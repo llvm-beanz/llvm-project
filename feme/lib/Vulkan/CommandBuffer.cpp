@@ -1837,6 +1837,13 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
     case RecordedCommand::Kind::SetPrimitiveTopology:
       Gfx.Dynamic.Topology = toDynamicTopology(Cmd.PrimitiveTopologyValue);
       break;
+    case RecordedCommand::Kind::SetLineWidth:
+      Gfx.Dynamic.LineWidth = Cmd.LineWidthValue;
+      break;
+    case RecordedCommand::Kind::SetLineStipple:
+      Gfx.Dynamic.StippleFactor = Cmd.LineStippleFactorValue;
+      Gfx.Dynamic.StipplePattern = Cmd.LineStipplePatternValue;
+      break;
     case RecordedCommand::Kind::Draw:
     case RecordedCommand::Kind::DrawIndexed: {
       if (!BoundGraphicsPipeline)
@@ -2801,7 +2808,26 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetPrimitiveTopologyEXT(
 // feme/docs/FeMeVulkanDesign.md) or, for `vkCmdSetDeviceMask`, has no
 // second device to ever mask out -- so no bound pipeline this ICD
 // accepted could ever have made any of them anything but a no-op record.
-VKAPI_ATTR void VKAPI_CALL vkCmdSetLineWidth(VkCommandBuffer, float) {}
+// (roadmap F5) `vkCmdSetLineWidth`: `VK_DYNAMIC_STATE_LINE_WIDTH` already
+// has a real static path (`RasterState::LineWidth`), so making it dynamic
+// is the same "read from the per-draw snapshot" pattern
+// `vkCmdSetCullModeEXT` above already uses, not a new rasterizer
+// feature.
+VKAPI_ATTR void VKAPI_CALL vkCmdSetLineWidth(VkCommandBuffer commandBuffer,
+                                             float lineWidth) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setLineWidth(lineWidth);
+}
+
+// (roadmap F5) `VK_KHR_line_rasterization`'s one command:
+// `VK_DYNAMIC_STATE_LINE_STIPPLE_KHR`'s payload, the same "read from the
+// per-draw snapshot" pattern `vkCmdSetLineWidth` above already uses.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
+                       uint32_t lineStippleFactor,
+                       uint16_t lineStipplePattern) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setLineStipple(lineStippleFactor, lineStipplePattern);
+}
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer, float, float,
                                              float) {}

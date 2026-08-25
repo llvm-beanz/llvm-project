@@ -82,6 +82,12 @@ SUPPORTED_EXTENSIONS = (
     "VK_KHR_dynamic_rendering",
     "VK_EXT_extended_dynamic_state",
     "VK_KHR_maintenance5",
+    # (roadmap F5) `vkCmdSetLineStippleKHR`, the extension's one command
+    # (CommandBuffer.cpp). `dEQP-VK.pipeline.line_rasterization.*` enables
+    # this extension by name regardless of the advertised `apiVersion`,
+    # the same reason every other post-`maintenance5` entry in this tuple
+    # is listed.
+    "VK_KHR_line_rasterization",
 )
 
 # First-parameter handle types that make a command dispatched at the

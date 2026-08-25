@@ -613,6 +613,11 @@ vkCmdSetPrimitiveTopologyEXT(VkCommandBuffer commandBuffer,
                            VkPrimitiveTopology primitiveTopology);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetLineWidth(VkCommandBuffer commandBuffer,
                                              float lineWidth);
+// (roadmap F5) `VK_KHR_line_rasterization`'s one command.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
+                       uint32_t lineStippleFactor,
+                       uint16_t lineStipplePattern);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer commandBuffer,
                                              float depthBiasConstantFactor,
                                              float depthBiasClamp,

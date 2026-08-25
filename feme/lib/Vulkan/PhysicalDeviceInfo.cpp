@@ -340,11 +340,14 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // the executor's dual-source blend path (`feme::graphics::executeDraws`'
   // `FSColor1`) is implemented and `maxFragmentDualSrcAttachments` above
   // is already the honest `1` this feature requires, so advertising it is
-  // likewise honest -- `largePoints`/`wideLines` are left `VK_FALSE`
-  // (unlike `dualSrcBlend`, the executor's point/line quad expansion
-  // hardcodes a fixed 1-pixel size/width rather than reading a
-  // `SV_PointSize` output or `vkCmdSetLineWidth` value, see Executor.cpp's
-  // own comment).
+  // likewise honest -- `largePoints`/`wideLines` are left `VK_FALSE`: a
+  // point's quad expansion still hardcodes a fixed 1-pixel size (roadmap
+  // F5 only generalized the *line* path), and although
+  // `feme::graphics::RasterState::LineWidth`/`vkCmdSetLineWidth` are now
+  // genuinely threaded through the line rasterizer (Executor.cpp), this
+  // struct's own `lineWidthRange` stays the honest, degenerate `[1.0,
+  // 1.0]` below until a later row claims `wideLines` itself (see
+  // Vulkan14FeatureInventory.md's H7 row).
   Info.Features = VkPhysicalDeviceFeatures{};
   Info.Features.robustBufferAccess = VK_TRUE;
   Info.Features.dualSrcBlend = VK_TRUE;
@@ -642,6 +645,17 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // extension must be listed here too.
       {VK_KHR_SHADER_EXPECT_ASSUME_EXTENSION_NAME,
        VK_KHR_SHADER_EXPECT_ASSUME_SPEC_VERSION},
+      // (roadmap F5) `rectangularLines`/`bresenhamLines`/`smoothLines` and
+      // their three `stippled*` variants are all implemented
+      // (`feme::graphics::RasterState::LineMode`/`StippledLineEnable`,
+      // `GraphicsPipeline.cpp`'s `VkPipelineRasterizationLineStateCreate
+      // InfoKHR` translation, `vkCmdSetLineStippleKHR`); like
+      // `VK_KHR_shader_subgroup_rotate`/`VK_KHR_shader_expect_assume`
+      // above, `dEQP-VK.pipeline.line_rasterization.*` enables this
+      // extension by name regardless of the advertised `apiVersion`, so
+      // it must be listed here too.
+      {VK_KHR_LINE_RASTERIZATION_EXTENSION_NAME,
+       VK_KHR_LINE_RASTERIZATION_SPEC_VERSION},
   };
   return Extensions;
 }

@@ -310,3 +310,8 @@ vkCreatePrivateDataSlot
 vkDestroyPrivateDataSlot
 vkSetPrivateData
 vkGetPrivateData
+
+# Roadmap F5: VK_KHR_line_rasterization's one command, setting the
+# stipple factor/pattern VK_DYNAMIC_STATE_LINE_STIPPLE_KHR declares
+# dynamic (GraphicsPipeline.cpp/CommandBuffer.cpp).
+vkCmdSetLineStippleKHR

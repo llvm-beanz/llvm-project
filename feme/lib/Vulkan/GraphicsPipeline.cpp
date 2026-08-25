@@ -42,6 +42,7 @@ using feme::graphics::BlendState;
 using feme::graphics::CompareOp;
 using feme::graphics::CullMode;
 using feme::graphics::FrontFace;
+using feme::graphics::LineRasterizationMode;
 using feme::graphics::LogicOp;
 using feme::graphics::PrimitiveTopology;
 using feme::graphics::StencilFaceState;
@@ -82,6 +83,27 @@ std::optional<CullMode> mapCullMode(VkCullModeFlags Cull) {
     return CullMode::Back;
   case VK_CULL_MODE_FRONT_AND_BACK:
     return CullMode::FrontAndBack;
+  default:
+    return std::nullopt;
+  }
+}
+
+// (roadmap F5) `VkLineRasterizationModeKHR` -> `feme::graphics::
+// LineRasterizationMode`. `VK_LINE_RASTERIZATION_MODE_DEFAULT_KHR` means
+// "whatever this implementation's own default line style is" -- since
+// this driver's default (and only style when no `VkPipelineRasterization
+// LineStateCreateInfo` is chained at all) is the same `Rectangular`
+// style `RECTANGULAR_KHR` names explicitly, both map to the same value.
+std::optional<LineRasterizationMode>
+mapLineRasterizationMode(VkLineRasterizationModeKHR Mode) {
+  switch (Mode) {
+  case VK_LINE_RASTERIZATION_MODE_DEFAULT_KHR:
+  case VK_LINE_RASTERIZATION_MODE_RECTANGULAR_KHR:
+    return LineRasterizationMode::Rectangular;
+  case VK_LINE_RASTERIZATION_MODE_BRESENHAM_KHR:
+    return LineRasterizationMode::Bresenham;
+  case VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH_KHR:
+    return LineRasterizationMode::RectangularSmooth;
   default:
     return std::nullopt;
   }
@@ -277,6 +299,10 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
     return DynamicStatePrimitiveTopology;
   case VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE:
     return DynamicStateVertexInputBindingStride;
+  case VK_DYNAMIC_STATE_LINE_WIDTH:
+    return DynamicStateLineWidth;
+  case VK_DYNAMIC_STATE_LINE_STIPPLE_KHR:
+    return DynamicStateLineStipple;
   default:
     return std::nullopt;
   }
@@ -630,6 +656,52 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
   Out.Raster.Front = Info->frontFace == VK_FRONT_FACE_CLOCKWISE
                          ? FrontFace::Clockwise
                          : FrontFace::CounterClockwise;
+  // (roadmap F5) `VK_DYNAMIC_STATE_LINE_WIDTH` is core 1.0, so a pipeline
+  // may declare `lineWidth` dynamic with no `VK_KHR_line_rasterization`
+  // involvement at all; when it does, `Info->lineWidth` itself is
+  // unspecified and must not be read (the same rule every other
+  // statically-ignored field in this function already follows).
+  if ((Out.DynamicStates & DynamicStateLineWidth) == 0)
+    Out.Raster.LineWidth = Info->lineWidth;
+  // (roadmap F5) `VkPipelineRasterizationLineStateCreateInfoKHR`, chained
+  // from `pNext`: absent entirely, this pipeline keeps `RasterState`'s own
+  // default (`Rectangular`, unstippled), exactly matching the spec's
+  // documented behavior for `VK_LINE_RASTERIZATION_MODE_DEFAULT_KHR` with
+  // stippling disabled.
+  for (const VkBaseInStructure *Next =
+           reinterpret_cast<const VkBaseInStructure *>(Info->pNext);
+       Next; Next = Next->pNext) {
+    if (Next->sType !=
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_KHR)
+      continue;
+    const auto *LineState =
+        reinterpret_cast<const VkPipelineRasterizationLineStateCreateInfoKHR *>(
+            Next);
+    std::optional<LineRasterizationMode> LineMode =
+        mapLineRasterizationMode(LineState->lineRasterizationMode);
+    if (!LineMode)
+      return createStringError(inconvertibleErrorCode(),
+                               "unrecognized VkLineRasterizationModeKHR "
+                               "value %u",
+                               unsigned(LineState->lineRasterizationMode));
+    Out.Raster.LineMode = *LineMode;
+    Out.Raster.StippledLineEnable = LineState->stippledLineEnable;
+    if (LineState->stippledLineEnable) {
+      if (LineState->lineStippleFactor < 1 ||
+          LineState->lineStippleFactor > 256)
+        return createStringError(inconvertibleErrorCode(),
+                                 "lineStippleFactor must be in [1, 256]");
+      // `vkCmdSetLineStippleKHR`'s dynamic payload replaces both fields
+      // together (`VK_DYNAMIC_STATE_LINE_STIPPLE_KHR`), so the static
+      // ones are only meaningful when that state stays static, exactly
+      // like `lineWidth` above.
+      if ((Out.DynamicStates & DynamicStateLineStipple) == 0) {
+        Out.Raster.StippleFactor = LineState->lineStippleFactor;
+        Out.Raster.StipplePattern = LineState->lineStipplePattern;
+      }
+    }
+    break;
+  }
   return Error::success();
 }
 
@@ -1231,6 +1303,12 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
     ResolvedRaster.Cull = Dynamic.Cull;
   if (isDynamic(DynamicStateFrontFace))
     ResolvedRaster.Front = Dynamic.Front;
+  if (isDynamic(DynamicStateLineWidth))
+    ResolvedRaster.LineWidth = Dynamic.LineWidth;
+  if (isDynamic(DynamicStateLineStipple)) {
+    ResolvedRaster.StippleFactor = Dynamic.StippleFactor;
+    ResolvedRaster.StipplePattern = Dynamic.StipplePattern;
+  }
 
   feme::graphics::DepthState ResolvedDepth = State.Depth;
   if (isDynamic(DynamicStateDepthTestEnable))

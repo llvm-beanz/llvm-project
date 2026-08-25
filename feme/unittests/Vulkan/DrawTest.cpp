@@ -98,6 +98,34 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// A 2-vertex horizontal line at NDC y = 0.25 (screen row 1's pixel
+/// center on a 4x4 target, exactly like `ExecutorTest.
+/// RendersAHorizontalLineList`'s own line), spanning the full NDC x
+/// range: vertex 0 at (-1, 0.25), vertex 1 at (1, 0.25).
+constexpr llvm::StringLiteral LineVertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %vidp = spirv.mlir.addressof @vid : !spirv.ptr<i32, Input>
+    %v = spirv.Load "Input" %vidp : i32
+    %c0 = spirv.Constant 0 : i32
+    %is0 = spirv.IEqual %v, %c0 : i32
+    %negone = spirv.Constant -1.0 : f32
+    %posone = spirv.Constant 1.0 : f32
+    %x = spirv.Select %is0, %negone, %posone : i1, f32
+    %y = spirv.Constant 0.25 : f32
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+    %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @vid, @pos
+}
+)mlir";
+
 /// Solid green into SV_Target0.
 constexpr llvm::StringLiteral GreenFragmentSource = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
@@ -834,6 +862,90 @@ TEST_F(DrawTest, DynamicCullModeControlsCulling) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap F5) `vkCmdSetLineWidth`, exercised end to end through a real
+/// pipeline/command buffer: a pipeline declaring `VK_DYNAMIC_STATE_LINE_
+/// WIDTH` draws its line at the width the last `vkCmdSetLineWidth` call
+/// set, not its own (deliberately mismatched, 1-pixel) creation-time
+/// value.
+TEST_F(DrawTest, DynamicLineWidthWidensTheLine) {
+  VkShaderModule Vertex = createModule(LineVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  Raster.lineWidth = 1.0f; // deliberately mismatched: see the test comment
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+  VkDynamicState Dynamic = VK_DYNAMIC_STATE_LINE_WIDTH;
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 1;
+  DynamicInfo.pDynamicStates = &Dynamic;
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.pDynamicState = &DynamicInfo;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdSetLineWidth(Cmd, 3.0f);
+  vkCmdDraw(Cmd, 2, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // A 3-pixel-wide line centered on row 1 covers rows 0-2, not just row 1.
+  EXPECT_EQ(texel(0, 0)[3], 0xFF);
+  EXPECT_EQ(texel(0, 1)[3], 0xFF);
+  EXPECT_EQ(texel(0, 2)[3], 0xFF);
+  EXPECT_EQ(texel(0, 3)[3], 0);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// An indexed draw fetches its vertices through the bound index buffer.
 TEST_F(DrawTest, RendersIndexedDraw) {
   VkShaderModule Vertex = createModule(FullscreenVertexSource);
@@ -1405,7 +1517,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 20u);
+  ASSERT_EQ(Count, 21u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),

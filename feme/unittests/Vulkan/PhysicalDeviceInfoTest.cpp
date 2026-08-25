@@ -452,7 +452,10 @@ TEST_F(PhysicalDeviceProperties2Test,
   Props2.pNext = &Props14;
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
 
-  EXPECT_EQ(Props14.lineSubPixelPrecisionBits, 0u);
+  // (roadmap F5) Real once `VK_KHR_line_rasterization` landed: agrees
+  // with `VkPhysicalDeviceLineRasterizationPropertiesKHR::
+  // lineSubPixelPrecisionBits`'s own dedicated-struct test below.
+  EXPECT_EQ(Props14.lineSubPixelPrecisionBits, 4u);
   EXPECT_EQ(Props14.maxVertexAttribDivisor, 0u);
   EXPECT_EQ(Props14.supportsNonZeroFirstInstance, VK_FALSE);
   EXPECT_EQ(Props14.maxPushDescriptors, 0u);
@@ -1059,12 +1062,17 @@ TEST_F(PhysicalDeviceProperties2Test,
   // `ExpectConversionPattern`), and must agree with the dedicated
   // `VkPhysicalDeviceShaderExpectAssumeFeatures` struct case below.
   EXPECT_EQ(Features14.shaderExpectAssume, VK_TRUE);
-  EXPECT_EQ(Features14.rectangularLines, VK_FALSE);
-  EXPECT_EQ(Features14.bresenhamLines, VK_FALSE);
-  EXPECT_EQ(Features14.smoothLines, VK_FALSE);
-  EXPECT_EQ(Features14.stippledRectangularLines, VK_FALSE);
-  EXPECT_EQ(Features14.stippledBresenhamLines, VK_FALSE);
-  EXPECT_EQ(Features14.stippledSmoothLines, VK_FALSE);
+  // Roadmap F5: `VkPipelineRasterizationLineStateCreateInfoKHR` now
+  // translates (`GraphicsPipeline.cpp`) and `feme::graphics::executeDraws`
+  // implements all three line styles plus stippling (Executor.cpp), and
+  // must agree with the dedicated
+  // `VkPhysicalDeviceLineRasterizationFeaturesKHR` struct case below.
+  EXPECT_EQ(Features14.rectangularLines, VK_TRUE);
+  EXPECT_EQ(Features14.bresenhamLines, VK_TRUE);
+  EXPECT_EQ(Features14.smoothLines, VK_TRUE);
+  EXPECT_EQ(Features14.stippledRectangularLines, VK_TRUE);
+  EXPECT_EQ(Features14.stippledBresenhamLines, VK_TRUE);
+  EXPECT_EQ(Features14.stippledSmoothLines, VK_TRUE);
   EXPECT_EQ(Features14.vertexAttributeInstanceRateDivisor, VK_FALSE);
   EXPECT_EQ(Features14.vertexAttributeInstanceRateZeroDivisor, VK_FALSE);
   EXPECT_EQ(Features14.indexTypeUint8, VK_FALSE);
@@ -1188,6 +1196,38 @@ TEST_F(PhysicalDeviceProperties2Test,
   Features2.pNext = &ShaderExpectAssumeFeatures;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(ShaderExpectAssumeFeatures.shaderExpectAssume, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       LineRasterizationIsAdvertisedThroughItsOwnDedicatedStructs) {
+  // Roadmap F5: `VK_KHR_line_rasterization`'s own dedicated feature and
+  // properties structs must agree with the aggregate
+  // `VkPhysicalDeviceVulkan14Features`/`...Vulkan14Properties` cases
+  // above, exactly like `VK_KHR_shader_expect_assume`'s own structs do.
+  VkPhysicalDeviceLineRasterizationFeaturesKHR LineFeatures{};
+  LineFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_KHR;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &LineFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(LineFeatures.rectangularLines, VK_TRUE);
+  EXPECT_EQ(LineFeatures.bresenhamLines, VK_TRUE);
+  EXPECT_EQ(LineFeatures.smoothLines, VK_TRUE);
+  EXPECT_EQ(LineFeatures.stippledRectangularLines, VK_TRUE);
+  EXPECT_EQ(LineFeatures.stippledBresenhamLines, VK_TRUE);
+  EXPECT_EQ(LineFeatures.stippledSmoothLines, VK_TRUE);
+
+  VkPhysicalDeviceLineRasterizationPropertiesKHR LineProperties{};
+  LineProperties.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_PROPERTIES_KHR;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &LineProperties;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(LineProperties.lineSubPixelPrecisionBits, 4u);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

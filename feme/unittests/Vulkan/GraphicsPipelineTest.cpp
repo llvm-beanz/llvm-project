@@ -513,6 +513,88 @@ TEST_F(GraphicsPipelineTest, DynamicCullModeAndFrontFaceOverrideStaticState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap F5) `VkPipelineRasterizationLineStateCreateInfoKHR`, chained
+/// from `pRasterizationState->pNext`, sets the line style/width/stipple
+/// state `RasterState` now carries.
+TEST_F(GraphicsPipelineTest, TranslatesLineRasterizationState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.lineWidth = 3.0f;
+  VkPipelineRasterizationLineStateCreateInfoKHR LineState{};
+  LineState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_KHR;
+  LineState.lineRasterizationMode = VK_LINE_RASTERIZATION_MODE_BRESENHAM_KHR;
+  LineState.stippledLineEnable = VK_TRUE;
+  LineState.lineStippleFactor = 3;
+  LineState.lineStipplePattern = 0x00FF;
+  Raster.pNext = &LineState;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  feme::graphics::RasterState Resolved =
+      Graphics->buildExecutorPipeline(DynamicGraphicsState{}).getRasterState();
+  EXPECT_EQ(Resolved.LineMode, feme::graphics::LineRasterizationMode::Bresenham);
+  EXPECT_EQ(Resolved.LineWidth, 3.0f);
+  EXPECT_TRUE(Resolved.StippledLineEnable);
+  EXPECT_EQ(Resolved.StippleFactor, 3u);
+  EXPECT_EQ(Resolved.StipplePattern, 0x00FFu);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap F5) `VK_DYNAMIC_STATE_LINE_WIDTH`/`VK_DYNAMIC_STATE_LINE_
+/// STIPPLE_KHR`: a pipeline may declare either dynamic, and
+/// `buildExecutorPipeline` must then read the per-draw snapshot rather
+/// than this pipeline's own (deliberately mismatched) creation-time
+/// value.
+TEST_F(GraphicsPipelineTest, DynamicLineWidthAndStippleOverrideStaticState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.lineWidth = 1.0f;
+  VkPipelineRasterizationLineStateCreateInfoKHR LineState{};
+  LineState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_KHR;
+  LineState.lineRasterizationMode = VK_LINE_RASTERIZATION_MODE_RECTANGULAR_KHR;
+  LineState.stippledLineEnable = VK_TRUE;
+  LineState.lineStippleFactor = 1;
+  LineState.lineStipplePattern = 0x0001;
+  Raster.pNext = &LineState;
+  VkDynamicState DynStates[2] = {VK_DYNAMIC_STATE_LINE_WIDTH,
+                                 VK_DYNAMIC_STATE_LINE_STIPPLE_KHR};
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 2;
+  DynamicInfo.pDynamicStates = DynStates;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState Dynamic;
+  Dynamic.LineWidth = 5.0f;
+  Dynamic.StippleFactor = 7;
+  Dynamic.StipplePattern = 0xABCD;
+  feme::graphics::RasterState Resolved =
+      Graphics->buildExecutorPipeline(Dynamic).getRasterState();
+  EXPECT_EQ(Resolved.LineWidth, 5.0f);
+  EXPECT_EQ(Resolved.StippleFactor, 7u);
+  EXPECT_EQ(Resolved.StipplePattern, 0xABCDu);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap C4c) A pipeline declaring `VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE`
 /// (or `_WRITE_ENABLE`) dynamic may still enable the test at draw time even
 /// though its own static `depthTestEnable`/`depthWriteEnable` are both

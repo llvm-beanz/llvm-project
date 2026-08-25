@@ -111,6 +111,10 @@ struct RecordedCommand {
     SetStencilTestEnable,
     SetStencilOp,
     SetPrimitiveTopology,
+    // (roadmap F5) `vkCmdSetLineWidth` (core 1.0) and
+    // `vkCmdSetLineStippleKHR` (`VK_KHR_line_rasterization`).
+    SetLineWidth,
+    SetLineStipple,
     Draw,
     DrawIndexed,
     DrawIndirect,
@@ -272,6 +276,13 @@ struct RecordedCommand {
   /// command replays into `Gfx.Dynamic`.
   VkPrimitiveTopology PrimitiveTopologyValue =
       VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  /// (roadmap F5) `SetLineWidth`: `vkCmdSetLineWidth`'s payload.
+  /// `SetLineStipple`: `vkCmdSetLineStippleKHR`'s payload (`LineWidthValue`
+  /// reused for neither, since a draw only ever records one of the two
+  /// per command).
+  float LineWidthValue = 1.0f;
+  uint32_t LineStippleFactorValue = 1;
+  uint16_t LineStipplePatternValue = 0xFFFF;
   /// (V6) `Draw`/`DrawIndexed`: the draw's own arguments, in the same shape
   /// `feme::graphics::DrawCommand` uses (`FirstQuery` above is reused for
   /// neither -- a draw needs all six of these at once).
@@ -669,6 +680,21 @@ public:
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::SetPrimitiveTopology;
     Cmd.PrimitiveTopologyValue = Topology;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap F5) `vkCmdSetLineWidth`.
+  void setLineWidth(float LineWidth) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetLineWidth;
+    Cmd.LineWidthValue = LineWidth;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap F5) `vkCmdSetLineStippleKHR`.
+  void setLineStipple(uint32_t Factor, uint16_t Pattern) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetLineStipple;
+    Cmd.LineStippleFactorValue = Factor;
+    Cmd.LineStipplePatternValue = Pattern;
     Commands.push_back(Cmd);
   }
   /// (V6) `vkCmdDraw`.

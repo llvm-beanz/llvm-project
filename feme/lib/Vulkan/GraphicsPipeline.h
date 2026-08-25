@@ -122,6 +122,14 @@ enum DynamicStateBits : uint32_t {
   // the buffers/offsets `vkCmdBindVertexBuffers` itself already carries,
   // not a fixed-size per-draw snapshot field like every other state here.
   DynamicStateVertexInputBindingStride = 1u << 15,
+  // (roadmap F5) `VK_DYNAMIC_STATE_LINE_WIDTH` (core 1.0) and
+  // `VK_DYNAMIC_STATE_LINE_STIPPLE_KHR`
+  // (`VK_KHR_line_rasterization`): `vkCmdSetLineWidth`'s payload
+  // previously had nowhere to go (the entry point was a no-op stub) and
+  // `vkCmdSetLineStippleKHR` is new; both now flow through
+  // `DynamicGraphicsState` exactly like every other per-draw state above.
+  DynamicStateLineWidth = 1u << 16,
+  DynamicStateLineStipple = 1u << 17,
 };
 
 /// The command-buffer-resolved value of every piece of dynamic state a
@@ -166,6 +174,11 @@ struct DynamicGraphicsState {
   /// static topology in that defensive case rather than rendering with an
   /// unspecified one).
   std::optional<feme::graphics::PrimitiveTopology> Topology;
+  /// (roadmap F5) `vkCmdSetLineWidth`'s payload.
+  float LineWidth = 1.0f;
+  /// (roadmap F5) `vkCmdSetLineStippleKHR`'s payload.
+  uint32_t StippleFactor = 1;
+  uint16_t StipplePattern = 0xFFFF;
 };
 
 /// The shareable, compiled part of a graphics `VkPipeline`: the

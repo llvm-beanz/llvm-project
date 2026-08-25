@@ -575,8 +575,15 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES: {
       auto *Props14 =
           reinterpret_cast<VkPhysicalDeviceVulkan14Properties *>(Base);
-      // (roadmap F5) `VK_KHR_line_rasterization` is unimplemented.
-      Props14->lineSubPixelPrecisionBits = 0;
+      // (roadmap F5) `VK_KHR_line_rasterization` is implemented; `4` is
+      // the same conservative, honest floor `subPixelPrecisionBits`/
+      // `subTexelPrecisionBits` (`PhysicalDeviceInfo.cpp`) already use --
+      // this software rasterizer's line positions are full `float`
+      // screen-space coordinates with no separate fixed-point snapping
+      // grid of their own, so no higher bit count is independently
+      // verified. Must agree with the dedicated
+      // `VkPhysicalDeviceLineRasterizationPropertiesKHR` case below.
+      Props14->lineSubPixelPrecisionBits = 4;
       // (roadmap F6) `vertexAttributeInstanceRateDivisor` is unimplemented.
       Props14->maxVertexAttribDivisor = 0;
       Props14->supportsNonZeroFirstInstance = VK_FALSE;
@@ -639,6 +646,18 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props14->pCopyDstLayouts = nullptr;
       std::memset(Props14->optimalTilingLayoutUUID, 0, VK_UUID_SIZE);
       Props14->identicalMemoryTypeRequirements = VK_FALSE;
+      break;
+    }
+    // (roadmap F5) `VK_KHR_line_rasterization`'s own properties struct,
+    // whose 1.4 core and `KHR` spellings share one `sType`, agreeing with
+    // the aggregate `VkPhysicalDeviceVulkan14Properties` case above
+    // exactly like `VkPhysicalDeviceMaintenance4Properties` already does
+    // for its own field.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_PROPERTIES: {
+      auto *LineRasterization =
+          reinterpret_cast<VkPhysicalDeviceLineRasterizationPropertiesKHR *>(
+              Base);
+      LineRasterization->lineSubPixelPrecisionBits = 4;
       break;
     }
     // (roadmap E5) `VK_KHR_maintenance5`'s own properties struct, agreeing
@@ -1165,12 +1184,20 @@ void fillFeatures2Chain(void *pNext) {
       // dedicated `VkPhysicalDeviceShaderExpectAssumeFeaturesKHR` struct
       // case below.
       Features->shaderExpectAssume = VK_TRUE;
-      Features->rectangularLines = VK_FALSE;
-      Features->bresenhamLines = VK_FALSE;
-      Features->smoothLines = VK_FALSE;
-      Features->stippledRectangularLines = VK_FALSE;
-      Features->stippledBresenhamLines = VK_FALSE;
-      Features->stippledSmoothLines = VK_FALSE;
+      // (roadmap F5) `VkPipelineRasterizationLineStateCreateInfoKHR`'s
+      // `lineRasterizationMode`/stipple fields now translate
+      // (`GraphicsPipeline.cpp`'s `translateRasterState`), and
+      // `feme::graphics::executeDraws`' line-topology quad expansion
+      // implements all three styles plus stippling (Executor.cpp), so
+      // these six bits -- like `shaderExpectAssume` above -- must agree
+      // with the dedicated `VkPhysicalDeviceLineRasterizationFeaturesKHR`
+      // struct case below.
+      Features->rectangularLines = VK_TRUE;
+      Features->bresenhamLines = VK_TRUE;
+      Features->smoothLines = VK_TRUE;
+      Features->stippledRectangularLines = VK_TRUE;
+      Features->stippledBresenhamLines = VK_TRUE;
+      Features->stippledSmoothLines = VK_TRUE;
       Features->vertexAttributeInstanceRateDivisor = VK_FALSE;
       Features->vertexAttributeInstanceRateZeroDivisor = VK_FALSE;
       Features->indexTypeUint8 = VK_FALSE;
@@ -1287,6 +1314,21 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceShaderExpectAssumeFeatures *>(Base);
       Features->shaderExpectAssume = VK_TRUE;
+      break;
+    }
+    // (roadmap F5) `VK_KHR_line_rasterization`'s own feature struct, whose
+    // 1.4 core and `KHR` spellings share one `sType`, exactly like
+    // `shaderExpectAssume` above, agreeing with the aggregate
+    // `VkPhysicalDeviceVulkan14Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceLineRasterizationFeatures *>(Base);
+      Features->rectangularLines = VK_TRUE;
+      Features->bresenhamLines = VK_TRUE;
+      Features->smoothLines = VK_TRUE;
+      Features->stippledRectangularLines = VK_TRUE;
+      Features->stippledBresenhamLines = VK_TRUE;
+      Features->stippledSmoothLines = VK_TRUE;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature

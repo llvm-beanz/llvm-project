@@ -26,11 +26,13 @@
 // A command of an extension `SUPPORTED_EXTENSIONS` lists is read out of
 // `<extensions>` even though no core feature requires it (V6's
 // `VK_KHR_dynamic_rendering`, roadmap C4c's `VK_EXT_extended_dynamic_
-// state`, roadmap E29's `VK_KHR_maintenance5`).
+// state`, roadmap E29's `VK_KHR_maintenance5`, roadmap F5's
+// `VK_KHR_line_rasterization`).
 // CHECK-DAG: FEME_VK_COMMAND(vkCmdBeginRenderingKHR, DEVICE)
 // CHECK-DAG: FEME_VK_COMMAND(vkCmdEndRenderingKHR, DEVICE)
 // CHECK-DAG: FEME_VK_COMMAND(vkCmdSetCullModeEXT, DEVICE)
 // CHECK-DAG: FEME_VK_COMMAND(vkGetRenderingAreaGranularityKHR, DEVICE)
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdSetLineStippleKHR, DEVICE)
 
 // vkExtCmd sits in a `<require depends="...">` block gated on an optional
 // extension `SUPPORTED_EXTENSIONS` does not list, so it must not appear at
