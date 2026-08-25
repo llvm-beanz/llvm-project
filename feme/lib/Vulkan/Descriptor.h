@@ -289,9 +289,12 @@ private:
 /// exactly the descriptor-type dispatch `vkUpdateDescriptorSets` itself
 /// uses (see `writeDescriptorFromRaw` in Descriptor.cpp) to each entry's
 /// `descriptorCount` array elements, read at `offset + i * stride` bytes
-/// into that buffer. Only `VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_
-/// DESCRIPTOR_SET` is supported -- `_PUSH_DESCRIPTORS_KHR` needs
-/// `VK_KHR_push_descriptor`, which this ICD does not implement.
+/// into that buffer. Both `VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_
+/// DESCRIPTOR_SET` and (roadmap F12) `_PUSH_DESCRIPTORS` are accepted --
+/// this class's own entry list needs no distinction between the two, since
+/// `applyDescriptorUpdateTemplate` below applies them identically to
+/// whichever `DescriptorSet` its caller (`vkUpdateDescriptorSetWithTemplate`
+/// or `CommandBuffer::pushDescriptorSetWithTemplate`) supplies.
 class DescriptorUpdateTemplate {
 public:
   explicit DescriptorUpdateTemplate(
@@ -305,6 +308,25 @@ public:
 private:
   std::vector<VkDescriptorUpdateTemplateEntry> Entries;
 };
+
+/// Applies every entry of \p Writes to \p Set, exactly as
+/// `vkUpdateDescriptorSets` applies each of its own `pDescriptorWrites`
+/// entries -- except each entry's own `dstSet` is ignored, matching
+/// `vkCmdPushDescriptorSet`'s spec text ("the dstSet member is ignored").
+/// Shared by `vkUpdateDescriptorSets` (whose own loop resolves each entry's
+/// `dstSet` itself before calling this once per entry) and (roadmap F12)
+/// `CommandBuffer::pushDescriptorSet`, the only caller that targets one
+/// fixed \p Set for the whole array instead.
+void applyDescriptorWrites(DescriptorSet &Set,
+                           llvm::ArrayRef<VkWriteDescriptorSet> Writes);
+
+/// (roadmap F12) Applies every entry of \p Template to \p Set, reading
+/// source bytes from \p Data exactly as `vkUpdateDescriptorSetWithTemplate`
+/// does. Shared by that entry point and
+/// `CommandBuffer::pushDescriptorSetWithTemplate`.
+void applyDescriptorUpdateTemplate(DescriptorSet &Set,
+                                   const DescriptorUpdateTemplate &Template,
+                                   const void *Data);
 
 /// A `VkDescriptorPool`: owns every `DescriptorSet` allocated from it and
 /// accounts for `maxSets`, per "Object Model". Per-descriptor-type pool

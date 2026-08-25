@@ -351,6 +351,43 @@ findInlineUniformBlockInfo(const void *pNext) {
   return nullptr;
 }
 
+/// Applies one `VkWriteDescriptorSet` entry to \p Set, exactly as
+/// `vkUpdateDescriptorSets` applies each of its own `pDescriptorWrites`
+/// entries -- \p Write's own `dstSet` is never consulted here (the caller
+/// resolves which `DescriptorSet` this entry targets). Shared by
+/// `vkUpdateDescriptorSets`'s loop below and the exported
+/// `applyDescriptorWrites` (roadmap F12), whose only caller,
+/// `CommandBuffer::pushDescriptorSet`, needs exactly this per-entry
+/// dispatch applied to one fixed target set instead.
+void applyDescriptorWrite(DescriptorSet &Set,
+                          const VkWriteDescriptorSet &Write) {
+  if (!isSupportedDescriptorType(Write.descriptorType))
+    return;
+  // (roadmap E14) See `writeDescriptorFromRaw`'s own comment: an inline
+  // uniform block write covers a caller-chosen byte range in one call
+  // rather than one array element at a time, so it is special-cased here
+  // too instead of falling into the per-element loop below.
+  if (isInlineUniformBlockDescriptorType(Write.descriptorType)) {
+    if (const VkWriteDescriptorSetInlineUniformBlock *Inline =
+            findInlineUniformBlockInfo(Write.pNext))
+      Set.writeInlineUniformBlock(Write.dstBinding, Write.dstArrayElement,
+                                  Inline->dataSize, Inline->pData);
+    return;
+  }
+  for (uint32_t J = 0; J != Write.descriptorCount; ++J) {
+    const void *Data;
+    if (isTexelBufferDescriptorType(Write.descriptorType))
+      Data = &Write.pTexelBufferView[J];
+    else if (isImageDescriptorType(Write.descriptorType) ||
+             isSamplerDescriptorType(Write.descriptorType))
+      Data = &Write.pImageInfo[J];
+    else
+      Data = &Write.pBufferInfo[J];
+    writeDescriptorFromRaw(Set, Write.descriptorType, Write.dstBinding,
+                           Write.dstArrayElement + J, Data);
+  }
+}
+
 } // namespace
 
 VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
@@ -359,34 +396,8 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     const VkCopyDescriptorSet *pDescriptorCopies) {
   for (uint32_t I = 0; I != descriptorWriteCount; ++I) {
     const VkWriteDescriptorSet &Write = pDescriptorWrites[I];
-    if (!isSupportedDescriptorType(Write.descriptorType))
-      continue;
     auto *Set = fromHandle<DescriptorSet>(Write.dstSet);
-    // (roadmap E14) `VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK` is a single
-    // byte-range write, not `descriptorCount` array elements: its source
-    // data comes from a chained `VkWriteDescriptorSetInlineUniformBlock`
-    // (per spec, `descriptorCount` here must equal that struct's own
-    // `dataSize`), and `dstArrayElement` is the starting byte offset
-    // rather than an array index.
-    if (isInlineUniformBlockDescriptorType(Write.descriptorType)) {
-      if (const VkWriteDescriptorSetInlineUniformBlock *Inline =
-              findInlineUniformBlockInfo(Write.pNext))
-        Set->writeInlineUniformBlock(Write.dstBinding, Write.dstArrayElement,
-                                     Inline->dataSize, Inline->pData);
-      continue;
-    }
-    for (uint32_t J = 0; J != Write.descriptorCount; ++J) {
-      const void *Data;
-      if (isTexelBufferDescriptorType(Write.descriptorType))
-        Data = &Write.pTexelBufferView[J];
-      else if (isImageDescriptorType(Write.descriptorType) ||
-               isSamplerDescriptorType(Write.descriptorType))
-        Data = &Write.pImageInfo[J];
-      else
-        Data = &Write.pBufferInfo[J];
-      writeDescriptorFromRaw(*Set, Write.descriptorType, Write.dstBinding,
-                             Write.dstArrayElement + J, Data);
-    }
+    applyDescriptorWrite(*Set, Write);
   }
 
   for (uint32_t I = 0; I != descriptorCopyCount; ++I) {
@@ -460,14 +471,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(
     VkDevice, const VkDescriptorUpdateTemplateCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator,
     VkDescriptorUpdateTemplate *pDescriptorUpdateTemplate) {
-  // `PUSH_DESCRIPTORS_KHR` templates target `VK_KHR_push_descriptor`, which
-  // this ICD does not implement (every other push-descriptor entry point
-  // already rejects with "VK_KHR_push_descriptor is not supported" --
-  // ProcAddr.cpp's table simply has no such command to resolve at all, so
-  // rejecting the template type here is this command's own version of
-  // that same rejection).
+  // (roadmap F12) `_PUSH_DESCRIPTORS` templates are now accepted alongside
+  // plain `_DESCRIPTOR_SET` ones: `DescriptorUpdateTemplate`'s own entry
+  // list needs no distinction between the two (see its class comment), and
+  // `vkCmdPushDescriptorSetWithTemplate` (CommandBuffer.cpp) is this
+  // template type's one real consumer.
   if (pCreateInfo->templateType !=
-      VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET)
+          VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET &&
+      pCreateInfo->templateType !=
+          VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS)
     return VK_ERROR_INITIALIZATION_FAILED;
   std::vector<VkDescriptorUpdateTemplateEntry> Entries(
       pCreateInfo->pDescriptorUpdateEntries,
@@ -495,14 +507,11 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplate(
   Alloc.destroy(fromHandle<DescriptorUpdateTemplate>(descriptorUpdateTemplate));
 }
 
-VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
-    VkDevice, VkDescriptorSet descriptorSet,
-    VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void *pData) {
-  auto *Set = fromHandle<DescriptorSet>(descriptorSet);
-  const auto *Template =
-      fromHandle<DescriptorUpdateTemplate>(descriptorUpdateTemplate);
-  const auto *Bytes = static_cast<const uint8_t *>(pData);
-  for (const VkDescriptorUpdateTemplateEntry &Entry : Template->entries()) {
+void applyDescriptorUpdateTemplate(DescriptorSet &Set,
+                                   const DescriptorUpdateTemplate &Template,
+                                   const void *Data) {
+  const auto *Bytes = static_cast<const uint8_t *>(Data);
+  for (const VkDescriptorUpdateTemplateEntry &Entry : Template.entries()) {
     // (roadmap E14) Per spec, an inline uniform block entry updates
     // `descriptorCount` contiguous bytes starting at byte offset
     // `dstArrayElement`, reading from `offset` bytes into the source
@@ -510,15 +519,30 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
     // `vkUpdateDescriptorSets`'s own inline-uniform-block case uses,
     // rather than the per-element `offset + i * stride` loop below.
     if (isInlineUniformBlockDescriptorType(Entry.descriptorType)) {
-      Set->writeInlineUniformBlock(Entry.dstBinding, Entry.dstArrayElement,
-                                   Entry.descriptorCount, Bytes + Entry.offset);
+      Set.writeInlineUniformBlock(Entry.dstBinding, Entry.dstArrayElement,
+                                  Entry.descriptorCount, Bytes + Entry.offset);
       continue;
     }
     for (uint32_t J = 0; J != Entry.descriptorCount; ++J)
-      writeDescriptorFromRaw(*Set, Entry.descriptorType, Entry.dstBinding,
+      writeDescriptorFromRaw(Set, Entry.descriptorType, Entry.dstBinding,
                              Entry.dstArrayElement + J,
                              Bytes + Entry.offset + J * Entry.stride);
   }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
+    VkDevice, VkDescriptorSet descriptorSet,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void *pData) {
+  auto *Set = fromHandle<DescriptorSet>(descriptorSet);
+  const auto *Template =
+      fromHandle<DescriptorUpdateTemplate>(descriptorUpdateTemplate);
+  applyDescriptorUpdateTemplate(*Set, *Template, pData);
+}
+
+void applyDescriptorWrites(DescriptorSet &Set,
+                           llvm::ArrayRef<VkWriteDescriptorSet> Writes) {
+  for (const VkWriteDescriptorSet &Write : Writes)
+    applyDescriptorWrite(Set, Write);
 }
 
 } // namespace feme::vulkan

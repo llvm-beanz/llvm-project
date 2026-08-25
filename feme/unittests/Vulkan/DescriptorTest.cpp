@@ -303,10 +303,11 @@ TEST_F(DescriptorTest, UpdateWithTemplateMatchesDirectWrite) {
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
-/// `_PUSH_DESCRIPTORS_KHR` needs `VK_KHR_push_descriptor`, which this ICD
-/// does not implement -- rejected at creation rather than accepted and
-/// then behaving as an ordinary descriptor-set template.
-TEST_F(DescriptorTest, PushDescriptorTemplateTypeIsRejected) {
+TEST_F(DescriptorTest, PushDescriptorTemplateTypeIsAccepted) {
+  // (roadmap F12) `VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS` is
+  // now accepted alongside the plain `_DESCRIPTOR_SET` type -- see
+  // `CommandBuffer::pushDescriptorSetWithTemplate`'s own end-to-end
+  // coverage in CommandBufferTest.cpp.
   VkDescriptorUpdateTemplateEntry Entry{};
   Entry.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
   Entry.descriptorCount = 1;
@@ -315,6 +316,21 @@ TEST_F(DescriptorTest, PushDescriptorTemplateTypeIsRejected) {
   TemplateInfo.pDescriptorUpdateEntries = &Entry;
   TemplateInfo.templateType =
       VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR;
+  VkDescriptorUpdateTemplate Template = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateDescriptorUpdateTemplate(Device, &TemplateInfo, nullptr,
+                                             &Template),
+            VK_SUCCESS);
+  vkDestroyDescriptorUpdateTemplate(Device, Template, nullptr);
+}
+
+TEST_F(DescriptorTest, UnsupportedDescriptorTypeInTemplateEntryIsRejected) {
+  VkDescriptorUpdateTemplateEntry Entry{};
+  Entry.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+  Entry.descriptorCount = 1;
+  VkDescriptorUpdateTemplateCreateInfo TemplateInfo{};
+  TemplateInfo.descriptorUpdateEntryCount = 1;
+  TemplateInfo.pDescriptorUpdateEntries = &Entry;
+  TemplateInfo.templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET;
   VkDescriptorUpdateTemplate Template = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreateDescriptorUpdateTemplate(Device, &TemplateInfo, nullptr,
                                              &Template),
