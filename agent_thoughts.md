@@ -32528,3 +32528,203 @@ summary counts/prose that cite the 1.4 feature/extension totals by
 number) rather than launder that unrelated staleness into this commit --
 fixing the `.txt` files' own broader drift is future bookkeeping work,
 not this row's.
+
+# Agent thoughts: roadmap F11 (VK_EXT_host_image_copy/hostImageCopy)
+
+## Recovering from the previous agent's incomplete work
+
+The prompt said the previous attempt's results were left in a git stash.
+Inspecting `stash@{0}` (`git stash show -p`) showed a refactor-in-progress:
+`copyBufferImageRegion`/`runCopyBufferToImage`/`runCopyImageToBuffer`/
+`runCopyImage` deleted from `CommandBuffer.cpp`'s own anonymous namespace,
+with matching declarations added to `ImageOps.h` -- but no bodies ever
+added to `ImageOps.cpp`. That is not a smaller version of the intended
+change, it is a broken tree (every call site in `CommandBuffer.cpp` would
+fail to link). Applying the stash and building confirmed this.
+
+The *intent* behind the move was sound, though, and exactly what F11
+itself needs: `copyBufferImageRegion` already takes a `(void*,
+VkDeviceSize)` buffer region rather than a `Buffer&`, so it is directly
+reusable by a host pointer with no bound `VkBuffer` at all; `runCopyImage`
+takes `Image*`/`Image*` and needs no `CommandBuffer`/executor either. So
+rather than discard the idea, I completed it properly -- moved the same
+four functions into `ImageOps.{h,cpp}` with their full bodies this time,
+verified `ninja check-feme` still passes identically (1763/1762, matching
+the pre-refactor baseline exactly, confirming no behavior changed), then
+dropped the now-superseded stash and committed the completed refactor as
+its own small, non-functional-first commit before touching any F11-
+specific code. This matches this codebase's own `.instructions.md` rule:
+"Break changes into as small granularity as possible where each change
+... is individually testable and tested."
+
+## Design: where the four commands live
+
+`HostImageCopy.{h,cpp}` is a new, small, self-contained file (like
+`PrivateData.{h,cpp}`'s own precedent for a self-contained V-series
+mechanism) rather than folded into `CommandBuffer.cpp`: these four
+commands take a `VkDevice`, not a `VkCommandBuffer`, and none of them goes
+through `executeCommandBuffer`'s recording/replay machinery at all --
+each one runs its work immediately, synchronously, the moment it's
+called. `HostImageCopy.h` exposes exactly two functions,
+`getSupportedHostImageCopySrcLayouts`/`DstLayouts`, since those are the
+only pieces of state this mechanism needs that a second file
+(`EntryPoints.cpp`'s properties-struct case) also needs to read -- every
+other declaration these four commands need already lives in
+`EntryPoints.h`, matching every other `feme::vulkan::vk*` entrypoint's own
+declared-centrally-defined-wherever pattern (`CommandBuffer.cpp`'s
+`vkCmd*` functions are the existing precedent for this).
+
+## Choosing the supported layout list
+
+Real Vulkan only strictly mandates `VK_IMAGE_LAYOUT_GENERAL` in
+`pCopySrcLayouts`/`pCopyDstLayouts` (confirmed against the spec text
+before assuming otherwise). Since this ICD's copy is a plain `memcpy`
+regardless of the layout a caller declares (`VK_IMAGE_TILING_OPTIMAL`/
+`_LINEAR` already resolve to one identical packed layout, per `Image.h`'s
+own file comment, and neither `copyBufferImageRegion` nor `runCopyImage`
+ever branches on a declared layout at all), advertising *every* defined
+`VkImageLayout` as supported would still be 100% honest -- correctness
+here genuinely does not depend on the declared layout. I chose the
+narrower, spec-minimum pair (`GENERAL` + `TRANSFER_{SRC,DST}_OPTIMAL`)
+anyway, for two reasons: it keeps this row's own scope legible (a reader
+checking "what does F11 actually claim" sees the two layouts this
+mechanism was designed and tested against, not an unbounded list that
+happens to also work), and it matches this codebase's own repeated
+"claim only what has been deliberately scoped" convention elsewhere (e.g.
+`defaultRobustness*`'s own non-`_2` choice, several rows back) over
+"claim everything that isn't proven wrong yet."
+
+## Two real bugs the first CTS run against this row found
+
+I ran `dEQP-VK.image.host_image_copy.*` (this session's existing
+VK-GL-CTS checkout) as soon as the four commands built, expecting mostly
+`NotSupported` given the narrow layout list above. Instead the whole
+process segfaulted on the very first case.
+
+**Bug 1: an outdated loader.** `gdb`'s backtrace showed the fault at
+address `0x0`, one frame below `SimpleHostImageCopyTestInstance::iterate`,
+with no frame for this ICD's own code at all. That is consistent with
+calling through a *resolved* (non-null) function pointer whose
+implementation is itself null -- and indeed, dumping the C++ vtable this
+call dispatched through (`vk::DeviceDriver`, CTS's own generated dispatch
+class) showed the *virtual* function correctly wired (a valid thunk
+address), but that thunk's own body (`return
+m_vk.transitionImageLayout(device, ...)`) calls through a *plain function
+pointer member* resolved once at `DeviceDriver` construction via
+`vkGetDeviceProcAddr(device, "vkTransitionImageLayout")` -- and *that*
+call, traced with temporary `fprintf` instrumentation added to this ICD's
+own `ProcAddr.cpp`, never reached this ICD's `getDeviceProcAddr` at all
+for the plain core-spelled name (only the `EXT`-suffixed fallback name
+showed up in the trace, correctly returning null since this ICD never
+implements the pre-promotion alias). A standalone reproduction
+(`dlopen`ing `libvulkan.so.1` directly, calling `vkGetInstanceProcAddr`/
+`vkGetDeviceProcAddr` by hand with the identical two-step sequence CTS's
+own `DeviceDriver` constructor uses) *did* return a non-null pointer for
+the same name -- so the mechanism isn't wrong, but calling that
+"resolved" pointer still crashes.
+
+The explanation: this environment's installed Vulkan loader
+(`libvulkan.so.1.3.275`, Ubuntu's `libvulkan1` package) recognizes
+`vkTransitionImageLayout`/`vkCopyMemoryToImage`/etc. as "core" from its
+own compiled-in, 1.3-vintage command table (these functions have no
+pre-promotion `EXT`-suffixed alias a pre-1.4 loader would otherwise
+route through its "unknown extension" trampoline), so it hands back one
+of its own generic per-device trampolines -- but since the loader itself
+predates the Vulkan 1.4 core promotion that added these commands, it
+never populates the underlying per-device dispatch slot that trampoline
+reads from. The pointer it returns is real, but the memory it reads from
+at call time is not. I confirmed this diagnosis by building a current
+(v1.4.328) `Vulkan-Loader` from source (a five-minute `cmake`/`ninja`
+build) and re-running the identical failing case with `LD_LIBRARY_PATH`
+pointed at the fresh build instead: it passed cleanly. This is an
+environment/loader-version limitation, not a defect in this ICD -- see
+`FeMeVulkanDesign.md`'s own "Project and Library Boundaries" for why the
+loader is explicitly out of this project's own scope -- so I recorded the
+finding (Roadmap.md's F11 row, VulkanCTSReport.md's own section) rather
+than trying to work around it from the ICD side (there is nothing this
+ICD could even do differently; the loader never asks it anything).
+
+**Bug 2: a real, pre-existing bug in shared copy code.** With a current
+loader, the *next* crash was a genuine one: a `memcpy` segfault (and,
+non-deterministically depending on allocation timing, a glibc "corrupted
+double-linked list" heap-corruption abort) inside `copyBufferImageRegion`
+itself, copying a `D32_SFLOAT_S8_UINT` depth/stencil image. Tracing it
+back: `copyBufferImageRegion`'s buffer-side row-size computation always
+used `Img.format()`'s own *combined* `bytesPerBlock` (8 bytes for this
+format), never the single aspect a copy region actually names
+(`VkBufferImageCopy::imageSubresource.aspectMask`) -- but real Vulkan's
+own host-image-copy tests (and, I confirmed by re-reading it, real
+Vulkan's `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer` too) always
+copy a combined depth/stencil format one aspect at a time, with a
+*buffer*-side layout matching only that aspect's own size (4 bytes for
+`D32_FLOAT_S8X24_UINT`'s depth aspect, not the combined format's 8).
+
+This bug clearly predates F11 entirely -- it lives in code this row only
+*moved*, not wrote -- but had never been noticed, because
+`vkCmdCopyBufferToImage`'s own bound `VkBuffer` has a real size to
+bounds-check the (wrongly-doubled) computed row against, so the existing
+command likely already rejected this case cleanly (as
+"out of range of its buffer") rather than actually misbehaving.
+`vkCopyMemoryToImage`'s raw host pointer has no such size at all --
+this row's own `copyBufferImageRegion` caller passes
+`std::numeric_limits<VkDeviceSize>::max()` since there is nothing else
+to pass -- so the identical latent mis-sizing became a real
+out-of-bounds read/write for the first time.
+
+I considered implementing real per-aspect support (the correct fix) but
+that needs interleaved read-modify-write packing/unpacking specific to
+each combined format's own byte layout, which today only exists for
+`D24_UNORM_S8_UINT` (`packDepthClear`/`packStencilClear`,
+`ImageFixture.cpp`) and only for a single repeated clear value, not an
+arbitrary per-texel buffer region -- and doesn't exist at all yet for
+`D32_FLOAT_S8X24_UINT`, the very format that crashed. Implementing that
+properly is real, separate work, so I fixed the immediate safety problem
+(reject cleanly, in `copyBufferImageRegion` itself, benefiting the
+pre-existing `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer` commands
+too) as its own preceding commit, and split the real fix off as roadmap
+F11a rather than silently declaring F11 itself "fully done" when a
+concrete, reachable gap remains.
+
+## Testing
+
+- `ImageTest.CopyBufferToImageRejectsCombinedDepthStencilFormat` proves
+  the bug-2 fix through the pre-existing `vkCmdCopyBufferToImage` path.
+- `HostImageCopyTest.cpp`: one end-to-end round trip
+  (`vkCopyMemoryToImage` then `vkCopyImageToMemory`, byte-for-byte
+  comparison), one unbound-destination rejection, one
+  `vkCopyImageToImage` round trip, one `vkTransitionImageLayout` (proving
+  `Image::layout()` actually changes with no command buffer involved at
+  all), one `CopyMemoryToImageRejectsCombinedDepthStencilFormat` (the
+  same bug-2 regression, through the new host-copy path this time), and
+  one direct check that `getSupportedHostImageCopySrcLayouts`/
+  `DstLayouts` return the exact two-entry lists documented above.
+- `PhysicalDeviceInfoTest.cpp`: two new cases for the dedicated
+  `VkPhysicalDeviceHostImageCopyFeatures`/`...Properties` structs
+  (agreeing with the aggregate `VkPhysicalDeviceVulkan14Features`/
+  `Properties` cases, the same "must agree" pattern every other F-row's
+  own dedicated-struct test already follows), plus updating the two
+  existing tests that hardcoded the old placeholder values.
+- `EntryPointsTest.cpp`: a new case proving
+  `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT` is set for a recognized
+  format and clear for an unrecognized one, plus updating the existing
+  `FormatProperties2FillsChainedFormatProperties3` test (which asserted
+  *exact* equality between the widened 32-bit result and the chained
+  `VkFormatProperties3` -- no longer true now that the latter carries one
+  extra 64-bit-only bit the former structurally cannot).
+
+`ninja check-feme`: 1773 discovered, 1772 passed, 1 unsupported
+(pre-existing, unrelated) -- no regressions.
+
+## CTS methodology note: `--deqp-case` vs. the report's own full-run recipe
+
+`VulkanCTSReport.md`'s own "Reproducing this report" section describes a
+54-group parallel run with per-group crash isolation; I ran a single,
+large but targeted `--deqp-case="dEQP-VK.image.host_image_copy.*"`
+instead (73289 cases, one process, one log), matching F9/F10's own
+sections' "targeted, not a full re-run" precedent, since this row's own
+scope is a single, self-contained new CTS group, and a full 54-group run
+adds ~25 minutes without changing this row's own attribution. I did,
+however, run the *reproduction steps* from that section (the
+`vulkan -> data/vulkan` symlink, the same `VK_DRIVER_FILES` pointed at
+this session's own build) to avoid the exact asset-resolution pitfall
+that section's own history already documents.
