@@ -1415,29 +1415,40 @@ output at that location -- the spec says it must not, but nothing about
 this software rasterizer's own correctness depends on enforcing that; the
 write is simply discarded along with everything else about the slot.
 
-**Status (roadmap F8): `vkCmdSetRenderingAttachmentLocations`/
+**Status (roadmap F8/F8a): `vkCmdSetRenderingAttachmentLocations`/
 `vkCmdSetRenderingInputAttachmentIndices` implemented; `dynamicRendering
-LocalRead` itself still unadvertised.** Both commands are restricted to a
-`vkCmdBeginRendering` instance (a classic `VkRenderPass`'s attachment/
-location correspondence is fixed by its `VkSubpassDescription`, which this
-extension does not touch) and reset to their identity-mapping default on
-every `vkCmdBeginRendering`, per each command's own man page.
-`vkCmdSetRenderingAttachmentLocations`' remap is genuinely honored: the
-mapping flows from `GraphicsState` (CommandBuffer.h) through
-`PreparedDraw::ColorAttachmentLocations` into the executor, whose fragment-
-output-to-attachment linkage (Executor.cpp) now searches by each
+LocalRead` now advertised for a single-sample color attachment.** Both
+commands are restricted to a `vkCmdBeginRendering` instance (a classic
+`VkRenderPass`'s attachment/location correspondence is fixed by its
+`VkSubpassDescription`, which this extension does not touch) and reset to
+their identity-mapping default on every `vkCmdBeginRendering`, per each
+command's own man page. `vkCmdSetRenderingAttachmentLocations`' remap is
+genuinely honored: the mapping flows from `GraphicsState` (CommandBuffer.h)
+through `PreparedDraw::ColorAttachmentLocations` into the executor, whose
+fragment-output-to-attachment linkage (Executor.cpp) now searches by each
 attachment's own mapped location -- including `VK_ATTACHMENT_UNUSED`'s "this
 location writes nowhere" case -- rather than assuming location `i` always
 feeds attachment `i`. `vkCmdSetRenderingInputAttachmentIndices`' mapping is
-only recorded and validated, not yet consulted: no shader-side SPIR-V
-`subpassInput`/`OpTypeImage(Dim=SubpassData)` consumption exists at all
-(confirmed absent from `SPIRVToLLVMPatterns.cpp`), the same pre-existing gap
-this document's own "shader-side SPIR-V `subpassInput` read is still a
-separate lowering step" note (above) already flagged for roadmap C5. Since
-`dynamicRenderingLocalRead`'s entire purpose is reading a currently-bound
-attachment as an input attachment, the feature, its extension, and its two
-limit fields all stay unadvertised per "Advertise only what passes" until
-that read itself exists -- tracked as roadmap F8a.
+now genuinely consulted too (roadmap F8a): a fragment shader's `subpassInput`
+read (`OpTypeImage(Dim=SubpassData)`/`OpImageRead`'s subpass-local form)
+converts directly into `feme.stage.subpass.load` calls
+(`feme::spirv::SubpassLoadPattern`, SPIRVToLLVMPatterns.cpp) naming the
+variable's own `InputAttachmentIndex` decoration, resolved by
+`feme::vulkan::runDraw`'s `buildSubpassInputHeap` (CommandBuffer.cpp) into a
+`FemeImageDescriptor` per logical index straight from the currently-bound
+color/depth/stencil attachments -- not a descriptor-set image -- and read
+back by FragmentWrapper.cpp's `lowerFragmentSubpassLoad` at the invocation's
+own `FragCoord`, closing the pre-existing gap this document's own
+"shader-side SPIR-V `subpassInput` read is still a separate lowering step"
+note (above) had flagged for roadmap C5.
+`dynamicRenderingLocalRead`/`VK_KHR_dynamic_rendering_local_read` are now
+advertised, proven end to end by `DrawTest.
+SubpassLoadReadsBackTheColorAttachmentItWrote`'s real read-after-write pixel
+round-trip -- but only for a single-sample color attachment:
+`dynamicRenderingLocalReadDepthStencilAttachments`/
+`dynamicRenderingLocalReadMultisampledAttachments` stay `VK_FALSE` until a
+depth/stencil or multisampled subpass input has its own demonstrated case,
+tracked as roadmap F8b.
 
 ### Graphics pipeline state
 
@@ -2532,11 +2543,12 @@ there once every command it declares is implemented.
 *Deviations, all failing at creation rather than at draw time* (the rule
 "a draw is not permitted to be the place a state combination is discovered
 to be unsupported"): subpass-local merging is not implemented, so an input
-attachment still goes through memory rather than a tile-local path, and a
-shader-side `subpassInput` read is still unlowered even though the render-pass
-and descriptor object model now accept the references (roadmap F8 built the
-dynamic-rendering-local-read *commands* atop this same gap without closing
-it -- see that section's own status note above -- tracked as roadmap F8a);
+attachment still goes through memory rather than a tile-local path -- a
+shader-side `subpassInput` read is now lowered (roadmap F8a closed the gap
+F8's own dynamic-rendering-local-read *commands* had built atop without
+closing -- see that section's own status note above), but always reads
+back through ordinary attachment memory rather than genuine tile-local
+storage, which this software rasterizer has no equivalent of regardless;
 subpass dependencies are
 validated and accepted but still collapse to the same full-join semantics this
 ICD already applies at every subpass boundary; attachment formats are the

@@ -315,7 +315,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_draw_indirect_count` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_driver_properties` | Implemented (core, not advertised by name) | roadmap C5: VkPhysicalDeviceDriverProperties filled, with a truthful zero VkConformanceVersion and no impersonated VkDriverId (EntryPoints.cpp's fillDriverProperties) |
 | `VK_KHR_dynamic_rendering` | Advertised |  |
-| `VK_KHR_dynamic_rendering_local_read` | Planned (in scope, partially implemented) | roadmap F8: `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInputAttachmentIndices` implemented, but not yet advertised -- no shader-side `subpassInput` local-read consumption exists yet (roadmap F8a) |
+| `VK_KHR_dynamic_rendering_local_read` | Implemented | roadmap F8/F8a: `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInputAttachmentIndices` implemented and now advertised -- a fragment shader's `subpassInput` local read produces real pixels for a single-sample color attachment (`DrawTest.SubpassLoadReadsBackTheColorAttachmentItWrote`); depth/stencil and multisample attachment coverage split off as roadmap F8b |
 | `VK_KHR_extended_flags` | Not implemented |  |
 | `VK_KHR_external_fence` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_external_fence_capabilities` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |

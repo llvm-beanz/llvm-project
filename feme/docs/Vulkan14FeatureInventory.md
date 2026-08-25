@@ -496,7 +496,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateDivisor` | yes | roadmap F6: `VkPipelineVertexInputDivisorStateCreateInfo`'s per-binding divisor (`GraphicsPipeline.cpp`'s `translateVertexInput`, `Executor.cpp`'s fetch-index formula) -- see the dedicated `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` row below |
 | feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateZeroDivisor` | yes | roadmap F6: a divisor of 0 is this same mechanism's own degenerate case, "every instance reads `firstInstance`" -- see the dedicated `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` row below |
 | feature | VK_VERSION_1_4 | `indexTypeUint8` | yes | roadmap F7: `vkCmdBindIndexBuffer`'s index read (`CommandBuffer.cpp`) and the executor's fetch (`Executor.cpp`) both gained an 8-bit case -- see the dedicated `VkPhysicalDeviceIndexTypeUint8FeaturesKHR` row below |
-| feature | VK_VERSION_1_4 | `dynamicRenderingLocalRead` | no | roadmap F8: `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInputAttachmentIndices` are implemented and validated (`CommandBuffer.{h,cpp}`), and the attachment-location remap is genuinely honored by the executor (`PreparedDraw::ColorAttachmentLocations`, `Executor.cpp`), but no shader-side SPIR-V `subpassInput` local-read consumption exists yet (a pre-existing gap roadmap C5 already found), so the feature itself stays unadvertised per "advertise only what passes"; remaining work is roadmap F8a |
+| feature | VK_VERSION_1_4 | `dynamicRenderingLocalRead` | yes | roadmap F8/F8a: `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInputAttachmentIndices` are implemented and validated (`CommandBuffer.{h,cpp}`); the attachment-location remap is honored by the executor (`PreparedDraw::ColorAttachmentLocations`, `Executor.cpp`), and a fragment shader's `subpassInput` local read now produces real pixels too (`feme::spirv::SubpassLoadPattern` in `SPIRVToLLVMPatterns.cpp`, `FragmentWrapper.cpp`'s `lowerFragmentSubpassLoad`, `CommandBuffer.cpp`'s `buildSubpassInputHeap`), proven end to end by `DrawTest.SubpassLoadReadsBackTheColorAttachmentItWrote` -- scoped to a single-sample color attachment; see the two dedicated limit rows below for what that excludes |
 | feature | VK_VERSION_1_4 | `maintenance5` | yes |  |
 | feature | VK_VERSION_1_4 | `maintenance6` | yes |  |
 | feature | VK_VERSION_1_4 | `pipelineProtectedAccess` | no |  |
@@ -507,8 +507,8 @@ Every row cites the specific feature/limit/extension name it closes.
 | limit | VK_VERSION_1_4 | `maxVertexAttribDivisor` | n/a |  |
 | limit | VK_VERSION_1_4 | `supportsNonZeroFirstInstance` | n/a |  |
 | limit | VK_VERSION_1_4 | `maxPushDescriptors` | n/a |  |
-| limit | VK_VERSION_1_4 | `dynamicRenderingLocalReadDepthStencilAttachments` | n/a | roadmap F8a: gated on `dynamicRenderingLocalRead` itself first |
-| limit | VK_VERSION_1_4 | `dynamicRenderingLocalReadMultisampledAttachments` | n/a | roadmap F8a: gated on `dynamicRenderingLocalRead` itself first |
+| limit | VK_VERSION_1_4 | `dynamicRenderingLocalReadDepthStencilAttachments` | n/a | roadmap F8b: `dynamicRenderingLocalRead` itself is real now, but only for a single-sample color attachment -- a depth/stencil-attachment local read is not yet demonstrated |
+| limit | VK_VERSION_1_4 | `dynamicRenderingLocalReadMultisampledAttachments` | n/a | roadmap F8b: same as the row above, for a multisampled attachment |
 | limit | VK_VERSION_1_4 | `earlyFragmentMultisampleCoverageAfterSampleCounting` | n/a |  |
 | limit | VK_VERSION_1_4 | `earlyFragmentSampleMaskTestBeforeSampleCounting` | n/a |  |
 | limit | VK_VERSION_1_4 | `depthStencilSwizzleOneSupport` | n/a |  |
@@ -531,7 +531,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_EXT_host_image_copy` | no |  |
 | extension | VK_VERSION_1_4 | `VK_EXT_pipeline_protected_access` | no |  |
 | extension | VK_VERSION_1_4 | `VK_EXT_pipeline_robustness` | no |  |
-| extension | VK_VERSION_1_4 | `VK_KHR_dynamic_rendering_local_read` | no | roadmap F8/F8a: see the `dynamicRenderingLocalRead` feature row above |
+| extension | VK_VERSION_1_4 | `VK_KHR_dynamic_rendering_local_read` | yes | roadmap F8/F8a: see the `dynamicRenderingLocalRead` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_global_priority` | yes | roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family |
 | extension | VK_VERSION_1_4 | `VK_KHR_index_type_uint8` | yes | roadmap F7: see the `indexTypeUint8` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_line_rasterization` | yes | roadmap F5: vkCmdSetLineStippleKHR (CommandBuffer.cpp), VkPipelineRasterizationLineStateCreateInfoKHR translation (GraphicsPipeline.cpp) |
