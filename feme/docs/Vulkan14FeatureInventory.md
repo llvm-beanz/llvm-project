@@ -495,7 +495,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `stippledSmoothLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
 | feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateDivisor` | yes | roadmap F6: `VkPipelineVertexInputDivisorStateCreateInfo`'s per-binding divisor (`GraphicsPipeline.cpp`'s `translateVertexInput`, `Executor.cpp`'s fetch-index formula) -- see the dedicated `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` row below |
 | feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateZeroDivisor` | yes | roadmap F6: a divisor of 0 is this same mechanism's own degenerate case, "every instance reads `firstInstance`" -- see the dedicated `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` row below |
-| feature | VK_VERSION_1_4 | `indexTypeUint8` | no |  |
+| feature | VK_VERSION_1_4 | `indexTypeUint8` | yes | roadmap F7: `vkCmdBindIndexBuffer`'s index read (`CommandBuffer.cpp`) and the executor's fetch (`Executor.cpp`) both gained an 8-bit case -- see the dedicated `VkPhysicalDeviceIndexTypeUint8FeaturesKHR` row below |
 | feature | VK_VERSION_1_4 | `dynamicRenderingLocalRead` | no |  |
 | feature | VK_VERSION_1_4 | `maintenance5` | yes |  |
 | feature | VK_VERSION_1_4 | `maintenance6` | yes |  |
@@ -533,7 +533,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_EXT_pipeline_robustness` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_dynamic_rendering_local_read` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_global_priority` | yes | roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family |
-| extension | VK_VERSION_1_4 | `VK_KHR_index_type_uint8` | no |  |
+| extension | VK_VERSION_1_4 | `VK_KHR_index_type_uint8` | yes | roadmap F7: see the `indexTypeUint8` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_line_rasterization` | yes | roadmap F5: vkCmdSetLineStippleKHR (CommandBuffer.cpp), VkPipelineRasterizationLineStateCreateInfoKHR translation (GraphicsPipeline.cpp) |
 | extension | VK_VERSION_1_4 | `VK_KHR_load_store_op_none` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_maintenance5` | yes | roadmap E5: null VkRenderingAttachmentInfo image views, VK_REMAINING_ARRAY_LAYERS in copy/blit/resolve regions (E27), and the rest of the group |

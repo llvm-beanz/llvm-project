@@ -4230,3 +4230,66 @@ every commit in this row -- new tests relative to F5's own report:
 `RendersVertexAttributeInstanceRateZeroDivisor` plus
 `AdvertisesDynamicRenderingExtension` (extended again, now 22).
 
+
+## Roadmap F7: measured impact (targeted, not a full re-run)
+
+F7 gave `feme::graphics::IndexType` a third enumerator, `UInt8`, alongside
+its pre-existing `UInt16`/`UInt32`: `CommandBuffer.cpp`'s draw-time
+validation (the index-type check, the `IndexBinding.Type` translation, and
+`validateDrawFetchBounds`'s `IndexSize` bounds check) now accepts
+`VK_INDEX_TYPE_UINT8` alongside its two pre-existing cases, and the
+executor's index fetch (`Executor.cpp`) reads a 1-byte-per-element index
+(`ElemSize == 1`) with that type's own all-1-bits restart marker (`0xFF`,
+not 16-/32-bit's `0xFFFF`/`0xFFFFFFFF`) for `primitiveRestartEnable` --
+mirroring the pre-existing 16-/32-bit cases' own shape exactly, not a
+parallel code path. `feme-render`'s scene YAML gained a matching
+`format: uint8` index-buffer encoding. `indexTypeUint8`/
+`VK_KHR_index_type_uint8` are now advertised.
+
+Targeted subset: every CTS case naming `index_type_uint8` in
+`dEQP-VK.pipeline.monolithic.*` and the two `dEQP-VK.api.*` cases that
+exercise this row's own advertised feature struct directly
+(`VK_DRIVER_FILES` pointed at this ICD's built `feme_icd.json`).
+
+- **The two `api.*` cases pass**: `dEQP-VK.api.device_init.
+  create_device_unsupported_features.index_type_uint8_features` and
+  `dEQP-VK.api.info.get_physical_device_properties2.features.
+  index_type_uint8_features` -- confirming `indexTypeUint8` is
+  consistently reported across both paths CTS queries it through.
+- **Every `dEQP-VK.pipeline.monolithic.input_assembly.primitive_restart.
+  index_type_uint8.*` case is blocked by pre-existing, unrelated gaps, not
+  anything this row's own code causes.** Of the 57 cases run: 43 are
+  `NotSupported` (`VK_EXT_primitive_topology_list_restart`, an unrelated
+  unimplemented extension a list-topology restart case requires, or
+  `geometryShader`, an unrelated unimplemented core feature a
+  `*_with_adjacency` case requires -- neither is this row's own
+  `indexTypeUint8` bit), 12 `Fail` with `"Vulkan vertex buffer format is
+  not supported"` (the amber-script harness's own vertex format choice,
+  not this row's index-buffer path), and 2 `Fail` with the same
+  pre-existing `feme-cpu-simdize` divergent-vector diagnostic F5/F6's own
+  reports already hit for an unrelated triangle-strip vertex shader
+  pattern (`"has a divergent vector value ... roadmap milestone 7
+  deviation"`). None of these 57 failures/skips name an 8-bit-index-read
+  problem anywhere in their own diagnostic text. This row's actual 8-bit
+  fetch correctness (element size, the type's own restart marker, and
+  bounds checking) is instead verified by four new, real tests below that
+  avoid these unrelated blockers: two `ExecutorTest` cases (a plain
+  8-bit-indexed triangle, and 8-bit primitive restart on a
+  `TriangleStrip`) plus a `DrawTest` end-to-end case exercising
+  `vkCmdBindIndexBuffer(..., VK_INDEX_TYPE_UINT8)` through the real ICD
+  entry points, plus a `feme-render` lit test
+  (`draw-indexed-uint8.test`) mirroring `draw-indexed.test`'s own scene
+  through an 8-bit index buffer.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1729
+discovered, 1728 passed, 1 unsupported (pre-existing, unrelated), after
+every commit in this row -- new tests relative to F6's own report:
+`ExecutorTest`'s `RendersTheSameTriangleThroughAnEightBitIndexBuffer`/
+`HonorsPrimitiveRestartOnIndexedTriangleStripWithEightBitIndices`,
+`PreparedDrawTest`'s `DescribesAnEightBitIndexedDraw`,
+`PhysicalDeviceInfoTest`'s
+`IndexTypeUint8IsAdvertisedThroughItsOwnDedicatedFeatureStruct`, and
+`DrawTest`'s `RendersIndexedDrawWithEightBitIndices` plus
+`AdvertisesDynamicRenderingExtension` (extended again, now 23), plus the
+new `Tools/feme-render/draw-indexed-uint8.test` lit test.

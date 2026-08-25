@@ -62,12 +62,12 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 
 | Status | Count |
 |---|---:|
-| Advertised | 21 |
+| Advertised | 22 |
 | Implemented (core, not advertised by name) | 17 |
-| Planned (in scope, not implemented) | 60 |
+| Planned (in scope, not implemented) | 59 |
 | Not implemented (out of scope) | 202 |
 
-- **The 21 advertised** are the ones a `deqp-vk` case enables by name
+- **The 22 advertised** are the ones a `deqp-vk` case enables by name
   regardless of the advertised `apiVersion`, plus the three that predate
   that discipline: `VK_KHR_dynamic_rendering`,
   `VK_EXT_extended_dynamic_state`, `VK_KHR_shader_integer_dot_product`,
@@ -81,8 +81,8 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   (E18), `VK_EXT_4444_formats`/`VK_EXT_pipeline_creation_feedback`/
   `VK_KHR_shader_non_semantic_info`/`VK_EXT_tooling_info` (E19),
   `VK_KHR_global_priority` (F1), `VK_KHR_shader_expect_assume` (F4),
-  `VK_KHR_line_rasterization` (F5), and
-  `VK_KHR_vertex_attribute_divisor` (F6).
+  `VK_KHR_line_rasterization` (F5), `VK_KHR_vertex_attribute_divisor`
+  (F6), and `VK_KHR_index_type_uint8` (F7).
 - **The 17 core-but-unadvertised** were 3 until this edition. A full audit
   of every core-promoted extension against this ICD's own sources (rather
   than only the ones a roadmap row happened to name) found 14 more that
@@ -340,7 +340,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_image_format_list` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_imageless_framebuffer` | Implemented (core, not advertised by name) | roadmap C6: VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT and VkRenderPassAttachmentBeginInfo both honored (RenderPass.cpp's vkCreateFramebuffer, CommandBuffer.cpp's vkCmdBeginRenderPass) |
 | `VK_KHR_incremental_present` | Not implemented |  |
-| `VK_KHR_index_type_uint8` | Planned (in scope, not implemented) | roadmap F7 |
+| `VK_KHR_index_type_uint8` | Advertised | roadmap F7: `vkCmdBindIndexBuffer`'s index read (`CommandBuffer.cpp`) and the executor's fetch (`Executor.cpp`) both gained an 8-bit case |
 | `VK_KHR_internally_synchronized_queues` | Not implemented |  |
 | `VK_KHR_line_rasterization` | Advertised | roadmap F5 |
 | `VK_KHR_load_store_op_none` | Planned (in scope, not implemented) | roadmap F13 |
