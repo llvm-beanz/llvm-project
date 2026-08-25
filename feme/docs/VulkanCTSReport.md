@@ -4164,3 +4164,69 @@ every commit in this row -- new tests relative to F4's own report:
 `LineRasterizationIsAdvertisedThroughItsOwnDedicatedStructs`, and
 `DrawTest`'s `DynamicLineWidthWidensTheLine` (extended) plus
 `AdvertisesDynamicRenderingExtension` (extended again, now 21).
+
+## Roadmap F6: measured impact (targeted, not a full re-run)
+
+F6 translated `VkPipelineVertexInputDivisorStateCreateInfo`'s per-binding
+divisor into a new `Divisor` field on `VertexInputBinding`
+(`GraphicsPipeline.cpp`'s `translateVertexInput`), rejecting an invalid
+binding reference, a `VK_VERTEX_INPUT_RATE_VERTEX` target, or a
+too-large value at creation, and generalized the executor's existing
+per-instance vertex fetch (`Executor.cpp`) to the spec's own
+`firstInstance + (instanceIndex - firstInstance) / divisor` formula
+(`divisor == 0` being the one further, explicit case, "every instance
+reads `firstInstance`"). `vertexAttributeInstanceRateDivisor`/
+`vertexAttributeInstanceRateZeroDivisor` and `VK_KHR_vertex_attribute_
+divisor` are now advertised.
+
+Targeted subset: every CTS case naming `vertex_attribute_divisor`/
+`attrib_divisor` in `dEQP-VK.api.*` and `dEQP-VK.draw.*`
+(`VK_DRIVER_FILES` pointed at this ICD's built `feme_icd.json`).
+
+- **The three `api.*` cases that exercise this row's own advertised
+  feature/property directly all pass**:
+  `dEQP-VK.api.device_init.create_device_unsupported_features.vertex_
+  attribute_divisor_features`, `dEQP-VK.api.info.get_physical_device_
+  properties2.features.vertex_attribute_divisor_features`, and
+  `dEQP-VK.api.info.vulkan1p2_limits_validation.khr_vertex_attribute_
+  divisor` -- confirming `vertexAttributeInstanceRateDivisor`/
+  `vertexAttributeInstanceRateZeroDivisor` and `maxVertexAttribDivisor`/
+  `supportsNonZeroFirstInstance` are consistently reported across every
+  path CTS queries them through.
+- **Every `dEQP-VK.draw.*` case naming `attrib_divisor` fails at
+  `vkCreateGraphicsPipelines`, but not for a reason this row's own code
+  causes.** Re-running with `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+  (`Diagnostics.h`'s opt-in error log) surfaces the same message for
+  every one of them, divisor value and topology held equal:
+  `"rasterizer discard, depth clamp, depth bias, and non-fill polygon
+  modes are not implemented"` (`GraphicsPipeline.cpp`'s
+  `translateRasterState`) -- a pre-existing, unrelated gap in this
+  ICD's rasterization-state translation, not anything F6 touches.
+  Confirmed by two baseline checks that name no divisor state at all:
+  `dEQP-VK.draw.renderpass.basic_draw.draw.triangle_list.1` and
+  `dEQP-VK.draw.renderpass.instanced.draw_indexed_vk_primitive_
+  topology_line_list` both fail with the identical message, so this is
+  the whole `draw` module's shared `vktDrawTests` fixture setting one of
+  those three static rasterization fields the way `dEQP-VK.rasterization.
+  primitives.*`'s shared vertex shader hit F5's own unrelated
+  `feme-cpu-simdize` gap above -- a pre-existing block on the entire
+  module, not a regression this row introduces or a gap within this
+  row's own scope to close. This row's actual draw-time correctness (the
+  fetch-index formula itself, including the `divisor == 0` case and a
+  `firstInstance != 0` base) is instead verified by two new, real
+  end-to-end `DrawTest` cases below that avoid this unrelated blocker by
+  using the same minimal fixed-function state `RendersPerInstanceVertex
+  Attribute` already established.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1723
+discovered, 1722 passed, 1 unsupported (pre-existing, unrelated), after
+every commit in this row -- new tests relative to F5's own report:
+`GraphicsPipelineTest`'s `TranslatesVertexAttributeDivisorState`/
+`AcceptsZeroVertexAttributeDivisor`/
+`RejectsInvalidVertexAttributeDivisorState`, `PhysicalDeviceInfoTest`'s
+`VertexAttributeDivisorIsAdvertisedThroughItsOwnDedicatedStructs`, and
+`DrawTest`'s `RendersVertexAttributeInstanceRateDivisor`/
+`RendersVertexAttributeInstanceRateZeroDivisor` plus
+`AdvertisesDynamicRenderingExtension` (extended again, now 22).
+

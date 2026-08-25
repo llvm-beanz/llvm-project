@@ -62,12 +62,12 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 
 | Status | Count |
 |---|---:|
-| Advertised | 20 |
+| Advertised | 21 |
 | Implemented (core, not advertised by name) | 17 |
-| Planned (in scope, not implemented) | 61 |
+| Planned (in scope, not implemented) | 60 |
 | Not implemented (out of scope) | 202 |
 
-- **The 20 advertised** are the ones a `deqp-vk` case enables by name
+- **The 21 advertised** are the ones a `deqp-vk` case enables by name
   regardless of the advertised `apiVersion`, plus the three that predate
   that discipline: `VK_KHR_dynamic_rendering`,
   `VK_EXT_extended_dynamic_state`, `VK_KHR_shader_integer_dot_product`,
@@ -80,8 +80,9 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_EXT_inline_uniform_block` (E14), `VK_EXT_texel_buffer_alignment`
   (E18), `VK_EXT_4444_formats`/`VK_EXT_pipeline_creation_feedback`/
   `VK_KHR_shader_non_semantic_info`/`VK_EXT_tooling_info` (E19),
-  `VK_KHR_global_priority` (F1), `VK_KHR_shader_expect_assume` (F4), and
-  `VK_KHR_line_rasterization` (F5).
+  `VK_KHR_global_priority` (F1), `VK_KHR_shader_expect_assume` (F4),
+  `VK_KHR_line_rasterization` (F5), and
+  `VK_KHR_vertex_attribute_divisor` (F6).
 - **The 17 core-but-unadvertised** were 3 until this edition. A full audit
   of every core-promoted extension against this ICD's own sources (rather
   than only the ones a roadmap row happened to name) found 14 more that
@@ -413,7 +414,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_unified_image_layouts` | Not implemented |  |
 | `VK_KHR_uniform_buffer_standard_layout` | Implemented (core, not advertised by name) | roadmap C6: reported true, and honest -- no std140 layout restriction was ever enforced to relax (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp) |
 | `VK_KHR_variable_pointers` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
-| `VK_KHR_vertex_attribute_divisor` | Planned (in scope, not implemented) | roadmap F6 |
+| `VK_KHR_vertex_attribute_divisor` | Advertised | roadmap F6: `VkPipelineVertexInputDivisorStateCreateInfo`'s per-binding divisor, including the 0 ("every instance reads `firstInstance`") case (`GraphicsPipeline.cpp`'s `translateVertexInput`, `Executor.cpp`'s fetch-index formula) |
 | `VK_KHR_video_decode_av1` | Not implemented |  |
 | `VK_KHR_video_decode_h264` | Not implemented |  |
 | `VK_KHR_video_decode_h265` | Not implemented |  |

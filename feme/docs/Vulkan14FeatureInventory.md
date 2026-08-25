@@ -73,21 +73,22 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 | 1.1 | **0 of 12** | n/a (see scope note) | 6 of 23 |
 | 1.2 | 7 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
-| 1.4 | 5 of 21 | 25 | 4 of 16 |
-| **total** | **27 of 150** | **70** | **36 of 86** |
+| 1.4 | 14 of 21 | 25 | 7 of 16 |
+| **total** | **36 of 150** | **70** | **39 of 86** |
 
 - **The 1.3 floor is nearly closed; the 1.1/1.2 floor was never audited
-  until now, and the 1.4 floor has only just started.** Roadmap E1-E28 drove
+  until now, and the 1.4 floor is well underway.** Roadmap E1-E28 drove
   1.3 from 1 advertised feature bit to 12 of 15 (only `robustImageAccess`,
   `descriptorBindingInlineUniformBlockUpdateAfterBind` and
-  `textureCompressionASTC_HDR` remain), and the F-series has now closed F1
-  (`globalPriorityQuery`) and F2 (`shaderSubgroupRotate`/
-  `shaderSubgroupRotateClustered`), bringing 1.4 to 5 of its 21 bits
-  (`maintenance5`/`maintenance6`/`globalPriorityQuery`/
-  `shaderSubgroupRotate`/`shaderSubgroupRotateClustered`), while 1.1 still
-  reports **zero** of its 12 bits. That zero is the single most surprising
-  number in this table: `multiview`, `variablePointers`,
-  `samplerYcbcrConversion`, `shaderDrawParameters`, the 16-bit storage
+  `textureCompressionASTC_HDR` remain), and the F-series has so far closed
+  F1 (`globalPriorityQuery`), F2 (`shaderSubgroupRotate`/
+  `shaderSubgroupRotateClustered`), F4 (`shaderExpectAssume`), F5 (the six
+  line-rasterization bits) and F6
+  (`vertexAttributeInstanceRateDivisor`/`vertexAttributeInstanceRateZeroDivisor`),
+  bringing 1.4 to 14 of its 21 bits, while 1.1 still reports **zero** of
+  its 12 bits. That zero is the single most surprising number in this
+  table: `multiview`, `variablePointers`, `samplerYcbcrConversion`,
+  `shaderDrawParameters`, the 16-bit storage
   cluster and `protectedMemory` are all `VK_FALSE`, and a 1.4 conformance
   claim inherits every one of them.
 - **17 of the 52 unimplemented 1.0 feature bits are graphics
@@ -492,8 +493,8 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `stippledRectangularLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
 | feature | VK_VERSION_1_4 | `stippledBresenhamLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
 | feature | VK_VERSION_1_4 | `stippledSmoothLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
-| feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateDivisor` | no |  |
-| feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateZeroDivisor` | no |  |
+| feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateDivisor` | yes | roadmap F6: `VkPipelineVertexInputDivisorStateCreateInfo`'s per-binding divisor (`GraphicsPipeline.cpp`'s `translateVertexInput`, `Executor.cpp`'s fetch-index formula) -- see the dedicated `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` row below |
+| feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateZeroDivisor` | yes | roadmap F6: a divisor of 0 is this same mechanism's own degenerate case, "every instance reads `firstInstance`" -- see the dedicated `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` row below |
 | feature | VK_VERSION_1_4 | `indexTypeUint8` | no |  |
 | feature | VK_VERSION_1_4 | `dynamicRenderingLocalRead` | no |  |
 | feature | VK_VERSION_1_4 | `maintenance5` | yes |  |
@@ -542,4 +543,4 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_expect_assume` | yes | roadmap F4: see the `shaderExpectAssume` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no | roadmap F15c/F15d: see the `shaderFloatControls2` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_subgroup_rotate` | yes | roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern) |
-| extension | VK_VERSION_1_4 | `VK_KHR_vertex_attribute_divisor` | no |  |
+| extension | VK_VERSION_1_4 | `VK_KHR_vertex_attribute_divisor` | yes | roadmap F6: `VkPipelineVertexInputDivisorStateCreateInfo`'s per-binding divisor, including the 0 ("every instance reads `firstInstance`") case (`GraphicsPipeline.cpp`'s `translateVertexInput`, `Executor.cpp`'s fetch-index formula) |
