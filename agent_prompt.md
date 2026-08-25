@@ -33,10 +33,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F6?
+Can you implement roadmap milestone F7?
 
-> **`VK_KHR_vertex_attribute_divisor`/`vertexAttributeInstanceRateDivisor`(+`Zero`)
-> + `maxVertexAttribDivisor`.** `VkVertexInputBindingDivisorDescription` extends
-> the existing per-binding instance-rate stepping already implied by instanced
-> draws; a divisor of 0 (every instance reads vertex 0) is the one new case, not
-> a new mechanism
+> **`VK_KHR_index_type_uint8`/`indexTypeUint8`.** `vkCmdBindIndexBuffer`'s
+> existing 16/32-bit index read in `CommandBuffer.cpp`/the executor gains an
+> 8-bit case — mechanical, narrow, good second task after F4
