@@ -31279,3 +31279,112 @@ sure I wasn't missing a real F5-specific regression hiding among them.
 Documented as a new "Roadmap F5: measured impact" section in
 `VulkanCTSReport.md`, following the same template every prior F-row's own
 section already established.
+
+# Agent thoughts: roadmap F6 (VK_KHR_vertex_attribute_divisor/vertexAttributeInstanceRateDivisor(+Zero) + maxVertexAttribDivisor)
+
+## Reading the request
+
+The roadmap row's own premise is that `VkVertexInputBindingDivisorDescription`
+is not a new fetch mechanism: instanced draws already fetch a per-instance
+vertex attribute by instance index (`VertexInputBinding::PerInstance`,
+`Executor.cpp`'s existing `Binding->PerInstance ? Invocations[Flat].InstanceID
+: VertexIndices[Flat]`), and a divisor just changes which instance index a
+given instance's fetch maps to -- `divisor == 1` (the implicit default) is
+exactly that existing behavior, and `divisor == 0` is simply this same
+formula's own degenerate case. I confirmed this against the spec's own wording
+before writing any code: the fetch index is `firstInstance + (instanceIndex -
+firstInstance) / divisor`, and `divisor == 0` is spelled out as its own rule
+("every instance uses firstInstance") rather than a division by zero. This
+mattered for the implementation shape: rather than special-casing "no
+divisor state" vs. "divisor state present" as two different code paths, I
+gave every `VertexInputBinding` a `Divisor` field defaulting to `1`, so the
+*general* formula (not a special-cased "if declared, do X, else do the old
+thing") is the only fetch-index logic that exists, and it naturally reduces
+to the old behavior when nothing chains
+`VkPipelineVertexInputDivisorStateCreateInfo` at all.
+
+## Design decisions worth recording
+
+- **`MaxVertexAttribDivisor = 0xFFFFFFFF`, not an artificial smaller
+  number.** The fetch-index division this bounds is a plain 32-bit integer
+  divide with no narrower requirement of its own (`FirstInstance +
+  (InstanceID - FirstInstance) / Divisor`), so there is no real hardware/
+  software limit to report short of the type's own range -- inventing a
+  smaller "conservative" number here would not be honest, it would just be
+  an arbitrary restriction with no verified reason behind it. I put the
+  constant in `GraphicsPipeline.h` (not duplicated as a literal in both
+  `GraphicsPipeline.cpp`'s validation and `EntryPoints.cpp`'s advertised
+  property) specifically so the two can never drift apart -- the same
+  "shared, not duplicated" discipline `MaxMemoryAllocationSize` already
+  established for `PhysicalDeviceInfo`.
+- **Validating the binding reference and rate at pipeline-creation time,
+  not accepting it silently.** `VkVertexInputBindingDivisorDescription`
+  names a `binding` index, which could reference a binding the pipeline
+  never declared, or one declared `VK_VERTEX_INPUT_RATE_VERTEX` (the spec's
+  own valid-usage rule: a divisor only ever applies to a per-instance
+  binding). Both are rejected outright rather than silently ignored --
+  consistent with this file's own stated policy ("Anything with no
+  implemented path fails here, at creation") and with how
+  `VkVertexInputAttributeDescription`'s own binding reference is already
+  validated a few lines above in the same function.
+- **`supportsNonZeroFirstInstance = VK_TRUE`, not a placeholder `VK_FALSE`.**
+  This property specifically distinguishes a driver that only correctly
+  divides `instanceIndex` itself (implicitly assuming `firstInstance == 0`)
+  from one that correctly divides `(instanceIndex - firstInstance)` and
+  re-adds `firstInstance` -- i.e., a divisor that keeps working when a draw
+  also uses a non-zero `firstInstance`. Since the executor already had
+  `firstInstance` on hand (`Invocations[Flat].BaseInstance`, populated for
+  every invocation regardless of divisor), implementing the *correct*
+  formula from the start cost nothing extra over the simpler, incorrect one
+  -- so there was no reason to advertise the weaker guarantee. I added a
+  dedicated end-to-end test (`RendersVertexAttributeInstanceRateZeroDivisor`)
+  that specifically uses `firstInstance == 1` (not `0`) to make sure this
+  claim is exercised, not just asserted.
+- **Reused the executor's existing `BaseInstance` field rather than adding a
+  new one.** `cpu::FemeVertexInvocation::BaseInstance` was already populated
+  (`Executor.cpp`'s per-invocation assembly loop) for shader-visible
+  `SV_InstanceID`-adjacent semantics, and turned out to be exactly
+  `firstInstance` already -- no new per-invocation state needed threading
+  through for this row.
+- **Left the "exceeds `maxVertexAttribDivisor`" rejection branch in
+  `translateVertexInput`'s code even though it is currently unreachable.**
+  Since the divisor field is `uint32_t` and the advertised maximum is
+  `0xFFFFFFFF` (the type's own full range), no value can ever exceed it
+  today. I kept the check anyway (as defensive, self-documenting code
+  matching every other limit check in this function) but deliberately did
+  **not** write a unit test asserting rejection at that boundary, since
+  constructing such a test would require overflowing the divisor value
+  itself (wrapping back into range) -- a test that would misleadingly imply
+  the branch is reachable when it currently is not. If a future row ever
+  lowers this constant for a real reason, that would be the place to add
+  the corresponding test.
+
+## CTS verification
+
+The dedicated feature/property CTS cases
+(`dEQP-VK.api.device_init.create_device_unsupported_features.vertex_
+attribute_divisor_features`, `dEQP-VK.api.info.get_physical_device_
+properties2.features.vertex_attribute_divisor_features`,
+`dEQP-VK.api.info.vulkan1p2_limits_validation.khr_vertex_attribute_divisor`)
+all pass. The much larger `dEQP-VK.draw.*` subset that actually exercises a
+divisor through a real draw all fail at `vkCreateGraphicsPipelines`, but I
+confirmed (via `FEME_VULKAN_LOG_CREATION_ERRORS=1`, this ICD's opt-in error
+log) that every one of them hits the exact same message --
+`"rasterizer discard, depth clamp, depth bias, and non-fill polygon modes are
+not implemented"` -- regardless of which divisor value or topology the case
+names, and that two baseline cases naming *no* divisor state at all
+(`dEQP-VK.draw.renderpass.basic_draw.draw.triangle_list.1`,
+`dEQP-VK.draw.renderpass.instanced.draw_indexed_vk_primitive_topology_
+line_list`) fail identically. This is CTS's shared `vktDrawTests` fixture
+setting a static rasterization-state field this ICD does not implement at
+all, a pre-existing gap in `translateRasterState` that blocks the entire
+`draw` module and has nothing to do with this row's own translation/fetch
+logic -- the same "shared-harness-wide gap, not a regression this row
+introduces" shape F5's own `feme-cpu-simdize` finding already had. Rather
+than leave this row's actual draw-time correctness unverified, I added two
+new end-to-end `DrawTest` cases that exercise the real fetch-index formula
+(a non-trivial divisor of 2 across 4 instances staying in-bounds against a
+2-element buffer, and a zero divisor with a non-zero `firstInstance`) using
+the same minimal fixed-function pipeline shape
+`RendersPerInstanceVertexAttribute` already established, which avoids the
+unrelated blocker entirely.
