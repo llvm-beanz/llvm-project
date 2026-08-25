@@ -1275,10 +1275,11 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
     if (!Gfx.IndexBuffer || !Gfx.IndexBuffer->isBound())
       return createStringError(inconvertibleErrorCode(),
                                "an indexed draw has no bound index buffer");
-    if (Gfx.IndexType != VK_INDEX_TYPE_UINT16 &&
+    if (Gfx.IndexType != VK_INDEX_TYPE_UINT8 &&
+        Gfx.IndexType != VK_INDEX_TYPE_UINT16 &&
         Gfx.IndexType != VK_INDEX_TYPE_UINT32)
       return createStringError(inconvertibleErrorCode(),
-                               "only 16- and 32-bit index types are "
+                               "only 8-, 16-, and 32-bit index types are "
                                "implemented");
     if (Gfx.IndexBufferOffset > Gfx.IndexBuffer->size())
       return createStringError(inconvertibleErrorCode(),
@@ -1297,7 +1298,9 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
       return createStringError(inconvertibleErrorCode(),
                                "the index buffer's bound offset/size range "
                                "is out of range of its buffer");
-    IndexBinding.Type = Gfx.IndexType == VK_INDEX_TYPE_UINT16
+    IndexBinding.Type = Gfx.IndexType == VK_INDEX_TYPE_UINT8
+                            ? feme::graphics::IndexType::UInt8
+                        : Gfx.IndexType == VK_INDEX_TYPE_UINT16
                             ? feme::graphics::IndexType::UInt16
                             : feme::graphics::IndexType::UInt32;
     IndexBinding.Data = llvm::ArrayRef<uint8_t>(
@@ -1375,7 +1378,9 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
     uint64_t BoundEnd = Gfx.IndexBufferSize == VK_WHOLE_SIZE
                             ? Gfx.IndexBuffer->size()
                             : Gfx.IndexBufferOffset + Gfx.IndexBufferSize;
-    uint64_t IndexSize = Gfx.IndexType == VK_INDEX_TYPE_UINT16 ? 2 : 4;
+    uint64_t IndexSize = Gfx.IndexType == VK_INDEX_TYPE_UINT8    ? 1
+                         : Gfx.IndexType == VK_INDEX_TYPE_UINT16 ? 2
+                                                                 : 4;
     uint64_t End = (uint64_t(Draw.FirstIndex) + Draw.VertexCount) * IndexSize +
                    Gfx.IndexBufferOffset;
     if (End > BoundEnd)

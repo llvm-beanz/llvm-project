@@ -93,6 +93,20 @@ TEST(PreparedDrawTest, DescribesAnIndexedDraw) {
   EXPECT_EQ(Prepared.Draws[0].VertexOffset, 1);
 }
 
+/// Roadmap F7 (`VK_KHR_index_type_uint8`): `IndexType::UInt8` describes a
+/// 1-byte-per-element index buffer, one raw byte per index rather than
+/// `UInt16`'s 2 or `UInt32`'s 4.
+TEST(PreparedDrawTest, DescribesAnEightBitIndexedDraw) {
+  std::array<uint8_t, 3> Indices = {0, 1, 2};
+  IndexBufferBinding IndexBuffer{IndexType::UInt8, Indices};
+
+  PreparedDraw Prepared;
+  Prepared.IndexBuffer = IndexBuffer;
+
+  EXPECT_EQ(Prepared.IndexBuffer.Type, IndexType::UInt8);
+  EXPECT_EQ(Prepared.IndexBuffer.Data.size(), 3u);
+}
+
 TEST(PreparedDrawTest, AttachmentViewDefaultsToOneArrayLayer) {
   AttachmentView Color;
   EXPECT_EQ(Color.ArrayLayers, 1u);

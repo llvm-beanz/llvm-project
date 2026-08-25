@@ -285,6 +285,45 @@ TEST(ExecutorTest, RendersTheSameTriangleThroughAnIndexBuffer) {
   }
 }
 
+/// Roadmap F7 (`VK_KHR_index_type_uint8`): the same indexed triangle as
+/// above, but through an 8-bit index buffer -- the executor's index-fetch
+/// path (`Executor.cpp`) must read a 1-byte-per-element index exactly like
+/// its pre-existing 16-/32-bit cases.
+TEST(ExecutorTest, RendersTheSameTriangleThroughAnEightBitIndexBuffer) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // One extra unused leading vertex so `VertexOffset` is exercised.
+  Scene.VertexData = {
+      0.0f,  0.0f,  0.0f, 0.0f, 0.0f, 0.0f, 0.0f, // unused
+      -1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v0 (green)
+      3.0f,  -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v2
+  };
+  std::array<uint8_t, 3> Indices8 = {0, 1, 2};
+  // `Scene.prepare()` sizes `Cmd.VertexCount` off `Scene.Indices`'s element
+  // count; the real 8-bit index data below replaces `Draw.IndexBuffer`
+  // itself, so only the count (3, matching `Indices8`) matters here.
+  Scene.Indices = {0, 1, 2};
+  PreparedDraw Draw = Scene.prepare(/*Indexed=*/true);
+  Draw.IndexBuffer = IndexBufferBinding{IndexType::UInt8, Indices8};
+  Scene.Draws[0].VertexOffset = 1;
+  Draw.Draws = Scene.Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = Scene.AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 0) << "texel " << I;
+    EXPECT_EQ(Texel[1], 255) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
+}
+
 /// A `VK_VERTEX_INPUT_RATE`-unrelated milestone deviation: primitive restart
 /// on an indexed `TriangleStrip`. The restart marker (the index type's
 /// all-1-bits value) between two disjoint triangles must not be treated as
@@ -340,6 +379,65 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedTriangleStrip) {
   EXPECT_EQ(Center[1], 0);
   EXPECT_EQ(Center[2], 0);
   EXPECT_EQ(Center[3], 0);
+}
+
+/// Roadmap F7: the same restart scenario as above, but through an 8-bit
+/// index buffer -- the restart marker is that type's own all-1-bits value
+/// (`0xFF`), not the 32-bit one, so this exercises `Executor.cpp`'s
+/// per-index-type `RestartValue` selection, not only its element-size one.
+TEST(ExecutorTest,
+     HonorsPrimitiveRestartOnIndexedTriangleStripWithEightBitIndices) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleStrip, DepthState{}, StencilState{},
+      BlendState{}, /*LogicOpEnable=*/false, LogicOp::Copy,
+      /*BlendConstants=*/{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/true);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      // Segment 1: a red triangle in the lower-left region.
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v1
+      -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v2
+      // Segment 2: a green triangle in the upper-right region.
+      0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v3
+      1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v4
+      1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v5
+  };
+  std::array<uint8_t, 7> Indices8 = {0, 1, 2, 0xFFu, 3, 4, 5};
+  // `Scene.prepare()` sizes `Cmd.VertexCount` off `Scene.Indices`, one
+  // 32-bit element per index; only its element count (not its 32-bit
+  // values) matters, since `Draw.IndexBuffer` is overridden with the real
+  // 8-bit data right below.
+  Scene.Indices = {0, 1, 2, 0, 3, 4, 5};
+  PreparedDraw Draw = Scene.prepare(/*Indexed=*/true);
+  Draw.IndexBuffer = IndexBufferBinding{IndexType::UInt8, Indices8};
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  // Centroid of segment 1's triangle: definitely red.
+  const uint8_t *Red = texel(0, 2);
+  EXPECT_EQ(Red[0], 255);
+  EXPECT_EQ(Red[1], 0);
+  EXPECT_EQ(Red[2], 0);
+  // Centroid of segment 2's triangle: definitely green.
+  const uint8_t *Green = texel(3, 1);
+  EXPECT_EQ(Green[0], 0);
+  EXPECT_EQ(Green[1], 255);
+  EXPECT_EQ(Green[2], 0);
+  // The screen center is covered by neither triangle (and no phantom
+  // triangle bridging the restart): still the cleared background.
+  const uint8_t *Center2 = texel(2, 2);
+  EXPECT_EQ(Center2[0], 0);
+  EXPECT_EQ(Center2[1], 0);
+  EXPECT_EQ(Center2[2], 0);
+  EXPECT_EQ(Center2[3], 0);
 }
 
 TEST(ExecutorTest, CullsBackFacingTrianglesWhenConfigured) {

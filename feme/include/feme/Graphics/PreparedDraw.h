@@ -73,6 +73,7 @@ struct VertexBufferBinding {
 
 /// The scalar type an index buffer's elements store.
 enum class IndexType : uint8_t {
+  UInt8,
   UInt16,
   UInt32,
 };

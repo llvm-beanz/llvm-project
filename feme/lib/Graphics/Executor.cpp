@@ -1279,8 +1279,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         (Pipeline.getTopology() == PrimitiveTopology::LineStrip ||
          Pipeline.getTopology() == PrimitiveTopology::TriangleStrip ||
          Pipeline.getTopology() == PrimitiveTopology::TriangleFan);
-    uint32_t RestartValue =
-        Draw.IndexBuffer.Type == IndexType::UInt16 ? 0xFFFFu : 0xFFFFFFFFu;
+    // The primitive-restart marker is the index type's own all-1-bits value
+    // (`0xFF`/`0xFFFF`/`0xFFFFFFFF`), matching the raw index's own width.
+    uint32_t RestartValue = Draw.IndexBuffer.Type == IndexType::UInt8 ? 0xFFu
+                            : Draw.IndexBuffer.Type == IndexType::UInt16
+                                ? 0xFFFFu
+                                : 0xFFFFFFFFu;
     std::vector<bool> IsRestart(PerInstance, false);
 
     // --- Vertex/index fetch: assemble invocation keys. ---
@@ -1292,13 +1296,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         uint32_t VertexIndex;
         if (Cmd.Indexed) {
           uint32_t IndexPos = Cmd.FirstIndex + J;
-          size_t ElemSize = Draw.IndexBuffer.Type == IndexType::UInt16 ? 2 : 4;
+          size_t ElemSize = Draw.IndexBuffer.Type == IndexType::UInt8    ? 1
+                            : Draw.IndexBuffer.Type == IndexType::UInt16 ? 2
+                                                                         : 4;
           size_t Off = (size_t)IndexPos * ElemSize;
           if (Off + ElemSize > Draw.IndexBuffer.Data.size())
             return createStringError(inconvertibleErrorCode(),
                                      "index buffer read is out of bounds");
           uint32_t RawIndex;
-          if (ElemSize == 2) {
+          if (ElemSize == 1) {
+            RawIndex = Draw.IndexBuffer.Data[Off];
+          } else if (ElemSize == 2) {
             uint16_t V;
             memcpy(&V, Draw.IndexBuffer.Data.data() + Off, 2);
             RawIndex = V;
