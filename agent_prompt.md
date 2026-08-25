@@ -33,9 +33,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F4?
+Can you implement roadmap milestone F5?
 
-> **`VK_KHR_shader_expect_assume`/`shaderExpectAssume`.**
-> `OpAssumeTrueKHR`/`OpExpectKHR` lower directly to `llvm.assume`/`llvm.expect`
-> intrinsics — one of the smallest rows in this whole breakdown, good as a first
-> task for a new contributor
+> **`VK_KHR_line_rasterization`**
+> (`rectangularLines`/`bresenhamLines`/`smoothLines` + their `stippled*`
+> variants) **+ its 2 limit fields.** C4d already built a line-topology
+> rasterizer (1-pixel-wide quad expansion); this row generalizes it to variable
+> width and the three line styles, then adds stippling as a per-fragment pattern
+> test against `VkPipelineRasterizationLineStateCreateInfo`'s stipple
+> factor/pattern. The largest single G-track item in this section — consider
+> splitting rectangular/bresenham/smooth from the three `stippled*` variants
+> into two separately assignable pieces
