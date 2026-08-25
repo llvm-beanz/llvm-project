@@ -289,6 +289,31 @@ TEST_F(GraphicsPipelineTest, CompilesVertexAndFragmentStages) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap F9 (`VK_EXT_pipeline_protected_access`): the extension's two
+/// restriction bits apply to a graphics pipeline exactly like a compute one
+/// (`Pipeline` is their common base -- see `PipelineTest.
+/// Accepts{No,ProtectedAccessOnly}CreateFlag`'s compute-side coverage) --
+/// creation records the flag verbatim on `Pipeline::createFlags`.
+TEST_F(GraphicsPipelineTest, RecordsProtectedAccessCreateFlags) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.flags = VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  EXPECT_EQ(fromHandle<Pipeline>(Pipe)->createFlags() &
+                VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT,
+            static_cast<VkPipelineCreateFlags>(
+                VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT));
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// Roadmap E19 (`VK_EXT_pipeline_creation_feedback`): two stages (vertex +
 /// fragment) get two feedback slots, both `VALID_BIT`-only on a cache
 /// miss, matching `PipelineTest.ReportsPipelineCreationFeedback`'s compute

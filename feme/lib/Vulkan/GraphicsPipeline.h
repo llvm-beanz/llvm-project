@@ -239,8 +239,9 @@ struct GraphicsPipelineState {
 /// translated, normalized fixed-function state (see the file comment).
 class GraphicsPipeline : public Pipeline {
 public:
-  explicit GraphicsPipeline(GraphicsPipelineState State)
-      : Pipeline(Kind::Graphics), State(std::move(State)) {}
+  explicit GraphicsPipeline(GraphicsPipelineState State,
+                            VkPipelineCreateFlags CreateFlags = 0)
+      : Pipeline(Kind::Graphics, CreateFlags), State(std::move(State)) {}
 
   /// Builds the executor pipeline description for one draw, resolving
   /// pipeline state and \p Dynamic together (see the file comment above).

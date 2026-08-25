@@ -1429,7 +1429,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     fillPipelineCreationFeedback(pCreateInfos[I].pNext,
                                  pCreateInfos[I].stageCount, CacheHit);
     GraphicsPipeline *Obj = Alloc.create<GraphicsPipeline>(
-        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(**Compiled));
+        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(**Compiled),
+        pCreateInfos[I].flags);
     if (!Obj) {
       Result = VK_ERROR_OUT_OF_HOST_MEMORY;
       continue;

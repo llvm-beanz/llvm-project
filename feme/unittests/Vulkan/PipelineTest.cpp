@@ -659,6 +659,64 @@ TEST_F(PipelineTest, ReportsPipelineCreationFeedback) {
   vkDestroyShaderModule(Device, Module, nullptr);
 }
 
+/// Roadmap F9 (`VK_EXT_pipeline_protected_access`): both of the extension's
+/// mutually-exclusive restriction bits are legal `VkComputePipelineCreateInfo
+/// ::flags` on their own -- creation must succeed and record the flag
+/// verbatim on the resulting `Pipeline` object (`Pipeline::createFlags`),
+/// exactly the way `vkCmdBindPipeline` (CommandBufferTest.cpp's
+/// `BindingAProtectedAccessOnlyPipelineIsSilentlyRejected`) consults it.
+TEST_F(PipelineTest, AcceptsNoProtectedAccessCreateFlag) {
+  VkShaderModule Module = createShaderModule(kEmptyComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.flags = VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT;
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_EQ(fromHandle<feme::vulkan::Pipeline>(Pipeline)->createFlags() &
+                VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT,
+            static_cast<VkPipelineCreateFlags>(
+                VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT));
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// Roadmap F9: the other restriction bit -- also legal on its own at
+/// creation (only `vkCmdBindPipeline`'s own bind-time rule rejects it, per
+/// `VUID-vkCmdBindPipeline-pipelineProtectedAccess-07409`, since this ICD
+/// never hands out a protected command buffer to legally bind it in).
+TEST_F(PipelineTest, AcceptsProtectedAccessOnlyCreateFlag) {
+  VkShaderModule Module = createShaderModule(kEmptyComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.flags = VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT;
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_EQ(fromHandle<feme::vulkan::Pipeline>(Pipeline)->createFlags() &
+                VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT,
+            static_cast<VkPipelineCreateFlags>(
+                VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT));
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
 TEST(ShaderModuleTest, RejectsMisalignedCodeSize) {
   VkShaderModuleCreateInfo CreateInfo{};
   uint32_t Code[1] = {0};

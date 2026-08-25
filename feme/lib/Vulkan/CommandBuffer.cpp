@@ -2281,8 +2281,24 @@ vkCmdBindPipeline(VkCommandBuffer commandBuffer,
   // Which bind point the object belongs to is recorded on the object itself
   // (`Pipeline::kind`), so the bind point argument only selects which
   // pipelines this ICD accepts at all.
-  fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->bindPipeline(fromHandle<Pipeline>(pipeline));
+  Pipeline *P = fromHandle<Pipeline>(pipeline);
+  // (roadmap F9) `VK_EXT_pipeline_protected_access`: this ICD has no
+  // protected-memory model at all (`protectedMemory` always reports
+  // `VK_FALSE`, see EntryPoints.cpp), so no `VkCommandBuffer` it ever hands
+  // out is a protected one. A pipeline created with
+  // `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT` can therefore never be
+  // legally bound anywhere (`VUID-vkCmdBindPipeline-pipelineProtectedAccess-
+  // 07409`: "if pname:commandBuffer is not a protected command buffer,
+  // pname:pipeline must have been created without" this bit) -- skip
+  // recording the bind entirely, exactly like the ray-tracing bind point
+  // above is silently rejected, rather than binding a pipeline no
+  // draw/dispatch could ever legally use. A pipeline created with
+  // `VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT` trivially satisfies its own
+  // restriction (`VUID-...-07408`) instead, since every command buffer this
+  // ICD creates is already unprotected, so it binds normally below.
+  if (P->createFlags() & VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT)
+    return;
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->bindPipeline(P);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(

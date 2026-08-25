@@ -487,7 +487,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
     fillPipelineCreationFeedback(CreateInfo.pNext, /*StageCount=*/1, CacheHit);
 
     ComputePipeline *Obj = Alloc.create<ComputePipeline>(
-        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Artifact);
+        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Artifact, CreateInfo.flags);
     if (!Obj) {
       Result = VK_ERROR_OUT_OF_HOST_MEMORY;
       continue;

@@ -415,6 +415,74 @@ TEST_F(CommandBufferTest, DispatchWithoutBoundPipelineFails) {
   ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Failed());
 }
 
+/// Roadmap F9 (`VK_EXT_pipeline_protected_access`): a pipeline created with
+/// `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT` can never be legally bound
+/// anywhere in this ICD (`VUID-vkCmdBindPipeline-pipelineProtectedAccess-
+/// 07409`: no `VkCommandBuffer` it hands out is ever protected, since
+/// `protectedMemory` always reports `VK_FALSE`), so `vkCmdBindPipeline`
+/// silently skips recording the bind -- proven here the same way
+/// `DispatchWithoutBoundPipelineFails` above proves no pipeline was ever
+/// bound: only the dispatch itself is recorded, and executing it fails for
+/// lack of a bound pipeline.
+TEST_F(CommandBufferTest,
+       BindingAProtectedAccessOnlyPipelineIsSilentlyRejected) {
+  VkComputePipelineCreateInfo PipelineInfo{};
+  PipelineInfo.flags = VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT;
+  PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  PipelineInfo.stage.module = Module;
+  PipelineInfo.stage.pName = "main";
+  PipelineInfo.layout = Layout;
+  VkPipeline ProtectedOnlyPipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                     nullptr, &ProtectedOnlyPipeline),
+            VK_SUCCESS);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    ProtectedOnlyPipeline);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  EXPECT_EQ(Recorded->commands().size(), 1u); // The bind was never recorded.
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Failed());
+
+  vkDestroyPipeline(Device, ProtectedOnlyPipeline, nullptr);
+}
+
+/// Roadmap F9: the other restriction bit, `VK_PIPELINE_CREATE_NO_PROTECTED_
+/// ACCESS_BIT`, trivially satisfies its own bind-time rule instead (every
+/// command buffer this ICD creates is already unprotected), so it binds and
+/// dispatches exactly like an unflagged pipeline.
+TEST_F(CommandBufferTest, BindingANoProtectedAccessPipelineSucceeds) {
+  VkComputePipelineCreateInfo PipelineInfo{};
+  PipelineInfo.flags = VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT;
+  PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  PipelineInfo.stage.module = Module;
+  PipelineInfo.stage.pName = "main";
+  PipelineInfo.layout = Layout;
+  VkPipeline NoProtectedAccessPipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                     nullptr, &NoProtectedAccessPipeline),
+            VK_SUCCESS);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    NoProtectedAccessPipeline);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  EXPECT_EQ(Recorded->commands().size(), 2u);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  vkDestroyPipeline(Device, NoProtectedAccessPipeline, nullptr);
+}
+
 TEST_F(CommandBufferTest, ResetCommandPoolClearsCommands) {
   VkCommandBuffer CmdBuf = allocateCommandBuffer();
   VkCommandBufferBeginInfo BeginInfo{};

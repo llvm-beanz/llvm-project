@@ -108,13 +108,24 @@ public:
     Graphics,
   };
 
-  explicit Pipeline(Kind PipelineKind) : PipelineKind(PipelineKind) {}
+  explicit Pipeline(Kind PipelineKind, VkPipelineCreateFlags CreateFlags = 0)
+      : PipelineKind(PipelineKind), CreateFlags(CreateFlags) {}
   virtual ~Pipeline();
 
   Kind kind() const { return PipelineKind; }
 
+  /// (roadmap F9) `VkPipelineCreateInfo::flags` (or the equivalent field of
+  /// its `VkComputePipelineCreateInfo`/`VkGraphicsPipelineCreateInfo`
+  /// subtype), recorded verbatim at creation. Currently only consulted for
+  /// `VK_EXT_pipeline_protected_access`'s two restriction bits (see
+  /// `vkCmdBindPipeline` in CommandBuffer.cpp), but kept generic (not a
+  /// dedicated bool) since it is a property of every `VkPipeline`, not just
+  /// a graphics or compute one.
+  VkPipelineCreateFlags createFlags() const { return CreateFlags; }
+
 private:
   Kind PipelineKind;
+  VkPipelineCreateFlags CreateFlags;
 };
 
 /// A `VkPipeline` compute pipeline: a handle sharing ownership of a
@@ -124,8 +135,9 @@ private:
 /// just the first one compiled).
 class ComputePipeline : public Pipeline {
 public:
-  explicit ComputePipeline(std::shared_ptr<CachedPipelineArtifact> Artifact)
-      : Pipeline(Kind::Compute), Artifact(std::move(Artifact)) {}
+  explicit ComputePipeline(std::shared_ptr<CachedPipelineArtifact> Artifact,
+                           VkPipelineCreateFlags CreateFlags = 0)
+      : Pipeline(Kind::Compute, CreateFlags), Artifact(std::move(Artifact)) {}
 
   feme::cpu::CompiledStage &getStage() const { return *Artifact->Stage; }
 
