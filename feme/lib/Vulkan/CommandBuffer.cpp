@@ -1498,16 +1498,23 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   return Error::success();
 }
 
-/// Validates that every byte a draw's vertex/index fetch may read lies
-/// inside the bound buffers: "read once, bounds-checked against the bound
+/// Validates a draw's *index* fetch (an indexed draw's index range against
+/// its bound index buffer): "read once, bounds-checked against the bound
 /// buffers and the advertised limits, and rejected rather than clamped when
 /// they cannot be honored. `firstInstance`/`vertexOffset` participate in the
 /// fetch bounds check, not only in the index arithmetic."
 ///
-/// An indexed draw's vertex reach depends on index values this does not
-/// read, so its index *range* is what is checked here; the executor's own
-/// fetch is bounds-checked against the same buffer sizes for the values it
-/// then reads.
+/// A vertex/instance *attribute* fetch past its own bound buffer's end is
+/// deliberately **not** rejected here, unlike the index range below
+/// (roadmap F10): `robustBufferAccess` is unconditionally on for this ICD
+/// (`PhysicalDeviceInfo.cpp`'s own comment), and `VkPipelineRobustnessCreate
+/// Info::vertexInputs` (once a pipeline opts into it, see Pipeline.h) makes
+/// such a read legal, well-defined API usage -- not an error to reject --
+/// so it is left to `Executor.cpp`'s own per-component fetch, which reads
+/// it as zero instead. An indexed draw's vertex reach depends on index
+/// values this does not read, so only its index *range* is checked here;
+/// a non-indexed draw's only remaining check is that every declared
+/// binding is actually bound to something.
 Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
                               const GraphicsState &Gfx,
                               const feme::graphics::DrawCommand &Draw) {
@@ -1536,45 +1543,13 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
 
   if (Draw.VertexCount == 0 || Draw.InstanceCount == 0)
     return Error::success();
-  uint64_t LastVertex = uint64_t(Draw.FirstVertex) + Draw.VertexCount - 1;
-  uint64_t LastInstance = uint64_t(Draw.FirstInstance) + Draw.InstanceCount - 1;
-  for (const VertexInputBinding &BindingDecl : Pipeline.vertexBindings()) {
+  for (const VertexInputBinding &BindingDecl : Pipeline.vertexBindings())
     if (BindingDecl.Binding >= Gfx.VertexBuffers.size() ||
         !Gfx.VertexBuffers[BindingDecl.Binding] ||
         !Gfx.VertexBuffers[BindingDecl.Binding]->isBound())
       return createStringError(inconvertibleErrorCode(),
                                "vertex binding %u is not bound to a buffer",
                                BindingDecl.Binding);
-    // A per-instance binding's reach depends on the instance range, not the
-    // vertex range: it is read once per instance, not once per vertex.
-    // (roadmap F6) A non-default divisor narrows that reach further: a
-    // divisor of 0 reads only `firstInstance` regardless of instance
-    // count, and any other divisor reads at most `firstInstance +
-    // (lastInstance - firstInstance) / divisor` -- both are less than or
-    // equal to `LastInstance`, matching the same fetch-index formula the
-    // executor itself uses (Executor.cpp).
-    uint64_t LastIndex;
-    if (!BindingDecl.PerInstance)
-      LastIndex = LastVertex;
-    else if (BindingDecl.Divisor == 0)
-      LastIndex = Draw.FirstInstance;
-    else
-      LastIndex = Draw.FirstInstance +
-                  (LastInstance - Draw.FirstInstance) / BindingDecl.Divisor;
-    uint32_t Stride = resolveVertexBindingStride(Pipeline, Gfx, BindingDecl);
-    uint64_t Base =
-        Gfx.VertexBufferOffsets[BindingDecl.Binding] + LastIndex * Stride;
-    for (const VertexInputAttribute &Attr : Pipeline.vertexAttributes()) {
-      if (Attr.Binding != BindingDecl.Binding)
-        continue;
-      uint64_t End = Base + Attr.Offset + formatElementSize(Attr.Format);
-      if (End > Gfx.VertexBuffers[BindingDecl.Binding]->size())
-        return createStringError(inconvertibleErrorCode(),
-                                 "the draw's vertex fetch of location %u "
-                                 "overruns its bound vertex buffer",
-                                 Attr.Location);
-    }
-  }
   return Error::success();
 }
 

@@ -1418,15 +1418,28 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             attributeComponentByteSize(Attr->Format);
         if (!CompByteSize)
           return CompByteSize.takeError();
-        if (SrcOff + (uint64_t)Elt.ComponentCount * *CompByteSize >
-            Binding->Data.size())
-          return createStringError(inconvertibleErrorCode(),
-                                   "vertex buffer read is out of bounds");
+        // (roadmap F10) `VkPipelineRobustnessCreateInfo::vertexInputs` /
+        // `robustBufferAccess` (unconditionally on, see
+        // `PhysicalDeviceInfo.cpp`'s own comment): an out-of-bounds vertex
+        // attribute read must return zero per component -- like the
+        // descriptor-bound helper path's own "For a vector access the check
+        // is per-component" convention ("Bounds checking" in
+        // FeMeCPUDesign.md) -- rather than fail the whole draw. Only the
+        // components that actually fit within `Binding->Data` are decoded;
+        // `Bits` is already zero-initialized for the rest.
+        uint64_t AvailableBytes =
+            SrcOff < Binding->Data.size() ? Binding->Data.size() - SrcOff : 0;
+        uint32_t InBoundsComponents = static_cast<uint32_t>(
+            std::min<uint64_t>(Elt.ComponentCount, AvailableBytes /
+                                                        *CompByteSize));
         std::array<uint32_t, 4> Bits{};
-        if (Error E =
-                decodeAttribute(Attr->Format, Binding->Data.data() + SrcOff,
-                                Elt.ComponentCount, Elt.ComponentType, Bits))
-          return E;
+        if (InBoundsComponents != 0) {
+          if (Error E = decodeAttribute(Attr->Format,
+                                        Binding->Data.data() + SrcOff,
+                                        InBoundsComponents, Elt.ComponentType,
+                                        Bits))
+            return E;
+        }
         for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
           VSInput->writeRaw(Elt.ElementID, Elt.FirstComponent + C, Flat,
                             Bits[C]);
