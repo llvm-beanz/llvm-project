@@ -33,8 +33,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F7?
+Can you implement roadmap milestone F8?
 
-> **`VK_KHR_index_type_uint8`/`indexTypeUint8`.** `vkCmdBindIndexBuffer`'s
-> existing 16/32-bit index read in `CommandBuffer.cpp`/the executor gains an
-> 8-bit case — mechanical, narrow, good second task after F4
+> **`VK_KHR_dynamic_rendering_local_read`/`dynamicRenderingLocalRead` + its 2
+> limit fields.**
+> `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInputAttachmentIndices`
+> let a fragment shader read the current attachment bindings as input
+> attachments without a render-pass restart; builds on V6's dynamic-rendering
+> render-target binding
