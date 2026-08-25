@@ -32162,3 +32162,159 @@ and F8/F8a/F8b were already struck through as done, F8's own milestone
 no further split-off row is needed. `Vulkan14FeatureInventory.md` and
 `VulkanExtensionInventory.md` updated to match: both limit fields and the
 extension row now say "closed"/`VK_TRUE` throughout.
+
+# Roadmap F9: `VK_EXT_pipeline_protected_access`/`pipelineProtectedAccess`
+
+## Confirming the spec's exact conformance requirement first
+
+The roadmap row itself flagged uncertainty: "the honest, conformant
+answer is likely to accept the flag as a no-op restriction (reject
+creating a protected+unprotected-mixed pipeline, matching the spec's
+validation rules)... confirm against the spec's exact conformance
+requirement before assuming this is sufficient." I did that confirmation
+first, before writing any code, by reading the extension's own proposal
+doc (`proposals/VK_EXT_pipeline_protected_access.adoc` in
+`KhronosGroup/Vulkan-Docs`) and the actual normative VUIDs in
+`chapters/pipelines.adoc`.
+
+The proposal doc's own "Pipeline Creation" section only describes what
+each flag *means* ("cannot be used in a protected/non-protected command
+buffer and submission"); it says nothing about creation-time rejection.
+Searching `pipelines.adoc` for every VUID mentioning either flag turned
+up:
+
+- `VUID-VkGraphicsPipelineCreateInfo-flags-12357`..`12360`: these only
+  constrain `VK_EXT_graphics_pipeline_library` *linked libraries* to
+  agree with the linking pipeline's own flag -- irrelevant here, this ICD
+  doesn't implement pipeline libraries.
+- `VUID-vkCmdBindPipeline-pipelineProtectedAccess-07408`/`-07409`: *this*
+  is the real rule, and it's a bind-time one, not a creation-time one:
+  - 07408: if `pipelineProtectedAccess` is enabled and the command buffer
+    *is* protected, the pipeline must not have
+    `VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT`.
+  - 07409: if `pipelineProtectedAccess` is enabled and the command buffer
+    is *not* protected, the pipeline must not have
+    `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT`.
+
+Nothing in the spec forbids setting both flags on the same pipeline at
+creation (it would just make the pipeline unbindable anywhere, which is
+legal-but-useless, not an error) -- so the roadmap row's initial guess
+("reject creating a...mixed pipeline") was not quite right, and I did not
+implement any creation-time flag-combination rejection.
+
+I also checked whether this codebase tracks *which* features an
+application enabled at `vkCreateDevice` at all (since 07408/07409 are
+both conditioned on "if the `pipelineProtectedAccess` feature is
+enabled"). It does not, for any feature -- `vkCreateDevice`
+(EntryPoints.cpp) only validates the enabled *extension* list, never
+inspects `pCreateInfo->pEnabledFeatures`/a chained
+`VkPhysicalDeviceFeatures2` at all. Every feature this ICD advertises is
+already unconditionally implemented regardless of whether the app
+enabled it (see `pipelineCreationCacheControl`'s own precedent: `vkCreate
+ComputePipelines`/`vkCreateGraphicsPipelines` honor `VK_PIPELINE_CREATE_
+FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` unconditionally, feature-enablement
+tracking doesn't exist). Since real validation of "was this feature
+actually enabled" is a validation-layer concern this ICD doesn't
+implement for *any* feature, I did not add it just for this one -- I
+implemented the two VUIDs' rule directly instead: since `protectedMemory`
+always reports `VK_FALSE` (this ICD's own long-standing non-goal, see
+FeMeVulkanDesign.md), no command buffer it ever hands out can be a
+protected one. That fact alone makes `VK_PIPELINE_CREATE_NO_PROTECTED_
+ACCESS_BIT` trivially satisfy 07408 unconditionally (every command buffer
+is already unprotected) and makes `VK_PIPELINE_CREATE_PROTECTED_ACCESS_
+ONLY_BIT` unconditionally *unsatisfiable* by 07409 (no protected command
+buffer will ever exist to legally bind such a pipeline in) -- the
+"protectedMemory always false" fact turns both conditional VUIDs into
+unconditional ones for this specific ICD, without needing any general
+enabled-feature-tracking machinery.
+
+## Implementation
+
+- `Pipeline::createFlags()` (`Pipeline.h`): the base class every
+  `VkPipeline` (compute and graphics) shares now records
+  `VkPipelineCreateInfo::flags` verbatim, since the flag is a property of
+  any pipeline, not specific to one bind point. `ComputePipeline`/
+  `GraphicsPipeline`'s constructors both gained an optional
+  `VkPipelineCreateFlags` parameter threaded through from
+  `vkCreateComputePipelines`/`vkCreateGraphicsPipelines`
+  (`Pipeline.cpp`/`GraphicsPipeline.cpp`).
+- `vkCmdBindPipeline` (`CommandBuffer.cpp`): skips recording the bind
+  entirely when the pipeline was created with `VK_PIPELINE_CREATE_
+  PROTECTED_ACCESS_ONLY_BIT`, mirroring the pre-existing silent rejection
+  of an unsupported `pipelineBindPoint` (ray tracing) right above it in
+  the same function -- both are "this call can never legally do anything
+  useful here" cases this ICD chooses to no-op rather than crash on,
+  consistent with there being no VUID-checking validation layer built
+  into this driver anywhere else either.
+- `pipelineProtectedAccess`/`VK_EXT_pipeline_protected_access` advertised
+  `VK_TRUE` (aggregate `VkPhysicalDeviceVulkan14Features` and the
+  dedicated `VkPhysicalDevicePipelineProtectedAccessFeatures` struct,
+  `EntryPoints.cpp`), and the extension listed
+  (`PhysicalDeviceInfo.cpp`), following every other F-row's own precedent
+  exactly.
+
+## Testing
+
+- `PipelineTest.Accepts{No,ProtectedAccessOnly}CreateFlag`: both flags are
+  legal on their own at `vkCreateComputePipelines` time, and
+  `Pipeline::createFlags()` reports the flag back verbatim.
+- `GraphicsPipelineTest.RecordsProtectedAccessCreateFlags`: same
+  coverage, graphics side.
+- `CommandBufferTest.BindingAProtectedAccessOnlyPipelineIsSilentlyRejected`:
+  proves the bind-time rule end to end the same way the pre-existing
+  `DispatchWithoutBoundPipelineFails` proves "no pipeline bound" --
+  binding a `PROTECTED_ACCESS_ONLY_BIT` pipeline records only the
+  dispatch (`commands().size() == 1`), and executing the command buffer
+  fails for lack of a bound pipeline.
+- `CommandBufferTest.BindingANoProtectedAccessPipelineSucceeds`: the
+  other flag binds and dispatches exactly like an unflagged pipeline.
+- `PhysicalDeviceInfoTest`/`DrawTest`: updated the two existing tests that
+  asserted the old `VK_FALSE` default and the old (24) extension count.
+
+## CTS
+
+Ran a targeted `deqp-vk` pass (this session's existing build against the
+real `feme_icd.json`) rather than the full ~3.2M-case suite, since F9's
+own scope is narrow:
+
+- `dEQP-VK.api.info.get_physical_device_properties2.features.pipeline_
+  protected_access_features`: passes (feature-consistency check between
+  the aggregate and dedicated struct).
+- `dEQP-VK.pipeline.monolithic.image.*.pipeline_protected_flag_*`: the
+  one real CTS suite exercising `VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_
+  BIT_EXT` without needing `protectedMemory` itself. Compared directly
+  against the pre-F9 baseline (`git stash`, same case list, same build):
+  before, every case reported `NotSupported (VK_EXT_pipeline_protected_
+  access is not supported)` outright (the extension wasn't advertised);
+  after, they reach real pipeline creation and fail there on the
+  pre-existing, already-documented milestone-7 `SIMDizePass` "component
+  decomposition is not yet supported" deviation (F8a/F8b/F8c's own
+  reports describe the identical failure) -- confirmed by inspecting the
+  failure message directly, not a guess. Nothing in this row's own flag
+  logic is implicated; a real `glslang`-compiled image-sampling shader is
+  what these cases fail on, unrelated to `createFlags`/`vkCmdBindPipeline`.
+- One incidental, unrelated observation surfaced while running the
+  feature-consistency case: `dEQP-VK.api.info.get_physical_device_
+  properties2.features.protected_memory_features` fails in this same
+  run, because this ICD has no case at all for the dedicated
+  `VkPhysicalDeviceProtectedMemoryFeatures` struct (only the aggregate
+  `VkPhysicalDeviceVulkan11Features::protectedMemory` is ever written).
+  This is `protectedMemory`'s own gap, not F9's -- explicitly deferred to
+  roadmap K9 ("protected memory is listed as a non-goal in
+  FeMeVulkanDesign.md — this row is where that non-goal is either
+  confirmed on the record or overturned"). Left untouched, and noted here
+  and in `VulkanCTSReport.md` for K9's own future pass.
+
+`ninja check-feme`: 1756 discovered, 1755 passed, 1 unsupported
+(pre-existing, unrelated) -- 5 more passing than F8c's own 1750-passed
+baseline, no regressions.
+
+### Roadmap bookkeeping
+
+F9 is struck through as done. Roadmap.md's own file list for the row was
+widened from `{GraphicsPipeline,Pipeline}.cpp` to
+`{GraphicsPipeline,Pipeline,CommandBuffer}.cpp`, since the bind-time rule
+turned out to be where the real logic lives, not pipeline creation.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updated to
+match (`pipelineProtectedAccess`/`VK_EXT_pipeline_protected_access` both
+now "yes"/"Advertised").
