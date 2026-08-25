@@ -510,6 +510,56 @@ func.func @fma(%a : vector<3xf32>, %b : vector<3xf32>, %c : vector<3xf32>) -> ()
 }
 // -----
 
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.GL.ModfStruct
+//===----------------------------------------------------------------------===//
+
+func.func @modf_struct(%arg0 : f32) -> () {
+  // CHECK: spirv.GL.ModfStruct {{%.*}} : f32 -> !spirv.struct<(f32, f32)>
+  %2 = spirv.GL.ModfStruct %arg0 : f32 -> !spirv.struct<(f32, f32)>
+  return
+}
+
+func.func @modf_struct_64(%arg0 : f64) -> () {
+  // CHECK: spirv.GL.ModfStruct {{%.*}} : f64 -> !spirv.struct<(f64, f64)>
+  %2 = spirv.GL.ModfStruct %arg0 : f64 -> !spirv.struct<(f64, f64)>
+  return
+}
+
+func.func @modf_struct_vec(%arg0 : vector<3xf32>) -> () {
+  // CHECK: spirv.GL.ModfStruct {{%.*}} : vector<3xf32> -> !spirv.struct<(vector<3xf32>, vector<3xf32>)>
+  %2 = spirv.GL.ModfStruct %arg0 : vector<3xf32> -> !spirv.struct<(vector<3xf32>, vector<3xf32>)>
+  return
+}
+
+// -----
+
+func.func @modf_struct_mismatch_type(%arg0 : f32) -> () {
+  // expected-error @+1 {{member zero and one of the resulting struct type must be the same type as the operand}}
+  %2 = spirv.GL.ModfStruct %arg0 : f32 -> !spirv.struct<(vector<3xf32>, f32)>
+  return
+}
+
+// -----
+
+func.func @modf_struct_mismatch_type_1(%arg0 : f32) -> () {
+  // expected-error @+1 {{member zero and one of the resulting struct type must be the same type as the operand}}
+  %2 = spirv.GL.ModfStruct %arg0 : f32 -> !spirv.struct<(f32, f64)>
+  return
+}
+
+// -----
+
+func.func @modf_struct_wrong_type(%arg0 : i32) -> () {
+  // expected-error @+1 {{op operand #0 must be 16/32/64-bit float or fixed-length vector of 16/32/64-bit float values}}
+  %2 = spirv.GL.ModfStruct %arg0 : i32 -> !spirv.struct<(i32, i32)>
+  return
+}
+
+// -----
+
 //===----------------------------------------------------------------------===//
 // spirv.GL.FrexpStruct
 //===----------------------------------------------------------------------===//

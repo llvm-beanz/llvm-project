@@ -2171,6 +2171,26 @@ LogicalResult spirv::SpecConstantOperationOp::verifyRegions() {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.ModfStruct
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::GLModfStructOp::verify() {
+  spirv::StructType structTy =
+      dyn_cast<spirv::StructType>(getResult().getType());
+
+  if (structTy.getNumElements() != 2)
+    return emitError("result type must be a struct type with two memebers");
+
+  Type operandTy = getOperand().getType();
+  if (structTy.getElementType(0) != operandTy ||
+      structTy.getElementType(1) != operandTy)
+    return emitError("member zero and one of the resulting struct type must "
+                     "be the same type as the operand");
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.GL.FrexpStruct
 //===----------------------------------------------------------------------===//
 

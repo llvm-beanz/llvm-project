@@ -1198,6 +1198,45 @@ def SPIRV_GLFmaOp : SPIRV_GLTernaryArithmeticOp<"Fma", 50, SPIRV_Float, [AlwaysS
 
 // ----
 
+def SPIRV_GLModfStructOp : SPIRV_GLOp<"ModfStruct", 36, [NoMemoryEffect]> {
+  let summary = "Splits x into fractional and integer parts";
+
+  let description = [{
+    Result is a structure containing x split into an integer part i and a
+    fractional part, both with the same sign as x, such that:
+
+    x = i + fraction
+
+    Result Type must be an OpTypeStruct with two members, both of the same
+    type as x. Member 0 holds the fractional part, and member 1 holds the
+    integer part.
+
+    The operand x must be a scalar or vector whose component type is
+    floating-point.
+
+    #### Example:
+
+    ```mlir
+    %2 = spirv.GL.ModfStruct %0 : f32 -> !spirv.struct<f32, f32>
+    %3 = spirv.GL.ModfStruct %0 : vector<3xf32> -> !spirv.struct<vector<3xf32>, vector<3xf32>>
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$operand
+  );
+
+  let results = (outs
+    SPIRV_AnyStruct:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $operand `:` type($operand) `->` type($result)
+  }];
+}
+
+// ----
+
 def SPIRV_GLFrexpStructOp : SPIRV_GLOp<"FrexpStruct", 52, [NoMemoryEffect]> {
   let summary = "Splits x into two components such that x = significand * 2^exponent";
 
