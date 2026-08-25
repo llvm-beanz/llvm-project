@@ -4099,3 +4099,68 @@ every commit in this row -- new tests relative to F16's own report:
 (both FileCheck), `PhysicalDeviceInfoTest`'s
 `ShaderExpectAssumeIsAdvertisedThroughItsOwnDedicatedFeatureStruct`, and
 `DrawTest`'s `AdvertisesDynamicRenderingExtension` (extended).
+
+## Roadmap F5: measured impact (targeted, not a full re-run)
+
+F5 generalized `executeDraws`' line-topology quad expansion (roadmap
+C4d) to variable width and `VkLineRasterizationModeKHR`'s three styles
+(`Rectangular`/`Bresenham`/`RectangularSmooth`, `feme::graphics::
+RasterState::LineMode`/`LineWidth`), then added stippling as a
+per-sample pattern test against `VkPipelineRasterizationLineStateCreate
+InfoKHR`'s stipple factor/pattern (`StippledLineEnable`/`StippleFactor`/
+`StipplePattern`, `ScreenTriangle::ArcLength`). `rectangularLines`/
+`bresenhamLines`/`smoothLines` and their three `stippled*` variants are
+now advertised, and `VK_KHR_line_rasterization`/`vkCmdSetLineStippleKHR`/
+`VK_DYNAMIC_STATE_LINE_WIDTH` are implemented.
+
+Targeted subset: **`dEQP-VK.rasterization.primitives.*`** (the dedicated
+CTS group exercising `VkPipelineRasterizationLineStateCreateInfo`,
+219 cases matching this pattern against this ICD).
+
+- **0 passed / 44 failed / 175 not supported.** Every one of the 175
+  not-supported cases gates on a feature this row deliberately leaves
+  out of scope, not a regression: 108 need `geometryShader` (the
+  `*_with_adjacency` topology variants, roadmap R34's own scope, not
+  F5's), 52 need `wideLines` (roadmap H7's scope, not this row's, per
+  its own deviation note above), 14 need "strict rasterization"
+  (`nonStrictLines`-adjacent limit gating, also H7's scope), and 1 needs
+  `largePoints`. **All 44 failures are the exact same pre-existing,
+  unrelated gap**, confirmed by checking every single one's own error
+  message: `vkCreateGraphicsPipelines` fails before any line-rasterization
+  logic ever runs, with `feme-cpu-simdize: function 'main' has a
+  divergent vector value '' used outside a supported insertelement-
+  chain/resource-store/extractelement/select/shufflevector/phi/
+  elementwise pattern; component decomposition is not yet supported for
+  this use (roadmap milestone 7 deviation)` -- this test module's shared
+  vertex shader (used by every one of its cases, including
+  `no_stipple.triangles`/`triangle_strip`/`triangle_fan`, which name no
+  line-rasterization state at all) hits a pre-existing `feme::cpu`
+  SIMDization gap unrelated to this row's own translation/rasterizer
+  changes. Reproduced by inspecting `no_stipple.triangles`'s own failure
+  message, which is byte-for-byte identical to every line-mode/stipple
+  case's, confirming this is a shared-harness-wide gap this row's own
+  code does not cause and cannot fix from within its own scope (a real
+  fix needs `feme-cpu-simdize`'s divergent-value handling generalized to
+  cover whatever vector-component-decomposition pattern this shader uses,
+  a materially larger, separate unit of work in `feme::cpu`, not
+  `feme::graphics`/`feme::vulkan`). In other words: this CTS group was
+  not a passing category before this row (identically `NotSupported`
+  across the board, since `VK_KHR_line_rasterization` itself did not
+  exist), and F5 does not regress a previously-passing one -- it makes
+  219 previously-fully-`NotSupported` cases newly reach (and either
+  legitimately not-support on an explicitly out-of-scope feature, or
+  fail at) one pre-existing, unrelated gap.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1717
+discovered, 1716 passed, 1 unsupported (pre-existing, unrelated), after
+every commit in this row -- new tests relative to F4's own report:
+`ExecutorTest`'s `RendersAWideRectangularLine`/
+`RendersABresenhamDiagonalLine`/`RendersAStippledLine`/
+`RectangularSmoothLineAntialiasesItsEdge`, `GraphicsPipelineTest`'s
+`TranslatesLineRasterizationState`/
+`DynamicLineWidthAndStippleOverrideStaticState`,
+`PhysicalDeviceInfoTest`'s
+`LineRasterizationIsAdvertisedThroughItsOwnDedicatedStructs`, and
+`DrawTest`'s `DynamicLineWidthWidensTheLine` (extended) plus
+`AdvertisesDynamicRenderingExtension` (extended again, now 21).
