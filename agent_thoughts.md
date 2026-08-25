@@ -32728,3 +32728,154 @@ however, run the *reproduction steps* from that section (the
 `vulkan -> data/vulkan` symlink, the same `VK_DRIVER_FILES` pointed at
 this session's own build) to avoid the exact asset-resolution pitfall
 that section's own history already documents.
+
+# Agent thoughts: roadmap F12 (VK_KHR_push_descriptor/pushDescriptor)
+
+## Scoping: what F12 asks for, and what it shares with E6's leftover item
+
+The roadmap row's own text: `vkCmdPushDescriptorSet` writes descriptors
+directly into a command buffer's recorded state with no `VkDescriptorSet`
+object at all -- "a new, lighter-weight descriptor path alongside
+`Descriptor.{h,cpp}`'s existing pool-backed one, sharing its
+binding-to-heap-slot translation". The dependency note explicitly flags
+that E6's own `vkCmdPushDescriptorSet2`/`vkCmdPushDescriptorSetWithTemplate2`
+(deferred there, since they need exactly this row's own groundwork) should
+either land together with F12 or be explicitly sequenced. Given the `2`
+variants are thin `pNext`-extensible wrappers with no new logic of their
+own (the same shape `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2` already
+took over `vkCmdBindDescriptorSets`/`vkCmdPushConstants`), I chose to land
+all four together in one row rather than defer the `2`-suffixed pair again
+for no real reason -- closing E6's own leftover item as a side effect,
+following the precedent F11 set correcting E2's premise.
+
+## Design: what a "push descriptor set" is in this object model
+
+Vulkan's own text for `vkCmdPushDescriptorSet`: writes are applied "as in
+`vkUpdateDescriptorSets`" against a target selected by `(layout, set)`
+rather than a `VkDescriptorSet` handle, can be updated incrementally, and
+persist until the slot is "disturbed" (an incompatible layout) or the
+command buffer begins recording again. That is almost exactly what
+`Descriptor.h`'s existing `DescriptorSet`/`DescriptorSetLayout` object model
+already provides -- so rather than inventing a second, parallel storage
+shape, I made a push descriptor set an ordinary `DescriptorSet`, owned by
+the `CommandBuffer` instead of a `DescriptorPool`. `CommandBuffer::
+pushDescriptorSet` builds/updates one against the target `VkPipelineLayout`'s
+own declared `DescriptorSetLayout` for that set number (resolved from the
+`VkPipelineLayout` argument, since there is no `VkDescriptorSetLayout` handle
+argument here at all -- the one real structural difference from every other
+descriptor-set entry point), applies the write array to it, then calls the
+exact same `bindDescriptorSets` a real `VkDescriptorSet` bind already goes
+through. This is what "sharing its binding-to-heap-slot translation" in the
+roadmap's own text means literally: no new code in `buildBoundResources`/
+dispatch preparation at all.
+
+`applyDescriptorWrites`/`applyDescriptorUpdateTemplate` are the two functions
+I promoted out of `Descriptor.cpp`'s own file-local `vkUpdateDescriptorSets`/
+`vkUpdateDescriptorSetWithTemplate` loops (previously only reachable through
+those two entry points) so `CommandBuffer::pushDescriptorSet`/
+`pushDescriptorSetWithTemplate` could reuse the identical per-descriptor-type
+dispatch rather than a second copy of it.
+
+## The one real bug this design surfaced before landing: mutate-in-place vs. snapshot-per-push
+
+My first implementation stored one `DescriptorSet` per push-descriptor slot
+(`std::map<uint32_t, unique_ptr<DescriptorSet>>`), mutating the same object
+in place on every subsequent push to the same slot -- which seemed right for
+"can be updated incrementally". It is wrong, and a self-authored unit test
+modeled on VK-GL-CTS's own `PushDescriptorIncrementalUpdatesComputeTest`
+(push binding 0+1, dispatch, push only binding 1 again, dispatch again,
+expect *both* dispatches to see their own point-in-time state) caught it
+immediately: `CommandBuffer::Commands` is a recorded stream, only
+interpreted later by `executeCommandBuffer`/`executeCommandsInto` -- so by
+the time the *first* dispatch's `BindDescriptorSets` command actually runs,
+every push recorded *after* it in the stream has already mutated the same
+shared object at record time, and the first dispatch incorrectly observes
+the second push's writes too.
+
+The fix: each push must produce an independent *copy* -- a fresh snapshot
+built from whatever the slot's own previous snapshot held (if the layout
+still agrees) or empty otherwise -- and `BindDescriptorSets` in the recorded
+stream keeps pointing at its own snapshot, not a shared, still-being-mutated
+one. `DescriptorSet` needed no new machinery for this: its members are
+already plain `std::map`s of raw pointers, so the implicit copy constructor
+does the right thing. `CommandBuffer` now owns every snapshot ever created
+during a recording (`PushDescriptorSetStorage`, a `vector<unique_ptr<
+DescriptorSet>>` -- an earlier bind may still reference an older snapshot,
+not just the latest one) plus a `CurrentPushDescriptorSets` map of
+non-owning pointers used only to decide what the *next* push to a given slot
+should copy forward.
+
+This also explains why `CommandBuffer` needed an explicit (rather than
+implicit, header-inline) constructor/destructor and a
+`clearPushDescriptorSets` helper, all three defined in `CommandBuffer.cpp`:
+`unique_ptr<DescriptorSet>`/`std::map<...>::clear()` both need `DescriptorSet`'s
+complete type, which `CommandBuffer.h` only forward-declares (deliberately,
+to avoid pulling `Descriptor.h` into every translation unit `CommandBuffer.h`
+already reaches).
+
+## `VkDescriptorUpdateTemplateType`: accepting `_PUSH_DESCRIPTORS`
+
+`vkCreateDescriptorUpdateTemplate` previously rejected
+`VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS` outright, with a
+comment explaining it needed the (then-unimplemented) `VK_KHR_push_descriptor`.
+Now that the extension exists, I widened the check to accept both template
+types: `DescriptorUpdateTemplate`'s own entry list needs no distinction
+between them (a `VK_DESCRIPTOR_SET`-typed template is applied to a real
+`VkDescriptorSet`, a `_PUSH_DESCRIPTORS`-typed one to a push descriptor set,
+but both go through the same `applyDescriptorUpdateTemplate`), so the only
+change needed was widening the accepted-type check itself.
+
+## `maxPushDescriptors`/`pushDescriptor`: no dedicated features struct
+
+Every other F-row's feature bit has agreed with a same-named dedicated
+`VkPhysicalDevice*Features` struct (`hostImageCopy`, `pipelineRobustness`,
+...). `pushDescriptor` does not: `VK_KHR_push_descriptor`'s own core 1.4
+promotion added a *properties* struct (`VkPhysicalDevicePushDescriptorProperties`,
+carrying `maxPushDescriptors`) but the `pushDescriptor` feature bit itself is
+new as of the 1.4 promotion, living only in the aggregate
+`VkPhysicalDeviceVulkan14Features`. I confirmed this directly against
+`vk.xml` rather than assuming symmetry with every other row, and left a
+comment explaining the asymmetry so a future reader does not go looking for
+a struct that does not exist. `maxPushDescriptors` itself is a real `32`
+(the spec-mandated minimum, and also the real value, since a push
+descriptor set is an ordinary `DescriptorSet` with no smaller heap of its
+own).
+
+## Testing
+
+- `CommandBufferTest.cpp`'s new `PushDescriptorSetDispatchTest` fixture:
+  five cases -- a basic no-`VkDescriptorSet`-object round trip, the
+  incremental-accumulation case that caught the mutate-in-place bug above,
+  a `vkCmdPushDescriptorSetWithTemplate` round trip, a `vkCmdPushDescriptorSet2`
+  round trip (proving the `2`-suffixed wrapper produces the identical
+  result), and a `vkBeginCommandBuffer`-drops-push-state case.
+- `DescriptorTest.cpp`: renamed/repurposed `PushDescriptorTemplateTypeIsRejected`
+  (now stale) into `PushDescriptorTemplateTypeIsAccepted`, and added
+  `UnsupportedDescriptorTypeInTemplateEntryIsRejected` so the "an unsupported
+  descriptor type is still rejected" coverage that test used to provide
+  (incidentally, via the wrong template type) is not silently lost.
+- `PhysicalDeviceInfoTest.cpp`: flipped the two existing hardcoded
+  `maxPushDescriptors == 0`/`pushDescriptor == VK_FALSE` assertions, and
+  added a new dedicated-struct case for `VkPhysicalDevicePushDescriptorProperties`.
+- `DrawTest.cpp`: updated the extension-count/list assertions.
+
+`ninja check-feme`: 1780 discovered, 1779 passed, 1 unsupported
+(pre-existing, unrelated) -- no regressions.
+
+## CTS: every case in `dEQP-VK.pipeline.monolithic.push_descriptor.*` is blocked by a pre-existing, orthogonal gap
+
+Running that group (76 cases, `--deqp-case`, targeted rather than a full
+54-group re-run per F9/F10/F11's own precedent) found `Not supported: 0`
+(the extension gate is genuinely passed) but `Failed: 76/76` -- every case
+blocked before `vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWithTemplate`
+themselves ever run, at pipeline creation. Two are pre-existing gaps this
+report already knew about (the non-`rtarray` storage-buffer-block
+normalization gap E6's own report found, and the `feme-cpu-simdize`
+divergent-vector gap F5-F8 already document repeatedly); one is new, split
+off as roadmap F12a (a `std140` uniform buffer array's dynamic
+`spirv.AccessChain` fails legalization, unlike the equivalent `std430`
+storage-buffer array). None of the three is reachable-and-fixable within
+this row's own scope, so I verified the actual new mechanism a different
+way instead: unit tests reusing an already-working `rtarray`-shaped shader,
+including one modeled directly on the CTS case F12a's own finding blocks
+(`PushDescriptorIncrementalUpdatesComputeTest`).
