@@ -31188,3 +31188,94 @@ audit of this ICD's supported render-target formats against what
 
 `ninja check-feme`: 1709 discovered, 1708 passed, 1 unsupported
 (pre-existing, unrelated) after every commit in this row.
+
+# Agent thoughts: roadmap F5 (VK_KHR_line_rasterization)
+
+## Reading the request
+
+The roadmap row itself flagged this as "the largest single G-track item
+in this section" and suggested splitting rectangular/bresenham/smooth
+from the three `stippled*` variants into two separately assignable
+pieces. I read the full row, C4d's own prior work (the 1-pixel-wide
+point/line quad expansion `feme::graphics::executeDraws` already had),
+and the two design docs' existing status notes before writing any code,
+to understand exactly what "generalizes it to variable width" and "adds
+stippling as a per-fragment pattern test" needed to mean concretely in
+this codebase's own architecture.
+
+## Why I did not split it into two commits/pieces after all
+
+Once I looked at the actual mechanism, both halves turned out to share
+the same quad-expansion path and the same per-vertex "extra scalar
+carried through barycentric interpolation" trick (`ScreenTriangle::
+EdgeDistance` for smooth-line coverage, `ScreenTriangle::ArcLength` for
+stipple): the stipple test is a few lines inside the same per-sample
+coverage loop the three line styles already needed touching, not a
+separate subsystem. Splitting them into two PRs would have meant
+touching `pushQuadTriangle`'s signature and the `PendingQuad`/
+`ScreenTriangle` structs twice for no real isolation benefit, so I
+landed it as one row (still broken into several small, separately
+buildable/testable commits: `feme::graphics` executor layer first,
+Vulkan translation layer second, docs last) rather than literally two
+PRs. I noted this deviation from the roadmap's own suggested split
+directly in the struck-through roadmap text, per the task's "when you
+deviate from the design document, update the design document" rule.
+
+## Design decisions worth recording
+
+- **Bresenham mode**: rather than trying to replicate the CTS's own
+  segment-fill/AA-parallelogram formula, I chose the simplest
+  architecturally-consistent option: walk the pixel grid with actual
+  integer Bresenham stepping and emit one 1x1 axis-aligned quad per
+  covered pixel, reusing the exact same triangle rasterizer/fragment/
+  output-merge path every other primitive shape in this executor already
+  uses. This matches the codebase's own established precedent (C4d's
+  point/line quads, C4d's own comment about "no separate rasterizer").
+- **RectangularSmooth AA**: implemented as a 1-pixel geometric feather
+  plus a per-pixel-center (not per-sample) coverage value multiplied into
+  the final written alpha. This mirrors how the existing rasterizer
+  already computes shading barycentrics once per pixel center rather than
+  per sample (a precedent already documented in the file's own comments),
+  so I followed it rather than inventing a new interpolation granularity.
+- **Stipple arc-length reset heuristic**: `LineIndices`'s existing
+  assembly order already makes "does this segment's first vertex equal
+  the previous segment's second vertex" a correct, no-extra-bookkeeping
+  test for "is this the same connected strip" vs. "is this a fresh
+  LineList segment or a strip restart boundary" -- I verified this by
+  tracing through both `emitLineStripSegment`'s and the plain `LineList`
+  loop's index-pair generation before relying on it, rather than assuming
+  it and finding out later from a failing test.
+- **wideLines/largePoints deliberately untouched**: the roadmap explicitly
+  separates this into H7's own row ("wideLines/largePoints once F5's
+  line rasterization lands"). I generalized the *mechanism* (the
+  rasterizer now genuinely honors whatever `LineWidth` it's given) but
+  left `lineWidthRange`/the `wideLines` feature bit exactly as they were,
+  so a conformant real-world Vulkan application still cannot request
+  anything other than 1.0 -- only my own direct-`RasterState`/dynamic-
+  state-bypassing unit tests exercise widths other than 1.0. I called
+  this out explicitly in three places (PhysicalDeviceInfo.cpp's own
+  comment, the design doc's status note, and the roadmap's completion
+  note) so a future H7 implementer does not have to rediscover it.
+- **lineSubPixelPrecisionBits = 4**: chose the same conservative floor
+  `subPixelPrecisionBits`/`subTexelPrecisionBits` already use, rather
+  than inventing a new value, since this rasterizer's line positions are
+  full `float` coordinates with no separate fixed-point grid to measure a
+  tighter real bound from -- claiming a higher number would need an
+  actual verified precision guarantee I do not have.
+
+## CTS verification
+
+Ran `dEQP-VK.rasterization.primitives.*` (the real, dedicated CTS group
+for this extension) against the built ICD. Every failure traced back to
+the exact same pre-existing, unrelated `feme-cpu-simdize` divergent-
+vector-value shader-compiler gap (reproduced identically on a plain
+`no_stipple.triangles` case that names no line-rasterization state at
+all), and every not-supported case gated on a feature genuinely out of
+this row's scope (`geometryShader` for the adjacency topologies,
+`wideLines`/`largePoints`/strict-rasterization for H7). I checked several
+different line-mode/stipple combinations' own failure messages
+individually rather than assuming they all shared one cause, to make
+sure I wasn't missing a real F5-specific regression hiding among them.
+Documented as a new "Roadmap F5: measured impact" section in
+`VulkanCTSReport.md`, following the same template every prior F-row's own
+section already established.
