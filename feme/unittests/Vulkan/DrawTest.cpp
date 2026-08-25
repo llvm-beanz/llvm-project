@@ -255,6 +255,37 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment]
 }
 )mlir";
 
+/// (Roadmap F8c) The explicit-sample counterpart of
+/// `SubpassLoadFragmentSource`: the subpass image is `MultiSampled` and the
+/// `spirv.ImageRead` carries a lone `Sample` image operand (constant `2`)
+/// instead of an implicit sample 0, reading a specific sample of a
+/// multisampled color attachment back and writing its red channel into
+/// green -- proving `feme::StageOpKind::SubpassLoad`'s new `sample` operand
+/// (roadmap F8c) actually selects a real, non-zero sample rather than
+/// always reading sample 0.
+constexpr llvm::StringLiteral SubpassLoadMultisampleFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment], []> {
+  spirv.GlobalVariable @in_color_ms bind(0, 0) {input_attachment_index = 0 : i32} : !spirv.ptr<!spirv.image<f32, SubpassData, NoDepth, NonArrayed, MultiSampled, NoSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %inp = spirv.mlir.addressof @in_color_ms : !spirv.ptr<!spirv.image<f32, SubpassData, NoDepth, NonArrayed, MultiSampled, NoSampler, Unknown>, UniformConstant>
+    %img = spirv.Load "UniformConstant" %inp : !spirv.image<f32, SubpassData, NoDepth, NonArrayed, MultiSampled, NoSampler, Unknown>
+    %coord = spirv.Constant dense<0> : vector<2xi32>
+    %sample = spirv.Constant 2 : si32
+    %texel = spirv.ImageRead %img, %coord ["Sample"], %sample : !spirv.image<f32, SubpassData, NoDepth, NonArrayed, MultiSampled, NoSampler, Unknown>, vector<2xi32>, si32 -> vector<4xf32>
+    %r = spirv.CompositeExtract %texel[0 : i32] : vector<4xf32>
+    %zero = spirv.Constant 0.0 : f32
+    %one = spirv.Constant 1.0 : f32
+    %out = spirv.CompositeConstruct %zero, %r, %zero, %one : (f32, f32, f32, f32) -> vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %out : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @in_color_ms, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
 /// Opaque white into `SV_Target0`'s ordinary (`Index=0`) output and
 /// (0.25, 0.5, 0.75, 1.0) into its `Index=1` companion at the same
 /// `Location=0` -- roadmap C4's dual-source blend coverage
@@ -4062,6 +4093,206 @@ TEST_F(DrawTest, SubpassLoadReadsBackTheStencilAttachmentItWrote) {
   vkDestroyImageView(Device, StencilView, nullptr);
   vkDestroyImage(Device, StencilImage, nullptr);
   vkFreeMemory(Device, StencilMemory, nullptr);
+}
+
+/// (Roadmap F8c) The last piece `dynamicRenderingLocalReadMultisampled
+/// Attachments` needed: a multisample color attachment's own samples are
+/// seeded with 4 distinct, known values directly through its backing
+/// memory (`ResolvesMultisampleColorDuringRenderPass`'s own multisample
+/// attachment is written by a draw instead, but every covered sample of one
+/// pixel always ends up identical there -- see that test's own comment --
+/// so a draw can never produce 4 *different* per-sample values to read
+/// back distinctly; direct memory seeding is the only way to construct
+/// that shape). One draw's fragment shader
+/// (`SubpassLoadMultisampleFragmentSource`) then reads sample 2 specifically
+/// back through `subpassLoad`'s explicit-sample form and writes its red
+/// channel into green -- proving a real, non-zero sample selects the
+/// texel address `SubpassLoadReadsBackTheColorAttachmentItWrote`'s
+/// (implicit, always-sample-0) form never had to. The same draw's own
+/// (uniform, no-per-sample-shading) output write lands identically in
+/// every sample of the same attachment (matching
+/// `ResolvesMultisampleColorDuringRenderPass`'s own note), so reading back
+/// any one sample after the draw recovers the shader's result.
+TEST_F(DrawTest, SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote) {
+  constexpr uint32_t SampleCount = 4;
+  VkImage MSImage = VK_NULL_HANDLE;
+  VkImageView MSView = VK_NULL_HANDLE;
+  VkDeviceMemory MSMemory = VK_NULL_HANDLE;
+  createImageAndView(VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT, MSImage, MSView, MSMemory,
+                     VK_SAMPLE_COUNT_4_BIT);
+
+  // Every texel's 4 samples are seeded (0, 0, 0, 255), (64, 0, 0, 255),
+  // (128, 0, 0, 255), (192, 0, 0, 255) -- sample 2's red channel is
+  // therefore 128 everywhere, the value the fragment shader below is
+  // expected to read back and re-store as green.
+  std::vector<uint8_t> Seed(Extent * Extent * SampleCount * 4);
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X)
+      for (uint32_t S = 0; S != SampleCount; ++S) {
+        size_t Off = ((size_t)(Y * Extent + X) * SampleCount + S) * 4;
+        Seed[Off + 0] = static_cast<uint8_t>(S * 64);
+        Seed[Off + 1] = 0;
+        Seed[Off + 2] = 0;
+        Seed[Off + 3] = 0xFF;
+      }
+  std::memcpy(fromHandle<Image>(MSImage)->data(), Seed.data(), Seed.size());
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule SubpassFragment =
+      createModule(SubpassLoadMultisampleFragmentSource);
+
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+  Binding.descriptorCount = 1;
+  Binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+  VkPipelineLayoutCreateInfo SubpassLayoutInfo{};
+  SubpassLayoutInfo.setLayoutCount = 1;
+  SubpassLayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout SubpassLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineLayout(Device, &SubpassLayoutInfo, nullptr,
+                                   &SubpassLayout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+            VK_SUCCESS);
+  VkDescriptorSetAllocateInfo DSAllocInfo{};
+  DSAllocInfo.descriptorPool = DescPool;
+  DSAllocInfo.descriptorSetCount = 1;
+  DSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+  VkDescriptorImageInfo ImageInfo{};
+  ImageInfo.imageView = MSView;
+  ImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+  Write.pImageInfo = &ImageInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = &ColorFormat;
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = SubpassFragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+  VkGraphicsPipelineCreateInfo SubpassInfo{};
+  SubpassInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  SubpassInfo.stageCount = 2;
+  SubpassInfo.pStages = Stages;
+  SubpassInfo.pVertexInputState = &VertexInput;
+  SubpassInfo.pInputAssemblyState = &InputAssembly;
+  SubpassInfo.pViewportState = &ViewportState;
+  SubpassInfo.pRasterizationState = &Raster;
+  SubpassInfo.pMultisampleState = &Multisample;
+  SubpassInfo.pColorBlendState = &Blend;
+  SubpassInfo.layout = SubpassLayout;
+  SubpassInfo.pNext = &Rendering;
+  VkPipeline SubpassPipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &SubpassInfo,
+                                      nullptr, &SubpassPipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+
+  // `VK_ATTACHMENT_LOAD_OP_LOAD`: preserve the per-sample seed above rather
+  // than clearing it away (a clear would write the same value to every
+  // sample, defeating the whole point of this test).
+  VkRenderingAttachmentInfo ColorAttachment{};
+  ColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachment.imageView = MSView;
+  ColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+  ColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  RenderingInfo.renderArea = {{0, 0}, {Extent, Extent}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 1;
+  RenderingInfo.pColorAttachments = &ColorAttachment;
+
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, SubpassPipe);
+  vkCmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, SubpassLayout,
+                          0, 1, &Set, 0, nullptr);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  const auto *Data =
+      static_cast<const uint8_t *>(fromHandle<Image>(MSImage)->data());
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      // Every sample of this pixel now holds the same, uniformly-written
+      // output (see this test's own comment), so sample 0 is as good a
+      // read-back as any other.
+      size_t Off = ((size_t)(Y * Extent + X) * SampleCount + 0) * 4;
+      EXPECT_EQ(Data[Off + 0], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Data[Off + 1], 128) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Data[Off + 2], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Data[Off + 3], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, SubpassPipe, nullptr);
+  vkDestroyShaderModule(Device, SubpassFragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyDescriptorPool(Device, DescPool, nullptr);
+  vkDestroyPipelineLayout(Device, SubpassLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+  vkDestroyImageView(Device, MSView, nullptr);
+  vkDestroyImage(Device, MSImage, nullptr);
+  vkFreeMemory(Device, MSMemory, nullptr);
 }
 
 } // namespace
