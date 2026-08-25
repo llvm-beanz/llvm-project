@@ -31388,3 +31388,159 @@ new end-to-end `DrawTest` cases that exercise the real fetch-index formula
 the same minimal fixed-function pipeline shape
 `RendersPerInstanceVertexAttribute` already established, which avoids the
 unrelated blocker entirely.
+
+# Roadmap F7: `VK_KHR_index_type_uint8`/`indexTypeUint8`
+
+## Task
+
+Implement roadmap milestone F7: `vkCmdBindIndexBuffer`'s existing 16/32-bit
+index read in `CommandBuffer.cpp`/the executor gains an 8-bit case. The
+roadmap row itself flagged this as "mechanical, narrow, good second task
+after F4" -- a fair description in hindsight, once the shape of the two
+pre-existing index-type cases was clear.
+
+## Investigation
+
+I started by locating every place `VkIndexType`/`feme::graphics::IndexType`
+already appears, rather than guessing at the shape from the roadmap row's
+one-line description:
+
+- `feme/include/feme/Graphics/PreparedDraw.h`'s `IndexType` enum
+  (`UInt16`/`UInt32`) and `IndexBufferBinding`.
+- `feme/lib/Vulkan/CommandBuffer.cpp`'s `validateGraphicsDraw` (the
+  index-type allow-list check, and the `Gfx.IndexType` ->
+  `feme::graphics::IndexType` translation) and `validateDrawFetchBounds`
+  (the `IndexSize` bounds-check multiplier).
+- `feme/lib/Graphics/Executor.cpp`'s per-index-type element size and
+  primitive-restart marker value.
+- `feme/lib/Vulkan/EntryPoints.cpp`'s aggregate `VkPhysicalDeviceVulkan14
+  Features.indexTypeUint8` bit (already present as an explicit `VK_FALSE`,
+  since every 1.4 aggregate-feature field must be written one way or the
+  other -- this file's own existing convention for exhaustiveness).
+- `feme/lib/Vulkan/PhysicalDeviceInfo.cpp`'s advertised-extension list.
+
+Every one of F1/F2/F4/F5/F6's own precedent rows added a case to the
+aggregate `VkPhysicalDeviceVulkan14Features` switch, a dedicated per-
+extension feature-struct `case` in the same switch, and an entry in the
+advertised-extension list -- I followed that same three-place shape rather
+than inventing a new one. There is no dedicated *properties* struct for
+this extension (only a plain boolean feature bit, no limits), unlike F5's
+`VkPhysicalDeviceLineRasterizationPropertiesKHR`/F6's `...Divisor
+PropertiesKHR`, so nothing analogous was added there.
+
+One naming wrinkle: the Vulkan registry checked out under
+`/tmp/vksdk/include` (`VK_HEADER_VERSION` 328, the one this build's CMake
+cache actually resolves `Vulkan_INCLUDE_DIR` to) defines `VK_INDEX_TYPE_
+UINT8`/`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES` as the
+*core* names, with `_KHR`/`_EXT` as aliases of the same values (this
+extension started as `VK_EXT_index_type_uint8` and was later promoted to
+`VK_KHR_index_type_uint8`, both spellings still valid). I used the core
+spelling in `switch` cases (an alias would collide as a duplicate case
+label) and the `KHR` spelling in the advertised-extension-name string and
+test code, matching this codebase's own existing convention for every
+prior promoted-extension row (e.g. F5/F6's `_FEATURES`-suffixed `case`
+alongside `...FeaturesKHR` test code).
+
+## Implementation
+
+- `PreparedDraw.h`: added `IndexType::UInt8` as a third enumerator
+  alongside `UInt16`/`UInt32`.
+- `CommandBuffer.cpp`: the index-type allow-list check, the `IndexBinding.
+  Type` translation, and the `IndexSize` bounds-check multiplier each grew
+  a third `VK_INDEX_TYPE_UINT8` case, following the exact same shape their
+  existing two cases already had (a ternary chain, not a new function --
+  matching the surrounding code's own style rather than introducing an
+  abstraction the surrounding code doesn't already use).
+- `Executor.cpp`: the per-index-type element size (`ElemSize`) and the
+  primitive-restart marker (`RestartValue`) each grew a matching `UInt8`
+  case (`ElemSize == 1`, `RestartValue == 0xFFu`), and the raw-index read
+  itself grew a single-byte case alongside the existing 2-/4-byte
+  `memcpy`s.
+- `EntryPoints.cpp`: `indexTypeUint8` flipped to `VK_TRUE` in the aggregate
+  struct, plus a new dedicated `case
+  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES` (this being
+  the *only* structure-type value both `_KHR` and (former) `_EXT` alias to,
+  a single `case` covers every spelling an application might chain).
+- `PhysicalDeviceInfo.cpp`: added `VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME`
+  to the advertised-extension list, reasoning the same way F1/F2/F4/F5/F6's
+  own comments already do -- a real `dEQP-VK.pipeline.*.index_type_uint8.*`
+  case enables this extension by name regardless of the advertised
+  `apiVersion`, so it must be listed there rather than left to core-1.4
+  promotion alone.
+- `feme-render.cpp`: `encodeIndexBufferData` gained a `format: uint8` case,
+  purely for this row's own lit-test coverage (`feme-render`'s scene YAML
+  is this codebase's only text-driven way to exercise the executor's index
+  fetch end-to-end without a full Vulkan client).
+
+## Tests
+
+Added one test per translation phase this row touches, matching the task's
+own instruction to cover each phase:
+
+- `PreparedDrawTest.DescribesAnEightBitIndexedDraw` -- the new enumerator
+  and its 1-byte-per-element `ArrayRef` construction, the "plumbing" layer
+  `PreparedDrawTest.cpp`'s own file comment describes.
+- `ExecutorTest.RendersTheSameTriangleThroughAnEightBitIndexBuffer` -- the
+  same indexed-triangle scene `RendersTheSameTriangleThroughAnIndexBuffer`
+  already established, through an 8-bit index buffer instead of 32-bit,
+  confirming the 1-byte fetch produces the identical picture.
+- `ExecutorTest.HonorsPrimitiveRestartOnIndexedTriangleStripWithEightBit
+  Indices` -- the same restart scenario
+  `HonorsPrimitiveRestartOnIndexedTriangleStrip` already established,
+  through an 8-bit index buffer, confirming `RestartValue`'s own
+  per-index-type selection (`0xFF`, not the 32-bit `0xFFFFFFFF`) is
+  correct, not merely that `ElemSize` is.
+- `PhysicalDeviceInfoTest.IndexTypeUint8IsAdvertisedThroughItsOwnDedicated
+  FeatureStruct` -- the dedicated feature-struct `case`, mirroring
+  `VertexAttributeDivisorIsAdvertisedThroughItsOwnDedicatedStructs`'s own
+  shape (minus a properties half, since this extension has none), plus the
+  existing `Maintenance5IsAdvertisedThroughAggregateVulkan14Features`'s
+  `EXPECT_EQ(Features14.indexTypeUint8, ...)` line flipped from `VK_FALSE`
+  to `VK_TRUE`.
+- `DrawTest.RendersIndexedDrawWithEightBitIndices` -- a real end-to-end
+  draw through the actual ICD entry points (`vkCmdBindIndexBuffer` with
+  `VK_INDEX_TYPE_UINT8`), mirroring the pre-existing `RendersIndexedDraw`;
+  also extended `AdvertisesDynamicRenderingExtension`'s own extension-count
+  assertion (22 -> 23) and added the `VK_KHR_INDEX_TYPE_UINT8_EXTENSION_
+  NAME` check alongside F1/F2/F4/F6's own.
+- `test/Tools/feme-render/draw-indexed-uint8.test` -- a new lit test
+  mirroring `draw-indexed.test`'s exact scene (same shaders, same index
+  list, same `vertex-offset`), through `format: uint8` instead of
+  `uint32`, confirming identical rendered output through the `feme-render`
+  tool's own text-driven path (not only gtest-level `PreparedDraw`
+  plumbing).
+
+`ninja check-feme` (`RelWithDebInfo`, `LLVM_ENABLE_ASSERTIONS=ON`,
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1729
+discovered, 1728 passed, 1 unsupported (pre-existing, unrelated to this
+row) after every change above.
+
+## CTS verification
+
+Ran the full targeted subset naming `index_type_uint8`:
+`dEQP-VK.pipeline.monolithic.input_assembly.primitive_restart.
+index_type_uint8.*` (57 cases; the `fast_linked_library` sibling group
+exercises the same code paths through a different pipeline-construction
+API this ICD does not implement, so it was not run) plus the two
+`dEQP-VK.api.*` cases that exercise this row's own advertised feature
+struct directly, against this session's built `feme_icd.json`.
+
+The two `api.*` cases pass outright. Every `pipeline.monolithic.*` case is
+blocked by a pre-existing, unrelated gap, not this row's own 8-bit fetch
+logic -- confirmed by reading each failure's own diagnostic text rather
+than assuming: 43 `NotSupported` for `VK_EXT_primitive_topology_list_
+restart`/`geometryShader`, neither implemented and neither this row's
+concern; 12 `Fail` with `"Vulkan vertex buffer format is not supported"`,
+the amber-script harness's own vertex-format choice; and 2 `Fail` with the
+exact `feme-cpu-simdize` divergent-vector diagnostic F5/F6's own reports
+already documented for an unrelated triangle-strip vertex-shader pattern.
+None of the 57 name an index-*read* problem. Given the entire targeted
+group is blocked by unrelated, pre-existing gaps, I verified this row's
+actual 8-bit-fetch correctness through the four new, real (non-CTS) tests
+described above instead, each specifically shaped to avoid the blockers
+above (no list-topology restart, no adjacency/geometry shader, no amber
+vertex-format dependency, no triangle-strip winding-parity shader).
+
+Full details recorded in `feme/docs/VulkanCTSReport.md`'s new "Roadmap F7"
+section, following the same "targeted, not a full re-run" format F4/F5/F6's
+own sections use.
