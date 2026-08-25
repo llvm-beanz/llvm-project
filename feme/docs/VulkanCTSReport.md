@@ -4904,3 +4904,54 @@ end to end through `feme::cpu::SPIRVResourceLoweringPass`, and a new
 recognized as this row's own new wrapper shape too, rather than the
 direct/unwrapped one it used before, since the two are now handled
 identically regardless of whether the stride happens to be natural).
+
+## Roadmap F12b: measured impact (builtin `Input` vector lane access chain)
+
+`dEQP-VK.pipeline.monolithic.push_descriptor.*`, re-run against the exact
+same 76-case group F12/F12a's own sections above measured.
+
+```
+Passed:        0/76 (0.0%)
+Failed:        76/76 (100.0%)
+Not supported: 0/76 (0.0%)
+```
+
+Every count is unchanged from F12a's own 0/76/0 baseline, and `grep -c
+"getelementptr' op operand"`/`grep -c "failed to legalize operation
+'spirv.AccessChain'"` on the new log are both `0`, confirming this row's
+new `BuiltInAccessChainPattern` closes the exact diagnostic this row's own
+text names without reopening F12a's own. The `vkCreateComputePipelines`
+failure count for the group is unchanged too (37, same as F12a's own
+re-run: 33 silent + 4 `compute.incremental_updates*`), but -- unlike
+F12a's own diagnostic, which is only visible through `FEME_VULKAN_LOG_
+CREATION_ERRORS` on the *graphics* pipeline path (`GraphicsPipeline.cpp`'s
+own `logCreationFailure` call; `Pipeline.cpp`'s compute path has no
+equivalent hook and always `consumeError`s silently) -- confirming what
+now trips instead needed reproducing this row's own 4 cases' shader
+directly through the standalone `feme` driver (`glslangValidator`-compiled
+from the exact GLSL `PushDescriptorIncrementalUpdatesComputeTest::
+initPrograms` embeds, then `feme --target=x86_64-unknown-linux-gnu`)
+rather than through `deqp-vk` itself: before this row's own fix, that
+reproduction fails identically to F12b's own text (`'llvm.getelementptr'
+op operand #0 must be LLVM pointer type ... but got 'vector<3xi32>'`);
+after it, SPIR-V->LLVM legalization succeeds, and the same shader instead
+hits `feme: unsupported raised operation: '...
+llvm.spv.resource.handlefrombinding...' is a register-bound resource
+handle the FeMe CPU target cannot normalize into a heap access or the
+root-constant block` -- the same pre-existing, already-tracked "resource
+handle the FeMe CPU target cannot normalize" class of gap E6/F8's own
+reports already note (a `std140` uniform block reached through a runtime
+`vkCmdPushDescriptorSet` write, rather than a statically-bound descriptor
+this ICD's CPU target can already normalize), not a new one this row
+needs to split off. This closes F12b's own scope exactly as its own text
+describes, without turning any of the 4 CTS cases green (their own
+remaining failure was already out of scope before this row, and remains
+so after it).
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1790 discovered, 1789 passed, 1
+unsupported (pre-existing, unrelated) -- unchanged from F12a's own
+1790-discovered baseline: the new `spirv-to-llvm-builtin-variables.mlir`
+case (`read_global_invocation_id_x`, covering the new
+`BuiltInAccessChainPattern`) is a new `CHECK` block inside an
+already-counted lit test file, not a new discovered test of its own.
