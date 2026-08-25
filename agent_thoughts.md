@@ -32879,3 +32879,89 @@ this row's own scope, so I verified the actual new mechanism a different
 way instead: unit tests reusing an already-working `rtarray`-shaped shader,
 including one modeled directly on the CTS case F12a's own finding blocks
 (`PushDescriptorIncrementalUpdatesComputeTest`).
+
+## Roadmap F11a: `copyBufferImageRegion`'s aspect-specific combined depth/stencil copy
+
+**Goal:** implement real support for a single-aspect (`VK_IMAGE_ASPECT_DEPTH_BIT`/
+`STENCIL_BIT`) `VkBufferImageCopy`/`VkMemoryToImageCopy`/`VkImageToMemoryCopy` of a
+combined depth/stencil image (`D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`), which F11
+found it had to reject cleanly rather than mis-copy (its buffer-side row sizing used
+the whole combined format's `bytesPerBlock`, not the single named aspect's own,
+smaller size -- previously latent, but turned into a real out-of-bounds host-memory
+read/write once `vkCopyMemoryToImage`'s raw host pointer had no bound `VkBuffer` size
+to catch the oversized row against).
+
+**Design:** first confirmed the real Vulkan spec's own buffer-side layout for a
+single-aspect combined-depth/stencil copy (Khronos "Buffer and Image Addressing"):
+the depth aspect of both `D24_UNORM_S8_UINT` and `D32_FLOAT_S8X24_UINT` is 4 bytes/
+texel (a 32-bit word -- `D24`'s own low 24 bits, or `D32`'s own float, respectively),
+the stencil aspect always 1 byte/texel (`S8_UINT`'s own size), in both cases distinct
+from -- and smaller than -- the combined texel's own `bytesPerBlock`.
+
+Rather than literally changing `packDepthClear`/`packStencilClear`/`unpackDepth`/
+`unpackStencil`'s own signatures (as the roadmap row's own text suggested) from a
+single repeated clear value to an arbitrary region, I added two new functions,
+`copyDepthAspectRegion`/`copyStencilAspectRegion` (ImageFixture.h/.cpp), that do a
+direct per-texel bit-level read-modify-write between a tightly packed aspect-only
+buffer region and the image's own interleaved combined texels -- keeping
+`packDepthClear`/`packStencilClear` themselves untouched (still single-clear-value
+APIs `vkCmdClearDepthStencilImage` uses) and avoiding a lossy round trip through
+`packDepthClear`'s own `[0, 1]`-double clear-value math, which the real spec's own
+buffer-side layout (raw bits, not a semantic clear value) doesn't call for. I did
+still add `D32_FLOAT_S8X24_UINT`'s own case to `packDepthClear`/`unpackDepth`/
+`packStencilClear`/`unpackStencil` themselves, exactly as the roadmap row asked,
+since none of the four had it before (a real, independent gap even for the existing
+`vkCmdClearDepthStencilImage`, unrelated to the buffer-copy path).
+
+`copyBufferImageRegion` (ImageOps.cpp) now rejects only the genuinely ambiguous case
+for a combined format -- an `aspectMask` naming neither or both of `DEPTH_BIT`/
+`STENCIL_BIT` -- and otherwise sizes the buffer side by the named aspect's own
+smaller size and copies through the new region functions instead of one contiguous
+row `memcpy`, benefiting `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer`/
+`vkCopyMemoryToImage`/`vkCopyImageToMemory` alike (all four share this one function).
+
+**Testing:** `ImageFixtureTest.cpp` gets four new unit tests: `D32_FLOAT_S8X24_UINT`'s
+new pack/unpack cases (mirroring `D24_UNORM_S8_UINT`'s existing
+`PacksDepthAndStencilIndependentlyForCombinedFormat` test), and three cases directly
+exercising `copyDepthAspectRegion`/`copyStencilAspectRegion` for both formats,
+confirming each preserves the aspect it doesn't touch. `ImageTest.cpp`'s old
+`CopyBufferToImageRejectsCombinedDepthStencilFormat` (asserting the rejection F11a
+removes) is replaced with two new tests that pre-seed one aspect with a recognizable
+value, copy the other aspect via `vkCmdCopyBufferToImage`, and confirm both the
+copied aspect's new value and the untouched aspect's preserved value -- plus one new
+test confirming the *remaining* rejection (an ambiguous aspect mask) still happens.
+`HostImageCopyTest.cpp`'s equivalent old rejection test is replaced with a full
+round-trip test (`vkCopyMemoryToImage` then `vkCopyImageToMemory`, no `VkCommandBuffer`
+at all) confirming the exact same thing through the host-side path F11 added.
+
+**Formatting note:** `clang-format -i` on the whole modified files reformatted many
+unrelated, pre-existing lines too (this codebase's existing style differs slightly
+from a plain `clang-format` run under this environment's clang-format 18.1.3 --
+possibly written against a different clang-format version). Reverted that and used
+`git-clang-format` against `HEAD` instead, which only reformats the lines actually
+changed, leaving everything else byte-for-byte untouched -- the correct tool for
+"use clang-format on all changes" without violating "don't modify unrelated code".
+
+**CTS:** re-ran `dEQP-VK.image.host_image_copy.*` (73289 cases) against the same
+environment workaround F11's own report documents (a current, 1.4.328
+`Vulkan-Loader` built from source via `LD_LIBRARY_PATH`, since this environment's
+installed system loader, 1.3.275, still silently no-ops a purely-1.4-core command
+like `vkCopyMemoryToImage`/`vkTransitionImageLayout` rather than failing to resolve
+it). `Passed` rose by exactly 24 and `Failed` fell by exactly 24 from F11's own
+1121/1496 baseline -- precisely the 24 `Depth copy failed` cases F11's own report
+attributed to the clean rejection this row replaces with real support; none of them
+appear in the new failure list, and the remaining 1472 failures are exactly F11's
+own two pre-existing, unrelated shader-compilation gaps (1468 + 4), confirming no
+regression. See "Roadmap F11a: measured impact" in VulkanCTSReport.md for the full
+numbers.
+
+Updated Roadmap.md (F11a struck through and closed), VulkanCTSReport.md (F11's own
+table row for the 24 `Depth copy failed` cases now cross-references the fix, plus a
+new F11a measured-impact section), Vulkan14FeatureInventory.md's `hostImageCopy` row
+and VulkanExtensionInventory.md's `VK_EXT_host_image_copy` row (both now note the
+combined-depth/stencil gap F11 could only reject is real support now). Left
+Executor.cpp's own, separate `readDepth`/`writeDepth`/`readStencil`/`writeStencil`
+(the render-pass attachment depth-test/write path, not the buffer/image-copy path
+this row's own scope covers) and FeMeGraphicsDesign.md's/FeMeVulkanDesign.md's own
+notes about `D32_FLOAT_S8X24_UINT` remaining unsupported *there* untouched, since
+that is a genuinely different subsystem this row's own scope does not touch.
