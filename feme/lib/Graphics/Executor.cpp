@@ -1360,10 +1360,26 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // A per-instance binding advances once per instance rather than
         // once per vertex (`VkVertexInputRate::VK_VERTEX_INPUT_RATE_
         // INSTANCE`): it is indexed by the invocation's instance index, not
-        // its vertex index.
-        uint32_t FetchIndex = Binding->PerInstance
-                                  ? Invocations[Flat].InstanceID
-                                  : VertexIndices[Flat];
+        // its vertex index. (roadmap F6) `VK_KHR_vertex_attribute_divisor`
+        // generalizes that one-fetch-per-instance step to one fetch every
+        // `Divisor` instances (`Divisor == 1`, the default, is exactly the
+        // plain per-instance case above), and `Divisor == 0`
+        // (`vertexAttributeInstanceRateZeroDivisor`) is the one further
+        // case where every instance reads the same vertex, at
+        // `firstInstance` -- not a new fetch mechanism, just this same
+        // formula's own degenerate divide-by-zero case spelled out
+        // explicitly.
+        uint32_t FetchIndex;
+        if (!Binding->PerInstance) {
+          FetchIndex = VertexIndices[Flat];
+        } else if (Binding->Divisor == 0) {
+          FetchIndex = Invocations[Flat].BaseInstance;
+        } else {
+          uint32_t FirstInstance = Invocations[Flat].BaseInstance;
+          FetchIndex =
+              FirstInstance +
+              (Invocations[Flat].InstanceID - FirstInstance) / Binding->Divisor;
+        }
         uint64_t SrcOff = (uint64_t)Binding->Stride * FetchIndex + Attr->Offset;
         Expected<uint32_t> CompByteSize =
             attributeComponentByteSize(Attr->Format);

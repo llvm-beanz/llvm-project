@@ -634,6 +634,48 @@ Error translateVertexInput(const VkPipelineVertexInputStateCreateInfo *Info,
     Out.VertexAttributes.push_back(
         VertexInputAttribute{Src.location, Src.binding, Src.offset, *Format});
   }
+  // (roadmap F6) `VkPipelineVertexInputDivisorStateCreateInfo`, chained from
+  // `pNext`: overrides a per-instance binding's default divisor of 1 with
+  // an explicit per-binding value. This is not a new fetch mechanism --
+  // the executor's existing per-instance fetch (Executor.cpp) already
+  // reads by instance index; a divisor only changes which instance index a
+  // fetch of a given instance maps to, and `0`
+  // (`vertexAttributeInstanceRateZeroDivisor`) is simply the case where
+  // every instance maps to the same one, `firstInstance`.
+  for (const VkBaseInStructure *Next =
+           reinterpret_cast<const VkBaseInStructure *>(Info->pNext);
+       Next; Next = Next->pNext) {
+    if (Next->sType !=
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO)
+      continue;
+    const auto *DivisorState =
+        reinterpret_cast<const VkPipelineVertexInputDivisorStateCreateInfo *>(
+            Next);
+    for (uint32_t I = 0; I != DivisorState->vertexBindingDivisorCount; ++I) {
+      const VkVertexInputBindingDivisorDescription &Src =
+          DivisorState->pVertexBindingDivisors[I];
+      if (Src.divisor > MaxVertexAttribDivisor)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vertex binding %u's divisor exceeds "
+                                 "maxVertexAttribDivisor",
+                                 Src.binding);
+      VertexInputBinding *Binding = nullptr;
+      for (VertexInputBinding &B : Out.VertexBindings)
+        if (B.Binding == Src.binding)
+          Binding = &B;
+      if (!Binding)
+        return createStringError(inconvertibleErrorCode(),
+                                 "VkVertexInputBindingDivisorDescription "
+                                 "names binding %u, which the pipeline does "
+                                 "not declare",
+                                 Src.binding);
+      if (!Binding->PerInstance)
+        return createStringError(inconvertibleErrorCode(),
+                                 "a vertex binding divisor only applies to "
+                                 "a VK_VERTEX_INPUT_RATE_INSTANCE binding");
+      Binding->Divisor = Src.divisor;
+    }
+  }
   return Error::success();
 }
 
@@ -947,6 +989,7 @@ void appendVertexBinding(std::vector<uint8_t> &Out,
   appendScalar(Out, B.Binding);
   appendScalar(Out, B.Stride);
   appendScalar(Out, B.PerInstance);
+  appendScalar(Out, B.Divisor);
 }
 
 void appendVertexAttribute(std::vector<uint8_t> &Out,

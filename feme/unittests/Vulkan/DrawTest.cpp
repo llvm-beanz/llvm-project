@@ -1139,7 +1139,219 @@ TEST_F(DrawTest, RendersPerInstanceVertexAttribute) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// (roadmap C4c) `VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE`: a pipeline
+/// (roadmap F6) `VK_KHR_vertex_attribute_divisor`: a divisor of 2 makes the
+/// per-instance fetch advance once every 2 instances rather than every one,
+/// so drawing 4 instances against a 2-element buffer stays in bounds --
+/// without the divisor, instance 3's plain per-instance fetch would read
+/// past the buffer's end. Every instance renders the same full-screen
+/// triangle, so the final visible color is whichever color instance 3 (the
+/// last one drawn) fetches: `firstInstance(0) + (3 - 0) / 2 == 1`, the
+/// buffer's second (green) element.
+TEST_F(DrawTest, RendersVertexAttributeInstanceRateDivisor) {
+  VkShaderModule Vertex = createModule(PerInstanceColorVertexSource);
+  VkShaderModule Fragment = createModule(PassthroughColorFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  VkVertexInputBindingDescription BindingDesc{0, sizeof(float) * 4,
+                                              VK_VERTEX_INPUT_RATE_INSTANCE};
+  VkVertexInputAttributeDescription AttrDesc{1, 0,
+                                             VK_FORMAT_R32G32B32A32_SFLOAT, 0};
+  VkVertexInputBindingDivisorDescription DivisorDesc{/*binding=*/0,
+                                                     /*divisor=*/2};
+  VkPipelineVertexInputDivisorStateCreateInfo DivisorState{};
+  DivisorState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO;
+  DivisorState.vertexBindingDivisorCount = 1;
+  DivisorState.pVertexBindingDivisors = &DivisorDesc;
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VertexInput.pNext = &DivisorState;
+  VertexInput.vertexBindingDescriptionCount = 1;
+  VertexInput.pVertexBindingDescriptions = &BindingDesc;
+  VertexInput.vertexAttributeDescriptionCount = 1;
+  VertexInput.pVertexAttributeDescriptions = &AttrDesc;
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkDeviceMemory InstanceMemory = VK_NULL_HANDLE;
+  VkBuffer InstanceBuffer = createBuffer(2 * sizeof(float) * 4, InstanceMemory,
+                                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+  float Colors[8] = {
+      1.0f, 0.0f, 0.0f, 1.0f, // element 0: red
+      0.0f, 1.0f, 0.0f, 1.0f, // element 1: green
+  };
+  std::memcpy(fromHandle<Buffer>(InstanceBuffer)->data(), Colors,
+              sizeof(Colors));
+
+  VkDeviceSize Offset = 0;
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindVertexBuffers(Cmd, 0, 1, &InstanceBuffer, &Offset);
+  vkCmdDraw(Cmd, 3, /*instanceCount=*/4, 0, /*firstInstance=*/0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0x00);
+  EXPECT_EQ(texel(2, 2)[1], 0xFF);
+  EXPECT_EQ(texel(2, 2)[2], 0x00);
+
+  vkDestroyBuffer(Device, InstanceBuffer, nullptr);
+  vkFreeMemory(Device, InstanceMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap F6) `vertexAttributeInstanceRateZeroDivisor`: a divisor of 0
+/// means every instance reads the vertex at `firstInstance`, regardless of
+/// its own instance index -- here `firstInstance == 1` selects the
+/// buffer's second (green) element for every one of 3 instances, not just
+/// the second.
+TEST_F(DrawTest, RendersVertexAttributeInstanceRateZeroDivisor) {
+  VkShaderModule Vertex = createModule(PerInstanceColorVertexSource);
+  VkShaderModule Fragment = createModule(PassthroughColorFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  VkVertexInputBindingDescription BindingDesc{0, sizeof(float) * 4,
+                                              VK_VERTEX_INPUT_RATE_INSTANCE};
+  VkVertexInputAttributeDescription AttrDesc{1, 0,
+                                             VK_FORMAT_R32G32B32A32_SFLOAT, 0};
+  VkVertexInputBindingDivisorDescription DivisorDesc{/*binding=*/0,
+                                                     /*divisor=*/0};
+  VkPipelineVertexInputDivisorStateCreateInfo DivisorState{};
+  DivisorState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO;
+  DivisorState.vertexBindingDivisorCount = 1;
+  DivisorState.pVertexBindingDivisors = &DivisorDesc;
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VertexInput.pNext = &DivisorState;
+  VertexInput.vertexBindingDescriptionCount = 1;
+  VertexInput.pVertexBindingDescriptions = &BindingDesc;
+  VertexInput.vertexAttributeDescriptionCount = 1;
+  VertexInput.pVertexAttributeDescriptions = &AttrDesc;
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkDeviceMemory InstanceMemory = VK_NULL_HANDLE;
+  VkBuffer InstanceBuffer = createBuffer(2 * sizeof(float) * 4, InstanceMemory,
+                                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+  float Colors[8] = {
+      1.0f, 0.0f, 0.0f, 1.0f, // element 0: red
+      0.0f, 1.0f, 0.0f, 1.0f, // element 1: green
+  };
+  std::memcpy(fromHandle<Buffer>(InstanceBuffer)->data(), Colors,
+              sizeof(Colors));
+
+  VkDeviceSize Offset = 0;
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindVertexBuffers(Cmd, 0, 1, &InstanceBuffer, &Offset);
+  vkCmdDraw(Cmd, 3, /*instanceCount=*/3, 0, /*firstInstance=*/1);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0x00);
+  EXPECT_EQ(texel(2, 2)[1], 0xFF);
+  EXPECT_EQ(texel(2, 2)[2], 0x00);
+
+  vkDestroyBuffer(Device, InstanceBuffer, nullptr);
+  vkFreeMemory(Device, InstanceMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// created with a deliberately wrong static stride (double the real
 /// per-instance record size, which would read instance 1's color at half
 /// its correct offset) still renders correctly once

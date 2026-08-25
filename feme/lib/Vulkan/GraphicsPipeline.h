@@ -58,6 +58,12 @@ struct VertexInputBinding {
   /// Whether this binding advances per vertex or per instance
   /// (`VkVertexInputRate`).
   bool PerInstance = false;
+  /// (roadmap F6) `VK_KHR_vertex_attribute_divisor`'s per-binding instance
+  /// divisor: only meaningful when `PerInstance` is set, `1` (the default)
+  /// matches core 1.0's "advance once per instance" behavior exactly, and
+  /// `0` (`vertexAttributeInstanceRateZeroDivisor`) means every instance
+  /// reads the same vertex, at `firstInstance`.
+  uint32_t Divisor = 1;
 };
 
 /// One `VkVertexInputAttributeDescription`, normalized: its
@@ -68,6 +74,17 @@ struct VertexInputAttribute {
   uint32_t Offset = 0;
   feme::cpu::ResourceFormat Format = feme::cpu::ResourceFormat::Unknown;
 };
+
+/// (roadmap F6) `VkPhysicalDeviceVertexAttributeDivisorProperties::
+/// maxVertexAttribDivisor`: the largest per-binding divisor
+/// `translateVertexInput` accepts. The fetch-index computation this divisor
+/// feeds (`firstInstance + (instanceIndex - firstInstance) / divisor`,
+/// `Executor.cpp`) is a plain 32-bit integer divide with no narrower bound
+/// of its own, so the full range is a genuine, verified limit rather than a
+/// conservative placeholder. Shared between `GraphicsPipeline.cpp`'s
+/// validation and `EntryPoints.cpp`'s advertised property so the two can
+/// never disagree.
+constexpr uint32_t MaxVertexAttribDivisor = 0xFFFFFFFFu;
 
 /// The `VkDynamicState` subset this driver implements, as a bitmask. A
 /// pipeline naming any other dynamic state fails creation (see the file

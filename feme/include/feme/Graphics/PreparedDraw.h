@@ -62,6 +62,13 @@ struct VertexBufferBinding {
   /// (`VkVertexInputRate`): a per-instance binding is indexed by the
   /// invocation's instance index rather than its vertex index.
   bool PerInstance = false;
+  /// (roadmap F6) `VK_KHR_vertex_attribute_divisor`'s per-binding instance
+  /// divisor, only meaningful when `PerInstance` is set: `1` (the default)
+  /// is core 1.0's own "one fetch per instance" behavior, any other value
+  /// makes the fetch advance once every `Divisor` instances instead, and
+  /// `0` (`vertexAttributeInstanceRateZeroDivisor`) means every instance
+  /// reads the same vertex, at `firstInstance`.
+  uint32_t Divisor = 1;
 };
 
 /// The scalar type an index buffer's elements store.

@@ -1266,6 +1266,7 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
                                       static_cast<size_t>(Buf.size() - Offset));
     VB.Attributes = AttributeStorage.back();
     VB.PerInstance = BindingDecl.PerInstance;
+    VB.Divisor = BindingDecl.Divisor;
     VertexBuffers.push_back(VB);
   }
 
@@ -1397,7 +1398,20 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
                                BindingDecl.Binding);
     // A per-instance binding's reach depends on the instance range, not the
     // vertex range: it is read once per instance, not once per vertex.
-    uint64_t LastIndex = BindingDecl.PerInstance ? LastInstance : LastVertex;
+    // (roadmap F6) A non-default divisor narrows that reach further: a
+    // divisor of 0 reads only `firstInstance` regardless of instance
+    // count, and any other divisor reads at most `firstInstance +
+    // (lastInstance - firstInstance) / divisor` -- both are less than or
+    // equal to `LastInstance`, matching the same fetch-index formula the
+    // executor itself uses (Executor.cpp).
+    uint64_t LastIndex;
+    if (!BindingDecl.PerInstance)
+      LastIndex = LastVertex;
+    else if (BindingDecl.Divisor == 0)
+      LastIndex = Draw.FirstInstance;
+    else
+      LastIndex = Draw.FirstInstance +
+                  (LastInstance - Draw.FirstInstance) / BindingDecl.Divisor;
     uint32_t Stride = resolveVertexBindingStride(Pipeline, Gfx, BindingDecl);
     uint64_t Base =
         Gfx.VertexBufferOffsets[BindingDecl.Binding] + LastIndex * Stride;

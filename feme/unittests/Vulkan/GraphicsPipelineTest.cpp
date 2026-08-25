@@ -549,7 +549,117 @@ TEST_F(GraphicsPipelineTest, TranslatesLineRasterizationState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// (roadmap F5) `VK_DYNAMIC_STATE_LINE_WIDTH`/`VK_DYNAMIC_STATE_LINE_
+/// (roadmap F6) `VkPipelineVertexInputDivisorStateCreateInfo` overrides a
+/// per-instance binding's default divisor (1) with an explicit value,
+/// recorded on the pipeline's own `VertexInputBinding` for the executor's
+/// fetch-index formula to use.
+TEST_F(GraphicsPipelineTest, TranslatesVertexAttributeDivisorState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkVertexInputBindingDescription BindingDesc{0, 16,
+                                              VK_VERTEX_INPUT_RATE_INSTANCE};
+  VertexInput.vertexBindingDescriptionCount = 1;
+  VertexInput.pVertexBindingDescriptions = &BindingDesc;
+  VkVertexInputBindingDivisorDescription DivisorDesc{/*binding=*/0,
+                                                     /*divisor=*/3};
+  VkPipelineVertexInputDivisorStateCreateInfo DivisorState{};
+  DivisorState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO;
+  DivisorState.vertexBindingDivisorCount = 1;
+  DivisorState.pVertexBindingDivisors = &DivisorDesc;
+  VertexInput.pNext = &DivisorState;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  ASSERT_EQ(Graphics->vertexBindings().size(), 1u);
+  EXPECT_EQ(Graphics->vertexBindings()[0].Divisor, 3u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap F6) A divisor of `0` (`vertexAttributeInstanceRateZeroDivisor`)
+/// is accepted too: it is not a new mechanism, just this same per-binding
+/// field's own degenerate value.
+TEST_F(GraphicsPipelineTest, AcceptsZeroVertexAttributeDivisor) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkVertexInputBindingDescription BindingDesc{0, 16,
+                                              VK_VERTEX_INPUT_RATE_INSTANCE};
+  VertexInput.vertexBindingDescriptionCount = 1;
+  VertexInput.pVertexBindingDescriptions = &BindingDesc;
+  VkVertexInputBindingDivisorDescription DivisorDesc{/*binding=*/0,
+                                                     /*divisor=*/0};
+  VkPipelineVertexInputDivisorStateCreateInfo DivisorState{};
+  DivisorState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO;
+  DivisorState.vertexBindingDivisorCount = 1;
+  DivisorState.pVertexBindingDivisors = &DivisorDesc;
+  VertexInput.pNext = &DivisorState;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  ASSERT_EQ(Graphics->vertexBindings().size(), 1u);
+  EXPECT_EQ(Graphics->vertexBindings()[0].Divisor, 0u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap F6) A `VkVertexInputBindingDivisorDescription` naming a binding
+/// the pipeline never declared, or one declared
+/// `VK_VERTEX_INPUT_RATE_VERTEX` (the divisor only ever applies to a
+/// per-instance binding), or a divisor exceeding `maxVertexAttribDivisor`,
+/// is rejected at creation rather than silently ignored or clamped.
+TEST_F(GraphicsPipelineTest, RejectsInvalidVertexAttributeDivisorState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+
+  // Names a binding the pipeline does not declare.
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkVertexInputBindingDescription BindingDesc{0, 16,
+                                              VK_VERTEX_INPUT_RATE_INSTANCE};
+  VertexInput.vertexBindingDescriptionCount = 1;
+  VertexInput.pVertexBindingDescriptions = &BindingDesc;
+  VkVertexInputBindingDivisorDescription BadBinding{/*binding=*/1,
+                                                    /*divisor=*/2};
+  VkPipelineVertexInputDivisorStateCreateInfo DivisorState{};
+  DivisorState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO;
+  DivisorState.vertexBindingDivisorCount = 1;
+  DivisorState.pVertexBindingDivisors = &BadBinding;
+  VertexInput.pNext = &DivisorState;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  // Names a `VK_VERTEX_INPUT_RATE_VERTEX` binding.
+  Info = makeCreateInfo(Vertex, Fragment);
+  VkVertexInputBindingDescription VertexRateBinding{
+      0, 16, VK_VERTEX_INPUT_RATE_VERTEX};
+  VertexInput.vertexBindingDescriptionCount = 1;
+  VertexInput.pVertexBindingDescriptions = &VertexRateBinding;
+  VkVertexInputBindingDivisorDescription WrongRate{/*binding=*/0,
+                                                   /*divisor=*/2};
+  DivisorState.pVertexBindingDivisors = &WrongRate;
+  VertexInput.pNext = &DivisorState;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// STIPPLE_KHR`: a pipeline may declare either dynamic, and
 /// `buildExecutorPipeline` must then read the per-draw snapshot rather
 /// than this pipeline's own (deliberately mismatched) creation-time
