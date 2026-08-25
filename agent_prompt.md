@@ -33,23 +33,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F8c and close out F8?
+Can you implement roadmap milestone F9?
 
-> **F8b's own remaining piece: an explicit-sample subpass-input local read, for
-> `dynamicRenderingLocalReadMultisampledAttachments`.**
-> `buildSubpassInputHeap`'s heap slot for a multisampled attachment is now
-> correctly laid out (F8b), but nothing can address a sample other than 0 of it
-> yet. Needs, in order: (1) a `Sample` operand on
-> `feme::StageOpKind::SubpassLoad` (`StageOps.h`/`StageOps.cpp`), defaulting to
-> a constant `0` where absent so single-sample callers are unaffected; (2)
-> `SubpassLoadPattern` (`SPIRVToLLVMPatterns.cpp`) reading a real
-> `spirv.ImageRead` `Sample` image operand instead of unconditionally rejecting
-> one (`hasImageOperands`); (3) `FragmentWrapper.cpp`'s
-> `lowerFragmentSubpassLoad` and the CPU runtime's
-> `femeRTFetchTexel2D`/`feme.cpu.image.load.2d.v4f32` threading that sample
-> index into the texel address `SampleStride` already supports, instead of
-> always reading sample 0; (4) a CTS-shaped test binding a multisample color
-> (and/or depth/stencil) attachment and reading a specific sample back through
-> `subpassLoad`'s explicit-sample form before
-> `dynamicRenderingLocalReadMultisampledAttachments` can honestly flip to
-> `VK_TRUE`
+> **`VK_EXT_pipeline_protected_access`/`pipelineProtectedAccess`.** This ICD has
+> no protected-memory model at all (no protected queue/allocation exists); the
+> honest, conformant answer is likely to accept the flag as a no-op restriction
+> (reject creating a protected+unprotected-mixed pipeline, matching the spec's
+> validation rules) without implementing real memory protection — confirm
+> against the spec's exact conformance requirement before assuming this is
+> sufficient
