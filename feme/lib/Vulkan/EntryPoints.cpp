@@ -1158,7 +1158,13 @@ void fillFeatures2Chain(void *pNext) {
       Features->shaderSubgroupRotate = VK_TRUE;
       Features->shaderSubgroupRotateClustered = VK_TRUE;
       Features->shaderFloatControls2 = VK_FALSE;
-      Features->shaderExpectAssume = VK_FALSE;
+      // (roadmap F4) `spirv.KHR.AssumeTrue`/`spirv.KHR.Expect` now convert
+      // directly to `llvm.assume`/`llvm.expect` (SPIRVToLLVMPatterns.cpp's
+      // `AssumeTrueConversionPattern`/`ExpectConversionPattern`), so this
+      // bit -- like `shaderSubgroupRotate` above -- must agree with the
+      // dedicated `VkPhysicalDeviceShaderExpectAssumeFeaturesKHR` struct
+      // case below.
+      Features->shaderExpectAssume = VK_TRUE;
       Features->rectangularLines = VK_FALSE;
       Features->bresenhamLines = VK_FALSE;
       Features->smoothLines = VK_FALSE;
@@ -1271,6 +1277,16 @@ void fillFeatures2Chain(void *pNext) {
               Base);
       Features->shaderSubgroupRotate = VK_TRUE;
       Features->shaderSubgroupRotateClustered = VK_TRUE;
+      break;
+    }
+    // (roadmap F4) `VK_KHR_shader_expect_assume`'s own feature struct,
+    // whose 1.4 core and `KHR` spellings share one `sType`, exactly like
+    // `shaderSubgroupRotate` above, agreeing with the aggregate
+    // `VkPhysicalDeviceVulkan14Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_EXPECT_ASSUME_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceShaderExpectAssumeFeatures *>(Base);
+      Features->shaderExpectAssume = VK_TRUE;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature

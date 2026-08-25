@@ -634,6 +634,14 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // `apiVersion`, so it must be listed here too.
       {VK_KHR_SHADER_SUBGROUP_ROTATE_EXTENSION_NAME,
        VK_KHR_SHADER_SUBGROUP_ROTATE_SPEC_VERSION},
+      // (roadmap F4) `spirv.KHR.AssumeTrue`/`spirv.KHR.Expect` now convert
+      // (SPIRVToLLVMPatterns.cpp's `AssumeTrueConversionPattern`/
+      // `ExpectConversionPattern`); like `VK_KHR_shader_subgroup_rotate`
+      // above, a real shader using either op declares `OpCapability
+      // ExpectAssumeKHR`/`OpExtension "SPV_KHR_expect_assume"`, so this
+      // extension must be listed here too.
+      {VK_KHR_SHADER_EXPECT_ASSUME_EXTENSION_NAME,
+       VK_KHR_SHADER_EXPECT_ASSUME_SPEC_VERSION},
   };
   return Extensions;
 }

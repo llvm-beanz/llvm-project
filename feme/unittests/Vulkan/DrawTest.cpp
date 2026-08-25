@@ -1405,7 +1405,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 19u);
+  ASSERT_EQ(Count, 20u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -1452,6 +1452,8 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   EXPECT_TRUE(HasExtension(VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME));
   // Roadmap F2.
   EXPECT_TRUE(HasExtension(VK_KHR_SHADER_SUBGROUP_ROTATE_EXTENSION_NAME));
+  // Roadmap F4.
+  EXPECT_TRUE(HasExtension(VK_KHR_SHADER_EXPECT_ASSUME_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;

@@ -126,3 +126,8 @@ globalPriorityQuery = roadmap F1: reported through both the aggregate VkPhysical
 # (SPIRVToLLVMPatterns.cpp's RotateConversionPattern) covering both forms.
 shaderSubgroupRotate
 shaderSubgroupRotateClustered
+# shaderExpectAssume: roadmap F4 -- spirv.KHR.AssumeTrue/spirv.KHR.Expect
+# have real spirv->llvm conversion patterns (SPIRVToLLVMPatterns.cpp's
+# AssumeTrueConversionPattern/ExpectConversionPattern), lowering directly
+# to llvm.assume/llvm.expect.
+shaderExpectAssume

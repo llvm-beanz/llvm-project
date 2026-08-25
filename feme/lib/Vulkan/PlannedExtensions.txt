@@ -75,7 +75,6 @@ VK_KHR_sampler_ycbcr_conversion = core-promoted into Vulkan 1.1: part of the man
 VK_KHR_separate_depth_stencil_layouts = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_shader_atomic_int64 = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_shader_draw_parameters = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
-VK_KHR_shader_expect_assume = roadmap F4
 VK_KHR_shader_float16_int8 = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_shader_float_controls = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_shader_float_controls2 = roadmap F3

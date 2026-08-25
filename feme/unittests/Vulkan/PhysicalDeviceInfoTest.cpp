@@ -1054,7 +1054,11 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Features14.shaderSubgroupRotate, VK_TRUE);
   EXPECT_EQ(Features14.shaderSubgroupRotateClustered, VK_TRUE);
   EXPECT_EQ(Features14.shaderFloatControls2, VK_FALSE);
-  EXPECT_EQ(Features14.shaderExpectAssume, VK_FALSE);
+  // Roadmap F4: `spirv.KHR.AssumeTrue`/`spirv.KHR.Expect` now convert
+  // (SPIRVToLLVMPatterns.cpp's `AssumeTrueConversionPattern`/
+  // `ExpectConversionPattern`), and must agree with the dedicated
+  // `VkPhysicalDeviceShaderExpectAssumeFeatures` struct case below.
+  EXPECT_EQ(Features14.shaderExpectAssume, VK_TRUE);
   EXPECT_EQ(Features14.rectangularLines, VK_FALSE);
   EXPECT_EQ(Features14.bresenhamLines, VK_FALSE);
   EXPECT_EQ(Features14.smoothLines, VK_FALSE);
@@ -1167,6 +1171,23 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(ShaderSubgroupRotateFeatures.shaderSubgroupRotate, VK_TRUE);
   EXPECT_EQ(ShaderSubgroupRotateFeatures.shaderSubgroupRotateClustered,
             VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       ShaderExpectAssumeIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap F4: `VK_KHR_shader_expect_assume`'s own dedicated feature
+  // struct must agree with the aggregate `VkPhysicalDeviceVulkan14Features`
+  // case above, exactly like `VK_KHR_shader_subgroup_rotate`'s own struct
+  // does.
+  VkPhysicalDeviceShaderExpectAssumeFeatures ShaderExpectAssumeFeatures{};
+  ShaderExpectAssumeFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_EXPECT_ASSUME_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &ShaderExpectAssumeFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(ShaderExpectAssumeFeatures.shaderExpectAssume, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
