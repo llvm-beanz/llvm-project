@@ -1664,12 +1664,12 @@ mlir::spirv::GlobalVariableOp getSubpassVariable(mlir::Value Image) {
 }
 
 /// Declares (or finds) the `feme.stage.subpass.load.f32` function
-/// `SubpassLoadPattern` calls: `(i32 attachment_index, i32 component) ->
-/// f32`, matching `feme::StageOpKind::SubpassLoad`'s always-`f32` shape
-/// (see StageOps.h) -- an ordinary named call, not an `llvm.spv.*`
-/// intrinsic, since `feme.stage.*` calls (StageOps.h's file comment) are
-/// FeMe's own vocabulary rather than a real target-independent LLVM
-/// intrinsic. Named with the explicit `.f32` type suffix
+/// `SubpassLoadPattern` calls: `(i32 attachment_index, i32 component,
+/// i32 sample) -> f32`, matching `feme::StageOpKind::SubpassLoad`'s
+/// always-`f32` shape (see StageOps.h) -- an ordinary named call, not an
+/// `llvm.spv.*` intrinsic, since `feme.stage.*` calls (StageOps.h's file
+/// comment) are FeMe's own vocabulary rather than a real target-independent
+/// LLVM intrinsic. Named with the explicit `.f32` type suffix
 /// `feme::getOrInsertStageOp` gives every overloaded `feme.stage.*` op
 /// (SubpassLoad is marked overloaded for exactly this reason -- see
 /// `StageOpKind::SubpassLoad`'s comment): `feme::cpu::SIMDizePass` widens
@@ -1688,7 +1688,7 @@ getOrInsertSubpassLoadFunc(mlir::ConversionPatternRewriter &Rewriter,
   Rewriter.setInsertionPointToStart(Module.getBody());
   auto FuncTy = mlir::LLVM::LLVMFunctionType::get(
       mlir::Float32Type::get(Rewriter.getContext()),
-      {Rewriter.getI32Type(), Rewriter.getI32Type()});
+      {Rewriter.getI32Type(), Rewriter.getI32Type(), Rewriter.getI32Type()});
   return mlir::LLVM::LLVMFuncOp::create(Rewriter, Module.getLoc(), Name,
                                         FuncTy, mlir::LLVM::Linkage::External);
 }
@@ -1713,6 +1713,15 @@ getOrInsertSubpassLoadFunc(mlir::ConversionPatternRewriter &Rewriter,
 /// are read as plain attributes elsewhere in this file
 /// (buildStageIODecorationsAttr).
 ///
+/// Roadmap F8c: a `subpassInputMS`'s explicit-sample `subpassLoad(input,
+/// sample)` form lowers to `OpImageRead`'s lone `Sample` image operand
+/// (optionally combined with the discarded `Nontemporal` bit, see
+/// `hasImageOperands`) -- that one modifier is now accepted and its operand
+/// argument threaded through as `feme.stage.subpass.load`'s third operand,
+/// rather than being rejected like every other modifier; a plain
+/// `subpassInput`'s implicit form (no image operands at all) still
+/// synthesizes a constant `0` the same way it always has.
+///
 /// Registered at a higher benefit than `ImageReadPattern` (see
 /// populateSPIRVToLLVMTargetPatterns) so it wins for the `Dim::SubpassData`
 /// case; `ImageReadPattern` still handles every other image dimension.
@@ -1723,13 +1732,20 @@ public:
       mlir::spirv::ImageReadOp>::SPIRVToLLVMConversion;
 
   mlir::LogicalResult
-  matchAndRewrite(mlir::spirv::ImageReadOp Op, OpAdaptor,
+  matchAndRewrite(mlir::spirv::ImageReadOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     auto ImageType = mlir::dyn_cast<mlir::spirv::ImageType>(Op.getImage().getType());
     if (!ImageType || ImageType.getDim() != mlir::spirv::Dim::SubpassData)
       return Rewriter.notifyMatchFailure(Op, "not a subpass-data image read");
-    if (hasImageOperands(Op.getImageOperands()))
+    std::optional<mlir::spirv::ImageOperands> ImageOperands =
+        Op.getImageOperands();
+    bool HasSample =
+        hasExactImageOperands(ImageOperands, mlir::spirv::ImageOperands::Sample);
+    if (hasImageOperands(ImageOperands) && !HasSample)
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+    if (HasSample && Adaptor.getOperandArguments().size() != 1)
+      return Rewriter.notifyMatchFailure(
+          Op, "Sample image operand needs exactly one operand argument");
 
     mlir::spirv::GlobalVariableOp Global = getSubpassVariable(Op.getImage());
     if (!Global)
@@ -1753,6 +1769,11 @@ public:
     mlir::Value IndexConst = mlir::LLVM::ConstantOp::create(
         Rewriter, Loc, Rewriter.getI32Type(),
         Rewriter.getI32IntegerAttr(static_cast<int32_t>(IndexAttr.getInt())));
+    mlir::Value SampleVal =
+        HasSample ? Adaptor.getOperandArguments()[0]
+                  : mlir::LLVM::ConstantOp::create(
+                        Rewriter, Loc, Rewriter.getI32Type(),
+                        Rewriter.getI32IntegerAttr(0));
 
     mlir::Value Result =
         VectorTy ? mlir::LLVM::PoisonOp::create(Rewriter, Loc, VectorTy)
@@ -1762,8 +1783,9 @@ public:
           Rewriter, Loc, Rewriter.getI32Type(),
           Rewriter.getI32IntegerAttr(static_cast<int32_t>(Component)));
       mlir::Value Scalar =
-          mlir::LLVM::CallOp::create(Rewriter, Loc, Callee,
-                                     mlir::ValueRange{IndexConst, ComponentConst})
+          mlir::LLVM::CallOp::create(
+              Rewriter, Loc, Callee,
+              mlir::ValueRange{IndexConst, ComponentConst, SampleVal})
               .getResult();
       if (!VectorTy) {
         Result = Scalar;

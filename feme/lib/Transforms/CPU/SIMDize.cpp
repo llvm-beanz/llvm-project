@@ -933,17 +933,23 @@ void FunctionWidener::widenStageOp(CallInst &CI, feme::StageOpKind Kind,
       Kind == feme::StageOpKind::InterpolateAtCentroid ||
       Kind == feme::StageOpKind::InterpolateAtSample ||
       Kind == feme::StageOpKind::InterpolateAtOffset;
-  // `SubpassLoad`'s `attachment_index`/`component` operands are always
-  // compile-time constants (baked from the shader's own `InputAttachment
-  // Index` decoration and the read's component selector), exactly like
-  // `InputLoad`'s element ID above -- never a genuinely divergent per-lane
-  // value -- so both stay scalar rather than being widened into a vector
-  // `lowerFragmentSubpassLoad` (FragmentWrapper.cpp) would then have to
-  // re-collapse.
-  bool BothOperandsAreConstantIDs = Kind == feme::StageOpKind::SubpassLoad;
+  // `SubpassLoad`'s `attachment_index`/`component` operands (0 and 1) are
+  // always compile-time constants (baked from the shader's own
+  // `InputAttachmentIndex` decoration and the read's component selector),
+  // exactly like `InputLoad`'s element ID above -- never a genuinely
+  // divergent per-lane value -- so both stay scalar rather than being
+  // widened into a vector `lowerFragmentSubpassLoad` (FragmentWrapper.cpp)
+  // would then have to re-collapse. Its third operand, `sample` (roadmap
+  // F8c), is an ordinary value-like operand -- `SubpassLoadPattern`
+  // (SPIRVToLLVMPatterns.cpp) synthesizes a constant `0` for the common
+  // implicit-sample case, but a real `OpImageRead` `Sample` image operand
+  // can be a genuinely divergent per-lane value -- so it is widened like
+  // any other operand rather than forced scalar.
+  bool FirstTwoOperandsAreConstantIDs =
+      Kind == feme::StageOpKind::SubpassLoad;
   for (unsigned I = 0, E = CI.arg_size(); I != E; ++I) {
-    bool KeepScalar =
-        (I == 0 && FirstOperandIsElementID) || BothOperandsAreConstantIDs;
+    bool KeepScalar = (I == 0 && FirstOperandIsElementID) ||
+                      (I <= 1 && FirstTwoOperandsAreConstantIDs);
     Value *Arg =
         KeepScalar ? CI.getArgOperand(I) : getWidened(CI.getArgOperand(I), Builder);
     WideArgs.push_back(Arg);
