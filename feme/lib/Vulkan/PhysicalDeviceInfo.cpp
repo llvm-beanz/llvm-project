@@ -676,6 +676,17 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // listed here too.
       {VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME,
        VK_KHR_INDEX_TYPE_UINT8_SPEC_VERSION},
+      // (roadmap F8/F8a) `vkCmdSetRenderingAttachmentLocations`/
+      // `vkCmdSetRenderingInputAttachmentIndices` are implemented
+      // (CommandBuffer.cpp), and a fragment shader's `subpassInput` local
+      // read now produces real pixels too (SPIRVToLLVMPatterns.cpp's
+      // `SubpassLoadPattern`, FragmentWrapper.cpp's
+      // `lowerFragmentSubpassLoad`); like every other post-`maintenance5`
+      // entry above, `dEQP-VK.renderpasses.dynamic_rendering.*.local_read.*`
+      // enables this extension by name regardless of the advertised
+      // `apiVersion`, so it must be listed here too.
+      {VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME,
+       VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_SPEC_VERSION},
   };
   return Extensions;
 }

@@ -1791,7 +1791,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 23u);
+  ASSERT_EQ(Count, 24u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -1844,6 +1844,9 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   EXPECT_TRUE(HasExtension(VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME));
   // Roadmap F7.
   EXPECT_TRUE(HasExtension(VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME));
+  // Roadmap F8/F8a.
+  EXPECT_TRUE(
+      HasExtension(VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
