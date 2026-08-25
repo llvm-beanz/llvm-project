@@ -462,11 +462,12 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Props14.maxVertexAttribDivisor, 0xFFFFFFFFu);
   EXPECT_EQ(Props14.supportsNonZeroFirstInstance, VK_TRUE);
   EXPECT_EQ(Props14.maxPushDescriptors, 0u);
-  // (roadmap F8a) `dynamicRenderingLocalRead` itself is real, but only for
-  // a single-sample color attachment so far -- each of these needs its own
-  // depth/stencil- or multisample-attachment case demonstrated (roadmap
-  // F8b) before it can honestly flip to `VK_TRUE`.
-  EXPECT_EQ(Props14.dynamicRenderingLocalReadDepthStencilAttachments, VK_FALSE);
+  // (roadmap F8b) `dynamicRenderingLocalRead` now covers a depth/stencil
+  // attachment too (agrees with the dedicated-struct feature bit's own
+  // comment) -- only a multisample attachment still needs its own case
+  // demonstrated (roadmap F8c) before that one can honestly flip to
+  // `VK_TRUE`.
+  EXPECT_EQ(Props14.dynamicRenderingLocalReadDepthStencilAttachments, VK_TRUE);
   EXPECT_EQ(Props14.dynamicRenderingLocalReadMultisampledAttachments, VK_FALSE);
   EXPECT_EQ(Props14.earlyFragmentMultisampleCoverageAfterSampleCounting,
             VK_FALSE);
