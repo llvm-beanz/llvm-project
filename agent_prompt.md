@@ -33,19 +33,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F11a?
+Can you implement roadmap milestone F12a?
 
-> **`copyBufferImageRegion`'s aspect-specific combined depth/stencil copy, split
-> off F11's own measured-impact finding.**
-> `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer`/`vkCopyMemoryToImage`/`vkCopyImageToMemory`
-> all reject (rather than mis-copy or crash) a
-> `VkBufferImageCopy`/`VkMemoryToImageCopy`/`VkImageToMemoryCopy` naming a
-> single `VK_IMAGE_ASPECT_DEPTH_BIT`/`STENCIL_BIT` aspect of a combined
-> depth/stencil image (`D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`) today; real
-> support needs a per-aspect interleaved read-modify-write into the shared texel
-> (extending
-> `feme::graphics::packDepthClear`/`packStencilClear`/`unpackDepth`/`unpackStencil`,
-> ImageFixture.cpp, from a single repeated clear/reference value to an arbitrary
-> per-texel buffer region, and adding `D32_FLOAT_S8X24_UINT`'s own case to all
-> four, which none of them have yet even for the existing
-> `vkCmdClearDepthStencilImage`)
+> **A `std140` uniform buffer array's `spirv.AccessChain` fails SPIR-V->LLVM
+> legalization when dynamically indexed, split off F12's own measured-impact
+> finding.**
+> `dEQP-VK.pipeline.monolithic.push_descriptor.compute.incremental_updates*` (4
+> cases) all fail `vkCreateComputePipelines` with `failed to legalize operation
+> 'spirv.AccessChain' that was explicitly marked illegal`, indexing a
+> `layout(std140) uniform Input { uint data[16]; } ubo;` block by
+> `gl_GlobalInvocationID.x` (`!spirv.ptr<!spirv.struct<(!spirv.array<16 x i32,
+> stride=16> [0]), Block>, Uniform>`) -- unlike the equivalent `std430 buffer`
+> (storage buffer) array, which every other passing shader in this report's own
+> scope already indexes dynamically without issue. `std140`'s own 16-byte array
+> stride for a scalar element (as opposed to `std430`'s 4-byte one) is the one
+> shape difference a uniform-buffer array's own lowering must additionally
+> handle that a storage-buffer array's does not; root-causing needs comparing
+> the two paths in `feme::cpu::SPIRVResourceLoweringPass`/the SPIR-V->LLVM
+> conversion patterns to find where the `std140` stride case is unhandled
