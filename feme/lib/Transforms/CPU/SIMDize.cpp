@@ -933,10 +933,19 @@ void FunctionWidener::widenStageOp(CallInst &CI, feme::StageOpKind Kind,
       Kind == feme::StageOpKind::InterpolateAtCentroid ||
       Kind == feme::StageOpKind::InterpolateAtSample ||
       Kind == feme::StageOpKind::InterpolateAtOffset;
+  // `SubpassLoad`'s `attachment_index`/`component` operands are always
+  // compile-time constants (baked from the shader's own `InputAttachment
+  // Index` decoration and the read's component selector), exactly like
+  // `InputLoad`'s element ID above -- never a genuinely divergent per-lane
+  // value -- so both stay scalar rather than being widened into a vector
+  // `lowerFragmentSubpassLoad` (FragmentWrapper.cpp) would then have to
+  // re-collapse.
+  bool BothOperandsAreConstantIDs = Kind == feme::StageOpKind::SubpassLoad;
   for (unsigned I = 0, E = CI.arg_size(); I != E; ++I) {
-    Value *Arg = (I == 0 && FirstOperandIsElementID)
-                     ? CI.getArgOperand(I)
-                     : getWidened(CI.getArgOperand(I), Builder);
+    bool KeepScalar =
+        (I == 0 && FirstOperandIsElementID) || BothOperandsAreConstantIDs;
+    Value *Arg =
+        KeepScalar ? CI.getArgOperand(I) : getWidened(CI.getArgOperand(I), Builder);
     WideArgs.push_back(Arg);
     WideArgTys.push_back(Arg->getType());
   }
@@ -1834,6 +1843,7 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       case feme::StageOpKind::InterpolateAtCentroid:
       case feme::StageOpKind::InterpolateAtSample:
       case feme::StageOpKind::InterpolateAtOffset:
+      case feme::StageOpKind::SubpassLoad:
         widenStageOp(*CI, StageKind, Builder);
         return true;
       case feme::StageOpKind::OutputStore:

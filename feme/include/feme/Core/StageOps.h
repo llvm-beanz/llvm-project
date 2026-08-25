@@ -110,6 +110,17 @@ enum class StageOpKind : uint8_t {
   /// -- terminates the current primitive strip on output stream \c stream
   /// without emitting a vertex.
   StreamCut,
+  /// `feme.stage.subpass.load(attachment_index, component)`: roadmap F8a's
+  /// dynamic-rendering-local-read consumption of a SPIR-V `subpassInput`
+  /// (`OpTypeImage` with `Dim::SubpassData`, read through `OpImageRead`'s
+  /// subpass-local form). Reads one scalar component of the
+  /// currently-bound color/depth/stencil render-target attachment mapped to
+  /// \c attachment_index at the invocation's own fragment location -- not a
+  /// descriptor-set image, and not overloaded (always `f32`, matching this
+  /// milestone's color-attachment scope; see FragmentWrapper.cpp's
+  /// `lowerFragmentSubpassLoad`). Both operands are always compile-time
+  /// constants, exactly like `InputLoad`'s element ID.
+  SubpassLoad,
   // Keep last: the number of stage op kinds, for range checks.
   NumStageOpKinds,
 };

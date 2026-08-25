@@ -49,6 +49,10 @@ bool isStageOpLegalForStage(StageOpKind Kind, ShaderStage Stage) {
   case StageOpKind::InterpolateAtSample:
   case StageOpKind::InterpolateAtOffset:
     return Stage == ShaderStage::Fragment;
+  case StageOpKind::SubpassLoad:
+    // Roadmap F8a: `subpassInput` local reads only exist in a fragment
+    // shader, per the Vulkan/SPIR-V spec's own restriction.
+    return Stage == ShaderStage::Fragment;
   case StageOpKind::StreamEmit:
   case StageOpKind::StreamCut:
     // Not yet reachable: `ValidateStagePass` only runs for Vertex/Fragment
@@ -183,6 +187,7 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
   case StageOpKind::QuadRead:
   case StageOpKind::StreamEmit:
   case StageOpKind::StreamCut:
+  case StageOpKind::SubpassLoad:
     // No element/row/component operands to validate.
     break;
   case StageOpKind::NumStageOpKinds:

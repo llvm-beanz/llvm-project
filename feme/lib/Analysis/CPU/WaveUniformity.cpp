@@ -54,6 +54,7 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
       case StageOpKind::InterpolateAtCentroid:
       case StageOpKind::InterpolateAtSample:
       case StageOpKind::InterpolateAtOffset:
+      case StageOpKind::SubpassLoad:
         return ValueUniformity::NeverUniform;
       case StageOpKind::OutputStore:
       case StageOpKind::Discard:

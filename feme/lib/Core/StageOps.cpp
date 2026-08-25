@@ -47,6 +47,7 @@ constexpr StageOpInfo StageOpTable[] = {
      true},
     {StageOpKind::StreamEmit, "feme.stage.stream.emit", false},
     {StageOpKind::StreamCut, "feme.stage.stream.cut", false},
+    {StageOpKind::SubpassLoad, "feme.stage.subpass.load", false},
 };
 // clang-format on
 
