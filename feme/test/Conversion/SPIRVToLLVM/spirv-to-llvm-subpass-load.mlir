@@ -11,13 +11,13 @@
 
 // CHECK-LABEL: llvm.func @load_subpass
 // CHECK: llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK: %[[R:.*]] = llvm.call @feme.stage.subpass.load(%{{.*}}, %{{.*}}) : (i32, i32) -> f32
+// CHECK: %[[R:.*]] = llvm.call @feme.stage.subpass.load.f32(%{{.*}}, %{{.*}}) : (i32, i32) -> f32
 // CHECK: llvm.insertelement %[[R]]
-// CHECK: %[[G:.*]] = llvm.call @feme.stage.subpass.load(%{{.*}}, %{{.*}}) : (i32, i32) -> f32
+// CHECK: %[[G:.*]] = llvm.call @feme.stage.subpass.load.f32(%{{.*}}, %{{.*}}) : (i32, i32) -> f32
 // CHECK: llvm.insertelement %[[G]]
-// CHECK: %[[B:.*]] = llvm.call @feme.stage.subpass.load(%{{.*}}, %{{.*}}) : (i32, i32) -> f32
+// CHECK: %[[B:.*]] = llvm.call @feme.stage.subpass.load.f32(%{{.*}}, %{{.*}}) : (i32, i32) -> f32
 // CHECK: llvm.insertelement %[[B]]
-// CHECK: %[[A:.*]] = llvm.call @feme.stage.subpass.load(%{{.*}}, %{{.*}}) : (i32, i32) -> f32
+// CHECK: %[[A:.*]] = llvm.call @feme.stage.subpass.load.f32(%{{.*}}, %{{.*}}) : (i32, i32) -> f32
 // CHECK: llvm.insertelement %[[A]]
 // CHECK-NOT: llvm.call_intrinsic "llvm.spv.resource.getpointer"
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment], []> {
@@ -38,7 +38,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment]
 // result.
 
 // CHECK-LABEL: llvm.func @load_subpass_scalar
-// CHECK: %[[R:.*]] = llvm.call @feme.stage.subpass.load(%{{.*}}, %{{.*}}) : (i32, i32) -> f32
+// CHECK: %[[R:.*]] = llvm.call @feme.stage.subpass.load.f32(%{{.*}}, %{{.*}}) : (i32, i32) -> f32
 // CHECK: llvm.return %[[R]]
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment], []> {
   spirv.GlobalVariable @in_depth bind(0, 1) {input_attachment_index = 0 : i32} : !spirv.ptr<!spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, UniformConstant>

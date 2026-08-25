@@ -1663,17 +1663,25 @@ mlir::spirv::GlobalVariableOp getSubpassVariable(mlir::Value Image) {
   return getReferencedGlobal(AddrOf);
 }
 
-/// Declares (or finds) the `feme.stage.subpass.load` function `SubpassLoad
-/// Pattern` calls: `(i32 attachment_index, i32 component) -> f32`, matching
-/// `feme::StageOpKind::SubpassLoad`'s non-overloaded, always-`f32` shape
+/// Declares (or finds) the `feme.stage.subpass.load.f32` function
+/// `SubpassLoadPattern` calls: `(i32 attachment_index, i32 component) ->
+/// f32`, matching `feme::StageOpKind::SubpassLoad`'s always-`f32` shape
 /// (see StageOps.h) -- an ordinary named call, not an `llvm.spv.*`
 /// intrinsic, since `feme.stage.*` calls (StageOps.h's file comment) are
 /// FeMe's own vocabulary rather than a real target-independent LLVM
-/// intrinsic.
+/// intrinsic. Named with the explicit `.f32` type suffix
+/// `feme::getOrInsertStageOp` gives every overloaded `feme.stage.*` op
+/// (SubpassLoad is marked overloaded for exactly this reason -- see
+/// `StageOpKind::SubpassLoad`'s comment): `feme::cpu::SIMDizePass` widens
+/// this scalar declaration into a *different*, `<W x f32>`-returning one
+/// later, and the two must not collide under one name, or
+/// `CallBase::getCalledFunction`'s function-type check (used throughout
+/// this codebase, not least `feme::isStageOpCall`) would refuse to
+/// recognize either call once both exist.
 mlir::LLVM::LLVMFuncOp
 getOrInsertSubpassLoadFunc(mlir::ConversionPatternRewriter &Rewriter,
                            mlir::ModuleOp Module) {
-  constexpr llvm::StringLiteral Name = "feme.stage.subpass.load";
+  constexpr llvm::StringLiteral Name = "feme.stage.subpass.load.f32";
   if (auto Existing = Module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
     return Existing;
   mlir::OpBuilder::InsertionGuard Guard(Rewriter);

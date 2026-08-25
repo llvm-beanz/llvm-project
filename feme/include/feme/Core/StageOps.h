@@ -116,10 +116,13 @@ enum class StageOpKind : uint8_t {
   /// subpass-local form). Reads one scalar component of the
   /// currently-bound color/depth/stencil render-target attachment mapped to
   /// \c attachment_index at the invocation's own fragment location -- not a
-  /// descriptor-set image, and not overloaded (always `f32`, matching this
-  /// milestone's color-attachment scope; see FragmentWrapper.cpp's
-  /// `lowerFragmentSubpassLoad`). Both operands are always compile-time
-  /// constants, exactly like `InputLoad`'s element ID.
+  /// descriptor-set image, and per-lane always `f32` -- like `InputLoad`,
+  /// it is marked overloaded (StageOps.cpp's table) purely so
+  /// `feme::cpu::SIMDizePass`'s widened `<W x f32>` form gets a distinct
+  /// symbol from the scalar declaration `feme::spirv::SubpassLoadPattern`
+  /// (SPIRVToLLVMPatterns.cpp) creates, not because a real shader ever
+  /// requests a different result type (see FragmentWrapper.cpp's
+  /// `lowerFragmentSubpassLoad`).
   SubpassLoad,
   // Keep last: the number of stage op kinds, for range checks.
   NumStageOpKinds,

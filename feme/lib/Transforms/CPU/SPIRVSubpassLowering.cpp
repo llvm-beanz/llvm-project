@@ -15,6 +15,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 
 using namespace llvm;
@@ -55,6 +56,18 @@ Function *addSubpassInputHeapParams(Function &F) {
                                     "", F.getParent());
   NewF->copyAttributesFrom(&F);
   NewF->setComdat(F.getComdat());
+  // `feme.signature` (the entry's `EntrySignature`, attached by
+  // `feme::graphics::CanonicalizeStagePass` before this pass ever runs)
+  // and every other function-level metadata node must survive this
+  // Function-replacement, exactly like `addResourceEnvParams` and every
+  // other stage-wrapper pass already copies for its own trailing-parameter
+  // replacement -- `feme::cpu::FragmentWrapperPass`'s `lowerFragmentStageOps`
+  // reads that metadata back much later, after `feme::cpu::SIMDizePass`
+  // widening.
+  SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
+  F.getAllMetadata(MDs);
+  for (auto [Kind, Node] : MDs)
+    NewF->setMetadata(Kind, Node);
   NewF->splice(NewF->begin(), &F);
 
   for (auto [OldArg, NewArg] : zip(F.args(), NewF->args())) {
@@ -76,12 +89,18 @@ Function *addSubpassInputHeapParams(Function &F) {
 
 PreservedAnalyses SPIRVSubpassLoweringPass::run(Module &M,
                                                 ModuleAnalysisManager &) {
-  bool Changed = false;
-  for (Function &F : llvm::make_early_inc_range(M.functions())) {
-    if (F.isDeclaration() || !usesSubpassLoad(F))
-      continue;
-    addSubpassInputHeapParams(F);
-    Changed = true;
-  }
-  return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+  // Snapshot every function needing the fix before mutating anything:
+  // `addSubpassInputHeapParams` replaces `F` with a new `Function` appended
+  // to `M`'s function list, which -- unlike iterating a pre-built
+  // collection -- a live `M.functions()` walk (even an early-inc-range one)
+  // can still reach later in the same loop, adding a second, colliding set
+  // of trailing parameters to it.
+  SmallVector<Function *, 4> Candidates;
+  for (Function &F : M)
+    if (!F.isDeclaration() && usesSubpassLoad(F))
+      Candidates.push_back(&F);
+  for (Function *F : Candidates)
+    addSubpassInputHeapParams(*F);
+  return Candidates.empty() ? PreservedAnalyses::all()
+                            : PreservedAnalyses::none();
 }

@@ -147,8 +147,12 @@ TEST_F(StageOpsTest, StreamEmitAndCutCarryStreamIndex) {
 TEST_F(StageOpsTest, SubpassLoadCarriesAttachmentIndexAndComponent) {
   CallInst *CI = createStageSubpassLoad(B, /*AttachmentIndex=*/2,
                                        /*Component=*/1);
-  EXPECT_EQ(CI->getCalledFunction()->getName(), "feme.stage.subpass.load");
-  EXPECT_FALSE(isStageOpKindOverloaded(StageOpKind::SubpassLoad));
+  EXPECT_EQ(CI->getCalledFunction()->getName(), "feme.stage.subpass.load.f32");
+  // Marked overloaded purely to give SIMDizePass's widened `<W x f32>` form
+  // its own distinct symbol from this scalar declaration -- see
+  // StageOpKind::SubpassLoad's comment -- not because a real call ever
+  // varies its result type.
+  EXPECT_TRUE(isStageOpKindOverloaded(StageOpKind::SubpassLoad));
   EXPECT_TRUE(CI->getType()->isFloatTy());
   ASSERT_EQ(getStageOpConstantOperand(*CI, 0), 2u);
   ASSERT_EQ(getStageOpConstantOperand(*CI, 1), 1u);
