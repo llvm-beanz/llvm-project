@@ -764,6 +764,41 @@ public:
   }
 };
 
+/// Converts the GLSL.std.450 `ModfStruct` instruction (`spirv.GL.ModfStruct`),
+/// which splits its operand into an integer part and a fractional part, both
+/// of the same sign as the operand, into the matching two-member struct.
+/// Unlike `FrexpStruct` (below), LLVM has no single intrinsic for this, so the
+/// two parts are computed directly: the integer part by truncating towards
+/// zero, and the fractional part as the remainder of that truncation.
+class ModfStructPattern
+    : public SPIRVToLLVMConversion<spirv::GLModfStructOp> {
+public:
+  using SPIRVToLLVMConversion<spirv::GLModfStructOp>::SPIRVToLLVMConversion;
+
+  LogicalResult
+  matchAndRewrite(spirv::GLModfStructOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Type dstType = getTypeConverter()->convertType(op.getType());
+    if (!dstType)
+      return rewriter.notifyMatchFailure(op, "type conversion failed");
+
+    Location loc = op.getLoc();
+    Type operandType = adaptor.getOperand().getType();
+    Value integer =
+        LLVM::FTruncOp::create(rewriter, loc, operandType, adaptor.getOperand());
+    Value fraction = LLVM::FSubOp::create(rewriter, loc, operandType,
+                                          adaptor.getOperand(), integer);
+
+    Value result = LLVM::PoisonOp::create(rewriter, loc, dstType);
+    result = LLVM::InsertValueOp::create(rewriter, loc, result, fraction,
+                                         ArrayRef<int64_t>{0});
+    result = LLVM::InsertValueOp::create(rewriter, loc, result, integer,
+                                         ArrayRef<int64_t>{1});
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 /// Converts `spirv.ExecutionMode` into a global struct constant that holds
 /// execution mode information.
 class ExecutionModePattern
@@ -2324,6 +2359,8 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       DirectConversionPattern<spirv::GLAtanOp, LLVM::ATanOp>,
       DirectConversionPattern<spirv::GLTanOp, LLVM::TanOp>,
       DirectConversionPattern<spirv::GLTanhOp, LLVM::TanhOp>,
+      DirectConversionPattern<spirv::GLFrexpStructOp, LLVM::FractionExpOp>,
+      ModfStructPattern,
       InverseSqrtPattern, SAbsPattern, FractPattern,
       SignPattern<spirv::GLFSignOp, /*isFloat=*/true>,
       SignPattern<spirv::GLSSignOp, /*isFloat=*/false>, GLFMixPattern,

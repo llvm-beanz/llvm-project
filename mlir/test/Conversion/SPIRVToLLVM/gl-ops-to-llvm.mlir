@@ -548,3 +548,29 @@ spirv.func @fmix_vector(%x: vector<4xf32>, %y: vector<4xf32>, %a: vector<4xf32>)
   %0 = spirv.GL.FMix %x : vector<4xf32>, %y : vector<4xf32>, %a : vector<4xf32> -> vector<4xf32>
   spirv.Return
 }
+
+//===----------------------------------------------------------------------===//
+// spirv.GL.FrexpStruct
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @frexp_struct
+spirv.func @frexp_struct(%arg0: f32) "None" {
+  // CHECK: llvm.intr.frexp(%{{.*}}) : (f32) -> !llvm.struct<packed (f32, i32)>
+  %0 = spirv.GL.FrexpStruct %arg0 : f32 -> !spirv.struct<(f32, i32)>
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
+// spirv.GL.ModfStruct
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @modf_struct
+spirv.func @modf_struct(%arg0: f32) "None" {
+  // CHECK: %[[INT:.*]] = llvm.intr.trunc(%{{.*}}) : (f32) -> f32
+  // CHECK: %[[FRAC:.*]] = llvm.fsub %{{.*}}, %[[INT]] : f32
+  // CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<packed (f32, f32)>
+  // CHECK: %[[S0:.*]] = llvm.insertvalue %[[FRAC]], %[[POISON]][0] : !llvm.struct<packed (f32, f32)>
+  // CHECK: llvm.insertvalue %[[INT]], %[[S0]][1] : !llvm.struct<packed (f32, f32)>
+  %0 = spirv.GL.ModfStruct %arg0 : f32 -> !spirv.struct<(f32, f32)>
+  spirv.Return
+}
