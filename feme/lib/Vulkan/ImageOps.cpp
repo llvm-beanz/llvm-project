@@ -186,25 +186,43 @@ Error copyBufferImageRegion(Image &Img, bool ToImage, void *BufferBase,
   // that single aspect's own tightly-packed size, not the combined
   // texel's -- e.g. `D32_FLOAT_S8X24_UINT`'s depth aspect is 4 buffer
   // bytes per texel, its stencil aspect 1, never this format's own 8-byte
-  // `bytesPerBlock`. Neither the buffer-side sizing below nor the
-  // image-side `texelPointer` write single out one aspect's own bytes
-  // within the shared interleaved texel (only `packDepthClear`/
-  // `packStencilClear`, ImageFixture.cpp, do that today, and only for a
-  // single repeated clear value, not an arbitrary per-texel buffer
-  // region) -- so rather than silently mis-sizing the copy (previously a
-  // wild out-of-bounds read/write once a caller had no bound `VkBuffer`
-  // size of its own to catch it against, roadmap F11's own host-copy
-  // path), this rejects the case cleanly.
-  if (Img.format() == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT ||
-      Img.format() == feme::cpu::ResourceFormat::D32_FLOAT_S8X24_UINT)
-    return createStringError(inconvertibleErrorCode(),
-                             "a buffer/image copy naming a single aspect of "
-                             "a combined depth/stencil format is not yet "
-                             "supported");
+  // `bytesPerBlock` (roadmap F11a; `getDepthAspectBufferSize`/
+  // `getStencilAspectBufferSize`, ImageFixture.h). Every other aspect
+  // combination for this format (neither bit alone) is rejected up front,
+  // rather than silently copying a whole combined texel that would
+  // clobber the aspect not named.
+  bool CombinedDepthStencil =
+      Img.format() == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT ||
+      Img.format() == feme::cpu::ResourceFormat::D32_FLOAT_S8X24_UINT;
+  bool DepthAspect = false;
+  if (CombinedDepthStencil) {
+    bool WantDepth =
+        Region.imageSubresource.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT;
+    bool WantStencil =
+        Region.imageSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (WantDepth == WantStencil)
+      return createStringError(inconvertibleErrorCode(),
+                               "a buffer/image copy of a combined "
+                               "depth/stencil format must name exactly one "
+                               "of VK_IMAGE_ASPECT_DEPTH_BIT/STENCIL_BIT");
+    DepthAspect = WantDepth;
+  }
+
   bool Compressed = feme::cpu::isBlockCompressedFormat(Img.format());
   uint32_t BlockW = blockWidth(Img.format());
   uint32_t BlockH = blockHeight(Img.format());
   uint32_t UnitSize = bytesPerBlock(Img.format());
+  if (CombinedDepthStencil) {
+    // The buffer side's per-texel size is the single named aspect's own,
+    // smaller size, not the combined texel's -- see this function's file
+    // comment above.
+    Expected<uint32_t> AspectSize =
+        DepthAspect ? feme::graphics::getDepthAspectBufferSize(Img.format())
+                    : feme::graphics::getStencilAspectBufferSize(Img.format());
+    if (!AspectSize)
+      return AspectSize.takeError();
+    UnitSize = *AspectSize;
+  }
   uint32_t RowLength = Region.bufferRowLength ? Region.bufferRowLength
                                               : Region.imageExtent.width;
   uint32_t ImageHeight = Region.bufferImageHeight ? Region.bufferImageHeight
@@ -247,10 +265,28 @@ Error copyBufferImageRegion(Image &Img, bool ToImage, void *BufferBase,
                                    OffsetYUnits + Y, Region.imageOffset.z + Z)
                 : Img.texelPointer(MipLevel, ArrayLayer, OffsetXUnits,
                                    OffsetYUnits + Y, Region.imageOffset.z + Z);
-        if (ToImage)
+        if (CombinedDepthStencil) {
+          // Each texel is its own read-modify-write into the shared
+          // interleaved word rather than one contiguous row `memcpy`
+          // (roadmap F11a; `copyDepthAspectRegion`/`copyStencilAspectRegion`,
+          // ImageFixture.h).
+          uint32_t ImageElemSize = formatElementSize(Img.format());
+          MutableArrayRef<uint8_t> BufferSpan(BufferRow, RowBytes);
+          MutableArrayRef<uint8_t> ImageSpan(static_cast<uint8_t *>(ImageRow),
+                                             uint64_t(ExtentWidthUnits) *
+                                                 ImageElemSize);
+          if (Error E = DepthAspect ? feme::graphics::copyDepthAspectRegion(
+                                          Img.format(), ToImage, BufferSpan,
+                                          ImageSpan, ExtentWidthUnits)
+                                    : feme::graphics::copyStencilAspectRegion(
+                                          Img.format(), ToImage, BufferSpan,
+                                          ImageSpan, ExtentWidthUnits))
+            return E;
+        } else if (ToImage) {
           std::memcpy(ImageRow, BufferRow, RowBytes);
-        else
+        } else {
           std::memcpy(BufferRow, ImageRow, RowBytes);
+        }
       }
     }
   }

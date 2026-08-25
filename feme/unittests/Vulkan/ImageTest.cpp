@@ -1013,23 +1013,177 @@ TEST_F(ImageTest, CopyImageRejectsIncompatibleTexelSize) {
   vkFreeMemory(Device, DstMemory, nullptr);
 }
 
-/// Roadmap F11: `copyBufferImageRegion`'s buffer-side sizing always uses
+/// Roadmap F11a: `copyBufferImageRegion`'s buffer-side sizing always used
 /// `Img.format()`'s own combined `bytesPerBlock`, but a copy region for a
 /// combined depth/stencil format (`D24_UNORM_S8_UINT`/
 /// `D32_FLOAT_S8X24_UINT`) always names exactly one aspect, whose own
 /// buffer-side size differs from the combined texel's (e.g.
-/// `D32_FLOAT_S8X24_UINT`'s depth aspect is 4 bytes, not 8) -- this used to
-/// silently mis-size the copy rather than reject it, discovered as an
-/// out-of-bounds host-memory read/write once `HostImageCopy.cpp`'s
-/// `vkCopyMemoryToImage` had no bound `VkBuffer` size of its own to catch
-/// it against first.
-TEST_F(ImageTest, CopyBufferToImageRejectsCombinedDepthStencilFormat) {
+/// `D32_FLOAT_S8X24_UINT`'s depth aspect is 4 bytes, not 8). F11 rejected
+/// this cleanly rather than mis-sizing it; this exercises the real,
+/// per-texel read-modify-write support F11a adds instead: a depth-aspect
+/// copy must write only the depth bits of each texel, leaving whatever
+/// stencil value already occupies the rest of that texel's shared storage
+/// untouched.
+TEST_F(ImageTest, CopyBufferToImageDepthAspectPreservesStencil) {
   VkDeviceMemory ImageMemory = VK_NULL_HANDLE;
   VkImage Img = createBoundImage2DWithFormat(
-      VK_FORMAT_D32_SFLOAT_S8_UINT, 2, 2, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      VK_FORMAT_D32_SFLOAT_S8_UINT, 2, 2,
+      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
       ImageMemory);
 
-  std::vector<uint8_t> SrcPixels(2 * 2 * 4); // Depth-aspect-only sizing.
+  // Seed every texel's stencil (the second 4-byte word's low byte) with a
+  // distinct, recognizable value the depth-aspect copy below must not
+  // disturb.
+  auto *ImgObj = fromHandle<Image>(Img);
+  for (uint32_t I = 0; I != 4; ++I) {
+    auto *Texel =
+        static_cast<uint8_t *>(ImgObj->texelPointer(0, 0, I % 2, I / 2, 0));
+    uint32_t Word1 = 0xAAAAAA00u | (0x10u + I);
+    std::memcpy(Texel + 4, &Word1, sizeof(Word1));
+  }
+
+  std::vector<float> DepthValues = {0.0f, 0.25f, 0.5f, 1.0f};
+  std::vector<uint8_t> SrcPixels(DepthValues.size() * 4); // Depth-only.
+  std::memcpy(SrcPixels.data(), DepthValues.data(), SrcPixels.size());
+
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = SrcPixels.size();
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  VkBuffer SrcBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &SrcBuf), VK_SUCCESS);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = SrcPixels.size();
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &SrcMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, SrcBuf, SrcMemory, 0), VK_SUCCESS);
+  std::memcpy(fromHandle<Buffer>(SrcBuf)->data(), SrcPixels.data(),
+              SrcPixels.size());
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkBufferImageCopy Region{};
+  Region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+  Region.imageExtent = {2, 2, 1};
+  vkCmdCopyBufferToImage(CmdBuf, SrcBuf, Img,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+
+  for (uint32_t I = 0; I != 4; ++I) {
+    auto *Texel =
+        static_cast<uint8_t *>(ImgObj->texelPointer(0, 0, I % 2, I / 2, 0));
+    float Depth;
+    std::memcpy(&Depth, Texel, sizeof(Depth));
+    EXPECT_FLOAT_EQ(Depth, DepthValues[I]);
+    uint32_t Word1;
+    std::memcpy(&Word1, Texel + 4, sizeof(Word1));
+    EXPECT_EQ(Word1, 0xAAAAAA00u | (0x10u + I)); // Stencil word untouched.
+  }
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyBuffer(Device, SrcBuf, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, ImageMemory, nullptr);
+}
+
+/// The stencil-aspect peer of the depth test above, and for
+/// `D24_UNORM_S8_UINT` rather than `D32_FLOAT_S8X24_UINT`: a stencil-aspect
+/// copy must write only each texel's high byte, leaving its low 24 bits
+/// (depth) untouched.
+TEST_F(ImageTest, CopyBufferToImageStencilAspectPreservesDepthD24) {
+  VkDeviceMemory ImageMemory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2DWithFormat(
+      VK_FORMAT_D24_UNORM_S8_UINT, 2, 2,
+      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+      ImageMemory);
+
+  auto *ImgObj = fromHandle<Image>(Img);
+  for (uint32_t I = 0; I != 4; ++I) {
+    auto *Texel =
+        static_cast<uint8_t *>(ImgObj->texelPointer(0, 0, I % 2, I / 2, 0));
+    uint32_t Word = 0x00010203u * (I + 1) & 0x00FFFFFFu;
+    std::memcpy(Texel, &Word, sizeof(Word));
+  }
+
+  std::vector<uint8_t> SrcPixels = {0x11, 0x22, 0x33, 0x44}; // 1 byte/texel.
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = SrcPixels.size();
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  VkBuffer SrcBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &SrcBuf), VK_SUCCESS);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = SrcPixels.size();
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &SrcMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, SrcBuf, SrcMemory, 0), VK_SUCCESS);
+  std::memcpy(fromHandle<Buffer>(SrcBuf)->data(), SrcPixels.data(),
+              SrcPixels.size());
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkBufferImageCopy Region{};
+  Region.imageSubresource = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1};
+  Region.imageExtent = {2, 2, 1};
+  vkCmdCopyBufferToImage(CmdBuf, SrcBuf, Img,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+
+  for (uint32_t I = 0; I != 4; ++I) {
+    auto *Texel =
+        static_cast<uint8_t *>(ImgObj->texelPointer(0, 0, I % 2, I / 2, 0));
+    uint32_t Word;
+    std::memcpy(&Word, Texel, sizeof(Word));
+    EXPECT_EQ(Word >> 24, SrcPixels[I]);
+    EXPECT_EQ(Word & 0x00FFFFFFu, (0x00010203u * (I + 1)) & 0x00FFFFFFu);
+  }
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyBuffer(Device, SrcBuf, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, ImageMemory, nullptr);
+}
+
+/// A combined depth/stencil format's copy region must name exactly one
+/// aspect (real Vulkan forbids combining `DEPTH_BIT`/`STENCIL_BIT` in a
+/// single region, and naming neither is meaningless): `copyBufferImageRegion`
+/// rejects both "neither" and "both" up front rather than silently copying
+/// a whole combined texel that would clobber the aspect not named.
+TEST_F(ImageTest, CopyBufferToImageRejectsAmbiguousDepthStencilAspectMask) {
+  VkDeviceMemory ImageMemory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2DWithFormat(VK_FORMAT_D32_SFLOAT_S8_UINT, 2, 2,
+                                             VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                             ImageMemory);
+
+  std::vector<uint8_t> SrcPixels(2 * 2 * 8);
   VkBufferCreateInfo BufferInfo{};
   BufferInfo.size = SrcPixels.size();
   BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -1055,10 +1209,11 @@ TEST_F(ImageTest, CopyBufferToImageRejectsCombinedDepthStencilFormat) {
   VkCommandBufferBeginInfo BeginInfo{};
   ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
   VkBufferImageCopy Region{};
-  Region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+  Region.imageSubresource = {
+      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1};
   Region.imageExtent = {2, 2, 1};
   vkCmdCopyBufferToImage(CmdBuf, SrcBuf, Img,
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
   ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
 
   EXPECT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),

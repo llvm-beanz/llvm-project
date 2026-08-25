@@ -155,32 +155,73 @@ TEST_F(HostImageCopyTest, CopyMemoryToImageRejectsUnboundDestination) {
   vkDestroyImage(Device, Img, nullptr);
 }
 
-/// Roadmap F11: `copyBufferImageRegion`'s buffer-side sizing always used
+/// Roadmap F11a: `copyBufferImageRegion`'s buffer-side sizing always used
 /// `Img.format()`'s own combined `bytesPerBlock`, but a copy region for a
 /// combined depth/stencil format always names exactly one aspect, whose
 /// own buffer-side size differs from the combined texel's -- unlike
 /// `vkCmdCopyBufferToImage` (a bound `VkBuffer`'s own size at least
 /// bounds-checks a too-large computed row against, turning the mismatch
 /// into a clean rejection), `vkCopyMemoryToImage`'s raw host pointer has
-/// no size of its own to catch it against at all, making this a real
-/// out-of-bounds host-memory read/write before `copyBufferImageRegion`
-/// (ImageOps.cpp) explicitly rejected a combined depth/stencil format.
-TEST_F(HostImageCopyTest, CopyMemoryToImageRejectsCombinedDepthStencilFormat) {
+/// no size of its own to catch it against at all, previously making this
+/// a real out-of-bounds host-memory read/write (F11's own finding). This
+/// now exercises the real, per-texel read-modify-write support F11a adds:
+/// a depth-aspect `vkCopyMemoryToImage`/`vkCopyImageToMemory` round trip
+/// through a raw host pointer, with no bound `VkBuffer` at all.
+TEST_F(HostImageCopyTest,
+       CopiesDepthAspectOfCombinedDepthStencilFormatRoundTrip) {
   VkImage Img = createBoundImage2DWithFormat(
-      VK_FORMAT_D32_SFLOAT_S8_UINT, 2, 2, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+      VK_FORMAT_D32_SFLOAT_S8_UINT, 2, 2,
+      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
 
-  std::vector<uint8_t> DepthPixels(2 * 2 * 4); // Depth-aspect-only sizing.
-  VkMemoryToImageCopy Region{};
-  Region.pHostPointer = DepthPixels.data();
-  Region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
-  Region.imageExtent = {2, 2, 1};
+  // Seed every texel's stencil word with a distinct value the depth-aspect
+  // copy below must not disturb.
+  auto *ImgObj = fromHandle<Image>(Img);
+  for (uint32_t I = 0; I != 4; ++I) {
+    auto *Texel =
+        static_cast<uint8_t *>(ImgObj->texelPointer(0, 0, I % 2, I / 2, 0));
+    uint32_t Word1 = 0x5A;
+    std::memcpy(Texel + 4, &Word1, sizeof(Word1));
+  }
 
-  VkCopyMemoryToImageInfo Info{};
-  Info.dstImage = Img;
-  Info.dstImageLayout = VK_IMAGE_LAYOUT_GENERAL;
-  Info.regionCount = 1;
-  Info.pRegions = &Region;
-  EXPECT_EQ(vkCopyMemoryToImage(Device, &Info), VK_ERROR_INITIALIZATION_FAILED);
+  std::vector<float> DepthValues = {0.0f, 0.25f, 0.5f, 1.0f};
+  std::vector<uint8_t> DepthPixels(DepthValues.size() * 4);
+  std::memcpy(DepthPixels.data(), DepthValues.data(), DepthPixels.size());
+
+  VkMemoryToImageCopy ToImageRegion{};
+  ToImageRegion.pHostPointer = DepthPixels.data();
+  ToImageRegion.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+  ToImageRegion.imageExtent = {2, 2, 1};
+
+  VkCopyMemoryToImageInfo ToImageInfo{};
+  ToImageInfo.dstImage = Img;
+  ToImageInfo.dstImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  ToImageInfo.regionCount = 1;
+  ToImageInfo.pRegions = &ToImageRegion;
+  ASSERT_EQ(vkCopyMemoryToImage(Device, &ToImageInfo), VK_SUCCESS);
+
+  for (uint32_t I = 0; I != 4; ++I) {
+    auto *Texel =
+        static_cast<uint8_t *>(ImgObj->texelPointer(0, 0, I % 2, I / 2, 0));
+    uint32_t Word1;
+    std::memcpy(&Word1, Texel + 4, sizeof(Word1));
+    EXPECT_EQ(Word1, 0x5Au); // Stencil word untouched.
+  }
+
+  std::vector<uint8_t> DstPixels(DepthPixels.size());
+  VkImageToMemoryCopy ToMemoryRegion{};
+  ToMemoryRegion.pHostPointer = DstPixels.data();
+  ToMemoryRegion.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+  ToMemoryRegion.imageExtent = {2, 2, 1};
+
+  VkCopyImageToMemoryInfo ToMemoryInfo{};
+  ToMemoryInfo.srcImage = Img;
+  ToMemoryInfo.srcImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  ToMemoryInfo.regionCount = 1;
+  ToMemoryInfo.pRegions = &ToMemoryRegion;
+  ASSERT_EQ(vkCopyImageToMemory(Device, &ToMemoryInfo), VK_SUCCESS);
+
+  EXPECT_EQ(
+      std::memcmp(DstPixels.data(), DepthPixels.data(), DepthPixels.size()), 0);
 }
 
 TEST_F(HostImageCopyTest, CopiesImageToImage) {
