@@ -33,10 +33,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F10?
+Can you implement roadmap milestone F11?
 
-> **`VK_EXT_pipeline_robustness`/`pipelineRobustness` + its 4
-> `defaultRobustness*` limit fields.** `VkPipelineRobustnessCreateInfo` lets a
-> pipeline opt in/out of robust buffer/image access per-binding-class rather
-> than only device-wide; depends on E16's image-robustness groundwork existing
-> to have something to opt in/out of
+> **`VK_EXT_host_image_copy`/`hostImageCopy` + its 6 limit/list fields.** The
+> largest single new mechanism in this section:
+> `vkCopyMemoryToImage`/`vkCopyImageToMemory`/`vkCopyImageToImage`/`vkTransitionImageLayout`
+> copy/transition without a command buffer at all, needing a host-side (not
+> executor-queued) path into `Image.cpp`'s existing layout/format machinery;
+> `pCopySrcLayouts`/`pCopyDstLayouts` (per D1's own finding, an enumerated list,
+> not a scalar limit) is the supported-layout list this new path accepts
