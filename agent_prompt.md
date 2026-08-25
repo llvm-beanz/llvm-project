@@ -33,31 +33,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F12b?
+Can you implement roadmap milestone F13?
 
-> **A builtin `Input` vector's `spirv.AccessChain` (selecting one lane, e.g.
-> `gl_GlobalInvocationID.x`) fails SPIR-V->LLVM legalization, split off F12a's
-> own measured-impact finding.**
-> `dEQP-VK.pipeline.monolithic.push_descriptor.compute.incremental_updates*`
-> (the same 4 cases F12a's own text names) now fail `vkCreateComputePipelines`
-> with `'llvm.getelementptr' op operand #0 must be LLVM pointer type or LLVM
-> dialect-compatible vector of LLVM pointer type, but got 'vector<3xi32>'` once
-> F12a's own std140 fix is applied. `BuiltInAddressOfPattern`/`LoadValuePattern`
-> (SPIRVToLLVMPatterns.cpp) already model a builtin `Input` variable like
-> `gl_GlobalInvocationID` as a plain SSA value rather than memory, and handle a
-> *direct* load of the whole variable correctly, but an `spirv.AccessChain`
-> selecting a single lane first (`gl_GlobalInvocationID.x`'s own `OpAccessChain
-> %ptr_uint_Input %gl_GlobalInvocationID %uint_0` -- the shape glslang emits
-> when only one component is ever read, apparently distinct from the shape it
-> emits when the whole vector or more than one lane is read, which is presumably
-> why every other passing shader in this report's own scope indexes by
-> `gl_GlobalInvocationID.x`/`.xy`/etc. without issue) has no dedicated pattern
-> of its own and falls through to MLIR's own default `AccessChainPattern`, which
-> assumes its base operand converted to a real `!llvm.ptr` the way every other
-> (memory-backed) `spirv.AccessChain` base does, and builds a `getelementptr`
-> treating the raw vector value as if it were one instead. Root-causing needs a
-> new pattern recognizing an `spirv.AccessChain` whose base is one of these
-> value-modeled builtin variables and rewriting it (plus the `spirv.Load` that
-> always follows it) to an ordinary `llvm.extractelement`, mirroring how
-> `MatrixCompositeExtractPattern`'s own lane-selecting logic already works for a
-> value rather than memory
+> **`VK_KHR_load_store_op_none` (no feature bit).**
+> `VK_ATTACHMENT_LOAD_OP_NONE`/`VK_ATTACHMENT_STORE_OP_NONE` are two new
+> enumerants `RenderPass.cpp`'s existing load/store-op switch already has a
+> natural "do nothing" case for — one of the smallest rows in this whole
+> breakdown
