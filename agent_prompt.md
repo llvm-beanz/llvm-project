@@ -33,18 +33,23 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F8b and close out F8?
+Can you implement roadmap milestone F8c and close out F8?
 
-> **F8a's own remaining quarter: depth/stencil and multisample subpass-input
-> local-read coverage.** `feme::vulkan::buildSubpassInputHeap`
-> (`CommandBuffer.cpp`) already resolves
-> `DepthInputAttachmentIndex`/`StencilInputAttachmentIndex` into heap slots, but
-> (a) leaves a `SampleCount > 1` attachment's slot unpopulated rather than
-> addressing its per-sample layout
-> (`FemeImageDescriptor::SampleCount`/`MipLayouts::SampleStride` already model
-> one, unused so far), and (b) has not been exercised against a real depth
-> (`D16_UNORM`/`D32_FLOAT`) or stencil (`S8_UINT`) format at all -- a CTS-shaped
-> test reading a depth/stencil input attachment back through
-> `subpassLoad`/`OpTypeImage(Dim=SubpassData)`'s single-component form is needed
-> to find whatever format-decode gap remains before either limit field can
-> honestly flip to `VK_TRUE`
+> **F8b's own remaining piece: an explicit-sample subpass-input local read, for
+> `dynamicRenderingLocalReadMultisampledAttachments`.**
+> `buildSubpassInputHeap`'s heap slot for a multisampled attachment is now
+> correctly laid out (F8b), but nothing can address a sample other than 0 of it
+> yet. Needs, in order: (1) a `Sample` operand on
+> `feme::StageOpKind::SubpassLoad` (`StageOps.h`/`StageOps.cpp`), defaulting to
+> a constant `0` where absent so single-sample callers are unaffected; (2)
+> `SubpassLoadPattern` (`SPIRVToLLVMPatterns.cpp`) reading a real
+> `spirv.ImageRead` `Sample` image operand instead of unconditionally rejecting
+> one (`hasImageOperands`); (3) `FragmentWrapper.cpp`'s
+> `lowerFragmentSubpassLoad` and the CPU runtime's
+> `femeRTFetchTexel2D`/`feme.cpu.image.load.2d.v4f32` threading that sample
+> index into the texel address `SampleStride` already supports, instead of
+> always reading sample 0; (4) a CTS-shaped test binding a multisample color
+> (and/or depth/stencil) attachment and reading a specific sample back through
+> `subpassLoad`'s explicit-sample form before
+> `dynamicRenderingLocalReadMultisampledAttachments` can honestly flip to
+> `VK_TRUE`
