@@ -158,3 +158,15 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
     spirv.Return
   }
 }
+
+// -----
+
+// A struct decorated with FPFastMathMode (rather than a struct member, or a
+// value produced by an op) round-trips correctly: it used to crash the
+// deserializer, since guessing the decoration back from its mangled
+// attribute name conflated "FPFastMathMode" with the nonexistent
+// "FpFastMathMode".
+spirv.module Logical OpenCL requires #spirv.vce<v1.0, [Kernel, Linkage], []> {
+  // CHECK: !spirv.ptr<!spirv.struct<(f32 [0], si32 [4]), FPFastMathMode=#spirv.fastmath_mode<NotNaN>>, Private>
+  spirv.GlobalVariable @var : !spirv.ptr<!spirv.struct<(f32 [0], si32 [4]), FPFastMathMode=#spirv.fastmath_mode<NotNaN>>, Private>
+}

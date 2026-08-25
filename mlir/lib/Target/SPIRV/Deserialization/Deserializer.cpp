@@ -24,6 +24,7 @@
 #include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/SaveAndRestore.h"
@@ -1434,6 +1435,29 @@ spirv::Deserializer::processRuntimeArrayType(ArrayRef<uint32_t> operands) {
   return success();
 }
 
+/// Returns a map from the mangled symbol name `getSymbolDecoration` stores a
+/// decoration's `NamedAttribute` under, back to the `spirv::Decoration` it
+/// was mangled from. `getSymbolDecoration`'s camelCase-to-snake_case mangling
+/// is not reliably reversible on its own: e.g. both `FPFastMathMode` and the
+/// (nonexistent) `FpFastMathMode` mangle to `fp_fast_math_mode`, so guessing
+/// the original decoration back from the mangled name via the inverse
+/// (snake_case-to-camelCase) conversion can silently produce a name that
+/// does not symbolize to any decoration at all. Building the map by
+/// mangling every known decoration's own name once, rather than unmangling
+/// an arbitrary string, keeps the lookup exact.
+static const llvm::StringMap<spirv::Decoration> &getSymbolToDecorationMap() {
+  static const llvm::StringMap<spirv::Decoration> symbolToDecoration = [] {
+    llvm::StringMap<spirv::Decoration> map;
+    for (uint32_t i = 0; i <= spirv::getMaxEnumValForDecoration(); ++i)
+      if (std::optional<spirv::Decoration> decoration =
+              spirv::symbolizeDecoration(i))
+        map[llvm::convertToSnakeFromCamelCase(
+            spirv::stringifyDecoration(*decoration))] = *decoration;
+    return map;
+  }();
+  return symbolToDecoration;
+}
+
 LogicalResult
 spirv::Deserializer::processStructType(ArrayRef<uint32_t> operands) {
   // TODO: Find a way to handle identified structs when debug info is stripped.
@@ -1500,11 +1524,14 @@ spirv::Deserializer::processStructType(ArrayRef<uint32_t> operands) {
   SmallVector<spirv::StructType::StructDecorationInfo, 0> structDecorationsInfo;
   if (decorations.count(operands[0])) {
     NamedAttrList &allDecorations = decorations[operands[0]];
+    const llvm::StringMap<spirv::Decoration> &symbolToDecoration =
+        getSymbolToDecorationMap();
     for (NamedAttribute &decorationAttr : allDecorations) {
-      std::optional<spirv::Decoration> decoration = spirv::symbolizeDecoration(
-          llvm::convertToCamelFromSnakeCase(decorationAttr.getName(), true));
-      assert(decoration.has_value());
-      structDecorationsInfo.emplace_back(decoration.value(),
+      auto decorationIt = symbolToDecoration.find(decorationAttr.getName());
+      if (decorationIt == symbolToDecoration.end())
+        return emitError(unknownLoc, "unhandled struct decoration '")
+               << decorationAttr.getName() << "' on <id> " << operands[0];
+      structDecorationsInfo.emplace_back(decorationIt->second,
                                          decorationAttr.getValue());
     }
   }
