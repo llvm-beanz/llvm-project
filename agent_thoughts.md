@@ -33465,3 +33465,115 @@ update every prior F-row's own extension addition has needed. Three new
 `UnmapMemory2AcceptsReserveBit`) cover the wrapper behavior itself,
 including a case that explicitly sets `VK_MEMORY_UNMAP_RESERVE_BIT_EXT`
 and confirms it is accepted rather than rejected.
+
+# Roadmap H2: Layered rendering + `multiview`
+
+## Scope and plan
+
+Roadmap H2 asked for three things: lift `vkCreateFramebuffer`'s
+`layers != 1` rejection and `vkCreateRenderPass`/`vkCreateRenderPass2`'s
+nonzero-`viewMask` rejection, wire a real layer dimension through the
+render-target binding and the raster loop, add `gl_Layer`/`ViewIndex` as
+stage system values, and only then advertise `multiview`. Before touching
+anything I read `LayeredRendering.h`/`.cpp` (roadmap R34's own standalone
+`resolveRenderTargetArrayLayer`/`getAttachmentLayerByteOffset` helpers,
+landed already but explicitly never wired to a real draw) and
+`Signature.h`'s existing `RenderTargetArrayIndex`/`ViewportArrayIndex`
+system values (also already mapped from SPIR-V `BuiltIn Layer`/
+`ViewportIndex` in `CanonicalizeStage.cpp`, also never consumed) --
+useful groundwork, but neither piece closed the loop end to end.
+
+## The scoping decision that made this tractable
+
+Full "any stage may route a primitive to an arbitrary array layer"
+support needs a real producer for `gl_Layer`: either a geometry shader
+(`shaderOutputLayer`/`multiviewGeometryShader`, roadmap H3/H5, neither
+implemented) or a vertex shader with `VK_EXT_shader_viewport_index_layer`
+(also unimplemented, also H3's own row). Multiview itself does not need
+either: per the Vulkan spec, a view with no explicit `gl_Layer` output
+writes into the array layer numbered the same as its own view index --
+"each set bit maps onto the same-numbered attachment layer" is the whole
+rule. That let me scope the actual wiring to "one draw per set `viewMask`
+bit, sliced to that bit's own attachment layer" (a per-*view* loop in
+`CommandBuffer.cpp`'s `runDraw`, entirely outside the executor's raster
+loop) rather than "a per-*primitive* layer selection inside
+`feme::graphics::executeDraws`" -- the latter is what H3/H5 will actually
+need once a real `gl_Layer` producer exists, and building it now would
+have had no way to be exercised or tested. `gl_ViewIndex` becomes a real,
+new system value (`SignatureSystemValue::ViewIndex`, SPIR-V `BuiltIn`
+4440, sourced from a new `FemeVertexInvocation`/`FemeFragmentInvocation::
+ViewIndex` ABI field, the same value for every invocation of one draw);
+`gl_Layer`/`RenderTargetArrayIndex`'s existing SPIR-V import mapping is
+left exactly as unreachable as it already was, honestly documented as
+such rather than silently claimed complete.
+
+## Implementation
+
+`RenderPass.h`/`.cpp`: `SubpassDescription` gains `ViewMask`, parsed from
+`VkRenderPassCreateInfo2::pSubpasses[i].viewMask` directly and from the
+classic `vkCreateRenderPass`'s chained `VkRenderPassMultiviewCreateInfo`
+(a structure classic render passes never scanned `pNext` for before).
+`vkCreateRenderPass2` converts back to the classic path by constructing a
+synthetic `VkRenderPassMultiviewCreateInfo` and chaining it, reusing the
+classic function's own new parsing rather than duplicating it --
+`vkCreateRenderPass2` already delegated to `vkCreateRenderPass` for every
+other field, so extending that delegation was the natural shape.
+`vkCreateFramebuffer`'s `layers != 1` rejection becomes `layers == 0`;
+`isCompatibleAttachmentView` gains a `Layers` parameter checking a bound
+view's own `layerCount` (via `Image::resolvedLayerCount`) covers what the
+framebuffer promises. `resolveAttachmentView` returns every requested
+array layer (not just layer 0), addressed via the image's own
+`SlicePitch` -- and, a bug caught only by writing a real end-to-end test
+rather than trusting the unit-level object-model tests: it also had to
+start accepting `VK_IMAGE_VIEW_TYPE_2D_ARRAY` (`ImageDimension::
+Texture2DArray`), not only plain `_2D`, since that is the view type a
+real layered/multiview render target attachment actually uses. Missing
+that produced a clean, confusing `VK_ERROR_INITIALIZATION_FAILED` from
+`vkQueueSubmit` with no diagnostic surfaced anywhere near the caller --
+found by temporarily rerouting `Sync.cpp`'s `consumeError` through
+`llvm::errs()` to see the swallowed error text, then reverting.
+
+`CommandBuffer.cpp`'s `runDraw` grows a per-view loop (`ViewMask ?
+ViewMask : 1u`, so the non-multiview common case still runs exactly once,
+at view 0): each iteration slices every color/depth/stencil
+`AttachmentView` down to that view's own layer (`sliceAttachmentLayer`,
+built on top of R34's own `getAttachmentLayerByteOffset`) before calling
+`feme::graphics::executeDraws`, and sets a new `PreparedDraw::ViewIndex`
+field the executor writes into every vertex/fragment invocation record.
+
+## Measuring it honestly
+
+A real `dEQP-VK.multiview` run (838 cases) found the roadmap's own
+"closes the whole group" framing did not hold: zero cases pass outright.
+454 hit a SIMDize "divergent vector value ... component decomposition"
+diagnostic -- a real, but pre-existing and out-of-file-scope, compiler
+gap (roadmap C3 closed four specific decomposition shapes; whatever these
+multiview fragment shaders' own divergent output does is apparently a
+fifth, undiagnosed one). 42 hit an unsupported `VK_FORMAT_R8G8B8A8_UINT`
+color attachment (`view_mask_iteration`'s own test group, roadmap H8's
+format-table gap, not new). 3 hit a zero-color-attachment pipeline shape
+this executor has never accepted at all (`depth_without_fragment_shader`,
+unrelated to multiview specifically). None of the three is something H2's
+own file scope (`RenderPass.cpp`/`CommandBuffer.cpp`/`Executor.cpp`'s
+object model and per-view loop) could or should have absorbed, so rather
+than either quietly claiming the roadmap's own "whole group" text or
+silently declining to strike the row through, I struck it through with an
+explicit deviation note, added two new lettered follow-up rows (H2a for
+the SIMDize shape, H2b for the zero-color-attachment gap), and wrote a
+self-contained synthetic regression test
+(`DrawTest.MultiviewRendersDifferentColorPerViewIntoItsOwnLayer`) that
+isolates and confirms the actual multiview wiring this row owns is
+correct end to end, independent of the three surrounding gaps the real
+CTS run cannot see past.
+
+## Documentation bookkeeping
+
+Regenerating `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+(the same `vk_gen_feature_inventory.py`/`vk_gen_extension_inventory.py`
+scripts F13/F14 used) surfaced one more instance of the drift F13's own
+regeneration already found and fixed once: `VK_KHR_map_memory2` (roadmap
+F14) was genuinely implemented but never added to
+`AdvertisedExtensions.txt`/`AdvertisedPromotedExtensions.txt`, understating
+the 1.4 extension row. Restored alongside this row's own `multiview`
+update, since I was already touching and regenerating both files and the
+drift would otherwise have silently persisted through another edition.
