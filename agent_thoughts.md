@@ -33874,3 +33874,146 @@ itself (see "Roadmap H2a: measured impact" in VulkanCTSReport.md) and
 confirmed the totals are unchanged from H2's own run (0 passed / 499
 failed / 339 not supported) -- expected, since no behavior changed, only
 diagnosis.
+
+# Milestone H2c: preserve a builtin interface block's per-member decorations
+
+## Problem
+
+Roadmap H2a root-caused (but did not fix) why every `dEQP-VK.multiview`
+vertex shader's `gl_Position` write goes un-legalized: glslang always
+spells `gl_Position`/`gl_PointSize`/`gl_ClipDistance`/`gl_CullDistance` as
+members of an implicit `gl_PerVertex` interface block, and SPIR-V attaches
+`BuiltIn`/etc. decorations to that block's *members* (`OpMemberDecorate`),
+not to the block variable itself. `SPIRVToLLVMPatterns.cpp`'s
+`buildStageIODecorationsAttr` only ever reads a whole-variable
+`BuiltIn`/`Location`/`Component`/`Index` attribute (`Op.getBuiltIn()`
+et al.), so the block's own `llvm.mlir.global` ends up with no
+`!spirv.Decorations` metadata at all, and `CanonicalizeStagePass` never
+recognizes it as stage IO. H2c's own scope (per the roadmap row H2a left
+behind) is just the SPIR-V import side of the fix: make the per-member
+decorations survive the conversion at all, in some encoding
+`CanonicalizeStagePass` can read later (H2d's job, not this row's).
+
+## Design
+
+I read `isBufferBlockWritable` (same file) as the existing precedent for
+reading a struct's own per-member decorations
+(`mlir::spirv::StructType::getMemberDecorations`) rather than a whole
+variable's attributes, and modeled the new code the same way. Key design
+choice: extend, don't replace, the existing whole-variable
+`feme.spirv.decorations`/`!spirv.Decorations` channel, per the roadmap
+row's own instruction -- a struct-typed stage-IO global can carry *both*
+in principle (though in practice a builtin interface block only ever has
+member decorations, since it has no whole-variable `BuiltIn` of its own).
+So this adds a **second**, parallel attribute name,
+`feme.spirv.member.decorations`, rather than overloading the first one
+with a new shape that would have broken every existing consumer's
+assumption that each entry is a flat `(code, arg...)` tuple.
+
+The new attribute's shape is `ArrayAttr` of `(memberIndex, tuples)` pairs,
+where `tuples` is exactly the existing whole-variable tuple-list shape
+(`ArrayAttr` of `(i32 decoration, i32 arg...)`) unchanged -- so any future
+consumer parsing one already knows how to parse the other. I factored the
+`(code, arg...)` tuple-building logic into a small
+`buildMemberDecorationTuple` switching on `mlir::spirv::Decoration`
+directly (its enum values are the real SPIR-V spec numbers, confirmed
+against `SPIRVBase.td`, so no local remapping table was needed the way
+`StageIOFlagDecorations` needs one for the whole-variable, MLIR-attribute-
+name-keyed case). I filtered to the same recognized decoration set the
+whole-variable path already handles (`BuiltIn`/`Location`/`Component`/
+`Index`/the five interpolation flags), silently dropping anything else
+(e.g. `Offset`, an ordinary UBO struct's own layout decoration that a
+stage-IO struct never carries in practice, but filtered defensively) --
+matching the existing "unrecognized decoration is simply not preserved"
+behavior `parseSPIRVDecorations`'s own `default:` case documents.
+
+For the LLVM-metadata side (`StageIODecorations.cpp`), I refactored the
+existing tuple-list -> `MDNode` conversion into a shared
+`buildDecorationListMD` helper, since the member-decorations metadata
+needs to build the *same* per-decoration-list shape, just nested one level
+deeper (one list per member, plus the member index). I deliberately named
+the new metadata kind `feme.spirv.MemberDecorations`, not
+`spirv.MemberDecorations` -- checked `llvm/lib/Target/SPIRV/` and
+confirmed there is no such real backend metadata kind at all (only
+`!spirv.Decorations`, whole-variable), because `OpMemberDecorate`
+decorates a *type*, not a global variable use, so there is no granularity
+for a real backend metadata kind to exist at. Using an `spirv.*`-prefixed
+name for something the backend doesn't understand felt like it would
+mislead a future reader into assuming it round-trips through the real
+SPIR-V pipeline; `feme.spirv.*` makes the FeMe-internal, bridge-only
+nature explicit, matching how `feme.spirv.decorations` (the MLIR-side
+attribute name, as opposed to the LLVM IR metadata name `spirv.Decorations`)
+already distinguishes "FeMe's own side channel" from "real backend format."
+
+`SPIRVToLLVMTranslator.cpp` (the one call site gluing collect before /
+attach after `translateModuleToLLVMIR`) now collects and re-attaches both
+channels side by side, in the same pattern.
+
+## Verification
+
+Manually exercised the new path end to end via `feme-opt`/`feme-translate`
+on a hand-written `gl_PerVertex`-shaped module before writing any
+permanent tests, to nail down the exact metadata shape (nesting, operand
+order) -- `!feme.spirv.MemberDecorations = !{!{i32 <index>, !{<tuple>...}},
+...}` -- confirming this matches what H2d will need to parse. Then added:
+- `SPIRVToLLVMTest.BuiltinInterfaceBlockPreservesMemberDecorations`/
+  `UnrecognizedMemberDecorationIsFilteredOut` (the new attribute-building
+  path, positive and negative cases);
+- `SPIRVToLLVMTest.{CollectStageIOMemberDecorationsFindsDecoratedGlobals,
+  AttachStageIOMemberDecorationsBuildsMetadata,
+  AttachStageIOMemberDecorationsIgnoresMissingGlobals}` (the
+  collect/attach pair, mirroring the existing whole-variable tests
+  one-for-one);
+- a new `gl_PerVertex`-shaped `--split-input-file` case in
+  `spirv-to-llvm-stage-io.mlir` (the MLIR-dialect-level FileCheck test);
+- a new file, `spirv-to-llvmir-stage-io-member-decorations.mlir` (kept
+  separate from the existing `spirv-to-llvmir-stage-io.mlir` rather than
+  appended as a second `RUN` line in the same file, since `feme-translate`
+  has no `--split-input-file` equivalent for a single file to hold two
+  independent top-level `spirv.module`s under different `RUN`
+  invocations).
+
+I deliberately did *not* touch `CanonicalizeStage.cpp`'s
+`isSPIRVStageIOGlobal` or the existing
+`CanonicalizeStageTest.DoesNotRecognizeMemberDecoratedInterfaceBlockAsStageIO`
+regression test H2a added: that test constructs its own hand-written,
+already-converted LLVM IR directly (bypassing the `spirv` -> `llvm`
+conversion entirely), so it is unaffected by this row either way, and its
+"still not recognized" assertion remains correct until H2d actually reads
+the new metadata. Confirmed by re-running the full suite rather than just
+this row's own new tests.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+1810/1811 (1 pre-existing, unrelated `Unsupported`), up from 1804/1805
+before this row (six new tests: five `SPIRVToLLVMTest` cases plus the new
+lit file; the `spirv-to-llvm-stage-io.mlir` split-file addition counts as
+part of the same discovered test).
+
+## Vulkan CTS
+
+Re-ran the full, real `dEQP-VK.multiview.*` group (838 cases) against a
+freshly built `libfeme_vulkan` after this change. Totals are unchanged
+from H2/H2a's own baseline: 0 passed / 499 failed / 339 not supported.
+This is the expected outcome, not a missed opportunity: H2c only adds a
+new metadata *channel*, it does not change what
+`feme::graphics::CanonicalizeStagePass` reads to decide whether a global
+is stage IO (still just `!spirv.Decorations`'s presence, which a builtin
+interface block's global still lacks) -- so `gl_Position`'s write through
+`gl_PerVertex` is exactly as un-legalized as before, and the 454-case
+`feme-cpu-simdize` divergent-vector failure H2a root-caused is untouched.
+Recorded this as "Roadmap H2c: measured impact" in VulkanCTSReport.md, in
+the same "confirms no regression, no improvement yet" shape H2a's own
+section used. No feature/extension bit changed in this row, so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update -- noted explicitly in the CTS report rather than left silent.
+
+Updated FeMeGraphicsDesign.md's "Signature reflection" section (the H2a
+deviation note) with a follow-up paragraph describing what changed and
+what deliberately did not, and Design.md's SPIR-V conversion section with
+a one-paragraph pointer to that discussion, so a reader following either
+doc lands on the accurate, current state rather than H2a's now-stale
+"neither pattern recognizes it, nothing preserved" description. Struck
+through roadmap row H2c and updated H2d's own text (no longer "pending
+H2c", plus a note about the exact `isSPIRVStageIOGlobal` gap H2d still
+needs to close: recognizing a global with `feme.spirv.MemberDecorations`
+but no whole-variable `!spirv.Decorations`).
