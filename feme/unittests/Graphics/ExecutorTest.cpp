@@ -1243,6 +1243,79 @@ TEST(ExecutorTest, RejectsDepthStateWithoutBoundAttachment) {
   EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw), Failed());
 }
 
+// Roadmap H2b: a depth-only pipeline (zero color attachments, no fragment
+// shader color output) is legal Vulkan (`dEQP-VK.multiview.depth_without_
+// fragment_shader`'s own shape) and must render successfully rather than
+// being rejected for lacking a color attachment.
+TEST(ExecutorTest, RendersWithZeroColorAttachments) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  constexpr char DepthOnlyVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, DepthOnlyVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  // A fragment stage with no color output at all -- depth writes alone,
+  // exactly like `dEQP-VK.multiview.depth_without_fragment_shader`'s own
+  // pipeline shape.
+  EntrySignature FSSig;
+  constexpr char NoOutputFragmentShaderIR[] = R"(
+    define void @fs_main() #0 {
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, NoOutputFragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  DepthState Depth;
+  Depth.TestEnable = true;
+  Depth.WriteEnable = true;
+  Depth.Compare = CompareOp::Less;
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, Depth,
+      BlendMode::Replace, /*SampleCount=*/1, /*Attachments=*/{}, StencilState{},
+      /*ColorBlends=*/{}, /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+
+  TriangleScene Scene;
+  Scene.BindDepth = true;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+  Draw.Attachments = {}; // No color attachments at all.
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+  // Depth is still written for every covered texel even with no color
+  // attachment to shade.
+  for (uint32_t I = 0; I != 16; ++I)
+    EXPECT_FLOAT_EQ(Scene.DepthStorage[I], 0.0f) << "texel " << I;
+}
+
 // Roadmap R33: stencil testing/writes with a real `S8_UINT` attachment.
 TEST(ExecutorTest, StencilTestRejectsMismatchedReference) {
   Context Ctx;

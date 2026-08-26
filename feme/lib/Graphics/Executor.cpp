@@ -1048,9 +1048,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     return createStringError(inconvertibleErrorCode(),
                              "stencil testing is enabled but the draw has "
                              "no bound stencil attachment");
-  if (Draw.Attachments.empty())
-    return createStringError(inconvertibleErrorCode(),
-                             "a draw needs at least one color attachment");
+  // A depth-only pipeline (no fragment shader color output) legally has
+  // zero color attachments (`dEQP-VK.multiview.depth_without_fragment_
+  // shader`'s own shape, roadmap H2b); the count-match check below is
+  // what actually enforces consistency between the pipeline and the draw,
+  // in the zero-attachment case as much as any other.
   if (Pipeline.getColorBlends().size() != Draw.Attachments.size())
     return createStringError(inconvertibleErrorCode(),
                              "the pipeline has %zu color blend state(s) but "
