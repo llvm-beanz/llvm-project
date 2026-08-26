@@ -1479,6 +1479,18 @@ rejects any `spirv.ImageRead` that carries one), so
 `dynamicRenderingLocalReadMultisampledAttachments` stays `VK_FALSE` --
 tracked as roadmap F8c.
 
+**Status (roadmap F13): `VK_ATTACHMENT_LOAD_OP_NONE`/`STORE_OP_NONE`
+(`VK_KHR_load_store_op_none`) needed no new behavior at all.** Every
+attachment's `LoadOp` already took the "do nothing" path for anything
+other than `VK_ATTACHMENT_LOAD_OP_CLEAR` (`applyClear`, CommandBuffer.cpp),
+so `NONE` -- like `LOAD`/`DONT_CARE` before it -- simply leaves whatever the
+attachment's bound memory already held. `StoreOp` is carried on
+`RenderTargetView` for API completeness but never read to act on: this
+software renderer writes straight into an attachment's real memory with no
+discard-on-store optimization to skip, so `STORE`/`DONT_CARE`/`NONE` are
+indistinguishable outcomes. The extension is now simply advertised
+(`PhysicalDeviceInfo.cpp`).
+
 ### Graphics pipeline state
 
 `vkCreateGraphicsPipelines` compiles each stage through the same flow the
