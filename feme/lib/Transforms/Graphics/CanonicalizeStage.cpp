@@ -19,6 +19,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
@@ -700,6 +701,124 @@ void storeStageIOBlockValue(IRBuilderBase &B, Value *Val, Type *Ty,
                       MemberIDs[I], Row, Component, Zero);
 }
 
+/// The stage-IO global \p Ptr addresses, and the byte offset within it:
+/// unwraps any chain of (possibly `ConstantExpr`) `getelementptr`s via
+/// `Value::stripAndAccumulateConstantOffsets`, since LLVM canonicalizes a
+/// builtin interface block's own per-member/per-component access into a
+/// raw byte-offset form (`getelementptr (i8, ptr @block, i64 N)`, a
+/// `ConstantExpr` rather than a `GetElementPtrInst` -- confirmed against a
+/// real `dEQP-VK.multiview` vertex shader's `gl_Position.y` write) rather
+/// than the struct-member-indexed shape (`getelementptr StructTy, ptr
+/// @block, i32 0, i32 M`) a naive `GetElementPtrInst`-only walk would
+/// expect. Returns `std::nullopt` if \p Ptr does not resolve to a constant
+/// offset from a `GlobalVariable` at all (e.g. a dynamically-indexed
+/// access, left unresolved for `feme::graphics::ValidateStagePass` to
+/// diagnose, matching every other unresolved case in this pass).
+std::optional<std::pair<GlobalVariable *, uint64_t>>
+getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
+  APInt Offset(DL.getIndexTypeSizeInBits(Ptr->getType()), 0);
+  Value *Base = Ptr->stripAndAccumulateConstantOffsets(
+      DL, Offset, /*AllowNonInbounds=*/true);
+  auto *GV = dyn_cast<GlobalVariable>(Base);
+  if (!GV)
+    return std::nullopt;
+  return std::make_pair(GV, Offset.getZExtValue());
+}
+
+/// One load/store's resolved stage-IO target: the `ElementID` it
+/// addresses and the `Row`/`Component` operands to seed
+/// `loadStageIOValue`/`storeStageIOValue`'s own recursion with (`nullptr`
+/// selects the caller's own default, an ordinary `i32 0`) -- or, for a
+/// whole builtin-interface-block aggregate access, every member's
+/// `ElementID` at once, for `loadStageIOBlockValue`/
+/// `storeStageIOBlockValue`'s own per-member decomposition.
+struct StageIOAccess {
+  ArrayRef<uint32_t> ElementIDs;
+  Value *Row = nullptr;
+  Value *Component = nullptr;
+};
+
+/// The (row, component) pair `loadStageIOValue`/`storeStageIOValue` need to
+/// seed their own recursion with, from \p Residual -- a byte offset within
+/// one stage-IO member's own declared type \p MemberTy -- mirroring
+/// `getStageIORowShape`'s own type recursion (a single-member struct
+/// peeled, then an array's rows, then a vector's components).
+std::pair<uint64_t, uint64_t>
+resolveRowComponent(Type *MemberTy, uint64_t Residual, const DataLayout &DL) {
+  Type *PerRowTy = peelSingleMemberStruct(MemberTy);
+  uint64_t Row = 0;
+  if (auto *ArrTy = dyn_cast<ArrayType>(PerRowTy)) {
+    uint64_t RowSize = DL.getTypeAllocSize(ArrTy->getElementType());
+    if (RowSize) {
+      Row = Residual / RowSize;
+      Residual -= Row * RowSize;
+    }
+    PerRowTy = ArrTy->getElementType();
+  }
+  uint64_t Component = 0;
+  if (auto *VecTy = dyn_cast<FixedVectorType>(PerRowTy)) {
+    uint64_t CompSize = DL.getTypeAllocSize(VecTy->getElementType());
+    if (CompSize)
+      Component = Residual / CompSize;
+  }
+  return {Row, Component};
+}
+
+/// Resolves \p Ptr -- a load/store's pointer operand -- against \p
+/// ElementIDs (one entry per stage-IO global, one `ElementID` per struct
+/// member for a builtin interface block, a single one for everything
+/// else) into a `StageIOAccess`, or `std::nullopt` if \p Ptr does not
+/// address a recognized stage-IO global at all.
+///
+/// A plain stage-IO global (a single `ElementID`) is always addressed as a
+/// whole value at offset 0, matching every `loadStageIOValue`/
+/// `storeStageIOValue` call before this milestone. A builtin interface
+/// block (multiple `ElementID`s) has two addressable shapes instead: (1)
+/// the whole block loaded/stored as one aggregate value (\p ValueTy
+/// exactly matches the block's own struct type) -- every member's
+/// `ElementID`; (2) a single member (or one row/component within it,
+/// `gl_ClipDistance`/`gl_CullDistance`'s own per-element access, or
+/// `gl_Position`'s own per-component one) selected by \p Ptr's constant
+/// byte offset (`getStageIOBaseAndOffset`) into the block's own
+/// `StructLayout`.
+std::optional<StageIOAccess> resolveStageIOAccess(
+    Value *Ptr, Type *ValueTy, const DataLayout &DL,
+    const DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> &ElementIDs) {
+  std::optional<std::pair<GlobalVariable *, uint64_t>> BaseAndOffset =
+      getStageIOBaseAndOffset(Ptr, DL);
+  if (!BaseAndOffset)
+    return std::nullopt;
+  auto [GV, ByteOffset] = *BaseAndOffset;
+  auto It = ElementIDs.find(GV);
+  if (It == ElementIDs.end())
+    return std::nullopt;
+  ArrayRef<uint32_t> IDs = It->second;
+  if (IDs.size() == 1) {
+    // Every other stage-IO global is always addressed as a whole value;
+    // a nonzero offset here would be a shape this milestone does not
+    // model (left unresolved, as above).
+    if (ByteOffset != 0)
+      return std::nullopt;
+    return StageIOAccess{IDs, nullptr, nullptr};
+  }
+
+  auto *ST = cast<StructType>(GV->getValueType());
+  if (ValueTy == ST)
+    return StageIOAccess{IDs, nullptr, nullptr};
+
+  const StructLayout *SL = DL.getStructLayout(ST);
+  unsigned Member = SL->getElementContainingOffset(ByteOffset);
+  uint64_t Residual = ByteOffset - SL->getElementOffset(Member);
+  auto [Row, Component] =
+      resolveRowComponent(ST->getElementType(Member), Residual, DL);
+  return StageIOAccess{
+      IDs.slice(Member, 1),
+      Row ? ConstantInt::get(Type::getInt32Ty(ST->getContext()), Row) : nullptr,
+      Component
+          ? ConstantInt::get(Type::getInt32Ty(ST->getContext()), Component)
+          : nullptr};
+}
+
 /// Rewrites \p F's SPIR-V-derived stage IR into `feme.stage.*`: its
 /// `Input`/`Output` interface-variable loads/stores (address space 7/8,
 /// see `isSPIRVStageIOGlobal`) into `feme.stage.input.load`/
@@ -720,12 +839,18 @@ bool canonicalizeSPIRVStage(Function &F) {
   // formats' numbering conventions consistent.
   SmallVector<GlobalVariable *> InputGlobals, OutputGlobals;
   DenseSet<GlobalVariable *> Seen;
+  const DataLayout &DL = F.getParent()->getDataLayout();
   for (Instruction &I : instructions(F)) {
     GlobalVariable *GV = nullptr;
-    if (auto *LI = dyn_cast<LoadInst>(&I))
-      GV = dyn_cast<GlobalVariable>(LI->getPointerOperand());
-    else if (auto *SI = dyn_cast<StoreInst>(&I))
-      GV = dyn_cast<GlobalVariable>(SI->getPointerOperand());
+    if (auto *LI = dyn_cast<LoadInst>(&I)) {
+      if (auto BaseAndOffset =
+              getStageIOBaseAndOffset(LI->getPointerOperand(), DL))
+        GV = BaseAndOffset->first;
+    } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      if (auto BaseAndOffset =
+              getStageIOBaseAndOffset(SI->getPointerOperand(), DL))
+        GV = BaseAndOffset->first;
+    }
     unsigned AddrSpace = 0;
     if (!isSPIRVStageIOGlobal(GV, AddrSpace) || !Seen.insert(GV).second)
       continue;
@@ -798,9 +923,9 @@ bool canonicalizeSPIRVStage(Function &F) {
     IRBuilder<> B(&I);
     Value *Zero = B.getInt32(0);
     if (auto *LI = dyn_cast<LoadInst>(&I)) {
-      auto *GV = dyn_cast<GlobalVariable>(LI->getPointerOperand());
-      auto It = GV ? ElementIDs.find(GV) : ElementIDs.end();
-      if (It == ElementIDs.end())
+      std::optional<StageIOAccess> Access = resolveStageIOAccess(
+          LI->getPointerOperand(), LI->getType(), DL, ElementIDs);
+      if (!Access)
         continue;
       // A scalar interface variable is one `feme.stage.input.load`; a
       // vector/matrix/single-member-struct-wrapped one is decomposed one
@@ -813,19 +938,23 @@ bool canonicalizeSPIRVStage(Function &F) {
       // its own `ElementID` first (roadmap H2d). See
       // `loadStageIOBlockValue`/`loadStageIOValue`/`getStageIORowShape`'s
       // shared type recursion.
-      Value *New = loadStageIOBlockValue(B, LI->getType(), It->second, Zero,
-                                         Zero, Zero, LI->getName());
+      Value *Row = Access->Row ? Access->Row : Zero;
+      Value *Component = Access->Component ? Access->Component : Zero;
+      Value *New = loadStageIOBlockValue(B, LI->getType(), Access->ElementIDs,
+                                         Row, Component, Zero, LI->getName());
       LI->replaceAllUsesWith(New);
       LI->eraseFromParent();
       Changed = true;
     } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
-      auto *GV = dyn_cast<GlobalVariable>(SI->getPointerOperand());
-      auto It = GV ? ElementIDs.find(GV) : ElementIDs.end();
-      if (It == ElementIDs.end())
-        continue;
       Value *Val = SI->getValueOperand();
-      storeStageIOBlockValue(B, Val, Val->getType(), It->second, Zero, Zero,
-                             Zero);
+      std::optional<StageIOAccess> Access = resolveStageIOAccess(
+          SI->getPointerOperand(), Val->getType(), DL, ElementIDs);
+      if (!Access)
+        continue;
+      Value *Row = Access->Row ? Access->Row : Zero;
+      Value *Component = Access->Component ? Access->Component : Zero;
+      storeStageIOBlockValue(B, Val, Val->getType(), Access->ElementIDs, Row,
+                             Component, Zero);
       SI->eraseFromParent();
       Changed = true;
     }

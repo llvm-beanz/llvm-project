@@ -12,6 +12,7 @@
 #include "feme/Core/StageOps.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -370,7 +371,87 @@ TEST(CanonicalizeStageTest, RecognizesMemberDecoratedInterfaceBlockAsStageIO) {
   EXPECT_EQ(StoreCount, 7u);
 }
 
-/// (Roadmap C8) A matrix-typed `Output` global -- the `!llvm.array<Columns x
+/// (Roadmap H2d) The shape a real `dEQP-VK.multiview` vertex shader's
+/// `gl_PerVertex` access actually takes, confirmed by inspecting the IR
+/// `canonicalizeSPIRVStage` receives for a real `deqp-vk` shader (not the
+/// whole-struct aggregate `RecognizesMemberDecoratedInterfaceBlockAsStageIO`
+/// above exercises, which never occurs in practice): each member -- and
+/// even each individual component of `gl_Position` -- is addressed by its
+/// own scalar load/store, either a bare `@gl_PerVertex` global (member 0,
+/// component 0 -- SPIR-V's own offset-0 access, which LLVM's constant-
+/// `getelementptr` folding erases entirely) or a `getelementptr (i8, ptr
+/// @gl_PerVertex, i64 ByteOffset)` `ConstantExpr` (every other member/
+/// component -- LLVM's own canonical byte-offset form, not the struct-
+/// member-indexed shape `getelementptr StructTy, ptr @block, i32 0, i32 M`
+/// might suggest). `resolveStageIOAccess`/`getStageIOBaseAndOffset` resolve
+/// each of these back to its own `ElementID` and `(Row, Component)` pair
+/// via the block's own `StructLayout` (`{<4 x float>, float, [1 x float],
+/// [1 x float]}`: `Position` at byte 0, `PointSize` at 16, `ClipDistance`
+/// at 20, `CullDistance` at 24).
+TEST(CanonicalizeStageTest, RecognizesInterfaceBlockPerMemberByteOffsetAccess) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PerVertex = external addrspace(8) global { <4 x float>, float, [1 x float], [1 x float] }, !feme.spirv.MemberDecorations !10
+    define void @main() #0 {
+      ; gl_Position.x = 1.0 (member 0, component 0 -- the offset-0 access
+      ; that folds down to a bare global).
+      store float 1.000000e+00, ptr addrspace(8) @gl_PerVertex
+      ; gl_Position.y = 2.0 (member 0, component 1 -- byte offset 4).
+      store float 2.000000e+00, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @gl_PerVertex, i64 4)
+      ; gl_PointSize = 3.0 (member 1, whole value -- byte offset 16).
+      store float 3.000000e+00, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @gl_PerVertex, i64 16)
+      ; gl_ClipDistance[0] = 4.0 (member 2, row 0 -- byte offset 20).
+      store float 4.000000e+00, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @gl_PerVertex, i64 20)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !10 = !{!11, !12, !13, !14}
+    !11 = !{i32 0, !15}
+    !12 = !{i32 1, !16}
+    !13 = !{i32 2, !17}
+    !14 = !{i32 3, !18}
+    !15 = !{!19}
+    !19 = !{i32 11, i32 0}
+    !16 = !{!20}
+    !20 = !{i32 11, i32 1}
+    !17 = !{!21}
+    !21 = !{i32 11, i32 3}
+    !18 = !{!22}
+    !22 = !{i32 11, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No raw store on `gl_PerVertex` (bare or via `getelementptr`) survives.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+
+  struct Store {
+    uint64_t ElementID, Row, Component;
+  };
+  SmallVector<Store> Stores;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      StageOpKind Kind;
+      if (!isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+        continue;
+      Stores.push_back(
+          {cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+           cast<ConstantInt>(CI->getArgOperand(1))->getZExtValue(),
+           cast<ConstantInt>(CI->getArgOperand(2))->getZExtValue()});
+    }
+  ASSERT_EQ(Stores.size(), 4u);
+  // `gl_Position` (element 0), `PointSize` (1), `ClipDistance` (2).
+  EXPECT_EQ(Stores[0].ElementID, 0u);
+  EXPECT_EQ(Stores[0].Component, 0u);
+  EXPECT_EQ(Stores[1].ElementID, 0u);
+  EXPECT_EQ(Stores[1].Component, 1u);
+  EXPECT_EQ(Stores[2].ElementID, 1u);
+  EXPECT_EQ(Stores[3].ElementID, 2u);
+  EXPECT_EQ(Stores[3].Row, 0u);
+}
+
 /// VectorType>` shape SPIRVToLLVM's `spirv.MatrixType` conversion produces
 /// (see SPIRVToLLVMPatterns.cpp) -- gets a signature element with
 /// `RowCount` set to its column count, and its store decomposes into one
