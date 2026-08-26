@@ -96,6 +96,13 @@ enum class SignatureSystemValue : uint8_t {
   /// producing, distinct from `VertexID` because a hull shader may declare
   /// a different output control point count than its input.
   OutputControlPointID,
+  /// (Roadmap H2) `gl_ViewIndex`: the multiview render-pass instance view
+  /// a vertex/fragment invocation is running for, an *input* readable by
+  /// either stage (unlike `RenderTargetArrayIndex`, a vertex/geometry
+  /// *output*). Sourced from the draw's own current view index
+  /// (`feme::graphics::PreparedDraw::ViewIndex`), not from per-invocation
+  /// data, so every invocation of one draw sees the same value.
+  ViewIndex,
   // Keep last: the number of system values, for range checks.
   NumSystemValues,
 };

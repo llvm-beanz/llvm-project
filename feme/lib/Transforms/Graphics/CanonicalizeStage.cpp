@@ -386,7 +386,7 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
 /// The `feme::SignatureSystemValue` a SPIR-V `BuiltIn` decoration's value
 /// names, or `None` for a builtin FeMe's signature model has no
 /// representation for yet (`PointSize`, `PointCoord`, `SamplePosition`,
-/// the multiview/device-index family, ...), which is then treated as an
+/// `DeviceIndex`, ...), which is then treated as an
 /// ordinary -- and, having no `Location` either, unlinkable -- varying and
 /// diagnosed by `feme::graphics::ValidateStagePass`/the executor rather
 /// than silently mapped onto an unrelated system value. Numbering is the
@@ -402,6 +402,11 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
 /// vertex-index spellings likewise collapse: `VertexId`/`InstanceId` are
 /// the OpenGL-flavored, non-base-relative forms of `VertexIndex`/
 /// `InstanceIndex`, and Vulkan only ever produces the latter pair.
+///
+/// (Roadmap H2) `ViewIndex` (`gl_ViewIndex`, multiview's own builtin) now
+/// maps to `SignatureSystemValue::ViewIndex` -- the "multiview ... family"
+/// this comment used to list as unrepresented is down to just the device-
+/// index one (`DeviceIndex`, `VK_KHR_device_group`, still unimplemented).
 SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
   switch (BuiltIn) {
   case 0:  // Position
@@ -439,6 +444,8 @@ SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
     return SignatureSystemValue::DrawID;
   case 5014: // FragStencilRefEXT
     return SignatureSystemValue::StencilRef;
+  case 4440: // ViewIndex
+    return SignatureSystemValue::ViewIndex;
   default:
     return SignatureSystemValue::None;
   }

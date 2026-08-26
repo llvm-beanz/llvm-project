@@ -203,4 +203,40 @@ TEST(CanonicalizeStageTest, MapsSPIRVBuiltInsToSystemValues) {
   EXPECT_EQ(*Varying.Location, 0u);
 }
 
+/// (Roadmap H2) `BuiltIn ViewIndex` (SPIR-V code 4440, `gl_ViewIndex`) maps
+/// to `SignatureSystemValue::ViewIndex` -- the multiview render-pass
+/// instance view a vertex/fragment invocation runs for, readable from
+/// either stage (unlike `RenderTargetArrayIndex`/`gl_Layer`, a
+/// vertex/geometry *output*).
+TEST(CanonicalizeStageTest, MapsSPIRVViewIndexBuiltInToSystemValue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_ViewIndex = external addrspace(7) constant i32, !spirv.Decorations !0
+    @gl_Position = external addrspace(8) global <4 x float>, !spirv.Decorations !1
+    define void @main() #0 {
+      %vi = load i32, ptr addrspace(7) @gl_ViewIndex
+      %f = sitofp i32 %vi to float
+      %v = insertelement <4 x float> poison, float %f, i32 0
+      store <4 x float> %v, ptr addrspace(8) @gl_Position
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 11, i32 4440}
+    !3 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  const SignatureElement &ViewIndex = Sig->Elements[0];
+  EXPECT_EQ(ViewIndex.Direction, SignatureDirection::Input);
+  EXPECT_EQ(ViewIndex.SystemValue, SignatureSystemValue::ViewIndex);
+  EXPECT_FALSE(ViewIndex.Location.has_value());
+}
+
 } // namespace
