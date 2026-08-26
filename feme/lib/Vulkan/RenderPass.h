@@ -167,6 +167,18 @@ struct RenderTargetView {
 /// consumed by every draw recorded inside it.
 struct RenderTargetBinding {
   std::vector<RenderTargetView> Colors;
+  /// (Roadmap H2h) The current subpass's own input attachments (`Vk
+  /// RenderPass`'s `SubpassDescription::InputAttachments`), resolved to the
+  /// framebuffer's image views: `Inputs[J]` is exactly the view a shader's
+  /// `layout(input_attachment_index = J, ...)` `subpassInput` names, which
+  /// may be a *different* attachment than any of this subpass's own
+  /// `Colors`/`Depth`/`Stencil` (e.g. a later subpass reading back an
+  /// earlier subpass's color output). Null for an unused slot
+  /// (`VK_ATTACHMENT_UNUSED`). Always empty for a `vkCmdBeginRendering`
+  /// instance, which has no classic input-attachment list of its own --
+  /// `VK_KHR_dynamic_rendering_local_read` instead maps `Colors` itself
+  /// through `GraphicsState::ColorAttachmentInputIndices`.
+  std::vector<ImageView *> Inputs;
   /// The depth and stencil attachments. For a pure depth (`D16_UNORM`/
   /// `D32_FLOAT`) or pure stencil (`S8_UINT`) format, at most one of these
   /// is bound and each owns its own image. For a combined format

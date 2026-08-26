@@ -780,6 +780,18 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
   Binding.Layers = Fb.layers();
   Binding.ViewMask = Desc.ViewMask;
 
+  // (Roadmap H2h) `Desc.InputAttachments[J]` names the render pass's own
+  // attachment index a shader's `InputAttachmentIndex == J` decoration
+  // reads -- which may not be one of this subpass's own color/depth/
+  // stencil attachments at all (e.g. a later subpass reading back an
+  // earlier subpass's color output), so it must be resolved here, against
+  // \p Attachments (the whole framebuffer), rather than left for
+  // `buildSubpassInputHeap` to rediscover from `Binding.Colors`.
+  Binding.Inputs.reserve(Desc.InputAttachments.size());
+  for (uint32_t Index : Desc.InputAttachments)
+    Binding.Inputs.push_back(
+        Index == VK_ATTACHMENT_UNUSED ? nullptr : Attachments[Index]);
+
   auto makeView = [&](uint32_t Index, bool UseStencilOps) -> RenderTargetView {
     const AttachmentDescription &Attachment = Pass.attachments()[Index];
     RenderTargetView View;
@@ -956,6 +968,17 @@ uint32_t resolveVertexBindingStride(const GraphicsPipeline &Pipeline,
 /// page). \p Layouts backs each populated descriptor's single-mip
 /// `MipLayouts` entry and must outlive \p Heap.
 ///
+/// Roadmap H2h: \p SubpassInputs, when non-empty, is authoritative instead
+/// -- a classic `VkRenderPass`'s current subpass's own resolved input-
+/// attachment list (`RenderTargetBinding::Inputs`), one entry per shader
+/// `InputAttachmentIndex`, which may name an attachment that is not among
+/// \p Attachments at all (a later subpass reading back an earlier
+/// subpass's own color output, the exact shape `dEQP-VK.multiview.
+/// input_attachments` exercises). `Gfx.ColorAttachmentInputIndices`'s
+/// identity-mapping fallback below only ever applies to `vkCmdBeginRendering`
+/// (`VK_KHR_dynamic_rendering_local_read`), which has no classic input-
+/// attachment list of its own and so always leaves \p SubpassInputs empty.
+///
 /// Roadmap F8b: a depth (`D16_UNORM`/`D32_FLOAT`) or stencil (`S8_UINT`)
 /// attachment's slot is populated exactly like a color one -- the format-
 /// decode gap that left every such fetch reading zero was in the CPU
@@ -974,6 +997,7 @@ Error buildSubpassInputHeap(
     const GraphicsState &Gfx,
     llvm::ArrayRef<feme::graphics::AttachmentView> Attachments,
     const feme::graphics::DepthStencilAttachment &DepthStencil,
+    llvm::ArrayRef<feme::graphics::AttachmentView> SubpassInputs,
     uint32_t SampleCount, std::vector<feme::cpu::FemeImageDescriptor> &Heap,
     std::vector<feme::cpu::FemeImageSubresourceLayout> &Layouts) {
   auto ColorIndexFor = [&](size_t I) -> uint32_t {
@@ -990,12 +1014,29 @@ Error buildSubpassInputHeap(
     Any = true;
     MaxIndex = std::max(MaxIndex, Idx);
   };
-  for (size_t I = 0; I != Attachments.size(); ++I)
-    considerIndex(ColorIndexFor(I));
-  if (Gfx.DepthInputAttachmentIndex)
-    considerIndex(*Gfx.DepthInputAttachmentIndex);
-  if (Gfx.StencilInputAttachmentIndex)
-    considerIndex(*Gfx.StencilInputAttachmentIndex);
+  // (Roadmap H2h) A classic `VkRenderPass`'s current subpass has its own
+  // input-attachment list (`RenderTargetBinding::Inputs`, already resolved
+  // one-per-`InputAttachmentIndex` by `buildRenderTargetBinding`), which
+  // may name an attachment that is not one of this subpass's own color
+  // attachments at all (e.g. a later subpass reading back an earlier
+  // subpass's color output) -- `ColorIndexFor`'s identity-mapping
+  // fallback, built only for `VK_KHR_dynamic_rendering_local_read` (which
+  // has no separate input-attachment concept), cannot see such an
+  // attachment. When the current subpass declares any input attachment,
+  // \p SubpassInputs is authoritative and used directly, one entry per
+  // `InputAttachmentIndex`; otherwise fall back to the dynamic-rendering
+  // mapping over \p Attachments/`DepthStencil`.
+  if (!SubpassInputs.empty()) {
+    for (size_t I = 0; I != SubpassInputs.size(); ++I)
+      considerIndex(static_cast<uint32_t>(I));
+  } else {
+    for (size_t I = 0; I != Attachments.size(); ++I)
+      considerIndex(ColorIndexFor(I));
+    if (Gfx.DepthInputAttachmentIndex)
+      considerIndex(*Gfx.DepthInputAttachmentIndex);
+    if (Gfx.StencilInputAttachmentIndex)
+      considerIndex(*Gfx.StencilInputAttachmentIndex);
+  }
   if (!Any)
     return Error::success();
 
@@ -1036,6 +1077,13 @@ Error buildSubpassInputHeap(
     return Error::success();
   };
 
+  if (!SubpassInputs.empty()) {
+    for (size_t I = 0; I != SubpassInputs.size(); ++I)
+      if (Error E = populate(static_cast<uint32_t>(I), SubpassInputs[I]))
+        return E;
+    return Error::success();
+  }
+
   for (size_t I = 0; I != Attachments.size(); ++I)
     if (Error E = populate(ColorIndexFor(I), Attachments[I]))
       return E;
@@ -1059,7 +1107,7 @@ Error buildSubpassInputHeap(
 /// one-layer view is exactly that view.
 feme::graphics::AttachmentView
 sliceAttachmentLayer(const feme::graphics::AttachmentView &View,
-                    uint32_t Layer) {
+                     uint32_t Layer) {
   if (View.Data.empty() || View.ArrayLayers <= 1)
     return View;
   feme::graphics::AttachmentView Sliced = View;
@@ -1169,6 +1217,28 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
     if (!Attachment)
       return Attachment.takeError();
     DepthStencil.Stencil = *Attachment;
+  }
+
+  // (Roadmap H2h) `Gfx.Binding.Inputs` -- a classic `VkRenderPass`'s
+  // current subpass's own input-attachment list, one entry per shader
+  // `InputAttachmentIndex` -- is resolved here exactly like every other
+  // attachment above, rather than derived from `Attachments`
+  // (this subpass's own color attachments) the way the dynamic-rendering
+  // fallback in `buildSubpassInputHeap` does: a classic subpass's input
+  // attachment may be a different render-pass attachment entirely (e.g. an
+  // earlier subpass's own color output).
+  std::vector<feme::graphics::AttachmentView> SubpassInputs;
+  SubpassInputs.reserve(Gfx.Binding.Inputs.size());
+  for (ImageView *View : Gfx.Binding.Inputs) {
+    if (!View) {
+      SubpassInputs.push_back(feme::graphics::AttachmentView{});
+      continue;
+    }
+    Expected<feme::graphics::AttachmentView> Attachment =
+        resolveAttachmentView(View);
+    if (!Attachment)
+      return Attachment.takeError();
+    SubpassInputs.push_back(*Attachment);
   }
 
   // Vertex fetch: one `VertexBufferBinding` per bound buffer the pipeline
@@ -1315,15 +1385,20 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
     for (const feme::graphics::AttachmentView &A : ResolveAttachments)
       ViewResolveAttachments.push_back(sliceAttachmentLayer(A, ViewIndex));
     feme::graphics::DepthStencilAttachment ViewDepthStencil;
-    ViewDepthStencil.Depth = sliceAttachmentLayer(DepthStencil.Depth, ViewIndex);
+    ViewDepthStencil.Depth =
+        sliceAttachmentLayer(DepthStencil.Depth, ViewIndex);
     ViewDepthStencil.Stencil =
         sliceAttachmentLayer(DepthStencil.Stencil, ViewIndex);
+    std::vector<feme::graphics::AttachmentView> ViewSubpassInputs;
+    ViewSubpassInputs.reserve(SubpassInputs.size());
+    for (const feme::graphics::AttachmentView &A : SubpassInputs)
+      ViewSubpassInputs.push_back(sliceAttachmentLayer(A, ViewIndex));
 
     std::vector<feme::cpu::FemeImageDescriptor> SubpassInputHeap;
     std::vector<feme::cpu::FemeImageSubresourceLayout> SubpassInputLayouts;
     if (Error E = buildSubpassInputHeap(
-            Gfx, ViewAttachments, ViewDepthStencil, Pipeline.sampleCount(),
-            SubpassInputHeap, SubpassInputLayouts))
+            Gfx, ViewAttachments, ViewDepthStencil, ViewSubpassInputs,
+            Pipeline.sampleCount(), SubpassInputHeap, SubpassInputLayouts))
       return E;
 
     uint64_t PassedSamples = 0;
