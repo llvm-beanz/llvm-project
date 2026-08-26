@@ -91,6 +91,50 @@ VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(VkDevice, VkDeviceMemory) {
   // Buffers": "Coherent memory avoids cache-management work").
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory2(
+    VkDevice device, const VkMemoryMapInfo *pMemoryMapInfo, void **ppData) {
+  // `VkMemoryMapInfo`'s `pNext` chain has no recognized extension struct
+  // (roadmap F14 -- `VK_KHR_map_memory2`'s only other user, `VK_EXT_map_
+  // memory_placed`, is not implemented/advertised), so every field this
+  // wrapper needs comes straight off the struct itself, matching
+  // `vkBindBufferMemory2`'s (Buffer.cpp) "unwrap the info struct, call the
+  // plain form" precedent.
+  return feme::vulkan::vkMapMemory(device, pMemoryMapInfo->memory,
+                                   pMemoryMapInfo->offset,
+                                   pMemoryMapInfo->size,
+                                   pMemoryMapInfo->flags, ppData);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vkUnmapMemory2(VkDevice device, const VkMemoryUnmapInfo *pMemoryUnmapInfo) {
+  // `VK_MEMORY_UNMAP_RESERVE_BIT_EXT` only has meaning together with
+  // `VK_EXT_map_memory_placed`'s reservation-backed mapping, which this
+  // ICD does not implement/advertise: a real placed mapping never exists
+  // here to reserve, so the bit is validate-only, exactly like the rest
+  // of `vkUnmapMemory`'s coherent-memory no-op above (see "Memory and
+  // Buffers"). `VkMemoryUnmapInfo`'s `pNext` chain has no recognized
+  // extension struct either, for the same reason as `vkMapMemory2` above.
+  feme::vulkan::vkUnmapMemory(device, pMemoryUnmapInfo->memory);
+  return VK_SUCCESS;
+}
+
+// `vkMapMemory2`/`vkUnmapMemory2` above are already core, non-`KHR`-suffixed
+// `VK_VERSION_1_4` entries `vk_gen_entrypoints.py`'s `CORE_FEATURES`
+// resolves, but (like `VK_KHR_maintenance5`'s granularity/subresource-layout
+// commands) a `deqp-vk` test whose own negotiated `usedApiVersion` is below
+// 1.4 falls back to the `KHR` name instead, which the loader's icd.json
+// `api_version` (1.1) makes otherwise unreachable -- see
+// `vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` comment for this row.
+VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory2KHR(
+    VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo, void **ppData) {
+  return feme::vulkan::vkMapMemory2(device, pMemoryMapInfo, ppData);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkUnmapMemory2KHR(
+    VkDevice device, const VkMemoryUnmapInfoKHR *pMemoryUnmapInfo) {
+  return feme::vulkan::vkUnmapMemory2(device, pMemoryUnmapInfo);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 vkFlushMappedMemoryRanges(VkDevice, uint32_t memoryRangeCount,
                           const VkMappedMemoryRange *pMemoryRanges) {

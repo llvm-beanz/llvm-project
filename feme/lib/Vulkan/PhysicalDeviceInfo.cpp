@@ -734,6 +734,16 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // advertised `apiVersion`.
       {VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME,
        VK_KHR_LOAD_STORE_OP_NONE_SPEC_VERSION},
+      // (roadmap F14) `vkMapMemory2`/`vkUnmapMemory2` (Memory.cpp) are
+      // implemented; unlike most post-`maintenance5` entries above, these
+      // two commands are already core, non-`KHR`-suffixed `VK_VERSION_1_4`
+      // entries `vk_gen_entrypoints.py`'s `CORE_FEATURES` resolves, but
+      // `vktMemoryMappingTests.cpp`'s own
+      // `requireDeviceFunctionality("VK_KHR_map_memory2")` still enables
+      // this extension by name regardless of the advertised `apiVersion`,
+      // so it must be listed here too, or every one of those cases fails
+      // `NotSupported` instead of running for real.
+      {VK_KHR_MAP_MEMORY_2_EXTENSION_NAME, VK_KHR_MAP_MEMORY_2_SPEC_VERSION},
   };
   return Extensions;
 }

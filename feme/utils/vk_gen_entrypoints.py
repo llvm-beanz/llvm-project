@@ -96,6 +96,17 @@ SUPPORTED_EXTENSIONS = (
     # `dynamicRenderingLocalRead`'s own feature-bit comment in
     # EntryPoints.cpp for this row's single-sample-color-attachment scope.
     "VK_KHR_dynamic_rendering_local_read",
+    # (roadmap F14) `vkMapMemory2KHR`/`vkUnmapMemory2KHR` (Memory.cpp), thin
+    # wrappers around the core, non-`KHR`-suffixed `vkMapMemory2`/
+    # `vkUnmapMemory2` this driver also implements. Like `maintenance5`
+    # above, `vktMemoryMappingTests.cpp`'s own `mapMemoryWrapper`/
+    # `unmapMemoryWrapper` fall back to the `KHR` name whenever `deqp-vk`'s
+    # own negotiated `usedApiVersion` for a test is below 1.4 (confirmed by
+    # a real CTS run SIGSEGV'ing in `testMemoryMapping` through a null
+    # `m_vk.mapMemory2` exactly the way the granularity functions did), so
+    # the core name alone is not reachable through the loader for every
+    # caller.
+    "VK_KHR_map_memory2",
 )
 
 # First-parameter handle types that make a command dispatched at the

@@ -9,8 +9,8 @@
      skip since it's conditioned on an optional extension, not the core
      version itself. It also declares `VK_KHR_dynamic_rendering`,
      `VK_EXT_extended_dynamic_state`, `VK_KHR_maintenance5`,
-     `VK_KHR_line_rasterization`, and `VK_KHR_dynamic_rendering_local_read`,
-     the five
+     `VK_KHR_line_rasterization`, `VK_KHR_dynamic_rendering_local_read`, and
+     `VK_KHR_map_memory2`, the six
      extensions `SUPPORTED_EXTENSIONS` lists, whose commands must be read out
      of `<extensions>` rather than out of any core feature. -->
 <registry>
@@ -59,6 +59,14 @@
     <command>
       <proto><type>void</type><name>vkCmdSetRenderingInputAttachmentIndicesKHR</name></proto>
       <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkMapMemory2KHR</name></proto>
+      <param><type>VkDevice</type><name>device</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkUnmapMemory2KHR</name></proto>
+      <param><type>VkDevice</type><name>device</name></param>
     </command>
   </commands>
   <feature api="vulkan" name="VK_BASE_VERSION_1_0" number="1.0">
@@ -125,6 +133,13 @@
       <require>
         <command name="vkCmdSetRenderingAttachmentLocationsKHR"/>
         <command name="vkCmdSetRenderingInputAttachmentIndicesKHR"/>
+      </require>
+    </extension>
+    <extension name="VK_KHR_map_memory2" number="890" type="device"
+               supported="vulkan">
+      <require>
+        <command name="vkMapMemory2KHR"/>
+        <command name="vkUnmapMemory2KHR"/>
       </require>
     </extension>
   </extensions>

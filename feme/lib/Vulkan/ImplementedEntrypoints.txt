@@ -47,6 +47,11 @@ vkUnmapMemory
 vkFlushMappedMemoryRanges
 vkInvalidateMappedMemoryRanges
 vkGetDeviceMemoryCommitment
+# (roadmap F14) VK_KHR_map_memory2.
+vkMapMemory2
+vkUnmapMemory2
+vkMapMemory2KHR
+vkUnmapMemory2KHR
 
 # V1: buffers (see "Object Model" and "Memory and Buffers").
 vkCreateBuffer

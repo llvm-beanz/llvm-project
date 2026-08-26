@@ -97,4 +97,85 @@ TEST_F(MemoryTest, MapRejectsOutOfRange) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+// Roadmap F14: VK_KHR_map_memory2's vkMapMemory2/vkUnmapMemory2 wrap the
+// same logic as vkMapMemory/vkUnmapMemory above, driven by a
+// VkMemoryMapInfo/VkMemoryUnmapInfo struct instead of separate arguments.
+TEST_F(MemoryTest, MapMemory2WriteUnmap) {
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 256;
+  AllocInfo.memoryTypeIndex = 0;
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+  ASSERT_NE(Memory, VK_NULL_HANDLE);
+
+  VkMemoryMapInfo MapInfo{};
+  MapInfo.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO;
+  MapInfo.memory = Memory;
+  MapInfo.offset = 0;
+  MapInfo.size = VK_WHOLE_SIZE;
+
+  void *Data = nullptr;
+  ASSERT_EQ(vkMapMemory2(Device, &MapInfo, &Data), VK_SUCCESS);
+  ASSERT_NE(Data, nullptr);
+  std::memset(Data, 0x42, 256);
+  EXPECT_EQ(static_cast<uint8_t *>(Data)[255], 0x42);
+
+  VkMemoryUnmapInfo UnmapInfo{};
+  UnmapInfo.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO;
+  UnmapInfo.memory = Memory;
+  EXPECT_EQ(vkUnmapMemory2(Device, &UnmapInfo), VK_SUCCESS);
+
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+TEST_F(MemoryTest, MapMemory2RejectsOutOfRange) {
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 64;
+  AllocInfo.memoryTypeIndex = 0;
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+
+  VkMemoryMapInfo MapInfo{};
+  MapInfo.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO;
+  MapInfo.memory = Memory;
+  MapInfo.offset = 32;
+  MapInfo.size = 64;
+
+  void *Data = nullptr;
+  EXPECT_EQ(vkMapMemory2(Device, &MapInfo, &Data),
+            VK_ERROR_MEMORY_MAP_FAILED);
+
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+// `VK_MEMORY_UNMAP_RESERVE_BIT_EXT` only has meaning together with
+// `VK_EXT_map_memory_placed` (unimplemented); this driver accepts it as a
+// validate-only no-op rather than rejecting it.
+TEST_F(MemoryTest, UnmapMemory2AcceptsReserveBit) {
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 64;
+  AllocInfo.memoryTypeIndex = 0;
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+
+  VkMemoryMapInfo MapInfo{};
+  MapInfo.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO;
+  MapInfo.memory = Memory;
+  MapInfo.offset = 0;
+  MapInfo.size = VK_WHOLE_SIZE;
+  void *Data = nullptr;
+  ASSERT_EQ(vkMapMemory2(Device, &MapInfo, &Data), VK_SUCCESS);
+
+  VkMemoryUnmapInfo UnmapInfo{};
+  UnmapInfo.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO;
+  UnmapInfo.flags = VK_MEMORY_UNMAP_RESERVE_BIT_EXT;
+  UnmapInfo.memory = Memory;
+  EXPECT_EQ(vkUnmapMemory2(Device, &UnmapInfo), VK_SUCCESS);
+
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 } // namespace

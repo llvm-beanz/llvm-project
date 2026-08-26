@@ -122,6 +122,19 @@ vkInvalidateMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount,
 VKAPI_ATTR void VKAPI_CALL
 vkGetDeviceMemoryCommitment(VkDevice device, VkDeviceMemory memory,
                             VkDeviceSize *pCommittedMemoryInBytes);
+// (roadmap F14) VK_KHR_map_memory2: pNext-extensible map/unmap wrappers.
+VKAPI_ATTR VkResult VKAPI_CALL
+vkMapMemory2(VkDevice device, const VkMemoryMapInfo *pMemoryMapInfo,
+            void **ppData);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkUnmapMemory2(VkDevice device, const VkMemoryUnmapInfo *pMemoryUnmapInfo);
+// See Memory.cpp's own comment above these two: the loader cannot reach
+// the core names above for a caller using a pre-1.4 `usedApiVersion`.
+VKAPI_ATTR VkResult VKAPI_CALL
+vkMapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
+                void **ppData);
+VKAPI_ATTR VkResult VKAPI_CALL vkUnmapMemory2KHR(
+    VkDevice device, const VkMemoryUnmapInfoKHR *pMemoryUnmapInfo);
 
 // V1: buffers (see "Object Model" and "Memory and Buffers").
 VKAPI_ATTR VkResult VKAPI_CALL
