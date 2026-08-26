@@ -13,6 +13,7 @@
 #include "Image.h"
 
 #include "feme/Graphics/ImageFixture.h"
+#include "feme/Graphics/LayeredRendering.h"
 
 #include "llvm/ADT/STLFunctionalExtras.h"
 
@@ -446,8 +447,21 @@ Error runClearDepthStencilImage(Image *Img,
 /// rather than a precomputed uniform value, so a partial (single-aspect)
 /// clear of a combined depth+stencil attachment never clobbers the other
 /// aspect's bits (roadmap C1).
+///
+/// (Roadmap H2h) Inside a multiview render pass instance, \p ViewMask
+/// (`RenderTargetBinding::ViewMask`, 0 outside multiview) makes the clear
+/// apply once per set bit, to that bit's own attachment array layer --
+/// exactly the replication `CommandBuffer.cpp`'s own `runDraw` already
+/// applies via `sliceAttachmentLayer`, and precisely because a clear rect's
+/// own `baseArrayLayer`/`layerCount` are relative to the current subpass's
+/// view mask rather than the underlying attachment image's own layers (the
+/// Vulkan spec's "if there is no VkRenderPassMultiviewCreateInfo... clears
+/// baseArrayLayer/layerCount; otherwise clears the views listed in the
+/// mask" `vkCmdClearAttachments` rule). Every non-multiview attachment
+/// (`ViewMask == 0`) is unaffected: the mask normalizes to `1u`, one
+/// iteration at layer 0, matching every call before this milestone.
 Error clearAttachmentRects(const RenderTargetView &Target,
-                          ArrayRef<VkClearRect> Rects,
+                          ArrayRef<VkClearRect> Rects, uint32_t ViewMask,
                           llvm::function_ref<Error(MutableArrayRef<uint8_t>)>
                               Write) {
   Expected<feme::graphics::AttachmentView> View =
@@ -459,24 +473,36 @@ Error clearAttachmentRects(const RenderTargetView &Target,
   if (!ElemSize)
     return ElemSize.takeError();
 
-  for (const VkClearRect &Rect : Rects) {
-    uint32_t MinX = std::max<int32_t>(0, Rect.rect.offset.x);
-    uint32_t MinY = std::max<int32_t>(0, Rect.rect.offset.y);
-    uint32_t MaxX = std::min<uint64_t>(View->Width,
-                                       uint64_t(MinX) + Rect.rect.extent.width);
-    uint32_t MaxY = std::min<uint64_t>(
-        View->Height, uint64_t(MinY) + Rect.rect.extent.height);
-    for (uint32_t Y = MinY; Y < MaxY; ++Y)
-      for (uint32_t X = MinX; X < MaxX; ++X)
-        for (uint32_t S = 0; S != Target.SampleCount; ++S) {
-          size_t Offset =
-              (((size_t)Y * View->Width + X) * Target.SampleCount + S) *
-              *ElemSize;
-          if (Error E =
-                  Write(MutableArrayRef<uint8_t>(View->Data.data() + Offset,
-                                                 *ElemSize)))
-            return E;
-        }
+  for (uint32_t Mask = ViewMask ? ViewMask : 1u, ViewIndex = 0; Mask != 0;
+       ++ViewIndex, Mask >>= 1) {
+    if ((Mask & 1u) == 0)
+      continue;
+    feme::graphics::AttachmentView Sliced = *View;
+    if (!Sliced.Data.empty() && Sliced.ArrayLayers > 1) {
+      uint64_t LayerSizeBytes = Sliced.Data.size() / Sliced.ArrayLayers;
+      uint64_t Offset =
+          feme::graphics::getAttachmentLayerByteOffset(ViewIndex, LayerSizeBytes);
+      Sliced.Data = Sliced.Data.slice(Offset, LayerSizeBytes);
+      Sliced.ArrayLayers = 1;
+    }
+    for (const VkClearRect &Rect : Rects) {
+      uint32_t MinX = std::max<int32_t>(0, Rect.rect.offset.x);
+      uint32_t MinY = std::max<int32_t>(0, Rect.rect.offset.y);
+      uint32_t MaxX = std::min<uint64_t>(
+          Sliced.Width, uint64_t(MinX) + Rect.rect.extent.width);
+      uint32_t MaxY = std::min<uint64_t>(
+          Sliced.Height, uint64_t(MinY) + Rect.rect.extent.height);
+      for (uint32_t Y = MinY; Y < MaxY; ++Y)
+        for (uint32_t X = MinX; X < MaxX; ++X)
+          for (uint32_t S = 0; S != Target.SampleCount; ++S) {
+            size_t Offset =
+                (((size_t)Y * Sliced.Width + X) * Target.SampleCount + S) *
+                *ElemSize;
+            if (Error E = Write(MutableArrayRef<uint8_t>(
+                    Sliced.Data.data() + Offset, *ElemSize)))
+              return E;
+          }
+    }
   }
   return Error::success();
 }
@@ -511,7 +537,8 @@ Error runClearAttachments(const RenderTargetBinding &Binding,
       if (!Texel)
         return Texel.takeError();
       if (Error E = clearAttachmentRects(
-              Target, Rects, [&](MutableArrayRef<uint8_t> Texel_) -> Error {
+              Target, Rects, Binding.ViewMask,
+              [&](MutableArrayRef<uint8_t> Texel_) -> Error {
                 std::memcpy(Texel_.data(), Texel->data(), Texel_.size());
                 return Error::success();
               }))
@@ -529,7 +556,8 @@ Error runClearAttachments(const RenderTargetBinding &Binding,
       feme::cpu::ResourceFormat Format = Binding.Depth->Format;
       double Depth = Clear.clearValue.depthStencil.depth;
       if (Error E = clearAttachmentRects(
-              *Binding.Depth, Rects, [&](MutableArrayRef<uint8_t> Texel) {
+              *Binding.Depth, Rects, Binding.ViewMask,
+              [&](MutableArrayRef<uint8_t> Texel) {
                 return feme::graphics::packDepthClear(Format, Depth, Texel);
               }))
         return E;
@@ -542,7 +570,8 @@ Error runClearAttachments(const RenderTargetBinding &Binding,
       feme::cpu::ResourceFormat Format = Binding.Stencil->Format;
       uint32_t Stencil = Clear.clearValue.depthStencil.stencil;
       if (Error E = clearAttachmentRects(
-              *Binding.Stencil, Rects, [&](MutableArrayRef<uint8_t> Texel) {
+              *Binding.Stencil, Rects, Binding.ViewMask,
+              [&](MutableArrayRef<uint8_t> Texel) {
                 return feme::graphics::packStencilClear(Format, Stencil,
                                                         Texel);
               }))
