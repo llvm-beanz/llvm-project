@@ -217,6 +217,46 @@ StageIODecorationsMap collectStageIODecorations(mlir::Operation *Module);
 void attachStageIODecorations(const StageIODecorationsMap &Decorations,
                               llvm::Module &LLVMModule);
 
+/// The name of the `llvm.mlir.global` attribute the stage-IO global variable
+/// pattern (see populateSPIRVToLLVMTargetPatterns) records a builtin
+/// interface block's (e.g. `gl_PerVertex`) own *per-member* decorations
+/// under (roadmap H2c): an `ArrayAttr` of `(memberIndex, tuples...)`
+/// entries, one per struct member carrying a recognized decoration, where
+/// `tuples` is itself an `ArrayAttr` of `(i32 decoration, i32 arg...)`
+/// tuples in the same shape getStageIODecorationsAttrName()'s whole-variable
+/// attribute uses. Unlike that whole-variable attribute -- which
+/// `attachStageIODecorations` turns into the real `!spirv.Decorations`
+/// metadata LLVM's SPIRV backend understands -- this is a FeMe-internal
+/// encoding with no backend equivalent (SPIR-V's own `OpMemberDecorate`
+/// decorates a *type*, not a global variable, so there is nothing for the
+/// backend to attach a per-member decoration to at the global-variable
+/// granularity this metadata channel uses); it exists purely for
+/// `feme::graphics::CanonicalizeStagePass` (roadmap H2d) to recover which
+/// system value/`Location` each member of an interface block corresponds
+/// to.
+llvm::StringRef getStageIOMemberDecorationsAttrName();
+
+/// A builtin interface block's per-member decorations (see
+/// getStageIOMemberDecorationsAttrName), keyed by the `llvm.mlir.global`'s
+/// symbol name.
+using StageIOMemberDecorationsMap = llvm::StringMap<mlir::ArrayAttr>;
+
+/// Collects every `llvm.mlir.global` in \p Module carrying a
+/// getStageIOMemberDecorationsAttrName() attribute, keyed by symbol name.
+/// Must run before `mlir::translateModuleToLLVMIR`, the same way
+/// collectStageIODecorations does, and for the same reason.
+StageIOMemberDecorationsMap
+collectStageIOMemberDecorations(mlir::Operation *Module);
+
+/// Re-attaches \p MemberDecorations (from collectStageIOMemberDecorations,
+/// run on the `llvm` dialect module \p LLVMModule was translated from) as
+/// `feme.spirv.MemberDecorations` metadata on the matching
+/// `llvm::GlobalVariable`s in \p LLVMModule, looked up by name. A no-op for
+/// any name \p LLVMModule does not declare a global under.
+void attachStageIOMemberDecorations(
+    const StageIOMemberDecorationsMap &MemberDecorations,
+    llvm::Module &LLVMModule);
+
 } // namespace spirv
 } // namespace feme
 

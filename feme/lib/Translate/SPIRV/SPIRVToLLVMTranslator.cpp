@@ -43,6 +43,12 @@ llvm::Expected<Module> SPIRVToLLVMTranslator::translate(Module &&M,
   feme::spirv::StageIODecorationsMap Decorations =
       feme::spirv::collectStageIODecorations(
           LLVMDialectModule->getMLIROperation());
+  // A builtin interface block's (e.g. `gl_PerVertex`) own per-member
+  // decorations survive the same way, under a distinct attribute (roadmap
+  // H2c) -- see feme::spirv::getStageIOMemberDecorationsAttrName.
+  feme::spirv::StageIOMemberDecorationsMap MemberDecorations =
+      feme::spirv::collectStageIOMemberDecorations(
+          LLVMDialectModule->getMLIROperation());
 
   LLVMDialectToLLVMIRTranslator ToLLVMIR;
   llvm::Expected<Module> LLVMIRModule =
@@ -52,6 +58,8 @@ llvm::Expected<Module> SPIRVToLLVMTranslator::translate(Module &&M,
 
   feme::spirv::attachStageIODecorations(Decorations,
                                         LLVMIRModule->getLLVMModule());
+  feme::spirv::attachStageIOMemberDecorations(MemberDecorations,
+                                              LLVMIRModule->getLLVMModule());
   return LLVMIRModule;
 }
 

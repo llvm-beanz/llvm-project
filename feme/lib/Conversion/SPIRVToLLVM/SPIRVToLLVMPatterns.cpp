@@ -887,6 +887,79 @@ mlir::ArrayAttr buildStageIODecorationsAttr(mlir::spirv::GlobalVariableOp Op) {
   return Builder.getArrayAttr(Decorations);
 }
 
+/// Builds one `(code, arg...)` tuple for a single struct member's decoration
+/// (see mlir::spirv::StructType::MemberDecorationInfo), in the same shape
+/// buildStageIODecorationsAttr uses for a whole-variable decoration, or a
+/// null attribute if \p Info's decoration is not one of the ones a stage-IO
+/// interface block's own member can carry (i.e. not `Offset`/`MatrixStride`/
+/// `ColMajor`/`RowMajor`, an ordinary UBO/SSBO struct's own layout
+/// decorations, which a stage-IO struct never carries in practice, but
+/// filtered defensively all the same).
+mlir::Attribute buildMemberDecorationTuple(
+    mlir::Builder &Builder,
+    const mlir::spirv::StructType::MemberDecorationInfo &Info) {
+  switch (Info.decoration) {
+  case mlir::spirv::Decoration::BuiltIn:
+  case mlir::spirv::Decoration::Location:
+  case mlir::spirv::Decoration::Component:
+  case mlir::spirv::Decoration::Index: {
+    auto Value =
+        mlir::dyn_cast_or_null<mlir::IntegerAttr>(Info.decorationValue);
+    if (!Value)
+      return nullptr;
+    return Builder.getArrayAttr(
+        {Builder.getI32IntegerAttr(static_cast<int32_t>(Info.decoration)),
+         Builder.getI32IntegerAttr(static_cast<int32_t>(Value.getInt()))});
+  }
+  case mlir::spirv::Decoration::NoPerspective:
+  case mlir::spirv::Decoration::Flat:
+  case mlir::spirv::Decoration::Patch:
+  case mlir::spirv::Decoration::Centroid:
+  case mlir::spirv::Decoration::Sample:
+    return Builder.getArrayAttr(
+        {Builder.getI32IntegerAttr(static_cast<int32_t>(Info.decoration))});
+  default:
+    return nullptr;
+  }
+}
+
+/// Builds the getStageIOMemberDecorationsAttrName() attribute for \p Struct
+/// -- a builtin interface block's own field struct (e.g. `gl_PerVertex`'s
+/// `{Position, PointSize, ClipDistance, CullDistance}`) -- from its members'
+/// own `OpMemberDecorate`d decorations
+/// (mlir::spirv::StructType::getMemberDecorations, already used by
+/// isBufferBlockWritable above for a storage-buffer block's `NonWritable`
+/// member decoration), or a null attribute if no member carries a
+/// recognized one (roadmap H2c: SPIR-V decorates a `BuiltIn` interface
+/// block's members individually rather than the block variable itself, so
+/// buildStageIODecorationsAttr's whole-variable read never sees them).
+/// Each entry is `(memberIndex, tuples)`, where `tuples` is an `ArrayAttr`
+/// of buildMemberDecorationTuple's own per-decoration shape.
+mlir::ArrayAttr buildMemberDecorationsAttr(mlir::spirv::StructType Struct) {
+  mlir::Builder Builder(Struct.getContext());
+  llvm::SmallVector<mlir::Attribute> Members;
+  for (unsigned Index = 0, End = Struct.getNumElements(); Index != End;
+       ++Index) {
+    llvm::SmallVector<mlir::spirv::StructType::MemberDecorationInfo, 2>
+        Decorations;
+    Struct.getMemberDecorations(Index, Decorations);
+
+    llvm::SmallVector<mlir::Attribute> Tuples;
+    for (const auto &Decoration : Decorations)
+      if (mlir::Attribute Tuple =
+              buildMemberDecorationTuple(Builder, Decoration))
+        Tuples.push_back(Tuple);
+    if (Tuples.empty())
+      continue;
+    Members.push_back(Builder.getArrayAttr(
+        {Builder.getI32IntegerAttr(static_cast<int32_t>(Index)),
+         Builder.getArrayAttr(Tuples)}));
+  }
+  if (Members.empty())
+    return nullptr;
+  return Builder.getArrayAttr(Members);
+}
+
 /// Converts a non-builtin `Input`/`Output` `spirv.GlobalVariable` -- an
 /// ordinary vertex/fragment/etc. stage-IO variable, as opposed to a `BuiltIn`
 /// one (BuiltInGlobalVariablePattern) -- to an `llvm.mlir.global` in the
@@ -956,6 +1029,17 @@ public:
     if (mlir::ArrayAttr Decorations = buildStageIODecorationsAttr(Op))
       NewGlobal->setAttr(feme::spirv::getStageIODecorationsAttrName(),
                          Decorations);
+
+    // A builtin interface block (e.g. `gl_PerVertex`) has no whole-variable
+    // `BuiltIn` attribute of its own -- SPIR-V decorates its members
+    // individually -- but those per-member decorations are recovered here
+    // the same way (roadmap H2c).
+    if (auto Struct =
+            mlir::dyn_cast<mlir::spirv::StructType>(SrcType.getPointeeType()))
+      if (mlir::ArrayAttr MemberDecorations =
+              buildMemberDecorationsAttr(Struct))
+        NewGlobal->setAttr(feme::spirv::getStageIOMemberDecorationsAttrName(),
+                           MemberDecorations);
     return mlir::success();
   }
 };
