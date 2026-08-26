@@ -33236,3 +33236,114 @@ so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 changes) and added a new "Roadmap F12b: measured impact" section to
 VulkanCTSReport.md recording the before/after diagnostic and CTS numbers
 above.
+
+# Roadmap F13: `VK_KHR_load_store_op_none`
+
+## Reading the roadmap row and the existing code first
+
+F13's own text predicted the smallest possible row: `VK_ATTACHMENT_LOAD_
+OP_NONE`/`VK_ATTACHMENT_STORE_OP_NONE` are two new enumerants an existing
+load/store-op switch already has a natural "do nothing" case for, citing
+`RenderPass.cpp`. Reading `RenderPass.cpp` end to end found no such switch
+at all -- attachment normalization (`normalizeAttachment`) just copies
+`loadOp`/`storeOp` through into `AttachmentDescription` verbatim, with no
+validation of the enum's value. The actual place either op is *inspected*
+turned out to be `CommandBuffer.cpp`'s `applyClear`, which unifies both
+`VkRenderPass` and `vkCmdBeginRendering` attachments into one
+`RenderTargetView` and checks `if (View.LoadOp != VK_ATTACHMENT_LOAD_OP_
+CLEAR) return Error::success();` before ever looking at the value further.
+That check already treats *any* non-`CLEAR` op -- `LOAD`, `DONT_CARE`, and
+now `NONE` -- identically: leave the attachment's memory alone. `StoreOp`
+is carried on `RenderTargetView` too, but grepping for every read of it
+found none outside the two places it is *assigned* (`normalizeAttachment`/
+`normalizeRenderingAttachment`): nothing ever acts on it. That makes sense
+for a real-memory-backed software renderer -- there is no discard-on-store
+optimization to skip, so `STORE`/`DONT_CARE`/`NONE` are already
+indistinguishable outcomes regardless of which one a caller passes.
+
+So this row's own prediction was right in spirit but wrong in one detail
+(the switch lives in `CommandBuffer.cpp`, not `RenderPass.cpp`, because
+render-pass and dynamic-rendering attachments were unified into one
+`RenderTargetView` sometime after this row was originally written) -- and
+genuinely required zero behavioral code changes. The only real work left
+was declarative: advertise `VK_KHR_load_store_op_none` in
+`PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions`.
+
+## A bookkeeping gap, found while updating the docs
+
+Before touching the doc-generation scripts, I checked whether
+`AdvertisedExtensions.txt`/`AdvertisedPromotedExtensions.txt`/
+`AdvertisedPromotedFeatures.txt` (the hand-maintained files
+`vk_gen_extension_inventory.py`/`vk_gen_feature_inventory.py` regenerate
+`VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` from) already
+agreed with `PhysicalDeviceInfo.cpp`/`EntryPoints.cpp`. They did not: all
+three were missing six already-closed rows worth of entries --
+`VK_KHR_global_priority` (F1), `VK_KHR_shader_subgroup_rotate` (F2),
+`VK_KHR_shader_expect_assume` (F4, present in the extensions files but
+absent from the features one is not the case here -- F4 has no feature
+bit of its own), `VK_KHR_line_rasterization` (F5), `VK_KHR_vertex_
+attribute_divisor` (F6, present already), `VK_KHR_index_type_uint8` (F7),
+`VK_KHR_dynamic_rendering_local_read` (F8), `VK_EXT_pipeline_protected_
+access` (F9), and `VK_KHR_push_descriptor` (F12). Each is genuinely
+implemented -- confirmed directly in `EntryPoints.cpp`/`CommandBuffer.cpp`/
+`GraphicsPipeline.cpp`, not inferred -- but had never been recorded in
+these three files, even though the *committed* `Vulkan14FeatureInventory.
+md`/`VulkanExtensionInventory.md` documents already (inconsistently)
+described some of them as advertised: those docs had been hand-patched to
+describe the true state at some point without the underlying tracking
+files being updated to match, so a straight regeneration from the
+committed files alone would have *regressed* the docs' own accuracy,
+silently re-describing already-closed rows as not advertised.
+
+Restored all three files to match `PhysicalDeviceInfo.cpp`/
+`EntryPoints.cpp` (in the same roadmap order each file's own preceding
+entries already use), corrected `PlannedExtensions.txt` to drop the same
+six rows (still listed as "planned" despite being fully implemented), and
+added F13's own new entries to all four. Verified the fix is genuine, not
+just numerically plausible, by grepping each newly-added feature bit's own
+`= VK_TRUE` assignment site in `EntryPoints.cpp` before adding it.
+
+## Testing
+
+Added `RenderPassTest.CompilesLoadStoreOpNone` (structural: `VK_ATTACHMENT_
+LOAD_OP_NONE`/`STORE_OP_NONE` round-trip through `vkCreateRenderPass`
+unchanged) and `DrawTest.LoadStoreOpNoneLeavesUntouchedTexelsAlone`
+(behavioral: pre-fills the color attachment with a sentinel byte pattern,
+begins a render pass whose only attachment uses `LOAD_OP_NONE`/`STORE_OP_
+NONE`, draws a scissored quad, and checks that the sentinel survives
+outside the scissor -- proving `NONE` does not clear, unlike every other
+test in this file -- while the draw's own red still lands inside it,
+proving `STORE_OP_NONE` does not suppress it either). `ninja check-feme`:
+1792 discovered, 1791 passed, 1 unsupported (pre-existing, unrelated) --
+up from 1790 discovered before this row.
+
+## Verifying against the actual CTS
+
+Ran `dEQP-VK.renderpasses.*load_store_op_none*` (273 cases) against the
+built ICD. Zero `NotSupported ("VK_KHR_load_store_op_none is not
+supported")`, confirming the extension gate is genuinely passed. Every
+failure traced to one of three pre-existing, unrelated gaps (the SIMDize
+divergent-value decomposition gap F5-F12's own sections already document,
+an unimplemented combined depth/stencil format, and a pipeline-library
+construction gap the `complete_secondary_cmd_buff` variant hits) -- none
+of them anything this row's own load/store-op handling could plausibly
+have caused, and confirmed identical on a completely unrelated baseline
+case (`dEQP-VK.renderpasses.renderpass2.suballocation.simple.color`, which
+has nothing to do with `NONE` load/store ops and fails with the exact same
+SIMDize diagnostic). Also re-ran `dEQP-VK.api.info.extension_core_
+versions.extension_core_versions`/`vulkan1p2.feature_extensions_
+consistency`/`vulkan1p3.feature_extensions_consistency` -- the checks a
+newly-advertised extension name could most plausibly regress -- and all
+three still `Pass`.
+
+## Documentation
+
+Struck through Roadmap.md's F13 row, noting the `RenderPass.cpp` ->
+`CommandBuffer.cpp` correction and the bookkeeping-gap discovery. Added a
+"Status (roadmap F13)" note to FeMeVulkanDesign.md's "Render passes and
+dynamic rendering" section. Regenerated `VulkanExtensionInventory.md`/
+`Vulkan14FeatureInventory.md` against the corrected tracking files (22 ->
+29 advertised extensions, 59 -> 52 planned, 1.4 promoted features 15/21 ->
+20/21, 1.4 promoted extensions 8/16 -> 14/16) and updated their own
+"Findings" prose to match. Added a "Roadmap F13: measured impact" section
+to VulkanCTSReport.md with the CTS numbers above.
