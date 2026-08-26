@@ -6,6 +6,7 @@ add_feme_library(FeMeTransformsGraphics
   Core
   Support
   TargetParser
+  TransformUtils
 
   LINK_LIBS PUBLIC
   FeMeCore

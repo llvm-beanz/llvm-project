@@ -20,6 +20,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
@@ -30,6 +31,7 @@
 #include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
 using namespace llvm;
 using namespace feme;
@@ -598,6 +600,56 @@ bool isSPIRVStageIOGlobal(const GlobalVariable *GV, unsigned &AddrSpace) {
          GV->getMetadata("feme.spirv.MemberDecorations") != nullptr;
 }
 
+/// (Roadmap H2e) Tracks, per (`ElementID`, `Row`, `Component`) leaf scalar
+/// of an `Output`-direction stage-IO element, the shadow `AllocaInst` its
+/// stores and read-back loads are redirected through. Unlike DXIL's
+/// `storeOutput` (genuinely write-only), SPIR-V's `Output` storage class
+/// permits reading back a value already written earlier in the same
+/// invocation (e.g. a compound `gl_Position.x += 1.0`-shaped update), which
+/// `feme.stage.input.load`/`.output.store`'s Input-vs-Output dichotomy has
+/// no representation for. Routing both sides through an ordinary
+/// `AllocaInst` instead -- one per leaf scalar, since that is the
+/// granularity `loadStageIOValue`/`storeStageIOValue`'s own recursion
+/// already decomposes every access to -- lets `PromoteMemToReg`
+/// (`canonicalizeSPIRVStage`, once every instruction has been rewritten)
+/// do the dominance-correct SSA construction a hand-rolled "last stored
+/// value" forward walk could not: a read-back on one control-flow path may
+/// not be dominated by a write on another, exactly the shape a compiler's
+/// own `mem2reg` pass -- not a linear scan -- is built to resolve.
+class ShadowValueMap {
+public:
+  explicit ShadowValueMap(Function &F) : F(F) {}
+
+  AllocaInst *getOrCreate(uint32_t ElementID, Value *Row, Value *Component,
+                          Type *Ty) {
+    Key K{ElementID, cast<ConstantInt>(Row)->getZExtValue(),
+          cast<ConstantInt>(Component)->getZExtValue()};
+    AllocaInst *&Slot = Allocas[K];
+    if (!Slot) {
+      IRBuilder<> EntryBuilder(&F.getEntryBlock(),
+                               F.getEntryBlock().getFirstInsertionPt());
+      Slot = EntryBuilder.CreateAlloca(Ty, nullptr, "feme.stage.output.shadow");
+    }
+    return Slot;
+  }
+
+  bool empty() const { return Allocas.empty(); }
+
+  /// All shadow allocas created so far, for `PromoteMemToReg` to convert to
+  /// SSA form once every instruction has been rewritten.
+  SmallVector<AllocaInst *, 8> takeAllocas() const {
+    SmallVector<AllocaInst *, 8> Result;
+    for (const auto &KV : Allocas)
+      Result.push_back(KV.second);
+    return Result;
+  }
+
+private:
+  using Key = std::tuple<uint32_t, uint64_t, uint64_t>;
+  Function &F;
+  DenseMap<Key, AllocaInst *> Allocas;
+};
+
 /// Recursively loads \p Ty's value out of stage-IO element \p ElementID,
 /// one scalar `feme.stage.input.load` at a time: a single-member struct is
 /// peeled first (see `peelSingleMemberStruct`) and rebuilt with
@@ -605,20 +657,25 @@ bool isSPIRVStageIOGlobal(const GlobalVariable *GV, unsigned &AddrSpace) {
 /// element and rebuilt with `insertvalue`; a vector is loaded one
 /// `Component` per element and rebuilt with `insertelement`; anything else
 /// is one scalar load. Mirrors `getStageIORowShape`'s own type recursion.
+/// (Roadmap H2e) When \p Shadow is non-null -- an `Output`-direction
+/// element being read back -- the terminal scalar load reads that leaf's
+/// own shadow alloca instead of emitting a (semantically wrong-direction)
+/// `feme.stage.input.load`.
 Value *loadStageIOValue(IRBuilderBase &B, Type *Ty, uint32_t ElementID,
                         Value *Row, Value *Component, Value *Zero,
-                        const Twine &Name) {
+                        const Twine &Name, ShadowValueMap *Shadow) {
   if (auto *ST = dyn_cast<StructType>(Ty)) {
     if (ST->getNumElements() == 1) {
       Value *Inner = loadStageIOValue(B, ST->getElementType(0), ElementID, Row,
-                                      Component, Zero, Name);
+                                      Component, Zero, Name, Shadow);
       return B.CreateInsertValue(PoisonValue::get(ST), Inner, 0);
     }
   } else if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
     Value *New = PoisonValue::get(ArrTy);
     for (unsigned R = 0, RE = ArrTy->getNumElements(); R != RE; ++R) {
-      Value *RowVal = loadStageIOValue(B, ArrTy->getElementType(), ElementID,
-                                       B.getInt32(R), Component, Zero, Name);
+      Value *RowVal =
+          loadStageIOValue(B, ArrTy->getElementType(), ElementID, B.getInt32(R),
+                           Component, Zero, Name, Shadow);
       New = B.CreateInsertValue(New, RowVal, R);
     }
     return New;
@@ -626,41 +683,49 @@ Value *loadStageIOValue(IRBuilderBase &B, Type *Ty, uint32_t ElementID,
     Value *New = PoisonValue::get(VecTy);
     for (unsigned C = 0, CE = VecTy->getNumElements(); C != CE; ++C) {
       Value *Elt = loadStageIOValue(B, VecTy->getElementType(), ElementID, Row,
-                                    B.getInt32(C), Zero, Name);
+                                    B.getInt32(C), Zero, Name, Shadow);
       New = B.CreateInsertElement(New, Elt, C);
     }
     return New;
   }
+  if (Shadow)
+    return B.CreateLoad(Ty, Shadow->getOrCreate(ElementID, Row, Component, Ty),
+                        Name);
   return createStageInputLoad(B, Ty, ElementID, Row, Component, Zero, Name);
 }
 
 /// The store-side mirror of `loadStageIOValue`: decomposes \p Val (of type
 /// \p Ty) into one scalar `feme.stage.output.store` per (struct member,
 /// row, component), the same recursion in reverse (`extractvalue`/
-/// `extractelement` instead of `insertvalue`/`insertelement`).
+/// `extractelement` instead of `insertvalue`/`insertelement`). (Roadmap
+/// H2e) When \p Shadow is non-null, each terminal scalar store also writes
+/// through to that leaf's own shadow alloca, so a later read-back of the
+/// same element (see `loadStageIOValue`) resolves to it.
 void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
                        uint32_t ElementID, Value *Row, Value *Component,
-                       Value *Zero) {
+                       Value *Zero, ShadowValueMap *Shadow) {
   if (auto *ST = dyn_cast<StructType>(Ty)) {
     if (ST->getNumElements() == 1) {
       storeStageIOValue(B, B.CreateExtractValue(Val, 0), ST->getElementType(0),
-                        ElementID, Row, Component, Zero);
+                        ElementID, Row, Component, Zero, Shadow);
       return;
     }
   } else if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
     for (unsigned R = 0, RE = ArrTy->getNumElements(); R != RE; ++R)
       storeStageIOValue(B, B.CreateExtractValue(Val, R),
                         ArrTy->getElementType(), ElementID, B.getInt32(R),
-                        Component, Zero);
+                        Component, Zero, Shadow);
     return;
   } else if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
     for (unsigned C = 0, CE = VecTy->getNumElements(); C != CE; ++C)
       storeStageIOValue(B, B.CreateExtractElement(Val, C),
                         VecTy->getElementType(), ElementID, Row, B.getInt32(C),
-                        Zero);
+                        Zero, Shadow);
     return;
   }
   createStageOutputStore(B, ElementID, Row, Component, Val, Zero);
+  if (Shadow)
+    B.CreateStore(Val, Shadow->getOrCreate(ElementID, Row, Component, Ty));
 }
 
 /// (Roadmap H2d) The entry point into `loadStageIOValue`'s per-(struct
@@ -674,14 +739,16 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
 /// than sharing the one `loadStageIOValue` alone would assume.
 Value *loadStageIOBlockValue(IRBuilderBase &B, Type *Ty,
                              ArrayRef<uint32_t> MemberIDs, Value *Row,
-                             Value *Component, Value *Zero, const Twine &Name) {
+                             Value *Component, Value *Zero, const Twine &Name,
+                             ShadowValueMap *Shadow) {
   if (MemberIDs.size() == 1)
-    return loadStageIOValue(B, Ty, MemberIDs[0], Row, Component, Zero, Name);
+    return loadStageIOValue(B, Ty, MemberIDs[0], Row, Component, Zero, Name,
+                            Shadow);
   auto *ST = cast<StructType>(Ty);
   Value *New = PoisonValue::get(ST);
   for (unsigned I = 0, E = MemberIDs.size(); I != E; ++I) {
     Value *MemberVal = loadStageIOValue(B, ST->getElementType(I), MemberIDs[I],
-                                        Row, Component, Zero, Name);
+                                        Row, Component, Zero, Name, Shadow);
     New = B.CreateInsertValue(New, MemberVal, I);
   }
   return New;
@@ -690,15 +757,16 @@ Value *loadStageIOBlockValue(IRBuilderBase &B, Type *Ty,
 /// The store-side mirror of `loadStageIOBlockValue`.
 void storeStageIOBlockValue(IRBuilderBase &B, Value *Val, Type *Ty,
                             ArrayRef<uint32_t> MemberIDs, Value *Row,
-                            Value *Component, Value *Zero) {
+                            Value *Component, Value *Zero,
+                            ShadowValueMap *Shadow) {
   if (MemberIDs.size() == 1) {
-    storeStageIOValue(B, Val, Ty, MemberIDs[0], Row, Component, Zero);
+    storeStageIOValue(B, Val, Ty, MemberIDs[0], Row, Component, Zero, Shadow);
     return;
   }
   auto *ST = cast<StructType>(Ty);
   for (unsigned I = 0, E = MemberIDs.size(); I != E; ++I)
     storeStageIOValue(B, B.CreateExtractValue(Val, I), ST->getElementType(I),
-                      MemberIDs[I], Row, Component, Zero);
+                      MemberIDs[I], Row, Component, Zero, Shadow);
 }
 
 /// The stage-IO global \p Ptr addresses, and the byte offset within it:
@@ -732,10 +800,14 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
 /// whole builtin-interface-block aggregate access, every member's
 /// `ElementID` at once, for `loadStageIOBlockValue`/
 /// `storeStageIOBlockValue`'s own per-member decomposition.
+/// (Roadmap H2e) Whether \p ElementIDs' global is `Output`-direction,
+/// checked so a load resolving to one can be routed through
+/// `ShadowValueMap` instead of a wrong-direction `feme.stage.input.load`.
 struct StageIOAccess {
   ArrayRef<uint32_t> ElementIDs;
   Value *Row = nullptr;
   Value *Component = nullptr;
+  bool IsOutput = false;
 };
 
 /// The (row, component) pair `loadStageIOValue`/`storeStageIOValue` need to
@@ -780,10 +852,13 @@ resolveRowComponent(Type *MemberTy, uint64_t Residual, const DataLayout &DL) {
 /// `gl_ClipDistance`/`gl_CullDistance`'s own per-element access, or
 /// `gl_Position`'s own per-component one) selected by \p Ptr's constant
 /// byte offset (`getStageIOBaseAndOffset`) into the block's own
-/// `StructLayout`.
+/// `StructLayout`. \p OutputGlobals (roadmap H2e) is checked to set the
+/// result's `IsOutput`, so a caller can tell a genuinely-input load from an
+/// `Output`-direction read-back.
 std::optional<StageIOAccess> resolveStageIOAccess(
     Value *Ptr, Type *ValueTy, const DataLayout &DL,
-    const DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> &ElementIDs) {
+    const DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> &ElementIDs,
+    const DenseSet<GlobalVariable *> &OutputGlobals) {
   std::optional<std::pair<GlobalVariable *, uint64_t>> BaseAndOffset =
       getStageIOBaseAndOffset(Ptr, DL);
   if (!BaseAndOffset)
@@ -793,18 +868,19 @@ std::optional<StageIOAccess> resolveStageIOAccess(
   if (It == ElementIDs.end())
     return std::nullopt;
   ArrayRef<uint32_t> IDs = It->second;
+  bool IsOutput = OutputGlobals.contains(GV);
   if (IDs.size() == 1) {
     // Every other stage-IO global is always addressed as a whole value;
     // a nonzero offset here would be a shape this milestone does not
     // model (left unresolved, as above).
     if (ByteOffset != 0)
       return std::nullopt;
-    return StageIOAccess{IDs, nullptr, nullptr};
+    return StageIOAccess{IDs, nullptr, nullptr, IsOutput};
   }
 
   auto *ST = cast<StructType>(GV->getValueType());
   if (ValueTy == ST)
-    return StageIOAccess{IDs, nullptr, nullptr};
+    return StageIOAccess{IDs, nullptr, nullptr, IsOutput};
 
   const StructLayout *SL = DL.getStructLayout(ST);
   unsigned Member = SL->getElementContainingOffset(ByteOffset);
@@ -816,7 +892,8 @@ std::optional<StageIOAccess> resolveStageIOAccess(
       Row ? ConstantInt::get(Type::getInt32Ty(ST->getContext()), Row) : nullptr,
       Component
           ? ConstantInt::get(Type::getInt32Ty(ST->getContext()), Component)
-          : nullptr};
+          : nullptr,
+      IsOutput};
 }
 
 /// Rewrites \p F's SPIR-V-derived stage IR into `feme.stage.*`: its
@@ -919,12 +996,21 @@ bool canonicalizeSPIRVStage(Function &F) {
     Changed = true;
   }
 
+  // (Roadmap H2e) An `Output`-direction global's own read-back load (see
+  // `ShadowValueMap`'s own comment) is routed through a per-leaf-scalar
+  // shadow alloca instead of a wrong-direction `feme.stage.input.load`;
+  // `OutputGlobalSet` lets `resolveStageIOAccess` tell the two apart.
+  DenseSet<GlobalVariable *> OutputGlobalSet(OutputGlobals.begin(),
+                                             OutputGlobals.end());
+  ShadowValueMap ShadowValues(F);
+
   for (Instruction &I : llvm::make_early_inc_range(instructions(F))) {
     IRBuilder<> B(&I);
     Value *Zero = B.getInt32(0);
     if (auto *LI = dyn_cast<LoadInst>(&I)) {
-      std::optional<StageIOAccess> Access = resolveStageIOAccess(
-          LI->getPointerOperand(), LI->getType(), DL, ElementIDs);
+      std::optional<StageIOAccess> Access =
+          resolveStageIOAccess(LI->getPointerOperand(), LI->getType(), DL,
+                               ElementIDs, OutputGlobalSet);
       if (!Access)
         continue;
       // A scalar interface variable is one `feme.stage.input.load`; a
@@ -937,27 +1023,49 @@ bool canonicalizeSPIRVStage(Function &F) {
       // builtin interface block routes each of its own members through
       // its own `ElementID` first (roadmap H2d). See
       // `loadStageIOBlockValue`/`loadStageIOValue`/`getStageIORowShape`'s
-      // shared type recursion.
+      // shared type recursion. An `Output`-direction load (roadmap H2e) is
+      // a read-back rather than a genuine input, so it is routed through
+      // `ShadowValues` instead.
       Value *Row = Access->Row ? Access->Row : Zero;
       Value *Component = Access->Component ? Access->Component : Zero;
-      Value *New = loadStageIOBlockValue(B, LI->getType(), Access->ElementIDs,
-                                         Row, Component, Zero, LI->getName());
+      Value *New = loadStageIOBlockValue(
+          B, LI->getType(), Access->ElementIDs, Row, Component, Zero,
+          LI->getName(), Access->IsOutput ? &ShadowValues : nullptr);
       LI->replaceAllUsesWith(New);
       LI->eraseFromParent();
       Changed = true;
     } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
       Value *Val = SI->getValueOperand();
-      std::optional<StageIOAccess> Access = resolveStageIOAccess(
-          SI->getPointerOperand(), Val->getType(), DL, ElementIDs);
+      std::optional<StageIOAccess> Access =
+          resolveStageIOAccess(SI->getPointerOperand(), Val->getType(), DL,
+                               ElementIDs, OutputGlobalSet);
       if (!Access)
         continue;
       Value *Row = Access->Row ? Access->Row : Zero;
       Value *Component = Access->Component ? Access->Component : Zero;
+      // Every store this pass resolves is to an `Output`-direction global
+      // (an `Input` one is never written to in SPIR-V); also tracking it
+      // through `ShadowValues` (roadmap H2e) lets a later read-back of the
+      // same element resolve to it.
       storeStageIOBlockValue(B, Val, Val->getType(), Access->ElementIDs, Row,
-                             Component, Zero);
+                             Component, Zero, &ShadowValues);
       SI->eraseFromParent();
       Changed = true;
     }
+  }
+
+  // Every read-back load above still points at its own leaf's shadow
+  // alloca; `PromoteMemToReg` resolves each to the dominance-correct
+  // reaching store now that every instruction has been rewritten,
+  // inserting a `phi` for any real control-flow join the source's own
+  // read-modify-write straddles (e.g. `gl_Position.y += 1.0f` guarded by an
+  // `if`) -- exactly the SSA construction a compiler's own `mem2reg` does
+  // for a local variable, which a linear "last stored value" scan could
+  // not do correctly in general.
+  if (!ShadowValues.empty()) {
+    DominatorTree DT(F);
+    PromoteMemToReg(ShadowValues.takeAllocas(), DT);
+    Changed = true;
   }
 
   // `llvm.spv.discard` (SPIR-V's `OpKill`) is unconditional, unlike DXIL's
