@@ -34591,3 +34591,202 @@ up from 1818/1819 by the one new `DrawTest` case this row adds.
 change needed -- both fixes correct existing rendering/clear behavior,
 neither touches feature/extension advertisement (`multiview`/
 `VK_KHR_multiview` were already `yes`/`Advertised` since roadmap H2).
+
+# Roadmap H2h: blank multiview input-attachments, root cause and fix
+
+## Starting point
+
+H2h is one of the two independent gaps H2g's own triage spun off (the
+other being H2i): `dEQP-VK.multiview.input_attachments` renders a totally
+blank image (every pixel black/transparent) in all 16 of its remaining
+cases, a qualitatively different failure shape than either of H2g's own
+two fixes (both of which produced a wrong-but-present value, not nothing
+at all). H2h's own text framed two hypotheses: either the subpass-input
+read always returns zero/fails silently under multiview, or the
+pipeline/subpass wiring for a multiview input-attachment subpass never
+reaches the draw in the first place.
+
+## Finding the actual root cause
+
+Read `dEQP-VK.multiview.input_attachments`'s own CTS source
+(`vktMultiViewRenderUtil.cpp`/`vktMultiViewRenderTests.cpp`) rather than
+guess from the failure symptom alone. Its own subpass structure is
+exactly two subpasses: subpass 0 renders (per view) into color attachment
+0; subpass 1 reads attachment 0 back through a `subpassInput` (declared
+in `pInputAttachments`, index 0) and writes a *different* attachment,
+1, as its own color output. That is the load-bearing detail: subpass 1's
+input attachment is not one of its own color attachments at all.
+
+Traced `CommandBuffer.cpp`'s existing subpass-input machinery
+(`buildSubpassInputHeap`) end to end and found its *only* resolution
+mechanism was `ColorIndexFor`/`Gfx.ColorAttachmentInputIndices` --
+built exclusively for `VK_KHR_dynamic_rendering_local_read`
+(`vkCmdSetRenderingInputAttachmentIndices`'s own identity/remap table,
+roadmap F8a), which necessarily maps a `subpassInput`'s
+`InputAttachmentIndex` onto one of the *current* subpass's own bound
+color attachments -- because dynamic rendering has no separate classic
+input-attachment list; a `vkCmdBeginRendering` instance's only attachment
+concept is its own color/depth/stencil list. That mechanism was silently
+reused for classic `VkRenderPass` subpasses too, without ever checking
+whether the classic subpass actually had its own, independent
+`pInputAttachments` list. For `dEQP-VK.multiview.input_attachments`'s own
+shape, subpass 1's `Attachments` parameter (its own color attachments) is
+just `{ attachment 1 }` -- attachment 0 (the one actually named by
+`InputAttachmentIndex 0`) is nowhere in that list at all. So
+`buildSubpassInputHeap` populated heap index 0 from attachment 1 (subpass
+1's own, freshly-`LOAD_OP_CLEAR`ed color attachment) instead of
+attachment 0's real, subpass-0-written content -- `subpassLoad` read back
+transparent black, and every pixel of the resulting draw came out black,
+matching the "totally blank" symptom exactly. This also directly answers
+H2h's own second hypothesis ("does subpassLoad even execute?") --
+it executes correctly, it just reads the wrong (implicitly zeroed)
+memory the whole time.
+
+This meant the real gap was one level up from `buildSubpassInputHeap`:
+nothing in the shared `RenderTargetBinding` object model (RenderPass.h,
+the same normalized shape both classic `VkRenderPass` and dynamic
+rendering funnel into before `CommandBuffer.cpp`'s draw path, documented
+at the top of that header) ever captured a classic subpass's own
+`SubpassDescription::InputAttachments` list at all -- it was simply
+missing data, not a resolution-logic bug in `buildSubpassInputHeap`
+itself.
+
+## Choosing the fix shape
+
+Two ways to close this occurred to me: (a) have `buildSubpassInputHeap`
+consult `RenderPass`/`SubpassDescription` directly (reaching further back
+than it currently does, past `RenderTargetBinding`), or (b) extend
+`RenderTargetBinding` itself with the missing data, matching how every
+other classic-render-pass concept (`Colors`, `Depth`/`Stencil`, `Layers`,
+`ViewMask`) already reaches `CommandBuffer.cpp`'s draw path -- through
+`RenderTargetBinding`, never by a direct back-reference to the
+`RenderPass`/`Framebuffer` objects. Chose (b): it is the established
+pattern in this file (the header's own comment says exactly this --
+"normalize into one internal shape before reaching the draw path"), it
+keeps `buildSubpassInputHeap` decoupled from `RenderPass`'s own types
+(it already only takes `GraphicsState`/`AttachmentView`s, no `RenderPass`
+reference at all), and it makes the new data automatically available to
+every other consumer of `RenderTargetBinding` in the future without
+another special-case plumbing pass.
+
+Added `RenderTargetBinding::Inputs` (`std::vector<ImageView *>`, one
+entry per `InputAttachmentIndex`, resolved against the whole
+framebuffer's attachment list -- not the current subpass's own bound
+attachments -- exactly the fix subpass 1's own shape needs).
+`buildRenderTargetBinding` populates it directly from
+`SubpassDescription::InputAttachments`, `VK_ATTACHMENT_UNUSED` mapping to
+`nullptr` (matching every other attachment slot's existing unused
+convention in this file).
+
+For `buildSubpassInputHeap` itself, added a `SubpassInputs` parameter
+(the per-view-resolved form of `RenderTargetBinding::Inputs`) that takes
+priority over the old identity-mapping fallback whenever it is non-empty.
+Considered instead always preferring `SubpassInputs` unconditionally (even
+when empty) and deleting the old fallback path -- rejected, since that
+would silently break `VK_KHR_dynamic_rendering_local_read`, which never
+populates `RenderTargetBinding::Inputs` (dynamic rendering has no classic
+input-attachment list) and depends entirely on the old identity-mapping
+logic. Keeping both paths, gated on emptiness, cleanly preserves F8a's
+existing behavior while adding the new classic-render-pass path, and the
+two can never both apply to the same draw (a draw is either inside a
+classic render pass instance or a dynamic-rendering instance, never
+both).
+
+`runDraw` needed the same per-view slicing treatment every other
+attachment already gets (`sliceAttachmentLayer`, once per set `ViewMask`
+bit) -- otherwise a multiview subpass's own input-attachment read would
+ignore the view dimension entirely and always read view/layer 0 of the
+resolved attachment, wrong for any view index other than 0. Added
+`SubpassInputs` construction (resolving `Gfx.Binding.Inputs` through
+`resolveAttachmentView`, mirroring the existing depth/stencil resolution
+block immediately above it) and `ViewSubpassInputs` slicing inside the
+existing per-view loop, in the same style as `ViewAttachments`/
+`ViewDepthStencil`/`ViewResolveAttachments`.
+
+## Verifying the fix
+
+Added `DrawTest.MultiviewInputAttachmentReadsBackAnEarlierSubpassColorOutput`,
+modeling the CTS test's own shape as closely as practical within this
+repository's existing unit-test idioms: two 2-layer (`viewMask == 0b11`)
+color attachments, a classic two-subpass `VkRenderPass` (subpass 0: color
+attachment 0 only; subpass 1: color attachment 1, input attachment 0),
+`VkRenderPassMultiviewCreateInfo` for both subpasses, a full red draw in
+subpass 0, `vkCmdNextSubpass`, then a draw with the pre-existing
+`SubpassLoadFragmentSource` shader (already used by three other
+`SubpassLoad...` tests in this file, reads subpass input 0's red channel
+and outputs solid green) in subpass 1. Verified both output layers come
+out solid green.
+
+Confirmed the test actually exercises the bug, not just the fix's own
+code path, by `git stash push` on just the two fix files (RenderPass.h,
+CommandBuffer.cpp -- leaving the new test file itself in the working
+tree) and rebuilding: the test failed, reading uninitialized/garbage
+bytes rather than green, exactly the "reads whatever subpass 1's own
+freshly-cleared attachment happens to contain" failure mode the root-
+cause analysis predicted. `git stash pop` restored the fix; re-running
+confirmed the test passes.
+
+`ninja check-feme` (assertions-enabled, ccache build): 1762/1821 passed,
+59 unsupported (pre-existing, unrelated to this fix -- differs from
+H2g's own claimed "1 unsupported", believed to be sandbox/Vulkan-loader-
+version sensitivity in this session's own environment, not something my
+change affects), 0 failed, up from 1761/1820 before this row's own new
+test.
+
+## Running the real CTS
+
+Built `deqp-vk` from `/home/dev/dev/VK-GL-CTS/` (external dependencies
+fetched via `external/fetch_sources.py`, `-DSELECTED_BUILD_TARGETS=
+"deqp-vk"` to skip unrelated targets). First configure used
+`-DDEQP_TARGET=default`, which built but crashed immediately with
+`FATAL ERROR: Vulkan is not supported` -- `tcu::Platform`'s base
+`getVulkanPlatform()` unconditionally throws unless a target overrides
+it, and `default` doesn't; needed `-DDEQP_TARGET=vulkan_headless`
+specifically (no windowing-system dependency, matching this sandbox's
+lack of `DISPLAY`/`XDG_RUNTIME_DIR`), which required a second full
+rebuild (`DEQP_TARGET` changes which platform object file links in).
+Pointed `VK_ICD_FILENAMES` at feme's own generated ICD manifest
+(`build/tools/feme/tools/feme-vulkan/feme_icd.json`, referencing the
+just-built `libfeme_vulkan.so`).
+
+Ran `dEQP-VK.multiview.input_attachments.*` and
+`dEQP-VK.multiview.renderpass2.input_attachments.*` directly first (8/8
+and 8/8, all `Pass`) to confirm the specific 16 cases H2h names are
+fixed, then the fuller `dEQP-VK.multiview.*` group (838 cases, matching
+H2g's own precedent) for a before/after comparison against H2g's own
+420/79/339 baseline: 436 passed / 63 failed / 339 not supported -- a net
++16 passed, -16 failed, exactly this row's own 16 cases and nothing else
+(confirmed by grouping every remaining `Fail` case by subgroup: 42
+`view_mask_iteration` (H8, pre-existing format gap), 18
+`readback_implicit_clear` multi-subpass (H2i, untouched, as expected --
+a different attachment path), 3 `depth_without_fragment_shader` (H2b,
+pre-existing) -- 79 - 16 = 63 matches exactly, with zero unexpected
+regressions or unexpected additional fixes).
+
+## Docs
+
+`VulkanCTSReport.md`: appended a "Roadmap H2h: measured impact" section
+following the exact style of H2e/H2f/H2g's own sections (before/after
+`dEQP-VK.multiview` numbers, root-cause narrative, fix description, test
+name, `ninja check-feme` counts). `Roadmap.md`: struck through H2h's own
+row with a "(done, ...)" writeup in the same density as H2g's own.
+`FeMeVulkanDesign.md`: appended a short "Status (roadmap H2h)" note under
+F8/F8a's own existing subpass-input-heap section, since that section's
+prior text ("resolved ... straight from the currently-bound color/depth/
+stencil attachments") was no longer a complete description of
+`buildSubpassInputHeap`'s own behavior and deserved a pointer to the new
+classic-render-pass path, rather than leaving the design doc silently
+stale about its own documented mechanism.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked both
+explicitly (`multiview`/`VK_KHR_multiview` already `yes`/`Advertised`
+since roadmap H2; `VK_KHR_dynamic_rendering_local_read`'s own status,
+roadmap F8/F8a, is untouched) -- confirmed no update needed, since this
+is a pure rendering-correctness fix inside an already-advertised
+feature/extension pair, not a change to what's advertised.
+
+H2i (the sibling row H2g also spun off, `readback_implicit_clear`'s
+multi-subpass cases) remains open and unaffected by this change, as
+predicted going in (a different attachment-resolution path -- load-op
+clear semantics across multiple multiview subpasses -- with no code
+overlap with this fix); the targeted CTS run above confirms its own
+18-case failure count is unchanged, exactly.
