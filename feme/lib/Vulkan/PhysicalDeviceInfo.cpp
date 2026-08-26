@@ -722,6 +722,18 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // here too regardless of the advertised `apiVersion`.
       {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
        VK_KHR_PUSH_DESCRIPTOR_SPEC_VERSION},
+      // (roadmap F13) `VK_ATTACHMENT_LOAD_OP_NONE`/`STORE_OP_NONE` need no
+      // new code of their own: `applyClear`'s existing `LoadOp !=
+      // VK_ATTACHMENT_LOAD_OP_CLEAR` check (CommandBuffer.cpp) already
+      // treats any non-`CLEAR` load op, `NONE` included, as "do nothing",
+      // and `StoreOp` is never read to act on at all -- this ICD writes
+      // straight into an attachment's real memory, so `STORE`/`DONT_CARE`/
+      // `NONE` are indistinguishable outcomes with no discard-on-store
+      // optimization to skip. Like every other post-`maintenance5` entry
+      // above, this extension must be listed here too regardless of the
+      // advertised `apiVersion`.
+      {VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME,
+       VK_KHR_LOAD_STORE_OP_NONE_SPEC_VERSION},
   };
   return Extensions;
 }
