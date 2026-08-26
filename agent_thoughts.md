@@ -33577,3 +33577,178 @@ F14) was genuinely implemented but never added to
 the 1.4 extension row. Restored alongside this row's own `multiview`
 update, since I was already touching and regenerating both files and the
 drift would otherwise have silently persisted through another edition.
+
+# Roadmap C8a: Matrix/aggregate stage IO legalization
+
+## Scoping the "shader long tail"
+
+C8 itself is deliberately unscoped -- "best attacked after C2/C3, since the
+true size of this bucket is unknown until the stacked blockers ahead of it
+are gone" -- and by the time I picked it up, C1-C3 and C6/C7 were all done.
+Rather than trying to move C8's whole multi-thousand-case bucket in one
+pass, I picked its single largest *named* row, "matrix/aggregate stage IO
+(309)", since it was concrete enough to root-cause and fix end to end, and
+gave it its own lettered row (C8a) rather than silently folding the work
+into C8's own text -- C8's bucket is explicitly a grab-bag of unrelated
+gaps, and conflating "I fixed one named row" with "I made progress on C8"
+would have been exactly the kind of overclaim this project's own roadmap
+discipline (see every `~~struck-through~~` finding with an honest deviation
+note) exists to avoid.
+
+## Root-causing the gap
+
+`CanonicalizeStage.cpp`'s SPIR-V-side rewrite (`canonicalizeSPIRVStage`)
+only ever special-cased two shapes for a stage-IO global's value type: a
+plain scalar, and a `FixedVectorType`. A matrix -- SPIRVToLLVM's
+`spirv.MatrixType` conversion produces `!llvm.array<Columns x
+VectorType>|scalar>` (SPIRVToLLVMPatterns.cpp's own comment on this, next
+to the conversion itself) -- fell through to the scalar case by accident:
+`ArrayType` isn't `FixedVectorType`, so the code treated the *entire
+array* as if it were one opaque scalar "component", producing a
+`SignatureElement` with `ComponentCount == 1`, `RowCount` left at its
+default of 1, and a single `feme.stage.output.store`/`input.load` call
+whose "value" operand was the whole array -- silently wrong, not a crash,
+which is exactly why nothing caught it before a real CTS run.
+
+The fix direction was already half-built: `feme.stage.input.load`/
+`output.store`'s own signature has always taken a `Row` operand alongside
+`Component` (`StageOps.h`), and the DXIL side already forwards a real
+`Row` operand from `dx.op.loadInput`/`storeOutput` (DXIL natively encodes
+a matrix's row count in its signature metadata), so `ValidateStagePass`'s
+row-bounds check and the CPU-target wrapper lowering
+(`VertexWrapper.cpp`/`FragmentWrapper.cpp`'s `computeStageStorageAddress`,
+already multiplying `Row * RowStride` generically) were already
+`Row`-aware and had simply never been exercised with `RowCount > 1` for a
+vertex/fragment stage (only `PatchPipeline.cpp`'s hull/domain
+patch-constant path used it, a separate wrapper family). The gap was
+narrowly in `CanonicalizeStage.cpp` (never building a correct multi-row
+signature element or a correct load/store decomposition for a SPIR-V
+matrix) and in `Executor.cpp`'s `buildStageStorage`, which explicitly
+rejected any `RowCount != 1` element with an error rather than trying to
+support it.
+
+## The struct-wrapper shape: a genuine measurement-driven finding
+
+I first shipped a version of the fix that only handled a bare `ArrayType`
+(a plain matrix global with no wrapper). It passed every unit test I
+wrote against it. Running a real `dEQP-VK.glsl.linkage.varying.struct.*`
+group against the built ICD (the same `glsl` group the existing "Roadmap
+C8: measured impact" section had already used, so before/after logs would
+be directly comparable) surfaced a *different* diagnostic shape than
+before -- not the old "of aggregate type" message, but a new
+`feme-graphics-validate-stage: ... row 1 is out of range for element 2`.
+That is a real, if narrower, regression risk signal: my fix had changed
+*something* about this case's behavior, but not (yet) fixed it. Rather
+than guess, I added a temporary `FEME_DEBUG_STAGEIO` environment-variable
+trace to `CanonicalizeStage.cpp` (dumping each stage-IO global's own LLVM
+type, element ID, and computed `ComponentCount`/`RowCount`), reran just
+that one case, and found the actual global's type was
+`{ [4 x <2 x float>] }` -- a *single-member struct* wrapping the matrix,
+not the matrix directly. glslang wraps a `varying`-block *member* -- even
+one that is itself a matrix -- in an outer one-member struct at the
+SPIR-V level; this is a real, distinct shape neither my original fix nor
+any unit test I had written exercised, and it would not have been
+discoverable by reasoning about SPIR-V's type system in the abstract
+without this measurement. (The debug trace was removed before landing;
+it does not appear in the final diff.)
+
+I generalized the fix into two small mutually-recursive helpers
+(`loadStageIOValue`/`storeStageIOValue`, plus a `peelSingleMemberStruct`
+type helper `getStageIORowShape` also uses) that peel a single-member
+struct, then recurse through `ArrayType` (one `Row` per element) and
+`FixedVectorType` (one `Component` per element) uniformly, bottoming out
+at a scalar `feme.stage.input.load`/`output.store`. This replaced the
+original hand-unrolled two-level nesting (array-of-vector only) with a
+shape that generalizes to arbitrary nesting depth for free, and is
+shorter than the code it replaced.
+
+## A second bug, caught only by a real triangle-draw test
+
+Extending `Executor.cpp` to support `RowCount > 1` touched: `StageStorage::
+readRaw`/`writeRaw`/`readFloat`/`writeFloat` (a new `Row` parameter,
+defaulted to 0 so every existing scalar/vector caller is unaffected),
+`buildStageStorage` (drop the `RowCount != 1` rejection; size storage by
+`RowCount * ComponentCount * InvocationCount`), `LinkedVarying` (a new
+`RowCount` field, checked at link time), `vertexAt`'s varying-read loop,
+and the fragment-side barycentric-interpolation write loop -- all of
+which I updated together and which passed every existing unit test
+immediately.
+
+A dedicated new end-to-end test
+(`ExecutorTest.InterpolatesConstantColorPackedInAMatrixVarying`: a
+fully-covered, constant-color triangle whose color is packed into a
+`RowCount == 2` varying instead of a plain `float4`) caught a real bug
+none of the signature-level unit tests could have: row 0 read back
+correctly, but row 1 came back as either zero or an unexplained blend of
+unrelated values, varying by which screen quad was sampled. Instrumenting
+`Executor.cpp` with temporary debug prints at each stage of the pipeline
+(VS output storage after `invokeVertices`, `vertexAt`'s per-vertex
+flattened varyings, the fragment-side interpolation write) narrowed it to
+exactly one untouched function: `lerpVertex`, the Sutherland-Hodgman
+clip-time interpolation helper. Unlike `vertexAt`'s read loop and the
+fragment interpolation-write loop (both of which take a `LinkedVarying`
+and could be made `Row`-aware directly), `lerpVertex` flattens every
+varying's components into one linear `Idx` without an outer `Row` loop of
+its own -- so a *clipped* (synthetically lerped) vertex's row-1 components
+were left at their `resize()`-zero-initialized default rather than being
+lerped from the two source vertices at all. My test's triangle
+deliberately exceeds the `[-1, 1]` NDC square specifically so
+Sutherland-Hodgman clipping actually runs and produces lerped vertices,
+not just the three original ones -- a smaller triangle needing no clipping
+would not have exercised this path and the bug would have shipped. Fixed
+by adding the same `Row` loop to `lerpVertex` the other two call sites
+already had.
+
+## Measuring it honestly
+
+Re-running the exact same `dEQP-VK.glsl.*` group (26,808 cases) the
+existing "Roadmap C8: measured impact" section used, before and after
+this fix, on otherwise-identical builds: the group's own `Passed`/
+`Failed`/`Not supported` totals are byte-for-byte unchanged (confirmed by
+diffing the full logs, not just the three summary counters) --
+0/26,808 passed, 13,921/26,808 failed, 12,887/26,808 not supported, both
+times. But the *diagnostic* that failure comes from changed completely:
+every occurrence of the "of aggregate type" `feme-cpu-simdize` diagnostic
+and the row/component-out-of-range `feme-graphics-validate-stage`
+diagnostics this gap produced (63 occurrences total, spanning the
+`dEQP-VK.glsl.linkage.varying.struct.*` cases) is gone. Each of those 63
+cases now fails one step later, at `feme-cpu-simdize`'s own
+divergent-vector decomposition (roadmap C3's scope): a matrix/aggregate's
+`insertvalue`/`extractvalue` chain is a shape none of the four
+producer/consumer patterns C3 closed cover, so the newly-legalized value
+still can't be widened. This is the same "correct, regression-tested, and
+individually real -- but immediately blocked by a distinct downstream gap"
+shape the existing "Roadmap C8: measured impact" section already found
+for a different stage-IO issue, and I recorded it the same way: struck
+through C8a in Roadmap.md with the full deviation note, and added a new
+C8b row for the newly-exposed SIMDize blocker rather than either silently
+declining to strike C8a through or overclaiming that it moved the CTS
+needle. C8b's own text cross-references roadmap H2a, which flagged what
+reads like the same `feme-cpu-simdize` diagnostic shape from a completely
+unrelated CTS group (`dEQP-VK.multiview`) -- worth triaging together
+before assuming either is a fresh, unique root cause.
+
+## What I did not attempt
+
+The rest of C8's own named bucket -- descriptor arrays of combined image
+samplers (816), the SPIR-V importer's `unhandled opcode` set (171),
+`Workgroup` arrays-of-arrays (151), the 277 individually-unlegalized ops,
+and the 242-case diagnostic tail -- is untouched by this row and remains
+exactly as open as C8's own text already described. I also did not
+attempt matrix *vertex attributes* (a `RowCount > 1` element reached
+through the vertex-attribute-fetch path, which binds from a vertex buffer
+by `VkVertexInputAttributeDescription` rather than being produced by a
+prior shader stage): Vulkan requires the caller to describe each of a
+matrix attribute's columns as its own attribute description at a
+consecutive location, a different ABI shape than the "one signature
+element, `RowCount` columns" shape this row built for varyings, so I left
+`Executor.cpp`'s vertex-attribute-fetch loop rejecting `RowCount != 1`
+explicitly (with a comment explaining why), rather than silently
+mishandling it by reusing the varying-side plumbing for a shape it does
+not actually fit.
+
+No change to the Vulkan feature/extension surface was made by this row
+(it is a purely internal compiler-pipeline fix), so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+regeneration this time -- confirmed by inspecting both generator scripts'
+inputs, neither of which reads anything this row touched.
