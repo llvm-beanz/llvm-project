@@ -211,6 +211,11 @@ Value *loadVertexSystemValue(IRBuilder<> &Builder, const SignatureElement &Elt,
                                          VertexInvocationFieldDrawID);
     return Builder.CreateLoad(Builder.getInt32Ty(), Ptr);
   }
+  case SignatureSystemValue::ViewIndex: {
+    Value *Ptr = Builder.CreateStructGEP(InvocationTy, InvocationPtr,
+                                         VertexInvocationFieldViewIndex);
+    return Builder.CreateLoad(Builder.getInt32Ty(), Ptr);
+  }
   default:
     Builder.getContext().emitError(
         Twine("feme-cpu-wrap-vertex: unsupported vertex system value for "

@@ -480,6 +480,11 @@ enum class StageLayoutSystemValue : uint32_t {
   /// rather than from a stage-storage block, so an element carrying this
   /// system value has no meaningful strides or data offset.
   DomainLocation = 19,
+  /// (Roadmap H2) `gl_ViewIndex`: the current multiview render-pass
+  /// instance view, matching `SignatureSystemValue::ViewIndex`. Sourced
+  /// from `FemeVertexInvocation::ViewIndex`/`FemeFragmentInvocation::
+  /// ViewIndex`, the same value for every invocation of one draw.
+  ViewIndex = 20,
 };
 
 /// The interpolation mode recorded for one stage-layout element, mirroring
@@ -623,8 +628,13 @@ struct FemeVertexInvocation {
   uint32_t BaseInstance;
   /// Shader-visible draw ID.
   uint32_t DrawID;
+  /// (Roadmap H2) `gl_ViewIndex`: the current multiview render-pass
+  /// instance view, or 0 for a non-multiview draw. The same value for
+  /// every invocation of one draw (see `feme::graphics::PreparedDraw::
+  /// ViewIndex`).
+  uint32_t ViewIndex;
   /// ABI headroom for later vertex-stage invocation metadata.
-  uint32_t Reserved[3];
+  uint32_t Reserved[2];
 };
 
 /// One fragment-stage quad record. Lane bits `0..3` in `LiveMask` and
@@ -642,12 +652,17 @@ struct FemeFragmentInvocation {
   uint32_t Coverage[4];
   /// Front-face flag per lane: 0 for back-facing, 1 for front-facing.
   uint32_t IsFrontFace[4];
+  /// (Roadmap H2) `gl_ViewIndex`: the current multiview render-pass
+  /// instance view, or 0 for a non-multiview draw. One value per quad
+  /// (not per lane), matching `FemeVertexInvocation::ViewIndex`'s own
+  /// "same value for every invocation of one draw" rule.
+  uint32_t ViewIndex;
   /// Lanes participating in execution, including helper lanes.
   uint32_t LiveMask;
   /// Lanes allowed to perform side effects.
   uint32_t SideEffectMask;
   /// ABI headroom for later fragment-stage invocation metadata.
-  uint32_t Reserved[6];
+  uint32_t Reserved[5];
 };
 
 /// One fragment-stage quad's post-shader status. Color/depth/stencil/coverage

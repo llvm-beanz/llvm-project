@@ -206,6 +206,18 @@ struct PreparedDraw {
   /// input-attachment index is mapped at all (the common case for a draw
   /// that never calls `vkCmdSetRenderingInputAttachmentIndices`).
   llvm::ArrayRef<cpu::FemeImageDescriptor> SubpassInputHeap;
+  /// (Roadmap H2) The multiview render-pass instance view this draw is
+  /// running for, or 0 for a non-multiview draw. `Attachments`/
+  /// `DepthStencil` are already sliced down to the one array layer this
+  /// view writes (`feme::vulkan::runDraw` selects it before calling
+  /// `executeDraws`, since a `VkRenderPassMultiviewCreateInfo`/
+  /// `VkRenderingInfo::viewMask` bit maps 1:1 onto the same-numbered
+  /// attachment layer when no stage writes `RenderTargetArrayIndex`
+  /// explicitly -- see RenderPass.h's `RenderTargetBinding::ViewMask`); the
+  /// executor only needs this value to source a vertex/fragment stage's
+  /// `gl_ViewIndex` input (`SignatureSystemValue::ViewIndex`), not to
+  /// address the attachment itself.
+  uint32_t ViewIndex = 0;
 };
 
 } // namespace feme::graphics

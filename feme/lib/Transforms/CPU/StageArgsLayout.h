@@ -65,7 +65,8 @@ enum VertexInvocationField : unsigned {
   VertexInvocationFieldBaseVertex = 2,
   VertexInvocationFieldBaseInstance = 3,
   VertexInvocationFieldDrawID = 4,
-  VertexInvocationFieldReserved = 5,
+  VertexInvocationFieldViewIndex = 5,
+  VertexInvocationFieldReserved = 6,
 };
 
 enum FragmentInvocationField : unsigned {
@@ -74,9 +75,10 @@ enum FragmentInvocationField : unsigned {
   FragmentInvocationFieldSampleIndex = 2,
   FragmentInvocationFieldCoverage = 3,
   FragmentInvocationFieldIsFrontFace = 4,
-  FragmentInvocationFieldLiveMask = 5,
-  FragmentInvocationFieldSideEffectMask = 6,
-  FragmentInvocationFieldReserved = 7,
+  FragmentInvocationFieldViewIndex = 5,
+  FragmentInvocationFieldLiveMask = 6,
+  FragmentInvocationFieldSideEffectMask = 7,
+  FragmentInvocationFieldReserved = 8,
 };
 
 enum FragmentResultField : unsigned {
@@ -210,7 +212,8 @@ inline llvm::StructType *getShaderResourcesType(llvm::LLVMContext &Ctx) {
 inline llvm::StructType *getVertexInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   return llvm::StructType::get(
-      Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 3)});
+      Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty,
+            llvm::ArrayType::get(I32Ty, 2)});
 }
 
 inline llvm::StructType *getFragmentInvocationType(llvm::LLVMContext &Ctx) {
@@ -221,7 +224,7 @@ inline llvm::StructType *getFragmentInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32x4 = llvm::ArrayType::get(I32Ty, 4);
   return llvm::StructType::get(Ctx,
                                {PositionTy, I32x4, I32x4, I32x4, I32x4, I32Ty,
-                                I32Ty, llvm::ArrayType::get(I32Ty, 6)});
+                                I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 5)});
 }
 
 inline llvm::StructType *getFragmentResultType(llvm::LLVMContext &Ctx) {

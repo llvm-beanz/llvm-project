@@ -1353,6 +1353,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                      : static_cast<int32_t>(Cmd.FirstVertex);
         Inv.BaseInstance = Cmd.FirstInstance;
         Inv.DrawID = 0;
+        Inv.ViewIndex = Draw.ViewIndex;
       }
     }
 
@@ -2084,6 +2085,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               Inv.SampleIndex[Lane] = 0;
               Inv.Coverage[Lane] = Quad.SampleMask[Lane];
               Inv.IsFrontFace[Lane] = Tri.FrontFacing ? 1 : 0;
+              Inv.ViewIndex = Draw.ViewIndex;
 
               if (UseEarlyDepthStencil && Quad.SampleMask[Lane]) {
                 int32_t PX = Quad.PixelX[Lane], PY = Quad.PixelY[Lane];

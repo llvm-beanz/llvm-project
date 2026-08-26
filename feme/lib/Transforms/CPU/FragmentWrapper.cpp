@@ -245,6 +245,11 @@ Value *loadFragmentSystemValue(IRBuilder<> &Builder,
         {Builder.getInt32(0), Builder.getInt32(QuadLane)});
     return Builder.CreateLoad(Builder.getInt32Ty(), LanePtr);
   }
+  case SignatureSystemValue::ViewIndex: {
+    Value *Ptr = Builder.CreateStructGEP(InvocationTy, InvocationPtr,
+                                         FragmentInvocationFieldViewIndex);
+    return Builder.CreateLoad(Builder.getInt32Ty(), Ptr);
+  }
   default:
     Builder.getContext().emitError(
         Twine("feme-cpu-wrap-fragment: unsupported fragment system value for "
