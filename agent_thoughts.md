@@ -34946,3 +34946,120 @@ This closes the last of H2g's own three-way triage (H2h and H2i both
 now done); the only `dEQP-VK.multiview` failures remaining are H8's
 format-support gap (42 cases) and H2b's depth-only-pipeline gap (3
 cases), both pre-existing and unrelated to multiview specifically.
+
+# Roadmap H2b: zero color attachments
+
+## Task
+
+Work on milestone H2b: "A pipeline with zero color attachments"
+(`dEQP-VK.multiview.depth_without_fragment_shader`'s own shape, and
+presumably the same case outside multiview). The row's own text: `feme::
+graphics::executeDraws` unconditionally requires at least one color
+attachment (`"a draw needs at least one color attachment"`), but a
+depth-only pipeline with no fragment shader output is legal Vulkan. Needs
+the executor's attachment-count validation relaxed to allow zero when the
+pipeline itself declares none -- explicitly *not* framed as a
+multiview-specific fix.
+
+## Investigation
+
+Found the named check quickly (`Executor.cpp:1051-1053`,
+`executeDraws`): an unconditional `if (Draw.Attachments.empty()) return
+"a draw needs at least one color attachment"`, immediately before the
+existing `Pipeline.getColorBlends().size() != Draw.Attachments.size()`
+count-match check. Walked every other `Draw.Attachments` use in the
+function (extent fallback for the scissor clamp, per-attachment format/
+size validation, the dual-source-blend lookup, the resolve-attachment
+loop, the per-attachment blend/write-mask loop) -- every one already
+loops `Draw.Attachments.size()` times or is separately guarded
+(`!Pipeline.getColorBlends().empty()` for dual-source blend), so nothing
+downstream actually assumes a nonempty list. The unconditional check was
+simply redundant with the count-match check one line below it once zero
+is allowed on both sides.
+
+While tracing what actually produces `Draw.Attachments` for a real
+Vulkan pipeline, found a second, analogous check one layer up:
+`GraphicsPipeline.cpp`'s `translateFixedFunctionState` rejects
+`Targets->Colors.empty()` at `vkCreateGraphicsPipelines` time, with
+almost the identical message ("a graphics pipeline needs at least one
+color attachment"). This is *not* named by the roadmap row's own text,
+but it gates pipeline creation itself -- a real depth-only pipeline never
+even reaches a draw to hit the row's own named `executeDraws` check.
+Confirmed via `getRenderTargets`: both a classic `VkRenderPass` subpass
+with `colorAttachmentCount == 0` and a `VkPipelineRenderingCreateInfo`
+with the same normalize into an empty `Targets.Colors` today, entirely
+legally. Traced every other user of `Targets->Colors`/`ColorBlends`
+(`translateColorBlendState`'s `Info->attachmentCount != Targets.Colors.
+size()` match, already correct for zero; `validateStageInterfaces`'s
+`for (I != ColorAttachmentCount)` loop, zero iterations for zero; the
+`Attachments.push_back` cache-identity loop) -- same story, nothing
+assumes nonempty. Fixed both checks in the same style: delete the
+unconditional rejection, leave a comment explaining why the check
+below it (count match / limit check) is what actually still enforces
+correctness.
+
+## Verification found a bigger gap than either fix's own text claimed
+
+Wrote two new unit tests (`ExecutorTest.RendersWithZeroColorAttachments`,
+a real depth-only draw entirely bypassing SPIR-V import via
+`dxil::setEntrySignature` the way the rest of this file's fixtures do;
+`GraphicsPipelineTest.AcceptsZeroColorAttachments`, a real dynamic-
+rendering pipeline through the actual SPIR-V import path) -- both pass
+cleanly, confirming both fixes work as described. `check-feme` rose from
+1763/1822 to 1765/1824 (2 new tests, 0 regressions).
+
+Then ran the actual named CTS case
+(`dEQP-VK.multiview.depth_without_fragment_shader*`, `FEME_VULKAN_LOG_
+CREATION_ERRORS=1` for attribution) against the freshly rebuilt ICD to
+confirm the fix closes it -- it did not. Same `VK_ERROR_INITIALIZATION_
+FAILED` at `vkCreateGraphicsPipelines`, now for a different reason:
+`"a graphics pipeline needs both a vertex and a fragment stage"`. A quick
+web check of `vktMultiViewRenderTests.cpp`'s own construction confirmed
+why: the real CTS pipeline does not build a fragment shader that writes
+no color output (this row's own title's assumption) -- it omits the
+fragment stage from `pStages` *entirely*, which Vulkan explicitly permits
+whenever the render target has no color attachments. This is a
+qualitatively bigger gap than "relax an attachment-count check": it
+touches pipeline creation (skip fragment-stage compilation/interface
+validation when none is named and the render target has no color
+attachments), the compiled `GraphicsPipeline`'s own shape (a genuinely
+optional `FragmentStage`, not always-present), and the executor's entire
+per-quad fragment-invocation loop (`FSSig`/`Varyings`/`FSColors`/`FS.
+invokeFragments`, all unconditional today) -- not something to bolt onto
+this row without a proper design pass of its own.
+
+Confirmed via a full `dEQP-VK.multiview.*` re-run (838 cases) that both
+of this row's own fixes are safe and neutral at the group level: still
+454/838 (54.2%) passed, 45 `Failed` -- byte-for-byte identical to H2i's
+own baseline, with the 3 `depth_without_fragment_shader*` cases (base +
+`dynamic_rendering` + `renderpass2` siblings) still failing, just later
+in pipeline creation than before.
+
+## Decision
+
+Rather than silently expanding scope mid-row, followed this roadmap's own
+established precedent (H2, H2d, H2g/H2h/H2i all did the same): struck
+through H2b with a "(done, ..., see Deviation)" writeup describing
+exactly what was fixed and verified, plus a Deviation section laying out
+the newly-found "fragment stage is entirely optional" gap in full,
+citing the exact still-failing error and the specific `Executor.cpp`/
+`GraphicsPipeline.cpp` mechanisms that would need to change. Spun off a
+new row, **H2j** (next unused `H2` letter -- `H2h`/`H2i` already exist
+out of alphabetical order from earlier rows, so `H2j` continues the
+existing sequence rather than reusing one), scoped to making the
+fragment stage genuinely optional across creation, compilation, and
+execution, depending on H2b.
+
+## Docs
+
+`VulkanCTSReport.md`: appended a "Roadmap H2b: measured impact" section
+(before/after `FEME_VULKAN_LOG_CREATION_ERRORS` output for the named
+case, the full `dEQP-VK.multiview` re-run showing no group-level change,
+`ninja check-feme` counts) in the same style as every other `H2x`
+section. `Roadmap.md`: struck through H2b, added H2j.
+`FeMeVulkanDesign.md`: added a "Status (roadmap H2b)" note next to the
+other `H2` status notes, describing both fixes and pointing at H2j for
+what remains. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.
+md`: checked both explicitly -- no entry references zero color
+attachments or this shape at all, and this fix advertises no new
+feature or extension, so neither file needed a change.
