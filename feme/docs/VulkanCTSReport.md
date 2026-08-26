@@ -5562,3 +5562,139 @@ availability gap alone, and touches none of those other buckets.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: unchanged --
 this row touches no feature/extension advertisement, only
 `QueryPool`/`CommandBuffer.cpp`'s own occlusion-query bookkeeping.
+
+## Roadmap H2g: measured impact (the triage pass, and the two root causes it found)
+
+`dEQP-VK.multiview.*` (`--deqp-case`, same reproduction recipe as F9-F14's
+own sections above): 838 cases discovered.
+
+Baseline (H2f's own numbers):
+
+```
+Passed:        96/838 (11.5%)
+Failed:        403/838 (48.1%)
+Not supported: 339/838 (40.5%)
+```
+
+After both of this row's own fixes:
+
+```
+Passed:        420/838 (50.1%)
+Failed:         79/838 (9.4%)
+Not supported: 339/838 (40.5%)
+```
+
+**Triage method**: rather than guess, this row extracted the actual
+`Result`/`Reference` PNGs the `Fail (Fail)` cases' own `--deqp-log-images`
+output embeds (one `ImageSet` per rendered layer, plus a montage `Result`
+set) and diffed them pixel-by-pixel. `instanced.no_queries.15` (the case
+H2d/H2e's own text already spot-checked) showed a very specific shape: its
+two rendered layers were each internally uniform-but-swapped -- the top
+half of the rendered image held the color the reference expected in the
+bottom half, and vice versa, in both layers identically. That is exactly
+what a vertical (Y-axis) mirror of an otherwise-correct image looks like,
+not a wrong color computation.
+
+**Root cause 1 (the majority: 270 of the 358, `96/838` &rarr; `366/838`)**:
+`feme::graphics::Executor::executeDraws`'s `projectVertex` (the Vulkan
+"coordinate transformations" viewport transform) maps clip-space `NdcY`
+into window space as `(1 - (NdcY * 0.5 + 0.5)) * Height` -- i.e. it flips
+Y. That flip is correct for DXIL/HLSL's own clip space (Y increases
+*upward*, matching Direct3D's NDC convention, so the flip converts it to
+window space's Y-down layout) but wrong for SPIR-V/GLSL, whose clip space
+already increases *downward* -- identical to window space, needing no
+flip at all. Grepping the whole `feme/lib` tree found no compensating
+negation anywhere in the SPIR-V import/canonicalization path (`grep -rn
+FNeg feme/lib` turns up nothing related to `Position` at all): a SPIR-V
+vertex shader's `gl_Position.y` reaches the shared executor completely
+unmodified, gets the DXIL-shaped flip applied anyway, and comes out
+upside down. Confirmed directly against `clear_attachments.no_queries.15`
+(a plain, `gl_PerVertex`-free-of-multiview-specific-logic quad-color test):
+its top-left texel held quad 1's color (the quad authored at NDC `y in
+[0, 1]`) where the reference expected quad 0's (`y in [-1, 0]`) -- exactly
+the pre-existing `ExecutorTest` unit tests' own documented convention
+("Y flipped by the viewport transform") applied to an SPIR-V-sourced
+position it was never meant to apply to.
+
+Fix: `canonicalizeSPIRVStage` (`CanonicalizeStage.cpp`) now negates a
+`SignatureSystemValue::Position` *output* store's Y component
+(`negateSystemValuePositionY`) -- a whole-vector `gl_Position = ...` store
+negates lane 1; a single-component `gl_Position.y = ...` store negates
+directly when its (statically-known) component is 1. A `Position`
+*input* (`gl_FragCoord`/`SV_Position` in a fragment shader, the other
+reuse of the same `SystemValue`, per `getSystemValueForBuiltIn`'s own
+comment) is untouched, since it is already a genuine, correctly-oriented
+window-space value in both APIs and the fix only ever runs on the store
+side. This is the first place either SPIR-V or DXIL import applies any
+sign convention at all to a position value; since this repository's own
+graphics test suite (`ExecutorTest`, `PreparedDrawTest`, `SceneTest`) all
+construct their clip-space positions directly in IR (bypassing SPIR-V
+import entirely), none of them depend on the pre-fix behavior, and no
+currently-passing non-multiview `dEQP-VK` case reaches real image
+comparison yet (every one this session tried -- `dEQP-VK.draw.
+renderpass.basic_draw.draw.triangle_list.1`,
+`dynamic_rendering.complete_secondary_cmd_buff.basic_draw.draw.
+triangle_list.1` -- still fails at `vkCreateGraphicsPipelines`, an
+unrelated, pre-existing gap), so this fix could only improve, never
+regress, real rendered output. Two of this repository's own SPIR-V-
+sourced unit tests *did* encode the pre-fix convention in their input
+data and needed updating to match: `spirv-canonicalize-stage-interface-
+block-byte-offset.ll`'s own `gl_Position.y` store (expected value negated
+from `2.0` to `-2.0`) and `DrawTest.DynamicLineWidthWidensTheLine`'s
+`LineVertexSource` (NDC `y` flipped from `0.25` to `-0.25`, `-0.25` now
+being the real, spec-correct value for a 4-row target's row-1 pixel
+center).
+
+**Root cause 2 (54 more of the 358 -- all of `clear_attachments`/
+`readback_explicit_clear`, plus 6 of `readback_implicit_clear`'s 24;
+`366/838` &rarr; `420/838`)**: `vkCmdClearAttachments`'s
+`clearAttachmentRects` (`ImageOps.cpp`) resolved and wrote directly into
+one attachment view with no awareness of multiview at all -- unlike
+`CommandBuffer.cpp`'s own `runDraw`, which slices each color/depth/stencil
+attachment down to the current view's own array layer
+(`sliceAttachmentLayer`) once per set `viewMask` bit before ever calling
+into the executor. Per the Vulkan spec, a clear rect's own
+`baseArrayLayer`/`layerCount` are relative to the current subpass's view
+mask inside a multiview render pass instance, exactly like a draw's own
+implicit per-view replication -- but this repository's clear path simply
+ignored `RenderTargetBinding::ViewMask` and always wrote layer 0 alone.
+Confirmed against `clear_attachments.no_queries.15`'s own per-layer PNGs
+once root cause 1 was fixed: layer 0 matched the reference exactly, but
+layers 1-3 each still held their pre-clear (drawn) content in the region
+the reference expected the `vkCmdClearAttachments` blue rectangle to
+have overwritten.
+
+Fix: `clearAttachmentRects` now loops over `ViewMask`'s own set bits (`1`,
+outside multiview -- the same normalization `runDraw` already uses) and
+slices the resolved `AttachmentView` down to each one's own array layer
+first, reusing the same byte-offset arithmetic `sliceAttachmentLayer`
+already established (`feme::graphics::getAttachmentLayerByteOffset`).
+`DrawTest.MultiviewClearAttachmentsClearsEveryViewsOwnLayer` (a two-view
+`viewMask == 0b11` render pass: a full-screen red draw, then a
+`vkCmdClearAttachments` covering the whole render area) locks this down
+at the unit level.
+
+**What's left (34 of the 358, newly triaged into two independent gaps --
+see roadmap H2h/H2i for the full writeup)**: 16 `input_attachments`
+cases render a totally blank image (every pixel black/transparent, not
+merely a wrong color or missing rectangle -- a different failure shape
+from either root cause above, not yet investigated); 18 of
+`readback_implicit_clear`'s 24 still fail, but only its multi-subpass
+view-mask combinations (`1_2_4_8`, `5_10_5_10`, `8_1_1_8`, etc.) --
+every single-subpass case (e.g. `15`) now passes, suggesting a load-op/
+multi-subpass interaction this row's own `vkCmdClearAttachments` fix does
+not cover.
+
+The remaining 45 failures are unchanged from H2d/H2e/H2f's own breakdown:
+`vkCreateGraphicsPipelines`/`vkCreateRenderPass(2)` failures split between
+roadmap H2b's 3 and roadmap H8's 14 + 28.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full, 1820/1821 (1 pre-existing, unrelated `Unsupported`), up from
+1818/1819 before this row (the one new `DrawTest.
+MultiviewClearAttachmentsClearsEveryViewsOwnLayer` case).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: unchanged --
+both fixes correct existing rendering/clear behavior; neither advertises,
+nor requires advertising, any new feature or extension.
+
