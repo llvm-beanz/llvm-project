@@ -5062,3 +5062,92 @@ by this row's own three new `MemoryTest` cases
 `UnmapMemory2AcceptsReserveBit`, plus the extension-count/name updates to
 `DrawTest.AdvertisesDynamicRenderingExtension`) and the generator's own
 `vk-gen-entrypoints-split-features.test` fixture update.
+
+
+## Roadmap H2: measured impact (layered rendering + `multiview`)
+
+`dEQP-VK.multiview.*` (`--deqp-case`, same reproduction recipe as
+F9-F14's own sections above): 838 cases discovered.
+
+```
+Passed:        0/838 (0.0%)
+Failed:        499/838 (59.5%)
+Not supported: 339/838 (40.5%)
+```
+
+This is a much narrower "closed" than this row's own roadmap text
+("Closes ... the whole `dEQP-VK.multiview` group") claimed, and every
+one of the 499 failures traces to a cause outside this row's own file
+scope (`RenderPass.cpp`/`CommandBuffer.cpp`/`Executor.cpp`'s object model
+and per-view draw loop):
+
+| Cause | Cases | Detail |
+|---|---|---|
+| `feme-cpu-simdize` "divergent vector value ... component decomposition is not yet supported" | 454 | A *different* shape than the four `phi`/`select`/`shufflevector`/`extractelement` patterns roadmap C3 already closed -- C3's own fix (confirmed still in place) does not reach whatever these multiview fragment shaders' own divergent, per-invocation output does. Root cause unstarted; tracked as new roadmap row H2a |
+| `vk.createRenderPass(2)(...): VK_ERROR_FORMAT_NOT_SUPPORTED` | 28 | `dEQP-VK.multiview.{,renderpass2.}view_mask_iteration.*`'s own `VK_FORMAT_R8G8B8A8_UINT` color attachment -- an integer format `isSupportedColorAttachmentFormat` (`RenderPass.cpp`) correctly, and pre-existingly, declines (see "every other format is ... an integer format no fragment output writes yet" in that function's own comment). Roadmap H8's mandatory-format-table gap, not a new one |
+| `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED` (dynamic-rendering `view_mask_iteration`) | 14 | Same `VK_FORMAT_R8G8B8A8_UINT` cause as above, surfacing at pipeline creation instead of render-pass creation because dynamic rendering has no separate render-pass object to reject it at |
+| `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED` (`depth_without_fragment_shader`, all three render-pass-type variants) | 3 | A pipeline with zero color attachments (a legal, depth-only Vulkan pipeline shape): `feme::graphics::executeDraws` unconditionally requires at least one (`"a draw needs at least one color attachment"`). Not multiview-specific; tracked as new roadmap row H2b |
+
+The remaining 339 `NotSupported` cases are legitimate: `dEQP-VK.multiview.
+secondary_cmd_buffer_geometry.*` needs `geometryShader` (still `VK_FALSE`,
+roadmap H5), and a handful need `VK_EXT_depth_range_unrestricted`
+(unimplemented, out of this row's scope).
+
+No case in the group passes outright: every one of its color/depth
+attachments and fragment shaders happens to hit one of the three causes
+above (mostly the SIMDize gap, which this run found affects the large
+majority of the group's own shader shapes). Since the CTS run itself
+cannot isolate whether the *multiview* wiring specifically (as opposed to
+those three surrounding gaps) is correct, a new self-contained regression
+test, `DrawTest.MultiviewRendersDifferentColorPerViewIntoItsOwnLayer`,
+exercises exactly that in isolation instead: a two-layer framebuffer, a
+render pass with `viewMask == 0b11`, and a fragment shader that reads
+`gl_ViewIndex` (`BuiltIn ViewIndex`) to pick red for view 0 and green for
+view 1 -- confirmed each view's own color lands in its own array layer
+(layer 0 red, layer 1 green), not both clobbering layer 0. Two more new
+`RenderPassTest` cases confirm a layered framebuffer is accepted when its
+view covers enough layers and rejected when it does not, and
+`PhysicalDeviceProperties2Test.MultiviewFeaturesReportMultiviewTrueAmplificationFalse`
+confirms the flipped feature bit.
+
+A targeted re-run of `dEQP-VK.api.info.get_physical_device_properties2.
+features.multiview_features` and `dEQP-VK.api.info.vulkan1p2_limits_validation.
+khr_multiview` (the two cases that most directly probe `multiview`'s own
+feature/limit reporting) both `Pass`, and
+`dEQP-VK.api.info.vulkan1p2.{feature,property}_extensions_consistency`/
+`vulkan1p3.{feature,property}_extensions_consistency` still `Pass` too,
+confirming `multiview`'s new `VK_TRUE` and `VK_KHR_multiview`'s addition
+to `getSupportedDeviceExtensions` introduced no inconsistency with any
+other advertised feature or extension. (One unrelated, pre-existing
+failure was observed in the same sweep --
+`get_physical_device_properties2.features.shader_subgroup_rotate_property_consistency_khr`,
+a `VkPhysicalDeviceShaderSubgroupRotateFeaturesKHR`/`Vulkan11Properties`
+mismatch with no connection to this row's own files -- left untouched.)
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1800 discovered, 1799 passed, 1
+unsupported (pre-existing, unrelated) -- up from F14's own 1795 discovered
+by this row's own five new regression tests
+(`RenderPassTest.{RenderPass2AcceptsMultiviewAndRecordsViewMask,
+RenderPass2AcceptsNonZeroDependencyViewOffset,
+FramebufferAcceptsLayeredAttachmentWithEnoughLayers,
+FramebufferRejectsViewWithTooFewLayers,FramebufferRejectsZeroLayers}`,
+`DrawTest.MultiviewRendersDifferentColorPerViewIntoItsOwnLayer`, and
+`CanonicalizeStageTest.MapsSPIRVViewIndexBuiltInToSystemValue` -- six new
+cases plus two renamed/rewritten ones for the flipped `multiview`
+behavior, `PhysicalDeviceProperties2Test.
+MultiviewFeaturesReportMultiviewTrueAmplificationFalse` and
+`RenderPassTest.{RenderPass2AcceptsMultiviewAndRecordsViewMask,
+RenderPass2AcceptsNonZeroDependencyViewOffset}`, plus the extension-count
+update to `DrawTest.AdvertisesDynamicRenderingExtension`).
+
+This edition's regeneration of `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` also found and restored one more instance
+of the F13-discovered `AdvertisedPromotedFeatures.txt`/
+`AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt` drift, this
+time from roadmap F14: `VK_KHR_map_memory2` was genuinely implemented
+(`Memory.cpp`) but never recorded in any of the three tracking files,
+understating the 1.4 extension row as 14 of 16 rather than its true 15 of
+16 and the total advertised-extension count as 29 rather than 31 (with
+`VK_KHR_multiview` itself the other +1). Restored alongside this row's
+own bookkeeping.

@@ -70,11 +70,11 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---|---|---|
 | 1.0 | 3 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
-| 1.1 | **0 of 12** | n/a (see scope note) | 6 of 23 |
+| 1.1 | 1 of 12 | n/a (see scope note) | 7 of 23 |
 | 1.2 | 7 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
-| 1.4 | 20 of 21 | 25 | 14 of 16 |
-| **total** | **42 of 150** | **70** | **46 of 86** |
+| 1.4 | 20 of 21 | 25 | 15 of 16 |
+| **total** | **43 of 150** | **70** | **48 of 86** |
 
 - **The 1.3 floor is nearly closed; the 1.1/1.2 floor was never audited
   until now, and the 1.4 floor is nearly closed too.** Roadmap E1-E28 drove
@@ -89,12 +89,14 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   (`pipelineProtectedAccess`), F10 (`pipelineRobustness`), F11
   (`hostImageCopy`) and F12 (`pushDescriptor`), bringing 1.4 to 20 of its
   21 bits -- only `shaderFloatControls2` remains, F3's own still-open
-  target -- while 1.1 still
-  reports **zero** of its 12 bits. That zero is the single most surprising
-  number in this table: `multiview`, `variablePointers`,
+  target -- while roadmap H2 has now closed `multiview`, the single bit
+  1.1's own floor was missing the most: `variablePointers`,
   `samplerYcbcrConversion`, `shaderDrawParameters`, the 16-bit storage
-  cluster and `protectedMemory` are all `VK_FALSE`, and a 1.4 conformance
-  claim inherits every one of them. (`VK_KHR_load_store_op_none`, roadmap
+  cluster and `protectedMemory` remain `VK_FALSE` (`multiviewGeometryShader`/
+  `multiviewTessellationShader`, `multiview`'s own two amplification bits,
+  stay `VK_FALSE` too -- neither a geometry nor a tessellation-evaluation
+  stage exists yet, roadmap H4/H5), and a 1.4 conformance claim inherits
+  every remaining one of them. (`VK_KHR_load_store_op_none`, roadmap
   F13, adds no feature bit of its own -- see its own extension-table row
   below and [VulkanExtensionInventory.md](VulkanExtensionInventory.md).)
   This edition also found `AdvertisedPromotedFeatures.txt`/
@@ -105,7 +107,12 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   file, understating the 1.4 row as 15 of 21/8 of 16 rather than its true
   20 of 21/14 of 16; restored as part of roadmap F13's own bookkeeping,
   the same drift [VulkanExtensionInventory.md](VulkanExtensionInventory.md)
-  found in its own advertised-extension list.
+  found in its own advertised-extension list. This edition found one more
+  instance of the same drift, from roadmap F14: `VK_KHR_map_memory2` was
+  genuinely implemented (`Memory.cpp`) but never recorded in
+  `AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt`, understating
+  the 1.4 extension row as 14 of 16 rather than its true 15 of 16; restored
+  here alongside roadmap H2's own `multiview` update.
 - **17 of the 52 unimplemented 1.0 feature bits are graphics
   capabilities** (`geometryShader`, `tessellationShader`, `multiViewport`,
   `fillModeNonSolid`, `wideLines`, `largePoints`, `sampleRateShading`,
@@ -117,14 +124,14 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   none blocks the claim; each is nonetheless a block of mandatory-list
   cases reported `NotSupported`, which is why roadmap &sect;1.9.7's H7
   tracks them as a cluster rather than as conformance blockers.
-- **Eleven core-promoted extensions are *partially* implemented**, a
+- **Ten core-promoted extensions are *partially* implemented**, a
   state neither this file nor
   [VulkanExtensionInventory.md](VulkanExtensionInventory.md) can express
   and which therefore reads as a bare "no" in both:
   `VK_KHR_dedicated_allocation`, `VK_KHR_device_group`,
   `VK_KHR_get_memory_requirements2`,
   `VK_KHR_get_physical_device_properties2`, `VK_KHR_maintenance2`,
-  `VK_KHR_multiview`, `VK_KHR_shader_draw_parameters`,
+  `VK_KHR_shader_draw_parameters`,
   `VK_EXT_sampler_filter_minmax`,
   `VK_KHR_sampler_mirror_clamp_to_edge`,
   `VK_KHR_separate_depth_stencil_layouts` and `VK_KHR_spirv_1_4` each have
@@ -312,7 +319,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_1 | `uniformAndStorageBuffer16BitAccess` | no |  |
 | feature | VK_VERSION_1_1 | `storagePushConstant16` | no |  |
 | feature | VK_VERSION_1_1 | `storageInputOutput16` | no |  |
-| feature | VK_VERSION_1_1 | `multiview` | no |  |
+| feature | VK_VERSION_1_1 | `multiview` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewGeometryShader` | no |  |
 | feature | VK_VERSION_1_1 | `multiviewTessellationShader` | no |  |
 | feature | VK_VERSION_1_1 | `variablePointersStorageBuffer` | no |  |
@@ -337,7 +344,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_1 | `VK_KHR_maintenance1` | yes | core, not advertised by name: vkTrimCommandPool (CommandBuffer.cpp) |
 | extension | VK_VERSION_1_1 | `VK_KHR_maintenance2` | no |  |
 | extension | VK_VERSION_1_1 | `VK_KHR_maintenance3` | yes | core, not advertised by name: vkGetDescriptorSetLayoutSupport + VkPhysicalDeviceMaintenance3Properties (Descriptor.cpp, EntryPoints.cpp) |
-| extension | VK_VERSION_1_1 | `VK_KHR_multiview` | no |  |
+| extension | VK_VERSION_1_1 | `VK_KHR_multiview` | yes | roadmap H2, advertised by name: vkCreateFramebuffer/vkCreateRenderPass/vkCreateRenderPass2 accept layers > 1/a nonzero viewMask (RenderPass.cpp), CommandBuffer.cpp's runDraw runs one draw per set view bit -- dEQP-VK.multiview's own cases enable this extension by name regardless of apiVersion |
 | extension | VK_VERSION_1_1 | `VK_KHR_relaxed_block_layout` | yes | core, not advertised by name: declared offsets/strides are used as-is, no std140 re-layout is imposed (SPIRVToLLVMPatterns.cpp) |
 | extension | VK_VERSION_1_1 | `VK_KHR_sampler_ycbcr_conversion` | no |  |
 | extension | VK_VERSION_1_1 | `VK_KHR_shader_draw_parameters` | no |  |
@@ -553,7 +560,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_KHR_load_store_op_none` | yes | roadmap F13: applyClear's existing LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR check (CommandBuffer.cpp) already treats VK_ATTACHMENT_LOAD_OP_NONE as "do nothing"; StoreOp is never read to act on at all, so STORE/DONT_CARE/NONE are indistinguishable in this real-memory-backed renderer |
 | extension | VK_VERSION_1_4 | `VK_KHR_maintenance5` | yes | roadmap E5: null VkRenderingAttachmentInfo image views, VK_REMAINING_ARRAY_LAYERS in copy/blit/resolve regions (E27), and the rest of the group |
 | extension | VK_VERSION_1_4 | `VK_KHR_maintenance6` | yes | roadmap E6: vkCmdBindDescriptorSets2/vkCmdPushConstants2/vkCmdPushDescriptorSet2 (Descriptor.cpp, CommandBuffer.cpp) |
-| extension | VK_VERSION_1_4 | `VK_KHR_map_memory2` | yes | roadmap F14: vkMapMemory2/vkUnmapMemory2 (Memory.cpp), thin pNext-extensible wrappers around vkMapMemory/vkUnmapMemory; VK_MEMORY_UNMAP_RESERVE_BIT_EXT is validate-only since VK_EXT_map_memory_placed is unimplemented |
+| extension | VK_VERSION_1_4 | `VK_KHR_map_memory2` | yes | roadmap F14: vkMapMemory2/vkUnmapMemory2 (Memory.cpp) wrap the existing vkMapMemory/vkUnmapMemory; restored here (this row's own bookkeeping was missing it, the same drift found and fixed for F5/F7/F8/F9/F12 in roadmap F13) |
 | extension | VK_VERSION_1_4 | `VK_KHR_push_descriptor` | yes | roadmap F12: see the pushDescriptor feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_expect_assume` | yes | roadmap F4: spirv.KHR.AssumeTrue/spirv.KHR.Expect conversion patterns (SPIRVToLLVMPatterns.cpp's AssumeTrueConversionPattern/ExpectConversionPattern) |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no |  |

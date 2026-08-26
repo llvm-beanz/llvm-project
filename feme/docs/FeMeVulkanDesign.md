@@ -572,18 +572,20 @@ both their dedicated properties structs and the promoted
 `VkPhysicalDeviceVulkan11Properties`/`VkPhysicalDeviceVulkan12Properties`
 chains, fixing the `vkGetPhysicalDeviceFeatures2`/`Properties2`-versus-
 promoted-struct disagreement `dEQP-VK.api.info.vulkan1p2_*_consistency`
-checks for each. **`multiview` stays unadvertised**: it needs layered
-rendering (a framebuffer/attachment with more than one array layer bound
-per view), which is roadmap V7, not yet implemented -- see
-`vkCreateFramebuffer`'s `layers != 1` rejection and
-`vkCreateRenderPass2`'s `viewMask != 0` rejection, both untouched by this
-milestone. The `maxMultiviewViewCount`/`maxMultiviewInstanceIndex`
-properties are still raised to their required minimum regardless, since
-`dEQP-VK.api.info.vulkan1p2_limits_validation` checks them unconditionally
-once the advertised API version is >= 1.2, independent of whether
-`multiview` itself is supported. See `feme/lib/Vulkan/PhysicalDeviceInfo.h`'s
-field comments and `EntryPoints.cpp`'s `fillFeatures2Chain`/
-`fillProperties2Chain` case comments for the full per-field reasoning.
+checks for each. **`multiview` is now advertised (roadmap H2)**:
+`vkCreateFramebuffer` accepts `layers > 1` and `vkCreateRenderPass`/
+`vkCreateRenderPass2` accept a nonzero `viewMask`
+(`VkRenderPassMultiviewCreateInfo`/`VkRenderPassCreateInfo2`), each set
+view bit running the bound pipeline once and writing that bit's own
+attachment array layer (`CommandBuffer.cpp`'s `runDraw`) -- see
+"Render passes and dynamic rendering"'s own updated status note below.
+The `maxMultiviewViewCount`/`maxMultiviewInstanceIndex`
+properties still only report their required minimum (6 / 2^27-1): nothing
+about this ICD's per-view draw loop imposes a lower cap, but nothing
+raises one above that floor either. See `feme/lib/Vulkan/
+PhysicalDeviceInfo.h`'s field comments and `EntryPoints.cpp`'s
+`fillFeatures2Chain`/`fillProperties2Chain` case comments for the full
+per-field reasoning.
 
 The driver reports no device extension merely because Vulkan-Headers declares
 it. Each extension has an implementation owner and a focused test before it is
@@ -1419,11 +1421,99 @@ bound at creation time; only the chained `VkFramebufferAttachmentsCreateInfo`
 least one format-compatible entry) can be validated eagerly, with the same
 format/sample-count/size check `vkCreateFramebuffer`'s concrete path already
 performed deferred into `buildRenderTargetBinding` (`CommandBuffer.cpp`)
-instead. This needed no layered-rendering support: an imageless framebuffer
-is exactly as single-layer as a concrete one (`vkCreateFramebuffer`'s
-`layers != 1` rejection is untouched), so it stayed in scope even though
+instead. This needed no layered-rendering support at the time: an imageless
+framebuffer was exactly as single-layer as a concrete one (`vkCreateFramebuffer`'s
+`layers != 1` rejection was untouched), so it stayed in scope even though
 `multiview` itself did not (see "Physical Device and Capabilities"'s
-"Limits and features" status note).
+"Limits and features" status note) -- roadmap H2 below lifts that
+restriction for both.
+
+**Status (roadmap H2): layered rendering and `multiview` implemented.**
+`vkCreateFramebuffer`'s `layers != 1` rejection and `vkCreateRenderPass`/
+`vkCreateRenderPass2`'s nonzero-`viewMask` rejection are both gone:
+`vkCreateFramebuffer` now only requires `layers != 0` and validates each
+bound attachment view's own `layerCount` against it
+(`isCompatibleAttachmentView`'s new `Layers` parameter); a classic
+`vkCreateRenderPass` reads `VkRenderPassMultiviewCreateInfo` from `pNext`
+the way `vkCreateRenderPass2` reads `VkSubpassDescription2::viewMask`
+directly, both landing in the same new `SubpassDescription::ViewMask`
+field (`RenderPass.{h,cpp}`). `VK_DEPENDENCY_VIEW_LOCAL_BIT` and a nonzero
+`VkSubpassDependency2::viewOffset` are both accepted (not merely tolerated):
+like every other subpass dependency, the per-view join either describes is
+already satisfied by this ICD's strictly sequential execution, so neither
+needs any tracking of its own. `RenderTargetBinding` grows a matching
+`Layers`/`ViewMask` pair (`buildRenderTargetBinding` reads them from the
+framebuffer/subpass; `vkCmdBeginRenderingKHR` reads `VkRenderingInfo::
+layerCount`/`viewMask` the same way for dynamic rendering), and `resolve
+AttachmentView` (`RenderPass.cpp`) now returns every requested array layer
+of a view (`VK_IMAGE_VIEW_TYPE_2D_ARRAY` accepted alongside plain `_2D`)
+instead of only layer 0, addressed layer-major via the existing
+`AttachmentView::ArrayLayers`/`feme::graphics::getAttachmentLayerByteOffset`
+plumbing roadmap R34 had already built standalone (`LayeredRendering.h`)
+but never wired to a real draw.
+
+The executor side is a per-view loop, not a per-primitive one:
+`CommandBuffer.cpp`'s `runDraw` iterates one draw per set bit of
+`RenderTargetBinding::ViewMask` (or exactly once, at view 0, for the
+non-multiview -- `ViewMask == 0` -- common case), slicing every color/
+depth/stencil `AttachmentView` down to that view's own array layer
+(`sliceAttachmentLayer`) before calling `feme::graphics::executeDraws`,
+and setting the new `PreparedDraw::ViewIndex` field so the compiled
+stages can source `gl_ViewIndex`. This is deliberately narrower than a
+general "any stage may route a primitive to an arbitrary layer" model:
+per Vulkan's own multiview rule, a view with no explicit
+`RenderTargetArrayIndex`/`gl_Layer` output writes into the array layer
+numbered the same as its view index, which is exactly what this loop
+does without needing a vertex/geometry stage to write anything -- the
+*general* per-primitive case (an explicit `gl_Layer` write routing a
+primitive to a layer other than its view index) still has nowhere to
+come from, since no stage can write it yet (`shaderOutputLayer` is
+`VK_FALSE`, no geometry stage exists) -- see H3/H5's own rows.
+
+Two new stage system values complete the wiring: `SignatureSystemValue::
+ViewIndex` (`Core/Signature.h`), mapped from SPIR-V `BuiltIn ViewIndex`
+(code 4440, `CanonicalizeStage.cpp`) and sourced by `VertexWrapper.cpp`/
+`FragmentWrapper.cpp` from a new `FemeVertexInvocation::ViewIndex`/
+`FemeFragmentInvocation::ViewIndex` ABI field (the same value for every
+invocation of one draw, unlike a real per-invocation system value); and
+`RenderTargetArrayIndex`/`gl_Layer`, whose SPIR-V import mapping already
+existed (`BuiltIn Layer`, code 9) but had no consumer -- still true after
+this row, since only a vertex stage could write it today, and no test
+exercises that combination without the still-`VK_FALSE`
+`shaderOutputLayer` feature.
+
+`multiview` is now advertised `VK_TRUE` (both
+`VkPhysicalDeviceMultiviewFeatures` and the aggregate
+`VkPhysicalDeviceVulkan11Features`); `multiviewGeometryShader`/
+`multiviewTessellationShader` stay `VK_FALSE` (H4/H5). `VK_KHR_multiview`
+is added to `getSupportedDeviceExtensions` by name, since `dEQP-VK.
+multiview`'s own cases enable it regardless of the advertised
+`apiVersion`.
+
+**Deviation from this milestone's own roadmap text**: "add ... then
+advertise `multiview`" undersold how much of the real `dEQP-VK.multiview`
+group a targeted run still leaves failing, and for reasons entirely
+outside this row's own file scope. Of 838 cases, only 1 passes outright;
+454 hit the pre-existing `feme-cpu-simdize` "divergent vector value ...
+component decomposition is not yet supported" diagnostic (a *different*
+shape than the four roadmap C3 already closed -- these multiview shaders'
+own divergent per-invocation output apparently reaches SIMDize by some
+path C3's fix does not cover; root-causing which shape is unstarted, see
+roadmap H2a below), 42 hit `view_mask_iteration`'s `VK_FORMAT_R8G8B8A8_UINT`
+color attachment (an integer format `isSupportedColorAttachmentFormat`
+correctly, and pre-existingly, does not accept -- roadmap H8's own
+mandatory-format-table gap, not a new one), 3 hit a zero-color-attachment
+"depth without a fragment shader" pipeline shape this executor has never
+supported (roadmap H2b below), and the small remainder are legitimately
+`NotSupported` (`secondary_cmd_buffer_geometry` needing `geometryShader`,
+`VK_EXT_depth_range_unrestricted`). A synthetic, self-contained regression
+test (`DrawTest.MultiviewRendersDifferentColorPerViewIntoItsOwnLayer`)
+confirms the object-model/executor wiring this row actually owns is
+correct end to end (two views, two layers, two different `gl_ViewIndex`-
+selected colors, each landing in its own layer) -- what remains is real,
+but belongs to three separate, already-scoped gaps (H2a, H2b, H8), not to
+this row. See "Roadmap H2: measured impact" in VulkanCTSReport.md for the
+full breakdown.
 
 **Status (roadmap E5): a dynamic-rendering color attachment's
 `VkRenderingAttachmentInfo::imageView == VK_NULL_HANDLE` is a slot that is
@@ -2739,7 +2829,9 @@ Depends on G5.
   buffer coverage, if this ICD ever advertises that path), plus conditional
   rendering if advertised.
 - Add layered rendering, viewport/layer array indexing, and multiple viewports
-  and scissors.
+  and scissors (roadmap H2 closes layered rendering/`multiview`'s own
+  object-model and executor half; viewport/layer array indexing and
+  multiple viewports remain H3's own scope).
 - Complete the format matrix for the advertised graphics profile, including
   render-target, blend, depth/stencil, and multisample capability bits.
 - Add secondary command buffers recorded inside a render pass.

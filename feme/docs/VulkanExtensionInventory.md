@@ -62,12 +62,12 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 
 | Status | Count |
 |---|---:|
-| Advertised | 29 |
+| Advertised | 31 |
 | Implemented (core, not advertised by name) | 17 |
-| Planned (in scope, not implemented) | 52 |
+| Planned (in scope, not implemented) | 50 |
 | Not implemented (out of scope) | 202 |
 
-- **The 29 advertised** are the ones a `deqp-vk` case enables by name
+- **The 31 advertised** are the ones a `deqp-vk` case enables by name
   regardless of the advertised `apiVersion`, plus the three that predate
   that discipline: `VK_KHR_dynamic_rendering`,
   `VK_EXT_extended_dynamic_state`, `VK_KHR_shader_integer_dot_product`,
@@ -86,7 +86,8 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_KHR_dynamic_rendering_local_read` (F8),
   `VK_EXT_pipeline_protected_access` (F9), `VK_EXT_pipeline_robustness`
   (F10), `VK_EXT_host_image_copy` (F11), `VK_KHR_push_descriptor` (F12),
-  and `VK_KHR_load_store_op_none` (F13). This edition's own addition,
+  and `VK_KHR_load_store_op_none` (F13), `VK_KHR_map_memory2` (F14), and
+  `VK_KHR_multiview` (H2). This edition's own addition,
   `VK_KHR_load_store_op_none`, needed no new runtime code at all: it is the
   first row in this file to move from "Planned" to "Advertised" purely by
   recognizing behavior `applyClear`'s existing `LoadOp != CLEAR` check
@@ -97,6 +98,14 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   already-implemented roadmap rows (F2, F5, F7, F8, F9, F12) that were
   still marked "planned" or missing from the advertised list entirely --
   a bookkeeping gap this file's own regeneration exists to catch.
+  Roadmap H2's own regeneration found one more instance of the same drift:
+  `VK_KHR_map_memory2` (F14) was genuinely implemented (`Memory.cpp`) but
+  never added to `AdvertisedExtensions.txt`/`AdvertisedPromotedExtensions.txt`,
+  restored here alongside `VK_KHR_multiview`'s own move from "Planned" to
+  "Advertised" (`vkCreateFramebuffer`/`vkCreateRenderPass`/
+  `vkCreateRenderPass2` accepting `layers > 1`/a nonzero `viewMask`,
+  `CommandBuffer.cpp`'s `runDraw` running one draw per set view bit -- see
+  Roadmap.md's H2 entry).
 - **The 17 core-but-unadvertised** were 3 until roadmap E-series' own
   audit. A full audit of every core-promoted extension against this ICD's
   own sources (rather than only the ones a roadmap row happened to name)
@@ -112,7 +121,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_KHR_format_feature_flags2`. Most are roadmap C6/V3-era work whose
   extension-name consequences were never written down. None is newly
   implemented by this edition.
-- **The 52 planned** decompose into three groups, and the membership rule
+- **The 50 planned** decompose into three groups, and the membership rule
   is enforced by `PlannedExtensions.txt`'s own header rather than by
   judgement per row: every core-promoted (1.1-1.4) extension this ICD does
   not implement (the mandatory floor a 1.4 claim inherits, including the
@@ -124,7 +133,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_KHR_pipeline_library`, `VK_KHR_buffer_device_address`,
   `VK_KHR_ray_tracing_maintenance1`,
   `VK_KHR_ray_tracing_position_fetch`, roadmap &sect;1.9.8); and the
-  graphics/WSI set (`VK_EXT_mesh_shader`, `VK_KHR_multiview`,
+  graphics/WSI set (`VK_EXT_mesh_shader`,
   `VK_KHR_surface`, `VK_KHR_swapchain`, `VK_EXT_headless_surface`,
   `VK_KHR_get_surface_capabilities2`, roadmap &sect;1.9.7).
 - **The 202 out of scope** are what remains after that rule: every
@@ -369,8 +378,8 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_maintenance7` | Not implemented |  |
 | `VK_KHR_maintenance8` | Not implemented |  |
 | `VK_KHR_maintenance9` | Not implemented |  |
-| `VK_KHR_map_memory2` | Advertised | roadmap F14: vkMapMemory2/vkUnmapMemory2 (Memory.cpp) wrap the existing vkMapMemory/vkUnmapMemory; VK_MEMORY_UNMAP_RESERVE_BIT_EXT is validate-only, since VK_EXT_map_memory_placed (the only extension that gives it meaning) is not implemented |
-| `VK_KHR_multiview` | Planned (in scope, not implemented) | roadmap H2: layered rendering first; deqp-vk's own multiview cases enable this by name |
+| `VK_KHR_map_memory2` | Advertised |  |
+| `VK_KHR_multiview` | Advertised |  |
 | `VK_KHR_opacity_micromap` | Not implemented |  |
 | `VK_KHR_performance_query` | Not implemented |  |
 | `VK_KHR_pipeline_binary` | Not implemented |  |
