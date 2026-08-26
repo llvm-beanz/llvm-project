@@ -33,8 +33,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F14?
+Can you implement roadmap milestone H2?
 
-> **`VK_KHR_map_memory2`.** `vkMapMemory2`/`vkUnmapMemory2` are
-> `pNext`-extensible wrappers around the existing `Memory.cpp` map/unmap, adding
-> `VkMemoryUnmapFlagsKHR`'s reserve-on-unmap bit
+> **Layered rendering + `multiview`.** `vkCreateFramebuffer` rejects `layers !=
+> 1` (`RenderPass.cpp:383`) and `vkCreateRenderPass2` rejects any nonzero
+> `viewMask` (`RenderPass.cpp:274`); the executor renders one layer. Add a layer
+> dimension to the render-target binding and the raster loop, then
+> `gl_Layer`/`ViewIndex` as stage system values, and only then advertise
+> `multiview` — the one 1.2 feature roadmap C6 deliberately left unadvertised
+> for exactly this reason. Closes C6's open exception and the whole
+> `dEQP-VK.multiview` group
