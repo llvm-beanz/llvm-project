@@ -5698,3 +5698,101 @@ MultiviewClearAttachmentsClearsEveryViewsOwnLayer` case).
 both fixes correct existing rendering/clear behavior; neither advertises,
 nor requires advertising, any new feature or extension.
 
+## Roadmap H2h: measured impact
+
+`dEQP-VK.multiview.*` (`--deqp-case`, same reproduction recipe as every
+row above): 838 cases.
+
+Baseline (H2g's own numbers):
+
+```
+Passed:        420/838 (50.1%)
+Failed:         79/838 (9.4%)
+Not supported: 339/838 (40.5%)
+```
+
+After this row's fix:
+
+```
+Passed:        436/838 (52.0%)
+Failed:         63/838 (7.5%)
+Not supported: 339/838 (40.5%)
+```
+
+All 16 `input_attachments`/`renderpass2.input_attachments` cases named in
+H2g's own triage now pass (confirmed via `--deqp-case=dEQP-VK.multiview.
+input_attachments.*`/`renderpass2.input_attachments.*`, 8/8 and 8/8);
+`dynamic_rendering`'s own `input_attachments_geometry` variants (24 cases)
+remain, unaffected, `NotSupported` (`geometryShader` is not implemented --
+unrelated to this fix). The other 63 remaining `Failed` cases are every
+one of H2g's own already-tracked, unrelated gaps: 18
+`readback_implicit_clear` multi-subpass cases (roadmap H2i, untouched by
+this fix, as expected -- a different attachment path entirely), 42
+`view_mask_iteration` (`VK_FORMAT_R8G8B8A8_UINT`, roadmap H8), and 3
+`depth_without_fragment_shader` (roadmap H2b) -- `79 - 16 = 63` matches
+exactly.
+
+**Root cause**: `RenderTargetBinding` (`RenderPass.h`) -- the shape both
+a classic `VkRenderPass`+`VkFramebuffer` and a `vkCmdBeginRendering`
+instance normalize into before reaching `CommandBuffer.cpp`'s draw path --
+never captured `SubpassDescription::InputAttachments` at all, only
+`Colors`/`Depth`/`Stencil`. `buildSubpassInputHeap`'s only attachment-
+resolution mechanism was `ColorIndexFor`/`Gfx.ColorAttachmentInputIndices`,
+an identity-mapping fallback built solely for `VK_KHR_dynamic_rendering_
+local_read` (which has no separate classic input-attachment list, and so
+maps a `subpassInput`'s `InputAttachmentIndex` directly onto one of the
+current subpass's own color attachments, `Attachments`). That fallback
+was silently reused for classic render passes too, which is wrong
+whenever a subpass's input attachment is *not* one of its own color
+attachments -- exactly `dEQP-VK.multiview.input_attachments`'s own shape,
+where a later subpass reads back an *earlier* subpass's color output
+through a `subpassInput`. Since that earlier attachment was never present
+in `Attachments` (the later subpass's own color-attachment list) at all,
+`subpassLoad` addressed index 0 against the later subpass's own (freshly-
+cleared) color attachment instead -- reading transparent-black, not the
+earlier subpass's real content, and rendering every pixel of every one
+of the 16 cases blank.
+
+Fix: `RenderTargetBinding` gains an `Inputs` field (one resolved
+`ImageView *` per `InputAttachmentIndex`, `nullptr` for
+`VK_ATTACHMENT_UNUSED`), populated by `buildRenderTargetBinding` from
+`SubpassDescription::InputAttachments`, resolved against the whole
+framebuffer's own attachment list (not just the current subpass's color
+attachments). `runDraw` resolves and (per multiview view) slices these
+into a new `SubpassInputs` list exactly like every other attachment kind,
+and threads it into a new `buildSubpassInputHeap` parameter of the same
+name. When non-empty, `SubpassInputs` is now authoritative -- `Subpass
+Inputs[I]` maps directly onto input-attachment index `I`, bypassing the
+old identity-mapping fallback entirely; that fallback still applies,
+unchanged, whenever `SubpassInputs` is empty (i.e. every `vkCmdBegin
+Rendering` instance, which always leaves `RenderTargetBinding::Inputs`
+empty since it has no classic input-attachment list of its own). The two
+paths cannot conflict.
+
+`DrawTest.MultiviewInputAttachmentReadsBackAnEarlierSubpassColorOutput`
+(a two-subpass classic `VkRenderPass`, `viewMask == 0b11` both subpasses:
+subpass 0 writes attachment 0 solid red per-view; subpass 1 declares
+attachment 0 -- not one of its own color attachments, which is attachment
+1 -- as its input attachment, reads it back with the existing
+`SubpassLoadFragmentSource` shader, and writes solid green to attachment
+1) locks this fix down at the unit level; confirmed (via `git stash` of
+just the fix, keeping the new test) that it fails -- reading uninitialized/
+garbage bytes instead of green -- on the pre-fix code, and passes with the
+fix restored.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full, 1762/1821 passed (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from 1761/1820 before this row's own new `DrawTest` case.
+The 59-vs-1 `Unsupported` count differs from H2g's own claimed "1
+pre-existing Unsupported" -- believed to be sandbox/Vulkan-loader-version
+sensitivity in this session's own environment rather than anything this
+row's change affects (`Failed` is 0 in both cases either way, which is
+what determines pass/fail here).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: unchanged --
+this fix corrects existing input-attachment rendering behavior under a
+classic multi-subpass `VkRenderPass`; it advertises no new feature or
+extension (`multiview`/`VK_KHR_multiview` were already `yes`/`Advertised`
+since roadmap H2, and `VK_KHR_dynamic_rendering_local_read`'s own input-
+attachment support, since roadmap F8/F8a, is untouched).
+

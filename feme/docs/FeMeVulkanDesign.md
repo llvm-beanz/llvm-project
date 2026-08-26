@@ -1596,6 +1596,29 @@ rejects any `spirv.ImageRead` that carries one), so
 `dynamicRenderingLocalReadMultisampledAttachments` stays `VK_FALSE` --
 tracked as roadmap F8c.
 
+**Status (roadmap H2h): `buildSubpassInputHeap`'s "straight from the
+currently-bound color/depth/stencil attachments" resolution above is now
+only the `vkCmdBeginRendering` half of the story.** A classic
+`VkRenderPass`'s current subpass has its own `SubpassDescription::
+InputAttachments` list, which may name a render-pass attachment that is
+not one of that subpass's own color/depth/stencil attachments at all
+(e.g. a later subpass reading back an earlier subpass's own color
+output) -- the identity-mapping resolution this section describes cannot
+see such an attachment, since it only ever looks at the current
+subpass's own bound attachments. `RenderTargetBinding` (RenderPass.h) now
+grows an `Inputs` field, populated by `buildRenderTargetBinding`
+(CommandBuffer.cpp) by resolving `SubpassDescription::InputAttachments`
+against the whole framebuffer rather than the current subpass's own
+attachments; `runDraw` resolves and per-view-slices `Inputs` into a
+`SubpassInputs` list passed as a new `buildSubpassInputHeap` parameter,
+which is authoritative -- mapping directly onto each `InputAttachmentIndex`
+-- whenever it is non-empty. The identity-mapping resolution this section
+already documents is unchanged and still applies whenever `SubpassInputs`
+is empty, which is always true for `vkCmdBeginRendering` (no classic
+input-attachment list of its own exists to populate it from). See
+"Roadmap H2h: measured impact" in VulkanCTSReport.md for the
+`dEQP-VK.multiview.input_attachments` regression this closes.
+
 **Status (roadmap F13): `VK_ATTACHMENT_LOAD_OP_NONE`/`STORE_OP_NONE`
 (`VK_KHR_load_store_op_none`) needed no new behavior at all.** Every
 attachment's `LoadOp` already took the "do nothing" path for anything
