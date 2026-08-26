@@ -135,6 +135,11 @@ struct RenderTargetView {
   feme::cpu::ResourceFormat Format = feme::cpu::ResourceFormat::Unknown;
   uint32_t SampleCount = 1;
   VkAttachmentLoadOp LoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  /// (Roadmap F13) Carried for API completeness only: this is a
+  /// real-memory-backed software renderer with no discard-on-store
+  /// optimization to skip, so `STORE`/`DONT_CARE`/`NONE`
+  /// (`VK_KHR_load_store_op_none`) are all equivalent -- whatever a draw or
+  /// `applyClear` wrote is simply left in the attachment's memory.
   VkAttachmentStoreOp StoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
   VkClearValue ClearValue{};
   /// The single-sample attachment this one resolves into once the render

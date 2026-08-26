@@ -831,6 +831,10 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
     // (`VK_NULL_HANDLE`-imageView) dynamic-rendering attachment performs no
     // load, regardless of what `LoadOp` it was given.
     return Error::success();
+  // (Roadmap F13) `VK_ATTACHMENT_LOAD_OP_LOAD`/`DONT_CARE`/`NONE`
+  // (`VK_KHR_load_store_op_none`) all take this same "do nothing" path:
+  // whatever the attachment's memory already holds is left as-is, which is
+  // `LOAD`'s defined meaning and a valid choice for the other two.
   if (View.LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR)
     return Error::success();
   Expected<feme::graphics::AttachmentView> Attachment =
@@ -2942,10 +2946,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetLineWidth(VkCommandBuffer commandBuffer,
 // (roadmap F5) `VK_KHR_line_rasterization`'s one command:
 // `VK_DYNAMIC_STATE_LINE_STIPPLE_KHR`'s payload, the same "read from the
 // per-draw snapshot" pattern `vkCmdSetLineWidth` above already uses.
-VKAPI_ATTR void VKAPI_CALL
-vkCmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
-                       uint32_t lineStippleFactor,
-                       uint16_t lineStipplePattern) {
+VKAPI_ATTR void VKAPI_CALL vkCmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
+                                                  uint32_t lineStippleFactor,
+                                                  uint16_t lineStipplePattern) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setLineStipple(lineStippleFactor, lineStipplePattern);
 }
