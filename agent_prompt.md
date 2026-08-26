@@ -33,14 +33,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H2i?
+Can you work on milestone H2b?
 
-> **`dEQP-VK.multiview.readback_implicit_clear`'s multi-subpass view-mask
-> combinations still fail** (18 of H2g's own triage, exactly the cases whose
-> numeric suffix names more than one subpass -- e.g. `1_2_4_8`, `5_10_5_10`,
-> `8_1_1_8` -- while every single-subpass combination, e.g. `15`, now passes
-> after H2g's `vkCmdClearAttachments` fix): a per-subpass
-> `VK_ATTACHMENT_LOAD_OP_CLEAR` interacting with multiple multiview subpasses
-> (each its own view mask) inside one render pass instance is not yet correctly
-> modeled -- root cause otherwise undetermined
-
+> **A pipeline with zero color attachments**
+> (`dEQP-VK.multiview.depth_without_fragment_shader`'s own shape, and presumably
+> the same case outside multiview): `feme::graphics::executeDraws`
+> unconditionally requires at least one (`"a draw needs at least one color
+> attachment"`), but a depth-only pipeline with no fragment shader output is
+> legal Vulkan. Needs the executor's attachment-count validation relaxed to
+> allow zero color attachments when the pipeline itself declares none, not a
+> multiview-specific fix
