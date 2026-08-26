@@ -33,20 +33,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H2g?
+Can you work on milestone H2h?
 
-> **A widespread rendering-correctness gap spanning most of
-> `dEQP-VK.multiview`'s subgroups** (334 of H2d's own measured 421 failures, now
-> 358 once H2e's own 24 `input_instance` cases joined this bucket instead of
-> failing earlier at pipeline creation -- `clear_attachments`, `index`,
-> `secondary_cmd_buffer`, `readback_{implicit,explicit}_clear`,
-> `multisample{,_resolve}`, `masks`, `instanced`, `input_attachments`,
-> `draw_indirect{,_indexed}`, `draw_indexed`, `stencil`, `depth`,
-> `input_instance`, each in both `renderpass2`/`dynamic_rendering` variants):
-> plain image-comparison failures, the first real check of these tests' rendered
-> output at all (every one previously hit H2a's SIMDize crash before ever
-> reaching image comparison). Spot-checking `instanced.no_queries.15` rules out
-> H2e's own read-back gap (a plain, unconditional multi-branch
-> `gl_Position`/`out_color` write) as the shared cause -- root cause otherwise
-> undetermined, needs its own triage pass before assuming a single fix closes
-> all 358
+> **`dEQP-VK.multiview.input_attachments` renders a totally blank (`Fail
+> (Fail)`, every pixel black/transparent) image in every one of its 16 remaining
+> cases** (H2g's own triage): unlike H2g's other two fixes (a wrong-but-present
+> value), nothing is drawn at all, suggesting either the subpass-input read
+> itself always returns zero/fails silently under multiview, or the
+> pipeline/subpass wiring for a multiview input-attachment subpass never reaches
+> the draw in the first place. Not yet root-caused; needs its own investigation
+> (dump the subpass-input descriptor heap contents and confirm whether the
+> fragment shader's `subpassLoad` executes at all, or short-circuits)
