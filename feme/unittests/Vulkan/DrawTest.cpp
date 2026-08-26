@@ -98,10 +98,13 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
-/// A 2-vertex horizontal line at NDC y = 0.25 (screen row 1's pixel
-/// center on a 4x4 target, exactly like `ExecutorTest.
-/// RendersAHorizontalLineList`'s own line), spanning the full NDC x
-/// range: vertex 0 at (-1, 0.25), vertex 1 at (1, 0.25).
+/// A 2-vertex horizontal line at NDC y = -0.25 (screen row 1's pixel
+/// center on a 4x4 target -- real Vulkan clip-space Y-down convention,
+/// `((row + 0.5) / height) * 2 - 1`, matching `ExecutorTest.
+/// RendersAHorizontalLineList`'s own row 1 line once `feme-graphics-
+/// canonicalize-stage` negates this SPIR-V-sourced `gl_Position.y`, see
+/// roadmap H2g), spanning the full NDC x range: vertex 0 at (-1, -0.25),
+/// vertex 1 at (1, -0.25).
 constexpr llvm::StringLiteral LineVertexSource = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
@@ -114,7 +117,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     %negone = spirv.Constant -1.0 : f32
     %posone = spirv.Constant 1.0 : f32
     %x = spirv.Select %is0, %negone, %posone : i1, f32
-    %y = spirv.Constant 0.25 : f32
+    %y = spirv.Constant -0.25 : f32
     %z = spirv.Constant 0.0 : f32
     %w = spirv.Constant 1.0 : f32
     %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
