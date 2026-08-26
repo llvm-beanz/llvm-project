@@ -33752,3 +33752,125 @@ No change to the Vulkan feature/extension surface was made by this row
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 regeneration this time -- confirmed by inspecting both generator scripts'
 inputs, neither of which reads anything this row touched.
+
+# Agent thoughts: roadmap H2a (root-causing the multiview divergent-vector shape)
+
+## What I was asked to do
+
+Roadmap H2a: root-cause the `feme-cpu-simdize` divergent-vector shape
+`dEQP-VK.multiview` hit (454 of 838 cases in H2's own measured run) --
+a shape distinct from the four `phi`/`select`/`shufflevector`/
+`extractelement` patterns C3 already closed, and likely a new member of
+C8's "shader long tail" bucket rather than a fresh root cause -- triage
+against C8 first.
+
+## How I found the actual root cause
+
+I built `check-feme` and `feme_vulkan` (ccache, assertions-enabled --
+already configured in the existing build tree) and reproduced H2's own
+838-case `dEQP-VK.multiview.*` run against a fresh `libfeme_vulkan` build,
+confirming the same 499 failures (454 + 42 + 3, byte-for-byte matching
+H2's own breakdown). All 454 `feme-cpu-simdize` failures carry the exact
+same diagnostic text, with no distinguishing detail (the diagnostic only
+names the divergent value by `Value::getName()`, always empty for an
+unnamed instruction) -- so I added temporary, uncommitted `errs()`
+instrumentation to `FunctionWidener::checkVectorDecompositionSupported`
+(SIMDize.cpp) printing the offending instruction, its user, and the whole
+function, rebuilt, and re-ran one representative case
+(`dEQP-VK.multiview.clear_attachments.no_queries.15`) in isolation.
+
+The dumped IR immediately showed the real shape: a plain `store <4 x
+float>` directly to `@spirv_var_13`, a raw SPIR-V global with **no**
+`!spirv.Decorations` metadata at all -- unlike every other stage-IO global
+in the same function, which had already been correctly rewritten into
+`feme.stage.input.load`/`feme.cpu.masked.stage.output.store` calls. I
+dumped every global in the module and found `@spirv_var_13`'s type is
+`{ <4 x float>, float, [1 x float], [1 x float] }` -- glslang's implicit
+`gl_PerVertex` output block (`Position`, `PointSize`, `ClipDistance[1]`,
+`CullDistance[1]`). That, plus the surrounding IR (four scalar loads
+reassembled into a vec4 and stored raw, immediately followed by a
+correctly-legalized `out_color` store three instructions later in the
+same function) made clear this is the *vertex* shader's `gl_Position`
+write, not a fragment shader's output at all -- H2's own framing
+("`dEQP-VK.multiview`'s own fragment shaders") does not survive contact
+with the actual IR.
+
+Tracing why: SPIR-V decorates a builtin interface block's members
+individually (`OpMemberDecorate ... BuiltIn Position`), not the block
+variable itself. `SPIRVToLLVMPatterns.cpp`'s `buildStageIODecorationsAttr`
+only ever reads a whole-variable `built_in`/`location` attribute
+(`Op.getBuiltIn()`); it never looks at a struct type's own per-member
+decorations (`mlir::spirv::StructType::getMemberDecorations`, which this
+same file already uses elsewhere, in `isBufferBlockWritable`, for a
+different block shape's member decoration). So the block converts to an
+ordinary `llvm.mlir.global` (nothing in `getStageIOAddressSpace`/
+`getBuiltInMapping` rejects it -- it isn't a *single*-builtin variable
+either) but with zero decorations attached, and
+`CanonicalizeStagePass::isSPIRVStageIOGlobal` requires that metadata to
+recognize a stage-IO global at all. The whole block is silently skipped,
+and its `gl_Position` store reaches `feme-cpu-simdize` exactly as raw as
+it started.
+
+I confirmed I hadn't just found a rarer variant of C8b (the matrix/
+aggregate `insertvalue`/`extractvalue` shape H2a itself flagged for
+triage): C8b's own gap is downstream of legalization -- SIMDize can't
+widen a value that *was* correctly turned into `feme.stage.*` calls. This
+gap is upstream of legalization entirely -- `CanonicalizeStagePass` never
+recognizes the global as stage IO in the first place, so it never reaches
+the legalized form C8b's gap is about. It's closer to (but distinct from)
+C8's *original*, already-closed finding about a raw stage-IO global
+reaching SIMDize directly: that one's root cause was "the pass canonicalizing
+it is never invoked"; this one's is "the pass is invoked, but one shape
+of stage-IO global -- a builtin interface block -- was never in its
+recognition scope to begin with" (confirmed against R19/R20's own roadmap
+text, both scoped to "a non-builtin variable" or "a builtin *variable*",
+neither of which is a builtin *block*). So: a new member of C8's bucket,
+as H2a's own text predicted, not a new bucket of its own.
+
+I reverted the temporary debug instrumentation before committing (git
+diff on SIMDize.cpp is empty).
+
+## What I recorded, and what I left for follow-up rows
+
+I struck H2a through in Roadmap.md with the corrected framing and full
+root-cause detail, added a "Roadmap H2a: measured impact" section to
+VulkanCTSReport.md with the reproduction and the IR excerpt that exposed
+it, and added a Status/deviation note to FeMeGraphicsDesign.md's
+"Signature reflection" section explaining precisely which shape R19/R20
+never covered. I added a regression test,
+`CanonicalizeStageTest.DoesNotRecognizeMemberDecoratedInterfaceBlockAsStageIO`,
+using the *real* undecorated-struct shape found above -- which also
+exposed that the pre-existing `MapsSPIRVBuiltInsToSystemValues` test's own
+`@gl_Position` fixture had modeled `gl_Position` incorrectly all along (as
+a standalone, whole-variable-decorated global, which glslang never
+actually emits), exactly why this gap survived the existing unit suite
+and needed a real `deqp-vk` run to catch.
+
+I did not implement the actual fix. H2a's own charter was to root-cause,
+not fix, and the fix itself is two nontrivial, separable pieces: (1)
+teaching `SPIRVToLLVMPatterns.cpp` to preserve a struct-typed interface
+block's per-member decorations at all (there is currently no encoding for
+"this global has N members, each with its own decorations" -- the
+existing `!spirv.Decorations` shape is whole-variable-only), and (2)
+teaching `CanonicalizeStage.cpp`'s signature-building and load/store
+legalization that one global can now yield *multiple* `SignatureElement`s,
+each with its own `ElementID`, rather than its current one-global-one-element
+assumption throughout. I added these as new roadmap rows H2c and H2d
+rather than rushing an under-tested partial implementation into this
+row, or silently leaving H2a as a dead end with no path forward recorded.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+1804/1805 (1 pre-existing, unrelated `Unsupported`), up from 1803/1804
+before this row (the one new regression test).
+
+## Vulkan CTS
+
+No feature/extension bit changed in this row (a root-cause investigation
+plus one internal regression test, no functional code change), so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update. I re-ran the full, real `dEQP-VK.multiview.*` group (838 cases)
+against a freshly built `libfeme_vulkan` as part of the investigation
+itself (see "Roadmap H2a: measured impact" in VulkanCTSReport.md) and
+confirmed the totals are unchanged from H2's own run (0 passed / 499
+failed / 339 not supported) -- expected, since no behavior changed, only
+diagnosis.
