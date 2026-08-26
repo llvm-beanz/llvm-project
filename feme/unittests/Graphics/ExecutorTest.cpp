@@ -87,16 +87,70 @@ constexpr char FragmentShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="fragment" }
 )";
 
+// (Roadmap C8) A vertex shader like VertexShaderIR above, but its color
+// varying (element 4, location 1) is a 2x2 matrix -- `RowCount == 2`,
+// `ComponentCount == 2` -- rather than a plain float4, packing the same
+// per-vertex (r, g, b, a) into (row 0: r, g), (row 1: b, a). Exercises
+// this row's `Row`-aware `StageStorage`/`LinkedVarying` support end to end
+// through a real triangle draw, the way a SPIR-V-imported shader's own
+// `spirv.CompositeConstruct`-built matrix output now reaches it via
+// CanonicalizeStage.cpp.
+constexpr char MatrixVaryingVertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %cr = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %cg = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %cb = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+    %ca = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %cr, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 1, float %cg, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 1, i32 0, float %cb, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 1, i32 1, float %ca, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+// The fragment-side counterpart of MatrixVaryingVertexShaderIR: reads the
+// same 2x2 matrix input (element 0, location 0) back out one (row,
+// component) at a time and unpacks it into SV_Target0 in the same order.
+constexpr char MatrixVaryingFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    %r = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %g = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %b = call float @feme.stage.input.load.f32(i32 0, i32 1, i32 0, i32 0)
+    %a = call float @feme.stage.input.load.f32(i32 0, i32 1, i32 1, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %r, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %g, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %b, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float %a, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
 SignatureElement
 makeElement(uint32_t ElementID, SignatureDirection Dir, uint32_t ComponentCount,
             std::optional<uint32_t> Location,
-            SignatureSystemValue SysVal = SignatureSystemValue::None) {
+            SignatureSystemValue SysVal = SignatureSystemValue::None,
+            uint32_t RowCount = 1) {
   SignatureElement Elt;
   Elt.ElementID = ElementID;
   Elt.Direction = Dir;
   Elt.ComponentType = SignatureComponentType::Float;
   Elt.BitWidth = 32;
   Elt.ComponentCount = ComponentCount;
+  Elt.RowCount = RowCount;
   Elt.Location = Location;
   Elt.SystemValue = SysVal;
   return Elt;
@@ -255,6 +309,77 @@ TEST(ExecutorTest, FillsFullyCoveredTriangleWithSolidColor) {
   }
 }
 
+/// (Roadmap C8) The same fully-covered, solid-color triangle as
+/// `FillsFullyCoveredTriangleWithSolidColor`, but the color varying between
+/// the vertex and fragment stage is a `RowCount == 2` "matrix" element
+/// (`MatrixVaryingVertexShaderIR`/`MatrixVaryingFragmentShaderIR` above)
+/// instead of a plain float4 -- the shape a SPIR-V-imported shader's own
+/// matrix output now produces via CanonicalizeStage.cpp. A wrong `Row`
+/// stride/offset anywhere in `StageStorage`/`LinkedVarying` would show up
+/// as a scrambled (not just wrong) color, since each of the 4 scalars
+/// packed into the 2x2 matrix is a different, distinguishable value.
+TEST(ExecutorTest, InterpolatesConstantColorPackedInAMatrixVarying) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, /*ComponentCount=*/2,
+                  /*Location=*/1, SignatureSystemValue::None,
+                  /*RowCount=*/2)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, MatrixVaryingVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, /*ComponentCount=*/2,
+                  /*Location=*/1, SignatureSystemValue::None,
+                  /*RowCount=*/2),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, MatrixVaryingFragmentShaderIR, "fs_main", FSSig,
+                   ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  Expected<GraphicsPipeline> Pipeline = GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A triangle covering the whole [-1, 1] NDC square, CCW-wound, every
+  // vertex a distinguishable (r, g, b, a) = (0.2, 0.4, 0.6, 0.8) so a
+  // scrambled row/component mapping would not accidentally read back
+  // correct either.
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.2f, 0.4f, 0.6f, 0.8f, // v0
+      3.0f,  -1.0f, 0.0f, 0.2f, 0.4f, 0.6f, 0.8f, // v1
+      -1.0f, 3.0f,  0.0f, 0.2f, 0.4f, 0.6f, 0.8f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = Scene.AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 51) << "texel " << I;  // round(0.2 * 255)
+    EXPECT_EQ(Texel[1], 102) << "texel " << I; // round(0.4 * 255)
+    EXPECT_EQ(Texel[2], 153) << "texel " << I; // round(0.6 * 255)
+    EXPECT_EQ(Texel[3], 204) << "texel " << I; // round(0.8 * 255)
+  }
+}
+
 TEST(ExecutorTest, RendersTheSameTriangleThroughAnIndexBuffer) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
@@ -343,13 +468,49 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedTriangleStrip) {
   TriangleScene Scene;
   Scene.VertexData = {
       // Segment 1: a red triangle in the lower-left region.
-      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
-      0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v1
-      -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v2
+      -1.0f,
+      -1.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f, // v0
+      0.0f,
+      -1.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f, // v1
+      -1.0f,
+      1.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f, // v2
       // Segment 2: a green triangle in the upper-right region.
-      0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v3
-      1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v4
-      1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v5
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f, // v3
+      1.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f, // v4
+      1.0f,
+      -1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f, // v5
   };
   // A restart index between the two segments: without primitive restart
   // this would otherwise be read as a (nonsensical, out-of-bounds) vertex
@@ -399,13 +560,49 @@ TEST(ExecutorTest,
   TriangleScene Scene;
   Scene.VertexData = {
       // Segment 1: a red triangle in the lower-left region.
-      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
-      0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v1
-      -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v2
+      -1.0f,
+      -1.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f, // v0
+      0.0f,
+      -1.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f, // v1
+      -1.0f,
+      1.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f, // v2
       // Segment 2: a green triangle in the upper-right region.
-      0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v3
-      1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v4
-      1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v5
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f, // v3
+      1.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f, // v4
+      1.0f,
+      -1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f, // v5
   };
   std::array<uint8_t, 7> Indices8 = {0, 1, 2, 0xFFu, 3, 4, 5};
   // `Scene.prepare()` sizes `Cmd.VertexCount` off `Scene.Indices`, one
@@ -550,13 +747,49 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedTriangleFan) {
   TriangleScene Scene;
   Scene.VertexData = {
       // Segment 1: a red triangle in the lower-left region.
-      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
-      0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v1
-      -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v2
+      -1.0f,
+      -1.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f, // v0
+      0.0f,
+      -1.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f, // v1
+      -1.0f,
+      1.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f, // v2
       // Segment 2: a green triangle in the upper-right region.
-      0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v3
-      1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v4
-      1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v5
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f, // v3
+      1.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f, // v4
+      1.0f,
+      -1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f, // v5
   };
   Scene.Indices = {0, 1, 2, 0xFFFFFFFFu, 3, 4, 5};
   PreparedDraw Draw = Scene.prepare(/*Indexed=*/true);

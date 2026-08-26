@@ -33,9 +33,14 @@
 //    not a correctness gap in the coverage/resolve behavior a completion
 //    test observes) are implemented. Depth/stencil resolve and 8+ sample
 //    counts are mechanical, on-demand additions to this same shape.
-//  - Vertex/fragment stage elements are 32-bit scalars/vectors only
-//    (`RowCount == 1`, `BitWidth == 32`); matrices and 16-/64-bit varyings
-//    are a mechanical, on-demand addition once a test needs them.
+//  - Vertex/fragment stage elements are 32-bit scalars only, per component
+//    (`BitWidth == 32`); a matrix/array-typed varying or `Output` element
+//    (`RowCount > 1`, roadmap C8) is supported for the vertex-output ->
+//    fragment-input path (linked, interpolated, and stored/read one row at
+//    a time -- see `LinkedVarying::RowCount` and `StageStorage::readRaw`/
+//    `writeRaw`'s `Row` parameter). A matrix *vertex attribute* (bound from
+//    a vertex buffer, not a varying) and 16-/64-bit varyings remain a
+//    mechanical, on-demand addition once a test needs them.
 //  - A non-`Position` varying whose `SignatureComponentType` is not `Float`
 //    is passed through unmodified from the first vertex of the (possibly
 //    clipped) triangle actually rasterized, rather than tracking each
@@ -116,7 +121,9 @@ uint32_t scalarKindFor(SignatureComponentType Ty) {
 /// block (`FemeVertexArgs::Inputs`/`Outputs`, or the fragment equivalent),
 /// plus the dense `FemeStageLayout` describing it. Built once per draw
 /// command per direction from that stage's own `EntrySignature` elements
-/// (see the file comment above for the 32-bit-scalar-only scope).
+/// (see the file comment above for the 32-bit-scalar-only scope; a
+/// multi-row (matrix) element's rows are addressed with \p Row, which
+/// defaults to 0 for every scalar/vector (`RowCount == 1`) caller).
 struct StageStorage {
   std::vector<cpu::FemeStageElement> Elements;
   std::vector<uint8_t> Data;
@@ -128,11 +135,11 @@ struct StageStorage {
     return L;
   }
 
-  uint32_t readRaw(uint32_t ElementID, uint32_t Component,
-                   uint32_t Invocation) const {
+  uint32_t readRaw(uint32_t ElementID, uint32_t Component, uint32_t Invocation,
+                   uint32_t Row = 0) const {
     const cpu::FemeStageElement &E = Elements[ElementID];
     uint64_t Off =
-        E.DataOffset +
+        E.DataOffset + (uint64_t)Row * E.RowStride +
         (uint64_t)(Component - E.FirstComponent) * E.ComponentStride +
         (uint64_t)Invocation * E.InvocationStride;
     uint32_t V;
@@ -141,28 +148,28 @@ struct StageStorage {
   }
 
   void writeRaw(uint32_t ElementID, uint32_t Component, uint32_t Invocation,
-                uint32_t Value) {
+                uint32_t Value, uint32_t Row = 0) {
     const cpu::FemeStageElement &E = Elements[ElementID];
     uint64_t Off =
-        E.DataOffset +
+        E.DataOffset + (uint64_t)Row * E.RowStride +
         (uint64_t)(Component - E.FirstComponent) * E.ComponentStride +
         (uint64_t)Invocation * E.InvocationStride;
     memcpy(Data.data() + Off, &Value, sizeof(uint32_t));
   }
 
-  float readFloat(uint32_t ElementID, uint32_t Component,
-                  uint32_t Invocation) const {
-    uint32_t Bits = readRaw(ElementID, Component, Invocation);
+  float readFloat(uint32_t ElementID, uint32_t Component, uint32_t Invocation,
+                  uint32_t Row = 0) const {
+    uint32_t Bits = readRaw(ElementID, Component, Invocation, Row);
     float F;
     memcpy(&F, &Bits, sizeof(float));
     return F;
   }
 
   void writeFloat(uint32_t ElementID, uint32_t Component, uint32_t Invocation,
-                  float Value) {
+                  float Value, uint32_t Row = 0) {
     uint32_t Bits;
     memcpy(&Bits, &Value, sizeof(float));
-    writeRaw(ElementID, Component, Invocation, Bits);
+    writeRaw(ElementID, Component, Invocation, Bits, Row);
   }
 };
 
@@ -193,18 +200,12 @@ Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
   for (const SignatureElement &Elt : Sig.Elements) {
     if (Elt.Direction != Direction)
       continue;
-    if (Elt.RowCount != 1)
-      return createStringError(
-          inconvertibleErrorCode(),
-          "stage element %u spans %u rows; only RowCount == 1 (no "
-          "matrices/arrays) is implemented yet",
-          Elt.ElementID, Elt.RowCount);
 
     cpu::FemeStageElement &E = Storage.Elements[Elt.ElementID];
     E.ElementID = Elt.ElementID;
     E.FirstComponent = Elt.FirstComponent;
     E.ComponentCount = Elt.ComponentCount;
-    E.RowCount = 1;
+    E.RowCount = Elt.RowCount;
     E.Interpolation = static_cast<uint32_t>(Elt.Interpolation);
     E.Frequency = static_cast<uint32_t>(Elt.Frequency);
     E.SystemValue = static_cast<uint32_t>(Elt.SystemValue);
@@ -232,7 +233,7 @@ Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
     E.ComponentStride = InvocationCount * 4;
     E.RowStride = E.ComponentStride * Elt.ComponentCount;
     E.DataOffset = Offset;
-    Offset += (uint64_t)Elt.ComponentCount * InvocationCount * 4;
+    Offset += (uint64_t)Elt.RowCount * Elt.ComponentCount * InvocationCount * 4;
   }
   Storage.Data.assign(Offset, 0);
   return Storage;
@@ -400,6 +401,7 @@ struct LinkedVarying {
   uint32_t VSElementID;
   uint32_t FSElementID;
   uint32_t ComponentCount;
+  uint32_t RowCount;
   SignatureComponentType ComponentType;
   SignatureInterpolationMode Interpolation;
 };
@@ -423,15 +425,17 @@ RasterVertex lerpVertex(const RasterVertex &A, const RasterVertex &B, float T,
   Out.Varyings.resize(A.Varyings.size());
   unsigned Idx = 0;
   for (const LinkedVarying &V : Varyings) {
-    for (unsigned C = 0; C != V.ComponentCount; ++C, ++Idx) {
-      if (V.ComponentType == SignatureComponentType::Float) {
-        float Av, Bv;
-        memcpy(&Av, &A.Varyings[Idx], 4);
-        memcpy(&Bv, &B.Varyings[Idx], 4);
-        float R = Av + (Bv - Av) * T;
-        memcpy(&Out.Varyings[Idx], &R, 4);
-      } else {
-        Out.Varyings[Idx] = A.Varyings[Idx];
+    for (unsigned Row = 0; Row != V.RowCount; ++Row) {
+      for (unsigned C = 0; C != V.ComponentCount; ++C, ++Idx) {
+        if (V.ComponentType == SignatureComponentType::Float) {
+          float Av, Bv;
+          memcpy(&Av, &A.Varyings[Idx], 4);
+          memcpy(&Bv, &B.Varyings[Idx], 4);
+          float R = Av + (Bv - Av) * T;
+          memcpy(&Out.Varyings[Idx], &R, 4);
+        } else {
+          Out.Varyings[Idx] = A.Varyings[Idx];
+        }
       }
     }
   }
@@ -1110,14 +1114,15 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "vertex stage output",
                                *FSIn.Location);
     if (VSOut->ComponentCount != FSIn.ComponentCount ||
+        VSOut->RowCount != FSIn.RowCount ||
         VSOut->ComponentType != FSIn.ComponentType)
       return createStringError(inconvertibleErrorCode(),
                                "vertex output and fragment input at "
-                               "location %u disagree on component "
-                               "count/type",
+                               "location %u disagree on component/row "
+                               "count or type",
                                *FSIn.Location);
     Varyings.push_back({VSOut->ElementID, FSIn.ElementID, FSIn.ComponentCount,
-                        FSIn.ComponentType, FSIn.Interpolation});
+                        FSIn.RowCount, FSIn.ComponentType, FSIn.Interpolation});
   }
 
   // One `SV_TargetN` fragment output per color attachment (roadmap R33's
@@ -1371,6 +1376,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                  "vertex input element %u has no location "
                                  "to bind a vertex buffer attribute",
                                  Elt.ElementID);
+      // A matrix vertex *attribute* needs one
+      // `VkVertexInputAttributeDescription` per column, at consecutive
+      // locations (unlike a matrix varying/ `Output`, which this executor's
+      // `StageStorage`/`readRaw`/`writeRaw` now support directly via `Row`) --
+      // that per-column attribute splitting is not implemented yet, so this is
+      // still rejected explicitly rather than silently binding only row 0's
+      // data.
+      if (Elt.RowCount != 1)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "vertex input element %u spans %u rows; matrix vertex "
+            "attributes are not implemented yet",
+            Elt.ElementID, Elt.RowCount);
       const VertexBufferBinding *Binding = nullptr;
       const VertexAttribute *Attr = nullptr;
       for (const VertexBufferBinding &VB : Draw.VertexBuffers)
@@ -1430,15 +1448,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // `Bits` is already zero-initialized for the rest.
         uint64_t AvailableBytes =
             SrcOff < Binding->Data.size() ? Binding->Data.size() - SrcOff : 0;
-        uint32_t InBoundsComponents = static_cast<uint32_t>(
-            std::min<uint64_t>(Elt.ComponentCount, AvailableBytes /
-                                                        *CompByteSize));
+        uint32_t InBoundsComponents = static_cast<uint32_t>(std::min<uint64_t>(
+            Elt.ComponentCount, AvailableBytes / *CompByteSize));
         std::array<uint32_t, 4> Bits{};
         if (InBoundsComponents != 0) {
-          if (Error E = decodeAttribute(Attr->Format,
-                                        Binding->Data.data() + SrcOff,
-                                        InBoundsComponents, Elt.ComponentType,
-                                        Bits))
+          if (Error E =
+                  decodeAttribute(Attr->Format, Binding->Data.data() + SrcOff,
+                                  InBoundsComponents, Elt.ComponentType, Bits))
             return E;
         }
         for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
@@ -1477,8 +1493,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         V.Clip[C] = VSOutput->readFloat(VSPosition->ElementID, C, Flat);
       V.Varyings.resize(0);
       for (const LinkedVarying &LV : Varyings)
-        for (uint32_t C = 0; C != LV.ComponentCount; ++C)
-          V.Varyings.push_back(VSOutput->readRaw(LV.VSElementID, C, Flat));
+        for (uint32_t Row = 0; Row != LV.RowCount; ++Row)
+          for (uint32_t C = 0; C != LV.ComponentCount; ++C)
+            V.Varyings.push_back(
+                VSOutput->readRaw(LV.VSElementID, C, Flat, Row));
       return V;
     };
 
@@ -1801,16 +1819,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               float InvWt = InvW0 + (InvW1 - InvW0) * T;
               float Deptht = Depth0 + (Depth1 - Depth0) * T;
               float Arc = ArcAccum + T * Len;
-              QuadCorner TL{{float(X), float(Y)}, InvWt, Deptht, &Vt, 0.0f,
-                            Arc};
+              QuadCorner TL{
+                  {float(X), float(Y)}, InvWt, Deptht, &Vt, 0.0f, Arc};
               QuadCorner TR{
                   {float(X + 1), float(Y)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-              QuadCorner BR{{float(X + 1), float(Y + 1)},
-                            InvWt,
-                            Deptht,
-                            &Vt,
-                            0.0f,
-                            Arc};
+              QuadCorner BR{
+                  {float(X + 1), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
               QuadCorner BL{
                   {float(X), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
               pushQuadTriangle(TL, TR, BR, /*IsLine=*/true);
@@ -1838,10 +1852,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             // feme/docs/FeMeGraphicsDesign.md), rather than the binary
             // in/out test `Rectangular` still uses.
             float HalfWidth = Raster.LineWidth * 0.5f;
-            float Feather = Raster.LineMode ==
-                                    LineRasterizationMode::RectangularSmooth
-                                ? 1.0f
-                                : 0.0f;
+            float Feather =
+                Raster.LineMode == LineRasterizationMode::RectangularSmooth
+                    ? 1.0f
+                    : 0.0f;
             float HalfExtent = HalfWidth + Feather;
             std::array<float, 2> Perp{-Dy / Len * HalfExtent,
                                       Dx / Len * HalfExtent};
@@ -2026,9 +2040,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                     float B0 = E0 / Area, B1 = E1 / Area, B2 = E2 / Area;
                     float Arc = B0 * Tri.ArcLength[0] + B1 * Tri.ArcLength[1] +
                                 B2 * Tri.ArcLength[2];
-                    uint32_t Bit =
-                        static_cast<uint32_t>(Arc / float(Raster.StippleFactor)) %
-                        16;
+                    uint32_t Bit = static_cast<uint32_t>(
+                                       Arc / float(Raster.StippleFactor)) %
+                                   16;
                     if (((Raster.StipplePattern >> Bit) & 1u) == 0)
                       continue;
                   }
@@ -2136,38 +2150,40 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           uint32_t Invocation = Q * 4 + Lane;
           size_t Idx = 0;
           for (const LinkedVarying &LV : Varyings) {
-            for (uint32_t C = 0; C != LV.ComponentCount; ++C, ++Idx) {
-              uint32_t Bits;
-              if (LV.ComponentType == SignatureComponentType::Float) {
-                float V0, V1, V2;
-                memcpy(&V0, &Tri.Varyings[0][Idx], 4);
-                memcpy(&V1, &Tri.Varyings[1][Idx], 4);
-                memcpy(&V2, &Tri.Varyings[2][Idx], 4);
-                float Value;
-                bool Perspective =
-                    LV.Interpolation !=
-                        SignatureInterpolationMode::NoPerspective &&
-                    LV.Interpolation !=
-                        SignatureInterpolationMode::NoPerspectiveCentroid &&
-                    LV.Interpolation !=
-                        SignatureInterpolationMode::NoPerspectiveSample;
-                if (LV.Interpolation == SignatureInterpolationMode::Flat) {
-                  Value = V0;
-                } else if (Perspective) {
-                  float InvW =
-                      B0 * Tri.InvW[0] + B1 * Tri.InvW[1] + B2 * Tri.InvW[2];
-                  float Numerator = B0 * Tri.InvW[0] * V0 +
-                                    B1 * Tri.InvW[1] * V1 +
-                                    B2 * Tri.InvW[2] * V2;
-                  Value = Numerator / InvW;
+            for (uint32_t Row = 0; Row != LV.RowCount; ++Row) {
+              for (uint32_t C = 0; C != LV.ComponentCount; ++C, ++Idx) {
+                uint32_t Bits;
+                if (LV.ComponentType == SignatureComponentType::Float) {
+                  float V0, V1, V2;
+                  memcpy(&V0, &Tri.Varyings[0][Idx], 4);
+                  memcpy(&V1, &Tri.Varyings[1][Idx], 4);
+                  memcpy(&V2, &Tri.Varyings[2][Idx], 4);
+                  float Value;
+                  bool Perspective =
+                      LV.Interpolation !=
+                          SignatureInterpolationMode::NoPerspective &&
+                      LV.Interpolation !=
+                          SignatureInterpolationMode::NoPerspectiveCentroid &&
+                      LV.Interpolation !=
+                          SignatureInterpolationMode::NoPerspectiveSample;
+                  if (LV.Interpolation == SignatureInterpolationMode::Flat) {
+                    Value = V0;
+                  } else if (Perspective) {
+                    float InvW =
+                        B0 * Tri.InvW[0] + B1 * Tri.InvW[1] + B2 * Tri.InvW[2];
+                    float Numerator = B0 * Tri.InvW[0] * V0 +
+                                      B1 * Tri.InvW[1] * V1 +
+                                      B2 * Tri.InvW[2] * V2;
+                    Value = Numerator / InvW;
+                  } else {
+                    Value = B0 * V0 + B1 * V1 + B2 * V2;
+                  }
+                  memcpy(&Bits, &Value, 4);
                 } else {
-                  Value = B0 * V0 + B1 * V1 + B2 * V2;
+                  Bits = Tri.Varyings[0][Idx];
                 }
-                memcpy(&Bits, &Value, 4);
-              } else {
-                Bits = Tri.Varyings[0][Idx];
+                FSInput->writeRaw(LV.FSElementID, C, Invocation, Bits, Row);
               }
-              FSInput->writeRaw(LV.FSElementID, C, Invocation, Bits);
             }
           }
         }
