@@ -1316,6 +1316,74 @@ TEST(ExecutorTest, RendersWithZeroColorAttachments) {
     EXPECT_FLOAT_EQ(Scene.DepthStorage[I], 0.0f) << "texel " << I;
 }
 
+// Roadmap H2j: unlike `RendersWithZeroColorAttachments` above (whose
+// fragment stage is present but writes no color output), a pipeline may
+// omit the fragment stage entirely -- `GraphicsPipeline`'s own
+// `FragmentStage` is `nullptr` -- and still clip/rasterize/early-depth-test
+// correctly, with no per-fragment shading (`FS.invokeFragments`) ever
+// running at all.
+TEST(ExecutorTest, RendersWithNoFragmentStage) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  constexpr char DepthOnlyVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, DepthOnlyVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  DepthState Depth;
+  Depth.TestEnable = true;
+  Depth.WriteEnable = true;
+  Depth.Compare = CompareOp::Less;
+  GraphicsPipeline Pipeline(
+      std::move(*VS), /*FragmentStage=*/nullptr,
+      PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, Depth,
+      BlendMode::Replace, /*SampleCount=*/1, /*Attachments=*/{}, StencilState{},
+      /*ColorBlends=*/{}, /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  EXPECT_FALSE(Pipeline.hasFragmentStage());
+
+  TriangleScene Scene;
+  Scene.BindDepth = true;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+  Draw.Attachments = {}; // No color attachments at all.
+  uint64_t PassedSamples = 0;
+  Draw.PassedSampleCounter = &PassedSamples;
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+  // Depth is still written for every covered texel by the early
+  // depth test/write alone, with no fragment stage ever invoked.
+  for (uint32_t I = 0; I != 16; ++I)
+    EXPECT_FLOAT_EQ(Scene.DepthStorage[I], 0.0f) << "texel " << I;
+  // Occlusion-query bookkeeping still runs off the early test's own result,
+  // one sample per one of the 16 fully-covered texels.
+  EXPECT_EQ(PassedSamples, 16u);
+}
+
 // Roadmap R33: stencil testing/writes with a real `S8_UINT` attachment.
 TEST(ExecutorTest, StencilTestRejectsMismatchedReference) {
   Context Ctx;

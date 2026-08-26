@@ -1077,13 +1077,23 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   }
 
   const cpu::CompiledStage &VS = Pipeline.getVertexStage();
-  const cpu::CompiledStage &FS = Pipeline.getFragmentStage();
   Expected<EntrySignature> VSSig = getStageSignature(VS);
   if (!VSSig)
     return VSSig.takeError();
-  Expected<EntrySignature> FSSig = getStageSignature(FS);
-  if (!FSSig)
-    return FSSig.takeError();
+  // (roadmap H2j) A depth/stencil-only pipeline may legally omit its
+  // fragment stage entirely; `FSSig` is then left with no elements at all,
+  // which every loop below over `FSSig.Elements` (varying linkage, color
+  // outputs, depth/stencil overrides) already treats as "this stage
+  // declares none of these", exactly the right behavior for "no fragment
+  // stage runs at all".
+  EntrySignature FSSig;
+  if (Pipeline.hasFragmentStage()) {
+    Expected<EntrySignature> Sig =
+        getStageSignature(Pipeline.getFragmentStage());
+    if (!Sig)
+      return Sig.takeError();
+    FSSig = std::move(*Sig);
+  }
 
   const SignatureElement *VSPosition = findElement(
       *VSSig, SignatureDirection::Output, SignatureSystemValue::Position);
@@ -1099,7 +1109,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // Link every non-system-value fragment input to the vertex output at the
   // same `Location` (Vulkan-style linkage; see "Normalized pipeline").
   SmallVector<LinkedVarying, 8> Varyings;
-  for (const SignatureElement &FSIn : FSSig->Elements) {
+  for (const SignatureElement &FSIn : FSSig.Elements) {
     if (FSIn.Direction != SignatureDirection::Input ||
         FSIn.SystemValue != SignatureSystemValue::None)
       continue;
@@ -1166,7 +1176,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       continue;
     }
     const SignatureElement *FSColor =
-        findElementByLocation(*FSSig, SignatureDirection::Output, *Loc);
+        findElementByLocation(FSSig, SignatureDirection::Output, *Loc);
     if (!FSColor)
       return createStringError(inconvertibleErrorCode(),
                                "fragment stage has no output at location %u "
@@ -1203,7 +1213,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
        usesDualSourceBlend(Pipeline.getColorBlends()[0].DstAlphaFactor));
   const SignatureElement *FSColor1 = nullptr;
   if (NeedsSrc1) {
-    FSColor1 = findElementByLocation(*FSSig, SignatureDirection::Output, 0,
+    FSColor1 = findElementByLocation(FSSig, SignatureDirection::Output, 0,
                                      /*Index=*/1);
     if (!FSColor1)
       return createStringError(inconvertibleErrorCode(),
@@ -1270,10 +1280,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // until after the fragment stage returns, matching output merge's own
   // "depth, stencil, blend, and attachment writes in specification order".
   const SignatureElement *FSDepthOut = findElement(
-      *FSSig, SignatureDirection::Output, SignatureSystemValue::Depth);
+      FSSig, SignatureDirection::Output, SignatureSystemValue::Depth);
   const SignatureElement *FSStencilRefOut = findElement(
-      *FSSig, SignatureDirection::Output, SignatureSystemValue::StencilRef);
-  uint32_t FSFlags = FS.getArtifactInfo().Flags;
+      FSSig, SignatureDirection::Output, SignatureSystemValue::StencilRef);
+  // (roadmap H2j) A fragment-less pipeline can neither write `SV_Depth`/
+  // `SV_StencilRef` (its empty `FSSig` above already guarantees `FSDepthOut`/
+  // `FSStencilRefOut` are null) nor discard/demote, so `UseEarlyDepthStencil`
+  // below is unconditionally true whenever depth/stencil testing is needed
+  // at all -- matching "only vertex-stage clip/rasterize/early-depth-test,
+  // no per-fragment shading" exactly.
+  uint32_t FSFlags = Pipeline.hasFragmentStage()
+                         ? Pipeline.getFragmentStage().getArtifactInfo().Flags
+                         : 0;
   bool FSMayDiscard = (FSFlags & (cpu::FEME_CPU_ARTIFACT_USES_DISCARD |
                                   cpu::FEME_CPU_ARTIFACT_USES_DEMOTE)) != 0;
   bool DepthTestOrWrite = PipelineDepth.TestEnable || PipelineDepth.WriteEnable;
@@ -2138,9 +2156,29 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       if (Quads.empty())
         return Error::success();
 
+      if (!Pipeline.hasFragmentStage()) {
+        // (roadmap H2j) No fragment stage runs at all: the early
+        // depth/stencil test above (unconditionally used whenever depth or
+        // stencil testing is needed, since there is no fragment stage that
+        // could override it, see `UseEarlyDepthStencil`) already resolved
+        // final per-sample pass/fail and performed any depth/stencil
+        // writes; only per-sample occlusion-query bookkeeping remains
+        // (there is no color attachment to write into either -- pipeline
+        // creation only allows a fragment-less pipeline when the render
+        // target has none).
+        if (Draw.PassedSampleCounter)
+          for (uint32_t Q = 0, E = static_cast<uint32_t>(Quads.size()); Q != E;
+               ++Q)
+            for (unsigned Lane = 0; Lane != 4; ++Lane)
+              if ((Quads[Q].Coverage >> Lane) & 1u)
+                *Draw.PassedSampleCounter +=
+                    llvm::popcount(QuadInvocations[Q].Coverage[Lane]);
+        return Error::success();
+      }
+
       uint32_t QuadCount = static_cast<uint32_t>(Quads.size());
       Expected<StageStorage> FSInput =
-          buildStageStorage(*FSSig, SignatureDirection::Input, QuadCount * 4);
+          buildStageStorage(FSSig, SignatureDirection::Input, QuadCount * 4);
       if (!FSInput)
         return FSInput.takeError();
       for (uint32_t Q = 0; Q != QuadCount; ++Q) {
@@ -2192,7 +2230,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       }
 
       Expected<StageStorage> FSOutput =
-          buildStageStorage(*FSSig, SignatureDirection::Output, QuadCount * 4);
+          buildStageStorage(FSSig, SignatureDirection::Output, QuadCount * 4);
       if (!FSOutput)
         return FSOutput.takeError();
 
@@ -2213,6 +2251,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       FRes.Outputs = FSOutput->Data.data();
       FRes.Invocations = QuadInvocations;
       FRes.Results = Results;
+      const cpu::CompiledStage &FS = Pipeline.getFragmentStage();
       cpu::PreparedFragmentBatch PFB =
           cpu::PreparedFragmentBatch::create(FS.getResourceInfo(), FRes);
       if (Error E = FS.invokeFragments(PFB))
