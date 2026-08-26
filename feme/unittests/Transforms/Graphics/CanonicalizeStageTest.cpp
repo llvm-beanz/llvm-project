@@ -242,6 +242,63 @@ TEST(CanonicalizeStageTest, MapsSPIRVViewIndexBuiltInToSystemValue) {
   EXPECT_FALSE(ViewIndex.Location.has_value());
 }
 
+/// (Roadmap H2a) glslang emits `gl_Position`/`gl_PointSize`/
+/// `gl_ClipDistance`/`gl_CullDistance` as members of an implicit
+/// `gl_PerVertex` interface *block* (a struct-typed `Output` variable)
+/// rather than as their own standalone globals -- unlike
+/// `MapsSPIRVBuiltInsToSystemValues`'s idealized `@gl_Position` above, which
+/// (incorrectly, per this finding) modeled it as one. SPIR-V decorates each
+/// member individually (`OpMemberDecorate ... BuiltIn Position`), not the
+/// block variable itself (`OpDecorate`), so
+/// `SPIRVToLLVMPatterns.cpp`'s `buildStageIODecorationsAttr` -- which only
+/// reads a *whole-variable* `BuiltIn`/`Location` attribute -- attaches no
+/// `!spirv.Decorations` metadata to the block's own `llvm.mlir.global` at
+/// all, confirmed against a real `dEQP-VK.multiview` run (454 of 838 cases,
+/// effectively every vertex shader in the suite, all of which write
+/// `gl_Position` this way -- see "Roadmap H2a: measured impact" in
+/// VulkanCTSReport.md). `isSPIRVStageIOGlobal` requires that metadata to
+/// recognize a stage-IO global at all, so `canonicalizeSPIRVStage` silently
+/// leaves the block's store untouched, and the divergent vector value
+/// being stored reaches `feme::cpu::SIMDizePass` raw, hitting its "used
+/// outside a supported pattern" diagnostic instead of ever becoming a
+/// `feme.stage.output.store`. This is a distinct root cause from roadmap
+/// C3 (SIMDize's own decomposition shapes, already closed) and from C8b
+/// (a matrix/aggregate stage-IO value SIMDize cannot widen once
+/// legalized) -- this one never reaches SIMDize's widening logic having
+/// been legalized at all; it is a new member of C8's "shader long tail"
+/// bucket instead (see roadmap rows H2c/H2d for the follow-up fix, not
+/// yet implemented). This test documents the still-open gap: it asserts
+/// today's actual (undesired) behavior so a future fix's own test changes
+/// visibly alongside it.
+TEST(CanonicalizeStageTest,
+    DoesNotRecognizeMemberDecoratedInterfaceBlockAsStageIO) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PerVertex = external addrspace(8) global { <4 x float>, float, [1 x float], [1 x float] }
+    define void @main() #0 {
+      %pos = load <4 x float>, ptr addrspace(7) @in_pos
+      store <4 x float> %pos, ptr addrspace(8) @gl_PerVertex
+      ret void
+    }
+    @in_pos = external addrspace(7) constant <4 x float>, !spirv.Decorations !0
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  // `in_pos` is still legalized (a plain, whole-variable-decorated `Input`),
+  // so *something* changes -- but the `gl_PerVertex` store itself must not.
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  bool SawRawGlPerVertexStore = false;
+  for (Instruction &I : instructions(F))
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      if (auto *GV = dyn_cast<GlobalVariable>(SI->getPointerOperand()))
+        if (GV->getName() == "gl_PerVertex")
+          SawRawGlPerVertexStore = true;
+  EXPECT_TRUE(SawRawGlPerVertexStore);
+}
+
 /// (Roadmap C8) A matrix-typed `Output` global -- the `!llvm.array<Columns x
 /// VectorType>` shape SPIRVToLLVM's `spirv.MatrixType` conversion produces
 /// (see SPIRVToLLVMPatterns.cpp) -- gets a signature element with
