@@ -78,16 +78,30 @@ resolveAttachmentView(ImageView *View) {
                                    "to memory");
   Image &Img = *View->image();
   const VkImageSubresourceRange &Range = View->range();
-  if (View->dimension() != feme::cpu::ImageDimension::Texture2D ||
-      Range.baseArrayLayer != 0 ||
-      (Range.layerCount != VK_REMAINING_ARRAY_LAYERS && Range.layerCount != 1))
+  // (Roadmap H2) A layered render target's view is `VK_IMAGE_VIEW_TYPE_
+  // 2D_ARRAY` (`ImageDimension::Texture2DArray`), not `_2D`; both are
+  // otherwise addressed identically here (2D, one array-layer stride
+  // apart), so both are accepted.
+  if (View->dimension() != feme::cpu::ImageDimension::Texture2D &&
+      View->dimension() != feme::cpu::ImageDimension::Texture2DArray)
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                   "only a single-layer 2D image view may be "
-                                   "a render target (layered rendering is V7)");
+                                   "only a 2D or 2D-array image view may be "
+                                   "a render target");
   if (Range.baseMipLevel >= Img.mipLevels())
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "a render target view's base mip level is "
                                    "out of range");
+  // (Roadmap H2) A layered render target: `LayerCount` array layers
+  // starting at `baseArrayLayer`, stored consecutively (layer-major, see
+  // `AttachmentView::ArrayLayers`'s own comment) at this mip level's
+  // `SlicePitch` stride -- exactly the addressing `getAttachmentLayerByte
+  // Offset` (LayeredRendering.h) assumes.
+  uint32_t LayerCount =
+      Img.resolvedLayerCount(Range.baseArrayLayer, Range.layerCount);
+  if (LayerCount == 0)
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "a render target view has zero array "
+                                   "layers");
 
   uint32_t Level = Range.baseMipLevel;
   const feme::cpu::FemeImageSubresourceLayout &Layout = Img.mipLayouts()[Level];
@@ -95,21 +109,26 @@ resolveAttachmentView(ImageView *View) {
   Result.Format = View->format();
   Result.Width = std::max(1u, Img.width() >> Level);
   Result.Height = std::max(1u, Img.height() >> Level);
-  Result.ArrayLayers = 1;
-  auto *Base = static_cast<uint8_t *>(Img.data()) + Layout.Offset;
+  Result.ArrayLayers = LayerCount;
+  auto *Base = static_cast<uint8_t *>(Img.data()) + Layout.Offset +
+               (uint64_t)Range.baseArrayLayer * Layout.SlicePitch;
   Result.Data = llvm::MutableArrayRef<uint8_t>(
-      Base, static_cast<size_t>(Layout.SlicePitch));
+      Base, static_cast<size_t>(Layout.SlicePitch) * LayerCount);
   return Result;
 }
 
 bool isCompatibleAttachmentView(const AttachmentDescription &Attachment,
                                 ImageView *View, uint32_t Width,
-                                uint32_t Height) {
+                                uint32_t Height, uint32_t Layers) {
   if (!View || !View->image())
     return false;
+  const VkImageSubresourceRange &Range = View->range();
+  uint32_t ViewLayers = View->image()->resolvedLayerCount(
+      Range.baseArrayLayer, Range.layerCount);
   return View->format() == Attachment.Format &&
          View->image()->sampleCount() == Attachment.SampleCount &&
-         View->image()->width() >= Width && View->image()->height() >= Height;
+         View->image()->width() >= Width && View->image()->height() >= Height &&
+         ViewLayers >= Layers;
 }
 
 } // namespace feme::vulkan
@@ -125,8 +144,11 @@ VkResult validateSubpassDependency(const VkSubpassDependency &Dep,
   if (!isValidSubpassIndex(Dep.srcSubpass, SubpassCount) ||
       !isValidSubpassIndex(Dep.dstSubpass, SubpassCount))
     return VK_ERROR_INITIALIZATION_FAILED;
-  if ((Dep.dependencyFlags & VK_DEPENDENCY_VIEW_LOCAL_BIT) != 0)
-    return VK_ERROR_INITIALIZATION_FAILED;
+  // (Roadmap H2) `VK_DEPENDENCY_VIEW_LOCAL_BIT` describes a per-view
+  // dependency a multiview render pass may declare; like every other
+  // subpass dependency here, it needs no tracking of its own, since this
+  // ICD's strictly sequential, execute-in-record-order model already
+  // satisfies any join it could describe (see this file's class comment).
   return VK_SUCCESS;
 }
 
@@ -177,6 +199,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
     Attachments.push_back(*Normalized);
   }
 
+  // (Roadmap H2) The classic `vkCreateRenderPass` gets multiview
+  // (`viewMask`/`pCorrelationMasks`) through a chained
+  // `VkRenderPassMultiviewCreateInfo` rather than `VkRenderPassCreateInfo2`'s
+  // own per-subpass field; `pCorrelationMasks` is a batching hint this
+  // single-threaded executor never needs (every view already renders in the
+  // same record order everything else does), so it is read for its
+  // `subpassCount`/`viewMask` array alone.
+  const VkRenderPassMultiviewCreateInfo *Multiview = nullptr;
+  for (auto *Base = static_cast<const VkBaseInStructure *>(pCreateInfo->pNext);
+       Base; Base = Base->pNext)
+    if (Base->sType == VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO) {
+      Multiview =
+          reinterpret_cast<const VkRenderPassMultiviewCreateInfo *>(Base);
+      break;
+    }
+  if (Multiview && Multiview->subpassCount != 0 &&
+      Multiview->subpassCount != pCreateInfo->subpassCount)
+    return VK_ERROR_INITIALIZATION_FAILED;
+
   std::vector<SubpassDescription> Subpasses;
   Subpasses.reserve(pCreateInfo->subpassCount);
   for (uint32_t I = 0; I != pCreateInfo->subpassCount; ++I) {
@@ -185,6 +226,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
       return VK_ERROR_INITIALIZATION_FAILED;
 
     SubpassDescription Subpass;
+    if (Multiview)
+      Subpass.ViewMask = Multiview->pViewMasks[I];
     for (uint32_t J = 0; J != Src.inputAttachmentCount; ++J) {
       uint32_t Index = Src.pInputAttachments[J].attachment;
       if (Index != VK_ATTACHMENT_UNUSED && Index >= Attachments.size())
@@ -263,16 +306,11 @@ VkAttachmentReference toAttachmentReference(const VkAttachmentReference2 &Src) {
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
     VkDevice device, const VkRenderPassCreateInfo2 *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkRenderPass *pRenderPass) {
-  // `VkRenderPassCreateInfo2` adds multiview (`viewMask`/
-  // `pCorrelatedViewMasks`) on top of the classic structures' fields --
-  // unimplemented (roadmap R34/V7, same as `vkCreateRenderPass`'s own
-  // layered-framebuffer rejection) -- so a render pass asking for it fails
-  // here rather than being silently flattened to view 0.
-  if (pCreateInfo->correlatedViewMaskCount != 0)
-    return VK_ERROR_INITIALIZATION_FAILED;
-  for (uint32_t I = 0; I != pCreateInfo->subpassCount; ++I)
-    if (pCreateInfo->pSubpasses[I].viewMask != 0)
-      return VK_ERROR_INITIALIZATION_FAILED;
+  // (Roadmap H2) `pCorrelatedViewMasks` is the same batching-only hint
+  // `VkRenderPassMultiviewCreateInfo::pCorrelationMasks` is (see
+  // `vkCreateRenderPass`'s own comment): never consulted, since a
+  // single-threaded executor gains nothing from knowing which views may
+  // render concurrently.
 
   // Every other field `VkRenderPassCreateInfo2`/`VkAttachmentDescription2`/
   // `VkSubpassDescription2`/`VkSubpassDependency2` carry has the same name
@@ -306,8 +344,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
   Dependencies.reserve(pCreateInfo->dependencyCount);
   for (uint32_t I = 0; I != pCreateInfo->dependencyCount; ++I) {
     const VkSubpassDependency2 &Src = pCreateInfo->pDependencies[I];
-    if (Src.viewOffset != 0)
-      return VK_ERROR_INITIALIZATION_FAILED;
+    // (Roadmap H2) `viewOffset` is a per-view memory-dependency offset;
+    // like `VK_DEPENDENCY_VIEW_LOCAL_BIT` above, it needs no tracking of
+    // its own under this ICD's strictly sequential execution model.
     Dependencies.push_back({Src.srcSubpass, Src.dstSubpass, Src.srcStageMask,
                             Src.dstStageMask, Src.srcAccessMask,
                             Src.dstAccessMask, Src.dependencyFlags});
@@ -315,8 +354,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
 
   std::vector<VkSubpassDescription> Subpasses;
   Subpasses.reserve(pCreateInfo->subpassCount);
+  // (Roadmap H2) `VkRenderPassCreateInfo2` carries `viewMask` per subpass
+  // directly rather than through a chained `VkRenderPassMultiviewCreateInfo`
+  // the way the classic structure does; collected here so it can be handed
+  // to `vkCreateRenderPass` through that same chained structure below,
+  // reusing its own multiview handling rather than duplicating it.
+  std::vector<uint32_t> ViewMasks(pCreateInfo->subpassCount);
+  bool AnyMultiview = false;
   for (uint32_t I = 0; I != pCreateInfo->subpassCount; ++I) {
     const VkSubpassDescription2 &Src = pCreateInfo->pSubpasses[I];
+    ViewMasks[I] = Src.viewMask;
+    AnyMultiview |= Src.viewMask != 0;
     for (uint32_t J = 0; J != Src.inputAttachmentCount; ++J)
       InputRefs[I].push_back(toAttachmentReference(Src.pInputAttachments[J]));
     for (uint32_t J = 0; J != Src.colorAttachmentCount; ++J)
@@ -338,9 +386,19 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
          Src.pPreserveAttachments});
   }
 
+  VkRenderPassMultiviewCreateInfo MultiviewInfo{
+      VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO,
+      nullptr,
+      static_cast<uint32_t>(ViewMasks.size()),
+      ViewMasks.data(),
+      0,
+      nullptr,
+      0,
+      nullptr,
+  };
   VkRenderPassCreateInfo ClassicInfo{
       VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-      nullptr,
+      AnyMultiview ? &MultiviewInfo : nullptr,
       pCreateInfo->flags,
       static_cast<uint32_t>(Attachments.size()),
       Attachments.data(),
@@ -388,9 +446,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
   const RenderPass &Pass = *fromHandle<RenderPass>(pCreateInfo->renderPass);
   if (pCreateInfo->attachmentCount != Pass.attachments().size())
     return VK_ERROR_INITIALIZATION_FAILED;
-  // Layered rendering is roadmap R34/V7; a framebuffer with more than one
-  // layer would silently render into layer 0 only, so it is rejected here.
-  if (pCreateInfo->layers != 1)
+  // (Roadmap H2) A framebuffer must declare at least one layer; beyond
+  // that, `layers > 1` (layered rendering/multiview) is now accepted --
+  // `isCompatibleAttachmentView`'s own `Layers` check below requires each
+  // bound view to actually cover that many array layers.
+  if (pCreateInfo->layers == 0)
     return VK_ERROR_INITIALIZATION_FAILED;
 
   // (Roadmap C6) `VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT`: the concrete image
@@ -451,7 +511,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
   for (uint32_t I = 0; I != pCreateInfo->attachmentCount; ++I) {
     auto *View = fromHandle<ImageView>(pCreateInfo->pAttachments[I]);
     if (!isCompatibleAttachmentView(Pass.attachments()[I], View,
-                                    pCreateInfo->width, pCreateInfo->height))
+                                    pCreateInfo->width, pCreateInfo->height,
+                                    pCreateInfo->layers))
       return VK_ERROR_INITIALIZATION_FAILED;
     Attachments.push_back(View);
   }

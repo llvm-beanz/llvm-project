@@ -73,6 +73,15 @@ struct SubpassDescription {
   /// `VK_ATTACHMENT_UNUSED` for a color attachment that is not resolved.
   std::vector<uint32_t> ResolveAttachments;
   uint32_t DepthStencilAttachment = VK_ATTACHMENT_UNUSED;
+  /// (Roadmap H2) `VkRenderPassCreateInfo2::pSubpasses[i].viewMask`, or the
+  /// classic `vkCreateRenderPass`'s own `VkRenderPassMultiviewCreateInfo::
+  /// pViewMasks[i]` when chained -- 0 for a non-multiview subpass. Each set
+  /// bit `V` is one view this subpass's every draw runs once for, writing
+  /// array layer `V` of every attachment (`CommandBuffer.cpp`'s `runDraw`),
+  /// unless a stage explicitly writes `RenderTargetArrayIndex` (not yet
+  /// reachable without a geometry stage or `shaderOutputLayer` -- roadmap
+  /// H3/H5).
+  uint32_t ViewMask = 0;
 };
 
 /// A `VkRenderPass`: its attachment descriptions plus one compiled
@@ -81,8 +90,11 @@ struct SubpassDescription {
 /// CommandBuffer.h's `pipelineBarrier` comment): this ICD executes every
 /// command to completion in record order, so each subpass boundary's join is
 /// already satisfied by construction. They are still validated at creation
-/// time, though, so out-of-range subpass references or multiview-only flags do
-/// not slip through silently.
+/// time, though, so out-of-range subpass references do not slip through
+/// silently. (Roadmap H2) A view-local dependency
+/// (`VK_DEPENDENCY_VIEW_LOCAL_BIT`) is accepted for the same reason: the
+/// per-view join it describes is also already satisfied by this ICD's
+/// strictly sequential execution.
 class RenderPass {
 public:
   RenderPass(std::vector<AttachmentDescription> Attachments,
@@ -103,9 +115,11 @@ private:
 /// plus the extent they were created against. (Roadmap C6) A framebuffer
 /// created with `VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT` defers its attachment
 /// views to `vkCmdBeginRenderPass` time (`VkRenderPassAttachmentBeginInfo`)
-/// instead: `Attachments` is empty and `isImageless()` is true, so nothing
-/// here depends on `layers != 1` (still rejected -- layered rendering is
-/// V7) the way a concrete attachment's image view already is.
+/// instead: `Attachments` is empty and `isImageless()` is true. (Roadmap H2)
+/// `layers() > 1` (layered rendering/multiview) is accepted either way: an
+/// imageless framebuffer validates its per-instance views' `layerCount`
+/// against it the same way `isCompatibleAttachmentView` validates a
+/// concrete one's at creation time.
 class Framebuffer {
 public:
   Framebuffer(std::vector<ImageView *> Attachments, uint32_t Width,
@@ -166,15 +180,21 @@ struct RenderTargetBinding {
   std::optional<RenderTargetView> Stencil;
   VkRect2D RenderArea{};
   uint32_t Layers = 1;
+  /// (Roadmap H2) The multiview view mask this render-pass instance's
+  /// current subpass declared (`SubpassDescription::ViewMask`), or
+  /// `VkRenderingInfo::viewMask` for `vkCmdBeginRendering`; 0 for a
+  /// non-multiview instance. `CommandBuffer.cpp`'s `runDraw` iterates one
+  /// draw per set bit, each writing that bit's own attachment array layer.
+  uint32_t ViewMask = 0;
 };
 
 /// One attachment's linear host storage, as the software graphics executor
 /// addresses it: the mip level's own tightly packed `width * height *
-/// samples` texels. `Image`'s packed subresource layout is exactly the
+/// samples` texels, times however many array layers (Roadmap H2) the
+/// backing view covers. `Image`'s packed subresource layout is exactly the
 /// layout `feme::graphics::AttachmentView` assumes, so this is a pointer
 /// and an extent, never a copy. Fails for a view this driver cannot render
-/// into (an unbound image, a non-2D view, or a layered one -- layered
-/// rendering is V7).
+/// into (an unbound image or a non-2D view).
 llvm::Expected<feme::graphics::AttachmentView>
 resolveAttachmentView(ImageView *View);
 
@@ -198,16 +218,18 @@ bool isSupportedStencilAttachmentFormat(feme::cpu::ResourceFormat Format);
 bool isSupportedAttachmentSampleCount(uint32_t SampleCount);
 
 /// Whether \p View is a legal binding for \p Attachment sized against a
-/// framebuffer's \p Width x \p Height: format and sample count match, and
-/// the view's image is bound and at least as large. Shared by
-/// `vkCreateFramebuffer`'s eager per-attachment validation and, for an
-/// imageless framebuffer (roadmap C6, `VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT`),
-/// `vkCmdBeginRenderPass`'s deferred one via `VkRenderPassAttachmentBeginInfo`
-/// -- an imageless framebuffer cannot validate this at creation, since it
-/// has no image views yet.
+/// framebuffer's \p Width x \p Height x \p Layers: format and sample count
+/// match, and the view's image is bound, at least as large, and (roadmap
+/// H2) carries at least \p Layers array layers from its own base array
+/// layer. Shared by `vkCreateFramebuffer`'s eager per-attachment validation
+/// and, for an imageless framebuffer (roadmap C6,
+/// `VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT`), `vkCmdBeginRenderPass`'s
+/// deferred one via `VkRenderPassAttachmentBeginInfo` -- an imageless
+/// framebuffer cannot validate this at creation, since it has no image
+/// views yet.
 bool isCompatibleAttachmentView(const AttachmentDescription &Attachment,
                                 ImageView *View, uint32_t Width,
-                                uint32_t Height);
+                                uint32_t Height, uint32_t Layers = 1);
 
 } // namespace feme::vulkan
 

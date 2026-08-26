@@ -329,7 +329,10 @@ TEST_F(RenderPassTest, RejectsDependencyWithOutOfRangeSubpass) {
             VK_ERROR_INITIALIZATION_FAILED);
 }
 
-TEST_F(RenderPassTest, RenderPass2RejectsMultiview) {
+TEST_F(RenderPassTest, RenderPass2AcceptsMultiviewAndRecordsViewMask) {
+  // (Roadmap H2) A nonzero `viewMask` is now accepted, and the compiled
+  // `RenderPass`'s own `SubpassDescription::ViewMask` records it for
+  // `CommandBuffer.cpp`'s `runDraw` to iterate.
   VkSubpassDescription2 Subpass{};
   Subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
   Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -341,11 +344,17 @@ TEST_F(RenderPassTest, RenderPass2RejectsMultiview) {
   Info.pSubpasses = &Subpass;
 
   VkRenderPass Pass = VK_NULL_HANDLE;
-  EXPECT_EQ(vkCreateRenderPass2(Device, &Info, nullptr, &Pass),
-            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(vkCreateRenderPass2(Device, &Info, nullptr, &Pass), VK_SUCCESS);
+  ASSERT_NE(Pass, VK_NULL_HANDLE);
+  EXPECT_EQ(fromHandle<RenderPass>(Pass)->subpasses()[0].ViewMask, 0x1u);
+  vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
-TEST_F(RenderPassTest, RenderPass2RejectsNonZeroDependencyViewOffset) {
+TEST_F(RenderPassTest, RenderPass2AcceptsNonZeroDependencyViewOffset) {
+  // (Roadmap H2) `viewOffset` needs no tracking of its own: like every
+  // other subpass-dependency field, this ICD's strictly sequential
+  // execution already satisfies the join it describes (see RenderPass.h's
+  // class comment).
   VkSubpassDescription2 Subpasses[2]{};
   for (VkSubpassDescription2 &Subpass : Subpasses) {
     Subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
@@ -365,8 +374,8 @@ TEST_F(RenderPassTest, RenderPass2RejectsNonZeroDependencyViewOffset) {
   Info.pDependencies = &Dependency;
 
   VkRenderPass Pass = VK_NULL_HANDLE;
-  EXPECT_EQ(vkCreateRenderPass2(Device, &Info, nullptr, &Pass),
-            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(vkCreateRenderPass2(Device, &Info, nullptr, &Pass), VK_SUCCESS);
+  vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
 TEST_F(RenderPassTest, FramebufferBindsMatchingViews) {
@@ -415,6 +424,140 @@ TEST_F(RenderPassTest, FramebufferBindsMatchingViews) {
             VK_ERROR_INITIALIZATION_FAILED);
 
   vkDestroyFramebuffer(Device, Fb, nullptr);
+  vkDestroyImageView(Device, View, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkDestroyRenderPass(Device, Pass, nullptr);
+}
+
+/// Roadmap H2: `vkCreateFramebuffer` now accepts `layers > 1`, so long as
+/// each bound attachment view actually covers that many array layers from
+/// its own base array layer (`isCompatibleAttachmentView`'s new `Layers`
+/// check).
+TEST_F(RenderPassTest, FramebufferAcceptsLayeredAttachmentWithEnoughLayers) {
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass), VK_SUCCESS);
+
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 2;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.layerCount = 2;
+  VkImageView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = Pass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.pAttachments = &View;
+  FbInfo.width = 4;
+  FbInfo.height = 4;
+  FbInfo.layers = 2;
+  VkFramebuffer Fb = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &Fb), VK_SUCCESS);
+  EXPECT_EQ(fromHandle<Framebuffer>(Fb)->layers(), 2u);
+
+  vkDestroyFramebuffer(Device, Fb, nullptr);
+  vkDestroyImageView(Device, View, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkDestroyRenderPass(Device, Pass, nullptr);
+}
+
+/// Roadmap H2: a framebuffer declaring more layers than a bound view's own
+/// `layerCount` (from its base array layer) is rejected -- the view cannot
+/// supply every layer the framebuffer promises.
+TEST_F(RenderPassTest, FramebufferRejectsViewWithTooFewLayers) {
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass), VK_SUCCESS);
+
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 2;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  // Only one of the image's two layers.
+  ViewInfo.subresourceRange.layerCount = 1;
+  VkImageView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = Pass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.pAttachments = &View;
+  FbInfo.width = 4;
+  FbInfo.height = 4;
+  FbInfo.layers = 2;
+  VkFramebuffer Fb = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &Fb),
+            VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyImageView(Device, View, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkDestroyRenderPass(Device, Pass, nullptr);
+}
+
+/// Roadmap H2: `vkCreateFramebuffer` rejects `layers == 0` (the only
+/// remaining hard floor -- any positive layer count is now legal).
+TEST_F(RenderPassTest, FramebufferRejectsZeroLayers) {
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass), VK_SUCCESS);
+
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.layerCount = 1;
+  VkImageView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = Pass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.pAttachments = &View;
+  FbInfo.width = 4;
+  FbInfo.height = 4;
+  FbInfo.layers = 0;
+  VkFramebuffer Fb = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &Fb),
+            VK_ERROR_INITIALIZATION_FAILED);
+
   vkDestroyImageView(Device, View, nullptr);
   vkDestroyImage(Device, Img, nullptr);
   vkDestroyRenderPass(Device, Pass, nullptr);

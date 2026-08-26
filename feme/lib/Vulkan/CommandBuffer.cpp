@@ -23,6 +23,7 @@
 
 #include "feme/Graphics/Executor.h"
 #include "feme/Graphics/ImageFixture.h"
+#include "feme/Graphics/LayeredRendering.h"
 #include "feme/Graphics/Pipeline.h"
 #include "feme/Graphics/PreparedDraw.h"
 #include "feme/Target/CPU/CompiledStage.h"
@@ -762,7 +763,7 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
                                "attachment");
     for (size_t I = 0; I != Attachments.size(); ++I)
       if (!isCompatibleAttachmentView(Pass.attachments()[I], Attachments[I],
-                                      Fb.width(), Fb.height()))
+                                      Fb.width(), Fb.height(), Fb.layers()))
         return createStringError(inconvertibleErrorCode(),
                                  "an imageless framebuffer's render pass "
                                  "instance supplied an image view "
@@ -772,6 +773,11 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
   const SubpassDescription &Desc = Pass.subpasses()[Subpass];
   RenderTargetBinding Binding;
   Binding.RenderArea = RenderArea;
+  // (Roadmap H2) `Fb.layers()` is the framebuffer's own layer count
+  // (multiview or plain layered rendering); `Desc.ViewMask` is this
+  // subpass's own multiview mask, 0 for a non-multiview render pass.
+  Binding.Layers = Fb.layers();
+  Binding.ViewMask = Desc.ViewMask;
 
   auto makeView = [&](uint32_t Index, bool UseStencilOps) -> RenderTargetView {
     const AttachmentDescription &Attachment = Pass.attachments()[Index];
@@ -1042,6 +1048,28 @@ Error buildSubpassInputHeap(
   return Error::success();
 }
 
+/// (Roadmap H2) Slices one already-resolved, possibly-layered
+/// `AttachmentView` down to array layer \p Layer alone -- the view a
+/// multiview render-pass instance's view \p Layer actually renders into,
+/// per "each set `viewMask` bit maps onto the same-numbered attachment
+/// layer" (`RenderTargetBinding::ViewMask`'s own comment). An empty \p View
+/// (an unbound/unused attachment slot) or a single-layer one (the common,
+/// non-multiview case) is returned unchanged -- slicing layer 0 out of a
+/// one-layer view is exactly that view.
+feme::graphics::AttachmentView
+sliceAttachmentLayer(const feme::graphics::AttachmentView &View,
+                    uint32_t Layer) {
+  if (View.Data.empty() || View.ArrayLayers <= 1)
+    return View;
+  feme::graphics::AttachmentView Sliced = View;
+  uint64_t LayerSizeBytes = View.Data.size() / View.ArrayLayers;
+  uint64_t Offset =
+      feme::graphics::getAttachmentLayerByteOffset(Layer, LayerSizeBytes);
+  Sliced.Data = View.Data.slice(Offset, LayerSizeBytes);
+  Sliced.ArrayLayers = 1;
+  return Sliced;
+}
+
 Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
               const feme::graphics::DrawCommand &Draw,
               llvm::ArrayRef<BoundSetState> BoundSets,
@@ -1231,32 +1259,61 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
 
   uint64_t PassedSamples = 0;
   feme::graphics::PreparedDraw Prepared;
-  Prepared.Attachments = Attachments;
-  Prepared.DepthStencil = DepthStencil;
   Prepared.Viewport = Pipeline.resolveViewport(Gfx.Dynamic);
   Prepared.Scissor = Scissor;
   Prepared.VertexBuffers = VertexBuffers;
   Prepared.IndexBuffer = IndexBinding;
   Prepared.Resources = Resources;
   Prepared.Draws = llvm::ArrayRef<feme::graphics::DrawCommand>(Draw);
-  Prepared.ResolveAttachments = ResolveAttachments;
   Prepared.PassedSampleCounter = &PassedSamples;
   // (roadmap F8) `vkCmdSetRenderingAttachmentLocations`'s current mapping;
   // empty (the identity default) unless a dynamic-rendering instance's own
   // `vkCmdSetRenderingAttachmentLocations` call set one.
   Prepared.ColorAttachmentLocations = Gfx.ColorAttachmentLocations;
 
-  std::vector<feme::cpu::FemeImageDescriptor> SubpassInputHeap;
-  std::vector<feme::cpu::FemeImageSubresourceLayout> SubpassInputLayouts;
-  if (Error E = buildSubpassInputHeap(Gfx, Attachments, DepthStencil,
-                                      Pipeline.sampleCount(), SubpassInputHeap,
-                                      SubpassInputLayouts))
-    return E;
-  Prepared.SubpassInputHeap = SubpassInputHeap;
+  // (Roadmap H2) A non-multiview render-target binding (`ViewMask == 0`,
+  // the overwhelming common case) runs the pipeline exactly once, at
+  // (implicit) view 0; a multiview one (`RenderTargetBinding::ViewMask`)
+  // runs it once per set bit, each writing that bit's own attachment array
+  // layer (`sliceAttachmentLayer`) and reading that bit back as
+  // `gl_ViewIndex` (`PreparedDraw::ViewIndex`) -- see `SubpassDescription::
+  // ViewMask`'s own comment for why this needs no explicit `gl_Layer`
+  // write to be correct.
+  uint32_t ViewMask = Gfx.Binding.ViewMask ? Gfx.Binding.ViewMask : 1u;
+  for (uint32_t ViewIndex = 0; ViewMask != 0; ++ViewIndex, ViewMask >>= 1) {
+    if ((ViewMask & 1u) == 0)
+      continue;
 
-  if (Error E = feme::graphics::executeDraws(
-          Pipeline.buildExecutorPipeline(Gfx.Dynamic), Prepared))
-    return E;
+    std::vector<feme::graphics::AttachmentView> ViewAttachments;
+    ViewAttachments.reserve(Attachments.size());
+    for (const feme::graphics::AttachmentView &A : Attachments)
+      ViewAttachments.push_back(sliceAttachmentLayer(A, ViewIndex));
+    std::vector<feme::graphics::AttachmentView> ViewResolveAttachments;
+    ViewResolveAttachments.reserve(ResolveAttachments.size());
+    for (const feme::graphics::AttachmentView &A : ResolveAttachments)
+      ViewResolveAttachments.push_back(sliceAttachmentLayer(A, ViewIndex));
+    feme::graphics::DepthStencilAttachment ViewDepthStencil;
+    ViewDepthStencil.Depth = sliceAttachmentLayer(DepthStencil.Depth, ViewIndex);
+    ViewDepthStencil.Stencil =
+        sliceAttachmentLayer(DepthStencil.Stencil, ViewIndex);
+
+    std::vector<feme::cpu::FemeImageDescriptor> SubpassInputHeap;
+    std::vector<feme::cpu::FemeImageSubresourceLayout> SubpassInputLayouts;
+    if (Error E = buildSubpassInputHeap(
+            Gfx, ViewAttachments, ViewDepthStencil, Pipeline.sampleCount(),
+            SubpassInputHeap, SubpassInputLayouts))
+      return E;
+
+    Prepared.Attachments = ViewAttachments;
+    Prepared.ResolveAttachments = ViewResolveAttachments;
+    Prepared.DepthStencil = ViewDepthStencil;
+    Prepared.SubpassInputHeap = SubpassInputHeap;
+    Prepared.ViewIndex = ViewIndex;
+
+    if (Error E = feme::graphics::executeDraws(
+            Pipeline.buildExecutorPipeline(Gfx.Dynamic), Prepared))
+      return E;
+  }
   for (QueryPool *Pool : ActiveOcclusionQueries)
     Pool->accumulateActiveOcclusionSamples(PassedSamples);
   return Error::success();
@@ -2648,6 +2705,10 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderingKHR(
   RenderTargetBinding Binding;
   Binding.RenderArea = pRenderingInfo->renderArea;
   Binding.Layers = pRenderingInfo->layerCount;
+  // (Roadmap H2) `VkRenderingInfo::viewMask` is dynamic rendering's own
+  // multiview mask, the same role `SubpassDescription::ViewMask` plays for
+  // a classic render pass.
+  Binding.ViewMask = pRenderingInfo->viewMask;
   for (uint32_t I = 0; I != pRenderingInfo->colorAttachmentCount; ++I)
     Binding.Colors.push_back(
         normalizeRenderingAttachment(pRenderingInfo->pColorAttachments[I]));
