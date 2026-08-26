@@ -18,11 +18,13 @@
 # absent: a partial implementation is a conformance gap (roadmap 1.9.10's
 # K-series), not an entry here.
 #
-# --- Promoted into Vulkan 1.1, all core-only (never advertised by name).
+# --- Promoted into Vulkan 1.1, all core-only (never advertised by name),
+# --- except VK_KHR_multiview below.
 VK_KHR_bind_memory2 = core, not advertised by name: vkBindBufferMemory2/vkBindImageMemory2 (Buffer.cpp, Image.cpp)
 VK_KHR_descriptor_update_template = core, not advertised by name: descriptor-set update templates (Descriptor.cpp)
 VK_KHR_maintenance1 = core, not advertised by name: vkTrimCommandPool (CommandBuffer.cpp)
 VK_KHR_maintenance3 = core, not advertised by name: vkGetDescriptorSetLayoutSupport + VkPhysicalDeviceMaintenance3Properties (Descriptor.cpp, EntryPoints.cpp)
+VK_KHR_multiview = roadmap H2, advertised by name: vkCreateFramebuffer/vkCreateRenderPass/vkCreateRenderPass2 accept layers > 1/a nonzero viewMask (RenderPass.cpp), CommandBuffer.cpp's runDraw runs one draw per set view bit -- dEQP-VK.multiview's own cases enable this extension by name regardless of apiVersion
 VK_KHR_relaxed_block_layout = core, not advertised by name: declared offsets/strides are used as-is, no std140 re-layout is imposed (SPIRVToLLVMPatterns.cpp)
 VK_KHR_storage_buffer_storage_class = core, not advertised by name: the StorageBuffer storage class is accepted directly (SPIRVToLLVMPatterns.cpp)
 #
@@ -69,3 +71,4 @@ VK_EXT_pipeline_robustness = roadmap F10: VkPipelineRobustnessCreateInfo accepte
 VK_EXT_host_image_copy = roadmap F11: vkCopyMemoryToImage/vkCopyImageToMemory/vkCopyImageToImage/vkTransitionImageLayout (HostImageCopy.cpp) copy/transition images with no VkCommandBuffer
 VK_KHR_push_descriptor = roadmap F12: see the pushDescriptor feature row above
 VK_KHR_load_store_op_none = roadmap F13: applyClear's existing LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR check (CommandBuffer.cpp) already treats VK_ATTACHMENT_LOAD_OP_NONE as "do nothing"; StoreOp is never read to act on at all, so STORE/DONT_CARE/NONE are indistinguishable in this real-memory-backed renderer
+VK_KHR_map_memory2 = roadmap F14: vkMapMemory2/vkUnmapMemory2 (Memory.cpp) wrap the existing vkMapMemory/vkUnmapMemory; restored here (this row's own bookkeeping was missing it, the same drift found and fixed for F5/F7/F8/F9/F12 in roadmap F13)

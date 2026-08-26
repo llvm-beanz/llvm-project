@@ -54,7 +54,6 @@ VK_KHR_get_physical_device_properties2 = core-promoted into Vulkan 1.1: part of 
 VK_KHR_get_surface_capabilities2 = roadmap H10 (V8)
 VK_KHR_image_format_list = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_maintenance2 = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
-VK_KHR_multiview = roadmap H2: layered rendering first; deqp-vk's own multiview cases enable this by name
 VK_KHR_pipeline_library = roadmap J7
 VK_KHR_ray_query = roadmap J5
 VK_KHR_ray_tracing_maintenance1 = roadmap J7

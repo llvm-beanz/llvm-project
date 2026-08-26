@@ -391,9 +391,12 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
 
   // Roadmap C6 ("Mandatory 1.2 features and limits"): see the field
   // comments in PhysicalDeviceInfo.h for why each of these is honest
-  // rather than merely the spec-mandated floor, except
-  // `MaxMultiviewViewCount`/`MaxMultiviewInstanceIndex`, which stay at
-  // their required minimum since `multiview` itself is not advertised.
+  // rather than merely the spec-mandated floor. `MaxMultiviewViewCount`/
+  // `MaxMultiviewInstanceIndex` stay at their required minimum even
+  // though `multiview` is now advertised (roadmap H2): nothing about this
+  // ICD's per-view draw loop (`CommandBuffer.cpp`'s `runDraw`) caps the
+  // view count or instance index below the spec floor, but nothing raises
+  // it above that floor either.
   Info.MaxMemoryAllocationSize = HostMemorySize;
   Info.MaxPerSetDescriptors = 1024;
   Info.MaxMultiviewViewCount = 6;
@@ -744,6 +747,17 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // so it must be listed here too, or every one of those cases fails
       // `NotSupported` instead of running for real.
       {VK_KHR_MAP_MEMORY_2_EXTENSION_NAME, VK_KHR_MAP_MEMORY_2_SPEC_VERSION},
+      // (roadmap H2) Layered rendering/multiview: `vkCreateFramebuffer`
+      // accepts `layers > 1` and `vkCreateRenderPass`/`vkCreateRenderPass2`
+      // accept a nonzero `viewMask` (`VkRenderPassMultiviewCreateInfo`/
+      // `VkRenderPassCreateInfo2`, RenderPass.cpp), each set view bit
+      // running the bound pipeline once and writing that bit's own
+      // attachment array layer (`CommandBuffer.cpp`'s `runDraw`), with
+      // `gl_ViewIndex` readable from either stage
+      // (`SignatureSystemValue::ViewIndex`). `dEQP-VK.multiview`'s own
+      // cases enable this extension by name regardless of the advertised
+      // `apiVersion`, so it must be listed here too.
+      {VK_KHR_MULTIVIEW_EXTENSION_NAME, VK_KHR_MULTIVIEW_SPEC_VERSION},
   };
   return Extensions;
 }

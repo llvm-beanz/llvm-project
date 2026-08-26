@@ -163,9 +163,9 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props11->subgroupSupportedStages = Info.SubgroupSupportedStages;
       Props11->subgroupSupportedOperations = Info.SubgroupSupportedOperations;
       Props11->subgroupQuadOperationsInAllStages = VK_FALSE;
-      // (roadmap C6) `multiview` itself is not advertised (layered
-      // rendering is V7), so these two are set to their required minimum
-      // rather than a real capability -- see PhysicalDeviceInfo.h's field
+      // (roadmap H2) `multiview` is now advertised, but
+      // `maxMultiviewViewCount`/`maxMultiviewInstanceIndex` still just
+      // report their required minimum -- see PhysicalDeviceInfo.h's field
       // comment. `maxMemoryAllocationSize`/`maxPerSetDescriptors` are
       // `VK_KHR_maintenance3`'s own fields, promoted here unchanged; see
       // the `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES`
@@ -998,30 +998,30 @@ namespace {
 /// `hostQueryReset`, `uniformBufferStandardLayout`,
 /// `separateDepthStencilLayouts`, `shaderSubgroupExtendedTypes`, and
 /// `subgroupBroadcastDynamicId` (see each case's own comment for why every
-/// one is honest rather than a bare mandatory-floor claim) -- each
-/// reported through either its dedicated 1.2 feature struct or the
-/// aggregate `VkPhysicalDeviceVulkan12Features` struct, matching whichever
-/// one an application chained. `multiview` is deliberately absent: layered
-/// rendering (roadmap V7) is not implemented, so it cannot be honestly
-/// advertised yet (see PhysicalDeviceInfo.h's field comment for the
-/// properties this ICD reports regardless).
+/// one is honest rather than a bare mandatory-floor claim); roadmap H2:
+/// `multiview` (layered rendering/multiview, `RenderPass.cpp`/
+/// `CommandBuffer.cpp`) -- each reported through either its dedicated 1.1/
+/// 1.2 feature struct or the aggregate `VkPhysicalDeviceVulkan1{1,2}Features`
+/// struct, matching whichever one an application chained.
+/// `multiviewGeometryShader`/`multiviewTessellationShader` stay `VK_FALSE`:
+/// neither a geometry nor a tessellation-evaluation stage exists yet
+/// (roadmap H4/H5), so multiview amplification through either has nothing
+/// to amplify.
 void fillFeatures2Chain(void *pNext) {
   for (auto *Base = static_cast<VkBaseOutStructure *>(pNext); Base;
        Base = Base->pNext) {
     switch (Base->sType) {
-    // (roadmap C6) Explicitly all-false, not merely left untouched:
-    // `dEQP-VK.api.info.vulkan1p2.features`/`multiview_features` fill
-    // every chained struct's buffer with a guard pattern first and fail if
-    // any field the offset table lists is unmodified -- the same
-    // "must be written even when false" requirement `PhysicalDeviceInfo.h`
-    // already documents for `Properties11`'s `pointClippingBehavior`/
-    // `protectedNoFault` above. None of `multiview`'s two shader-stage
-    // amplification bits apply either way: geometry/tessellation stages
-    // are not supported at all (`GraphicsPipeline.cpp`).
+    // (Roadmap H2) `multiview` itself is real: `vkCreateFramebuffer`
+    // accepts `layers > 1` and `vkCreateRenderPass`/`vkCreateRenderPass2`
+    // accept a nonzero `viewMask`, each set view bit running the bound
+    // pipeline once per `CommandBuffer.cpp`'s `runDraw`.
+    // `multiviewGeometryShader`/`multiviewTessellationShader` stay
+    // `VK_FALSE`: geometry/tessellation stages are not supported at all
+    // yet (`GraphicsPipeline.cpp`, roadmap H4/H5).
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES: {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceMultiviewFeatures *>(Base);
-      Features->multiview = VK_FALSE;
+      Features->multiview = VK_TRUE;
       Features->multiviewGeometryShader = VK_FALSE;
       Features->multiviewTessellationShader = VK_FALSE;
       break;
@@ -1091,17 +1091,17 @@ void fillFeatures2Chain(void *pNext) {
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: {
-      // (roadmap C6) Explicitly all-false: nothing 1.1 promotes is
-      // advertised (`multiview` cannot be -- see the dedicated-struct case
-      // above), but every field must still be written for the same guard-
-      // pattern reason that case documents.
+      // (roadmap H2) `multiview` is real (see the dedicated-struct case
+      // above); every other 1.1-promoted bit stays `VK_FALSE`, still
+      // explicitly written for the same guard-pattern reason that case
+      // documents.
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceVulkan11Features *>(Base);
       Features->storageBuffer16BitAccess = VK_FALSE;
       Features->uniformAndStorageBuffer16BitAccess = VK_FALSE;
       Features->storagePushConstant16 = VK_FALSE;
       Features->storageInputOutput16 = VK_FALSE;
-      Features->multiview = VK_FALSE;
+      Features->multiview = VK_TRUE;
       Features->multiviewGeometryShader = VK_FALSE;
       Features->multiviewTessellationShader = VK_FALSE;
       Features->variablePointersStorageBuffer = VK_FALSE;

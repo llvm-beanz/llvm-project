@@ -298,7 +298,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   // Roadmap E2: every one of the aggregate `VkPhysicalDeviceVulkan13
   // Properties` struct's 46 limit fields must be explicitly written, for
   // the same unwritten-field guard reason
-  // `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten` below uses (a
+  // `MultiviewFeaturesReportMultiviewTrueAmplificationFalse` below uses (a
   // 0xAA fill pattern would otherwise leave an unset field looking like a
   // plausible, but coincidental, non-zero value). Every field but
   // `maxBufferSize` (roadmap E4), the four `subgroupSizeControl` fields
@@ -560,7 +560,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   // Roadmap E1: `VkPhysicalDeviceVulkan13Features.dynamicRendering` must
   // agree with the dedicated `VK_KHR_dynamic_rendering` struct case above
   // it -- pre-filled with a non-zero pattern first (the same
-  // unwritten-field guard `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten`
+  // unwritten-field guard `MultiviewFeaturesReportMultiviewTrueAmplificationFalse`
   // below uses) so every other 1.3 bit's explicit `VK_FALSE` is verified
   // rather than merely a pre-existing zero.
   VkPhysicalDeviceVulkan13Features Features13;
@@ -1052,7 +1052,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   // with the dedicated `VK_KHR_maintenance5` struct case below it -- every
   // other 1.4 bit remains an explicit `VK_FALSE`, pre-filled with a
   // non-zero pattern first (the same unwritten-field guard
-  // `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten` below uses) so
+  // `MultiviewFeaturesReportMultiviewTrueAmplificationFalse` below uses) so
   // each one is verified rather than merely a pre-existing zero.
   VkPhysicalDeviceVulkan14Features Features14;
   std::memset(&Features14, 0xAA, sizeof(Features14));
@@ -1547,13 +1547,15 @@ TEST_F(PhysicalDeviceProperties2Test,
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
-       MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten) {
-  // Roadmap C6: `multiview` cannot be honestly advertised yet (layered
-  // rendering is V7), but every field must still be an explicit `VK_FALSE`
-  // rather than whatever the caller's own buffer held -- guarded here by
-  // pre-filling with a non-zero pattern before the call, the same pattern
+       MultiviewFeaturesReportMultiviewTrueAmplificationFalse) {
+  // Roadmap H2: `multiview` is now real (layered rendering/multiview,
+  // RenderPass.cpp/CommandBuffer.cpp) and reported `VK_TRUE`;
+  // `multiviewGeometryShader`/`multiviewTessellationShader` stay an
+  // explicit `VK_FALSE` -- guarded here by pre-filling with a non-zero
+  // pattern before the call, the same pattern
   // `dEQP-VK.api.info.vulkan1p2.features`/`multiview_features` use to
-  // catch an unwritten field.
+  // catch an unwritten field -- since neither a geometry nor a
+  // tessellation-evaluation stage exists yet (roadmap H4/H5).
   VkPhysicalDeviceMultiviewFeatures Multiview;
   std::memset(&Multiview, 0xAA, sizeof(Multiview));
   Multiview.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES;
@@ -1564,7 +1566,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   Features2.pNext = &Multiview;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
 
-  EXPECT_EQ(Multiview.multiview, VK_FALSE);
+  EXPECT_EQ(Multiview.multiview, VK_TRUE);
   EXPECT_EQ(Multiview.multiviewGeometryShader, VK_FALSE);
   EXPECT_EQ(Multiview.multiviewTessellationShader, VK_FALSE);
 }

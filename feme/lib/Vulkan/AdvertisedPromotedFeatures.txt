@@ -25,10 +25,13 @@ dualSrcBlend
 # copy/blit/resolve paths address such an image a block at a time.
 textureCompressionASTC_LDR
 #
-# --- Core Vulkan 1.1 (VkPhysicalDeviceVulkan11Features): nothing yet.
-# `multiview` is the notable absence -- roadmap C6 left it deliberately
-# unadvertised because layered rendering does not exist, and roadmap
-# 1.9.7's H2 owns closing it.
+# --- Core Vulkan 1.1 (VkPhysicalDeviceVulkan11Features).
+#
+# multiview: roadmap H2 -- vkCreateFramebuffer accepts layers > 1,
+# vkCreateRenderPass/vkCreateRenderPass2 accept a nonzero viewMask
+# (RenderPass.cpp), and CommandBuffer.cpp's runDraw runs one draw per set
+# view bit, writing that bit's own attachment array layer.
+multiview
 #
 # --- Core Vulkan 1.2 (VkPhysicalDeviceVulkan12Features): roadmap C6,
 # --- plus timelineSemaphore from V3.

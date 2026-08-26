@@ -112,12 +112,14 @@ struct PhysicalDeviceInfo {
   /// is `UINT64_MAX`: a timeline semaphore's counter is a plain in-memory
   /// `uint64_t` compare (see `feme::vulkan::Semaphore`), so nothing about
   /// this ICD's implementation caps the difference between two values
-  /// below the type's own range. `MaxMultiviewViewCount`/
-  /// `MaxMultiviewInstanceIndex` are set to the spec's required minimum
-  /// (6 / 2^27-1): `multiview` itself stays unadvertised (layered
-  /// rendering is roadmap V7, not yet implemented -- see
-  /// `resolveAttachmentView`'s rejection comment in RenderPass.cpp), so
-  /// there is no real capability to promise beyond that floor.
+  /// below the type's own range. (Roadmap H2) `MaxMultiviewViewCount` is
+  /// 6, `MaxMultiviewInstanceIndex` is `2^27 - 1` -- both the spec's
+  /// required minimum, since `multiview` (now advertised: see
+  /// `RenderPass.cpp`'s `SubpassDescription::ViewMask` and
+  /// `CommandBuffer.cpp`'s `runDraw` per-view loop) imposes no lower
+  /// implementation-side cap of its own; `EntryPoints.cpp`'s
+  /// `fillFeatures2Chain`/`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_
+  /// FEATURES` case is the feature bit itself.
   VkDeviceSize MaxMemoryAllocationSize = 0;
   uint32_t MaxPerSetDescriptors = 0;
   uint32_t MaxMultiviewViewCount = 0;
