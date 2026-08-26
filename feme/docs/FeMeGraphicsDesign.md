@@ -476,6 +476,31 @@ conversion's own textual-IR-driven tests do not depend on). See
 `test/Conversion/SPIRVToLLVM/spirv-to-llvm-stage-io.mlir`/
 `test/Translate/SPIRV/spirv-to-llvmir-stage-io.mlir`.
 
+**Deviation (roadmap H2a)**: neither R19 nor R20 covers a *builtin
+interface block* -- a struct-typed `Input`/`Output` variable whose members
+each carry their own `BuiltIn`/`Location` decoration via SPIR-V's
+`OpMemberDecorate`, the shape glslang always emits `gl_Position`/
+`gl_PointSize`/`gl_ClipDistance`/`gl_CullDistance` as (the implicit
+`gl_PerVertex` block), rather than as standalone builtin variables the way
+`buildStageIODecorationsAttr`/`BuiltInGlobalVariablePattern` both assume.
+Neither pattern recognizes it: it is not a "non-builtin `Input`/`Output`
+variable" (`StageIOGlobalVariablePattern`'s own scope), since its members
+are builtins, and it is not a single "builtin variable" either
+(`BuiltInGlobalVariablePattern`'s own scope, which maps one `BuiltIn`
+decoration to one `llvm.spv.*` intrinsic call site, not a memory-backed
+struct). The block still converts to an ordinary `llvm.mlir.global` via
+`StageIOGlobalVariablePattern` (its per-variable `getBuiltInMapping` check
+finds nothing to reject it on), but with no `!spirv.Decorations` metadata
+at all, since `buildStageIODecorationsAttr` never looks at the struct
+type's own per-member decorations. `feme::graphics::CanonicalizeStagePass`
+requires that metadata to recognize a stage-IO global (see "Canonical
+stage operations" below), so a `gl_Position` write is left completely
+un-legalized -- confirmed against a real `dEQP-VK.multiview` run (454 of
+838 cases, effectively every vertex shader in the suite; see "Roadmap H2a:
+measured impact" in VulkanCTSReport.md). Tracked as roadmap rows H2c (the
+SPIR-V import side: preserving per-member decorations) and H2d (the
+`CanonicalizeStage.cpp` side: one `SignatureElement` per block member).
+
 ### Canonical stage operations
 
 After source raising, graphics behavior should be expressed by a small family

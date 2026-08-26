@@ -5173,6 +5173,108 @@ and per-view draw loop):
 The remaining 339 `NotSupported` cases are legitimate: `dEQP-VK.multiview.
 secondary_cmd_buffer_geometry.*` needs `geometryShader` (still `VK_FALSE`,
 roadmap H5), and a handful need `VK_EXT_depth_range_unrestricted`
+
+## Roadmap H2a: measured impact (root-causing the divergent-vector shape)
+
+Reproduced the same 454-case `feme-cpu-simdize` failure this row's own
+finding names, with `errs()`-instrumented, un-committed local diagnostics
+(the diagnostic itself carries no instruction/function detail beyond an
+always-empty `Value::getName()`) added temporarily to
+`FunctionWidener::checkVectorDecompositionSupported`
+(`feme/lib/Transforms/CPU/SIMDize.cpp`) to print the offending instruction,
+its user, and the whole function -- reverted before this row's own commit,
+since the actual fix (see below) needs none of it.
+
+**This row's own framing ("`dEQP-VK.multiview`'s own fragment shaders")
+does not hold.** Every one of the 454 cases is the *vertex* shader's
+`gl_Position` write, not a fragment shader's output at all -- confirmed by
+running one representative case
+(`dEQP-VK.multiview.clear_attachments.no_queries.15`) and dumping the
+function that fails:
+
+```llvm
+%1 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+%2 = insertelement <4 x float> poison, float %1, i64 0
+...
+%8 = insertelement <4 x float> %6, float %7, i64 3
+store <4 x float> %8, ptr addrspace(8) @spirv_var_13, align 4   ; gl_Position
+...
+call void @feme.cpu.masked.stage.output.store.f32(i32 3, i32 0, i32 0, float %24, i32 0, i1 true) ; out_color, correctly legalized
+```
+
+`@spirv_var_13`'s type -- `{ <4 x float>, float, [1 x float], [1 x float] }`
+-- is glslang's implicit `gl_PerVertex` interface *block* (`Position`,
+`PointSize`, `ClipDistance[1]`, `CullDistance[1]`), and it carries **no**
+`!spirv.Decorations` metadata at all (confirmed by dumping every global in
+the module), unlike every other stage-IO global in the same function
+(`out_color`'s own store, three lines below the failing one, is already a
+correctly-legalized `feme.cpu.masked.stage.output.store` call). Root cause:
+SPIR-V decorates a `BuiltIn` interface block's members individually
+(`OpMemberDecorate ... BuiltIn Position`, one per member), not the block
+variable itself (`OpDecorate`) the way an ordinary standalone builtin
+variable is -- but `SPIRVToLLVMPatterns.cpp`'s `buildStageIODecorationsAttr`
+only ever reads a *whole-variable* `built_in`/`location` attribute
+(`Op.getBuiltIn()`), never a struct type's own per-member decorations
+(`mlir::spirv::StructType::getMemberDecorations`, already used elsewhere in
+this file for a storage-buffer block's `NonWritable` member decoration --
+see `isBufferBlockWritable`). `feme::graphics::CanonicalizeStagePass`'s
+`isSPIRVStageIOGlobal` (`CanonicalizeStage.cpp`) requires that metadata to
+recognize a stage-IO global at all, so the whole block is silently
+skipped, and its store is left exactly as raw as it started, reaching
+`feme::cpu::SIMDizePass` directly -- which correctly diagnoses the
+now-divergent vector value it was never supposed to see in the first
+place, since `gl_Position` is virtually always computed from per-vertex
+attribute data (divergent across the wave by construction).
+
+This explains the case count precisely: every `dEQP-VK.multiview` vertex
+shader writes `gl_Position` (mandatory in every vertex shader), so this one
+gap reaches essentially the entire suite regardless of which other feature
+each subgroup (`clear_attachments`, `draw_indexed`, `masks`, `instanced`,
+...) exercises -- 454 distinct cases across 19 top-level subgroups (see
+each one's own `Test case` lines in the reproduction log), all failing with
+byte-for-byte the same diagnostic text.
+
+**Triage against roadmap C8, as this row's own text asked for**: this is
+*not* the same shape as C8b's matrix/aggregate `insertvalue`/`extractvalue`
+finding -- C8b's own gap is in `feme::cpu::SIMDizePass` itself, once a
+value has *already* been correctly legalized into `feme.stage.*` calls;
+this gap never reaches that pass's legalized form at all, since
+`CanonicalizeStagePass` never recognizes the global in the first place. It
+is closer to (but distinct from) C8's original, since-closed finding about
+a raw, un-canonicalized `Input`/`Output` global reaching `feme-cpu-simdize`
+directly: that finding's root cause was "`CanonicalizeStagePass` is never
+invoked at all" (fixed by wiring it into `runPipeline`, though the fix
+never mattered for a real `deqp-vk` case, `GraphicsPipeline.cpp` having
+always called it directly). This finding's root cause is narrower and
+different: `CanonicalizeStagePass` *is* invoked, but its own
+`isSPIRVStageIOGlobal` recognition has a scope gap -- a struct-typed,
+per-member-decorated graphics builtin interface block was never a shape
+either roadmap R19 (SPIR-V import) or R20 (`feme.stage.*` legalization)
+covered; both were scoped to "a non-builtin `Input`/`Output` variable" and
+"a builtin *variable*" (`BuiltInGlobalVariablePattern`), neither of which
+describes a builtin interface *block*. It is a new member of C8's "shader
+long tail" bucket, exactly as this row's own text predicted, not a new
+root-cause bucket of its own.
+
+A regression test locking down the current (still-broken) behavior,
+`CanonicalizeStageTest.DoesNotRecognizeMemberDecoratedInterfaceBlockAsStageIO`
+(`unittests/Transforms/Graphics/CanonicalizeStageTest.cpp`), reproduces the
+exact shape found above (a struct-typed, undecorated `Output` global) at
+the `CanonicalizeStagePass` unit level, independent of a real SPIR-V
+import -- notably, the *existing* `MapsSPIRVBuiltInsToSystemValues` test's
+own `@gl_Position` fixture turns out to have modeled `gl_Position`
+incorrectly all along (as a standalone, whole-variable-decorated global,
+which it never actually is), which is exactly why this gap went unnoticed
+by the existing unit suite and was only caught by a real `deqp-vk` run.
+
+This row does not implement the fix -- extending both
+`buildStageIODecorationsAttr` (to recognize and preserve a struct-typed
+interface block's per-member decorations) and `CanonicalizeStage.cpp`'s
+`isSPIRVStageIOGlobal`/signature-building/load-store legalization (to
+decompose the block into one `SignatureElement` per member, each keeping
+its own `BuiltIn`/system-value identity, rather than the current one
+value-equals-one-element assumption) is nontrivial enough to warrant its
+own measured row -- see roadmap rows H2c and H2d.
 (unimplemented, out of this row's scope).
 
 No case in the group passes outright: every one of its color/depth
