@@ -20,6 +20,16 @@
 // Pipeline-statistics queries remain rejected: there is still no truthful
 // counter for those yet.
 //
+// (Roadmap H2f) Under a multiview render pass instance, `vkCmdBeginQuery`/
+// `vkCmdEndQuery` implicitly span one query index per set bit of the active
+// subpass's view mask (the Vulkan spec's own multiview query rule), not the
+// single index a non-multiview query uses -- `CommandBuffer.cpp`'s
+// `runDraw`/`executeCommandsInto` compute that count from
+// `GraphicsState::Binding.ViewMask` and pass it down to `begin`/
+// `markAvailable` below, and attribute each view's own passed-sample count
+// (not the sum across every rendered view) to its own query index via
+// `accumulateOcclusionSamples`.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_QUERYPOOL_H
@@ -60,36 +70,42 @@ public:
   }
 
   /// `vkCmdBeginQuery`: starts a fresh occlusion-query accumulation.
-  void begin(uint32_t Query) {
-    if (Query >= Available.size())
-      return;
-    Available[Query] = false;
-    Active[Query] = true;
-    Values[Query] = 0;
+  /// Inside a multiview render pass instance, a query spans \p ViewCount
+  /// (> 1) consecutive query indices starting at \p Query -- one per set
+  /// bit of the active subpass's view mask, per the Vulkan spec's own
+  /// multiview query rule (see `QueryPool.h`'s file comment) -- rather
+  /// than the single index a non-multiview `vkCmdBeginQuery` uses.
+  void begin(uint32_t Query, uint32_t ViewCount = 1) {
+    for (uint32_t I = 0; I != ViewCount && Query + I < Available.size(); ++I) {
+      Available[Query + I] = false;
+      Active[Query + I] = true;
+      Values[Query + I] = 0;
+    }
   }
 
-  /// `vkCmdEndQuery`/`vkCmdWriteTimestamp`: marks \p Query available.
-  void markAvailable(uint32_t Query) {
-    if (Query >= Available.size())
-      return;
-    Active[Query] = false;
-    Available[Query] = true;
+  /// `vkCmdEndQuery`/`vkCmdWriteTimestamp`: marks \p Query (and, under
+  /// multiview, its following \p ViewCount-1 implicit indices -- see
+  /// `begin`'s own comment) available.
+  void markAvailable(uint32_t Query, uint32_t ViewCount = 1) {
+    for (uint32_t I = 0; I != ViewCount && Query + I < Available.size(); ++I) {
+      Active[Query + I] = false;
+      Available[Query + I] = true;
+    }
   }
 
-  /// Adds \p Samples to every active occlusion query in this pool.
-  void accumulateActiveOcclusionSamples(uint64_t Samples) {
-    if (Type != VK_QUERY_TYPE_OCCLUSION || Samples == 0)
+  /// Adds \p Samples to occlusion query index \p Query alone -- the one
+  /// specific per-view slot a multiview query's own view is accumulating
+  /// into, unlike a non-multiview query's single, implicitly-"per-view"
+  /// index. Distinct per-index accumulation (rather than broadcasting one
+  /// combined total to every currently-active index) is required so each
+  /// of a multiview query's `ViewCount` slots ends up with that view's own
+  /// passed-sample count instead of every slot sharing the sum across all
+  /// views.
+  void accumulateOcclusionSamples(uint32_t Query, uint64_t Samples) {
+    if (Type != VK_QUERY_TYPE_OCCLUSION || Samples == 0 ||
+        Query >= Values.size())
       return;
-    for (size_t I = 0; I != Active.size(); ++I)
-      if (Active[I])
-        Values[I] += Samples;
-  }
-
-  bool hasActiveQueries() const {
-    for (bool QueryActive : Active)
-      if (QueryActive)
-        return true;
-    return false;
+    Values[Query] += Samples;
   }
 
   bool isAvailable(uint32_t Query) const {

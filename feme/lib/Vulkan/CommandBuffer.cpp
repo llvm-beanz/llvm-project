@@ -29,6 +29,7 @@
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/ResourceInfo.h"
+#include "llvm/ADT/bit.h"
 
 #include <algorithm>
 #include <cstring>
@@ -1070,11 +1071,25 @@ sliceAttachmentLayer(const feme::graphics::AttachmentView &View,
   return Sliced;
 }
 
+/// (Roadmap H2f) One occlusion query currently active between
+/// `vkCmdBeginQuery`/`vkCmdEndQuery`: its pool, its first query index, and
+/// how many consecutive indices it spans (its active subpass's view mask
+/// popcount, 1 outside multiview -- see `QueryPool.h`'s file comment).
+/// Tracked as an explicit list of these rather than a plain `QueryPool *`
+/// set, since `ViewCount` is needed at every draw to route each rendered
+/// view's own passed-sample count to its own query index instead of
+/// broadcasting one combined total to every index the query spans.
+struct ActiveOcclusionQuery {
+  QueryPool *Pool = nullptr;
+  uint32_t FirstQuery = 0;
+  uint32_t ViewCount = 1;
+};
+
 Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
               const feme::graphics::DrawCommand &Draw,
               llvm::ArrayRef<BoundSetState> BoundSets,
               llvm::ArrayRef<uint8_t> PushConstants,
-              llvm::ArrayRef<QueryPool *> ActiveOcclusionQueries) {
+              llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries) {
   if (!Gfx.Rendering)
     return createStringError(inconvertibleErrorCode(),
                              "a draw must be recorded inside a render pass "
@@ -1257,7 +1272,6 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   Scissor.Width = MaxX > MinX ? uint32_t(MaxX - MinX) : 0;
   Scissor.Height = MaxY > MinY ? uint32_t(MaxY - MinY) : 0;
 
-  uint64_t PassedSamples = 0;
   feme::graphics::PreparedDraw Prepared;
   Prepared.Viewport = Pipeline.resolveViewport(Gfx.Dynamic);
   Prepared.Scissor = Scissor;
@@ -1265,7 +1279,6 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   Prepared.IndexBuffer = IndexBinding;
   Prepared.Resources = Resources;
   Prepared.Draws = llvm::ArrayRef<feme::graphics::DrawCommand>(Draw);
-  Prepared.PassedSampleCounter = &PassedSamples;
   // (roadmap F8) `vkCmdSetRenderingAttachmentLocations`'s current mapping;
   // empty (the identity default) unless a dynamic-rendering instance's own
   // `vkCmdSetRenderingAttachmentLocations` call set one.
@@ -1279,7 +1292,16 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   // `gl_ViewIndex` (`PreparedDraw::ViewIndex`) -- see `SubpassDescription::
   // ViewMask`'s own comment for why this needs no explicit `gl_Layer`
   // write to be correct.
+  //
+  // (Roadmap H2f) Each view's own passed-sample count is tracked
+  // separately (`PassedSamples`, reset per view) rather than summed across
+  // every rendered view into one combined total: a multiview occlusion
+  // query's `ViewCount` slots (`ActiveOcclusionQuery::ViewCount`) each need
+  // their own view's count, not every slot sharing the sum across all
+  // views -- see `QueryPool.h`'s file comment and
+  // `ActiveOcclusionQuery`'s own comment above.
   uint32_t ViewMask = Gfx.Binding.ViewMask ? Gfx.Binding.ViewMask : 1u;
+  uint32_t EnumeratedViewIndex = 0;
   for (uint32_t ViewIndex = 0; ViewMask != 0; ++ViewIndex, ViewMask >>= 1) {
     if ((ViewMask & 1u) == 0)
       continue;
@@ -1304,6 +1326,8 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
             SubpassInputHeap, SubpassInputLayouts))
       return E;
 
+    uint64_t PassedSamples = 0;
+    Prepared.PassedSampleCounter = &PassedSamples;
     Prepared.Attachments = ViewAttachments;
     Prepared.ResolveAttachments = ViewResolveAttachments;
     Prepared.DepthStencil = ViewDepthStencil;
@@ -1313,9 +1337,13 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
     if (Error E = feme::graphics::executeDraws(
             Pipeline.buildExecutorPipeline(Gfx.Dynamic), Prepared))
       return E;
+
+    for (const ActiveOcclusionQuery &Query : ActiveOcclusionQueries)
+      if (EnumeratedViewIndex < Query.ViewCount)
+        Query.Pool->accumulateOcclusionSamples(
+            Query.FirstQuery + EnumeratedViewIndex, PassedSamples);
+    ++EnumeratedViewIndex;
   }
-  for (QueryPool *Pool : ActiveOcclusionQueries)
-    Pool->accumulateActiveOcclusionSamples(PassedSamples);
   return Error::success();
 }
 
@@ -1399,13 +1427,13 @@ Error validateDrawCounts(const PhysicalDeviceInfo *Info,
 /// and its fetches against the bound buffers -- the single path every
 /// direct and indirect draw goes through, so an indirect command's
 /// attacker-controlled arguments are validated exactly like a direct one's.
-Error runValidatedDraw(const GraphicsPipeline &Pipeline,
-                       const GraphicsState &Gfx,
-                       const feme::graphics::DrawCommand &Draw,
-                       const PhysicalDeviceInfo *DeviceInfo,
-                       llvm::ArrayRef<BoundSetState> BoundSets,
-                       llvm::ArrayRef<uint8_t> PushConstants,
-                       llvm::ArrayRef<QueryPool *> ActiveOcclusionQueries) {
+Error runValidatedDraw(
+    const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
+    const feme::graphics::DrawCommand &Draw,
+    const PhysicalDeviceInfo *DeviceInfo,
+    llvm::ArrayRef<BoundSetState> BoundSets,
+    llvm::ArrayRef<uint8_t> PushConstants,
+    llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries) {
   if (Error E = validateDrawCounts(DeviceInfo, Draw))
     return E;
   if (Error E = validateDrawFetchBounds(Pipeline, Gfx, Draw))
@@ -1480,14 +1508,12 @@ readIndirectDraws(Buffer *Buf, uint64_t Offset, uint32_t DrawCount,
 /// through for `validateGroupCount`, which does not otherwise have access
 /// to a secondary command buffer's own (possibly null, if never set)
 /// `PhysicalDeviceInfo`.
-Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
-                          const PhysicalDeviceInfo *DeviceInfo,
-                          ComputePipeline *&BoundPipeline,
-                          GraphicsPipeline *&BoundGraphicsPipeline,
-                          GraphicsState &Gfx,
-                          std::vector<BoundSetState> &BoundSets,
-                          std::vector<uint8_t> &PushConstants,
-                          std::vector<QueryPool *> &ActiveOcclusionQueries) {
+Error executeCommandsInto(
+    llvm::ArrayRef<RecordedCommand> Commands,
+    const PhysicalDeviceInfo *DeviceInfo, ComputePipeline *&BoundPipeline,
+    GraphicsPipeline *&BoundGraphicsPipeline, GraphicsState &Gfx,
+    std::vector<BoundSetState> &BoundSets, std::vector<uint8_t> &PushConstants,
+    std::vector<ActiveOcclusionQuery> &ActiveOcclusionQueries) {
   for (const RecordedCommand &Cmd : Commands) {
     switch (Cmd.Op) {
     case RecordedCommand::Kind::BindPipeline:
@@ -1595,19 +1621,40 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
     case RecordedCommand::Kind::ResetQueryPool:
       Cmd.TargetQueryPool->reset(Cmd.FirstQuery, Cmd.Count[0]);
       break;
-    case RecordedCommand::Kind::BeginQuery:
-      Cmd.TargetQueryPool->begin(Cmd.FirstQuery);
-      if (Cmd.TargetQueryPool->queryType() == VK_QUERY_TYPE_OCCLUSION &&
-          llvm::find(ActiveOcclusionQueries, Cmd.TargetQueryPool) ==
-              ActiveOcclusionQueries.end())
-        ActiveOcclusionQueries.push_back(Cmd.TargetQueryPool);
+    case RecordedCommand::Kind::BeginQuery: {
+      // (Roadmap H2f) Under an active multiview subpass (`Gfx.Binding.
+      // ViewMask` nonzero, tracked the same way `runDraw`'s own per-view
+      // loop reads it), an occlusion query implicitly spans one query
+      // index per set view-mask bit, per the Vulkan spec's multiview
+      // query rule (`QueryPool.h`'s file comment) -- not the single index
+      // a non-multiview query uses.
+      uint32_t ViewCount =
+          Cmd.TargetQueryPool->queryType() == VK_QUERY_TYPE_OCCLUSION &&
+                  Gfx.Binding.ViewMask
+              ? llvm::popcount(Gfx.Binding.ViewMask)
+              : 1u;
+      Cmd.TargetQueryPool->begin(Cmd.FirstQuery, ViewCount);
+      if (Cmd.TargetQueryPool->queryType() == VK_QUERY_TYPE_OCCLUSION)
+        ActiveOcclusionQueries.push_back(
+            {Cmd.TargetQueryPool, Cmd.FirstQuery, ViewCount});
       break;
-    case RecordedCommand::Kind::EndQuery:
-      Cmd.TargetQueryPool->markAvailable(Cmd.FirstQuery);
-      if (Cmd.TargetQueryPool->queryType() == VK_QUERY_TYPE_OCCLUSION &&
-          !Cmd.TargetQueryPool->hasActiveQueries())
-        llvm::erase(ActiveOcclusionQueries, Cmd.TargetQueryPool);
+    }
+    case RecordedCommand::Kind::EndQuery: {
+      // The matching `ActiveOcclusionQuery` entry (if any) carries the
+      // same `ViewCount` `BeginQuery` computed above, so `markAvailable`
+      // marks exactly the range `begin` started.
+      auto It = llvm::find_if(ActiveOcclusionQueries,
+                              [&](const ActiveOcclusionQuery &Q) {
+                                return Q.Pool == Cmd.TargetQueryPool &&
+                                       Q.FirstQuery == Cmd.FirstQuery;
+                              });
+      uint32_t ViewCount =
+          It != ActiveOcclusionQueries.end() ? It->ViewCount : 1u;
+      Cmd.TargetQueryPool->markAvailable(Cmd.FirstQuery, ViewCount);
+      if (It != ActiveOcclusionQueries.end())
+        ActiveOcclusionQueries.erase(It);
       break;
+    }
     case RecordedCommand::Kind::WriteTimestamp:
       Cmd.TargetQueryPool->markAvailable(Cmd.FirstQuery);
       break;
@@ -1975,7 +2022,7 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
   const PhysicalDeviceInfo *DeviceInfo = CmdBuf.getPhysicalDeviceInfo();
   std::vector<uint8_t> PushConstants(
       DeviceInfo ? DeviceInfo->Properties.limits.maxPushConstantsSize : 0, 0);
-  std::vector<QueryPool *> ActiveOcclusionQueries;
+  std::vector<ActiveOcclusionQuery> ActiveOcclusionQueries;
   return executeCommandsInto(CmdBuf.commands(), DeviceInfo, BoundPipeline,
                              BoundGraphicsPipeline, Gfx, BoundSets,
                              PushConstants, ActiveOcclusionQueries);
