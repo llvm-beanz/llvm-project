@@ -5449,3 +5449,56 @@ row's own new `CanonicalizeStageTest` cases
 this row touches no feature/extension advertisement, only
 `CanonicalizeStagePass`'s own SPIR-V-derived-IR legalization.
 
+## Roadmap H2e: measured impact (`Output` storage-class read-back)
+
+`dEQP-VK.multiview.*` (`--deqp-case`, same reproduction recipe as F9-F14's
+own sections above): 838 cases discovered.
+
+```
+Passed:        78/838 (9.3%)
+Failed:        421/838 (50.2%)
+Not supported: 339/838 (40.5%)
+```
+
+Identical headline totals to H2d's own baseline -- expected, and not a
+sign the fix did nothing: this row's own scope is a single root cause
+(`'feme.stage.input.load' ... refers to element N with the wrong
+direction`, `input_instance`'s 24 cases), and every one of those 24 no
+longer hits that diagnostic (`grep -c "wrong direction"` against the full
+log now returns 0, down from 24). What changed is *which* bucket they fall
+into: all 24 now build and run to completion, and reach real image
+comparison -- landing in the same `Fail (Fail)` bucket roadmap H2g already
+tracks (334 -> 358), rather than failing earlier at
+`vkCreateGraphicsPipelines` with a diagnosed compiler error. This is the
+same "closes the root cause, not the test" shape H2d's own report
+predicted for exactly this row ("a real, targeted run" would be needed to
+tell whether fixing the read-back gap alone makes `input_instance` pass,
+versus merely uncovering a different, pre-existing failure underneath --
+H2g's own rendering-correctness gap turns out to be that different
+failure).
+
+The fix itself: `canonicalizeSPIRVStage` now routes every `Output`-
+direction leaf scalar (one per (`ElementID`, `Row`, `Component`), the same
+granularity `loadStageIOValue`/`storeStageIOValue`'s existing recursion
+already decomposes every access to) through its own shadow `AllocaInst`
+(`ShadowValueMap`), rather than lowering an `Output` read-back into a
+wrong-direction `feme.stage.input.load`. Every rewritten store also writes
+through to its own shadow alloca; once every instruction in the function
+has been rewritten, `PromoteMemToReg` converts every shadow alloca to SSA
+form, resolving each read-back to the dominance-correct reaching store
+(inserting a `phi` for a real control-flow join, e.g. `input_instance`'s
+own `if (gl_VertexIndex == 1) gl_Position.y += 1.0f;`-shaped guard) --
+exactly the SSA construction a compiler's own `mem2reg` pass performs for
+a local variable, which a linear "last stored value" scan could not do
+correctly in general. `CanonicalizeStageTest` gains
+`OutputReadBackResolvesToStoredValueStraightLine` and
+`OutputReadBackResolvesAcrossControlFlow` (the latter confirming the `phi`
+case); a new `spirv-canonicalize-stage-output-readback.ll` lit test covers
+the same control-flow-join shape end-to-end. `ninja check-feme`
+(assertions-enabled, ccache build) passes in full, 1817/1818 (1
+pre-existing, unrelated `Unsupported`), up from 1814/1815 before this row.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: unchanged --
+this row touches no feature/extension advertisement, only
+`CanonicalizeStagePass`'s own SPIR-V-derived-IR legalization.
+

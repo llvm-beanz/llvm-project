@@ -557,6 +557,38 @@ to 78/838; see "Roadmap H2d: measured impact" in VulkanCTSReport.md for
 the full breakdown of what remains (three already-tracked buckets, three
 new ones spun off as roadmap rows H2e/H2f/H2g).
 
+**Roadmap H2e**: unlike DXIL's `loadInput`/`storeOutput` split (where an
+output is genuinely write-only), SPIR-V's `Output` storage class permits
+reading back a value already written earlier in the same invocation --
+`input_instance`'s own vertex shader does exactly this
+(`gl_Position.y += 1.0f;` guarded by an `if`, GLSL's own compound-assignment
+sugar for a read-modify-write). `feme.stage.input.load`/`.output.store`'s
+Input-vs-Output dichotomy has no representation for "read back what this
+invocation already wrote", so the read-back was lowered into a
+wrong-direction `feme.stage.input.load`, correctly diagnosed (and
+rejected) by `ValidateStagePass`. `canonicalizeSPIRVStage` now routes
+every `Output`-direction leaf scalar (one per (`ElementID`, `Row`,
+`Component`) -- the same granularity `loadStageIOValue`/
+`storeStageIOValue`'s existing recursion already decomposes every access
+to) through its own shadow `AllocaInst` (`ShadowValueMap`) instead: every
+rewritten store also writes through to its own shadow alloca, and a
+read-back load is redirected to read from it rather than emitting a
+`feme.stage.input.load` at all. Once every instruction in the function has
+been rewritten, `llvm::PromoteMemToReg` converts every shadow alloca to
+SSA form, resolving each read-back to the dominance-correct reaching
+store -- inserting a `phi` for a real control-flow join, exactly the SSA
+construction a compiler's own `mem2reg` pass performs for a local
+variable, which a linear "last stored value" scan could not do correctly
+in general (a read-back on one control-flow path is not necessarily
+dominated by a write on another). A real `dEQP-VK.multiview` re-run
+confirms the root cause is gone (the `'... refers to element N with the
+wrong direction'` diagnostic no longer occurs anywhere in the group), but
+does not turn `input_instance` green on its own: all 24 cases now build
+and run to completion, landing in the same `Fail (Fail)` image-comparison
+bucket roadmap H2g already tracks, rather than failing earlier at
+`vkCreateGraphicsPipelines`. See "Roadmap H2e: measured impact" in
+VulkanCTSReport.md for the full breakdown.
+
 ### Canonical stage operations
 
 After source raising, graphics behavior should be expressed by a small family
