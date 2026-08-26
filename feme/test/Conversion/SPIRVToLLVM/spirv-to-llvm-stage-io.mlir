@@ -12,7 +12,10 @@
 // feme::spirv::getStageIODecorationsAttrName), which
 // feme::spirv::attachStageIODecorations later turns into real
 // `!spirv.Decorations` LLVM metadata once a genuine llvm::Module exists (see
-// test/Translate/SPIRV/spirv-to-llvmir-stage-io.mlir).
+// test/Translate/SPIRV/spirv-to-llvmir-stage-io.mlir). A builtin interface
+// block's own per-member decorations (roadmap H2c) are preserved the same
+// way, under a distinct `feme.spirv.member.decorations` attribute -- see the
+// last test below.
 
 // CHECK: llvm.mlir.global external constant @in_var() {addr_space = 7 : i32, feme.spirv.decorations = {{\[}}[30 : i32, 0 : i32], [14 : i32]{{\]}}} : i32
 // CHECK-LABEL: llvm.func @read_stage_io
@@ -97,4 +100,23 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.Store "Output" %0, %v : vector<4xf32>
     spirv.Return
   }
+}
+
+// -----
+
+// (Roadmap H2c) A builtin *interface block* (glslang's implicit
+// `gl_PerVertex`, `{gl_Position, gl_PointSize, gl_ClipDistance,
+// gl_CullDistance}`) has no whole-variable `BuiltIn` attribute at all --
+// SPIR-V decorates its members individually (`OpMemberDecorate`) -- but
+// still converts through this same ordinary stage-IO path (its storage
+// class is `Output`, and getBuiltInMapping only ever matches a
+// whole-variable `built_in` attribute, which this op does not have). Its
+// members' own `BuiltIn` decorations are preserved as a
+// `feme.spirv.member.decorations` attribute instead of being silently
+// dropped, which is what lets `feme::graphics::CanonicalizeStagePass`
+// (roadmap H2d) later recover each member's own system-value identity.
+
+// CHECK: llvm.mlir.global external @gl_PerVertex() {addr_space = 8 : i32, feme.spirv.member.decorations = {{\[}}[0 : i32, {{\[}}[11 : i32, 0 : i32]{{\]}}], [1 : i32, {{\[}}[11 : i32, 1 : i32]{{\]}}], [2 : i32, {{\[}}[11 : i32, 3 : i32]{{\]}}], [3 : i32, {{\[}}[11 : i32, 4 : i32]{{\]}}]{{\]}}}
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @gl_PerVertex : !spirv.ptr<!spirv.struct<(vector<4xf32> [BuiltIn=0 : i32], f32 [BuiltIn=1 : i32], !spirv.array<1 x f32> [BuiltIn=3 : i32], !spirv.array<1 x f32> [BuiltIn=4 : i32])>, Output>
 }
