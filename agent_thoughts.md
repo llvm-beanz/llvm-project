@@ -35063,3 +35063,217 @@ what remains. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.
 md`: checked both explicitly -- no entry references zero color
 attachments or this shape at all, and this fix advertises no new
 feature or extension, so neither file needed a change.
+
+# Roadmap H2j: make the fragment stage genuinely optional
+
+## Context
+
+H2b's own Deviation left `dEQP-VK.multiview.depth_without_fragment_shader*`
+(and its `dynamic_rendering`/`renderpass2` siblings, 3 cases total) still
+failing after relaxing the zero-color-attachment checks: the real CTS
+pipeline omits `VK_SHADER_STAGE_FRAGMENT_BIT` from `pStages` entirely
+rather than merely binding a fragment shader with no color output, which
+is separately legal Vulkan whenever the render target has no color
+attachments (`VUID-VkGraphicsPipelineCreateInfo-pStages-06894`/neighbors).
+H2b spun this off as H2j, scoping it to three places: pipeline creation
+(`compileAndValidateStages`/`validateStageInterfaces` skipping fragment
+compilation and its half of interface validation), the compiled
+artifact's shape (`GraphicsPipeline`'s `FragmentStage` becoming genuinely
+optional), and the executor's per-quad fragment-invocation loop
+(`executeDraws` skipping `FSSig`/`Varyings`/`FSColors`/`FS.
+invokeFragments` entirely).
+
+## Investigation
+
+Traced every place the codebase currently assumes a fragment stage is
+always present:
+
+- `lib/Vulkan/GraphicsPipeline.cpp`'s `translateFixedFunctionState`
+  unconditionally requires both `VertexInfo` and `FragmentInfo` before
+  doing anything else, including resolving fragment robustness and
+  computing render targets.
+- `validateStageInterfaces` takes `FragmentStage` by const reference and
+  reads its resource info, inputs, and outputs unconditionally to cross-
+  check against the vertex stage and the render target's color
+  attachments.
+- `compileAndValidateStages` takes `FragmentInfo` by const reference,
+  compiling it unconditionally and validating its push constants/bound
+  ranges against `Layout` before ever reaching `validateStageInterfaces`.
+- `compileGraphicsPipeline` computes `FragmentModule` unconditionally via
+  `fromHandle<ShaderModule>(FragmentInfo->module)`, and feeds it into the
+  pipeline cache key computation (`FragmentModule->words()`,
+  `FragmentInfo->pName`) unconditionally too.
+- `include/feme/Graphics/Pipeline.h`'s executor-facing `GraphicsPipeline`
+  exposes `getFragmentStage()` returning a reference into
+  `FragmentStage`, implicitly assuming it is always populated.
+- `lib/Graphics/Executor.cpp`'s `executeDraws` grabs
+  `const cpu::CompiledStage &FS = Pipeline.getFragmentStage();` at the
+  very top of the function, then uses `FS`'s resource info to build
+  `FSSig` (an `Expected<EntrySignature>` immediately dereferenced),
+  iterates `FSSig->Elements` to find varyings/color outputs, and calls
+  `FS.invokeFragments(...)` inside the per-quad loop -- all unconditional.
+
+Checked whether any supporting type would resist becoming "empty" for a
+fragment-less pipeline: `EntrySignature` is a plain
+`struct { std::vector<SignatureElement> Elements; }`, trivially
+default-constructible with empty `Elements`; `PipelineRobustness` is
+default-constructible with every field at its `..._DEVICE_DEFAULT`;
+`computeGraphicsPipelineCacheKey` already takes `ArrayRef<uint32_t>`/
+`StringRef` for shader words/entry names, so an empty `ArrayRef`/
+`StringRef` for the fragment half of the key falls out for free without
+touching `PipelineCache.{h,cpp}` at all. This meant the natural
+representation for "no fragment stage" throughout the executor was an
+empty `FSSig` (rather than, say, a `std::optional<EntrySignature>`
+threaded through every call site) -- every existing loop over
+`FSSig.Elements`/`FSSig->Elements` becomes a no-op automatically, with no
+per-call-site special-casing needed beyond the one early-return block
+that skips fragment invocation and color merging altogether.
+
+## Design
+
+- `Pipeline.h`/`GraphicsPipeline.h` (both the executor-facing and
+  Vulkan-level wrappers): documented `FragmentStage` as nullable, added
+  `hasFragmentStage()` on both.
+- `translateFixedFunctionState`: only requires `VertexInfo` up front;
+  resolves fragment robustness only if `FragmentInfo` is present (falling
+  back to a default-constructed `PipelineRobustness` otherwise); moved
+  the "fragment required" rejection to *after* `Targets` (render targets)
+  is computed, so it only fires when `!FragmentInfo && !Targets->Colors.
+  empty()` -- matching the VUID's own condition exactly, rather than an
+  unconditional both-stages check.
+- `validateStageInterfaces`: `FragmentStage` becomes a nullable pointer;
+  every fragment-side check (inputs, outputs, color outputs) is skipped
+  when null; added `assert(FragmentStage || ColorAttachmentCount == 0)`
+  to document (and catch violations of) the invariant that a fragment-
+  less pipeline can only reach this function with zero color
+  attachments.
+- `compileAndValidateStages`: `FragmentInfo` becomes a nullable pointer;
+  fragment compilation and its push-constant/bound-range validation are
+  both skipped when null; `validateStageInterfaces` is called with
+  `FragmentStage.get()` (possibly null) rather than a dereference.
+- `compileGraphicsPipeline`: `FragmentModule` computed conditionally
+  (`nullptr` when `FragmentInfo` is null); the cache-key `if` guard
+  becomes `Cache && VertexModule && (!FragmentInfo || FragmentModule)`,
+  and the fragment words/entry point fed into the key computation are
+  empty `ArrayRef`/`StringRef` when there's no fragment stage.
+- `executeDraws`: replaced the unconditional
+  `const cpu::CompiledStage &FS = Pipeline.getFragmentStage();` at the
+  top with a plain, default-constructed `EntrySignature FSSig`,
+  populated only when `Pipeline.hasFragmentStage()`; fixed every
+  `*FSSig`/`FSSig->` dereference to plain `FSSig.`/`FSSig`; `FSFlags` is
+  `0` when there's no fragment stage (which, since `FSDepthOut`/
+  `FSStencilRefOut` are then always null and `FSMayDiscard` is always
+  false, makes `UseEarlyDepthStencil` collapse to exactly
+  `NeedsDepthStencil` -- meaning the early-Z path, which both tests and
+  writes depth/stencil as a side effect, is always taken for a
+  fragment-less pipeline, and the late-test path is provably
+  unreachable for these pipelines); added an early-return block right
+  after the existing `Quads.empty()` check that, when there's no
+  fragment stage, walks `Quads`/`QuadInvocations` to increment
+  `Draw.PassedSampleCounter` per already-depth-tested passing lane (for
+  occlusion-query bookkeeping) and returns, skipping `FSInput`/
+  `FSOutput` construction, `FS.invokeFragments`, and the whole color-
+  merge loop; reintroduced a local `FS` reference right before the (now
+  unconditionally-safe, gated by the early return) `FS.getResourceInfo()`/
+  `FS.invokeFragments(PFB)` calls.
+
+Built and ran `ninja check-feme` after these four changes alone (before
+adding new tests): all 1765/1824 pre-existing tests still passed, 0
+failures, confirming no regressions.
+
+## Tests
+
+- `GraphicsPipelineTest.AcceptsMissingFragmentStage`: a depth-only,
+  dynamic-rendering pipeline with zero color attachments and
+  `stageCount = 1` (vertex only) succeeds, and `hasFragmentStage()` is
+  false.
+- `GraphicsPipelineTest.RejectsMissingFragmentStageWithColorAttachments`:
+  the same shape but using the fixture's default 1-color-attachment
+  render pass fails creation -- the VUID's own condition still enforced.
+- `ExecutorTest.RendersWithNoFragmentStage`: mirrors
+  `RendersWithZeroColorAttachments` but constructs `GraphicsPipeline`
+  with `FragmentStage = nullptr`; asserts `hasFragmentStage()` is false,
+  depth is still written correctly via early-Z, and
+  `PassedSampleCounter` correctly counts 16 passed samples for
+  occlusion-query bookkeeping.
+
+Rebuilt `check-feme`: all 3 new tests passed, 1768/1827 total (0 failed,
+59 unsupported, unchanged from before). Ran `git-clang-format --diff`
+against all 6 changed files, fixed 3 minor long-line issues by hand,
+re-ran clean.
+
+## CTS verification finds a second, tightly-coupled bug
+
+Ran `dEQP-VK.multiview.depth_without_fragment_shader*` in `/tmp/cts-h2j`
+against the rebuilt ICD: still `Fail (VK_ERROR_INITIALIZATION_FAILED)`,
+but at a different, later point than before. With
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`:
+
+```
+the pipeline declares 1 color blend state(s) but its render target has 0 color attachment(s)
+```
+
+This comes from `translateColorBlendState` (not named by H2j's own
+task description), which still unconditionally validates
+`Info->attachmentCount == Targets.Colors.size()` even when there's no
+fragment stage. Checked `vktMultiViewRenderTests.cpp` directly: it
+hardcodes `VkPipelineColorBlendStateCreateInfo::attachmentCount = 1u`
+unconditionally regardless of whether `colorFormats` (the render
+target's actual color attachments) is empty -- this is legal Vulkan
+because a pipeline with no fragment shader has no fragment output
+interface, so `pColorBlendState` (including `attachmentCount`) must be
+entirely *ignored*, not validated
+(`VUID-VkGraphicsPipelineCreateInfo-renderPass-06055`'s documented scope
+only applies when a fragment output interface state is present, which
+requires an actual fragment shader stage).
+
+This is a bug directly caused by, and tightly coupled to, making the
+fragment stage optional -- it only manifests once a fragment-less
+pipeline can reach `translateColorBlendState` at all, which is exactly
+H2j's own scope. Per the repo's own instructions ("if you discover bugs
+directly caused by or tightly coupled to the code you're changing, fix
+those too"), fixed it as part of this same milestone rather than
+spinning off yet another row: threaded a `HasFragmentStage` bool
+(`FragmentInfo != nullptr` at the call site) into
+`translateColorBlendState`, skipping the `attachmentCount` check (and
+thus the rest of `pColorBlendState`) whenever it is false, while still
+correctly sizing `Out.ColorBlends` to `Targets.Colors.size()` (already
+guaranteed to be 0 whenever there's no fragment stage, by
+`translateFixedFunctionState`'s own earlier check).
+
+Added `GraphicsPipelineTest.
+AcceptsMissingFragmentStageWithMismatchedColorBlendState`, exercising
+exactly the shape CTS builds: a fragment-less, zero-color-attachment
+pipeline whose `pColorBlendState` still declares `attachmentCount = 1`.
+Rebuilt and reran `check-feme`: 1769/1828 total, 0 failed.
+
+## CTS re-verification
+
+Re-ran the 3 targeted cases: all now `Pass`. Ran the full
+`dEQP-VK.multiview.*` suite (838 cases): 457/838 (54.5%) passed, up from
+H2b's own 454/838 baseline by exactly the 3 newly-fixed cases, with no
+regressions (`Failed` drops from 45 to 42, `Not supported` unchanged at
+339).
+
+## Commit breakdown
+
+Split into four commits for review-ability, each independently building
+and testing green:
+1. The core fragment-optional plumbing (`Pipeline.h`, `GraphicsPipeline.
+   h`, the four functions in `GraphicsPipeline.cpp` other than
+   `translateColorBlendState`) plus its two pipeline-creation tests.
+2. `translateColorBlendState`'s fix plus its dedicated regression test --
+   split out from commit 1 via `git add -p` (and, for the test file,
+   temporarily reverting/re-adding the third test) since the Deviation
+   was found and fixed as a logically distinct, separately-reviewable
+   change from the initial fragment-optional plumbing, even though it
+   lives in the same source file.
+3. `Executor.cpp`'s fragment-invocation-loop skip plus its test.
+4. Doc updates (`Roadmap.md` strikethrough, `VulkanCTSReport.md`'s new
+   "Roadmap H2j: measured impact" section) -- confirmed
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+   change, since this milestone makes an existing, always-legal pipeline
+   shape actually work rather than advertising anything new.
+
+This file's own new heading is committed separately afterward, per the
+standing instruction to keep `agent_thoughts.md` in its own commit.
