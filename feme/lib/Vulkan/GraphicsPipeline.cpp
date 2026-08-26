@@ -1149,10 +1149,9 @@ Error translateFixedFunctionState(
   Expected<PipelineRenderTargets> Targets = getRenderTargets(CreateInfo);
   if (!Targets)
     return Targets.takeError();
-  if (Targets->Colors.empty())
-    return createStringError(inconvertibleErrorCode(),
-                             "a graphics pipeline needs at least one color "
-                             "attachment");
+  // A depth-only render target -- no color attachments at all -- is legal
+  // Vulkan (`dEQP-VK.multiview.depth_without_fragment_shader`'s own shape,
+  // roadmap H2b); nothing below this point assumes a nonempty `Colors`.
   if (Targets->Colors.size() > DeviceInfo.Properties.limits.maxColorAttachments)
     return createStringError(inconvertibleErrorCode(),
                              "the render target exceeds maxColorAttachments");

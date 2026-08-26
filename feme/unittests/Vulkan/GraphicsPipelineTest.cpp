@@ -96,6 +96,24 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (Roadmap H2b) A fragment stage with no *color* output at all -- only a
+/// `gl_FragDepth` write -- the shape `dEQP-VK.multiview.depth_without_
+/// fragment_shader`'s own depth-only pipeline uses.
+constexpr llvm::StringLiteral NoColorOutputFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @depth built_in("FragDepth") : !spirv.ptr<f32, Output>
+  spirv.func @main() -> () "None" {
+    %d = spirv.Constant 0.5 : f32
+    %p = spirv.mlir.addressof @depth : !spirv.ptr<f32, Output>
+    spirv.Store "Output" %p, %d : f32
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @depth
+  spirv.ExecutionMode @main "OriginUpperLeft"
+  spirv.ExecutionMode @main "DepthReplacing"
+}
+)mlir";
+
 class GraphicsPipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -1026,6 +1044,44 @@ TEST_F(GraphicsPipelineTest, AcceptsDynamicRenderingFormats) {
   EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe))
                 ->colorAttachmentCount(),
             1u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H2b: a depth-only pipeline -- zero color attachments and a
+/// fragment stage with no color output -- is legal Vulkan
+/// (`dEQP-VK.multiview.depth_without_fragment_shader`'s own shape) and must
+/// build rather than being rejected for lacking a color attachment.
+TEST_F(GraphicsPipelineTest, AcceptsZeroColorAttachments) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(NoColorOutputFragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Blend.attachmentCount = 0;
+  Blend.pAttachments = nullptr;
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthTestEnable = VK_TRUE;
+  DepthInfo.depthWriteEnable = VK_TRUE;
+  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+  Info.pDepthStencilState = &DepthInfo;
+
+  VkFormat DepthFormat = VK_FORMAT_D32_SFLOAT;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 0;
+  Rendering.depthAttachmentFormat = DepthFormat;
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &Rendering;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe))
+                ->colorAttachmentCount(),
+            0u);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
