@@ -33,10 +33,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F13?
+Can you implement roadmap milestone F14?
 
-> **`VK_KHR_load_store_op_none` (no feature bit).**
-> `VK_ATTACHMENT_LOAD_OP_NONE`/`VK_ATTACHMENT_STORE_OP_NONE` are two new
-> enumerants `RenderPass.cpp`'s existing load/store-op switch already has a
-> natural "do nothing" case for — one of the smallest rows in this whole
-> breakdown
+> **`VK_KHR_map_memory2`.** `vkMapMemory2`/`vkUnmapMemory2` are
+> `pNext`-extensible wrappers around the existing `Memory.cpp` map/unmap, adding
+> `VkMemoryUnmapFlagsKHR`'s reserve-on-unmap bit
