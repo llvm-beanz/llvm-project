@@ -493,6 +493,53 @@ std::pair<SignatureComponentType, uint32_t> getComponentType(Type *Scalar) {
   return {SignatureComponentType::Float, 32};
 }
 
+/// Peels a single-member `StructType` down to its one member's own type,
+/// repeatedly. glslang wraps a `varying`-block *member* -- even a single
+/// scalar/vector/matrix one -- in an outer one-member struct at the SPIR-V
+/// level (`dEQP-VK.glsl.linkage.varying.struct.*`'s own shape: `{ [4 x <2 x
+/// float>] }` for a `mat4x2` member, confirmed by inspecting the imported
+/// global's LLVM type directly), the same "aggregate" half of this
+/// milestone's "matrix/aggregate stage IO" bucket the plain-matrix
+/// (`ArrayType`) handling above does not by itself cover. A struct with
+/// more than one member has no single well-defined row/component shape and
+/// is left alone (returned as-is, to fail exactly as before this change).
+Type *peelSingleMemberStruct(Type *Ty) {
+  while (auto *ST = dyn_cast<StructType>(Ty)) {
+    if (ST->getNumElements() != 1)
+      break;
+    Ty = ST->getElementType(0);
+  }
+  return Ty;
+}
+
+/// The per-row (a matrix's per-column, or a plain scalar/vector's own)
+/// shape of a stage-IO variable's value type: its scalar element type and
+/// how many of them make up one row. A plain scalar or `FixedVectorType`
+/// has exactly one row (\p RowCount left at 1); an `ArrayType` -- the shape
+/// SPIRVToLLVM's `spirv.MatrixType` conversion produces (see
+/// SPIRVToLLVMPatterns.cpp's "MLIR upstream has no `spirv.MatrixType`"
+/// comment: a matrix becomes `!llvm.array<Columns x VectorType>|scalar>`)
+/// -- has one row per array element, each row itself a scalar or vector.
+/// `ValueTy` is unwrapped through any single-member struct first (see
+/// `peelSingleMemberStruct`).
+struct StageIORowShape {
+  Type *Scalar;
+  unsigned ComponentCount;
+  unsigned RowCount;
+};
+
+StageIORowShape getStageIORowShape(Type *ValueTy) {
+  unsigned RowCount = 1;
+  Type *PerRowTy = peelSingleMemberStruct(ValueTy);
+  if (auto *ArrTy = dyn_cast<ArrayType>(PerRowTy)) {
+    RowCount = ArrTy->getNumElements();
+    PerRowTy = ArrTy->getElementType();
+  }
+  if (auto *VecTy = dyn_cast<FixedVectorType>(PerRowTy))
+    return {VecTy->getElementType(), VecTy->getNumElements(), RowCount};
+  return {PerRowTy, /*ComponentCount=*/1, RowCount};
+}
+
 /// Whether \p GV is a stage-IO variable -- the shape
 /// `StageIOGlobalVariablePattern`/`feme::spirv::attachStageIODecorations`
 /// (feme/lib/Conversion/SPIRVToLLVM/) produce: address space 7 (`Input`) or
@@ -505,6 +552,71 @@ bool isSPIRVStageIOGlobal(const GlobalVariable *GV, unsigned &AddrSpace) {
   if (AddrSpace != 7 && AddrSpace != 8)
     return false;
   return GV->getMetadata("spirv.Decorations") != nullptr;
+}
+
+/// Recursively loads \p Ty's value out of stage-IO element \p ElementID,
+/// one scalar `feme.stage.input.load` at a time: a single-member struct is
+/// peeled first (see `peelSingleMemberStruct`) and rebuilt with
+/// `insertvalue`; an array (a matrix's columns) is loaded one `Row` per
+/// element and rebuilt with `insertvalue`; a vector is loaded one
+/// `Component` per element and rebuilt with `insertelement`; anything else
+/// is one scalar load. Mirrors `getStageIORowShape`'s own type recursion.
+Value *loadStageIOValue(IRBuilderBase &B, Type *Ty, uint32_t ElementID,
+                        Value *Row, Value *Component, Value *Zero,
+                        const Twine &Name) {
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    if (ST->getNumElements() == 1) {
+      Value *Inner = loadStageIOValue(B, ST->getElementType(0), ElementID, Row,
+                                      Component, Zero, Name);
+      return B.CreateInsertValue(PoisonValue::get(ST), Inner, 0);
+    }
+  } else if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
+    Value *New = PoisonValue::get(ArrTy);
+    for (unsigned R = 0, RE = ArrTy->getNumElements(); R != RE; ++R) {
+      Value *RowVal = loadStageIOValue(B, ArrTy->getElementType(), ElementID,
+                                       B.getInt32(R), Component, Zero, Name);
+      New = B.CreateInsertValue(New, RowVal, R);
+    }
+    return New;
+  } else if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
+    Value *New = PoisonValue::get(VecTy);
+    for (unsigned C = 0, CE = VecTy->getNumElements(); C != CE; ++C) {
+      Value *Elt = loadStageIOValue(B, VecTy->getElementType(), ElementID, Row,
+                                    B.getInt32(C), Zero, Name);
+      New = B.CreateInsertElement(New, Elt, C);
+    }
+    return New;
+  }
+  return createStageInputLoad(B, Ty, ElementID, Row, Component, Zero, Name);
+}
+
+/// The store-side mirror of `loadStageIOValue`: decomposes \p Val (of type
+/// \p Ty) into one scalar `feme.stage.output.store` per (struct member,
+/// row, component), the same recursion in reverse (`extractvalue`/
+/// `extractelement` instead of `insertvalue`/`insertelement`).
+void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
+                       uint32_t ElementID, Value *Row, Value *Component,
+                       Value *Zero) {
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    if (ST->getNumElements() == 1) {
+      storeStageIOValue(B, B.CreateExtractValue(Val, 0), ST->getElementType(0),
+                        ElementID, Row, Component, Zero);
+      return;
+    }
+  } else if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
+    for (unsigned R = 0, RE = ArrTy->getNumElements(); R != RE; ++R)
+      storeStageIOValue(B, B.CreateExtractValue(Val, R),
+                        ArrTy->getElementType(), ElementID, B.getInt32(R),
+                        Component, Zero);
+    return;
+  } else if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
+    for (unsigned C = 0, CE = VecTy->getNumElements(); C != CE; ++C)
+      storeStageIOValue(B, B.CreateExtractElement(Val, C),
+                        VecTy->getElementType(), ElementID, Row, B.getInt32(C),
+                        Zero);
+    return;
+  }
+  createStageOutputStore(B, ElementID, Row, Component, Val, Zero);
 }
 
 /// Rewrites \p F's SPIR-V-derived stage IR into `feme.stage.*`: its
@@ -556,16 +668,12 @@ bool canonicalizeSPIRVStage(Function &F) {
         if (D.BuiltIn)
           Elt.SystemValue = getSystemValueForBuiltIn(*D.BuiltIn);
 
-        Type *ValueTy = GV->getValueType();
-        Type *Scalar = ValueTy;
-        unsigned Count = 1;
-        if (auto *VecTy = dyn_cast<FixedVectorType>(ValueTy)) {
-          Scalar = VecTy->getElementType();
-          Count = VecTy->getNumElements();
-        }
-        std::tie(Elt.ComponentType, Elt.BitWidth) = getComponentType(Scalar);
+        StageIORowShape Shape = getStageIORowShape(GV->getValueType());
+        std::tie(Elt.ComponentType, Elt.BitWidth) =
+            getComponentType(Shape.Scalar);
         Elt.FirstComponent = D.Component.value_or(0);
-        Elt.ComponentCount = Count;
+        Elt.ComponentCount = Shape.ComponentCount;
+        Elt.RowCount = Shape.RowCount;
         Elt.Interpolation = getInterpolationMode(D);
         Elt.Frequency = D.PerPrimitive ? SignatureFrequency::PerPrimitive
                         : D.Patch      ? SignatureFrequency::PerPatch
@@ -590,24 +698,16 @@ bool canonicalizeSPIRVStage(Function &F) {
       auto It = GV ? ElementIDs.find(GV) : ElementIDs.end();
       if (It == ElementIDs.end())
         continue;
-      Value *New = nullptr;
-      // A vector-typed interface variable is loaded one component at a
-      // time, matching both the `feme.stage.*` family's own per-component
-      // `Component` operand and the scalar shape DXIL's `loadInput` always
-      // produces -- and, in turn, what `feme::cpu::SIMDizePass` widens (a
-      // whole divergent vector value has no widened form there).
-      if (auto *VecTy = dyn_cast<FixedVectorType>(LI->getType())) {
-        New = PoisonValue::get(VecTy);
-        for (unsigned C = 0, E = VecTy->getNumElements(); C != E; ++C) {
-          CallInst *Component =
-              createStageInputLoad(B, VecTy->getElementType(), It->second, Zero,
-                                   B.getInt32(C), Zero, LI->getName());
-          New = B.CreateInsertElement(New, Component, C);
-        }
-      } else {
-        New = createStageInputLoad(B, LI->getType(), It->second, Zero, Zero,
-                                   Zero, LI->getName());
-      }
+      // A scalar interface variable is one `feme.stage.input.load`; a
+      // vector/matrix/single-member-struct-wrapped one is decomposed one
+      // scalar at a time and rebuilt with `insertelement`/`insertvalue`,
+      // matching both the `feme.stage.*` family's own per-(row, component)
+      // operands and the scalar shape DXIL's `loadInput` always produces --
+      // and, in turn, what `feme::cpu::SIMDizePass` widens (a whole
+      // divergent aggregate/vector value has no widened form there). See
+      // `loadStageIOValue`/`getStageIORowShape`'s shared type recursion.
+      Value *New = loadStageIOValue(B, LI->getType(), It->second, Zero, Zero,
+                                    Zero, LI->getName());
       LI->replaceAllUsesWith(New);
       LI->eraseFromParent();
       Changed = true;
@@ -617,13 +717,7 @@ bool canonicalizeSPIRVStage(Function &F) {
       if (It == ElementIDs.end())
         continue;
       Value *Val = SI->getValueOperand();
-      if (auto *VecTy = dyn_cast<FixedVectorType>(Val->getType())) {
-        for (unsigned C = 0, E = VecTy->getNumElements(); C != E; ++C)
-          createStageOutputStore(B, It->second, Zero, B.getInt32(C),
-                                 B.CreateExtractElement(Val, C), Zero);
-      } else {
-        createStageOutputStore(B, It->second, Zero, Zero, Val, Zero);
-      }
+      storeStageIOValue(B, Val, Val->getType(), It->second, Zero, Zero, Zero);
       SI->eraseFromParent();
       Changed = true;
     }
@@ -645,13 +739,13 @@ bool canonicalizeSPIRVStage(Function &F) {
   // narrows the invocation's side-effect mask, matching
   // `feme.stage.demote`'s own semantics exactly (see StageOps.h), so it
   // needs no further adjustment beyond the same constant-true condition.
-  Changed |= forEachIntrinsicCall(
-      F, Intrinsic::spv_demote_to_helper_invocation, [](CallInst &CI) {
-        IRBuilder<> B(&CI);
-        createStageDemote(B, B.getTrue());
-        CI.eraseFromParent();
-        return true;
-      });
+  Changed |= forEachIntrinsicCall(F, Intrinsic::spv_demote_to_helper_invocation,
+                                  [](CallInst &CI) {
+                                    IRBuilder<> B(&CI);
+                                    createStageDemote(B, B.getTrue());
+                                    CI.eraseFromParent();
+                                    return true;
+                                  });
 
   // SPIR-V's plain `OpDPdx`/`OpDPdy` (raised as `llvm.spv.ddx`/`.ddy`) leave
   // fine-vs-coarse precision to the implementation; this conservatively
@@ -666,7 +760,7 @@ bool canonicalizeSPIRVStage(Function &F) {
           {Intrinsic::spv_ddy_fine, StageOpKind::DerivativeYFine},
           {Intrinsic::spv_ddx_coarse, StageOpKind::DerivativeXCoarse},
           {Intrinsic::spv_ddy_coarse, StageOpKind::DerivativeYCoarse},
-      };
+  };
   for (const auto &Mapping : SPIRVDerivativeMappings) {
     Intrinsic::ID ID = Mapping.first;
     StageOpKind Kind = Mapping.second;

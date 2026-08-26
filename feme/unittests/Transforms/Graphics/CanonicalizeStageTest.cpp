@@ -21,6 +21,9 @@
 #include "llvm/Support/SourceMgr.h"
 #include "gtest/gtest.h"
 
+#include <set>
+#include <utility>
+
 using namespace feme;
 using namespace feme::graphics;
 using namespace llvm;
@@ -237,6 +240,165 @@ TEST(CanonicalizeStageTest, MapsSPIRVViewIndexBuiltInToSystemValue) {
   EXPECT_EQ(ViewIndex.Direction, SignatureDirection::Input);
   EXPECT_EQ(ViewIndex.SystemValue, SignatureSystemValue::ViewIndex);
   EXPECT_FALSE(ViewIndex.Location.has_value());
+}
+
+/// (Roadmap C8) A matrix-typed `Output` global -- the `!llvm.array<Columns x
+/// VectorType>` shape SPIRVToLLVM's `spirv.MatrixType` conversion produces
+/// (see SPIRVToLLVMPatterns.cpp) -- gets a signature element with
+/// `RowCount` set to its column count, and its store decomposes into one
+/// `feme.stage.output.store` per (row, component) pair, each carrying the
+/// matching constant `Row`/`Component` operand.
+TEST(CanonicalizeStageTest, RewritesSPIRVMatrixOutputStoreOneRowAtATime) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_mat = external addrspace(8) global [3 x <3 x float>], !spirv.Decorations !0
+    define void @main([3 x <3 x float>] %m) #0 {
+      store [3 x <3 x float>] %m, ptr addrspace(8) @out_mat
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  const SignatureElement &Mat = Sig->Elements[0];
+  EXPECT_EQ(Mat.Direction, SignatureDirection::Output);
+  EXPECT_EQ(Mat.ComponentCount, 3u);
+  EXPECT_EQ(Mat.RowCount, 3u);
+  EXPECT_EQ(Mat.ComponentType, SignatureComponentType::Float);
+  EXPECT_EQ(Mat.BitWidth, 32u);
+
+  std::set<std::pair<uint64_t, uint64_t>> SeenRowComponent;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    std::optional<uint64_t> Component = getStageOpConstantOperand(*CI, 2);
+    ASSERT_TRUE(Row.has_value());
+    ASSERT_TRUE(Component.has_value());
+    SeenRowComponent.insert({*Row, *Component});
+  }
+  // Every one of the 3 rows' 3 components is stored exactly once.
+  EXPECT_EQ(SeenRowComponent.size(), 9u);
+  for (uint64_t Row = 0; Row != 3; ++Row)
+    for (uint64_t Component = 0; Component != 3; ++Component)
+      EXPECT_TRUE(SeenRowComponent.count({Row, Component}))
+          << "row " << Row << " component " << Component;
+}
+
+/// (Roadmap C8) The load side of the same matrix shape: a matrix-typed
+/// `Input` global's load decomposes into one `feme.stage.input.load` per
+/// (row, component) pair, reassembled into the original `[Rows x VecTy]`
+/// value with `insertvalue`/`insertelement`.
+TEST(CanonicalizeStageTest, RewritesSPIRVMatrixInputLoadOneRowAtATime) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_mat = external addrspace(7) constant [2 x <4 x float>], !spirv.Decorations !0
+    define [2 x <4 x float>] @main() #0 {
+      %m = load [2 x <4 x float>], ptr addrspace(7) @in_mat
+      ret [2 x <4 x float>] %m
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  const SignatureElement &Mat = Sig->Elements[0];
+  EXPECT_EQ(Mat.Direction, SignatureDirection::Input);
+  EXPECT_EQ(Mat.ComponentCount, 4u);
+  EXPECT_EQ(Mat.RowCount, 2u);
+
+  std::set<std::pair<uint64_t, uint64_t>> SeenRowComponent;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    std::optional<uint64_t> Component = getStageOpConstantOperand(*CI, 2);
+    ASSERT_TRUE(Row.has_value());
+    ASSERT_TRUE(Component.has_value());
+    SeenRowComponent.insert({*Row, *Component});
+  }
+  EXPECT_EQ(SeenRowComponent.size(), 8u);
+  for (uint64_t Row = 0; Row != 2; ++Row)
+    for (uint64_t Component = 0; Component != 4; ++Component)
+      EXPECT_TRUE(SeenRowComponent.count({Row, Component}))
+          << "row " << Row << " component " << Component;
+
+  // No raw array-typed load/store instruction should remain (it must have
+  // been fully replaced by the per-row/component `feme.stage.input.load`
+  // calls above, reassembled with insertvalue/insertelement).
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<LoadInst>(&I));
+}
+
+/// (Roadmap C8) glslang wraps a `varying`-block *member* -- even a matrix
+/// one -- in an outer single-member struct at the SPIR-V level
+/// (`dEQP-VK.glsl.linkage.varying.struct.*`'s own shape: a `mat4x2` member
+/// becomes the LLVM type `{ [4 x <2 x float>] }`, confirmed against a real
+/// `deqp-vk` run). This is the "aggregate" half of this milestone's
+/// "matrix/aggregate stage IO" bucket the plain-matrix (bare `ArrayType`)
+/// handling above does not by itself cover: the struct wrapper must be
+/// peeled before the matrix inside it is recognized, or the whole struct
+/// is treated as one opaque, wrongly-shaped "scalar" element.
+TEST(CanonicalizeStageTest,
+     RewritesSPIRVSingleMemberStructWrappedMatrixOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_wrapped = external addrspace(8) global { [4 x <2 x float>] }, !spirv.Decorations !0
+    define void @main([4 x <2 x float>] %m) #0 {
+      %wrapped = insertvalue { [4 x <2 x float>] } poison, [4 x <2 x float>] %m, 0
+      store { [4 x <2 x float>] } %wrapped, ptr addrspace(8) @out_wrapped
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 1}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  const SignatureElement &Mat = Sig->Elements[0];
+  EXPECT_EQ(Mat.Direction, SignatureDirection::Output);
+  EXPECT_EQ(Mat.ComponentCount, 2u);
+  EXPECT_EQ(Mat.RowCount, 4u);
+
+  std::set<std::pair<uint64_t, uint64_t>> SeenRowComponent;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    std::optional<uint64_t> Component = getStageOpConstantOperand(*CI, 2);
+    ASSERT_TRUE(Row.has_value());
+    ASSERT_TRUE(Component.has_value());
+    SeenRowComponent.insert({*Row, *Component});
+  }
+  EXPECT_EQ(SeenRowComponent.size(), 8u);
+  for (uint64_t Row = 0; Row != 4; ++Row)
+    for (uint64_t Component = 0; Component != 2; ++Component)
+      EXPECT_TRUE(SeenRowComponent.count({Row, Component}))
+          << "row " << Row << " component " << Component;
 }
 
 } // namespace
