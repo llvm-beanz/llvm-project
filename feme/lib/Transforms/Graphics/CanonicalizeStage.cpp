@@ -383,6 +383,35 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
   return Result;
 }
 
+/// (Roadmap H2d) Parses a builtin interface block's (e.g. `gl_PerVertex`)
+/// own `feme.spirv.MemberDecorations` metadata --
+/// `feme::spirv::attachStageIOMemberDecorations`'s
+/// `!{!{i32 memberIndex, !{decoration...}}, ...}` shape (see
+/// StageIODecorations.cpp) -- into a per-struct-member-index table of
+/// `ParsedSPIRVDecorations`, reusing `parseSPIRVDecorations` for each
+/// member's own decoration list (the same shape `!spirv.Decorations`
+/// itself uses). A member with no entry (this milestone's own filtering,
+/// or simply an undecorated member) is absent from the result, and
+/// `DenseMap::lookup` then yields a default-constructed
+/// `ParsedSPIRVDecorations` (an ordinary, unlinkable varying) for it.
+DenseMap<unsigned, ParsedSPIRVDecorations>
+parseSPIRVMemberDecorations(const MDNode *MD) {
+  DenseMap<unsigned, ParsedSPIRVDecorations> Result;
+  if (!MD)
+    return Result;
+  for (const MDOperand &Op : MD->operands()) {
+    const auto *Entry = dyn_cast_or_null<MDNode>(Op.get());
+    if (!Entry || Entry->getNumOperands() != 2)
+      continue;
+    std::optional<uint64_t> Index = getConstMDInt(Entry->getOperand(0));
+    if (!Index)
+      continue;
+    Result[static_cast<unsigned>(*Index)] =
+        parseSPIRVDecorations(dyn_cast_or_null<MDNode>(Entry->getOperand(1)));
+  }
+  return Result;
+}
+
 /// The `feme::SignatureSystemValue` a SPIR-V `BuiltIn` decoration's value
 /// names, or `None` for a builtin FeMe's signature model has no
 /// representation for yet (`PointSize`, `PointCoord`, `SamplePosition`,
@@ -407,15 +436,24 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
 /// maps to `SignatureSystemValue::ViewIndex` -- the "multiview ... family"
 /// this comment used to list as unrepresented is down to just the device-
 /// index one (`DeviceIndex`, `VK_KHR_device_group`, still unimplemented).
+///
+/// (Roadmap H2d) `ClipDistance`/`CullDistance` (`gl_ClipDistance`/
+/// `gl_CullDistance`, `PointSize` (`gl_PointSize`) likewise) map to `None`:
+/// none of the three has a real ABI-field consumer anywhere downstream
+/// (`shaderClipDistance`/`shaderCullDistance` are still `VK_FALSE`, see
+/// roadmap H7), the same "unmodeled system value" treatment an
+/// unrecognized DXIL semantic already gets (`SignatureImport.cpp`'s own
+/// `getSystemValue` default case). Before this milestone these two SPIR-V
+/// `BuiltIn`s were unreachable in practice -- GLSL/SPIR-V never declares
+/// either as a standalone variable, only as `gl_PerVertex` interface-block
+/// members (H2a/H2c), which this function never saw until H2d's own
+/// per-member decomposition -- so this is a change in *what* gets produced,
+/// not in any previously-observable behavior.
 SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
   switch (BuiltIn) {
   case 0:  // Position
   case 15: // FragCoord
     return SignatureSystemValue::Position;
-  case 3: // ClipDistance
-    return SignatureSystemValue::ClipDistance;
-  case 4: // CullDistance
-    return SignatureSystemValue::CullDistance;
   case 5:  // VertexId
   case 42: // VertexIndex
     return SignatureSystemValue::VertexID;
@@ -543,15 +581,20 @@ StageIORowShape getStageIORowShape(Type *ValueTy) {
 /// Whether \p GV is a stage-IO variable -- the shape
 /// `StageIOGlobalVariablePattern`/`feme::spirv::attachStageIODecorations`
 /// (feme/lib/Conversion/SPIRVToLLVM/) produce: address space 7 (`Input`) or
-/// 8 (`Output`), carrying `!spirv.Decorations` metadata. Sets \p AddrSpace
-/// to \p GV's address space when true.
+/// 8 (`Output`), carrying either whole-variable `!spirv.Decorations`
+/// metadata or (roadmap H2d) a builtin interface block's own per-member
+/// `feme.spirv.MemberDecorations` metadata -- the shape a block variable
+/// (e.g. `gl_PerVertex`) gets instead, having no whole-variable decoration
+/// of its own (roadmap H2c). Sets \p AddrSpace to \p GV's address space
+/// when true.
 bool isSPIRVStageIOGlobal(const GlobalVariable *GV, unsigned &AddrSpace) {
   if (!GV)
     return false;
   AddrSpace = GV->getAddressSpace();
   if (AddrSpace != 7 && AddrSpace != 8)
     return false;
-  return GV->getMetadata("spirv.Decorations") != nullptr;
+  return GV->getMetadata("spirv.Decorations") != nullptr ||
+         GV->getMetadata("feme.spirv.MemberDecorations") != nullptr;
 }
 
 /// Recursively loads \p Ty's value out of stage-IO element \p ElementID,
@@ -619,6 +662,44 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
   createStageOutputStore(B, ElementID, Row, Component, Val, Zero);
 }
 
+/// (Roadmap H2d) The entry point into `loadStageIOValue`'s per-(struct
+/// member, row, component) recursion for one stage-IO global: \p MemberIDs
+/// holds one `ElementID` per struct member of a builtin interface block
+/// (e.g. `gl_PerVertex`), or a single one for every other stage-IO global
+/// (a plain scalar/vector/matrix/single-member-struct-wrapped value, still
+/// one `SignatureElement`). An interface block's own outer struct layer is
+/// unwrapped here, one level up from `loadStageIOValue`'s own recursion,
+/// since each of its members routes through its own `ElementID` rather
+/// than sharing the one `loadStageIOValue` alone would assume.
+Value *loadStageIOBlockValue(IRBuilderBase &B, Type *Ty,
+                             ArrayRef<uint32_t> MemberIDs, Value *Row,
+                             Value *Component, Value *Zero, const Twine &Name) {
+  if (MemberIDs.size() == 1)
+    return loadStageIOValue(B, Ty, MemberIDs[0], Row, Component, Zero, Name);
+  auto *ST = cast<StructType>(Ty);
+  Value *New = PoisonValue::get(ST);
+  for (unsigned I = 0, E = MemberIDs.size(); I != E; ++I) {
+    Value *MemberVal = loadStageIOValue(B, ST->getElementType(I), MemberIDs[I],
+                                        Row, Component, Zero, Name);
+    New = B.CreateInsertValue(New, MemberVal, I);
+  }
+  return New;
+}
+
+/// The store-side mirror of `loadStageIOBlockValue`.
+void storeStageIOBlockValue(IRBuilderBase &B, Value *Val, Type *Ty,
+                            ArrayRef<uint32_t> MemberIDs, Value *Row,
+                            Value *Component, Value *Zero) {
+  if (MemberIDs.size() == 1) {
+    storeStageIOValue(B, Val, Ty, MemberIDs[0], Row, Component, Zero);
+    return;
+  }
+  auto *ST = cast<StructType>(Ty);
+  for (unsigned I = 0, E = MemberIDs.size(); I != E; ++I)
+    storeStageIOValue(B, B.CreateExtractValue(Val, I), ST->getElementType(I),
+                      MemberIDs[I], Row, Component, Zero);
+}
+
 /// Rewrites \p F's SPIR-V-derived stage IR into `feme.stage.*`: its
 /// `Input`/`Output` interface-variable loads/stores (address space 7/8,
 /// see `isSPIRVStageIOGlobal`) into `feme.stage.input.load`/
@@ -651,37 +732,60 @@ bool canonicalizeSPIRVStage(Function &F) {
     (AddrSpace == 7 ? InputGlobals : OutputGlobals).push_back(GV);
   }
 
-  DenseMap<GlobalVariable *, uint32_t> ElementIDs;
+  DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> ElementIDs;
   if (!InputGlobals.empty() || !OutputGlobals.empty()) {
     EntrySignature Sig = dxil::getEntrySignature(F).value_or(EntrySignature{});
     uint32_t NextID = Sig.Elements.size();
+    // Appends one `SignatureElement` for \p GV (or one of its struct
+    // members, for a builtin interface block -- see the `addElements`
+    // lambda below), sourced from \p D's decorations and \p ValueTy's own
+    // scalar/vector/matrix/single-member-struct shape.
+    auto addElement = [&](GlobalVariable *GV, SignatureDirection Dir,
+                          const ParsedSPIRVDecorations &D, Type *ValueTy) {
+      SignatureElement Elt;
+      Elt.ElementID = NextID;
+      Elt.Direction = Dir;
+      Elt.Location = D.Location;
+      Elt.Index = D.Index;
+      if (D.BuiltIn)
+        Elt.SystemValue = getSystemValueForBuiltIn(*D.BuiltIn);
+
+      StageIORowShape Shape = getStageIORowShape(ValueTy);
+      std::tie(Elt.ComponentType, Elt.BitWidth) =
+          getComponentType(Shape.Scalar);
+      Elt.FirstComponent = D.Component.value_or(0);
+      Elt.ComponentCount = Shape.ComponentCount;
+      Elt.RowCount = Shape.RowCount;
+      Elt.Interpolation = getInterpolationMode(D);
+      Elt.Frequency = D.PerPrimitive ? SignatureFrequency::PerPrimitive
+                      : D.Patch      ? SignatureFrequency::PerPatch
+                                     : SignatureFrequency::PerVertex;
+
+      Sig.Elements.push_back(Elt);
+      ElementIDs[GV].push_back(NextID);
+      ++NextID;
+    };
     auto addElements = [&](ArrayRef<GlobalVariable *> Globals,
                            SignatureDirection Dir) {
       for (GlobalVariable *GV : Globals) {
+        // (Roadmap H2d) A builtin interface block (e.g. `gl_PerVertex`)
+        // carries no whole-variable decoration of its own -- SPIR-V
+        // decorates each of its struct members individually -- so it
+        // decomposes into one `SignatureElement` per member instead of
+        // the single one every other stage-IO global gets.
+        if (const MDNode *MemberMD =
+                GV->getMetadata("feme.spirv.MemberDecorations")) {
+          auto *ST = cast<StructType>(GV->getValueType());
+          DenseMap<unsigned, ParsedSPIRVDecorations> MemberDecorations =
+              parseSPIRVMemberDecorations(MemberMD);
+          for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I)
+            addElement(GV, Dir, MemberDecorations.lookup(I),
+                       ST->getElementType(I));
+          continue;
+        }
         ParsedSPIRVDecorations D =
             parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
-        SignatureElement Elt;
-        Elt.ElementID = NextID;
-        Elt.Direction = Dir;
-        Elt.Location = D.Location;
-        Elt.Index = D.Index;
-        if (D.BuiltIn)
-          Elt.SystemValue = getSystemValueForBuiltIn(*D.BuiltIn);
-
-        StageIORowShape Shape = getStageIORowShape(GV->getValueType());
-        std::tie(Elt.ComponentType, Elt.BitWidth) =
-            getComponentType(Shape.Scalar);
-        Elt.FirstComponent = D.Component.value_or(0);
-        Elt.ComponentCount = Shape.ComponentCount;
-        Elt.RowCount = Shape.RowCount;
-        Elt.Interpolation = getInterpolationMode(D);
-        Elt.Frequency = D.PerPrimitive ? SignatureFrequency::PerPrimitive
-                        : D.Patch      ? SignatureFrequency::PerPatch
-                                       : SignatureFrequency::PerVertex;
-
-        Sig.Elements.push_back(Elt);
-        ElementIDs[GV] = NextID;
-        ++NextID;
+        addElement(GV, Dir, D, GV->getValueType());
       }
     };
     addElements(InputGlobals, SignatureDirection::Input);
@@ -704,10 +808,13 @@ bool canonicalizeSPIRVStage(Function &F) {
       // matching both the `feme.stage.*` family's own per-(row, component)
       // operands and the scalar shape DXIL's `loadInput` always produces --
       // and, in turn, what `feme::cpu::SIMDizePass` widens (a whole
-      // divergent aggregate/vector value has no widened form there). See
-      // `loadStageIOValue`/`getStageIORowShape`'s shared type recursion.
-      Value *New = loadStageIOValue(B, LI->getType(), It->second, Zero, Zero,
-                                    Zero, LI->getName());
+      // divergent aggregate/vector value has no widened form there). A
+      // builtin interface block routes each of its own members through
+      // its own `ElementID` first (roadmap H2d). See
+      // `loadStageIOBlockValue`/`loadStageIOValue`/`getStageIORowShape`'s
+      // shared type recursion.
+      Value *New = loadStageIOBlockValue(B, LI->getType(), It->second, Zero,
+                                         Zero, Zero, LI->getName());
       LI->replaceAllUsesWith(New);
       LI->eraseFromParent();
       Changed = true;
@@ -717,7 +824,8 @@ bool canonicalizeSPIRVStage(Function &F) {
       if (It == ElementIDs.end())
         continue;
       Value *Val = SI->getValueOperand();
-      storeStageIOValue(B, Val, Val->getType(), It->second, Zero, Zero, Zero);
+      storeStageIOBlockValue(B, Val, Val->getType(), It->second, Zero, Zero,
+                             Zero);
       SI->eraseFromParent();
       Changed = true;
     }
@@ -760,7 +868,7 @@ bool canonicalizeSPIRVStage(Function &F) {
           {Intrinsic::spv_ddy_fine, StageOpKind::DerivativeYFine},
           {Intrinsic::spv_ddx_coarse, StageOpKind::DerivativeXCoarse},
           {Intrinsic::spv_ddy_coarse, StageOpKind::DerivativeYCoarse},
-  };
+      };
   for (const auto &Mapping : SPIRVDerivativeMappings) {
     Intrinsic::ID ID = Mapping.first;
     StageOpKind Kind = Mapping.second;

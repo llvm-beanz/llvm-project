@@ -247,31 +247,17 @@ TEST(CanonicalizeStageTest, MapsSPIRVViewIndexBuiltInToSystemValue) {
 /// `gl_PerVertex` interface *block* (a struct-typed `Output` variable)
 /// rather than as their own standalone globals -- unlike
 /// `MapsSPIRVBuiltInsToSystemValues`'s idealized `@gl_Position` above, which
-/// (incorrectly, per this finding) modeled it as one. SPIR-V decorates each
-/// member individually (`OpMemberDecorate ... BuiltIn Position`), not the
-/// block variable itself (`OpDecorate`), so
-/// `SPIRVToLLVMPatterns.cpp`'s `buildStageIODecorationsAttr` -- which only
-/// reads a *whole-variable* `BuiltIn`/`Location` attribute -- attaches no
-/// `!spirv.Decorations` metadata to the block's own `llvm.mlir.global` at
-/// all, confirmed against a real `dEQP-VK.multiview` run (454 of 838 cases,
-/// effectively every vertex shader in the suite, all of which write
-/// `gl_Position` this way -- see "Roadmap H2a: measured impact" in
-/// VulkanCTSReport.md). `isSPIRVStageIOGlobal` requires that metadata to
-/// recognize a stage-IO global at all, so `canonicalizeSPIRVStage` silently
-/// leaves the block's store untouched, and the divergent vector value
-/// being stored reaches `feme::cpu::SIMDizePass` raw, hitting its "used
-/// outside a supported pattern" diagnostic instead of ever becoming a
-/// `feme.stage.output.store`. This is a distinct root cause from roadmap
-/// C3 (SIMDize's own decomposition shapes, already closed) and from C8b
-/// (a matrix/aggregate stage-IO value SIMDize cannot widen once
-/// legalized) -- this one never reaches SIMDize's widening logic having
-/// been legalized at all; it is a new member of C8's "shader long tail"
-/// bucket instead (see roadmap rows H2c/H2d for the follow-up fix, not
-/// yet implemented). This test documents the still-open gap: it asserts
-/// today's actual (undesired) behavior so a future fix's own test changes
-/// visibly alongside it.
+/// (incorrectly, per this finding) modeled it as one. A struct-typed
+/// stage-IO global carrying *no* decoration metadata at all -- neither a
+/// whole-variable `!spirv.Decorations` nor (roadmap H2c) a per-member
+/// `feme.spirv.MemberDecorations` -- is still not a recognized stage-IO
+/// global (`isSPIRVStageIOGlobal` requires one or the other), so its store
+/// is left untouched; see `RecognizesMemberDecoratedInterfaceBlockAsStageIO`
+/// below for the real `gl_PerVertex` shape H2c's own SPIR-V import
+/// actually produces (per-member decorations present), which H2d now does
+/// decompose.
 TEST(CanonicalizeStageTest,
-    DoesNotRecognizeMemberDecoratedInterfaceBlockAsStageIO) {
+     DoesNotRecognizeUndecoratedInterfaceBlockAsStageIO) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     @gl_PerVertex = external addrspace(8) global { <4 x float>, float, [1 x float], [1 x float] }
@@ -297,6 +283,91 @@ TEST(CanonicalizeStageTest,
         if (GV->getName() == "gl_PerVertex")
           SawRawGlPerVertexStore = true;
   EXPECT_TRUE(SawRawGlPerVertexStore);
+}
+
+/// (Roadmap H2d) The real shape H2c's own SPIR-V import produces for
+/// `gl_PerVertex`: a struct-typed `Output` global carrying no
+/// whole-variable `!spirv.Decorations` but a per-member
+/// `feme.spirv.MemberDecorations` one (see StageIODecorations.cpp),
+/// decoding member 0 as `BuiltIn Position` (11, 0), member 1 as `BuiltIn
+/// PointSize` (11, 1), member 2 as `BuiltIn ClipDistance` (11, 3) and
+/// member 3 as `BuiltIn CullDistance` (11, 4) -- the same four `OpMember
+/// Decorate`s glslang always emits. `isSPIRVStageIOGlobal` now recognizes
+/// this shape, and `canonicalizeSPIRVStage` decomposes it into one
+/// `SignatureElement` per member (closing the gap
+/// `DoesNotRecognizeUndecoratedInterfaceBlockAsStageIO` used to document
+/// as `DoesNotRecognizeMemberDecoratedInterfaceBlockAsStageIO`, before this
+/// fixture was corrected to carry the metadata H2c's own writer actually
+/// attaches).
+TEST(CanonicalizeStageTest, RecognizesMemberDecoratedInterfaceBlockAsStageIO) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PerVertex = external addrspace(8) global { <4 x float>, float, [1 x float], [1 x float] }, !feme.spirv.MemberDecorations !10
+    @in_pos = external addrspace(7) constant <4 x float>, !spirv.Decorations !0
+    define void @main() #0 {
+      %pos = load <4 x float>, ptr addrspace(7) @in_pos
+      %agg0 = insertvalue { <4 x float>, float, [1 x float], [1 x float] } poison, <4 x float> %pos, 0
+      %agg1 = insertvalue { <4 x float>, float, [1 x float], [1 x float] } %agg0, float 1.000000e+00, 1
+      store { <4 x float>, float, [1 x float], [1 x float] } %agg1, ptr addrspace(8) @gl_PerVertex
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+    !10 = !{!11, !12, !13, !14}
+    !11 = !{i32 0, !15}
+    !12 = !{i32 1, !16}
+    !13 = !{i32 2, !17}
+    !14 = !{i32 3, !18}
+    !15 = !{!19}
+    !19 = !{i32 11, i32 0}
+    !16 = !{!20}
+    !20 = !{i32 11, i32 1}
+    !17 = !{!21}
+    !21 = !{i32 11, i32 3}
+    !18 = !{!22}
+    !22 = !{i32 11, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // The raw struct store on `gl_PerVertex` must be gone.
+  for (Instruction &I : instructions(F))
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      if (auto *GV = dyn_cast<GlobalVariable>(SI->getPointerOperand()))
+        EXPECT_NE(GV->getName(), "gl_PerVertex");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  // `in_pos` (1) + one element per `gl_PerVertex` member (4).
+  ASSERT_EQ(Sig->Elements.size(), 5u);
+
+  const SignatureElement &Position = Sig->Elements[1];
+  EXPECT_EQ(Position.Direction, SignatureDirection::Output);
+  EXPECT_EQ(Position.SystemValue, SignatureSystemValue::Position);
+  EXPECT_EQ(Position.ComponentCount, 4u);
+
+  // `PointSize`/`ClipDistance`/`CullDistance` have no ABI-field consumer
+  // anywhere downstream (roadmap H7's still-`VK_FALSE`
+  // `shaderClipDistance`/`shaderCullDistance`), so they map to `None`, the
+  // same "unmodeled system value" treatment an unrecognized DXIL semantic
+  // already gets.
+  for (unsigned I = 2; I != 5; ++I)
+    EXPECT_EQ(Sig->Elements[I].SystemValue, SignatureSystemValue::None);
+
+  unsigned StoreCount = 0;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      StageOpKind Kind;
+      if (isStageOpCall(*CI, &Kind) && Kind == StageOpKind::OutputStore)
+        ++StoreCount;
+    }
+  // Position (a 4-component vector) decomposes into 4 stores; PointSize
+  // (a scalar) and ClipDistance/CullDistance (each a 1-element array) into
+  // 1 each -- see `loadStageIOValue`/`storeStageIOValue`'s own row/
+  // component recursion.
+  EXPECT_EQ(StoreCount, 7u);
 }
 
 /// (Roadmap C8) A matrix-typed `Output` global -- the `!llvm.array<Columns x
