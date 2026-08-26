@@ -892,6 +892,129 @@ TEST_F(DrawTest, DynamicScissorRestrictsTheDraw) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap F13) `VK_ATTACHMENT_LOAD_OP_NONE`/`VK_ATTACHMENT_STORE_OP_NONE`
+/// (`VK_KHR_load_store_op_none`) both mean "leave the attachment's memory
+/// as-is": unlike `VK_ATTACHMENT_LOAD_OP_CLEAR`, `NONE` must not touch
+/// whatever the image already held outside of what a draw itself writes,
+/// and `STORE_OP_NONE` must not prevent a draw's own writes from landing
+/// (this ICD writes straight into the bound image; there is no discard to
+/// perform).
+TEST_F(DrawTest, LoadStoreOpNoneLeavesUntouchedTexelsAlone) {
+  // Sentinel pattern the fixture's default `LOAD_OP_CLEAR` render pass would
+  // never produce, so any survivor unambiguously proves `NONE` did not
+  // clear.
+  auto *Data = static_cast<uint8_t *>(fromHandle<Image>(ColorImage)->data());
+  std::memset(Data, 0x7F, size_t(Extent) * Extent * 4);
+
+  VkAttachmentDescription Attachment{};
+  Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_NONE_KHR;
+  Attachment.storeOp = VK_ATTACHMENT_STORE_OP_NONE_KHR;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 1;
+  PassInfo.pAttachments = &Attachment;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass NoneOpsPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &NoneOpsPass),
+            VK_SUCCESS);
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = NoneOpsPass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.pAttachments = &ColorView;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer NoneOpsFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &NoneOpsFb),
+            VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {2, 2}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = NoneOpsPass;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = NoneOpsPass;
+  PassBegin.framebuffer = NoneOpsFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Inside the scissor: the draw's own red, same as any other load/store op.
+  EXPECT_EQ(texel(0, 0)[0], 0xFF);
+  EXPECT_EQ(texel(1, 1)[0], 0xFF);
+  // Outside the scissor: `LOAD_OP_NONE` left the sentinel alone -- a
+  // `LOAD_OP_CLEAR` render pass (every other test in this file) would have
+  // zeroed it instead.
+  EXPECT_EQ(texel(3, 3)[0], 0x7F);
+  EXPECT_EQ(texel(3, 3)[1], 0x7F);
+  EXPECT_EQ(texel(3, 3)[2], 0x7F);
+  EXPECT_EQ(texel(3, 3)[3], 0x7F);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyFramebuffer(Device, NoneOpsFb, nullptr);
+  vkDestroyRenderPass(Device, NoneOpsPass, nullptr);
+}
+
 /// (roadmap C4c) `VK_DYNAMIC_STATE_CULL_MODE`: a pipeline that declares it
 /// dynamic must actually cull per whatever `vkCmdSetCullModeEXT` last
 /// recorded, not per its (irrelevant) creation-time `cullMode`.
@@ -1974,7 +2097,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 28u);
+  ASSERT_EQ(Count, 29u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -2038,6 +2161,8 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   EXPECT_TRUE(HasExtension(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME));
   // Roadmap F12.
   EXPECT_TRUE(HasExtension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME));
+  // Roadmap F13.
+  EXPECT_TRUE(HasExtension(VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
@@ -3880,9 +4005,9 @@ TEST_F(DrawTest, SubpassLoadReadsBackTheDepthAttachmentItWrote) {
   SubpassLayoutInfo.setLayoutCount = 1;
   SubpassLayoutInfo.pSetLayouts = &SetLayout;
   VkPipelineLayout SubpassLayout = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreatePipelineLayout(Device, &SubpassLayoutInfo, nullptr,
-                                   &SubpassLayout),
-            VK_SUCCESS);
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &SubpassLayoutInfo, nullptr, &SubpassLayout),
+      VK_SUCCESS);
 
   VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1};
   VkDescriptorPoolCreateInfo PoolInfo{};
@@ -4059,9 +4184,9 @@ TEST_F(DrawTest, SubpassLoadReadsBackTheStencilAttachmentItWrote) {
   SubpassLayoutInfo.setLayoutCount = 1;
   SubpassLayoutInfo.pSetLayouts = &SetLayout;
   VkPipelineLayout SubpassLayout = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreatePipelineLayout(Device, &SubpassLayoutInfo, nullptr,
-                                   &SubpassLayout),
-            VK_SUCCESS);
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &SubpassLayoutInfo, nullptr, &SubpassLayout),
+      VK_SUCCESS);
 
   VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1};
   VkDescriptorPoolCreateInfo PoolInfo{};
@@ -4268,9 +4393,9 @@ TEST_F(DrawTest, SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote
   SubpassLayoutInfo.setLayoutCount = 1;
   SubpassLayoutInfo.pSetLayouts = &SetLayout;
   VkPipelineLayout SubpassLayout = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreatePipelineLayout(Device, &SubpassLayoutInfo, nullptr,
-                                   &SubpassLayout),
-            VK_SUCCESS);
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &SubpassLayoutInfo, nullptr, &SubpassLayout),
+      VK_SUCCESS);
 
   VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1};
   VkDescriptorPoolCreateInfo PoolInfo{};

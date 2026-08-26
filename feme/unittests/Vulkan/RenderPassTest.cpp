@@ -100,6 +100,42 @@ TEST_F(RenderPassTest, CompilesAttachmentsAndSubpasses) {
   vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
+/// (roadmap F13) `VK_KHR_load_store_op_none`: `VK_ATTACHMENT_LOAD_OP_NONE`/
+/// `VK_ATTACHMENT_STORE_OP_NONE` are accepted and normalized through
+/// verbatim, exactly like every other `VkAttachmentLoadOp`/
+/// `VkAttachmentStoreOp` enumerant.
+TEST_F(RenderPassTest, CompilesLoadStoreOpNone) {
+  VkAttachmentDescription Attachment{};
+  Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_NONE_KHR;
+  Attachment.storeOp = VK_ATTACHMENT_STORE_OP_NONE_KHR;
+  Attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+
+  VkRenderPassCreateInfo Info{};
+  Info.attachmentCount = 1;
+  Info.pAttachments = &Attachment;
+  Info.subpassCount = 1;
+  Info.pSubpasses = &Subpass;
+
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &Info, nullptr, &Pass), VK_SUCCESS);
+  ASSERT_NE(Pass, VK_NULL_HANDLE);
+
+  const auto *Obj = fromHandle<RenderPass>(Pass);
+  ASSERT_EQ(Obj->attachments().size(), 1u);
+  EXPECT_EQ(Obj->attachments()[0].LoadOp, VK_ATTACHMENT_LOAD_OP_NONE_KHR);
+  EXPECT_EQ(Obj->attachments()[0].StoreOp, VK_ATTACHMENT_STORE_OP_NONE_KHR);
+
+  vkDestroyRenderPass(Device, Pass, nullptr);
+}
+
 TEST_F(RenderPassTest, CompilesDepthAttachment) {
   VkAttachmentDescription Attachments[2]{};
   Attachments[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
