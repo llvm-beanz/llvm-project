@@ -34186,3 +34186,112 @@ the three new roadmap rows. No feature/extension bit changed in this
 row, so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need
 no update -- noted explicitly rather than left silent, matching every
 prior row in this stretch.
+
+# Roadmap H2e: `Output` storage-class read-back
+
+## Understanding the gap
+
+H2d's own measured-impact section pinned down `input_instance`'s 24
+failures precisely: `error: feme-graphics-validate-stage:
+'feme.stage.input.load' ... refers to element N with the wrong
+direction`. Read the actual GLSL (`vktMultiViewRenderTests.cpp`,
+`TEST_TYPE_INPUT_RATE_INSTANCE`'s vertex shader) to confirm the shape
+before touching any code: `gl_Position = in_position;` followed by an
+`if (gl_VertexIndex == 1) gl_Position.y += 1.0f; else if (...) ...`
+chain -- a genuine read-modify-write of an `Output`-storage-class
+variable, legal SPIR-V (unlike DXIL, where `storeOutput` is write-only
+and this pattern cannot even be expressed at the IR level DXIL emits).
+`canonicalizeSPIRVStage` was unconditionally lowering every load from a
+recognized stage-IO global into `feme.stage.input.load`, regardless of
+whether the underlying global was `Input`- or `Output`-direction, so an
+`Output` read-back always produced a call `ValidateStagePass` correctly
+rejects (its own direction check has no representation for "this
+element is both read and written").
+
+## Choosing a fix shape
+
+The roadmap row itself offered two options: a per-element local shadow
+value threaded through `canonicalizeSPIRVStage`, or relaxing
+`ValidateStagePass`'s direction check. Relaxing validation was rejected
+outright: it would let a *genuinely* mis-lowered read (e.g. a real bug
+elsewhere) through silently, and it does not actually fix anything --
+the `feme.stage.input.load` call would still exist, semantically wrong
+(there is no "input" here at all, just a value already computed in this
+invocation), and downstream consumers (the DXIL/AMDGPU backends'
+`loadInput` shape) would have no way to implement it correctly since
+there is no real input storage to read from.
+
+A hand-rolled "last stored value" forward walk (checked at the point of
+each load, using a `DenseMap` updated as instructions are visited in
+`instructions(F)` order) was the first idea, but is unsound for the
+actual test shape: `input_instance`'s own `if`/`else if` chain means a
+store on one branch does not dominate a load on a sibling or a later
+merge point, and using a non-dominating value as a direct operand is an
+SSA violation (not just wrong, but a verifier-rejected module). Realized
+this was exactly the problem `llvm::PromoteMemToReg` (mem2reg) already
+solves for local variables -- and that `loadStageIOValue`/
+`storeStageIOValue`'s existing recursion already decomposes every
+access down to one leaf scalar per (`ElementID`, `Row`, `Component`),
+which is precisely the granularity mem2reg operates at (one value per
+alloca, no sub-element addressing). So: give each `Output`-direction
+leaf scalar its own `AllocaInst` (`ShadowValueMap`, new in
+`CanonicalizeStage.cpp`), redirect both the real `feme.stage.output.store`
+emission (already happening) and the read-back load through it, and run
+`PromoteMemToReg` once every instruction in the function has been
+rewritten (a `DominatorTree` built fresh, since this is a per-function
+canonicalization pass with no analysis-manager dependency to reuse).
+This reuses LLVM's own, already-correct SSA-construction algorithm
+instead of re-deriving a weaker version of it by hand.
+
+Threading `ShadowValueMap*` through the existing recursive helpers
+(`loadStageIOValue`/`storeStageIOValue`/`loadStageIOBlockValue`/
+`storeStageIOBlockValue`) rather than writing parallel "shadow" variants
+kept the change smaller and avoided the two families silently drifting
+apart later. `StageIOAccess` gained an `IsOutput` bit (computed in
+`resolveStageIOAccess` from a new `OutputGlobals` set, built once per
+function) so the per-instruction rewrite loop can tell a genuine input
+load from an output read-back without re-deriving direction from
+scratch at each call site.
+
+## Verifying correctness, not just "builds"
+
+Two hand-written `.ll` reproductions were checked directly against
+`feme-opt` output before writing any unit test: a straight-line
+whole-value read-back, and a branchy one mirroring
+`input_instance`'s own `if` guard (confirmed the branchy case correctly
+produces a value used directly at the point of read, with no leftover
+`alloca`/`feme.stage.input.load`, and that `ValidateStagePass` raises no
+diagnostic afterward). Only then wrote
+`CanonicalizeStageTest.{OutputReadBackResolvesToStoredValueStraightLine,
+OutputReadBackResolvesAcrossControlFlow}` (the latter using a real
+conditional branch and function argument, not a hand-constructed `phi`,
+so the test exercises `PromoteMemToReg`'s own phi insertion rather than
+assuming it works) and the matching
+`spirv-canonicalize-stage-output-readback.ll` lit test.
+
+## Vulkan CTS
+
+Re-ran the full `dEQP-VK.multiview.*` group (838 cases) after the fix.
+Headline totals are unchanged from H2d's own baseline (78/421/339) --
+expected, not a bug: confirmed via `grep -c "wrong direction"` against
+the full log (0, down from 24) that this row's own root cause is
+genuinely gone everywhere in the group, and via `grep -n
+"input_instance"` that all 24 cases now build and run to completion,
+landing in `Fail (Fail)` (image comparison) instead of failing earlier
+at `vkCreateGraphicsPipelines`. That places them in the same bucket
+roadmap H2g already tracks (334 -> 358) rather than turning them green;
+noted this explicitly in both `VulkanCTSReport.md` and the roadmap row
+itself rather than letting the unchanged headline number read as "no
+effect" when it actually means "root cause fixed, downstream bug
+inherited". Updated H2g's own roadmap row to reflect the new count and
+widened case list (`input_instance` added alongside the thirteen
+subgroups it already named). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: confirmed no change needed (this row
+touches no feature/extension advertisement) and said so explicitly in
+the report, matching every prior row in this stretch rather than
+leaving the question unanswered.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`):
+1817/1818 passed, 1 unsupported (pre-existing, unrelated), up from
+1814/1815 before this row (two new `CanonicalizeStageTest` cases, one new
+lit test).
