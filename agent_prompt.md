@@ -33,27 +33,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H2j?
+Can you work on milestone H3?
 
-> **Make a graphics pipeline's fragment shader stage genuinely optional**
-> (roadmap H2b's own Deviation): `GraphicsPipeline.cpp`'s
-> `translateFixedFunctionState` unconditionally rejects
-> `VkGraphicsPipelineCreateInfo::pStages` missing a
-> `VK_SHADER_STAGE_FRAGMENT_BIT` entry (`"a graphics pipeline needs both a
-> vertex and a fragment stage"`), but Vulkan permits omitting it entirely
-> whenever the pipeline's render target has no color attachments
-> (depth/stencil-only rendering,
-> `VUID-VkGraphicsPipelineCreateInfo-pStages-06894`/neighbors) -- exactly
-> `dEQP-VK.multiview.depth_without_fragment_shader`'s own shape (and its
-> `dynamic_rendering`/`renderpass2` siblings), still failing after H2b's own fix
-> for this exact reason. Needs
-> `compileAndValidateStages`/`validateStageInterfaces` to skip fragment-stage
-> compilation and cross-stage interface validation when no fragment stage is
-> named (only when `Targets.Colors.empty()`, matching the VUID's own condition
-> -- a color-attached pipeline still requires one), `GraphicsPipeline`'s
-> `FragmentStage` to become a genuinely optional (`nullptr`)
-> `shared_ptr<CompiledStage>` rather than always-present, and
-> `feme::graphics::executeDraws` to skip its whole fragment-invocation loop
-> (`FSSig`/`Varyings`/`FSColors`/`FS.invokeFragments`) when the pipeline has
-> none, running only vertex-stage clip/rasterize/early-depth-test with no
-> per-fragment shading at all
+> **Multiple viewports and scissors.** `maxViewports` is hard-coded to 1
+> (`PhysicalDeviceInfo.cpp:247`) and `vkCmdSetViewportWithCount` and the
+> pipeline path both reject anything else (`GraphicsPipeline.cpp:825`). Needs a
+> per-primitive viewport index in the executor, `ViewportIndex` as a stage
+> output, and `shaderOutputViewportIndex`/`shaderOutputLayer` (both `VK_FALSE`
+> in the aggregate 1.2 struct today) raised in lockstep with H2
