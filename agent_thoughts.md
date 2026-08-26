@@ -34295,3 +34295,136 @@ leaving the question unanswered.
 1817/1818 passed, 1 unsupported (pre-existing, unrelated), up from
 1814/1815 before this row (two new `CanonicalizeStageTest` cases, one new
 lit test).
+
+# Roadmap H2f: multiview occlusion query availability
+
+## Root-causing
+
+Started from the row's own symptom: `dEQP-VK.multiview.
+non_precise_queries_with_availability`'s "occlusion availability bit N is
+0" for 18 of H2d's own measured 421 failures, root cause unknown. Read
+`feme::vulkan::QueryPool`/`CommandBuffer.cpp`'s occlusion-query
+implementation first (small, self-contained: `begin`/`markAvailable`/
+`accumulateActiveOcclusionSamples`, all single-query-index), then went
+straight to the CTS test source itself
+(`vktMultiViewRenderTests.cpp`'s `MultiViewQueriesTestInstance`) rather
+than guessing from the symptom alone. That immediately explained
+everything: the test computes `queryCountersToUse =
+getUsedViewsCount(subpassNdx)` (the subpass's own view-mask popcount)
+and advances `queryStartIndex` by that count after every single
+`vkCmdBeginQuery`/`vkCmdEndQuery` pair recorded at just the *first* of
+those indices -- i.e. the test itself relies on the Vulkan spec's
+multiview query rule (one query recorded, N indices implicitly written,
+one per set view-mask bit, ordered by ascending bit position) rather
+than recording N separate begin/end pairs itself. `feme::vulkan::
+QueryPool` had no representation for this at all: `begin`/
+`markAvailable` always touched exactly the one index passed in, and
+`runDraw`'s per-view loop summed every rendered view's own passed-sample
+count into one shared `PassedSamples` scalar, applied identically to
+every currently-active query via a "broadcast to every active index"
+accumulator. For a two-view query that means: index 0 ends up holding
+the *sum* of both views' samples (not either view's own count), and
+index 1 is simply never touched by `begin` or `markAvailable`, staying
+permanently unavailable forever -- exactly the row's own symptom, and
+also (though the row's own text didn't mention it, since it only checked
+availability) a wrong *value* at index 0 whenever the two views'
+occluder counts differ.
+
+This was a genuinely different shape from every other H2-family gap so
+far (H2a/c/d/e are all SPIR-V/`CanonicalizeStagePass` legalization
+issues; this one is pure Vulkan-API-layer bookkeeping in `feme/lib/
+Vulkan`), confirming the row's own "could be ... something unrelated"
+hedge was the wrong branch -- it is a real query-pool/multiview
+interaction gap, in the query-pool implementation itself.
+
+## The fix
+
+Kept the change surgical: `QueryPool::begin`/`markAvailable` gained a
+`ViewCount` parameter (default 1, so every non-multiview/timestamp call
+site needs no change) and now loop over `[Query, Query+ViewCount)`
+instead of touching one index. `accumulateActiveOcclusionSamples`'s
+"broadcast one total to every active index in the pool" shape doesn't
+generalize to "each of N active indices needs its *own* distinct value"
+at all, so it's replaced outright by `accumulateOcclusionSamples(Query,
+Samples)`, adding to exactly the index named -- pushing responsibility
+for "which index gets which view's count" up to the caller, which now
+has the information to do it correctly.
+
+On the `CommandBuffer.cpp` side, `ActiveOcclusionQueries` changes from a
+plain `std::vector<QueryPool *>` (deduped by pool identity, discarded
+once "no active queries remain" in that pool) to an explicit
+`std::vector<ActiveOcclusionQuery>` of `{Pool, FirstQuery, ViewCount}`
+records, one per `vkCmdBeginQuery`/`vkCmdEndQuery` pair rather than per
+pool -- needed because `ViewCount` (computed once, at `vkCmdBeginQuery`
+time, from `llvm::popcount(Gfx.Binding.ViewMask)`) has to survive to
+every draw between begin and end, and because two distinct query index
+ranges in the *same* pool could in principle be simultaneously active
+(unusual, but nothing in the object model prevented it before, and nothing
+does now either -- this fix doesn't newly forbid it). `vkCmdEndQuery`
+looks its own entry up by `(Pool, FirstQuery)` rather than by pool alone,
+so it recovers the same `ViewCount` `vkCmdBeginQuery` computed rather than
+re-deriving it from the (possibly since-changed) current view mask.
+
+`runDraw`'s per-view loop is the other half: `PassedSamples` moves from
+"declared once before the loop, summed across every view" to "declared
+fresh inside the loop body, one view's own count" -- and a new
+`EnumeratedViewIndex` (0, 1, 2, ... in draw order, distinct from the bit-
+position `ViewIndex` the loop already tracks) maps each view straight to
+`Query.FirstQuery + EnumeratedViewIndex`, matching the CTS's own "ordered
+by ascending set bit" rule directly, with no separate popcount-position
+bookkeeping needed since the loop already visits set bits in that exact
+order.
+
+## Testing
+
+Wrote `DrawTest.MultiviewOcclusionQueryWritesOneQueryIndexPerView`
+before trusting the fix: same two-view (`viewMask == 0b11`) layered-
+framebuffer setup as the existing `MultiviewRendersDifferentColorPerView
+IntoItsOwnLayer` test (reused wholesale, swapping the view-index-
+selecting fragment shader for the existing single-color
+`RedFragmentSource`, since occlusion sample counting doesn't care what
+color is written), plus a 2-slot occlusion query pool and a single
+`vkCmdBeginQuery(pool, 0)`/`vkCmdDraw`/`vkCmdEndQuery(pool, 0)` around a
+fullscreen draw. Confirmed the test actually reproduces the bug before
+trusting it as a regression test: stashed the `QueryPool.h`/
+`CommandBuffer.cpp` fix (keeping only the new test), rebuilt, and
+re-ran -- failed exactly as predicted (index 0 held the summed total
+across both views i.e. still `Extent*Extent` here since both views drew
+the same coverage, but index 2/3 -- view 1's count/availability -- were
+`0`/`0` instead of `Extent*Extent`/`1`). Restored the fix (`git stash
+pop`) and re-ran clean.
+
+Ran `clang-format`/`git-clang-format` on the changes, but this time only
+scoped to the actual diff (`git-clang-format --staged`) after a first
+attempt with plain `clang-format -i` on the whole file reformatted a
+few dozen unrelated pre-existing lines elsewhere in the same files
+(evidently formatted with a different `clang-format` version originally)
+-- caught this in the diff review before committing and redid the edits
+from scratch against the unformatted originals rather than committing
+the unrelated reformatting.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1818/1819 passed, 1 unsupported
+(pre-existing, unrelated) -- up from 1817/1818 by the one new
+`DrawTest` case.
+
+## Vulkan CTS
+
+Re-ran the full `dEQP-VK.multiview.*` group (838 cases) after the fix
+(the sandboxed `deqp-vk` run itself throws an unrelated `tcu::
+NotSupportedError` from a subprocess-based device-fault test harness
+during process teardown *after* printing final totals -- an environment
+limitation, not a regression, and the totals/per-case log are already
+flushed by that point). `grep -c "availability bit"` against the new log
+returns 0 (down from 18), and the pass count rises to 96/838 (up from
+H2e's own 78/838) -- exactly the 18 cases this row's own root cause
+predicted, no more and no fewer. The remaining 403 failures split
+exactly as before this fix (358 `Fail (Fail)` roadmap H2g already
+tracks, 17 `vkCreateGraphicsPipelines` failures split between roadmap
+H2b's 3 and roadmap H8's 14, and 28 `vkCreateRenderPass(2)`
+`VK_ERROR_FORMAT_NOT_SUPPORTED` cases also roadmap H8's), confirming
+this fix's own scope is exactly the multiview occlusion-query
+availability gap and nothing else. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: confirmed no change needed (this fix
+touches no feature/extension advertisement, only internal query-pool
+bookkeeping) and said so explicitly in the report.
