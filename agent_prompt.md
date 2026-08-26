@@ -33,22 +33,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H2d?
+Can you work on milestone H2e?
 
-> **Decompose a builtin interface block into one `SignatureElement` per member
-> during `CanonicalizeStagePass` legalization**, now that H2c makes each
-> member's own decorations available: `isSPIRVStageIOGlobal`'s "one global, one
-> signature element" assumption (`CanonicalizeStage.cpp`) needs to become "one
-> global, N signature elements, one per struct member", each keeping its own
-> `BuiltIn`/system-value identity (`gl_Position` ->
-> `SignatureSystemValue::Position`,
-> `gl_PointSize`/`gl_ClipDistance`/`gl_CullDistance` -> `None`, unmodeled system
-> values, matching how an unrecognized DXIL semantic already converts), and
-> `loadStageIOValue`/`storeStageIOValue`'s existing recursive per-(struct
-> member, row, component) decomposition (built for C8a's matrix/aggregate case)
-> needs to route each member through its own `ElementID` instead of the whole
-> block's single one. `isSPIRVStageIOGlobal` also needs to recognize a global
-> carrying only `feme.spirv.MemberDecorations` (no whole-variable
-> `!spirv.Decorations`), the shape H2c's own builtin-interface-block global now
-> produces. Closes the whole `dEQP-VK.multiview` group's own remaining largest
-> blocker
+> **A SPIR-V `Output` storage-class variable read back after being written
+> within the same invocation** (`dEQP-VK.multiview.input_instance`'s own shape,
+> 24 of H2d's own measured 421 failures): unlike DXIL's
+> `loadInput`/`storeOutput` split (where an output is genuinely write-only),
+> SPIR-V's `Output` storage class permits reading back a value already written
+> in the same invocation (e.g. a compound `gl_Position.x += 1.0`-shaped update);
+> `feme.stage.input.load`/`.output.store`'s Input-vs-Output dichotomy (and
+> `ValidateStagePass`'s enforcement of it, `'feme.stage.input.load' ... refers
+> to element N with the wrong direction`) has no representation for this. Needs
+> either a per-element local shadow value `canonicalizeSPIRVStage` can thread
+> through (replacing the read-back load with the last stored value directly,
+> since both sides are already known at legalization time) or a relaxation of
+> `ValidateStagePass`'s direction check for this specific pattern
