@@ -60,6 +60,12 @@ VK_KHR_format_feature_flags2 = core, not advertised by name: roadmap E24/E25, ch
 VK_KHR_global_priority = roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family
 VK_KHR_shader_subgroup_rotate = roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern)
 VK_KHR_shader_expect_assume = roadmap F4: spirv.KHR.AssumeTrue/spirv.KHR.Expect conversion patterns (SPIRVToLLVMPatterns.cpp's AssumeTrueConversionPattern/ExpectConversionPattern)
+VK_KHR_line_rasterization = roadmap F5: vkCmdSetLineStippleKHR (CommandBuffer.cpp), VkPipelineRasterizationLineStateCreateInfoKHR translation (GraphicsPipeline.cpp)
 VK_KHR_vertex_attribute_divisor = roadmap F6: VkPipelineVertexInputDivisorStateCreateInfo's per-binding divisor, including the 0 ("every instance reads firstInstance") case (GraphicsPipeline.cpp's translateVertexInput, Executor.cpp's fetch-index formula)
+VK_KHR_index_type_uint8 = roadmap F7: see the indexTypeUint8 feature row above
+VK_KHR_dynamic_rendering_local_read = roadmap F8/F8a/F8b/F8c (closed): see the dynamicRenderingLocalRead feature row above
+VK_EXT_pipeline_protected_access = roadmap F9 (closed): see the pipelineProtectedAccess feature row above
 VK_EXT_pipeline_robustness = roadmap F10: VkPipelineRobustnessCreateInfo accepted and validated at both compute and graphics pipeline creation (Pipeline.cpp's resolvePipelineRobustness)
 VK_EXT_host_image_copy = roadmap F11: vkCopyMemoryToImage/vkCopyImageToMemory/vkCopyImageToImage/vkTransitionImageLayout (HostImageCopy.cpp) copy/transition images with no VkCommandBuffer
+VK_KHR_push_descriptor = roadmap F12: see the pushDescriptor feature row above
+VK_KHR_load_store_op_none = roadmap F13: applyClear's existing LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR check (CommandBuffer.cpp) already treats VK_ATTACHMENT_LOAD_OP_NONE as "do nothing"; StoreOp is never read to act on at all, so STORE/DONT_CARE/NONE are indistinguishable in this real-memory-backed renderer

@@ -131,6 +131,16 @@ shaderSubgroupRotateClustered
 # AssumeTrueConversionPattern/ExpectConversionPattern), lowering directly
 # to llvm.assume/llvm.expect.
 shaderExpectAssume
+# rectangularLines/bresenhamLines/smoothLines and their stippled*
+# counterparts: roadmap F5 -- VkPipelineRasterizationLineStateCreateInfoKHR
+# translation (GraphicsPipeline.cpp) and vkCmdSetLineStippleKHR
+# (CommandBuffer.cpp) implement all six line-rasterization modes.
+rectangularLines
+bresenhamLines
+smoothLines
+stippledRectangularLines
+stippledBresenhamLines
+stippledSmoothLines
 # vertexAttributeInstanceRateDivisor/vertexAttributeInstanceRateZeroDivisor:
 # roadmap F6 -- VkPipelineVertexInputDivisorStateCreateInfo's per-binding
 # divisor (GraphicsPipeline.cpp's translateVertexInput) and the executor's
@@ -138,5 +148,22 @@ shaderExpectAssume
 # including 0 ("every instance reads firstInstance").
 vertexAttributeInstanceRateDivisor
 vertexAttributeInstanceRateZeroDivisor
+# indexTypeUint8: roadmap F7 -- vkCmdBindIndexBuffer's index read
+# (CommandBuffer.cpp) and the executor's fetch (Executor.cpp) both gained
+# an 8-bit case.
+indexTypeUint8
+# dynamicRenderingLocalRead: roadmap F8/F8a/F8b/F8c -- vkCmdSetRendering
+# AttachmentLocations/vkCmdSetRenderingInputAttachmentIndices
+# (CommandBuffer.cpp) and a fragment shader's subpassInput local read
+# (SPIRVToLLVMPatterns.cpp's SubpassLoadPattern) are both implemented.
+dynamicRenderingLocalRead
+# pipelineProtectedAccess: roadmap F9 -- vkCmdBindPipeline
+# (CommandBuffer.cpp) honors VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT/
+# VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT.
+pipelineProtectedAccess
 pipelineRobustness = roadmap F10: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDevicePipelineRobustnessFeatures struct
 hostImageCopy = roadmap F11: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDeviceHostImageCopyFeatures struct
+# pushDescriptor: roadmap F12 -- vkCmdPushDescriptorSet/vkCmdPushDescriptor
+# SetWithTemplate (CommandBuffer.cpp) write descriptors directly into a
+# command buffer's own recorded state, with no VkDescriptorSet object.
+pushDescriptor
