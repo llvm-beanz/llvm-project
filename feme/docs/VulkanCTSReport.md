@@ -4955,3 +4955,58 @@ unsupported (pre-existing, unrelated) -- unchanged from F12a's own
 case (`read_global_invocation_id_x`, covering the new
 `BuiltInAccessChainPattern`) is a new `CHECK` block inside an
 already-counted lit test file, not a new discovered test of its own.
+
+## Roadmap F13: measured impact (`VK_KHR_load_store_op_none`)
+
+`dEQP-VK.renderpasses.*load_store_op_none*` (`--deqp-case`, same
+reproduction recipe as F9-F12's own sections above): 273 cases discovered.
+
+```
+Passed:        0/273 (0.0%)
+Failed:        151/273 (55.3%)
+Not supported: 122/273 (44.7%)
+```
+
+Zero `Not supported ("VK_KHR_load_store_op_none is not supported")` --
+confirming the extension gate itself is genuinely passed now that it is
+advertised -- and every one of the 122 `Not supported` cases is instead
+the pre-existing, unrelated "Depth-stencil format not supported"
+(`vktRenderPassLoadStoreOpNoneTests.cpp:500`, a combined
+`D32_FLOAT_S8X24_UINT`/`X8_D24_UNORM_PACK32` format this ICD does not
+implement at all, orthogonal to load/store ops). Every one of the 151
+failures is at pipeline construction, before this row's own load/store-op
+handling (already correct, per its own closing note in Roadmap.md) is ever
+reached:
+
+| Reason | Count | Cause |
+|---|---|---|
+| `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED` (`vkPipelineConstructionUtil.cpp:176`), `feme-cpu-simdize: ... divergent vector value ...` | 100 | The same pre-existing SIMDize decomposition gap F5-F12's own sections already document repeatedly (e.g. "Roadmap F12: measured impact") -- this group's own fragment shader drives a per-quad color through a divergent (per-invocation) value this compiler cannot yet decompose |
+| `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED` (`vkPipelineConstructionUtil.cpp:176`), no diagnostic printed | 46 | The `complete_secondary_cmd_buff` variant's own pipeline-library construction path, a pre-existing gap unrelated to load/store ops (this group's `renderpass2`/plain `dynamic_rendering` variants, which do not use pipeline libraries, hit the SIMDize gap above instead, not this one) |
+| `vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED` (`vkCmdUtil.cpp:338`) | 5 | The `*_resolve` cases' multisample-resolve variant, downstream of the same pre-existing gaps above once a pipeline that failed to build is submitted anyway |
+
+**This row's own load/store-op handling was verified end to end a
+different way**, since every CTS case in this group is blocked by one of
+the pre-existing, orthogonal gaps above before ever reaching a real draw:
+`RenderPassTest.CompilesLoadStoreOpNone` proves `VK_ATTACHMENT_LOAD_OP_NONE`/
+`STORE_OP_NONE` round-trip through `vkCreateRenderPass` unchanged, and
+`DrawTest.LoadStoreOpNoneLeavesUntouchedTexelsAlone` proves the real
+behavioral claim end to end: a `LOAD_OP_NONE` color attachment pre-filled
+with a sentinel pattern keeps that sentinel outside a draw's own scissor
+(unlike every other test in this file, whose `LOAD_OP_CLEAR` render pass
+would have zeroed it), while the draw's own pixels still land normally,
+confirming `STORE_OP_NONE` does not suppress them either.
+
+A targeted re-run of `dEQP-VK.api.info.extension_core_versions.
+extension_core_versions`/`vulkan1p2.feature_extensions_consistency`/
+`vulkan1p3.feature_extensions_consistency` (the consistency checks a
+newly-advertised extension name could most plausibly regress) all still
+`Pass`, confirming `VK_KHR_load_store_op_none`'s addition to
+`getSupportedDeviceExtensions` introduced no inconsistency with any other
+advertised feature or extension.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1792 discovered, 1791 passed, 1
+unsupported (pre-existing, unrelated) -- up from F12b's own 1790 by this
+row's own two new regression tests (`RenderPassTest.
+CompilesLoadStoreOpNone`, `DrawTest.LoadStoreOpNoneLeavesUntouchedTexelsAlone`).
+
