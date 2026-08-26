@@ -33,18 +33,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H2c?
+Can you work on milestone H2d?
 
-> **Preserve a SPIR-V builtin interface block's (e.g. `gl_PerVertex`) per-member
-> decorations.** `SPIRVToLLVMPatterns.cpp`'s `buildStageIODecorationsAttr` only
-> reads a whole-variable `BuiltIn`/`Location`/`Component`/`Index` attribute
-> (`Op.getBuiltIn()`), never a struct type's own per-member decorations
-> (`mlir::spirv::StructType::getMemberDecorations`, already used by this same
-> file's `isBufferBlockWritable` for a storage-buffer block's `NonWritable`
-> member decoration) -- so a builtin interface block's own `llvm.mlir.global`
-> carries no `!spirv.Decorations` metadata at all (roadmap H2a's own root
-> cause). Needs a per-member decorations encoding (extending, not replacing, the
-> existing whole-variable `!spirv.Decorations` shape
-> `feme::spirv::attachStageIODecorations`/`parseSPIRVDecorations` already
-> round-trip) attached to the block's global, covering `gl_PerVertex`'s four
-> members at minimum
+> **Decompose a builtin interface block into one `SignatureElement` per member
+> during `CanonicalizeStagePass` legalization**, now that H2c makes each
+> member's own decorations available: `isSPIRVStageIOGlobal`'s "one global, one
+> signature element" assumption (`CanonicalizeStage.cpp`) needs to become "one
+> global, N signature elements, one per struct member", each keeping its own
+> `BuiltIn`/system-value identity (`gl_Position` ->
+> `SignatureSystemValue::Position`,
+> `gl_PointSize`/`gl_ClipDistance`/`gl_CullDistance` -> `None`, unmodeled system
+> values, matching how an unrecognized DXIL semantic already converts), and
+> `loadStageIOValue`/`storeStageIOValue`'s existing recursive per-(struct
+> member, row, component) decomposition (built for C8a's matrix/aggregate case)
+> needs to route each member through its own `ElementID` instead of the whole
+> block's single one. `isSPIRVStageIOGlobal` also needs to recognize a global
+> carrying only `feme.spirv.MemberDecorations` (no whole-variable
+> `!spirv.Decorations`), the shape H2c's own builtin-interface-block global now
+> produces. Closes the whole `dEQP-VK.multiview` group's own remaining largest
+> blocker
