@@ -33,15 +33,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H2h?
+Can you work on milestone H2i?
 
-> **`dEQP-VK.multiview.input_attachments` renders a totally blank (`Fail
-> (Fail)`, every pixel black/transparent) image in every one of its 16 remaining
-> cases** (H2g's own triage): unlike H2g's other two fixes (a wrong-but-present
-> value), nothing is drawn at all, suggesting either the subpass-input read
-> itself always returns zero/fails silently under multiview, or the
-> pipeline/subpass wiring for a multiview input-attachment subpass never reaches
-> the draw in the first place. Not yet root-caused; needs its own investigation
-> (dump the subpass-input descriptor heap contents and confirm whether the
-> fragment shader's `subpassLoad` executes at all, or short-circuits)
+> **`dEQP-VK.multiview.readback_implicit_clear`'s multi-subpass view-mask
+> combinations still fail** (18 of H2g's own triage, exactly the cases whose
+> numeric suffix names more than one subpass -- e.g. `1_2_4_8`, `5_10_5_10`,
+> `8_1_1_8` -- while every single-subpass combination, e.g. `15`, now passes
+> after H2g's `vkCmdClearAttachments` fix): a per-subpass
+> `VK_ATTACHMENT_LOAD_OP_CLEAR` interacting with multiple multiview subpasses
+> (each its own view mask) inside one render pass instance is not yet correctly
+> modeled -- root cause otherwise undetermined
 
