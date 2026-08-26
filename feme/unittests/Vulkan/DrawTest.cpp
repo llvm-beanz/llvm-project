@@ -5220,6 +5220,210 @@ TEST_F(DrawTest, MultiviewClearAttachmentsClearsEveryViewsOwnLayer) {
   vkFreeMemory(Device, LayeredMemory, nullptr);
 }
 
+/// (Roadmap H2i) A classic, multi-subpass `VkRenderPass` where every
+/// subpass shares one `VK_ATTACHMENT_LOAD_OP_CLEAR` color attachment but
+/// each declares its own, disjoint-or-repeated multiview `viewMask` --
+/// exactly `dEQP-VK.multiview.readback_implicit_clear`'s own multi-subpass
+/// combinations (e.g. `1_2_4_8`, `5_10_5_10`), which all failed before this
+/// fix while every single-subpass combination already passed. Three
+/// subpasses: subpass 0 (`viewMask == 0b01`) draws solid red into view 0's
+/// own layer; subpass 1 (`viewMask == 0b10`) draws nothing, relying solely
+/// on the render pass's own load op to paint view 1's layer with the clear
+/// color; subpass 2 (`viewMask == 0b01` again, re-using view 0) also draws
+/// nothing. This exercises both of this row's own fixes at once:
+/// (1) view 1 is a view `applyLoadOps` never saw at `vkCmdBeginRenderPass`
+/// time (only view 0 was in subpass 0's own mask) -- before this fix,
+/// `nextSubpass` never called `applyLoadOps` again at all, so view 1's own
+/// layer was left with whatever the freshly bound image's own memory
+/// already held, not the clear color; (2) subpass 2 re-uses view 0, which
+/// subpass 0 already cleared *and* drew real content into -- naively
+/// re-applying the clear at every `nextSubpass` (rather than gating it on
+/// `GraphicsState::LoadedAttachmentViewMask`) would erase subpass 0's own
+/// red draw.
+TEST_F(DrawTest,
+       MultiviewLoadOpClearAppliesEachSubpassOwnNewlyIntroducedViews) {
+  constexpr uint32_t LayerCount = 2;
+
+  VkImage LayeredImage = VK_NULL_HANDLE;
+  VkDeviceMemory LayeredMemory = VK_NULL_HANDLE;
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {Extent, Extent, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = LayerCount;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &LayeredImage),
+            VK_SUCCESS);
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, LayeredImage, &Reqs);
+  VkMemoryAllocateInfo MemAllocInfo{};
+  MemAllocInfo.allocationSize = Reqs.size;
+  ASSERT_EQ(vkAllocateMemory(Device, &MemAllocInfo, nullptr, &LayeredMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, LayeredImage, LayeredMemory, 0),
+            VK_SUCCESS);
+
+  VkImageView LayeredView = VK_NULL_HANDLE;
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = LayeredImage;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.layerCount = LayerCount;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &LayeredView),
+            VK_SUCCESS);
+
+  VkAttachmentDescription Attachment{};
+  Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpasses[3]{};
+  for (VkSubpassDescription &Subpass : Subpasses) {
+    Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    Subpass.colorAttachmentCount = 1;
+    Subpass.pColorAttachments = &ColorRef;
+  }
+
+  uint32_t ViewMasks[3] = {0b01, 0b10, 0b01};
+  VkRenderPassMultiviewCreateInfo MultiviewInfo{};
+  MultiviewInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO;
+  MultiviewInfo.subpassCount = 3;
+  MultiviewInfo.pViewMasks = ViewMasks;
+
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.pNext = &MultiviewInfo;
+  PassInfo.attachmentCount = 1;
+  PassInfo.pAttachments = &Attachment;
+  PassInfo.subpassCount = 3;
+  PassInfo.pSubpasses = Subpasses;
+  VkRenderPass MultiviewPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &MultiviewPass),
+            VK_SUCCESS);
+
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = MultiviewPass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.pAttachments = &LayeredView;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = LayerCount;
+  VkFramebuffer MultiviewFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &MultiviewFb),
+            VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo PipeInfo{};
+  PipeInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  PipeInfo.stageCount = 2;
+  PipeInfo.pStages = Stages;
+  PipeInfo.pVertexInputState = &VertexInput;
+  PipeInfo.pInputAssemblyState = &InputAssembly;
+  PipeInfo.pViewportState = &ViewportState;
+  PipeInfo.pRasterizationState = &Raster;
+  PipeInfo.pMultisampleState = &Multisample;
+  PipeInfo.pColorBlendState = &Blend;
+  PipeInfo.layout = Layout;
+  PipeInfo.renderPass = MultiviewPass;
+  PipeInfo.subpass = 0;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &PipeInfo,
+                                      nullptr, &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValue{};
+  ClearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = MultiviewPass;
+  PassBegin.framebuffer = MultiviewFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 1;
+  PassBegin.pClearValues = &ClearValue;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  // Subpass 0 (view 0): draw solid red over the whole render area.
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  // Subpass 1 (view 1): no draw, relies only on the load op's own clear.
+  vkCmdNextSubpass(Cmd, VK_SUBPASS_CONTENTS_INLINE);
+  // Subpass 2 (view 0 again): no draw either -- must not re-clear over
+  // subpass 0's own red.
+  vkCmdNextSubpass(Cmd, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Layer 0 (view 0) keeps subpass 0's own red draw, not re-cleared to
+  // black by subpass 2 re-using the same view; layer 1 (view 1) is the
+  // clear color, painted by its own share of the load op at subpass 1's
+  // `vkCmdNextSubpass`, not left as whatever the fresh image's memory held.
+  const auto *Data =
+      static_cast<const uint8_t *>(fromHandle<Image>(LayeredImage)->data());
+  size_t LayerSizeBytes = (size_t)Extent * Extent * 4;
+  const uint8_t *Layer0 = Data;
+  const uint8_t *Layer1 = Data + LayerSizeBytes;
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      size_t Off = ((size_t)Y * Extent + X) * 4;
+      EXPECT_EQ(Layer0[Off + 0], 0xFF)
+          << "layer 0 red channel at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Layer0[Off + 1], 0x00)
+          << "layer 0 green channel at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Layer1[Off + 0], 0x00)
+          << "layer 1 red channel at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Layer1[Off + 3], 0xFF)
+          << "layer 1 alpha channel at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyFramebuffer(Device, MultiviewFb, nullptr);
+  vkDestroyRenderPass(Device, MultiviewPass, nullptr);
+  vkDestroyImageView(Device, LayeredView, nullptr);
+  vkDestroyImage(Device, LayeredImage, nullptr);
+  vkFreeMemory(Device, LayeredMemory, nullptr);
+}
+
 /// (Roadmap H2f) Occlusion queries recorded inside a multiview render pass
 /// instance implicitly span one query index per set view-mask bit (the
 /// Vulkan spec's own multiview query rule -- see `QueryPool.h`'s file

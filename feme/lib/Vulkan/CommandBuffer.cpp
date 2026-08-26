@@ -29,9 +29,11 @@
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/ResourceInfo.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/bit.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <optional>
 
@@ -700,6 +702,22 @@ struct GraphicsState {
   std::vector<VkClearValue> ClearValues;
   bool Rendering = false;
   RenderTargetBinding Binding;
+  /// (Roadmap H2i) Which views of each color/depth/stencil attachment of
+  /// the *current* render-pass instance have already had their
+  /// `VK_ATTACHMENT_LOAD_OP_CLEAR` load op applied, at this or an earlier
+  /// subpass -- keyed by `loadedViewMaskKey`. A classic, multi-subpass
+  /// `VkRenderPass` applies each attachment's load op only once, "at the
+  /// beginning of the subpass where it is first used" (Vulkan spec), and
+  /// under multiview that "first use" happens per-view (one bit of
+  /// `SubpassDescription::ViewMask`), not once for the whole attachment: a
+  /// later subpass introducing a *new* view of an already-used attachment
+  /// still needs its own share of the clear (`applyLoadOps` is called again
+  /// at every `nextSubpass`), while a view an earlier subpass already used
+  /// must not be re-cleared, which would erase that subpass's own draws.
+  /// Reset empty by `beginRenderPass`/`vkCmdBeginRendering` (a fresh
+  /// render-pass instance); `vkCmdBeginRendering` has no `nextSubpass`
+  /// equivalent to revisit it, so it is always harmlessly write-once there.
+  llvm::DenseMap<uintptr_t, uint32_t> LoadedAttachmentViewMask;
 
   std::vector<Buffer *> VertexBuffers;
   std::vector<VkDeviceSize> VertexBufferOffsets;
@@ -840,11 +858,45 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
 /// underlying image.
 enum class AttachmentKind { Color, Depth, Stencil };
 
+/// Slices one already-resolved, possibly-layered `AttachmentView` down to
+/// array layer \p Layer alone -- forward-declared here (defined below,
+/// alongside its other multiview per-view callers) so `applyClear` can also
+/// use it. See its own definition for the full comment.
+feme::graphics::AttachmentView
+sliceAttachmentLayer(const feme::graphics::AttachmentView &View,
+                     uint32_t Layer);
+
+/// (Roadmap H2i) The stable key `GraphicsState::LoadedAttachmentViewMask`
+/// tracks one attachment's already-loaded view bits under: the attachment's
+/// own `ImageView*`, with the low bit repurposed to distinguish the stencil
+/// half of a combined depth/stencil attachment (which otherwise shares its
+/// `Depth` counterpart's `ImageView*`, and would otherwise collide with it)
+/// from every other kind. Every `ImageView` is at least word-aligned, so
+/// the low bit of its address is otherwise always zero.
+uintptr_t loadedViewMaskKey(ImageView *View, AttachmentKind Kind) {
+  return reinterpret_cast<uintptr_t>(View) |
+         (Kind == AttachmentKind::Stencil ? 1u : 0u);
+}
+
 /// Applies one attachment's `VK_ATTACHMENT_LOAD_OP_CLEAR` over \p Area,
 /// which is the render area rather than the whole attachment: Vulkan clears
 /// exactly what the render pass instance covers.
+///
+/// (Roadmap H2i) Only the views in \p ViewMask (`RenderTargetBinding::
+/// ViewMask`, normalized to `1u` outside multiview) that \p AlreadyLoaded
+/// does not yet mark as loaded for this attachment (`loadedViewMaskKey`)
+/// are cleared, matching a real attachment's own array layer this view
+/// writes to (`sliceAttachmentLayer`) -- see `GraphicsState::
+/// LoadedAttachmentViewMask`'s own comment for why a classic multi-subpass
+/// render pass needs this at all. \p ViewMask is recorded into \p
+/// AlreadyLoaded unconditionally, even where `LoadOp != CLEAR` (a no-op
+/// either way): once a view is used by any subpass, no later subpass
+/// referencing the same attachment (which always shares the same `LoadOp`
+/// -- fixed per-attachment for the whole render pass) may clear over it
+/// again.
 Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
-                 const VkRect2D &Area, AttachmentKind Kind) {
+                 const VkRect2D &Area, AttachmentKind Kind, uint32_t ViewMask,
+                 llvm::DenseMap<uintptr_t, uint32_t> &AlreadyLoaded) {
   if (!View.View)
     // (Roadmap E5) `VK_KHR_maintenance5`: an unused
     // (`VK_NULL_HANDLE`-imageView) dynamic-rendering attachment performs no
@@ -856,6 +908,13 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
   // `LOAD`'s defined meaning and a valid choice for the other two.
   if (View.LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR)
     return Error::success();
+
+  uint32_t &Loaded = AlreadyLoaded[loadedViewMaskKey(View.View, Kind)];
+  uint32_t ToClear = ViewMask & ~Loaded;
+  Loaded |= ViewMask;
+  if (ToClear == 0)
+    return Error::success();
+
   Expected<feme::graphics::AttachmentView> Attachment =
       resolveAttachmentView(View.View);
   if (!Attachment)
@@ -886,47 +945,61 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
       std::min<uint64_t>(Attachment->Width, uint64_t(MinX) + Area.extent.width);
   uint32_t MaxY = std::min<uint64_t>(Attachment->Height,
                                      uint64_t(MinY) + Area.extent.height);
-  for (uint32_t Y = MinY; Y < MaxY; ++Y)
-    for (uint32_t X = MinX; X < MaxX; ++X)
-      for (uint32_t S = 0; S != SampleCount; ++S) {
-        size_t Offset =
-            (((size_t)Y * Attachment->Width + X) * SampleCount + S) * *ElemSize;
-        llvm::MutableArrayRef<uint8_t> Texel(Attachment->Data.data() + Offset,
-                                             *ElemSize);
-        switch (Kind) {
-        case AttachmentKind::Color:
-          std::memcpy(Texel.data(), UniformTexel.data(), *ElemSize);
-          break;
-        case AttachmentKind::Depth:
-          if (Error E = feme::graphics::packDepthClear(
-                  Attachment->Format, View.ClearValue.depthStencil.depth,
-                  Texel))
-            return E;
-          break;
-        case AttachmentKind::Stencil:
-          if (Error E = feme::graphics::packStencilClear(
-                  Attachment->Format, View.ClearValue.depthStencil.stencil,
-                  Texel))
-            return E;
-          break;
+  for (uint32_t Mask = ToClear, ViewIndex = 0; Mask != 0;
+       ++ViewIndex, Mask >>= 1) {
+    if ((Mask & 1u) == 0)
+      continue;
+    feme::graphics::AttachmentView Sliced =
+        sliceAttachmentLayer(*Attachment, ViewIndex);
+    for (uint32_t Y = MinY; Y < MaxY; ++Y)
+      for (uint32_t X = MinX; X < MaxX; ++X)
+        for (uint32_t S = 0; S != SampleCount; ++S) {
+          size_t Offset =
+              (((size_t)Y * Sliced.Width + X) * SampleCount + S) * *ElemSize;
+          llvm::MutableArrayRef<uint8_t> Texel(Sliced.Data.data() + Offset,
+                                               *ElemSize);
+          switch (Kind) {
+          case AttachmentKind::Color:
+            std::memcpy(Texel.data(), UniformTexel.data(), *ElemSize);
+            break;
+          case AttachmentKind::Depth:
+            if (Error E = feme::graphics::packDepthClear(
+                    Attachment->Format, View.ClearValue.depthStencil.depth,
+                    Texel))
+              return E;
+            break;
+          case AttachmentKind::Stencil:
+            if (Error E = feme::graphics::packStencilClear(
+                    Attachment->Format, View.ClearValue.depthStencil.stencil,
+                    Texel))
+              return E;
+            break;
+          }
         }
-      }
+  }
   return Error::success();
 }
 
-/// Applies every attachment's load op when a render pass instance begins.
-Error applyLoadOps(const RenderTargetBinding &Binding) {
+/// Applies every attachment's load op for the current subpass -- once when
+/// a render pass instance begins, and (roadmap H2i) again at every
+/// `vkCmdNextSubpass`, so a later subpass's own new views of an
+/// already-referenced attachment still get their own share of the clear.
+Error applyLoadOps(const RenderTargetBinding &Binding,
+                   llvm::DenseMap<uintptr_t, uint32_t> &AlreadyLoaded) {
+  uint32_t ViewMask = Binding.ViewMask ? Binding.ViewMask : 1u;
   for (const RenderTargetView &View : Binding.Colors)
     if (Error E = applyClear(View, View.SampleCount, Binding.RenderArea,
-                             AttachmentKind::Color))
+                             AttachmentKind::Color, ViewMask, AlreadyLoaded))
       return E;
   if (Binding.Depth)
     if (Error E = applyClear(*Binding.Depth, Binding.Depth->SampleCount,
-                             Binding.RenderArea, AttachmentKind::Depth))
+                             Binding.RenderArea, AttachmentKind::Depth,
+                             ViewMask, AlreadyLoaded))
       return E;
   if (Binding.Stencil)
     if (Error E = applyClear(*Binding.Stencil, Binding.Stencil->SampleCount,
-                             Binding.RenderArea, AttachmentKind::Stencil))
+                             Binding.RenderArea, AttachmentKind::Stencil,
+                             ViewMask, AlreadyLoaded))
       return E;
   return Error::success();
 }
@@ -1796,7 +1869,10 @@ Error executeCommandsInto(
       Gfx.ColorAttachmentInputIndices.clear();
       Gfx.DepthInputAttachmentIndex.reset();
       Gfx.StencilInputAttachmentIndex.reset();
-      if (Error E = applyLoadOps(Gfx.Binding))
+      // (Roadmap H2i) A fresh render-pass instance: no attachment has had
+      // any view of its own loaded yet.
+      Gfx.LoadedAttachmentViewMask.clear();
+      if (Error E = applyLoadOps(Gfx.Binding, Gfx.LoadedAttachmentViewMask))
         return E;
       break;
     }
@@ -1816,7 +1892,10 @@ Error executeCommandsInto(
       Gfx.ColorAttachmentInputIndices.clear();
       Gfx.DepthInputAttachmentIndex.reset();
       Gfx.StencilInputAttachmentIndex.reset();
-      if (Error E = applyLoadOps(Gfx.Binding))
+      // (Roadmap H2i) Same reset as `BeginRenderPass`, though a dynamic-
+      // rendering instance never revisits it (no `nextSubpass` equivalent).
+      Gfx.LoadedAttachmentViewMask.clear();
+      if (Error E = applyLoadOps(Gfx.Binding, Gfx.LoadedAttachmentViewMask))
         return E;
       break;
     case RecordedCommand::Kind::NextSubpass: {
@@ -1834,6 +1913,15 @@ Error executeCommandsInto(
       if (!Binding)
         return Binding.takeError();
       Gfx.Binding = std::move(*Binding);
+      // (Roadmap H2i) The new subpass may be the first to use a view of an
+      // attachment an earlier subpass never touched (e.g. each subpass of
+      // `dEQP-VK.multiview.readback_implicit_clear`'s multi-subpass cases
+      // owns a disjoint slice of one shared attachment's view mask) -- that
+      // view still needs its own share of the load op, gated by
+      // `Gfx.LoadedAttachmentViewMask` against re-clearing a view an
+      // earlier subpass already used.
+      if (Error E = applyLoadOps(Gfx.Binding, Gfx.LoadedAttachmentViewMask))
+        return E;
       break;
     }
     case RecordedCommand::Kind::EndRenderPass:
