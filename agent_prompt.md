@@ -44,3 +44,4 @@ Can you work on milestone H2h?
 > the draw in the first place. Not yet root-caused; needs its own investigation
 > (dump the subpass-input descriptor heap contents and confirm whether the
 > fragment shader's `subpassLoad` executes at all, or short-circuits)
+
