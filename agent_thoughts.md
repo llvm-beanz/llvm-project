@@ -33347,3 +33347,121 @@ dynamic rendering" section. Regenerated `VulkanExtensionInventory.md`/
 20/21, 1.4 promoted extensions 8/16 -> 14/16) and updated their own
 "Findings" prose to match. Added a "Roadmap F13: measured impact" section
 to VulkanCTSReport.md with the CTS numbers above.
+
+# Roadmap F14: VK_KHR_map_memory2
+
+## Scoping the row
+
+The roadmap text was already precise: `vkMapMemory2`/`vkUnmapMemory2` are
+`pNext`-extensible wrappers around `Memory.cpp`'s existing
+`vkMapMemory`/`vkUnmapMemory`, plus `VkMemoryUnmapFlagsKHR`'s
+reserve-on-unmap bit. Checking the actual Vulkan-Headers this build uses
+(`/tmp/vksdk`, header version 328) confirmed `VK_KHR_map_memory2` is
+promoted to core at `VK_VERSION_1_4` -- `VkMemoryMapInfo`/
+`VkMemoryUnmapInfo` and the plain `vkMapMemory2`/`vkUnmapMemory2` names
+exist with no `KHR` suffix required, matching the pattern
+`VK_KHR_maintenance5`/`VK_KHR_maintenance6` already established (see
+`PhysicalDeviceInfo.cpp`'s own "post-`maintenance5`" extension-list
+comments). The one substantive design question was what
+`VK_MEMORY_UNMAP_RESERVE_BIT_EXT` should actually do: it only has meaning
+paired with `VK_EXT_map_memory_placed`'s reservation-backed mapping
+(confirmed against the real header and `vktMemoryMapPlacedTests.cpp`,
+the only CTS file that ever sets the bit), which this ICD does not
+implement or advertise -- a real placed mapping never exists here to
+reserve, so the bit is accepted but otherwise a no-op, exactly like the
+rest of `vkUnmapMemory`'s existing coherent-memory no-op.
+
+## Implementation
+
+`vkMapMemory2`/`vkUnmapMemory2` (Memory.cpp) unwrap `VkMemoryMapInfo`/
+`VkMemoryUnmapInfo` and call straight into the existing plain forms,
+following `vkBindBufferMemory2`'s own "unwrap the info struct, call the
+plain form" precedent (Buffer.cpp) rather than duplicating any
+validation logic. Neither struct has a recognized `pNext`-chained
+extension struct in this ICD's scope (the only other consumer,
+`VK_EXT_map_memory_placed`, is unimplemented), so both wrappers ignore
+`pNext` entirely, the same way `vkBindBufferMemory2` ignores
+`VkBindBufferMemoryInfo`'s own device-group `pNext` extension.
+`getSupportedDeviceExtensions` (`PhysicalDeviceInfo.cpp`) now advertises
+`VK_KHR_map_memory2`, following the by-now-well-established "even though
+its commands are already core at this driver's apiVersion, a real CTS
+case enables it by name regardless" precedent -- confirmed directly this
+time, not just by analogy: `vktMemoryMappingTests.cpp`'s own
+`checkMapMemory2Support` calls `context.requireDeviceFunctionality
+("VK_KHR_map_memory2")` for every `_map2` test variant.
+
+## The crash, and what it actually revealed
+
+A build and `check-feme` run was clean on the first pass. Running the
+real, targeted CTS group this row's own scope points at
+(`dEQP-VK.memory.mapping.*`, 4466 cases) was not: the very first `_map2`
+case SIGSEGV'd immediately, `deqp-vk` itself printing "Segmentation
+fault" rather than any test result. `gdb -batch -ex run -ex bt` against
+that single case reproduced a clean, deterministic crash every time --
+frame 0 at address `0x0`, called directly from
+`vkt::memory::(anonymous namespace)::testMemoryMapping`. That exact
+shape is the same one `agent_thoughts.md`'s own V0-era crash-isolation
+loop first documented: a null function pointer a caller's own dispatch
+table expected to be real.
+
+I first suspected our own `vkGetDeviceProcAddr` was somehow failing to
+resolve `"vkMapMemory2"` -- but a minimal reproducer (a ~30-line C
+program linking the real system Vulkan loader against this ICD via
+`VK_ICD_FILENAMES`, creating an instance/device and calling
+`vkGetDeviceProcAddr(dev, "vkMapMemory2")` directly) got back a real,
+non-null pointer immediately. So the gap was not in our own
+`ProcAddr.cpp`/`EntryPoints.h` plumbing at all -- it had to be in
+*which name* the actual CTS caller queried. Reading
+`vkInitDeviceFunctionPointers.inl` (CTS's own generated function-pointer
+loader) found the answer directly:
+
+```cpp
+if (usedApiVersion >= VK_MAKE_API_VERSION(0, 1, 4, 0))
+    m_vk.mapMemory2 = (MapMemory2Func) GET_PROC_ADDR("vkMapMemory2");
+if (!m_vk.mapMemory2)
+    m_vk.mapMemory2 = (MapMemory2Func) GET_PROC_ADDR("vkMapMemory2KHR");
+```
+
+This CTS checkout only tries the core, non-`KHR`-suffixed name when its
+own negotiated `usedApiVersion` for a given test is `>= 1.4`; every other
+test (including, apparently, this one) falls back to the `KHR` name --
+which our dispatch table did not carry at all, since I had only
+implemented the core name, correctly reasoning that `VK_VERSION_1_4` is
+already in `vk_gen_entrypoints.py`'s `CORE_FEATURES`. That reasoning was
+right about the *core* name's presence in the generated table, but wrong
+to stop there: this driver's `icd.json` declares `api_version: "1.1.0"`,
+which (per `vk_gen_entrypoints.py`'s own `SUPPORTED_EXTENSIONS` comment,
+written for exactly this reason when `VK_KHR_maintenance5`'s granularity/
+subresource-layout commands hit the identical gap) makes a real system
+Vulkan loader refuse to resolve a direct, non-`KHR`-suffixed query for
+any command newer than 1.1 -- so the `KHR` name has to be implemented
+and exposed too, for any caller the loader itself gates this way, not
+just for a caller using an older `usedApiVersion`.
+
+The fix followed the same precedent exactly: `vkMapMemory2KHR`/
+`vkUnmapMemory2KHR` (Memory.cpp) are thin wrappers calling straight into
+the core `vkMapMemory2`/`vkUnmapMemory2` (the same "implement the KHR
+name as its own symbol, forwarding to the core one" shape
+`vkGetImageSubresourceLayout2KHR` already uses forwarding to
+`vkGetImageSubresourceLayout`), `VK_KHR_map_memory2` was added to
+`vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` tuple so the generated
+dispatch table actually carries the `KHR` names, and both were added to
+`ImplementedEntrypoints.txt`. Re-running the full `dEQP-VK.memory.
+mapping.*` group afterward passed clean: 4466/4466, 100%.
+
+## Test/documentation bookkeeping
+
+`vk-gen-entrypoints-split-features.test`'s own fixture
+(`vk-split-features.xml`) needed `vkMapMemory2KHR`/`vkUnmapMemory2KHR`
+added as a sixth `SUPPORTED_EXTENSIONS` entry, matching how
+`VK_KHR_maintenance5`/`VK_KHR_line_rasterization`/etc. are already
+covered there -- this generator-unit-test fixture is deliberately
+independent of the real Vulkan-Headers `vk.xml`, so it needed its own
+update rather than picking the new extension up automatically.
+`DrawTest.AdvertisesDynamicRenderingExtension`'s hardcoded extension
+count (29 -> 30) and extension-name list both needed the same one-line
+update every prior F-row's own extension addition has needed. Three new
+`MemoryTest` cases (`MapMemory2WriteUnmap`, `MapMemory2RejectsOutOfRange`,
+`UnmapMemory2AcceptsReserveBit`) cover the wrapper behavior itself,
+including a case that explicitly sets `VK_MEMORY_UNMAP_RESERVE_BIT_EXT`
+and confirms it is accepted rather than rejected.
