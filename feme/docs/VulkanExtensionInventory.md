@@ -62,12 +62,12 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 
 | Status | Count |
 |---|---:|
-| Advertised | 22 |
+| Advertised | 29 |
 | Implemented (core, not advertised by name) | 17 |
-| Planned (in scope, not implemented) | 59 |
+| Planned (in scope, not implemented) | 52 |
 | Not implemented (out of scope) | 202 |
 
-- **The 22 advertised** are the ones a `deqp-vk` case enables by name
+- **The 29 advertised** are the ones a `deqp-vk` case enables by name
   regardless of the advertised `apiVersion`, plus the three that predate
   that discipline: `VK_KHR_dynamic_rendering`,
   `VK_EXT_extended_dynamic_state`, `VK_KHR_shader_integer_dot_product`,
@@ -80,14 +80,28 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_EXT_inline_uniform_block` (E14), `VK_EXT_texel_buffer_alignment`
   (E18), `VK_EXT_4444_formats`/`VK_EXT_pipeline_creation_feedback`/
   `VK_KHR_shader_non_semantic_info`/`VK_EXT_tooling_info` (E19),
-  `VK_KHR_global_priority` (F1), `VK_KHR_shader_expect_assume` (F4),
-  `VK_KHR_line_rasterization` (F5), `VK_KHR_vertex_attribute_divisor`
-  (F6), and `VK_KHR_index_type_uint8` (F7).
-- **The 17 core-but-unadvertised** were 3 until this edition. A full audit
-  of every core-promoted extension against this ICD's own sources (rather
-  than only the ones a roadmap row happened to name) found 14 more that
-  are genuinely implemented through their promoted core entry points and
-  had simply never been recorded: `VK_KHR_bind_memory2`,
+  `VK_KHR_global_priority` (F1), `VK_KHR_shader_subgroup_rotate` (F2),
+  `VK_KHR_shader_expect_assume` (F4), `VK_KHR_line_rasterization` (F5),
+  `VK_KHR_vertex_attribute_divisor` (F6), `VK_KHR_index_type_uint8` (F7),
+  `VK_KHR_dynamic_rendering_local_read` (F8),
+  `VK_EXT_pipeline_protected_access` (F9), `VK_EXT_pipeline_robustness`
+  (F10), `VK_EXT_host_image_copy` (F11), `VK_KHR_push_descriptor` (F12),
+  and `VK_KHR_load_store_op_none` (F13). This edition's own addition,
+  `VK_KHR_load_store_op_none`, needed no new runtime code at all: it is the
+  first row in this file to move from "Planned" to "Advertised" purely by
+  recognizing behavior `applyClear`'s existing `LoadOp != CLEAR` check
+  (CommandBuffer.cpp) already had -- see Roadmap.md's F13 entry. This
+  edition also restores `AdvertisedExtensions.txt`/
+  `AdvertisedPromotedExtensions.txt`/`PlannedExtensions.txt` to agree with
+  `PhysicalDeviceInfo.cpp`, which had drifted out of sync with six
+  already-implemented roadmap rows (F2, F5, F7, F8, F9, F12) that were
+  still marked "planned" or missing from the advertised list entirely --
+  a bookkeeping gap this file's own regeneration exists to catch.
+- **The 17 core-but-unadvertised** were 3 until roadmap E-series' own
+  audit. A full audit of every core-promoted extension against this ICD's
+  own sources (rather than only the ones a roadmap row happened to name)
+  found 14 more that are genuinely implemented through their promoted core
+  entry points and had simply never been recorded: `VK_KHR_bind_memory2`,
   `VK_KHR_descriptor_update_template`, `VK_KHR_maintenance1`,
   `VK_KHR_maintenance3`, `VK_KHR_relaxed_block_layout`,
   `VK_KHR_storage_buffer_storage_class`, `VK_EXT_host_query_reset`,
@@ -98,7 +112,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_KHR_format_feature_flags2`. Most are roadmap C6/V3-era work whose
   extension-name consequences were never written down. None is newly
   implemented by this edition.
-- **The 64 planned** decompose into three groups, and the membership rule
+- **The 52 planned** decompose into three groups, and the membership rule
   is enforced by `PlannedExtensions.txt`'s own header rather than by
   judgement per row: every core-promoted (1.1-1.4) extension this ICD does
   not implement (the mandatory floor a 1.4 claim inherits, including the
@@ -194,7 +208,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_EXT_graphics_pipeline_library` | Not implemented |  |
 | `VK_EXT_hdr_metadata` | Not implemented |  |
 | `VK_EXT_headless_surface` | Planned (in scope, not implemented) | roadmap H10 (V8): the first surface this ICD implements, per FeMeVulkanDesign.md's WSI decision |
-| `VK_EXT_host_image_copy` | Advertised | roadmap F11 (closed): `vkCopyMemoryToImage`/`vkCopyImageToMemory`/`vkCopyImageToImage`/`vkTransitionImageLayout` (`HostImageCopy.cpp`) copy/transition images with no `VkCommandBuffer`, reusing `ImageOps.h`'s `copyBufferImageRegion`/`runCopyImage`, see Vulkan14FeatureInventory.md's `hostImageCopy` row. Roadmap F11a (closed): the combined-depth/stencil single-aspect copy gap F11 itself found and could only reject is now really supported, same row |
+| `VK_EXT_host_image_copy` | Advertised |  |
 | `VK_EXT_host_query_reset` | Implemented (core, not advertised by name) | roadmap C6: vkResetQueryPool implemented and hostQueryReset reported true (QueryPool.cpp, EntryPoints.cpp) |
 | `VK_EXT_image_2d_view_of_3d` | Not implemented |  |
 | `VK_EXT_image_compression_control` | Not implemented |  |
@@ -232,8 +246,8 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_EXT_pipeline_creation_feedback` | Advertised |  |
 | `VK_EXT_pipeline_library_group_handles` | Not implemented |  |
 | `VK_EXT_pipeline_properties` | Not implemented |  |
-| `VK_EXT_pipeline_protected_access` | Advertised | roadmap F9 (closed): `Pipeline::createFlags`/`vkCmdBindPipeline`'s bind-time rejection, see Vulkan14FeatureInventory.md's `pipelineProtectedAccess` row |
-| `VK_EXT_pipeline_robustness` | Advertised | roadmap F10 (closed): `VkPipelineRobustnessCreateInfo` accepted/validated at both compute and graphics pipeline creation (`Pipeline.cpp`'s `resolvePipelineRobustness`), see Vulkan14FeatureInventory.md's `pipelineRobustness` row |
+| `VK_EXT_pipeline_protected_access` | Advertised |  |
+| `VK_EXT_pipeline_robustness` | Advertised |  |
 | `VK_EXT_post_depth_coverage` | Not implemented |  |
 | `VK_EXT_present_mode_fifo_latest_ready` | Not implemented |  |
 | `VK_EXT_present_timing` | Not implemented |  |
@@ -305,7 +319,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_deferred_host_operations` | Planned (in scope, not implemented) | roadmap J3 |
 | `VK_KHR_depth_clamp_zero_one` | Not implemented |  |
 | `VK_KHR_depth_stencil_resolve` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
-| `VK_KHR_descriptor_update_template` | Implemented (core, not advertised by name) | descriptor-set update templates implemented; roadmap F12: `VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS` is now also accepted (`vkCreateDescriptorUpdateTemplate` in Descriptor.cpp), consumed by `vkCmdPushDescriptorSetWithTemplate` |
+| `VK_KHR_descriptor_update_template` | Implemented (core, not advertised by name) | descriptor-set update templates implemented; the push-descriptor template type is explicitly rejected as the separate, unimplemented VK_KHR_push_descriptor (Descriptor.cpp's vkCreateDescriptorUpdateTemplate/vkUpdateDescriptorSetWithTemplate) |
 | `VK_KHR_device_address_commands` | Not implemented |  |
 | `VK_KHR_device_fault` | Not implemented |  |
 | `VK_KHR_device_group` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
@@ -315,7 +329,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_draw_indirect_count` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_driver_properties` | Implemented (core, not advertised by name) | roadmap C5: VkPhysicalDeviceDriverProperties filled, with a truthful zero VkConformanceVersion and no impersonated VkDriverId (EntryPoints.cpp's fillDriverProperties) |
 | `VK_KHR_dynamic_rendering` | Advertised |  |
-| `VK_KHR_dynamic_rendering_local_read` | Implemented | roadmap F8/F8a/F8b/F8c (closed): `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInputAttachmentIndices` implemented and now advertised -- a fragment shader's `subpassInput`/`subpassInputMS` local read produces real pixels for a color, depth (`D16_UNORM`/`D32_FLOAT`), stencil (`S8_UINT`), or explicitly-sampled multisample attachment (`DrawTest.SubpassLoadReadsBackThe{Color,Depth,Stencil}AttachmentItWrote`/`SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote`); both `dynamicRenderingLocalReadDepthStencilAttachments`/`dynamicRenderingLocalReadMultisampledAttachments` now report `VK_TRUE` |
+| `VK_KHR_dynamic_rendering_local_read` | Advertised |  |
 | `VK_KHR_extended_flags` | Not implemented |  |
 | `VK_KHR_external_fence` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_external_fence_capabilities` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
@@ -340,10 +354,10 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_image_format_list` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_imageless_framebuffer` | Implemented (core, not advertised by name) | roadmap C6: VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT and VkRenderPassAttachmentBeginInfo both honored (RenderPass.cpp's vkCreateFramebuffer, CommandBuffer.cpp's vkCmdBeginRenderPass) |
 | `VK_KHR_incremental_present` | Not implemented |  |
-| `VK_KHR_index_type_uint8` | Advertised | roadmap F7: `vkCmdBindIndexBuffer`'s index read (`CommandBuffer.cpp`) and the executor's fetch (`Executor.cpp`) both gained an 8-bit case |
+| `VK_KHR_index_type_uint8` | Advertised |  |
 | `VK_KHR_internally_synchronized_queues` | Not implemented |  |
-| `VK_KHR_line_rasterization` | Advertised | roadmap F5 |
-| `VK_KHR_load_store_op_none` | Planned (in scope, not implemented) | roadmap F13 |
+| `VK_KHR_line_rasterization` | Advertised |  |
+| `VK_KHR_load_store_op_none` | Advertised |  |
 | `VK_KHR_maintenance1` | Implemented (core, not advertised by name) | vkTrimCommandPool implemented (CommandBuffer.cpp) |
 | `VK_KHR_maintenance10` | Not implemented |  |
 | `VK_KHR_maintenance11` | Not implemented |  |
@@ -369,7 +383,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_present_mode_fifo_latest_ready` | Not implemented |  |
 | `VK_KHR_present_wait` | Not implemented |  |
 | `VK_KHR_present_wait2` | Not implemented |  |
-| `VK_KHR_push_descriptor` | Advertised | roadmap F12: `vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWithTemplate` (`CommandBuffer.{h,cpp}`) write descriptors directly into a command buffer's own owned `DescriptorSet` snapshot -- no `VkDescriptorSet` object -- reusing `Descriptor.{h,cpp}`'s existing binding-to-heap-slot translation; `VK_KHR_maintenance6`'s deferred `vkCmdPushDescriptorSet2`/`vkCmdPushDescriptorSetWithTemplate2` are thin wrappers around the same mechanism |
+| `VK_KHR_push_descriptor` | Advertised |  |
 | `VK_KHR_ray_query` | Planned (in scope, not implemented) | roadmap J5 |
 | `VK_KHR_ray_tracing_maintenance1` | Planned (in scope, not implemented) | roadmap J7 |
 | `VK_KHR_ray_tracing_pipeline` | Planned (in scope, not implemented) | roadmap J6 |
@@ -388,7 +402,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_shader_expect_assume` | Advertised |  |
 | `VK_KHR_shader_float16_int8` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_shader_float_controls` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
-| `VK_KHR_shader_float_controls2` | Planned (in scope, not implemented) | roadmap F15c/F15d (per-instruction decorations and `FPFastMathDefault` codegen closed) and F16 (the unrelated `FrexpStruct`/`ModfStruct` deserializer crash F15d's own CTS re-run found is fixed, along with modeling `spirv.GL.ModfStruct` and both instructions' `SPIRVToLLVM` conversion patterns); still blocked from a conformant claim by the unrelated `feme::cpu` resource-lowering gap F15a/F15b found |
+| `VK_KHR_shader_float_controls2` | Planned (in scope, not implemented) | roadmap F3 |
 | `VK_KHR_shader_fma` | Not implemented |  |
 | `VK_KHR_shader_integer_dot_product` | Advertised |  |
 | `VK_KHR_shader_maximal_reconvergence` | Not implemented |  |
@@ -396,7 +410,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_shader_quad_control` | Not implemented |  |
 | `VK_KHR_shader_relaxed_extended_instruction` | Not implemented |  |
 | `VK_KHR_shader_subgroup_extended_types` | Implemented (core, not advertised by name) | roadmap C6: reported true, and vacuously so -- no OpGroupNonUniform* operation is converted at all yet (EntryPoints.cpp's fillFeatures2Chain) |
-| `VK_KHR_shader_subgroup_rotate` | Planned (in scope, not implemented) | roadmap F2 |
+| `VK_KHR_shader_subgroup_rotate` | Advertised |  |
 | `VK_KHR_shader_subgroup_uniform_control_flow` | Not implemented |  |
 | `VK_KHR_shader_terminate_invocation` | Advertised |  |
 | `VK_KHR_shader_untyped_pointers` | Not implemented |  |
@@ -414,7 +428,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_unified_image_layouts` | Not implemented |  |
 | `VK_KHR_uniform_buffer_standard_layout` | Implemented (core, not advertised by name) | roadmap C6: reported true, and honest -- no std140 layout restriction was ever enforced to relax (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp) |
 | `VK_KHR_variable_pointers` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
-| `VK_KHR_vertex_attribute_divisor` | Advertised | roadmap F6: `VkPipelineVertexInputDivisorStateCreateInfo`'s per-binding divisor, including the 0 ("every instance reads `firstInstance`") case (`GraphicsPipeline.cpp`'s `translateVertexInput`, `Executor.cpp`'s fetch-index formula) |
+| `VK_KHR_vertex_attribute_divisor` | Advertised |  |
 | `VK_KHR_video_decode_av1` | Not implemented |  |
 | `VK_KHR_video_decode_h264` | Not implemented |  |
 | `VK_KHR_video_decode_h265` | Not implemented |  |

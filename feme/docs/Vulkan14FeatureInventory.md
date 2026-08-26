@@ -73,25 +73,39 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 | 1.1 | **0 of 12** | n/a (see scope note) | 6 of 23 |
 | 1.2 | 7 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
-| 1.4 | 15 of 21 | 25 | 8 of 16 |
-| **total** | **37 of 150** | **70** | **40 of 86** |
+| 1.4 | 20 of 21 | 25 | 14 of 16 |
+| **total** | **42 of 150** | **70** | **46 of 86** |
 
 - **The 1.3 floor is nearly closed; the 1.1/1.2 floor was never audited
-  until now, and the 1.4 floor is well underway.** Roadmap E1-E28 drove
+  until now, and the 1.4 floor is nearly closed too.** Roadmap E1-E28 drove
   1.3 from 1 advertised feature bit to 12 of 15 (only `robustImageAccess`,
   `descriptorBindingInlineUniformBlockUpdateAfterBind` and
   `textureCompressionASTC_HDR` remain), and the F-series has so far closed
   F1 (`globalPriorityQuery`), F2 (`shaderSubgroupRotate`/
   `shaderSubgroupRotateClustered`), F4 (`shaderExpectAssume`), F5 (the six
   line-rasterization bits), F6
-  (`vertexAttributeInstanceRateDivisor`/`vertexAttributeInstanceRateZeroDivisor`)
-  and F10 (`pipelineRobustness`),
-  bringing 1.4 to 15 of its 21 bits, while 1.1 still reports **zero** of
-  its 12 bits. That zero is the single most surprising number in this
-  table: `multiview`, `variablePointers`, `samplerYcbcrConversion`,
-  `shaderDrawParameters`, the 16-bit storage
+  (`vertexAttributeInstanceRateDivisor`/`vertexAttributeInstanceRateZeroDivisor`),
+  F7 (`indexTypeUint8`), F8 (`dynamicRenderingLocalRead`), F9
+  (`pipelineProtectedAccess`), F10 (`pipelineRobustness`), F11
+  (`hostImageCopy`) and F12 (`pushDescriptor`), bringing 1.4 to 20 of its
+  21 bits -- only `shaderFloatControls2` remains, F3's own still-open
+  target -- while 1.1 still
+  reports **zero** of its 12 bits. That zero is the single most surprising
+  number in this table: `multiview`, `variablePointers`,
+  `samplerYcbcrConversion`, `shaderDrawParameters`, the 16-bit storage
   cluster and `protectedMemory` are all `VK_FALSE`, and a 1.4 conformance
-  claim inherits every one of them.
+  claim inherits every one of them. (`VK_KHR_load_store_op_none`, roadmap
+  F13, adds no feature bit of its own -- see its own extension-table row
+  below and [VulkanExtensionInventory.md](VulkanExtensionInventory.md).)
+  This edition also found `AdvertisedPromotedFeatures.txt`/
+  `AdvertisedPromotedExtensions.txt` had drifted out of sync with
+  `EntryPoints.cpp`/`PhysicalDeviceInfo.cpp` for F5, F7, F8, F9 and F12 --
+  each genuinely implemented (confirmed directly in `EntryPoints.cpp`/
+  `CommandBuffer.cpp`/`GraphicsPipeline.cpp`) but never recorded in either
+  file, understating the 1.4 row as 15 of 21/8 of 16 rather than its true
+  20 of 21/14 of 16; restored as part of roadmap F13's own bookkeeping,
+  the same drift [VulkanExtensionInventory.md](VulkanExtensionInventory.md)
+  found in its own advertised-extension list.
 - **17 of the 52 unimplemented 1.0 feature bits are graphics
   capabilities** (`geometryShader`, `tessellationShader`, `multiViewport`,
   `fillModeNonSolid`, `wideLines`, `largePoints`, `sampleRateShading`,
@@ -394,7 +408,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_2 | `VK_KHR_separate_depth_stencil_layouts` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_atomic_int64` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_float16_int8` | no |  |
-| extension | VK_VERSION_1_2 | `VK_KHR_shader_float_controls` | no | roadmap F3/F15a/F15b: every per-entry-point float-controls execution mode was previously silently dropped by `ExecutionModePattern` (SPIRVToLLVMPatterns.cpp); `DenormPreserve`/`RoundingModeRTE`/`SignedZeroInfNanPreserve` are accepted (and still erased) because they already describe the strict, denormal-preserving, round-to-nearest-even code every FP op pattern always emits, and `RoundingModeRTZ`/`DenormFlushToZero` are now both actually honored by `FloatControlArithmeticPattern`: that width's arithmetic routes through `llvm.experimental.constrained.*` intrinsics with an explicit round-toward-zero rounding mode for `RoundingModeRTZ` (verified against LLVM's real, in-tree SPIRV backend: the round trip produces an `spirv.FAdd` carrying `fp_rounding_mode = RTZ`), and each operand/result of that width's arithmetic is flushed to a same-signed zero if subnormal for `DenormFlushToZero` (via `llvm.is.fpclass`/`llvm.copysign`/`llvm.select`, since LLVM has no constrained-intrinsics equivalent for flush-to-zero the way it does for rounding mode) -- every `VK_KHR_shader_float_controls` execution mode is now genuinely honored rather than merely diagnosed or accepted-and-dropped. Still not advertised even so: a targeted CTS run found every generated-shader case that reaches pipeline creation fails on an unrelated, pre-existing `feme::cpu` resource-lowering gap (small runtime-sized storage-buffer bindings), so flipping the feature bit on would trade a graceful `NotSupported` skip for an outright `Fail` (see `EntryPoints.cpp`'s own comment and agent_thoughts.md's F15a/F15b entries) |
+| extension | VK_VERSION_1_2 | `VK_KHR_shader_float_controls` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_subgroup_extended_types` | yes | core, not advertised by name: roadmap C6; roadmap F2 closed "no OpGroupNonUniform* conversion exists" for spirv.GroupNonUniformRotateKHR specifically, but Rotate exercises no 8/16-bit/bool-typed operand, so this bit's own "extended types" claim is still unvalidated by any real conversion (EntryPoints.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_spirv_1_4` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_timeline_semaphore` | yes | core, not advertised by name: V3's timeline semaphores (Sync.cpp) |
@@ -486,30 +500,30 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `globalPriorityQuery` | yes | roadmap F1: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDeviceGlobalPriorityQueryFeatures struct |
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotate` | yes |  |
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotateClustered` | yes |  |
-| feature | VK_VERSION_1_4 | `shaderFloatControls2` | no | roadmap F15c: per-instruction `FPRoundingMode` (all four rounding directions, not just `RTZ`) and `FPFastMathMode` decorations are now genuinely honored by `FloatControlArithmeticPattern` (SPIRVToLLVMPatterns.cpp), verified against LLVM's real, in-tree SPIRV backend (`spirv-backend-per-instruction-rounding-mode.mlir`) and the real translated LLVM IR (`spirv-to-llvmir-per-instruction-fast-math.mlir`). F15d closed the rest of the codegen -- `FPFastMathDefault` (a whole-entry-point default `FPFastMathMode`) is now genuinely honored too, and the dialect-level `FloatControls2` capability/`FPFastMathDefault` execution-mode/`AllowTransform` fast-math-mode gaps F15d found are fixed (`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`). Still not advertised: a targeted CTS re-run (temporarily flipping the feature/property/extension gates) found the same unrelated `feme::cpu` resource-lowering gap `shaderFloatControls`/F15a/F15b's rows already found (small runtime-sized storage-buffer bindings) still blocks a conformant claim, and incidentally found a further, unrelated MLIR deserializer crash on `FrexpStruct`/`ModfStruct` result types (roadmap F16). F16 itself is now fixed: the crash was a dialect-level bug (`Deserializer::processStructType` guessing a struct-level decoration's enum back from its mangled attribute name, which is not reliably reversible for names like `FPFastMathMode`), not anything specific to these two instructions, and `spirv.GL.ModfStruct` (which this dialect did not model at all) plus a `SPIRVToLLVM` conversion pattern for both instructions were added alongside it. Still not advertised: the unrelated `feme::cpu` resource-lowering gap F15a/F15b/F15d already found remains the only blocker to a conformant claim |
-| feature | VK_VERSION_1_4 | `shaderExpectAssume` | yes | roadmap F4: spirv.KHR.AssumeTrue/spirv.KHR.Expect conversion patterns (SPIRVToLLVMPatterns.cpp) |
-| feature | VK_VERSION_1_4 | `rectangularLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
-| feature | VK_VERSION_1_4 | `bresenhamLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
-| feature | VK_VERSION_1_4 | `smoothLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
-| feature | VK_VERSION_1_4 | `stippledRectangularLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
-| feature | VK_VERSION_1_4 | `stippledBresenhamLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
-| feature | VK_VERSION_1_4 | `stippledSmoothLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
-| feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateDivisor` | yes | roadmap F6: `VkPipelineVertexInputDivisorStateCreateInfo`'s per-binding divisor (`GraphicsPipeline.cpp`'s `translateVertexInput`, `Executor.cpp`'s fetch-index formula) -- see the dedicated `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` row below |
-| feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateZeroDivisor` | yes | roadmap F6: a divisor of 0 is this same mechanism's own degenerate case, "every instance reads `firstInstance`" -- see the dedicated `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` row below |
-| feature | VK_VERSION_1_4 | `indexTypeUint8` | yes | roadmap F7: `vkCmdBindIndexBuffer`'s index read (`CommandBuffer.cpp`) and the executor's fetch (`Executor.cpp`) both gained an 8-bit case -- see the dedicated `VkPhysicalDeviceIndexTypeUint8FeaturesKHR` row below |
-| feature | VK_VERSION_1_4 | `dynamicRenderingLocalRead` | yes | roadmap F8/F8a/F8b/F8c (closed): `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInputAttachmentIndices` are implemented and validated (`CommandBuffer.{h,cpp}`); the attachment-location remap is honored by the executor (`PreparedDraw::ColorAttachmentLocations`, `Executor.cpp`), and a fragment shader's `subpassInput`/`subpassInputMS` local read now produces real pixels for a color, depth (`D16_UNORM`/`D32_FLOAT`), stencil (`S8_UINT`), or explicitly-sampled multisample attachment (`feme::spirv::SubpassLoadPattern` in `SPIRVToLLVMPatterns.cpp`, `FragmentWrapper.cpp`'s `lowerFragmentSubpassLoad`, `CommandBuffer.cpp`'s `buildSubpassInputHeap`, and the CPU runtime's `FeMeRuntimeCPU.c`), proven end to end by `DrawTest.SubpassLoadReadsBackThe{Color,Depth,Stencil}AttachmentItWrote`/`SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote`; see the two dedicated limit rows below |
+| feature | VK_VERSION_1_4 | `shaderFloatControls2` | no |  |
+| feature | VK_VERSION_1_4 | `shaderExpectAssume` | yes |  |
+| feature | VK_VERSION_1_4 | `rectangularLines` | yes |  |
+| feature | VK_VERSION_1_4 | `bresenhamLines` | yes |  |
+| feature | VK_VERSION_1_4 | `smoothLines` | yes |  |
+| feature | VK_VERSION_1_4 | `stippledRectangularLines` | yes |  |
+| feature | VK_VERSION_1_4 | `stippledBresenhamLines` | yes |  |
+| feature | VK_VERSION_1_4 | `stippledSmoothLines` | yes |  |
+| feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateDivisor` | yes |  |
+| feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateZeroDivisor` | yes |  |
+| feature | VK_VERSION_1_4 | `indexTypeUint8` | yes |  |
+| feature | VK_VERSION_1_4 | `dynamicRenderingLocalRead` | yes |  |
 | feature | VK_VERSION_1_4 | `maintenance5` | yes |  |
 | feature | VK_VERSION_1_4 | `maintenance6` | yes |  |
-| feature | VK_VERSION_1_4 | `pipelineProtectedAccess` | yes | roadmap F9: this ICD has no protected-memory model at all (`protectedMemory` stays `VK_FALSE`), but `Pipeline::createFlags` (`Pipeline.h`) now records `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT`/`VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT` verbatim, and `vkCmdBindPipeline` (`CommandBuffer.cpp`) silently rejects binding a `PROTECTED_ACCESS_ONLY_BIT` pipeline (no `VkCommandBuffer` this ICD hands out is ever protected, per `VUID-vkCmdBindPipeline-pipelineProtectedAccess-07409`); see the dedicated `VkPhysicalDevicePipelineProtectedAccessFeatures` row below |
-| feature | VK_VERSION_1_4 | `pipelineRobustness` | yes | roadmap F10: `VkPipelineRobustnessCreateInfo` accepted and validated at both compute and graphics pipeline creation (`Pipeline.cpp`'s `resolvePipelineRobustness`, `GraphicsPipeline.cpp`'s `translateFixedFunctionState`); see the dedicated `VkPhysicalDevicePipelineRobustnessFeatures`/`...Properties` rows below |
-| feature | VK_VERSION_1_4 | `hostImageCopy` | yes | roadmap F11: `vkCopyMemoryToImage`/`vkCopyImageToMemory`/`vkCopyImageToImage`/`vkTransitionImageLayout` (`HostImageCopy.cpp`) copy/transition images with no `VkCommandBuffer`, reusing `ImageOps.h`'s `copyBufferImageRegion`/`runCopyImage`; see the six dedicated limit rows below and the dedicated `VkPhysicalDeviceHostImageCopyFeatures`/`...Properties` rows. Roadmap F11a (closed): a single-aspect (`VK_IMAGE_ASPECT_DEPTH_BIT`/`STENCIL_BIT`) copy of a combined depth/stencil image (`D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`), which F11 itself could only reject cleanly, now really works via `copyDepthAspectRegion`/`copyStencilAspectRegion` (ImageFixture.h) |
-| feature | VK_VERSION_1_4 | `pushDescriptor` | yes | roadmap F12: `vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWithTemplate` (`CommandBuffer.{h,cpp}`) write descriptors directly into a command buffer's own owned `DescriptorSet` snapshot, reusing `Descriptor.{h,cpp}`'s `applyDescriptorWrites`/`applyDescriptorUpdateTemplate` and `bindDescriptorSets`'s existing binding-to-heap-slot translation; no dedicated features struct exists for this bit (see the aggregate case's own comment in `EntryPoints.cpp`) |
-| limit | VK_VERSION_1_4 | `lineSubPixelPrecisionBits` | n/a | roadmap F5: 4, the same conservative floor subPixelPrecisionBits/subTexelPrecisionBits already use (both the aggregate and dedicated VkPhysicalDeviceLineRasterizationPropertiesKHR struct) |
+| feature | VK_VERSION_1_4 | `pipelineProtectedAccess` | yes |  |
+| feature | VK_VERSION_1_4 | `pipelineRobustness` | yes | roadmap F10: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDevicePipelineRobustnessFeatures struct |
+| feature | VK_VERSION_1_4 | `hostImageCopy` | yes | roadmap F11: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDeviceHostImageCopyFeatures struct |
+| feature | VK_VERSION_1_4 | `pushDescriptor` | yes |  |
+| limit | VK_VERSION_1_4 | `lineSubPixelPrecisionBits` | n/a |  |
 | limit | VK_VERSION_1_4 | `maxVertexAttribDivisor` | n/a |  |
 | limit | VK_VERSION_1_4 | `supportsNonZeroFirstInstance` | n/a |  |
-| limit | VK_VERSION_1_4 | `maxPushDescriptors` | n/a | roadmap F12: `32`, the spec-mandated minimum and also the real value -- a push descriptor set is an ordinary `DescriptorSet` with no smaller heap of its own to cap it further; agrees with the dedicated `VkPhysicalDevicePushDescriptorProperties` struct (`EntryPoints.cpp`) |
-| limit | VK_VERSION_1_4 | `dynamicRenderingLocalReadDepthStencilAttachments` | n/a | roadmap F8b: `buildSubpassInputHeap` (`CommandBuffer.cpp`) feeds a depth/stencil attachment through `feme.stage.subpass.load` exactly like a color one, and the CPU runtime's texel-unpack table now decodes `D16_UNORM`/`D32_FLOAT`/`S8_UINT` (`FeMeRuntimeCPU.c`) -- proven by `DrawTest.SubpassLoadReadsBackThe{Depth,Stencil}AttachmentItWrote`; the ICD now reports `VK_TRUE` |
-| limit | VK_VERSION_1_4 | `dynamicRenderingLocalReadMultisampledAttachments` | n/a | roadmap F8c (closed): `feme::StageOpKind::SubpassLoad` gained a `sample` operand, `SubpassLoadPattern` (`SPIRVToLLVMPatterns.cpp`) reads a real `spirv.ImageRead` `Sample` image operand (needing a small MLIR-core fix too: `mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s generic image-operand verifier previously asserted `Sample` was unimplemented for every image op, not only this one), and `lowerFragmentSubpassLoad`/the CPU runtime's `femeRTFetchTexel2D` thread that sample index into `buildSubpassInputHeap`'s already-correct per-sample layout -- proven by `DrawTest.SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote`; the ICD now reports `VK_TRUE` |
+| limit | VK_VERSION_1_4 | `maxPushDescriptors` | n/a |  |
+| limit | VK_VERSION_1_4 | `dynamicRenderingLocalReadDepthStencilAttachments` | n/a |  |
+| limit | VK_VERSION_1_4 | `dynamicRenderingLocalReadMultisampledAttachments` | n/a |  |
 | limit | VK_VERSION_1_4 | `earlyFragmentMultisampleCoverageAfterSampleCounting` | n/a |  |
 | limit | VK_VERSION_1_4 | `earlyFragmentSampleMaskTestBeforeSampleCounting` | n/a |  |
 | limit | VK_VERSION_1_4 | `depthStencilSwizzleOneSupport` | n/a |  |
@@ -519,29 +533,29 @@ Every row cites the specific feature/limit/extension name it closes.
 | limit | VK_VERSION_1_4 | `blockTexelViewCompatibleMultipleLayers` | n/a |  |
 | limit | VK_VERSION_1_4 | `maxCombinedImageSamplerDescriptorCount` | n/a |  |
 | limit | VK_VERSION_1_4 | `fragmentShadingRateClampCombinerInputs` | n/a |  |
-| limit | VK_VERSION_1_4 | `defaultRobustnessStorageBuffers` | n/a | roadmap F10: `VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS` -- storage buffer bounds checking is unconditionally on regardless of any feature (see `robustBufferAccess`'s own row above), always reading zero rather than "zero or any in-bounds value"; not the stronger `..._2` value, since that additionally requires a null descriptor to read as zero too (`VK_EXT_robustness2`, unimplemented) |
-| limit | VK_VERSION_1_4 | `defaultRobustnessUniformBuffers` | n/a | roadmap F10: same reasoning and value as `defaultRobustnessStorageBuffers` above -- uniform buffers go through the same bounds-checked descriptor read |
-| limit | VK_VERSION_1_4 | `defaultRobustnessVertexInputs` | n/a | roadmap F10: same value as `defaultRobustnessStorageBuffers` above; closing this row required fixing two real gaps first -- `Executor.cpp`'s vertex-attribute fetch used to fail the whole draw on an out-of-bounds read instead of reading zero per component, and `CommandBuffer.cpp`'s `validateDrawFetchBounds` used to pre-reject any such draw before the executor even ran -- both contradicted `robustBufferAccess` being unconditionally on |
-| limit | VK_VERSION_1_4 | `defaultRobustnessImages` | n/a | roadmap F10: `VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS` -- `Image.cpp`'s shader-visible texel fetch already returns all-zero for any out-of-range access (roadmap E16), one of this behavior's own explicitly permitted "(0,0,0,0) or (0,0,0,1)" results; not the stronger `..._2` value, for the same null-descriptor reasoning as the buffer rows above |
-| limit | VK_VERSION_1_4 | `copySrcLayoutCount` | n/a | roadmap F11: 2 (`VK_IMAGE_LAYOUT_GENERAL`, `VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL`) -- `HostImageCopy.h`'s `getSupportedHostImageCopySrcLayouts` |
-| limit | VK_VERSION_1_4 | `pCopySrcLayouts` | n/a | roadmap F11: see `copySrcLayoutCount` above |
-| limit | VK_VERSION_1_4 | `copyDstLayoutCount` | n/a | roadmap F11: 2 (`VK_IMAGE_LAYOUT_GENERAL`, `VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL`) -- `HostImageCopy.h`'s `getSupportedHostImageCopyDstLayouts` |
-| limit | VK_VERSION_1_4 | `pCopyDstLayouts` | n/a | roadmap F11: see `copyDstLayoutCount` above |
-| limit | VK_VERSION_1_4 | `optimalTilingLayoutUUID` | n/a | roadmap F11: derived the same way as `VkPhysicalDeviceIDProperties::deviceUUID` (`PhysicalDeviceInfo.cpp`'s `fillUUID`, "Device identity") -- `VK_IMAGE_TILING_OPTIMAL`/`_LINEAR` already resolve to one identical packed layout on this software rasterizer, making this ICD its own, and only, point of comparison |
-| limit | VK_VERSION_1_4 | `identicalMemoryTypeRequirements` | n/a | roadmap F11: `VK_TRUE` -- this ICD has exactly one memory type, so an image created with or without `VK_IMAGE_CREATE_HOST_IMAGE_COPY_BIT` always has identical memory type requirements |
-| extension | VK_VERSION_1_4 | `VK_EXT_host_image_copy` | yes | roadmap F11 (closed): see the `hostImageCopy` feature row above |
-| extension | VK_VERSION_1_4 | `VK_EXT_pipeline_protected_access` | yes | roadmap F9 (closed): see the `pipelineProtectedAccess` feature row above |
-| extension | VK_VERSION_1_4 | `VK_EXT_pipeline_robustness` | yes | roadmap F10 (closed): see the `pipelineRobustness` feature row above |
-| extension | VK_VERSION_1_4 | `VK_KHR_dynamic_rendering_local_read` | yes | roadmap F8/F8a/F8b/F8c (closed): see the `dynamicRenderingLocalRead` feature row above |
+| limit | VK_VERSION_1_4 | `defaultRobustnessStorageBuffers` | n/a |  |
+| limit | VK_VERSION_1_4 | `defaultRobustnessUniformBuffers` | n/a |  |
+| limit | VK_VERSION_1_4 | `defaultRobustnessVertexInputs` | n/a |  |
+| limit | VK_VERSION_1_4 | `defaultRobustnessImages` | n/a |  |
+| limit | VK_VERSION_1_4 | `copySrcLayoutCount` | n/a |  |
+| limit | VK_VERSION_1_4 | `pCopySrcLayouts` | n/a |  |
+| limit | VK_VERSION_1_4 | `copyDstLayoutCount` | n/a |  |
+| limit | VK_VERSION_1_4 | `pCopyDstLayouts` | n/a |  |
+| limit | VK_VERSION_1_4 | `optimalTilingLayoutUUID` | n/a |  |
+| limit | VK_VERSION_1_4 | `identicalMemoryTypeRequirements` | n/a |  |
+| extension | VK_VERSION_1_4 | `VK_EXT_host_image_copy` | yes | roadmap F11: vkCopyMemoryToImage/vkCopyImageToMemory/vkCopyImageToImage/vkTransitionImageLayout (HostImageCopy.cpp) copy/transition images with no VkCommandBuffer |
+| extension | VK_VERSION_1_4 | `VK_EXT_pipeline_protected_access` | yes | roadmap F9 (closed): see the pipelineProtectedAccess feature row above |
+| extension | VK_VERSION_1_4 | `VK_EXT_pipeline_robustness` | yes | roadmap F10: VkPipelineRobustnessCreateInfo accepted and validated at both compute and graphics pipeline creation (Pipeline.cpp's resolvePipelineRobustness) |
+| extension | VK_VERSION_1_4 | `VK_KHR_dynamic_rendering_local_read` | yes | roadmap F8/F8a/F8b/F8c (closed): see the dynamicRenderingLocalRead feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_global_priority` | yes | roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family |
-| extension | VK_VERSION_1_4 | `VK_KHR_index_type_uint8` | yes | roadmap F7: see the `indexTypeUint8` feature row above |
+| extension | VK_VERSION_1_4 | `VK_KHR_index_type_uint8` | yes | roadmap F7: see the indexTypeUint8 feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_line_rasterization` | yes | roadmap F5: vkCmdSetLineStippleKHR (CommandBuffer.cpp), VkPipelineRasterizationLineStateCreateInfoKHR translation (GraphicsPipeline.cpp) |
-| extension | VK_VERSION_1_4 | `VK_KHR_load_store_op_none` | no |  |
+| extension | VK_VERSION_1_4 | `VK_KHR_load_store_op_none` | yes | roadmap F13: applyClear's existing LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR check (CommandBuffer.cpp) already treats VK_ATTACHMENT_LOAD_OP_NONE as "do nothing"; StoreOp is never read to act on at all, so STORE/DONT_CARE/NONE are indistinguishable in this real-memory-backed renderer |
 | extension | VK_VERSION_1_4 | `VK_KHR_maintenance5` | yes | roadmap E5: null VkRenderingAttachmentInfo image views, VK_REMAINING_ARRAY_LAYERS in copy/blit/resolve regions (E27), and the rest of the group |
-| extension | VK_VERSION_1_4 | `VK_KHR_maintenance6` | yes | roadmap E6: vkCmdBindDescriptorSets2/vkCmdPushConstants2 (Descriptor.cpp, CommandBuffer.cpp); roadmap F12 (completing this row): vkCmdPushDescriptorSet2/vkCmdPushDescriptorSetWithTemplate2 (CommandBuffer.cpp) |
+| extension | VK_VERSION_1_4 | `VK_KHR_maintenance6` | yes | roadmap E6: vkCmdBindDescriptorSets2/vkCmdPushConstants2/vkCmdPushDescriptorSet2 (Descriptor.cpp, CommandBuffer.cpp) |
 | extension | VK_VERSION_1_4 | `VK_KHR_map_memory2` | no |  |
-| extension | VK_VERSION_1_4 | `VK_KHR_push_descriptor` | yes | roadmap F12: see the `pushDescriptor` feature row above |
-| extension | VK_VERSION_1_4 | `VK_KHR_shader_expect_assume` | yes | roadmap F4: see the `shaderExpectAssume` feature row above |
-| extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no | roadmap F15c/F15d: see the `shaderFloatControls2` feature row above |
+| extension | VK_VERSION_1_4 | `VK_KHR_push_descriptor` | yes | roadmap F12: see the pushDescriptor feature row above |
+| extension | VK_VERSION_1_4 | `VK_KHR_shader_expect_assume` | yes | roadmap F4: spirv.KHR.AssumeTrue/spirv.KHR.Expect conversion patterns (SPIRVToLLVMPatterns.cpp's AssumeTrueConversionPattern/ExpectConversionPattern) |
+| extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_subgroup_rotate` | yes | roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern) |
-| extension | VK_VERSION_1_4 | `VK_KHR_vertex_attribute_divisor` | yes | roadmap F6: `VkPipelineVertexInputDivisorStateCreateInfo`'s per-binding divisor, including the 0 ("every instance reads `firstInstance`") case (`GraphicsPipeline.cpp`'s `translateVertexInput`, `Executor.cpp`'s fetch-index formula) |
+| extension | VK_VERSION_1_4 | `VK_KHR_vertex_attribute_divisor` | yes | roadmap F6: VkPipelineVertexInputDivisorStateCreateInfo's per-binding divisor, including the 0 ("every instance reads firstInstance") case (GraphicsPipeline.cpp's translateVertexInput, Executor.cpp's fetch-index formula) |
