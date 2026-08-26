@@ -5996,3 +5996,87 @@ full, 1765/1824 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
 up from 1763/1822 before this row's own two new tests
 (`ExecutorTest.RendersWithZeroColorAttachments`,
 `GraphicsPipelineTest.AcceptsZeroColorAttachments`).
+
+## Roadmap H2j: measured impact (fragment stage genuinely optional)
+
+`dEQP-VK.multiview.depth_without_fragment_shader*` (`--deqp-case`, same
+reproduction recipe as every row above): 3 cases (the base group plus its
+`dynamic_rendering`/`renderpass2` siblings), same case H2b's own row left
+failing.
+
+Before this row's fix:
+
+```
+Test case 'dEQP-VK.multiview.depth_without_fragment_shader.no_queries.3_6_12_9_6_12_9_3_6_12_9_3'..
+vkCreateGraphicsPipelines: a graphics pipeline needs both a vertex and a fragment stage
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37)
+```
+
+After making the fragment stage genuinely optional (`translateFixedFunctionState`
+only requiring a vertex stage; `compileAndValidateStages`/`validateStageInterfaces`
+skipping fragment compilation and its half of interface validation; `GraphicsPipeline`'s
+`FragmentStage` becoming a genuinely optional `shared_ptr<CompiledStage>`; and
+`executeDraws` skipping its whole fragment-invocation loop):
+
+```
+Test case 'dEQP-VK.multiview.depth_without_fragment_shader.no_queries.3_6_12_9_6_12_9_3_6_12_9_3'..
+vkCreateGraphicsPipelines: the pipeline declares 1 color blend state(s) but its render target has 0 color attachment(s)
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37)
+```
+
+Still `Fail`, at the same call, for a different, previously-latent reason
+(this row's own Deviation): `translateColorBlendState` still unconditionally
+validated `Info->attachmentCount == Targets.Colors.size()`, but a pipeline
+with no fragment shader has no fragment output interface, so
+`pColorBlendState` -- including its own `attachmentCount` -- must be
+entirely ignored, not validated
+(`VUID-VkGraphicsPipelineCreateInfo-renderPass-06055`'s scope only applies
+when a fragment output interface state is present). `deqp-vk`'s own test
+(`vktMultiViewRenderTests.cpp`) hardcodes `pColorBlendState.attachmentCount = 1`
+unconditionally regardless of whether the render target actually has any
+color attachments, exactly triggering this. Fixed by threading a
+`HasFragmentStage` flag into `translateColorBlendState` that skips the
+`attachmentCount` check (and the rest of `pColorBlendState`) whenever it is
+false; tightly coupled to this row's own change, so fixed as part of it
+rather than spun off to another row.
+
+After both fixes:
+
+```
+Test case 'dEQP-VK.multiview.depth_without_fragment_shader.no_queries.3_6_12_9_6_12_9_3_6_12_9_3'..
+  Pass (Pass)
+
+Test case 'dEQP-VK.multiview.dynamic_rendering.depth_without_fragment_shader.no_queries.3_6_12_9_6_12_9_3_6_12_9_3'..
+  Pass (Pass)
+
+Test case 'dEQP-VK.multiview.renderpass2.depth_without_fragment_shader.no_queries.3_6_12_9_6_12_9_3_6_12_9_3'..
+  Pass (Pass)
+
+Test run totals:
+  Passed:        3/3 (100.0%)
+```
+
+All 3 cases this row (and H2b before it) cite now pass.
+
+A full `dEQP-VK.multiview.*` run (838 cases) after this row's fixes:
+
+```
+Passed:        457/838 (54.5%)
+Failed:         42/838 (5.0%)
+Not supported: 339/838 (40.5%)
+```
+
+Up from H2b's own 454/838 (54.2%, 45 `Failed`) baseline by exactly the 3
+named cases, with no regressions elsewhere (`Failed` drops from 45 to 42,
+`Not supported` unchanged). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: confirmed no change needed -- this row makes
+an existing, always-legal pipeline shape (a fragment-less depth/stencil-only
+pipeline) actually work; it advertises no new feature or extension.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full, 1769/1828 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up
+from 1768/1827 before this row's own four new tests
+(`GraphicsPipelineTest.AcceptsMissingFragmentStage`,
+`.RejectsMissingFragmentStageWithColorAttachments`,
+`.AcceptsMissingFragmentStageWithMismatchedColorBlendState`,
+`ExecutorTest.RendersWithNoFragmentStage`).
