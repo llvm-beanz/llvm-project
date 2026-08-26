@@ -610,4 +610,92 @@ TEST(CanonicalizeStageTest,
           << "row " << Row << " component " << Component;
 }
 
+/// (Roadmap H2e) An `Output`-direction global read back after being
+/// written earlier in the same, straight-line invocation (unlike DXIL's
+/// genuinely write-only `storeOutput`, SPIR-V's `Output` storage class
+/// permits this) resolves directly to the stored value -- no
+/// `feme.stage.input.load` at all, since the read is not a genuine input.
+TEST(CanonicalizeStageTest, OutputReadBackResolvesToStoredValueStraightLine) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_var = external addrspace(8) global float, !spirv.Decorations !0
+    define void @main() #0 {
+      store float 1.000000e+00, ptr addrspace(8) @out_var
+      %v = load float, ptr addrspace(8) @out_var
+      %v2 = fadd float %v, 1.000000e+00
+      store float %v2, ptr addrspace(8) @out_var
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No `feme.stage.input.load` at all: the read-back is not a genuine
+  // input, and no leftover `alloca`/load/store of a shadow value survives
+  // `PromoteMemToReg`.
+  unsigned SawStore = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(isa<AllocaInst>(&I));
+    EXPECT_FALSE(isa<LoadInst>(&I));
+    EXPECT_FALSE(isa<StoreInst>(&I));
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind))
+      continue;
+    EXPECT_NE(Kind, StageOpKind::InputLoad);
+    if (Kind == StageOpKind::OutputStore)
+      ++SawStore;
+  }
+  EXPECT_EQ(SawStore, 2u);
+}
+
+/// The same read-back, but across a real control-flow join -- the shape
+/// `dEQP-VK.multiview.input_instance`'s own vertex shader takes (a
+/// compound `gl_Position.y += 1.0f;` guarded by an `if`): the read-back
+/// inside the conditional block resolves to the value stored in the
+/// dominating entry block, without any `feme.stage.input.load`.
+TEST(CanonicalizeStageTest, OutputReadBackResolvesAcrossControlFlow) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_var = external addrspace(8) global float, !spirv.Decorations !0
+    define void @main(i1 %cond) #0 {
+    entry:
+      store float 1.000000e+00, ptr addrspace(8) @out_var
+      br i1 %cond, label %if.then, label %if.end
+    if.then:
+      %v = load float, ptr addrspace(8) @out_var
+      %v2 = fadd float %v, 1.000000e+00
+      store float %v2, ptr addrspace(8) @out_var
+      br label %if.end
+    if.end:
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  unsigned SawStore = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(isa<AllocaInst>(&I));
+    EXPECT_FALSE(isa<LoadInst>(&I));
+    EXPECT_FALSE(isa<StoreInst>(&I));
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind))
+      continue;
+    EXPECT_NE(Kind, StageOpKind::InputLoad);
+    if (Kind == StageOpKind::OutputStore)
+      ++SawStore;
+  }
+  EXPECT_EQ(SawStore, 2u);
+}
+
 } // namespace
