@@ -1088,6 +1088,61 @@ TEST_F(GraphicsPipelineTest, AcceptsZeroColorAttachments) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap H2j: a depth-only pipeline may omit the fragment stage from
+/// `pStages` entirely -- distinct from `AcceptsZeroColorAttachments` above
+/// (whose fragment stage is present but merely writes no color output) --
+/// exactly `dEQP-VK.multiview.depth_without_fragment_shader`'s own shape
+/// (`VUID-VkGraphicsPipelineCreateInfo-pStages-06894`/neighbors).
+TEST_F(GraphicsPipelineTest, AcceptsMissingFragmentStage) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, VK_NULL_HANDLE);
+  Info.stageCount = 1;
+  Blend.attachmentCount = 0;
+  Blend.pAttachments = nullptr;
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthTestEnable = VK_TRUE;
+  DepthInfo.depthWriteEnable = VK_TRUE;
+  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+  Info.pDepthStencilState = &DepthInfo;
+
+  VkFormat DepthFormat = VK_FORMAT_D32_SFLOAT;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 0;
+  Rendering.depthAttachmentFormat = DepthFormat;
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &Rendering;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  auto *Pipe2 = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  EXPECT_EQ(Pipe2->colorAttachmentCount(), 0u);
+  EXPECT_FALSE(Pipe2->hasFragmentStage());
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H2j: unlike a depth-only pipeline, a pipeline whose render
+/// target has at least one color attachment still requires a fragment
+/// stage to produce it -- omitting `pStages`'s fragment entry is only
+/// legal when `Targets.Colors` is empty, matching
+/// `VUID-VkGraphicsPipelineCreateInfo-pStages-06894`'s own condition.
+TEST_F(GraphicsPipelineTest, RejectsMissingFragmentStageWithColorAttachments) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, VK_NULL_HANDLE);
+  Info.stageCount = 1;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_NE(create(Info, Pipe), VK_SUCCESS);
+
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// Roadmap C1 ("Mandatory formats"): every format
 /// `isSupportedColorAttachmentFormat` grants Vulkan 1.2's mandatory
 /// `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT` status to must build

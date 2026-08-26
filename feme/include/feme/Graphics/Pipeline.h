@@ -379,6 +379,12 @@ struct AttachmentFormat {
 /// and this skeleton has no test exercising them yet.
 class GraphicsPipeline {
 public:
+  /// \p FragmentStage may be `nullptr` (roadmap H2j): a graphics pipeline
+  /// whose render target has no color attachments legally omits the
+  /// fragment stage entirely (`VUID-VkGraphicsPipelineCreateInfo-
+  /// pStages-06894`/neighbors), running only vertex-stage clip/rasterize/
+  /// early-depth-test with no per-fragment shading at all. Callers must
+  /// check `hasFragmentStage()` before calling `getFragmentStage()`.
   GraphicsPipeline(std::shared_ptr<cpu::CompiledStage> VertexStage,
                    std::shared_ptr<cpu::CompiledStage> FragmentStage,
                    PrimitiveTopology Topology, RasterState Raster,
@@ -392,6 +398,10 @@ public:
                    bool PrimitiveRestartEnable = false);
 
   const cpu::CompiledStage &getVertexStage() const { return *VertexStage; }
+  /// Whether this pipeline has a fragment stage at all (roadmap H2j); false
+  /// for a depth/stencil-only pipeline that omitted one.
+  bool hasFragmentStage() const { return FragmentStage != nullptr; }
+  /// Only valid to call when `hasFragmentStage()` is true.
   const cpu::CompiledStage &getFragmentStage() const { return *FragmentStage; }
   PrimitiveTopology getTopology() const { return Topology; }
   const RasterState &getRasterState() const { return Raster; }

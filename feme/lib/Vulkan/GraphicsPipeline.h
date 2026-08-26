@@ -295,6 +295,13 @@ public:
   const feme::cpu::CompiledStage &vertexStage() const {
     return *State.Artifact->VertexStage;
   }
+  /// Whether this pipeline has a fragment stage (roadmap H2j): false for a
+  /// depth/stencil-only pipeline whose render target has no color
+  /// attachments and that legally omitted one.
+  bool hasFragmentStage() const {
+    return State.Artifact->FragmentStage != nullptr;
+  }
+  /// Only valid to call when `hasFragmentStage()` is true.
   const feme::cpu::CompiledStage &fragmentStage() const {
     return *State.Artifact->FragmentStage;
   }

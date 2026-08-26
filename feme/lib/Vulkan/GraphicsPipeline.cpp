@@ -420,16 +420,20 @@ getStageSignature(const feme::cpu::CompiledStage &Stage) {
 /// interface obligations the executor itself has -- an `SV_Position` vertex
 /// output and one `SV_TargetN` fragment output per color attachment -- here,
 /// at creation, rather than leaving them for the first draw.
+///
+/// \p FragmentStage is `nullptr` for a pipeline that legally omitted its
+/// fragment stage (roadmap H2j, only possible when \p ColorAttachmentCount
+/// is 0, matching `VUID-VkGraphicsPipelineCreateInfo-pStages-06894`'s own
+/// condition): every fragment-side check below (varying linkage, per-
+/// attachment outputs) is skipped in that case, since there is no fragment
+/// signature to check them against.
 Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
-                              const feme::cpu::CompiledStage &FragmentStage,
+                              const feme::cpu::CompiledStage *FragmentStage,
                               uint32_t ColorAttachmentCount,
                               llvm::ArrayRef<VertexInputAttribute> Attributes) {
   Expected<feme::EntrySignature> VSSig = getStageSignature(VertexStage);
   if (!VSSig)
     return VSSig.takeError();
-  Expected<feme::EntrySignature> FSSig = getStageSignature(FragmentStage);
-  if (!FSSig)
-    return FSSig.takeError();
 
   const feme::SignatureElement *Position =
       findSystemValue(*VSSig, feme::SignatureDirection::Output,
@@ -439,41 +443,50 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                              "vertex stage does not write a 4-component "
                              "SV_Position output");
 
-  for (const feme::SignatureElement &FSIn : FSSig->Elements) {
-    if (FSIn.Direction != feme::SignatureDirection::Input ||
-        FSIn.SystemValue != feme::SignatureSystemValue::None)
-      continue;
-    if (!FSIn.Location)
-      return createStringError(inconvertibleErrorCode(),
-                               "fragment input element %u has no location to "
-                               "link against a vertex output",
-                               FSIn.ElementID);
-    const feme::SignatureElement *VSOut =
-        findLocation(*VSSig, feme::SignatureDirection::Output, *FSIn.Location);
-    if (!VSOut)
-      return createStringError(inconvertibleErrorCode(),
-                               "fragment input location %u has no matching "
-                               "vertex stage output",
-                               *FSIn.Location);
-    if (VSOut->ComponentCount != FSIn.ComponentCount ||
-        VSOut->ComponentType != FSIn.ComponentType)
-      return createStringError(inconvertibleErrorCode(),
-                               "vertex output and fragment input at location "
-                               "%u disagree on component count/type",
-                               *FSIn.Location);
-  }
+  if (FragmentStage) {
+    Expected<feme::EntrySignature> FSSig = getStageSignature(*FragmentStage);
+    if (!FSSig)
+      return FSSig.takeError();
 
-  for (uint32_t I = 0; I != ColorAttachmentCount; ++I) {
-    const feme::SignatureElement *Color =
-        findLocation(*FSSig, feme::SignatureDirection::Output, I);
-    if (!Color || Color->ComponentCount != 4 ||
-        Color->ComponentType != feme::SignatureComponentType::Float)
-      return createStringError(inconvertibleErrorCode(),
-                               "fragment stage has no 4-component "
-                               "floating-point output at location %u "
-                               "(SV_Target%u)",
-                               I, I);
+    for (const feme::SignatureElement &FSIn : FSSig->Elements) {
+      if (FSIn.Direction != feme::SignatureDirection::Input ||
+          FSIn.SystemValue != feme::SignatureSystemValue::None)
+        continue;
+      if (!FSIn.Location)
+        return createStringError(inconvertibleErrorCode(),
+                                 "fragment input element %u has no location "
+                                 "to link against a vertex output",
+                                 FSIn.ElementID);
+      const feme::SignatureElement *VSOut = findLocation(
+          *VSSig, feme::SignatureDirection::Output, *FSIn.Location);
+      if (!VSOut)
+        return createStringError(inconvertibleErrorCode(),
+                                 "fragment input location %u has no matching "
+                                 "vertex stage output",
+                                 *FSIn.Location);
+      if (VSOut->ComponentCount != FSIn.ComponentCount ||
+          VSOut->ComponentType != FSIn.ComponentType)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vertex output and fragment input at "
+                                 "location %u disagree on component "
+                                 "count/type",
+                                 *FSIn.Location);
+    }
+
+    for (uint32_t I = 0; I != ColorAttachmentCount; ++I) {
+      const feme::SignatureElement *Color =
+          findLocation(*FSSig, feme::SignatureDirection::Output, I);
+      if (!Color || Color->ComponentCount != 4 ||
+          Color->ComponentType != feme::SignatureComponentType::Float)
+        return createStringError(inconvertibleErrorCode(),
+                                 "fragment stage has no 4-component "
+                                 "floating-point output at location %u "
+                                 "(SV_Target%u)",
+                                 I, I);
+    }
   }
+  assert((FragmentStage || ColorAttachmentCount == 0) &&
+         "a fragment-less pipeline must not declare color attachments");
 
   // Every located vertex *input* must be supplied by a vertex attribute:
   // an unbound one would read as zero at every vertex, which is a silently
@@ -1125,26 +1138,29 @@ Error translateFixedFunctionState(
                                "implemented (V6)");
     }
   }
-  if (!VertexInfo || !FragmentInfo)
+  if (!VertexInfo)
     return createStringError(inconvertibleErrorCode(),
-                             "a graphics pipeline needs both a vertex and a "
-                             "fragment stage");
+                             "a graphics pipeline needs a vertex stage");
 
   // (roadmap F10) `VK_EXT_pipeline_robustness`: each stage's own
   // `VkPipelineRobustnessCreateInfo` (falling back to the pipeline-level
   // one, see `PipelineRobustness`'s own comment) is resolved and validated
   // independently, since the extension's own spec text scopes it "to all
-  // accesses emanating from the shader code of this shader stage".
+  // accesses emanating from the shader code of this shader stage". A
+  // fragment-less pipeline (below) has no fragment-stage `pNext` to
+  // resolve, so `Result.FragmentRobustness` is left at its default.
   Expected<PipelineRobustness> VertexRobustness =
       resolvePipelineRobustness(CreateInfo.pNext, VertexInfo->pNext);
   if (!VertexRobustness)
     return VertexRobustness.takeError();
-  Expected<PipelineRobustness> FragmentRobustness =
-      resolvePipelineRobustness(CreateInfo.pNext, FragmentInfo->pNext);
-  if (!FragmentRobustness)
-    return FragmentRobustness.takeError();
   Result.VertexRobustness = *VertexRobustness;
-  Result.FragmentRobustness = *FragmentRobustness;
+  if (FragmentInfo) {
+    Expected<PipelineRobustness> FragmentRobustness =
+        resolvePipelineRobustness(CreateInfo.pNext, FragmentInfo->pNext);
+    if (!FragmentRobustness)
+      return FragmentRobustness.takeError();
+    Result.FragmentRobustness = *FragmentRobustness;
+  }
 
   Expected<PipelineRenderTargets> Targets = getRenderTargets(CreateInfo);
   if (!Targets)
@@ -1155,6 +1171,14 @@ Error translateFixedFunctionState(
   if (Targets->Colors.size() > DeviceInfo.Properties.limits.maxColorAttachments)
     return createStringError(inconvertibleErrorCode(),
                              "the render target exceeds maxColorAttachments");
+  // (roadmap H2j) A fragment shader is only genuinely optional when the
+  // render target has no color attachments at all
+  // (`VUID-VkGraphicsPipelineCreateInfo-pStages-06894`/neighbors); a
+  // color-attached pipeline still requires one to produce those outputs.
+  if (!FragmentInfo && !Targets->Colors.empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "a graphics pipeline with color attachments "
+                             "needs a fragment stage");
 
   const VkPipelineInputAssemblyStateCreateInfo *InputAssembly =
       CreateInfo.pInputAssemblyState;
@@ -1235,9 +1259,15 @@ Error translateFixedFunctionState(
 /// Compiles both stages, validates them against \p Layout and each other,
 /// and builds the shareable artifact -- everything a pipeline-cache miss
 /// still has to do that a hit skips entirely.
+///
+/// \p FragmentInfo is `nullptr` for a pipeline that legally omitted its
+/// fragment stage (roadmap H2j): fragment-stage compilation, its root-
+/// constant/bound-range validation, and its half of cross-stage interface
+/// validation are all skipped in that case, and the returned artifact's own
+/// `FragmentStage` is left `nullptr` too.
 Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     const VkPipelineShaderStageCreateInfo &VertexInfo,
-    const VkPipelineShaderStageCreateInfo &FragmentInfo,
+    const VkPipelineShaderStageCreateInfo *FragmentInfo,
     const PipelineLayout &Layout, const VkPhysicalDeviceLimits &Limits,
     uint32_t ColorAttachmentCount,
     llvm::ArrayRef<VertexInputAttribute> VertexAttributes) {
@@ -1248,36 +1278,46 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
       compileGraphicsStage(*Ctx, VertexInfo, feme::ShaderStage::Vertex);
   if (!VertexStage)
     return VertexStage.takeError();
-  Expected<std::shared_ptr<feme::cpu::CompiledStage>> FragmentStage =
-      compileGraphicsStage(*Ctx, FragmentInfo, feme::ShaderStage::Fragment);
-  if (!FragmentStage)
-    return FragmentStage.takeError();
+  std::shared_ptr<feme::cpu::CompiledStage> FragmentStage;
+  if (FragmentInfo) {
+    Expected<std::shared_ptr<feme::cpu::CompiledStage>> Compiled =
+        compileGraphicsStage(*Ctx, *FragmentInfo, feme::ShaderStage::Fragment);
+    if (!Compiled)
+      return Compiled.takeError();
+    FragmentStage = std::move(*Compiled);
+  }
 
   const feme::cpu::ResourceInfo &VSInfo = (*VertexStage)->getResourceInfo();
-  const feme::cpu::ResourceInfo &FSInfo = (*FragmentStage)->getResourceInfo();
   if (!pushConstantsCoverRootConstantSize(Layout, VSInfo.RootConstantSize,
                                           Limits.maxPushConstantsSize,
-                                          VK_SHADER_STAGE_VERTEX_BIT) ||
-      !pushConstantsCoverRootConstantSize(Layout, FSInfo.RootConstantSize,
-                                          Limits.maxPushConstantsSize,
-                                          VK_SHADER_STAGE_FRAGMENT_BIT))
+                                          VK_SHADER_STAGE_VERTEX_BIT))
     return createStringError(
         inconvertibleErrorCode(),
         "a stage's root-constant span is not fully covered by a "
         "VkPushConstantRange visible to it in its VkPipelineLayout");
   if (Error E = validateBoundRanges(VSInfo, Layout))
     return std::move(E);
-  if (Error E = validateBoundRanges(FSInfo, Layout))
-    return std::move(E);
+  if (FragmentStage) {
+    const feme::cpu::ResourceInfo &FSInfo = FragmentStage->getResourceInfo();
+    if (!pushConstantsCoverRootConstantSize(Layout, FSInfo.RootConstantSize,
+                                            Limits.maxPushConstantsSize,
+                                            VK_SHADER_STAGE_FRAGMENT_BIT))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "a stage's root-constant span is not fully covered by a "
+          "VkPushConstantRange visible to it in its VkPipelineLayout");
+    if (Error E = validateBoundRanges(FSInfo, Layout))
+      return std::move(E);
+  }
 
-  if (Error E = validateStageInterfaces(**VertexStage, **FragmentStage,
+  if (Error E = validateStageInterfaces(**VertexStage, FragmentStage.get(),
                                         ColorAttachmentCount, VertexAttributes))
     return std::move(E);
 
   auto Artifact = std::make_shared<GraphicsPipelineArtifact>();
   Artifact->Ctx = std::move(Ctx);
   Artifact->VertexStage = std::move(*VertexStage);
-  Artifact->FragmentStage = std::move(*FragmentStage);
+  Artifact->FragmentStage = std::move(FragmentStage);
   return Artifact;
 }
 
@@ -1299,21 +1339,31 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
 
   const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
   auto *VertexModule = fromHandle<ShaderModule>(VertexInfo->module);
-  auto *FragmentModule = fromHandle<ShaderModule>(FragmentInfo->module);
+  // (roadmap H2j) `FragmentInfo` is `nullptr` for a pipeline that legally
+  // omitted its fragment stage; `FragmentModule` (and the words/entry point
+  // fed into the cache key below) follow it to a null/empty state rather
+  // than dereferencing a stage that was never named.
+  auto *FragmentModule =
+      FragmentInfo ? fromHandle<ShaderModule>(FragmentInfo->module) : nullptr;
 
   // A cache key needs the whole normalized pipeline description (see
   // "Pipeline Cache" in feme/docs/FeMeVulkanDesign.md): computed here, it
   // can be checked *before* paying for stage compilation, unlike a key
   // computed from the compiled result.
   std::optional<PipelineCacheKey> Key;
-  if (Cache && VertexModule && FragmentModule) {
+  if (Cache && VertexModule && (!FragmentInfo || FragmentModule)) {
     std::vector<uint8_t> FixedFunctionState =
         serializeFixedFunctionState(Result);
+    llvm::ArrayRef<uint32_t> FragmentWords =
+        FragmentModule ? FragmentModule->words() : llvm::ArrayRef<uint32_t>();
+    llvm::StringRef FragmentEntry =
+        FragmentInfo ? (FragmentInfo->pName ? FragmentInfo->pName : "main")
+                     : llvm::StringRef();
     Key = computeGraphicsPipelineCacheKey(
         DeviceInfo.Properties.pipelineCacheUUID, VertexModule->words(),
-        VertexInfo->pName ? VertexInfo->pName : "main", FragmentModule->words(),
-        FragmentInfo->pName ? FragmentInfo->pName : "main", Layout.setLayouts(),
-        Layout.pushConstantRanges(), FixedFunctionState);
+        VertexInfo->pName ? VertexInfo->pName : "main", FragmentWords,
+        FragmentEntry, Layout.setLayouts(), Layout.pushConstantRanges(),
+        FixedFunctionState);
   }
 
   std::shared_ptr<GraphicsPipelineArtifact> Artifact =
@@ -1328,7 +1378,7 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
       return std::nullopt;
     Expected<std::shared_ptr<GraphicsPipelineArtifact>> Compiled =
         compileAndValidateStages(
-            *VertexInfo, *FragmentInfo, Layout, DeviceInfo.Properties.limits,
+            *VertexInfo, FragmentInfo, Layout, DeviceInfo.Properties.limits,
             static_cast<uint32_t>(Result.Attachments.size()),
             Result.VertexAttributes);
     if (!Compiled)
