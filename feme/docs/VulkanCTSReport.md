@@ -5931,3 +5931,68 @@ change needed -- this fix corrects existing multiview render-pass
 load-op behavior; it advertises no new feature or extension
 (`multiview`/`VK_KHR_multiview` were already `yes`/`Advertised` since
 roadmap H2).
+
+## Roadmap H2b: measured impact (zero color attachments)
+
+`dEQP-VK.multiview.depth_without_fragment_shader*` (`--deqp-case`, same
+reproduction recipe as every row above): 3 cases (the base group plus its
+`dynamic_rendering`/`renderpass2` siblings, matching this row's own
+originally-cited count).
+
+Before this row's fix:
+
+```
+Test case 'dEQP-VK.multiview.depth_without_fragment_shader.no_queries.3_6_12_9_6_12_9_3_6_12_9_3'..
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37)
+```
+
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` attributes this to `GraphicsPipeline.
+cpp`'s own `"a graphics pipeline needs at least one color attachment"`
+check (`Targets->Colors.empty()`), one step ahead of `feme::graphics::
+executeDraws`'s analogous `"a draw needs at least one color attachment"`
+this row's own text names -- pipeline creation never gets far enough to
+reach the executor at all.
+
+After this row's two fixes (`executeDraws`'s and `GraphicsPipeline.cpp`'s
+own empty-`Colors`/empty-`Attachments` rejections both relaxed):
+
+```
+Test case 'dEQP-VK.multiview.depth_without_fragment_shader.no_queries.3_6_12_9_6_12_9_3_6_12_9_3'..
+vkCreateGraphicsPipelines: a graphics pipeline needs both a vertex and a fragment stage
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37)
+```
+
+Still `Fail`, at the same call, for a different reason: with the color-
+attachment checks out of the way, `GraphicsPipeline.cpp`'s unconditional
+"both stages required" check is next in line. `deqp-vk`'s own test
+(`vktMultiViewRenderTests.cpp`) does not merely bind a fragment shader
+that writes no color output, as this row's own title assumed -- it omits
+`VK_SHADER_STAGE_FRAGMENT_BIT` from `VkGraphicsPipelineCreateInfo::
+pStages` entirely, which is separately legal Vulkan whenever the bound
+render target has no color attachments. This is a distinct, materially
+larger gap (making the fragment stage itself optional through pipeline
+creation, compilation, and the executor's per-quad shading loop) than
+the attachment-count relaxation this row's own text scoped to; it is
+spun off as new roadmap row H2j rather than folded into this one.
+
+A full `dEQP-VK.multiview.*` run (838 cases) after both of this row's
+own fixes:
+
+```
+Passed:        454/838 (54.2%)
+Failed:         45/838 (5.4%)
+Not supported: 339/838 (40.5%)
+```
+
+Unchanged from H2i's own baseline (454/838, 45 `Failed`) -- expected,
+since this row's own named case (and its two siblings) still fail, just
+at a later point in pipeline creation than before. `Vulkan14
+FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed no change
+needed -- this row relaxes existing attachment-count validation; it
+advertises no new feature or extension.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full, 1765/1824 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from 1763/1822 before this row's own two new tests
+(`ExecutorTest.RendersWithZeroColorAttachments`,
+`GraphicsPipelineTest.AcceptsZeroColorAttachments`).

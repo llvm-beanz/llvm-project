@@ -1619,6 +1619,25 @@ input-attachment list of its own exists to populate it from). See
 "Roadmap H2h: measured impact" in VulkanCTSReport.md for the
 `dEQP-VK.multiview.input_attachments` regression this closes.
 
+**Status (roadmap H2b): zero color attachments now accepted, both at
+pipeline creation and at draw time.** `GraphicsPipeline.cpp`'s own
+`Targets->Colors.empty()` rejection and `feme::graphics::executeDraws`'s
+own `Draw.Attachments.empty()` rejection both assumed a render target
+always has at least one color attachment; a depth/stencil-only render
+target (no color attachments at all) is legal Vulkan and is exactly the
+shape `dEQP-VK.multiview.depth_without_fragment_shader` uses. Both checks
+are now relaxed to allow zero, relying on the existing `Pipeline.
+getColorBlends().size() == Draw.Attachments.size()` count match (already
+enforced) for consistency in the zero-attachment case the same as any
+other. This alone is not sufficient to make the named CTS case pass,
+though: it turns out to omit the fragment shader stage from its
+`VkGraphicsPipelineCreateInfo::pStages` entirely (also legal Vulkan
+whenever the render target has no color attachments), which
+`GraphicsPipeline.cpp`'s unconditional "needs both a vertex and a
+fragment stage" check still rejects -- left to roadmap H2j. See
+"Roadmap H2b: measured impact" in VulkanCTSReport.md for the full
+reproduction.
+
 **Status (roadmap F13): `VK_ATTACHMENT_LOAD_OP_NONE`/`STORE_OP_NONE`
 (`VK_KHR_load_store_op_none`) needed no new behavior at all.** Every
 attachment's `LoadOp` already took the "do nothing" path for anything
