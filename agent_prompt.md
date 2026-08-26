@@ -33,12 +33,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H2a?
+Can you work on milestone H2c?
 
-> **Root-cause the `feme-cpu-simdize` divergent-vector shape
-> `dEQP-VK.multiview`'s own fragment shaders hit** (454 of 838 cases in H2's own
-> measured run): a shape distinct from the four
-> `phi`/`select`/`shufflevector`/`extractelement` patterns roadmap C3 already
-> closed, since C3's own fix does not reach it. Likely a new member of C8's
-> "shader long tail" bucket rather than a new root cause of its own — triage
-> against C8 first
+> **Preserve a SPIR-V builtin interface block's (e.g. `gl_PerVertex`) per-member
+> decorations.** `SPIRVToLLVMPatterns.cpp`'s `buildStageIODecorationsAttr` only
+> reads a whole-variable `BuiltIn`/`Location`/`Component`/`Index` attribute
+> (`Op.getBuiltIn()`), never a struct type's own per-member decorations
+> (`mlir::spirv::StructType::getMemberDecorations`, already used by this same
+> file's `isBufferBlockWritable` for a storage-buffer block's `NonWritable`
+> member decoration) -- so a builtin interface block's own `llvm.mlir.global`
+> carries no `!spirv.Decorations` metadata at all (roadmap H2a's own root
+> cause). Needs a per-member decorations encoding (extending, not replacing, the
+> existing whole-variable `!spirv.Decorations` shape
+> `feme::spirv::attachStageIODecorations`/`parseSPIRVDecorations` already
+> round-trip) attached to the block's global, covering `gl_PerVertex`'s four
+> members at minimum
