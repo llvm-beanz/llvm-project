@@ -1048,6 +1048,88 @@ arrays of combined image samplers, and the remaining unhandled-opcode/
 diagnostic tail -- remains open, unmeasured beyond this `glsl` group, and
 is not moved by this row.**
 
+## Roadmap C8a: measured impact
+
+Roadmap C8a picks up the largest *named* row left in C8's own bucket after
+the section above: "matrix/aggregate stage IO (309)". Reading
+`CanonicalizeStage.cpp`'s SPIR-V-side rewrite confirmed the gap was real --
+it only ever recognized a scalar or `FixedVectorType` `Input`/`Output`
+global, so a matrix (`ArrayType` of column vectors) or a
+single-member-struct-wrapped variant fell through to a wrong default
+(`ComponentCount`/`RowCount` both 1, the whole aggregate treated as one
+opaque "scalar" store) -- and fixed it: `getStageIORowShape`/
+`peelSingleMemberStruct` now recognize both shapes, and `loadStageIOValue`/
+`storeStageIOValue` recursively decompose the aggregate into one
+`feme.stage.input.load`/`output.store` per (row, component). The CPU
+executor's `buildStageStorage` (`feme/lib/Graphics/Executor.cpp`), which
+had explicitly rejected any `RowCount != 1` element outright, now supports
+it end to end.
+
+**Finding the single-member-struct shape was itself only possible by
+measuring against a real `deqp-vk` run, not by reasoning about SPIR-V's
+type system in the abstract.** The plain-matrix fix alone (bare
+`ArrayType`, no struct wrapper) passed every unit test written against it,
+but running `dEQP-VK.glsl.linkage.varying.struct.mat4x2` against the built
+ICD produced a *new* diagnostic shape (`'feme.stage.output.store' ... row 1
+is out of range for element 2`) that a hand-written unit test would not
+have anticipated. Dumping the actual imported global's LLVM type (a
+temporary `FEME_DEBUG_STAGEIO` environment-variable trace, removed before
+landing) showed why: glslang wraps a `varying`-block *member* -- even one
+that is itself a matrix -- in an outer one-member struct
+(`{ [4 x <2 x float>] }` for a `mat4x2` member), a shape neither the
+original matrix fix nor any of this row's own unit tests exercised.
+
+**A second bug was caught only by a real end-to-end triangle-draw test,
+not by the unit-level signature/IR tests.** The first version of the
+`Executor.cpp` change passed every `CanonicalizeStageTest`/signature-level
+unit test, but a dedicated `ExecutorTest.
+InterpolatesConstantColorPackedInAMatrixVarying` regression test (a
+fully-covered, constant-color triangle whose color is packed into a
+`RowCount == 2` varying instead of a plain `float4`) failed: row 0 of the
+matrix read back correctly, but row 1 read back as either zero or a
+scrambled blend of unrelated values. The root cause was `lerpVertex`
+(the Sutherland-Hodgman clip-time interpolation helper) -- unlike
+`vertexAt`'s read loop and the fragment-side interpolation write loop,
+which both take a `LinkedVarying` and could be made `Row`-aware directly,
+`lerpVertex` flattens every varying's components into one linear `Idx`
+without ever iterating `Row`, so a clipped vertex's row-1 components were
+left at their zero-initialized default instead of being lerped. Since this
+row's own test triangle deliberately exceeds the `[-1, 1]` NDC square (so
+Sutherland-Hodgman clipping actually runs, producing synthetic lerped
+vertices, not just the three original ones), this bug would not have been
+caught by a test that only checked signature/IR shape, or one whose
+triangle happened to need no clipping.
+
+**Measured against a real `deqp-vk.glsl` run (26,808 cases, before/after
+otherwise-identical builds):** every occurrence of the "aggregate type"
+`feme-cpu-simdize` diagnostic (21) and the `feme-graphics-validate-stage`
+component/row-out-of-range diagnostics this gap produced (42 pre-fix
+occurrences of "out of range for element", one specific case's own three
+manifestations of the same underlying bug) is gone -- 0 occurrences of
+either in the post-fix log. The group's own `Passed`/`Failed`/
+`Not supported` totals are byte-for-byte unchanged: **0/26,808 passed,
+13,921/26,808 failed, 12,887/26,808 not supported**, identical before and
+after (confirmed by diffing the full logs, not just the summary line).
+Every one of the 63 affected occurrences (grep-counted, spanning multiple
+`dEQP-VK.glsl.linkage.varying.struct.*` cases) now fails one step later
+instead: the *same* case's log now shows `feme-cpu-simdize`'s pre-existing
+"used outside a supported insertelement-chain/resource-store/
+extractelement/select/shufflevector/phi/elementwise pattern" diagnostic
+(42 post-fix occurrences, up from the 21 pre-fix "of aggregate type"
+occurrences -- a matrix/aggregate value now reaches `SIMDizePass` as a
+legalized `feme.stage.*` call, and *that* pass's own divergent-vector
+decomposition, roadmap C3's scope, does not yet cover the `insertvalue`/
+`extractvalue` chain shape this produces). This is the same
+"legalized-but-still-blocked-downstream" outcome the "Roadmap C8: measured
+impact" section above found for its own (different) stage-IO gap: a real,
+correct, regression-tested fix to this row's own named scope, with zero
+observable `dEQP-VK` movement because a distinct, already-tracked (C3) or
+newly-named (roadmap C8b) blocker sits immediately downstream of it. See
+Roadmap.md's new C8b row for that blocker, and roadmap H2a (which flagged
+what looks like the same `feme-cpu-simdize` shape from a completely
+different CTS group, `dEQP-VK.multiview`) for why the two should be
+triaged together rather than assumed to be the same fix twice over.
+
 ## Roadmap D0: measured impact
 
 Roadmap D0 (see Roadmap.md's new §1.9.2, "The road to Vulkan 1.4

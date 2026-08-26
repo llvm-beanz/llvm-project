@@ -596,7 +596,20 @@ validation passes this section calls for:
   `llvm.spv.discard` call `OpKill` uses, followed by an explicit
   `llvm.return` (`OpTerminateInvocation`, unlike `OpDemoteToHelperInvocation`,
   is a true terminator), so this pass needs no changes of its own: the
-  existing `llvm.spv.discard` renaming above already covers it.
+  existing `llvm.spv.discard` renaming above already covers it. Roadmap C8
+  taught the SPIR-V-side rewrite a matrix/array-typed (`ArrayType` of
+  column vectors, the shape SPIRVToLLVM's `spirv.MatrixType` conversion
+  produces, see SPIRVToLLVMPatterns.cpp) or single-member-struct-wrapped
+  variant (glslang's own shape for a `varying`-block *member*, even a
+  scalar/vector/matrix one -- e.g. a `mat4x2` member becomes the LLVM type
+  `{ [4 x <2 x float>] }`): the struct wrapper is peeled first
+  (`peelSingleMemberStruct`), and the resulting scalar/vector/array value
+  is recursively decomposed into one `feme.stage.input.load`/
+  `output.store` per (row, component), the same shape a plain vector
+  already used, one level further out (`loadStageIOValue`/
+  `storeStageIOValue`). The signature element gets `RowCount` set to the
+  matrix's column count (1 for a plain scalar/vector, unchanged from
+  before).
 - `feme::graphics::ValidateStagePass` (`feme-graphics-validate-stage`)
   diagnoses (through `LLVMContext::emitError`, never rewrites) a
   `feme.stage.*` call whose element/row/component operands are non-constant,
@@ -1786,10 +1799,17 @@ a `w > 0` guard), fan-triangulating the result; a non-`Float` varying
 survives clipping from the first vertex of the rasterized (possibly
 clipped) triangle rather than the original mesh's provoking vertex, since
 no provoking-vertex convention is modelled yet (see "Normalized pipeline"'s
-own deviation note). Vertex/fragment stage elements are 32-bit scalars/
-vectors only (`RowCount == 1`); vertex-output/fragment-input varyings link
-by `Location`, the same Vulkan-style convention "Normalized pipeline" notes
-in place of a `StageInterfaceMap`. `unittests/Graphics/ExecutorTest.cpp`
+own deviation note). Vertex/fragment stage elements are 32-bit scalars
+only, per component; a matrix/array-typed vertex-output/fragment-input
+varying (`RowCount > 1`, roadmap C8) is supported end to end -- linked,
+clip-interpolated, and stored/read one row at a time (`StageStorage::
+readRaw`/`writeRaw`'s `Row` parameter, `LinkedVarying::RowCount`) -- but a
+matrix *vertex attribute* (bound from a vertex buffer, which needs one
+`VkVertexInputAttributeDescription` per column at consecutive locations)
+remains a mechanical, on-demand addition, same as 16-/64-bit varyings.
+Vertex-output/fragment-input varyings link by `Location`, the same
+Vulkan-style convention "Normalized pipeline" notes in place of a
+`StageInterfaceMap`. `unittests/Graphics/ExecutorTest.cpp`
 and `test/Tools/feme-render/draw-{triangle,vertex-buffer,indexed}.test`
 cover this row; see Roadmap.md's own R32 entry for the full status note.
 
