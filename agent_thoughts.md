@@ -34017,3 +34017,172 @@ through roadmap row H2c and updated H2d's own text (no longer "pending
 H2c", plus a note about the exact `isSPIRVStageIOGlobal` gap H2d still
 needs to close: recognizing a global with `feme.spirv.MemberDecorations`
 but no whole-variable `!spirv.Decorations`).
+
+# Milestone H2d: decompose a builtin interface block into per-member signature elements
+
+## Scope and plan
+
+H2c left `CanonicalizeStagePass` unable to consume the new per-member
+`feme.spirv.MemberDecorations` metadata it produces for a builtin
+interface block (e.g. `gl_PerVertex`). H2d's own scope, per the roadmap
+row: teach `isSPIRVStageIOGlobal` to recognize a global carrying only
+that metadata (no whole-variable `!spirv.Decorations`), and teach
+`canonicalizeSPIRVStage` to decompose such a global into one
+`SignatureElement` per struct member instead of one for the whole
+variable, routing each member through its own `ElementID`.
+
+Read `CanonicalizeStage.cpp` end to end first: `isSPIRVStageIOGlobal`
+gates purely on `!spirv.Decorations`' presence; `canonicalizeSPIRVStage`
+discovers stage-IO globals, assigns each one `ElementID`, and rewrites
+its loads/stores through `loadStageIOValue`/`storeStageIOValue`'s
+existing per-(struct member, row, component) recursion (built for C8a's
+matrix/aggregate case). The natural extension: keep one `ElementID` per
+*global* for an ordinary variable, but a `SmallVector` of `ElementID`s
+(one per struct member) for a block global, and add a `loadStageIOBlockValue`/
+`storeStageIOBlockValue` pair one level above the existing recursion to
+route each member through its own ID.
+
+## First landing and its own bug
+
+Implemented exactly that: `isSPIRVStageIOGlobal` now also accepts
+`feme.spirv.MemberDecorations`-only globals; `canonicalizeSPIRVStage`
+decomposes a block into N `SignatureElement`s using the struct's own
+member types for `getStageIORowShape`; `loadStageIOBlockValue`/
+`storeStageIOBlockValue` decompose a *whole aggregate* load/store into
+one `loadStageIOValue`/`storeStageIOValue` call per member. Wrote a new
+unit test (`RecognizesMemberDecoratedInterfaceBlockAsStageIO`) modeling
+`gl_PerVertex` as a single `store {struct} %agg, ptr addrspace(8)
+@gl_PerVertex` -- the same shape H2a's own (now corrected) test used --
+and it passed. `ninja check-feme` was fully green: 1812/1813.
+
+Getting `getSystemValueForBuiltIn`'s `ClipDistance`/`CullDistance` cases
+right took a moment: the existing switch already mapped SPIR-V `BuiltIn`
+codes 3/4 to real `SignatureSystemValue` tags, but nothing downstream
+(`VertexWrapper.cpp`, `Executor.cpp`) ever consumes those two -- they
+were dead code, only reachable once a block decomposes into per-member
+BuiltIns, which never happened before H2d. The roadmap row's own text
+explicitly wanted them mapped to `None` ("unmodeled system values,
+matching how an unrecognized DXIL semantic already converts"), so
+changed the mapping to match, updating the doc comment to explain both
+why (no real consumer) and that this is a change in *what gets produced*
+from previously-unreachable code, not an observable behavior change.
+
+Before assuming this was done, ran a real `dEQP-VK.multiview` group
+(838 cases) against a freshly built `libfeme_vulkan`, since every prior
+row in this stretch (H2, H2a) found the roadmap's own "closes the whole
+group" framing did not survive contact with a real `deqp-vk` run. Good
+thing I did: the very first case aborted with a `cast<StructType>`
+assertion failure inside `canonicalizeSPIRVStage`.
+
+Used `gdb -batch -ex run -ex bt` against the crashing case directly
+(`dEQP-VK.multiview.clear_attachments.no_queries.15`) to get a real
+backtrace, confirming the crash was in my own new code, not some
+pre-existing issue. Rather than guess at the IR shape, added a
+temporary `FEME_DEBUG_DUMP_STAGE_IO` env-gated `F.print(errs())` at the
+top of `canonicalizeSPIRVStage`, rebuilt just `libfeme_vulkan`, and
+re-ran the single failing case. The dump showed the real shape:
+
+```
+store <4 x float> %1, ptr addrspace(8) @spirv_var_13, align 4
+```
+
+A bare store of a `<4 x float>` (not the whole struct!) directly on the
+block global -- no `getelementptr` at all. This is `gl_Position`'s own
+write: SPIR-V's `OpAccessChain` into member 0 needs no pointer
+arithmetic (member 0 sits at byte offset 0), so LLVM's own constant-GEP
+folding erases the `getelementptr` entirely, leaving what looks
+structurally identical to "the whole variable is one plain value" --
+except the value's type is the *member's* type, not the struct's.
+
+My original design's `cast<StructType>` assumed every multi-`ElementID`
+global's load/store value type was the whole struct. It never occurred
+to me to check the *value type* against the discovered element count
+before committing to that assumption, since my own hand-written unit
+test (built before knowing the real shape) happened to model exactly
+that wrong case.
+
+## Fixing it: byte-offset resolution
+
+Initially reached for a narrower fix: detect a `getelementptr` with a
+constant second index (the "member" index in the naive `getelementptr
+StructTy, ptr @block, i32 0, i32 M` shape) and route through that
+member specifically, falling back to "member 0" for a bare global
+(matching the offset-0 fold). Implemented this, rebuilt, and it
+resolved the crash for `clear_attachments` -- but the *next* real run
+(`dEQP-VK.multiview.input_instance.no_queries.max_multi_view_view_count`)
+found a second gap in the same design: its shader reads back
+`gl_Position.y` after writing it (a `getelementptr (i8, ptr @block, i64
+4)` `ConstantExpr` -- LLVM's own canonical byte-offset GEP form,
+*not* a struct-indexed `getelementptr` at all). My structural-index
+walk never matched this shape (it looks for a `GetElementPtrInst` with
+a constant struct-member index; this is a `ConstantExpr`, and its
+single index is a raw byte count, not a member index), so the access
+was left unresolved, and a *different* bug (this one pre-existing,
+unrelated to my own change) then surfaced: `ValidateStagePass` flagging
+a `feme.stage.input.load` referencing an `Output`-direction element as
+"wrong direction" -- once I looked closer, this was actually a
+completely separate, genuine finding (SPIR-V permits reading back an
+`Output` storage-class variable within the same invocation, which
+`feme.stage.*`'s Input-vs-Output split has no representation for), not
+something caused by my own resolution gap. But the resolution gap
+itself (the byte-offset GEP not being recognized at all) was real and
+needed its own fix regardless.
+
+Rather than special-case yet another GEP shape, replaced the whole
+approach with `Value::stripAndAccumulateConstantOffsets` -- an LLVM API
+built exactly for this: it walks any chain of GEPs (instruction or
+`ConstantExpr`, structural or byte-offset) and returns the ultimate base
+pointer plus the total constant byte offset, uniformly. Combined with
+the block's own `DataLayout::getStructLayout` (`getElementContainingOffset`,
+`getElementOffset`), this turns any constant-offset access -- bare
+global, structural GEP, or byte-offset GEP -- into (member index,
+residual byte offset), and a new `resolveRowComponent` helper turns that
+residual into the `(Row, Component)` pair `loadStageIOValue`/
+`storeStageIOValue` already expect, mirroring `getStageIORowShape`'s own
+type-recursion logic (peel a single-member struct, then an array's rows,
+then a vector's components) but working from a byte offset instead of a
+type-structure walk. This is strictly more general than either of my
+first two attempts and needed no further special-casing once the real
+CTS shapes were retested.
+
+Added `RecognizesInterfaceBlockPerMemberByteOffsetAccess` (the real
+per-member/per-component byte-offset shape, checking each store's
+resolved `ElementID`/`Row`/`Component` directly) alongside the existing
+whole-aggregate test, plus a matching lit test
+(`spirv-canonicalize-stage-interface-block-byte-offset.ll`). `ninja
+check-feme`: 1814/1815, still fully green.
+
+## Vulkan CTS
+
+Re-ran the full `dEQP-VK.multiview.*` group (838 cases) after the
+byte-offset fix: no more crashes, and 78/838 now pass outright, up from
+H2/H2a/H2c's own 0/838. Categorized the remaining 421 failures using
+`grep`/`awk` over the `--deqp-log-filename` output, `gdb` for the two
+pipeline-creation failures whose reason wasn't obvious from the log
+text alone, and the driver's own opt-in `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+(discovered by reading `Diagnostics.cpp`) to get the actual rejection
+reason without instrumenting the code myself. Three buckets matched
+already-tracked gaps (H2b's depth-only pipelines, H8's unsupported
+integer color-attachment format -- confirmed the `dynamic_rendering`
+variant's `VK_ERROR_INITIALIZATION_FAILED` is the *same* H8 root cause,
+just surfacing at `vkCreateGraphicsPipelines` instead of
+`vkCreateRenderPass(2)` since dynamic rendering has no render-pass
+object to reject the format earlier). Three did not match anything
+already tracked: the `Output` read-after-write gap `input_instance`
+exposed (real, and directly informative for finishing the crash fix
+above -- not something to fix within H2d's own stated scope, so spun
+off as roadmap row H2e rather than folded in here), an occlusion-query
+availability-bit gap under multiview (H2f, not investigated further),
+and a large (334-case) plain image-comparison bucket spanning most
+subgroups (H2g) -- spot-checked one case (`instanced.no_queries.15`) to
+rule out H2e's own read-back gap as the shared cause before writing it
+up as "root cause not yet determined" rather than guessing.
+
+Recorded all of this as "Roadmap H2d: measured impact" in
+VulkanCTSReport.md, struck through roadmap row H2d with an honest
+deviation note (matching H2/H2a's own precedent of noting when a row's
+"closes the whole group" framing did not survive a real run), and added
+the three new roadmap rows. No feature/extension bit changed in this
+row, so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need
+no update -- noted explicitly rather than left silent, matching every
+prior row in this stretch.
