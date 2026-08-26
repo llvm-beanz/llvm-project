@@ -553,7 +553,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_KHR_load_store_op_none` | yes | roadmap F13: applyClear's existing LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR check (CommandBuffer.cpp) already treats VK_ATTACHMENT_LOAD_OP_NONE as "do nothing"; StoreOp is never read to act on at all, so STORE/DONT_CARE/NONE are indistinguishable in this real-memory-backed renderer |
 | extension | VK_VERSION_1_4 | `VK_KHR_maintenance5` | yes | roadmap E5: null VkRenderingAttachmentInfo image views, VK_REMAINING_ARRAY_LAYERS in copy/blit/resolve regions (E27), and the rest of the group |
 | extension | VK_VERSION_1_4 | `VK_KHR_maintenance6` | yes | roadmap E6: vkCmdBindDescriptorSets2/vkCmdPushConstants2/vkCmdPushDescriptorSet2 (Descriptor.cpp, CommandBuffer.cpp) |
-| extension | VK_VERSION_1_4 | `VK_KHR_map_memory2` | no |  |
+| extension | VK_VERSION_1_4 | `VK_KHR_map_memory2` | yes | roadmap F14: vkMapMemory2/vkUnmapMemory2 (Memory.cpp), thin pNext-extensible wrappers around vkMapMemory/vkUnmapMemory; VK_MEMORY_UNMAP_RESERVE_BIT_EXT is validate-only since VK_EXT_map_memory_placed is unimplemented |
 | extension | VK_VERSION_1_4 | `VK_KHR_push_descriptor` | yes | roadmap F12: see the pushDescriptor feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_expect_assume` | yes | roadmap F4: spirv.KHR.AssumeTrue/spirv.KHR.Expect conversion patterns (SPIRVToLLVMPatterns.cpp's AssumeTrueConversionPattern/ExpectConversionPattern) |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no |  |

@@ -5010,3 +5010,55 @@ unsupported (pre-existing, unrelated) -- up from F12b's own 1790 by this
 row's own two new regression tests (`RenderPassTest.
 CompilesLoadStoreOpNone`, `DrawTest.LoadStoreOpNoneLeavesUntouchedTexelsAlone`).
 
+
+## Roadmap F14: measured impact (`VK_KHR_map_memory2`)
+
+`dEQP-VK.memory.mapping.*` (`--deqp-case`, same reproduction recipe as
+F9-F13's own sections above -- this group is the only one in the whole
+CTS tree that exercises `vkMapMemory2`/`vkUnmapMemory2` at all, one
+`_map2`-suffixed variant per existing plain-`vkMapMemory`/`vkUnmapMemory`
+case): 4466 cases discovered.
+
+```
+Passed:        4466/4466 (100.0%)
+Failed:        0/4466 (0.0%)
+Not supported: 0/4466 (0.0%)
+```
+
+The first attempt at this row crashed instead of running: a real
+`deqp-vk` invocation SIGSEGV'd inside
+`vkt::memory::(anonymous namespace)::testMemoryMapping` at a null
+function pointer (`gdb -batch -ex run -ex bt`), the exact "frame 0 at
+address 0x0" shape `agent_thoughts.md`'s own V0-era crash-isolation loop
+first documented for a missing dispatch-table entry. Root cause,
+confirmed by reading `vkInitDeviceFunctionPointers.inl`: this CTS
+checkout only loads `vkMapMemory2`/`vkUnmapMemory2` (the core,
+non-`KHR`-suffixed names this driver first implemented) when its own
+negotiated `usedApiVersion` for a test is `>= 1.4`, falling back to the
+`KHR` name otherwise -- and this driver's `icd.json` `api_version`
+(`1.1.0`) makes the *core* name unreachable through the real system
+Vulkan loader for any caller below that, the same "loader cannot reach a
+newer core name" gap `vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS`
+comment already documents for `VK_KHR_maintenance5`'s granularity/
+subresource-layout commands. Implementing `vkMapMemory2KHR`/
+`vkUnmapMemory2KHR` as thin wrappers around the core names (`Memory.cpp`)
+and adding `VK_KHR_map_memory2` to `SUPPORTED_EXTENSIONS` so the
+generator's dispatch table actually carries the `KHR` names fixed it: the
+full group above then ran clean, with every `_map2` variant passing
+alongside its pre-existing plain counterpart.
+
+A targeted re-run of `dEQP-VK.api.info.extension_core_versions.
+extension_core_versions` (the consistency check a newly-advertised
+extension name could most plausibly regress, per F13's own section
+above) still `Pass`es, confirming `VK_KHR_map_memory2`'s addition to
+`getSupportedDeviceExtensions` introduced no inconsistency with any other
+advertised feature or extension.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1795 discovered, 1794 passed, 1
+unsupported (pre-existing, unrelated) -- up from F13's own 1792 discovered
+by this row's own three new `MemoryTest` cases
+(`MapMemory2WriteUnmap`, `MapMemory2RejectsOutOfRange`,
+`UnmapMemory2AcceptsReserveBit`, plus the extension-count/name updates to
+`DrawTest.AdvertisesDynamicRenderingExtension`) and the generator's own
+`vk-gen-entrypoints-split-features.test` fixture update.

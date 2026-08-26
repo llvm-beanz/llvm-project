@@ -369,7 +369,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_maintenance7` | Not implemented |  |
 | `VK_KHR_maintenance8` | Not implemented |  |
 | `VK_KHR_maintenance9` | Not implemented |  |
-| `VK_KHR_map_memory2` | Planned (in scope, not implemented) | roadmap F14 |
+| `VK_KHR_map_memory2` | Advertised | roadmap F14: vkMapMemory2/vkUnmapMemory2 (Memory.cpp) wrap the existing vkMapMemory/vkUnmapMemory; VK_MEMORY_UNMAP_RESERVE_BIT_EXT is validate-only, since VK_EXT_map_memory_placed (the only extension that gives it meaning) is not implemented |
 | `VK_KHR_multiview` | Planned (in scope, not implemented) | roadmap H2: layered rendering first; deqp-vk's own multiview cases enable this by name |
 | `VK_KHR_opacity_micromap` | Not implemented |  |
 | `VK_KHR_performance_query` | Not implemented |  |

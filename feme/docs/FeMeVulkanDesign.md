@@ -1007,7 +1007,12 @@ implications for `vkFlushMappedMemoryRanges`. `vkAllocateMemory` allocates host
 storage aligned to at least the advertised `minMemoryMapAlignment`;
 `vkMapMemory` returns a pointer into it. Coherent memory avoids cache-management
 work in the first implementation, so flush and invalidate validate ranges and
-otherwise do nothing.
+otherwise do nothing. `vkMapMemory2`/`vkUnmapMemory2` (roadmap F14,
+`VK_KHR_map_memory2`) are thin `pNext`-extensible wrappers around the same
+map/unmap logic; `VkMemoryUnmapFlagsKHR`'s `VK_MEMORY_UNMAP_RESERVE_BIT_EXT`
+only has meaning together with `VK_EXT_map_memory_placed`'s reservation-based
+mapping, which this driver does not implement, so it is validated but
+otherwise a no-op here.
 
 Binding a buffer records a `(VkDeviceMemory, offset)` pair after validating
 alignment, range, and usage. A descriptor referring to a buffer resolves to:
