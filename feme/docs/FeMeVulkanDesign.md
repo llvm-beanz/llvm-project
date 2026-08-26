@@ -1515,6 +1515,28 @@ but belongs to three separate, already-scoped gaps (H2a, H2b, H8), not to
 this row. See "Roadmap H2: measured impact" in VulkanCTSReport.md for the
 full breakdown.
 
+**Status (roadmap H2f): occlusion query availability under multiview
+fixed.** `dEQP-VK.multiview.non_precise_queries_with_availability`'s own
+"occlusion availability bit N is 0" root cause: per the Vulkan spec, an
+occlusion query recorded inside a multiview render pass instance
+implicitly spans one query index per set bit of the active subpass's
+view mask (ordered by ascending bit position), not the single index a
+non-multiview query uses -- `QueryPool::begin`/`markAvailable` now take
+a `ViewCount` (the popcount of `GraphicsState::Binding.ViewMask` at
+`vkCmdBeginQuery` time, 1 outside multiview) and operate on
+`[Query, Query+ViewCount)`, and `CommandBuffer.cpp` tracks each active
+occlusion query as an explicit `ActiveOcclusionQuery{Pool, FirstQuery,
+ViewCount}` rather than a plain `QueryPool *` set. `runDraw`'s own
+per-view loop resets its passed-sample counter for each rendered view
+and routes each view's own count to its own enumerated query index
+(`accumulateOcclusionSamples`), rather than the prior behavior of
+summing every view's samples into the query's single first index and
+leaving every other implicit index permanently unavailable.
+`DrawTest.MultiviewOcclusionQueryWritesOneQueryIndexPerView` (a two-view
+`viewMask == 0b11` render pass, a single `vkCmdBeginQuery`/
+`vkCmdEndQuery` pair at query index 0) confirms both query index 0 and 1
+end up available with the fullscreen draw's own sample count.
+
 **Status (roadmap E5): a dynamic-rendering color attachment's
 `VkRenderingAttachmentInfo::imageView == VK_NULL_HANDLE` is a slot that is
 present -- it still counts against the pipeline's `colorAttachmentCount`,

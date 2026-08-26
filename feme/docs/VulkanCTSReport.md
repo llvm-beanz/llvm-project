@@ -5502,3 +5502,63 @@ pre-existing, unrelated `Unsupported`), up from 1814/1815 before this row.
 this row touches no feature/extension advertisement, only
 `CanonicalizeStagePass`'s own SPIR-V-derived-IR legalization.
 
+## Roadmap H2f: measured impact (multiview occlusion query availability)
+
+`dEQP-VK.multiview.*` (`--deqp-case`, same reproduction recipe as F9-F14's
+own sections above): 838 cases discovered.
+
+```
+Passed:        96/838 (11.5%)
+Failed:        403/838 (48.1%)
+Not supported: 339/838 (40.5%)
+```
+
+Up from H2e's own 78/838, and every one of the additional 18 passes is
+`non_precise_queries_with_availability`'s own case set -- `grep -c
+"availability bit"` against the full log now returns 0, down from 18. Root
+cause: per the Vulkan spec, `vkCmdBeginQuery`/`vkCmdEndQuery` for an
+occlusion query recorded inside a multiview render pass instance
+implicitly span one query index per set bit of the active subpass's view
+mask (ordered by ascending bit position), not the single index a
+non-multiview query uses. `feme::vulkan::QueryPool`/`CommandBuffer.cpp`
+had no representation for this at all: `begin`/`markAvailable` always
+touched exactly one index, and `runDraw`'s per-view loop summed every
+rendered view's own passed-sample count into one shared `PassedSamples`
+scalar applied to every currently-active query pool broadcast-style
+(`accumulateActiveOcclusionSamples`) -- so a two-view query's second
+(and every further) implicit index was simply never written, staying
+permanently unavailable, and its first index held the sum across both
+views rather than either view's own count.
+
+The fix: `QueryPool::begin`/`markAvailable` take a `ViewCount` (the
+popcount of `GraphicsState::Binding.ViewMask` at `vkCmdBeginQuery` time,
+1 outside multiview) and operate on `[Query, Query+ViewCount)`;
+`accumulateActiveOcclusionSamples`'s "broadcast to every active index" is
+replaced by `accumulateOcclusionSamples(Query, Samples)`, adding to one
+explicit index. `CommandBuffer.cpp` tracks each active occlusion query as
+an explicit `ActiveOcclusionQuery{Pool, FirstQuery, ViewCount}` (found at
+`vkCmdEndQuery` time by matching `(Pool, FirstQuery)`) rather than a plain
+`QueryPool *` set, and `runDraw`'s per-view loop now resets its own
+`PassedSamples` counter for each rendered view and routes each view's own
+count to its own enumerated query index.
+
+`DrawTest.MultiviewOcclusionQueryWritesOneQueryIndexPerView` (a two-view
+`viewMask == 0b11` render pass, a single `vkCmdBeginQuery`/
+`vkCmdEndQuery` pair at query index 0) locks this down at the unit level
+-- confirmed to fail against the pre-fix code with exactly this row's own
+symptom (query index 0 holding the summed total, query index 1 permanently
+unavailable) before the fix landed. `ninja check-feme`
+(`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in full, 1818/1819 (1
+pre-existing, unrelated `Unsupported`), up from 1817/1818 before this row.
+
+The remaining 403 failures are unchanged from H2d/H2e's own breakdown
+(358 `Fail (Fail)` image-comparison cases tracked by roadmap H2g, 17
+`vkCreateGraphicsPipelines` failures split between roadmap H2b's 3 and
+roadmap H8's 14 `dynamic_rendering.view_mask_iteration` cases, and 28
+`vkCreateRenderPass(2)` `VK_ERROR_FORMAT_NOT_SUPPORTED` cases tracked by
+roadmap H8) -- this row's own scope is the multiview occlusion-query
+availability gap alone, and touches none of those other buckets.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: unchanged --
+this row touches no feature/extension advertisement, only
+`QueryPool`/`CommandBuffer.cpp`'s own occlusion-query bookkeeping.
