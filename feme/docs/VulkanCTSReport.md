@@ -5796,3 +5796,138 @@ extension (`multiview`/`VK_KHR_multiview` were already `yes`/`Advertised`
 since roadmap H2, and `VK_KHR_dynamic_rendering_local_read`'s own input-
 attachment support, since roadmap F8/F8a, is untouched).
 
+
+## Roadmap H2i: measured impact
+
+`dEQP-VK.multiview.readback_implicit_clear.*` (`--deqp-case`, same
+reproduction recipe as every row above): 24 cases
+(`renderpass2`/`dynamic_rendering` variants included).
+
+Baseline (H2g/H2h's own numbers -- untouched by H2h's own fix, which was
+a different attachment path entirely):
+
+```
+Passed:         6/24 (25.0%)
+Failed:        18/24 (75.0%)
+Not supported:  0/24 (0.0%)
+```
+
+After this row's fix:
+
+```
+Passed:        24/24 (100.0%)
+Failed:         0/24 (0.0%)
+Not supported:  0/24 (0.0%)
+```
+
+A full `dEQP-VK.multiview.*` run (838 cases) rose from H2h's own 436/838
+(52.0%) to 454/838 (54.2%) passed, `Failed` falling from 63 to 45 --
+exactly this row's own 18 cases. The other 45 remaining `Failed` cases
+are every one of H2h's own already-tracked, unrelated gaps: 42
+`view_mask_iteration` (`VK_FORMAT_R8G8B8A8_UINT`, roadmap H8) and 3
+`depth_without_fragment_shader` (roadmap H2b) -- `63 - 18 = 45` matches
+exactly.
+
+**Root cause**: two compounding bugs in `CommandBuffer.cpp`'s render-pass
+load-op path, found by re-running the 8 `readback_implicit_clear.no_
+queries.*` cases individually against the baseline build:
+
+```
+Test case 'dEQP-VK.multiview.readback_implicit_clear.no_queries.15'..
+  Pass (Pass)
+Test case 'dEQP-VK.multiview.readback_implicit_clear.no_queries.15_15_15_15'..
+  Pass (Pass)
+Test case 'dEQP-VK.multiview.readback_implicit_clear.no_queries.1_2_4_8'..
+  Fail (Fail)
+Test case 'dEQP-VK.multiview.readback_implicit_clear.no_queries.1_2_4_8_16_32'..
+  Fail (Fail)
+Test case 'dEQP-VK.multiview.readback_implicit_clear.no_queries.5_10_5_10'..
+  Fail (Fail)
+Test case 'dEQP-VK.multiview.readback_implicit_clear.no_queries.8'..
+  Fail (Fail)
+Test case 'dEQP-VK.multiview.readback_implicit_clear.no_queries.8_1_1_8'..
+  Fail (Fail)
+Test case 'dEQP-VK.multiview.readback_implicit_clear.no_queries.max_multi_view_view_count'..
+  Fail (Fail)
+```
+
+`8` is a *single*-subpass case (`viewMask == 0b1000`, view 3 alone) and
+still failed -- disproving the roadmap row's own framing ("exactly the
+cases whose numeric suffix names more than one subpass") and pointing at
+a first, simpler bug independent of multi-subpass anything: `applyClear`
+(the `VK_ATTACHMENT_LOAD_OP_CLEAR` handler run at `vkCmdBeginRenderPass`/
+`vkCmdBeginRendering`) never sliced its target attachment by array layer
+at all -- unlike H2g's own `clearAttachmentRects` fix for
+`vkCmdClearAttachments`, it iterated `Y`/`X`/`S` and computed each texel's
+offset directly against `Attachment->Width`/`Height`, with no per-`View
+Mask`-bit loop and no call to `sliceAttachmentLayer` -- so it always
+cleared only the *first* attachment layer's own byte range, regardless of
+which views `RenderTargetBinding::ViewMask` actually named. A mask that
+happened to include view 0 (`15`, `15_15_15_15`) passed by coincidence;
+any mask that didn't (`8`) failed outright, real multi-subpass shape or
+not.
+
+Fixing bug 1 alone is not sufficient for the multi-subpass cases, though:
+`vkCmdNextSubpass` never called `applyLoadOps` at all -- only
+`vkCmdBeginRenderPass`/`vkCmdBeginRendering` did. Every one of this
+test's variants binds a *single* color attachment shared by every
+subpass, each declaring its own view mask (`1_2_4_8`: four subpasses,
+masks `0b0001`/`0b0010`/`0b0100`/`0b1000`, one view each). Per the Vulkan
+spec, an attachment's load op fires "at the beginning of the subpass
+where it is first used" -- and, per `imageData`'s own reference-image
+construction in `vktMultiViewRenderTests.cpp` (which accumulates each
+layer's expected background color per *subpass*, walking the view masks
+in execution order), that "first use" is tracked per *view*, not once for
+the whole attachment: a view no earlier subpass's mask included still
+needs its own share of the clear the first time a later subpass's mask
+introduces it. Since `nextSubpass` never re-ran `applyLoadOps`, subpasses
+1-3 of `1_2_4_8` (views 1-3) never got their own share of the clear at
+all, leaving their layers with whatever the freshly bound image's memory
+already held.
+
+Naively calling `applyLoadOps` at every `nextSubpass` is not correct
+either, though: `5_10_5_10`'s masks (`0b0101`/`0b1010`/`0b0101`/`0b1010`)
+repeat -- subpass 2 re-uses view 0 and view 2, both already used (and,
+in a case with real per-subpass draws layered on top, already *drawn
+into*) by subpass 0. Re-clearing them again at subpass 2 would erase
+subpass 0's own content. Fix (`CommandBuffer.cpp`): `applyClear` gains a
+`ViewMask` parameter and a `GraphicsState::LoadedAttachmentViewMask` map
+(keyed by each attachment's own `ImageView*`, with the low pointer bit
+repurposed to distinguish the stencil half of a combined depth/stencil
+attachment from its `Depth` counterpart, since both otherwise share one
+`ImageView*`) it both reads and updates: only the bits of `ViewMask` not
+yet marked loaded for that attachment are cleared (now correctly sliced
+per view, fixing bug 1 too), and the *entire* `ViewMask` is recorded as
+loaded afterward, whether or not this particular attachment's `LoadOp`
+was actually `CLEAR` (a `LOAD`/`DONT_CARE` subpass touching a view still
+means no *later* subpass may clear over it, since `LoadOp` is fixed
+per-attachment for the whole render pass and cannot differ between
+subpasses). `applyLoadOps` is now called at every `vkCmdNextSubpass`
+too, not just at the render-pass instance's own start; both call sites
+reset `LoadedAttachmentViewMask` to empty first (a fresh instance has
+loaded nothing yet).
+
+`DrawTest.MultiviewLoadOpClearAppliesEachSubpassOwnNewlyIntroducedViews`
+(a three-subpass classic `VkRenderPass`, one shared two-layer color
+attachment: subpass 0, `viewMask == 0b01`, draws solid red into view 0;
+subpass 1, `viewMask == 0b10`, draws nothing, relying solely on its own
+share of the load op to paint view 1's layer with the clear color;
+subpass 2, `viewMask == 0b01` again, also draws nothing) locks both
+fixes down at the unit level at once -- view 1's layer being the clear
+color (not left as whatever the fresh image's memory held) exercises the
+`nextSubpass` fix, and view 0's layer still being subpass 0's own red
+(not reset to the clear color by subpass 2's own re-use) exercises the
+`LoadedAttachmentViewMask` guard. Confirmed (via `git stash` of just the
+`CommandBuffer.cpp` fix, keeping the new test) to fail on the pre-fix
+code -- view 1 held uninitialized image memory rather than the clear
+color -- and pass with the fix restored.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full, 1763/1822 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from 1762/1821 before this row's own new `DrawTest` case.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed no
+change needed -- this fix corrects existing multiview render-pass
+load-op behavior; it advertises no new feature or extension
+(`multiview`/`VK_KHR_multiview` were already `yes`/`Advertised` since
+roadmap H2).
