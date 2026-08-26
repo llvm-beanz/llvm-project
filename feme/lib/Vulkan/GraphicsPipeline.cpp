@@ -888,11 +888,19 @@ Error translateDepthStencilState(
   return translateFace(Info->back, Out.Stencil.Back);
 }
 
+/// \p HasFragmentStage is false for a pipeline that legally omitted its
+/// fragment stage (roadmap H2j, only possible when \p Targets has no color
+/// attachments): per the Vulkan spec, a pipeline with no fragment shader
+/// has no fragment output interface, so `pColorBlendState` -- including its
+/// own `attachmentCount` -- is entirely ignored rather than validated
+/// against (the necessarily empty) `Targets.Colors`, exactly like `Info`
+/// being null below.
 Error translateColorBlendState(const VkPipelineColorBlendStateCreateInfo *Info,
                                const PipelineRenderTargets &Targets,
+                               bool HasFragmentStage,
                                GraphicsPipelineState &Out) {
   Out.ColorBlends.assign(Targets.Colors.size(), BlendState{});
-  if (!Info)
+  if (!Info || !HasFragmentStage)
     return Error::success();
   if (Info->attachmentCount != Targets.Colors.size())
     return createStringError(inconvertibleErrorCode(),
@@ -1221,7 +1229,7 @@ Error translateFixedFunctionState(
                                            *Targets, Result))
     return E;
   if (Error E = translateColorBlendState(CreateInfo.pColorBlendState, *Targets,
-                                         Result))
+                                         FragmentInfo != nullptr, Result))
     return E;
 
   if (const VkPipelineMultisampleStateCreateInfo *Multisample =

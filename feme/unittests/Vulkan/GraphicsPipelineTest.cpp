@@ -1143,6 +1143,48 @@ TEST_F(GraphicsPipelineTest, RejectsMissingFragmentStageWithColorAttachments) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap H2j: when a pipeline has no fragment stage, it has no fragment
+/// output interface, so per the Vulkan spec `pColorBlendState` -- including
+/// its own `attachmentCount` -- must be entirely ignored rather than
+/// validated against the render target's (necessarily empty) color
+/// attachments. Exercises exactly the shape real CTS tests build (e.g.
+/// `vktMultiViewRenderTests.cpp`'s `depth_without_fragment_shader` case),
+/// which hardcodes `attachmentCount = 1` unconditionally even with zero
+/// color attachments and no fragment shader.
+TEST_F(GraphicsPipelineTest,
+       AcceptsMissingFragmentStageWithMismatchedColorBlendState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, VK_NULL_HANDLE);
+  Info.stageCount = 1;
+  // Deliberately left at the fixture's default of 1, mismatching the zero
+  // color attachments below -- this must be ignored, not rejected.
+  ASSERT_EQ(Blend.attachmentCount, 1u);
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthTestEnable = VK_TRUE;
+  DepthInfo.depthWriteEnable = VK_TRUE;
+  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+  Info.pDepthStencilState = &DepthInfo;
+
+  VkFormat DepthFormat = VK_FORMAT_D32_SFLOAT;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 0;
+  Rendering.depthAttachmentFormat = DepthFormat;
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &Rendering;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  auto *Pipe2 = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  EXPECT_EQ(Pipe2->colorAttachmentCount(), 0u);
+  EXPECT_FALSE(Pipe2->hasFragmentStage());
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// Roadmap C1 ("Mandatory formats"): every format
 /// `isSupportedColorAttachmentFormat` grants Vulkan 1.2's mandatory
 /// `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT` status to must build
