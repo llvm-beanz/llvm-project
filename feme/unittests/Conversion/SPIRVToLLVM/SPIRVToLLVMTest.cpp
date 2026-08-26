@@ -156,6 +156,49 @@ TEST(SPIRVToLLVMTest, NonBuiltinInputOutputConvertsInsteadOfFailing) {
       << Result;
 }
 
+// (Roadmap H2c) A builtin interface block (a struct-typed `Output`
+// variable with no whole-variable `BuiltIn` attribute of its own, e.g.
+// glslang's implicit `gl_PerVertex`) still converts through the ordinary
+// stage-IO path -- its per-member `BuiltIn` decorations are preserved as a
+// distinct `feme.spirv.member.decorations` attribute rather than being
+// silently dropped, since buildStageIODecorationsAttr's whole-variable read
+// never sees them (see spirv-to-llvm-stage-io.mlir's own test for the exact
+// attribute shape).
+TEST(SPIRVToLLVMTest, BuiltinInterfaceBlockPreservesMemberDecorations) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @gl_PerVertex : "
+      "!spirv.ptr<!spirv.struct<(vector<4xf32> [BuiltIn=0 : i32], f32 "
+      "[BuiltIn=1 : i32])>, Output> }");
+  EXPECT_NE(Result, "<failed>");
+  EXPECT_NE(
+      Result.find(feme::spirv::getStageIOMemberDecorationsAttrName().str()),
+      std::string::npos)
+      << Result;
+  // No whole-variable decoration to preserve: `gl_PerVertex` itself carries
+  // no `built_in`/`location` attribute, only its members do.
+  EXPECT_EQ(Result.find(feme::spirv::getStageIODecorationsAttrName().str()),
+            std::string::npos)
+      << Result;
+}
+
+// A member decoration this milestone does not model (e.g. `Offset`, which
+// an ordinary uniform block's members carry but a stage-IO struct never
+// does) is filtered out rather than corrupting the encoding, matching
+// buildStageIODecorationsAttr's own "unrecognized decoration is simply not
+// preserved" behavior for a whole-variable attribute.
+TEST(SPIRVToLLVMTest, UnrecognizedMemberDecorationIsFilteredOut) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @block : "
+      "!spirv.ptr<!spirv.struct<(f32 [0])>, Output> }");
+  EXPECT_NE(Result, "<failed>");
+  EXPECT_EQ(
+      Result.find(feme::spirv::getStageIOMemberDecorationsAttrName().str()),
+      std::string::npos)
+      << Result;
+}
+
 /// Builds a one-`llvm.mlir.global` `mlir::ModuleOp` carrying
 /// getStageIODecorationsAttrName() with \p Decorations (each inner
 /// `ArrayRef<int32_t>` one `(decoration, arg...)` tuple), the shape
@@ -255,6 +298,109 @@ TEST(SPIRVToLLVMTest, AttachStageIODecorationsIgnoresMissingGlobals) {
   // No global named "no_such_global" in this module (e.g. dead-code
   // eliminated during translation) -- must not crash.
   feme::spirv::attachStageIODecorations(Decorations, LLVMModule);
+}
+
+/// Builds a one-`llvm.mlir.global` `mlir::ModuleOp` carrying
+/// getStageIOMemberDecorationsAttrName() with \p Members (each entry a
+/// (memberIndex, tuples) pair, `tuples` in the same shape
+/// buildDecoratedGlobal's own `Decorations` parameter uses), the shape
+/// buildMemberDecorationsAttr (SPIRVToLLVMPatterns.cpp) produces.
+mlir::OwningOpRef<mlir::ModuleOp> buildDecoratedMemberGlobal(
+    mlir::MLIRContext &Ctx, llvm::StringRef Name,
+    llvm::ArrayRef<std::pair<int32_t, llvm::ArrayRef<llvm::ArrayRef<int32_t>>>>
+        Members) {
+  Ctx.loadDialect<mlir::LLVM::LLVMDialect>();
+  mlir::OpBuilder Builder(&Ctx);
+  auto Module = mlir::ModuleOp::create(Builder, mlir::UnknownLoc::get(&Ctx));
+  Builder.setInsertionPointToStart(Module.getBody());
+
+  llvm::SmallVector<mlir::Attribute> Outer;
+  for (const auto &Member : Members) {
+    llvm::SmallVector<mlir::Attribute> Tuples;
+    for (llvm::ArrayRef<int32_t> Inner : Member.second) {
+      llvm::SmallVector<mlir::Attribute> InnerAttrs;
+      for (int32_t Value : Inner)
+        InnerAttrs.push_back(Builder.getI32IntegerAttr(Value));
+      Tuples.push_back(Builder.getArrayAttr(InnerAttrs));
+    }
+    Outer.push_back(Builder.getArrayAttr(
+        {Builder.getI32IntegerAttr(Member.first), Builder.getArrayAttr(Tuples)}));
+  }
+
+  auto Global = mlir::LLVM::GlobalOp::create(
+      Builder, mlir::UnknownLoc::get(&Ctx), Builder.getI32Type(),
+      /*isConstant=*/false, mlir::LLVM::Linkage::External, Name,
+      mlir::Attribute(), /*alignment=*/0, /*addrSpace=*/8);
+  Global->setAttr(feme::spirv::getStageIOMemberDecorationsAttrName(),
+                  Builder.getArrayAttr(Outer));
+  return mlir::OwningOpRef<mlir::ModuleOp>(Module);
+}
+
+TEST(SPIRVToLLVMTest, CollectStageIOMemberDecorationsFindsDecoratedGlobals) {
+  mlir::MLIRContext Ctx;
+  llvm::SmallVector<int32_t, 2> BuiltInTuple = {11, 0};
+  mlir::OwningOpRef<mlir::ModuleOp> Module = buildDecoratedMemberGlobal(
+      Ctx, "gl_PerVertex", {{0, {llvm::ArrayRef<int32_t>(BuiltInTuple)}}});
+
+  feme::spirv::StageIOMemberDecorationsMap MemberDecorations =
+      feme::spirv::collectStageIOMemberDecorations(Module.get());
+  ASSERT_TRUE(MemberDecorations.count("gl_PerVertex"));
+  EXPECT_EQ(MemberDecorations["gl_PerVertex"].size(), 1u);
+}
+
+// attachStageIOMemberDecorations turns the collected attribute into
+// `feme.spirv.MemberDecorations` metadata: `!{!{i32 memberIndex,
+// !{tuples...}}, ...}`.
+TEST(SPIRVToLLVMTest, AttachStageIOMemberDecorationsBuildsMetadata) {
+  mlir::MLIRContext Ctx;
+  llvm::SmallVector<int32_t, 2> BuiltInTuple = {11, 0};
+  mlir::OwningOpRef<mlir::ModuleOp> Module = buildDecoratedMemberGlobal(
+      Ctx, "gl_PerVertex", {{0, {llvm::ArrayRef<int32_t>(BuiltInTuple)}}});
+  feme::spirv::StageIOMemberDecorationsMap MemberDecorations =
+      feme::spirv::collectStageIOMemberDecorations(Module.get());
+
+  llvm::LLVMContext LLVMCtx;
+  llvm::Module LLVMModule("m", LLVMCtx);
+  auto *GV = new llvm::GlobalVariable(
+      LLVMModule, llvm::Type::getInt32Ty(LLVMCtx), /*isConstant=*/false,
+      llvm::GlobalValue::ExternalLinkage, nullptr, "gl_PerVertex", nullptr,
+      llvm::GlobalValue::NotThreadLocal, /*AddressSpace=*/8);
+
+  feme::spirv::attachStageIOMemberDecorations(MemberDecorations, LLVMModule);
+
+  llvm::MDNode *MD = GV->getMetadata("feme.spirv.MemberDecorations");
+  ASSERT_NE(MD, nullptr);
+  ASSERT_EQ(MD->getNumOperands(), 1u);
+  auto *MemberEntry = llvm::cast<llvm::MDNode>(MD->getOperand(0));
+  ASSERT_EQ(MemberEntry->getNumOperands(), 2u);
+  EXPECT_EQ(llvm::cast<llvm::ConstantInt>(
+                llvm::cast<llvm::ConstantAsMetadata>(MemberEntry->getOperand(0))
+                    ->getValue())
+                ->getSExtValue(),
+            0);
+  auto *Decorations = llvm::cast<llvm::MDNode>(MemberEntry->getOperand(1));
+  ASSERT_EQ(Decorations->getNumOperands(), 1u);
+  auto *BuiltIn = llvm::cast<llvm::MDNode>(Decorations->getOperand(0));
+  ASSERT_EQ(BuiltIn->getNumOperands(), 2u);
+  EXPECT_EQ(llvm::cast<llvm::ConstantInt>(
+                llvm::cast<llvm::ConstantAsMetadata>(BuiltIn->getOperand(0))
+                    ->getValue())
+                ->getSExtValue(),
+            11);
+}
+
+TEST(SPIRVToLLVMTest, AttachStageIOMemberDecorationsIgnoresMissingGlobals) {
+  mlir::MLIRContext Ctx;
+  llvm::SmallVector<int32_t, 2> BuiltInTuple = {11, 0};
+  mlir::OwningOpRef<mlir::ModuleOp> Module = buildDecoratedMemberGlobal(
+      Ctx, "no_such_global", {{0, {llvm::ArrayRef<int32_t>(BuiltInTuple)}}});
+  feme::spirv::StageIOMemberDecorationsMap MemberDecorations =
+      feme::spirv::collectStageIOMemberDecorations(Module.get());
+
+  llvm::LLVMContext LLVMCtx;
+  llvm::Module LLVMModule("m", LLVMCtx);
+  // No global named "no_such_global" in this module -- must not crash.
+  feme::spirv::attachStageIOMemberDecorations(MemberDecorations, LLVMModule);
 }
 
 } // namespace
