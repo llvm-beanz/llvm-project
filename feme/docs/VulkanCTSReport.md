@@ -5380,3 +5380,72 @@ new `spirv-to-llvmir-stage-io-member-decorations.mlir`).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: unchanged --
 this row touches no feature/extension advertisement, only an internal
 SPIR-V -> LLVM conversion detail.
+
+## Roadmap H2d: measured impact (per-member interface block decomposition)
+
+`dEQP-VK.multiview.*` (`--deqp-case`, same reproduction recipe as F9-F14's
+own sections above): 838 cases discovered.
+
+```
+Passed:        78/838 (9.3%)
+Failed:        421/838 (50.2%)
+Not supported: 339/838 (40.5%)
+```
+
+Up from H2/H2a/H2c's own 0/838 baseline -- the first real pass count this
+group has ever had. **Deviation**: the row's own text ("closes the whole
+`dEQP-VK.multiview` group's own remaining largest blocker") is accurate in
+the narrow sense that landed (the SIMDize-crash blocker H2a root-caused is
+gone, and 78 cases now genuinely pass), but a first real `deqp-vk` run
+against the initial landing found the fix incomplete in a way no unit test
+had caught: `CanonicalizeStageTest`'s own fixtures (and this row's first
+commit) modeled a builtin interface block as loaded/stored *as one whole
+aggregate value* (`store {<4 x float>, float, [1 x float], [1 x float]}
+%agg, ptr addrspace(8) @gl_PerVertex`) -- a shape that, per this
+investigation, **never occurs in practice**. Real SPIR-V-derived IR
+addresses each member -- and even each individual component of
+`gl_Position` -- with its own scalar load/store instead: SPIR-V's own
+offset-0 member access (`gl_Position.x`) folds down to a bare global
+load/store with no `getelementptr` at all (LLVM's own constant-folding, a
+zero-offset GEP being a no-op), and every other member/component is a
+`getelementptr (i8, ptr @block, i64 ByteOffset)` `ConstantExpr` -- LLVM's
+own canonical byte-offset form, not the struct-member-indexed shape
+(`getelementptr StructTy, ptr @block, i32 0, i32 M`) a naive
+`GetElementPtrInst`-only walk would expect. The first landing's
+`cast<StructType>` (assuming every multi-`ElementID` global's load/store
+value is the whole struct) crashed immediately on the first real
+`gl_PerVertex.Position` store it saw (`dEQP-VK.multiview.clear_attachments
+.no_queries.15`, an assertion failure, not a diagnosed error). A follow-up
+commit replaces the whole-struct-only resolution with
+`getStageIOBaseAndOffset` (`Value::stripAndAccumulateConstantOffsets`,
+which uniformly unwraps both `GetElementPtrInst` and `ConstantExpr` GEP
+chains) and `resolveStageIOAccess`, which uses the block's own
+`StructLayout` to turn a constant byte offset into (member, row,
+component), reusing `loadStageIOValue`/`storeStageIOValue`'s existing
+recursion for whichever sub-shape remains.
+
+With that fix, the crash is gone and 78 cases pass outright. The remaining
+421 failures break down as:
+
+| Failure | Count | Root cause |
+| --- | --- | --- |
+| `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED` (`depth_without_fragment_shader`, all three render-pass-type variants) | 3 | A pipeline with zero color attachments. Pre-existing, tracked as roadmap H2b |
+| `vk.createRenderPass(2)(...): VK_ERROR_FORMAT_NOT_SUPPORTED` (`view_mask_iteration.*`) | 28 | `VK_FORMAT_R8G8B8A8_UINT` color attachment, an integer format `isSupportedColorAttachmentFormat` correctly declines. Pre-existing, tracked as roadmap H8 |
+| `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED` (`dynamic_rendering.view_mask_iteration.*`) | 14 | Confirmed (via `FEME_VULKAN_LOG_CREATION_ERRORS=1`) to be `"color attachment 0 names a format this driver cannot render into"` -- the *same* `VK_FORMAT_R8G8B8A8_UINT` root cause as the row above, just surfacing at `vkCreateGraphicsPipelines` instead of `vkCreateRenderPass(2)` since `dynamic_rendering` has no render pass object to reject it earlier. Also roadmap H8, not a new finding |
+| `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED` (`input_instance.*`, all three render-pass-type variants) | 24 | A **new** finding: `error: feme-graphics-validate-stage: 'feme.stage.input.load' ... refers to element 5 with the wrong direction`. This shader's own GLSL reads back an `Output` it already wrote in the same invocation (SPIR-V permits reading an `Output` storage-class variable after writing it, e.g. for a compound `gl_PerVertex.gl_Position.x += 1.0`-shaped update -- confirmed against this test's own dumped IR, a `load float, ptr addrspace(8) @gl_PerVertex` immediately following a `store` to the same address). `feme.stage.input.load`/`.output.store`'s own Input-vs-Output dichotomy (and `ValidateStagePass`'s enforcement of it) has no representation for "read back what this invocation already wrote" -- a real hardware rasterizer's input/output storage is normally physically separate, but SPIR-V's `Output` storage class does not make that same promise. New roadmap row H2e |
+| `Fail (occlusion availability bit N is 0 ...)` (`non_precise_queries_with_availability.*`) | 18 | A **new**, unrelated finding: occlusion-query availability reporting appears incorrect under multiview specifically. Not investigated further (out of this row's own interface-block-decomposition scope); new roadmap row H2f |
+| `Fail (Fail)` (image comparison) | 334 | A **new**, large finding spanning most subgroups (`renderpass2`/`dynamic_rendering` variants of `clear_attachments`, `index`, `secondary_cmd_buffer`, `readback_{implicit,explicit}_clear`, `multisample{,_resolve}`, `masks`, `instanced`, `input_attachments`, `draw_indirect{,_indexed}`, `draw_indexed`, `stencil`, `depth`). Every one of these previously hit the SIMDize crash (H2a) before ever reaching image comparison, so this is the *first* time their actual rendered output has been checked at all. Spot-checking `instanced.no_queries.15` (a plain, unconditional multi-branch `gl_Position`/`out_color` write, no read-back) shows this is not simply H2e's own read-back gap recurring -- a genuine rendering-correctness bug, root cause not yet determined. New roadmap row H2g |
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1814 discovered, 1813 passed, 1
+unsupported (pre-existing, unrelated) -- up from H2c's own 1811 by this
+row's own new `CanonicalizeStageTest` cases
+(`RecognizesMemberDecoratedInterfaceBlockAsStageIO`,
+`RecognizesInterfaceBlockPerMemberByteOffsetAccess`, and the renamed
+`DoesNotRecognizeUndecoratedInterfaceBlockAsStageIO`) and the two new
+`spirv-canonicalize-stage-interface-block{,-byte-offset}.ll` lit tests.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: unchanged --
+this row touches no feature/extension advertisement, only
+`CanonicalizeStagePass`'s own SPIR-V-derived-IR legalization.
+

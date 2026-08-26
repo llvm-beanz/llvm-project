@@ -531,6 +531,32 @@ and the `dEQP-VK.multiview` numbers this row measured are unchanged from
 H2's own baseline (0 pass / 499 fail / 339 not-supported); see "Roadmap
 H2c: measured impact" in VulkanCTSReport.md.
 
+**Roadmap H2d**: `isSPIRVStageIOGlobal` now also recognizes a global
+carrying only `feme.spirv.MemberDecorations` (no whole-variable
+`!spirv.Decorations`) -- the shape H2c's own builtin-interface-block
+global produces -- and `canonicalizeSPIRVStage` decomposes it into one
+`SignatureElement` per struct member, each keeping its own `BuiltIn`/
+system-value identity (`gl_Position` -> `SignatureSystemValue::Position`;
+`gl_PointSize`/`gl_ClipDistance`/`gl_CullDistance` -> `None`, since none has
+a real ABI-field consumer downstream, the same "unmodeled system value"
+treatment an unrecognized DXIL semantic already gets). A real
+`dEQP-VK.multiview` run found the first landing's own model of "how a
+block is loaded/stored" wrong: it assumed a single whole-aggregate load/
+store (mirroring C8a's matrix/aggregate case), but real SPIR-V-derived IR
+addresses each member -- and even each individual component of
+`gl_Position` -- with its own scalar load/store instead, either a bare
+global (SPIR-V's own offset-0 member access, which LLVM's constant-
+`getelementptr` folding erases entirely) or a `getelementptr (i8, ptr
+@block, i64 ByteOffset)` `ConstantExpr` (LLVM's own canonical byte-offset
+form, not a struct-member-indexed `getelementptr`). `resolveStageIOAccess`/
+`getStageIOBaseAndOffset` (`Value::stripAndAccumulateConstantOffsets` plus
+the block's own `StructLayout`) resolve either shape back to the member,
+row and component `loadStageIOValue`/`storeStageIOValue`'s existing
+recursion needs. With that fix, `dEQP-VK.multiview` goes from 0/838 passing
+to 78/838; see "Roadmap H2d: measured impact" in VulkanCTSReport.md for
+the full breakdown of what remains (three already-tracked buckets, three
+new ones spun off as roadmap rows H2e/H2f/H2g).
+
 ### Canonical stage operations
 
 After source raising, graphics behavior should be expressed by a small family
