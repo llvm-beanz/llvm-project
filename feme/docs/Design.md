@@ -787,6 +787,13 @@ still deferred (feeding these variables into the `feme::EntrySignature`
 model itself, and MLIR's own SPIR-V *deserializer* not yet parsing
 `Component`/`Centroid`/`Sample`/`PerPrimitiveEXT` from a real binary, which
 is an upstream MLIR limitation rather than one FeMe's own conversion adds).
+A builtin interface block (`gl_PerVertex`) is a distinct case from either
+of the two above: it converts through this same non-builtin path (its
+storage class check finds nothing whole-variable to reject it on), but its
+`BuiltIn` decorations are attached per member (`OpMemberDecorate`), not to
+the variable itself -- see "Signature reflection"'s H2a/H2c/H2d discussion
+in feme/docs/FeMeGraphicsDesign.md for that gap and its (partial, as of
+H2c) resolution.
 
 #### Known gap: `feme::SPIRVImporter` cannot deserialize LLVM SPIR-V backend output
 

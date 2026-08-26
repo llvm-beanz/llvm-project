@@ -5335,3 +5335,48 @@ understating the 1.4 extension row as 14 of 16 rather than its true 15 of
 16 and the total advertised-extension count as 29 rather than 31 (with
 `VK_KHR_multiview` itself the other +1). Restored alongside this row's
 own bookkeeping.
+
+## Roadmap H2c: measured impact (builtin interface block per-member decorations)
+
+`dEQP-VK.multiview.*` (`--deqp-case`, same reproduction recipe as F9-F14's
+own sections above): 838 cases discovered.
+
+```
+Passed:        0/838 (0.0%)
+Failed:        499/838 (59.5%)
+Not supported: 339/838 (40.5%)
+```
+
+Identical to roadmap H2's own baseline and to H2a's confirmation of it.
+This is the expected outcome, not a regression: H2c only teaches the
+`spirv` -> `llvm` dialect conversion to preserve a builtin interface
+block's per-member decorations as a new `feme.spirv.member.decorations`/
+`feme.spirv.MemberDecorations` side channel (see `buildMemberDecorationsAttr`
+in `SPIRVToLLVMPatterns.cpp` and `collectStageIOMemberDecorations`/
+`attachStageIOMemberDecorations` in `StageIODecorations.cpp`).
+`feme::graphics::CanonicalizeStagePass`'s `isSPIRVStageIOGlobal` still only
+recognizes a stage-IO global by its whole-variable `!spirv.Decorations`
+metadata, which a builtin interface block's global still does not carry
+(only the new per-member channel does) -- so `gl_Position`'s write through
+the implicit `gl_PerVertex` block is, exactly as before H2c, left
+completely un-legalized, reaching `feme::cpu::SIMDizePass` raw and
+triggering the same 454-case "divergent vector value ... component
+decomposition is not yet supported" diagnostic H2a root-caused. Consuming
+the new metadata to actually decompose the block into per-member signature
+elements is H2d's own scope, not this row's.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1811 discovered, 1810 passed, 1
+unsupported (pre-existing, unrelated) -- up from H2's own 1800 discovered
+by this row's own five new `SPIRVToLLVMTest` cases
+(`BuiltinInterfaceBlockPreservesMemberDecorations,
+UnrecognizedMemberDecorationIsFilteredOut,
+CollectStageIOMemberDecorationsFindsDecoratedGlobals,
+AttachStageIOMemberDecorationsBuildsMetadata,
+AttachStageIOMemberDecorationsIgnoresMissingGlobals`) and the new lit
+cases (`spirv-to-llvm-stage-io.mlir`'s new `gl_PerVertex` split, and the
+new `spirv-to-llvmir-stage-io-member-decorations.mlir`).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: unchanged --
+this row touches no feature/extension advertisement, only an internal
+SPIR-V -> LLVM conversion detail.

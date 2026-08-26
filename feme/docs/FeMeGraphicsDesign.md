@@ -501,6 +501,36 @@ measured impact" in VulkanCTSReport.md). Tracked as roadmap rows H2c (the
 SPIR-V import side: preserving per-member decorations) and H2d (the
 `CanonicalizeStage.cpp` side: one `SignatureElement` per block member).
 
+**Roadmap H2c**: `buildStageIODecorationsAttr`'s whole-variable read is
+still exactly as narrow as the paragraph above describes -- a builtin
+interface block still has no whole-variable `BuiltIn`/`Location` attribute
+of its own for it to find. What changed is a second, parallel read:
+`StageIOGlobalVariablePattern` now also checks whether the pointee is a
+`mlir::spirv::StructType`, and if so walks its members'
+`OpMemberDecorate`d decorations (`StructType::getMemberDecorations`,
+already used by this same file's `isBufferBlockWritable` for a
+storage-buffer block's `NonWritable` member decoration), recognizing the
+same `BuiltIn`/`Location`/`Component`/`Index`/interpolation set the
+whole-variable attribute does. The result is a second `llvm.mlir.global`
+attribute, `feme.spirv.member.decorations` -- an `ArrayAttr` of
+`(memberIndex, tuples)` entries, `tuples` in the same `(i32 decoration, i32
+arg...)` shape the whole-variable attribute already uses -- which
+`feme::spirv::attachStageIOMemberDecorations` turns into
+`feme.spirv.MemberDecorations` metadata on the real `llvm::GlobalVariable`
+once translation produces one. Unlike `!spirv.Decorations`, this metadata
+kind has no real SPIR-V backend meaning: `OpMemberDecorate` decorates a
+*type*, not a global variable, so there is nothing for LLVM's SPIRV
+backend to attach a per-member decoration to at this granularity -- the
+channel exists purely for `CanonicalizeStagePass` (roadmap H2d, not yet
+implemented) to read. Since H2d has not landed, `isSPIRVStageIOGlobal`
+still recognizes a stage-IO global purely by `!spirv.Decorations`'
+presence, which a builtin interface block's global still does not carry
+(only its new member-decorations metadata does) -- so `gl_Position`'s
+write through `gl_PerVertex` is, as before, left completely un-legalized,
+and the `dEQP-VK.multiview` numbers this row measured are unchanged from
+H2's own baseline (0 pass / 499 fail / 339 not-supported); see "Roadmap
+H2c: measured impact" in VulkanCTSReport.md.
+
 ### Canonical stage operations
 
 After source raising, graphics behavior should be expressed by a small family
