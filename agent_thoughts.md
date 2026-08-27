@@ -35986,3 +35986,202 @@ hard part is not lifting `CanonicalizeStage.cpp`'s `Vertex`/`Fragment`
 filter (that is a one-line change) but splitting one SPIR-V
 `TessellationControl` entry point, with its `OpControlBarrier`, into FeMe's
 two separately compiled hull phases.
+
+# Roadmap H4a: SPIR-V tessellation entry-point reflection (recovering a failed agent's stash)
+
+## Starting point
+
+A previous agent's session had stopped mid-work on H4a without committing,
+leaving its changes in `git stash`. My instructions: restore the stash,
+verify and fix it, cover it with tests, run the full process (`check-feme`,
+Vulkan CTS, roadmap/design-doc updates, `agent_thoughts.md`), and land it as
+a sequence of small, individually tested commits.
+
+`git stash pop` restored modifications to 11 tracked files plus two new
+untracked files (`feme/include/feme/Core/Tessellation.h`,
+`feme/lib/Graphics/Tessellation.cpp`). Before trusting any of it, I read it
+all closely against the four things the prompt's own body says H4a needs:
+lifting `CanonicalizeStagePass`'s Vertex/Fragment-only filter, splitting one
+SPIR-V tessellation-control entry into FeMe's two D3D-shaped hull phases at
+its barrier, mapping SPIR-V's tessellation execution modes onto
+`TessellationState`, and mapping the tessellation `BuiltIn`s onto
+`SignatureSystemValue`s.
+
+## What was actually wrong with the stash
+
+Four real bugs, in decreasing order of how badly they would have bitten
+someone downstream:
+
+1. **A layering violation that made the whole thing fail to link.** The new
+   `feme/include/feme/Core/Tessellation.h` included
+   `feme/Graphics/PatchPipeline.h` -- Core depending on Graphics, backwards
+   from this codebase's Core-does-not-depend-on-Graphics rule -- and its
+   `.cpp` was compiled into `FeMeGraphics`, while
+   `ConvertSPIRVToLLVMPass.cpp` (in `FeMeConversionSPIRVToLLVM`, which only
+   links `FeMeCore`) called its functions, producing undefined-symbol
+   linker errors. Fixed by relocating the header and its implementation to
+   the Graphics layer instead of trying to invert the dependency: moved to
+   `feme/include/feme/Graphics/Tessellation.h`, renamespaced from bare
+   `feme` to `feme::graphics` (matching every sibling Graphics header), and
+   added `FeMeGraphics` to `FeMeConversionSPIRVToLLVM`'s `LINK_LIBS PUBLIC`
+   (checked first that this creates no circular dependency -- it does not,
+   since `FeMeGraphics` does not link back to `FeMeConversionSPIRVToLLVM`).
+
+2. **A silent ABI-corrupting ordering bug.** `StageArgsLayout.h`'s
+   `getPatchArgsType()` builds the LLVM struct type that must byte-for-byte
+   mirror `FemePatchArgs` (`RuntimeABI.h`) for `StructGEP`-based field
+   access to be correct. The stash's `PatchArgsField` enum had gained a new
+   `InputPatchControlPointCount` scalar field at index 2, but
+   `getPatchArgsType()` still packed a `Reserved32` two-element array at
+   that slot -- every field after it would have read/written the wrong
+   offset, with no compiler diagnostic to catch it (the enum and the LLVM
+   type are two separate sources of truth with nothing enforcing they
+   agree). Fixed by rebuilding the struct type field-for-field against the
+   enum.
+
+3. **A restored regression.** `CanonicalizeStage.cpp`'s
+   `getSystemValueForBuiltIn` had lost its `case 5014: FragStencilRefEXT`
+   mapping somewhere in the stash's history (visible as a deletion in the
+   diff against the pre-stash tree). Restored it; this one was pure
+   bookkeeping, not new H4a work, but leaving a regression in a stash-restore
+   is exactly the kind of thing this process is designed to catch.
+
+4. **A gating bug that would have made half of H4a's own execution-mode
+   work dead code.** `ConvertSPIRVToLLVMPass.cpp`'s
+   `applyEntryPointAttributes` nested the `feme.tessellation.
+   output_control_points` attribute emission (from SPIR-V's `OutputVertices`,
+   a tessellation-**control**-only execution mode) inside an
+   `if (TessDomain && TessPartitioning && TessOutputPrimitive)` block --
+   fields that are tessellation-**evaluation**-only and mutually exclusive
+   with `OutputVertices` on any real SPIR-V module (no single entry point
+   declares both groups). A tessellation-control entry point would
+   therefore never get its own `OutputVertices` attribute attached at all.
+   Fixed by moving that attribute's emission out of the gated block so it
+   fires independently whenever present, and correspondingly rewrote
+   `getTessellationState()` (which had the same "all four together"
+   assumption baked into its own `if`) to treat the evaluation-only group
+   and the control-only field as two independently optional pieces,
+   returning `nullopt` only when *neither* group is present at all.
+
+## What I decided not to change
+
+The stash's actual design decision for splitting a SPIR-V tessellation-
+control entry -- doing it at reflection time in `CanonicalizeStage.cpp`
+(`splitTessellationControlEntry`), before either CPU wrapper ever sees the
+function, rather than generalizing `EntryWrapperPass`'s own barrier-region-
+splitting machinery the way R34's deferred item and the design doc's G5
+section describe -- was sound, and I kept it. It is a different mechanism
+solving a related but distinct problem: `EntryWrapperPass`'s deferred item
+is about a control-point phase (already FeMe-shaped, as *received* by
+`HullWrapperPass`) that itself needs a barrier because one control point
+must read a sibling's *output* -- still unsupported, and still correctly
+diagnosed as such by `HullWrapperPass`. `splitTessellationControlEntry`
+instead removes SPIR-V's control/patch-constant barrier before
+`HullWrapperPass` ever runs, by construction, because a real tessellation-
+control shader's barrier always separates exactly those two phases and
+never occurs within the per-vertex phase alone. Since this genuinely
+deviates from what the design doc's G5 section implied the eventual fix
+would be, I added a paragraph to `FeMeGraphicsDesign.md`'s
+`CanonicalizeStagePass` section explaining the distinction explicitly, so a
+future reader does not conflate the two and conclude R34's deferred item is
+now closed when it is not.
+
+I also chose not to unify the aliased system values (`TessLevelOuter` ==
+`TessFactorEdge`, `TessLevelInner` == `TessFactorInside`, `TessCoord` ==
+`DomainLocation`, `InvocationID` == `OutputControlPointID`) into anything
+more elaborate. They are literal enumerator aliases in `Signature.h`, which
+is exactly right: SPIR-V/GLSL's spelling and D3D's spelling name the same
+system value, and every existing CPU-wrapper lowering path for the D3D name
+already handles the SPIR-V one for free (confirmed by testing
+`HullStageMapsInvocationIdAndPatchVertices`, which checks that `BuiltIn` 8
+resolves to a value that compares equal to `OutputControlPointID`, and by
+the fact that no new `HullWrapper.cpp` code was needed for `InvocationId`
+at all -- only for the genuinely new `PatchVertices` system value, which
+has no D3D equivalent already wired up).
+
+## Test coverage added
+
+The stash arrived with zero new tests for any of this -- `ninja check-feme`
+passed at exactly the same 1859/1800/59/0 as the pre-stash H4 baseline, which
+by itself was the tell that nothing new was actually being exercised. Given
+"cover each phase of translation" from the prompt, I added tests at each
+phase this milestone touches, prioritizing the riskiest/most novel code
+first:
+
+- `CanonicalizeStageTest.cpp` (+4): `HullStageWithNoBarrierIsNotSplit`,
+  `SplitsHullEntryAtGroupSyncBarrier` (the actual barrier-splitting logic --
+  the riskiest new code in this milestone), `HullStageMapsInvocationIdAndPatchVertices`,
+  `DomainStageMapsTessCoordAndPatchInput`.
+- `TessellationTest.cpp` (new file, +6): round-trips every combination
+  `getTessellationState` can see on a real entry point -- absent
+  attributes, evaluation-only, control-only, every enum spelling, and two
+  malformed-attribute-value cases that must return `nullopt` rather than
+  reading garbage.
+- `spirv-to-llvm-tessellation-execution-modes.mlir` (new lit test, 4
+  `RUN`/`CHECK` cases): the MLIR-to-LLVM boundary this all rests on --
+  triangle/fractional-odd/ccw, quad+`PointMode` overriding `VertexOrderCw`,
+  isoline defaulting sensibly, and the TCS-only `OutputVertices` case that
+  exposed bug (4) above in the first place (I found the gating bug *while
+  designing this test*, before it ever ran against real code -- reading the
+  execution-mode capture code side by side with what a real TCS module's
+  attribute set actually looks like made the "impossible together" fields
+  obvious).
+- `HullWrapperTest`/`DomainWrapperTest`/`PatchConstantWrapperTest` (+4
+  total): `LowersPatchVerticesInput` in both `HullWrapperTest` and
+  `DomainWrapperTest` (the one genuinely new CPU-lowering system value this
+  milestone adds, with no prior D3D equivalent), and
+  `PatchConstantWrapperTest`'s `LowersOutputControlPointIDAsZero` (patch-
+  constant phase runs once per patch, so "this invocation's own control
+  point" does not exist -- verifying the lowering returns a constant zero
+  rather than something reading uninitialized invocation state) and
+  `LowersInputPatchVerticesCount` (the `FromInputPatch`-qualified sibling of
+  the same system value, reporting `InputPatchControlPointCount` instead).
+
+All four wrapper tests, the six `TessellationTest.cpp` tests, the four
+`CanonicalizeStageTest.cpp` tests, and the lit test pass individually; a
+full `ninja check-feme` afterward passed at **1815/1874** (up from H4's
+1800/1859 baseline by exactly these 15 new tests, 59 pre-existing
+`Unsupported`, 0 `Failed`).
+
+## Vulkan CTS
+
+Ran `dEQP-VK.tessellation.*` (1114 cases) against the rebuilt driver:
+still 0 `Pass`/0 `Fail`/1114 `NotSupported`, which is the *correct* result
+for this row -- H4a only makes reflection possible, it does not touch
+`GraphicsPipeline.cpp`'s stage-mask acceptance or
+`PhysicalDeviceInfo.cpp`'s `tessellationShader` bit, both of which remain
+H4b's job, and flipping either ahead of H4b would turn these 1114 honest
+`NotSupported`s into 1114 `Fail`s. Also re-ran H4's own `dEQP-VK.draw.*`
+regression sample (every 15th of 29419 cases, `*viewport_height*` families
+excluded, 1957 cases) as a confidence check on the shared `Executor.cpp`
+plumbing this milestone's new code sits next to but does not modify:
+byte-identical totals to H4's own recorded run (12 `Pass`/133 `Fail`/1812
+`NotSupported`), so 0 regressions, 0 new passes, as expected. Recorded both
+under a new "Roadmap H4a: measured impact" section in
+`VulkanCTSReport.md`. `Vulkan14FeatureInventory.md` and
+`VulkanExtensionInventory.md` need no changes, since `tessellationShader`
+is still (correctly) `no`.
+
+## Roadmap
+
+Struck through H4a in `Roadmap.md`, appending a summary of what closed it
+and an explicit note about what it deliberately did *not* need (no
+`HullPhase.cpp` file exists in this tree; `isPatchConstantPhase` already
+lives in `HullWrapper.h`, and no changes to `EntryWrapper.cpp` were needed,
+matching the design-doc note above about why this does not close R34's own
+deferred barrier-splitting item). H4 itself stays open, since H4b is still
+outstanding and H4's own acceptance criterion is both sub-rows closing.
+
+## What's still open
+
+H4b: `GraphicsPipeline.cpp` still needs to accept the tessellation stage
+bits, validate/translate `VkPipelineTessellationStateCreateInfo`, compile
+the two tessellation stages into `CompiledStage`s, and call
+`GraphicsPipeline::setTessellationStages`; `PhysicalDeviceInfo.cpp` then
+advertises `tessellationShader = VK_TRUE` and real `maxTessellation*`
+limits (already recorded in the roadmap's H4b row: `MaxPatchControlPoints`
+32, `DefaultMaxTessFactor` 64 are this implementation's own honest
+ceilings). That is squarely the next session's job, and it is now
+unblocked: a real SPIR-V tessellation-control/evaluation module can be
+reflected end to end into the two FeMe hull phases plus the domain stage,
+with `TessellationState` readable from either compiled stage's attributes.
