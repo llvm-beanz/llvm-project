@@ -1963,6 +1963,90 @@ public:
   }
 };
 
+/// Declares (or finds) the `feme.stage.stream.*` function \p Name calls:
+/// `(i32 stream) -> void`, matching `feme::StageOpKind::StreamEmit`/
+/// `StreamCut`'s shape (StageOps.h) -- an ordinary named call, not an
+/// `llvm.spv.*` intrinsic, for the same reason `getOrInsertSubpassLoadFunc`
+/// above is: `feme.stage.*` calls are FeMe's own vocabulary, not a real
+/// target-independent LLVM intrinsic, and neither `StreamEmit` nor
+/// `StreamCut` is overloaded (StageOps.cpp's table), so \p Name is used
+/// as-is with no type-mangling suffix.
+mlir::LLVM::LLVMFuncOp
+getOrInsertStreamOpFunc(mlir::ConversionPatternRewriter &Rewriter,
+                        mlir::ModuleOp Module, llvm::StringRef Name) {
+  if (auto Existing = Module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
+    return Existing;
+  mlir::OpBuilder::InsertionGuard Guard(Rewriter);
+  Rewriter.setInsertionPointToStart(Module.getBody());
+  auto FuncTy = mlir::LLVM::LLVMFunctionType::get(
+      mlir::LLVM::LLVMVoidType::get(Rewriter.getContext()),
+      {Rewriter.getI32Type()});
+  return mlir::LLVM::LLVMFuncOp::create(Rewriter, Module.getLoc(), Name, FuncTy,
+                                        mlir::LLVM::Linkage::External);
+}
+
+/// Converts `spirv.EmitVertex` (GLSL geometry shader `EmitVertex()`) into a
+/// call to `feme.stage.stream.emit(0)` -- the same
+/// `feme::StageOpKind::StreamEmit` intrinsic
+/// `feme::cpu::lowerGeometryStreamEmit` (GeometryWrapper.cpp, built under
+/// roadmap G5) already knows how to lower into a
+/// `GeometryStreamBuilder::emit`, mirroring how every other stage-IO
+/// SPIR-V op already routes through a `feme.stage.*` intrinsic rather than
+/// a bespoke LLVM IR shape (roadmap H5e-a). The stream operand is always a
+/// constant `0`: `spirv.EmitVertex`'s own SPIR-V spec text requires it be
+/// used "only ... when only one stream is present" (multiple output
+/// streams are a later milestone, not yet supported by
+/// `GeometryState`/`FemeGeometryArgs`). Not a terminator -- like
+/// `spirv.DemoteToHelperInvocation` above, this op is simply erased in
+/// place once its call is emitted.
+class EmitVertexConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::EmitVertexOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::EmitVertexOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::EmitVertexOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Location Loc = Op.getLoc();
+    mlir::LLVM::LLVMFuncOp Callee =
+        getOrInsertStreamOpFunc(Rewriter, Op->getParentOfType<mlir::ModuleOp>(),
+                                "feme.stage.stream.emit");
+    mlir::Value StreamConst = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI32Type(), Rewriter.getI32IntegerAttr(0));
+    mlir::LLVM::CallOp::create(Rewriter, Loc, Callee,
+                               mlir::ValueRange{StreamConst});
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.EndPrimitive` (GLSL geometry shader `EndPrimitive()`)
+/// into a call to `feme.stage.stream.cut(0)`, mirroring
+/// `EmitVertexConversionPattern` above exactly except for the callee name
+/// and the `feme::cpu::lowerGeometryStreamCut` consumer it targets.
+class EndPrimitiveConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::EndPrimitiveOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::EndPrimitiveOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::EndPrimitiveOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Location Loc = Op.getLoc();
+    mlir::LLVM::LLVMFuncOp Callee =
+        getOrInsertStreamOpFunc(Rewriter, Op->getParentOfType<mlir::ModuleOp>(),
+                                "feme.stage.stream.cut");
+    mlir::Value StreamConst = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI32Type(), Rewriter.getI32IntegerAttr(0));
+    mlir::LLVM::CallOp::create(Rewriter, Loc, Callee,
+                               mlir::ValueRange{StreamConst});
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 /// Converts a `spirv.ImageFetch` with the `Lod` image operand (optionally
 /// combined with the discarded `Nontemporal` bit, see `hasImageOperands`
 /// above) into the `llvm.spv.resource.load.level` intrinsic call, mirroring
@@ -3231,11 +3315,12 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BuiltInAddressOfPattern, BuiltInAccessChainPattern,
       BuiltInGlobalVariablePattern, BlockAccessChainPattern,
       CompositeConstructPattern, DemoteToHelperInvocationConversionPattern,
-      DotConversionPattern, ExecutionModePattern, ExecutionModeIdPattern,
-      ExpectConversionPattern, ImageFetchPattern, ImageFetchLodPattern,
-      ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
-      ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
-      LoadValuePattern, MatrixCompositeExtractPattern,
+      DotConversionPattern, EmitVertexConversionPattern,
+      EndPrimitiveConversionPattern, ExecutionModePattern,
+      ExecutionModeIdPattern, ExpectConversionPattern, ImageFetchPattern,
+      ImageFetchLodPattern, ImageSampleExplicitLodPattern,
+      ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
+      ImageWritePattern, LoadValuePattern, MatrixCompositeExtractPattern,
       MatrixCompositeInsertPattern, PushConstantGlobalVariablePattern,
       RotateConversionPattern, SampledImagePattern, SDotConversionPattern,
       UDotConversionPattern, SUDotConversionPattern,
