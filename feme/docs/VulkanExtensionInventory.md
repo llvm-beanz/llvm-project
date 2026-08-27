@@ -375,7 +375,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_maintenance1` | Implemented (core, not advertised by name) | vkTrimCommandPool implemented (CommandBuffer.cpp) |
 | `VK_KHR_maintenance10` | Not implemented |  |
 | `VK_KHR_maintenance11` | Not implemented |  |
-| `VK_KHR_maintenance2` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_maintenance2` | Partially implemented (core, not advertised by name) | roadmap H4i: `VkPipelineTessellationDomainOriginStateCreateInfo`/`VkTessellationDomainOrigin` now parsed and honored (GraphicsPipeline.cpp); the extension's other pieces (`VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT`, `VkInputAttachmentAspectReference`, per-point-clipping-behavior queries) remain planned, not yet implemented; part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_maintenance3` | Implemented (core, not advertised by name) | vkGetDescriptorSetLayoutSupport plus VkPhysicalDeviceMaintenance3Properties (Descriptor.cpp, EntryPoints.cpp's fillProperties2Chain) |
 | `VK_KHR_maintenance4` | Implemented (core, not advertised by name) | roadmap E4: vkGetDeviceBufferMemoryRequirements/vkGetDeviceImageMemoryRequirements/vkGetDeviceImageSparseMemoryRequirements, maxBufferSize, all implemented as core VK_VERSION_1_3 names; extension string never needed by any known CTS case |
 | `VK_KHR_maintenance5` | Advertised |  |

@@ -1753,6 +1753,23 @@ phase cannot yet capture an SSA value defined before the barrier, and a
 distinct JIT symbol-resolution failure on a separate set of
 tessellation-control shapes).
 
+**Status (roadmap H4i): `VkTessellationDomainOrigin` honored.**
+`VkPipelineTessellationStateCreateInfo::pNext` is now walked for a
+chained `VkPipelineTessellationDomainOriginStateCreateInfo`
+(`hasLowerLeftTessellationDomainOrigin`, `GraphicsPipeline.cpp`); when its
+`domainOrigin` is `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT` (the spec
+default, and the merged `TessellationState`'s own API-neutral
+representation, is upper-left), `flipTessellationWindingForDomainOrigin`
+swaps the merged `TessellationState::OutputPrimitive`'s `TriangleCw`/
+`TriangleCcw` before `compileGraphicsPipeline` returns -- the lower-left
+domain origin mirrors the tessellator's `(u,v)` parameter frame relative
+to upper-left, which reverses every generated triangle's winding as a
+side effect, independent of `Tessellator.cpp`'s own (fixed, upper-left
+relative) Cw/Ccw convention. See "Roadmap H4i: measured impact" in
+VulkanCTSReport.md for the real `dEQP-VK.tessellation.winding.*` numbers,
+and roadmap H4j for a distinct, smaller rasterizer-precision defect that
+run surfaced next.
+
 ### Draw commands and vertex data
 
 The command set from "Command Buffers" grows by:

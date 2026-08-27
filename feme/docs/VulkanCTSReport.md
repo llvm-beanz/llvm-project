@@ -7342,3 +7342,114 @@ FEME_VULKAN_LOG_CREATION_ERRORS=1 \
   deqp-vk --deqp-case="dEQP-VK.tessellation.winding.*glsl*" \
     --deqp-log-filename=winding_glsl.qpa
 ```
+
+## Roadmap H4i: measured impact (`VkTessellationDomainOrigin` winding fix)
+
+**What changed.** H4h's own relaxation let all 24
+`dEQP-VK.tessellation.winding.*glsl*` cases reach real rendering, where
+they failed at a systematic front-face/winding-orientation mismatch. The
+first hypothesis tried -- that `Tessellator.cpp`'s own `appendTriangle`
+Cw/Ccw operand-swap convention was simply inverted (`TessellatorTest.cpp`'s
+own comment calls it "not the standard convention") -- was tested via a
+fast `git stash`-and-rebuild A/B against a real `deqp-vk` run before
+committing to it, and found to be **wrong**: it fixed `lower_left_domain`'s
+8 cases but broke the previously-nearly-correct `default_domain`/
+`upper_left_domain`'s 16, an exact swap of which subgroup failed rather
+than a net fix. That A/B is what isolated the real root cause: FeMe never
+parsed `VkTessellationDomainOrigin` anywhere (`grep -r DomainOrigin
+feme/lib feme/include` found nothing), silently treating every
+`VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT` pipeline identically to the
+spec-default upper-left one. Per the Vulkan spec (confirmed against
+`vktTessellationWindingTests.cpp`'s own `verifyResultImage`/
+`expectVisiblePrimitive` formula, which is a direct function of
+`domainOrigin`), the lower-left domain origin mirrors the tessellator's
+`(u,v)` parameter frame, which reverses every generated triangle's
+winding as a side effect -- independent of, and not fixable by touching,
+the tessellator's own (already-correct) Cw/Ccw convention.
+
+Fixed in `feme/lib/Vulkan/GraphicsPipeline.cpp`:
+`hasLowerLeftTessellationDomainOrigin` walks
+`VkPipelineTessellationStateCreateInfo::pNext` for a chained
+`VkPipelineTessellationDomainOriginStateCreateInfo`, true only when its
+`domainOrigin` is explicitly `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT`;
+`flipTessellationWindingForDomainOrigin` swaps `TriangleCw`/`TriangleCcw`
+(leaving `Point`/`Line` untouched) and is applied to the merged
+`TessellationState::OutputPrimitive` once, at the end of
+`compileGraphicsPipeline`, only when a tessellation-control stage is
+present and the lower-left origin was requested.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+1833/1892 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from
+1831/1890 before this row -- the two new `GraphicsPipelineTest` cases:
+`FlipsTessellationWindingForLowerLeftDomainOrigin` (an explicit
+lower-left domain origin flips `OutputPrimitive` from `TriangleCcw` to
+`TriangleCw`) and `KeepsTessellationWindingForExplicitUpperLeftDomainOrigin`
+(an *explicit* upper-left domain origin behaves identically to omitting
+the struct entirely, confirming the check reads the field's value, not
+merely the struct's presence).
+
+**Measured impact.** A real before/after `deqp-vk` A/B against
+`dEQP-VK.tessellation.winding.*glsl*` (24 cases,
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`) confirms the fix: **before**,
+`lower_left_domain`'s 8 cases showed a genuine, complete front-face
+inversion -- one pipeline of every `_ccw`/`_cw` pair rendered exactly the
+opposite of both pipelines in `default_domain`/`upper_left_domain` (e.g.
+"got 0 white and 4096 red pixels" where the sibling subgroup's equivalent
+pipeline got "got 4081 white and 15 red pixels", and vice versa). **After**,
+all three domain-origin subgroups (`default_domain`, `lower_left_domain`,
+`upper_left_domain`) show the *identical* pattern -- `lower_left_domain`'s
+own systematic inversion is gone. Per-case final totals (all 24 still
+`Fail`, but uniformly, at a distinct and much smaller defect):
+
+```
+default_domain.glsl_quads_ccw:            got 4081 white and 15 red pixels / got 0 white and 4096 red pixels
+default_domain.glsl_quads_ccw_yflip:       got 0 white and 4096 red pixels / got 4081 white and 15 red pixels
+default_domain.glsl_quads_cw:              got 0 white and 4096 red pixels / got 4081 white and 15 red pixels
+default_domain.glsl_quads_cw_yflip:        got 4081 white and 15 red pixels / got 0 white and 4096 red pixels
+default_domain.glsl_triangles_ccw:         got 2047 white and 2049 red pixels / got 0 white and 4096 red pixels
+default_domain.glsl_triangles_ccw_yflip:   got 0 white and 4096 red pixels / got 2050 white and 2046 red pixels
+default_domain.glsl_triangles_cw:          got 0 white and 4096 red pixels / got 2047 white and 2049 red pixels
+default_domain.glsl_triangles_cw_yflip:    got 2050 white and 2046 red pixels / got 0 white and 4096 red pixels
+lower_left_domain.*  -- byte-identical shape to default_domain.* above (confirming the fix)
+upper_left_domain.*  -- byte-identical shape to default_domain.* above (confirming the spec-mandated equivalence)
+```
+
+In every case, the "Note" pair is (visible-pipeline result, culled-pipeline
+result); the culled pipeline is always exactly correct (0 white/4096 red
+for quads, or its exact complement); only the pipeline that is supposed to
+render visibly ever shows the residual 15-pixel (quads) or ~1-pixel-row
+(triangles, via `verifyResultImage`'s top/bottom-row-fill count landing
+at 64/64 or 1/64 instead of the expected 63/0) defect. This is spun off
+as roadmap H4j, since it does not correlate with front-face, winding, or
+domain origin at all (identical across all three subgroups) and is
+almost certainly a rasterizer tie-break/rounding or tessellator
+crack-free-bridging-seam issue rather than a winding bug.
+
+**Full group** (`dEQP-VK.tessellation.*`, 1114 cases) is byte-identical
+to H4h's own recorded totals (8 `Pass`/227 `Fail`/879 `NotSupported`).
+**Regression sample**: the same `dEQP-VK.draw.*` 1957-case sample used
+throughout this report is also byte-identical (12 `Pass`/139 `Fail`/1806
+`NotSupported`) -- 0 regressions, expected, since `VkTessellationDomainOrigin`
+was previously silently ignored everywhere, and this fix only changes
+behavior for a pipeline that actually chains the lower-left struct (none
+of this codebase's own non-winding tests do).
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change for this row: `VkPipelineTessellationDomainOriginStateCreateInfo`
+is a core Vulkan 1.2 (originally `VK_KHR_maintenance2`) pipeline-creation
+struct, not a feature bit or an extension name to advertise -- it was
+always legal for an application to chain this struct, FeMe simply
+ignored its contents until now, the same "always-accepted struct now
+actually honored" shape as H4b/H4h's own tessellation-state parsing,
+neither of which needed an inventory change either.
+
+**Reproducing this row.** Same ICD build as the rest of this report:
+
+```shell
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  deqp-vk --deqp-case="dEQP-VK.tessellation.winding.*glsl*" \
+    --deqp-log-filename=winding_glsl.qpa
+```
