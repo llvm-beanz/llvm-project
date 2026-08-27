@@ -33,21 +33,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5f?
+Can you work on milestone H5g?
 
-> **A *constant*-indexed `gl_in[k]`-shaped access (or any other
-> per-vertex-arrayed `Input` global) still resolves through the pre-existing
-> `getStageIOBaseAndOffset`/`resolveRowComponent` byte-offset path exactly as
-> before H5b, folding that constant array index into the accessed member's own
-> `Row` operand instead of `Vertex`**, and the corresponding
-> `SignatureElement.RowCount` for such a global still reports the per-vertex
-> array's own extent (e.g. 3 for a triangle's `gl_in[3]`) rather than a real
-> matrix's row count -- the two are indistinguishable in the signature today,
-> which H5b's own investigation found and deliberately left alone (out of that
-> row's own scope, which asked only for the non-constant case). Needs a way for
-> a `SignatureElement` (or a sibling flag alongside it) to record "this
-> dimension is a per-vertex array, not a matrix row" so a real consumer (H5c's
-> own geometry-entry canonicalization, or a future one) can tell the two apart
-> regardless of whether the shader's own index into it happens to be constant,
-> and route a constant index through `Vertex` (not `Row`) for consistency with
-> the non-constant case H5b already handles
+> **`SPIRVToLLVMPatterns.cpp`'s `StageIOGlobalVariablePattern::matchAndRewrite`
+> only attaches `feme.spirv.MemberDecorations` metadata when a stage-IO global's
+> pointee type is directly an `mlir::spirv::StructType`, never an
+> `mlir::spirv::ArrayType<StructType>`** -- the exact shape a geometry entry's
+> `gl_in[]` builtin interface block actually takes (an array of the per-vertex
+> block, not the bare block) -- so a real SPIR-V geometry shader's `gl_in`
+> global reaches `CanonicalizeStage.cpp` with no member-decoration metadata at
+> all today, even after H5b's own `addElements` fix (which peels the outer array
+> dimension correctly, but only once metadata is present to peel in front of).
+> Needs `StageIOGlobalVariablePattern` to also recognize the
+> pointee-is-`ArrayType`-of-`StructType` shape and attach the inner struct's own
+> per-member decorations the same way it already does for a bare block, so H5b's
+> mechanism has real input to exercise ahead of H5c
