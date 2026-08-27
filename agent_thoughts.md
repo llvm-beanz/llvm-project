@@ -38011,3 +38011,122 @@ found (constant-index `Row`-folding/`RowCount` conflation, and the
 SPIR-V-to-LLVM conversion pass not yet producing the metadata this row's
 own `addElements` fix expects) are now tracked as H5f/H5g rather than
 silently left for someone else to rediscover.
+
+# Milestone H5f: constant-indexed `gl_in[k]` routed through `Vertex`, `RowCountIsVertexArray`
+
+## Task
+
+Roadmap H5f (spun off by H5b's own investigation): a *constant*-indexed
+`gl_in[k]`-shaped access (or any other per-vertex-arrayed `Input` global)
+still resolved through the pre-existing `getStageIOBaseAndOffset`/
+`resolveRowComponent` byte-offset path exactly as before H5b, folding the
+constant array index into the accessed member's own `Row` operand instead
+of `Vertex`. The corresponding `SignatureElement.RowCount` for such a
+global still reported the per-vertex array's own extent (e.g. 3 for a
+triangle's `gl_in[3]`) rather than a real matrix's row count, with no way
+for a consumer to tell the two apart. Needed: a way for a `SignatureElement`
+(or sibling flag) to record "this dimension is a per-vertex array, not a
+matrix row", and route a constant index through `Vertex` (not `Row`) for
+consistency with the non-constant case H5b already handles.
+
+## Investigation
+
+Read H5b's own code (`getDynamicVertexIndexedAccess`, `resolveStageIOAccess`,
+`addElements`) to understand exactly which shape is recognized today and
+where a constant index instead falls through to the ordinary
+`getStageIOBaseAndOffset` path. Confirmed via `resolveOffsetWithinElement`
+that a constant `gl_in[k]` access on a plain (non-block) per-vertex-arrayed
+global lands in the `IDs.size() == 1` branch, calling `resolveRowComponent`
+on the *whole* global's `ArrayType` (the outer per-vertex dimension) --
+exactly the "folds into `Row`" behavior the roadmap row describes.
+
+For the builtin-interface-block shape (`gl_in[]` itself, an
+`ArrayType<StructType>` with `feme.spirv.MemberDecorations` metadata), the
+same ordinary path would actually pass the *whole* `ArrayType` as `ElemTy`
+to `resolveOffsetWithinElement` with a multi-entry `IDs` (one per member),
+which asserts/crashes trying `cast<StructType>(ElemTy)` on an `ArrayType`.
+This path is unreachable today only because H5g (SPIR-V-to-LLVM not yet
+attaching `MemberDecorations` metadata to an array-of-block global) means
+no real IR ever reaches `addElements`' `MemberMD` branch with a top-level
+array type in the first place -- so this was a latent, not-yet-triggered
+bug, and fixing the constant-index path uniformly (rather than only for
+the plain-global case) closes it for free once H5g lands.
+
+## Design
+
+- New shared predicate `isPerVertexArrayInputGlobal(GV, AddrSpace)`:
+  purely structural (address space 7 + top-level `ArrayType`), matching
+  `getDynamicVertexIndexedAccess`'s own established precedent of not
+  trying to disambiguate a genuine geometry per-vertex array from some
+  other stage's real per-invocation matrix attribute at this level --
+  `ValidateStagePass::validateVertex` is the actual arbiter of stage
+  legality, and this row does not change that division of labor.
+  Refactored `getDynamicVertexIndexedAccess` to use it instead of its own
+  inlined check (previously `dyn_cast<ArrayType>` + null check; now
+  `cast<ArrayType>` after the shared predicate already confirmed it).
+- `resolveStageIOAccess`'s ordinary constant-offset fallback now also
+  consults this predicate: if the resolved global is this shape *and* the
+  access is not a whole-global aggregate one (`ValueTy != GV->getValueType()`,
+  guarding against genuinely copying every vertex's value at once), the
+  byte offset is split into a vertex index (dividing by one vertex's own
+  `TypeAllocSize`) and a residual offset, then handed to
+  `resolveOffsetWithinElement` exactly the way the dynamic path already
+  does, just with a constant `Value*` instead of a genuine SSA one.
+- New `SignatureElement::RowCountIsVertexArray` (`Signature.h`,
+  `SignatureAbiVersion` bumped 3 -> 4, serialize/parse and
+  `NumFixedFieldsPerElement` updated in `Signature.cpp`): true only for a
+  whole (non-block) per-vertex-arrayed `Input` global's own element (set
+  in `addElements` via the same predicate), always false for a builtin
+  interface block's own per-member elements -- their `RowCount` never
+  included the per-vertex dimension to begin with, since `addElements`
+  already peels that dimension off before building each member's element
+  (an H5b fix, not something this row touches).
+- Every pre-existing serialized `feme.signature` metadata blob this
+  codebase's own tests hardcode (`feme-render`'s `draw-*.test` scenes, the
+  CPU stage-wrapper lit tests) needed mechanical re-serialization to the
+  new version-4 byte layout -- a Python script parsed each blob as v3,
+  inserted a zero `RowCountIsVertexArray` field per element, and
+  re-encoded as v4, since these are hand-authored binary blobs with no
+  generator script to just re-run.
+
+## Testing
+
+- `SignatureTest.cpp`: extended (not added) `SerializeParseRoundTrips`'s
+  existing rich signature to set `RowCountIsVertexArray = true` on one
+  element and assert it round-trips.
+- `CanonicalizeStageTest.cpp`: two new tests,
+  `FoldsConstantVertexIndexIntoVertexOperand` (plain per-vertex-arrayed
+  global, constant index 1) and
+  `FoldsConstantVertexIndexIntoInterfaceBlockArrayMemberVertexOperand`
+  (builtin-interface-block shape, constant index 2, hand-authored with the
+  `MemberDecorations` metadata H5g would otherwise need to attach for
+  real), both asserting the constant folds into the `Vertex` operand (not
+  `Row`) and the signature's `RowCountIsVertexArray` flag. Also updated the
+  two existing H5b dynamic-index tests to assert the flag's value (true
+  for the plain-global case, false for the interface-block-member case).
+- `ninja check-feme` (assertions-enabled, ccache build): 1849/1908 passed
+  (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from H5b's
+  1847/1906 by exactly the 2 new `CanonicalizeStageTest` cases.
+- Vulkan CTS: re-ran `dEQP-VK.geometry.*` (0/0/200, unchanged -- H5c hasn't
+  lifted the stage filter yet) and the same `dEQP-VK.draw.*` 1957-case
+  sample this report has used since H4 (12 Pass/139 Fail/1806
+  NotSupported, byte-identical to H5b's own baseline). 0 regressions, 0 new
+  passes, as expected for a change reachable only through a shape no real
+  `dEQP-VK.draw.*` shader takes and no `dEQP-VK.geometry.*` shader can
+  reach yet.
+- Updated `VulkanCTSReport.md` with a "Roadmap H5f: measured impact"
+  section, `Roadmap.md`'s H5f row struck through, and
+  `FeMeGraphicsDesign.md`'s existing forward-reference to H5f (in the
+  tessellation/geometry chaining section) updated to describe what
+  actually landed.
+
+## Outcome
+
+H5f is done as scoped: a constant `gl_in[k]` index now folds into the same
+`Vertex` operand a non-constant one already does, and
+`SignatureElement::RowCountIsVertexArray` lets a consumer tell a
+per-vertex array's own extent apart from a real matrix's row count
+regardless of how the shader happens to index it. H5g (SPIR-V-to-LLVM not
+yet attaching `MemberDecorations` metadata for an array-of-block global)
+and H5c (`CanonicalizeStagePass::run` still not accepting
+`ShaderStage::Geometry`) remain open, as scoped.
