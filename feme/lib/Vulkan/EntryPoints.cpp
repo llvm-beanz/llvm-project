@@ -1003,10 +1003,14 @@ namespace {
 /// `CommandBuffer.cpp`) -- each reported through either its dedicated 1.1/
 /// 1.2 feature struct or the aggregate `VkPhysicalDeviceVulkan1{1,2}Features`
 /// struct, matching whichever one an application chained.
-/// `multiviewGeometryShader`/`multiviewTessellationShader` stay `VK_FALSE`:
-/// neither a geometry nor a tessellation-evaluation stage exists yet
-/// (roadmap H4/H5), so multiview amplification through either has nothing
-/// to amplify.
+/// `multiviewGeometryShader` is real too (roadmap H5e): multiview
+/// amplification is `CommandBuffer.cpp`'s `runDraw` simply re-executing the
+/// whole bound pipeline -- geometry stage included -- once per set view
+/// bit, so it needs no geometry-specific amplification logic of its own.
+/// `multiviewTessellationShader` stays `VK_FALSE`: a tessellation-evaluation
+/// stage's own multiview interaction (`gl_Layer`/`gl_ViewportIndex` written
+/// from a domain shader rather than a vertex/geometry one) has not been
+/// independently verified yet (roadmap H4's own remaining rows).
 void fillFeatures2Chain(void *pNext) {
   for (auto *Base = static_cast<VkBaseOutStructure *>(pNext); Base;
        Base = Base->pNext) {
@@ -1015,14 +1019,16 @@ void fillFeatures2Chain(void *pNext) {
     // accepts `layers > 1` and `vkCreateRenderPass`/`vkCreateRenderPass2`
     // accept a nonzero `viewMask`, each set view bit running the bound
     // pipeline once per `CommandBuffer.cpp`'s `runDraw`.
-    // `multiviewGeometryShader`/`multiviewTessellationShader` stay
-    // `VK_FALSE`: geometry/tessellation stages are not supported at all
-    // yet (`GraphicsPipeline.cpp`, roadmap H4/H5).
+    // (Roadmap H5e) `multiviewGeometryShader` is real for the same reason:
+    // a bound geometry stage runs as part of that same per-view
+    // re-execution, with no separate amplification path of its own.
+    // `multiviewTessellationShader` stays `VK_FALSE` -- see the file
+    // comment above.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES: {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceMultiviewFeatures *>(Base);
       Features->multiview = VK_TRUE;
-      Features->multiviewGeometryShader = VK_FALSE;
+      Features->multiviewGeometryShader = VK_TRUE;
       Features->multiviewTessellationShader = VK_FALSE;
       break;
     }
@@ -1091,10 +1097,10 @@ void fillFeatures2Chain(void *pNext) {
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: {
-      // (roadmap H2) `multiview` is real (see the dedicated-struct case
-      // above); every other 1.1-promoted bit stays `VK_FALSE`, still
-      // explicitly written for the same guard-pattern reason that case
-      // documents.
+      // (roadmap H2/H5e) `multiview`/`multiviewGeometryShader` are real
+      // (see the dedicated-struct case above); every other 1.1-promoted
+      // bit stays `VK_FALSE`, still explicitly written for the same
+      // guard-pattern reason that case documents.
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceVulkan11Features *>(Base);
       Features->storageBuffer16BitAccess = VK_FALSE;
@@ -1102,7 +1108,7 @@ void fillFeatures2Chain(void *pNext) {
       Features->storagePushConstant16 = VK_FALSE;
       Features->storageInputOutput16 = VK_FALSE;
       Features->multiview = VK_TRUE;
-      Features->multiviewGeometryShader = VK_FALSE;
+      Features->multiviewGeometryShader = VK_TRUE;
       Features->multiviewTessellationShader = VK_FALSE;
       Features->variablePointersStorageBuffer = VK_FALSE;
       Features->variablePointers = VK_FALSE;

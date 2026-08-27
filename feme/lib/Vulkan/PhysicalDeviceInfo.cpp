@@ -405,6 +405,24 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // DefaultMaxTessFactor` (Graphics/Tessellator.h) respectively, and were
   // not raised for this milestone.
   Info.Features.tessellationShader = VK_TRUE;
+  // Roadmap H5e: `GraphicsPipeline.cpp`'s `vkCreateGraphicsPipelines` now
+  // accepts `VK_SHADER_STAGE_GEOMETRY_BIT`, compiles the module into a
+  // `CompiledStage` tagged `feme::ShaderStage::Geometry`, reflects its
+  // declared shape (`feme::graphics::GeometryState`) into
+  // `graphics::GraphicsPipeline::setGeometryStage` (which the executor has
+  // consumed since roadmap H5d), and enforces the four adjacency
+  // topologies' own requirement of a bound geometry stage -- so this can
+  // honestly flip to `VK_TRUE`. `maxGeometryShaderInvocations` (32),
+  // `maxGeometryInputComponents`/`maxGeometryOutputComponents` (64 each),
+  // `maxGeometryOutputVertices` (256) and
+  // `maxGeometryTotalOutputComponents` (1024) above are exactly core
+  // 1.0's own mandatory minimums, not a raised ceiling: `Executor.cpp`'s
+  // geometry chaining sizes every one of `GeometryStreamBuilder`/
+  // `FemeGeometryArgs` dynamically from the compiled stage's own declared
+  // `Invocations`/`MaxOutputVertices` rather than off any fixed
+  // implementation cap, so there is no smaller real limit to report and no
+  // larger one this milestone raises either.
+  Info.Features.geometryShader = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
