@@ -38925,3 +38925,192 @@ now closed, pointing at the new report section for the follow-on buckets.
    rows, `VulkanCTSReport.md`'s new "Roadmap H5e-a: measured impact"
    section, `FeMeGraphicsDesign.md`'s updated closing paragraph.
 4. This entry.
+
+# Milestone H5e-b: silent `vkCreateGraphicsPipelines`/`vkQueueSubmit` no-diagnostic bucket
+
+## Starting point
+
+H5e-a's own re-triage left H5e-b's 21-case bucket exactly as H5e first
+flagged it: `builtin_variable.in_block.primitive_id_in{,_restarted}`,
+`input.basic_primitive.{line_strip,line_strip_adjacency,triangle_fan}`,
+`input.triangle_strip_adjacency.vertex_count_*` (13 cases), and
+`emit.{line_strip,points,triangle_strip}_emit_0_end_0` (3 cases) --
+wait, that's 16, plus the two `primitive_id_in` variants and counting the
+`vertex_count_*` sub-cases gets to 21 total. All fail
+`vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED` and
+*no diagnostic text at all* reaches `deqp-vk`'s own log -- just the
+generic Vulkan error code.
+
+## First move: turn on the diagnostics that already exist
+
+Before doing any bisection, I checked whether the silence was itself a
+logging gap. It wasn't quite -- `feme/lib/Vulkan/Diagnostics.{h,cpp}`
+already implements `logCreationFailure`, wired into
+`GraphicsPipeline.cpp`'s top-level catch, but gated behind
+`FEME_VULKAN_LOG_CREATION_ERRORS` being set to a non-empty, non-"0"
+value, off by default. Re-running the 21-case list with that env var set
+immediately produced two distinct, specific diagnostics:
+
+- 18 cases: `"primitive restart is only implemented for
+  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP"`
+- 3 cases (`emit.*_emit_0_end_0`): `"geometry stage does not write a
+  4-component SV_Position output"`
+
+So the "no diagnostic" framing in the roadmap row is accurate only in
+the sense that the *log* was silent by default -- the *validation logic*
+itself had a real, specific reason for rejecting each case all along.
+This reframes the task: not "find where an untraced code path silently
+eats an error," but "figure out whether these two rejections are
+correct behavior or bugs, and fix them if bugs."
+
+## Bug #1: the restart gate never caught up with the executor
+
+`git log -S 'TRIANGLE_STRIP'` on `GraphicsPipeline.cpp` traced the
+restart check back to roadmap V6. But `git log -S
+'RestartEnabled'` on `Executor.cpp` found a much later commit,
+`a734f0eec234` ("Chain the geometry stage into `Executor::
+executeDraws` (H5d)"), which extended the *runtime* condition to treat
+`LineStrip`/`TriangleStrip`/`TriangleFan`/`LineStripWithAdjacency`/
+`TriangleStripWithAdjacency` as restart-capable -- but never touched
+`GraphicsPipeline.cpp`'s creation-time gate, which still only allowed
+`TriangleStrip`. That's a real inconsistency bug, not a missing
+feature: the executor was already correct and tested for five
+topologies; the creation-time gate just never got the memo. The fix I
+chose was to factor a single shared predicate,
+`feme::graphics::topologySupportsPrimitiveRestart`, in `Pipeline.h`/
+`Pipeline.cpp` -- deliberately mirroring the existing
+`topologyHasAdjacency` helper's shape, since that's the established
+precedent in this codebase for "a per-topology yes/no fact both the
+Vulkan layer and the executor need to agree on." Both call sites now
+route through it, so they structurally cannot drift apart again.
+
+One care point: `GraphicsPipeline.cpp`'s check has to run *after*
+`Topology` is resolved via `mapTopology` (the incoming value is a raw
+`VkPrimitiveTopology`, but the helper takes the internal
+`PrimitiveTopology` enum) -- I moved the check down rather than adding a
+second, redundant raw-`VkPrimitiveTopology`-based helper.
+
+## Bug #2: an entirely-empty geometry signature isn't "missing a
+   position," it's "does nothing at all"
+
+The three `emit_0_end_0` cases are more interesting. I read CTS's own
+`vktGeometryEmitGeometryShaderTests.cpp` to understand exactly what
+these shapes compile: `emitCountA=emitCountB=endCountA=endCountB=0`
+means the geometry `main` body is completely empty -- no `gl_Position`
+write, no varying write, not even a call to `EmitVertex`/
+`EndPrimitive`. It's a deliberate "verify nothing crashes when the
+shader legitimately emits zero vertices" test case, not a malformed
+shader.
+
+The key realization: SPIR-V's entry-point interface list only contains
+variables the entry point *actually touches*. A shader that never
+writes `gl_Position` doesn't produce an interface entry for `Position`
+with some sentinel/default value -- it produces *no entry for Position
+at all*, exactly as if the variable didn't exist. For a shader this
+degenerate, that means the *entire* reflected `EntrySignature` for the
+geometry stage has zero elements, full stop -- not "missing one
+specific expected element among several present ones." That's a
+qualitatively different signal from a shader that has some elements but
+forgot `Position`.
+
+`validateStageInterfaces`'s "does the last pre-rasterization stage write
+a 4-component SV_Position" check couldn't tell these two situations
+apart before this change -- it just saw "no Position, reject." I added
+a distinguishing condition, `GeometryNeverWrites = GeometryStage &&
+PositionSig.Elements.empty()`, and used it to skip both that check and
+the fragment-input/vertex-output location-linkage loop right next to it
+(which would otherwise separately reject the fragment stage's
+now-orphaned varying input, since nothing upstream produces it either).
+The reasoning: a stage that provably writes literally nothing can never
+contribute anything to rasterization no matter what it might have
+written, so treating it as "fine, this pipeline just draws nothing" is
+correct, not merely permissive.
+
+Fixing only the creation-time check exposed a masked third bug: with
+pipeline creation now succeeding, the exact same three cases moved on
+to fail at `vkQueueSubmit` instead, with the identical "no diagnostic"
+symptom. I temporarily instrumented `Sync.cpp`'s
+`executeCommandBuffers` with `logCreationFailure` (matching
+`GraphicsPipeline.cpp`'s own pattern) purely to confirm the hypothesis,
+saw the expected `"the last pre-rasterization stage does not write an
+SV_Position output"` message from `Executor.cpp`, and then reverted
+`Sync.cpp` back to its original bare `consumeError` -- wiring up
+submit-time diagnostics generally is a real, separate improvement, but
+out of scope for this row, so I kept the change to the minimum needed to
+fix the actual bug. The real fix mirrors the creation-time one: in
+`executeDraws`, right after `RasterSig` is computed and before the
+`VSPosition` null-check, an empty `GSSig` now returns `Error::success()`
+as a legitimate no-op draw.
+
+## Verification
+
+- Rebuilt after each fix and re-ran `ninja check-feme`: held steady at
+  1863/1922 passing throughout (0 regressions) until the new unit tests
+  landed, which brought it to 1867/1926 (exactly +4, the new tests
+  added, see below).
+- Re-ran the 21-case CTS subset after each fix: final state is 3/21
+  outright `Pass` (the three `emit_0_end_0` cases) and 18/21 failing
+  with the real, printed `getelementptr`/output-array-storage
+  diagnostic H5e-a already flagged and left as an unisolated 60-case
+  bucket -- i.e. these 18 are now correctly filed under an
+  already-tracked issue, not a new open item.
+- Full `dEQP-VK.geometry.*` (200 cases): 4/200 passing (up from H5e-a's
+  1/200), 163/200 failing (down from 166), 33/200 not-supported
+  (unchanged) -- exactly +3 passing, as expected.
+- `dEQP-VK.draw.*`'s 1957-case regression sample: byte-identical to
+  H5e-a's own baseline (12 Pass/155 Fail/1790 NotSupported), 0
+  regressions, as expected since neither fix touches any non-geometry
+  path.
+
+## Test coverage added
+
+- `unittests/Graphics/PipelineTest.cpp`:
+  `SupportsPrimitiveRestartIdentifiesEveryStripAndFanKind`, covering
+  every `PrimitiveTopology` enumerator against the new helper.
+- `unittests/Vulkan/GraphicsPipelineTest.cpp`:
+  `AcceptsPrimitiveRestartOnStripAndFanTopologies` (exercises
+  `LineStrip`/`TriangleFan`/`LineStripWithAdjacency`/
+  `TriangleStripWithAdjacency` end to end through real pipeline
+  creation) and `AcceptsGeometryStageThatNeverEmits` (a real SPIR-V
+  geometry module with an empty body, paired with a fragment stage that
+  declares an unmatched varying input, to exercise both relaxed checks
+  at once).
+- `unittests/Graphics/ExecutorTest.cpp`:
+  `ExecutesDrawsAsNoOpWhenGeometryStageNeverEmits`, verifying
+  `executeDraws` returns success and leaves the color attachment
+  untouched for a pipeline built around an empty-signature geometry
+  stage.
+
+## Docs
+
+`FeMeVulkanDesign.md`'s primitive-restart paragraph is updated in place
+(it previously said restart "is also implemented, but only for
+`VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP`" -- true when written, stale
+after H5d, now corrected to name every topology `Executor.cpp` (and now
+`GraphicsPipeline.cpp`) actually support and point at the shared
+helper). `VulkanCTSReport.md` gains a new "Roadmap H5e-b: measured
+impact" section following the exact structure of H5e/H5e-a's own
+sections. `Roadmap.md`'s H5e-b row is struck through: its own literal
+ask (isolate the root cause of the silent 21-case bucket) is fully
+satisfied -- every case now either passes or fails with a real,
+attributed diagnostic, and the residual 18-case bucket is explicitly
+folded into H5e-a's own already-tracked, unrelated `getelementptr`
+issue rather than needing a new lettered row of its own.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` needed no
+changes -- neither fix flips a feature or extension bit, both are pure
+validation-logic corrections.
+
+## Commits
+
+1. `topologySupportsPrimitiveRestart` helper (`Pipeline.h`/
+   `Pipeline.cpp`) plus its use in `Executor.cpp`/`GraphicsPipeline.cpp`,
+   and its unit tests (`PipelineTest.cpp`,
+   `GraphicsPipelineTest::AcceptsPrimitiveRestartOnStripAndFanTopologies`).
+2. The degenerate zero-emit geometry-stage fix in
+   `GraphicsPipeline.cpp`/`Executor.cpp`, and its unit tests
+   (`GraphicsPipelineTest::AcceptsGeometryStageThatNeverEmits`,
+   `ExecutorTest::ExecutesDrawsAsNoOpWhenGeometryStageNeverEmits`).
+3. Docs: `Roadmap.md`'s H5e-b row struck through, `VulkanCTSReport.md`'s
+   new "Roadmap H5e-b: measured impact" section,
+   `FeMeVulkanDesign.md`'s corrected restart-topology paragraph.
+4. This entry.
