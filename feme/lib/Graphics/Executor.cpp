@@ -431,13 +431,24 @@ double edgeFnD(std::array<float, 2> A, std::array<float, 2> B,
 }
 
 /// Whether the directed edge A->B is a "top" or "left" edge of a
-/// positively-wound (by `edgeFn`) triangle in pixel space -- the tie-break
-/// rule ("Rasterization correctness": "top-left fill") that gives an edge
-/// shared by two triangles exactly one owner.
+/// positively-wound (by `edgeFn`) triangle in pixel space (y increasing
+/// downward) -- the tie-break rule ("Rasterization correctness": "top-left
+/// fill") that gives an edge shared by two triangles exactly one owner,
+/// and (roadmap H4j) gives a lone triangle's own outer boundary (no
+/// sharing triangle at all, e.g. a tessellated domain's own edge against
+/// the clear color) a single, well-defined inside/outside answer at any
+/// sample that lands exactly on it. A "positively-wound" triangle here
+/// (`edgeFn(Pos0, Pos1, Pos2) > 0`, guaranteed for every triangle that
+/// reaches the coverage test below, see the `SArea < 0.0f` reorder in the
+/// triangle-assembly loop above) walks its boundary such that a "top"
+/// edge is exactly horizontal and points *leftward* (`Dx < 0`, since the
+/// interior lies below it) and a "left" edge points *downward* (`Dy > 0`,
+/// since the interior lies to its right); their complements ("bottom":
+/// horizontal and rightward, "right": upward) are correctly excluded.
 bool isTopLeftEdge(std::array<float, 2> A, std::array<float, 2> B) {
   float Dy = B[1] - A[1];
   float Dx = B[0] - A[0];
-  return (Dy == 0.0f && Dx > 0.0f) || Dy < 0.0f;
+  return (Dy == 0.0f && Dx < 0.0f) || Dy > 0.0f;
 }
 
 /// Fixed per-pixel sample offsets (relative to the pixel's top-left

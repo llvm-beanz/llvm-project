@@ -1061,6 +1061,59 @@ TEST(ExecutorTest, AdjacentTrianglesShareAnEdgeWithoutGapsOrOverlaps) {
   }
 }
 
+/// (Roadmap H4j) A lone triangle's own outer boundary edge (no
+/// edge-sharing partner triangle at all) must give the same well-defined
+/// inside/outside answer the top-left tie-break gives a *shared* edge:
+/// a sample landing exactly on it belongs to at most one side. This
+/// triangle's hypotenuse is the anti-diagonal of the 4x4 viewport
+/// (screen `x + y == 4`), which four of the sixteen pixel centers
+/// (`(0.5,3.5)`, `(1.5,2.5)`, `(2.5,1.5)`, `(3.5,0.5)`) land exactly on;
+/// the corrected `isTopLeftEdge` polarity (this edge walks
+/// top-right-to-bottom-left, i.e. `Dy < 0`, neither the horizontal+
+/// leftward "top" case nor the downward "left" case) excludes all four,
+/// leaving exactly the 6 pixels strictly inside (`x + y < 3`) filled.
+/// Before H4j's fix, the old (backwards) polarity included all four
+/// boundary pixels too, matching this bug's `glsl_triangles_*` CTS
+/// symptom of an exact off-by-one row/column fill count.
+TEST(ExecutorTest, TopLeftTieBreakExcludesALoneTrianglesOwnBoundaryEdge) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Screen-space corners (0,0), (4,0), (0,4) -- NDC (-1,1), (1,1), (-1,-1)
+  // (the executor's `projectVertex` flips Y, NDC y=1 landing at screen
+  // y=0): a right triangle covering the origin corner of the 4x4
+  // viewport, whose hypotenuse is the anti-diagonal `x + y == 4`.
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, 1.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0 = screen (0,0)
+      1.0f,  1.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1 = screen (4,0)
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2 = screen (0,4)
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t Y = 0; Y != 4; ++Y) {
+    for (uint32_t X = 0; X != 4; ++X) {
+      uint32_t I = Y * 4 + X;
+      const uint8_t *Texel = Scene.AttachmentStorage.data() + I * 4;
+      bool IsRed = Texel[0] == 255 && Texel[1] == 0 && Texel[3] == 255;
+      bool IsClear = Texel[3] == 0;
+      // Strictly inside the hypotenuse (x + y < 3): must be filled red.
+      // Exactly on it (x + y == 3, the four boundary pixel centers): must
+      // be excluded (left as the untouched, transparent clear color).
+      if (X + Y < 3)
+        EXPECT_TRUE(IsRed) << "texel (" << X << "," << Y << ")";
+      else if (X + Y == 3)
+        EXPECT_TRUE(IsClear) << "texel (" << X << "," << Y
+                             << ") should be excluded by the top-left rule";
+      else
+        EXPECT_TRUE(IsClear) << "texel (" << X << "," << Y << ")";
+    }
+  }
+}
+
 /// (Roadmap H4j) Two triangles sharing an exact edge must give a sample
 /// landing on that edge to exactly one of them, even when the edge is
 /// neither axis-aligned nor at a "nice" fraction -- the scenario the
