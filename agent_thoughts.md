@@ -38602,3 +38602,193 @@ the optimistic direction, just gated behind an unrelated capacity bug.
    a "(done: ...)" summary, `VulkanCTSReport.md`'s new "Roadmap H5d-a:
    measured impact" section.
 5. This entry.
+
+# Milestone H5e: `vkCreateGraphicsPipelines` geometry-stage acceptance
+
+## Scope and starting point
+
+H5d/H5d-a already made the *executor* fully ready to run a geometry stage
+(`GraphicsPipeline::setGeometryStage`/`hasGeometryStages`, `Executor.cpp`'s
+adjacency-aware primitive assembly, invocation replication and merged-stream
+substitution for rasterization). What remained, per the roadmap row's own
+text, was purely the Vulkan-API front end: `GraphicsPipeline.cpp`'s
+`translateFixedFunctionState` still rejected `VK_SHADER_STAGE_GEOMETRY_BIT`
+outright, `mapTopology` rejected all four `*_WITH_ADJACENCY` topologies
+unconditionally (even though nothing downstream needed that anymore), and
+`PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` still reported `geometryShader`/
+`multiviewGeometryShader` as `VK_FALSE` despite the limits already being
+set to their true values.
+
+## What I changed, and in what order
+
+1. `mapTopology`: added the four adjacency topology mappings. This was
+   pure enablement -- `Executor.cpp` already handled every one of these
+   topologies generically.
+2. `GraphicsPipeline.cpp`'s `translateFixedFunctionState`/
+   `compileAndValidateStages`/`compileGraphicsPipeline`/
+   `buildExecutorPipeline`: threaded a `GeometryInfo`/`Geometry` parameter
+   through the same shape `TessControlInfo`/`TessEvalInfo`/`Tessellation`
+   already use, compiling the geometry module into a `CompiledStage`,
+   reading back its `GeometryState`, and wiring it into
+   `GraphicsPipeline::setGeometryStage`. Added a one-directional legality
+   check (adjacency topology requires a bound geometry stage; the
+   converse is not required, since a geometry stage's own input primitive
+   class can be a non-adjacency one too) mirroring the existing
+   bidirectional `PatchList`/tessellation-stage check.
+3. Added two direct limit checks -- `GeomState->Invocations` against
+   `maxGeometryShaderInvocations` and `GeomState->MaxOutputVertices`
+   against `maxGeometryOutputVertices` -- mirroring
+   `validatePatchControlPointCounts`'s role for the tessellation halves.
+   I deliberately did *not* add checks for the remaining `maxGeometry*`
+   limits (`maxGeometryInputComponents`/`maxGeometryOutputComponents`/
+   `maxGeometryTotalOutputComponents`), which are per-signature
+   component-count sums with no existing counterpart validation on the
+   tessellation side either (its own analogous per-vertex/per-patch
+   component limits are advertised but not independently re-checked) --
+   keeping this row's own scope consistent with its own precedent rather
+   than introducing a new validation shape unprompted.
+4. `PipelineCache.{h,cpp}`: extended `computeGraphicsPipelineCacheKey`
+   with geometry shader words/entry parameters (both defaulted, so no
+   existing caller needed updating -- confirmed via grep that nothing in
+   `PipelineCacheTest.cpp` calls this function directly with positional
+   arguments that would break).
+5. `PhysicalDeviceInfo.cpp`: `geometryShader = VK_TRUE`, with a comment
+   explaining *why* the existing `maxGeometry*` limits (already core
+   1.0's own mandatory minimums, set even while the feature was gated
+   off) need no further justification: `Executor.cpp`'s geometry chaining
+   sizes every one of `GeometryStreamBuilder`/`FemeGeometryArgs`
+   dynamically from the compiled stage's own declared
+   `Invocations`/`MaxOutputVertices`, not off any fixed implementation
+   cap, so there is no smaller real ceiling to report.
+6. `EntryPoints.cpp`: flipped `multiviewGeometryShader` to `VK_TRUE` in
+   both the dedicated `VkPhysicalDeviceMultiviewFeatures` case and the
+   aggregate `VkPhysicalDeviceVulkan11Features` case, with the reasoning
+   that multiview amplification is already just `CommandBuffer.cpp`'s
+   `runDraw` re-executing the whole bound pipeline (geometry stage
+   included) once per set view bit -- no geometry-specific amplification
+   code was needed at all. Left `multiviewTessellationShader` at
+   `VK_FALSE` exactly as the roadmap text specified.
+
+## A pre-existing bug found and fixed along the way
+
+`validateStageInterfaces`'s fragment-input/vertex-output location-linkage
+loop always checked against the raw vertex stage's own signature
+(`*VSSig`), even for a tessellating pipeline, where the actual last
+pre-rasterization producer is the domain stage -- the same function's own
+`SV_Position` check right next to it already correctly used a
+`PositionSig` selection (`DomainSig` if tessellating, else `VSSig`) for
+exactly this reason, but the varying-linkage loop a few lines below never
+followed suit. This was never exercised by any existing test or CTS shape
+(none happens to declare a domain-stage output at a `Location` a fragment
+input also reads), so it was a latent bug, not a regression I introduced.
+Adding geometry required extending `PositionSig`'s own selection to
+`GeomSig ? *GeomSig : (DomainSig ? *DomainSig : *VSSig)` for the
+`SV_Position` check anyway (geometry is "more last" than the domain stage
+when both are present); making the varying-linkage loop use that same
+`PositionSig` rather than a hardcoded `*VSSig` was the natural, minimal
+fix once I was already touching that exact selection logic -- not
+unrelated scope creep, but a correctness improvement bundled with the
+geometry work that also changes (in a strictly more-correct direction)
+tessellation-pipeline validation. Flagged explicitly in the CTS report
+rather than left silent, per this project's own stated preference for
+surfacing exactly this kind of incidental fix.
+
+## Unit tests
+
+Added `GraphicsPipelineTest.cpp`'s `GeometrySource` fixture (a triangle-in/
+triangle-strip-out geometry entry point that writes `Position` but calls
+neither `EmitVertex` nor `EndPrimitive`, since neither lowers yet -- see
+below) and three new tests: `AcceptsGeometryStage` (compiles, reflects
+`GeometryState` correctly, and confirms the base topology is left
+unaffected), `AcceptsAdjacencyTopologyWithGeometryStage` (the new
+`mapTopology` cases actually work end to end with a bound geometry stage),
+and `RejectsAdjacencyTopologyWithoutGeometryStage` (all four adjacency
+topologies, not just one, still rejected without one -- the existing
+`RejectsUnimplementedStateCombinations` test's own
+`LINE_LIST_WITH_ADJACENCY` case continues to pass unchanged, now for a
+different reason: previously `mapTopology` itself rejected it; now
+`mapTopology` succeeds and the new one-directional geometry-stage
+requirement rejects it instead). Also added
+`PhysicalDeviceInfoTest.cpp`'s `GeometryLimitsMeetCore10Minimums` and
+`AggregateVulkan11FeaturesReportMultiviewGeometryShader`, and updated two
+*existing* tests in place rather than adding new ones for what they
+already covered: `OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised`
+(added `geometryShader` to its explicit-bits list) and
+`MultiviewFeaturesReportMultiviewTrueAmplificationFalse` (a pre-existing
+test I found only *after* my first `ninja check-feme` run failed on it --
+exactly the kind of check-before-you-strike-through this project's
+process is designed to catch; updated its assertion and comment rather
+than treating it as a regression to explain away).
+
+## The real blocker this row's own CTS run confirms
+
+I suspected before writing any Vulkan-layer code (and confirmed by
+grepping the whole tree for `EmitVertexOp`/`EndPrimitiveOp`) that
+`ConvertSPIRVToLLVMPass`/`SPIRVToLLVMPatterns` have no lowering at all for
+SPIR-V's `spirv.EmitVertex`/`spirv.EndPrimitive` ops into the
+`feme.stage.stream.emit`/`.cut` intrinsics `GeometryWrapperPass` has fully
+implemented since G5. A real `dEQP-VK.geometry.*` run confirms this is by
+far the dominant failure mode: 122 of 167 failures (73%) are exactly
+`error: failed to legalize operation 'spirv.EmitVertex'`/`'spirv.EndPrimitive'`.
+This is a new SPIRVToLLVM conversion pattern, not a
+`vkCreateGraphicsPipelines`-acceptance-path change, so -- mirroring H5a's
+own precedent of stopping at execution-mode reflection and spinning off
+H5b for the per-vertex-input-addressing gap it found -- I did not fix it
+as part of H5e. I broke it out as roadmap **H5e-a** instead, and struck
+through H5e itself with a "(done: ...)" summary that is explicit about
+what it *doesn't* close (the whole `dEQP-VK.geometry.*` group is still
+0/200 passing), following H4b's own precedent of reporting the real,
+possibly-partial breakdown rather than assuming "whole group" from a
+milestone's own title.
+
+The remaining ~21 "silent `VK_ERROR_INITIALIZATION_FAILED`, no diagnostic
+at all" cases (degenerate zero-emit shaders, several
+`triangle_strip_adjacency`/`basic_primitive` input-primitive-class
+shapes) were not individually root-caused this row -- I traced one shape
+far enough (the `*_emit_0_end_0` cases have an entirely empty geometry
+shader body, calling neither `EmitVertex` nor `EndPrimitive` because both
+generator loops run zero times, so no operand ever reaches the missing
+lowering pattern at all) to suspect they are hitting the pre-existing
+"a stage must write a 4-component `SV_Position` output" creation-time
+check via a shader that legitimately never emits any vertex at all -- a
+known, pre-existing design simplification (already applied to
+vertex-only pipelines, `RejectsEmptyVertexShaderWithoutTessellation`) not
+a new bug -- but did not confirm this for every case in the bucket, given
+the added noise the dominant `EmitVertex`/`EndPrimitive` gap creates for
+now. I left this explicitly as follow-up work for H5e-a's own re-triage
+once that noise is gone, rather than either guessing at a fix or silently
+omitting the bucket from the report.
+
+## CTS report and inventories
+
+`VulkanCTSReport.md` gets a full "Roadmap H5e: measured impact" section:
+the geometry-group triage table above, the `dEQP-VK.draw.*` 1957-case
+regression sample (12 Pass unchanged, Failed 139 -> 155 and NotSupported
+1806 -> 1790, a clean +16/-16 swap explained by previously-gated geometry
+draw pipelines now attempting real compilation), and `ninja check-feme`
+totals (1857/1916 -> 1862/1921, +5 new tests, 0 regressions).
+`Vulkan14FeatureInventory.md` updates both the `geometryShader`/
+`multiviewGeometryShader` table rows and the two prose summaries that
+enumerate unimplemented 1.0/1.1 bits by name (15 -> 14 remaining graphics
+capabilities, `multiviewGeometryShader` moved out of the "stays VK_FALSE"
+sentence). `VulkanExtensionInventory.md` needed no change -- this row adds
+no extension, only core feature bits. `FeMeGraphicsDesign.md`'s
+"Tessellation and geometry stage model" section gets a closing paragraph
+describing exactly what H5e closes and what it explicitly leaves to
+H5e-a, so the design doc and the roadmap/report agree on the same
+boundary.
+
+## Commits
+
+1. `mapTopology`'s four adjacency-topology cases.
+2. `GraphicsPipeline.{cpp,h}`/`PipelineCache.{h,cpp}`: geometry-stage
+   compilation, validation, cache-key hashing, and executor wiring.
+3. `PhysicalDeviceInfo.cpp`/`EntryPoints.cpp`: `geometryShader`/
+   `multiviewGeometryShader` feature-bit advertisement.
+4. `GraphicsPipelineTest.cpp`/`PhysicalDeviceInfoTest.cpp`: new and
+   updated unit tests.
+5. Docs: `Roadmap.md`'s H5e row struck through plus new H5e-a row,
+   `VulkanCTSReport.md`'s new "Roadmap H5e: measured impact" section,
+   `Vulkan14FeatureInventory.md`'s table/summary updates,
+   `FeMeGraphicsDesign.md`'s closing paragraph.
+6. This entry.
