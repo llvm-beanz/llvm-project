@@ -35760,3 +35760,229 @@ wiring + the end-to-end `DrawTest` case (this is the commit that actually
 closes the CTS gap end to end), (6) doc updates. This file's own new
 heading is committed separately afterward, per the standing instruction to
 keep `agent_thoughts.md` in its own commit.
+
+# Roadmap H4: tessellation stages, part 1 (the cross-stage patch linker and executor wiring)
+
+## What I found before writing any code
+
+H4 ("Tessellation stages") is gated on G5/R34, and R34's own row says
+plainly what is missing: (a) `EntryWrapperPass`'s barrier-region splitting
+has not been generalized to the hull control-point batch ABI, (b) there is
+no real cross-stage attribute linker (`runPatchPipeline`'s caller has to
+hand-build one shared `FemeStageLayout` per shared data block, a documented
+stand-in), (c) the geometry stage is not chained on, and (d)
+`feme::graphics::Executor` does not call
+`invokePatch`/`invokePatchConstant`/`invokeDomain`/`invokeGeometry` at all.
+
+I measured the CTS baseline first: `dEQP-VK.tessellation.*` is 1114 cases,
+**0 Pass / 0 Fail / 1114 NotSupported ("Tessellation shader not
+supported")**. So nothing in that group can move until the *whole* chain --
+SPIR-V import, pipeline acceptance, feature bit, executor -- is real.
+
+Then I checked whether the Vulkan half of H4 (roadmap items (b)/(c)/(d) of
+the prompt: accept the stages, advertise `tessellationShader`, compile the
+stages) is landable at all this session, and it is not, for a reason worth
+recording precisely:
+
+- `feme::graphics::CanonicalizeStagePass::run`
+  (`lib/Transforms/Graphics/CanonicalizeStage.cpp`, ~line 1200) skips every
+  function whose `feme::getShaderStage` is not `Vertex` or `Fragment`. A
+  SPIR-V tessellation-control/evaluation module therefore never gets an
+  `EntrySignature` built for it at all, so `compileGraphicsStage` in
+  `lib/Vulkan/GraphicsPipeline.cpp` has nothing to compile against.
+- Worse, and structurally: a Vulkan/GLSL tessellation-control shader is a
+  *single* SPIR-V entry point that writes both per-vertex outputs and
+  `gl_TessLevelOuter`/`Inner`, usually with a `ControlBarrier` between the
+  two. FeMe's compiled-stage model (`HullWrapperPass` +
+  `PatchConstantWrapperPass`, discriminated by `feme::cpu::
+  isPatchConstantPhase`) is Direct3D's *two separately compiled entry
+  points* shape. Splitting one SPIR-V `TessellationControl` entry into
+  those two phases is exactly R34's own deferred "generalize
+  `EntryWrapperPass`'s barrier-region splitting to the control-point batch
+  ABI" item -- a milestone of its own, not a step inside another one.
+
+Advertising `tessellationShader = VK_TRUE` before that exists would convert
+1114 honest `NotSupported` results into 1114 `Fail`s, which is the opposite
+of this project's own definition of done. So I scoped this session to the
+two pieces that are genuinely the smallest missing links, are
+complete-in-themselves, and are what everything above is blocked on:
+
+1. A **real cross-stage attribute linker** for the hull/patch-constant/
+   domain chain, retiring `PatchPipeline.h`'s documented "the caller must
+   hand-build one shared `FemeStageLayout`" stand-in (R34 item (b)).
+2. **Wiring the chain into `feme::graphics::executeDraws`** for a patch-list
+   draw, so the domain stage's per-vertex outputs become the vertex stream
+   the existing clip/raster/fragment path consumes (R34 item (d), its
+   "the big one").
+
+H4 itself stays open, with new lettered sub-rows recording exactly what is
+left on the Vulkan side.
+
+## Increment 1: get `StageStorage` out of Executor.cpp
+
+Before I could link anything I needed both sides of the link to speak the
+same data structure. `Executor.cpp` had a private `StageStorage` -- a
+signature-driven, tightly packed SoA block indexed
+`[Row][Component][Invocation]` -- and `PatchPipeline.cpp` had its own
+ad-hoc buffers. Moving `StageStorage` verbatim into
+`Graphics/StageStorage.h`/`.cpp` (174 lines out of Executor.cpp, no
+behavior change) was the first commit. Deliberately a pure move so that the
+next commit's diff would be only the new idea.
+
+One layout fact turns out to matter a lot later: `InvocationStride` is 4
+bytes, `ComponentStride` is `InvocationCount * 4`, `RowStride` is
+`ComponentStride * ComponentCount`. Because the component stride depends on
+the invocation count, **two stage blocks with different invocation counts
+cannot be concatenated with a `memcpy`**. I did not appreciate this until
+increment 4 and briefly wrote a `memcpy` version that produced beautifully
+scrambled garbage.
+
+## Increment 2: the linker
+
+`linkStageElements(ProducerSig, ConsumerSig, Filter)` pairs a producing
+signature's outputs with a consuming signature's inputs by
+`Location`/`Component`, or by `SignatureSystemValue` when both sides are
+system values, and returns a `LinkedStageElement` list; `copyLinkedElements`
+walks that list copying scalars between two `StageStorage` blocks, remapping
+invocation indices. That is precisely what `executeDraws` was already doing
+inline for the vertex/fragment pair, hoisted into something reusable.
+
+`linkPatchPipeline` then builds the four links a patch pipeline needs (VS
+out to HS in; HS control-point out to both the patch-constant phase's
+`InputPatch` and the domain stage's per-control-point inputs; PC out to the
+domain stage's patch-constant inputs) once per pipeline. The `Filter`
+parameter exists only because `FemePatchConstantArgs` has *two* input blocks
+sharing one `ElementID` space, discriminated by
+`SignatureElement::FromInputPatch` -- so the "hull out to PC in" link has to
+consider only the `FromInputPatch` half.
+
+I rewrote `PatchPipelineTest.cpp` around this with deliberately *disjoint*
+per-stage `ElementID` numbering, so that if the linker silently degenerated
+into identity the tests would fail. They passed first try, which made me
+suspicious enough to check by hand that the element IDs really were
+disjoint. They were.
+
+## Increment 3: a real tessellator bug, and a test that could not see it
+
+Writing the first end-to-end executor test I got a full-viewport patch that
+rendered with a wedge missing at factor 1. I assumed my executor wiring was
+wrong for about an hour. It was not; `feme::graphics::tessellate` was.
+
+`bridgeRingsByEdge` stitches an outer ring edge to an inner ring edge with a
+triangle strip, and when one ring runs out of vertices first it must keep
+using that ring's *last* vertex -- which is the corner it shares with the
+next edge -- while the other ring advances. It instead indexed
+`OuterEdge[I % Mo]` / `InnerEdge[J % Mi]`, wrapping back to *that edge's own
+first vertex*. So the final bridging triangle of every edge folded back
+across the whole strip. The fix is two lines:
+
+```
+uint32_t OuterAt = I < Mo ? OuterEdge[I] : OuterNextCorner;
+uint32_t InnerAt = J < Mi ? InnerEdge[J] : InnerNextCorner;
+```
+
+The interesting part is the test. My first attempt summed triangle areas and
+compared against the domain's area. **It passed against the buggy code.** Of
+course it did: the fold covers exactly as much area as the crack it leaves
+behind, so the total is identical. Area is the wrong invariant entirely. I
+replaced it with `findNonManifoldEdge`, which is combinatorial: no directed
+edge may appear twice, and every interior directed edge must be paired by
+its reverse. That catches both the fold (an edge used twice in the same
+direction) and the crack (an unpaired interior edge). I verified the test
+by reintroducing the bug -- all four new tests fail; with the fix, all pass.
+
+Lesson worth writing down: for watertightness, never test a quantity that is
+conserved by the failure mode you are looking for.
+
+## Increment 4: `executeDraws`
+
+`graphics::PrimitiveTopology::PatchList` and
+`graphics::GraphicsPipeline::setTessellationStages` are the new inputs. The
+executor requires the two to agree in both directions (patch-list topology
+without tessellation stages, and tessellation stages without patch-list
+topology, are both rejected).
+
+The shape of the change turned out to be less "add a tessellation branch"
+and more "stop assuming the vertex stage is the last pre-rasterization
+stage". Three consequences:
+
+- Every consumer downstream of the vertex stage -- `SV_Position`,
+  `SV_RenderTargetArrayIndex`, `SV_ViewportArrayIndex`, and the whole
+  varying list handed to the fragment stage -- now resolves against a
+  `RasterSig`/`RasterOut` pair rather than `VSSig`/`VSOutput`. On a
+  tessellating pipeline the vertex stage need not write `SV_Position` at
+  all; the domain stage must.
+- The per-instance `TriIndices`/`LineIndices` had to become absolute
+  `AbsTriIndices`/`AbsLineIndices`. Two instances of the same patch derive
+  their tessellation factors from their own control points and therefore
+  need not emit the same number of domain points, so there is simply no
+  per-instance vertex stride to bias indices by. This cost a chunk of
+  refactoring in the three consumer loops (they no longer iterate instances
+  themselves) and it does multiply index memory by the instance count for
+  heavily instanced draws, which I noted but did not optimize.
+- `RasterPrimitiveClass` replaces the direct topology comparisons that chose
+  point vs. line vs. triangle rasterization. On a patch-list pipeline the
+  topology tells you nothing about what reaches the rasterizer; the
+  tessellator's `TessOutputPrimitive` does (isolines produce lines, point
+  mode produces points).
+
+`appendStageInvocations` concatenates each patch's domain output into one
+flat block, per-scalar for the stride reason above, and skips patches the
+tessellator culled entirely -- `runPatchPipeline` sizes a culled patch's
+`DomainOutputs` with `std::max(PointCount, 1u)`, so "no points" is signalled
+by `Tessellated.Points` being empty, not by the storage being empty.
+
+The end-to-end test is a genuine five-stage draw with each stage numbering
+its own signature elements differently, so the executor's own
+`linkPatchPipeline` call is load-bearing.
+`TessellatedPatchListCoversTheWholeViewport` renders the same patch at
+factor 1 and factor 4 and requires both to produce the identical
+watertight 8x8 fill -- which is the property increment 3's bug broke.
+
+## Measurements
+
+`ninja check-feme`, assertions on, ccache build:
+
+| | discovered | passed | unsupported | failed |
+|---|---|---|---|---|
+| before (`bb096339e499`) | 1844 | 1785 | 59 | 0 |
+| after (`ccceee4cb69c`) | 1859 | 1800 | 59 | 0 |
+
++15, exactly the tests added: StageLinkTest 6, TessellatorTest 4,
+PatchPipelineTest +1 net after its rewrite, ExecutorTest 4.
+
+CTS, real runs, both trees:
+
+- `dEQP-VK.tessellation.*` (1114): 0 Pass / 0 Fail / 1114 NotSupported,
+  before and after, all reporting "Tessellation shader not supported".
+  Unchanged **on purpose** -- see the top of this section.
+- `dEQP-VK.draw.*` regression sample (every 15th case, `*viewport_height*`
+  families excluded because they trip the pre-existing `SelectInst::init`
+  assertion this report already documents under H3a and abort the process):
+  1957 cases, **12 Pass / 133 Fail / 1812 NotSupported on both trees**, and
+  the sorted failing-case-name lists `diff` clean. To get the "before"
+  number I checked out `bb096339e499`, rebuilt `feme_vulkan` (ccache made it
+  about a minute) and re-ran the same case-list file, rather than
+  extrapolating.
+
+## What I chose not to do, and why
+
+I did not flip `tessellationShader`, did not touch
+`GraphicsPipeline.cpp`'s stage-mask loop, and did not touch
+`PhysicalDeviceInfo.cpp`. Each of those is individually easy and
+collectively useless while H4a's reflection gap exists: a pipeline that is
+accepted and then fails to compile is strictly worse than one that is
+rejected, and a feature bit advertised for a path that cannot run converts
+1114 truthful `NotSupported`s into 1114 `Fail`s. The prompt's candidate (c)
+in particular is a trap for exactly this reason, and the roadmap's own H4b
+row now records the honest ceilings (`MaxPatchControlPoints` 32,
+`DefaultMaxTessFactor` 64) so the next session does not have to rediscover
+them.
+
+I also did not touch the geometry stage, per the prompt.
+
+The next session's smallest real link is H4a, and within it the genuinely
+hard part is not lifting `CanonicalizeStage.cpp`'s `Vertex`/`Fragment`
+filter (that is a one-line change) but splitting one SPIR-V
+`TessellationControl` entry point, with its `OpControlBarrier`, into FeMe's
+two separately compiled hull phases.
