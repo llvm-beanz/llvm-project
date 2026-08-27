@@ -10,6 +10,7 @@ add_feme_library(FeMeConversionSPIRVToLLVM
 
   LINK_LIBS PUBLIC
   FeMeCore
+  FeMeGraphics
   MLIRIR
   MLIRLLVMDialect
   MLIRPass

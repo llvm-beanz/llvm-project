@@ -9,6 +9,7 @@
 #include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 
 #include "feme/Core/ShaderStage.h"
+#include "feme/Graphics/Tessellation.h"
 
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
@@ -92,6 +93,10 @@ void setTargetAttributes(mlir::ModuleOp Module, llvm::StringRef TargetTriple) {
 struct EntryPointInfo {
   feme::ShaderStage Stage;
   std::string LocalSize;
+  std::optional<feme::graphics::TessellatorDomain> TessDomain;
+  std::optional<feme::graphics::TessPartitioning> TessPartitioning;
+  std::optional<feme::graphics::TessOutputPrimitive> TessOutputPrimitive;
+  std::optional<uint32_t> TessOutputControlPointCount;
   /// The bit widths (16/32/64) `VK_KHR_shader_float_controls`'s
   /// `RoundingModeRTZ` execution mode was declared for (roadmap F15a): each
   /// arithmetic FP op conversion pattern of that width in this entry point
@@ -163,6 +168,48 @@ unsigned getFloatControlWidth(mlir::spirv::ExecutionModeOp Mode) {
       mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
 }
 
+std::string formatTessellationOutputPrimitive(
+    feme::graphics::TessOutputPrimitive Primitive) {
+  switch (Primitive) {
+  case feme::graphics::TessOutputPrimitive::Point:
+    return "point";
+  case feme::graphics::TessOutputPrimitive::Line:
+    return "line";
+  case feme::graphics::TessOutputPrimitive::TriangleCw:
+    return "triangle_cw";
+  case feme::graphics::TessOutputPrimitive::TriangleCcw:
+    return "triangle_ccw";
+  }
+  llvm_unreachable("unhandled TessOutputPrimitive");
+}
+
+std::string formatTessellatorDomain(feme::graphics::TessellatorDomain Domain) {
+  switch (Domain) {
+  case feme::graphics::TessellatorDomain::Isoline:
+    return "isoline";
+  case feme::graphics::TessellatorDomain::Triangle:
+    return "triangle";
+  case feme::graphics::TessellatorDomain::Quad:
+    return "quad";
+  }
+  llvm_unreachable("unhandled TessellatorDomain");
+}
+
+std::string
+formatTessPartitioning(feme::graphics::TessPartitioning Partitioning) {
+  switch (Partitioning) {
+  case feme::graphics::TessPartitioning::Integer:
+    return "integer";
+  case feme::graphics::TessPartitioning::Pow2:
+    return "pow2";
+  case feme::graphics::TessPartitioning::FractionalOdd:
+    return "fractional_odd";
+  case feme::graphics::TessPartitioning::FractionalEven:
+    return "fractional_even";
+  }
+  llvm_unreachable("unhandled TessPartitioning");
+}
+
 /// Returns whether \p Func's body contains an arithmetic FP op
 /// (`spirv.FAdd`/`FSub`/`FMul`/`FDiv`/`FRem`) carrying an `fp_rounding_mode`
 /// decoration (`VK_KHR_shader_float_controls2`'s per-instruction
@@ -219,26 +266,73 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
   }
 
   for (auto Mode : Module.getOps<mlir::spirv::ExecutionModeOp>()) {
-    if (Mode.getExecutionMode() == mlir::spirv::ExecutionMode::RoundingModeRTZ) {
-      auto It = EntryPoints.find(Mode.getFn());
-      if (It != EntryPoints.end())
-        It->second.RoundingModeRTZWidths.push_back(
-            getFloatControlWidth(Mode));
+    auto It = EntryPoints.find(Mode.getFn());
+    if (It == EntryPoints.end())
+      continue;
+    if (Mode.getExecutionMode() ==
+        mlir::spirv::ExecutionMode::RoundingModeRTZ) {
+      It->second.RoundingModeRTZWidths.push_back(getFloatControlWidth(Mode));
       continue;
     }
     if (Mode.getExecutionMode() ==
         mlir::spirv::ExecutionMode::DenormFlushToZero) {
-      auto It = EntryPoints.find(Mode.getFn());
-      if (It != EntryPoints.end())
-        It->second.DenormFlushToZeroWidths.push_back(
-            getFloatControlWidth(Mode));
+      It->second.DenormFlushToZeroWidths.push_back(getFloatControlWidth(Mode));
       continue;
     }
-    if (Mode.getExecutionMode() != mlir::spirv::ExecutionMode::LocalSize)
-      continue;
-    auto It = EntryPoints.find(Mode.getFn());
-    if (It != EntryPoints.end())
+    switch (Mode.getExecutionMode()) {
+    case mlir::spirv::ExecutionMode::LocalSize:
       It->second.LocalSize = formatLocalSize(Mode.getValues());
+      break;
+    case mlir::spirv::ExecutionMode::Triangles:
+      It->second.TessDomain = feme::graphics::TessellatorDomain::Triangle;
+      break;
+    case mlir::spirv::ExecutionMode::Quads:
+      It->second.TessDomain = feme::graphics::TessellatorDomain::Quad;
+      break;
+    case mlir::spirv::ExecutionMode::Isolines:
+      It->second.TessDomain = feme::graphics::TessellatorDomain::Isoline;
+      break;
+    case mlir::spirv::ExecutionMode::SpacingEqual:
+      It->second.TessPartitioning = feme::graphics::TessPartitioning::Integer;
+      break;
+    case mlir::spirv::ExecutionMode::SpacingFractionalOdd:
+      It->second.TessPartitioning =
+          feme::graphics::TessPartitioning::FractionalOdd;
+      break;
+    case mlir::spirv::ExecutionMode::SpacingFractionalEven:
+      It->second.TessPartitioning =
+          feme::graphics::TessPartitioning::FractionalEven;
+      break;
+    case mlir::spirv::ExecutionMode::PointMode:
+      It->second.TessOutputPrimitive =
+          feme::graphics::TessOutputPrimitive::Point;
+      break;
+    case mlir::spirv::ExecutionMode::VertexOrderCw:
+      It->second.TessOutputPrimitive =
+          feme::graphics::TessOutputPrimitive::TriangleCw;
+      break;
+    case mlir::spirv::ExecutionMode::VertexOrderCcw:
+      It->second.TessOutputPrimitive =
+          feme::graphics::TessOutputPrimitive::TriangleCcw;
+      break;
+    case mlir::spirv::ExecutionMode::OutputVertices:
+      assert(Mode.getValues().size() == 1 &&
+             "verified OutputVertices has one literal operand");
+      It->second.TessOutputControlPointCount = static_cast<uint32_t>(
+          mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
+      break;
+    default:
+      break;
+    }
+  }
+
+  for (auto &[Name, Info] : EntryPoints) {
+    if (!Info.TessDomain || !Info.TessPartitioning)
+      continue;
+    if (!Info.TessOutputPrimitive) {
+      if (*Info.TessDomain == feme::graphics::TessellatorDomain::Isoline)
+        Info.TessOutputPrimitive = feme::graphics::TessOutputPrimitive::Line;
+    }
   }
 
   // Unlike the whole-module maps above, `FPRoundingMode` (roadmap F15c) is
@@ -261,7 +355,8 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
   // per-instruction decorations F15c reads straight off their own op -- it
   // does need collecting here, before the conversion drops it.
   for (auto Mode : Module.getOps<mlir::spirv::ExecutionModeIdOp>()) {
-    if (Mode.getExecutionMode() != mlir::spirv::ExecutionMode::FPFastMathDefault)
+    if (Mode.getExecutionMode() !=
+        mlir::spirv::ExecutionMode::FPFastMathDefault)
       continue;
     auto It = EntryPoints.find(Mode.getFn());
     if (It == EntryPoints.end())
@@ -323,6 +418,35 @@ void applyEntryPointAttributes(
                             feme::getShaderStageName(It->second.Stage));
     if (!It->second.LocalSize.empty())
       addPassthroughAttribute(Func, "hlsl.numthreads", It->second.LocalSize);
+    // A tessellation-evaluation entry point's `Domain`/`Partitioning`/
+    // `OutputPrimitive` (SPIR-V's `Triangles`/`Quads`/`Isolines`,
+    // `SpacingEqual`/`SpacingFractionalEven`/`SpacingFractionalOdd`, and
+    // `VertexOrderCw`/`VertexOrderCcw`/`PointMode` execution modes) always
+    // arrive together -- the SPIR-V spec requires exactly one domain and
+    // one spacing mode, and (per the fixup loop above) an output primitive
+    // is always derived, explicitly or by the isoline default. A
+    // tessellation-control entry point's `OutputVertices` is a wholly
+    // separate execution mode, attached independently below, so that
+    // `feme::graphics::getTessellationState` can read it off that stage's
+    // own entry point rather than only ever seeing it alongside fields no
+    // control-stage entry point ever declares.
+    if (It->second.TessDomain && It->second.TessPartitioning &&
+        It->second.TessOutputPrimitive) {
+      addPassthroughAttribute(Func,
+                              feme::graphics::getTessellationDomainAttrName(),
+                              formatTessellatorDomain(*It->second.TessDomain));
+      addPassthroughAttribute(
+          Func, feme::graphics::getTessellationPartitioningAttrName(),
+          formatTessPartitioning(*It->second.TessPartitioning));
+      addPassthroughAttribute(
+          Func, feme::graphics::getTessellationOutputPrimitiveAttrName(),
+          formatTessellationOutputPrimitive(*It->second.TessOutputPrimitive));
+    }
+    if (It->second.TessOutputControlPointCount)
+      addPassthroughAttribute(
+          Func,
+          feme::graphics::getTessellationOutputControlPointCountAttrName(),
+          std::to_string(*It->second.TessOutputControlPointCount));
     // A function containing any `llvm.experimental.constrained.*` intrinsic
     // call -- which `FloatControlArithmeticPattern`
     // (SPIRVToLLVMPatterns.cpp) emits for this entry point's

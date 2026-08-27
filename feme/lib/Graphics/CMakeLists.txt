@@ -12,6 +12,7 @@ add_feme_library(FeMeGraphics
   Scene.cpp
   StageLink.cpp
   StageStorage.cpp
+  Tessellation.cpp
   Tessellator.cpp
 
   LINK_COMPONENTS

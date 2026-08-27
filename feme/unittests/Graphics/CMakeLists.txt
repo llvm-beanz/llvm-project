@@ -18,6 +18,7 @@ add_feme_unittest(FeMeGraphicsTests
   PreparedDrawTest.cpp
   SceneTest.cpp
   StageLinkTest.cpp
+  TessellationTest.cpp
   TessellatorTest.cpp
   )
 target_link_libraries(FeMeGraphicsTests
