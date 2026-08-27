@@ -36559,3 +36559,184 @@ SplitsHullEntryThreadingCapturedSSAValue`) plus a clean `ninja check-feme`
 headline not moving is expected and documented, not a sign of an
 incomplete fix -- it's H4e's job (and, ultimately, C8's) to move it
 further.
+
+# Roadmap H4d: per-element addressing for a bare array-typed stage-IO global
+
+## Starting point: the roadmap's own hypothesis was a red herring
+
+H4d's own roadmap text guessed the cause was cross-phase symbol collision
+between the two `CompiledStage`/`LLJIT` instances H4b's design gives the
+control-point and patch-constant phases, or a `GlobalDCE`-shaped pass
+stripping a global's definition reachable only from one phase's new entry
+point. I checked this first rather than assuming it: each phase already
+gets its own independent `LLJIT`, so a symbol undefined in one has no way
+to reach the other's link step at all -- there is no shared link context to
+collide in. I also grepped `Prepare.cpp`'s `removeUnreachableDefinitions`
+and the CPU target's own DCE-shaped passes for anything that could delete
+a global's *definition* while leaving a *reference* to it; nothing plausible
+turned up specific to "reachable from one entry point but not another."
+
+To test the hypothesis anyway rather than just reasoning about it, I built
+a synthetic no-barrier tessellation-control entry (a single scalar `patch`
+global, no `gl_out` write) in a temporary gtest. If the hypothesis were
+right, `splitTessellationControlEntry` returning early with
+`PatchConstantPhase == nullptr` should still somehow reach the JIT crash.
+It didn't: it produced a clean `VK_ERROR_INITIALIZATION_FAILED`, because
+`selectEntryPoint` simply can't find a function literally named
+`main.patchconstant` and fails gracefully. That refuted the roadmap's own
+guess for this shape -- the real bug needed a real shader, not a synthetic
+one that happened to also lack a barrier.
+
+## Getting a real repro without `glslangValidator`
+
+The roadmap explicitly names
+`dEQP-VK.tessellation.winding.default_domain.glsl_quads_ccw` as a
+starting point, and its GLSL source is right there in
+`vktTessellationWindingTests.cpp`: `layout(vertices=1) out;`, writing only
+`gl_TessLevelInner[0..1]`/`gl_TessLevelOuter[0..3]` constants -- no
+barrier, no per-vertex output at all. No `glslangValidator` binary was
+available in this sandbox, and there's no network access to install one.
+But `VK-GL-CTS`'s own build tree already has `libglslang.a`/`libSPIRV.a`/
+`libSPIRV-Tools-opt.a`/`libSPIRV-Tools.a` built as static libraries (as
+dependencies of `deqp-vk` itself), so I wrote a ~40-line driver
+(`/tmp/glslmin/main.cpp`, not part of the repo) that links directly
+against them and calls `glslang::TShader::parse`/`glslang::SpvTools`'s
+translation, taking a GLSL stage + source file and emitting a SPIR-V
+binary. This let me compile the *exact* real winding shader (copied
+verbatim from the CTS source) rather than a shape I guessed at, and feed
+the resulting SPIR-V words straight into a temporary
+`TEMP_RealWindingRepro` gtest's `vkCreateShaderModule` calls.
+
+This reproduced the bug exactly: `JIT session error: Symbols not found: [
+gl_TessLevelOuter, gl_TessLevelInner ]`. This "build a minimal driver
+against the CTS's own already-built static libs when the usual tool isn't
+available" trick is worth remembering for future FeMe/CTS debugging in
+this same sandboxed environment.
+
+## Finding the actual defect: a debug dump, not more reasoning
+
+Rather than keep guessing from the IR structure alone, I added a
+temporary `FEME_DEBUG_DUMP_STAGE`-gated dump in `compileGraphicsStage`
+that prints the module after `CanonicalizeStagePass` runs, for every
+stage compiled (up to 5, for a full tessellating pipeline). This is the
+single tool that actually cracked the bug: the dump showed clearly that
+*only the first* store to `gl_TessLevelInner`/`gl_TessLevelOuter` (byte
+offset 0) had been rewritten into a `feme.stage.output.store.f32` call --
+every other element's store was still a raw
+`store float ..., ptr addrspace(8) getelementptr(...)` on the
+still-`external`, never-defined global. That is precisely what an LLJIT
+"Symbols not found" error looks like: the real backing storage for a
+stage-IO global lives entirely behind the `feme.stage.*` intrinsic family,
+never behind the global itself, so any surviving raw reference to the
+global is unresolvable.
+
+Tracing that back to `resolveStageIOAccess` in `CanonicalizeStage.cpp`
+found the actual bug in about ten lines: its `IDs.size() == 1` branch (the
+one taken by every stage-IO global that is *not* part of a builtin
+interface block/struct -- which is every global with a single
+`ElementID`) unconditionally treated such a global as whole-value-only,
+rejecting any nonzero `ByteOffset` outright. That's correct for a scalar
+global, but wrong for one whose own LLVM type is itself a multi-row
+array or vector -- exactly `gl_TessLevelInner`/`gl_TessLevelOuter`'s own
+`[2 x f32]`/`[4 x f32]` `BuiltIn`+`Patch`-decorated shape. The struct-member
+branch just below it already handled this correctly for a builtin
+interface block's own per-member nonzero offsets, using
+`resolveRowComponent` to turn a residual byte offset into a (Row,
+Component) pair. The fix was to apply that same helper to the
+single-`ElementID` branch's own global type, using the *whole* byte
+offset as the residual (there's no struct member offset to subtract
+first, since there's no struct).
+
+I checked this was safe for the *existing*, previously-working
+whole-value case (`ByteOffset == 0`, `ValueTy == GV->getValueType()`):
+`resolveRowComponent` naturally returns `(0, 0)` for that case, which the
+code already converts to `(nullptr, nullptr)` -- identical to the old
+behavior -- and `loadStageIOValue`/`storeStageIOValue`'s own array/vector
+recursion branches ignore the passed-in Row parameter when they recurse
+over their own elements, so this is a strict widening, not a change in
+behavior for any shape that already worked.
+
+## Locking it down
+
+Rather than keep the real-SPIR-V-based repro test as the permanent
+regression test (a `vkCreateShaderModule` call fed hundreds of raw SPIR-V
+words is exactly the kind of test this codebase's own conventions avoid
+in favor of hand-written MLIR spirv-dialect text), I wrote two focused,
+permanent tests instead:
+
+- `CanonicalizeStageTest.RewritesSPIRVArrayOutputStorePerElementByteOffset`,
+  at the LLVM-IR level, mirroring the file's own existing
+  `RecognizesInterfaceBlockPerMemberByteOffsetAccess` test but for a bare
+  (non-block) array global instead of a builtin interface block. I
+  confirmed by temporarily reverting the fix that this test does fail
+  (rows 1-3 unresolved) without it.
+- `GraphicsPipelineTest.AcceptsTessellationControlMultiElementArrayOutput`,
+  end to end: a hand-written MLIR spirv-dialect tessellation-control
+  entry (mirroring the file's own existing `TessControlSource`, but
+  writing 2 elements of a `gl_TessLevelOuter`-shaped `BuiltIn` global
+  after the barrier) that now compiles and creates a real
+  `VkPipeline`. I confirmed the same way -- reverting the fix reproduces
+  the *exact* reported symptom, `JIT session error: Symbols not found: [
+  tess_outer ]`, `VK_ERROR_INITIALIZATION_FAILED` -- a genuine A/B test,
+  not just "the new test passes."
+
+Both temporary scaffolding pieces (the `FEME_DEBUG_DUMP_STAGE` dump in
+`GraphicsPipeline.cpp`, the `TEMP_RealWindingRepro` test and its embedded
+SPIR-V word arrays in `GraphicsPipelineTest.cpp`) were removed before
+committing; `/tmp/glslmin` (the ad hoc glslang driver, not part of the
+repo) was deleted once the permanent tests existed.
+
+## Measuring against a real `deqp-vk` run surfaced a second finding
+
+Running the real `dEQP-VK.tessellation.winding.*` glsl cases confirmed
+zero JIT crashes (`grep -c "Symbols not found"` -> 0, was 24), but all 24
+still `Fail` -- now via a clean, different error,
+`"no hull entry point named 'main.patchconstant'"`. Winding's own shader
+has no barrier at all (`OutputVertices == 1` genuinely needs no
+cross-invocation sync), so `splitTessellationControlEntry` never clones a
+`.patchconstant` phase, but `compileAndValidateStages` always expects one
+to exist. This is a real, distinct gap in the barrier-split design itself
+(not a `resolveStageIOAccess` bug), exactly the kind of "fix the named
+symptom, immediately hit the next blocking issue" shape H4b -> H4c -> H4e
+already established for this milestone. I resisted the temptation to fix
+it inline here -- it needs its own design decision (synthesize a trivial
+control-point phase and clone the whole function as patch-constant when
+there's no barrier? only sound for `OutputVertices == 1`, and needs
+`classifySPIRVElement` to actually distinguish patch-frequency writes
+from per-vertex ones in the control-point phase too, which today's
+`Phase == HullControlPoint` branch doesn't do at all) and is broken out as
+roadmap H4f instead.
+
+Resuming the full `dEQP-VK.tessellation.*` group past its own known
+crash points (H4c's methodology, generalized slightly -- see
+`VulkanCTSReport.md`'s own "Reproducing this row" for H4d) turned up a
+second, unplanned discovery: this same fix also unblocks 8
+`shader_input_output.*` cases from a pre-existing `'llvm.getelementptr' op
+operand #0 must be LLVM pointer type ...` `Fail` into reaching H4e's
+already-tracked masked-intrinsics crash instead -- the identical
+resolveStageIOAccess gap, manifesting against a bare `OutputPatch`-shaped
+(`gl_out[]`/`gl_in[]`-style) array rather than against
+`gl_TessLevelInner`/`Outer`. I confirmed this wasn't a regression I'd
+introduced by A/B testing it (reverting the fix reproduces the old
+`getelementptr` error for all 8, unchanged) before writing it up as a
+positive side effect of the fix's generality rather than treating it as
+noise.
+
+Net measured result: the full group's headline `dEQP-VK.tessellation.*`
+totals (8 `Pass`/227 `Fail`/879 `NotSupported`) and the `dEQP-VK.draw.*`
+regression sample (12/139/1806) are byte-identical to H4b/H4c's own
+baseline -- expected, since converting a crash or a differently-shaped
+error into a different clean `Fail`/crash doesn't move any of the three
+buckets by itself, exactly as H4c's own report already established when
+its own fix didn't move the headline either.
+
+## What's still open
+
+Roadmap H4f (new, this session): make a no-barrier tessellation-control
+entry (`OutputVertices == 1`'s own legal shape) produce a working
+`.patchconstant` phase instead of leaving `compileAndValidateStages`
+looking for one that was never created. Roadmap H4e (pre-existing, not
+touched here): harden `MaskIntrinsics.cpp`'s masked-load/store scalar
+mangling to diagnose an unsupported element type gracefully instead of
+`llvm_unreachable`-aborting the whole `deqp-vk` process -- now reached by
+32 cases instead of 24, all still tracked under the same row.
