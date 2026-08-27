@@ -82,20 +82,31 @@ enum class SignatureSystemValue : uint8_t {
   /// "Tessellation and geometry stage model"
   /// (feme/docs/FeMeGraphicsDesign.md).
   TessFactorEdge,
+  /// SPIR-V/GLSL's spelling of `TessFactorEdge` (`gl_TessLevelOuter`).
+  TessLevelOuter = TessFactorEdge,
   /// A hull shader's patch-constant output: one inner tessellation factor
   /// (`RowCount` is 0 for an isoline domain, which has none; 1 for a
   /// triangle domain; 2 for a quad domain).
   TessFactorInside,
+  /// SPIR-V/GLSL's spelling of `TessFactorInside` (`gl_TessLevelInner`).
+  TessLevelInner = TessFactorInside,
   /// The domain/evaluation stage's own generated-coordinate input: the
   /// tessellator's per-invocation (u, v[, w]) domain location (`RowCount`
   /// gives the number of components the domain needs: 2 for isoline/quad,
   /// 3 for a triangle's barycentric coordinate).
   DomainLocation,
+  /// SPIR-V/GLSL's spelling of `DomainLocation` (`gl_TessCoord`).
+  TessCoord = DomainLocation,
   /// A hull shader control-point-phase output's invocation index: which
   /// output control point of the patch the current invocation is
   /// producing, distinct from `VertexID` because a hull shader may declare
   /// a different output control point count than its input.
   OutputControlPointID,
+  /// SPIR-V/GLSL's spelling of `OutputControlPointID` (`gl_InvocationID`).
+  InvocationID = OutputControlPointID,
+  /// SPIR-V/GLSL's `gl_PatchVerticesIn`: how many input control points the
+  /// current patch contains.
+  PatchVertices,
   /// (Roadmap H2) `gl_ViewIndex`: the multiview render-pass instance view
   /// a vertex/fragment invocation is running for, an *input* readable by
   /// either stage (unlike `RenderTargetArrayIndex`, a vertex/geometry

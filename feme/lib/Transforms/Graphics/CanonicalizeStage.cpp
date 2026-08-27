@@ -31,6 +31,8 @@
 #include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
 using namespace llvm;
@@ -477,6 +479,16 @@ SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
     return SignatureSystemValue::Coverage;
   case 22: // FragDepth
     return SignatureSystemValue::Depth;
+  case 8: // InvocationId
+    return SignatureSystemValue::InvocationID;
+  case 11: // TessLevelOuter
+    return SignatureSystemValue::TessLevelOuter;
+  case 12: // TessLevelInner
+    return SignatureSystemValue::TessLevelInner;
+  case 13: // TessCoord
+    return SignatureSystemValue::TessCoord;
+  case 14: // PatchVertices
+    return SignatureSystemValue::PatchVertices;
   case 4424: // BaseVertex
     return SignatureSystemValue::BaseVertex;
   case 4425: // BaseInstance
@@ -847,6 +859,222 @@ struct StageIOAccess {
   bool IsOutput = false;
 };
 
+enum class SPIRVCanonicalPhase {
+  Ordinary,
+  HullControlPoint,
+  HullPatchConstant,
+};
+
+struct SPIRVElementInfo {
+  SignatureDirection Direction = SignatureDirection::Input;
+  SignatureFrequency Frequency = SignatureFrequency::PerVertex;
+  bool FromInputPatch = false;
+  bool IsOutput = false;
+};
+
+bool isTessFactorSystemValue(SignatureSystemValue Sys) {
+  return Sys == SignatureSystemValue::TessFactorEdge ||
+         Sys == SignatureSystemValue::TessFactorInside;
+}
+
+bool isPatchOutputDecoration(const ParsedSPIRVDecorations &D) {
+  if (!D.BuiltIn)
+    return D.Patch;
+  SignatureSystemValue Sys = getSystemValueForBuiltIn(*D.BuiltIn);
+  return D.Patch || isTessFactorSystemValue(Sys);
+}
+
+bool isSPIRVGroupSyncBarrier(const CallInst &CI) {
+  const Function *Callee = CI.getCalledFunction();
+  if (!Callee)
+    return false;
+  switch (Callee->getIntrinsicID()) {
+  case Intrinsic::spv_group_memory_barrier_with_group_sync:
+  case Intrinsic::spv_device_memory_barrier_with_group_sync:
+  case Intrinsic::spv_all_memory_barrier_with_group_sync:
+    return true;
+  default:
+    return false;
+  }
+}
+
+SPIRVElementInfo classifySPIRVElement(ShaderStage Stage,
+                                      SPIRVCanonicalPhase Phase,
+                                      unsigned AddrSpace,
+                                      const ParsedSPIRVDecorations &D) {
+  SPIRVElementInfo Info;
+  Info.Frequency = D.PerPrimitive ? SignatureFrequency::PerPrimitive
+                   : D.Patch      ? SignatureFrequency::PerPatch
+                                  : SignatureFrequency::PerVertex;
+  SignatureSystemValue Sys = D.BuiltIn ? getSystemValueForBuiltIn(*D.BuiltIn)
+                                       : SignatureSystemValue::None;
+  if (Stage == ShaderStage::Hull &&
+      Phase == SPIRVCanonicalPhase::HullPatchConstant) {
+    if (AddrSpace == 7) {
+      Info.Direction = SignatureDirection::Input;
+      Info.FromInputPatch = Sys == SignatureSystemValue::None ||
+                            Sys == SignatureSystemValue::PatchVertices;
+      if (Sys == SignatureSystemValue::PatchVertices)
+        Info.Frequency = SignatureFrequency::PerPatch;
+      return Info;
+    }
+    if (isPatchOutputDecoration(D)) {
+      Info.Direction = SignatureDirection::PatchOutput;
+      Info.Frequency = SignatureFrequency::PerPatch;
+      Info.IsOutput = true;
+      return Info;
+    }
+    Info.Direction = SignatureDirection::Input;
+    return Info;
+  }
+
+  if (Stage == ShaderStage::Domain) {
+    if (AddrSpace == 8) {
+      Info.Direction = SignatureDirection::Output;
+      Info.IsOutput = true;
+      return Info;
+    }
+    if (Sys == SignatureSystemValue::DomainLocation ||
+        Sys == SignatureSystemValue::PatchVertices) {
+      Info.Direction = SignatureDirection::Input;
+      if (Sys == SignatureSystemValue::PatchVertices)
+        Info.Frequency = SignatureFrequency::PerPatch;
+      return Info;
+    }
+    if (isPatchOutputDecoration(D)) {
+      Info.Direction = SignatureDirection::PatchInput;
+      Info.Frequency = SignatureFrequency::PerPatch;
+      return Info;
+    }
+    Info.Direction = SignatureDirection::Input;
+    return Info;
+  }
+
+  Info.Direction =
+      AddrSpace == 7 ? SignatureDirection::Input : SignatureDirection::Output;
+  Info.IsOutput = AddrSpace == 8;
+  if (Stage == ShaderStage::Hull && Sys == SignatureSystemValue::PatchVertices)
+    Info.Frequency = SignatureFrequency::PerPatch;
+  return Info;
+}
+
+bool usesSPIRVStageIO(Function &F) {
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  for (Instruction &I : instructions(F)) {
+    GlobalVariable *GV = nullptr;
+    if (auto *LI = dyn_cast<LoadInst>(&I)) {
+      if (auto BaseAndOffset =
+              getStageIOBaseAndOffset(LI->getPointerOperand(), DL))
+        GV = BaseAndOffset->first;
+    } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      if (auto BaseAndOffset =
+              getStageIOBaseAndOffset(SI->getPointerOperand(), DL))
+        GV = BaseAndOffset->first;
+    }
+    unsigned AddrSpace = 0;
+    if (isSPIRVStageIOGlobal(GV, AddrSpace))
+      return true;
+  }
+  return false;
+}
+
+bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
+  PatchConstantPhase = nullptr;
+  SmallVector<CallInst *, 2> Barriers;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I); CI && isSPIRVGroupSyncBarrier(*CI))
+      Barriers.push_back(CI);
+  if (Barriers.empty())
+    return true;
+  if (Barriers.size() != 1) {
+    F.getContext().emitError(
+        "feme-canonicalize-stage: tessellation-control SPIR-V entry points "
+        "currently support exactly one group-sync barrier");
+    return false;
+  }
+
+  CallInst *Barrier = Barriers[0];
+  if (!Barrier->getNextNode()) {
+    F.getContext().emitError(
+        Barrier, "feme-canonicalize-stage: tessellation-control SPIR-V entry "
+                 "point has no post-barrier patch-constant region");
+    return false;
+  }
+
+  BasicBlock *BarrierBlock = Barrier->getParent();
+  BasicBlock *PatchEntry = BarrierBlock->splitBasicBlock(
+      std::next(Barrier->getIterator()), F.getName() + ".patchconst.entry");
+
+  SmallPtrSet<BasicBlock *, 8> Region;
+  SmallVector<BasicBlock *, 8> WorkList(1, PatchEntry);
+  while (!WorkList.empty()) {
+    BasicBlock *BB = WorkList.pop_back_val();
+    if (!Region.insert(BB).second)
+      continue;
+    for (BasicBlock *Succ : successors(BB))
+      WorkList.push_back(Succ);
+  }
+
+  for (BasicBlock *BB : Region)
+    for (BasicBlock *Pred : predecessors(BB))
+      if (!Region.contains(Pred) && Pred != BarrierBlock) {
+        F.getContext().emitError(
+            BB->getTerminator(),
+            "feme-canonicalize-stage: tessellation-control SPIR-V entry "
+            "point's patch-constant region must have exactly one entry edge "
+            "from the barrier");
+        return false;
+      }
+
+  for (BasicBlock *BB : Region)
+    for (Instruction &I : *BB)
+      for (Value *Op : I.operands()) {
+        auto *OpI = dyn_cast<Instruction>(Op);
+        if (!OpI || Region.contains(OpI->getParent()))
+          continue;
+        F.getContext().emitError(
+            &I, "feme-canonicalize-stage: tessellation-control SPIR-V entry "
+                "point's patch-constant region cannot yet capture SSA values "
+                "defined before the barrier");
+        return false;
+      }
+
+  PatchConstantPhase =
+      Function::Create(F.getFunctionType(), F.getLinkage(), F.getAddressSpace(),
+                       (F.getName() + ".patchconstant").str(), F.getParent());
+  PatchConstantPhase->copyAttributesFrom(&F);
+  PatchConstantPhase->setComdat(F.getComdat());
+  SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
+  F.getAllMetadata(MDs);
+  for (auto [Kind, Node] : MDs)
+    PatchConstantPhase->setMetadata(Kind, Node);
+
+  ValueToValueMapTy VMap;
+  for (auto [OldArg, NewArg] : zip(F.args(), PatchConstantPhase->args())) {
+    NewArg.takeName(&OldArg);
+    VMap[&OldArg] = &NewArg;
+  }
+
+  SmallVector<BasicBlock *, 8> OrderedRegion;
+  for (BasicBlock &BB : F)
+    if (Region.contains(&BB))
+      OrderedRegion.push_back(&BB);
+  for (BasicBlock *BB : OrderedRegion)
+    VMap[BB] = CloneBasicBlock(BB, VMap, "", PatchConstantPhase);
+  for (BasicBlock *BB : OrderedRegion) {
+    BasicBlock *Cloned = cast<BasicBlock>(VMap[BB]);
+    for (Instruction &I : *Cloned)
+      RemapInstruction(&I, VMap, RF_NoModuleLevelChanges);
+  }
+
+  Barrier->eraseFromParent();
+  Instruction *OldTerm = BarrierBlock->getTerminator();
+  ReturnInst::Create(F.getContext(), BarrierBlock);
+  OldTerm->eraseFromParent();
+  DeleteDeadBlocks(OrderedRegion);
+  return true;
+}
+
 /// The (row, component) pair `loadStageIOValue`/`storeStageIOValue` need to
 /// seed their own recursion with, from \p Residual -- a byte offset within
 /// one stage-IO member's own declared type \p MemberTy -- mirroring
@@ -943,7 +1171,8 @@ std::optional<StageIOAccess> resolveStageIOAccess(
 /// `llvm.spv.discard`/derivative/quad-read intrinsic calls into their
 /// `feme.stage.*` peers, mirroring `canonicalizeDXILStage`'s handling of the
 /// same operations' DXIL-derived forms.
-bool canonicalizeSPIRVStage(Function &F) {
+bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
+                            SPIRVCanonicalPhase Phase) {
   bool Changed = false;
 
   // Discover this entry's stage-IO globals in two passes -- inputs, then
@@ -968,7 +1197,10 @@ bool canonicalizeSPIRVStage(Function &F) {
     unsigned AddrSpace = 0;
     if (!isSPIRVStageIOGlobal(GV, AddrSpace) || !Seen.insert(GV).second)
       continue;
-    (AddrSpace == 7 ? InputGlobals : OutputGlobals).push_back(GV);
+    ParsedSPIRVDecorations D =
+        parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+    SPIRVElementInfo Info = classifySPIRVElement(Stage, Phase, AddrSpace, D);
+    (Info.IsOutput ? OutputGlobals : InputGlobals).push_back(GV);
   }
 
   DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> ElementIDs;
@@ -984,11 +1216,12 @@ bool canonicalizeSPIRVStage(Function &F) {
     // members, for a builtin interface block -- see the `addElements`
     // lambda below), sourced from \p D's decorations and \p ValueTy's own
     // scalar/vector/matrix/single-member-struct shape.
-    auto addElement = [&](GlobalVariable *GV, SignatureDirection Dir,
+    auto addElement = [&](GlobalVariable *GV, unsigned AddrSpace,
                           const ParsedSPIRVDecorations &D, Type *ValueTy) {
+      SPIRVElementInfo Info = classifySPIRVElement(Stage, Phase, AddrSpace, D);
       SignatureElement Elt;
       Elt.ElementID = NextID;
-      Elt.Direction = Dir;
+      Elt.Direction = Info.Direction;
       Elt.Location = D.Location;
       Elt.Index = D.Index;
       if (D.BuiltIn)
@@ -1001,17 +1234,19 @@ bool canonicalizeSPIRVStage(Function &F) {
       Elt.ComponentCount = Shape.ComponentCount;
       Elt.RowCount = Shape.RowCount;
       Elt.Interpolation = getInterpolationMode(D);
-      Elt.Frequency = D.PerPrimitive ? SignatureFrequency::PerPrimitive
-                      : D.Patch      ? SignatureFrequency::PerPatch
-                                     : SignatureFrequency::PerVertex;
+      Elt.Frequency = Info.Frequency;
+      Elt.FromInputPatch = Info.FromInputPatch;
 
       Sig.Elements.push_back(Elt);
       ElementIDs[GV].push_back(NextID);
       ++NextID;
     };
-    auto addElements = [&](ArrayRef<GlobalVariable *> Globals,
-                           SignatureDirection Dir) {
+    auto addElements = [&](ArrayRef<GlobalVariable *> Globals) {
       for (GlobalVariable *GV : Globals) {
+        unsigned AddrSpace = 0;
+        [[maybe_unused]] bool IsStageIO = isSPIRVStageIOGlobal(GV, AddrSpace);
+        assert(IsStageIO &&
+               "expected previously-collected SPIR-V stage-IO global");
         // (Roadmap H2d) A builtin interface block (e.g. `gl_PerVertex`)
         // carries no whole-variable decoration of its own -- SPIR-V
         // decorates each of its struct members individually -- so it
@@ -1023,17 +1258,17 @@ bool canonicalizeSPIRVStage(Function &F) {
           DenseMap<unsigned, ParsedSPIRVDecorations> MemberDecorations =
               parseSPIRVMemberDecorations(MemberMD);
           for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I)
-            addElement(GV, Dir, MemberDecorations.lookup(I),
+            addElement(GV, AddrSpace, MemberDecorations.lookup(I),
                        ST->getElementType(I));
           continue;
         }
         ParsedSPIRVDecorations D =
             parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
-        addElement(GV, Dir, D, GV->getValueType());
+        addElement(GV, AddrSpace, D, GV->getValueType());
       }
     };
-    addElements(InputGlobals, SignatureDirection::Input);
-    addElements(OutputGlobals, SignatureDirection::Output);
+    addElements(InputGlobals);
+    addElements(OutputGlobals);
     dxil::setEntrySignature(F, Sig);
     Changed = true;
   }
@@ -1192,18 +1427,33 @@ bool canonicalizeSPIRVStage(Function &F) {
   return Changed;
 }
 
+bool canonicalizeSPIRVHullStage(Function &F) {
+  if (!usesSPIRVStageIO(F))
+    return false;
+  Function *PatchConstantPhase = nullptr;
+  if (!splitTessellationControlEntry(F, PatchConstantPhase))
+    return false;
+  bool Changed = canonicalizeSPIRVStage(F, ShaderStage::Hull,
+                                        SPIRVCanonicalPhase::HullControlPoint);
+  if (PatchConstantPhase)
+    Changed |= canonicalizeSPIRVStage(*PatchConstantPhase, ShaderStage::Hull,
+                                      SPIRVCanonicalPhase::HullPatchConstant);
+  return Changed || PatchConstantPhase;
+}
+
 } // namespace
 
 PreservedAnalyses CanonicalizeStagePass::run(Module &M,
                                              ModuleAnalysisManager &AM) {
   bool Changed = false;
-  for (Function &F : M) {
-    std::optional<ShaderStage> Stage = getShaderStage(F);
-    // G0 covers the vertex and fragment stages only (see the design's
-    // "Canonical stage operations": "only operations required by
-    // implemented stages are legal").
+  SmallVector<Function *, 16> WorkList;
+  for (Function &F : M)
+    WorkList.push_back(&F);
+  for (Function *F : WorkList) {
+    std::optional<ShaderStage> Stage = getShaderStage(*F);
     if (!Stage ||
-        (*Stage != ShaderStage::Vertex && *Stage != ShaderStage::Fragment))
+        (*Stage != ShaderStage::Vertex && *Stage != ShaderStage::Fragment &&
+         *Stage != ShaderStage::Hull && *Stage != ShaderStage::Domain))
       continue;
 
     // An absent signature (e.g. a hand-written test exercising only the
@@ -1212,9 +1462,14 @@ PreservedAnalyses CanonicalizeStagePass::run(Module &M,
     // unmodified, for `feme::graphics::ValidateStagePass` to diagnose),
     // while discard/derivative/quad-read/helper-lane rewriting -- which
     // needs no signature at all -- still proceeds.
-    EntrySignature Sig = dxil::getEntrySignature(F).value_or(EntrySignature{});
-    Changed |= canonicalizeDXILStage(F, Sig);
-    Changed |= canonicalizeSPIRVStage(F);
+    EntrySignature Sig = dxil::getEntrySignature(*F).value_or(EntrySignature{});
+    if (*Stage == ShaderStage::Vertex || *Stage == ShaderStage::Fragment)
+      Changed |= canonicalizeDXILStage(*F, Sig);
+    if (*Stage == ShaderStage::Hull)
+      Changed |= canonicalizeSPIRVHullStage(*F);
+    else
+      Changed |=
+          canonicalizeSPIRVStage(*F, *Stage, SPIRVCanonicalPhase::Ordinary);
   }
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

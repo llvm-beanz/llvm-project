@@ -16,6 +16,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -696,6 +697,185 @@ TEST(CanonicalizeStageTest, OutputReadBackResolvesAcrossControlFlow) {
       ++SawStore;
   }
   EXPECT_EQ(SawStore, 2u);
+}
+
+/// (Roadmap H4a) A SPIR-V `TessellationControl` entry point with no
+/// `OpControlBarrier` (`llvm.spv.group.memory.barrier.with.group.sync`) at
+/// all needs no splitting: `canonicalizeSPIRVHullStage` treats the whole
+/// body as the control-point phase.
+TEST(CanonicalizeStageTest, HullStageWithNoBarrierIsNotSplit) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+    @gl_in_pos = external addrspace(7) constant <4 x float>, !spirv.Decorations !1
+    define void @main() #0 {
+      %v = load <4 x float>, ptr addrspace(7) @gl_in_pos
+      store <4 x float> %v, ptr addrspace(8) @gl_out_pos
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!2}
+    !1 = !{!2}
+    !2 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_TRUE(M->getFunction("main"));
+  EXPECT_FALSE(M->getFunction("main.patchconstant"));
+  std::optional<EntrySignature> Sig =
+      dxil::getEntrySignature(*M->getFunction("main"));
+  ASSERT_TRUE(Sig.has_value());
+  EXPECT_EQ(Sig->Elements.size(), 2u);
+}
+
+/// (Roadmap H4a) The real shape a GLSL tessellation-control shader's
+/// SPIR-V compiles to: one entry point writing its per-vertex outputs,
+/// then an `OpControlBarrier`, then the `Patch`-decorated tessellation-
+/// factor/patch-constant writes. `canonicalizeSPIRVHullStage` must split
+/// this into FeMe's two separately compiled phases -- the control-point
+/// phase (`HullWrapperPass`'s ABI) keeping the pre-barrier code under the
+/// original name, and a new `<name>.patchconstant` function (
+/// `PatchConstantWrapperPass`'s ABI) cloned from the post-barrier code --
+/// discriminated by `feme::cpu::isPatchConstantPhase`'s
+/// `SignatureDirection::PatchOutput` test.
+TEST(CanonicalizeStageTest, SplitsHullEntryAtGroupSyncBarrier) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+    @gl_in_pos = external addrspace(7) constant <4 x float>, !spirv.Decorations !1
+    @gl_TessLevelOuter = external addrspace(8) global [4 x float], !spirv.Decorations !3
+    define void @main() #0 {
+      %v = load <4 x float>, ptr addrspace(7) @gl_in_pos
+      store <4 x float> %v, ptr addrspace(8) @gl_out_pos
+      call void @llvm.spv.group.memory.barrier.with.group.sync()
+      store float 1.000000e+00, ptr addrspace(8) @gl_TessLevelOuter
+      ret void
+    }
+    declare void @llvm.spv.group.memory.barrier.with.group.sync()
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!2}
+    !1 = !{!2}
+    !2 = !{i32 11, i32 0}
+    !3 = !{!4}
+    !4 = !{i32 11, i32 11}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // The control-point phase keeps only the pre-barrier control-point
+  // output; the barrier call itself is gone.
+  std::optional<EntrySignature> CPSig = dxil::getEntrySignature(*ControlPoint);
+  ASSERT_TRUE(CPSig.has_value());
+  ASSERT_EQ(CPSig->Elements.size(), 2u);
+  for (Instruction &I : instructions(ControlPoint))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(CI->getCalledFunction() &&
+                   CI->getCalledFunction()->getIntrinsicID() ==
+                       Intrinsic::spv_group_memory_barrier_with_group_sync);
+
+  // The patch-constant phase carries the `TessLevelOuter` write as a
+  // `SignatureDirection::PatchOutput` element.
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 1u);
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
+  EXPECT_EQ(PCSig->Elements[0].SystemValue,
+            SignatureSystemValue::TessFactorEdge);
+}
+
+/// (Roadmap H4a) `BuiltIn InvocationId` (SPIR-V code 8, `gl_InvocationID`)
+/// maps to `SignatureSystemValue::InvocationID`, and `BuiltIn
+/// PatchVertices` (code 14, `gl_PatchVerticesIn`) to `SignatureSystemValue
+/// ::PatchVertices` with `SignatureFrequency::PerPatch` -- the hull
+/// control-point phase's own identity and input-patch-size system values.
+TEST(CanonicalizeStageTest, HullStageMapsInvocationIdAndPatchVertices) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_InvocationID = external addrspace(7) constant i32, !spirv.Decorations !0
+    @gl_PatchVerticesIn = external addrspace(7) constant i32, !spirv.Decorations !1
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !2
+    define void @main() #0 {
+      %id = load i32, ptr addrspace(7) @gl_InvocationID
+      %pv = load i32, ptr addrspace(7) @gl_PatchVerticesIn
+      %f = sitofp i32 %id to float
+      %v = insertelement <4 x float> poison, float %f, i32 0
+      store <4 x float> %v, ptr addrspace(8) @gl_out_pos
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!3}
+    !1 = !{!4}
+    !2 = !{!5}
+    !3 = !{i32 11, i32 8}
+    !4 = !{i32 11, i32 14}
+    !5 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 3u);
+
+  const SignatureElement &InvocationId = Sig->Elements[0];
+  EXPECT_EQ(InvocationId.Direction, SignatureDirection::Input);
+  EXPECT_EQ(InvocationId.SystemValue, SignatureSystemValue::InvocationID);
+
+  const SignatureElement &PatchVertices = Sig->Elements[1];
+  EXPECT_EQ(PatchVertices.Direction, SignatureDirection::Input);
+  EXPECT_EQ(PatchVertices.SystemValue, SignatureSystemValue::PatchVertices);
+  EXPECT_EQ(PatchVertices.Frequency, SignatureFrequency::PerPatch);
+}
+
+/// (Roadmap H4a) A domain (tessellation-evaluation) stage entry point's
+/// `BuiltIn TessCoord` (code 13, `gl_TessCoord`) input maps to
+/// `SignatureSystemValue::DomainLocation` (its FeMe-native spelling), and a
+/// `Patch`-decorated input -- `gl_TessLevelOuter` here, read back by the
+/// domain stage -- becomes a `SignatureDirection::PatchInput` element.
+TEST(CanonicalizeStageTest, DomainStageMapsTessCoordAndPatchInput) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_TessCoord = external addrspace(7) constant <3 x float>, !spirv.Decorations !0
+    @gl_TessLevelOuter = external addrspace(7) constant [4 x float], !spirv.Decorations !1
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !2
+    define void @main() #0 {
+      %tc = load <3 x float>, ptr addrspace(7) @gl_TessCoord
+      %tf = load [4 x float], ptr addrspace(7) @gl_TessLevelOuter
+      %tf0 = extractvalue [4 x float] %tf, 0
+      %tcx = extractelement <3 x float> %tc, i32 0
+      %sum = fadd float %tcx, %tf0
+      %v = insertelement <4 x float> poison, float %sum, i32 0
+      store <4 x float> %v, ptr addrspace(8) @gl_out_pos
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="domain" }
+    !0 = !{!3}
+    !1 = !{!4}
+    !2 = !{!5}
+    !3 = !{i32 11, i32 13}
+    !4 = !{i32 11, i32 11}
+    !5 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 3u);
+
+  const SignatureElement &TessCoord = Sig->Elements[0];
+  EXPECT_EQ(TessCoord.Direction, SignatureDirection::Input);
+  EXPECT_EQ(TessCoord.SystemValue, SignatureSystemValue::DomainLocation);
+
+  const SignatureElement &TessLevelOuter = Sig->Elements[1];
+  EXPECT_EQ(TessLevelOuter.Direction, SignatureDirection::PatchInput);
+  EXPECT_EQ(TessLevelOuter.SystemValue, SignatureSystemValue::TessFactorEdge);
+  EXPECT_EQ(TessLevelOuter.Frequency, SignatureFrequency::PerPatch);
 }
 
 } // namespace
