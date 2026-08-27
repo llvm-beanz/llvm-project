@@ -188,4 +188,51 @@ TEST(ValidateStageTest, WrongDirectionElementIsDiagnosed) {
   EXPECT_NE(Errors[0].find("wrong direction"), std::string::npos);
 }
 
+/// (Roadmap H5b) A non-constant `Vertex` operand (`feme.stage.input.load`'s
+/// 4th argument) is only legal for the geometry stage's own
+/// dynamically-indexed `gl_in[i]`-shaped per-vertex inputs
+/// (`FemeGeometryArgs`'s primitive-major `Inputs` layout); every other
+/// stage's own recursion always seeds it with a constant, so a
+/// non-constant one there is diagnosed. `ValidateStagePass::run` does not
+/// yet validate the geometry stage at all (see H5e), so this can only be
+/// exercised against a stage it does validate today.
+TEST(ValidateStageTest, NonConstantVertexOperandIsDiagnosedOutsideGeometry) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %i) #0 {
+      %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %i)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )");
+  ASSERT_TRUE(M);
+  attachTestSignature(*M->getFunction("main"));
+  std::vector<std::string> Errors = validate(*M);
+  ASSERT_EQ(Errors.size(), 1u);
+  EXPECT_NE(Errors[0].find("non-constant vertex operand"), std::string::npos);
+}
+
+/// The store-side mirror of
+/// `NonConstantVertexOperandIsDiagnosedOutsideGeometry`:
+/// `feme.stage.output.store`'s `Vertex` operand is its 5th argument
+/// (`Element, Row, Component, Val, Vertex` -- one more than
+/// `feme.stage.input.load`'s own, for the value being stored).
+TEST(ValidateStageTest, NonConstantVertexOperandIsDiagnosedOnOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %i) #0 {
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 1.0, i32 %i)
+      ret void
+    }
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )");
+  ASSERT_TRUE(M);
+  attachTestSignature(*M->getFunction("main"));
+  std::vector<std::string> Errors = validate(*M);
+  ASSERT_EQ(Errors.size(), 1u);
+  EXPECT_NE(Errors[0].find("non-constant vertex operand"), std::string::npos);
+}
+
 } // namespace

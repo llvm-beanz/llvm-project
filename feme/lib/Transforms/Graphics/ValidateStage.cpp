@@ -139,6 +139,33 @@ void validateRow(CallInst &CI, unsigned RowOperand, const SignatureElement &Elt,
   }
 }
 
+/// (Roadmap H5b) Checks that \p CI's \p VertexOperand, if non-constant, is
+/// legal for \p Stage. Every stage's own `feme.stage.input.load`/
+/// `.output.store` recursion (`loadStageIOValue`/`storeStageIOValue` in
+/// CanonicalizeStage.cpp) seeds this operand with an ordinary constant
+/// `i32 0` by default; the sole exception is a geometry entry's own
+/// dynamically-indexed `gl_in[i]`-shaped per-vertex input
+/// (`getDynamicVertexIndexedAccess`), threaded through as a genuine
+/// non-constant `Value*` -- legal only there because `FemeGeometryArgs`'s
+/// own primitive-major `Inputs` layout (see GeometryWrapper.cpp's file
+/// comment: "the vertex-in-primitive operand ... may be any value in
+/// `[0, VerticesPerPrimitive)`") is the only stage ABI actually built to
+/// address one at runtime. A non-constant `Vertex` operand anywhere else
+/// can only mean a malformed/miscompiled access no valid input should ever
+/// produce.
+void validateVertex(CallInst &CI, unsigned VertexOperand, ShaderStage Stage,
+                    StringRef OpName) {
+  if (getStageOpConstantOperand(CI, VertexOperand) ||
+      Stage == ShaderStage::Geometry)
+    return;
+  Function &F = *CI.getFunction();
+  F.getContext().emitError(
+      &CI, "feme-graphics-validate-stage: '" + OpName + "' in function '" +
+               F.getName() +
+               "' has a non-constant vertex operand, illegal outside the "
+               "geometry stage");
+}
+
 void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
                   const EntrySignature &Sig) {
   StringRef OpName = getStageOpName(Kind);
@@ -163,6 +190,7 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
     if (Kind == StageOpKind::InputLoad) {
       validateRow(CI, /*RowOperand=*/1, *Elt, OpName);
       validateComponent(CI, /*ComponentOperand=*/2, *Elt, OpName);
+      validateVertex(CI, /*VertexOperand=*/3, Stage, OpName);
     } else {
       validateComponent(CI, /*ComponentOperand=*/1, *Elt, OpName);
     }
@@ -175,6 +203,7 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
       return;
     validateRow(CI, /*RowOperand=*/1, *Elt, OpName);
     validateComponent(CI, /*ComponentOperand=*/2, *Elt, OpName);
+    validateVertex(CI, /*VertexOperand=*/4, Stage, OpName);
     break;
   }
   case StageOpKind::Discard:
