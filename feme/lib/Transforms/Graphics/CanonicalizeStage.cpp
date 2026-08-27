@@ -842,6 +842,89 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
   return std::make_pair(GV, Offset.getZExtValue());
 }
 
+/// (Roadmap H5b) A geometry entry point's own per-vertex inputs
+/// (`gl_in[]`-shaped: either the `gl_PerVertex` builtin block itself, or a
+/// plain user-defined varying -- GLSL/SPIR-V always arrays *every* input
+/// of a geometry entry point at `VerticesPerPrimitive`-many elements for
+/// that stage) are read through a genuinely dynamic index, the shader's
+/// own loop-carried vertex-in-primitive counter -- unlike a matrix's `Row`
+/// dimension (`getStageIORowShape`'s own `RowCount`), which is always a
+/// compile-time-fixed `ArrayType` extent. `getStageIOBaseAndOffset`'s own
+/// `stripAndAccumulateConstantOffsets` walk cannot fold a non-constant GEP
+/// index at all, so it stops at (and returns) the GEP itself rather than
+/// the underlying global -- exactly why a `gl_in[i]`-shaped access
+/// resolved to `std::nullopt` (left unrewritten) before this.
+///
+/// This recognizes that one specific shape instead: a `GetElementPtrInst`
+/// whose pointer operand is directly a stage-IO `Input`-storage-class
+/// (address space 7) global variable's own outer array dimension -- its
+/// first index constant zero (ordinary pointer-to-aggregate arithmetic),
+/// its second a non-constant `Value*` (the vertex index) -- with every
+/// further index, if any, constant (a builtin interface block's own
+/// member, or a matrix row within that one vertex's own value), resolved
+/// into a byte offset the same way `resolveRowComponent` already does for
+/// the ordinary constant-offset path, just starting one array dimension
+/// in. A constant vertex index is deliberately left to
+/// `getStageIOBaseAndOffset`'s own path instead (it folds into an ordinary
+/// constant byte offset there, needing no `Vertex` operand at all).
+/// Returns `std::nullopt` if \p Ptr is not this exact shape.
+std::optional<std::tuple<GlobalVariable *, Value *, uint64_t>>
+getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
+  auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
+  if (!GEP)
+    return std::nullopt;
+  auto *GV = dyn_cast<GlobalVariable>(GEP->getPointerOperand());
+  unsigned AddrSpace = 0;
+  if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 7)
+    return std::nullopt;
+  auto *ArrTy = dyn_cast<ArrayType>(GV->getValueType());
+  if (!ArrTy || GEP->getNumIndices() < 2)
+    return std::nullopt;
+
+  auto IdxIt = GEP->idx_begin();
+  auto *OuterIdx = dyn_cast<ConstantInt>(*IdxIt);
+  if (!OuterIdx || !OuterIdx->isZero())
+    return std::nullopt;
+  Value *VertexIndex = *++IdxIt;
+  if (isa<Constant>(VertexIndex))
+    return std::nullopt; // The ordinary constant-offset path handles this.
+
+  Type *CurTy = ArrTy->getElementType();
+  uint64_t ByteOffset = 0;
+  for (++IdxIt; IdxIt != GEP->idx_end(); ++IdxIt) {
+    auto *CI = dyn_cast<ConstantInt>(*IdxIt);
+    if (!CI)
+      return std::nullopt; // Only the vertex index may be non-constant.
+    uint64_t Idx = CI->getZExtValue();
+    if (auto *ST = dyn_cast<StructType>(CurTy)) {
+      const StructLayout *SL = DL.getStructLayout(ST);
+      ByteOffset += SL->getElementOffset(Idx);
+      CurTy = ST->getElementType(Idx);
+    } else if (auto *InnerArrTy = dyn_cast<ArrayType>(CurTy)) {
+      ByteOffset += Idx * DL.getTypeAllocSize(InnerArrTy->getElementType());
+      CurTy = InnerArrTy->getElementType();
+    } else {
+      return std::nullopt;
+    }
+  }
+  return std::make_tuple(GV, VertexIndex, ByteOffset);
+}
+
+/// The stage-IO global \p Ptr addresses, trying both
+/// `getStageIOBaseAndOffset`'s constant-offset resolution and (roadmap
+/// H5b) `getDynamicVertexIndexedAccess`'s dynamic-vertex-indexed one --
+/// every place that only needs to discover *which* global a load/store
+/// touches (as opposed to `resolveStageIOAccess`'s full per-instruction
+/// resolution) goes through this so neither discovery loop below misses a
+/// geometry entry's own `gl_in[i]`-shaped access.
+GlobalVariable *getStageIOGlobal(Value *Ptr, const DataLayout &DL) {
+  if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL))
+    return BaseAndOffset->first;
+  if (auto Dyn = getDynamicVertexIndexedAccess(Ptr, DL))
+    return std::get<0>(*Dyn);
+  return nullptr;
+}
+
 /// One load/store's resolved stage-IO target: the `ElementID` it
 /// addresses and the `Row`/`Component` operands to seed
 /// `loadStageIOValue`/`storeStageIOValue`'s own recursion with (`nullptr`
@@ -852,10 +935,15 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
 /// (Roadmap H2e) Whether \p ElementIDs' global is `Output`-direction,
 /// checked so a load resolving to one can be routed through
 /// `ShadowValueMap` instead of a wrong-direction `feme.stage.input.load`.
+/// (Roadmap H5b) \p Vertex is non-null for a dynamically-indexed
+/// `gl_in[i]`-shaped access, the `Value*` to seed
+/// `loadStageIOValue`/`storeStageIOValue`'s own `Vertex` operand with in
+/// place of the caller's own default (an ordinary constant `i32 0`).
 struct StageIOAccess {
   ArrayRef<uint32_t> ElementIDs;
   Value *Row = nullptr;
   Value *Component = nullptr;
+  Value *Vertex = nullptr;
   bool IsOutput = false;
 };
 
@@ -985,15 +1073,10 @@ bool usesSPIRVStageIO(Function &F) {
   const DataLayout &DL = F.getParent()->getDataLayout();
   for (Instruction &I : instructions(F)) {
     GlobalVariable *GV = nullptr;
-    if (auto *LI = dyn_cast<LoadInst>(&I)) {
-      if (auto BaseAndOffset =
-              getStageIOBaseAndOffset(LI->getPointerOperand(), DL))
-        GV = BaseAndOffset->first;
-    } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
-      if (auto BaseAndOffset =
-              getStageIOBaseAndOffset(SI->getPointerOperand(), DL))
-        GV = BaseAndOffset->first;
-    }
+    if (auto *LI = dyn_cast<LoadInst>(&I))
+      GV = getStageIOGlobal(LI->getPointerOperand(), DL);
+    else if (auto *SI = dyn_cast<StoreInst>(&I))
+      GV = getStageIOGlobal(SI->getPointerOperand(), DL);
     unsigned AddrSpace = 0;
     if (isSPIRVStageIOGlobal(GV, AddrSpace))
       return true;
@@ -1334,32 +1417,92 @@ resolveRowComponent(Type *MemberTy, uint64_t Residual, const DataLayout &DL) {
 /// else) into a `StageIOAccess`, or `std::nullopt` if \p Ptr does not
 /// address a recognized stage-IO global at all.
 ///
+/// The shared tail of `resolveStageIOAccess`'s two entry shapes (an
+/// ordinary constant-byte-offset access rooted directly at a stage-IO
+/// global, and, roadmap H5b, a dynamically-vertex-indexed one rooted one
+/// array dimension in): resolves \p ByteOffset within \p ElemTy -- the
+/// stage-IO global's own value type in the former case, or one array
+/// element's (one vertex's own) value type in the latter -- into a
+/// `StageIOAccess`, exactly as the pre-H5b body of this function did
+/// inline. \p Vertex is threaded through unchanged: non-null (the dynamic
+/// vertex index) for the H5b path, `nullptr` (the caller's own default,
+/// an ordinary constant `i32 0`) for the ordinary one.
+///
 /// A plain stage-IO global (a single `ElementID`) is addressed exactly
 /// like one struct member below: a whole-value access at offset 0 (the
 /// common case, \p Row/\p Component left null so `loadStageIOValue`/
 /// `storeStageIOValue` decompose \p ValueTy -- itself the global's own
 /// array/vector/matrix shape when \p ValueTy names the whole thing --
 /// starting from row/component 0), or a single (\p Row, \p Component)
-/// selected by \p Ptr's constant byte offset into the global's own type
-/// (roadmap H4d: `gl_TessLevelOuter[i]`/`gl_TessLevelInner[i]`'s own
-/// per-row write for `i != 0`, exactly the shape a real GLSL-compiled
-/// tessellation-control shader takes -- previously rejected here as an
-/// unmodeled shape, leaving every such store's global reference
-/// unrewritten and undefined at JIT time). A builtin interface block
-/// (multiple `ElementID`s) has two addressable shapes instead: (1) the
-/// whole block loaded/stored as one aggregate value (\p ValueTy exactly
-/// matches the block's own struct type) -- every member's `ElementID`;
-/// (2) a single member (or one row/component within it,
-/// `gl_ClipDistance`/`gl_CullDistance`'s own per-element access, or
-/// `gl_Position`'s own per-component one) selected by \p Ptr's constant
-/// byte offset (`getStageIOBaseAndOffset`) into the block's own
-/// `StructLayout`. \p OutputGlobals (roadmap H2e) is checked to set the
-/// result's `IsOutput`, so a caller can tell a genuinely-input load from an
-/// `Output`-direction read-back.
+/// selected by \p ByteOffset into \p ElemTy (roadmap H4d:
+/// `gl_TessLevelOuter[i]`/`gl_TessLevelInner[i]`'s own per-row write for
+/// `i != 0`, exactly the shape a real GLSL-compiled tessellation-control
+/// shader takes -- previously rejected here as an unmodeled shape, leaving
+/// every such store's global reference unrewritten and undefined at JIT
+/// time). A builtin interface block (multiple `ElementID`s) has two
+/// addressable shapes instead: (1) the whole block loaded/stored as one
+/// aggregate value (\p ValueTy exactly matches \p ElemTy) -- every
+/// member's `ElementID`; (2) a single member (or one row/component within
+/// it, `gl_ClipDistance`/`gl_CullDistance`'s own per-element access, or
+/// `gl_Position`'s own per-component one) selected by \p ByteOffset into
+/// \p ElemTy's own `StructLayout`. \p IsOutput (roadmap H2e) lets a caller
+/// tell a genuinely-input load from an `Output`-direction read-back.
+StageIOAccess resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
+                                         uint64_t ByteOffset, Type *ValueTy,
+                                         const DataLayout &DL, bool IsOutput,
+                                         Value *Vertex) {
+  LLVMContext &Ctx = ElemTy->getContext();
+  auto AsConstant = [&](uint64_t V) -> Value * {
+    return V ? ConstantInt::get(Type::getInt32Ty(Ctx), V) : nullptr;
+  };
+  if (IDs.size() == 1) {
+    if (ValueTy == ElemTy)
+      return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
+    auto [Row, Component] = resolveRowComponent(ElemTy, ByteOffset, DL);
+    return StageIOAccess{IDs, AsConstant(Row), AsConstant(Component), Vertex,
+                         IsOutput};
+  }
+
+  auto *ST = cast<StructType>(ElemTy);
+  if (ValueTy == ST)
+    return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
+
+  const StructLayout *SL = DL.getStructLayout(ST);
+  unsigned Member = SL->getElementContainingOffset(ByteOffset);
+  uint64_t Residual = ByteOffset - SL->getElementOffset(Member);
+  auto [Row, Component] =
+      resolveRowComponent(ST->getElementType(Member), Residual, DL);
+  return StageIOAccess{IDs.slice(Member, 1), AsConstant(Row),
+                       AsConstant(Component), Vertex, IsOutput};
+}
+
+/// Resolves \p Ptr -- a load/store's pointer operand -- against \p
+/// ElementIDs (one entry per stage-IO global, one `ElementID` per struct
+/// member for a builtin interface block, a single one for everything
+/// else) into a `StageIOAccess`, or `std::nullopt` if \p Ptr does not
+/// address a recognized stage-IO global at all. Tries
+/// `getDynamicVertexIndexedAccess`'s dynamically-vertex-indexed shape
+/// (roadmap H5b) first, falling back to `getStageIOBaseAndOffset`'s
+/// ordinary constant-byte-offset one -- see `resolveOffsetWithinElement`'s
+/// own comment for how each resolves from there. \p OutputGlobals
+/// (roadmap H2e) is checked to set the result's `IsOutput`, so a caller can
+/// tell a genuinely-input load from an `Output`-direction read-back.
 std::optional<StageIOAccess> resolveStageIOAccess(
     Value *Ptr, Type *ValueTy, const DataLayout &DL,
     const DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> &ElementIDs,
     const DenseSet<GlobalVariable *> &OutputGlobals) {
+  if (std::optional<std::tuple<GlobalVariable *, Value *, uint64_t>> Dyn =
+          getDynamicVertexIndexedAccess(Ptr, DL)) {
+    auto [GV, VertexIndex, ByteOffset] = *Dyn;
+    auto It = ElementIDs.find(GV);
+    if (It == ElementIDs.end())
+      return std::nullopt;
+    Type *ElemTy = cast<ArrayType>(GV->getValueType())->getElementType();
+    return resolveOffsetWithinElement(ElemTy, It->second, ByteOffset, ValueTy,
+                                      DL, OutputGlobals.contains(GV),
+                                      VertexIndex);
+  }
+
   std::optional<std::pair<GlobalVariable *, uint64_t>> BaseAndOffset =
       getStageIOBaseAndOffset(Ptr, DL);
   if (!BaseAndOffset)
@@ -1368,39 +1511,9 @@ std::optional<StageIOAccess> resolveStageIOAccess(
   auto It = ElementIDs.find(GV);
   if (It == ElementIDs.end())
     return std::nullopt;
-  ArrayRef<uint32_t> IDs = It->second;
-  bool IsOutput = OutputGlobals.contains(GV);
-  if (IDs.size() == 1) {
-    if (ValueTy == GV->getValueType())
-      return StageIOAccess{IDs, nullptr, nullptr, IsOutput};
-    auto [Row, Component] =
-        resolveRowComponent(GV->getValueType(), ByteOffset, DL);
-    return StageIOAccess{
-        IDs,
-        Row ? ConstantInt::get(Type::getInt32Ty(GV->getContext()), Row)
-            : nullptr,
-        Component
-            ? ConstantInt::get(Type::getInt32Ty(GV->getContext()), Component)
-            : nullptr,
-        IsOutput};
-  }
-
-  auto *ST = cast<StructType>(GV->getValueType());
-  if (ValueTy == ST)
-    return StageIOAccess{IDs, nullptr, nullptr, IsOutput};
-
-  const StructLayout *SL = DL.getStructLayout(ST);
-  unsigned Member = SL->getElementContainingOffset(ByteOffset);
-  uint64_t Residual = ByteOffset - SL->getElementOffset(Member);
-  auto [Row, Component] =
-      resolveRowComponent(ST->getElementType(Member), Residual, DL);
-  return StageIOAccess{
-      IDs.slice(Member, 1),
-      Row ? ConstantInt::get(Type::getInt32Ty(ST->getContext()), Row) : nullptr,
-      Component
-          ? ConstantInt::get(Type::getInt32Ty(ST->getContext()), Component)
-          : nullptr,
-      IsOutput};
+  return resolveOffsetWithinElement(GV->getValueType(), It->second, ByteOffset,
+                                    ValueTy, DL, OutputGlobals.contains(GV),
+                                    /*Vertex=*/nullptr);
 }
 
 /// Rewrites \p F's SPIR-V-derived stage IR into `feme.stage.*`: its
@@ -1427,15 +1540,10 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   const DataLayout &DL = F.getParent()->getDataLayout();
   for (Instruction &I : instructions(F)) {
     GlobalVariable *GV = nullptr;
-    if (auto *LI = dyn_cast<LoadInst>(&I)) {
-      if (auto BaseAndOffset =
-              getStageIOBaseAndOffset(LI->getPointerOperand(), DL))
-        GV = BaseAndOffset->first;
-    } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
-      if (auto BaseAndOffset =
-              getStageIOBaseAndOffset(SI->getPointerOperand(), DL))
-        GV = BaseAndOffset->first;
-    }
+    if (auto *LI = dyn_cast<LoadInst>(&I))
+      GV = getStageIOGlobal(LI->getPointerOperand(), DL);
+    else if (auto *SI = dyn_cast<StoreInst>(&I))
+      GV = getStageIOGlobal(SI->getPointerOperand(), DL);
     unsigned AddrSpace = 0;
     if (!isSPIRVStageIOGlobal(GV, AddrSpace) || !Seen.insert(GV).second)
       continue;
@@ -1493,10 +1601,20 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // carries no whole-variable decoration of its own -- SPIR-V
         // decorates each of its struct members individually -- so it
         // decomposes into one `SignatureElement` per member instead of
-        // the single one every other stage-IO global gets.
+        // the single one every other stage-IO global gets. (Roadmap H5b)
+        // A geometry entry's own per-vertex block (`gl_in[]`-shaped) is
+        // this same shape one array dimension further out -- the block
+        // type itself, not the array wrapping `VerticesPerPrimitive`-many
+        // of it, is what carries one `ElementID` per member; the array
+        // dimension is the dynamically-indexed `Vertex` operand instead
+        // (`getDynamicVertexIndexedAccess`'s own peeling on the access
+        // side), never folded into any member's own `RowCount`.
         if (const MDNode *MemberMD =
                 GV->getMetadata("feme.spirv.MemberDecorations")) {
-          auto *ST = cast<StructType>(GV->getValueType());
+          Type *BlockTy = GV->getValueType();
+          if (auto *ArrTy = dyn_cast<ArrayType>(BlockTy))
+            BlockTy = ArrTy->getElementType();
+          auto *ST = cast<StructType>(BlockTy);
           DenseMap<unsigned, ParsedSPIRVDecorations> MemberDecorations =
               parseSPIRVMemberDecorations(MemberMD);
           for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I)
@@ -1547,8 +1665,13 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       // `ShadowValues` instead.
       Value *Row = Access->Row ? Access->Row : Zero;
       Value *Component = Access->Component ? Access->Component : Zero;
+      // (Roadmap H5b) A dynamically-indexed `gl_in[i]`-shaped access
+      // threads its own vertex index through as the `Vertex` operand in
+      // place of the ordinary constant `Zero` every other stage-IO access
+      // uses.
+      Value *Vertex = Access->Vertex ? Access->Vertex : Zero;
       Value *New = loadStageIOBlockValue(
-          B, LI->getType(), Access->ElementIDs, Row, Component, Zero,
+          B, LI->getType(), Access->ElementIDs, Row, Component, Vertex,
           LI->getName(), Access->IsOutput ? &ShadowValues : nullptr);
       LI->replaceAllUsesWith(New);
       LI->eraseFromParent();
