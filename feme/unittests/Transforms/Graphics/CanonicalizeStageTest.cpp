@@ -1400,4 +1400,74 @@ TEST(CanonicalizeStageTest, DomainStageMapsTessCoordAndPatchInput) {
   EXPECT_EQ(TessLevelOuter.Frequency, SignatureFrequency::PerPatch);
 }
 
+/// (Roadmap H5c) A geometry entry point's `BuiltIn PrimitiveId` (code 7,
+/// `gl_PrimitiveIDIn` as an `Input`), `InvocationId` (code 8,
+/// `gl_InvocationID`), `Layer`/`ViewportIndex` (codes 9/10,
+/// `gl_Layer`/`gl_ViewportIndex` as `Output`s), and `PrimitiveId` again
+/// (this time as an `Output`, `gl_PrimitiveID`) all map onto the same
+/// `SignatureSystemValue`s `getSystemValueForBuiltIn` already produces for
+/// every other stage -- unlike Hull/Domain (`HullStageMapsInvocationIdAnd
+/// PatchVertices`/`DomainStageMapsTessCoordAndPatchInput` above), a
+/// geometry entry needs no barrier-splitting (`canonicalizeSPIRVHullStage`)
+/// and no new system-value work, per `CanonicalizeStagePass::run` now
+/// routing `ShaderStage::Geometry` straight through `canonicalizeSPIRVStage`
+/// with `SPIRVCanonicalPhase::Ordinary`, exactly like Domain.
+TEST(CanonicalizeStageTest, GeometryStageMapsSystemValues) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PrimitiveIDIn = external addrspace(7) constant i32, !spirv.Decorations !0
+    @gl_InvocationID = external addrspace(7) constant i32, !spirv.Decorations !1
+    @gl_Layer = external addrspace(8) global i32, !spirv.Decorations !2
+    @gl_ViewportIndex = external addrspace(8) global i32, !spirv.Decorations !3
+    @gl_PrimitiveID = external addrspace(8) global i32, !spirv.Decorations !4
+    define void @main() #0 {
+      %pid = load i32, ptr addrspace(7) @gl_PrimitiveIDIn
+      %iid = load i32, ptr addrspace(7) @gl_InvocationID
+      %sum = add i32 %pid, %iid
+      store i32 %sum, ptr addrspace(8) @gl_Layer
+      store i32 %sum, ptr addrspace(8) @gl_ViewportIndex
+      store i32 %sum, ptr addrspace(8) @gl_PrimitiveID
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="geometry" }
+    !0 = !{!5}
+    !1 = !{!6}
+    !2 = !{!7}
+    !3 = !{!8}
+    !4 = !{!9}
+    !5 = !{i32 11, i32 7}
+    !6 = !{i32 11, i32 8}
+    !7 = !{i32 11, i32 9}
+    !8 = !{i32 11, i32 10}
+    !9 = !{i32 11, i32 7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 5u);
+
+  const SignatureElement &PrimitiveIDIn = Sig->Elements[0];
+  EXPECT_EQ(PrimitiveIDIn.Direction, SignatureDirection::Input);
+  EXPECT_EQ(PrimitiveIDIn.SystemValue, SignatureSystemValue::PrimitiveID);
+
+  const SignatureElement &InvocationId = Sig->Elements[1];
+  EXPECT_EQ(InvocationId.Direction, SignatureDirection::Input);
+  EXPECT_EQ(InvocationId.SystemValue, SignatureSystemValue::InvocationID);
+
+  const SignatureElement &Layer = Sig->Elements[2];
+  EXPECT_EQ(Layer.Direction, SignatureDirection::Output);
+  EXPECT_EQ(Layer.SystemValue, SignatureSystemValue::RenderTargetArrayIndex);
+
+  const SignatureElement &ViewportIndex = Sig->Elements[3];
+  EXPECT_EQ(ViewportIndex.Direction, SignatureDirection::Output);
+  EXPECT_EQ(ViewportIndex.SystemValue,
+            SignatureSystemValue::ViewportArrayIndex);
+
+  const SignatureElement &PrimitiveID = Sig->Elements[4];
+  EXPECT_EQ(PrimitiveID.Direction, SignatureDirection::Output);
+  EXPECT_EQ(PrimitiveID.SystemValue, SignatureSystemValue::PrimitiveID);
+}
+
 } // namespace
