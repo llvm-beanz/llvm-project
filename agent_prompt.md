@@ -33,12 +33,24 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H3? The previous agent failed. I stashed it's partial
-progress in the git repo. You an restore it by running `git stash pop`.
+Can you work on milestone H3a?
 
-> **Multiple viewports and scissors.** `maxViewports` is hard-coded to 1
-> (`PhysicalDeviceInfo.cpp:247`) and `vkCmdSetViewportWithCount` and the
-> pipeline path both reject anything else (`GraphicsPipeline.cpp:825`). Needs a
-> per-primitive viewport index in the executor, `ViewportIndex` as a stage
-> output, and `shaderOutputViewportIndex`/`shaderOutputLayer` (both `VK_FALSE`
-> in the aggregate 1.2 struct today) raised in lockstep with H2
+> **`gl_ViewportIndex` read back as a fragment-shader input fails pipeline
+> creation** (roadmap H3's own Deviation,
+> `dEQP-VK.draw.*.shader_viewport_index.fragment_shader_*`, 68 of H3's own
+> measured 196 cases, `GL_ARB_shader_viewport_layer_array`'s other half:
+> `out_color = color[gl_ViewportIndex]`): `vkCreateGraphicsPipelines` fails with
+> `VK_ERROR_INITIALIZATION_FAILED`, `FragmentWrapper.cpp`'s
+> `lowerFragmentStageOps` reporting "fragment stage wrapper requires attached
+> feme.signature metadata" -- i.e. the fragment entry function reaches code
+> generation with no `feme.signature` metadata attached at all, not merely a
+> mismatched one. `CanonicalizeStage.cpp`'s builtin-to-`SignatureSystemValue`
+> mapping (`getSystemValueForBuiltIn`) already maps SPIR-V `BuiltIn` 10
+> (`ViewportIndex`) to `SignatureSystemValue::ViewportArrayIndex` regardless of
+> storage class, so the reflection-side mapping itself looks direction-agnostic;
+> root cause not yet isolated to a single line, needs its own investigation into
+> why the fragment stage's globals loop (`CanonicalizeStage.cpp`'s
+> `InputGlobals`/`OutputGlobals` collection) does not see this variable at all
+> for a fragment-shader `Input`-storage-class `ViewportIndex` builtin, unlike
+> the small set of fragment-input builtins already wired up before this
+> milestone (`FragCoord`/`Position`, `FrontFacing`, `SampleId`, `SampleMask`)
