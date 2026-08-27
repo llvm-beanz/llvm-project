@@ -33,24 +33,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H3a?
+Can you work on milestone H4?
 
-> **`gl_ViewportIndex` read back as a fragment-shader input fails pipeline
-> creation** (roadmap H3's own Deviation,
-> `dEQP-VK.draw.*.shader_viewport_index.fragment_shader_*`, 68 of H3's own
-> measured 196 cases, `GL_ARB_shader_viewport_layer_array`'s other half:
-> `out_color = color[gl_ViewportIndex]`): `vkCreateGraphicsPipelines` fails with
-> `VK_ERROR_INITIALIZATION_FAILED`, `FragmentWrapper.cpp`'s
-> `lowerFragmentStageOps` reporting "fragment stage wrapper requires attached
-> feme.signature metadata" -- i.e. the fragment entry function reaches code
-> generation with no `feme.signature` metadata attached at all, not merely a
-> mismatched one. `CanonicalizeStage.cpp`'s builtin-to-`SignatureSystemValue`
-> mapping (`getSystemValueForBuiltIn`) already maps SPIR-V `BuiltIn` 10
-> (`ViewportIndex`) to `SignatureSystemValue::ViewportArrayIndex` regardless of
-> storage class, so the reflection-side mapping itself looks direction-agnostic;
-> root cause not yet isolated to a single line, needs its own investigation into
-> why the fragment stage's globals loop (`CanonicalizeStage.cpp`'s
-> `InputGlobals`/`OutputGlobals` collection) does not see this variable at all
-> for a fragment-shader `Input`-storage-class `ViewportIndex` builtin, unlike
-> the small set of fragment-input builtins already wired up before this
-> milestone (`FragCoord`/`Position`, `FrontFacing`, `SampleId`, `SampleMask`)
+>  **Tessellation stages.** `GraphicsPipeline.cpp` accepts exactly
+>  `VK_SHADER_STAGE_VERTEX_BIT` and `VK_SHADER_STAGE_FRAGMENT_BIT` (its
+>  `mapStage`/stage-mask check, ~lines 983-1118); everything else is rejected.
+>  Needs G5's hull/domain wrappers, patch storage, and tessellator, then the
+>  `tessellationShader` feature bit, `maxTessellation*` limits, and the
+>  `VkPipelineTessellationStateCreateInfo`/patch-list topology path. Whole
+>  `dEQP-VK.tessellation` group
