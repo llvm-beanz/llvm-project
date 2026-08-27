@@ -37812,3 +37812,202 @@ correctly unchanged. Commits, in order: the new `Geometry.h`/`.cpp` +
 CMake registration; the `ConvertSPIRVToLLVMPass.cpp` execution-mode
 capture; the new unit test; the new lit test; the docs update
 (`Roadmap.md`/`FeMeGraphicsDesign.md`/`VulkanCTSReport.md`); this file.
+
+# Session: Roadmap H5b (dynamic `Vertex` operand for `gl_in[i]`-shaped access)
+
+## Goal
+
+H5a's own report spun off H5b as the actual blocker on lifting
+`CanonicalizeStagePass::run`'s stage filter to accept `ShaderStage::Geometry`:
+a geometry entry point's per-vertex inputs (`gl_in[]`-shaped) are read via
+`gl_in[i]` for a loop-carried `i`, but `loadStageIOValue`'s recursion always
+passed a constant `Zero` for the `Vertex` operand of `feme.stage.input.load`.
+Nothing recognized a SPIR-V array-typed `Input`-storage-class global being
+indexed by a genuine, non-constant SSA value. The roadmap row's own wording
+scopes this precisely: recognize the shape, extract the index as a `Value*`,
+and validate that a non-constant `Vertex` operand is only legal for a stage
+whose ABI actually supports it.
+
+## Reading the existing machinery before writing anything
+
+`CanonicalizeStage.cpp`'s existing `getStageIOBaseAndOffset` only ever
+strips *constant* offsets (`stripAndAccumulateConstantOffsets`) from a
+`GetElementPtrInst`/`ConstantExpr` chain rooted at a stage-IO global, folding
+everything into one `RowShape`-derived `(Row, Component)` pair per element.
+There was no branch anywhere that even looked at whether a GEP index was
+constant before requiring it to be -- a non-constant second index on a GEP
+into an array-typed `Input` global would simply fail to fold and the whole
+access would never be discovered as stage IO at all, in either
+`usesSPIRVStageIO` or `canonicalizeSPIRVStage`'s own discovery loop.
+
+Separately, `ValidateStage.cpp` had no `Vertex`-operand validation
+whatsoever -- only `Row`/`Component`/`Element` were checked. And
+`GeometryWrapper.cpp`'s `lowerGeometryInputLoad` (from G5) already consumed
+an arbitrary, non-constant `Vertex` operand on the CPU-backend consumer
+side -- confirming this really was purely a front-end gap, not a
+missing-ABI one. `FemeGeometryArgs`'s own primitive-major `Inputs` layout is
+exactly built for "any value in `[0, VerticesPerPrimitive)`", so that's the
+one stage this new validation should *not* reject a non-constant `Vertex`
+operand for.
+
+## Design: recognizing the shape without disturbing the existing path
+
+The new `getDynamicVertexIndexedAccess` walks the same GEP-chain shape
+`getStageIOBaseAndOffset` does, but instead of requiring every index
+constant, it specifically looks for: pointer operand is a stage-IO `Input`
+global directly (address space 7) whose value type is an `ArrayType`; first
+GEP index is constant `0` (the mandatory pointer-to-aggregate hop); second
+index is *not* constant -- that's the vertex index; and everything after
+that is constant, resolved into a byte offset by a new shared helper,
+`resolveOffsetWithinElement`, extracted from what used to be inline logic
+in `resolveStageIOAccess` so both the ordinary (fully constant) path and
+this new one build a `SignatureElement`/`(Row, Component)` pair the same
+way. If the second index turns out to be constant after all, this function
+bails (returns `std::nullopt`) and the caller falls back to the pre-existing
+`getStageIOBaseAndOffset` -- so a *constant*-indexed `gl_in[0].gl_Position`
+keeps behaving exactly as it did before this row, still folding that index
+into `Row`. That's a deliberate scope boundary, not an oversight: the
+roadmap row's own title says "non-constant, dynamically-indexed", and every
+real GLSL geometry shader loops over `gl_in` rather than unrolling it, so a
+constant-indexed access reaching `Row` instead of `Vertex` doesn't actually
+matter for a real shader today. I filed this gap as roadmap H5f rather than
+silently leaving it undocumented, since a future consumer (H5c's real
+geometry canonicalization, or later) will eventually need the two paths
+reconciled -- right now a per-vertex-arrayed global's `SignatureElement.
+RowCount` still (mis)reports the array's own extent because `addElement`/
+`getStageIORowShape` were deliberately left untouched.
+
+I introduced `getStageIOGlobal` as a thin "try the dynamic path, then the
+constant path" wrapper so both discovery call sites (`usesSPIRVStageIO`,
+and `canonicalizeSPIRVStage`'s own loop) recognize a dynamically-indexed
+global as stage IO at all -- without this, `getStageIOBaseAndOffset` alone
+would simply never see such a global, since it can't fold a non-constant
+GEP index, and it would silently be skipped by the whole pass.
+
+`resolveStageIOAccess` tries the new dynamic-vertex path first (since it's
+strictly more specific -- only fires for the exact array-of-Input-global-
+with-non-constant-second-index shape), then falls back to the existing
+constant-offset path unchanged.
+
+## The `addElements` array-of-block bug I found along the way
+
+While building a hand-crafted test for a `gl_in[]`-shaped *builtin interface
+block* (not just a bare per-vertex array of a single value like a plain
+`vec4` input), I found `addElements`'s builtin-interface-block-member branch
+unconditionally did `cast<StructType>(GV->getValueType())` when it saw
+`feme.spirv.MemberDecorations` metadata. For a bare block global that's
+correct, but for an array-of-block global (`gl_in[]`'s actual shape) the
+value type is an `ArrayType` wrapping the struct, and that `cast` would
+assert-fail (or worse, misbehave in a release build). I fixed this
+defensively by peeling one outer `ArrayType` first if present, building
+each member's own `SignatureElement` from the block struct's own member
+types -- not the array's element count folded into `RowCount`.
+
+While chasing why this metadata branch wasn't already exercised by any
+existing test with a real array-of-block shape, I found the actual
+producer of this metadata, `SPIRVToLLVMPatterns.cpp`'s
+`StageIOGlobalVariablePattern::matchAndRewrite`, only attaches
+`feme.spirv.MemberDecorations` when the pointee type is directly an
+`mlir::spirv::StructType` -- never an `mlir::spirv::ArrayType<StructType>`.
+So a real geometry `gl_in[]` global, once actually lowered from real SPIR-V
+input, would reach `CanonicalizeStage.cpp` with no such metadata at all
+today, meaning my `addElements` fix (correct on its own terms) currently has
+no real producer to feed it. I filed this as roadmap H5g rather than fixing
+it here, since the roadmap's own H5b row lists only
+`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp` as the affected file --
+`SPIRVToLLVMPatterns.cpp` is a different file, a different pass, and a
+genuinely separable piece of work with its own test surface. My
+hand-constructed test for this shape builds the IR directly (bypassing the
+SPIR-V-to-LLVM conversion step) specifically because the real pipeline
+can't produce it yet -- that's noted in the test's own doc comment so
+nobody mistakes it for confirmation that the full pipeline already works
+end to end.
+
+## `ValidateStage.cpp`: `validateVertex`
+
+Added `validateVertex(CI, VertexOperand, Stage, OpName)`, diagnosing a
+non-constant `Vertex` operand unless `Stage == ShaderStage::Geometry`.
+Wired into both `InputLoad` (operand 3) and `OutputStore` (operand 4 --
+`createStageOutputStore`'s signature has an extra `Val` argument ahead of
+`Vertex`, so the index differs from `InputLoad`'s). I did *not* touch
+`ValidateStagePass::run`'s own stage-filter (`Vertex`/`Fragment` only) --
+that's explicitly H5e's job, not this row's, so the new Geometry-legality
+branch is unreachable from the real pass today, only unit-testable in
+isolation. That's fine: the whole point of decomposing H5 into lettered
+sub-rows this way is that each piece is independently correct and testable
+before the next piece wires it in.
+
+## Testing
+
+Added two `CanonicalizeStageTest.cpp` cases:
+`ThreadsDynamicVertexIndexIntoInputLoad` (a plain arrayed value, not a
+block, confirming the dynamic path works without any metadata at all) and
+`ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad` (the
+hand-constructed array-of-block-with-metadata shape described above,
+confirming per-member `RowCount`/`ComponentCount` aren't inflated by the
+outer per-vertex-array dimension). Both assert the rewritten
+`feme.stage.input.load` calls carry the original, non-constant `%i` as
+`Vertex` rather than a constant `Zero`.
+
+Added two `ValidateStageTest.cpp` cases for `validateVertex`'s two call
+sites (`InputLoad`, `OutputStore`), both using the vertex stage (the only
+stage `ValidateStagePass::run` actually dispatches today besides fragment)
+to confirm the diagnostic actually fires there, since Geometry itself isn't
+reachable from the real pass yet.
+
+## Verification
+
+- `ninja FeMeTransformsGraphics` -- clean compile.
+- `ninja FeMeTransformsGraphicsTests` -- all 33 tests pass (29 pre-existing
+  + 4 new), 0 regressions.
+- `ninja check-feme` -- 1847/1906 passed, up from H5a's 1843/1902 by exactly
+  the 4 new tests, 59 pre-existing unrelated `Unsupported`, 0 `Failed`.
+- `git clang-format --diff HEAD` -- flagged 4 small formatting nits (mostly
+  brace-init continuation indentation in the new
+  `resolveOffsetWithinElement` helper and one doc-comment line wrap); fixed
+  by hand since a dirty tree can't be auto-applied through the tool.
+- `dEQP-VK.geometry.*` -- unchanged at 0/0/200, exactly as expected since
+  `CanonicalizeStagePass::run` still doesn't dispatch `Geometry` (that's
+  H5c).
+- `dEQP-VK.draw.*` regression sample (the same 1957-case
+  `grep -v viewport_height draw.txt | awk 'NR%15==1'` sample this report has
+  used since H4): hit
+  `dEQP-VK.draw.dynamic_rendering.complete_secondary_cmd_buff.
+  negative_viewport_height.front_ccw_cull_back` aborting the *full*
+  (non-sampled) run with a `SelectInst::init` assertion -- confirmed via
+  `git stash`/rebuild/rerun bisection that this reproduces identically on
+  the unmodified H5a baseline tree, so it's pre-existing and unrelated
+  to this row (and already excluded from the standard sample by the
+  `grep -v viewport_height` step, which is why it hadn't surfaced before).
+  The sampled run itself: 12/1957 passed, 139/1957 failed, 1806/1957 not
+  supported -- byte-identical between my tree and a freshly rebuilt H5a
+  baseline (both measured fresh, since the CTS mustpass/environment this
+  report runs against has drifted since H4a's own 133-failure figure was
+  first recorded; the drift is environmental and predates this row, not
+  caused by it). 0 regressions.
+
+## Roadmap updates
+
+Struck through H5b. Added H5f (constant-indexed `gl_in[k]` still folds into
+`Row`, and `RowCount` still conflates a per-vertex array's own extent with a
+real matrix's row count -- both discovered but explicitly out of this row's
+own scope) and H5g (`SPIRVToLLVMPatterns.cpp` not yet attaching
+`MemberDecorations` metadata for an array-of-block global, discovered while
+building the interface-block test but a different file/pass, not part of
+H5b's own listed affected files). Updated `FeMeGraphicsDesign.md`'s existing
+forward-reference to H5b (in the tessellation/geometry chaining section) to
+describe what actually landed, rather than leaving it as a still-open
+placeholder.
+
+## Outcome
+
+H5b is done as scoped: `CanonicalizeStage.cpp` recognizes a non-constant
+per-vertex array index and threads it through as `Vertex`;
+`ValidateStage.cpp` restricts that legality to the one stage whose ABI
+supports it. `CanonicalizeStagePass::run` itself still does not accept
+`ShaderStage::Geometry` -- that remains H5c's own job, now genuinely
+unblocked. Two real, deliberately out-of-scope gaps this investigation
+found (constant-index `Row`-folding/`RowCount` conflation, and the
+SPIR-V-to-LLVM conversion pass not yet producing the metadata this row's
+own `addElements` fix expects) are now tracked as H5f/H5g rather than
+silently left for someone else to rediscover.
