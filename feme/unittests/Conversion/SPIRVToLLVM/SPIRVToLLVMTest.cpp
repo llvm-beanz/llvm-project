@@ -182,6 +182,35 @@ TEST(SPIRVToLLVMTest, BuiltinInterfaceBlockPreservesMemberDecorations) {
       << Result;
 }
 
+// (Roadmap H5g) A geometry entry's own per-vertex builtin interface block
+// (`gl_in[]`) is shaped one array dimension further out than
+// `gl_PerVertex` above -- an `Input` array-of-struct, since SPIR-V still
+// wraps `Triangles`/etc.'s "one block per vertex" shape in an outer
+// `OpTypeArray` -- but the member decorations that matter live on the
+// inner struct exactly as they do for the bare-block case, and
+// `CanonicalizeStage.cpp`'s own `addElements` (roadmap H5b) already knows
+// how to peel that outer array dimension back off once this metadata is
+// present to peel in front of.
+TEST(SPIRVToLLVMTest, PerVertexArrayInterfaceBlockPreservesMemberDecorations) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "
+      "Geometry], []> "
+      "{ spirv.GlobalVariable @gl_in : "
+      "!spirv.ptr<!spirv.array<3 x !spirv.struct<(vector<4xf32> "
+      "[BuiltIn=0 : i32], f32 [BuiltIn=1 : i32])>>, Input> }");
+  EXPECT_NE(Result, "<failed>");
+  EXPECT_NE(
+      Result.find(feme::spirv::getStageIOMemberDecorationsAttrName().str()),
+      std::string::npos)
+      << Result;
+  // No whole-variable decoration to preserve, same as the bare-block case:
+  // `gl_in` itself carries no `built_in`/`location` attribute, only the
+  // inner per-vertex block's own members do.
+  EXPECT_EQ(Result.find(feme::spirv::getStageIODecorationsAttrName().str()),
+            std::string::npos)
+      << Result;
+}
+
 // A member decoration this milestone does not model (e.g. `Offset`, which
 // an ordinary uniform block's members carry but a stage-IO struct never
 // does) is filtered out rather than corrupting the encoding, matching

@@ -120,3 +120,20 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @gl_PerVertex : !spirv.ptr<!spirv.struct<(vector<4xf32> [BuiltIn=0 : i32], f32 [BuiltIn=1 : i32], !spirv.array<1 x f32> [BuiltIn=3 : i32], !spirv.array<1 x f32> [BuiltIn=4 : i32])>, Output>
 }
+
+// -----
+
+// (Roadmap H5g) A geometry entry's own per-vertex builtin interface block
+// (`gl_in[]`) wraps the same per-member-decorated block struct as
+// `gl_PerVertex` above in one more array dimension -- `Input` storage
+// class here, since a geometry entry reads it rather than writing it --
+// but the member decorations that matter still live on the inner struct,
+// so they are recovered the same way, keyed off that inner struct
+// regardless of the outer array. `CanonicalizeStage.cpp`'s own
+// `addElements` (roadmap H5b) peels the outer array dimension back off
+// once this metadata is present to peel in front of.
+
+// CHECK: llvm.mlir.global external constant @gl_in() {addr_space = 7 : i32, feme.spirv.member.decorations = {{\[}}[0 : i32, {{\[}}[11 : i32, 0 : i32]{{\]}}], [1 : i32, {{\[}}[11 : i32, 1 : i32]{{\]}}]{{\]}}}
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Geometry], []> {
+  spirv.GlobalVariable @gl_in : !spirv.ptr<!spirv.array<3 x !spirv.struct<(vector<4xf32> [BuiltIn=0 : i32], f32 [BuiltIn=1 : i32])>>, Input>
+}

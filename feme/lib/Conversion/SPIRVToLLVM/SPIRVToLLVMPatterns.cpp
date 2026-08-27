@@ -1033,9 +1033,19 @@ public:
     // A builtin interface block (e.g. `gl_PerVertex`) has no whole-variable
     // `BuiltIn` attribute of its own -- SPIR-V decorates its members
     // individually -- but those per-member decorations are recovered here
-    // the same way (roadmap H2c).
-    if (auto Struct =
-            mlir::dyn_cast<mlir::spirv::StructType>(SrcType.getPointeeType()))
+    // the same way (roadmap H2c). A geometry entry's own per-vertex block
+    // (`gl_in[]`) takes this same shape one array dimension further out --
+    // an `ArrayType` of the block struct rather than the bare struct --
+    // since SPIR-V still decorates the inner struct's own members, not the
+    // array wrapping it; `CanonicalizeStage.cpp`'s own `addElements` already
+    // peels that outer array dimension back off when reading this same
+    // metadata (roadmap H5b), so it is attached here unconditionally,
+    // keyed off the inner struct regardless of which of these two shapes
+    // wraps it (roadmap H5g).
+    mlir::Type PointeeType = SrcType.getPointeeType();
+    if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(PointeeType))
+      PointeeType = ArrayTy.getElementType();
+    if (auto Struct = mlir::dyn_cast<mlir::spirv::StructType>(PointeeType))
       if (mlir::ArrayAttr MemberDecorations =
               buildMemberDecorationsAttr(Struct))
         NewGlobal->setAttr(feme::spirv::getStageIOMemberDecorationsAttrName(),
