@@ -107,21 +107,24 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
 }
 
 TEST(PhysicalDeviceInfo,
-     OnlyRobustBufferAccessDualSrcBlendAndASTCLDRAreAdvertised) {
-  // (V4/C4/E22) `robustBufferAccess`/`dualSrcBlend`/
-  // `textureCompressionASTC_LDR` are the only core features this
-  // milestone can honestly claim (see PhysicalDeviceInfo.cpp's comment);
-  // every other `VkBool32` stays false, since nothing else has been
-  // implemented that could back one yet.
+     OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised) {
+  // (V4/C4/E22/H3) `robustBufferAccess`/`dualSrcBlend`/
+  // `textureCompressionASTC_LDR`/`multiViewport` are the only core
+  // features this milestone can honestly claim (see
+  // PhysicalDeviceInfo.cpp's comment); every other `VkBool32` stays
+  // false, since nothing else has been implemented that could back one
+  // yet.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
   EXPECT_EQ(Info.Features.textureCompressionASTC_LDR, VK_TRUE);
+  EXPECT_EQ(Info.Features.multiViewport, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
   Cleared.dualSrcBlend = VK_FALSE;
   Cleared.textureCompressionASTC_LDR = VK_FALSE;
+  Cleared.multiViewport = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }
@@ -159,6 +162,24 @@ protected:
   VkInstance Instance = VK_NULL_HANDLE;
   VkPhysicalDevice Physical = VK_NULL_HANDLE;
 };
+
+TEST_F(PhysicalDeviceProperties2Test, ShaderViewportIndexLayerFeaturesAreTrue) {
+  // Roadmap H3: `VK_EXT_shader_viewport_index_layer`'s core-1.2-promoted
+  // feature pair, queried through the aggregate `VkPhysicalDeviceVulkan12
+  // Features` struct (see EntryPoints.cpp's `vkGetPhysicalDeviceFeatures2`
+  // case), must both be `VK_TRUE` now that the executor resolves
+  // `ViewportIndex`/`Layer` stage outputs from any stage that writes them.
+  VkPhysicalDeviceVulkan12Features Vulkan12Features{};
+  Vulkan12Features.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Vulkan12Features;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(Vulkan12Features.shaderOutputViewportIndex, VK_TRUE);
+  EXPECT_EQ(Vulkan12Features.shaderOutputLayer, VK_TRUE);
+}
 
 TEST_F(PhysicalDeviceProperties2Test,
        SubgroupBasicBitMatchesPromotedVulkan11Properties) {

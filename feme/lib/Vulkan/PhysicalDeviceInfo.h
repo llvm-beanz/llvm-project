@@ -28,6 +28,9 @@
 
 namespace feme::vulkan {
 
+/// Roadmap H3 implements exactly Vulkan's mandatory `maxViewports` floor.
+constexpr uint32_t MaxViewportCount = 16;
+
 /// Every value this ICD needs to answer `vkGetPhysicalDevice*` with, computed
 /// once and held immutably by the `PhysicalDevice` object. See "Physical
 /// Device and Capabilities" for the truthfulness rules each field follows.

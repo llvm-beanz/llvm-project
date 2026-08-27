@@ -246,7 +246,13 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxDrawIndirectCount = 1;
   Limits.maxSamplerLodBias = 2.0f;
   Limits.maxSamplerAnisotropy = 1.0f;
-  Limits.maxViewports = 1;
+  // Roadmap H3 implements exactly Vulkan's mandatory multi-viewport floor:
+  // 16 independent viewport/scissor slots (`MaxViewportCount`), no larger
+  // arbitrary value until a test needs one. Every consuming loop in
+  // GraphicsPipeline.cpp/CommandBuffer.cpp/Executor.cpp is bounded by this
+  // same constant, so this is a real contract rather than a speculative
+  // advertisement.
+  Limits.maxViewports = MaxViewportCount;
   Limits.maxViewportDimensions[0] = 4096;
   Limits.maxViewportDimensions[1] = 4096;
   Limits.viewportBoundsRange[0] = -8192.0f;
@@ -376,6 +382,15 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // corruption -- see Image.h's file comment), which is a real content
   // gap this milestone's own file scope did not include closing.
   Info.Features.textureCompressionASTC_LDR = VK_TRUE;
+  // Roadmap H3: `multiViewport` gates whether an application may even
+  // request more than one viewport/scissor at all -- a real CTS
+  // `checkSupport` (e.g. `dEQP-VK.draw.*.shader_viewport_index`) rejects its
+  // entire test group as `NotSupported` whenever this bit is false,
+  // regardless of `maxViewports`'s value. This ICD's array plumbing (see
+  // `MaxViewportCount` above and GraphicsPipeline.cpp/CommandBuffer.cpp/
+  // Executor.cpp) now genuinely supports multiple viewports/scissors, so
+  // this can honestly flip to `VK_TRUE`.
+  Info.Features.multiViewport = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
