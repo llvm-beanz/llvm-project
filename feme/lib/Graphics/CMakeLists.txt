@@ -10,6 +10,7 @@ add_feme_library(FeMeGraphics
   PatchPipeline.cpp
   Pipeline.cpp
   Scene.cpp
+  StageStorage.cpp
   Tessellator.cpp
 
   LINK_COMPONENTS
