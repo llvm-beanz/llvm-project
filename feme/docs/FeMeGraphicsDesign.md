@@ -956,6 +956,27 @@ total across every row, not a single row's own `GState.MaxOutputVertices`
 bound alone, or later rows' emissions are silently truncated by the merge's
 checked prefix sum once an earlier row's own budget is exhausted.
 
+Roadmap H5e closes the Vulkan-API acceptance half of this model:
+`vkCreateGraphicsPipelines` now accepts `VK_SHADER_STAGE_GEOMETRY_BIT`
+alongside vertex/fragment/tessellation, compiling the module into a
+`feme::ShaderStage::Geometry` `CompiledStage` and feeding its reflected
+`GeometryState` into `GraphicsPipeline::setGeometryStage` exactly as this
+section describes; `mapTopology` gains the four `*_WITH_ADJACENCY`
+topologies (previously rejected unconditionally, even though the executor
+side above has been ready to consume them since H5d); and
+`PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` advertise `geometryShader`,
+`maxGeometry*` (already true, unbounded-by-design ceilings -- see this
+row's own `PhysicalDeviceInfo.cpp` comment -- so left at core 1.0's own
+mandatory minimums) and `multiviewGeometryShader`. This is deliberately
+*not* the point at which real `dEQP-VK.geometry.*` shaders start passing:
+`ConvertSPIRVToLLVMPass`/`SPIRVToLLVMPatterns` still have no lowering for
+SPIR-V's `spirv.EmitVertex`/`spirv.EndPrimitive` ops into the
+`feme.stage.stream.emit`/`.cut` intrinsics this section's own paragraph
+above already describes as fully implemented -- almost every real
+geometry shader calls both, so this remains the dominant blocker,
+broken out as roadmap H5e-a (see `VulkanCTSReport.md`'s "Roadmap H5e:
+measured impact" for the measured breakdown).
+
 ### Amplification/task and mesh stage model
 
 Amplification (Direct3D) and task (SPIR-V) stages are normalized as workgroups

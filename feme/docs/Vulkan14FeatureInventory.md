@@ -94,10 +94,12 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `shaderOutputLayer` (1.2), the single bit
   1.1's own floor was missing the most: `variablePointers`,
   `samplerYcbcrConversion`, `shaderDrawParameters`, the 16-bit storage
-  cluster and `protectedMemory` remain `VK_FALSE` (`multiviewGeometryShader`/
-  `multiviewTessellationShader`, `multiview`'s own two amplification bits,
-  stay `VK_FALSE` too -- neither a geometry nor a tessellation-evaluation
-  stage exists yet, roadmap H4/H5), and a 1.4 conformance claim inherits
+  cluster and `protectedMemory` remain `VK_FALSE` (`multiviewTessellationShader`,
+  `multiview`'s own second amplification bit, stays `VK_FALSE` too -- no
+  tessellation-evaluation stage's own multiview interaction has been
+  independently verified yet, roadmap H4's remaining rows;
+  `multiviewGeometryShader` itself closed alongside `geometryShader`,
+  roadmap H5e), and a 1.4 conformance claim inherits
   every remaining one of them. (`VK_KHR_load_store_op_none`, roadmap
   F13, adds no feature bit of its own -- see its own extension-table row
   below and [VulkanExtensionInventory.md](VulkanExtensionInventory.md).)
@@ -115,13 +117,14 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt`, understating
   the 1.4 extension row as 14 of 16 rather than its true 15 of 16; restored
   here alongside roadmap H2's own `multiview` update.
-- **15 of the 50 unimplemented 1.0 feature bits are graphics
-  capabilities** (`geometryShader`,
-  `fillModeNonSolid`, `wideLines`, `largePoints`, `sampleRateShading`,
+- **14 of the 50 unimplemented 1.0 feature bits are graphics
+  capabilities** (`fillModeNonSolid`, `wideLines`, `largePoints`,
+  `sampleRateShading`,
   `independentBlend`, `depthClamp`, `depthBiasClamp`, `depthBounds`,
   `imageCubeArray`, `shaderClipDistance`, `shaderCullDistance`,
   `occlusionQueryPrecise`, `multiDrawIndirect`, `alphaToOne`) -- down from
-  16 now that roadmap H4a/H4b closed `tessellationShader`. Each is
+  15 now that roadmap H5e closed `geometryShader` (itself down from 16
+  once roadmap H4a/H4b closed `tessellationShader`). Each is
   *optional* for a conformance submission -- unlike every 1.1-1.4 row
   above, a device may report them false and still be conformant -- so
   none blocks the claim; each is nonetheless a block of mandatory-list
@@ -267,7 +270,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `fullDrawIndexUint32` | no |  |
 | feature | VK_VERSION_1_0 | `imageCubeArray` | no |  |
 | feature | VK_VERSION_1_0 | `independentBlend` | no |  |
-| feature | VK_VERSION_1_0 | `geometryShader` | no |  |
+| feature | VK_VERSION_1_0 | `geometryShader` | yes | roadmap H5a-H5e: SPIR-V geometry entry-point execution-mode reflection, `CanonicalizeStagePass`/`Executor.cpp` geometry chaining, and `vkCreateGraphicsPipelines` acceptance/compilation |
 | feature | VK_VERSION_1_0 | `tessellationShader` | yes | roadmap H4a/H4b: SPIR-V tessellation-control/-evaluation reflection, splitting and `vkCreateGraphicsPipelines` acceptance/compilation |
 | feature | VK_VERSION_1_0 | `sampleRateShading` | no |  |
 | feature | VK_VERSION_1_0 | `dualSrcBlend` | yes |  |
@@ -323,7 +326,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_1 | `storagePushConstant16` | no |  |
 | feature | VK_VERSION_1_1 | `storageInputOutput16` | no |  |
 | feature | VK_VERSION_1_1 | `multiview` | yes |  |
-| feature | VK_VERSION_1_1 | `multiviewGeometryShader` | no |  |
+| feature | VK_VERSION_1_1 | `multiviewGeometryShader` | yes | roadmap H5e: `CommandBuffer.cpp`'s multiview per-view re-execution (roadmap H2) already re-runs a bound geometry stage once per set view bit |
 | feature | VK_VERSION_1_1 | `multiviewTessellationShader` | no |  |
 | feature | VK_VERSION_1_1 | `variablePointersStorageBuffer` | no |  |
 | feature | VK_VERSION_1_1 | `variablePointers` | no |  |

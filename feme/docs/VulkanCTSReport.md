@@ -8232,3 +8232,132 @@ row adds.
 **Reproducing.** Same invocation as H5d's own edition above
 (`dEQP-VK.geometry.*` and the `draw_sample.txt` caselist); no new command
 needed.
+
+## Roadmap H5e: measured impact (`vkCreateGraphicsPipelines` geometry-stage acceptance)
+
+**0/200, up from 0/200 -- but the composition changes completely, and that
+is the expected, correctly-diagnosed result.** Before this row,
+`dEQP-VK.geometry.*` reported `NotSupported (Requested core feature is not
+supported: geometryShader)` for all 200 cases, since the feature bit was
+still `VK_FALSE`. This row's Vulkan-layer work (`GraphicsPipeline.cpp`
+accepting `VK_SHADER_STAGE_GEOMETRY_BIT`, `PhysicalDeviceInfo.cpp`'s
+`geometryShader = VK_TRUE`) makes the feature real enough for real test
+cases to actually attempt pipeline creation -- and the large majority
+immediately hit the next, still-open gap this row's own investigation
+found (see below), turning what was a uniform "not supported" result into
+a mostly-`Fail` one:
+
+```
+Test run totals:
+  Passed:        0/200 (0.0%)
+  Failed:        167/200 (83.5%)
+  Not supported: 33/200 (16.5%)
+```
+
+**Root-cause triage of the 167 failures**, grouped by first diagnostic:
+
+| Count | Root cause | Bucket |
+|---|---|---|
+| 116 | `error: failed to legalize operation 'spirv.EmitVertex'` | New, this row's own discovered gap (H5e-a) |
+| 6 | `error: failed to legalize operation 'spirv.EndPrimitive'` | New, this row's own discovered gap (H5e-a) |
+| 14 | `vk.createImage(...)`: `VK_ERROR_INITIALIZATION_FAILED` (`dEQP-VK.geometry.layered.3d.*`, a 3D-image-type layered render target) | Pre-existing, unrelated to geometry stage compilation at all -- the failure is in image creation, before any geometry shader is even touched |
+| 8 | `error: ... unsupported fragment system value for element 0` (`dEQP-VK.geometry.layered.*.fragment_layer`, reading back `gl_Layer` in the fragment stage) | Pre-existing layered-rendering fragment-input gap, orthogonal to this row's own geometry-stage acceptance work |
+| 21 | `Fail (vk.createGraphicsPipelines(...))`, **no diagnostic printed at all** (`dEQP-VK.geometry.emit.*_emit_0_end_0`'s degenerate zero-emit shaders, `dEQP-VK.geometry.input.basic_primitive.{line_strip,line_strip_adjacency,triangle_fan}`, `dEQP-VK.geometry.input.triangle_strip_adjacency.vertex_count_*`, and two `builtin_variable.in_block.primitive_id_in*` cases) | Not yet individually isolated -- flagged for H5e-a's own CTS re-run to re-triage once the dominant `EmitVertex`/`EndPrimitive` noise is gone (see below) |
+| 1 | `error: feme-cpu-simdize: ... divergent value ...` | Pre-existing `SIMDize` limitation (already documented, roadmap milestone 7 deviation), unrelated to geometry |
+| 1 | `error: 'llvm.getelementptr' op operand #0 must be LLVM pointer type ...` | Pre-existing struct/array lowering gap, unrelated to geometry |
+
+**The dominant bucket (122 of 167, 73%) is exactly the gap this row's own
+investigation predicted before writing any Vulkan-layer code**: grepping
+the whole tree for `EmitVertexOp`/`EndPrimitiveOp` found zero occurrences
+in `ConvertSPIRVToLLVMPass.cpp`/`SPIRVToLLVMPatterns.cpp` -- SPIR-V's
+`spirv.EmitVertex`/`spirv.EndPrimitive` ops (which do exist in MLIR's own
+SPIR-V dialect) have no lowering into the `feme.stage.stream.emit`/`.cut`
+intrinsics `GeometryWrapperPass` has fully implemented and tested since
+G5. Virtually every real GLSL geometry shader calls both at least once
+(that is the entire point of a geometry stage), so this alone accounts for
+most of the group. **This row deliberately does not fix that gap**: it is
+a new SPIRVToLLVM conversion pattern, not a `vkCreateGraphicsPipelines`
+acceptance-path change, so it is broken out as roadmap H5e-a rather than
+folded into this row (mirroring H5a's own precedent of stopping at
+execution-mode reflection and spinning off H5b for the per-vertex-input
+addressing gap it found).
+
+**The 33 `NotSupported` cases** are the pre-existing, unrelated feature
+gates `dEQP-VK.geometry.*` already exercised before this row --
+`vertexPipelineStoresAndAtomics`, `fragmentStoresAndAtomics`,
+`shaderTessellationAndGeometryPointSize`, `depth/stencil format is not
+supported` -- none of them geometry-specific, all unaffected by this row's
+own changes.
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` are
+updated (see below): `geometryShader` and `multiviewGeometryShader` both
+flip from an unimplemented-feature-bit count entry to an implemented one.
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case sample, same
+`draw_sample.txt` this report has used since H4:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        155/1957 (7.9%)
+  Not supported: 1790/1957 (92.5%)
+```
+
+**12 passing cases unchanged (0 regressions)**; `Failed` moves from H5d-a's
+own **139** baseline to **155** (+16), and `Not supported` correspondingly
+moves from **1806** to **1790** (-16, exactly offsetting). This is
+the expected shape, not a regression: the 16 newly-failing cases are
+`dEQP-VK.draw.*` pipelines that previously reported `NotSupported
+(Requested core feature is not supported: geometryShader)` (gated on the
+feature bit this row flips to `VK_TRUE`) and now proceed far enough to
+attempt real pipeline creation, landing in the same pre-existing/new-gap
+buckets the dedicated geometry run above triages (mostly `EmitVertex`/
+`EndPrimitive`, a few `getelementptr`/`divergent value`). No previously-
+passing case's own status changed.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1862/1921** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from H5d-a's own **1857/1916** baseline by exactly the 5 new tests this
+row adds -- `GraphicsPipelineTest.cpp`'s `AcceptsGeometryStage`,
+`AcceptsAdjacencyTopologyWithGeometryStage`,
+`RejectsAdjacencyTopologyWithoutGeometryStage`, and
+`PhysicalDeviceInfoTest.cpp`'s `GeometryLimitsMeetCore10Minimums`,
+`AggregateVulkan11FeaturesReportMultiviewGeometryShader` (the existing
+`MultiviewFeaturesReportMultiviewTrueAmplificationFalse` and
+`OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised`
+tests were updated in place, not added, to assert `multiviewGeometryShader`/
+`geometryShader` are now `VK_TRUE`).
+
+**One correctness fix bundled with this row.**
+`validateStageInterfaces`'s fragment-input/vertex-output location-linkage
+loop always checked against the raw vertex stage's own signature
+(`*VSSig`), even for a tessellating pipeline, where the actual last
+pre-rasterization producer is the domain stage. This was never exercised
+before (no existing test or CTS shape has a domain-stage output at a
+`Location` a fragment input also reads), but adding geometry -- which
+also needs to be treated as "the last pre-raster stage" for both this
+check and the pre-existing `SV_Position` check right next to it -- means
+both now consistently use the same `PositionSig` (`GeomSig` if present,
+else `DomainSig`, else `VSSig`) selection the `SV_Position` check already
+used. This is a strictly more-correct fix in the same code this row
+already had to touch, not unrelated scope creep, but it does change
+tessellation-pipeline validation behavior too; no existing or new test
+regressed as a result.
+
+**Reproducing.**
+
+```
+mkdir -p run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.geometry.*" --deqp-log-filename=geom.qpa
+
+grep -v viewport_height \
+  /home/dev/dev/VK-GL-CTS/external/vulkancts/mustpass/main/vk-default/draw.txt \
+  | awk 'NR%15==1' > draw_sample.txt
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_sample.qpa
+```
+
