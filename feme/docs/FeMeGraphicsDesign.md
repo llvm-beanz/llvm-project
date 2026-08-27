@@ -763,11 +763,33 @@ either CPU wrapper ever sees the function: it requires exactly one
 group-sync barrier call in the entry, splits the CFG at that call via
 `splitBasicBlock`/`CloneBasicBlock`, and clones the post-barrier region into
 a new `<name>.patchconstant` function, diagnosing (rather than
-mis-splitting) zero-or-multiple barriers, no post-barrier region, multiple
-entry edges into the post-barrier region, or any SSA value crossing the
-split boundary (not yet supported -- a control point's own outputs do not
-generally need to survive into the patch-constant phase, since that phase
-reads the *completed* `OutputPatch` from stage storage, not SSA values).
+mis-splitting) zero-or-multiple barriers, no post-barrier region, or
+multiple entry edges into the post-barrier region. Roadmap H4c closed this
+row's original remaining gap -- an SSA value defined before the barrier and
+read back after it, the common real shape a per-patch tessellation factor
+computed from control-point-body data takes -- by threading each such
+captured value through a synthetic patch-scoped storage location rather
+than diagnosing it: for every value the cloned post-barrier region still
+references, the pass creates one new address-space-8 (`Output`-storage-
+class) `GlobalVariable` with a synthetic, collision-free `Location`
+decoration (`computeNextSyntheticLocation`), stores the captured value into
+it immediately after the value's own definition in the control-point phase,
+and loads it back at the top of a new `patchconst.captures` block prepended
+to the patch-constant phase. This needed no new linking mechanism:
+`classifySPIRVElement` already classifies such a global as an ordinary
+per-vertex `Output` element in the control-point phase and as an ordinary,
+non-`FromInputPatch` `Input` element in the patch-constant phase -- the
+same "OutputPatch" shape a real `gl_out[]` read-back after the barrier
+already takes -- so `PatchPipeline.cpp`'s existing `Location`-based
+`HullToPatchConstant` link (`linkStageElements`) picks up the new pair
+automatically. This is sound unconditionally, not merely for the common
+case: SPIR-V only gives cross-invocation reads defined behavior *after* a
+barrier, so anything computed before the one barrier this pass splits at
+can only depend on the current invocation's own state, never another
+invocation's, by the source language's own rules -- unlike this row's other
+considered option, re-materializing/cloning the pre-barrier computation
+into the patch-constant phase, which would only be sound when that
+computation itself reads no other invocation's per-vertex output.
 This is a different mechanism from the "generalize `EntryWrapperPass`'s
 barrier-region-splitting machinery to the control-point batch ABI" item
 `HullWrapperPass`'s own file comment and the G5 section above still list as

@@ -6651,3 +6651,159 @@ non-zero after printing `DONE!` and the totals (the same pre-existing
 `tcu::NotSupportedError: Device fault tests execution not supported in
 Linux-like OSs` teardown quirk this report already documents); the totals
 printed before it are the real result.
+
+## Roadmap H4c: measured impact (threading a captured SSA value through a synthetic patch-scoped global)
+
+**The 24-case diagnostic is gone, but the headline `dEQP-VK.tessellation.*`
+totals do not move.** H4c replaces `splitTessellationControlEntry`'s old
+`"...cannot yet capture SSA values defined before the barrier"`
+`emitError`+bail with the design H4c's own roadmap row named as "likely the
+right shape in general": for every SSA value the post-barrier
+(patch-constant) region still references after the clone, the pass now
+creates one new `PrivateLinkage`, address-space-8 (`Output`-storage-class)
+`GlobalVariable` per captured value, carrying a synthetic `Location`
+decoration chosen not to collide with any real stage-IO element
+(`computeNextSyntheticLocation`); stores the captured value into it
+immediately after the value's own definition in the control-point phase;
+and loads it back at the top of a new `patchconst.captures` block prepended
+to the patch-constant phase, before branching into the cloned post-barrier
+entry. No new linking mechanism was needed: `classifySPIRVElement` already
+classifies an address-space-8 global with only a `Location` decoration (no
+`Patch`/tess-factor `BuiltIn`) as an ordinary per-vertex `Output` element in
+`HullControlPoint` and as an ordinary, non-`FromInputPatch` `Input` element
+(`isOutputPatchElement`) in `HullPatchConstant` -- the same "OutputPatch"
+shape a real `gl_out[]` read-back after the barrier already uses -- so
+`PatchPipeline.cpp`'s existing `linkStageElements`-based
+`HullToPatchConstant` link picks the new pair up automatically, by
+`Location`, with zero changes to `PatchPipeline.cpp`/`StageLink.cpp`. This
+is sound unconditionally (not just for the common case): SPIR-V only
+defines cross-invocation reads as well-defined *after* a barrier, so
+anything the patch-constant region captures from *before* the one barrier
+this pass splits at can only be the current invocation's own
+already-computed state, never another invocation's -- unlike
+re-materializing/cloning the pre-barrier computation (this row's other
+named option), which is unsound whenever that computation itself reads
+another invocation's per-vertex output.
+
+```
+Test run totals:
+  Passed:        8/1114 (0.7%)
+  Failed:        227/1114 (20.4%)
+  Not supported: 879/1114 (78.9%)
+```
+
+Byte-identical to H4b's own baseline. This is expected, not a sign the fix
+did nothing: per-case attribution (built the same way H4b's own triage
+table was, by isolating the group into `--deqp-caselist-file` batches that
+each stop *before* the next crash -- see "Reproducing this row" below for
+why that was necessary this time) shows all 24 of H4c's own named cases
+(every `dEQP-VK.tessellation.winding.{default,lower_left,upper_left}_domain.
+hlsl_{quads,triangles}_{ccw,cw}[_yflip]` case) no longer hit the SSA-capture
+diagnostic at all -- the split now succeeds and the compiled pipeline
+reaches real code generation -- but every one of them immediately hits a
+different, pre-existing, out-of-scope gap one step further in: `feme.cpu.
+masked.load`/`.store`'s scalar-element-type mangling
+(`MaskIntrinsics.cpp`'s `appendScalarMangling`) has no case for a
+matrix/aggregate element type, the same underlying legalization gap C8's
+bucket already tracks (it is very likely the same root cause as the 88
+`feme-cpu-simdize: ... divergent value ... of vector type` and 74
+`llvm.getelementptr` cases H4b's own triage table names, reached this time
+through `feme::cpu::SIMDizePass`'s masked-memory-op path instead of
+`feme-cpu-simdize`'s own diagnostic or a raw `getelementptr` -- not yet
+independently confirmed, but the type shapes line up), so all 24 still
+count as failing, just one step later and by a different mechanism. Net
+result: 0 new `Pass`, 0 new `Fail`, 0 new `NotSupported` -- the fix is
+real and necessary (H4c's own diagnostic is gone, and the pass now
+produces a correctly split, correctly linked module for this shape, locked
+down at the unit level below), but this measured group cannot show it move
+the headline until the C8-bucket gap it now reaches is itself closed.
+
+**A newly-surfaced severity concern, not a new root cause**: those same 24
+cases do not fail gracefully any more -- `appendScalarMangling`'s
+`llvm_unreachable("unsupported feme.cpu.masked.* element type")` aborts the
+whole `deqp-vk` process (`SIGABRT`), rather than the graceful, per-case
+`Fail`/diagnostic every other unsupported shape in this codebase produces.
+Confirmed pre-existing rather than introduced by this row's change: an A/B
+rebuild (`git stash`, rebuild only `bin/feme`/`lib/libfeme_vulkan.so`, run
+`dEQP-VK.tessellation.winding.default_domain.hlsl_quads_ccw` in isolation,
+`git stash pop`) shows the pre-H4c build never reaches
+`appendScalarMangling` for this case at all -- it stops at H4c's own
+diagnostic first -- so this is a pre-existing C8-bucket gap, coincidentally
+unblocked by this row's own fix and reached for the first time via a
+masked-SIMD path rather than the `getelementptr`/`feme-cpu-simdize` paths
+C8's bucket was previously measured through. Deliberately **not** fixed
+here: hardening `MaskIntrinsics.cpp`'s scalar mangling to diagnose this
+shape gracefully instead of aborting is real, valuable follow-up work, but
+it is CPU-backend masked-memory-op legalization, not tessellation-control
+splitting -- a different milestone's scope (C8's own "best attacked after
+C2/C3" bucket), not something "directly caused by or tightly coupled to"
+this row's change merely because this row's fix is what first reaches it.
+Tracked as a new roadmap follow-up, H4e, below, rather than folded into
+this row's own commit.
+
+**Regression sample.** The same `dEQP-VK.draw.*` sample H4/H4a/H4b's own
+reports use (1957 of the 29419-case mustpass list, every 15th case with
+`*viewport_height*` removed):
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        139/1957 (7.1%)
+  Not supported: 1806/1957 (92.3%)
+```
+
+Byte-identical to H4b's own recorded totals for the same sample. **0
+regressions, 0 new passes** -- expected, since this row's change is scoped
+entirely to `splitTessellationControlEntry`'s capture-handling branch, not
+reachable from any non-tessellation pipeline.
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change for this row: it neither flips a feature bit nor touches an
+extension, only changes how an already-accepted tessellation-control
+module is split.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1822/1881** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from H4b's own 1821/1880 baseline by exactly the one new test this row
+adds, `CanonicalizeStageTest.SplitsHullEntryThreadingCapturedSSAValue`
+(asserts the split now succeeds for this shape, that the control-point
+phase gains a matching new `Output` element and the patch-constant phase a
+matching new, non-`FromInputPatch` `Input` element for the captured value,
+and that no instruction in the patch-constant phase still references a
+value defined in the control-point phase).
+
+**Reproducing this row.** Same ICD build and case-list generation as the
+rest of this report (see "Reproducing this report" above), but the full
+`dEQP-VK.tessellation.*` group can no longer be run in one `deqp-vk`
+invocation the way H4b's own report did it: the `SIGABRT` above kills the
+whole process, silently truncating every case after the first crash the
+same way the `pipeline`-group `ResourceError` this report already
+documents does. Instead, generate the group's own case list
+(`--deqp-runmode=txt-caselist`) and run it through a resume loop that, on
+each abort, greps the log for the last `Test case '...'..` line with no
+result line after it, appends that one case to an exclusion list, and
+reruns the remainder via `--deqp-caselist-file`:
+
+```shell
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.tessellation.*" \
+    --deqp-runmode=txt-caselist
+grep -oP "^TEST: \K.*" dEQP-VK-cases.txt > remaining.txt
+while [ -s remaining.txt ]; do
+  VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+    deqp-vk --deqp-caselist-file=remaining.txt \
+      --deqp-log-filename=iter.qpa > iter.log 2>&1
+  grep -q "^DONE!" iter.log && break
+  LAST=$(grep -o "Test case '[^']*'" iter.log | tail -1 | \
+    sed -E "s/Test case '([^']*)'/\1/")
+  grep -vFx "$LAST" remaining.txt > remaining.txt.new
+  mv remaining.txt.new remaining.txt
+done
+```
+
+Every case this loop excludes this way (24 total, all
+`dEQP-VK.tessellation.winding.*_domain.hlsl_{quads,triangles}_*`) is the
+`MaskIntrinsics.cpp` abort above; summing that group's own
+`Passed`/`Failed`/`Not supported` counts across every iteration plus one
+`Failed` for each excluded case reproduces the totals above. The draw
+sample and `check-feme` reproduce exactly as H4b's own entry describes.
