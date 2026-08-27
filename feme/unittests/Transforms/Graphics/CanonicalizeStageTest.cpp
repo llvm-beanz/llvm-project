@@ -453,6 +453,65 @@ TEST(CanonicalizeStageTest, RecognizesInterfaceBlockPerMemberByteOffsetAccess) {
   EXPECT_EQ(Stores[3].Row, 0u);
 }
 
+/// (Roadmap H4d) A bare (non-block, single-`ElementID`) array-typed
+/// stage-IO global -- exactly `gl_TessLevelInner`/`gl_TessLevelOuter`'s own
+/// shape, a real GLSL-compiled tessellation-control shader's `[2 x float]`/
+/// `[4 x float]` `BuiltIn`+`Patch`-decorated `Output` globals, confirmed
+/// against `dEQP-VK.tessellation.winding.*`'s own compiled SPIR-V -- gets
+/// one scalar store per array element, each at its own constant byte
+/// offset into the global (mirroring the interface-block member case
+/// `RecognizesInterfaceBlockPerMemberByteOffsetAccess` above, but with a
+/// single `ElementID` shared by every row instead of one `ElementID` per
+/// struct member). Before this milestone's fix, `resolveStageIOAccess`
+/// treated any single-`ElementID` global as whole-value-only and rejected
+/// every nonzero-byte-offset access outright, leaving every row but the
+/// first (byte offset 0) an unrewritten raw store on the still-`external`
+/// global -- an unresolvable symbol at JIT time (`LLJIT`'s own "Symbols not
+/// found: [ ... ]").
+TEST(CanonicalizeStageTest, RewritesSPIRVArrayOutputStorePerElementByteOffset) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_arr = external addrspace(8) global [4 x float], !spirv.Decorations !0
+    define void @main() #0 {
+      ; out_arr[0] = 1.0 (row 0 -- the offset-0 access that folds to a bare
+      ; global, exactly like member 0 above).
+      store float 1.000000e+00, ptr addrspace(8) @out_arr
+      ; out_arr[1] = 2.0 (row 1 -- byte offset 4).
+      store float 2.000000e+00, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @out_arr, i64 4)
+      ; out_arr[2] = 3.0 (row 2 -- byte offset 8).
+      store float 3.000000e+00, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @out_arr, i64 8)
+      ; out_arr[3] = 4.0 (row 3 -- byte offset 12).
+      store float 4.000000e+00, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @out_arr, i64 12)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No raw store on `out_arr` (bare or via `getelementptr`) survives: this
+  // is the exact defect roadmap H4d fixes -- every row must be rewritten,
+  // not just row 0.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(), 0u);
+    SeenRows.insert(cast<ConstantInt>(CI->getArgOperand(1))->getZExtValue());
+  }
+  EXPECT_EQ(SeenRows.size(), 4u);
+  for (uint64_t Row = 0; Row != 4; ++Row)
+    EXPECT_TRUE(SeenRows.count(Row)) << "row " << Row;
+}
+
 /// VectorType>` shape SPIRVToLLVM's `spirv.MatrixType` conversion produces
 /// (see SPIRVToLLVMPatterns.cpp) -- gets a signature element with
 /// `RowCount` set to its column count, and its store decomposes into one

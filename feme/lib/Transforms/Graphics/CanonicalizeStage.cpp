@@ -1245,13 +1245,22 @@ resolveRowComponent(Type *MemberTy, uint64_t Residual, const DataLayout &DL) {
 /// else) into a `StageIOAccess`, or `std::nullopt` if \p Ptr does not
 /// address a recognized stage-IO global at all.
 ///
-/// A plain stage-IO global (a single `ElementID`) is always addressed as a
-/// whole value at offset 0, matching every `loadStageIOValue`/
-/// `storeStageIOValue` call before this milestone. A builtin interface
-/// block (multiple `ElementID`s) has two addressable shapes instead: (1)
-/// the whole block loaded/stored as one aggregate value (\p ValueTy
-/// exactly matches the block's own struct type) -- every member's
-/// `ElementID`; (2) a single member (or one row/component within it,
+/// A plain stage-IO global (a single `ElementID`) is addressed exactly
+/// like one struct member below: a whole-value access at offset 0 (the
+/// common case, \p Row/\p Component left null so `loadStageIOValue`/
+/// `storeStageIOValue` decompose \p ValueTy -- itself the global's own
+/// array/vector/matrix shape when \p ValueTy names the whole thing --
+/// starting from row/component 0), or a single (\p Row, \p Component)
+/// selected by \p Ptr's constant byte offset into the global's own type
+/// (roadmap H4d: `gl_TessLevelOuter[i]`/`gl_TessLevelInner[i]`'s own
+/// per-row write for `i != 0`, exactly the shape a real GLSL-compiled
+/// tessellation-control shader takes -- previously rejected here as an
+/// unmodeled shape, leaving every such store's global reference
+/// unrewritten and undefined at JIT time). A builtin interface block
+/// (multiple `ElementID`s) has two addressable shapes instead: (1) the
+/// whole block loaded/stored as one aggregate value (\p ValueTy exactly
+/// matches the block's own struct type) -- every member's `ElementID`;
+/// (2) a single member (or one row/component within it,
 /// `gl_ClipDistance`/`gl_CullDistance`'s own per-element access, or
 /// `gl_Position`'s own per-component one) selected by \p Ptr's constant
 /// byte offset (`getStageIOBaseAndOffset`) into the block's own
@@ -1273,12 +1282,18 @@ std::optional<StageIOAccess> resolveStageIOAccess(
   ArrayRef<uint32_t> IDs = It->second;
   bool IsOutput = OutputGlobals.contains(GV);
   if (IDs.size() == 1) {
-    // Every other stage-IO global is always addressed as a whole value;
-    // a nonzero offset here would be a shape this milestone does not
-    // model (left unresolved, as above).
-    if (ByteOffset != 0)
-      return std::nullopt;
-    return StageIOAccess{IDs, nullptr, nullptr, IsOutput};
+    if (ValueTy == GV->getValueType())
+      return StageIOAccess{IDs, nullptr, nullptr, IsOutput};
+    auto [Row, Component] =
+        resolveRowComponent(GV->getValueType(), ByteOffset, DL);
+    return StageIOAccess{
+        IDs,
+        Row ? ConstantInt::get(Type::getInt32Ty(GV->getContext()), Row)
+            : nullptr,
+        Component
+            ? ConstantInt::get(Type::getInt32Ty(GV->getContext()), Component)
+            : nullptr,
+        IsOutput};
   }
 
   auto *ST = cast<StructType>(GV->getValueType());

@@ -165,6 +165,41 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
 }
 )mlir";
 
+/// (Roadmap H4d) A tessellation-control entry point writing more than one
+/// element of a *bare* (non-block) array-typed `BuiltIn` output --
+/// `gl_TessLevelOuter`'s own `[4 x f32]` shape, exactly what every real
+/// `dEQP-VK.tessellation.*` control shader writes -- after the same
+/// `spirv.ControlBarrier` split `TessControlSource` above exercises. Before
+/// this milestone's fix, only the first element (byte offset 0) of such an
+/// array ever got rewritten into a `feme.stage.output.store`; every other
+/// element's store was left referencing the still-`external`,
+/// never-defined SPIR-V global directly, an unresolvable symbol at JIT
+/// link time (`LLJIT`'s own "Symbols not found: [ gl_TessLevelOuter ]",
+/// the exact defect that rejected `dEQP-VK.tessellation.winding.*`).
+constexpr llvm::StringLiteral TessControlMultiElementArraySource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @tess_outer built_in("TessLevelOuter") {patch} : !spirv.ptr<!spirv.array<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %p = spirv.Constant dense<[0.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.ControlBarrier <Workgroup>, <Workgroup>, <AcquireRelease|WorkgroupMemory>
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %f = spirv.Constant 1.000000e+00 : f32
+    %outerp = spirv.mlir.addressof @tess_outer : !spirv.ptr<!spirv.array<4xf32>, Output>
+    %e0 = spirv.AccessChain %outerp[%c0] : !spirv.ptr<!spirv.array<4xf32>, Output>, i32 -> !spirv.ptr<f32, Output>
+    spirv.Store "Output" %e0, %f : f32
+    %e1 = spirv.AccessChain %outerp[%c1] : !spirv.ptr<!spirv.array<4xf32>, Output>, i32 -> !spirv.ptr<f32, Output>
+    spirv.Store "Output" %e1, %f : f32
+    spirv.Return
+  }
+  spirv.EntryPoint "TessellationControl" @main, @out_pos, @tess_outer
+  spirv.ExecutionMode @main "OutputVertices", 3
+}
+)mlir";
+
 class GraphicsPipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -1602,6 +1637,33 @@ TEST_F(GraphicsPipelineTest, AcceptsTessellationStages) {
             feme::graphics::TessPartitioning::FractionalOdd);
   EXPECT_EQ(Executor.getTessellationState().OutputPrimitive,
             feme::graphics::TessOutputPrimitive::TriangleCcw);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H4d: a tessellation-control entry point writing more than one
+/// element of a bare (non-block) array-typed `BuiltIn` output --
+/// `TessControlMultiElementArraySource`'s own `gl_TessLevelOuter`-shaped
+/// global -- must compile (and JIT-link) successfully end to end: every
+/// element's store, not just the first, has to resolve to a real
+/// `feme.stage.output.store` rather than leaving a dangling reference to
+/// the (never-defined) SPIR-V-imported global.
+TEST_F(GraphicsPipelineTest,
+       AcceptsTessellationControlMultiElementArrayOutput) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlMultiElementArraySource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
 
   vkDestroyPipeline(Device, Handle, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
