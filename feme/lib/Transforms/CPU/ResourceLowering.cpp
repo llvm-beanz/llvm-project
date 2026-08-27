@@ -185,6 +185,12 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
   Function *NewF = Function::Create(NewTy, F.getLinkage(), F.getAddressSpace(),
                                     "", F.getParent());
   NewF->copyAttributesFrom(&F);
+  // GlobalObject::copyAttributesFrom() does not copy function-attached
+  // metadata (e.g. !feme.signature attached by CanonicalizeStagePass); do
+  // that explicitly so stage reflection metadata survives resource-env
+  // parameter injection. See the identical fix in SPIRVResourceLowering.cpp
+  // (roadmap H3a).
+  NewF->copyMetadata(&F, /*Offset=*/0);
   NewF->setComdat(F.getComdat());
   NewF->splice(NewF->begin(), &F);
 

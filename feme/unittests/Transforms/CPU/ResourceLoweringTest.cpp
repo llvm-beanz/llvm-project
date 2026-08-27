@@ -177,6 +177,43 @@ TEST(ResourceLoweringTest, LeavesRegisterBoundHandleUnchanged) {
   EXPECT_EQ(F->arg_size(), 0u);
 }
 
+// Regression test for roadmap H3a: addResourceEnvParams() (the DXIL-oriented
+// twin of SPIRVResourceLowering.cpp's identically-named helper) has the same
+// GlobalObject::copyAttributesFrom() metadata-copying gap. Verify
+// function-attached metadata (e.g. !feme.signature) survives the
+// resource-env-parameter rewrite here too.
+TEST(ResourceLoweringTest, PreservesFunctionMetadataAcrossEnvParamRewrite) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(i32 %idx) !feme.signature !0 {
+      %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
+          @llvm.dx.resource.handlefromheap(i32 3, i1 false)
+      %loaded = call {<4 x float>, i1} @llvm.dx.resource.load.typedbuffer(
+          target("dx.TypedBuffer", <4 x float>, 1, 0, 0) %h, i32 %idx)
+      %val = extractvalue {<4 x float>, i1} %loaded, 0
+      ret <4 x float> %val
+    }
+    declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
+        @llvm.dx.resource.handlefromheap(i32, i1)
+    declare {<4 x float>, i1} @llvm.dx.resource.load.typedbuffer(
+        target("dx.TypedBuffer", <4 x float>, 1, 0, 0), i32)
+
+    !0 = !{!"fragment-signature-placeholder"}
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  MDNode *Signature = F->getMetadata("feme.signature");
+  ASSERT_TRUE(Signature) << "!feme.signature metadata was lost when the "
+                             "function was rewritten to add resource-env "
+                             "parameters";
+  ASSERT_EQ(Signature->getNumOperands(), 1u);
+  EXPECT_EQ(cast<MDString>(Signature->getOperand(0))->getString(),
+            "fragment-signature-placeholder");
+}
+
 TEST(ResourceLoweringTest, CanonicalizesStructuredBufferByteOffset) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
