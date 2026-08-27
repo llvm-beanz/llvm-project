@@ -37606,3 +37606,209 @@ mixup) before they could have shipped as silently-wrong tests.
 - Four commits: the double-precision edge-test fix (with its own test),
   the top-left tie-break polarity fix (with its own test), the docs
   update, and this file.
+
+# Session: Roadmap H5 (geometry stage)
+
+## Goal
+
+Work on milestone H5: "Geometry stage. Same rejection as H4, same
+milestone (G5), but an independent feature bit (`geometryShader`), an
+independent limit block (`maxGeometry*`), stream output, and
+`multiviewGeometryShader` now that H2 has landed. Whole `dEQP-VK.geometry`
+group."
+
+## Investigation before writing any code
+
+Before touching anything, I read `feme/.instructions.md`, `docs/Design.md`,
+`docs/Roadmap.md`'s H1-H12 section, and `docs/FeMeGraphicsDesign.md`'s
+"Tessellation and geometry stage model" and "Patch and geometry wrappers"
+sections, plus the H4 sub-row chain (H4a-H4j) in full, since H5's roadmap
+row explicitly says "same rejection as H4" and names H4 as a "shared
+wrapper work" dependency.
+
+This turned up a very different starting position than I expected: G5's
+own prior work (`feme::cpu::GeometryWrapperPass`, `feme::graphics::
+GeometryStreamBuilder`/`mergeGeometryStreamsInLaneOrder`, `feme::graphics::
+GeometryStreamCollection`/`collectGeometryStreams`, `feme::graphics::
+buildGeometryInputs`/`buildGeometryInvocations`, `feme::cpu::CompiledStage::
+invokeGeometry`) had *already* built the entire CPU-lowering half of the
+geometry stage -- the wrapper that turns a compiled geometry entry point
+into an invokable batch, and all the host-side glue to gather a batch's
+inputs from assembled primitives and replay its emitted streams back --
+all fully implemented and unit-tested, well before this session. This is
+much further along than H4's own starting position was (H4 had to build
+`HullWrapperPass`/`PatchConstantWrapperPass`/`DomainWrapperPass` from
+scratch across its own sub-rows).
+
+What is genuinely still missing, cross-referencing every layer:
+
+1. **SPIR-V import**: `mlir::spirv::ExecutionModel::Geometry` already maps
+   to `llvm::Triple::Geometry` (`ConvertSPIRVToLLVMPass.cpp`'s
+   `getStageForExecutionModel`), and every geometry-relevant `BuiltIn`
+   (`PrimitiveId`, `Layer`, `ViewportIndex`, `InvocationId`) already maps to
+   an existing `SignatureSystemValue` (`getSystemValueForBuiltIn`,
+   `CanonicalizeStage.cpp`) -- these needed *no* new work, unlike H4a's
+   tessellation `BuiltIn`s, which were all new. But a geometry entry
+   point's own declared *shape* (input/output primitive class, instance
+   count, max output vertices -- SPIR-V's `InputPoints`/.../`Invocations`/
+   `OutputVertices` execution modes) was captured nowhere at all.
+2. **`CanonicalizeStagePass::run`** still filters to exactly `Vertex`/
+   `Fragment`/`Hull`/`Domain` -- `Geometry` is not in the accepted set, so
+   a geometry entry point reaches code generation with no `!feme.signature`
+   metadata at all, exactly H4a's own starting problem for tessellation.
+3. **Executor chaining**: `FeMeGraphicsDesign.md`'s own "Patch and geometry
+   wrappers" section already says, in a sentence I initially took for
+   stale leftover text from before H4 landed, "Chaining the geometry stage
+   on top of `runPatchPipeline`'s result remains open, as does the whole
+   Vulkan-API surface" -- confirmed still true by grepping for
+   `invokeGeometry` across `Executor.cpp`/`CommandBuffer.cpp` (zero hits
+   outside the `CompiledStage`/wrapper layer itself). `GraphicsPipeline`
+   has no `setGeometryStage`/`hasGeometryStages` pair.
+4. **Vulkan API**: `GraphicsPipeline.cpp`'s `translateFixedFunctionState`
+   rejects any stage bit besides vertex/fragment/tessellation outright
+   (the `default:` case's own comment already names "V7/V8" as the
+   milestone, clearly written before this session and in need of updating
+   once H5 actually lands geometry). `PhysicalDeviceInfo.cpp` reports
+   `geometryShader = VK_FALSE`/no `maxGeometry*` limits/
+   `multiviewGeometryShader = VK_FALSE`.
+
+## Scoping the session's actual work
+
+Given items 2-4 above are each comparable in size to one of H4's own
+multi-row sub-chains (H4a alone took real root-causing to get right, H4b
+took its own follow-up rows H4c-H4j to actually turn cases green), I
+scoped this session to item 1 first -- SPIR-V execution-mode capture --
+as a self-contained, real, independently testable increment, planning to
+then attempt lifting `CanonicalizeStagePass::run`'s filter (item 2) if
+time allowed.
+
+While implementing the execution-mode capture, I found two things worth
+recording:
+
+- **Two SPIR-V execution-mode enumerant values are reused between
+  tessellation and geometry**: `Triangles` (id 6, both a tessellation-
+  evaluation domain and a geometry input primitive class) and
+  `OutputVertices` (both a hull entry's output control point count and a
+  geometry entry's maximum emitted vertex count). The existing
+  `collectEntryPoints` switch handled `Triangles`/`OutputVertices`
+  unconditionally, always writing to the tessellation-only fields -- a
+  latent bug that would have mis-attributed a geometry entry's own
+  `Triangles`/`OutputVertices` execution modes as tessellation state the
+  moment a geometry entry point reached this code, corrupting whichever
+  fields happened to already exist. Fixed by checking the declaring
+  entry's own `Stage` (already known, collected in the same function's
+  first loop, before execution modes are even visited) before writing to
+  either field. Added a lit test (`spirv-to-llvm-geometry-execution-
+  modes.mlir`'s first case, with a `CHECK-NOT: feme.tessellation`) to lock
+  this down, cross-referenced against the existing tessellation lit test's
+  own coverage of the same enumerant on the tessellation side.
+
+- **Investigating item 2 (lifting the stage filter) before doing it found
+  a real blocker**, which is the most important finding of this session.
+  A geometry shader's per-vertex inputs are SPIR-V/GLSL's `gl_in[]`: an
+  `Input`-storage-class array, one element per assembled primitive vertex,
+  indexed in the general case by a genuine loop variable (`for (int i = 0;
+  i < gl_in.length(); i++) ... gl_in[i] ...`), not a single implicit "this
+  invocation's own" index the way a hull control-point phase's own
+  per-control-point inputs are restricted to (`classifySPIRVElement`'s
+  `FromInputPatch` handling is Hull-phase-only, and deliberately so --
+  hull's control-point phase is one invocation per *output* control point,
+  each reading only its own corresponding input, never an arbitrary one).
+  `feme.stage.input.load`'s `Vertex` operand exists precisely for this
+  ("any vertex of the primitive") case -- `GeometryWrapperPass` (already
+  built, under G5) already consumes it generically, its own file comment
+  explicitly contrasting this with the hull case -- but nothing on the
+  *producing* side (`CanonicalizeStage.cpp`'s `loadStageIOValue`/
+  `storeStageIOValue`) has ever threaded a non-constant SSA value into that
+  operand; every call site passes a constant `Zero`. There is no existing
+  code path that recognizes "this SPIR-V `Input` global's outer dimension
+  is a genuine array of vertex records, addressed by an arbitrary SSA
+  value" as opposed to "this pointer's constant byte offset selects a
+  matrix row/struct member" (the shape `getStageIOBaseAndOffset`/
+  `resolveStageIOAccess`, H2d, already handles).
+
+  I deliberately chose *not* to lift the stage filter without this fix in
+  place. Doing so would not fail loudly -- it would silently resolve every
+  `gl_in[i]` read as `gl_in[0]`, always, regardless of `i`, which is a
+  wrong answer a real `deqp-vk` run might not even catch cleanly (some
+  cases might accidentally still produce plausible-looking output for
+  trivial primitives). This codebase's own established precedent (H2a
+  discovering H2c/H2d were needed rather than pretending H2 was done;
+  H4c/H4d diagnosing an unsupported shape rather than mis-splitting it)
+  is unambiguous on this point: a real diagnostic or a real fix, never a
+  silent wrong answer, even under schedule pressure. So `Geometry` stays
+  out of `CanonicalizeStagePass::run`'s accepted set this session, and the
+  fix is spun off as roadmap H5b, a new row, ahead of H5c (lifting the
+  filter, now safe once H5b lands), H5d (executor chaining) and H5e
+  (the Vulkan-API surface itself) -- the same "root cause found mid-
+  implementation, broken into a new lettered row" pattern the roadmap's
+  own H2a/H4a entries already establish as this project's house style.
+
+## What actually landed this session
+
+- `feme/include/feme/Graphics/Geometry.h` / `feme/lib/Graphics/Geometry.cpp`
+  (new files): `GeometryInputPrimitive`/`GeometryOutputPrimitive` enums,
+  `getVerticesPerPrimitive`, `GeometryState`, and `getGeometryState`
+  (attribute round-trip), mirroring `Tessellation.h`/`.cpp` exactly.
+- `feme/lib/Conversion/SPIRVToLLVM/ConvertSPIRVToLLVMPass.cpp`: new
+  `EntryPointInfo` fields for a geometry entry's declared shape; six new
+  `ExecutionMode` switch cases (`InputPoints`/`InputLines`/
+  `InputLinesAdjacency`/`InputTrianglesAdjacency`/`OutputPoints`/
+  `OutputLineStrip`/`OutputTriangleStrip`/`Invocations`, plus the
+  `Triangles`/`OutputVertices` stage-disambiguation fix); `feme.geometry.*`
+  passthrough attributes attached in `applyEntryPointAttributes`.
+- `feme/unittests/Graphics/GeometryTest.cpp` (new, 7 cases) and
+  `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-geometry-execution-
+  modes.mlir` (new lit test, 4 `RUN`/`CHECK` blocks).
+- `feme/docs/Roadmap.md`: H5's own row updated to explain the split and
+  point at H5a-H5e; H5a struck through as done; H5b/H5c/H5d/H5e added as
+  new open rows with a concrete, already-investigated scope for each
+  (not a vague "figure this out later" placeholder -- H5b names the exact
+  function needing a fix, H5c names the exact call to add and what needs
+  unit coverage, H5d names every already-implemented piece it needs to
+  wire together and what still needs a new test, H5e names the exact
+  feature bits/limits and files).
+- `feme/docs/FeMeGraphicsDesign.md`: updated the stale "Chaining the
+  geometry stage ... `CanonicalizeStage.cpp` reflects only `Vertex` and
+  `Fragment`" sentence (already inaccurate before this session, since H4a
+  had added Hull/Domain) to reflect H5a's own new state and cite H5b-H5e.
+- `feme/docs/VulkanCTSReport.md`: new "Roadmap H5a: measured impact"
+  section (before/after numbers, unchanged as expected) and a "Roadmap H5:
+  what H5a found, and why it stops here" section recording the per-vertex
+  addressing gap for anyone picking up H5b.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed,
+  not changed -- `geometryShader`/`multiviewGeometryShader` correctly
+  still read "no", and this row advertises nothing new.
+
+## Verification
+
+- `ninja FeMeGraphics FeMeConversionSPIRVToLLVM` (assertions-enabled,
+  ccache build): clean.
+- New lit test run directly through `feme-opt`/`FileCheck` (exit 0) before
+  wiring it into the suite, confirming the `CHECK`s actually match the
+  real attribute output, not just that the pass didn't crash.
+- Full `ninja check-feme`: **1843/1902** (59 pre-existing, unrelated
+  `Unsupported`, 0 `Failed`), up from the prior session's **1835/1894**
+  baseline by exactly the 8 new tests this row adds.
+- Targeted `dEQP-VK.geometry.*` run (200 cases) against the real feme ICD:
+  **0/0/200**, byte-identical to the pre-existing baseline -- confirming
+  this session's changes are genuinely inert from the Vulkan API's own
+  point of view, exactly as expected (nothing calls any of the new code
+  yet).
+- Regression sample (`dEQP-VK.draw.*`, the same 1957-case
+  `grep -v viewport_height | awk 'NR%15==1'` sample every H4 row since H4a
+  has used): **12/1957 pass, 133/1957 fail, 1812/1957 not-supported**,
+  byte-identical to H4a's own recorded totals. 0 regressions.
+
+## Outcome
+
+H5 is **not** complete this session. Struck through: H5a only. Left open,
+with concrete scope written down for the next session: H5b (the per-vertex
+dynamic-index addressing fix -- the real remaining blocker), H5c (lift the
+`CanonicalizeStagePass` stage filter once H5b lands), H5d (executor
+chaining), H5e (the Vulkan-API surface: pipeline acceptance, feature bit,
+limits, `multiviewGeometryShader`). `dEQP-VK.geometry.*` remains 0/0/200,
+correctly unchanged. Commits, in order: the new `Geometry.h`/`.cpp` +
+CMake registration; the `ConvertSPIRVToLLVMPass.cpp` execution-mode
+capture; the new unit test; the new lit test; the docs update
+(`Roadmap.md`/`FeMeGraphicsDesign.md`/`VulkanCTSReport.md`); this file.
