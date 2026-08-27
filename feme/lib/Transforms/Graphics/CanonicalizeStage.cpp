@@ -1900,7 +1900,8 @@ PreservedAnalyses CanonicalizeStagePass::run(Module &M,
     std::optional<ShaderStage> Stage = getShaderStage(*F);
     if (!Stage ||
         (*Stage != ShaderStage::Vertex && *Stage != ShaderStage::Fragment &&
-         *Stage != ShaderStage::Hull && *Stage != ShaderStage::Domain))
+         *Stage != ShaderStage::Hull && *Stage != ShaderStage::Domain &&
+         *Stage != ShaderStage::Geometry))
       continue;
 
     // An absent signature (e.g. a hand-written test exercising only the
