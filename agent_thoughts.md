@@ -38215,3 +38215,94 @@ exercise once a real geometry shader reaches it. H5c
 (`CanonicalizeStagePass::run` still not accepting `ShaderStage::Geometry`)
 remains the only closed-form blocker left before `dEQP-VK.geometry.*`
 sees any actual movement off 0/0/200.
+
+# H5c: `CanonicalizeStagePass::run` accepts `ShaderStage::Geometry`
+
+## Task
+
+Complete roadmap milestone H5c: lift `CanonicalizeStagePass::run`'s stage
+filter to accept `ShaderStage::Geometry`, now that H5b/H5f/H5g have made
+doing so safe (dynamic and constant `gl_in[i]` addressing both resolve
+correctly, and a real `gl_in[]` array-of-block global carries the
+per-member decoration metadata `addElements` needs). Add unit coverage
+mirroring `CanonicalizeStageTest`'s existing Hull/Domain system-value
+mapping cases, for `gl_PrimitiveIDIn`/`gl_InvocationID`/`gl_Layer`/
+`gl_ViewportIndex`/`gl_PrimitiveID`.
+
+## Investigation
+
+- Confirmed H5b/H5f/H5g are all struck through (done) in `Roadmap.md`,
+  and read H5's own row plus H5a/H5b's "what H5a found" writeup in
+  `VulkanCTSReport.md` to understand exactly why the filter was withheld
+  until now (the per-vertex dynamic-index gap, now closed).
+- Read `CanonicalizeStagePass::run` (`CanonicalizeStage.cpp`): the stage
+  filter is one `if` guard listing `Vertex`/`Fragment`/`Hull`/`Domain`
+  explicitly; anything routed past it that isn't `Hull` (which needs
+  `canonicalizeSPIRVHullStage`'s barrier-splitting) falls into the
+  `else` branch, `canonicalizeSPIRVStage(*F, *Stage,
+  SPIRVCanonicalPhase::Ordinary)` -- exactly the path Domain already
+  uses, and exactly what the roadmap row asks a Geometry entry to use
+  too (no barrier-splitting, since GLSL/SPIR-V compiles a whole geometry
+  shader to one entry point already, per `GeometryWrapper.cpp`'s own
+  file comment).
+- Checked `getSystemValueForBuiltIn`: `PrimitiveId` (code 7, shared by
+  both `gl_PrimitiveIDIn` as an `Input` and `gl_PrimitiveID` as an
+  `Output`, disambiguated by storage class rather than by builtin value),
+  `InvocationId` (code 8), `Layer` (code 9), and `ViewportIndex` (code
+  10) all already map onto `SignatureSystemValue::{PrimitiveID,
+  InvocationID, RenderTargetArrayIndex, ViewportArrayIndex}` respectively
+  -- confirming the roadmap row's own claim that no new system-value work
+  is needed here.
+
+## Changes
+
+- `CanonicalizeStage.cpp`: added `*Stage != ShaderStage::Geometry` to the
+  stage-filter guard in `CanonicalizeStagePass::run`. One-line change;
+  everything else (the `else` branch routing to
+  `canonicalizeSPIRVStage(..., SPIRVCanonicalPhase::Ordinary)`) already
+  worked unmodified for any non-Hull stage.
+- `CanonicalizeStageTest.cpp`: added
+  `GeometryStageMapsSystemValues`, mirroring
+  `HullStageMapsInvocationIdAndPatchVertices`/
+  `DomainStageMapsTessCoordAndPatchInput` -- a geometry entry reading
+  `gl_PrimitiveIDIn`/`gl_InvocationID` and writing `gl_Layer`/
+  `gl_ViewportIndex`/`gl_PrimitiveID`, asserting each signature element's
+  `Direction` and `SystemValue`.
+- `ninja check-feme` (assertions-enabled, ccache build): 1851/1910 passing
+  (59 pre-existing, unrelated `Unsupported`), up from 1850/1909 by
+  exactly the 1 new test.
+- Ran a real, targeted `dEQP-VK.geometry.*` (200 cases) against the
+  updated ICD: still 0/0/200, but for a *different* reason than
+  H5b/H5f/H5g's own baseline -- `vkCreateGraphicsPipelines` still rejects
+  `VK_SHADER_STAGE_GEOMETRY_BIT` outright (H5e's own job), so no real
+  geometry module is ever compiled far enough to reach
+  `CanonicalizeStage.cpp` in practice yet. Also reran the standard
+  `dEQP-VK.draw.*` 1957-case sample (excluding the same pre-existing,
+  unrelated `SelectInst::init` crash this report already documents):
+  byte-identical to H5g's own baseline (12 Pass/139 Fail/1806
+  NotSupported), 0 regressions.
+- Updated `VulkanCTSReport.md` with a "Roadmap H5c: measured impact"
+  section, `Roadmap.md`'s H5c row struck through, and
+  `FeMeGraphicsDesign.md`'s forward-reference to H5c (in the
+  tessellation/geometry chaining section) updated to describe what
+  actually landed. `Vulkan14FeatureInventory.md`/
+  `VulkanExtensionInventory.md` needed no change: `geometryShader` stays
+  `VK_FALSE`, unchanged since H5a.
+- Ran `clang-format -i` on both changed source files; it also reformatted
+  three unrelated pre-existing lines in `CanonicalizeStage.cpp` (line-
+  wrap drift from a different `clang-format` version than produced the
+  current tree). Reverted those three hunks, keeping only the actual
+  one-line functional change, per this repo's "don't fix pre-existing
+  issues unrelated to your task" discipline.
+
+## Outcome
+
+H5c is done as scoped: `CanonicalizeStagePass::run` now accepts
+`ShaderStage::Geometry`, routing a real geometry entry point through the
+same `SPIRVCanonicalPhase::Ordinary` path Domain already uses, with no
+new system-value work needed. `dEQP-VK.geometry.*` stays at 0/0/200 --
+correctly so, since `vkCreateGraphicsPipelines` still rejects the
+geometry stage bit (H5e) and `Executor::executeDraws` doesn't yet chain a
+compiled geometry stage into a draw (H5d) -- both of which remain open
+before the whole `dEQP-VK.geometry` group (roadmap H5's own parent row)
+can close.
