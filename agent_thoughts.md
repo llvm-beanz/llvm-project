@@ -38306,3 +38306,160 @@ geometry stage bit (H5e) and `Executor::executeDraws` doesn't yet chain a
 compiled geometry stage into a draw (H5d) -- both of which remain open
 before the whole `dEQP-VK.geometry` group (roadmap H5's own parent row)
 can close.
+
+# Milestone H5d: chaining the geometry stage into `Executor::executeDraws`
+
+## The request
+
+H5d asked for the "other half" of the geometry-stage story:
+`FeMeGraphicsDesign.md`'s "Tessellation and geometry stage model" section
+explicitly flagged that, while H5's own R34 work built every individual
+piece (adjacency splitting, `buildGeometryInputs`/`buildGeometryInvocations`,
+`CompiledStage::invokeGeometry`, `collectGeometryStreams`,
+`mergeGeometryStreamsInLaneOrder`), nothing in `Executor::executeDraws`
+actually called any of them. H5c had just lifted `CanonicalizeStagePass`'s
+own stage filter to admit `ShaderStage::Geometry`, so all the raw
+plumbing existed; this row's job was purely the wiring, following H4's
+own "chain the last pre-rasterization stage in, substituting `RasterSig`/
+`RasterOut`" pattern for tessellation as the template.
+
+## Design decisions
+
+**`GraphicsPipeline::setGeometryStage`/`hasGeometryStages`.** A direct
+mirror of `setTessellationStages`/`hasTessellationStages` -- store a
+`CompiledStage` pointer plus a `GeometryState` (the pipeline's own record
+of input/output primitive topology, `MaxOutputVertices`, etc., independent
+of whatever a real SPIR-V geometry entry's own IR attributes might say --
+that distinction matters for H5e, not this row, since every test here
+hand-builds the `GeometryState` directly rather than deriving it from a
+compiled `Function`).
+
+**`linkStageElements`/`copyLinkedElements` instead of
+`buildGeometryInputs`.** This was the one deliberate deviation from the
+roadmap's own suggested implementation path, so it's called out explicitly
+in both the Executor.cpp commit message and the Roadmap.md write-up.
+`buildGeometryInputs` (`GeometryInputs.h`) assumes a vertex-shaped input --
+one attribute value per vertex, addressed by an ordinary vertex index --
+because it was designed to gather a domain/vertex stage's own per-vertex
+outputs into a geometry stage's inputs by *reusing the same signature
+element layout a vertex stage already has*. But a geometry stage's real
+input shape is primitive-major: `VerticesPerPrimitive` vertices' worth of
+every attribute, per primitive, and the "vertex" dimension inside that is
+addressed by the `Vertex` operand H5b's own dynamic-indexing work added,
+not something `buildGeometryInputs`'s existing helper models. Rather than
+extend `buildGeometryInputs` to cover a shape it wasn't designed for (out
+of scope for a single roadmap row, and risking destabilizing the real
+SPIR-V-import path H5e will actually exercise it through), I used the
+lower-level `StageLink.h` primitives (`linkStageElements`/
+`copyLinkedElements`) directly, matching each geometry-input element to
+its producing vertex/domain-stage element by system-value/semantic
+identity and copying `VerticesPerPrimitive` scalars per primitive instead
+of one. This keeps `buildGeometryInputs` untouched and available for
+H5e's real use case (deriving a geometry input layout from an imported
+SPIR-V entry's own IR signature), while still getting this row's own
+hand-built-pipeline tests to a correct, real geometry invocation.
+
+**Adjacency reordering matches `splitListPrimitiveAdjacency`/
+`splitStripPrimitiveAdjacency` exactly.** Re-read `Pipeline.cpp`'s actual
+implementation rather than re-deriving the vertex order from spec memory:
+lines-adjacency is `{Adjacent[0], Primitive[0], Primitive[1],
+Adjacent[1]}`; triangles-adjacency is `{Primitive[0], Adjacent[0],
+Primitive[1], Adjacent[1], Primitive[2], Adjacent[2]}` -- identical for
+both list and strip variants, with strip variants additionally needing a
+restart-segmented sliding window (restart is now valid on the two
+`*StripWithAdjacency` topologies, which needed `RestartEnabled` widened
+alongside the topology-validation switch).
+
+**Output store addressing: primitive-major, not vertex-major.**
+Re-verified against `GeometryWrapper.cpp`'s `lowerGeometryOutputStore`
+that a geometry entry's output-element store ignores any "Vertex" operand
+entirely and addresses only by `primitiveIndex` -- there is exactly one
+scratch slot per primitive/invocation in `Outputs`, and the actual emitted
+vertex stream is threaded through `feme.geometry.stream.emit`, not through
+`feme.stage.output.store`. This confirmed `GSScratch`'s `StageStorage`
+only needs `PrimitiveCount`-many slots, not
+`PrimitiveCount * MaxOutputVertices`, and that the merged emitted-vertex
+data comes entirely from `collectGeometryStreams`'s own replay of the flat
+emit records, not from anything in `GSScratch` after the invocation
+returns.
+
+**Deliberately deferred: `GeometryState::Invocations`.** GLSL/SPIR-V
+geometry shaders can declare `layout(invocations = N)` for `N > 1`,
+invoking the same entry point N times per primitive with a distinct
+`gl_InvocationID` each time. Neither `GeometryState` nor this row's
+`FemeGeometryInvocation`-building loop has any such dimension -- every
+geometry stage today runs exactly once per input primitive, which is
+correct for the default (`invocations = 1`, or no `layout` qualifier at
+all) and for every hand-compiled test this row adds, but would silently
+under-invoke a real `invocations = N` shader once H5e starts importing
+real SPIR-V geometry entries. Rather than guess at the right ABI shape for
+a feature this row's own tests can't exercise (there is no way to hand-
+compile IR that reaches this code path with per-invocation-index semantics
+without inventing that ABI first, and inventing it without a real SPIR-V
+producer to validate against risks getting the shape wrong), I spun this
+off as Roadmap H5d-a, a small, explicitly-scoped follow-up.
+
+## Testing
+
+Two new `ExecutorTest.cpp` cases, mirroring the existing H4 tessellation
+domain-stage rasterization tests' own structure:
+- `GeometryStagePassesThroughATriangleCoveringTheViewport`: a hand-compiled
+  passthrough geometry stage (emits each input vertex unchanged, writing
+  `SV_Position` itself) rendering a full-viewport triangle, checked against
+  the exact same solid-color fill the ordinary vertex/fragment-only
+  pipeline test (`FillsFullyCoveredTriangleWithSolidColor`) already
+  checks. This is the strongest test available without a real SPIR-V
+  producer: if the merged geometry stream's own indices/positions didn't
+  reach the rasterizer correctly, the fill would be wrong or absent
+  rather than merely "close."
+- `RejectsAdjacencyTopologyWithoutAGeometryStage`: confirms the
+  topology-validation switch still rejects the four adjacency topologies
+  when no geometry stage is bound, exactly as before this row (adjacency
+  topologies exist purely to feed a geometry stage; accepting them without
+  one would silently misinterpret half the index buffer as decorative
+  adjacency data with nothing to consume it).
+
+Full `ninja check-feme` (assertions-enabled, ccache build): 1853/1912
+passed, 59 pre-existing unrelated `Unsupported`, 0 failures -- up from
+H5c's own 1851/1910 baseline by exactly the 2 new tests. `clang-format -i
+--style=file` applied to all four changed files with no behavioral
+diffs, re-verified via a second full `ninja check-feme` pass.
+
+## Vulkan CTS
+
+`dEQP-VK.geometry.*` (200 cases): unchanged, 0 Pass/0 Fail/200
+NotSupported, identical before and after. This is the expected outcome:
+`vkCreateGraphicsPipelines` still unconditionally rejects
+`VK_SHADER_STAGE_GEOMETRY_BIT` (H5e's own job), so no real Vulkan geometry
+pipeline can reach this row's new code path at all yet, and
+`geometryShader` remains `VK_FALSE` in `PhysicalDeviceInfo.cpp` --
+deliberately left alone rather than flipped early, since doing so ahead
+of H5e would just convert 200 honest `NotSupported`s into (at best) 200
+`Fail`s for no benefit. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` therefore need no changes, matching every
+other H5-series row before H5e.
+
+The standard `dEQP-VK.draw.*` 1957-case regression sample (reusing the
+exact same `draw_sample.txt` case list every H4/H5-series row has used,
+to guarantee a fair before/after comparison) came back byte-identical to
+H5c's own baseline: 12 Pass/139 Fail/1806 NotSupported, and the sorted set
+of 139 failing case names matched exactly (verified via a small Python
+`TestCaseResult`/`Result StatusCode` XML parse rather than raw `diff`,
+since `.qpa` files aren't line-stable run to run). Zero regressions, zero
+new passes -- expected, since no case in that sample exercises a geometry
+stage; `RasterSig`/`RasterOut`/`RasterClass` all still resolve to the
+vertex/domain stage's own signature and output for every one of them,
+exactly as before this row.
+
+Full write-up: "Roadmap H5d: measured impact" in `VulkanCTSReport.md`.
+
+## Commits
+
+1. `Pipeline.h`/`Pipeline.cpp`: `setGeometryStage`/`hasGeometryStages`/
+   `getGeometryStage`/`getGeometryState` API.
+2. `Executor.cpp`: the full per-draw geometry chaining logic.
+3. `ExecutorTest.cpp`: the two new tests described above.
+4. Docs: `FeMeGraphicsDesign.md` status-note update, `Roadmap.md` H5d
+   strikethrough + new H5d-a row, `VulkanCTSReport.md`'s new "Roadmap H5d:
+   measured impact" section.
+5. This entry.
