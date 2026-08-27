@@ -33,31 +33,30 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H4h?
+Can you work on milestone H4i?
 
-> **Fixing H4f and H4g still does not turn any of
-> `dEQP-VK.tessellation.winding.*`'s glsl cases green -- all 24 now fail at a
-> third, later blocker: `validateStageInterfaces` (`GraphicsPipeline.cpp`)
-> unconditionally requires the *vertex* stage to write a 4-component
-> `SV_Position`/`gl_Position` output** (`findSystemValue(*VSSig,
-> SignatureDirection::Output, SignatureSystemValue::Position)`), which is
-> correct for the ordinary vertex -> fragment pipeline (the rasterizer needs a
-> clip-space position from *somewhere*, and without a domain stage the vertex
-> stage is the only producer) but is not a real requirement once a tessellation
-> evaluation stage exists: the CTS's own `winding` test's vertex shader is
-> deliberately and legally empty (`void main (void) {}`; confirmed by reading
-> `vktTessellationWindingTests.cpp` directly), because its tessellation
-> evaluation shader computes `gl_Position` purely from `gl_TessCoord`
-> (`gl_Position = vec4(gl_TessCoord.xy*2.0 - 1.0, 0.0, 1.0);`) and never reads
-> back any vertex-stage output via `gl_in[]`. `validateStageInterfaces` needs to
-> skip (or relax) its `SV_Position` requirement on the vertex stage specifically
-> when a tessellation evaluation stage is present in the pipeline, since in that
-> shape the *domain* stage's own output is what gets rasterized (per
-> `PatchPipeline.cpp`'s `runPatchPipeline`/`Executor.cpp`), not the vertex
-> stage's -- root-caused and isolated as part of H4f/H4g's own re-measurement
-> but deliberately not fixed here, since it is a distinct validation-layer gap,
-> not a stage-splitting or signature-serialization one. Confirmed via a real
-> `deqp-vk` run with `FEME_VULKAN_LOG_CREATION_ERRORS=1`: all 24
-> `dEQP-VK.tessellation.winding.*` glsl cases now fail with exactly `"vertex
-> stage does not write a 4-component SV_Position output"` (0 occurrences of
-> either of H4f/H4g's own former blockers)
+> **With H4h's own `SV_Position` relaxation in place, all 24
+> `dEQP-VK.tessellation.winding.*` glsl cases now reach real rendering and fail
+> at a fourth, later blocker: a systematic front-face/winding-orientation
+> mismatch in the rasterized image**, not a pipeline-creation error. A real
+> `deqp-vk` run (`dEQP-VK.tessellation.winding.*glsl*`, 24 cases) shows a
+> consistent pattern across every `_ccw`/`_cw` pair: where the CTS expects a
+> full-viewport quad/triangle of one color, the renderer instead produces the
+> *complementary* culled/uncultured result (e.g. `glsl_quads_ccw` gets "Note:
+> got 4081 white and 15 red pixels" / "Failure: expected only white pixels
+> (full-viewport quad)" while its `_cw` sibling gets "got 0 white and 4096 red
+> pixels" for the same expectation, and the `glsl_triangles_*` cases fail with
+> "triangle orientation is incorrect" at roughly a 50/50 pixel split) -- the
+> shape of a front-face or vertex-winding-order inversion specific to
+> tessellated primitives (the domain stage's own emitted vertex order per
+> `gl_TessCoord`/`VertexOrderCcw`/`VertexOrderCw`, or how the executor's
+> rasterizer classifies a tessellated triangle's front face, likely in
+> `PatchPipeline.cpp`/`Executor.cpp`), rather than a per-fragment color or depth
+> bug (the two colors present in every failing image are always exactly the two
+> the test itself defines for "correctly wound" vs "incorrectly wound"). Root
+> cause not yet isolated -- needs its own investigation, likely starting from
+> `vktTessellationWindingTests.cpp`'s own pass/fail image classification
+> alongside `PatchPipeline.cpp`'s tessellator-output vertex ordering for each of
+> `VertexOrderCcw`/`VertexOrderCw` and `Triangles`/`Quads`, and how that
+> interacts with `VkPipelineRasterizationStateCreateInfo::frontFace`/`cullMode`
+> translation the ordinary (non-tessellated) path already implements
