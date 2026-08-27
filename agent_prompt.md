@@ -33,21 +33,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H4d?
+Can you work on milestone H4e?
 
-> **A JIT-time `"Symbols not found: [ spirv_var_N, spirv_var_N ]"` error rejects
-> some tessellation-control shaders that do *not* hit H4c's SSA-capture
-> diagnostic** (24 of H4b's own measured 227 `dEQP-VK.tessellation.*` `Fail`s,
-> e.g. all of `dEQP-VK.tessellation.winding.*`): the control-point and
-> patch-constant phases each get their own `CompiledStage::create`/`LLJIT`
-> (H4b's own design, matching every other stage), so this is not a cross-phase
-> symbol collision; more likely `splitTessellationControlEntry`'s clone of the
-> module for one phase leaves a global variable referenced-but-undefined after
-> some later pass (a `GlobalDCE`-shaped pass reachable only from the phase's own
-> new entry point, not the original one) strips its definition while a reference
-> to it survives. Root cause not yet isolated -- needs its own investigation,
-> likely starting from a minimal reproduction of
-> `dEQP-VK.tessellation.winding.default_domain.glsl_quads_ccw`'s own
-> tessellation-control module reduced through the same
-> `feme-convert-spirv-to-llvm`/`feme-canonicalize-stage` pipeline H4b's own
-> tests used to hand-verify shapes
+> **`MaskIntrinsics.cpp`'s `appendScalarMangling` calls
+> `llvm_unreachable("unsupported feme.cpu.masked.* element type")` for any
+> masked-load/store element type it does not recognize (matrix/aggregate shapes
+> among them), aborting the whole process instead of diagnosing gracefully** --
+> newly reached (not introduced) by H4c's own fix: all 24 of H4c's named cases
+> now split successfully and reach `feme::cpu::SIMDizePass`'s masked-memory-op
+> path, which is very likely the same C8-bucket matrix/aggregate-legalization
+> gap H4b's own triage table already names for the 88 `feme-cpu-simdize: ...
+> divergent value ... of vector type` and 74 `llvm.getelementptr` cases (not yet
+> independently confirmed), just reached through a third path. Needs both the
+> root legalization fix (C8's own scope) and, independently and more urgently,
+> hardening this specific function to `emitError`+return a null/sentinel rather
+> than `llvm_unreachable`, so an unsupported shape becomes a graceful per-case
+> `Fail` the way every other gap in this codebase already does, rather than a
+> `SIGABRT` that kills an entire CTS run's remaining cases
