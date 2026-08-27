@@ -33,12 +33,30 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H4?
+Can you work on milestone H4a?
 
->  **Tessellation stages.** `GraphicsPipeline.cpp` accepts exactly
->  `VK_SHADER_STAGE_VERTEX_BIT` and `VK_SHADER_STAGE_FRAGMENT_BIT` (its
->  `mapStage`/stage-mask check, ~lines 983-1118); everything else is rejected.
->  Needs G5's hull/domain wrappers, patch storage, and tessellator, then the
->  `tessellationShader` feature bit, `maxTessellation*` limits, and the
->  `VkPipelineTessellationStateCreateInfo`/patch-list topology path. Whole
->  `dEQP-VK.tessellation` group
+> **No SPIR-V tessellation-control or tessellation-evaluation entry point can be
+> reflected, so H4b has nothing to compile.**
+> `feme::graphics::CanonicalizeStagePass::run`
+> (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`, ~line 1200) skips every
+> function whose `feme::getShaderStage` is not `Vertex` or `Fragment`, so a
+> `TessellationControl`/`TessellationEvaluation` entry point reaches code
+> generation with no `EntrySignature` attached and cannot be wrapped. Lifting
+> that filter is necessary but nowhere near sufficient: FeMe's hull ABI is
+> D3D-shaped and needs **two** separately compiled entry points -- a
+> control-point phase for `HullWrapperPass` and a patch-constant phase for
+> `PatchConstantWrapperPass`, discriminated by
+> `feme::cpu::isPatchConstantPhase`'s `SignatureDirection::PatchOutput` test --
+> whereas GLSL/SPIR-V compiles a tessellation-control shader to a **single**
+> entry point that writes both its per-vertex outputs and
+> `gl_TessLevelOuter`/`gl_TessLevelInner`, typically with an intervening
+> `OpControlBarrier`. Splitting that one entry into the two FeMe phases is
+> exactly R34's own still-deferred "generalize `EntryWrapperPass`'s
+> barrier-region splitting to the control-point batch ABI" item, and is the real
+> work here. Also needs SPIR-V's tessellation execution modes
+> (`Triangles`/`Quads`/`Isolines`,
+> `SpacingEqual`/`SpacingFractionalEven`/`SpacingFractionalOdd`,
+> `VertexOrderCw`/`VertexOrderCcw`, `PointMode`, `OutputVertices`) mapped onto
+> `feme::graphics::TessellationState`, and `BuiltIn`
+> `TessLevelOuter`/`TessLevelInner`/`TessCoord`/`PatchVertices`/`InvocationId`
+> mapped onto the corresponding `SignatureSystemValue`s
