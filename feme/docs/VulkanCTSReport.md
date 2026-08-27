@@ -6521,3 +6521,133 @@ printing `DONE!` and the totals (the same `tcu::NotSupportedError: Device
 fault tests execution not supported in Linux-like OSs` teardown quirk this
 report already documents); the totals printed before it are the real
 result.
+
+## Roadmap H4b: measured impact (`vkCreateGraphicsPipelines` tessellation acceptance)
+
+**8/227/879, up from H4a's own 0/0/1114 -- real functional progress, with
+real, triaged failures.** H4b makes `GraphicsPipeline.cpp`'s `mapStage`/
+stage-mask loop accept `VK_SHADER_STAGE_TESSELLATION_{CONTROL,EVALUATION}_
+BIT`, requiring exactly one of each when either is present and
+`VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` iff both are; validates
+`VkPipelineTessellationStateCreateInfo::patchControlPoints` against
+`maxTessellationPatchSize`; compiles the tessellation-control module twice
+(once for its own control-point entry, once for its H4a-produced
+`<entry>.patchconstant` phase) and the tessellation-evaluation module once,
+merging their independently-optional reflected `TessellationState` halves;
+and calls `graphics::GraphicsPipeline::setTessellationStages`, which
+`Executor::executeDraws` has consumed since H4. `PhysicalDeviceInfo.cpp`
+advertises `tessellationShader = VK_TRUE` (`maxTessellationPatchSize`/
+`maxTessellationGenerationLevel` were already the true
+`feme::graphics::MaxPatchControlPoints` (32) / `DefaultMaxTessFactor` (64)
+ceilings, just gated behind the false feature bit).
+
+This row's own work also surfaced (and fixed, as a prerequisite) a bug in
+H4a's own barrier-splitting logic: `isSPIRVGroupSyncBarrier`
+(`CanonicalizeStage.cpp`) only ever recognized the
+`llvm.spv.*.barrier.with.group.sync` intrinsics HLSL's own builtin path
+lowers to, not the mangled `_Z22__spirv_ControlBarrieriii` call MLIR's real
+upstream `ControlBarrierPattern` lowers `spirv.ControlBarrier` to (confirmed
+against `mlir/test/Conversion/SPIRVToLLVM/barrier-ops-to-llvm.mlir`'s own
+lowering shape) -- meaning `splitTessellationControlEntry` never actually
+fired for any real SPIR-V-imported tessellation-control shader until this
+fix, which is why this section's own measured numbers below are the first
+real ones for this group.
+
+```
+Test run totals:
+  Passed:        8/1114 (0.7%)
+  Failed:        227/1114 (20.4%)
+  Not supported: 879/1114 (78.9%)
+```
+
+**Root-cause triage of the 227 `Fail`s.** Categorizing each failing case's
+own first `error:`/JIT diagnostic (case counts, not incident counts --
+several cases hit the same root cause):
+
+| Count | Root cause | Tracking |
+|---|---|---|
+| 88 | `feme-cpu-simdize: function 'main' has a divergent value ... of vector type` | pre-existing, C8's matrix/aggregate-legalization bucket -- unrelated to tessellation, now reachable for the first time because a tessellation pipeline can reach code generation at all |
+| 74 | `'llvm.getelementptr' op operand #N must be LLVM pointer type ... but got '!llvm.array<...>'` (four distinct array/struct shapes) | pre-existing, same C8 bucket (matrix/aggregate/array stage-IO legalization) |
+| 24 | `feme-canonicalize-stage: tessellation-control SPIR-V entry point's patch-constant region cannot yet capture SSA values defined before the barrier` | new, this milestone's own gap -- roadmap H4c |
+| 24 | JIT `Symbols not found: [ spirv_var_N, spirv_var_N ]` (all of `dEQP-VK.tessellation.winding.*`) | new, this milestone's own gap, root cause not yet isolated -- roadmap H4d |
+| 12 | `feme-cpu-wrap-vertex: vertex stage wrapper requires attached feme.signature metadata` | pre-existing, same shape as roadmap H3a's fragment-side finding (metadata dropped by a `Function::Create`+`copyAttributesFrom` rebuild somewhere upstream), not yet independently tracked for the vertex side |
+| 7 | assorted SPIR-V-to-LLVM legalization gaps (`spirv.CompositeConstruct`/`spirv.Constant`/`spirv.All` "explicitly marked illegal", one `unhandled Decoration : 'Component'`) | pre-existing, C8 bucket's "unhandled opcode/diagnostic tail" |
+
+Of the 227 `Fail`s, only 48 (H4c's 24 + H4d's 24) are gaps this milestone's
+own tessellation-control splitting design introduced or exposed; the
+remaining 179 are pre-existing SPIR-V/codegen limitations already named in
+C8's own bucket (or, for the 12 vertex-wrapper-metadata cases, a close
+sibling of roadmap H3a's own already-fixed fragment-side finding), simply
+unreachable for this test group before H4b because every one of its cases
+was `NotSupported` outright.
+
+**Regression sample.** A targeted `dEQP-VK.draw.*` regression sample (1957
+of the 29419-case mustpass list, every 15th case with `*viewport_height*`
+removed, the same sample H2f/H3/H4/H4a's own reports use) run against this
+row's build:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        139/1957 (7.1%)
+  Not supported: 1806/1957 (92.3%)
+```
+
+Diffing this against the same sample run on the pre-H4b build (12 `Pass`,
+133 `Fail`, 1812 `NotSupported` -- rebuilt from `eb8ee3f12f52`, the commit
+immediately before this row's own first commit, in a separate worktree to
+get an exact byte-for-byte baseline) with a per-case status comparison
+(not a raw text diff of failing-case lists, which mis-tracks: the same
+`grep`-based line count differed by more than the real change because
+several unrelated case names happen to share result-code words) shows
+exactly 6 cases change status, and only 6:
+
+```
+NotSupported -> Fail   dEQP-VK.draw.dynamic_rendering.complete_secondary_cmd_buff.shader_layer.tessellation_shader_1
+NotSupported -> Fail   dEQP-VK.draw.dynamic_rendering.complete_secondary_cmd_buff.shader_viewport_index.tessellation_shader_12
+NotSupported -> Fail   dEQP-VK.draw.dynamic_rendering.partial_secondary_cmd_buff.shader_viewport_index.tessellation_shader_5
+NotSupported -> Fail   dEQP-VK.draw.dynamic_rendering.primary_cmd_buff.shader_layer.tessellation_shader_3
+NotSupported -> Fail   dEQP-VK.draw.dynamic_rendering.primary_cmd_buff.shader_viewport_index.tessellation_shader_7
+NotSupported -> Fail   dEQP-VK.draw.renderpass.shader_viewport_index.tessellation_shader_3
+```
+
+Every one of these six is itself a `tessellation_shader_N` case -- gated on
+`tessellationShader` the same way the main `dEQP-VK.tessellation.*` group
+is, previously `NotSupported` outright and now correctly attempted, hitting
+the same already-triaged gaps above (not a new, distinct failure mode).
+**0 regressions**: every one of the sample's other 1951 cases is byte-for-
+byte unchanged between the two builds.
+
+`Vulkan14FeatureInventory.md` updated: `tessellationShader` (1.0) moves to
+`VK_TRUE`, `AdvertisedPromotedFeatures.txt` grown to match, and the "N of M
+unimplemented 1.0 feature bits are graphics capabilities" finding's count
+and list updated (51 -> 50 unimplemented, 16 -> 15 graphics-capability
+bits, `tessellationShader` dropped from the list). `VulkanExtensionInventory.md`
+confirmed no change needed -- tessellation adds no extension of its own.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1821/1880** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from H4a's own 1815/1874 baseline by exactly the new tests this row
+adds (`CanonicalizeStageTest.SplitsHullEntryAtMangledSPIRVControlBarrierCall`,
+`GraphicsPipelineTest.AcceptsTessellationStages`/
+`.RejectsUnpairedTessellationStage`/`.RejectsTopologyTessellationStageMismatch`/
+`.RejectsInvalidPatchControlPoints`, and `PhysicalDeviceInfoTest`'s updated
+feature-bit assertion plus its new `TessellationLimitsMatchImplementationCeilings`).
+
+**Reproducing.** Same invocation as H4a's own report entry:
+
+```
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.tessellation.*" --deqp-log-filename=tess.qpa
+```
+
+and, for the draw sample, the same `grep -v viewport_height draw.txt | awk
+'NR%15==1'` case list against `external/vulkancts/mustpass/main/vk-default/
+draw.txt`, then `--deqp-caselist-file=draw_sample.txt`. `deqp-vk` still exits
+non-zero after printing `DONE!` and the totals (the same pre-existing
+`tcu::NotSupportedError: Device fault tests execution not supported in
+Linux-like OSs` teardown quirk this report already documents); the totals
+printed before it are the real result.
