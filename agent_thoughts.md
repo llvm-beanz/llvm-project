@@ -38130,3 +38130,88 @@ regardless of how the shader happens to index it. H5g (SPIR-V-to-LLVM not
 yet attaching `MemberDecorations` metadata for an array-of-block global)
 and H5c (`CanonicalizeStagePass::run` still not accepting
 `ShaderStage::Geometry`) remain open, as scoped.
+
+# H5g: `StageIOGlobalVariablePattern` array-of-block member decorations
+
+## Task
+
+Milestone H5g: `SPIRVToLLVMPatterns.cpp`'s `StageIOGlobalVariablePattern::
+matchAndRewrite` only attached `feme.spirv.MemberDecorations` metadata when
+a stage-IO global's pointee type was directly an `mlir::spirv::StructType`,
+never an `mlir::spirv::ArrayType<StructType>` -- the exact shape a geometry
+entry's `gl_in[]` builtin interface block actually takes. H5b's own
+`addElements` fix in `CanonicalizeStage.cpp` already knew how to peel the
+outer per-vertex array dimension off such a global before reading its
+per-member metadata, but had nothing to peel in front of, since no
+metadata was ever attached to an array-of-block global in the first place.
+
+## Investigation
+
+Traced the exact shape mismatch: `matchAndRewrite`'s existing check was
+`mlir::dyn_cast<mlir::spirv::StructType>(SrcType.getPointeeType())` --
+correct for `gl_PerVertex`-shaped *outputs* (a bare struct), but a
+geometry entry's `gl_in` *input* is declared as `!spirv.array<N x
+!spirv.struct<...>>` in real SPIR-V (glslang emits one struct per vertex
+of the input primitive, wrapped in an array sized to the primitive's
+vertex count -- 1 for points, 2 for lines, 3 for triangles, etc.).
+Confirmed by reading `CanonicalizeStage.cpp`'s `addElements` lambda
+(`if (auto *ArrTy = dyn_cast<ArrayType>(BlockTy)) BlockTy =
+ArrTy->getElementType();`), which already unconditionally expects to peel
+one array layer off `GV->getValueType()` before casting to `StructType`
+when `feme.spirv.MemberDecorations` metadata is present -- confirming the
+consuming side's contract and that this row only needed to fix the
+producing side.
+
+## Changes
+
+- `SPIRVToLLVMPatterns.cpp`: `StageIOGlobalVariablePattern::matchAndRewrite`
+  now peels one outer `mlir::spirv::ArrayType` off the pointee type (if
+  present) before checking for a `mlir::spirv::StructType`, attaching
+  `feme.spirv.MemberDecorations` off the inner struct regardless of which
+  of the two shapes (bare block or array-of-block) wraps it.
+- New test `SPIRVToLLVMTest.PerVertexArrayInterfaceBlockPreservesMemberDecorations`
+  (gtest, `SPIRVToLLVMTest.cpp`): converts an `Input` array-of-struct
+  global (mirroring `gl_in[]`'s real shape) and asserts the member-
+  decorations attribute is present while the ordinary whole-variable one
+  is not, mirroring the existing bare-block
+  `BuiltinInterfaceBlockPreservesMemberDecorations` case.
+- New `CHECK` block appended to `spirv-to-llvm-stage-io.mlir` (lit),
+  asserting the exact `feme.spirv.member.decorations` attribute shape for
+  an `Input` array-of-struct global.
+- `ninja check-feme` (assertions-enabled, ccache build): 1850/1909 passed
+  (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from H5f's
+  1849/1908 by exactly the 1 new test this row adds (the lit `CHECK` block
+  extends an existing `RUN` line's own file rather than adding a new
+  file/`RUN` line, so it doesn't add a second discovered test the way the
+  gtest case does).
+- Vulkan CTS: re-ran `dEQP-VK.geometry.*` (0/0/200, unchanged -- H5c hasn't
+  lifted the stage filter yet) and the same `dEQP-VK.draw.*` 1957-case
+  sample this report has used since H4 (12 Pass/139 Fail/1806
+  NotSupported, byte-identical to H5f's own baseline). 0 regressions, 0 new
+  passes, as expected: no `dEQP-VK.draw.*` shader declares an array-of-
+  block stage-IO global, and no `dEQP-VK.geometry.*` shader reaches
+  `CanonicalizeStage.cpp` yet.
+- Updated `VulkanCTSReport.md` with a "Roadmap H5g: measured impact"
+  section, `Roadmap.md`'s H5g row struck through, and
+  `FeMeGraphicsDesign.md`'s existing forward-reference to H5g (in the
+  tessellation/geometry chaining section) updated to describe what
+  actually landed instead of what remained open.
+- Note on tooling: a naive whole-file `clang-format -i` on
+  `SPIRVToLLVMPatterns.cpp` reformatted ~130 unrelated lines elsewhere in
+  the file (a pre-existing formatting drift unrelated to this change,
+  likely from a different `clang-format` version than whatever produced
+  the current tree). Reverted that and used `git-clang-format --diff`
+  scoped to just this change's lines instead, which reported no issues --
+  matching this repo's own "don't fix pre-existing issues unrelated to
+  your task" discipline.
+
+## Outcome
+
+H5g is done as scoped: `StageIOGlobalVariablePattern` now attaches
+`feme.spirv.MemberDecorations` metadata for both the bare-block shape
+(`gl_PerVertex`-style outputs) and the array-of-block shape (`gl_in[]`-
+style inputs), giving H5b's own `addElements` peeling logic real input to
+exercise once a real geometry shader reaches it. H5c
+(`CanonicalizeStagePass::run` still not accepting `ShaderStage::Geometry`)
+remains the only closed-form blocker left before `dEQP-VK.geometry.*`
+sees any actual movement off 0/0/200.
