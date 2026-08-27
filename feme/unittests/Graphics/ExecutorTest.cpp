@@ -1061,6 +1061,83 @@ TEST(ExecutorTest, AdjacentTrianglesShareAnEdgeWithoutGapsOrOverlaps) {
   }
 }
 
+/// (Roadmap H4j) Two triangles sharing an exact edge must give a sample
+/// landing on that edge to exactly one of them, even when the edge is
+/// neither axis-aligned nor at a "nice" fraction -- the scenario the
+/// tessellator's own crack-free bridging produces for a non-trivial
+/// tessellation factor. `A`/`B` below are two float32 screen positions
+/// (reached through the executor's own NDC-to-screen `projectVertex`
+/// transform, not hand-picked screen coordinates) chosen so that pixel
+/// (16,16)'s sample point (16.5,16.5) lies, in exact real-number math,
+/// almost exactly on segment `A`-`B`: evaluating the coverage test's edge
+/// function in `float` independently from each triangle's own vertex
+/// order (`edgeFn(A,B,P)` for one, `edgeFn(B,A,P)` for the other) rounds
+/// *both* to a spuriously negative value, leaving the pixel covered by
+/// neither triangle -- a rasterization crack. Evaluating in `double`
+/// (`edgeFnD`) resolves the tie in exactly one triangle's favor.
+TEST(ExecutorTest,
+     DoublePrecisionEdgeTestClosesAFloatRoundingCrackBetweenAdjacentTriangles) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A quadrilateral covering the whole 64x64 viewport, split along the
+  // diagonal A-B into two CCW triangles (A,B,(0,0)) and (B,A,(64,64)):
+  // together they must leave no gap, including at the crack-prone pixel
+  // (16,16) their shared diagonal passes almost exactly through. NDC
+  // (-1,1) projects to screen (0,0) and NDC (1,-1) to screen (64,64)
+  // (`projectVertex` flips Y).
+  std::vector<float> VertexData = {
+      // clang-format off
+      -0.8589868f, 0.2970691f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // A, red
+      0.32081833f, 0.88697165f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // B
+      -1.0f,       1.0f,        0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // (0,0)
+      0.32081833f, 0.88697165f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // B, green
+      -0.8589868f, 0.2970691f,  0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // A
+      1.0f,        -1.0f,       0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // (64,64)
+      // clang-format on
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<uint8_t> Storage(64u * 64u * 4u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 64, 64};
+  std::array<AttachmentView, 1> Attachs{Color};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 64, 64};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 6;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // A neighborhood around the exact crack pixel this test was built
+  // around: every one of these must be covered by exactly one of the two
+  // triangles (non-zero alpha), never left as the untouched clear color.
+  // (The two triangles' *other* two edges legitimately exclude some
+  // far-off pixels near the viewport's own corners per the top-left rule;
+  // this test only asserts about the shared diagonal's own neighborhood.)
+  for (int32_t DY = -2; DY <= 2; ++DY) {
+    for (int32_t DX = -2; DX <= 2; ++DX) {
+      uint32_t X = 16 + DX, Y = 16 + DY;
+      uint32_t I = Y * 64 + X;
+      const uint8_t *Texel = Storage.data() + I * 4;
+      EXPECT_NE(Texel[3], 0) << "texel (" << X << "," << Y
+                             << ") uncovered by either triangle (crack)";
+    }
+  }
+}
+
 // Roadmap R33 ("Depth, stencil, blending, and multisampling"): depth
 // testing/writes with a real `D32_FLOAT` attachment.
 TEST(ExecutorTest, DepthTestRejectsFartherFragment) {

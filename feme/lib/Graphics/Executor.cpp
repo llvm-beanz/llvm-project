@@ -408,6 +408,28 @@ float edgeFn(std::array<float, 2> A, std::array<float, 2> B,
   return (P[0] - A[0]) * (B[1] - A[1]) - (P[1] - A[1]) * (B[0] - A[0]);
 }
 
+/// Same directed-edge function as `edgeFn`, but evaluated in `double`
+/// precision. Two triangles sharing an exact edge (the tessellator's own
+/// crack-free bridging, or a quad/triangle-domain core lattice's per-cell
+/// diagonal split) reuse the *same* pair of `float` vertex positions for
+/// that shared edge, each in the opposite direction; the `float`-precision
+/// `edgeFn` above is not antisymmetric bit-for-bit under that reversal (its
+/// two directions subtract different operand pairs, e.g. `P - A` versus
+/// `P - B`), so a sample that lies almost exactly on the shared edge can
+/// round to a tiny negative value from *both* directions, leaving a
+/// 1-sample gap neither triangle covers (roadmap H4j). Evaluating in
+/// `double` does not change the geometry -- the `float` vertex positions
+/// convert to `double` exactly, with no precision lost -- but shrinks the
+/// rounding of the edge function itself (still a sum of products, so not
+/// bit-exactly antisymmetric either) from `float`'s ~2^-23 relative
+/// precision to `double`'s ~2^-52, several orders of magnitude below any
+/// real crack this rasterizer's own coordinate range produces.
+double edgeFnD(std::array<float, 2> A, std::array<float, 2> B,
+               std::array<float, 2> P) {
+  double Ax = A[0], Ay = A[1], Bx = B[0], By = B[1], Px = P[0], Py = P[1];
+  return (Px - Ax) * (By - Ay) - (Py - Ay) * (Bx - Ax);
+}
+
 /// Whether the directed edge A->B is a "top" or "left" edge of a
 /// positively-wound (by `edgeFn`) triangle in pixel space -- the tie-break
 /// rule ("Rasterization correctness": "top-left fill") that gives an edge
@@ -2151,18 +2173,25 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                 for (uint32_t S = 0; S != SampleCount; ++S) {
                   std::array<float, 2> Offset = (*SamplePositions)[S];
                   std::array<float, 2> P{PX + Offset[0], PY + Offset[1]};
-                  float E0 = edgeFn(Tri.Pos[1], Tri.Pos[2], P);
-                  float E1 = edgeFn(Tri.Pos[2], Tri.Pos[0], P);
-                  float E2 = edgeFn(Tri.Pos[0], Tri.Pos[1], P);
+                  // The inside test itself is evaluated in `double`
+                  // (`edgeFnD`, see its own comment) so that two triangles
+                  // sharing an exact edge cannot both round a shared-edge
+                  // sample to a (spuriously) negative value and leave a
+                  // crack -- the barycentric weights derived from this
+                  // same sample below stay in `float` (this is a coverage
+                  // decision, not an interpolated value).
+                  double E0 = edgeFnD(Tri.Pos[1], Tri.Pos[2], P);
+                  double E1 = edgeFnD(Tri.Pos[2], Tri.Pos[0], P);
+                  double E2 = edgeFnD(Tri.Pos[0], Tri.Pos[1], P);
                   bool In0 =
-                      E0 > 0.0f ||
-                      (E0 == 0.0f && isTopLeftEdge(Tri.Pos[1], Tri.Pos[2]));
+                      E0 > 0.0 ||
+                      (E0 == 0.0 && isTopLeftEdge(Tri.Pos[1], Tri.Pos[2]));
                   bool In1 =
-                      E1 > 0.0f ||
-                      (E1 == 0.0f && isTopLeftEdge(Tri.Pos[2], Tri.Pos[0]));
+                      E1 > 0.0 ||
+                      (E1 == 0.0 && isTopLeftEdge(Tri.Pos[2], Tri.Pos[0]));
                   bool In2 =
-                      E2 > 0.0f ||
-                      (E2 == 0.0f && isTopLeftEdge(Tri.Pos[0], Tri.Pos[1]));
+                      E2 > 0.0 ||
+                      (E2 == 0.0 && isTopLeftEdge(Tri.Pos[0], Tri.Pos[1]));
                   if (!(In0 && In1 && In2))
                     continue;
                   // (roadmap F5) The stipple test rejects an otherwise-
