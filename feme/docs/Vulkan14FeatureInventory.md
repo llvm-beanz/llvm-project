@@ -115,12 +115,13 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt`, understating
   the 1.4 extension row as 14 of 16 rather than its true 15 of 16; restored
   here alongside roadmap H2's own `multiview` update.
-- **16 of the 51 unimplemented 1.0 feature bits are graphics
-  capabilities** (`geometryShader`, `tessellationShader`,
+- **15 of the 50 unimplemented 1.0 feature bits are graphics
+  capabilities** (`geometryShader`,
   `fillModeNonSolid`, `wideLines`, `largePoints`, `sampleRateShading`,
   `independentBlend`, `depthClamp`, `depthBiasClamp`, `depthBounds`,
   `imageCubeArray`, `shaderClipDistance`, `shaderCullDistance`,
-  `occlusionQueryPrecise`, `multiDrawIndirect`, `alphaToOne`). Each is
+  `occlusionQueryPrecise`, `multiDrawIndirect`, `alphaToOne`) -- down from
+  16 now that roadmap H4a/H4b closed `tessellationShader`. Each is
   *optional* for a conformance submission -- unlike every 1.1-1.4 row
   above, a device may report them false and still be conformant -- so
   none blocks the claim; each is nonetheless a block of mandatory-list
@@ -267,7 +268,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `imageCubeArray` | no |  |
 | feature | VK_VERSION_1_0 | `independentBlend` | no |  |
 | feature | VK_VERSION_1_0 | `geometryShader` | no |  |
-| feature | VK_VERSION_1_0 | `tessellationShader` | no |  |
+| feature | VK_VERSION_1_0 | `tessellationShader` | yes | roadmap H4a/H4b: SPIR-V tessellation-control/-evaluation reflection, splitting and `vkCreateGraphicsPipelines` acceptance/compilation |
 | feature | VK_VERSION_1_0 | `sampleRateShading` | no |  |
 | feature | VK_VERSION_1_0 | `dualSrcBlend` | yes |  |
 | feature | VK_VERSION_1_0 | `logicOp` | no |  |

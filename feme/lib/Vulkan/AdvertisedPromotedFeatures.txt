@@ -32,6 +32,15 @@ textureCompressionASTC_LDR
 # picks one array element per primitive from a vertex stage's
 # ViewportArrayIndex output.
 multiViewport
+# tessellationShader: roadmap H4a/H4b -- CanonicalizeStagePass reflects a
+# SPIR-V tessellation-control/-evaluation entry point and splits the
+# control shader's control-point/patch-constant phases at its barrier
+# (H4a), and GraphicsPipeline.cpp's mapStage/translateFixedFunctionState
+# accept the two stage bits, require VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+# translate patchControlPoints and compile all three tessellation
+# CompiledStages into graphics::GraphicsPipeline::setTessellationStages,
+# which Executor.cpp already consumes (H4b).
+tessellationShader
 #
 # --- Core Vulkan 1.1 (VkPhysicalDeviceVulkan11Features).
 #
