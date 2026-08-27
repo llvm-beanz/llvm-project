@@ -214,6 +214,32 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (Roadmap H5e) A geometry entry point declaring a triangle input
+/// primitive and a triangle-strip output of up to 3 vertices, writing its
+/// own `Position` -- no `spirv.EmitVertex`/`spirv.EndPrimitive` calls,
+/// since `ConvertSPIRVToLLVMPass`/`SPIRVToLLVMPatterns` do not lower those
+/// ops yet (a gap this milestone's own report spins off as a follow-up
+/// row rather than fixing here). This is enough to exercise every
+/// Vulkan-layer acceptance/translation path H5e adds: compiling the
+/// module into a `feme::ShaderStage::Geometry` `CompiledStage`, reading
+/// back its `feme::graphics::GeometryState`, and feeding both into
+/// `graphics::GraphicsPipeline::setGeometryStage`.
+constexpr llvm::StringLiteral GeometrySource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Geometry], []> {
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %p = spirv.Constant dense<[0.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Geometry" @main, @out_pos
+  spirv.ExecutionMode @main "Triangles"
+  spirv.ExecutionMode @main "OutputTriangleStrip"
+  spirv.ExecutionMode @main "OutputVertices", 3
+}
+)mlir";
+
 class GraphicsPipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -387,6 +413,29 @@ protected:
     return Info;
   }
 
+  /// (Roadmap H5e) `makeCreateInfo`'s geometry-enabled sibling: a
+  /// three-stage (vertex/geometry/fragment) pipeline over `GeomStages`
+  /// rather than `Stages`. The base's own `TriangleList` topology is left
+  /// unchanged, since a geometry stage does not by itself require an
+  /// adjacency topology -- only the converse (an adjacency topology
+  /// requires a bound geometry stage) is enforced.
+  VkGraphicsPipelineCreateInfo makeGeometryCreateInfo(VkShaderModule Vertex,
+                                                       VkShaderModule Geometry,
+                                                       VkShaderModule Fragment) {
+    VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+    GeomStages[0] = Stages[0];
+    GeomStages[1] = {};
+    GeomStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    GeomStages[1].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+    GeomStages[1].module = Geometry;
+    GeomStages[1].pName = "main";
+    GeomStages[2] = Stages[1];
+
+    Info.stageCount = 3;
+    Info.pStages = GeomStages;
+    return Info;
+  }
+
   VkInstance Instance = VK_NULL_HANDLE;
   VkPhysicalDevice Physical = VK_NULL_HANDLE;
   VkDevice Device = VK_NULL_HANDLE;
@@ -396,6 +445,7 @@ protected:
 
   VkPipelineShaderStageCreateInfo Stages[2]{};
   VkPipelineShaderStageCreateInfo TessStages[4]{};
+  VkPipelineShaderStageCreateInfo GeomStages[3]{};
   VkPipelineTessellationStateCreateInfo Tessellation{};
   VkPipelineVertexInputStateCreateInfo VertexInput{};
   VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
@@ -1906,6 +1956,109 @@ TEST_F(GraphicsPipelineTest, RejectsInvalidPatchControlPoints) {
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, TessEval, nullptr);
   vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H5e: `vkCreateGraphicsPipelines` now accepts
+/// `VK_SHADER_STAGE_GEOMETRY_BIT`, compiling the module into a
+/// `feme::ShaderStage::Geometry` `CompiledStage` and reflecting its
+/// declared input/output primitive class, invocation count and maximum
+/// output vertex count into `graphics::GraphicsPipeline::
+/// setGeometryStage`/`getGeometryState` (which the executor has consumed
+/// since roadmap H5d).
+TEST_F(GraphicsPipelineTest, AcceptsGeometryStage) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Geometry = createModule(GeometrySource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeGeometryCreateInfo(Vertex, Geometry, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  EXPECT_TRUE(Pipe->hasGeometryStages());
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  ASSERT_TRUE(Executor.hasGeometryStages());
+  EXPECT_EQ(Executor.getGeometryStage().getStage(),
+            feme::ShaderStage::Geometry);
+  EXPECT_EQ(Executor.getGeometryState().InputPrimitive,
+            feme::graphics::GeometryInputPrimitive::Triangles);
+  EXPECT_EQ(Executor.getGeometryState().OutputPrimitive,
+            feme::graphics::GeometryOutputPrimitive::TriangleStrip);
+  EXPECT_EQ(Executor.getGeometryState().MaxOutputVertices, 3u);
+  EXPECT_EQ(Executor.getGeometryState().Invocations, 1u);
+  // `TriangleList` was left unchanged from `makeCreateInfo`'s own default
+  // -- a geometry stage does not, by itself, require an adjacency
+  // topology (`AcceptsAdjacencyTopologyWithGeometryStage` below covers the
+  // topology this milestone actually adds).
+  EXPECT_EQ(Executor.getTopology(),
+            feme::graphics::PrimitiveTopology::TriangleList);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Geometry, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H5e: the four `*_WITH_ADJACENCY` topologies, previously
+/// rejected unconditionally by `mapTopology` (see
+/// `RejectsUnimplementedStateCombinations`'s own
+/// `VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY` case, still rejected
+/// today since it binds no geometry stage), now succeed once a geometry
+/// stage is bound -- the executor (roadmap H5d) has been ready to consume
+/// adjacency-assembled primitives all along.
+TEST_F(GraphicsPipelineTest, AcceptsAdjacencyTopologyWithGeometryStage) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Geometry = createModule(GeometrySource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeGeometryCreateInfo(Vertex, Geometry, Fragment);
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  EXPECT_EQ(Executor.getTopology(),
+            feme::graphics::PrimitiveTopology::TriangleListWithAdjacency);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Geometry, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H5e: every one of the four adjacency topologies is still
+/// rejected without a bound geometry stage -- the check is one-directional
+/// (adjacency requires geometry; geometry does not require adjacency, see
+/// `AcceptsGeometryStage` above), mirroring `RejectsTopologyTessellation
+/// StageMismatch`'s own bidirectional `PatchList`/tessellation pairing.
+TEST_F(GraphicsPipelineTest, RejectsAdjacencyTopologyWithoutGeometryStage) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+
+  static constexpr VkPrimitiveTopology AdjacencyTopologies[] = {
+      VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY,
+      VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY,
+      VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY,
+      VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY,
+  };
+  for (VkPrimitiveTopology Topology : AdjacencyTopologies) {
+    VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+    InputAssembly.topology = Topology;
+    EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED)
+        << "topology " << Topology;
+    EXPECT_EQ(Pipe, VK_NULL_HANDLE) << "topology " << Topology;
+  }
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 

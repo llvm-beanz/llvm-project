@@ -111,18 +111,19 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
 
 TEST(PhysicalDeviceInfo,
      OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised) {
-  // (V4/C4/E22/H3/H4b) `robustBufferAccess`/`dualSrcBlend`/
-  // `textureCompressionASTC_LDR`/`multiViewport`/`tessellationShader` are
-  // the only core features this milestone can honestly claim (see
-  // PhysicalDeviceInfo.cpp's comment); every other `VkBool32` stays
-  // false, since nothing else has been implemented that could back one
-  // yet.
+  // (V4/C4/E22/H3/H4b/H5e) `robustBufferAccess`/`dualSrcBlend`/
+  // `textureCompressionASTC_LDR`/`multiViewport`/`tessellationShader`/
+  // `geometryShader` are the only core features this milestone can
+  // honestly claim (see PhysicalDeviceInfo.cpp's comment); every other
+  // `VkBool32` stays false, since nothing else has been implemented that
+  // could back one yet.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
   EXPECT_EQ(Info.Features.textureCompressionASTC_LDR, VK_TRUE);
   EXPECT_EQ(Info.Features.multiViewport, VK_TRUE);
   EXPECT_EQ(Info.Features.tessellationShader, VK_TRUE);
+  EXPECT_EQ(Info.Features.geometryShader, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -130,6 +131,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.textureCompressionASTC_LDR = VK_FALSE;
   Cleared.multiViewport = VK_FALSE;
   Cleared.tessellationShader = VK_FALSE;
+  Cleared.geometryShader = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }
@@ -147,6 +149,50 @@ TEST(PhysicalDeviceInfo, TessellationLimitsMatchImplementationCeilings) {
   EXPECT_EQ(Info.Properties.limits.maxTessellationGenerationLevel,
             feme::graphics::DefaultMaxTessFactor);
 }
+
+// Roadmap H5e: `maxGeometryShaderInvocations`/`maxGeometryInputComponents`/
+// `maxGeometryOutputComponents`/`maxGeometryOutputVertices`/
+// `maxGeometryTotalOutputComponents` are exactly core 1.0's own mandatory
+// minimums (PhysicalDeviceInfo.cpp's own comment explains why there is no
+// smaller real ceiling to report), and must never regress below them now
+// that `geometryShader` is `VK_TRUE`.
+TEST(PhysicalDeviceInfo, GeometryLimitsMeetCore10Minimums) {
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  const VkPhysicalDeviceLimits &Limits = Info.Properties.limits;
+  EXPECT_GE(Limits.maxGeometryShaderInvocations, 32u);
+  EXPECT_GE(Limits.maxGeometryInputComponents, 64u);
+  EXPECT_GE(Limits.maxGeometryOutputComponents, 64u);
+  EXPECT_GE(Limits.maxGeometryOutputVertices, 256u);
+  EXPECT_GE(Limits.maxGeometryTotalOutputComponents, 1024u);
+}
+
+// Roadmap H5e: `multiviewGeometryShader` is also reported through the
+// aggregate `VkPhysicalDeviceVulkan11Features` struct (the dedicated
+// `VkPhysicalDeviceMultiviewFeatures` struct is covered by
+// `MultiviewFeaturesReportMultiviewTrueAmplificationFalse` below), and
+// must agree with it now that a geometry stage exists at all.
+TEST(PhysicalDeviceInfo, AggregateVulkan11FeaturesReportMultiviewGeometryShader) {
+  VkInstance Instance = VK_NULL_HANDLE;
+  VkInstanceCreateInfo InstInfo{};
+  ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+  uint32_t Count = 1;
+  VkPhysicalDevice Physical = VK_NULL_HANDLE;
+  ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+            VK_SUCCESS);
+
+  VkPhysicalDeviceVulkan11Features Vulkan11{};
+  Vulkan11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Vulkan11;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(Vulkan11.multiview, VK_TRUE);
+  EXPECT_EQ(Vulkan11.multiviewGeometryShader, VK_TRUE);
+  EXPECT_EQ(Vulkan11.multiviewTessellationShader, VK_FALSE);
+
+  vkDestroyInstance(Instance, nullptr);
+}
+
 
 TEST(PhysicalDeviceInfo, TextureCompressionASTCLDRIsAdvertised) {
   // Roadmap E22: `vkCreateImage` now accepts a block-compressed
@@ -1588,14 +1634,15 @@ TEST_F(PhysicalDeviceProperties2Test,
 
 TEST_F(PhysicalDeviceProperties2Test,
        MultiviewFeaturesReportMultiviewTrueAmplificationFalse) {
-  // Roadmap H2: `multiview` is now real (layered rendering/multiview,
-  // RenderPass.cpp/CommandBuffer.cpp) and reported `VK_TRUE`;
-  // `multiviewGeometryShader`/`multiviewTessellationShader` stay an
-  // explicit `VK_FALSE` -- guarded here by pre-filling with a non-zero
-  // pattern before the call, the same pattern
-  // `dEQP-VK.api.info.vulkan1p2.features`/`multiview_features` use to
-  // catch an unwritten field -- since neither a geometry nor a
-  // tessellation-evaluation stage exists yet (roadmap H4/H5).
+  // Roadmap H2/H5e: `multiview`/`multiviewGeometryShader` are now real
+  // (layered rendering/multiview, `RenderPass.cpp`/`CommandBuffer.cpp`;
+  // geometry stages, `GraphicsPipeline.cpp`) and reported `VK_TRUE`;
+  // `multiviewTessellationShader` stays an explicit `VK_FALSE` -- guarded
+  // here by pre-filling with a non-zero pattern before the call, the same
+  // pattern `dEQP-VK.api.info.vulkan1p2.features`/`multiview_features` use
+  // to catch an unwritten field -- since no tessellation-evaluation
+  // stage's own multiview interaction has been independently verified yet
+  // (roadmap H4's own remaining rows).
   VkPhysicalDeviceMultiviewFeatures Multiview;
   std::memset(&Multiview, 0xAA, sizeof(Multiview));
   Multiview.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES;
@@ -1607,7 +1654,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
 
   EXPECT_EQ(Multiview.multiview, VK_TRUE);
-  EXPECT_EQ(Multiview.multiviewGeometryShader, VK_FALSE);
+  EXPECT_EQ(Multiview.multiviewGeometryShader, VK_TRUE);
   EXPECT_EQ(Multiview.multiviewTessellationShader, VK_FALSE);
 }
 
