@@ -250,6 +250,14 @@ Value *loadFragmentSystemValue(IRBuilder<> &Builder,
                                          FragmentInvocationFieldViewIndex);
     return Builder.CreateLoad(Builder.getInt32Ty(), Ptr);
   }
+  case SignatureSystemValue::ViewportArrayIndex: {
+    Value *Ptr = Builder.CreateStructGEP(
+        InvocationTy, InvocationPtr, FragmentInvocationFieldViewportIndex);
+    Value *LanePtr = Builder.CreateInBoundsGEP(
+        ArrayType::get(Builder.getInt32Ty(), 4), Ptr,
+        {Builder.getInt32(0), Builder.getInt32(QuadLane)});
+    return Builder.CreateLoad(Builder.getInt32Ty(), LanePtr);
+  }
   default:
     Builder.getContext().emitError(
         Twine("feme-cpu-wrap-fragment: unsupported fragment system value for "

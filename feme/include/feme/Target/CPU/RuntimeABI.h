@@ -652,6 +652,12 @@ struct FemeFragmentInvocation {
   uint32_t Coverage[4];
   /// Front-face flag per lane: 0 for back-facing, 1 for front-facing.
   uint32_t IsFrontFace[4];
+  /// (Roadmap H3a) `gl_ViewportIndex` read back as a fragment-shader input:
+  /// the viewport index the rasterizer resolved for each lane's primitive,
+  /// one value per lane (not per quad, unlike `ViewIndex` below) since a
+  /// 2x2 quad can straddle a primitive boundary where neighboring
+  /// primitives resolved different viewport indices at a silhouette edge.
+  uint32_t ViewportIndex[4];
   /// (Roadmap H2) `gl_ViewIndex`: the current multiview render-pass
   /// instance view, or 0 for a non-multiview draw. One value per quad
   /// (not per lane), matching `FemeVertexInvocation::ViewIndex`'s own
@@ -662,7 +668,7 @@ struct FemeFragmentInvocation {
   /// Lanes allowed to perform side effects.
   uint32_t SideEffectMask;
   /// ABI headroom for later fragment-stage invocation metadata.
-  uint32_t Reserved[5];
+  uint32_t Reserved[4];
 };
 
 /// One fragment-stage quad's post-shader status. Color/depth/stencil/coverage
