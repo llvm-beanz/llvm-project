@@ -2611,4 +2611,200 @@ TEST(ExecutorTest, RejectsAPatchListDrawWithAPartialPatch) {
   EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
 }
 
+// (Roadmap H5d) A geometry-stage passthrough: reads all three of a
+// triangle's assembled vertices' position/color, emits them unchanged as
+// one triangle strip, and closes it -- the trivial "input primitive class
+// matches output primitive class" case chaining `Executor::executeDraws`
+// into a geometry stage needs to get exactly right before H5e's real
+// SPIR-V-sourced geometry pipelines can be trusted. Unlike
+// `TessVertexShaderIR`'s pairing with the domain stage, this geometry
+// stage -- not the vertex stage -- is what finally writes `SV_Position`
+// (element 2): the vertex stage's own position output (element 2,
+// location 1) stays a plain varying until the geometry stage reads it.
+constexpr char PassthroughGeometryShaderIR[] = R"(
+  define void @gs_main() #0 {
+    %p0x = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %p0y = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %p0z = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %c0r = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %c0g = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %c0b = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+    %c0a = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %p0x, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %p0y, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %p0z, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %c0r, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %c0g, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %c0b, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %c0a, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+
+    %p1x = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 1)
+    %p1y = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 1)
+    %p1z = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 1)
+    %c1r = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 1)
+    %c1g = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 1)
+    %c1b = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 1)
+    %c1a = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 1)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %p1x, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %p1y, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %p1z, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %c1r, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %c1g, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %c1b, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %c1a, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+
+    %p2x = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 2)
+    %p2y = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 2)
+    %p2z = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 2)
+    %c2r = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 2)
+    %c2g = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 2)
+    %c2b = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 2)
+    %c2a = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 2)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %p2x, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %p2y, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %p2z, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %c2r, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %c2g, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %c2b, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %c2a, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.cut(i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.stream.emit(i32)
+  declare void @feme.stage.stream.cut(i32)
+  attributes #0 = { "feme.shader.stage"="geometry" }
+)";
+
+/// Builds a vertex/geometry/fragment `GraphicsPipeline` -- an ordinary
+/// `TriangleList` draw whose vertex stage leaves position an unconsumed
+/// varying (`TessVertexShaderIR`, reused unmodified from the tessellation
+/// tests above) and whose geometry stage (`PassthroughGeometryShaderIR`)
+/// both produces `SV_Position` and passes every vertex through unchanged.
+Expected<GraphicsPipeline>
+buildPassthroughGeometryPipeline(Context &Ctx, uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 3, /*Location=*/1),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, TessVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature GSSig;
+  GSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/1),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> GS =
+      compileStage(Ctx, PassthroughGeometryShaderIR, "gs_main", GSSig,
+                   ShaderStage::Geometry);
+  if (!GS)
+    return GS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  GeometryState Geom;
+  Geom.InputPrimitive = GeometryInputPrimitive::Triangles;
+  Geom.OutputPrimitive = GeometryOutputPrimitive::TriangleStrip;
+  Geom.MaxOutputVertices = 3;
+  Pipeline.setGeometryStage(std::move(*GS), Geom);
+  return Pipeline;
+}
+
+TEST(ExecutorTest, GeometryStagePassesThroughATriangleCoveringTheViewport) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildPassthroughGeometryPipeline(Ctx, /*AttachmentSize=*/8);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A triangle covering the whole [-1, 1] NDC square (and more), CCW-wound,
+  // every vertex red -- the geometry stage's own `SV_Position` output is
+  // what clipping/rasterization now reads, so this only rasterizes to a
+  // solid-red viewport if that value made it through the geometry stage
+  // unchanged.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  uint32_t Size = 8;
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  for (uint32_t I = 0; I != Size * Size; ++I) {
+    const uint8_t *Texel = Storage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 255) << "texel " << I;
+    EXPECT_EQ(Texel[1], 0) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
+}
+
+TEST(ExecutorTest, RejectsAdjacencyTopologyWithoutAGeometryStage) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleListWithAdjacency);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
+      0.0f,  0.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f, 0.0f,
+      0.0f,  0.0f,  1.0f, 0.0f,  0.0f, 1.0f, 0.0f, 0.0f, 0.0f,  1.0f, 0.0f,
+      0.0f,  1.0f,  0.0f, 0.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
+}
+
 } // namespace
