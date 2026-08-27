@@ -1267,27 +1267,60 @@ milestone's `FemeGeometryArgs` only carries storage for stream 0), and a
 group-sync barrier (geometry invocations are independent, like the domain
 stage's). See GeometryWrapper.cpp's file comment for the full design.
 
-Landed, beginning to close R34's remaining "chain the four compiled stage
-invocations together per patch/primitive" open item for its tessellation
-stages (`feme::graphics::runPatchPipeline`, new PatchPipeline.h/.cpp): given
-one patch's input control points and the three compiled stages above, it runs
-`invokePatch`, `invokePatchConstant`, extracts `TessFactorEdge`/
-`TessFactorInside` from the patch-constant phase's own attached signature to
-feed `feme::graphics::tessellate`, and `invokeDomain` (via
-`buildDomainInvocations`), returning the domain stage's per-vertex outputs
-alongside the tessellator's connectivity. Because the hull control-point
-phase, patch-constant phase, and domain stage are three independently
-compiled entry points, each with its own `EntrySignature`/`ElementID`
-numbering, this function does not itself link "the completed patch's control
-points"/"the patch constants" across them by `Location` the way
-`feme::graphics::Executor` already does for the vertex/fragment stages (that
-generalization remains a documented follow-up); it instead requires its
-caller to build one shared `FemeStageLayout` for each of those two concepts,
-used by every stage that reads or writes it. Chaining the geometry stage on
-top of this function's result, and wiring any of this into
-`executeDraws`/`feme-render`, remain open (`feme::graphics::Executor` still
-does not call `invokePatch`/`invokePatchConstant`/`invokeDomain`/
-`invokeGeometry` at all).
+Landed, closing R34's remaining "chain the four compiled stage invocations
+together per patch/primitive" open item for its tessellation stages
+(`feme::graphics::runPatchPipeline`, PatchPipeline.h/.cpp): given one patch's
+input control points, a `PatchPipelineLinkage`, and the three compiled stages
+above, it runs `invokePatch`, `invokePatchConstant`, extracts
+`TessFactorEdge`/`TessFactorInside` from the patch-constant phase's own
+attached signature to feed `feme::graphics::tessellate`, and `invokeDomain`
+(via `buildDomainInvocations`), returning the domain stage's per-vertex
+outputs alongside the tessellator's connectivity.
+
+The hull control-point phase, patch-constant phase, and domain stage are
+three independently compiled entry points, each with its own
+`EntrySignature`/`ElementID` numbering, so nothing may be assumed to line up
+between them. `feme::graphics::linkStageElements`/`copyLinkedElements`
+(StageLink.h/.cpp) generalize the `Location`-based matching
+`feme::graphics::Executor` already did for the vertex/fragment pair into a
+reusable pass over any producing/consuming signature pair: elements match by
+`Location`/`Component`, or by `SignatureSystemValue` for system values, and
+copying is a scalar copy between the two stages' own tightly packed
+`StageStorage` blocks (`feme::graphics::StageStorage`, StageStorage.h/.cpp,
+shared by the executor and the patch pipeline). `linkPatchPipeline` builds
+one `PatchPipelineLinkage` from the four signatures involved -- vertex out to
+hull in, hull control-point out to both the patch-constant phase's
+`InputPatch` and the domain stage's per-control-point inputs, and
+patch-constant out to the domain stage's patch-constant inputs -- once per
+pipeline rather than once per patch.
+
+Landed on top of that, `feme::graphics::Executor::executeDraws` runs the
+chain for a real draw. A `feme::graphics::GraphicsPipeline` carrying hull,
+patch-constant and domain `CompiledStage`s (`setTessellationStages`) must use
+`PrimitiveTopology::PatchList`, and vice versa; such a draw runs the vertex
+stage over its fetched control points exactly as an untessellated draw would,
+then feeds each `VertexCount / InputControlPointCount` group of consecutive
+post-vertex control points through `runPatchPipeline` and concatenates every
+patch's domain output into one flat block (`StageStorage::
+appendStageInvocations`, a per-scalar copy rather than a `memcpy`, since a
+block's component stride is a function of its own invocation count). From
+there the pipeline is unchanged: everything downstream of the vertex stage
+reads whichever signature and output block belongs to the *last
+pre-rasterization stage* -- the domain stage when tessellating, the vertex
+stage otherwise -- so on a tessellating pipeline it is the domain stage, not
+the vertex stage, that must write `SV_Position` and every varying the
+fragment stage consumes. The rasterized primitive class comes from the
+tessellator's `TessOutputPrimitive` rather than from the topology, which on a
+patch-list pipeline says nothing about what reaches the rasterizer, and
+primitive index lists are absolute rather than per-instance-strided, since
+two instances of one patch derive their tessellation factors from their own
+control points and need not emit the same vertex count.
+
+Chaining the geometry stage on top of `runPatchPipeline`'s result remains
+open, as does the whole Vulkan-API surface: `CanonicalizeStage.cpp` reflects
+only `Vertex` and `Fragment` entry points, so a SPIR-V tessellation module
+cannot be imported, and `vkCreateGraphicsPipelines` still rejects the two
+tessellation stage bits (roadmap H4a/H4b).
 
 ### Amplification and mesh wrappers
 

@@ -6340,3 +6340,100 @@ needed -- H3 already flipped `multiViewport`/`shaderOutputViewportIndex`/
 `shaderOutputLayer` to `VK_TRUE` and `VK_EXT_shader_viewport_index_layer`
 to "Implemented"; this row is a pure bugfix underneath those same feature
 bits, not a new capability.
+
+## Roadmap H4: measured impact (tessellation stages, executor half)
+
+`dEQP-VK.tessellation.*`: 1114 cases, run against this driver before and
+after this row's four commits.
+
+**Before** (`bb096339e499`, the pre-H4 tree) and **after**
+(`ccceee4cb69c`), identically:
+
+```
+Test run totals:
+  Passed:        0/1114 (0.0%)
+  Failed:        0/1114 (0.0%)
+  Not supported: 1114/1114 (100.0%)
+  Warnings:      0/1114 (0.0%)
+  Waived:        0/1114 (0.0%)
+```
+
+Every one of the 1114 reports `NotSupported (Tessellation shader not
+supported)`, i.e. `deqp-vk` gates the entire group on
+`VkPhysicalDeviceFeatures::tessellationShader`, which this driver still
+reports as `VK_FALSE`.
+
+**This is the intended outcome for this row, and the number is expected to
+stay at 0/0/1114 until roadmap H4a lands.** The four commits here are the
+graphics-executor half of H4: `feme::graphics::Executor::executeDraws` now
+actually runs the hull control-point phase, the patch-constant phase,
+`feme::graphics::tessellate` and the domain stage for a patch-list draw and
+rasterizes the domain stage's output (roadmap R34's own "`Executor` does not
+call `invokePatch`/`invokePatchConstant`/`invokeDomain` at all" item). None
+of that is *reachable* from `vkCreateGraphicsPipelines` yet, because
+`CanonicalizeStage.cpp` still refuses to reflect any entry point that is not
+`Vertex` or `Fragment` (H4a) and `GraphicsPipeline.cpp` still rejects the two
+tessellation stage bits (H4b). Flipping `tessellationShader` to `VK_TRUE`
+ahead of those would convert 1114 honest `NotSupported`s into 1114 `Fail`s,
+so it was deliberately left alone; `Vulkan14FeatureInventory.md` and
+`VulkanExtensionInventory.md` consequently need no change for this row.
+
+**Regression sample.** `Graphics/Executor.cpp` is shared by every draw, and
+this row rewrote its post-vertex-stage plumbing (the `RasterSig`/`RasterOut`
+indirection, the absolute `AbsTriIndices`/`AbsLineIndices` index lists, and
+`RasterPrimitiveClass` replacing direct topology comparisons on the
+point/line/triangle paths), so a `dEQP-VK.draw.*` sample was run on both
+trees. The sample is every 15th case of the 29419-case group with the
+`*viewport_height*` families removed (1957 cases); those are excluded
+because they still hit the same pre-existing, unrelated
+`SelectInst::init` "Invalid operands for select" assertion this report
+already documents under H3a, which aborts the whole `deqp-vk` process and
+truncates the run. Both trees:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        133/1957 (6.8%)
+  Not supported: 1812/1957 (92.6%)
+```
+
+and the sorted list of failing case names is byte-identical between the two
+runs (`diff` clean, 128 distinct names). **0 regressions, 0 new passes** --
+as expected, since a pipeline with no tessellation stages takes exactly the
+paths it took before, with `RasterSig`/`RasterOut` bound to the vertex
+stage's own signature and output block.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full after every one of the four commits: **1800/1859** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H3a's own **1785/1844**
+baseline by exactly the 15 new tests this row adds --
+`StageLinkTest.cpp`'s 6 (`LinksByLocationNotByElementID`,
+`LinksSystemValuesBySystemValue`, `RejectsAConsumerInputWithNoProducer`,
+`RejectsAComponentCountMismatch`, `HonorsAConsumerFilter`,
+`CopiesLinkedElementsRemappingInvocations`), `TessellatorTest.cpp`'s 4
+(`TriangleTessellationIsCrackFreeAtEveryFactor`,
+`TriangleTessellationIsCrackFreeWithUnequalEdgeFactors`, and the two
+`Quad` equivalents), `PatchPipelineTest.cpp`'s 1 net new test after its
+rewrite around
+`linkPatchPipeline`, and `ExecutorTest.cpp`'s 4
+(`TessellatedPatchListCoversTheWholeViewport`,
+`TessellationFactorZeroCullsTheWholePatch`,
+`RejectsAPatchListWithoutTessellationStages`,
+`RejectsAPatchListDrawWithAPartialPatch`).
+
+**Reproducing.** Same invocation as the rest of this report, with
+`VK_DRIVER_FILES` (which is more reliable than `VK_ICD_FILENAMES` on this
+loader) and a `vulkan` data symlink in the working directory:
+
+```
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.tessellation.*" --deqp-log-filename=tess.qpa
+```
+
+`deqp-vk` still exits 134 *after* printing `DONE!` and the totals, throwing
+`tcu::NotSupportedError: Device fault tests execution not supported in
+Linux-like OSs`; that is a CTS teardown quirk unrelated to this driver, and
+the totals printed before it are the real result.

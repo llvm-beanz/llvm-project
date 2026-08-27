@@ -2914,7 +2914,21 @@ through the real Khronos loader.
 Depends on G5.
 
 - Add tessellation control/evaluation and geometry stages, their pipeline
-  state, and their signature and patch-constant reflection.
+  state, and their signature and patch-constant reflection. The graphics-
+  library half of the tessellation stages is done (roadmap H4:
+  `feme::graphics::Executor::executeDraws` runs the hull, patch-constant,
+  fixed-function tessellator and domain stages for a `PatchList` draw and
+  rasterizes the domain stage's output). What is missing is entirely on this
+  side of the boundary: `CanonicalizeStage.cpp` reflects only `Vertex` and
+  `Fragment` entry points, so a SPIR-V `TessellationControl`/
+  `TessellationEvaluation` module cannot be imported at all, and one SPIR-V
+  control entry point must additionally be split into FeMe's two D3D-shaped
+  hull phases (roadmap H4a); `vkCreateGraphicsPipelines` then needs to accept
+  the two stage bits, translate `VkPipelineTessellationStateCreateInfo`, and
+  advertise `tessellationShader` plus the `maxTessellation*` limits (roadmap
+  H4b). `tessellationShader` is deliberately still `VK_FALSE` until H4a
+  lands, so that the whole `dEQP-VK.tessellation` group reports
+  `NotSupported` honestly rather than failing.
 - Implement transform feedback only if it is advertised; otherwise report it
   unsupported truthfully.
 - Add pipeline-statistics queries and any remaining occlusion-query state
