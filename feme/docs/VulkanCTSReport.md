@@ -6807,3 +6807,189 @@ Every case this loop excludes this way (24 total, all
 `Passed`/`Failed`/`Not supported` counts across every iteration plus one
 `Failed` for each excluded case reproduces the totals above. The draw
 sample and `check-feme` reproduce exactly as H4b's own entry describes.
+
+## Roadmap H4d: measured impact (per-element addressing for a bare array-typed stage-IO global)
+
+**Root cause, isolated from a real, glslang-compiled repro rather than a
+synthetic one.** The roadmap row's own `GlobalDCE`/two-`LLJIT`
+cross-phase-collision hypothesis was checked first and refuted: a
+synthetic no-barrier tessellation-control entry (a single scalar `patch`
+global, no `gl_out` write at all) reproduced a clean
+`VK_ERROR_INITIALIZATION_FAILED` from `selectEntryPoint` failing to find
+`main.patchconstant` -- not the crash. The real shape needed a real
+shader: `dEQP-VK.tessellation.winding.default_domain.glsl_quads_ccw`'s own
+tessellation-control GLSL (`vktTessellationWindingTests.cpp`) was compiled
+to real SPIR-V with a minimal hand-written glslang driver (no
+`glslangValidator` binary was available in this environment, and no
+network access to install one; the driver links directly against
+`VK-GL-CTS`'s own already-built `libglslang.a`/`libSPIRV.a`/
+`libSPIRV-Tools*.a` static libraries) and fed straight into
+`vkCreateShaderModule` in a temporary gtest, reproducing the exact
+symptom: `JIT session error: Symbols not found: [ gl_TessLevelOuter,
+gl_TessLevelInner ]`. A `FEME_DEBUG_DUMP_STAGE`-gated dump of the
+post-`CanonicalizeStagePass` LLVM IR (temporary, not part of the final
+change) showed the actual defect: only the *first* store to each of
+`gl_TessLevelInner`/`gl_TessLevelOuter` (byte offset 0) was rewritten into
+a `feme.stage.output.store.f32` call; every other element's store (byte
+offsets 4/8/12, i.e. `gl_TessLevelInner[1]`/`gl_TessLevelOuter[1..3]`) was
+left as a raw `store float ..., ptr addrspace(8) getelementptr(...)`
+referencing the still-`external`, never-defined SPIR-V-imported global
+directly -- an unresolvable symbol at `LLJIT` link time.
+
+`resolveStageIOAccess` (`CanonicalizeStage.cpp`) treated every
+single-`ElementID` stage-IO global (i.e. every one *not* part of a builtin
+interface block/struct) as whole-value-only, unconditionally rejecting
+any nonzero byte offset with `return std::nullopt`. That is correct for a
+scalar global, but `gl_TessLevelInner`/`gl_TessLevelOuter` are
+`BuiltIn`+`Patch`-decorated `[2 x f32]`/`[4 x f32]` arrays with a *single*
+`ElementID` each (unlike a builtin interface block's one-`ElementID`-per-
+member shape) -- exactly the shape every GLSL tessellation-control shader
+writes one element at a time, with no interface block wrapping it. Fixed
+by applying the same `resolveRowComponent`-based byte-offset-to-(Row,
+Component) resolution the builtin-interface-block-member branch already
+used (`gl_PerVertex`'s own `gl_ClipDistance[i]`/`gl_CullDistance[i]`
+handling), to the single-`ElementID` branch's own global type instead of a
+struct member's type, using the full byte offset as the residual (there is
+no struct member offset to subtract first).
+
+**Unit tests.** `CanonicalizeStageTest.
+RewritesSPIRVArrayOutputStorePerElementByteOffset` locks the fix down at
+the LLVM-IR level: a bare `[4 x float]` `Output` global (no interface
+block, mirroring `gl_TessLevelOuter`'s own shape) written at 4 different
+byte offsets, asserting no raw `store` survives and all 4 (Row, 0)
+`feme.stage.output.store` pairs are seen -- confirmed to fail (rows 1-3
+unresolved) with the fix reverted. `GraphicsPipelineTest.
+AcceptsTessellationControlMultiElementArrayOutput` locks it down end to
+end: a real tessellation pipeline (`spirv.ControlBarrier`-split, matching
+`TessControlSource`'s own shape) whose control-point phase writes 2
+elements of a `gl_TessLevelOuter`-shaped `BuiltIn("TessLevelOuter")
+{patch}` global now `vkCreateGraphicsPipelines`-succeeds; confirmed, by
+reverting the fix and rebuilding, to reproduce the exact reported crash
+instead (`JIT session error: Symbols not found: [ tess_outer ]`,
+`VK_ERROR_INITIALIZATION_FAILED`). `ninja check-feme`
+(`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in full: **1824/1883**
+(59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from H4c's own
+1822/1881 baseline by exactly the two new tests this row adds.
+
+```
+Test run totals (dEQP-VK.tessellation.winding.*, glsl variants only, 24 cases):
+  Passed:        0/24 (0.0%)
+  Failed:        24/24 (100.0%)
+  Not supported: 0/24 (0.0%)
+```
+
+**0 `"Symbols not found"` JIT crashes** (was 24/24) -- confirmed by
+`grep -c "Symbols not found"` against the run's own log, 0 occurrences,
+down from 24 before this fix. But all 24 still `Fail`: a new, distinct,
+previously-unreached gap this fix itself surfaces (not introduced by it,
+the same "fix the named symptom, immediately hit the next blocking issue"
+shape H4b -> H4c -> H4e already established) --
+`splitTessellationControlEntry` only clones a `<entry>.patchconstant`
+phase when it finds a barrier to split at; winding's own trivial
+`layout(vertices=1)` control shader has none (a single output control
+point needs no cross-invocation synchronization, so glslang correctly
+never emits one), so `PatchConstantPhase` stays `nullptr` and no
+`.patchconstant` function is ever created. `compileAndValidateStages`
+(H4b), which always expects a `.patchconstant` sibling to exist and
+compiles it as a second stage unconditionally, now fails cleanly instead:
+`"no hull entry point named 'main.patchconstant'"` ->
+`VK_ERROR_INITIALIZATION_FAILED`, confirmed via a temporary diagnostic
+capture in `compileAndValidateStages`'s own error path (removed before
+this change was committed). This is a distinct gap in the barrier-split
+design itself (R34/H4a's own scope), not a `resolveStageIOAccess`
+addressing bug, so it is broken out as follow-up roadmap H4f rather than
+fixed in this row.
+
+**The same fix, applied at the `resolveStageIOAccess` level rather than
+winding-specifically, also unblocks 8 more cases**, discovered while
+resuming the full group's own crash-prone run (see "Reproducing this row"
+below): `dEQP-VK.tessellation.shader_input_output.{barrier,
+gl_position_tcs_to_tes,gl_position_vs_to_tcs,
+gl_position_vs_to_tcs_to_tes,patch_vertices_10_in_5_out,
+patch_vertices_5_in_10_out,primitive_id_tcs,primitive_id_tes}`. Before
+this fix, all 8 hit a different, pre-existing `Fail` one step later in the
+pipeline (confirmed unchanged by an A/B rebuild with this fix reverted):
+`error: 'llvm.getelementptr' op operand #0 must be LLVM pointer type or
+LLVM dialect-compatible vector of LLVM pointer type, but got
+'!llvm.array<32 x ...>'` -- the same underlying single-`ElementID`
+nonzero-offset gap this row fixes, just manifesting against a bare
+`OutputPatch`-shaped (`gl_out[]`/`gl_in[]`-style, 32 = `MaxPatchControlPoints`)
+array global addressed per control point rather than against
+`gl_TessLevelInner`/`Outer`'s own per-tess-factor addressing. After this
+fix, all 8 reach real code generation and immediately hit H4e's own
+already-tracked `MaskIntrinsics.cpp` `llvm_unreachable` abort instead --
+the identical "unblocked into the next, already-tracked gap" pattern H4c's
+own 24 hlsl-winding cases established, just for a different 8 cases this
+time.
+
+**Net result on the full group: byte-identical to H4b/H4c's own
+baseline.**
+
+```
+Test run totals (dEQP-VK.tessellation.*, 1114 cases):
+  Passed:          8/1114 (0.7%)
+  Failed:        227/1114 (20.4%)
+  Not supported: 879/1114 (78.9%)
+```
+
+Expected, not a sign the fix did nothing: of the 227 `Fail`s, 32 now
+resolve through the H4e crash bucket (24 winding-glsl + 8
+shader_input_output, both newly unblocked into it by this fix) instead of
+their own prior, distinct `Fail`/crash reasons -- but `Fail` is `Fail`
+either way the three headline buckets are concerned, so converting one
+`Fail` mechanism into another `Fail` mechanism cannot move Pass/Fail/
+NotSupported by itself, exactly as H4c's own report already established
+for its own 24 cases.
+
+**Regression sample.** The same `dEQP-VK.draw.*` sample H4/H4a/H4b/H4c's
+own reports use (1957 of the 29419-case mustpass list, every 15th case
+with `*viewport_height*` removed):
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        139/1957 (7.1%)
+  Not supported: 1806/1957 (92.3%)
+```
+
+Byte-identical to H4b/H4c's own recorded totals. **0 regressions, 0 new
+passes** -- expected, since this row's change is scoped entirely to
+`resolveStageIOAccess`'s single-`ElementID` nonzero-byte-offset handling,
+which no non-tessellation pipeline in the sample reaches (no other stage
+in this codebase's own test corpus writes a bare, non-block array/vector
+stage-IO global one element at a time the way a tessellation-control
+shader's tess-factor/`gl_out` writes do).
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change for this row: it neither flips a feature bit nor touches an
+extension, only widens which stage-IO store shapes `CanonicalizeStagePass`
+resolves correctly.
+
+**Reproducing this row.** Same ICD build and case-list generation as the
+rest of this report (see "Reproducing this report" above). The winding-glsl
+subset:
+
+```shell
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.tessellation.winding.*glsl*" \
+    --deqp-log-filename=winding_glsl.qpa
+```
+
+The full `dEQP-VK.tessellation.*` group needs H4c's own resume-on-abort
+loop (see its "Reproducing this row" above), generalized slightly: rather
+than assuming every abort's last case is the one to exclude and every
+other case prints a result line, drive the loop purely off "does this
+case's own block contain a `Pass`/`Fail`/`NotSupported` result line", and
+treat any case whose block does not (the process died before it could
+print one) as a `Fail` when summing -- this run hit crashes at 31 distinct
+points (32 cases total across all resumed iterations: 24
+`winding.*_domain.hlsl_*` plus the 8 `shader_input_output.*` cases named
+above), not H4c's own single 24-case bucket, so a loop that only ever
+excludes the *literal last-started* case per iteration (H4c's own
+simplification, valid when it only ever needed to skip one specific,
+already-known 24-case family) needs the "any unterminated block is a
+`Fail`" generalization to reproduce the correct total without hand-listing
+every crash point in advance. The draw sample and `check-feme` reproduce
+exactly as H4b/H4c's own entries describe.
