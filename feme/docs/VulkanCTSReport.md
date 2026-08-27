@@ -7137,3 +7137,140 @@ reports required is itself made obsolete by this row for every case that
 used to hit this specific abort (any case that still crashes after this
 fix would indicate a different, not-yet-tracked abort site, none of which
 were observed in this reproduction).
+
+## Roadmap H4f: measured impact (barrier-less tessellation-control split)
+
+**What changed.** `splitTessellationControlEntry`
+(`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`) only ever cloned a
+`<entry>.patchconstant` phase when it found a barrier; a tessellation-
+control shader with none -- legally the case whenever `OutputVertices ==
+1`, since a single control-point invocation needs no cross-invocation
+synchronization, exactly `dEQP-VK.tessellation.winding.*`'s own shape --
+left `PatchConstantPhase == nullptr`, while `compileAndValidateStages`
+(H4b) unconditionally expects that sibling to exist and compiles it as a
+second stage regardless. Fixed via option (a) of this row's own two
+proposed fixes: a new `isPatchConstantOnlyEntry(Function &F)` scans every
+address-space-8 store an entry makes and returns `true` only when at
+least one exists and every one is patch-frequency (`Patch`-decorated or a
+tess-factor `BuiltIn`), conservatively `false` for any global carrying
+`feme.spirv.MemberDecorations` (a real GLSL tess-factor write is always a
+plain global, never an interface-block member); a new
+`splitBarrierlessTessellationControlEntry` clones the whole entry as
+`<name>.patchconstant` via `CloneFunctionInto` when that holds, and
+replaces the original function's body with a trivial `ret void` stub,
+leaving the barrier-found path untouched. Option (b) (an unconditional
+whole-function clone whenever there is no barrier) was rejected: tracing
+`classifySPIRVElement`'s `HullPatchConstant`-phase branch shows it
+classifies any non-`Patch`-decorated address-space-8 write as
+`Direction::Input` (a read-back of a captured cross-barrier value, never
+a store), so cloning a function with an ordinary per-vertex output store
+into the patch-constant phase would misclassify that store's direction
+and trip `ValidateStagePass`'s `OutputStore` direction check.
+
+Locked down by `CanonicalizeStageTest.NoBarrierPatchConstantOnlyEntryIsSplitWhole`
+(a no-barrier hull entry writing only `gl_TessLevelOuter` splits into a
+trivial `main`, no signature, one `ret void` block, and a
+`main.patchconstant` clone whose signature carries one
+`PatchOutput`/`TessFactorEdge` element); the pre-existing
+`HullStageWithNoBarrierIsNotSplit` (an ordinary per-vertex write, no
+barrier) continues to correctly not split, confirming the new gate is not
+over-broad. `ninja check-feme` (assertions-enabled, ccache build) passes
+in full, 1829/1888 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from 1828/1887 before this row.
+
+**Measured impact.** Reproduced with `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+against `dEQP-VK.tessellation.winding.default_domain.glsl_*` (8 cases):
+before this fix, every one failed inside `GraphicsPipeline.cpp`'s
+compile step because `compileAndValidateStages` could not find a
+`.patchconstant` sibling function at all (`no hull entry point named
+'main.patchconstant'`, a diagnostic-and-`Fail` since roadmap H4e). After
+this fix, that specific error is gone (`grep -c "no hull entry point
+named"` against a full `dEQP-VK.tessellation.*` re-run returns 0, down
+from 24), but all 24 winding-glsl cases still `Fail` -- root-caused as a
+second, distinct blocker this row's own fix exposed (H4g below), and,
+after H4g's own fix, a third, still-open one (H4h). **Full group**
+(`dEQP-VK.tessellation.*`, 1114 cases) is byte-identical to H4b/H4c/H4d/
+H4e's own recorded totals (8 `Pass`/227 `Fail`/879 `NotSupported`) --
+expected, since this row's own fix alone does not yet turn any case
+green; it only changes *which* diagnostic the 24 winding-glsl cases hit.
+**Regression sample**: the same `dEQP-VK.draw.*` 1957-case sample used by
+every prior H4 row is byte-identical too (12 `Pass`/139 `Fail`/1806
+`NotSupported`) -- 0 regressions, expected, since no non-tessellation
+pipeline in this codebase's own test corpus reaches
+`splitTessellationControlEntry` at all.
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change for this row: `tessellationShader` was already flipped in H4/H4b,
+and this row neither adds nor removes a feature bit or extension, only
+fixes a stage-splitting gap.
+
+**Reproducing this row.** Same ICD build and case-list generation as the
+rest of this report:
+
+```shell
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  deqp-vk --deqp-case="dEQP-VK.tessellation.winding.default_domain.glsl_*" \
+    --deqp-log-filename=winding_glsl.qpa
+```
+
+## Roadmap H4g: measured impact (absent signature reflection for a zero-stage-IO compiled stage)
+
+**What changed.** H4f's own fix immediately exposed a second, distinct
+blocker: a compiled stage with zero SPIR-V stage-IO globals never got
+`!feme.signature` metadata attached at all, hit both by H4f's own new
+trivial control-point stub and, independently, by
+`dEQP-VK.tessellation.winding.*`'s own genuinely-empty vertex shader
+(`void main (void) {}`). `canonicalizeSPIRVStage`'s guard (`if
+(!InputGlobals.empty() || !OutputGlobals.empty())`) skips attaching any
+signature when a function has no stage-IO globals to begin with, so
+`feme::cpu::CompiledStage::create` never serialized a `Signature` byte
+vector for it, and `GraphicsPipeline.cpp`'s `getStageSignature` then
+hard-errors ("compiled stage carries no signature reflection") on the
+empty `Bytes`, reached unconditionally via `validateStageInterfaces`'s
+`getStageSignature(VertexStage)` call.
+
+Fixed at the narrowest safe layer, `CompiledStage::create`'s own
+serialization step (`feme/lib/Target/CPU/CompiledStage.cpp`), which now
+always serializes `feme::dxil::getEntrySignature(**Entry).value_or(
+EntrySignature{})` rather than only when a signature exists, treating an
+entirely-absent signature identically to an explicit empty one at the
+artifact-serialization boundary only -- matching
+`CanonicalizeStagePass::run`'s own pre-existing documented philosophy
+("an absent signature is treated as an empty one") without touching
+`canonicalizeSPIRVStage`'s `Changed`/rewriting behavior anywhere. A more
+general fix attempted first -- attaching an explicit empty
+`!feme.signature` in `canonicalizeSPIRVStage` itself whenever no stage-IO
+globals are found and no signature already exists -- was rejected and
+reverted: it cannot distinguish a genuinely-empty SPIR-V entry from an
+unresolved DXIL-origin entry using only that pass's local view, and would
+have broken the pre-existing `CanonicalizeStageTest.
+UnresolvableLoadInputIsLeftAlone` test (a DXIL-origin fragment entry with
+no `!feme.signature` metadata, asserting `run(*M)` returns `false`),
+which continues to pass unmodified under the layer actually chosen.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+1829/1888 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`) -- same
+headline as H4f's own row, since this fix changes serialization content,
+not pass/fail counts, and adds no new dedicated unit test of its own
+(covered indirectly by the existing `FeMeTargetCPUTests`/
+`FeMeTransformsGraphicsTests`/`FeMeVulkanTests` suites, including the
+DXIL-path test above, all of which continue to pass).
+
+**Measured impact.** Reproduced against the same
+`dEQP-VK.tessellation.winding.default_domain.glsl_*` 8-case list: the
+"compiled stage carries no signature reflection" error is gone entirely
+(0 occurrences across a full `dEQP-VK.tessellation.*` re-run, down from
+all 24 winding-glsl cases). **Full group** and **regression sample**
+totals are unchanged from H4f's own row (8/227/879 and 12/139/1806
+respectively) -- no case turns green yet, since a third, later blocker
+(H4h) still rejects every one of these 24 cases at
+`vkCreateGraphicsPipelines`.
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change for this row, for the same reason as H4f's own.
+
+**Reproducing this row.** Identical reproduction command to H4f's own
+row above; the "no signature reflection" error is what to check is gone.

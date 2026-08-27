@@ -763,8 +763,25 @@ either CPU wrapper ever sees the function: it requires exactly one
 group-sync barrier call in the entry, splits the CFG at that call via
 `splitBasicBlock`/`CloneBasicBlock`, and clones the post-barrier region into
 a new `<name>.patchconstant` function, diagnosing (rather than
-mis-splitting) zero-or-multiple barriers, no post-barrier region, or
-multiple entry edges into the post-barrier region. Roadmap H4c closed this
+mis-splitting) multiple barriers or multiple entry edges into the
+post-barrier region. A *zero*-barrier entry is not automatically a
+diagnostic: `OutputVertices == 1` (a single control-point invocation)
+needs no cross-invocation synchronization at all, so a real
+tessellation-control shader shaped that way legally never emits a
+barrier, yet is still semantically a patch-constant phase in its own
+right -- there is only one control point, so nothing meaningfully
+distinguishes "per control point" from "per patch" here. Roadmap H4f
+handles this shape: `isPatchConstantOnlyEntry` recognizes it (every
+address-space-8 store the entry makes is patch-frequency --
+`Patch`-decorated or a tess-factor `BuiltIn`) and
+`splitBarrierlessTessellationControlEntry` clones the *whole* entry as
+`<name>.patchconstant`, replacing the original with a trivial
+`ret void` control-point stub, rather than treating the absence of a
+barrier as an error; an entry with no barrier that still writes an
+ordinary (non-patch-frequency) per-vertex output is left unsplit exactly
+as before (diagnosed downstream instead, since that shape cannot
+legally arise for `OutputVertices == 1` and is not yet otherwise
+supported). Roadmap H4c closed this
 row's original remaining gap -- an SSA value defined before the barrier and
 read back after it, the common real shape a per-patch tessellation factor
 computed from control-point-body data takes -- by threading each such
