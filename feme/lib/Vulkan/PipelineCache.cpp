@@ -103,7 +103,8 @@ PipelineCacheKey feme::vulkan::computeGraphicsPipelineCacheKey(
     ArrayRef<VkPushConstantRange> PushConstantRanges,
     ArrayRef<uint8_t> FixedFunctionState,
     ArrayRef<uint32_t> TessControlShaderWords, StringRef TessControlEntry,
-    ArrayRef<uint32_t> TessEvalShaderWords, StringRef TessEvalEntry) {
+    ArrayRef<uint32_t> TessEvalShaderWords, StringRef TessEvalEntry,
+    ArrayRef<uint32_t> GeometryShaderWords, StringRef GeometryEntry) {
   SHA256 Hash;
   Hash.update(ArrayRef(DeviceUUID, VK_UUID_SIZE));
   Hash.update(
@@ -124,6 +125,11 @@ PipelineCacheKey feme::vulkan::computeGraphicsPipelineCacheKey(
       ArrayRef(reinterpret_cast<const uint8_t *>(TessEvalShaderWords.data()),
                TessEvalShaderWords.size() * sizeof(uint32_t)));
   Hash.update(TessEvalEntry);
+  // (roadmap H5e) Empty for a pipeline with no geometry stage, the same way.
+  Hash.update(
+      ArrayRef(reinterpret_cast<const uint8_t *>(GeometryShaderWords.data()),
+               GeometryShaderWords.size() * sizeof(uint32_t)));
+  Hash.update(GeometryEntry);
   hashSetLayoutsAndPushConstants(Hash, SetLayouts, PushConstantRanges);
   Hash.update(FixedFunctionState);
   return Hash.final();

@@ -32,6 +32,7 @@
 #include "PhysicalDeviceInfo.h"
 #include "Pipeline.h"
 
+#include "feme/Graphics/Geometry.h"
 #include "feme/Graphics/Pipeline.h"
 #include "feme/Graphics/PreparedDraw.h"
 #include "feme/Target/CPU/RuntimeABI.h"
@@ -222,6 +223,9 @@ struct GraphicsPipelineArtifact {
   std::shared_ptr<feme::cpu::CompiledStage> HullStage;
   std::shared_ptr<feme::cpu::CompiledStage> PatchConstantStage;
   std::shared_ptr<feme::cpu::CompiledStage> DomainStage;
+  /// (roadmap H5e) Set only for a pipeline declaring
+  /// `VK_SHADER_STAGE_GEOMETRY_BIT`.
+  std::shared_ptr<feme::cpu::CompiledStage> GeometryStage;
 };
 
 /// One graphics pipeline's compiled stages plus its whole translated,
@@ -266,6 +270,13 @@ struct GraphicsPipelineState {
   /// compiled stage's own `feme.tessellation.*` reflection (everything
   /// else).
   feme::graphics::TessellationState Tessellation;
+  /// (roadmap H5e) Set only when `Artifact->GeometryStage` is (i.e. the
+  /// pipeline declares a geometry stage): the geometry shape
+  /// `buildExecutorPipeline` hands to `graphics::GraphicsPipeline::
+  /// setGeometryStage`, assembled entirely from the compiled stage's own
+  /// `feme.geometry.*` reflection (unlike `Tessellation`, nothing here
+  /// comes from a `VkGraphicsPipelineCreateInfo` field).
+  feme::graphics::GeometryState Geometry;
 };
 
 /// A `VkPipeline` graphics pipeline: the compiled stages plus the
@@ -350,6 +361,10 @@ public:
   /// (roadmap H4b) Whether this pipeline declares tessellation stages.
   bool hasTessellationStages() const {
     return State.Artifact->HullStage != nullptr;
+  }
+  /// (roadmap H5e) Whether this pipeline declares a geometry stage.
+  bool hasGeometryStages() const {
+    return State.Artifact->GeometryStage != nullptr;
   }
 
 private:

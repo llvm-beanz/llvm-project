@@ -99,7 +99,9 @@ computePipelineCacheKey(const uint8_t (&DeviceUUID)[VK_UUID_SIZE],
 /// tessellation-control/evaluation stages' own words and entry points --
 /// empty when the pipeline declares no tessellation stages, exactly like
 /// \p FragmentShaderWords/\p FragmentEntry are for a fragment-less pipeline
-/// (roadmap H2j) -- (a graphics stage has no specialization data to fold
+/// (roadmap H2j) -- and (roadmap H5e) the geometry stage's own words and
+/// entry point, empty the same way for a pipeline with no geometry stage --
+/// (a graphics stage has no specialization data to fold
 /// in -- it is rejected outright at creation, see GraphicsPipeline.cpp's
 /// `compileGraphicsStage`), the pipeline layout's binding map and
 /// push-constant ranges, \p DeviceUUID (as `computePipelineCacheKey`
@@ -120,7 +122,9 @@ PipelineCacheKey computeGraphicsPipelineCacheKey(
     llvm::ArrayRef<uint32_t> TessControlShaderWords = {},
     llvm::StringRef TessControlEntry = {},
     llvm::ArrayRef<uint32_t> TessEvalShaderWords = {},
-    llvm::StringRef TessEvalEntry = {});
+    llvm::StringRef TessEvalEntry = {},
+    llvm::ArrayRef<uint32_t> GeometryShaderWords = {},
+    llvm::StringRef GeometryEntry = {});
 
 /// Whether persistent (serialized) pipeline-cache data is ever trusted as
 /// `vkCreatePipelineCache` input, per `FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA`
