@@ -932,13 +932,29 @@ remains available for a caller that already has its own flat scalar layout
 in hand; `buildGeometryInvocations` (the same header) is still used here to
 build the per-primitive `FemeGeometryInvocation` records.
 
-Scope note: `GeometryState::Invocations` (SPIR-V's `Invocations` execution
-mode / `gl_InvocationID`, letting one geometry entry point run more than
-once per assembled input primitive) is not modeled at the
-`FemeGeometryArgs`/`FemeGeometryInvocation` ABI level yet -- there is no
-`InvocationID` field, only `SV_PrimitiveID` -- so `executeDraws` only ever
-drives exactly one geometry invocation per input primitive, matching
-`GeometryWrapperPass`'s own current implementation. See Roadmap.md H5d-a.
+`GeometryState::Invocations` (SPIR-V's `Invocations` execution mode /
+`gl_InvocationID`, letting one geometry entry point run more than once per
+assembled input primitive) is modeled at the `FemeGeometryArgs`/
+`FemeGeometryInvocation` ABI level: each record carries both `PrimitiveID`
+and `InvocationID` fields, and `GeometryWrapperPass` lowers
+`SystemValue::InvocationID` input loads the same way it already lowers
+`SV_PrimitiveID` (roadmap H5d-a). `executeDraws` builds
+`Invocations * PrimitiveCount` records for a bound geometry stage --
+repeating each primitive's own input vertex attributes once per invocation,
+primitive-major/invocation-minor (row `= P * Invocations + Inv`), each
+stamped with its own `gl_InvocationID` -- rather than always exactly one
+record per primitive. `collectGeometryStreams`/
+`mergeGeometryStreamsInLaneOrder` needed no changes to support this: both
+already treat `Args.PrimitiveCount` (i.e. the ABI record/row count) generically
+as "row count" and merge lanes in array order, so N invocations per primitive
+simply become N consecutive lanes for that primitive, verified with a real
+end-to-end test (`ExecutorTest.
+GeometryStageInvocationsRunOncePerDeclaredInvocationCount`). That test also
+exposed a latent bug, now fixed: the merged `GeometryStreamBuilder`'s own
+capacity must be sized from the combined `RowCount * GState.MaxOutputVertices`
+total across every row, not a single row's own `GState.MaxOutputVertices`
+bound alone, or later rows' emissions are silently truncated by the merge's
+checked prefix sum once an earlier row's own budget is exhausted.
 
 ### Amplification/task and mesh stage model
 

@@ -8125,3 +8125,110 @@ still errors with no geometry stage bound). `ninja check-feme`
 **Reproducing.** Same invocation as H5b/H5f/H5g's own editions above
 (`dEQP-VK.geometry.*` and the `draw_sample.txt` caselist); no new command
 needed.
+
+## Roadmap H5d-a: measured impact (`GeometryState::Invocations` / `gl_InvocationID`)
+
+`dEQP-VK.geometry.*`: 200 cases, run against this driver before and after
+this row's three commits.
+
+**Before** and **after**, identically:
+
+```
+Test run totals:
+  Passed:        0/200 (0.0%)
+  Failed:        0/200 (0.0%)
+  Not supported: 200/200 (100.0%)
+  Warnings:      0/200 (0.0%)
+  Waived:        0/200 (0.0%)
+```
+
+Every case still reports `NotSupported (Requested core feature is not
+supported: geometryShader)`, same as H5d: this row is entirely about
+`Executor::executeDraws`'s own handling of `GeometryState::Invocations` for a
+hand-built pipeline, not about anything `vkCreateGraphicsPipelines` exposes,
+so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change, same as H5a/H5b/H5c/H5d/H5f/H5g.
+
+**Regression sample.** The same `draw_sample.txt` 1957-case sample this
+report has used since H4, run again against `Graphics/Executor.cpp`'s own
+widened geometry invocation-building loop and the coupled
+`GeometryStreamBuilder` capacity fix (see below):
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        139/1957 (7.1%)
+  Not supported: 1806/1957 (92.3%)
+```
+
+The sorted list of failing case names is byte-identical to H5d's own
+baseline (139 distinct names, diffed via the same small Python
+`TestCaseResult`/`StatusCode` parse H5d's own edition used). **0
+regressions, 0 new passes** -- expected, since no case in this sample binds
+a geometry stage at all, so `Invocations` (which only takes effect when
+`GraphicsPipeline::hasGeometryStages()`) never changes any of this sample's
+own code paths.
+
+**What changed and why real coverage was needed.** `GeometryState::
+Invocations` (`feme/include/feme/Graphics/Geometry.h`) already existed from
+H5a, but nothing downstream read it: `FemeGeometryInvocation` had no
+`InvocationID` field, `GeometryWrapperPass` had no lowering for
+`SystemValue::InvocationID`, and `Executor.cpp`'s H5d geometry-chaining
+block always built exactly one invocation record per assembled input
+primitive. Three commits close this gap: (1) `FemeGeometryInvocation` gains
+an `InvocationID` field (`RuntimeABI.h`/`StageArgsLayout.h`), and
+`GeometryWrapperPass` gains `lowerGeometryInvocationID` (sharing a new
+`lowerGeometryInvocationField` helper with the existing
+`lowerGeometryPrimitiveID`); (2) `buildGeometryInvocations`
+(`GeometryInputs.h`/`.cpp`) gains an optional `InvocationIDs` array
+parameter; (3) `Executor.cpp` computes `Invocations = max(GState.
+Invocations, 1)` and builds `RowCount = PrimitiveCount * Invocations` rows,
+repeating each primitive's input vertex attributes once per invocation
+(primitive-major, invocation-minor: row `= P * Invocations + Inv`), each
+stamped with both its `SV_PrimitiveID` and its own `gl_InvocationID`.
+
+The roadmap flagged `collectGeometryStreams`/`mergeGeometryStreamsInLaneOrder`'s
+lane-ordering contract as needing confirmation "with a real test rather than
+assumed" for N invocations per primitive. A new `ExecutorTest.cpp` case,
+`GeometryStageInvocationsRunOncePerDeclaredInvocationCount`, does exactly
+that: a single input triangle with `GeometryState::Invocations = 2`, whose
+geometry shader emits a full-viewport strip colored red for invocation 0 and
+green for invocation 1 (selected via `gl_InvocationID`, no branching), with
+`BlendMode::Replace` (last write wins) -- the test expects solid green,
+confirming invocation 1's lane is merged/rasterized strictly after
+invocation 0's. **This test failed on first run** (came back solid red, the
+*first* lane's color, not the last), which led to finding a real,
+pre-existing bug rather than a new one introduced by this row: the merged
+`GeometryStreamBuilder`'s own capacity
+(`GeometryStreamBuilder Combined(1, GState.MaxOutputVertices)`) was sized
+from a single row's own per-invocation `MaxOutputVertices` bound, not the
+combined `RowCount * GState.MaxOutputVertices` total every row could
+together emit. Since `mergeGeometryStreamsInLaneOrder` is a monotonic
+bump-allocator that truncates any lane whose vertices don't fit the
+combined builder's remaining capacity, invocation 1's emissions were
+silently dropped once invocation 0's own budget was exhausted -- present
+since H5d, never before exercised because every prior geometry test used
+exactly one row (one primitive, one invocation), so total emissions never
+exceeded a single row's own bound. Fixing the capacity computation to
+`RowCount * GState.MaxOutputVertices` made the new test pass without any
+change to the lane-ordering logic itself, confirming the roadmap's
+suspicion that "the merge's existing 'lane order' concept may already
+tolerate" multiple invocations per primitive -- it does; only the unrelated
+capacity bug stood in the way.
+
+**Unit coverage.** New tests, one per compiler phase touched:
+`GeometryWrapperTest.LowersInvocationIDInputLoad` (IR-level lowering),
+`CompiledStageTest.InvokeGeometryReadsInvocationIDDistinctFromPrimitiveID`
+(JIT-compiled end-to-end ABI read-back), `GeometryInputsTest.
+BuildsDistinctInvocationIDsForRepeatedPrimitives` (host-side record
+building, plus an extended `BuildsOneInvocationPerPrimitiveIdInOrder`), and
+`ExecutorTest.GeometryStageInvocationsRunOncePerDeclaredInvocationCount`
+(full executor/rasterizer path, the lane-ordering confirmation above).
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1857/1916** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from H5d's own **1853/1912** baseline by exactly the 4 new tests this
+row adds.
+
+**Reproducing.** Same invocation as H5d's own edition above
+(`dEQP-VK.geometry.*` and the `draw_sample.txt` caselist); no new command
+needed.
