@@ -36740,3 +36740,152 @@ touched here): harden `MaskIntrinsics.cpp`'s masked-load/store scalar
 mangling to diagnose an unsupported element type gracefully instead of
 `llvm_unreachable`-aborting the whole `deqp-vk` process -- now reached by
 32 cases instead of 24, all still tracked under the same row.
+
+# Roadmap H4e: `MaskIntrinsics.cpp` graceful diagnostic instead of `llvm_unreachable`
+
+## What this milestone is
+
+H4c's and H4d's own reports each independently confirmed the same
+downstream gap: `MaskIntrinsics.cpp`'s `appendScalarMangling` (the helper
+`getOrInsertMaskedLoad`/`getOrInsertMaskedStore`/`getOrInsertMaskedAtomicRMW`
+use to build a `feme.cpu.masked.*` declaration's type-mangled name) calls
+`llvm_unreachable("unsupported feme.cpu.masked.* element type")` for any
+element type it doesn't recognize a scalar/vector mangling for -- reached
+whenever `feme::cpu::LinearizePass` needs to mask a `load`/`store`/
+`atomicrmw` whose value is a matrix/aggregate-shaped type (the concrete
+repro is a tessellation-control shader's own `[4 x float]`/`[2 x float]`
+tess-factor struct, but any matrix/aggregate would trip the same path).
+Unlike every other unsupported-shape gap in this codebase, this one is a
+hard process abort (`SIGABRT`), not a diagnosed `Fail` -- so it doesn't
+just fail the one CTS case that hits it, it kills every case still queued
+behind it in the same `deqp-vk` process. H4e's own roadmap description
+asked for two things: the root legalization fix (teaching `feme::cpu::
+SIMDizePass` to actually widen a matrix/aggregate masked memory op --
+C8's own scope, not attempted here) and, "independently and more
+urgently", hardening `appendScalarMangling` itself to `emitError`+return
+a sentinel instead of asserting unreachable. This session did the second
+half only, exactly as the roadmap itself prioritized it.
+
+## Design
+
+The fix is a straightforward propagate-failure-outward refactor, not a
+new mechanism: this codebase already has a well-established pattern for
+"a pass finds a shape it can't yet handle" -- call `Ctx.emitError(...)`
+and return a sentinel (`false`/`nullptr`/`std::nullopt`) up to whatever
+caller can safely stop doing further work with the value that turned out
+to be unsupported. `GroupShared.cpp`'s `rewriteGroupSharedGlobals` (return
+`false`) and `FunctionWidener`'s various `emitError`-then-early-return
+call sites in `SIMDize.cpp` are the two clearest existing examples. I
+mirrored that shape exactly rather than inventing a new one:
+
+- `appendScalarMangling`: `void` -> `bool`. The one new `else` branch
+  prints the offending `Type` (via a `raw_string_ostream`, matching how
+  every other `emitError` call site in this codebase that needs to embed
+  a dynamic value into its message already does it -- there's no existing
+  helper for "stringify an `llvm::Type`" to reuse, and `Type::print` is
+  already the standard way to do that one-off) into an `emitError` message
+  through `Ty->getContext()`, then returns `false`.
+- `mangleMaskedMemOpName` (file-local, so I could change its signature
+  freely): `std::string` -> `std::optional<std::string>`. Propagates
+  `appendScalarMangling`'s `bool` result rather than swallowing it; the
+  vector-element-type case and the scalar case both flow through the same
+  `if (!Supported) return std::nullopt;` check now instead of the old
+  code appending directly to the output stream unconditionally.
+- `getOrInsertMaskedLoad`/`getOrInsertMaskedStore`/
+  `getOrInsertMaskedAtomicRMW`: check `mangleMaskedMemOpName`'s result
+  before doing anything else (building the `FunctionType`, calling
+  `getOrInsertFunction`) and return `nullptr` on failure. This also
+  incidentally means an unsupported type's declaration is never inserted
+  into the module at all -- there's nothing sound to insert a declaration
+  for in the first place, so this is strictly better than the
+  alternative of inserting a same-named-but-wrong-shaped stub.
+- `createMaskedLoad`/`createMaskedStore`/`createMaskedAtomicRMW`: check
+  the `Function *` they get back and return `nullptr` themselves rather
+  than handing `IRBuilderBase::CreateCall` a null callee (which would
+  itself crash, just one call frame later and with a much less legible
+  failure than the one this row exists to remove).
+- `feme::cpu::LinearizePass`'s `applyStageMasks` (`Linearize.cpp`), the
+  *only* caller of the three `createMasked*` entry points in this
+  codebase (confirmed by grep -- `feme::cpu::SIMDizePass`'s own masked-
+  load/store handling, `widenMaskedLoad`/`widenMaskedStore`, builds
+  `llvm.masked.gather`/`scatter` directly and never calls back into
+  `MaskIntrinsics.cpp`'s `createMasked*`/`getOrInsertMasked*` family at
+  all -- so the "reaches `feme::cpu::SIMDizePass`'s masked-memory-op path"
+  wording in H4c's own report is about where execution ends up *after*
+  `LinearizePass` creates the call, not about `SIMDizePass` being another
+  caller needing its own null check): each of the three call sites
+  (`LoadInst`, `StoreInst`, `AtomicRMWInst`) now checks the `CallInst *`
+  result and, on `nullptr`, `continue`s without touching the original
+  instruction. The original `load`/`store`/`atomicrmw` is left in place,
+  unmasked and un-erased -- not ideal in isolation (a divergent access
+  that should have been masked now runs unconditionally on every lane),
+  but that's exactly the "root legalization fix is C8's own scope, not
+  this row's" boundary the roadmap itself drew: the alternative of trying
+  to synthesize *some* correct masked lowering for a shape this pass
+  doesn't understand yet would be scope creep into C8, and would also
+  need to be sound, which "give up gracefully" trivially is and a
+  half-guessed lowering would not be.
+
+I deliberately did *not* try to thread a `bool` return all the way through
+`applyStageMasks`'s own callers (`DiamondFlattener`/`LoopLinearizer`,
+which call it many times per function and don't currently propagate a
+failure signal at all) to make the whole pass bail out early on this
+specific diagnostic. That would be a much larger, cross-cutting refactor
+for no additional correctness benefit here: `LLVMContext::emitError` is
+already enough, by itself, to guarantee `runPipeline`'s
+`ErrorDiagnosticGuard` turns this into a graceful `llvm::Error` once the
+whole `ModulePassManager` finishes running (see `Pipeline.cpp`'s own
+comment on `DiagGuard`: "every pass below reports an unsupported shape
+through `LLVMContext::emitError` rather than an `Error` a
+`ModulePassManager::run` could propagate, so this guard is what turns
+'printed a diagnostic' into 'this function fails'"). Continuing to run
+the rest of `LinearizePass` (and then `SIMDizePass`, etc.) on a module
+that's already doomed to fail at the `ErrorDiagnosticGuard` check is
+wasted work, but *safe* wasted work -- nothing downstream dereferences a
+null value or otherwise crashes on the un-rewritten instruction, it's
+just an ordinary `LoadInst`/`StoreInst`/`AtomicRMWInst` that later passes
+already know how to handle (possibly hitting *their own* unrelated
+`emitError` diagnostics on the same doomed module, which is fine: the
+`ErrorDiagnosticGuard` only needs to observe that *some* error occurred).
+
+## Verification
+
+Confirmed the fix is real, not just theoretical, with an actual CTS
+reproduction rather than trusting the unit tests alone: ran
+`dEQP-VK.tessellation.winding.*hlsl*` (the exact 24-case list H4c's own
+report first found this gap through) both to see the new clean-`Fail`
+behavior directly and to confirm the process no longer aborts partway
+through. Before this fix (checked via the pre-existing behavior described
+in H4c/H4d's own reports, not re-verified by reverting -- the crash is
+well-established and reverting to re-confirm it would just be re-breaking
+things I already know are broken) the run died with `SIGABRT` on the
+first case; after this fix, `deqp-vk` runs the full 24-case list in one
+pass, prints `error: feme-cpu-masked-mem-op: unsupported feme.cpu.masked.*
+element type '{ [4 x float], [2 x float] }' ...` plus a clean `Fail`
+result line for every one of the 24 cases, then reaches `DONE!` and prints
+its own totals summary (0 `Pass`/24 `Fail`/0 `NotSupported`) -- exactly
+the "graceful per-case `Fail`" this row's own text asked for. Also ran the
+full `dEQP-VK.tessellation.*` group (8/227/879, byte-identical to H4b/
+H4c/H4d's own baseline) and the standard `dEQP-VK.draw.*` regression
+sample (12/139/1806, also byte-identical) to confirm no regressions
+anywhere else. `ninja check-feme` (assertions-enabled, ccache build)
+passes in full: 1828/1887 (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), including four new tests (three `MaskIntrinsicsTest` cases, one
+per `createMasked*` entry point, and one `LinearizeTest` case exercising
+the same gap through the real pass rather than the helper directly).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+this row hardens an existing diagnostic path, it doesn't touch any
+feature bit or extension, matching H4c's/H4d's own "no change needed"
+conclusion for the identical reason.
+
+## What's still open
+
+The root legalization fix H4e's own roadmap text named -- teaching
+`feme::cpu::SIMDizePass` (or an earlier canonicalization pass) to actually
+widen a matrix/aggregate-typed masked memory access instead of merely
+failing to mangle a declaration name for one -- remains open under C8's
+own scope, unchanged by this row. The 32 cases this row's own measured
+impact covers (24 winding-hlsl + 8 shader_input_output) still `Fail`;
+only the *mechanism* by which they fail changed, from a process-ending
+crash to a clean, isolated diagnostic.
