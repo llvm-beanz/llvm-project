@@ -7453,3 +7453,131 @@ FEME_VULKAN_LOG_CREATION_ERRORS=1 \
   deqp-vk --deqp-case="dEQP-VK.tessellation.winding.*glsl*" \
     --deqp-log-filename=winding_glsl.qpa
 ```
+
+## Roadmap H4j: measured impact (rasterizer double-precision coverage test + top-left tie-break polarity fix)
+
+**What changed.** H4i's own domain-origin fix left all 24
+`dEQP-VK.tessellation.winding.*glsl*` cases uniformly failing at a much
+smaller, distinct defect: exactly 15/4096 stray red pixels for
+`glsl_quads_*`, and a 1-pixel top/bottom-row-fill off-by-one for
+`glsl_triangles_*`. Both were isolated entirely inside `Executor.cpp`'s
+per-sample coverage test, not `Tessellator.cpp`'s crack-free bridging (one
+of the roadmap row's own two candidates) -- direct `FEME_DEBUG_XY`-gated
+instrumentation at the CTS's own failing pixel (16,16) confirmed the two
+candidate triangles there share bit-identical vertex positions, ruling
+out any divergent/duplicate domain-point evaluation on the tessellator
+side.
+
+**Root cause 1 (quads).** The coverage test's `edgeFn` (`float`) is not
+bit-exactly antisymmetric under vertex-order reversal: `edgeFn(A,B,P)`
+computes `P - A` while `edgeFn(B,A,P)` computes `P - B`, a different
+subtraction whose rounding does not exactly cancel even though the two
+results are mathematically exact negations of each other. Two adjacent
+triangles sharing an exact diagonal edge (the tessellator's own
+quad-core-cell split) each independently round a sample landing almost
+exactly on that shared edge to a spuriously *negative* value and both
+reject it -- a floating-point rasterization crack. Confirmed in isolation
+with a Python float32 emulation (`struct`/`numpy.float32`): recomputing
+the same edge function in `double` from the same float32 vertex inputs
+resolves the tie to a genuine, non-degenerate sign.
+
+**Root cause 2 (triangles).** Independent pre-existing polarity bug in
+`isTopLeftEdge`. Tessellation factor 5 (`gl_TessLevelInner/Outer = 5.0`
+throughout this CTS group) lands every domain edge on a clean multiple
+of `64/5 = 12.8`, so a lone tessellated triangle's own outer hypotenuse
+can land a sample exactly on `E == 0.0` at the corners of the tessellated
+domain. The old (backwards) tie-break formula, `(Dy == 0 && Dx > 0) ||
+Dy < 0`, classified that edge as "included" when Vulkan's spec-mandated
+top-left rule (matching D3D/OpenGL) requires it excluded -- confirmed
+identical in both `_ccw` and `_cw` "visible" pipelines (independent of
+winding or domain origin, exactly matching this roadmap row's own
+observation that the defect does not correlate with either).
+
+**Fixes (`feme/lib/Graphics/Executor.cpp`).**
+
+1. A new `edgeFnD` (the same edge function, evaluated in `double`)
+   replaces `edgeFn` for the coverage test's three inside/outside
+   comparisons (`E0`/`E1`/`E2`) only; the barycentric interpolation
+   weights (`Bary0`/`Bary1`/`Bary2`) stay `float`, since those are
+   interpolated *values*, not coverage *decisions*. This shrinks the
+   rounding from `float`'s ~2^-23 relative precision to `double`'s
+   ~2^-52, several orders of magnitude below any crack this rasterizer's
+   own coordinate range produces.
+2. `isTopLeftEdge`'s polarity is flipped to `(Dy == 0 && Dx < 0) ||
+   Dy > 0`, re-derived geometrically for a positively-wound triangle
+   (`Area > 0`, an invariant the existing `SArea < 0.0f`
+   triangle-assembly reorder already guarantees before the coverage
+   test runs): a "top" edge is horizontal and points leftward (interior
+   below it), a "left" edge points downward (interior to its right).
+
+**New unit tests (`ExecutorTest.cpp`).**
+
+- `DoublePrecisionEdgeTestClosesAFloatRoundingCrackBetweenAdjacentTriangles`:
+  two triangles sharing a non-axis-aligned, non-"nice"-fraction edge
+  reached through the executor's own NDC-to-screen `projectVertex`
+  transform (not hand-picked screen coordinates), chosen so pixel
+  (16,16)'s sample point lands almost exactly on the shared edge.
+  Confirmed (via a temporary revert) to fail against the pre-fix code
+  and pass against the fix.
+- `TopLeftTieBreakExcludesALoneTrianglesOwnBoundaryEdge`: a single
+  triangle whose hypotenuse is a 4x4 viewport's own anti-diagonal
+  (`x + y == 4`); confirms all four boundary pixel centers landing
+  exactly on it are excluded, leaving exactly the 6 strictly-interior
+  pixels filled. Also confirmed to fail pre-fix and pass post-fix.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+1835/1894 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from
+1833/1892 before this row (the two new tests).
+
+**Measured impact.** A real `deqp-vk` run against
+`dEQP-VK.tessellation.winding.*glsl*` (24 cases) confirms the fix:
+
+```
+Test run totals:
+  Passed:        24/24 (100.0%)
+  Failed:        0/24 (0.0%)
+```
+
+All 24 cases now pass, up from 0/24 before this row.
+
+**Full group** (`dEQP-VK.tessellation.*`, 1114 cases):
+
+```
+Test run totals:
+  Passed:        32/1114 (2.9%)
+  Failed:        203/1114 (18.2%)
+  Not supported: 879/1114 (78.9%)
+```
+
+Up from H4i's own 8/227/879 -- exactly the 24 newly-fixed winding cases
+moving from `Fail` to `Pass`, with `NotSupported` unchanged -- confirming
+zero regressions elsewhere in the group.
+
+**Regression sample**: the same `dEQP-VK.draw.*` 1957-case sample used
+throughout this report is byte-identical to H4i's own recorded totals
+(12 `Pass`/139 `Fail`/1806 `NotSupported`) -- 0 regressions, expected,
+since neither fix changes any coverage-test outcome that was not already
+a genuine floating-point tie or crack (an exact tie or a value within a
+few ULPs of zero); no other test in either group exercises that
+condition differently than before.
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change for this row: this is a pure rasterizer-precision bug fix in the
+software rasterizer's own coverage test, touching no feature bit or
+extension.
+
+**Reproducing this row.** Same ICD build as the rest of this report:
+
+```shell
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.tessellation.winding.*glsl*" \
+    --deqp-log-filename=winding_glsl.qpa
+```
+
+and, for the full group / regression sample, the same invocations H4a's
+own report entry documents (`--deqp-case="dEQP-VK.tessellation.*"`, and
+`grep -v viewport_height draw.txt | awk 'NR%15==1'` against
+`external/vulkancts/mustpass/main/vk-default/draw.txt` for the draw
+sample's case list).
