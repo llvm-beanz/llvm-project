@@ -150,10 +150,22 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
 
   GroupSharedRequirements GroupSharedReqs = getGroupSharedRequirements(Mod);
   uint32_t SideEffectFlags = computeSideEffectFlags(**Entry);
-  std::vector<uint8_t> Signature;
-  if (std::optional<EntrySignature> Sig =
-          feme::dxil::getEntrySignature(**Entry))
-    Signature = serializeSignature(*Sig);
+  // (Roadmap H4g) An entry point with no `!feme.signature` metadata at all
+  // (e.g. a genuine SPIR-V entry with no stage-IO varyings of its own,
+  // `dEQP-VK.tessellation.winding.*`'s own empty `void main (void) {}`
+  // vertex shader, or `splitTessellationControlEntry`'s synthesized
+  // trivial control-point phase for an `OutputVertices == 1` no-barrier
+  // tessellation-control entry) is treated identically to one carrying an
+  // explicitly empty `EntrySignature`, matching
+  // `CanonicalizeStagePass::run`'s own "an absent signature is treated as
+  // an empty one" rewriting convention -- so `getStageSignature`
+  // (GraphicsPipeline.cpp) always finds *some* serialized reflection to
+  // parse, rather than erroring out with "compiled stage carries no
+  // signature reflection" for a stage that legitimately declares zero
+  // elements.
+  EntrySignature Sig =
+      feme::dxil::getEntrySignature(**Entry).value_or(EntrySignature{});
+  std::vector<uint8_t> Signature = serializeSignature(Sig);
 
   unsigned WaveSize = 1;
   if (!Reference) {
