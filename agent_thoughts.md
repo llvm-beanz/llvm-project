@@ -37071,3 +37071,135 @@ lands).
   now describes the no-barrier, `OutputVertices == 1` case H4f added
   support for, since the old text was a real deviation from the code's
   new behavior.
+
+# Milestone H4h: relax the `SV_Position` requirement to the domain stage under tessellation
+
+## Starting point
+
+H4f and H4g (see previous heading) got a `dEQP-VK.tessellation.winding.*`
+glsl pipeline all the way through stage compilation and signature
+serialization, but the roadmap's own H4h row recorded a third blocker
+still ahead of them: `validateStageInterfaces` (`GraphicsPipeline.cpp`)
+unconditionally required the *vertex* stage's own reflected signature to
+carry a 4-component `SV_Position` output. That is the right requirement
+for an ordinary vertex -> fragment pipeline (the rasterizer needs a
+clip-space position from somewhere, and the vertex stage is the only
+producer without a domain stage), but wrong once a tessellation
+evaluation stage exists. I confirmed by reading `vktTessellationWinding
+Tests.cpp` directly that the CTS's own `winding` group deliberately uses
+a genuinely empty vertex shader (`void main (void) {}`): the evaluation
+shader computes `gl_Position` purely from `gl_TessCoord`
+(`vec4(gl_TessCoord.xy*2.0 - 1.0, 0.0, 1.0)`) and never reads any
+per-vertex output back through `gl_in[]`, so nothing the vertex stage
+could write would ever matter to this test group anyway.
+
+## What I changed
+
+`FeMeGraphicsDesign.md`'s own tessellation section (section on
+`runPatchPipeline`) already documented, ahead of this fix, that
+"everything downstream of the vertex stage reads whichever signature and
+output block belongs to the *last pre-rasterization stage* -- the domain
+stage when tessellating, the vertex stage otherwise" -- i.e. the
+*executor's* runtime data flow already had this right. The gap was
+purely in the *validation* code checking pipeline creation eagerly,
+which hadn't caught up to that same design. That meant I didn't need to
+touch any design doc for this fix (unlike H4f's `splitTessellationControl
+Entry` deviation) -- the implementation was simply catching up to an
+already-correct, already-written design description.
+
+The fix itself: `compileAndValidateStages` already has the compiled
+`DomainStage` in scope (it needs it for the tessellation-state merge
+H4b added), so I threaded it through as a new, optional parameter to
+`validateStageInterfaces`. When non-null, the function now parses and
+checks *its* signature for the `SV_Position` requirement instead of the
+vertex stage's, leaving every other check in the function completely
+untouched: fragment varying linkage is still checked against the vertex
+stage's own outputs (a real limitation still worth flagging for a later
+milestone -- in a full tessellation pipeline, fragment inputs should
+really link against the *domain* stage's outputs, not the vertex
+stage's, but no CTS case in this milestone's own scope exercises a
+varying passed through a tessellating pipeline, and fixing that
+prematurely would be scope creep past what H4h's own roadmap wording
+asked for), per-attachment `SV_TargetN` outputs, and vertex-input-
+attribute coverage all stayed on the vertex stage as before. An ordinary
+two-stage pipeline (`DomainStage == nullptr`) still requires the vertex
+stage to write `SV_Position` exactly as it did before this change --
+verified by a new negative test, `RejectsEmptyVertexShaderWithoutTessellation`.
+
+One implementation detail worth recording: my first draft tried storing
+the chosen signature as a `const feme::EntrySignature *` reseated from
+one of two `Expected<...>` locals, but that risks leaving an `Expected`
+with an unchecked error alive when the branch not taken is never
+consulted -- LLVM's `Expected<T>` asserts on destruction if its error
+state was never inspected. I switched to a `std::optional<feme::Entry
+Signature>` that is only ever populated (and always inspected, via its
+own `if (!Parsed)` check) when `DomainStage` is non-null, with a
+reference that binds to either it or the already-checked `VSSig`
+instead -- avoids the whole unchecked-`Expected` hazard by construction.
+
+## Testing
+
+Added `AcceptsTessellationPipelineWithEmptyVertexShader` (a real
+four-stage tessellation pipeline whose vertex module is `void main
+(void) {}`, using a new `EmptyVertexSource` MLIR fixture with zero
+stage-IO globals, now creates successfully end to end) and `Rejects
+EmptyVertexShaderWithoutTessellation` (the same empty vertex module in
+an ordinary two-stage pipeline is still correctly rejected, confirming
+the relaxation doesn't leak into the non-tessellation path). `ninja
+check-feme` (assertions-enabled, ccache build) passes in full,
+1831/1890 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up
+from 1829/1888 before this change.
+
+## Vulkan CTS measurement
+
+Ran a real `deqp-vk` (built under `/home/dev/dev/VK-GL-CTS/`) against
+`dEQP-VK.tessellation.winding.*glsl*` (24 cases) with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`. The `"vertex stage does not write a
+4-component SV_Position output"` error is gone entirely (0 occurrences),
+and all 24 cases now reach `vkCreateGraphicsPipelines` success and
+produce a rendered image -- genuine forward progress. They still all
+`Fail`, though, at a new, later, fourth blocker: a pixel-comparison
+mismatch inside the test's own image verification. Looking at the
+pattern across every `_ccw`/`_cw` pair (e.g. `glsl_quads_ccw` gets "got
+4081 white and 15 red pixels" against an expectation of "only white
+pixels", while its `_cw` sibling gets "got 0 white and 4096 red pixels"
+against the same expectation; the `glsl_triangles_*` cases fail with
+"triangle orientation is incorrect" at close to a 50/50 pixel split), the
+two colors present in every failing image are always exactly the two
+the test itself defines for "correctly wound" vs "incorrectly wound" --
+strongly suggesting a systematic front-face/winding-order inversion
+specific to tessellated primitives (most likely in how `PatchPipeline.
+cpp` orders a tessellated triangle's vertices relative to `VertexOrder
+Ccw`/`VertexOrderCw`, or how the executor's rasterizer classifies a
+tessellated triangle's front face), rather than a per-fragment color or
+depth bug. I did not investigate further or attempt a fix, since it is a
+distinct, later gap outside H4h's own described scope (the `SV_Position`
+validation check) -- broken out as a new, open roadmap row, H4i, rather
+than folded into this row's own claims, matching the project's
+established pattern of keeping each row's own diff small and its own
+"done" claims narrowly, exactly true.
+
+Confirmed no regressions: the full `dEQP-VK.tessellation.*` group (1114
+cases) and the `dEQP-VK.draw.*` regression sample (1957-case subset, same
+one every prior H4 row used) are both byte-identical to H4g's own
+recorded totals (8/227/879 and 12/139/1806 respectively).
+
+## Documentation updates made alongside the code
+
+- `feme/docs/Roadmap.md`: struck through H4h with a "done" note
+  describing the fix, its unit-test coverage, `check-feme` counts, and
+  the measured `deqp-vk` impact; added H4i as a new, open row for the
+  winding/front-face orientation mismatch this fix's own re-measurement
+  uncovered.
+- `feme/docs/VulkanCTSReport.md`: added a "Roadmap H4h: measured impact"
+  section, following the exact structure of the pre-existing H4a-H4g
+  sections (what changed, unit test coverage, `check-feme` counts,
+  full-group and regression-sample CTS numbers, feature/extension
+  inventory notes, reproduction command).
+- `feme/docs/Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+  checked, no change needed -- this fix touches no feature bit or
+  extension, only a validation-layer relaxation.
+- No design-doc update was needed this time: `FeMeGraphicsDesign.md`'s
+  own tessellation section already documented the domain-stage-owns-
+  SV_Position rule correctly ahead of this fix; the gap was purely that
+  the validation code hadn't caught up to it yet.
