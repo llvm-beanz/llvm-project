@@ -6198,3 +6198,145 @@ advertised, up from 43); `VK_EXT_shader_viewport_index_layer` moves from
 "Planned" to "Implemented (core, not advertised by name)" (18 of 51
 core-but-unadvertised extensions, up from 17; 49 of 150 planned, down from
 50).
+
+## Roadmap H3a: measured impact (`gl_ViewportIndex` as a fragment-shader input)
+
+`dEQP-VK.draw.*.shader_viewport_index.fragment_shader_*` (`vktDrawShaderViewportIndexTests.cpp`,
+`initFragmentTestPrograms`): 68 cases (17 each across the four
+render-target-path variants, including `fragment_shader_implicit`).
+
+**Environment note**: `deqp-vk` must be run with
+`VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json`
+explicitly set. The shell's ambient `VK_ICD_FILENAMES` (Mesa Lavapipe's
+`lvp_icd.json`) silently makes every case in this group appear to pass
+against the *wrong* driver -- a false positive discovered while reproducing
+this row, since Lavapipe fully supports `gl_ViewportIndex` as a fragment
+input and this milestone's own bug therefore never showed up until feme's
+own ICD was targeted explicitly.
+
+Before this row (H3's own baseline, reproduced against feme's own ICD):
+
+```
+Test case 'dEQP-VK.draw.renderpass.shader_viewport_index.fragment_shader_2'..
+error: feme-cpu-wrap-fragment: fragment stage wrapper requires attached feme.signature metadata
+  Fail (vk.createGraphicsPipelines(device, pipelineCache, 1u, pCreateInfo, pAllocator, &object): VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37)
+
+Test run totals:
+  Passed:          0/68 (0.0%)
+  Failed:         68/68 (100.0%)
+  Not supported:   0/68 (0.0%)
+```
+
+Root cause was **not** the fragment-stage-signature-attachment path H3's
+own triage suspected (`CanonicalizeStage.cpp`'s builtin-to-`SignatureSystemValue`
+mapping and its `InputGlobals`/`OutputGlobals` collection loop were
+re-verified correct for this exact shape via a hand-written minimal
+`gl_ViewportIndex`-reading fragment shader run through `feme-opt
+-passes=feme-graphics-canonicalize-stage`: `!feme.signature` metadata was
+attached correctly, both on a single pass run and simulating the real
+double-run pipeline). The real dEQP shader differs from that minimal repro
+in one way: it reads `gl_ViewportIndex` to index into a bound `Colors`
+uniform block (`out_color = color[gl_ViewportIndex]`) -- and that bound
+resource is what actually triggers the bug, four independent gaps deep:
+
+1. **`SPIRVResourceLowering.cpp`'s `addResourceEnvParams`** (and the
+   DXIL-oriented twin, `ResourceLowering.cpp`'s own identically-shaped
+   helper) rewrites any function using a bound resource handle into a new
+   `Function` via `Function::Create`+`copyAttributesFrom` to append the
+   resource-heap ABI parameters. `llvm::GlobalObject::copyAttributesFrom`
+   copies calling convention/attributes/linkage/GC/personality/prefix-
+   prologue data, but **not** function-attached metadata -- so the
+   `!feme.signature` metadata `CanonicalizeStagePass` had already attached
+   was silently dropped the moment the fragment entry function touched its
+   bound UBO, explaining exactly the observed error and why it was
+   invisible to any repro without a bound resource. Fixed with an explicit
+   `NewF->copyMetadata(&F, /*Offset=*/0)` right after `copyAttributesFrom`
+   in both files.
+2. Once metadata survived, **`FragmentWrapper.cpp`'s `loadFragmentSystemValue`**
+   had no `case SignatureSystemValue::ViewportArrayIndex`, hitting the
+   "unsupported fragment system value for element 0" error path (the small
+   set of fragment-input builtins wired up before this milestone --
+   `FragCoord`/`Position`, `FrontFacing`, `SampleId`, `SampleMask` -- never
+   included it). Fixed by adding a new per-lane `ViewportIndex` field to
+   `FemeFragmentInvocation` (`RuntimeABI.h`) and the mirrored
+   `FragmentInvocationField` enum/`getFragmentInvocationType` builder
+   (`StageArgsLayout.h`), plus the new read case in `loadFragmentSystemValue`.
+3. Once codegen succeeded, JIT'ing the real shader failed with `Symbols
+   not found: [ feme.cpu.resource.load.raw.v4f32 ]`: `ResourceCalls.cpp`'s
+   `mangleResourceCallName`/`isSupportedRawElementType` already generically
+   support vector-typed raw/structured buffer element loads, but
+   `FeMeRuntimeCPU.c` only ever defined the scalar
+   `feme.cpu.resource.load/store.raw.i32`/`.f32` runtime helpers -- a
+   pre-existing "raw buffer views" completeness gap, unrelated to
+   `ViewportIndex` specifically, that this shader's whole-`vec4` UBO load
+   was simply the first thing in this codebase's test/CTS surface to
+   exercise. Fixed by adding `femeCpuResourceLoadRawV4F32`/
+   `femeCpuResourceStoreRawV4F32` (16-byte unaligned memcpy, mirroring the
+   existing scalar raw load/store pattern).
+4. With all three of the above fixed, pipeline creation and rendering both
+   succeeded, but the rendered image was still wrong: `Executor.cpp`'s
+   `resolvePrimitiveState` already computed the resolved `gl_ViewportIndex`
+   value locally (via `resolveViewportArrayIndex`, added by H3 itself, to
+   select the viewport/scissor array element) but discarded it once that
+   selection was made, never threading it into the per-lane
+   `FemeFragmentInvocation` the fragment shader body actually reads from.
+   Fixed by adding a `ViewportIndex` field to `PrimitiveState`/
+   `ScreenTriangle` and filling `Inv.ViewportIndex[Lane]` in the per-lane
+   invocation-fill loop, mirroring the existing `TargetLayer`/`ViewIndex`
+   wiring.
+
+After all four fixes:
+
+```
+Test run totals:
+  Passed:         68/68 (100.0%)
+  Failed:          0/68 (0.0%)
+  Not supported:   0/68 (0.0%)
+```
+
+The full `shader_viewport_index` group (196 cases, H3's own measurement)
+now reads 132/196 passed (68 fragment + 64 vertex, unchanged), 64 `Not
+supported` (`geometry_shader`/`tessellation_*`, H4/H5, unrelated), 0
+`Failed` -- H3's own Deviation is fully closed.
+
+**Regression checks** (no regressions found; two showed a net improvement):
+
+- `dEQP-VK.multiview.*` (838 cases, since the `FemeFragmentInvocation`
+  layout change shifts the `ViewIndex` field's own struct offset): 457/838
+  (54.5%) passed, 42 `Failed`, 339 `Not supported` -- byte-identical to the
+  pre-fix baseline (confirmed via `git stash`/rebuild/re-run). The 42
+  `Failed` are pre-existing `VK_ERROR_FORMAT_NOT_SUPPORTED` renderpass
+  failures, unrelated to this row.
+- `dEQP-VK.ubo.*` (a representative every-15th-case sample of the full
+  13240-case group, 882 cases, since the `SPIRVResourceLowering.cpp`/
+  runtime changes touch any fragment shader using a bound UBO, not just
+  `ViewportIndex` ones): 32/882 passed pre-fix vs. **47/882 passed
+  post-fix**, 345 `Failed` pre-fix vs. 330 `Failed` post-fix -- 0 new
+  failures, and 15 additional cases now pass, a direct side benefit of the
+  metadata-preservation and vector-raw-load runtime fixes generalizing
+  beyond this row's own `ViewportIndex` motivation.
+- A broad `dEQP-VK.draw.*` run (29419 cases) hit one unrelated pre-existing
+  crash (`SelectInst::init` assertion in
+  `negative_viewport_height.front_ccw_cull_back`) and one unrelated
+  pre-existing `VK_ERROR_INITIALIZATION_FAILED` (`multiple_interpolation`);
+  both reproduced identically after `git stash`ing this row's changes,
+  confirming neither is a regression from this row.
+
+New unit tests (one per translation phase this row touches):
+`SPIRVResourceLoweringTest.PreservesFunctionMetadataAcrossEnvParamRewrite`,
+`ResourceLoweringTest.PreservesFunctionMetadataAcrossEnvParamRewrite`
+(gap #1), `FragmentWrapperTest.LowersViewportArrayIndexSystemValueInput`
+(gap #2), `RuntimeCPUTest.RawLoadV4F32IdentityFormat`/
+`.RawLoadV4F32InactiveMaskReadsZero`/`.RawStoreV4F32RoundTrips`/
+`.RawStoreV4F32DroppedWithoutUavFlag`/`.RawLoadV4F32StructuredKindIsAccepted`
+(gap #3), `DrawTest.FragmentShaderReadsBackViewportIndex` (gap #4,
+end-to-end). `ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build)
+passes in full, 1785/1844 (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H3's own 1776/1835 baseline by exactly the 9 new tests
+above.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no changes
+needed -- H3 already flipped `multiViewport`/`shaderOutputViewportIndex`/
+`shaderOutputLayer` to `VK_TRUE` and `VK_EXT_shader_viewport_index_layer`
+to "Implemented"; this row is a pure bugfix underneath those same feature
+bits, not a new capability.
