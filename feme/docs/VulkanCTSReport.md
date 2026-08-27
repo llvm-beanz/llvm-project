@@ -7694,3 +7694,134 @@ useful for H5b) and does not flip the stage filter. The array-indexed
 per-vertex input read is broken out as roadmap H5b below, which needs to
 land before `CanonicalizeStagePass::run` can safely accept
 `ShaderStage::Geometry` at all.
+
+## Roadmap H5b: measured impact (dynamic `Vertex` operand for `gl_in[i]`-shaped access)
+
+**Still 0/0/200 on `dEQP-VK.geometry.*` -- correctly so.** H5b builds the
+machinery `CanonicalizeStagePass::run` will need once H5c finally accepts
+`ShaderStage::Geometry`, but it does not itself flip that filter (H5c's own
+job, and still deliberately not done here -- see "Roadmap H5: what H5a
+found, and why it stops here" above). With no geometry entry point ever
+reaching `canonicalizeSPIRVStage` yet, none of this row's new code paths
+are reachable from a real `deqp-vk` run at all:
+
+```
+Test run totals:
+  Passed:        0/200 (0.0%)
+  Failed:        0/200 (0.0%)
+  Not supported: 200/200 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no change:
+`geometryShader` stays `VK_FALSE`, and this row advertises nothing new.
+
+**What this row actually adds.** `CanonicalizeStage.cpp` gains
+`getDynamicVertexIndexedAccess`, recognizing the one specific IR shape
+`gl_in[i]` (or any other per-vertex-arrayed `Input`-storage-class SPIR-V
+global, block or plain) compiles down to: a `GetElementPtrInst` -- not a
+constant-foldable `ConstantExpr`, since `i` is a genuine loop-carried SSA
+value -- whose first index is the ordinary pointer-to-aggregate `0` and
+whose second is that non-constant vertex index, with everything past it
+(a builtin interface block's own member selection, or a matrix row within
+that one vertex's own value) still constant and resolved into a byte
+offset exactly the way the existing constant-offset path
+(`getStageIOBaseAndOffset`/`resolveRowComponent`) already does, just
+starting one array dimension in. `resolveStageIOAccess` tries this shape
+first, threading the extracted `Value*` through as `feme.stage.input.load`'s
+`Vertex` operand in place of the ordinary constant `i32 0` every other
+stage-IO access seeds it with; both of this pass's stage-IO discovery
+loops (`usesSPIRVStageIO`, and `canonicalizeSPIRVStage`'s own) are updated
+to recognize such a global too (via the new shared `getStageIOGlobal`
+helper), since `getStageIOBaseAndOffset` alone can never fold a
+non-constant GEP index and so never discovers it. The signature-building
+side (`addElements`) is taught to peel exactly one outer array dimension
+before checking for a builtin interface block's per-member
+`feme.spirv.MemberDecorations` metadata, so a geometry `gl_in[]` block's
+own per-member `SignatureElement`s are built from each member's *own*
+value type (e.g. `gl_Position`'s bare `<4 x float>`), never conflating the
+per-vertex array dimension with a member's own `RowCount` the way a real
+matrix's row dimension is (see the note below on the one thing this row
+deliberately leaves alone).
+
+`ValidateStage.cpp` gains `validateVertex`, diagnosing a non-constant
+`Vertex` operand anywhere except the geometry stage -- the only stage
+whose ABI (`FemeGeometryArgs`'s primitive-major `Inputs` layout,
+`GeometryWrapper.cpp`'s own `lowerGeometryInputLoad`: "the vertex-in-
+primitive operand ... may be any value in `[0, VerticesPerPrimitive)`") is
+actually built to address one at runtime. Since `ValidateStagePass::run`
+itself still only validates the vertex/fragment stages (Hull/Domain
+already unvalidated before this row; Geometry remains so too -- both are
+H5e's own open item, not this row's), this check is exercised today only
+against the stages it *does* validate, confirming it fires as a diagnostic
+rather than becoming reachable dead code once H5e lands.
+
+**One thing this row deliberately does not do.** A *constant* vertex index
+into one of these arrays (`gl_in[0].gl_Position`, or an entirely unrolled
+loop) still resolves through the pre-existing `getStageIOBaseAndOffset`
+byte-offset path exactly as before H5b, folding that constant array index
+into the member's own `Row` operand rather than `Vertex` -- the roadmap
+entry's own title scopes this row to the *non-constant* case only, and
+every real GLSL geometry shader loops over `gl_in` rather than unrolling
+it by hand, so this is not expected to matter in practice. Reconciling
+that (a per-vertex-array global's `RowCount` in the signature not
+matching what a real matrix's `RowCount` means, and a constant index
+still routing through `Row` instead of `Vertex`) is left to a later
+roadmap row, once H5c starts routing real geometry entries through this
+pass and a real consumer needs to tell the two apart reliably regardless
+of whether the shader's own index happens to be constant.
+
+**Regression sample.** Every new code path above is reached only by a
+non-constant-vertex-array-indexed `Input` global's own access (`resolveStageIOAccess`'s
+new fallback) or a `feme.stage.input.load`/`.output.store`'s non-constant
+`Vertex` operand (`validateVertex`) -- neither shape appears anywhere in
+this codebase's existing vertex/fragment/hull/domain-stage tests, so no
+regression is expected. Confirmed against the same `dEQP-VK.draw.*`
+1957-case sample this report has used since H4:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        139/1957 (7.1%)
+  Not supported: 1806/1957 (92.3%)
+```
+
+Byte-identical between this row's build and H5a's own baseline (both
+measured fresh for this row, since the CTS mustpass/environment this
+report runs against has drifted since H4a's own **133**-failure figure was
+first recorded -- confirmed by re-running H5a's unmodified tree through
+the same sample and getting the same **139**/1806 totals, so the drift is
+environmental, not caused by this row). **0 regressions, 0 new passes**
+either way.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1847/1906** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from H5a's own **1843/1902** baseline by exactly the 4 new tests this
+row adds -- `CanonicalizeStageTest.cpp`'s
+`ThreadsDynamicVertexIndexIntoInputLoad` and
+`ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad`, and
+`ValidateStageTest.cpp`'s
+`NonConstantVertexOperandIsDiagnosedOutsideGeometry` and
+`NonConstantVertexOperandIsDiagnosedOnOutputStore`.
+
+**Reproducing.** Same invocation as the rest of this report:
+
+```
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.geometry.*" --deqp-log-filename=geom.qpa
+```
+
+and, for the draw sample, the same `grep -v viewport_height draw.txt | awk
+'NR%15==1'`-built case list H4b's own report entry documents
+(`--deqp-caselist-file=draw_sample.txt`). `deqp-vk` still exits non-zero
+after printing `DONE!` and the totals (the same `tcu::NotSupportedError`
+teardown quirk this report already documents); the totals printed before
+it are the real result. One case in the full (non-sampled)
+`dEQP-VK.draw.*` set --
+`dynamic_rendering.complete_secondary_cmd_buff.negative_viewport_height.front_ccw_cull_back`
+-- aborts the whole run with an unrelated, pre-existing `SelectInst::init`
+assertion failure (confirmed present on H5a's own unmodified tree too,
+hence `grep -v viewport_height` excluding it from the sample); not
+something this row touches or fixes.

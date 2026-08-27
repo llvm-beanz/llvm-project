@@ -1416,10 +1416,24 @@ open (roadmap H5d), as does the rest of the Vulkan-API surface: as of
 roadmap H5a, `ConvertSPIRVToLLVMPass` captures a geometry entry point's
 declared shape (`feme::graphics::GeometryState`, mirroring
 `TessellationState`), but `CanonicalizeStage.cpp` still reflects only
-`Vertex`/`Fragment`/`Hull`/`Domain` entry points -- not yet `Geometry`,
-pending H5b's own per-vertex dynamic-index addressing fix -- and
-`vkCreateGraphicsPipelines` still rejects the geometry stage bit (roadmap
-H5c/H5e).
+`Vertex`/`Fragment`/`Hull`/`Domain` entry points -- not yet `Geometry` --
+and `vkCreateGraphicsPipelines` still rejects the geometry stage bit
+(roadmap H5c/H5e). Roadmap H5b has since closed the per-vertex
+dynamic-index addressing gap that blocked lifting `CanonicalizeStagePass`'s
+own stage filter: `CanonicalizeStage.cpp` now recognizes a `gl_in[i]`-shaped
+access -- a SPIR-V array-typed `Input`-storage-class global indexed by a
+genuine, non-constant loop variable, as opposed to a matrix's own
+compile-time-fixed `Row` dimension -- and threads the extracted index
+through as `feme.stage.input.load`'s `Vertex` operand, with
+`ValidateStagePass` diagnosing a non-constant `Vertex` operand on every
+stage except `Geometry`, the one stage whose ABI (`FemeGeometryArgs`'s
+primitive-major `Inputs` layout) is actually built to address one at
+runtime. A *constant*-indexed `gl_in[k]` access still folds through the
+older `Row`-based path rather than `Vertex` (roadmap H5f), and
+`SPIRVToLLVMPatterns.cpp` does not yet attach the member-decoration
+metadata a real `gl_in[]` builtin block needs for any of this to see real
+input (roadmap H5g); `CanonicalizeStagePass::run` itself still does not
+accept `ShaderStage::Geometry` (roadmap H5c).
 
 ### Amplification and mesh wrappers
 
