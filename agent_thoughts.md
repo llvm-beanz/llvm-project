@@ -35509,3 +35509,254 @@ Split into commits, each independently building and testing:
 
 This file's own new heading is committed separately afterward, per the
 standing instruction to keep `agent_thoughts.md` in its own commit.
+
+# Roadmap H3a: `gl_ViewportIndex` as a fragment-shader input
+
+## The task
+
+Roadmap H3 (multiple viewports and scissors) had already landed, but broke
+out its own Deviation as H3a: `dEQP-VK.draw.*.shader_viewport_index.
+fragment_shader_*` (68 of H3's own measured 196 cases) failed pipeline
+creation with `VK_ERROR_INITIALIZATION_FAILED`, `FragmentWrapper.cpp`
+reporting "fragment stage wrapper requires attached feme.signature
+metadata". H3's own triage suspected `CanonicalizeStage.cpp`'s
+builtin-to-`SignatureSystemValue` mapping or its `InputGlobals`/
+`OutputGlobals` collection loop, since the mapping (`getSystemValueForBuiltIn`)
+looked storage-class-agnostic and no fragment-input `ViewportIndex` support
+existed yet, unlike the small set of fragment-input builtins already wired
+up (`FragCoord`/`Position`, `FrontFacing`, `SampleId`, `SampleMask`).
+
+## First: proving the suspected file was innocent
+
+Before touching any code I re-verified H3's own suspicion empirically rather
+than trusting it. I hand-wrote a minimal SPIR-V fragment shader reading
+`gl_ViewportIndex` (`spirv-as`/`spirv-dis` round-tripped by hand, then
+imported via `feme-translate --import-spirv --no-implicit-module
+--spirv-to-llvmir`), then ran it through `feme-opt -passes=feme-graphics-
+canonicalize-stage -S` in isolation. The `!feme.signature` metadata came out
+attached correctly -- both on a single pass run, and running the pass twice
+in a row to simulate the real pipeline's own double-`CanonicalizeStagePass`
+invocation (`GraphicsPipeline.cpp` runs it once directly, then
+`Pipeline.cpp`'s `runPipeline` runs it again after a bitcode-round-trip
+module clone). This ruled out `CanonicalizeStage.cpp` as the actual culprit
+and meant the roadmap's own hypothesis, while a reasonable starting guess,
+was a red herring -- the bug was somewhere later in the pipeline that my
+simplified repro never reached.
+
+I then manually chained every subsequent real-pipeline pass by name
+(`feme-cpu-fold-spirv-builtins`, `feme-cpu-prepare`, `feme-cpu-normalize-
+bound-resources`, `feme-cpu-lower-root-constants`, `feme-cpu-lower-spirv-
+resources`, `feme-cpu-lower-spirv-push-constants`, `feme-cpu-lower-
+resources`, `feme-cpu-linearize`, `feme-cpu-simdize`, `feme-cpu-lower-wave`,
+`feme-cpu-wrap-fragment`) on my simplified repro. Metadata survived every
+stage, and the run hit a *different*, second, already-anticipated bug
+instead ("unsupported fragment system value for element 0" -- a missing
+`ViewportArrayIndex` case in `FragmentWrapper.cpp`'s `loadFragmentSystemValue`),
+not the roadmap's own reported error at all. This told me my simplified
+repro simply didn't reproduce the real bug's precondition, and that I
+needed the actual failing dEQP shader, not a hand-rolled approximation of
+it.
+
+## Getting the real shader, and a costly environment trap
+
+I found the actual GLSL source in `vktDrawShaderViewportIndexTests.cpp`'s
+`initFragmentTestPrograms`: a fragment shader with a bound `Colors` uniform
+block (`layout(set=0,binding=0) uniform Colors { vec4 color[N]; }`) and
+`out_color = color[gl_ViewportIndex];` -- this is the roadmap's exact quote,
+and critically, unlike my simplified repro, it reads a bound resource.
+
+Running the real `deqp-vk` against this group initially showed 100% passing
+-- which contradicted the roadmap entirely. It took a while to realize the
+shell's ambient `VK_ICD_FILENAMES` pointed at Mesa Lavapipe
+(`/usr/share/vulkan/icd.d/lvp_icd.json`), not feme's own driver, so every
+run was silently testing the wrong ICD. Explicitly setting
+`VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json`
+reproduced the exact real bug from the roadmap. This is now recorded as a
+standing gotcha for any future CTS work in this repo (see the "Technical
+details" note below) -- it's exactly the kind of mistake that produces a
+false "it already works" result and would have derailed the whole
+investigation if I hadn't cross-checked against the roadmap's own reported
+symptom.
+
+## Root-causing for real: four independent gaps, all downstream of a bound resource
+
+With the real shader and the real ICD, I added temporary env-var-gated
+debug-dump instrumentation to `GraphicsPipeline.cpp`'s `compileGraphicsStage`
+(dumping raw SPIR-V, imported LLVM IR, and post-canonicalize LLVM IR) to
+inspect exactly what the real pipeline was doing to this shader, since no
+`deqp-vk` flag actually dumps decompiled SPIR-V into its log. This confirmed
+`!feme.signature` metadata was attached correctly right after the *first*
+`CanonicalizeStagePass` run -- same as my simplified repro -- so the bug was
+still further downstream. I then manually re-ran the exact real pipeline
+pass sequence on the real dumped IR and hit the *same* "unsupported fragment
+system value" error my simplified repro hit, not the roadmap's reported
+metadata error -- meaning something about the *real* Vulkan pipeline path
+(`Pipeline.cpp`'s `runPipeline`, as actually invoked, versus my hand
+reconstruction of the same pass list) still differed.
+
+Reading `SPIRVResourceLowering.cpp`'s `addResourceEnvParams` (invoked
+whenever a function uses *any* bound resource handle -- exactly what my
+simplified repro lacked and the real shader has) found the actual bug: it
+rebuilds the function via `Function::Create` + `NewF->copyAttributesFrom(&F)`
+to append the resource-heap ABI parameters, but `GlobalObject::
+copyAttributesFrom` (checked directly in `llvm/lib/IR/Globals.cpp`/
+`Function.cpp`) only copies calling convention, attributes, linkage, GC,
+personality function, and prefix/prologue data -- never function-attached
+metadata. So `!feme.signature` was silently dropped the instant the real
+shader's UBO access triggered this pass, and my simplified repro (no bound
+resource) never reached this code path at all -- fully explaining why my
+first "isolate the bug" approach quietly missed it.
+
+I fixed this the minimal way: an explicit `NewF->copyMetadata(&F, 0)` right
+after `copyAttributesFrom`, verified via `GlobalObject::copyMetadata`'s
+implementation in `llvm/lib/IR/Metadata.cpp`. I also found and fixed the
+identical bug in `ResourceLowering.cpp` (the DXIL-oriented twin of the same
+helper) since it's the exact same code-duplication pattern and would bite
+any DXIL-sourced resource-handle stage function the same way, even though no
+currently-failing CTS case in this session actually exercised that path --
+justified as "tightly coupled to the bug just found," per the standing
+instruction to fix such things along the way.
+
+Rebuilding and re-testing after fix #1 got past the metadata error and, as
+predicted from my simplified-repro dead end, hit the already-anticipated
+second bug: `FragmentWrapper.cpp`'s `loadFragmentSystemValue` had no
+`case SignatureSystemValue::ViewportArrayIndex`. I added it, alongside a new
+per-lane `ViewportIndex[4]` field in `FemeFragmentInvocation` (`RuntimeABI.h`)
+and the mirrored `FragmentInvocationField` enum / `getFragmentInvocationType`
+struct builder (`StageArgsLayout.h`) -- these two representations (the C
+struct `Executor.cpp` fills directly, and the LLVM struct type
+`FragmentWrapper.cpp`'s generated code indexes into) must stay byte-for-byte
+identical, which I kept true by routing every read/write through the shared
+named enum rather than any hardcoded field index.
+
+That got past codegen but hit a third, previously-unknown bug at JIT time:
+`Symbols not found: [ feme.cpu.resource.load.raw.v4f32 ]`. Reading
+`ResourceCalls.cpp`'s `mangleResourceCallName`/`isSupportedRawElementType`
+showed the *lowering* side already generically supports vector-typed raw
+buffer element loads -- but `FeMeRuntimeCPU.c`, the actual C runtime linked
+into the JIT, only ever defined the scalar `.i32`/`.f32` variants. This is a
+genuine, pre-existing "raw/structured buffer views" completeness gap,
+unrelated to `ViewportIndex` specifically -- the real shader's whole-`vec4`
+UBO load was simply the first thing in this codebase's own test/CTS surface
+to need a vector raw load. I added `femeCpuResourceLoadRawV4F32`/
+`StoreRawV4F32`, a straightforward 16-byte unaligned memcpy mirroring the
+existing scalar pattern.
+
+With all three of those fixed, pipeline creation and rendering both
+succeeded, but the rendered image was still wrong -- a fourth bug, this time
+in the runtime data flow rather than the compiler: `Executor.cpp`'s
+`resolvePrimitiveState` already computes the resolved `gl_ViewportIndex`
+value locally (`resolveViewportArrayIndex`, added by H3 itself, to select
+the active viewport/scissor array element) but discarded it right after
+that selection, never threading it into the per-lane `FemeFragmentInvocation`
+the fragment shader body actually reads from. I added a `ViewportIndex`
+field to `PrimitiveState`/`ScreenTriangle` (mirroring the existing
+`TargetLayer` field exactly) and wired `Inv.ViewportIndex[Lane]` in the
+per-lane invocation-fill loop. This was the last fix, and the real CTS case
+passed.
+
+## Validating no regressions, iteratively, after every fix
+
+After each of the four fixes I rebuilt `libfeme_vulkan.so` and re-ran the
+specific failing `deqp-vk` case to confirm forward progress (a different
+error each time, in the order described above), rather than batching all
+four fixes before testing -- this made the four-bug chain much easier to
+attribute correctly, since each fix's effect was isolated and immediately
+visible as "now it fails differently."
+
+Once all four fixes were in and the target case passed, I ran progressively
+broader checks:
+- The full 68-case `fragment_shader_*` group: 68/68 (was 0/68).
+- The full 196-case `shader_viewport_index` group (adding H3's own
+  vertex-side cases back in): 132/196 (68 fragment + 64 vertex), 64
+  not-supported (tessellation, unrelated), 0 failed -- no regression against
+  H3's own vertex-side baseline.
+- `ninja check-feme`: 1776/1835 baseline preserved exactly before adding any
+  new tests, confirming the four fixes alone introduce no regressions in the
+  existing suite.
+- A broad `dEQP-VK.draw.*` run (29419 cases) surfaced two failures unrelated
+  to viewport index (`SelectInst::init` assertion crash on
+  `negative_viewport_height.front_ccw_cull_back`, and a
+  `VK_ERROR_INITIALIZATION_FAILED` on `multiple_interpolation`). Rather than
+  assume these were pre-existing, I explicitly verified via `git stash`
+  (reverting my four fixes, rebuilding, and re-running those exact cases)
+  that both reproduce identically without my changes -- confirmed
+  pre-existing, not something I introduced.
+- Two narrower, more targeted regression checks specifically chosen to
+  stress the two riskiest changes: `dEQP-VK.multiview` (838 cases) for the
+  `FemeFragmentInvocation` layout change (`ViewIndex`'s struct offset moved),
+  and a representative every-15th-case sample of `dEQP-VK.ubo` (882 of
+  13240 cases) for the `SPIRVResourceLowering.cpp`/runtime changes (any
+  other fragment shader using a bound UBO). Both were run before-and-after
+  via `git stash` for a clean A/B comparison rather than trusting a single
+  run: multiview came back byte-identical (457/838, 42 failed, both pre-
+  existing renderpass-format failures unrelated to this row); the UBO
+  sample came back *strictly better* (32/882 passed pre-fix vs. 47/882
+  post-fix, 345 vs. 330 failed, 0 new failures) -- an unplanned but welcome
+  side benefit, since the metadata-preservation and vector-raw-load fixes
+  generalize well beyond this row's own `ViewportIndex` motivation.
+
+## Tests added, one per translation phase touched
+
+Per the standing instruction to cover each phase of translation:
+- `SPIRVResourceLoweringTest.PreservesFunctionMetadataAcrossEnvParamRewrite`/
+  `ResourceLoweringTest.PreservesFunctionMetadataAcrossEnvParamRewrite`: LLVM
+  IR-level pass tests attaching `!feme.signature` to a function with a bound
+  resource handle and asserting it survives `addResourceEnvParams`'s
+  function rewrite, for both the SPIR-V and DXIL-oriented passes.
+- `FragmentWrapperTest.LowersViewportArrayIndexSystemValueInput`: an
+  IR-level test driving a `ViewportArrayIndex`-bound signature element
+  through the full `Linearize`/`SIMDize`/`WaveLowering`/`FragmentWrapper`
+  pass sequence and asserting no "unsupported fragment system value"
+  diagnostic fires (installed a throwaway `LLVMContext` diagnostic handler
+  to assert on, rather than pattern-matching internal codegen shape, since
+  the private `StageArgsLayout.h` enum isn't reachable from the unittest
+  directory's include path).
+- Five `RuntimeCPUTest.RawLoad/StoreV4F32*` cases (identity-format load,
+  inactive-mask-reads-zero, store round-trip, store-dropped-without-UAV,
+  and structured-kind-is-accepted), JIT-compiling the real
+  `libFeMeRuntimeCPU` bitcode and calling the new helpers directly, mirroring
+  the existing `TypedLoadV4I32*`/`RawLoadStoreRoundTrip` test shapes exactly.
+- `DrawTest.FragmentShaderReadsBackViewportIndex`: a genuine end-to-end
+  Vulkan-API-level test, reusing H3's own
+  `FullscreenVertexWithInstanceViewportSource` (writes `gl_ViewportIndex`
+  from `gl_InstanceIndex`) paired with a new
+  `ViewportIndexFragmentSource` (reads `gl_ViewportIndex` back and selects
+  red/blue), routed through two dynamic viewports exactly like H3's own
+  `DynamicViewportWithCountRoutesInstancesToDifferentViewports` test -- if
+  any of the four fixes regressed, either pipeline creation would fail
+  outright or every pixel would come back red instead of the right half
+  being blue.
+
+All new tests were built and run in isolation first (`--gtest_filter`)
+before running each affected test binary in full, then `ninja check-feme`
+one final time: 1785/1844 (was 1776/1835 -- exactly +9, the new tests above,
+0 new failures).
+
+## Docs updated
+
+`Roadmap.md`'s H3a row struck through with a summary of the four gaps and
+the measured impact; a new "Roadmap H3a: measured impact" section appended
+to `VulkanCTSReport.md` with the full before/after reproduction and the
+`VK_ICD_FILENAMES` gotcha explicitly called out so a future session doesn't
+lose the same time I did; `VulkanExtensionInventory.md`'s
+`VK_EXT_shader_viewport_index_layer` note extended to mention the
+fragment-input side is now real. `Vulkan14FeatureInventory.md` needed no
+change -- H3 already flipped the relevant feature bits; this row is a pure
+bugfix underneath them, not a new capability. No design-doc deviation was
+needed either: neither `FeMeCPUDesign.md` nor `FeMeGraphicsDesign.md` ever
+claimed raw/structured buffers were scalar-only or that
+`copyAttributesFrom` preserved metadata -- both were implementation
+completeness gaps, not documented decisions I'm now contradicting.
+
+## Commits
+
+Split into six small, independently-buildable commits, in dependency order:
+(1) `SPIRVResourceLowering.cpp` metadata fix + its test, (2) the DXIL-twin
+`ResourceLowering.cpp` fix + its test, (3) `FragmentWrapper.cpp` +
+`RuntimeABI.h` + `StageArgsLayout.h` `ViewportArrayIndex` support + its test,
+(4) `FeMeRuntimeCPU.c` vector raw load/store + its tests, (5) `Executor.cpp`
+wiring + the end-to-end `DrawTest` case (this is the commit that actually
+closes the CTS gap end to end), (6) doc updates. This file's own new
+heading is committed separately afterward, per the standing instruction to
+keep `agent_thoughts.md` in its own commit.
