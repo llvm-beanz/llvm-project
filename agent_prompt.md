@@ -33,25 +33,17 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5e-a?
+Can you work on milestone H5e-b?
 
-> **`ConvertSPIRVToLLVMPass`/`SPIRVToLLVMPatterns` have no conversion pattern
-> for SPIR-V's `spirv.EmitVertex`/`spirv.EndPrimitive` ops at all** (confirmed
-> absent by grepping the whole `lib/`/`include/` tree for
-> `EmitVertexOp`/`EndPrimitiveOp`), the root cause behind 122 of H5e's own
-> measured 167 `dEQP-VK.geometry.*` failures (`error: failed to legalize
-> operation 'spirv.EmitVertex'`/`'spirv.EndPrimitive'` -- virtually every real
-> GLSL geometry shader calls both, since without them a geometry stage can emit
-> no output vertices at all). Needs a new pattern turning each op into a call to
-> the same `feme.stage.stream.emit`/`feme.stage.stream.cut` intrinsics
-> `GeometryWrapperPass::lowerGeometryStreamEmit`/`lowerGeometryStreamCut` (built
-> under G5, already fully implemented and tested) already know how to lower,
-> mirroring how every other stage-IO SPIR-V op already routes through a
-> `feme.stage.*` intrinsic rather than a bespoke LLVM IR shape. A real
-> `dEQP-VK.geometry.*` re-run after this row lands should re-triage the
-> remaining, still-unexplained ~21-case "silent
-> `VK_ERROR_INITIALIZATION_FAILED`, no diagnostic emitted" bucket H5e's own
-> report flagged (degenerate zero-emit shaders and the
-> `triangle_strip_adjacency`/`basic_primitive` input-primitive-class shapes)
-> once the dominant EmitVertex/EndPrimitive noise is gone, splitting out further
-> lettered rows for whatever remains
+> **21 `dEQP-VK.geometry.*` cases fail `vkCreateGraphicsPipelines` with
+> `VK_ERROR_INITIALIZATION_FAILED` and no diagnostic printed at all**
+> (`builtin_variable.in_block.primitive_id_in`/`primitive_id_in_restarted`,
+> `input.basic_primitive.{line_strip,line_strip_adjacency,triangle_fan}`,
+> `input.triangle_strip_adjacency.vertex_count_*`,
+> `emit.{line_strip,points,triangle_strip}_emit_0_end_0`) -- exactly H5e's own
+> flagged bucket, unchanged in composition and count now that H5e-a's
+> `EmitVertex`/`EndPrimitive` noise is gone. Root cause not yet isolated at all:
+> needs bisecting which of `GraphicsPipeline.cpp`'s geometry-stage acceptance
+> checks, `GeometryWrapperPass`, or a still-missing
+> input-primitive-class/degenerate-zero-emit-shader code path silently rejects
+> pipeline creation with no error text reaching the log
