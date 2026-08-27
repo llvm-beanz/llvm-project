@@ -998,6 +998,59 @@ TEST(CanonicalizeStageTest, SplitsHullEntryThreadingCapturedSSAValue) {
                "defined in the control-point phase";
 }
 
+/// (Roadmap H4f) A no-barrier tessellation-control entry point whose only
+/// stage-IO writes are patch-frequency (`Patch`-decorated or a tess-factor
+/// `BuiltIn`) is legally the case whenever `OutputVertices == 1`
+/// (`dEQP-VK.tessellation.winding.*`'s own `layout(vertices = 1) out;`
+/// shape, which writes only `gl_TessLevelInner`/`gl_TessLevelOuter` and
+/// never touches `gl_out[]` at all): a single control-point invocation has
+/// nothing to distinguish "per control point" from "per patch" here, so
+/// the whole entry is semantically already the patch-constant phase.
+/// `HullStageWithNoBarrierIsNotSplit` above must keep not splitting a
+/// no-barrier entry with an ordinary (non-patch) output write; this shape
+/// must split unconditionally instead, moving the whole body into a new
+/// `<name>.patchconstant` clone and leaving the original entry point as a
+/// trivial, empty control-point phase.
+TEST(CanonicalizeStageTest, NoBarrierPatchConstantOnlyEntryIsSplitWhole) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_TessLevelOuter = external addrspace(8) global [4 x float], !spirv.Decorations !0
+    define void @main() #0 {
+      store float 5.000000e+00, ptr addrspace(8) @gl_TessLevelOuter
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!1}
+    !1 = !{i32 11, i32 11}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // The control-point phase is left trivial: no stage-IO signature (an
+  // absent one is treated identically to an explicitly empty one -- see
+  // `feme::cpu::CompiledStage::create`, roadmap H4g), and no instructions
+  // beyond its own `ret void`.
+  EXPECT_FALSE(dxil::getEntrySignature(*ControlPoint).has_value());
+  ASSERT_EQ(ControlPoint->size(), 1u);
+  EXPECT_EQ(ControlPoint->front().size(), 1u);
+  EXPECT_TRUE(isa<ReturnInst>(ControlPoint->front().front()));
+
+  // The patch-constant phase carries the whole original body, including
+  // the `TessLevelOuter` write as a `SignatureDirection::PatchOutput`
+  // element.
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 1u);
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
+  EXPECT_EQ(PCSig->Elements[0].SystemValue,
+            SignatureSystemValue::TessFactorEdge);
+}
+
 /// (Roadmap H4a) `BuiltIn InvocationId` (SPIR-V code 8, `gl_InvocationID`)
 /// maps to `SignatureSystemValue::InvocationID`, and `BuiltIn
 /// PatchVertices` (code 14, `gl_PatchVerticesIn`) to `SignatureSystemValue

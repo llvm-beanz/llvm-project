@@ -1039,6 +1039,95 @@ MDNode *createLocationDecoration(LLVMContext &Ctx, uint32_t Location) {
   return MDNode::get(Ctx, {MDNode::get(Ctx, Entry)});
 }
 
+/// (Roadmap H4f) Whether every `Output`-direction (address-space-8)
+/// stage-IO global \p F stores to is patch-frequency (`Patch`-decorated
+/// or a tess-factor `BuiltIn`), and it stores to at least one -- the
+/// shape a no-barrier tessellation-control entry point legally takes
+/// whenever `OutputVertices == 1` (a single control-point invocation
+/// needs no cross-invocation synchronization, so nothing meaningfully
+/// distinguishes "per control point" from "per patch" here).
+/// `dEQP-VK.tessellation.winding.*`'s own `layout(vertices = 1) out;`
+/// tessellation-control shader, which writes only
+/// `gl_TessLevelInner`/`gl_TessLevelOuter` and never touches `gl_out[]`
+/// at all, is exactly this shape.
+bool isPatchConstantOnlyEntry(Function &F) {
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  bool SawPatchOutput = false;
+  for (Instruction &I : instructions(F)) {
+    auto *SI = dyn_cast<StoreInst>(&I);
+    if (!SI)
+      continue;
+    auto BaseAndOffset = getStageIOBaseAndOffset(SI->getPointerOperand(), DL);
+    if (!BaseAndOffset)
+      continue;
+    GlobalVariable *GV = BaseAndOffset->first;
+    unsigned AddrSpace = 0;
+    if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 8)
+      continue;
+    // A builtin interface block (e.g. `gl_PerVertex`) is always an
+    // ordinary per-vertex output in practice -- `gl_TessLevelInner`/
+    // `gl_TessLevelOuter` are plain globals, never interface-block
+    // members -- so conservatively treat one as not patch-frequency
+    // rather than teach this check the per-member decoration lookup
+    // `canonicalizeSPIRVStage`'s own `addElements` lambda already has.
+    if (GV->getMetadata("feme.spirv.MemberDecorations"))
+      return false;
+    ParsedSPIRVDecorations D =
+        parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+    if (!isPatchOutputDecoration(D))
+      return false;
+    SawPatchOutput = true;
+  }
+  return SawPatchOutput;
+}
+
+/// (Roadmap H4f) `splitTessellationControlEntry`'s own barrier-based split
+/// has nothing to split when \p F has no group-sync barrier at all, but
+/// `compileAndValidateStages` (GraphicsPipeline.cpp) unconditionally
+/// expects a `<entry>.patchconstant` sibling to exist regardless. When
+/// `isPatchConstantOnlyEntry` holds, \p F is semantically already "the
+/// patch-constant phase", so its whole body is moved into a new
+/// `<entry>.patchconstant` clone, and \p F itself is replaced with a
+/// trivial, empty control-point phase -- having no per-vertex output of
+/// its own to produce. Any other no-barrier shape (a mix of patch- and
+/// vertex-frequency writes, only legal for `OutputVertices == 1` too, but
+/// not sound to auto-split the same way: with more than one output
+/// control point and no barrier there is no legal way for one invocation
+/// to see another's data either, so nothing but the current invocation's
+/// own writes could safely be duplicated this way, which this simpler
+/// check does not attempt to reason about) is left with no
+/// patch-constant phase at all, matching this function's previous,
+/// barrier-only behavior.
+bool splitBarrierlessTessellationControlEntry(Function &F,
+                                              Function *&PatchConstantPhase) {
+  if (!isPatchConstantOnlyEntry(F))
+    return true;
+
+  PatchConstantPhase =
+      Function::Create(F.getFunctionType(), F.getLinkage(), F.getAddressSpace(),
+                       (F.getName() + ".patchconstant").str(), F.getParent());
+  PatchConstantPhase->setComdat(F.getComdat());
+
+  ValueToValueMapTy VMap;
+  for (auto [OldArg, NewArg] : zip(F.args(), PatchConstantPhase->args())) {
+    NewArg.takeName(&OldArg);
+    VMap[&OldArg] = &NewArg;
+  }
+  SmallVector<ReturnInst *, 1> Returns;
+  CloneFunctionInto(PatchConstantPhase, &F, VMap,
+                    CloneFunctionChangeType::LocalChangesOnly, Returns);
+
+  // `F` itself becomes the trivial control-point phase: with
+  // `OutputVertices == 1` and every one of its stage-IO writes already
+  // moved to the patch-constant clone above, it has nothing left to
+  // produce. It is left with no `!feme.signature` metadata of its own --
+  // `feme::cpu::CompiledStage::create` already treats an entirely absent
+  // signature identically to an explicitly empty one (roadmap H4g).
+  F.deleteBody();
+  ReturnInst::Create(F.getContext(), BasicBlock::Create(F.getContext(), "", &F));
+  return true;
+}
+
 bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
   PatchConstantPhase = nullptr;
   SmallVector<CallInst *, 2> Barriers;
@@ -1046,7 +1135,7 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
     if (auto *CI = dyn_cast<CallInst>(&I); CI && isSPIRVGroupSyncBarrier(*CI))
       Barriers.push_back(CI);
   if (Barriers.empty())
-    return true;
+    return splitBarrierlessTessellationControlEntry(F, PatchConstantPhase);
   if (Barriers.size() != 1) {
     F.getContext().emitError(
         "feme-canonicalize-stage: tessellation-control SPIR-V entry points "
