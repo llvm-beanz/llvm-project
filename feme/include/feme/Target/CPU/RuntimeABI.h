@@ -962,9 +962,16 @@ struct FemeGeometryInvocation {
   /// draw (`StageLayoutSystemValue::PrimitiveID`), not necessarily the same
   /// as its index within this batch.
   uint32_t PrimitiveID;
-  /// ABI headroom for later geometry-invocation metadata (an instance ID,
-  /// for instance).
-  uint32_t Reserved[7];
+  /// `gl_InvocationID`/`SignatureSystemValue::InvocationID` (roadmap
+  /// H5d-a): which of this primitive's `GeometryState::Invocations`
+  /// invocations this record is, in `[0, Invocations)`. Always 0 for a
+  /// shader declaring `layout(invocations = 1)` (or none at all, SPIR-V's
+  /// own default). Distinct invocations of the same primitive share the
+  /// same `PrimitiveID` but repeat that primitive's own `Inputs` slots
+  /// (see `FemeGeometryArgs::PrimitiveCount`'s own comment).
+  uint32_t InvocationID;
+  /// ABI headroom for later geometry-invocation metadata.
+  uint32_t Reserved[6];
 };
 
 /// The single argument a compiled geometry entry point takes:
@@ -1000,9 +1007,15 @@ struct FemeGeometryInvocation {
 struct FemeGeometryArgs {
   /// `StageArgsAbiVersion`.
   uint32_t AbiVersion;
-  /// Number of input primitives this batch processes: the number of records
-  /// in `Invocations`, and (times `VerticesPerPrimitive`) the number of
-  /// structure-of-arrays slots in `Inputs`.
+  /// Number of geometry invocations this batch processes: the number of
+  /// records in `Invocations`, and (times `VerticesPerPrimitive`) the
+  /// number of structure-of-arrays slots in `Inputs`. Equal to the number
+  /// of assembled input primitives when every one declares exactly one
+  /// invocation (SPIR-V's default); for a shader with `GeometryState::
+  /// Invocations` \> 1 (roadmap H5d-a), this is `Invocations` times the
+  /// primitive count, and `Inputs` repeats each primitive's own vertex
+  /// attributes once per invocation (`FemeGeometryInvocation::PrimitiveID`
+  /// names, for each row, which primitive it repeats).
   uint32_t PrimitiveCount;
   /// Number of vertices in one input primitive (3 for an ordinary triangle,
   /// 6 for a triangle-with-adjacency, and so on).

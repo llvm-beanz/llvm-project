@@ -759,6 +759,124 @@ SignatureElement makePrimitiveIDInput(uint32_t ElementID) {
   return Elt;
 }
 
+// (Roadmap H5d-a) One input vertex per primitive: scales that vertex's own
+// attribute (element 0) by `10 * SV_PrimitiveID + gl_InvocationID` (elements
+// 1/2), distinguishing the two system values from each other -- covers
+// `InvocationID` input-load lowering (see GeometryWrapper.cpp's
+// `lowerGeometryInvocationID`), which a shader declaring
+// `layout(invocations = N)` for `N > 1` needs to tell its own repeated
+// invocations of the same primitive apart.
+constexpr char GeometryInvocationIDShaderIR[] = R"(
+  define void @gs_main() #0 {
+    %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %pid = call i32 @feme.stage.input.load.i32(i32 1, i32 0, i32 0, i32 0)
+    %iid = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+    %pid10 = mul i32 %pid, 10
+    %key = add i32 %pid10, %iid
+    %keyf = uitofp i32 %key to float
+    %r = fmul float %v, %keyf
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %r, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.cut(i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.stream.emit(i32)
+  declare void @feme.stage.stream.cut(i32)
+  attributes #0 = { "feme.shader.stage"="geometry" }
+)";
+
+SignatureElement makeInvocationIDInput(uint32_t ElementID) {
+  SignatureElement Elt;
+  Elt.ElementID = ElementID;
+  Elt.Direction = SignatureDirection::Input;
+  Elt.SystemValue = SignatureSystemValue::InvocationID;
+  Elt.ComponentType = SignatureComponentType::UInt;
+  Elt.BitWidth = 32;
+  return Elt;
+}
+
+TEST(CompiledStageTest, InvokeGeometryReadsInvocationIDDistinctFromPrimitiveID) {
+  Context Ctx;
+  EntrySignature Sig;
+  Sig.Elements = {makeFloatInput(0), makePrimitiveIDInput(1),
+                  makeInvocationIDInput(2), makeFloatOutput(3)};
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      compileGraphicsStage(Ctx, GeometryInvocationIDShaderIR, "gs_main", Sig,
+                          ShaderStage::Geometry, 4);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+
+  FemeStageElement InputElements[1] = {};
+  InputElements[0].ElementID = 0;
+  InputElements[0].FirstComponent = 0;
+  InputElements[0].ComponentCount = 1;
+  InputElements[0].RowCount = 1;
+  InputElements[0].InvocationStride = 4;
+  FemeStageLayout InputLayout{};
+  InputLayout.Elements = InputElements;
+  InputLayout.ElementCount = 1;
+
+  FemeStageElement OutputElements[4] = {};
+  OutputElements[3].ElementID = 3;
+  OutputElements[3].FirstComponent = 0;
+  OutputElements[3].ComponentCount = 1;
+  OutputElements[3].RowCount = 1;
+  OutputElements[3].InvocationStride = 4;
+  FemeStageLayout OutputLayout{};
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 4;
+
+  // Two primitives, each run twice (`GeometryState::Invocations` == 2):
+  // every row shares its primitive's own single input vertex, but carries a
+  // distinct `InvocationID`.
+  constexpr uint32_t RowCount = 4;
+  constexpr uint32_t MaxVerticesPerStream = 1;
+  constexpr uint32_t OutputScalarsPerVertex = 1;
+
+  std::vector<float> Inputs = {10.0f, 10.0f, 20.0f, 20.0f};
+  std::vector<float> Outputs(RowCount, -1.0f);
+  FemeGeometryInvocation Invocations[RowCount] = {};
+  Invocations[0].PrimitiveID = 2;
+  Invocations[0].InvocationID = 0;
+  Invocations[1].PrimitiveID = 2;
+  Invocations[1].InvocationID = 1;
+  Invocations[2].PrimitiveID = 5;
+  Invocations[2].InvocationID = 0;
+  Invocations[3].PrimitiveID = 5;
+  Invocations[3].InvocationID = 1;
+
+  std::vector<float> EmittedVertices(RowCount * MaxVerticesPerStream *
+                                        OutputScalarsPerVertex,
+                                    0.0f);
+  std::vector<uint32_t> EmittedVertexCounts(RowCount, 0);
+  std::vector<uint8_t> StripEndsAfter(RowCount * MaxVerticesPerStream, 0);
+
+  GeometryResources Resources;
+  Resources.InputLayout = &InputLayout;
+  Resources.Inputs = Inputs.data();
+  Resources.OutputLayout = &OutputLayout;
+  Resources.Outputs = Outputs.data();
+  Resources.Invocations = Invocations;
+  Resources.VerticesPerPrimitive = 1;
+  Resources.MaxVerticesPerStream = MaxVerticesPerStream;
+  Resources.OutputScalarsPerVertex = OutputScalarsPerVertex;
+  Resources.EmittedVertices = EmittedVertices;
+  Resources.EmittedVertexCounts = EmittedVertexCounts;
+  Resources.StripEndsAfter = StripEndsAfter;
+  PreparedGeometryBatch Prepared =
+      PreparedGeometryBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeGeometry(Prepared), Succeeded());
+  // row 0: 10 * (10*2 + 0) == 200; row 1: 10 * (10*2 + 1) == 210;
+  // row 2: 20 * (10*5 + 0) == 1000; row 3: 20 * (10*5 + 1) == 1020.
+  EXPECT_EQ(EmittedVertices[0], 200.0f);
+  EXPECT_EQ(EmittedVertices[1], 210.0f);
+  EXPECT_EQ(EmittedVertices[2], 1000.0f);
+  EXPECT_EQ(EmittedVertices[3], 1020.0f);
+}
+
 TEST(CompiledStageTest, InvokeGeometryRunsStageAwarePath) {
   Context Ctx;
   EntrySignature Sig;

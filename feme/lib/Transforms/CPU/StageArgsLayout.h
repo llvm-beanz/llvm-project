@@ -166,7 +166,8 @@ enum DomainArgsField : unsigned {
 
 enum GeometryInvocationField : unsigned {
   GeometryInvocationFieldPrimitiveID = 0,
-  GeometryInvocationFieldReserved = 1,
+  GeometryInvocationFieldInvocationID = 1,
+  GeometryInvocationFieldReserved = 2,
 };
 
 enum GeometryArgsField : unsigned {
@@ -292,10 +293,12 @@ inline llvm::StructType *getDomainArgsType(llvm::LLVMContext &Ctx) {
 }
 
 /// Mirrors `FemeGeometryInvocation`: the input primitive one geometry-stage
-/// invocation processes.
+/// invocation processes, and (roadmap H5d-a) which of that primitive's
+/// `GeometryState::Invocations` invocations it is.
 inline llvm::StructType *getGeometryInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
-  return llvm::StructType::get(Ctx, {I32Ty, llvm::ArrayType::get(I32Ty, 7)});
+  return llvm::StructType::get(
+      Ctx, {I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 6)});
 }
 
 /// Mirrors `FemeGeometryArgs`: a vertex-shaped per-invocation batch whose

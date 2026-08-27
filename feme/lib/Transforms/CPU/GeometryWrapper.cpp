@@ -347,10 +347,13 @@ Value *lowerGeometryInputLoad(CallInst &CI, const SignatureElement &Elt,
   return Result;
 }
 
-/// Lowers a `feme.stage.input.load` of the `PrimitiveID` system value to a
-/// read of this invocation's own `FemeGeometryInvocation` record.
-Value *lowerGeometryPrimitiveID(CallInst &CI, const WaveBodyEnv &WEnv,
-                                const GeometryStageEnv &GEnv) {
+/// Lowers a `feme.stage.input.load` of one of `FemeGeometryInvocation`'s own
+/// scalar fields (\p Field) to a read of this invocation's own record --
+/// shared by `lowerGeometryPrimitiveID` (`PrimitiveID`) and
+/// `lowerGeometryInvocationID` (`InvocationID`, roadmap H5d-a) below.
+Value *lowerGeometryInvocationField(CallInst &CI, const WaveBodyEnv &WEnv,
+                                    const GeometryStageEnv &GEnv,
+                                    unsigned Field) {
   unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
   Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
   LLVMContext &Ctx = CI.getContext();
@@ -367,8 +370,8 @@ Value *lowerGeometryPrimitiveID(CallInst &CI, const WaveBodyEnv &WEnv,
         getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
     Value *InvocationPtr = Builder.CreateInBoundsGEP(
         InvocationTy, InvocationBase, InvocationIndex);
-    Value *FieldPtr = Builder.CreateStructGEP(
-        InvocationTy, InvocationPtr, GeometryInvocationFieldPrimitiveID);
+    Value *FieldPtr =
+        Builder.CreateStructGEP(InvocationTy, InvocationPtr, Field);
     Value *LaneResult = Builder.CreateLoad(ScalarTy, FieldPtr);
     LaneResult = Builder.CreateSelect(Active, LaneResult,
                                       Constant::getNullValue(ScalarTy));
@@ -376,6 +379,23 @@ Value *lowerGeometryPrimitiveID(CallInst &CI, const WaveBodyEnv &WEnv,
         Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
   }
   return Result;
+}
+
+/// Lowers a `feme.stage.input.load` of the `PrimitiveID` system value to a
+/// read of this invocation's own `FemeGeometryInvocation` record.
+Value *lowerGeometryPrimitiveID(CallInst &CI, const WaveBodyEnv &WEnv,
+                                const GeometryStageEnv &GEnv) {
+  return lowerGeometryInvocationField(CI, WEnv, GEnv,
+                                     GeometryInvocationFieldPrimitiveID);
+}
+
+/// Lowers a `feme.stage.input.load` of the `InvocationID` system value
+/// (`gl_InvocationID`, roadmap H5d-a) to a read of this invocation's own
+/// `FemeGeometryInvocation` record.
+Value *lowerGeometryInvocationID(CallInst &CI, const WaveBodyEnv &WEnv,
+                                 const GeometryStageEnv &GEnv) {
+  return lowerGeometryInvocationField(CI, WEnv, GEnv,
+                                     GeometryInvocationFieldInvocationID);
 }
 
 void lowerGeometryOutputStore(CallInst &CI, const SignatureElement &Elt,
@@ -665,9 +685,13 @@ bool lowerGeometryStageOps(Function &F) {
                 "signature element");
         return false;
       }
-      Value *Lowered = Elt->SystemValue == SignatureSystemValue::PrimitiveID
-                           ? lowerGeometryPrimitiveID(*CI, *WEnv, *GEnv)
-                           : lowerGeometryInputLoad(*CI, *Elt, *WEnv, *GEnv);
+      Value *Lowered;
+      if (Elt->SystemValue == SignatureSystemValue::PrimitiveID)
+        Lowered = lowerGeometryPrimitiveID(*CI, *WEnv, *GEnv);
+      else if (Elt->SystemValue == SignatureSystemValue::InvocationID)
+        Lowered = lowerGeometryInvocationID(*CI, *WEnv, *GEnv);
+      else
+        Lowered = lowerGeometryInputLoad(*CI, *Elt, *WEnv, *GEnv);
       CI->replaceAllUsesWith(Lowered);
       CI->eraseFromParent();
       break;
