@@ -33,20 +33,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H4e?
+Can you work on milestone H4f?
 
-> **`MaskIntrinsics.cpp`'s `appendScalarMangling` calls
-> `llvm_unreachable("unsupported feme.cpu.masked.* element type")` for any
-> masked-load/store element type it does not recognize (matrix/aggregate shapes
-> among them), aborting the whole process instead of diagnosing gracefully** --
-> newly reached (not introduced) by H4c's own fix: all 24 of H4c's named cases
-> now split successfully and reach `feme::cpu::SIMDizePass`'s masked-memory-op
-> path, which is very likely the same C8-bucket matrix/aggregate-legalization
-> gap H4b's own triage table already names for the 88 `feme-cpu-simdize: ...
-> divergent value ... of vector type` and 74 `llvm.getelementptr` cases (not yet
-> independently confirmed), just reached through a third path. Needs both the
-> root legalization fix (C8's own scope) and, independently and more urgently,
-> hardening this specific function to `emitError`+return a null/sentinel rather
-> than `llvm_unreachable`, so an unsupported shape becomes a graceful per-case
-> `Fail` the way every other gap in this codebase already does, rather than a
-> `SIGABRT` that kills an entire CTS run's remaining cases
+> **`splitTessellationControlEntry` (H4a/H4c) only clones a
+> `<entry>.patchconstant` phase when it finds a barrier -- a
+> tessellation-control shader with none (legally the case whenever
+> `OutputVertices == 1`, since a single control-point invocation needs no
+> cross-invocation synchronization, `dEQP-VK.tessellation.winding.*`'s own
+> shape) leaves `PatchConstantPhase == nullptr`, but `compileAndValidateStages`
+> (H4b) unconditionally expects a `.patchconstant` sibling to exist and compiles
+> it as a second stage regardless** (24 of H4d's own re-measured
+> `dEQP-VK.tessellation.*` `Fail`s, all of `dEQP-VK.tessellation.winding.*`'s
+> glsl variants -- confirmed via a real `deqp-vk` run, root-caused and isolated
+> as part of H4d's own investigation but deliberately not fixed there, since it
+> is a distinct gap in the barrier-split design itself, not the
+> `resolveStageIOAccess` array-addressing bug H4d fixed). The whole entry, in
+> this no-barrier shape, is semantically already "the patch-constant phase" for
+> `OutputVertices == 1` (there is only one control point, so nothing
+> meaningfully distinguishes "per control point" from "per patch" here) -- needs
+> either (a) treating a no-barrier entry as *solely* a patch-constant phase
+> whenever every one of its stage-IO writes is patch-frequency
+> (`Patch`-decorated or a tess-factor `BuiltIn`), with an empty/trivial
+> control-point phase synthesized instead, or (b) the more general fix of
+> cloning the *whole* function as `<entry>.patchconstant` unconditionally when
+> there is no barrier (sound only when `OutputVertices == 1`, since with more
+> than one output control point and no barrier there is by definition no legal
+> way for one invocation to see another's data, so nothing but the current
+> invocation's own patch-frequency writes could safely be duplicated this way
+> either -- needs care not to naively assume general soundness)
