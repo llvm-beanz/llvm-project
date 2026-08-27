@@ -217,6 +217,16 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
       CallInst *Masked =
           createMaskedLoad(B, LI->getPointerOperand(), LI->getAlign().value(),
                            Masks.Live, Passthru, LI->getName());
+      // A null result means `LI`'s type is a shape `MaskIntrinsics.cpp`'s
+      // `appendScalarMangling` cannot yet mangle (a matrix/aggregate
+      // element type, most notably), which has already reported an error
+      // through `LI`'s own `LLVMContext` (caught by `feme::cpu::
+      // runPipeline`'s `ErrorDiagnosticGuard`). Leave `LI` itself
+      // unmasked and unmodified rather than RAUW/erase with a call that
+      // was never created, so this loop keeps making progress on the rest
+      // of `BB` instead of crashing on a null `CallInst *`.
+      if (!Masked)
+        continue;
       LI->replaceAllUsesWith(Masked);
       LI->eraseFromParent();
       continue;
@@ -225,8 +235,11 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
       if (!SI->isSimple() || isa<Constant>(Masks.SideEffect))
         continue;
       IRBuilder<> B(SI);
-      createMaskedStore(B, SI->getValueOperand(), SI->getPointerOperand(),
-                        SI->getAlign().value(), Masks.SideEffect);
+      CallInst *Masked =
+          createMaskedStore(B, SI->getValueOperand(), SI->getPointerOperand(),
+                            SI->getAlign().value(), Masks.SideEffect);
+      if (!Masked) // See the load case above.
+        continue;
       SI->eraseFromParent();
       continue;
     }
@@ -238,6 +251,8 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
           B, RMW->getOperation(), RMW->getPointerOperand(),
           RMW->getValOperand(), RMW->getAlign().value(), Masks.SideEffect,
           RMW->getName());
+      if (!Masked) // See the load case above.
+        continue;
       RMW->replaceAllUsesWith(Masked);
       RMW->eraseFromParent();
       continue;

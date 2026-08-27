@@ -11,6 +11,7 @@
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -340,6 +341,59 @@ TEST(LinearizeTest, IsHelperReflectsDemotedState) {
   // this pass does no constant folding of its own.
   EXPECT_TRUE(isa<Instruction>(Ret->getReturnValue()) ||
               isa<Argument>(Ret->getReturnValue()));
+}
+
+// H4e: a store whose value operand is a shape `MaskIntrinsics.cpp`'s
+// `appendScalarMangling` does not recognize (a matrix/aggregate type,
+// represented here by a struct -- the same shape a matrix lowers to) must
+// not crash this pass with `llvm_unreachable` when it needs masking. It
+// should instead report a diagnostic through the module's `LLVMContext`
+// (see `feme::cpu::runPipeline`'s `ErrorDiagnosticGuard`, which turns this
+// into a graceful pipeline failure) and leave the original `store`
+// untouched, rather than replace it with a call built from a null callee.
+TEST(LinearizeTest,
+     UnsupportedAggregateMaskedStoreDiagnosesGracefullyInsteadOfCrashing) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %p, i1 %cond, {float, float} %val) #0 {
+    entry:
+      call void @feme.stage.discard(i1 %cond)
+      store {float, float} %val, ptr %p
+      ret void
+    }
+    declare void @feme.stage.discard(i1)
+    attributes #0 = { "feme.shader.stage"="fragment" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  // Must not crash the process (the pre-H4e `llvm_unreachable` this
+  // milestone replaces would have `SIGABRT`ed here instead of returning).
+  run(*M);
+  EXPECT_TRUE(SawError);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundPlainStore = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      FoundPlainStore = true;
+      EXPECT_TRUE(SI->getValueOperand()->getType()->isStructTy())
+          << "the unsupported-type store should be left unmasked, not "
+             "replaced with a null-callee call";
+    }
+    ASSERT_FALSE(isa<CallInst>(I) &&
+                 cast<CallInst>(I).getCalledFunction() == nullptr)
+        << "no call with a null callee should ever be created";
+  }
+  EXPECT_TRUE(FoundPlainStore);
 }
 
 } // namespace
