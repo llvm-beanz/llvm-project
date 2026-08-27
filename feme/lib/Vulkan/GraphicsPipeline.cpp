@@ -1355,17 +1355,25 @@ Error translateFixedFunctionState(
   if (!InputAssembly)
     return createStringError(inconvertibleErrorCode(),
                              "a graphics pipeline needs input assembly state");
-  if (InputAssembly->primitiveRestartEnable &&
-      InputAssembly->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
-    return createStringError(inconvertibleErrorCode(),
-                             "primitive restart is only implemented for "
-                             "VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP");
   std::optional<PrimitiveTopology> Topology =
       mapTopology(InputAssembly->topology);
   if (!Topology)
     return createStringError(inconvertibleErrorCode(),
                              "primitive topology %u is not implemented",
                              unsigned(InputAssembly->topology));
+  // (roadmap H5e-b) `Executor.cpp`'s `executeDraws` only honors
+  // `primitiveRestartEnable` for the strip/fan topologies
+  // `topologySupportsPrimitiveRestart` lists (every list topology has no
+  // notion of restarting an assembly in progress in the first place --
+  // `VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00428`/
+  // neighbors, since this ICD does not implement
+  // `VK_EXT_primitive_topology_list_restart`); mirrored here so an
+  // unsupported combination fails at creation, not silently at draw time.
+  if (InputAssembly->primitiveRestartEnable &&
+      !feme::graphics::topologySupportsPrimitiveRestart(*Topology))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "primitiveRestartEnable requires a strip or fan primitive topology");
   // (roadmap H4b) A tessellation-enabled pipeline must use
   // `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` -- it is the only topology the
   // tessellator can patch-assemble from -- and, symmetrically, that

@@ -2062,4 +2062,44 @@ TEST_F(GraphicsPipelineTest, RejectsAdjacencyTopologyWithoutGeometryStage) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap H5e-b: `Executor.cpp`'s `executeDraws` implements
+/// `primitiveRestartEnable` for every strip/fan topology
+/// `feme::graphics::topologySupportsPrimitiveRestart` lists, not just
+/// `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP` -- `AcceptsPrimitiveRestartOn
+/// TriangleStrip` above already covers that one; this covers the
+/// remaining four, including the two adjacency topologies (which
+/// additionally require a bound geometry stage). Before this fix,
+/// `GraphicsPipeline.cpp`'s creation-time gate rejected every one of
+/// these four with `VK_ERROR_INITIALIZATION_FAILED` and no diagnostic
+/// (`RejectsUnimplementedStateCombinations`'s own default-topology case
+/// above is unaffected: `TriangleList` still correctly rejects restart).
+TEST_F(GraphicsPipelineTest, AcceptsPrimitiveRestartOnStripAndFanTopologies) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Geometry = createModule(GeometrySource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  auto TestTopology = [&](VkPrimitiveTopology Topology, bool NeedsGeometry) {
+    VkGraphicsPipelineCreateInfo Info =
+        NeedsGeometry ? makeGeometryCreateInfo(Vertex, Geometry, Fragment)
+                      : makeCreateInfo(Vertex, Fragment);
+    InputAssembly.topology = Topology;
+    InputAssembly.primitiveRestartEnable = VK_TRUE;
+    VkPipeline Pipe = VK_NULL_HANDLE;
+    EXPECT_EQ(create(Info, Pipe), VK_SUCCESS) << "topology " << Topology;
+    if (Pipe != VK_NULL_HANDLE)
+      vkDestroyPipeline(Device, Pipe, nullptr);
+  };
+
+  TestTopology(VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, /*NeedsGeometry=*/false);
+  TestTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, /*NeedsGeometry=*/false);
+  TestTopology(VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY,
+              /*NeedsGeometry=*/true);
+  TestTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY,
+              /*NeedsGeometry=*/true);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Geometry, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 } // namespace

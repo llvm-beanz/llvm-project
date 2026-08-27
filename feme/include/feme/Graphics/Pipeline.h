@@ -79,6 +79,19 @@ enum class PrimitiveTopology : uint8_t {
 /// Whether \p Topology is one of the four "with adjacency" topologies.
 bool topologyHasAdjacency(PrimitiveTopology Topology);
 
+/// Whether \p Topology supports `primitiveRestartEnable` (roadmap H5e-b):
+/// every strip/fan topology (`LineStrip`, `TriangleStrip`, `TriangleFan`,
+/// and, since a geometry stage's adjacency vertices are assembled from the
+/// same restartable strip, `LineStripWithAdjacency`/
+/// `TriangleStripWithAdjacency`), matching `executeDraws`'s own
+/// `RestartEnabled` condition. The remaining "list" topologies have no
+/// notion of restarting an assembly in progress and, per
+/// `VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00428`/neighbors,
+/// must not set `primitiveRestartEnable` (this ICD does not implement
+/// `VK_EXT_primitive_topology_list_restart`, which would otherwise permit
+/// it).
+bool topologySupportsPrimitiveRestart(PrimitiveTopology Topology);
+
 /// The non-adjacency topology sharing \p Topology's assembled primitives,
 /// e.g. `TriangleListWithAdjacency` -> `TriangleList`. A geometry stage's
 /// own primitives (the ones clipping/rasterization sees) are these;

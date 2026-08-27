@@ -59,6 +59,34 @@ TEST(PrimitiveTopologyTest, HasAdjacencyIdentifiesTheFourAdjacencyKinds) {
       topologyHasAdjacency(PrimitiveTopology::TriangleStripWithAdjacency));
 }
 
+/// Roadmap H5e-b: every strip/fan topology restarts, not just
+/// `TriangleStrip` (`GraphicsPipeline.cpp`'s own creation-time gate used
+/// to only allow that one, a stale check `Executor.cpp`'s own
+/// `RestartEnabled` condition had already outgrown as of roadmap H5d).
+TEST(PrimitiveTopologyTest,
+    SupportsPrimitiveRestartIdentifiesEveryStripAndFanKind) {
+  EXPECT_TRUE(
+      topologySupportsPrimitiveRestart(PrimitiveTopology::LineStrip));
+  EXPECT_TRUE(
+      topologySupportsPrimitiveRestart(PrimitiveTopology::TriangleStrip));
+  EXPECT_TRUE(
+      topologySupportsPrimitiveRestart(PrimitiveTopology::TriangleFan));
+  EXPECT_TRUE(topologySupportsPrimitiveRestart(
+      PrimitiveTopology::LineStripWithAdjacency));
+  EXPECT_TRUE(topologySupportsPrimitiveRestart(
+      PrimitiveTopology::TriangleStripWithAdjacency));
+
+  EXPECT_FALSE(topologySupportsPrimitiveRestart(PrimitiveTopology::PointList));
+  EXPECT_FALSE(topologySupportsPrimitiveRestart(PrimitiveTopology::LineList));
+  EXPECT_FALSE(
+      topologySupportsPrimitiveRestart(PrimitiveTopology::TriangleList));
+  EXPECT_FALSE(topologySupportsPrimitiveRestart(
+      PrimitiveTopology::LineListWithAdjacency));
+  EXPECT_FALSE(topologySupportsPrimitiveRestart(
+      PrimitiveTopology::TriangleListWithAdjacency));
+  EXPECT_FALSE(topologySupportsPrimitiveRestart(PrimitiveTopology::PatchList));
+}
+
 TEST(PrimitiveTopologyTest, StripAdjacencyReturnsTheAssembledTopology) {
   EXPECT_EQ(stripAdjacency(PrimitiveTopology::LineListWithAdjacency),
             PrimitiveTopology::LineList);

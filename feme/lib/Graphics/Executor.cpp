@@ -1399,18 +1399,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     // Primitive restart (`primitiveRestartEnable`) only applies to an
     // indexed strip/fan draw: a special index value ends the current
     // strip/fan and starts a new one, exactly as an unindexed strip/fan
-    // would begin fresh. Vulkan applies this to every strip and fan
-    // topology (`LineStrip`, `TriangleStrip`, `TriangleFan`, and (roadmap
-    // H5d) the two `*StripWithAdjacency` topologies), not just
-    // `TriangleStrip`.
+    // would begin fresh. `topologySupportsPrimitiveRestart` is the single
+    // source of truth for which topologies that covers, shared with
+    // `GraphicsPipeline.cpp`'s own creation-time acceptance check.
     bool RestartEnabled =
         Cmd.Indexed && Pipeline.getPrimitiveRestartEnable() &&
-        (Pipeline.getTopology() == PrimitiveTopology::LineStrip ||
-         Pipeline.getTopology() == PrimitiveTopology::TriangleStrip ||
-         Pipeline.getTopology() == PrimitiveTopology::TriangleFan ||
-         Pipeline.getTopology() == PrimitiveTopology::LineStripWithAdjacency ||
-         Pipeline.getTopology() ==
-             PrimitiveTopology::TriangleStripWithAdjacency);
+        topologySupportsPrimitiveRestart(Pipeline.getTopology());
     // The primitive-restart marker is the index type's own all-1-bits value
     // (`0xFF`/`0xFFFF`/`0xFFFFFFFF`), matching the raw index's own width.
     uint32_t RestartValue = Draw.IndexBuffer.Type == IndexType::UInt8 ? 0xFFu

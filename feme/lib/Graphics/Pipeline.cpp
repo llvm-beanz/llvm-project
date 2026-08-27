@@ -68,6 +68,26 @@ bool feme::graphics::topologyHasAdjacency(PrimitiveTopology Topology) {
   llvm_unreachable("unhandled PrimitiveTopology");
 }
 
+bool feme::graphics::topologySupportsPrimitiveRestart(
+    PrimitiveTopology Topology) {
+  switch (Topology) {
+  case PrimitiveTopology::LineStrip:
+  case PrimitiveTopology::TriangleStrip:
+  case PrimitiveTopology::TriangleFan:
+  case PrimitiveTopology::LineStripWithAdjacency:
+  case PrimitiveTopology::TriangleStripWithAdjacency:
+    return true;
+  case PrimitiveTopology::PointList:
+  case PrimitiveTopology::LineList:
+  case PrimitiveTopology::TriangleList:
+  case PrimitiveTopology::LineListWithAdjacency:
+  case PrimitiveTopology::TriangleListWithAdjacency:
+  case PrimitiveTopology::PatchList:
+    return false;
+  }
+  llvm_unreachable("unhandled PrimitiveTopology");
+}
+
 PrimitiveTopology feme::graphics::stripAdjacency(PrimitiveTopology Topology) {
   switch (Topology) {
   case PrimitiveTopology::LineListWithAdjacency:
