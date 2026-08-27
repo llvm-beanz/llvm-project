@@ -535,6 +535,10 @@ struct ScreenTriangle {
   bool FrontFacing;
   uint32_t PrimitiveID;
   uint32_t TargetLayer = 0;
+  // (Roadmap H3a) The resolved `gl_ViewportIndex` value, carried through to
+  // `FemeFragmentInvocation::ViewportIndex` for a fragment shader reading it
+  // back as an input -- see `PrimitiveState::ViewportIndex`'s own comment.
+  uint32_t ViewportIndex = 0;
   int32_t ScissorMinX = 0;
   int32_t ScissorMinY = 0;
   int32_t ScissorMaxX = 0;
@@ -1569,6 +1573,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       const ViewportState *Viewport = nullptr;
       const ScissorRect *Scissor = nullptr;
       uint32_t TargetLayer = 0;
+      // (Roadmap H3a) The resolved `gl_ViewportIndex` value itself, not
+      // just the `Draw.Viewports`/`Draw.Scissors` slot it selects: a
+      // fragment shader reading `gl_ViewportIndex` back as an input (e.g.
+      // `dEQP-VK.draw.*.shader_viewport_index.fragment_shader_*`) needs the
+      // resolved index value carried all the way to `FemeFragmentInvocation
+      // ::ViewportIndex`, mirroring how `TargetLayer` above is already
+      // carried through for `gl_Layer`/`SV_RenderTargetArrayIndex`.
+      uint32_t ViewportIndex = 0;
     };
     auto resolvePrimitiveState =
         [&](uint32_t Invocation) -> std::optional<PrimitiveState> {
@@ -1603,7 +1615,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         return std::nullopt;
 
       return PrimitiveState{&Draw.Viewports[*ViewportIndex],
-                            &Draw.Scissors[*ScissorIndex], *Layer};
+                            &Draw.Scissors[*ScissorIndex], *Layer,
+                            *ViewportIndex};
     };
 
     auto projectVertex = [&](const RasterVertex &Vtx,
@@ -1768,6 +1781,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           ST.FrontFacing = FrontFacing;
           ST.PrimitiveID = PrimitiveCounter++;
           ST.TargetLayer = Primitive->TargetLayer;
+          ST.ViewportIndex = Primitive->ViewportIndex;
           ST.ScissorMinX = std::max<int32_t>(0, Primitive->Scissor->X);
           ST.ScissorMinY = std::max<int32_t>(0, Primitive->Scissor->Y);
           ST.ScissorMaxX = std::min<int32_t>(
@@ -1856,6 +1870,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       ST.FrontFacing = true;
       ST.PrimitiveID = PrimitiveCounter++;
       ST.TargetLayer = Primitive.TargetLayer;
+      ST.ViewportIndex = Primitive.ViewportIndex;
       ST.ScissorMinX = std::max<int32_t>(0, Primitive.Scissor->X);
       ST.ScissorMinY = std::max<int32_t>(0, Primitive.Scissor->Y);
       ST.ScissorMaxX = std::min<int32_t>(
@@ -2244,6 +2259,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               Inv.SampleIndex[Lane] = 0;
               Inv.Coverage[Lane] = Quad.SampleMask[Lane];
               Inv.IsFrontFace[Lane] = Tri.FrontFacing ? 1 : 0;
+              Inv.ViewportIndex[Lane] = Tri.ViewportIndex;
               Inv.ViewIndex = Draw.ViewIndex;
 
               if (UseEarlyDepthStencil && Quad.SampleMask[Lane]) {

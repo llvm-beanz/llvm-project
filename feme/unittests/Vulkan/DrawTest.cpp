@@ -139,6 +139,36 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// Roadmap H3a: reads `gl_ViewportIndex` back as a *fragment*-shader
+/// `Input`-storage-class builtin (the other half of
+/// `GL_ARB_shader_viewport_layer_array`'s support, `dEQP-VK.draw.*.
+/// shader_viewport_index.fragment_shader_*`'s own real shader shape:
+/// `out_color = color[gl_ViewportIndex]`, simplified here to a two-way
+/// select instead of an indexed uniform-block read) -- red for viewport 0,
+/// blue for viewport 1. Pairs with `FullscreenVertexWithInstanceViewportSource`
+/// (above), which *writes* `gl_ViewportIndex` from the vertex stage.
+constexpr llvm::StringLiteral ViewportIndexFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ShaderViewportIndexLayerEXT], [SPV_EXT_shader_viewport_index_layer]> {
+  spirv.GlobalVariable @vp built_in("ViewportIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %vpp = spirv.mlir.addressof @vp : !spirv.ptr<i32, Input>
+    %vp = spirv.Load "Input" %vpp : i32
+    %c1 = spirv.Constant 1 : i32
+    %is1 = spirv.IEqual %vp, %c1 : i32
+    %red = spirv.Constant dense<[1.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %blue = spirv.Constant dense<[0.0, 0.0, 1.0, 1.0]> : vector<4xf32>
+    %c = spirv.Select %is1, %blue, %red : i1, vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @vp, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
+
 /// A 2-vertex horizontal line at NDC y = -0.25 (screen row 1's pixel
 /// center on a 4x4 target -- real Vulkan clip-space Y-down convention,
 /// `((row + 0.5) / height) * 2 - 1`, matching `ExecutorTest.
@@ -5829,6 +5859,111 @@ TEST_F(DrawTest, OutOfRangeViewportIndexDiscardsThePrimitive) {
   // viewport/scissor array.
   EXPECT_EQ(texel(0, 0)[0], 0x00);
   EXPECT_EQ(texel(3, 3)[0], 0x00);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+// Roadmap H3a: `gl_ViewportIndex` read back as a *fragment*-shader input
+// (rather than only written as a vertex-shader output, as roadmap H3's own
+// tests above exercise). Before this milestone, any fragment-stage entry
+// function using a bound resource reached pipeline creation with no
+// `feme.signature` metadata attached at all (SPIRVResourceLowering.cpp's
+// `addResourceEnvParams` silently dropped it), and even once metadata
+// survived, `FragmentWrapper.cpp` had no case for
+// `SignatureSystemValue::ViewportArrayIndex` and `Executor.cpp` never
+// threaded the resolved viewport index into the per-lane fragment
+// invocation. Two draw instances, each routed by its own `ViewportIndex` to
+// a different one of two viewports (mirroring
+// `DynamicViewportWithCountRoutesInstancesToDifferentViewports` above), but
+// this time the *fragment* shader reads `gl_ViewportIndex` back and selects
+// its output color accordingly -- if the fragment input read failed
+// (pipeline creation failure) or silently read zero (metadata/wiring loss),
+// every pixel would be red instead of the right half being blue.
+TEST_F(DrawTest, FragmentShaderReadsBackViewportIndex) {
+  VkShaderModule Vertex =
+      createModule(FullscreenVertexWithInstanceViewportSource);
+  VkShaderModule Fragment = createModule(ViewportIndexFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+  VkDynamicState Dynamic[2] = {VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT,
+                               VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT};
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 2;
+  DynamicInfo.pDynamicStates = Dynamic;
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.pDynamicState = &DynamicInfo;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  // Prior to the H3a fix this failed with VK_ERROR_INITIALIZATION_FAILED
+  // ("fragment stage wrapper requires attached feme.signature metadata").
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  std::array<VkViewport, 2> Viewports = {{
+      {0.0f, 0.0f, float(Extent) / 2, float(Extent), 0.0f, 1.0f},
+      {float(Extent) / 2, 0.0f, float(Extent) / 2, float(Extent), 0.0f, 1.0f},
+  }};
+  std::array<VkRect2D, 2> Scissors = {{
+      {{0, 0}, {Extent / 2, Extent}},
+      {{int32_t(Extent / 2), 0}, {Extent / 2, Extent}},
+  }};
+  vkCmdSetViewportWithCount(Cmd, Viewports.size(), Viewports.data());
+  vkCmdSetScissorWithCount(Cmd, Scissors.size(), Scissors.data());
+  vkCmdDraw(Cmd, 3, 2, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Left half (viewport/instance 0): fragment shader reads back
+  // gl_ViewportIndex == 0 and selects red. Right half (viewport/instance 1):
+  // reads back gl_ViewportIndex == 1 and selects blue.
+  EXPECT_EQ(texel(0, 0)[0], 0xFF) << "left half is red (viewport 0)";
+  EXPECT_EQ(texel(0, 0)[2], 0x00) << "left half is red (viewport 0)";
+  EXPECT_EQ(texel(1, 3)[0], 0xFF) << "left half is red (viewport 0)";
+  EXPECT_EQ(texel(2, 0)[2], 0xFF) << "right half is blue (viewport 1)";
+  EXPECT_EQ(texel(2, 0)[0], 0x00) << "right half is blue (viewport 1)";
+  EXPECT_EQ(texel(3, 3)[2], 0xFF) << "right half is blue (viewport 1)";
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
