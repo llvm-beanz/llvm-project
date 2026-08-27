@@ -2865,15 +2865,21 @@ check reaches into the instance range rather than the vertex range for such
 a binding, and the executor (`Executor.cpp`) indexes a per-instance
 binding's data by the invocation's instance index (`FirstInstance +`
 instance) rather than its vertex index. Primitive restart
-(`primitiveRestartEnable`) is also implemented, but only for
-`VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP` -- a list topology combined with
-restart still fails at creation, matching real Vulkan's own requirement of
-an unadvertised extension for that combination: the executor's index fetch
-recognizes the index type's all-1-bits value, excludes that lane from the
-vertex-attribute fetch (it is not a real vertex, and its raw index is not a
-valid array offset), and splits triangle assembly into independent strip
-segments at each restart marker, each starting its own front/back winding
-parity exactly as an unindexed strip would. `vkCmdBlitImage`
+(`primitiveRestartEnable`) is also implemented, for every strip/fan
+topology (`VK_PRIMITIVE_TOPOLOGY_LINE_STRIP`/`TRIANGLE_STRIP`/
+`TRIANGLE_FAN`, and, since roadmap H5d's geometry-stage chaining, the two
+`*_STRIP_WITH_ADJACENCY` topologies too -- `feme::graphics::
+topologySupportsPrimitiveRestart` is the single source of truth both
+`GraphicsPipeline.cpp`'s creation-time gate and `Executor.cpp`'s own
+`RestartEnabled` condition share, roadmap H5e-b) -- a list topology
+combined with restart still fails at creation, matching real Vulkan's own
+requirement of an unadvertised extension for that combination: the
+executor's index fetch recognizes the index type's all-1-bits value,
+excludes that lane from the vertex-attribute fetch (it is not a real
+vertex, and its raw index is not a valid array offset), and splits
+triangle assembly into independent strip segments at each restart marker,
+each starting its own front/back winding parity exactly as an unindexed
+strip would. `vkCmdBlitImage`
 (`ImageOps.cpp`'s `runBlitImage`) also converts between differing formats
 and mirrors a region along either axis (or both) now: the same
 `unpackColor`/`packClearColor` central pack table the bilinear filter

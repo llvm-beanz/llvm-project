@@ -8468,3 +8468,122 @@ full: **1863/1922** (59 pre-existing, unrelated `Unsupported`, 0
 lit test this row adds (`spirv-to-llvm-geometry-stream.mlir`, 2 `RUN`
 splits counted as 1 discovered test file with 2 `CHECK` blocks under
 `--split-input-file`).
+
+## Roadmap H5e-b: measured impact (silent `vkCreateGraphicsPipelines`/`vkQueueSubmit` no-diagnostic bucket)
+
+**Change.** Two independent, unrelated false-positive validation bugs in
+`GraphicsPipeline.cpp` accounted for all 21 of this row's own flagged
+cases, both stale relative to work later milestones had already landed
+elsewhere; neither needed a new feature, just bringing an already-shipped
+capability's validation into agreement with itself.
+
+1. **Stale primitive-restart topology gate.** The creation-time
+   `primitiveRestartEnable` check still only allowed
+   `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP`, unchanged since roadmap V6
+   first added it. But roadmap H5d's own `Executor.cpp` change ("Chain
+   the geometry stage into `Executor::executeDraws`") had, in the same
+   commit, quietly extended the *runtime* restart condition to also cover
+   `LineStrip`, `TriangleFan`, and the two `*StripWithAdjacency`
+   topologies -- without anyone updating the creation-time gate to match.
+   Every pipeline using one of those four topologies plus restart was
+   therefore rejected at creation, before the (already-correct) executor
+   ever got a chance to run it. Fixed by factoring a single shared
+   helper, `feme::graphics::topologySupportsPrimitiveRestart`
+   (`Pipeline.h`/`Pipeline.cpp`, mirroring the existing
+   `topologyHasAdjacency` precedent), and pointing both
+   `GraphicsPipeline.cpp`'s gate and `Executor.cpp`'s own
+   `RestartEnabled` condition at it, so the two can never drift apart
+   again. Accounts for 18 of the 21 cases
+   (`builtin_variable.in_block.primitive_id_in{,_restarted}`,
+   `input.basic_primitive.{line_strip,line_strip_adjacency,triangle_fan}`,
+   `input.triangle_strip_adjacency.vertex_count_*`).
+2. **Degenerate zero-emit geometry shader rejected outright.**
+   `dEQP-VK.geometry.emit.{line_strip,points,triangle_strip}_emit_0_end_0`
+   compile a geometry entry point whose body is a deliberate no-op (CTS's
+   own `emitCountA=emitCountB=endCountA=endCountB=0` shape: no
+   `gl_Position` write, no varying write, no `EmitVertex`/`EndPrimitive`
+   call at all). SPIR-V only lists an entry point's *used* interface
+   variables, so such a shader's reflected `EntrySignature` has **zero
+   elements outright** -- not merely a missing `Position` element.
+   `validateStageInterfaces`'s "the last pre-rasterization stage must
+   write a 4-component SV_Position" check (and the fragment-input/
+   vertex-output location-linkage loop right beside it, which would
+   otherwise reject the fragment stage's now-unmatched varying input)
+   both unconditionally tripped on this empty signature. Since a
+   geometry stage that provably emits nothing can never contribute
+   anything to rasterization regardless of whether it ever would have
+   written a position or a varying, both checks now treat a fully empty
+   geometry signature (`GeometryNeverWrites`) as a legal no-op instead of
+   an error. Fixing only the creation-time check exposed a masked
+   third, exactly analogous runtime check in `Executor.cpp`'s
+   `executeDraws` (the same "last pre-rasterization stage does not write
+   an SV_Position" condition, now checked against
+   `GSSig->Elements.empty()` and short-circuited to `Error::success()`
+   before the `VSPosition` requirement). Accounts for the remaining 3
+   cases, all three now passing outright.
+
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` (the existing opt-in-only diagnostic
+env var `Diagnostics.cpp` already implements) reruns of the exact 21-case
+list confirmed each fix in isolation before and after: 18 cases printed
+`"primitive restart is only implemented for
+VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP"`, 3 printed `"geometry stage does
+not write a 4-component SV_Position output"` -- both real, specific
+diagnostics that were simply never surfaced because this env var is off
+by default during a normal CTS run, which is this row's own "and no
+diagnostic printed at all" observation explained, not a logging bug to
+fix on its own.
+
+**`dEQP-VK.geometry.*` re-run (200 cases), before/after:**
+
+```
+Before (H5e-a's own baseline):
+  Passed:        1/200 (0.5%)
+  Failed:        166/200 (83.0%)
+  Not supported: 33/200 (16.5%)
+
+After (this row):
+  Passed:        4/200 (2.0%)
+  Failed:        163/200 (81.5%)
+  Not supported: 33/200 (16.5%)
+```
+
+`NotSupported` is byte-identical (still the same pre-existing,
+geometry-unrelated feature/limit/format gates). All 21 of this row's own
+cases were re-examined individually after both fixes landed:
+
+| Count | Outcome | Detail |
+|---|---|---|
+| 3 | `Pass` | `emit.{line_strip,points,triangle_strip}_emit_0_end_0` -- the degenerate zero-emit fix closes these outright |
+| 18 | `Fail` with a real, printed diagnostic (`error: 'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but got '!llvm.array<N x struct<...>>'`) | The restart-topology fix lets these 18 proceed past pipeline creation into the same pre-existing 60-case `getelementptr`/output-array-storage bucket H5e-a already flagged and left unisolated -- correctly reclassified into an already-tracked bucket, not a new open item this row needs to carry forward |
+
+Total: 4 (Pass) + 163 (Fail) + 33 (NotSupported) = 200, matching the run.
+This row's own literal ask -- isolate the root cause behind the silent,
+un-diagnosed 21-case bucket -- is complete: every one of the 21 cases now
+either passes or fails with a real, attributed diagnostic; none are
+silent anymore.
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt`
+sample, same file H5e/H5e-a's own reports used:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        155/1957 (7.9%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical to H5e-a's own baseline (12/155/1790, 0 regressions) --
+expected, since neither fix touches any non-geometry topology/pipeline
+path (the restart-topology fix only changes which topologies restart is
+*accepted for*, not how restart itself behaves; the degenerate-zero-emit
+fix only relaxes checks that require a bound, non-trivial geometry
+stage in the first place).
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1867/1926** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H5e-a's own **1863/1922** baseline by exactly the 4
+new unit tests this row adds:
+`GraphicsPipelineTest.AcceptsPrimitiveRestartOnStripAndFanTopologies`,
+`GraphicsPipelineTest.AcceptsGeometryStageThatNeverEmits`,
+`PrimitiveTopologyTest.SupportsPrimitiveRestartIdentifiesEveryStripAndFanKind`,
+and `ExecutorTest.ExecutesDrawsAsNoOpWhenGeometryStageNeverEmits`.
