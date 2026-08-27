@@ -616,6 +616,139 @@ TEST(CanonicalizeStageTest, RewritesSPIRVMatrixInputLoadOneRowAtATime) {
     EXPECT_FALSE(isa<LoadInst>(&I));
 }
 
+/// (Roadmap H5b) A geometry entry point's own per-vertex inputs
+/// (`gl_in[]`-shaped) are read via `gl_in[i]` for a loop-carried, genuinely
+/// non-constant `i` -- unlike a matrix's `Row` dimension
+/// (`RewritesSPIRVMatrixInputLoadOneRowAtATime` above), which is always
+/// indexed by a constant that folds down to a plain byte offset.
+/// `getStageIOBaseAndOffset`'s `stripAndAccumulateConstantOffsets` walk
+/// cannot fold a non-constant GEP index at all, so before this it left
+/// `gl_in[i]`-shaped loads entirely unresolved (an unrewritten raw load on
+/// a still-`external` global, undefined at JIT time). This exercises the
+/// new `getDynamicVertexIndexedAccess` path on a plain (non-block)
+/// per-vertex-arrayed varying -- one `feme.stage.input.load` per vector
+/// component, each carrying `%i` itself (not a constant) as its own
+/// `Vertex` operand (argument 3), `Row` left at the default constant 0
+/// (the dynamic-index path resolves the remaining access starting one
+/// array dimension in, so there is no further row within that one
+/// vertex's own `<4 x float>` value). `Sig->Elements[0].RowCount` itself
+/// still reports 3 -- `getStageIORowShape`'s own whole-global type
+/// recursion is untouched by this milestone, so it still sees the same
+/// outer `[3 x <4 x float>]` a genuine 3-row matrix would -- but nothing
+/// in the rewritten IR ever actually addresses a nonzero `Row` on this
+/// global; only the dynamic `Vertex` operand does. Reconciling that
+/// signature-level mislabeling (a per-vertex-array `RowCount` that a
+/// consumer must not confuse with a real matrix row count) is left to a
+/// later roadmap row, once H5c starts routing real geometry entries
+/// through this pass and a real consumer needs to tell the two apart.
+TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoInputLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_texcoord = external addrspace(7) constant [3 x <4 x float>], !spirv.Decorations !0
+    define <4 x float> @main(i32 %i) #0 {
+      %p = getelementptr inbounds [3 x <4 x float>], ptr addrspace(7) @in_texcoord, i32 0, i32 %i
+      %v = load <4 x float>, ptr addrspace(7) %p
+      ret <4 x float> %v
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  // Unchanged from the ordinary (constant-index) matrix-row case: the
+  // per-vertex array dimension still becomes `RowCount` in the signature
+  // (`getStageIORowShape`'s own type-driven shape computation, untouched
+  // by this milestone) -- H5b only changes which *operand*
+  // (`feme.stage.input.load`'s `Vertex`, not `Row`) a *dynamically*
+  // indexed access threads that dimension's own index through as.
+  EXPECT_EQ(Sig->Elements[0].RowCount, 3u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    ++SeenLoads;
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 0u);
+    EXPECT_EQ(CI->getArgOperand(3), IArg);
+    EXPECT_FALSE(isa<Constant>(CI->getArgOperand(3)));
+  }
+  EXPECT_EQ(SeenLoads, 4u);
+
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<LoadInst>(&I));
+}
+
+/// (Roadmap H5b) The builtin-interface-block-array shape a geometry
+/// entry's own `gl_in[]` genuinely takes (mirroring
+/// `RecognizesInterfaceBlockPerMemberByteOffsetAccess`'s non-arrayed
+/// `gl_PerVertex`, but with the per-member metadata one array dimension
+/// further out): `gl_in[i].gl_Position` decomposes into member 0's own
+/// `ElementID`, `Row`/`Component` both left at their default constant 0
+/// (a whole-vector access), and `%i` itself threaded through as `Vertex`.
+TEST(CanonicalizeStageTest,
+     ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_in = external addrspace(7) global [3 x { <4 x float>, float, [1 x float], [1 x float] }], !feme.spirv.MemberDecorations !10
+    define <4 x float> @main(i32 %i) #0 {
+      %p = getelementptr inbounds [3 x { <4 x float>, float, [1 x float], [1 x float] }], ptr addrspace(7) @gl_in, i32 0, i32 %i, i32 0
+      %v = load <4 x float>, ptr addrspace(7) %p
+      ret <4 x float> %v
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !10 = !{!11, !12, !13, !14}
+    !11 = !{i32 0, !15}
+    !12 = !{i32 1, !16}
+    !13 = !{i32 2, !17}
+    !14 = !{i32 3, !18}
+    !15 = !{!19}
+    !19 = !{i32 11, i32 0}
+    !16 = !{!20}
+    !20 = !{i32 11, i32 1}
+    !17 = !{!21}
+    !21 = !{i32 11, i32 3}
+    !18 = !{!22}
+    !22 = !{i32 11, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 4u);
+  EXPECT_EQ(Sig->Elements[0].SystemValue, SignatureSystemValue::Position);
+  // Member 0's (`gl_Position`) own shape is a bare `<4 x float>` -- the
+  // per-vertex array dimension is not folded into it.
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    ++SeenLoads;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[0].ElementID);
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 0u);
+    EXPECT_EQ(CI->getArgOperand(3), IArg);
+  }
+  EXPECT_EQ(SeenLoads, 4u);
+}
+
 /// (Roadmap C8) glslang wraps a `varying`-block *member* -- even a matrix
 /// one -- in an outer single-member struct at the SPIR-V level
 /// (`dEQP-VK.glsl.linkage.varying.struct.*`'s own shape: a `mat4x2` member
