@@ -1428,8 +1428,13 @@ through as `feme.stage.input.load`'s `Vertex` operand, with
 `ValidateStagePass` diagnosing a non-constant `Vertex` operand on every
 stage except `Geometry`, the one stage whose ABI (`FemeGeometryArgs`'s
 primitive-major `Inputs` layout) is actually built to address one at
-runtime. A *constant*-indexed `gl_in[k]` access still folds through the
-older `Row`-based path rather than `Vertex` (roadmap H5f), and
+runtime. Roadmap H5f has since closed the *constant*-index half H5b left
+open: a `gl_in[k]` access with a compile-time-constant `k` now folds into
+that same `Vertex` operand too (not the older `Row`-based path), and
+`SignatureElement::RowCountIsVertexArray` records, for a whole (non-block)
+per-vertex-arrayed `Input` global's own signature element, that its
+`RowCount` is that array's own extent rather than a real matrix's row
+count -- the two are otherwise indistinguishable in the signature.
 `SPIRVToLLVMPatterns.cpp` does not yet attach the member-decoration
 metadata a real `gl_in[]` builtin block needs for any of this to see real
 input (roadmap H5g); `CanonicalizeStagePass::run` itself still does not

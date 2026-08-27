@@ -7825,3 +7825,88 @@ it are the real result. One case in the full (non-sampled)
 assertion failure (confirmed present on H5a's own unmodified tree too,
 hence `grep -v viewport_height` excluding it from the sample); not
 something this row touches or fixes.
+
+## Roadmap H5f: measured impact (constant `Vertex` operand, `RowCountIsVertexArray`)
+
+**Still 0/0/200 on `dEQP-VK.geometry.*` -- correctly so**, for the same
+reason H5b's own edition above gives: `CanonicalizeStagePass::run` still
+does not accept `ShaderStage::Geometry` (H5c's own job), so no geometry
+entry point reaches any of this row's code either:
+
+```
+Test run totals:
+  Passed:        0/200 (0.0%)
+  Failed:        0/200 (0.0%)
+  Not supported: 200/200 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no change:
+this row advertises nothing new, same as H5a/H5b.
+
+**What this row actually adds.** It closes the one thing H5b's own
+"deliberately does not do" note (above) left open: a *constant* `gl_in[k]`
+index (or any other per-vertex-arrayed `Input` global's constant index)
+now folds into the same `Vertex` operand a non-constant one already does,
+instead of an ordinary `Row`. The new shared predicate
+`isPerVertexArrayInputGlobal` (structural only, matching
+`getDynamicVertexIndexedAccess`'s own precedent of not trying to
+disambiguate a genuine geometry per-vertex array from some other stage's
+real per-invocation matrix attribute at this level -- `ValidateStagePass`'s
+`validateVertex` is what actually diagnoses stage-inappropriate use)
+replaces `getDynamicVertexIndexedAccess`'s own inlined check, and is now
+also consulted by `resolveStageIOAccess`'s ordinary constant-offset
+fallback: when the resolved global is this shape and the access is not a
+whole-global aggregate one, the byte offset is split into a vertex index
+(the outer array dimension) and a residual offset within that one
+vertex's own value, exactly mirroring the dynamic path's own peeling, just
+with a constant `Value*` instead of a genuine SSA one.
+
+Reconciling the other half of that same note -- `SignatureElement.RowCount`
+for such a global being indistinguishable from a real matrix's row count
+in the signature -- adds `SignatureElement::RowCountIsVertexArray`
+(`feme/include/feme/Core/Signature.h`, `SignatureAbiVersion` bumped 3 → 4):
+true only for a whole (non-block) per-vertex-arrayed `Input` global's own
+element, set in `addElements` via the same `isPerVertexArrayInputGlobal`
+predicate; always false for a builtin interface block's own per-member
+elements, whose `RowCount` never included the per-vertex array dimension
+to begin with (it is peeled off one layer before `addElement` ever sees a
+member's type). Every pre-existing serialized `feme.signature` blob this
+codebase's own tests embed (`feme-render`'s `draw-*.test` scenes, the CPU
+stage-wrapper lit tests) is regenerated to the new version-4 byte layout
+(a mechanical re-serialization, not a semantic change -- every value
+`RowCountIsVertexArray` least-significant zero-fills for a pre-H5f
+signature is the correct "not a per-vertex array" default for all of
+them).
+
+**Regression sample.** `ninja check-feme` needed no other production-code
+IR shape change: the two existing H5b tests
+(`ThreadsDynamicVertexIndexIntoInputLoad`,
+`ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad`) still pass
+unmodified except for asserting the now-populated
+`RowCountIsVertexArray` flag, confirming this row does not disturb the
+non-constant case it builds on. The same `dEQP-VK.draw.*` 1957-case sample
+this report has used since H4 is byte-identical to H5b's own baseline:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        139/1957 (7.1%)
+  Not supported: 1806/1957 (92.3%)
+```
+
+**0 regressions, 0 new passes** -- expected, since every real
+`dEQP-VK.draw.*`/`dEQP-VK.geometry.*` shader either has no per-vertex-array
+global at all (draw) or never reaches this pass yet (geometry, pending
+H5c).
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1849/1908** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from H5b's own **1847/1906** baseline by exactly the 2 new tests this
+row adds -- `CanonicalizeStageTest.cpp`'s
+`FoldsConstantVertexIndexIntoVertexOperand` and
+`FoldsConstantVertexIndexIntoInterfaceBlockArrayMemberVertexOperand` --
+plus `SignatureTest.cpp`'s existing `SerializeParseRoundTrips` extended
+(not added) to cover the new field.
+
+**Reproducing.** Same invocation as H5b's own edition above (`dEQP-VK.
+geometry.*` and the `draw_sample.txt` caselist); no new command needed.
