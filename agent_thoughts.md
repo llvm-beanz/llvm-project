@@ -37401,3 +37401,208 @@ rasterizer bug.
 2. Documentation updates (Roadmap.md, VulkanCTSReport.md,
    VulkanExtensionInventory.md, FeMeVulkanDesign.md).
 3. This `agent_thoughts.md` entry (own commit, per instructions).
+
+# Milestone H4j: rasterizer precision -- a float32 crack and a backwards top-left tie-break
+
+## Starting point
+
+H4i closed the domain-origin winding inversion, but all 24
+`dEQP-VK.tessellation.winding.*glsl*` cases still failed, now uniformly at
+a much smaller defect: exactly 15/4096 stray red pixels for `glsl_quads_*`
+(clustered near a corner and along a `y == x` diagonal), and a 1-pixel
+top/bottom-row-fill off-by-one for `glsl_triangles_*`. The roadmap framed
+two candidates: the tessellator's own crack-free bridging
+(`Tessellator.cpp`) or the rasterizer's top-left tie-break
+(`Executor.cpp`).
+
+## Reproducing first, before guessing
+
+Before touching any code I reproduced the actual CTS failures locally: a
+`deqp-vk` binary already existed at
+`/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk`,
+and FeMe's own Vulkan ICD JSON at
+`build/tools/feme/tools/feme-vulkan/feme_icd.json`. Running the 24-case
+group against a `vulkan -> .../data/vulkan` symlinked scratch directory
+reproduced exactly the roadmap's own description ("got 4081 white and 15
+red pixels" for quads, "triangle orientation is incorrect" for
+triangles). I also read `vktTessellationWindingTests.cpp`'s own
+`verifyResultImage` to understand the *exact* pass/fail arithmetic
+(quads: `numWhitePixels == totalNumPixels`; triangles: a tolerance-banded
+white-pixel count plus an *exact* top/bottom-row fill count) rather than
+guessing from the error strings alone, and confirmed the CTS shaders use
+tessellation factor 5.0 throughout (`gl_TessLevelInner/Outer = 5.0`),
+which matters later.
+
+## Isolating root cause 1 (quads) via targeted instrumentation
+
+Rather than reasoning abstractly about the tessellator's bridging code, I
+added a temporary `FEME_DEBUG_XY=X,Y`-gated `fprintf` inside the
+coverage-test loop in `Executor.cpp`, printing each candidate triangle's
+vertex positions and edge values whenever a specific pixel was being
+tested. Running with `FEME_DEBUG_XY=16,16` against `glsl_quads_ccw` (a
+known failing pixel from the decoded CTS output image, extracted via
+Python + `PIL` from the `.qpa` log's embedded base64 PNGs) showed *two*
+adjacent triangles, sharing a diagonal edge from the tessellator's own
+quad-core-cell split, *both* rejecting the sample at (16.5,16.5) with a
+tiny negative edge value (~1e-6 and ~4e-7 respectively) -- a textbook
+floating-point rasterization crack, not a tessellator gap. I verified the
+two triangles' shared-edge vertex positions were bit-identical floats
+(ruling out duplicate/divergent domain-point evaluation on the
+tessellator side, one of the roadmap's own two candidates), and confirmed
+via a small Python `struct`/float32-emulation script that recomputing the
+same edge function in `double` from those exact float32 inputs resolves
+to a genuine, non-degenerate sign -- not another near-zero value that
+could just as easily flip the other way with a different, equally
+"reasonable" precision choice. That gave me confidence the double-
+precision fix wasn't just moving the crack to a different (still tiny)
+magnitude.
+
+The fix: a new `edgeFnD` (identical formula, `double` inputs/output)
+replacing `edgeFn` for the coverage test's three inside/outside
+comparisons only -- deliberately *not* changing the barycentric weight
+computation, since that's an interpolated value (where `float` precision
+is both sufficient and consistent with the rest of the pipeline), not a
+binary coverage decision (where the crack actually lives). Rebuilding and
+rerunning the 24-case group: all 12 `glsl_quads_*` cases now passed; all
+12 `glsl_triangles_*` cases still failed, but now with white-pixel counts
+within the CTS's own tolerance band -- confirming the crack fix didn't
+accidentally paper over the triangle bug too, and that the two symptoms
+really were two independent root causes as the roadmap's own careful
+phrasing ("a rasterizer tie-break/rounding *or* tessellator
+crack-free-bridging-seam issue") hinted at.
+
+## Isolating root cause 2 (triangles)
+
+Same instrumentation technique, this time at `FEME_DEBUG_XY=63,0` (a
+corner pixel from the still-failing triangle cases' decoded output).
+Pixel (63.5, 0.5) landed *exactly* on the tessellated domain's own outer
+hypotenuse -- from screen vertex (64,0) to (51.2,12.8), an exact
+`x + y == 64` line since `64 / 5 = 12.8` is a clean multiple at
+tessellation factor 5 -- with edge value `E == 0.0` exactly (not a
+rounding artifact this time; a genuine exact tie). `isTopLeftEdge`
+classified this tie as "included" when it should have been excluded.
+
+I initially did a careful manual derivation comparing the existing
+`isTopLeftEdge` formula against Fabian Giesen's well-known reference
+rasterizer top-left-rule writeup and concluded the existing formula
+*matched* the reference -- which contradicted the observed CTS failure
+and left me stuck for a bit. I broke the impasse the same way H4i's own
+entry describes for a different bug: stop trusting a self-consistent
+manual re-derivation and instead empirically flip the one bit that
+matters and measure the real outside-world signal. I flipped
+`isTopLeftEdge`'s polarity (from `(Dy==0 && Dx>0) || Dy<0` to
+`(Dy==0 && Dx<0) || Dy>0`), rebuilt, and reran the full 24-case group:
+**all 24/24 passed**. Only afterward did I re-derive the corrected
+convention from scratch with a fresh, independent example triangle
+(`A=(0,0)`, `B=(10,10)`, `C=(10,0)`, a clean `Area=+100` case) to confirm
+the flipped rule was not just empirically lucky but geometrically sound
+-- my first "reference-matching" derivation had made a sign error
+somewhere in translating the reference's own axis convention (which
+differs in handedness from this rasterizer's y-down pixel space) that a
+second, independent derivation caught. This is the same lesson H4i's own
+entry already recorded: a self-consistent derivation can look right and
+still be wrong; the empirical, external check (a real `deqp-vk` run) is
+what actually validates a fix, and manual math should confirm *why* an
+empirically-validated fix works, not substitute for testing it.
+
+Also confirmed via the CW variant (`glsl_triangles_cw`) that the same
+defect (top=64/expected 63, bottom=1/expected 0) appeared identically
+regardless of winding direction -- ruling out a "front-face got flipped
+again" explanation and confirming this really was the tie-break
+convention itself, independent of anything H4i touched.
+
+## Cleanup and verification discipline
+
+Before considering this done I: removed the temporary `FEME_DEBUG_XY`
+debug block entirely (it should never have shipped); ran `clang-format`
+on both changed files (no changes needed, confirming the hand-written
+edits already matched house style); ran the *full* `ninja check-feme`
+(assertions-enabled, ccache build) to catch any regression from
+`isTopLeftEdge`'s polarity flip, since that function affects *every*
+triangle this rasterizer ever draws, not just tessellated ones --
+1835/1894 passed (up from the pre-change 1833/1892 baseline by exactly
+the two new unit tests, 0 regressions); reran the full
+`dEQP-VK.tessellation.*` group (1114 cases) and the same
+`dEQP-VK.draw.*` 1957-case regression sample this report's own H4-series
+rows have used throughout, and got byte-identical `NotSupported` counts
+and an exact, expected pass/fail shift in the tessellation group (24
+cases moving `Fail` -> `Pass`, nothing else moving) -- the standard this
+report has held every H4 row to since H4c.
+
+## Building deterministic unit tests for two floating-point edge cases
+
+The hardest part of this milestone wasn't the fix, it was writing unit
+tests that reproduce each bug *deterministically* without depending on
+the tessellator at all (so the tests isolate the rasterizer bug
+specifically, and don't silently stop testing anything useful if a
+future, unrelated tessellator change happens to also mask the symptom).
+
+For the top-left tie-break fix, this was straightforward once I'd found
+the right geometry: a single triangle whose hypotenuse is a small
+viewport's own anti-diagonal (`x + y == N`), landing exactly on several
+pixel centers. I made an off-by-one error on my first attempt figuring
+out which NDC coordinates project to which screen corners (I forgot
+`projectVertex` flips Y, `NdcY == 1` landing at screen `Y == 0`, not
+`NdcY == -1`) -- the test's first run showed pixels colored in a
+plausible-looking but wrong pattern, which was itself a useful signal to
+recheck my own arithmetic against the executor's actual formula rather
+than my assumption of it, before concluding the *fix* was broken.
+
+For the double-precision crack fix, hand-picking two "generic-looking"
+float32 vertices doesn't reliably reproduce a crack -- the crack is a
+property of a very specific bit pattern where two independent rounding
+paths (`P-A` vs `P-B`) diverge by a few ULPs right at a near-zero edge
+value, and most randomly chosen points aren't anywhere near that
+boundary. I wrote a small Python script emulating the exact
+`float32`/`double` operation sequence the C++ code performs (not just
+"close enough" floating point, but the literal same sequence of
+subtractions and multiply-subtract), parameterized a target pixel
+sample and a line direction/offset, and brute-force searched for
+vertex pairs that (a) place the target sample almost exactly on the
+segment in real-number math, and (b) round to a negative edge value from
+*both* directions in `float32`. The first search (screen-space
+coordinates directly) found candidates quickly, but I then discovered
+those exact screen values wouldn't be reachable through the executor's
+own NDC-to-screen `projectVertex` transform without its own additional
+rounding potentially disturbing the crack -- so I redid the search
+parameterized over NDC inputs, forward-simulating the *exact* projection
+formula, to guarantee the unit test's vertex data (expressed in NDC, the
+only way a real vertex shader can feed the rasterizer) reproduces the
+crack through the real code path, not just through a hand-simulated
+shortcut. I also made an indexing mistake reasoning about which of the
+coverage test's three edge slots (`E0`/`E1`/`E2`) corresponds to the
+"shared" edge after the triangle-assembly loop's `SArea < 0.0f`
+reorder swaps two vertices -- worth remembering for any future test in
+this area: the reorder changes *which* index tests which original edge,
+not just whether a swap happened.
+
+Both new tests were verified to actually catch the bug they're named
+for: I temporarily `git stash`-ed just the `Executor.cpp` fix (keeping
+the new tests), rebuilt, and confirmed both failed with the expected
+symptom before restoring the fix and confirming both pass. This is the
+same "does this test actually test anything" discipline the codebase's
+own instructions ask for, and it caught two real test-authoring bugs of
+mine along the way (the Y-flip mixup and the post-swap edge-index
+mixup) before they could have shipped as silently-wrong tests.
+
+## Outcome
+
+- `feme/lib/Graphics/Executor.cpp`: added `edgeFnD` (double-precision
+  edge function) used for the coverage test's inside/outside decisions;
+  flipped `isTopLeftEdge`'s polarity to the geometrically correct
+  convention for a positively-wound triangle.
+- `feme/unittests/Graphics/ExecutorTest.cpp`: two new deterministic unit
+  tests, each independently confirmed to fail pre-fix and pass post-fix.
+- `feme/docs/Roadmap.md`: H4j struck through with a "done" writeup.
+- `feme/docs/VulkanCTSReport.md`: new "Roadmap H4j: measured impact"
+  section with before/after numbers for the winding group, the full
+  tessellation group, and the draw regression sample.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed,
+  not changed -- this is a pure rasterizer bug fix, no feature bit or
+  extension involved.
+- All 24 `dEQP-VK.tessellation.winding.*glsl*` cases pass (up from 0/24).
+  `ninja check-feme` 1835/1894 (0 regressions). Full tessellation group
+  and draw regression sample both confirm 0 regressions elsewhere.
+- Four commits: the double-precision edge-test fix (with its own test),
+  the top-left tie-break polarity fix (with its own test), the docs
+  update, and this file.
