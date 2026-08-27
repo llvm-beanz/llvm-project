@@ -33,7 +33,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H4a?
+Can you work on milestone H4a? The last agent stopped part way through without
+committing its progress. I've stashed its changes, you can restore them with
+`git stash pop`.
 
 > **No SPIR-V tessellation-control or tessellation-evaluation entry point can be
 > reflected, so H4b has nothing to compile.**
