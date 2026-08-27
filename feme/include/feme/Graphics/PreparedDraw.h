@@ -30,6 +30,7 @@
 #include "feme/Target/CPU/RuntimeABI.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <cstdint>
 #include <vector>
@@ -158,16 +159,27 @@ struct DrawCommand {
 };
 
 /// A snapshot of one draw's dynamic state: color attachments, viewport and
-/// scissor, bound vertex buffers, the resource heap the vertex/fragment
+/// scissor arrays, bound vertex buffers, the resource heap the vertex/fragment
 /// stages read from, and the draw commands to execute against them. Owned
 /// for the prepared draw's duration, exactly like `cpu::DispatchResources`
 /// is owned for one dispatch's duration -- neither type copies the
 /// buffers/heaps it references.
 struct PreparedDraw {
+  PreparedDraw() {
+    Viewports.push_back(ViewportState{});
+    Scissors.push_back(ScissorRect{});
+  }
+
   llvm::MutableArrayRef<AttachmentView> Attachments;
   DepthStencilAttachment DepthStencil;
-  ViewportState Viewport;
-  ScissorRect Scissor;
+  /// The viewport array this draw may index by `ViewportArrayIndex`
+  /// (`gl_ViewportIndex`), or element 0 only for the long-standing common
+  /// case with no explicit viewport selection.
+  llvm::SmallVector<ViewportState, 1> Viewports;
+  /// The scissor array paired with `Viewports`: element 0 is the common case,
+  /// and a primitive routed to viewport `I` is also clipped against scissor
+  /// `I`, matching Vulkan's viewport-array state model.
+  llvm::SmallVector<ScissorRect, 1> Scissors;
   llvm::ArrayRef<VertexBufferBinding> VertexBuffers;
   IndexBufferBinding IndexBuffer;
   cpu::DispatchResources Resources;
@@ -215,8 +227,9 @@ struct PreparedDraw {
   /// attachment layer when no stage writes `RenderTargetArrayIndex`
   /// explicitly -- see RenderPass.h's `RenderTargetBinding::ViewMask`); the
   /// executor only needs this value to source a vertex/fragment stage's
-  /// `gl_ViewIndex` input (`SignatureSystemValue::ViewIndex`), not to
-  /// address the attachment itself.
+  /// `gl_ViewIndex` input (`SignatureSystemValue::ViewIndex`). When no
+  /// pre-raster stage writes `RenderTargetArrayIndex`, this is also the
+  /// default array layer a multiview draw targets.
   uint32_t ViewIndex = 0;
 };
 

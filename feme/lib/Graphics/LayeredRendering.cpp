@@ -10,15 +10,30 @@
 
 using namespace feme::graphics;
 
+namespace {
+
+std::optional<uint32_t> resolveArrayIndex(int32_t RequestedIndex,
+                                          uint32_t Count) {
+  if (RequestedIndex < 0)
+    return std::nullopt;
+  auto Index = static_cast<uint32_t>(RequestedIndex);
+  if (Index >= Count)
+    return std::nullopt;
+  return Index;
+}
+
+} // namespace
+
 std::optional<uint32_t>
 feme::graphics::resolveRenderTargetArrayLayer(int32_t RequestedLayer,
                                               uint32_t LayerCount) {
-  if (RequestedLayer < 0)
-    return std::nullopt;
-  auto Layer = static_cast<uint32_t>(RequestedLayer);
-  if (Layer >= LayerCount)
-    return std::nullopt;
-  return Layer;
+  return resolveArrayIndex(RequestedLayer, LayerCount);
+}
+
+std::optional<uint32_t>
+feme::graphics::resolveViewportArrayIndex(int32_t RequestedViewport,
+                                          uint32_t ViewportCount) {
+  return resolveArrayIndex(RequestedViewport, ViewportCount);
 }
 
 uint64_t feme::graphics::getAttachmentLayerByteOffset(uint32_t Layer,

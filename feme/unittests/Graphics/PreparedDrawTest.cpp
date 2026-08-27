@@ -48,8 +48,8 @@ TEST(PreparedDrawTest, DescribesOneDraw) {
 
   PreparedDraw Prepared;
   Prepared.Attachments = Attachments;
-  Prepared.Viewport = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
-  Prepared.Scissor = ScissorRect{0, 0, 4, 4};
+  Prepared.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Prepared.Scissors[0] = ScissorRect{0, 0, 4, 4};
   Prepared.VertexBuffers = VertexBuffers;
   Prepared.Draws = Draws;
 
@@ -58,8 +58,8 @@ TEST(PreparedDrawTest, DescribesOneDraw) {
   EXPECT_EQ(Prepared.Attachments[0].Height, 4u);
   EXPECT_EQ(Prepared.Attachments[0].Format,
             cpu::ResourceFormat::R8G8B8A8_UNORM);
-  EXPECT_EQ(Prepared.Viewport.Width, 4.0f);
-  EXPECT_EQ(Prepared.Scissor.Width, 4u);
+  EXPECT_EQ(Prepared.Viewports[0].Width, 4.0f);
+  EXPECT_EQ(Prepared.Scissors[0].Width, 4u);
   ASSERT_EQ(Prepared.VertexBuffers.size(), 1u);
   EXPECT_EQ(Prepared.VertexBuffers[0].Stride, 12u);
   ASSERT_EQ(Prepared.VertexBuffers[0].Attributes.size(), 1u);

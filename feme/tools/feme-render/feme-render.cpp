@@ -682,8 +682,8 @@ int main(int argc, char **argv) {
     PreparedDraw Draw;
     Draw.Attachments = AttachmentViews;
     Draw.DepthStencil = DepthStencil;
-    Draw.Viewport = Viewport;
-    Draw.Scissor = Scissor;
+    Draw.Viewports[0] = Viewport;
+    Draw.Scissors[0] = Scissor;
     Draw.VertexBuffers = VertexBuffers;
     Draw.IndexBuffer = IndexBuffer;
     Draw.Draws = Draws;

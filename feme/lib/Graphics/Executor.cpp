@@ -7,8 +7,10 @@
 //===----------------------------------------------------------------------===//
 //
 // Implements the "Draw flow" Executor.h describes. Roadmap R32 ("Basic
-// triangle pipeline") scopes this to one triangle-list/triangle-strip draw
-// and one viewport/scissor; the scope decisions this file makes -- each
+// triangle pipeline") scoped this to one triangle-list/triangle-strip draw
+// and one viewport/scissor; roadmap H3 lifts the singleton viewport/scissor
+// part to array state selected per primitive. The scope decisions this file
+// still makes -- each
 // deliberately deferred to a later roadmap step rather than silently
 // approximated -- are:
 //
@@ -58,6 +60,7 @@
 
 #include "feme/Core/Signature.h"
 #include "feme/Graphics/ImageFixture.h"
+#include "feme/Graphics/LayeredRendering.h"
 #include "feme/Graphics/Pipeline.h"
 #include "feme/Graphics/PreparedDraw.h"
 #include "feme/Target/CPU/CompiledStage.h"
@@ -258,6 +261,38 @@ const SignatureElement *findElementByLocation(const EntrySignature &Sig,
         Elt.Location == Location && Elt.Index == Index)
       return &Elt;
   return nullptr;
+}
+
+int32_t readSignedStageValue(const StageStorage &Storage,
+                             const SignatureElement &Elt, uint32_t Invocation) {
+  uint32_t Bits =
+      Storage.readRaw(Elt.ElementID, Elt.FirstComponent, Invocation);
+  int32_t Value;
+  memcpy(&Value, &Bits, sizeof(Value));
+  return Value;
+}
+
+AttachmentView sliceAttachmentLayer(const AttachmentView &View,
+                                    uint32_t Layer) {
+  if (View.Data.empty() || View.ArrayLayers <= 1)
+    return View;
+  uint64_t LayerSizeBytes = View.Data.size() / View.ArrayLayers;
+  uint64_t LayerOffset = getAttachmentLayerByteOffset(Layer, LayerSizeBytes);
+  AttachmentView Sliced = View;
+  Sliced.Data = View.Data.slice(LayerOffset, LayerSizeBytes);
+  Sliced.ArrayLayers = 1;
+  return Sliced;
+}
+
+uint32_t getDrawLayerCount(const PreparedDraw &Draw) {
+  for (const AttachmentView &Attachment : Draw.Attachments)
+    if (!Attachment.Data.empty())
+      return Attachment.ArrayLayers;
+  if (!Draw.DepthStencil.Depth.Data.empty())
+    return Draw.DepthStencil.Depth.ArrayLayers;
+  if (!Draw.DepthStencil.Stencil.Data.empty())
+    return Draw.DepthStencil.Stencil.ArrayLayers;
+  return 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -499,6 +534,11 @@ struct ScreenTriangle {
   std::array<const uint32_t *, 3> Varyings; // pointer into owning storage
   bool FrontFacing;
   uint32_t PrimitiveID;
+  uint32_t TargetLayer = 0;
+  int32_t ScissorMinX = 0;
+  int32_t ScissorMinY = 0;
+  int32_t ScissorMaxX = 0;
+  int32_t ScissorMaxY = 0;
   /// (roadmap F5) Whether this synthetic triangle is one half of a line
   /// primitive's quad expansion: gates whether `EdgeDistance`/`ArcLength`
   /// below are consulted at all (a point or real triangle primitive
@@ -1097,6 +1137,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
   const SignatureElement *VSPosition = findElement(
       *VSSig, SignatureDirection::Output, SignatureSystemValue::Position);
+  const SignatureElement *VSLayerOut =
+      findElement(*VSSig, SignatureDirection::Output,
+                  SignatureSystemValue::RenderTargetArrayIndex);
+  const SignatureElement *VSViewportOut =
+      findElement(*VSSig, SignatureDirection::Output,
+                  SignatureSystemValue::ViewportArrayIndex);
   if (!VSPosition)
     return createStringError(inconvertibleErrorCode(),
                              "vertex stage does not write an SV_Position "
@@ -1227,9 +1273,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "4-component floating-point output");
   }
 
-  // (Roadmap E5) The extent used to clamp the scissor rect below: the
-  // first bound (non-unused) color attachment, or else the depth/stencil
-  // attachment, since attachment 0 itself may be an unused
+  // (Roadmap E5/H3) The extent used to clamp each selected scissor rect
+  // below: the first bound (non-unused) color attachment, or else the
+  // depth/stencil attachment, since attachment 0 itself may be an unused
   // `VK_NULL_HANDLE` slot with no extent of its own.
   uint32_t ExtentWidth = 0, ExtentHeight = 0;
   for (const AttachmentView &A : Draw.Attachments)
@@ -1258,14 +1304,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     if (!ElemSize)
       return ElemSize.takeError();
     ColorElemSizes.push_back(*ElemSize);
-    size_t ExpectedSize = (size_t)A.Width * A.Height * SampleCount * *ElemSize;
+    size_t ExpectedSize =
+        (size_t)A.Width * A.Height * A.ArrayLayers * SampleCount * *ElemSize;
     if (A.Data.size() != ExpectedSize)
-      return createStringError(inconvertibleErrorCode(),
-                               "a color attachment's data is %zu byte(s), "
-                               "expected %zu (width * height * sample "
-                               "count * element size)",
-                               A.Data.size(), ExpectedSize);
+      return createStringError(
+          inconvertibleErrorCode(),
+          "a color attachment's data is %zu byte(s), "
+          "expected %zu (width * height * layer count * sample "
+          "count * element size)",
+          A.Data.size(), ExpectedSize);
   }
+
+  uint32_t DrawLayerCount = getDrawLayerCount(Draw);
 
   // --- Depth/stencil test/write setup (roadmap R33). ---
   //
@@ -1298,16 +1348,6 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   bool NeedsDepthStencil = DepthTestOrWrite || PipelineStencil.TestEnable;
   bool UseEarlyDepthStencil =
       NeedsDepthStencil && !FSDepthOut && !FSStencilRefOut && !FSMayDiscard;
-  AttachmentView DepthAttachment = Draw.DepthStencil.Depth;
-  AttachmentView StencilAttachment = Draw.DepthStencil.Stencil;
-
-  int32_t ScissorMinX = std::max<int32_t>(0, Draw.Scissor.X);
-  int32_t ScissorMinY = std::max<int32_t>(0, Draw.Scissor.Y);
-  int32_t ScissorMaxX = std::min<int32_t>(
-      ExtentWidth, Draw.Scissor.X + static_cast<int32_t>(Draw.Scissor.Width));
-  int32_t ScissorMaxY = std::min<int32_t>(
-      ExtentHeight, Draw.Scissor.Y + static_cast<int32_t>(Draw.Scissor.Height));
-
   uint32_t PrimitiveCounter = 0;
 
   for (const DrawCommand &Cmd : Draw.Draws) {
@@ -1525,19 +1565,60 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     // "coordinate transformations"). Shared by the triangle path below and
     // the point/line quad-expansion path further down so both apply
     // exactly the same viewport transform.
+    struct PrimitiveState {
+      const ViewportState *Viewport = nullptr;
+      const ScissorRect *Scissor = nullptr;
+      uint32_t TargetLayer = 0;
+    };
+    auto resolvePrimitiveState =
+        [&](uint32_t Invocation) -> std::optional<PrimitiveState> {
+      int32_t RequestedViewport = 0;
+      if (VSViewportOut)
+        RequestedViewport =
+            readSignedStageValue(*VSOutput, *VSViewportOut, Invocation);
+      std::optional<uint32_t> ViewportIndex =
+          resolveViewportArrayIndex(RequestedViewport, Draw.Viewports.size());
+      std::optional<uint32_t> ScissorIndex =
+          resolveViewportArrayIndex(RequestedViewport, Draw.Scissors.size());
+      if (!ViewportIndex || !ScissorIndex)
+        return std::nullopt;
+
+      // Default to layer 0, not `Draw.ViewIndex`: for multiview, the caller
+      // (CommandBuffer.cpp) already invokes one `Draw` per view with its
+      // attachments pre-sliced down to that single view's own layer, so
+      // `DrawLayerCount` here is already 1 and `Draw.ViewIndex` (which can be
+      // > 0) would spuriously fail `resolveRenderTargetArrayLayer` below and
+      // discard every primitive. `Draw.ViewIndex` remains available to the
+      // shader itself via the `ViewIndex` built-in (see `Inv.ViewIndex`);
+      // this default only matters when there is no `VSLayerOut` (no shader
+      // output layer), i.e. no explicit `gl_Layer`/`SV_RenderTargetArrayIndex`
+      // write routing the primitive to a specific array layer.
+      int32_t RequestedLayer = 0;
+      if (VSLayerOut)
+        RequestedLayer =
+            readSignedStageValue(*VSOutput, *VSLayerOut, Invocation);
+      std::optional<uint32_t> Layer =
+          resolveRenderTargetArrayLayer(RequestedLayer, DrawLayerCount);
+      if (!Layer)
+        return std::nullopt;
+
+      return PrimitiveState{&Draw.Viewports[*ViewportIndex],
+                            &Draw.Scissors[*ScissorIndex], *Layer};
+    };
+
     auto projectVertex = [&](const RasterVertex &Vtx,
+                             const ViewportState &Viewport,
                              std::array<float, 2> &Screen, float &InvW,
                              float &Depth) {
       float W = Vtx.Clip[3];
       float NdcX = Vtx.Clip[0] / W;
       float NdcY = Vtx.Clip[1] / W;
       float NdcZ = Vtx.Clip[2] / W;
-      Screen = {Draw.Viewport.X + (NdcX * 0.5f + 0.5f) * Draw.Viewport.Width,
-                Draw.Viewport.Y +
-                    (1.0f - (NdcY * 0.5f + 0.5f)) * Draw.Viewport.Height};
+      Screen = {Viewport.X + (NdcX * 0.5f + 0.5f) * Viewport.Width,
+                Viewport.Y + (1.0f - (NdcY * 0.5f + 0.5f)) * Viewport.Height};
       InvW = 1.0f / W;
-      Depth = Draw.Viewport.MinDepth +
-              NdcZ * (Draw.Viewport.MaxDepth - Draw.Viewport.MinDepth);
+      Depth =
+          Viewport.MinDepth + NdcZ * (Viewport.MaxDepth - Viewport.MinDepth);
     };
 
     // Assembles one strip segment [Start, End)'s triangles, alternating
@@ -1630,6 +1711,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
     for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
       for (std::array<uint32_t, 3> Tri : TriIndices) {
+        std::optional<PrimitiveState> Primitive =
+            resolvePrimitiveState(Inst * PerInstance + Tri[0]);
+        if (!Primitive)
+          continue;
         std::array<RasterVertex, 3> V = {vertexAt(Inst * PerInstance + Tri[0]),
                                          vertexAt(Inst * PerInstance + Tri[1]),
                                          vertexAt(Inst * PerInstance + Tri[2])};
@@ -1640,7 +1725,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           std::array<std::array<float, 2>, 3> Screen;
           std::array<float, 3> InvW, Depth;
           for (unsigned K = 0; K != 3; ++K)
-            projectVertex(*Poly[K], Screen[K], InvW[K], Depth[K]);
+            projectVertex(*Poly[K], *Primitive->Viewport, Screen[K], InvW[K],
+                          Depth[K]);
 
           // `SArea` uses the same directed-edge formula (`edgeFn`) the
           // rasterizer's own coverage test does below, so that after the
@@ -1681,6 +1767,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             ST.Varyings[K] = VaryingBits->data() + K * Stride;
           ST.FrontFacing = FrontFacing;
           ST.PrimitiveID = PrimitiveCounter++;
+          ST.TargetLayer = Primitive->TargetLayer;
+          ST.ScissorMinX = std::max<int32_t>(0, Primitive->Scissor->X);
+          ST.ScissorMinY = std::max<int32_t>(0, Primitive->Scissor->Y);
+          ST.ScissorMaxX = std::min<int32_t>(
+              ExtentWidth, Primitive->Scissor->X +
+                               static_cast<int32_t>(Primitive->Scissor->Width));
+          ST.ScissorMaxY = std::min<int32_t>(
+              ExtentHeight,
+              Primitive->Scissor->Y +
+                  static_cast<int32_t>(Primitive->Scissor->Height));
           ScreenTris.push_back(ST);
           TriVaryingStore.push_back(std::move(VaryingBits));
         }
@@ -1691,7 +1787,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     // expanding each into a two-triangle screen-space quad -- there being
     // no separate point/line rasterizer, only this mechanical
     // pre-expansion -- rather than clip/rasterize a 1- or 2-vertex
-    // primitive directly. `Draw.Viewport`/`Draw.Scissor` bounds (via the
+    // primitive directly. The selected viewport/scissor's bounds (via the
     // tile-binning pass below) are the only "clipping" a point/line gets:
     // there is no Sutherland-Hodgman-style near/far/side-plane clip here,
     // only a whole-primitive reject when a vertex is behind the eye (`W`
@@ -1722,7 +1818,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       float Arc = 0.0f;
     };
     auto pushQuadTriangle = [&](QuadCorner A, QuadCorner B, QuadCorner C,
-                                bool IsLine) {
+                                const PrimitiveState &Primitive, bool IsLine) {
       std::array<std::array<float, 2>, 3> Screen = {A.Pos, B.Pos, C.Pos};
       std::array<float, 3> InvW = {A.InvW, B.InvW, C.InvW};
       std::array<float, 3> Depth = {A.Depth, B.Depth, C.Depth};
@@ -1759,6 +1855,15 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // front/back-facing meaning worth computing.
       ST.FrontFacing = true;
       ST.PrimitiveID = PrimitiveCounter++;
+      ST.TargetLayer = Primitive.TargetLayer;
+      ST.ScissorMinX = std::max<int32_t>(0, Primitive.Scissor->X);
+      ST.ScissorMinY = std::max<int32_t>(0, Primitive.Scissor->Y);
+      ST.ScissorMaxX = std::min<int32_t>(
+          ExtentWidth, Primitive.Scissor->X +
+                           static_cast<int32_t>(Primitive.Scissor->Width));
+      ST.ScissorMaxY = std::min<int32_t>(
+          ExtentHeight, Primitive.Scissor->Y +
+                            static_cast<int32_t>(Primitive.Scissor->Height));
       ScreenTris.push_back(ST);
       TriVaryingStore.push_back(std::move(VaryingBits));
     };
@@ -1766,19 +1871,23 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     if (Pipeline.getTopology() == PrimitiveTopology::PointList) {
       for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
         for (uint32_t J = 0; J != PerInstance; ++J) {
+          std::optional<PrimitiveState> Primitive =
+              resolvePrimitiveState(Inst * PerInstance + J);
+          if (!Primitive)
+            continue;
           RasterVertex V = vertexAt(Inst * PerInstance + J);
           if (V.Clip[3] <= ClipEpsilon)
             continue;
           std::array<float, 2> P;
           float InvW, Depth;
-          projectVertex(V, P, InvW, Depth);
+          projectVertex(V, *Primitive->Viewport, P, InvW, Depth);
           constexpr float Half = 0.5f; // fixed 1-pixel point size
           QuadCorner TL{{P[0] - Half, P[1] - Half}, InvW, Depth, &V};
           QuadCorner TR{{P[0] + Half, P[1] - Half}, InvW, Depth, &V};
           QuadCorner BR{{P[0] + Half, P[1] + Half}, InvW, Depth, &V};
           QuadCorner BL{{P[0] - Half, P[1] + Half}, InvW, Depth, &V};
-          pushQuadTriangle(TL, TR, BR, /*IsLine=*/false);
-          pushQuadTriangle(TL, BR, BL, /*IsLine=*/false);
+          pushQuadTriangle(TL, TR, BR, *Primitive, /*IsLine=*/false);
+          pushQuadTriangle(TL, BR, BL, *Primitive, /*IsLine=*/false);
         }
       }
     } else if (Pipeline.getTopology() == PrimitiveTopology::LineList ||
@@ -1797,6 +1906,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         float ArcAccum = 0.0f;
         std::optional<uint32_t> PrevEnd;
         for (std::array<uint32_t, 2> Ln : LineIndices) {
+          std::optional<PrimitiveState> Primitive =
+              resolvePrimitiveState(Inst * PerInstance + Ln[0]);
+          if (!Primitive)
+            continue;
           if (!PrevEnd || *PrevEnd != Ln[0])
             ArcAccum = 0.0f;
           PrevEnd = Ln[1];
@@ -1806,8 +1919,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             continue;
           std::array<float, 2> P0, P1;
           float InvW0, Depth0, InvW1, Depth1;
-          projectVertex(V0, P0, InvW0, Depth0);
-          projectVertex(V1, P1, InvW1, Depth1);
+          projectVertex(V0, *Primitive->Viewport, P0, InvW0, Depth0);
+          projectVertex(V1, *Primitive->Viewport, P1, InvW1, Depth1);
           float Dx = P1[0] - P0[0], Dy = P1[1] - P0[1];
           float Len = std::sqrt(Dx * Dx + Dy * Dy);
           if (Len == 0.0f)
@@ -1847,8 +1960,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                   {float(X + 1), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
               QuadCorner BL{
                   {float(X), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-              pushQuadTriangle(TL, TR, BR, /*IsLine=*/true);
-              pushQuadTriangle(TL, BR, BL, /*IsLine=*/true);
+              pushQuadTriangle(TL, TR, BR, *Primitive, /*IsLine=*/true);
+              pushQuadTriangle(TL, BR, BL, *Primitive, /*IsLine=*/true);
               if (X == X1 && Y == Y1)
                 break;
               int32_t E2 = 2 * Err;
@@ -1903,8 +2016,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                           &V1,
                           HalfExtent,
                           ArcEnd};
-            pushQuadTriangle(QA, QB, QC, /*IsLine=*/true);
-            pushQuadTriangle(QA, QC, QD, /*IsLine=*/true);
+            pushQuadTriangle(QA, QB, QC, *Primitive, /*IsLine=*/true);
+            pushQuadTriangle(QA, QC, QD, *Primitive, /*IsLine=*/true);
           }
           ArcAccum = ArcEnd;
         }
@@ -1912,8 +2025,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     }
 
     // --- Bin primitives into tiles. ---
-    int32_t MinX = ScissorMinX, MinY = ScissorMinY;
-    int32_t MaxX = ScissorMaxX, MaxY = ScissorMaxY;
+    int32_t MinX = 0, MinY = 0;
+    int32_t MaxX = static_cast<int32_t>(ExtentWidth);
+    int32_t MaxY = static_cast<int32_t>(ExtentHeight);
     if (MinX >= MaxX || MinY >= MaxY)
       continue;
     int32_t TilesX = (MaxX - MinX + TileSize - 1) / TileSize;
@@ -1927,16 +2041,21 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
     for (uint32_t I = 0; I != ScreenTris.size(); ++I) {
       const ScreenTriangle &Tri = ScreenTris[I];
+      if (Tri.ScissorMinX >= Tri.ScissorMaxX ||
+          Tri.ScissorMinY >= Tri.ScissorMaxY)
+        continue;
       float BBMinXf = std::min({Tri.Pos[0][0], Tri.Pos[1][0], Tri.Pos[2][0]});
       float BBMaxXf = std::max({Tri.Pos[0][0], Tri.Pos[1][0], Tri.Pos[2][0]});
       float BBMinYf = std::min({Tri.Pos[0][1], Tri.Pos[1][1], Tri.Pos[2][1]});
       float BBMaxYf = std::max({Tri.Pos[0][1], Tri.Pos[1][1], Tri.Pos[2][1]});
       int32_t BBMinX =
-          std::max(MinX, static_cast<int32_t>(std::floor(BBMinXf)));
-      int32_t BBMaxX = std::min(MaxX, static_cast<int32_t>(std::ceil(BBMaxXf)));
+          std::max(Tri.ScissorMinX, static_cast<int32_t>(std::floor(BBMinXf)));
+      int32_t BBMaxX =
+          std::min(Tri.ScissorMaxX, static_cast<int32_t>(std::ceil(BBMaxXf)));
       int32_t BBMinY =
-          std::max(MinY, static_cast<int32_t>(std::floor(BBMinYf)));
-      int32_t BBMaxY = std::min(MaxY, static_cast<int32_t>(std::ceil(BBMaxYf)));
+          std::max(Tri.ScissorMinY, static_cast<int32_t>(std::floor(BBMinYf)));
+      int32_t BBMaxY =
+          std::min(Tri.ScissorMaxY, static_cast<int32_t>(std::ceil(BBMaxYf)));
       if (BBMinX >= BBMaxX || BBMinY >= BBMaxY)
         continue;
       int32_t TX0 = (BBMinX - MinX) / TileSize;
@@ -1971,6 +2090,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         std::array<int32_t, 4> PixelX;
         std::array<int32_t, 4> PixelY;
         uint32_t TriIdx = 0;
+        uint32_t TargetLayer = 0;
         std::array<float, 4> Bary0, Bary1, Bary2;
         // (roadmap F5) Each lane's `RectangularSmooth` antialiasing
         // coverage (`1.0` for every non-line/non-smooth triangle,
@@ -1986,18 +2106,22 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
       for (uint32_t TriIdx : Bin) {
         const ScreenTriangle &Tri = ScreenTris[TriIdx];
+        AttachmentView DepthAttachment =
+            sliceAttachmentLayer(Draw.DepthStencil.Depth, Tri.TargetLayer);
+        AttachmentView StencilAttachment =
+            sliceAttachmentLayer(Draw.DepthStencil.Stencil, Tri.TargetLayer);
         float BBMinXf = std::min({Tri.Pos[0][0], Tri.Pos[1][0], Tri.Pos[2][0]});
         float BBMaxXf = std::max({Tri.Pos[0][0], Tri.Pos[1][0], Tri.Pos[2][0]});
         float BBMinYf = std::min({Tri.Pos[0][1], Tri.Pos[1][1], Tri.Pos[2][1]});
         float BBMaxYf = std::max({Tri.Pos[0][1], Tri.Pos[1][1], Tri.Pos[2][1]});
-        int32_t QMinX =
-            std::max(TileMinX, static_cast<int32_t>(std::floor(BBMinXf)));
-        int32_t QMaxX =
-            std::min(TileMaxX, static_cast<int32_t>(std::ceil(BBMaxXf)));
-        int32_t QMinY =
-            std::max(TileMinY, static_cast<int32_t>(std::floor(BBMinYf)));
-        int32_t QMaxY =
-            std::min(TileMaxY, static_cast<int32_t>(std::ceil(BBMaxYf)));
+        int32_t QMinX = std::max(std::max(TileMinX, Tri.ScissorMinX),
+                                 static_cast<int32_t>(std::floor(BBMinXf)));
+        int32_t QMaxX = std::min(std::min(TileMaxX, Tri.ScissorMaxX),
+                                 static_cast<int32_t>(std::ceil(BBMaxXf)));
+        int32_t QMinY = std::max(std::max(TileMinY, Tri.ScissorMinY),
+                                 static_cast<int32_t>(std::floor(BBMinYf)));
+        int32_t QMaxY = std::min(std::min(TileMaxY, Tri.ScissorMaxY),
+                                 static_cast<int32_t>(std::ceil(BBMaxYf)));
         if (QMinX >= QMaxX || QMinY >= QMaxY)
           continue;
         // Align the 2x2 quad grid globally so adjacent tiles/primitives
@@ -2015,6 +2139,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           for (int32_t QX = QStartX; QX < QMaxX; QX += 2) {
             PendingQuad Quad;
             Quad.TriIdx = TriIdx;
+            Quad.TargetLayer = Tri.TargetLayer;
             cpu::FemeFragmentInvocation Inv{};
             bool AnyCovered = false;
             static constexpr int32_t Dx[4] = {0, 1, 0, 1};
@@ -2024,8 +2149,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               int32_t PY = QY + Dy[Lane];
               Quad.PixelX[Lane] = PX;
               Quad.PixelY[Lane] = PY;
-              bool InBounds =
-                  PX >= MinX && PX < MaxX && PY >= MinY && PY < MaxY;
+              bool InBounds = PX >= Tri.ScissorMinX && PX < Tri.ScissorMaxX &&
+                              PY >= Tri.ScissorMinY && PY < Tri.ScissorMaxY;
               // Coverage is tested once per sample position (a fixed
               // offset within the pixel, "Fixed per-pixel sample
               // offsets" above); with one sample this is exactly the
@@ -2260,6 +2385,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       for (uint32_t Q = 0; Q != QuadCount; ++Q) {
         const cpu::FemeFragmentResult &Result = Results[Q];
         const PendingQuad &Quad = Quads[Q];
+        AttachmentView DepthAttachment =
+            sliceAttachmentLayer(Draw.DepthStencil.Depth, Quad.TargetLayer);
+        AttachmentView StencilAttachment =
+            sliceAttachmentLayer(Draw.DepthStencil.Stencil, Quad.TargetLayer);
         for (unsigned Lane = 0; Lane != 4; ++Lane) {
           if (!((Result.SideEffectMask >> Lane) & 1u))
             continue;
@@ -2307,7 +2436,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
           for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size();
                ++AttIdx) {
-            AttachmentView &Att = Draw.Attachments[AttIdx];
+            AttachmentView Att = sliceAttachmentLayer(Draw.Attachments[AttIdx],
+                                                      Quad.TargetLayer);
             if (Att.Data.empty())
               // (Roadmap E5) An unused (`VK_NULL_HANDLE`) color slot: the
               // write is discarded rather than performed.
@@ -2414,30 +2544,35 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size(); ++AttIdx) {
       const AttachmentView &Src = Draw.Attachments[AttIdx];
       AttachmentView &Dst = Draw.ResolveAttachments[AttIdx];
-      for (uint32_t PY = 0; PY != Src.Height; ++PY) {
-        for (uint32_t PX = 0; PX != Src.Width; ++PX) {
-          std::array<double, 4> Sum{};
-          for (uint32_t S = 0; S != SampleCount; ++S) {
-            size_t Off = (((size_t)PY * Src.Width + PX) * SampleCount + S) *
-                         ColorElemSizes[AttIdx];
-            std::array<double, 4> Sample{};
-            if (Error E = unpackColor(
-                    Src.Format,
-                    ArrayRef(Src.Data.data() + Off, ColorElemSizes[AttIdx]),
-                    Sample))
-              return E;
+      for (uint32_t Layer = 0; Layer != Src.ArrayLayers; ++Layer) {
+        AttachmentView SrcLayer = sliceAttachmentLayer(Src, Layer);
+        AttachmentView DstLayer = sliceAttachmentLayer(Dst, Layer);
+        for (uint32_t PY = 0; PY != Src.Height; ++PY) {
+          for (uint32_t PX = 0; PX != Src.Width; ++PX) {
+            std::array<double, 4> Sum{};
+            for (uint32_t S = 0; S != SampleCount; ++S) {
+              size_t Off = (((size_t)PY * Src.Width + PX) * SampleCount + S) *
+                           ColorElemSizes[AttIdx];
+              std::array<double, 4> Sample{};
+              if (Error E = unpackColor(SrcLayer.Format,
+                                        ArrayRef(SrcLayer.Data.data() + Off,
+                                                 ColorElemSizes[AttIdx]),
+                                        Sample))
+                return E;
+              for (unsigned C = 0; C != 4; ++C)
+                Sum[C] += Sample[C];
+            }
+            std::array<double, 4> Avg{};
             for (unsigned C = 0; C != 4; ++C)
-              Sum[C] += Sample[C];
+              Avg[C] = Sum[C] / SampleCount;
+            size_t DstOff =
+                ((size_t)PY * Dst.Width + PX) * ColorElemSizes[AttIdx];
+            if (Error E = packClearColor(
+                    DstLayer.Format, Avg,
+                    MutableArrayRef(DstLayer.Data.data() + DstOff,
+                                    ColorElemSizes[AttIdx])))
+              return E;
           }
-          std::array<double, 4> Avg{};
-          for (unsigned C = 0; C != 4; ++C)
-            Avg[C] = Sum[C] / SampleCount;
-          size_t DstOff =
-              ((size_t)PY * Dst.Width + PX) * ColorElemSizes[AttIdx];
-          if (Error E = packClearColor(Dst.Format, Avg,
-                                       MutableArrayRef(Dst.Data.data() + DstOff,
-                                                       ColorElemSizes[AttIdx])))
-            return E;
         }
       }
     }

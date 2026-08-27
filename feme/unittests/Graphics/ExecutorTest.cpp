@@ -255,8 +255,8 @@ struct TriangleScene {
     if (BindStencil)
       Draw.DepthStencil.Stencil =
           AttachmentView{StencilStorage, cpu::ResourceFormat::S8_UINT, 4, 4};
-    Draw.Viewport = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
-    Draw.Scissor = ScissorRect{0, 0, 4, 4};
+    Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+    Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
 
     Bindings = {VertexBufferBinding{
         0, 28,
@@ -1726,8 +1726,8 @@ TEST(ExecutorTest, RendersToMultipleColorAttachments) {
 
   PreparedDraw Draw;
   Draw.Attachments = Attachs;
-  Draw.Viewport = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
-  Draw.Scissor = ScissorRect{0, 0, 4, 4};
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
   Draw.VertexBuffers = Bindings;
   DrawCommand Cmd;
   Cmd.VertexCount = 3;
@@ -1806,8 +1806,8 @@ TEST(ExecutorTest,
 
   PreparedDraw Draw;
   Draw.Attachments = Attachs;
-  Draw.Viewport = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
-  Draw.Scissor = ScissorRect{0, 0, 4, 4};
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
   Draw.VertexBuffers = Bindings;
   DrawCommand Cmd;
   Cmd.VertexCount = 3;
@@ -1896,8 +1896,8 @@ TEST(ExecutorTest, ColorAttachmentLocationsUnusedLeavesAttachmentUnchanged) {
 
   PreparedDraw Draw;
   Draw.Attachments = Attachs;
-  Draw.Viewport = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
-  Draw.Scissor = ScissorRect{0, 0, 4, 4};
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
   Draw.VertexBuffers = Bindings;
   DrawCommand Cmd;
   Cmd.VertexCount = 3;
@@ -1962,8 +1962,8 @@ TEST(ExecutorTest, RejectsMismatchedColorBlendCount) {
 
   PreparedDraw Draw;
   Draw.Attachments = Attachs;
-  Draw.Viewport = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
-  Draw.Scissor = ScissorRect{0, 0, 4, 4};
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
   EXPECT_THAT_ERROR(executeDraws(Pipeline, Draw), Failed());
 }
 
@@ -2034,8 +2034,8 @@ TEST(ExecutorTest, MultisampleResolveAveragesPerPixelCoverage) {
   PreparedDraw Draw;
   Draw.Attachments = Attachs;
   Draw.ResolveAttachments = Resolves;
-  Draw.Viewport = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
-  Draw.Scissor = ScissorRect{0, 0, 4, 4};
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
   Draw.VertexBuffers = Bindings;
   DrawCommand Cmd;
   Cmd.VertexCount = 6;
@@ -2188,8 +2188,8 @@ TEST(ExecutorTest, ParallelTileScheduleMatchesSequentialOutput) {
     std::array<AttachmentView, 1> Attachs{Color};
     PreparedDraw Draw;
     Draw.Attachments = Attachs;
-    Draw.Viewport = ViewportState{0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f};
-    Draw.Scissor = ScissorRect{0, 0, 64, 64};
+    Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f};
+    Draw.Scissors[0] = ScissorRect{0, 0, 64, 64};
     Draw.VertexBuffers = Bindings;
     Draw.Draws = Draws;
     EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, Workers), Succeeded());

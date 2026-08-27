@@ -83,6 +83,47 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// Roadmap H3: the same oversized fullscreen triangle as
+/// `FullscreenVertexSource`, plus a `ViewportIndex` output set to the
+/// primitive's own `InstanceIndex` -- routes instance 0 to viewport/scissor
+/// 0 and instance 1 to viewport/scissor 1, with no geometry stage (this ICD
+/// implements none), matching `VK_EXT_shader_viewport_index_layer`'s own
+/// "any shader stage" relaxation of the classic geometry-shader-only rule.
+constexpr llvm::StringLiteral FullscreenVertexWithInstanceViewportSource =
+    R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ShaderViewportIndexLayerEXT], [SPV_EXT_shader_viewport_index_layer]> {
+  spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @iid built_in("InstanceIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @vp built_in("ViewportIndex") : !spirv.ptr<i32, Output>
+  spirv.func @main() -> () "None" {
+    %vidp = spirv.mlir.addressof @vid : !spirv.ptr<i32, Input>
+    %v = spirv.Load "Input" %vidp : i32
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %is0 = spirv.IEqual %v, %c0 : i32
+    %is1 = spirv.IEqual %v, %c1 : i32
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %xb = spirv.Select %is1, %three, %neg1 : i1, f32
+    %x = spirv.Select %is0, %neg1, %xb : i1, f32
+    %yb = spirv.Select %is1, %neg1, %three : i1, f32
+    %y = spirv.Select %is0, %neg1, %yb : i1, f32
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+    %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    %iidp = spirv.mlir.addressof @iid : !spirv.ptr<i32, Input>
+    %inst = spirv.Load "Input" %iidp : i32
+    %vpp = spirv.mlir.addressof @vp : !spirv.ptr<i32, Output>
+    spirv.Store "Output" %vpp, %inst : i32
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @vid, @iid, @pos, @vp
+}
+)mlir";
+
 /// Solid red into SV_Target0.
 constexpr llvm::StringLiteral RedFragmentSource = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
@@ -5609,6 +5650,189 @@ TEST_F(DrawTest, MultiviewOcclusionQueryWritesOneQueryIndexPerView) {
   vkDestroyImageView(Device, LayeredView, nullptr);
   vkDestroyImage(Device, LayeredImage, nullptr);
   vkFreeMemory(Device, LayeredMemory, nullptr);
+}
+
+// Roadmap H3: two draw instances, each routed by its own `ViewportIndex`
+// (`gl_ViewportIndex`, written from `InstanceIndex` -- see
+// `FullscreenVertexWithInstanceViewportSource`) to a different one of two
+// dynamic viewport/scissor rectangles set through `vkCmdSetViewportWithCount`
+// /`vkCmdSetScissorWithCount`. If `ViewportIndex` were ignored (every
+// primitive resolving to viewport/scissor 0, the pre-H3 behavior), the right
+// half of the target -- instance 1's own viewport -- would be left at its
+// cleared value instead of red.
+TEST_F(DrawTest, DynamicViewportWithCountRoutesInstancesToDifferentViewports) {
+  VkShaderModule Vertex =
+      createModule(FullscreenVertexWithInstanceViewportSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  // Dynamic viewport/scissor: the static arrays below are ignored entirely
+  // (see GraphicsPipeline.cpp's `translateViewportState`), but a non-null
+  // `pViewportState` is still required.
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+  VkDynamicState Dynamic[2] = {VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT,
+                               VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT};
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 2;
+  DynamicInfo.pDynamicStates = Dynamic;
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.pDynamicState = &DynamicInfo;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  // Viewport/scissor 0: the left half; viewport/scissor 1: the right half.
+  std::array<VkViewport, 2> Viewports = {{
+      {0.0f, 0.0f, float(Extent) / 2, float(Extent), 0.0f, 1.0f},
+      {float(Extent) / 2, 0.0f, float(Extent) / 2, float(Extent), 0.0f, 1.0f},
+  }};
+  std::array<VkRect2D, 2> Scissors = {{
+      {{0, 0}, {Extent / 2, Extent}},
+      {{int32_t(Extent / 2), 0}, {Extent / 2, Extent}},
+  }};
+  vkCmdSetViewportWithCount(Cmd, Viewports.size(), Viewports.data());
+  vkCmdSetScissorWithCount(Cmd, Scissors.size(), Scissors.data());
+  vkCmdDraw(Cmd, 3, 2, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Both halves must be red: instance 0 covers the left half through
+  // viewport/scissor 0, instance 1 covers the right half through
+  // viewport/scissor 1. If `ViewportIndex` were ignored, both instances
+  // would resolve to viewport/scissor 0 and the right half would still be
+  // the (transparent black) clear color.
+  EXPECT_EQ(texel(0, 0)[0], 0xFF) << "left half (viewport 0)";
+  EXPECT_EQ(texel(1, 3)[0], 0xFF) << "left half (viewport 0)";
+  EXPECT_EQ(texel(2, 0)[0], 0xFF) << "right half (viewport 1)";
+  EXPECT_EQ(texel(3, 3)[0], 0xFF) << "right half (viewport 1)";
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+// Roadmap H3: `resolveViewportArrayIndex`'s own out-of-range clamp-or-
+// discard behavior (`LayeredRendering.cpp`) end-to-end: a `ViewportIndex`
+// written past the bound viewport array's own size discards the whole
+// primitive rather than reading/writing out of bounds.
+TEST_F(DrawTest, OutOfRangeViewportIndexDiscardsThePrimitive) {
+  VkShaderModule Vertex =
+      createModule(FullscreenVertexWithInstanceViewportSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  // A single-element static viewport/scissor array: instance 0's
+  // `ViewportIndex == 0` is in range, instance 1's `ViewportIndex == 1` is
+  // not (the array has only one element).
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  // `firstInstance = 1` makes this single instance's own `gl_InstanceIndex`
+  // (and so its `ViewportIndex` output) equal to 1, which is out of range
+  // for the pipeline's one-element static viewport/scissor array above.
+  vkCmdDraw(Cmd, 3, 1, 0, 1);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // The whole draw's only primitive is out of range and must be discarded
+  // entirely, leaving every texel at the (transparent black) clear color
+  // rather than crashing or reading/writing past the one-element
+  // viewport/scissor array.
+  EXPECT_EQ(texel(0, 0)[0], 0x00);
+  EXPECT_EQ(texel(3, 3)[0], 0x00);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
 } // namespace

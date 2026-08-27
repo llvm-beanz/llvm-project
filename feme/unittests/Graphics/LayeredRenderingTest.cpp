@@ -38,4 +38,14 @@ TEST(LayeredRenderingTest, ByteOffsetIsLayerMajor) {
   EXPECT_EQ(getAttachmentLayerByteOffset(3, 256), 768u);
 }
 
+TEST(LayeredRenderingTest, ResolvesAnInRangeViewportIndex) {
+  EXPECT_EQ(resolveViewportArrayIndex(0, 2), 0u);
+  EXPECT_EQ(resolveViewportArrayIndex(1, 2), 1u);
+}
+
+TEST(LayeredRenderingTest, DiscardsAnOutOfRangeViewportIndex) {
+  EXPECT_EQ(resolveViewportArrayIndex(-1, 2), std::nullopt);
+  EXPECT_EQ(resolveViewportArrayIndex(2, 2), std::nullopt);
+}
+
 } // namespace

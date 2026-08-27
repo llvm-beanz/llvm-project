@@ -7,20 +7,17 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares feme::graphics::resolveRenderTargetArrayLayer and
-// feme::graphics::getAttachmentLayerByteOffset, roadmap R34's "layered
-// rendering": routing a primitive to one array layer of a layered
-// attachment (`PreparedDraw.h`'s `AttachmentView::ArrayLayers`) based on
-// its last pre-raster stage's `SignatureSystemValue::RenderTargetArrayIndex`
-// output (Signature.h).
+// This file declares the small indexed-selection helpers roadmap H3's layered
+// rendering and multi-viewport work share:
+// feme::graphics::resolveRenderTargetArrayLayer,
+// feme::graphics::resolveViewportArrayIndex, and
+// feme::graphics::getAttachmentLayerByteOffset.
 //
 // This is the selection/addressing logic only, exercised standalone by
 // unittests/Graphics/LayeredRenderingTest.cpp; wiring a real vertex/
-// geometry stage's compiled `RenderTargetArrayIndex` output through
-// `feme::graphics::executeDraws` into a per-primitive call to
-// `resolveRenderTargetArrayLayer` is a documented follow-up, alongside the
-// other CPU-target wrapper/executor integration this milestone defers (see
-// Tessellator.h/Patch.h/GeometryStream.h's own file comments).
+// geometry stage's compiled `RenderTargetArrayIndex`/`ViewportArrayIndex`
+// output through `feme::graphics::executeDraws` into per-primitive calls to
+// these helpers was the documented H3 follow-up to R34.
 //
 //===----------------------------------------------------------------------===//
 
@@ -46,6 +43,14 @@ namespace feme::graphics {
 /// value rather than an unsupported one).
 std::optional<uint32_t> resolveRenderTargetArrayLayer(int32_t RequestedLayer,
                                                       uint32_t LayerCount);
+
+/// Resolves which viewport/scissor array element a primitive renders through,
+/// given its `ViewportArrayIndex` output \p RequestedViewport and the bound
+/// viewport/scissor array length \p ViewportCount. The rule matches
+/// `resolveRenderTargetArrayLayer`: negative or out-of-range discards the
+/// primitive rather than silently redirecting it to viewport 0.
+std::optional<uint32_t> resolveViewportArrayIndex(int32_t RequestedViewport,
+                                                  uint32_t ViewportCount);
 
 /// The byte offset of layer \p Layer's first byte within a layered
 /// attachment's `Data` (`PreparedDraw.h`'s `AttachmentView`), given one
