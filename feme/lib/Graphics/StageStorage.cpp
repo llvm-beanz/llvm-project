@@ -13,6 +13,7 @@
 #include "llvm/Support/Error.h"
 
 #include <algorithm>
+#include <cassert>
 
 using namespace llvm;
 
@@ -50,6 +51,7 @@ Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
                                          SignatureDirection Direction,
                                          uint32_t InvocationCount) {
   StageStorage Storage;
+  Storage.InvocationCount = InvocationCount;
   uint32_t MaxID = 0;
   bool Any = false;
   for (const SignatureElement &Elt : Sig.Elements) {
@@ -103,6 +105,22 @@ Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
   }
   Storage.Data.assign(Offset, 0);
   return Storage;
+}
+
+void appendStageInvocations(const StageStorage &From, StageStorage &To,
+                            uint32_t DestBase) {
+  assert(From.Elements.size() == To.Elements.size() &&
+         "appendStageInvocations needs two blocks of the same signature");
+  for (const cpu::FemeStageElement &E : From.Elements) {
+    if (E.BitWidth == 0)
+      continue;
+    for (uint32_t Row = 0; Row != E.RowCount; ++Row)
+      for (uint32_t C = 0; C != E.ComponentCount; ++C)
+        for (uint32_t I = 0; I != From.InvocationCount; ++I)
+          To.writeRaw(E.ElementID, E.FirstComponent + C, DestBase + I,
+                      From.readRaw(E.ElementID, E.FirstComponent + C, I, Row),
+                      Row);
+  }
 }
 
 const SignatureElement *findElement(const EntrySignature &Sig,

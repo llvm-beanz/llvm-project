@@ -30,6 +30,18 @@ GraphicsPipeline::GraphicsPipeline(
       Logic(Logic), BlendConstants(BlendConstants),
       PrimitiveRestartEnable(PrimitiveRestartEnable) {}
 
+void GraphicsPipeline::setTessellationStages(
+    std::shared_ptr<cpu::CompiledStage> HullStage,
+    std::shared_ptr<cpu::CompiledStage> PatchConstant,
+    std::shared_ptr<cpu::CompiledStage> DomainStage, TessellationState State) {
+  assert(HullStage && PatchConstant && DomainStage &&
+         "a tessellation-enabled pipeline needs all three stages");
+  this->HullStage = std::move(HullStage);
+  this->PatchConstantStage = std::move(PatchConstant);
+  this->DomainStage = std::move(DomainStage);
+  this->Tessellation = State;
+}
+
 bool feme::graphics::topologyHasAdjacency(PrimitiveTopology Topology) {
   switch (Topology) {
   case PrimitiveTopology::LineListWithAdjacency:
@@ -43,6 +55,7 @@ bool feme::graphics::topologyHasAdjacency(PrimitiveTopology Topology) {
   case PrimitiveTopology::TriangleList:
   case PrimitiveTopology::TriangleStrip:
   case PrimitiveTopology::TriangleFan:
+  case PrimitiveTopology::PatchList:
     return false;
   }
   llvm_unreachable("unhandled PrimitiveTopology");
@@ -64,6 +77,7 @@ PrimitiveTopology feme::graphics::stripAdjacency(PrimitiveTopology Topology) {
   case PrimitiveTopology::TriangleList:
   case PrimitiveTopology::TriangleStrip:
   case PrimitiveTopology::TriangleFan:
+  case PrimitiveTopology::PatchList:
     return Topology;
   }
   llvm_unreachable("unhandled PrimitiveTopology");
@@ -87,8 +101,10 @@ feme::graphics::getListPrimitiveVertexCount(PrimitiveTopology Topology) {
   case PrimitiveTopology::TriangleStrip:
   case PrimitiveTopology::TriangleStripWithAdjacency:
   case PrimitiveTopology::TriangleFan:
+  case PrimitiveTopology::PatchList:
     llvm_unreachable(
-        "getListPrimitiveVertexCount does not support strip topologies -- "
+        "getListPrimitiveVertexCount does not support strip or patch "
+        "topologies -- "
         "see splitListPrimitiveAdjacency's scope note");
   }
   llvm_unreachable("unhandled PrimitiveTopology");
@@ -126,8 +142,9 @@ SplitPrimitiveAdjacency feme::graphics::splitListPrimitiveAdjacency(
   case PrimitiveTopology::TriangleStrip:
   case PrimitiveTopology::TriangleStripWithAdjacency:
   case PrimitiveTopology::TriangleFan:
-    llvm_unreachable("splitListPrimitiveAdjacency does not support strip "
-                     "topologies -- see its own scope note");
+  case PrimitiveTopology::PatchList:
+    llvm_unreachable("splitListPrimitiveAdjacency does not support strip or "
+                     "patch topologies -- see its own scope note");
   }
   return Split;
 }
@@ -149,6 +166,7 @@ uint32_t feme::graphics::getStripPrimitiveCount(PrimitiveTopology Topology,
   case PrimitiveTopology::TriangleFan:
   case PrimitiveTopology::LineListWithAdjacency:
   case PrimitiveTopology::TriangleListWithAdjacency:
+  case PrimitiveTopology::PatchList:
     llvm_unreachable("getStripPrimitiveCount only supports the two "
                      "strip-with-adjacency topologies");
   }
@@ -193,6 +211,7 @@ SplitPrimitiveAdjacency feme::graphics::splitStripPrimitiveAdjacency(
   case PrimitiveTopology::TriangleFan:
   case PrimitiveTopology::LineListWithAdjacency:
   case PrimitiveTopology::TriangleListWithAdjacency:
+  case PrimitiveTopology::PatchList:
     llvm_unreachable("splitStripPrimitiveAdjacency only supports the two "
                      "strip-with-adjacency topologies");
   }

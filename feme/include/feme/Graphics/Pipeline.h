@@ -23,6 +23,7 @@
 #ifndef FEME_GRAPHICS_PIPELINE_H
 #define FEME_GRAPHICS_PIPELINE_H
 
+#include "feme/Graphics/PatchPipeline.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/RuntimeABI.h"
 
@@ -63,6 +64,15 @@ enum class PrimitiveTopology : uint8_t {
   LineStripWithAdjacency,
   TriangleListWithAdjacency,
   TriangleStripWithAdjacency,
+  /// A list of tessellation patches
+  /// (`VK_PRIMITIVE_TOPOLOGY_PATCH_LIST`/D3D's `*_CONTROL_POINT_PATCHLIST`):
+  /// every `GraphicsPipeline::getTessellationState().InputControlPointCount`
+  /// consecutive fetched vertices form one patch, and the fixed-function
+  /// tessellator -- not this enumeration -- decides what primitives the
+  /// rasterizer actually sees (roadmap H4). Only legal on a pipeline with
+  /// tessellation stages, and vice versa (see `feme::graphics::
+  /// executeDraws`).
+  PatchList,
 };
 
 /// Whether \p Topology is one of the four "with adjacency" topologies.
@@ -426,9 +436,44 @@ public:
   /// (`VkPipelineInputAssemblyStateCreateInfo::primitiveRestartEnable`).
   bool getPrimitiveRestartEnable() const { return PrimitiveRestartEnable; }
 
+  /// Attaches the three compiled stages a tessellation-enabled pipeline
+  /// runs between its vertex stage and rasterization -- a hull shader's
+  /// control-point phase and patch-constant phase, and a domain shader --
+  /// along with the fixed-function tessellator state they declare
+  /// (roadmap H4). `executeDraws` then feeds each patch of a
+  /// `PrimitiveTopology::PatchList` draw through
+  /// `feme::graphics::runPatchPipeline` and rasterizes the domain stage's
+  /// own per-domain-point outputs in place of the vertex stage's, so the
+  /// domain stage -- not the vertex stage -- is what must write
+  /// `SV_Position` and every varying the fragment stage consumes.
+  void setTessellationStages(std::shared_ptr<cpu::CompiledStage> HullStage,
+                             std::shared_ptr<cpu::CompiledStage> PatchConstant,
+                             std::shared_ptr<cpu::CompiledStage> DomainStage,
+                             TessellationState State);
+
+  /// Whether this pipeline tessellates (roadmap H4). True exactly when
+  /// `setTessellationStages` has been called; a pipeline for which this is
+  /// true must use `PrimitiveTopology::PatchList`, and one for which it is
+  /// false must not.
+  bool hasTessellationStages() const { return DomainStage != nullptr; }
+  /// Only valid to call when `hasTessellationStages()` is true.
+  const cpu::CompiledStage &getHullStage() const { return *HullStage; }
+  /// Only valid to call when `hasTessellationStages()` is true.
+  const cpu::CompiledStage &getPatchConstantStage() const {
+    return *PatchConstantStage;
+  }
+  /// Only valid to call when `hasTessellationStages()` is true.
+  const cpu::CompiledStage &getDomainStage() const { return *DomainStage; }
+  /// Only valid to call when `hasTessellationStages()` is true.
+  const TessellationState &getTessellationState() const { return Tessellation; }
+
 private:
   std::shared_ptr<cpu::CompiledStage> VertexStage;
   std::shared_ptr<cpu::CompiledStage> FragmentStage;
+  std::shared_ptr<cpu::CompiledStage> HullStage;
+  std::shared_ptr<cpu::CompiledStage> PatchConstantStage;
+  std::shared_ptr<cpu::CompiledStage> DomainStage;
+  TessellationState Tessellation;
   PrimitiveTopology Topology;
   RasterState Raster;
   DepthState Depth;

@@ -468,48 +468,18 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedTriangleStrip) {
   TriangleScene Scene;
   Scene.VertexData = {
       // Segment 1: a red triangle in the lower-left region.
-      -1.0f,
-      -1.0f,
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
       1.0f, // v0
-      0.0f,
-      -1.0f,
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
+      0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
       1.0f, // v1
-      -1.0f,
-      1.0f,
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
+      -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
       1.0f, // v2
       // Segment 2: a green triangle in the upper-right region.
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
-      1.0f,
-      0.0f,
+      0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
       1.0f, // v3
-      1.0f,
-      1.0f,
-      0.0f,
-      0.0f,
-      1.0f,
-      0.0f,
+      1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
       1.0f, // v4
-      1.0f,
-      -1.0f,
-      0.0f,
-      0.0f,
-      1.0f,
-      0.0f,
+      1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
       1.0f, // v5
   };
   // A restart index between the two segments: without primitive restart
@@ -560,48 +530,18 @@ TEST(ExecutorTest,
   TriangleScene Scene;
   Scene.VertexData = {
       // Segment 1: a red triangle in the lower-left region.
-      -1.0f,
-      -1.0f,
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
       1.0f, // v0
-      0.0f,
-      -1.0f,
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
+      0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
       1.0f, // v1
-      -1.0f,
-      1.0f,
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
+      -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
       1.0f, // v2
       // Segment 2: a green triangle in the upper-right region.
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
-      1.0f,
-      0.0f,
+      0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
       1.0f, // v3
-      1.0f,
-      1.0f,
-      0.0f,
-      0.0f,
-      1.0f,
-      0.0f,
+      1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
       1.0f, // v4
-      1.0f,
-      -1.0f,
-      0.0f,
-      0.0f,
-      1.0f,
-      0.0f,
+      1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
       1.0f, // v5
   };
   std::array<uint8_t, 7> Indices8 = {0, 1, 2, 0xFFu, 3, 4, 5};
@@ -747,48 +687,18 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedTriangleFan) {
   TriangleScene Scene;
   Scene.VertexData = {
       // Segment 1: a red triangle in the lower-left region.
-      -1.0f,
-      -1.0f,
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
       1.0f, // v0
-      0.0f,
-      -1.0f,
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
+      0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
       1.0f, // v1
-      -1.0f,
-      1.0f,
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
+      -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
       1.0f, // v2
       // Segment 2: a green triangle in the upper-right region.
-      0.0f,
-      1.0f,
-      0.0f,
-      0.0f,
-      1.0f,
-      0.0f,
+      0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
       1.0f, // v3
-      1.0f,
-      1.0f,
-      0.0f,
-      0.0f,
-      1.0f,
-      0.0f,
+      1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
       1.0f, // v4
-      1.0f,
-      -1.0f,
-      0.0f,
-      0.0f,
-      1.0f,
-      0.0f,
+      1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
       1.0f, // v5
   };
   Scene.Indices = {0, 1, 2, 0xFFFFFFFFu, 3, 4, 5};
@@ -2201,6 +2111,374 @@ TEST(ExecutorTest, ParallelTileScheduleMatchesSequentialOutput) {
   std::vector<uint8_t> SixtyFourWorkers = render(64);
   EXPECT_EQ(Sequential, EightWorkers);
   EXPECT_EQ(Sequential, SixtyFourWorkers);
+}
+
+//===----------------------------------------------------------------------===//
+// Tessellation (roadmap H4)
+//===----------------------------------------------------------------------===//
+//
+// A vertex/hull/patch-constant/domain/fragment chain driven through
+// `executeDraws` with `PrimitiveTopology::PatchList`. Each stage below
+// numbers its own signature elements independently -- the position varying
+// is element 2 on the vertex stage, 0 on the hull stage, 3 on its output,
+// and 1 on the domain stage -- so the executor's own
+// `feme::graphics::linkPatchPipeline` call is what makes the chain work,
+// not coincidentally-matching `ElementID`s.
+
+// The tessellating pipeline's vertex stage. Unlike the vertex/fragment
+// pipeline's own vertex shader above, it writes no `SV_Position` at all:
+// its outputs are the patch's control points, and the *domain* stage is
+// what feeds clipping/rasterization. Position becomes an ordinary
+// location-1 varying, color stays at location 0.
+constexpr char TessVertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %cr = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %cg = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %cb = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+    %ca = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %cr, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %cg, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %cb, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %ca, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+// The hull control-point phase: a plain passthrough of this invocation's
+// own input control point (`SV_OutputControlPointID`, element 2).
+constexpr char TessHullShaderIR[] = R"(
+  define void @hs_main() #0 {
+    %id = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %id)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 %id)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 %id)
+    %cr = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 %id)
+    %cg = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 %id)
+    %cb = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 %id)
+    %ca = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 %id)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %cr, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 1, float %cg, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 2, float %cb, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 3, float %ca, i32 0)
+    ret void
+  }
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
+// The patch-constant phase: three edge factors and one inner factor, all
+// derived from the completed output patch's own first control point
+// (`%x0 * 0 + K`, so the arithmetic is real but the value is fixed) --
+// enough to prove the phase really does see the hull stage's output.
+// `%K` is filled in per test by `formatPatchConstantIR` below.
+constexpr char TessPatchConstantShaderIRTemplate[] = R"(
+  define void @pc_main() #0 {
+    %x0 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %zero = fmul float %x0, 0.0
+    %f = fadd float %zero, FACTOR
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %f, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 1, i32 0, float %f, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 2, i32 0, float %f, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %f, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
+// The domain stage: barycentric evaluation of the three control points at
+// this invocation's own `SV_DomainLocation` (element 0), writing the
+// result as `SV_Position` (element 3) and the interpolated color varying
+// (element 4, location 0) the fragment stage consumes.
+constexpr char TessDomainShaderIR[] = R"(
+  define void @ds_main() #0 {
+    %u = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %w = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %x0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %y0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %z0 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+    %x1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 1)
+    %y1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 1)
+    %z1 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 1)
+    %x2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 2)
+    %y2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 2)
+    %z2 = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 2)
+    %xu = fmul float %x0, %u
+    %xv = fmul float %x1, %v
+    %xw = fmul float %x2, %w
+    %xa = fadd float %xu, %xv
+    %x = fadd float %xa, %xw
+    %yu = fmul float %y0, %u
+    %yv = fmul float %y1, %v
+    %yw = fmul float %y2, %w
+    %ya = fadd float %yu, %yv
+    %y = fadd float %ya, %yw
+    %zu = fmul float %z0, %u
+    %zv = fmul float %z1, %v
+    %zw = fmul float %z2, %w
+    %za = fadd float %zu, %zv
+    %z = fadd float %za, %zw
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %x, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %y, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %z, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+    %c0r = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 0)
+    %c0g = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 1, i32 0)
+    %c0b = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 2, i32 0)
+    %c0a = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 3, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %c0r, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 1, float %c0g, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 2, float %c0b, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 3, float %c0a, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="domain" }
+)";
+
+std::string formatPatchConstantIR(StringRef Factor) {
+  std::string IR = TessPatchConstantShaderIRTemplate;
+  size_t Pos = IR.find("FACTOR");
+  IR.replace(Pos, strlen("FACTOR"), Factor.str());
+  return IR;
+}
+
+/// Builds the vertex/hull/patch-constant/domain/fragment pipeline the five
+/// shaders above implement, tessellating a three-control-point patch over
+/// the triangle domain with the given (uniform) tessellation factor.
+Expected<GraphicsPipeline> buildTessellatedPipeline(Context &Ctx,
+                                                    StringRef Factor,
+                                                    uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 3, /*Location=*/1),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, TessVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature HSSig;
+  SignatureElement ControlPointID =
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::OutputControlPointID);
+  ControlPointID.ComponentType = SignatureComponentType::UInt;
+  HSSig.Elements = {makeElement(0, SignatureDirection::Input, 3,
+                                /*Location=*/1),
+                    makeElement(1, SignatureDirection::Input, 4,
+                                /*Location=*/0),
+                    ControlPointID,
+                    makeElement(3, SignatureDirection::Output, 3,
+                                /*Location=*/1),
+                    makeElement(4, SignatureDirection::Output, 4,
+                                /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> HS =
+      compileStage(Ctx, TessHullShaderIR, "hs_main", HSSig, ShaderStage::Hull);
+  if (!HS)
+    return HS.takeError();
+
+  EntrySignature PCSig;
+  SignatureElement Edges =
+      makeElement(1, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorEdge, /*RowCount=*/3);
+  Edges.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Inside =
+      makeElement(2, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorInside, /*RowCount=*/1);
+  Inside.Frequency = SignatureFrequency::PerPatch;
+  PCSig.Elements = {makeElement(0, SignatureDirection::Input, 3,
+                                /*Location=*/1),
+                    Edges, Inside};
+  std::string PCIR = formatPatchConstantIR(Factor);
+  Expected<std::shared_ptr<CompiledStage>> PCS =
+      compileStage(Ctx, PCIR, "pc_main", PCSig, ShaderStage::Hull);
+  if (!PCS)
+    return PCS.takeError();
+
+  EntrySignature DSSig;
+  DSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/std::nullopt,
+                  SignatureSystemValue::DomainLocation),
+      makeElement(1, SignatureDirection::Input, 3, /*Location=*/1),
+      makeElement(2, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> DS = compileStage(
+      Ctx, TessDomainShaderIR, "ds_main", DSSig, ShaderStage::Domain);
+  if (!DS)
+    return DS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PatchList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Triangle;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::TriangleCcw;
+  Tess.InputControlPointCount = 3;
+  Tess.OutputControlPointCount = 3;
+  Pipeline.setTessellationStages(std::move(*HS), std::move(*PCS),
+                                 std::move(*DS), Tess);
+  return Pipeline;
+}
+
+/// Renders one full-viewport red patch through \p Pipeline into an
+/// \p Size x \p Size R8G8B8A8 attachment.
+std::vector<uint8_t> renderTessellatedPatch(const GraphicsPipeline &Pipeline,
+                                            uint32_t Size) {
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // control point 0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // control point 1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // control point 2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  EXPECT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+  return Storage;
+}
+
+TEST(ExecutorTest, TessellatedPatchListCoversTheWholeViewport) {
+  Context Ctx;
+  // Factor 1 emits the undivided patch (a single triangle); factor 4
+  // subdivides it into a 4-resolution lattice. Both must rasterize to the
+  // exact same watertight full-viewport fill -- the subdivided one only if
+  // every generated domain point really did run through the domain stage
+  // and land in the flat, per-patch-based rasterization block.
+  for (StringRef Factor : {"1.0", "4.0"}) {
+    Expected<GraphicsPipeline> Pipeline =
+        buildTessellatedPipeline(Ctx, Factor, /*AttachmentSize=*/8);
+    ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+    std::vector<uint8_t> Storage =
+        renderTessellatedPatch(*Pipeline, /*Size=*/8);
+    for (uint32_t I = 0; I != 8u * 8u; ++I) {
+      EXPECT_EQ(Storage[I * 4 + 0], 255)
+          << "factor " << Factor << " texel " << I;
+      EXPECT_EQ(Storage[I * 4 + 1], 0);
+      EXPECT_EQ(Storage[I * 4 + 2], 0);
+      EXPECT_EQ(Storage[I * 4 + 3], 255);
+    }
+  }
+}
+
+TEST(ExecutorTest, TessellationFactorZeroCullsTheWholePatch) {
+  Context Ctx;
+  // A non-positive tessellation factor culls the patch entirely (see
+  // `feme::graphics::TessFactors`), so the tessellator emits no domain
+  // points, the domain stage runs zero invocations, and nothing is
+  // rasterized at all.
+  Expected<GraphicsPipeline> Pipeline =
+      buildTessellatedPipeline(Ctx, "0.0", /*AttachmentSize=*/4);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+  std::vector<uint8_t> Storage = renderTessellatedPatch(*Pipeline, /*Size=*/4);
+  for (uint8_t Texel : Storage)
+    EXPECT_EQ(Texel, 0);
+}
+
+TEST(ExecutorTest, RejectsAPatchListWithoutTessellationStages) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, RasterState{CullMode::None, FrontFace::Clockwise},
+                    PrimitiveTopology::PatchList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
+      0.0f,  0.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
+}
+
+TEST(ExecutorTest, RejectsAPatchListDrawWithAPartialPatch) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildTessellatedPipeline(Ctx, "1.0", /*AttachmentSize=*/4);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+  std::vector<uint8_t> Storage(4u * 4u * 4u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  // Two vertices is not a whole three-control-point patch.
+  DrawCommand Cmd;
+  Cmd.VertexCount = 2;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
 }
 
 } // namespace

@@ -50,6 +50,10 @@ struct StageStorage {
   std::vector<cpu::FemeStageElement> Elements;
   /// The raw bytes `Inputs`/`Outputs` points at.
   std::vector<uint8_t> Data;
+  /// How many invocations `Data` was sized for, i.e. the valid range of
+  /// every accessor's `Invocation` argument. One for a per-patch
+  /// (`PatchInput`/`PatchOutput`) block.
+  uint32_t InvocationCount = 0;
 
   /// The `FemeStageLayout` view of `Elements`. Only valid while this
   /// object is alive and `Elements` is not resized.
@@ -116,6 +120,21 @@ getStageSignature(const cpu::CompiledStage &Stage);
 llvm::Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
                                                SignatureDirection Direction,
                                                uint32_t InvocationCount);
+
+/// Copies every element of \p From's invocations `[0, From.InvocationCount)`
+/// into \p To's invocations starting at \p DestBase. Both blocks must have
+/// been built by `buildStageStorage` from the same signature and direction,
+/// so their `Elements` tables agree on everything but their invocation
+/// strides; this is a per-scalar copy rather than a `memcpy` precisely
+/// because those strides differ (the layout is
+/// row-major-then-component-major with the invocation index innermost).
+///
+/// This is what concatenating many patches' domain-stage outputs into one
+/// flat rasterizable block needs (roadmap H4, `feme::graphics::
+/// executeDraws`), where each patch's own point count is only known after
+/// its tessellation factors have been computed.
+void appendStageInvocations(const StageStorage &From, StageStorage &To,
+                            uint32_t DestBase);
 
 /// The first \p Direction element of \p Sig naming system value \p SysVal,
 /// or null if it declares none.

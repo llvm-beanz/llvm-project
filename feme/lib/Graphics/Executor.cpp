@@ -937,6 +937,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   case PrimitiveTopology::TriangleList:
   case PrimitiveTopology::TriangleStrip:
   case PrimitiveTopology::TriangleFan:
+    if (Pipeline.hasTessellationStages())
+      return createStringError(inconvertibleErrorCode(),
+                               "a pipeline with tessellation stages must use "
+                               "the patch-list topology");
+    break;
+  case PrimitiveTopology::PatchList:
+    if (!Pipeline.hasTessellationStages())
+      return createStringError(inconvertibleErrorCode(),
+                               "the patch-list topology requires a pipeline "
+                               "with tessellation stages");
     break;
   case PrimitiveTopology::LineListWithAdjacency:
   case PrimitiveTopology::LineStripWithAdjacency:
@@ -966,19 +976,39 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     FSSig = std::move(*Sig);
   }
 
+  // (roadmap H4) The stage whose per-vertex outputs actually reach
+  // clipping, the viewport transform and the interpolator: the domain
+  // stage on a tessellating pipeline, otherwise the vertex stage. Every
+  // lookup below -- `SV_Position`, the layer/viewport-index outputs, and
+  // the fragment stage's varying linkage -- is against *that* stage's
+  // signature, since on a tessellating pipeline the vertex stage's own
+  // outputs are consumed by the hull stage instead and need not include
+  // `SV_Position` at all.
+  std::optional<PatchPipelineLinkage> TessLink;
+  if (Pipeline.hasTessellationStages()) {
+    PatchPipelineStages Stages{Pipeline.getHullStage(),
+                               Pipeline.getPatchConstantStage(),
+                               Pipeline.getDomainStage()};
+    Expected<PatchPipelineLinkage> Link = linkPatchPipeline(*VSSig, Stages);
+    if (!Link)
+      return Link.takeError();
+    TessLink = std::move(*Link);
+  }
+  const EntrySignature &RasterSig = TessLink ? TessLink->DomainSig : *VSSig;
+
   const SignatureElement *VSPosition = findElement(
-      *VSSig, SignatureDirection::Output, SignatureSystemValue::Position);
+      RasterSig, SignatureDirection::Output, SignatureSystemValue::Position);
   const SignatureElement *VSLayerOut =
-      findElement(*VSSig, SignatureDirection::Output,
+      findElement(RasterSig, SignatureDirection::Output,
                   SignatureSystemValue::RenderTargetArrayIndex);
   const SignatureElement *VSViewportOut =
-      findElement(*VSSig, SignatureDirection::Output,
+      findElement(RasterSig, SignatureDirection::Output,
                   SignatureSystemValue::ViewportArrayIndex);
   if (!VSPosition)
     return createStringError(inconvertibleErrorCode(),
-                             "vertex stage does not write an SV_Position "
-                             "output; the executor cannot clip/rasterize "
-                             "without one");
+                             "the last pre-rasterization stage does not "
+                             "write an SV_Position output; the executor "
+                             "cannot clip/rasterize without one");
   if (VSPosition->ComponentCount != 4)
     return createStringError(inconvertibleErrorCode(),
                              "SV_Position output must have 4 components");
@@ -996,7 +1026,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "to link against a vertex output",
                                FSIn.ElementID);
     const SignatureElement *VSOut = findElementByLocation(
-        *VSSig, SignatureDirection::Output, *FSIn.Location);
+        RasterSig, SignatureDirection::Output, *FSIn.Location);
     if (!VSOut)
       return createStringError(inconvertibleErrorCode(),
                                "fragment input location %u has no matching "
@@ -1179,6 +1209,32 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   bool NeedsDepthStencil = DepthTestOrWrite || PipelineStencil.TestEnable;
   bool UseEarlyDepthStencil =
       NeedsDepthStencil && !FSDepthOut && !FSStencilRefOut && !FSMayDiscard;
+  // (roadmap H4) Which primitive class actually reaches the rasterizer. A
+  // patch-list pipeline's own topology says nothing about that -- the
+  // tessellator's `TessOutputPrimitive` does -- so this is the
+  // tessellator's output primitive when tessellating and the topology's
+  // own class otherwise.
+  enum class RasterPrimitiveClass { Point, Line, Triangle };
+  RasterPrimitiveClass RasterClass = RasterPrimitiveClass::Triangle;
+  if (TessLink) {
+    switch (Pipeline.getTessellationState().OutputPrimitive) {
+    case TessOutputPrimitive::Point:
+      RasterClass = RasterPrimitiveClass::Point;
+      break;
+    case TessOutputPrimitive::Line:
+      RasterClass = RasterPrimitiveClass::Line;
+      break;
+    case TessOutputPrimitive::TriangleCw:
+    case TessOutputPrimitive::TriangleCcw:
+      RasterClass = RasterPrimitiveClass::Triangle;
+      break;
+    }
+  } else if (Pipeline.getTopology() == PrimitiveTopology::PointList) {
+    RasterClass = RasterPrimitiveClass::Point;
+  } else if (Pipeline.getTopology() == PrimitiveTopology::LineList ||
+             Pipeline.getTopology() == PrimitiveTopology::LineStrip) {
+    RasterClass = RasterPrimitiveClass::Line;
+  }
   uint32_t PrimitiveCounter = 0;
 
   for (const DrawCommand &Cmd : Draw.Draws) {
@@ -1377,17 +1433,99 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     if (Error E = VS.invokeVertices(PVB))
       return E;
 
+    // --- Tessellation (roadmap H4). ---
+    //
+    // Each patch of the patch-list draw is run through its own
+    // hull/patch-constant/tessellator/domain chain
+    // (`feme::graphics::runPatchPipeline`), and every patch's domain-stage
+    // output is concatenated into one flat block whose invocation indices
+    // the assembled `TessTris`/`TessLines` below already refer to
+    // absolutely -- instancing folded in, since a patch's tessellation
+    // factors are computed from its own instance's control points and so
+    // two instances of the same patch need not produce the same number of
+    // domain points at all.
+    //
+    // `RasterOut` is what everything downstream (clipping, the viewport
+    // transform, the interpolator) reads: the domain stage's own outputs
+    // when tessellating, the vertex stage's otherwise.
+    const StageStorage *RasterOut = &*VSOutput;
+    StageStorage TessOutput;
+    SmallVector<std::array<uint32_t, 3>, 8> TessTris;
+    SmallVector<std::array<uint32_t, 2>, 8> TessLines;
+    if (TessLink) {
+      const TessellationState &Tess = Pipeline.getTessellationState();
+      if (Tess.InputControlPointCount == 0 ||
+          PerInstance % Tess.InputControlPointCount != 0)
+        return createStringError(inconvertibleErrorCode(),
+                                 "a patch-list draw's vertex count (%u) must "
+                                 "be a non-zero multiple of the pipeline's "
+                                 "patch control point count (%u)",
+                                 PerInstance, Tess.InputControlPointCount);
+      PatchPipelineStages Stages{Pipeline.getHullStage(),
+                                 Pipeline.getPatchConstantStage(),
+                                 Pipeline.getDomainStage()};
+      uint32_t PatchesPerInstance = PerInstance / Tess.InputControlPointCount;
+      std::vector<PatchPipelineResult> Patches;
+      SmallVector<uint32_t, 8> PatchBases;
+      SmallVector<uint32_t, 8> ControlPointInvocations;
+      uint32_t TotalPoints = 0;
+      for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+        for (uint32_t P = 0; P != PatchesPerInstance; ++P) {
+          ControlPointInvocations.clear();
+          for (uint32_t C = 0; C != Tess.InputControlPointCount; ++C)
+            ControlPointInvocations.push_back(
+                Inst * PerInstance + P * Tess.InputControlPointCount + C);
+          Expected<PatchPipelineResult> Patch =
+              runPatchPipeline(Stages, *TessLink, Tess, *VSOutput,
+                               ControlPointInvocations, &Draw.Resources);
+          if (!Patch)
+            return Patch.takeError();
+          PatchBases.push_back(TotalPoints);
+          TotalPoints +=
+              static_cast<uint32_t>(Patch->Tessellated.Points.size());
+          Patches.push_back(std::move(*Patch));
+        }
+      }
+
+      Expected<StageStorage> Flat = buildStageStorage(
+          TessLink->DomainSig, SignatureDirection::Output, TotalPoints);
+      if (!Flat)
+        return Flat.takeError();
+      TessOutput = std::move(*Flat);
+      for (size_t I = 0; I != Patches.size(); ++I) {
+        // A patch the tessellator culled entirely still carries a
+        // minimally-sized (one-invocation) output block rather than an
+        // empty one, so guard on its own point count rather than on that
+        // block's invocation count.
+        if (Patches[I].Tessellated.Points.empty())
+          continue;
+        appendStageInvocations(Patches[I].DomainOutputs, TessOutput,
+                               PatchBases[I]);
+        uint32_t Base = PatchBases[I];
+        ArrayRef<uint32_t> Indices = Patches[I].Tessellated.Indices;
+        if (Tess.OutputPrimitive == TessOutputPrimitive::Line) {
+          for (size_t K = 0; K + 2 <= Indices.size(); K += 2)
+            TessLines.push_back({Base + Indices[K], Base + Indices[K + 1]});
+        } else if (Tess.OutputPrimitive != TessOutputPrimitive::Point) {
+          for (size_t K = 0; K + 3 <= Indices.size(); K += 3)
+            TessTris.push_back({Base + Indices[K], Base + Indices[K + 1],
+                                Base + Indices[K + 2]});
+        }
+      }
+      RasterOut = &TessOutput;
+    }
+
     // --- Assemble primitives, clip, viewport-transform, cull. ---
     auto vertexAt = [&](uint32_t Flat) {
       RasterVertex V;
       for (unsigned C = 0; C != 4; ++C)
-        V.Clip[C] = VSOutput->readFloat(VSPosition->ElementID, C, Flat);
+        V.Clip[C] = RasterOut->readFloat(VSPosition->ElementID, C, Flat);
       V.Varyings.resize(0);
       for (const LinkedVarying &LV : Varyings)
         for (uint32_t Row = 0; Row != LV.RowCount; ++Row)
           for (uint32_t C = 0; C != LV.ComponentCount; ++C)
             V.Varyings.push_back(
-                VSOutput->readRaw(LV.VSElementID, C, Flat, Row));
+                RasterOut->readRaw(LV.VSElementID, C, Flat, Row));
       return V;
     };
 
@@ -1414,7 +1552,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       int32_t RequestedViewport = 0;
       if (VSViewportOut)
         RequestedViewport =
-            readSignedStageValue(*VSOutput, *VSViewportOut, Invocation);
+            readSignedStageValue(*RasterOut, *VSViewportOut, Invocation);
       std::optional<uint32_t> ViewportIndex =
           resolveViewportArrayIndex(RequestedViewport, Draw.Viewports.size());
       std::optional<uint32_t> ScissorIndex =
@@ -1435,7 +1573,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       int32_t RequestedLayer = 0;
       if (VSLayerOut)
         RequestedLayer =
-            readSignedStageValue(*VSOutput, *VSLayerOut, Invocation);
+            readSignedStageValue(*RasterOut, *VSLayerOut, Invocation);
       std::optional<uint32_t> Layer =
           resolveRenderTargetArrayLayer(RequestedLayer, DrawLayerCount);
       if (!Layer)
@@ -1544,83 +1682,100 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       }
     }
 
+    // (roadmap H4) The primitive index lists everything below actually
+    // rasterizes, in absolute (already instance-offset) invocation
+    // indices: the topology-assembled per-instance lists above biased by
+    // each instance's own base invocation, or the tessellator's own
+    // connectivity, which spans every instance already -- each patch
+    // produced its own point count, so a tessellated draw has no single
+    // per-instance stride to bias by.
+    SmallVector<std::array<uint32_t, 3>, 8> AbsTriIndices;
+    SmallVector<std::array<uint32_t, 2>, 8> AbsLineIndices;
+    if (TessLink) {
+      AbsTriIndices = std::move(TessTris);
+      AbsLineIndices = std::move(TessLines);
+    } else {
+      for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+        uint32_t Base = Inst * PerInstance;
+        for (std::array<uint32_t, 3> T : TriIndices)
+          AbsTriIndices.push_back({Base + T[0], Base + T[1], Base + T[2]});
+        for (std::array<uint32_t, 2> L : LineIndices)
+          AbsLineIndices.push_back({Base + L[0], Base + L[1]});
+      }
+    }
+
     // Screen-space triangles plus their owning varying storage, binned into
     // tiles for the deferred per-tile rasterization pass below.
     std::vector<ScreenTriangle> ScreenTris;
     std::vector<std::unique_ptr<SmallVector<uint32_t, 8>>> TriVaryingStore;
 
-    for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
-      for (std::array<uint32_t, 3> Tri : TriIndices) {
-        std::optional<PrimitiveState> Primitive =
-            resolvePrimitiveState(Inst * PerInstance + Tri[0]);
-        if (!Primitive)
+    for (std::array<uint32_t, 3> Tri : AbsTriIndices) {
+      std::optional<PrimitiveState> Primitive = resolvePrimitiveState(Tri[0]);
+      if (!Primitive)
+        continue;
+      std::array<RasterVertex, 3> V = {vertexAt(Tri[0]), vertexAt(Tri[1]),
+                                       vertexAt(Tri[2])};
+      std::vector<RasterVertex> Clipped = clipTriangle(V, Varyings);
+      for (size_t I = 1; I + 1 < Clipped.size(); ++I) {
+        std::array<const RasterVertex *, 3> Poly = {&Clipped[0], &Clipped[I],
+                                                    &Clipped[I + 1]};
+        std::array<std::array<float, 2>, 3> Screen;
+        std::array<float, 3> InvW, Depth;
+        for (unsigned K = 0; K != 3; ++K)
+          projectVertex(*Poly[K], *Primitive->Viewport, Screen[K], InvW[K],
+                        Depth[K]);
+
+        // `SArea` uses the same directed-edge formula (`edgeFn`) the
+        // rasterizer's own coverage test does below, so that after the
+        // positive-orientation normalization a covered point's edge
+        // values are guaranteed non-negative. It is the negative of the
+        // "positive area = CCW when authored in NDC" convention (the
+        // viewport transform above flips Y), so `IsCCW` compensates.
+        float SArea = edgeFn(Screen[0], Screen[1], Screen[2]);
+        if (SArea == 0.0f)
           continue;
-        std::array<RasterVertex, 3> V = {vertexAt(Inst * PerInstance + Tri[0]),
-                                         vertexAt(Inst * PerInstance + Tri[1]),
-                                         vertexAt(Inst * PerInstance + Tri[2])};
-        std::vector<RasterVertex> Clipped = clipTriangle(V, Varyings);
-        for (size_t I = 1; I + 1 < Clipped.size(); ++I) {
-          std::array<const RasterVertex *, 3> Poly = {&Clipped[0], &Clipped[I],
-                                                      &Clipped[I + 1]};
-          std::array<std::array<float, 2>, 3> Screen;
-          std::array<float, 3> InvW, Depth;
-          for (unsigned K = 0; K != 3; ++K)
-            projectVertex(*Poly[K], *Primitive->Viewport, Screen[K], InvW[K],
-                          Depth[K]);
+        bool IsCCW = SArea > 0.0f;
+        bool FrontFacing = (Pipeline.getRasterState().Front ==
+                            FrontFace::CounterClockwise) == IsCCW;
+        CullMode Cull = Pipeline.getRasterState().Cull;
+        if (Cull == CullMode::FrontAndBack ||
+            (Cull == CullMode::Front && FrontFacing) ||
+            (Cull == CullMode::Back && !FrontFacing))
+          continue;
 
-          // `SArea` uses the same directed-edge formula (`edgeFn`) the
-          // rasterizer's own coverage test does below, so that after the
-          // positive-orientation normalization a covered point's edge
-          // values are guaranteed non-negative. It is the negative of the
-          // "positive area = CCW when authored in NDC" convention (the
-          // viewport transform above flips Y), so `IsCCW` compensates.
-          float SArea = edgeFn(Screen[0], Screen[1], Screen[2]);
-          if (SArea == 0.0f)
-            continue;
-          bool IsCCW = SArea > 0.0f;
-          bool FrontFacing = (Pipeline.getRasterState().Front ==
-                              FrontFace::CounterClockwise) == IsCCW;
-          CullMode Cull = Pipeline.getRasterState().Cull;
-          if (Cull == CullMode::FrontAndBack ||
-              (Cull == CullMode::Front && FrontFacing) ||
-              (Cull == CullMode::Back && !FrontFacing))
-            continue;
-
-          if (SArea < 0.0f) {
-            std::swap(Screen[1], Screen[2]);
-            std::swap(InvW[1], InvW[2]);
-            std::swap(Depth[1], Depth[2]);
-            std::swap(Poly[1], Poly[2]);
-          }
-
-          auto VaryingBits = std::make_unique<SmallVector<uint32_t, 8>>();
-          for (unsigned K = 0; K != 3; ++K)
-            VaryingBits->append(Poly[K]->Varyings.begin(),
-                                Poly[K]->Varyings.end());
-
-          ScreenTriangle ST;
-          ST.Pos = Screen;
-          ST.InvW = InvW;
-          ST.Depth = Depth;
-          size_t Stride = Poly[0]->Varyings.size();
-          for (unsigned K = 0; K != 3; ++K)
-            ST.Varyings[K] = VaryingBits->data() + K * Stride;
-          ST.FrontFacing = FrontFacing;
-          ST.PrimitiveID = PrimitiveCounter++;
-          ST.TargetLayer = Primitive->TargetLayer;
-          ST.ViewportIndex = Primitive->ViewportIndex;
-          ST.ScissorMinX = std::max<int32_t>(0, Primitive->Scissor->X);
-          ST.ScissorMinY = std::max<int32_t>(0, Primitive->Scissor->Y);
-          ST.ScissorMaxX = std::min<int32_t>(
-              ExtentWidth, Primitive->Scissor->X +
-                               static_cast<int32_t>(Primitive->Scissor->Width));
-          ST.ScissorMaxY = std::min<int32_t>(
-              ExtentHeight,
-              Primitive->Scissor->Y +
-                  static_cast<int32_t>(Primitive->Scissor->Height));
-          ScreenTris.push_back(ST);
-          TriVaryingStore.push_back(std::move(VaryingBits));
+        if (SArea < 0.0f) {
+          std::swap(Screen[1], Screen[2]);
+          std::swap(InvW[1], InvW[2]);
+          std::swap(Depth[1], Depth[2]);
+          std::swap(Poly[1], Poly[2]);
         }
+
+        auto VaryingBits = std::make_unique<SmallVector<uint32_t, 8>>();
+        for (unsigned K = 0; K != 3; ++K)
+          VaryingBits->append(Poly[K]->Varyings.begin(),
+                              Poly[K]->Varyings.end());
+
+        ScreenTriangle ST;
+        ST.Pos = Screen;
+        ST.InvW = InvW;
+        ST.Depth = Depth;
+        size_t Stride = Poly[0]->Varyings.size();
+        for (unsigned K = 0; K != 3; ++K)
+          ST.Varyings[K] = VaryingBits->data() + K * Stride;
+        ST.FrontFacing = FrontFacing;
+        ST.PrimitiveID = PrimitiveCounter++;
+        ST.TargetLayer = Primitive->TargetLayer;
+        ST.ViewportIndex = Primitive->ViewportIndex;
+        ST.ScissorMinX = std::max<int32_t>(0, Primitive->Scissor->X);
+        ST.ScissorMinY = std::max<int32_t>(0, Primitive->Scissor->Y);
+        ST.ScissorMaxX = std::min<int32_t>(
+            ExtentWidth, Primitive->Scissor->X +
+                             static_cast<int32_t>(Primitive->Scissor->Width));
+        ST.ScissorMaxY = std::min<int32_t>(
+            ExtentHeight, Primitive->Scissor->Y +
+                              static_cast<int32_t>(Primitive->Scissor->Height));
+        ScreenTris.push_back(ST);
+        TriVaryingStore.push_back(std::move(VaryingBits));
       }
     }
 
@@ -1710,159 +1865,153 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       TriVaryingStore.push_back(std::move(VaryingBits));
     };
 
-    if (Pipeline.getTopology() == PrimitiveTopology::PointList) {
-      for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
-        for (uint32_t J = 0; J != PerInstance; ++J) {
-          std::optional<PrimitiveState> Primitive =
-              resolvePrimitiveState(Inst * PerInstance + J);
-          if (!Primitive)
-            continue;
-          RasterVertex V = vertexAt(Inst * PerInstance + J);
-          if (V.Clip[3] <= ClipEpsilon)
-            continue;
-          std::array<float, 2> P;
-          float InvW, Depth;
-          projectVertex(V, *Primitive->Viewport, P, InvW, Depth);
-          constexpr float Half = 0.5f; // fixed 1-pixel point size
-          QuadCorner TL{{P[0] - Half, P[1] - Half}, InvW, Depth, &V};
-          QuadCorner TR{{P[0] + Half, P[1] - Half}, InvW, Depth, &V};
-          QuadCorner BR{{P[0] + Half, P[1] + Half}, InvW, Depth, &V};
-          QuadCorner BL{{P[0] - Half, P[1] + Half}, InvW, Depth, &V};
-          pushQuadTriangle(TL, TR, BR, *Primitive, /*IsLine=*/false);
-          pushQuadTriangle(TL, BR, BL, *Primitive, /*IsLine=*/false);
-        }
+    if (RasterClass == RasterPrimitiveClass::Point) {
+      uint32_t PointCount = TessLink ? TessOutput.InvocationCount : Total;
+      for (uint32_t J = 0; J != PointCount; ++J) {
+        std::optional<PrimitiveState> Primitive = resolvePrimitiveState(J);
+        if (!Primitive)
+          continue;
+        RasterVertex V = vertexAt(J);
+        if (V.Clip[3] <= ClipEpsilon)
+          continue;
+        std::array<float, 2> P;
+        float InvW, Depth;
+        projectVertex(V, *Primitive->Viewport, P, InvW, Depth);
+        constexpr float Half = 0.5f; // fixed 1-pixel point size
+        QuadCorner TL{{P[0] - Half, P[1] - Half}, InvW, Depth, &V};
+        QuadCorner TR{{P[0] + Half, P[1] - Half}, InvW, Depth, &V};
+        QuadCorner BR{{P[0] + Half, P[1] + Half}, InvW, Depth, &V};
+        QuadCorner BL{{P[0] - Half, P[1] + Half}, InvW, Depth, &V};
+        pushQuadTriangle(TL, TR, BR, *Primitive, /*IsLine=*/false);
+        pushQuadTriangle(TL, BR, BL, *Primitive, /*IsLine=*/false);
       }
-    } else if (Pipeline.getTopology() == PrimitiveTopology::LineList ||
-               Pipeline.getTopology() == PrimitiveTopology::LineStrip) {
+    } else if (RasterClass == RasterPrimitiveClass::Line) {
       const RasterState &Raster = Pipeline.getRasterState();
-      for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
-        // (roadmap F5) The stipple pattern's arc-length parameter keeps
-        // accumulating across a `LineStrip`'s consecutive segments
-        // (Vulkan's "continuously stippled" rule for connected strips);
-        // a `LineList`'s independent segments -- and a strip's own
-        // restart boundary, which also breaks segment contiguity --
-        // instead each restart at 0. `LineIndices` preserves assembly
-        // order, so "the next segment's first vertex is the previous
-        // segment's second" is exactly the contiguity test needed, with
-        // no separate restart bookkeeping here.
-        float ArcAccum = 0.0f;
-        std::optional<uint32_t> PrevEnd;
-        for (std::array<uint32_t, 2> Ln : LineIndices) {
-          std::optional<PrimitiveState> Primitive =
-              resolvePrimitiveState(Inst * PerInstance + Ln[0]);
-          if (!Primitive)
-            continue;
-          if (!PrevEnd || *PrevEnd != Ln[0])
-            ArcAccum = 0.0f;
-          PrevEnd = Ln[1];
-          RasterVertex V0 = vertexAt(Inst * PerInstance + Ln[0]);
-          RasterVertex V1 = vertexAt(Inst * PerInstance + Ln[1]);
-          if (V0.Clip[3] <= ClipEpsilon || V1.Clip[3] <= ClipEpsilon)
-            continue;
-          std::array<float, 2> P0, P1;
-          float InvW0, Depth0, InvW1, Depth1;
-          projectVertex(V0, *Primitive->Viewport, P0, InvW0, Depth0);
-          projectVertex(V1, *Primitive->Viewport, P1, InvW1, Depth1);
-          float Dx = P1[0] - P0[0], Dy = P1[1] - P0[1];
-          float Len = std::sqrt(Dx * Dx + Dy * Dy);
-          if (Len == 0.0f)
-            continue;
-          float ArcEnd = ArcAccum + Len;
+      // (roadmap F5) The stipple pattern's arc-length parameter keeps
+      // accumulating across a `LineStrip`'s consecutive segments
+      // (Vulkan's "continuously stippled" rule for connected strips);
+      // a `LineList`'s independent segments -- and a strip's own
+      // restart boundary, which also breaks segment contiguity --
+      // instead each restart at 0. `AbsLineIndices` preserves assembly
+      // order (and biases each instance's segments by its own base
+      // invocation), so "the next segment's first vertex is the previous
+      // segment's second" is exactly the contiguity test needed, with no
+      // separate restart or instance-boundary bookkeeping here.
+      float ArcAccum = 0.0f;
+      std::optional<uint32_t> PrevEnd;
+      for (std::array<uint32_t, 2> Ln : AbsLineIndices) {
+        std::optional<PrimitiveState> Primitive = resolvePrimitiveState(Ln[0]);
+        if (!Primitive)
+          continue;
+        if (!PrevEnd || *PrevEnd != Ln[0])
+          ArcAccum = 0.0f;
+        PrevEnd = Ln[1];
+        RasterVertex V0 = vertexAt(Ln[0]);
+        RasterVertex V1 = vertexAt(Ln[1]);
+        if (V0.Clip[3] <= ClipEpsilon || V1.Clip[3] <= ClipEpsilon)
+          continue;
+        std::array<float, 2> P0, P1;
+        float InvW0, Depth0, InvW1, Depth1;
+        projectVertex(V0, *Primitive->Viewport, P0, InvW0, Depth0);
+        projectVertex(V1, *Primitive->Viewport, P1, InvW1, Depth1);
+        float Dx = P1[0] - P0[0], Dy = P1[1] - P0[1];
+        float Len = std::sqrt(Dx * Dx + Dy * Dy);
+        if (Len == 0.0f)
+          continue;
+        float ArcEnd = ArcAccum + Len;
 
-          if (Raster.LineMode == LineRasterizationMode::Bresenham) {
-            // `Bresenham` mode walks the integer pixel grid directly
-            // (`LineRasterizationMode`'s comment): the line's width is
-            // never consulted, and each covered pixel becomes its own
-            // 1x1 axis-aligned quad, shaded/interpolated at the line
-            // parameter `T` nearest that pixel's center -- there is no
-            // per-pixel width to expand, unlike the rectangular styles
-            // below.
-            int32_t X0 = static_cast<int32_t>(std::floor(P0[0]));
-            int32_t Y0 = static_cast<int32_t>(std::floor(P0[1]));
-            int32_t X1 = static_cast<int32_t>(std::floor(P1[0]));
-            int32_t Y1 = static_cast<int32_t>(std::floor(P1[1]));
-            int32_t StepDx = std::abs(X1 - X0), Sx = X0 < X1 ? 1 : -1;
-            int32_t StepDy = -std::abs(Y1 - Y0), Sy = Y0 < Y1 ? 1 : -1;
-            int32_t Err = StepDx + StepDy;
-            int32_t X = X0, Y = Y0;
-            for (;;) {
-              std::array<float, 2> Center{X + 0.5f, Y + 0.5f};
-              float T = ((Center[0] - P0[0]) * Dx + (Center[1] - P0[1]) * Dy) /
-                        (Len * Len);
-              T = std::clamp(T, 0.0f, 1.0f);
-              RasterVertex Vt = lerpVertex(V0, V1, T, Varyings);
-              float InvWt = InvW0 + (InvW1 - InvW0) * T;
-              float Deptht = Depth0 + (Depth1 - Depth0) * T;
-              float Arc = ArcAccum + T * Len;
-              QuadCorner TL{
-                  {float(X), float(Y)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-              QuadCorner TR{
-                  {float(X + 1), float(Y)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-              QuadCorner BR{
-                  {float(X + 1), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-              QuadCorner BL{
-                  {float(X), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-              pushQuadTriangle(TL, TR, BR, *Primitive, /*IsLine=*/true);
-              pushQuadTriangle(TL, BR, BL, *Primitive, /*IsLine=*/true);
-              if (X == X1 && Y == Y1)
-                break;
-              int32_t E2 = 2 * Err;
-              if (E2 >= StepDy) {
-                Err += StepDy;
-                X += Sx;
-              }
-              if (E2 <= StepDx) {
-                Err += StepDx;
-                Y += Sy;
-              }
+        if (Raster.LineMode == LineRasterizationMode::Bresenham) {
+          // `Bresenham` mode walks the integer pixel grid directly
+          // (`LineRasterizationMode`'s comment): the line's width is
+          // never consulted, and each covered pixel becomes its own
+          // 1x1 axis-aligned quad, shaded/interpolated at the line
+          // parameter `T` nearest that pixel's center -- there is no
+          // per-pixel width to expand, unlike the rectangular styles
+          // below.
+          int32_t X0 = static_cast<int32_t>(std::floor(P0[0]));
+          int32_t Y0 = static_cast<int32_t>(std::floor(P0[1]));
+          int32_t X1 = static_cast<int32_t>(std::floor(P1[0]));
+          int32_t Y1 = static_cast<int32_t>(std::floor(P1[1]));
+          int32_t StepDx = std::abs(X1 - X0), Sx = X0 < X1 ? 1 : -1;
+          int32_t StepDy = -std::abs(Y1 - Y0), Sy = Y0 < Y1 ? 1 : -1;
+          int32_t Err = StepDx + StepDy;
+          int32_t X = X0, Y = Y0;
+          for (;;) {
+            std::array<float, 2> Center{X + 0.5f, Y + 0.5f};
+            float T = ((Center[0] - P0[0]) * Dx + (Center[1] - P0[1]) * Dy) /
+                      (Len * Len);
+            T = std::clamp(T, 0.0f, 1.0f);
+            RasterVertex Vt = lerpVertex(V0, V1, T, Varyings);
+            float InvWt = InvW0 + (InvW1 - InvW0) * T;
+            float Deptht = Depth0 + (Depth1 - Depth0) * T;
+            float Arc = ArcAccum + T * Len;
+            QuadCorner TL{{float(X), float(Y)}, InvWt, Deptht, &Vt, 0.0f, Arc};
+            QuadCorner TR{
+                {float(X + 1), float(Y)}, InvWt, Deptht, &Vt, 0.0f, Arc};
+            QuadCorner BR{
+                {float(X + 1), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
+            QuadCorner BL{
+                {float(X), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
+            pushQuadTriangle(TL, TR, BR, *Primitive, /*IsLine=*/true);
+            pushQuadTriangle(TL, BR, BL, *Primitive, /*IsLine=*/true);
+            if (X == X1 && Y == Y1)
+              break;
+            int32_t E2 = 2 * Err;
+            if (E2 >= StepDy) {
+              Err += StepDy;
+              X += Sx;
             }
-          } else {
-            // `Rectangular`/`RectangularSmooth`: a screen-space rectangle
-            // `Raster.LineWidth` pixels wide, generalizing the fixed
-            // 1-pixel-wide quad roadmap C4d built. `RectangularSmooth`
-            // additionally feathers the quad 1 pixel wider than the
-            // nominal width on each side so a fragment near the true
-            // edge gets a fractional `EdgeDistance` to antialias against
-            // (see "Smooth line antialiasing" in
-            // feme/docs/FeMeGraphicsDesign.md), rather than the binary
-            // in/out test `Rectangular` still uses.
-            float HalfWidth = Raster.LineWidth * 0.5f;
-            float Feather =
-                Raster.LineMode == LineRasterizationMode::RectangularSmooth
-                    ? 1.0f
-                    : 0.0f;
-            float HalfExtent = HalfWidth + Feather;
-            std::array<float, 2> Perp{-Dy / Len * HalfExtent,
-                                      Dx / Len * HalfExtent};
-            QuadCorner QA{{P0[0] + Perp[0], P0[1] + Perp[1]},
-                          InvW0,
-                          Depth0,
-                          &V0,
-                          HalfExtent,
-                          ArcAccum};
-            QuadCorner QB{{P0[0] - Perp[0], P0[1] - Perp[1]},
-                          InvW0,
-                          Depth0,
-                          &V0,
-                          -HalfExtent,
-                          ArcAccum};
-            QuadCorner QC{{P1[0] - Perp[0], P1[1] - Perp[1]},
-                          InvW1,
-                          Depth1,
-                          &V1,
-                          -HalfExtent,
-                          ArcEnd};
-            QuadCorner QD{{P1[0] + Perp[0], P1[1] + Perp[1]},
-                          InvW1,
-                          Depth1,
-                          &V1,
-                          HalfExtent,
-                          ArcEnd};
-            pushQuadTriangle(QA, QB, QC, *Primitive, /*IsLine=*/true);
-            pushQuadTriangle(QA, QC, QD, *Primitive, /*IsLine=*/true);
+            if (E2 <= StepDx) {
+              Err += StepDx;
+              Y += Sy;
+            }
           }
-          ArcAccum = ArcEnd;
+        } else {
+          // `Rectangular`/`RectangularSmooth`: a screen-space rectangle
+          // `Raster.LineWidth` pixels wide, generalizing the fixed
+          // 1-pixel-wide quad roadmap C4d built. `RectangularSmooth`
+          // additionally feathers the quad 1 pixel wider than the
+          // nominal width on each side so a fragment near the true
+          // edge gets a fractional `EdgeDistance` to antialias against
+          // (see "Smooth line antialiasing" in
+          // feme/docs/FeMeGraphicsDesign.md), rather than the binary
+          // in/out test `Rectangular` still uses.
+          float HalfWidth = Raster.LineWidth * 0.5f;
+          float Feather =
+              Raster.LineMode == LineRasterizationMode::RectangularSmooth
+                  ? 1.0f
+                  : 0.0f;
+          float HalfExtent = HalfWidth + Feather;
+          std::array<float, 2> Perp{-Dy / Len * HalfExtent,
+                                    Dx / Len * HalfExtent};
+          QuadCorner QA{{P0[0] + Perp[0], P0[1] + Perp[1]},
+                        InvW0,
+                        Depth0,
+                        &V0,
+                        HalfExtent,
+                        ArcAccum};
+          QuadCorner QB{{P0[0] - Perp[0], P0[1] - Perp[1]},
+                        InvW0,
+                        Depth0,
+                        &V0,
+                        -HalfExtent,
+                        ArcAccum};
+          QuadCorner QC{{P1[0] - Perp[0], P1[1] - Perp[1]},
+                        InvW1,
+                        Depth1,
+                        &V1,
+                        -HalfExtent,
+                        ArcEnd};
+          QuadCorner QD{{P1[0] + Perp[0], P1[1] + Perp[1]},
+                        InvW1,
+                        Depth1,
+                        &V1,
+                        HalfExtent,
+                        ArcEnd};
+          pushQuadTriangle(QA, QB, QC, *Primitive, /*IsLine=*/true);
+          pushQuadTriangle(QA, QC, QD, *Primitive, /*IsLine=*/true);
         }
+        ArcAccum = ArcEnd;
       }
     }
 
