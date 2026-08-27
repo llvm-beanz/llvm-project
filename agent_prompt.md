@@ -41,3 +41,4 @@ Can you work on milestone H3?
 > per-primitive viewport index in the executor, `ViewportIndex` as a stage
 > output, and `shaderOutputViewportIndex`/`shaderOutputLayer` (both `VK_FALSE`
 > in the aggregate 1.2 struct today) raised in lockstep with H2
+
