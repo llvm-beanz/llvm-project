@@ -758,6 +758,15 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
   Function *NewF = Function::Create(NewTy, F.getLinkage(), F.getAddressSpace(),
                                     "", F.getParent());
   NewF->copyAttributesFrom(&F);
+  // `copyAttributesFrom` copies calling convention, function attributes,
+  // linkage, etc., but deliberately not function-attached metadata (see
+  // `GlobalObject::copyAttributesFrom`): without this, a fragment/vertex
+  // entry point that reaches this pass with a `!feme.signature` node
+  // already attached (from `feme::graphics::CanonicalizeStagePass`, which
+  // always runs first) would silently lose it here, and a later stage
+  // wrapper (e.g. `feme::cpu::FragmentWrapperPass`) would then reject the
+  // rebuilt function as having no signature at all -- see roadmap H3a.
+  NewF->copyMetadata(&F, /*Offset=*/0);
   NewF->setComdat(F.getComdat());
   NewF->splice(NewF->begin(), &F);
 

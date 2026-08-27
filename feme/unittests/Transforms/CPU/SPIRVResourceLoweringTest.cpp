@@ -100,6 +100,48 @@ TEST(SPIRVResourceLoweringTest, LowersScalarBindingToResourceLoad) {
   EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
 }
 
+// Regression test for roadmap H3a: addResourceEnvParams() replaces a
+// function that has any bound resource handle with a brand-new Function via
+// Function::Create()+copyAttributesFrom(), but GlobalObject::
+// copyAttributesFrom() does not copy function-attached metadata. Any stage
+// entry function using a bound resource (e.g. a UBO) was silently losing its
+// !feme.signature metadata (attached earlier by CanonicalizeStagePass),
+// causing "fragment stage wrapper requires attached feme.signature metadata"
+// pipeline-creation failures for shaders reading gl_ViewportIndex out of a
+// bound uniform block. Verify function-attached metadata survives the
+// resource-env-parameter rewrite.
+TEST(SPIRVResourceLoweringTest, PreservesFunctionMetadataAcrossEnvParamRewrite) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %idx) !feme.signature !0 {
+      %h = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 %idx)
+      %v = load float, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+
+    !0 = !{!"fragment-signature-placeholder"}
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceLoadCall(*F));
+  MDNode *Signature = F->getMetadata("feme.signature");
+  ASSERT_TRUE(Signature) << "!feme.signature metadata was lost when the "
+                             "function was rewritten to add resource-env "
+                             "parameters";
+  ASSERT_EQ(Signature->getNumOperands(), 1u);
+  EXPECT_EQ(cast<MDString>(Signature->getOperand(0))->getString(),
+            "fragment-signature-placeholder");
+}
+
 TEST(SPIRVResourceLoweringTest, RecordsArrayRangeSizeInBoundResourceMetadata) {
   // Roadmap R26: a 4-element arrayed binding is assigned a contiguous
   // 4-slot heap range, recorded as such -- rather than the implicit
