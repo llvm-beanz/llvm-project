@@ -1163,8 +1163,15 @@ void fillFeatures2Chain(void *pNext) {
       Features->vulkanMemoryModel = VK_FALSE;
       Features->vulkanMemoryModelDeviceScope = VK_FALSE;
       Features->vulkanMemoryModelAvailabilityVisibilityChains = VK_FALSE;
-      Features->shaderOutputViewportIndex = VK_FALSE;
-      Features->shaderOutputLayer = VK_FALSE;
+      // Roadmap H3: `VK_EXT_shader_viewport_index_layer`'s core-1.2-promoted
+      // feature pair -- gates whether a non-geometry shader stage (e.g. the
+      // vertex stage) may itself write `gl_ViewportIndex`/`gl_Layer` (rather
+      // than requiring a geometry shader, which this ICD does not
+      // implement). The executor now resolves `ViewportIndex`/`Layer` stage
+      // outputs from any stage that writes them (`Executor.cpp`'s
+      // `resolvePrimitiveState`), so both can honestly flip to `VK_TRUE`.
+      Features->shaderOutputViewportIndex = VK_TRUE;
+      Features->shaderOutputLayer = VK_TRUE;
       // (roadmap C6) No `OpGroupNonUniformBroadcast` conversion exists at
       // all (see the dedicated-struct case above), so there is no
       // non-dynamic-index broadcast this bit could be lying about: every
