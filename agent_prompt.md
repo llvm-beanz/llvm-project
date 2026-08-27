@@ -33,15 +33,25 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5c?
+Can you work on milestone H5d?
 
-> **Lift `CanonicalizeStagePass::run`'s stage filter to accept
-> `ShaderStage::Geometry`** once H5b makes doing so safe, routing a geometry
-> entry through `canonicalizeSPIRVStage(*F, ShaderStage::Geometry,
-> SPIRVCanonicalPhase::Ordinary)` (no barrier-splitting needed, unlike Hull --
-> GLSL/SPIR-V compiles a geometry shader to a single entry point already, per
-> GeometryWrapper.cpp's own file comment). Add unit coverage mirroring
-> `CanonicalizeStageTest`'s Hull/Domain cases, for
-> `gl_PrimitiveIDIn`/`gl_InvocationID`/`gl_Layer`/`gl_ViewportIndex`/`gl_PrimitiveID`
-> at minimum (all of which already map to an existing `SignatureSystemValue` per
-> `getSystemValueForBuiltIn` -- no new system-value work needed there)
+> **Chain the geometry stage into `Executor::executeDraws`**, the "as does the
+> whole ... executor" half FeMeGraphicsDesign.md's "Tessellation and geometry
+> stage model" section already flags open: assemble each draw's primitives
+> (`splitListPrimitiveAdjacency`/`splitStripPrimitiveAdjacency`, Pipeline.h,
+> already implemented), gather their vertex attributes into a geometry batch
+> (`feme::graphics::buildGeometryInputs`/`buildGeometryInvocations`,
+> GeometryInputs.h, already implemented), run the compiled geometry stage
+> (`CompiledStage::invokeGeometry`, already implemented), replay its flat
+> emitted-vertex/strip-boundary records back into one `GeometryStreamBuilder`
+> per primitive and merge them in lane order
+> (`feme::cpu::collectGeometryStreams`/`feme::graphics::mergeGeometryStreamsInLaneOrder`,
+> both already implemented), and rasterize the merged stream's own strips in
+> place of the vertex/domain stage's output -- the same "last pre-rasterization
+> stage" substitution H4's own tessellation chaining already established the
+> pattern for (`RasterSig`). `GraphicsPipeline` needs a
+> `setGeometryStage`/`hasGeometryStages` pair mirroring
+> `setTessellationStages`/`hasTessellationStages`. Needs real unit coverage in
+> `ExecutorTest.cpp` (a hand-compiled trivial geometry stage rendering,
+> mirroring the tessellation domain-stage rasterization tests) before H5e's real
+> SPIR-V-sourced pipelines can be trusted to hit the same code path correctly
