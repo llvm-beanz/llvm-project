@@ -894,8 +894,31 @@ bool isSPIRVGroupSyncBarrier(const CallInst &CI) {
   case Intrinsic::spv_all_memory_barrier_with_group_sync:
     return true;
   default:
-    return false;
+    break;
   }
+  // (roadmap H4b) A real SPIR-V import's own `OpControlBarrier` (the shape
+  // a genuine tessellation-control module -- as opposed to the intrinsic
+  // form above, which only ever comes from a DXIL/HLSL `GroupMemoryBarrier
+  // WithGroupSync()` call -- actually produces) does not lower through
+  // either of the `llvm.spv.*.barrier.with.group.sync` intrinsics above at
+  // all: `feme::spirv::populateSPIRVToLLVMTargetPatterns` installs no
+  // pattern of its own for `spirv::ControlBarrierOp`, so it falls through to
+  // MLIR upstream's own default (`mlir/lib/Conversion/SPIRVToLLVM/
+  // SPIRVToLLVM.cpp`'s `ControlBarrierPattern`), which lowers it to a call
+  // to this exact mangled external declaration
+  // (`__spirv_ControlBarrier(int ExecutionScope, int MemoryScope, int
+  // Semantics)`) instead. Without recognizing this shape too,
+  // `splitTessellationControlEntry` silently never finds the barrier a real
+  // SPIR-V tessellation-control module's group sync actually compiles to,
+  // and no patch-constant phase is ever split out of one -- a real,
+  // previously-undiscovered gap in roadmap H4a's own barrier detection
+  // (found while testing H4b's real `vkCreateGraphicsPipelines` path end to
+  // end against an actual SPIR-V tessellation-control module rather than
+  // the hand-written already-intrinsic-shaped LLVM IR H4a's own unit tests
+  // used). Every control barrier is the one splitting point this pass
+  // cares about regardless of its own execution/memory scope operands, so
+  // no attempt is made to parse them.
+  return Callee->getName() == "_Z22__spirv_ControlBarrieriii";
 }
 
 SPIRVElementInfo classifySPIRVElement(ShaderStage Stage,

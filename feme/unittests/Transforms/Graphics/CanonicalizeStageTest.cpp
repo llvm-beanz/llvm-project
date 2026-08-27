@@ -788,6 +788,69 @@ TEST(CanonicalizeStageTest, SplitsHullEntryAtGroupSyncBarrier) {
             SignatureSystemValue::TessFactorEdge);
 }
 
+/// (Roadmap H4b) A genuine MLIR-imported SPIR-V module's own
+/// `spirv.ControlBarrier` does not lower to the
+/// `llvm.spv.group.memory.barrier.with.group.sync` intrinsic the test
+/// above uses -- MLIR upstream's own `ControlBarrierPattern`
+/// (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) instead lowers it
+/// to a call to the mangled external declaration
+/// `_Z22__spirv_ControlBarrieriii` (`__spirv_ControlBarrier(int, int,
+/// int)`). `isSPIRVGroupSyncBarrier` must recognize this call shape too,
+/// or a real SPIR-V-imported tessellation-control module's own group sync
+/// would never split into a control-point/patch-constant phase pair at
+/// all -- this is the same source shape as
+/// `SplitsHullEntryAtGroupSyncBarrier` above, but with the barrier call
+/// replaced by the mangled-name form instead of the intrinsic.
+TEST(CanonicalizeStageTest, SplitsHullEntryAtMangledSPIRVControlBarrierCall) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+    @gl_in_pos = external addrspace(7) constant <4 x float>, !spirv.Decorations !1
+    @gl_TessLevelOuter = external addrspace(8) global [4 x float], !spirv.Decorations !3
+    define void @main() #0 {
+      %v = load <4 x float>, ptr addrspace(7) @gl_in_pos
+      store <4 x float> %v, ptr addrspace(8) @gl_out_pos
+      call void @_Z22__spirv_ControlBarrieriii(i32 2, i32 2, i32 264)
+      store float 1.000000e+00, ptr addrspace(8) @gl_TessLevelOuter
+      ret void
+    }
+    declare void @_Z22__spirv_ControlBarrieriii(i32, i32, i32)
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!2}
+    !1 = !{!2}
+    !2 = !{i32 11, i32 0}
+    !3 = !{!4}
+    !4 = !{i32 11, i32 11}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // The control-point phase keeps only the pre-barrier control-point
+  // output; the barrier call itself is gone.
+  std::optional<EntrySignature> CPSig = dxil::getEntrySignature(*ControlPoint);
+  ASSERT_TRUE(CPSig.has_value());
+  ASSERT_EQ(CPSig->Elements.size(), 2u);
+  for (Instruction &I : instructions(ControlPoint))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(CI->getCalledFunction() &&
+                   CI->getCalledFunction()->getName() ==
+                       "_Z22__spirv_ControlBarrieriii");
+
+  // The patch-constant phase carries the `TessLevelOuter` write as a
+  // `SignatureDirection::PatchOutput` element.
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 1u);
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
+  EXPECT_EQ(PCSig->Elements[0].SystemValue,
+            SignatureSystemValue::TessFactorEdge);
+}
+
 /// (Roadmap H4a) `BuiltIn InvocationId` (SPIR-V code 8, `gl_InvocationID`)
 /// maps to `SignatureSystemValue::InvocationID`, and `BuiltIn
 /// PatchVertices` (code 14, `gl_PatchVerticesIn`) to `SignatureSystemValue
