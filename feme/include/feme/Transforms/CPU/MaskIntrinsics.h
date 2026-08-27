@@ -83,6 +83,12 @@ bool isMaskAnyCall(const llvm::CallInst &CI);
 /// until `feme::cpu::rewriteGroupSharedGlobals` runs at the very end of
 /// `feme::cpu::SIMDizePass`) disagreed with whichever call happened to
 /// create the shared declaration first.
+///
+/// Returns `nullptr`, after reporting \p ElementType through its own
+/// `LLVMContext`'s diagnostic handler, if \p ElementType (or a
+/// `FixedVectorType` \p ElementType's own element type) is a shape this
+/// milestone cannot yet mangle a declaration name for (a matrix/aggregate
+/// element type, most notably -- roadmap C8/H4e).
 llvm::Function *getOrInsertMaskedLoad(llvm::Module &M, llvm::Type *ElementType,
                                       unsigned AddressSpace = 0);
 
@@ -90,7 +96,8 @@ llvm::Function *getOrInsertMaskedLoad(llvm::Module &M, llvm::Type *ElementType,
 /// declaration for \p ElementType in \p M: `declare void
 /// @feme.cpu.masked.store.<mangling>(<ElementType> %val, ptr %p, i32 immarg
 /// %align, i1 %mask)`. `nounwind willreturn` and `memory(argmem: write)`.
-/// See `getOrInsertMaskedLoad`'s comment for \p AddressSpace.
+/// See `getOrInsertMaskedLoad`'s comment for \p AddressSpace and for the
+/// `nullptr`-on-unsupported-\p ElementType case.
 llvm::Function *getOrInsertMaskedStore(llvm::Module &M, llvm::Type *ElementType,
                                        unsigned AddressSpace = 0);
 
@@ -98,13 +105,19 @@ llvm::Function *getOrInsertMaskedStore(llvm::Module &M, llvm::Type *ElementType,
 /// (aligned to \p Align bytes), returning \p Passthru wherever \p Mask is
 /// false (see "No lowering may create poison merely because `M` is
 /// all-zero" in "Phase 5", which this mirrors for Phase 4's masked loads).
+/// Returns `nullptr` (see `getOrInsertMaskedLoad`'s comment) if \p
+/// Passthru's type is unsupported; the caller must leave the original
+/// memory access untouched in that case rather than treat a null result as
+/// success.
 llvm::CallInst *createMaskedLoad(llvm::IRBuilderBase &Builder, llvm::Value *Ptr,
                                  unsigned Align, llvm::Value *Mask,
                                  llvm::Value *Passthru,
                                  const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.masked.store.*` call writing \p Val to \p Ptr
-/// (aligned to \p Align bytes) only where \p Mask is true.
+/// (aligned to \p Align bytes) only where \p Mask is true. Returns
+/// `nullptr` (see `createMaskedLoad`'s comment) if \p Val's type is
+/// unsupported.
 llvm::CallInst *createMaskedStore(llvm::IRBuilderBase &Builder,
                                   llvm::Value *Val, llvm::Value *Ptr,
                                   unsigned Align, llvm::Value *Mask);
@@ -143,7 +156,8 @@ std::optional<MatchedMaskedMemOp> matchMaskedStore(const llvm::CallInst &CI);
 /// ever matter -- see `feme::cpu::SIMDizePass`'s
 /// `checkVectorDecompositionSupported`). `nounwind willreturn` and
 /// `memory(argmem: readwrite)`, matching the real instruction's effects.
-/// See `getOrInsertMaskedLoad`'s comment for \p AddressSpace.
+/// See `getOrInsertMaskedLoad`'s comment for \p AddressSpace and for the
+/// `nullptr`-on-unsupported-\p ValueType case.
 llvm::Function *getOrInsertMaskedAtomicRMW(llvm::Module &M,
                                            llvm::Type *ValueType,
                                            unsigned AddressSpace = 0);
@@ -152,7 +166,8 @@ llvm::Function *getOrInsertMaskedAtomicRMW(llvm::Module &M,
 /// (aligned to \p Align bytes) with operand \p Val, active only where
 /// \p Mask is true (see "Mask representation between phases" in
 /// feme/docs/FeMeCPUDesign.md, mirroring `createMaskedLoad`/
-/// `createMaskedStore`).
+/// `createMaskedStore`). Returns `nullptr` (see `createMaskedLoad`'s
+/// comment) if \p Val's type is unsupported.
 llvm::CallInst *createMaskedAtomicRMW(llvm::IRBuilderBase &Builder,
                                       llvm::AtomicRMWInst::BinOp Op,
                                       llvm::Value *Ptr, llvm::Value *Val,

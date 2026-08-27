@@ -15,6 +15,9 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <optional>
+#include <string>
+
 using namespace llvm;
 
 namespace {
@@ -26,7 +29,17 @@ namespace {
 /// the vector-element case that file's version also handles never arises
 /// for a masked load/store operand, which is always the memory access's
 /// direct scalar/vector type, not a further-decomposed component.
-void appendScalarMangling(raw_ostream &OS, Type *Ty) {
+///
+/// Returns false, after reporting \p Ty through its own `LLVMContext`'s
+/// diagnostic handler (caught by `feme::cpu::runPipeline`'s
+/// `ErrorDiagnosticGuard`, turning it into a graceful pipeline failure
+/// rather than a crash), if \p Ty is a shape this milestone does not yet
+/// recognize -- a matrix/aggregate element type, most notably. That shape
+/// is real, reachable IR (e.g. a masked load/store `feme::cpu::
+/// LinearizePass` created for a matrix-typed memory access), not a
+/// programmer error, so it must be diagnosed like every other unsupported
+/// shape in this codebase (roadmap C8) rather than asserted unreachable.
+bool appendScalarMangling(raw_ostream &OS, Type *Ty) {
   if (Ty->isHalfTy()) {
     OS << "f16";
   } else if (Ty->isFloatTy()) {
@@ -38,21 +51,38 @@ void appendScalarMangling(raw_ostream &OS, Type *Ty) {
   } else if (Ty->isPointerTy()) {
     OS << "p0";
   } else {
-    llvm_unreachable("unsupported feme.cpu.masked.* element type");
+    std::string TyStr;
+    raw_string_ostream TyOS(TyStr);
+    Ty->print(TyOS);
+    Ty->getContext().emitError(
+        "feme-cpu-masked-mem-op: unsupported feme.cpu.masked.* element "
+        "type '" +
+        TyStr +
+        "' (matrix/aggregate shapes are not yet legalized for a masked "
+        "load/store/atomicrmw -- roadmap C8)");
+    return false;
   }
+  return true;
 }
 
-std::string mangleMaskedMemOpName(StringRef Prefix, Type *ElementType,
-                                  unsigned AddressSpace) {
+/// Returns `std::nullopt`, after `appendScalarMangling` has already
+/// reported the offending element type, if \p ElementType (or a
+/// `FixedVectorType`'s own element type) is unsupported.
+std::optional<std::string> mangleMaskedMemOpName(StringRef Prefix,
+                                                 Type *ElementType,
+                                                 unsigned AddressSpace) {
   std::string Name;
   raw_string_ostream OS(Name);
   OS << Prefix;
+  bool Supported;
   if (auto *VecTy = dyn_cast<FixedVectorType>(ElementType)) {
     OS << 'v' << VecTy->getNumElements();
-    appendScalarMangling(OS, VecTy->getElementType());
+    Supported = appendScalarMangling(OS, VecTy->getElementType());
   } else {
-    appendScalarMangling(OS, ElementType);
+    Supported = appendScalarMangling(OS, ElementType);
   }
+  if (!Supported)
+    return std::nullopt;
   // Folded into the mangled name, not the declaration's `ptr` parameter
   // type, since an opaque pointer's address space is part of its type --
   // see `feme::cpu::getOrInsertMaskedLoad`'s comment for why two different
@@ -93,15 +123,17 @@ bool feme::cpu::isMaskAnyCall(const CallInst &CI) {
 
 Function *feme::cpu::getOrInsertMaskedLoad(Module &M, Type *ElementType,
                                            unsigned AddressSpace) {
+  std::optional<std::string> Name =
+      mangleMaskedMemOpName("feme.cpu.masked.load.", ElementType, AddressSpace);
+  if (!Name)
+    return nullptr;
   LLVMContext &Ctx = M.getContext();
   Type *PtrTy = PointerType::get(Ctx, AddressSpace);
   Type *I32Ty = Type::getInt32Ty(Ctx);
   Type *I1Ty = Type::getInt1Ty(Ctx);
   FunctionType *FTy = FunctionType::get(
       ElementType, {PtrTy, I32Ty, I1Ty, ElementType}, /*isVarArg=*/false);
-  std::string Name =
-      mangleMaskedMemOpName("feme.cpu.masked.load.", ElementType, AddressSpace);
-  Function *F = cast<Function>(M.getOrInsertFunction(Name, FTy).getCallee());
+  Function *F = cast<Function>(M.getOrInsertFunction(*Name, FTy).getCallee());
   if (!F->hasFnAttribute(Attribute::Memory)) {
     F->setMemoryEffects(MemoryEffects::argMemOnly(ModRefInfo::Ref));
     F->setWillReturn();
@@ -112,6 +144,10 @@ Function *feme::cpu::getOrInsertMaskedLoad(Module &M, Type *ElementType,
 
 Function *feme::cpu::getOrInsertMaskedStore(Module &M, Type *ElementType,
                                             unsigned AddressSpace) {
+  std::optional<std::string> Name = mangleMaskedMemOpName(
+      "feme.cpu.masked.store.", ElementType, AddressSpace);
+  if (!Name)
+    return nullptr;
   LLVMContext &Ctx = M.getContext();
   Type *PtrTy = PointerType::get(Ctx, AddressSpace);
   Type *I32Ty = Type::getInt32Ty(Ctx);
@@ -119,9 +155,7 @@ Function *feme::cpu::getOrInsertMaskedStore(Module &M, Type *ElementType,
   Type *VoidTy = Type::getVoidTy(Ctx);
   FunctionType *FTy = FunctionType::get(
       VoidTy, {ElementType, PtrTy, I32Ty, I1Ty}, /*isVarArg=*/false);
-  std::string Name = mangleMaskedMemOpName("feme.cpu.masked.store.",
-                                           ElementType, AddressSpace);
-  Function *F = cast<Function>(M.getOrInsertFunction(Name, FTy).getCallee());
+  Function *F = cast<Function>(M.getOrInsertFunction(*Name, FTy).getCallee());
   if (!F->hasFnAttribute(Attribute::Memory)) {
     F->setMemoryEffects(MemoryEffects::argMemOnly(ModRefInfo::Mod));
     F->setWillReturn();
@@ -137,6 +171,8 @@ CallInst *feme::cpu::createMaskedLoad(IRBuilderBase &Builder, Value *Ptr,
   Function *F = getOrInsertMaskedLoad(
       *M, Passthru->getType(),
       cast<PointerType>(Ptr->getType())->getAddressSpace());
+  if (!F)
+    return nullptr;
   return Builder.CreateCall(F, {Ptr, Builder.getInt32(Align), Mask, Passthru},
                             Name);
 }
@@ -147,6 +183,8 @@ CallInst *feme::cpu::createMaskedStore(IRBuilderBase &Builder, Value *Val,
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertMaskedStore(
       *M, Val->getType(), cast<PointerType>(Ptr->getType())->getAddressSpace());
+  if (!F)
+    return nullptr;
   return Builder.CreateCall(F, {Val, Ptr, Builder.getInt32(Align), Mask});
 }
 
@@ -184,15 +222,17 @@ feme::cpu::matchMaskedStore(const CallInst &CI) {
 
 Function *feme::cpu::getOrInsertMaskedAtomicRMW(Module &M, Type *ValueType,
                                                 unsigned AddressSpace) {
+  std::optional<std::string> Name = mangleMaskedMemOpName(
+      "feme.cpu.masked.atomicrmw.", ValueType, AddressSpace);
+  if (!Name)
+    return nullptr;
   LLVMContext &Ctx = M.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
   Type *PtrTy = PointerType::get(Ctx, AddressSpace);
   Type *I1Ty = Type::getInt1Ty(Ctx);
   FunctionType *FTy = FunctionType::get(
       ValueType, {I32Ty, PtrTy, ValueType, I32Ty, I1Ty}, /*isVarArg=*/false);
-  std::string Name = mangleMaskedMemOpName("feme.cpu.masked.atomicrmw.",
-                                           ValueType, AddressSpace);
-  Function *F = cast<Function>(M.getOrInsertFunction(Name, FTy).getCallee());
+  Function *F = cast<Function>(M.getOrInsertFunction(*Name, FTy).getCallee());
   if (!F->hasFnAttribute(Attribute::Memory)) {
     F->setMemoryEffects(MemoryEffects::argMemOnly());
     F->setWillReturn();
@@ -208,6 +248,8 @@ CallInst *feme::cpu::createMaskedAtomicRMW(IRBuilderBase &Builder,
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertMaskedAtomicRMW(
       *M, Val->getType(), cast<PointerType>(Ptr->getType())->getAddressSpace());
+  if (!F)
+    return nullptr;
   return Builder.CreateCall(F,
                             {Builder.getInt32(static_cast<uint32_t>(Op)), Ptr,
                              Val, Builder.getInt32(Align), Mask},

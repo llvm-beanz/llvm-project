@@ -8,10 +8,13 @@
 
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
 
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/raw_ostream.h"
 #include "gtest/gtest.h"
 
 using namespace feme::cpu;
@@ -105,6 +108,89 @@ TEST_F(MaskIntrinsicsTest, MaskedAtomicRMWMangleAndRoundTrip) {
 
   EXPECT_FALSE(matchMaskedLoad(*CI));
   EXPECT_FALSE(matchMaskedStore(*CI));
+}
+
+// H4e: an element type `appendScalarMangling` does not recognize (a
+// matrix/aggregate shape, represented here by a struct type, most notably)
+// must diagnose gracefully through the element type's own `LLVMContext`
+// rather than `llvm_unreachable`-crash the whole process, and every
+// `createMasked*` entry point above it must report the failure back to its
+// caller as `nullptr` instead of handing back a call built from a null
+// callee.
+TEST_F(MaskIntrinsicsTest,
+       MaskedLoadUnsupportedElementTypeDiagnosesGracefully) {
+  IRBuilder<> Builder(BB);
+  Value *Ptr = ConstantPointerNull::get(PointerType::get(Ctx, 0));
+  Value *Mask = Builder.getInt1(true);
+  StructType *MatrixLikeTy =
+      StructType::get(Ctx, {Type::getFloatTy(Ctx), Type::getFloatTy(Ctx)});
+  Value *Passthru = ConstantAggregateZero::get(MatrixLikeTy);
+
+  std::string ErrorMessage;
+  Ctx.setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() != DS_Error)
+          return;
+        std::string &Out = *reinterpret_cast<std::string *>(Handle);
+        raw_string_ostream OS(Out);
+        DiagnosticPrinterRawOStream Printer(OS);
+        DI->print(Printer);
+      },
+      &ErrorMessage);
+
+  CallInst *CI =
+      createMaskedLoad(Builder, Ptr, /*Align=*/4, Mask, Passthru, "load");
+  EXPECT_EQ(CI, nullptr);
+  EXPECT_NE(ErrorMessage.find("unsupported feme.cpu.masked.* element type"),
+            std::string::npos)
+      << "actual diagnostic: " << ErrorMessage;
+}
+
+TEST_F(MaskIntrinsicsTest,
+       MaskedStoreUnsupportedElementTypeDiagnosesGracefully) {
+  IRBuilder<> Builder(BB);
+  Value *Ptr = ConstantPointerNull::get(PointerType::get(Ctx, 0));
+  Value *Mask = Builder.getInt1(true);
+  StructType *MatrixLikeTy =
+      StructType::get(Ctx, {Type::getFloatTy(Ctx), Type::getFloatTy(Ctx)});
+  Value *Val = ConstantAggregateZero::get(MatrixLikeTy);
+
+  std::string ErrorMessage;
+  Ctx.setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() != DS_Error)
+          return;
+        *reinterpret_cast<std::string *>(Handle) = "error";
+      },
+      &ErrorMessage);
+
+  CallInst *CI = createMaskedStore(Builder, Val, Ptr, /*Align=*/4, Mask);
+  EXPECT_EQ(CI, nullptr);
+  EXPECT_EQ(ErrorMessage, "error");
+}
+
+TEST_F(MaskIntrinsicsTest,
+       MaskedAtomicRMWUnsupportedElementTypeDiagnosesGracefully) {
+  IRBuilder<> Builder(BB);
+  Value *Ptr = ConstantPointerNull::get(PointerType::get(Ctx, 0));
+  Value *Mask = Builder.getInt1(true);
+  StructType *MatrixLikeTy =
+      StructType::get(Ctx, {Type::getFloatTy(Ctx), Type::getFloatTy(Ctx)});
+  Value *Val = ConstantAggregateZero::get(MatrixLikeTy);
+
+  std::string ErrorMessage;
+  Ctx.setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() != DS_Error)
+          return;
+        *reinterpret_cast<std::string *>(Handle) = "error";
+      },
+      &ErrorMessage);
+
+  CallInst *CI = createMaskedAtomicRMW(Builder, AtomicRMWInst::Add, Ptr, Val,
+                                       /*Align=*/4, Mask, "rmw");
+  EXPECT_EQ(CI, nullptr);
+  EXPECT_EQ(ErrorMessage, "error");
 }
 
 } // namespace
