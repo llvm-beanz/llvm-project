@@ -7826,6 +7826,71 @@ assertion failure (confirmed present on H5a's own unmodified tree too,
 hence `grep -v viewport_height` excluding it from the sample); not
 something this row touches or fixes.
 
+## Roadmap H5c: measured impact (`CanonicalizeStagePass` accepts `ShaderStage::Geometry`)
+
+**Still 0/0/200 on `dEQP-VK.geometry.*` -- correctly so, for a different
+reason than H5b/H5f/H5g's "the filter isn't lifted yet".** This row *does*
+lift `CanonicalizeStagePass::run`'s stage filter, and a geometry entry
+point now really does reach `canonicalizeSPIRVStage(*F,
+ShaderStage::Geometry, SPIRVCanonicalPhase::Ordinary)` -- but
+`vkCreateGraphicsPipelines` still rejects `VK_SHADER_STAGE_GEOMETRY_BIT`
+outright (`GraphicsPipeline.cpp`'s `translateFixedFunctionState`, H5e's
+own row), so no real SPIR-V geometry module is ever compiled far enough
+to reach this pass at all in a `deqp-vk` run:
+
+```
+Test run totals:
+  Passed:        0/200 (0.0%)
+  Failed:        0/200 (0.0%)
+  Not supported: 200/200 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: `geometryShader` stays `VK_FALSE`, and this row advertises
+nothing new.
+
+**What this row actually adds.** `CanonicalizeStagePass::run`'s stage
+filter now also accepts `ShaderStage::Geometry`, routed through the same
+`else` branch Domain already uses (`canonicalizeSPIRVStage(*F, *Stage,
+SPIRVCanonicalPhase::Ordinary)`) -- no barrier-splitting the way Hull
+needs (`canonicalizeSPIRVHullStage`), since GLSL/SPIR-V compiles a whole
+geometry shader to one entry point already (`GeometryWrapper.cpp`'s own
+file comment). `getSystemValueForBuiltIn` needed no new cases:
+`gl_PrimitiveIDIn`/`gl_PrimitiveID` (SPIR-V `BuiltIn PrimitiveId`, code 7,
+disambiguated by storage class rather than by value), `gl_InvocationID`
+(code 8), `gl_Layer` (code 9), and `gl_ViewportIndex` (code 10) already
+mapped onto `SignatureSystemValue::{PrimitiveID, InvocationID,
+RenderTargetArrayIndex, ViewportArrayIndex}` respectively, from H2/H4a's
+own earlier work.
+
+**Regression sample.** `CanonicalizeStageTest.GeometryStageMapsSystemValues`
+(new, mirroring `HullStageMapsInvocationIdAndPatchVertices`/
+`DomainStageMapsTessCoordAndPatchInput`) exercises a geometry entry point
+reading `gl_PrimitiveIDIn`/`gl_InvocationID` and writing
+`gl_Layer`/`gl_ViewportIndex`/`gl_PrimitiveID`, confirming each maps to
+its expected `SignatureSystemValue` with the right `SignatureDirection`.
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+1851/1910 (59 pre-existing, unrelated `Unsupported`), up from H5g's
+1850/1909 by exactly the 1 new test this row adds. The same
+`dEQP-VK.draw.*` 1957-case sample this report has used since H4 is
+byte-identical to H5g's own baseline (12 `Pass`/139 `Fail`/1806
+`NotSupported`, 0 regressions).
+
+**Reproducing.** Same invocation as the rest of this report:
+
+```
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.geometry.*" --deqp-log-filename=geom.qpa
+```
+
+and, for the draw sample, the same `grep -v viewport_height draw.txt | awk
+'NR%15==1'`-built case list H4b's own report entry documents
+(`--deqp-caselist-file=draw_sample.txt`), excluding the same pre-existing,
+unrelated `SelectInst::init` crash this report already documents.
+
 ## Roadmap H5f: measured impact (constant `Vertex` operand, `RowCountIsVertexArray`)
 
 **Still 0/0/200 on `dEQP-VK.geometry.*` -- correctly so**, for the same

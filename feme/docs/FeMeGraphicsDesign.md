@@ -1441,9 +1441,15 @@ real `gl_in[]` builtin block: `StageIOGlobalVariablePattern` in
 an `mlir::spirv::ArrayType` of a `StructType` (not just a bare `StructType`,
 the only shape it recognized before), attaching the inner struct's own
 per-member decorations either way -- exactly the shape `gl_in[]` actually
-takes. `CanonicalizeStagePass::run` itself still does not accept
-`ShaderStage::Geometry` (roadmap H5c), the one thing left before a real
-geometry entry point exercises any of this end to end.
+takes. Roadmap H5c has since lifted `CanonicalizeStagePass::run`'s own
+stage filter to accept `ShaderStage::Geometry`, routed through the same
+`SPIRVCanonicalPhase::Ordinary` path Domain already uses -- no
+barrier-splitting needed, since GLSL/SPIR-V compiles a whole geometry
+shader to one entry point already. A real geometry entry point now
+canonicalizes end to end at the IR level; what remains is the rest of the
+Vulkan-API surface (`vkCreateGraphicsPipelines` still rejects the geometry
+stage bit, roadmap H5e) and chaining the compiled stage into
+`Executor::executeDraws` (roadmap H5d).
 
 ### Amplification and mesh wrappers
 
