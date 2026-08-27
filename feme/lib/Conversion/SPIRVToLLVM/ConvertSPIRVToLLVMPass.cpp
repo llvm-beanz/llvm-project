@@ -9,6 +9,7 @@
 #include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 
 #include "feme/Core/ShaderStage.h"
+#include "feme/Graphics/Geometry.h"
 #include "feme/Graphics/Tessellation.h"
 
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
@@ -97,6 +98,20 @@ struct EntryPointInfo {
   std::optional<feme::graphics::TessPartitioning> TessPartitioning;
   std::optional<feme::graphics::TessOutputPrimitive> TessOutputPrimitive;
   std::optional<uint32_t> TessOutputControlPointCount;
+  /// (Roadmap H5a) A geometry entry point's declared shape: its input/
+  /// output primitive classes (SPIR-V's `InputPoints`/.../
+  /// `InputTrianglesAdjacency` and `OutputPoints`/`OutputLineStrip`/
+  /// `OutputTriangleStrip` execution modes) and maximum emitted vertex
+  /// count (`OutputVertices` -- shared, at the SPIR-V enumerant level,
+  /// with the hull stage's own output control point count, disambiguated
+  /// below by this entry's `Stage`).
+  std::optional<feme::graphics::GeometryInputPrimitive> GeometryInput;
+  std::optional<feme::graphics::GeometryOutputPrimitive> GeometryOutput;
+  std::optional<uint32_t> GeometryMaxOutputVertices;
+  /// SPIR-V's `Invocations` execution mode (roadmap H5a): defaults to 1
+  /// (`GeometryState::Invocations`'s own comment) when a geometry entry
+  /// point's module never declares it explicitly.
+  uint32_t GeometryInvocations = 1;
   /// The bit widths (16/32/64) `VK_KHR_shader_float_controls`'s
   /// `RoundingModeRTZ` execution mode was declared for (roadmap F15a): each
   /// arithmetic FP op conversion pattern of that width in this entry point
@@ -210,6 +225,36 @@ formatTessPartitioning(feme::graphics::TessPartitioning Partitioning) {
   llvm_unreachable("unhandled TessPartitioning");
 }
 
+std::string
+formatGeometryInputPrimitive(feme::graphics::GeometryInputPrimitive Primitive) {
+  switch (Primitive) {
+  case feme::graphics::GeometryInputPrimitive::Points:
+    return "points";
+  case feme::graphics::GeometryInputPrimitive::Lines:
+    return "lines";
+  case feme::graphics::GeometryInputPrimitive::LinesAdjacency:
+    return "lines_adjacency";
+  case feme::graphics::GeometryInputPrimitive::Triangles:
+    return "triangles";
+  case feme::graphics::GeometryInputPrimitive::TrianglesAdjacency:
+    return "triangles_adjacency";
+  }
+  llvm_unreachable("unhandled GeometryInputPrimitive");
+}
+
+std::string formatGeometryOutputPrimitive(
+    feme::graphics::GeometryOutputPrimitive Primitive) {
+  switch (Primitive) {
+  case feme::graphics::GeometryOutputPrimitive::Points:
+    return "points";
+  case feme::graphics::GeometryOutputPrimitive::LineStrip:
+    return "line_strip";
+  case feme::graphics::GeometryOutputPrimitive::TriangleStrip:
+    return "triangle_strip";
+  }
+  llvm_unreachable("unhandled GeometryOutputPrimitive");
+}
+
 /// Returns whether \p Func's body contains an arithmetic FP op
 /// (`spirv.FAdd`/`FSub`/`FMul`/`FDiv`/`FRem`) carrying an `fp_rounding_mode`
 /// decoration (`VK_KHR_shader_float_controls2`'s per-instruction
@@ -284,7 +329,15 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
       It->second.LocalSize = formatLocalSize(Mode.getValues());
       break;
     case mlir::spirv::ExecutionMode::Triangles:
-      It->second.TessDomain = feme::graphics::TessellatorDomain::Triangle;
+      // (Roadmap H5a) Shared, at the SPIR-V enumerant level, between a
+      // tessellation-evaluation entry's domain shape and a geometry
+      // entry's input primitive class; the two are never the same entry
+      // point, so `Stage` disambiguates which field this mode fills.
+      if (It->second.Stage == feme::ShaderStage::Geometry)
+        It->second.GeometryInput =
+            feme::graphics::GeometryInputPrimitive::Triangles;
+      else
+        It->second.TessDomain = feme::graphics::TessellatorDomain::Triangle;
       break;
     case mlir::spirv::ExecutionMode::Quads:
       It->second.TessDomain = feme::graphics::TessellatorDomain::Quad;
@@ -316,9 +369,49 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
           feme::graphics::TessOutputPrimitive::TriangleCcw;
       break;
     case mlir::spirv::ExecutionMode::OutputVertices:
+      // (Roadmap H5a) Shared, at the SPIR-V enumerant level, between a
+      // hull entry's output control point count and a geometry entry's
+      // maximum emitted vertex count; `Stage` disambiguates, exactly as
+      // for `Triangles` above.
       assert(Mode.getValues().size() == 1 &&
              "verified OutputVertices has one literal operand");
-      It->second.TessOutputControlPointCount = static_cast<uint32_t>(
+      if (It->second.Stage == feme::ShaderStage::Geometry)
+        It->second.GeometryMaxOutputVertices = static_cast<uint32_t>(
+            mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
+      else
+        It->second.TessOutputControlPointCount = static_cast<uint32_t>(
+            mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
+      break;
+    case mlir::spirv::ExecutionMode::InputPoints:
+      It->second.GeometryInput = feme::graphics::GeometryInputPrimitive::Points;
+      break;
+    case mlir::spirv::ExecutionMode::InputLines:
+      It->second.GeometryInput = feme::graphics::GeometryInputPrimitive::Lines;
+      break;
+    case mlir::spirv::ExecutionMode::InputLinesAdjacency:
+      It->second.GeometryInput =
+          feme::graphics::GeometryInputPrimitive::LinesAdjacency;
+      break;
+    case mlir::spirv::ExecutionMode::InputTrianglesAdjacency:
+      It->second.GeometryInput =
+          feme::graphics::GeometryInputPrimitive::TrianglesAdjacency;
+      break;
+    case mlir::spirv::ExecutionMode::OutputPoints:
+      It->second.GeometryOutput =
+          feme::graphics::GeometryOutputPrimitive::Points;
+      break;
+    case mlir::spirv::ExecutionMode::OutputLineStrip:
+      It->second.GeometryOutput =
+          feme::graphics::GeometryOutputPrimitive::LineStrip;
+      break;
+    case mlir::spirv::ExecutionMode::OutputTriangleStrip:
+      It->second.GeometryOutput =
+          feme::graphics::GeometryOutputPrimitive::TriangleStrip;
+      break;
+    case mlir::spirv::ExecutionMode::Invocations:
+      assert(Mode.getValues().size() == 1 &&
+             "verified Invocations has one literal operand");
+      It->second.GeometryInvocations = static_cast<uint32_t>(
           mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
       break;
     default:
@@ -447,6 +540,30 @@ void applyEntryPointAttributes(
           Func,
           feme::graphics::getTessellationOutputControlPointCountAttrName(),
           std::to_string(*It->second.TessOutputControlPointCount));
+    // (Roadmap H5a) A geometry entry point's input/output primitive class
+    // and maximum output vertex count always arrive together -- the SPIR-V
+    // spec requires exactly one of each per geometry entry point -- so
+    // `feme::graphics::getGeometryState` can rely on seeing all three or
+    // none. `Invocations` is attached independently: unlike the other
+    // three, it has a valid default (1) an entry point need not declare
+    // explicitly, so its own attribute's absence is meaningful (see
+    // `EntryPointInfo::GeometryInvocations`'s own comment) rather than a
+    // sign of a malformed module.
+    if (It->second.GeometryInput && It->second.GeometryOutput &&
+        It->second.GeometryMaxOutputVertices) {
+      addPassthroughAttribute(
+          Func, feme::graphics::getGeometryInputPrimitiveAttrName(),
+          formatGeometryInputPrimitive(*It->second.GeometryInput));
+      addPassthroughAttribute(
+          Func, feme::graphics::getGeometryOutputPrimitiveAttrName(),
+          formatGeometryOutputPrimitive(*It->second.GeometryOutput));
+      addPassthroughAttribute(
+          Func, feme::graphics::getGeometryMaxOutputVerticesAttrName(),
+          std::to_string(*It->second.GeometryMaxOutputVertices));
+      addPassthroughAttribute(Func,
+                              feme::graphics::getGeometryInvocationsAttrName(),
+                              std::to_string(It->second.GeometryInvocations));
+    }
     // A function containing any `llvm.experimental.constrained.*` intrinsic
     // call -- which `FloatControlArithmeticPattern`
     // (SPIRVToLLVMPatterns.cpp) emits for this entry point's
