@@ -244,6 +244,7 @@ Expected<PatchPipelineResult> runPatchPipeline(
     Res.OutputLayout = &OutLayout;
     Res.Outputs = Result.OutputPatch.Data.data();
     Res.OutputControlPointCount = Tess.OutputControlPointCount;
+    Res.InputPatchControlPointCount = Tess.InputControlPointCount;
     cpu::PreparedPatchBatch Prepared =
         cpu::PreparedPatchBatch::create(Stages.Hull.getResourceInfo(), Res);
     if (Error E = Stages.Hull.invokePatch(Prepared))

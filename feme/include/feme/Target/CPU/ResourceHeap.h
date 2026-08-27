@@ -251,6 +251,7 @@ struct PatchResources {
   const FemeStageLayout *OutputLayout = nullptr;
   void *Outputs = nullptr;
   uint32_t OutputControlPointCount = 0;
+  uint32_t InputPatchControlPointCount = 0;
 };
 
 /// One prepared control-point batch: materialized resources plus borrowed
@@ -270,7 +271,8 @@ private:
                      llvm::ArrayRef<uint8_t> RootConstants,
                      const FemeStageLayout *InputLayout, const void *Inputs,
                      const FemeStageLayout *OutputLayout, void *Outputs,
-                     uint32_t OutputControlPointCount);
+                     uint32_t OutputControlPointCount,
+                     uint32_t InputPatchControlPointCount);
 
   std::vector<FemeDescriptor> ResourceHeap;
   std::vector<FemeImageDescriptor> ImageHeap;
@@ -282,6 +284,7 @@ private:
   const FemeStageLayout *OutputLayout = nullptr;
   void *Outputs = nullptr;
   uint32_t OutputControlPointCount = 0;
+  uint32_t InputPatchControlPointCount = 0;
 };
 
 /// Caller-owned storage for one patch-constant invocation (added after

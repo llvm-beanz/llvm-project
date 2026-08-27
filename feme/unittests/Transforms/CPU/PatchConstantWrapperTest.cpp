@@ -183,6 +183,105 @@ TEST(PatchConstantWrapperTest, DiagnosesGroupSyncBarrier) {
   EXPECT_FALSE(M->getFunction("feme_cpu_entry_pc_main"));
 }
 
+/// (Roadmap H4a) `SV_OutputControlPointID`/`gl_InvocationID`, read from the
+/// patch-constant phase (unlike the control-point phase, which addresses
+/// its own invocation by that same value): this phase runs once per patch,
+/// not once per control point, so there is no "this invocation's own"
+/// control point to report -- `lowerPatchConstantSystemValue` always
+/// returns 0, matching D3D's own documented behavior for
+/// `SV_OutputControlPointID` read from a patch-constant function.
+TEST(PatchConstantWrapperTest, LowersOutputControlPointIDAsZero) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @pc_main() #0 {
+      %id = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %idf = uitofp i32 %id to float
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %idf, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement ID;
+  ID.ElementID = 0;
+  ID.Direction = SignatureDirection::Input;
+  ID.SystemValue = SignatureSystemValue::OutputControlPointID;
+  ID.ComponentType = SignatureComponentType::UInt;
+  SignatureElement Out;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::PatchOutput;
+  Out.Frequency = SignatureFrequency::PerPatch;
+  Out.ComponentType = SignatureComponentType::Float;
+  Sig.Elements = {ID, Out};
+  dxil::setEntrySignature(*M->getFunction("pc_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  PatchConstantWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_pc_main"));
+  for (const Instruction &I : instructions(*M->getFunction("pc_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+/// (Roadmap H4a) `gl_PatchVerticesIn` read from the *original* input patch
+/// (`FromInputPatch`, distinct from `OutputControlPointID`'s "always 0"):
+/// `lowerPatchConstantSystemValue` reports
+/// `PatchConstantStageEnv::InputPatchControlPointCount`.
+TEST(PatchConstantWrapperTest, LowersInputPatchVerticesCount) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @pc_main() #0 {
+      %pv = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %pvf = uitofp i32 %pv to float
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %pvf, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement PatchVertices;
+  PatchVertices.ElementID = 0;
+  PatchVertices.Direction = SignatureDirection::Input;
+  PatchVertices.SystemValue = SignatureSystemValue::PatchVertices;
+  PatchVertices.ComponentType = SignatureComponentType::UInt;
+  PatchVertices.Frequency = SignatureFrequency::PerPatch;
+  PatchVertices.FromInputPatch = true;
+  SignatureElement Out;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::PatchOutput;
+  Out.Frequency = SignatureFrequency::PerPatch;
+  Out.ComponentType = SignatureComponentType::Float;
+  Sig.Elements = {PatchVertices, Out};
+  dxil::setEntrySignature(*M->getFunction("pc_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  PatchConstantWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_pc_main"));
+  for (const Instruction &I : instructions(*M->getFunction("pc_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST(PatchConstantWrapperTest, HullWrapperSkipsPatchConstantPhase) {
   LLVMContext Ctx;
   // A `PatchOutput`-bearing function is the patch-constant phase, not the

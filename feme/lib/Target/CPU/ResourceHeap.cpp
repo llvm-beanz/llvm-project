@@ -262,11 +262,12 @@ PreparedPatchBatch::PreparedPatchBatch(
     std::vector<FemeSamplerDescriptor> SamplerHeap,
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
     const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
-    uint32_t OutputControlPointCount)
+    uint32_t OutputControlPointCount, uint32_t InputPatchControlPointCount)
     : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
       SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
-      Outputs(Outputs), OutputControlPointCount(OutputControlPointCount) {
+      Outputs(Outputs), OutputControlPointCount(OutputControlPointCount),
+      InputPatchControlPointCount(InputPatchControlPointCount) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
   ShaderResources.ResourceHeapCount =
       static_cast<uint32_t>(this->ResourceHeap.size());
@@ -291,13 +292,14 @@ PreparedPatchBatch PreparedPatchBatch::create(const ResourceInfo &Info,
                              Resources.SamplerHeap),
       Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
       Resources.OutputLayout, Resources.Outputs,
-      Resources.OutputControlPointCount);
+      Resources.OutputControlPointCount, Resources.InputPatchControlPointCount);
 }
 
 FemePatchArgs PreparedPatchBatch::args() const {
   FemePatchArgs Args{};
   Args.AbiVersion = StageArgsAbiVersion;
   Args.OutputControlPointCount = OutputControlPointCount;
+  Args.InputPatchControlPointCount = InputPatchControlPointCount;
   Args.Resources = &ShaderResources;
   Args.InputLayout = InputLayout;
   Args.Inputs = Inputs;

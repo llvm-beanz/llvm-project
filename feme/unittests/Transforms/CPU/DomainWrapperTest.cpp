@@ -58,6 +58,19 @@ SignatureElement makeDomainLocationInput(uint32_t ElementID) {
   return Elt;
 }
 
+/// (Roadmap H4a) `SV_DomainLocation`'s SPIR-V-native sibling system value:
+/// `gl_PatchVerticesIn`, i.e. how many input control points the completed
+/// patch this domain invocation evaluates was built from.
+SignatureElement makePatchVerticesInput(uint32_t ElementID) {
+  SignatureElement Elt;
+  Elt.ElementID = ElementID;
+  Elt.Direction = SignatureDirection::Input;
+  Elt.SystemValue = SignatureSystemValue::PatchVertices;
+  Elt.ComponentType = SignatureComponentType::UInt;
+  Elt.Frequency = SignatureFrequency::PerPatch;
+  return Elt;
+}
+
 TEST(DomainWrapperTest, LowersAllThreeInputSourcesAndBuildsWrapper) {
   LLVMContext Ctx;
   // The canonical evaluation shape: blend two control points of the
@@ -157,6 +170,43 @@ TEST(DomainWrapperTest, DiagnosesGroupSyncBarrier) {
   DomainWrapperPass().run(*M, MAM);
 
   EXPECT_FALSE(M->getFunction("feme_cpu_entry_ds_main"));
+}
+
+/// (Roadmap H4a) A domain stage reading `gl_PatchVerticesIn` (`SV_
+/// DomainLocation`'s SPIR-V-native sibling `PatchVertices` system value)
+/// lowers without diagnosing, and the wrapper is still built.
+TEST(DomainWrapperTest, LowersPatchVerticesInput) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ds_main() #0 {
+      %pv = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %pvf = uitofp i32 %pv to float
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %pvf, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="domain" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  Sig.Elements = {makePatchVerticesInput(0),
+                  makeFloatElement(1, SignatureDirection::Output)};
+  dxil::setEntrySignature(*M->getFunction("ds_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  DomainWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_ds_main"));
+  for (const Instruction &I : instructions(*M->getFunction("ds_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
 } // namespace

@@ -773,9 +773,12 @@ struct FemePatchArgs {
   /// Number of output control points this batch computes, and therefore the
   /// number of structure-of-arrays slots in `Outputs`.
   uint32_t OutputControlPointCount;
-  /// Reserved 32-bit fields to keep pointer fields naturally aligned and leave
+  /// Number of input control points in the original patch. This may differ
+  /// from `OutputControlPointCount`.
+  uint32_t InputPatchControlPointCount;
+  /// Reserved 32-bit field to keep pointer fields naturally aligned and leave
   /// room for later scalar metadata.
-  uint32_t Reserved32[2];
+  uint32_t Reserved32;
   /// Resource/root-constant block shared by every stage.
   const FemeShaderResources *Resources;
   /// Layout describing `Inputs`.

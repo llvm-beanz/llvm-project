@@ -119,6 +119,8 @@ constexpr StringLiteral InputPatchLayoutParamName = "stage_input_patch_layout";
 constexpr StringLiteral InputPatchParamName = "stage_input_patch";
 constexpr StringLiteral OutputLayoutParamName = "stage_output_layout";
 constexpr StringLiteral OutputsParamName = "stage_outputs";
+constexpr StringLiteral InputPatchControlPointCountParamName =
+    "stage_input_patch_control_point_count";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -136,6 +138,7 @@ struct PatchConstantStageEnv {
   Value *InputPatch = nullptr;
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
+  Value *InputPatchControlPointCount = nullptr;
 };
 
 std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
@@ -154,6 +157,8 @@ std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
       Env.OutputLayout = &Arg, Found = true;
     else if (Arg.getName() == OutputsParamName)
       Env.Outputs = &Arg, Found = true;
+    else if (Arg.getName() == InputPatchControlPointCountParamName)
+      Env.InputPatchControlPointCount = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -163,8 +168,9 @@ std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
 Function *appendPatchConstantStageParams(Function &F) {
   LLVMContext &Ctx = F.getContext();
   Type *PtrTy = PointerType::get(Ctx, 0);
+  Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, I32Ty});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -190,6 +196,7 @@ Function *appendPatchConstantStageParams(Function &F) {
   (&*ArgIt++)->setName(InputPatchParamName);
   (&*ArgIt++)->setName(OutputLayoutParamName);
   (&*ArgIt++)->setName(OutputsParamName);
+  (&*ArgIt++)->setName(InputPatchControlPointCountParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -282,6 +289,31 @@ Value *lowerPatchConstantInputLoad(CallInst &CI, const SignatureElement &Elt,
     Value *LaneResult = Builder.CreateLoad(ScalarTy, Addr);
     LaneResult = Builder.CreateSelect(Active, LaneResult,
                                       Constant::getNullValue(ScalarTy));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
+Value *lowerPatchConstantSystemValue(CallInst &CI, const SignatureElement &Elt,
+                                     const WaveBodyEnv &WEnv,
+                                     const PatchConstantStageEnv &PEnv) {
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  IRBuilder<> Builder(&CI);
+  Value *Scalar = Elt.SystemValue == SignatureSystemValue::OutputControlPointID
+                      ? Builder.getInt32(0)
+                  : Elt.SystemValue == SignatureSystemValue::PatchVertices &&
+                          Elt.FromInputPatch
+                      ? PEnv.InputPatchControlPointCount
+                      : nullptr;
+  if (!Scalar)
+    return nullptr;
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *LaneResult =
+        Builder.CreateSelect(Active, Scalar, Builder.getInt32(0));
     Result =
         Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
   }
@@ -401,7 +433,16 @@ bool lowerPatchConstantStageOps(Function &F) {
                 "unknown signature element");
         return false;
       }
-      Value *Lowered = lowerPatchConstantInputLoad(*CI, *Elt, *WEnv, *PEnv);
+      Value *Lowered =
+          Elt->SystemValue == SignatureSystemValue::None
+              ? lowerPatchConstantInputLoad(*CI, *Elt, *WEnv, *PEnv)
+              : lowerPatchConstantSystemValue(*CI, *Elt, *WEnv, *PEnv);
+      if (Elt->SystemValue != SignatureSystemValue::None && !Lowered) {
+        F.getContext().emitError(
+            CI, "feme-cpu-wrap-patch-constant: unsupported patch-constant "
+                "input system value");
+        return false;
+      }
       CI->replaceAllUsesWith(Lowered);
       CI->eraseFromParent();
       break;
@@ -445,6 +486,7 @@ struct WrapperEnv {
   Value *InputPatch = nullptr;
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
+  Value *InputPatchControlPointCount = nullptr;
 };
 
 WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
@@ -465,6 +507,9 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
                                      PatchConstantArgsFieldOutputLayout, PtrTy);
   Env.Outputs = loadStructField(Builder, ArgsTy, Args,
                                 PatchConstantArgsFieldOutputs, PtrTy);
+  Env.InputPatchControlPointCount =
+      loadStructField(Builder, ArgsTy, Args,
+                      PatchConstantArgsFieldInputPatchControlPointCount, I32Ty);
 
   Value *ResourcesRaw = loadStructField(Builder, ArgsTy, Args,
                                         PatchConstantArgsFieldResources, PtrTy);
@@ -567,6 +612,8 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.OutputLayout);
     else if (Arg.getName() == OutputsParamName)
       CallArgs.push_back(Env.Outputs);
+    else if (Arg.getName() == InputPatchControlPointCountParamName)
+      CallArgs.push_back(Env.InputPatchControlPointCount);
     else
       llvm_unreachable("unexpected parameter for PatchConstantWrapperPass");
   }

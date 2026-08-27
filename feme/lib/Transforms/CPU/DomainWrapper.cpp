@@ -97,6 +97,8 @@ constexpr StringLiteral PatchConstantsParamName = "stage_patch_constants";
 constexpr StringLiteral OutputLayoutParamName = "stage_output_layout";
 constexpr StringLiteral OutputsParamName = "stage_outputs";
 constexpr StringLiteral InvocationsParamName = "stage_domain_invocations";
+constexpr StringLiteral OutputControlPointCountParamName =
+    "stage_output_control_point_count";
 
 /// The number of components `FemeDomainInvocation::DomainLocation` holds.
 constexpr unsigned DomainLocationComponentCount = 3;
@@ -128,6 +130,7 @@ struct DomainStageEnv {
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
   Value *Invocations = nullptr;
+  Value *OutputControlPointCount = nullptr;
 };
 
 std::optional<DomainStageEnv> getDomainStageEnv(Function &F) {
@@ -148,6 +151,8 @@ std::optional<DomainStageEnv> getDomainStageEnv(Function &F) {
       Env.Outputs = &Arg, Found = true;
     else if (Arg.getName() == InvocationsParamName)
       Env.Invocations = &Arg, Found = true;
+    else if (Arg.getName() == OutputControlPointCountParamName)
+      Env.OutputControlPointCount = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -157,8 +162,9 @@ std::optional<DomainStageEnv> getDomainStageEnv(Function &F) {
 Function *appendDomainStageParams(Function &F) {
   LLVMContext &Ctx = F.getContext();
   Type *PtrTy = PointerType::get(Ctx, 0);
+  Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 16> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, I32Ty});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -185,6 +191,7 @@ Function *appendDomainStageParams(Function &F) {
   (&*ArgIt++)->setName(OutputLayoutParamName);
   (&*ArgIt++)->setName(OutputsParamName);
   (&*ArgIt++)->setName(InvocationsParamName);
+  (&*ArgIt++)->setName(OutputControlPointCountParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -383,6 +390,22 @@ Value *lowerDomainPatchConstantLoad(CallInst &CI, const SignatureElement &Elt,
   return Result;
 }
 
+Value *lowerDomainPatchVertices(CallInst &CI, const WaveBodyEnv &WEnv,
+                                const DomainStageEnv &DEnv) {
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  IRBuilder<> Builder(&CI);
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *LaneResult = Builder.CreateSelect(
+        Active, DEnv.OutputControlPointCount, Builder.getInt32(0));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
 void lowerDomainOutputStore(CallInst &CI, const SignatureElement &Elt,
                             const WaveBodyEnv &WEnv,
                             const DomainStageEnv &DEnv) {
@@ -423,6 +446,8 @@ Value *lowerDomainInputLoad(CallInst &CI, const SignatureElement &Elt,
     return lowerDomainControlPointLoad(CI, Elt, WEnv, DEnv);
   case SignatureSystemValue::DomainLocation:
     return lowerDomainLocation(CI, Elt, WEnv, DEnv);
+  case SignatureSystemValue::PatchVertices:
+    return lowerDomainPatchVertices(CI, WEnv, DEnv);
   default:
     CI.getContext().emitError(
         &CI, "feme-cpu-wrap-domain: unsupported domain system value");
@@ -557,6 +582,7 @@ struct WrapperEnv {
   Value *Outputs = nullptr;
   Value *Invocations = nullptr;
   Value *DomainPointCount = nullptr;
+  Value *OutputControlPointCount = nullptr;
 };
 
 WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
@@ -567,6 +593,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
   WrapperEnv Env;
   Env.DomainPointCount = loadStructField(
       Builder, ArgsTy, Args, DomainArgsFieldDomainPointCount, I32Ty);
+  Env.OutputControlPointCount = loadStructField(
+      Builder, ArgsTy, Args, DomainArgsFieldOutputControlPointCount, I32Ty);
   Env.InputLayout =
       loadStructField(Builder, ArgsTy, Args, DomainArgsFieldInputLayout, PtrTy);
   Env.Inputs =
@@ -702,6 +730,8 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.Outputs);
     else if (Arg.getName() == InvocationsParamName)
       CallArgs.push_back(Env.Invocations);
+    else if (Arg.getName() == OutputControlPointCountParamName)
+      CallArgs.push_back(Env.OutputControlPointCount);
     else
       llvm_unreachable("unexpected parameter for DomainWrapperPass");
   }

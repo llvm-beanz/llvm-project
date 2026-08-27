@@ -118,13 +118,14 @@ enum FragmentArgsField : unsigned {
 enum PatchArgsField : unsigned {
   PatchArgsFieldAbiVersion = 0,
   PatchArgsFieldOutputControlPointCount = 1,
-  PatchArgsFieldReserved32 = 2,
-  PatchArgsFieldResources = 3,
-  PatchArgsFieldInputLayout = 4,
-  PatchArgsFieldInputs = 5,
-  PatchArgsFieldOutputLayout = 6,
-  PatchArgsFieldOutputs = 7,
-  PatchArgsFieldReserved = 8,
+  PatchArgsFieldInputPatchControlPointCount = 2,
+  PatchArgsFieldReserved32 = 3,
+  PatchArgsFieldResources = 4,
+  PatchArgsFieldInputLayout = 5,
+  PatchArgsFieldInputs = 6,
+  PatchArgsFieldOutputLayout = 7,
+  PatchArgsFieldOutputs = 8,
+  PatchArgsFieldReserved = 9,
 };
 
 enum PatchConstantArgsField : unsigned {
@@ -205,16 +206,15 @@ inline llvm::StructType *getStageLayoutType(llvm::LLVMContext &Ctx) {
 inline llvm::StructType *getShaderResourcesType(llvm::LLVMContext &Ctx) {
   llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
-  return llvm::StructType::get(Ctx,
-                               {PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty, PtrTy,
-                                I32Ty, PtrTy, I32Ty, llvm::ArrayType::get(PtrTy, 2)});
+  return llvm::StructType::get(Ctx, {PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty,
+                                     PtrTy, I32Ty, PtrTy, I32Ty,
+                                     llvm::ArrayType::get(PtrTy, 2)});
 }
 
 inline llvm::StructType *getVertexInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
-  return llvm::StructType::get(
-      Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty,
-            llvm::ArrayType::get(I32Ty, 2)});
+  return llvm::StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty,
+                                     llvm::ArrayType::get(I32Ty, 2)});
 }
 
 inline llvm::StructType *getFragmentInvocationType(llvm::LLVMContext &Ctx) {
@@ -223,10 +223,9 @@ inline llvm::StructType *getFragmentInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *PositionTy =
       llvm::ArrayType::get(llvm::ArrayType::get(F32Ty, 4), 4);
   llvm::Type *I32x4 = llvm::ArrayType::get(I32Ty, 4);
-  return llvm::StructType::get(Ctx,
-                               {PositionTy, I32x4, I32x4, I32x4, I32x4, I32x4,
-                                I32Ty, I32Ty, I32Ty,
-                                llvm::ArrayType::get(I32Ty, 4)});
+  return llvm::StructType::get(Ctx, {PositionTy, I32x4, I32x4, I32x4, I32x4,
+                                     I32x4, I32Ty, I32Ty, I32Ty,
+                                     llvm::ArrayType::get(I32Ty, 4)});
 }
 
 inline llvm::StructType *getFragmentResultType(llvm::LLVMContext &Ctx) {
@@ -254,9 +253,9 @@ inline llvm::StructType *getFragmentArgsType(llvm::LLVMContext &Ctx) {
 inline llvm::StructType *getPatchArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
-  return llvm::StructType::get(
-      Ctx, {I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 2), PtrTy, PtrTy, PtrTy,
-            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 4)});
+  return llvm::StructType::get(Ctx,
+                               {I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy, PtrTy,
+                                PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 4)});
 }
 
 /// Distinct from `getPatchArgsType` (see `FemePatchConstantArgs`'s own

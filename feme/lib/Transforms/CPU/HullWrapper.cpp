@@ -107,6 +107,8 @@ constexpr StringLiteral InputLayoutParamName = "stage_input_layout";
 constexpr StringLiteral InputsParamName = "stage_inputs";
 constexpr StringLiteral OutputLayoutParamName = "stage_output_layout";
 constexpr StringLiteral OutputsParamName = "stage_outputs";
+constexpr StringLiteral InputPatchControlPointCountParamName =
+    "stage_input_patch_control_point_count";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -122,6 +124,7 @@ struct HullStageEnv {
   Value *Inputs = nullptr;
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
+  Value *InputPatchControlPointCount = nullptr;
 };
 
 std::optional<HullStageEnv> getHullStageEnv(Function &F) {
@@ -136,6 +139,8 @@ std::optional<HullStageEnv> getHullStageEnv(Function &F) {
       Env.OutputLayout = &Arg, Found = true;
     else if (Arg.getName() == OutputsParamName)
       Env.Outputs = &Arg, Found = true;
+    else if (Arg.getName() == InputPatchControlPointCountParamName)
+      Env.InputPatchControlPointCount = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -145,8 +150,9 @@ std::optional<HullStageEnv> getHullStageEnv(Function &F) {
 Function *appendHullStageParams(Function &F) {
   LLVMContext &Ctx = F.getContext();
   Type *PtrTy = PointerType::get(Ctx, 0);
+  Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy});
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, I32Ty});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -170,6 +176,7 @@ Function *appendHullStageParams(Function &F) {
   (&*ArgIt++)->setName(InputsParamName);
   (&*ArgIt++)->setName(OutputLayoutParamName);
   (&*ArgIt++)->setName(OutputsParamName);
+  (&*ArgIt++)->setName(InputPatchControlPointCountParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -254,6 +261,22 @@ Value *lowerOutputControlPointID(CallInst &CI, const WaveBodyEnv &WEnv) {
     Value *Index = getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
     Value *LaneResult =
         Builder.CreateSelect(Active, Index, Builder.getInt32(0));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
+Value *lowerPatchVerticesIn(CallInst &CI, const WaveBodyEnv &WEnv,
+                            const HullStageEnv &HEnv) {
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  IRBuilder<> Builder(&CI);
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *LaneResult = Builder.CreateSelect(
+        Active, HEnv.InputPatchControlPointCount, Builder.getInt32(0));
     Result =
         Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
   }
@@ -441,7 +464,19 @@ bool lowerHullStageOps(Function &F) {
                 "signature element");
         return false;
       }
-      Value *Lowered = lowerHullInputLoad(*CI, *Elt, *WEnv, *HEnv, SelfIndex);
+      Value *Lowered = nullptr;
+      switch (Elt->SystemValue) {
+      case SignatureSystemValue::None:
+        Lowered = lowerHullInputLoad(*CI, *Elt, *WEnv, *HEnv, SelfIndex);
+        break;
+      case SignatureSystemValue::PatchVertices:
+        Lowered = lowerPatchVerticesIn(*CI, *WEnv, *HEnv);
+        break;
+      default:
+        F.getContext().emitError(
+            CI, "feme-cpu-wrap-hull: unsupported hull input system value");
+        return false;
+      }
       if (!Lowered)
         return false;
       CI->replaceAllUsesWith(Lowered);
@@ -472,6 +507,7 @@ struct WrapperEnv {
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
   Value *OutputControlPointCount = nullptr;
+  Value *InputPatchControlPointCount = nullptr;
 };
 
 WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
@@ -482,6 +518,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
   WrapperEnv Env;
   Env.OutputControlPointCount = loadStructField(
       Builder, ArgsTy, Args, PatchArgsFieldOutputControlPointCount, I32Ty);
+  Env.InputPatchControlPointCount = loadStructField(
+      Builder, ArgsTy, Args, PatchArgsFieldInputPatchControlPointCount, I32Ty);
   Env.InputLayout =
       loadStructField(Builder, ArgsTy, Args, PatchArgsFieldInputLayout, PtrTy);
   Env.Inputs =
@@ -606,6 +644,8 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.OutputLayout);
     else if (Arg.getName() == OutputsParamName)
       CallArgs.push_back(Env.Outputs);
+    else if (Arg.getName() == InputPatchControlPointCountParamName)
+      CallArgs.push_back(Env.InputPatchControlPointCount);
     else
       llvm_unreachable("unexpected parameter for HullWrapperPass");
   }
