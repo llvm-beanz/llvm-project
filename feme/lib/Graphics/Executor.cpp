@@ -59,10 +59,15 @@
 #include "feme/Graphics/Executor.h"
 
 #include "feme/Core/Signature.h"
+#include "feme/Graphics/Geometry.h"
+#include "feme/Graphics/GeometryInputs.h"
+#include "feme/Graphics/GeometryStream.h"
+#include "feme/Graphics/GeometryStreamCollection.h"
 #include "feme/Graphics/ImageFixture.h"
 #include "feme/Graphics/LayeredRendering.h"
 #include "feme/Graphics/Pipeline.h"
 #include "feme/Graphics/PreparedDraw.h"
+#include "feme/Graphics/StageLink.h"
 #include "feme/Graphics/StageStorage.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/ResourceHeap.h"
@@ -80,6 +85,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -985,9 +991,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   case PrimitiveTopology::LineStripWithAdjacency:
   case PrimitiveTopology::TriangleListWithAdjacency:
   case PrimitiveTopology::TriangleStripWithAdjacency:
-    return createStringError(inconvertibleErrorCode(),
-                             "adjacency topologies are not implemented yet "
-                             "(roadmap R34, need a geometry stage)");
+    // (roadmap H5d) An adjacency topology's whole purpose is handing a
+    // geometry stage its primitives' neighboring vertices; without one
+    // there is nowhere for that adjacency data to go.
+    if (!Pipeline.hasGeometryStages())
+      return createStringError(inconvertibleErrorCode(),
+                               "an adjacency topology requires a pipeline "
+                               "with a geometry stage");
+    break;
   }
 
   const cpu::CompiledStage &VS = Pipeline.getVertexStage();
@@ -1027,7 +1038,97 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       return Link.takeError();
     TessLink = std::move(*Link);
   }
-  const EntrySignature &RasterSig = TessLink ? TessLink->DomainSig : *VSSig;
+  // (roadmap H5d) The stage whose primitives a geometry stage assembles
+  // from: the domain stage's evaluated vertices on a tessellating
+  // pipeline, otherwise the vertex stage's own -- the same "last
+  // pre-vertex-stage-chain output" `TessLink` above already names.
+  const EntrySignature &PreGeometrySig =
+      TessLink ? TessLink->DomainSig : *VSSig;
+
+  // (roadmap H5d) A geometry stage, if present, becomes the new "last
+  // pre-rasterization stage": every lookup below that used to read the
+  // vertex/domain stage's own signature now reads the geometry stage's
+  // instead, exactly mirroring how tessellation's own `TessLink` already
+  // substitutes the domain stage for the vertex stage above.
+  std::optional<EntrySignature> GSSig;
+  SmallVector<LinkedStageElement, 4> GeomInputLinks;
+  GeometryInputPrimitive GeomExpectedInput = GeometryInputPrimitive::Points;
+  uint32_t GeomVerticesPerPrimitive = 0;
+  if (Pipeline.hasGeometryStages()) {
+    Expected<EntrySignature> Sig =
+        getStageSignature(Pipeline.getGeometryStage());
+    if (!Sig)
+      return Sig.takeError();
+    GSSig = std::move(*Sig);
+
+    // The geometry stage's own declared input primitive class must match
+    // what its producer (the tessellator's output primitive, or the
+    // draw's own topology) actually assembles -- there is no implicit
+    // conversion between e.g. a triangle and a triangle-with-adjacency
+    // input.
+    if (TessLink) {
+      switch (Pipeline.getTessellationState().OutputPrimitive) {
+      case TessOutputPrimitive::Point:
+        GeomExpectedInput = GeometryInputPrimitive::Points;
+        break;
+      case TessOutputPrimitive::Line:
+        GeomExpectedInput = GeometryInputPrimitive::Lines;
+        break;
+      case TessOutputPrimitive::TriangleCw:
+      case TessOutputPrimitive::TriangleCcw:
+        GeomExpectedInput = GeometryInputPrimitive::Triangles;
+        break;
+      }
+    } else {
+      switch (Pipeline.getTopology()) {
+      case PrimitiveTopology::PointList:
+        GeomExpectedInput = GeometryInputPrimitive::Points;
+        break;
+      case PrimitiveTopology::LineList:
+      case PrimitiveTopology::LineStrip:
+        GeomExpectedInput = GeometryInputPrimitive::Lines;
+        break;
+      case PrimitiveTopology::LineListWithAdjacency:
+      case PrimitiveTopology::LineStripWithAdjacency:
+        GeomExpectedInput = GeometryInputPrimitive::LinesAdjacency;
+        break;
+      case PrimitiveTopology::TriangleList:
+      case PrimitiveTopology::TriangleStrip:
+      case PrimitiveTopology::TriangleFan:
+        GeomExpectedInput = GeometryInputPrimitive::Triangles;
+        break;
+      case PrimitiveTopology::TriangleListWithAdjacency:
+      case PrimitiveTopology::TriangleStripWithAdjacency:
+        GeomExpectedInput = GeometryInputPrimitive::TrianglesAdjacency;
+        break;
+      case PrimitiveTopology::PatchList:
+        llvm_unreachable("PatchList always sets TessLink");
+      }
+    }
+    if (Pipeline.getGeometryState().InputPrimitive != GeomExpectedInput)
+      return createStringError(inconvertibleErrorCode(),
+                               "the geometry stage's declared input "
+                               "primitive class does not match the "
+                               "pipeline's topology/tessellation output "
+                               "primitive");
+    GeomVerticesPerPrimitive = getVerticesPerPrimitive(GeomExpectedInput);
+
+    // Links every geometry-input element (except `SV_PrimitiveID`, sourced
+    // from `FemeGeometryInvocation` instead) to the producing stage's
+    // matching output by `Location`/system value (e.g. `SV_Position`),
+    // mirroring the fragment-input varying linkage below.
+    Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+        PreGeometrySig, SignatureDirection::Output, *GSSig,
+        SignatureDirection::Input,
+        "vertex/domain stage output -> geometry stage input",
+        [](const SignatureElement &Elt) {
+          return Elt.SystemValue != SignatureSystemValue::PrimitiveID;
+        });
+    if (!Links)
+      return Links.takeError();
+    GeomInputLinks = std::move(*Links);
+  }
+  const EntrySignature &RasterSig = GSSig ? *GSSig : PreGeometrySig;
 
   const SignatureElement *VSPosition = findElement(
       RasterSig, SignatureDirection::Output, SignatureSystemValue::Position);
@@ -1249,7 +1350,23 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // own class otherwise.
   enum class RasterPrimitiveClass { Point, Line, Triangle };
   RasterPrimitiveClass RasterClass = RasterPrimitiveClass::Triangle;
-  if (TessLink) {
+  if (GSSig) {
+    // (roadmap H5d) A geometry stage's own declared output primitive
+    // class -- not the topology/tessellator's -- is what rasterization
+    // now sees: the geometry stage is the new "last pre-rasterization
+    // stage".
+    switch (Pipeline.getGeometryState().OutputPrimitive) {
+    case GeometryOutputPrimitive::Points:
+      RasterClass = RasterPrimitiveClass::Point;
+      break;
+    case GeometryOutputPrimitive::LineStrip:
+      RasterClass = RasterPrimitiveClass::Line;
+      break;
+    case GeometryOutputPrimitive::TriangleStrip:
+      RasterClass = RasterPrimitiveClass::Triangle;
+      break;
+    }
+  } else if (TessLink) {
     switch (Pipeline.getTessellationState().OutputPrimitive) {
     case TessOutputPrimitive::Point:
       RasterClass = RasterPrimitiveClass::Point;
@@ -1281,14 +1398,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     // indexed strip/fan draw: a special index value ends the current
     // strip/fan and starts a new one, exactly as an unindexed strip/fan
     // would begin fresh. Vulkan applies this to every strip and fan
-    // topology (`LineStrip`, `TriangleStrip`, `TriangleFan`, and the two
-    // `*StripWithAdjacency` topologies once those are implemented), not
-    // just `TriangleStrip`.
+    // topology (`LineStrip`, `TriangleStrip`, `TriangleFan`, and (roadmap
+    // H5d) the two `*StripWithAdjacency` topologies), not just
+    // `TriangleStrip`.
     bool RestartEnabled =
         Cmd.Indexed && Pipeline.getPrimitiveRestartEnable() &&
         (Pipeline.getTopology() == PrimitiveTopology::LineStrip ||
          Pipeline.getTopology() == PrimitiveTopology::TriangleStrip ||
-         Pipeline.getTopology() == PrimitiveTopology::TriangleFan);
+         Pipeline.getTopology() == PrimitiveTopology::TriangleFan ||
+         Pipeline.getTopology() == PrimitiveTopology::LineStripWithAdjacency ||
+         Pipeline.getTopology() ==
+             PrimitiveTopology::TriangleStripWithAdjacency);
     // The primitive-restart marker is the index type's own all-1-bits value
     // (`0xFF`/`0xFFFF`/`0xFFFFFFFF`), matching the raw index's own width.
     uint32_t RestartValue = Draw.IndexBuffer.Type == IndexType::UInt8 ? 0xFFu
@@ -1735,6 +1855,227 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         for (std::array<uint32_t, 2> L : LineIndices)
           AbsLineIndices.push_back({Base + L[0], Base + L[1]});
       }
+    }
+
+    // --- Geometry stage (roadmap H5d). ---
+    //
+    // Assembles this draw's own input primitives (adjacency vertices
+    // included, for one of the four `*WithAdjacency` topologies) out of
+    // `RasterOut`'s already-instance-biased invocation positions, runs the
+    // compiled geometry stage over the whole batch, and replays its flat
+    // emitted-vertex/strip-boundary records back into one merged stream
+    // whose own strips take over `AbsTriIndices`/`AbsLineIndices` and whose
+    // own vertex storage takes over `RasterOut` -- the same "last
+    // pre-rasterization stage" substitution `TessOutput`/`RasterOut` above
+    // already established for tessellation.
+    StageStorage GeomStreamOutput;
+    if (GSSig) {
+      const GeometryState &GState = Pipeline.getGeometryState();
+
+      // Every input primitive's vertices, as absolute (already
+      // instance-biased) invocation indices into `RasterOut`, in the
+      // primitive's own declared `gl_in[]` vertex order -- adjacency
+      // vertices interleaved back into that order, since
+      // `splitListPrimitiveAdjacency`/`splitStripPrimitiveAdjacency`
+      // instead return primitive/adjacent vertices grouped separately
+      // (see their own comments in Pipeline.h).
+      SmallVector<SmallVector<uint32_t, 6>, 8> Primitives;
+      auto reorderAdjacency = [](const SplitPrimitiveAdjacency &Split) {
+        SmallVector<uint32_t, 6> Order;
+        if (Split.Adjacent.size() == 2) { // a *lines*-with-adjacency window
+          Order = {Split.Adjacent[0], Split.Primitive[0], Split.Primitive[1],
+                   Split.Adjacent[1]};
+        } else { // a triangle-with-adjacency window
+          Order = {Split.Primitive[0], Split.Adjacent[0],  Split.Primitive[1],
+                   Split.Adjacent[1],  Split.Primitive[2], Split.Adjacent[2]};
+        }
+        return Order;
+      };
+
+      PrimitiveTopology Topology = Pipeline.getTopology();
+      if (topologyHasAdjacency(Topology)) {
+        bool IsStrip =
+            Topology == PrimitiveTopology::LineStripWithAdjacency ||
+            Topology == PrimitiveTopology::TriangleStripWithAdjacency;
+        // Restart delimits an adjacency strip's own windows exactly as it
+        // does every other strip topology above: each segment between
+        // restart markers assembles its primitives independently, never
+        // sliding an adjacency window across the boundary.
+        SmallVector<std::pair<uint32_t, uint32_t>, 4> Segments;
+        if (IsStrip && RestartEnabled) {
+          uint32_t SegStart = 0;
+          for (uint32_t J = 0; J != PerInstance; ++J) {
+            if (!IsRestart[J])
+              continue;
+            Segments.push_back({SegStart, J});
+            SegStart = J + 1;
+          }
+          Segments.push_back({SegStart, PerInstance});
+        } else {
+          Segments.push_back({0, PerInstance});
+        }
+        for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+          uint32_t Base = Inst * PerInstance;
+          if (IsStrip) {
+            for (std::pair<uint32_t, uint32_t> Seg : Segments) {
+              SmallVector<uint32_t, 16> Window;
+              for (uint32_t J = Seg.first; J != Seg.second; ++J)
+                Window.push_back(Base + J);
+              uint32_t Count = getStripPrimitiveCount(
+                  Topology, static_cast<uint32_t>(Window.size()));
+              for (uint32_t P = 0; P != Count; ++P)
+                Primitives.push_back(reorderAdjacency(
+                    splitStripPrimitiveAdjacency(Topology, Window, P)));
+            }
+          } else {
+            uint32_t VertsPerPrim = getListPrimitiveVertexCount(Topology);
+            for (uint32_t P = 0; P + VertsPerPrim <= PerInstance;
+                 P += VertsPerPrim) {
+              SmallVector<uint32_t, 6> Window;
+              for (uint32_t K = 0; K != VertsPerPrim; ++K)
+                Window.push_back(Base + P + K);
+              Primitives.push_back(reorderAdjacency(
+                  splitListPrimitiveAdjacency(Topology, Window)));
+            }
+          }
+        }
+      } else if (GeomExpectedInput == GeometryInputPrimitive::Points) {
+        for (uint32_t J = 0; J != RasterOut->InvocationCount; ++J)
+          Primitives.push_back({J});
+      } else if (GeomExpectedInput == GeometryInputPrimitive::Lines) {
+        for (std::array<uint32_t, 2> Ln : AbsLineIndices)
+          Primitives.push_back({Ln[0], Ln[1]});
+      } else { // Triangles
+        for (std::array<uint32_t, 3> Tri : AbsTriIndices)
+          Primitives.push_back({Tri[0], Tri[1], Tri[2]});
+      }
+
+      // Every `Output`-direction element of the geometry stage's own
+      // signature, in signature order: the exact flattening order
+      // GeometryWrapper.cpp's `lowerGeometryStreamEmit` writes one emitted
+      // vertex record's scalars in, which this must mirror to read them
+      // back correctly.
+      SmallVector<const SignatureElement *, 8> GSOutputElements;
+      uint32_t OutputScalarsPerVertex = 0;
+      for (const SignatureElement &Elt : GSSig->Elements)
+        if (Elt.Direction == SignatureDirection::Output) {
+          GSOutputElements.push_back(&Elt);
+          OutputScalarsPerVertex += Elt.ComponentCount * Elt.RowCount;
+        }
+
+      uint32_t PrimitiveCount = static_cast<uint32_t>(Primitives.size());
+      GeometryStreamBuilder Combined(/*StreamCount=*/1,
+                                     GState.MaxOutputVertices);
+      if (PrimitiveCount != 0) {
+        Expected<StageStorage> GSInput =
+            buildStageStorage(*GSSig, SignatureDirection::Input,
+                              PrimitiveCount * GeomVerticesPerPrimitive);
+        if (!GSInput)
+          return GSInput.takeError();
+        SmallVector<uint32_t, 32> SourceInvocations;
+        SourceInvocations.reserve(PrimitiveCount * GeomVerticesPerPrimitive);
+        for (const SmallVector<uint32_t, 6> &Prim : Primitives)
+          for (uint32_t V : Prim)
+            SourceInvocations.push_back(V);
+        copyLinkedElements(*RasterOut, *GSInput, GeomInputLinks,
+                           PrimitiveCount * GeomVerticesPerPrimitive,
+                           SourceInvocations);
+
+        Expected<StageStorage> GSScratch = buildStageStorage(
+            *GSSig, SignatureDirection::Output, PrimitiveCount);
+        if (!GSScratch)
+          return GSScratch.takeError();
+
+        std::vector<uint32_t> PrimitiveIDs(PrimitiveCount);
+        std::iota(PrimitiveIDs.begin(), PrimitiveIDs.end(), 0u);
+        std::vector<cpu::FemeGeometryInvocation> GeomInvocations =
+            buildGeometryInvocations(PrimitiveIDs);
+
+        std::vector<float> EmittedVertices((size_t)PrimitiveCount *
+                                               GState.MaxOutputVertices *
+                                               OutputScalarsPerVertex,
+                                           0.0f);
+        std::vector<uint32_t> EmittedVertexCounts(PrimitiveCount, 0);
+        std::vector<uint8_t> StripEndsAfter(
+            (size_t)PrimitiveCount * GState.MaxOutputVertices, 0);
+
+        cpu::FemeStageLayout GSInLayout = GSInput->layout();
+        cpu::FemeStageLayout GSOutLayout = GSScratch->layout();
+        cpu::GeometryResources GRes;
+        GRes.ResourceHeap = Draw.Resources.ResourceHeap;
+        GRes.BoundResources = Draw.Resources.BoundResources;
+        GRes.BoundImages = Draw.Resources.BoundImages;
+        GRes.BoundSamplers = Draw.Resources.BoundSamplers;
+        GRes.ImageHeap = Draw.Resources.ImageHeap;
+        GRes.SamplerHeap = Draw.Resources.SamplerHeap;
+        GRes.RootConstants = Draw.Resources.RootConstants;
+        GRes.InputLayout = &GSInLayout;
+        GRes.Inputs = GSInput->Data.data();
+        GRes.OutputLayout = &GSOutLayout;
+        GRes.Outputs = GSScratch->Data.data();
+        GRes.Invocations = GeomInvocations;
+        GRes.VerticesPerPrimitive = GeomVerticesPerPrimitive;
+        GRes.MaxVerticesPerStream = GState.MaxOutputVertices;
+        GRes.OutputScalarsPerVertex = OutputScalarsPerVertex;
+        GRes.EmittedVertices = EmittedVertices;
+        GRes.EmittedVertexCounts = EmittedVertexCounts;
+        GRes.StripEndsAfter = StripEndsAfter;
+        cpu::PreparedGeometryBatch Prepared =
+            cpu::PreparedGeometryBatch::create(
+                Pipeline.getGeometryStage().getResourceInfo(), GRes);
+        if (Error E = Pipeline.getGeometryStage().invokeGeometry(Prepared))
+          return E;
+
+        collectGeometryStreams(Prepared.args(), Combined);
+      }
+
+      // Rebuilds the merged stream's flat vertex records into a
+      // `StageStorage` shaped like `GSSig`'s own outputs, so everything
+      // downstream (clipping, the viewport transform, the interpolator)
+      // reads it exactly as it already reads `RasterOut`.
+      llvm::ArrayRef<StreamVertex> MergedVerts = Combined.getVertices(0);
+      Expected<StageStorage> Flat =
+          buildStageStorage(*GSSig, SignatureDirection::Output,
+                            static_cast<uint32_t>(MergedVerts.size()));
+      if (!Flat)
+        return Flat.takeError();
+      GeomStreamOutput = std::move(*Flat);
+      for (uint32_t Slot = 0; Slot != MergedVerts.size(); ++Slot) {
+        const StreamVertex &Vtx = MergedVerts[Slot];
+        uint32_t Cursor = 0;
+        for (const SignatureElement *Elt : GSOutputElements)
+          for (uint32_t Row = 0; Row != Elt->RowCount; ++Row)
+            for (uint32_t Comp = 0; Comp != Elt->ComponentCount; ++Comp)
+              GeomStreamOutput.writeFloat(Elt->ElementID,
+                                          Elt->FirstComponent + Comp, Slot,
+                                          Vtx[Cursor++], Row);
+      }
+
+      // Rebuilds the primitive lists rasterization consumes from the
+      // merged stream's own strips: `Points` needs none (the point
+      // rasterization loop below already just iterates `RasterOut`'s
+      // whole invocation range).
+      AbsTriIndices.clear();
+      AbsLineIndices.clear();
+      switch (GState.OutputPrimitive) {
+      case GeometryOutputPrimitive::Points:
+        break;
+      case GeometryOutputPrimitive::LineStrip:
+        for (const StreamStrip &S : Combined.getStrips(0))
+          for (uint32_t I = S.Begin; I + 2 <= S.End; ++I)
+            AbsLineIndices.push_back({I, I + 1});
+        break;
+      case GeometryOutputPrimitive::TriangleStrip:
+        for (const StreamStrip &S : Combined.getStrips(0)) {
+          uint32_t Local = 0;
+          for (uint32_t I = S.Begin; I + 3 <= S.End; ++I, ++Local)
+            AbsTriIndices.push_back(
+                Local % 2 == 0 ? std::array<uint32_t, 3>{I, I + 1, I + 2}
+                               : std::array<uint32_t, 3>{I + 1, I, I + 2});
+        }
+        break;
+      }
+      RasterOut = &GeomStreamOutput;
     }
 
     // Screen-space triangles plus their owning varying storage, binned into
