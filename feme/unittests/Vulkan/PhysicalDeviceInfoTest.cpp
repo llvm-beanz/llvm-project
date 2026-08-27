@@ -10,6 +10,9 @@
 #include "PhysicalDeviceInfo.h"
 #include "EntryPoints.h"
 
+#include "feme/Graphics/Patch.h"
+#include "feme/Graphics/Tessellator.h"
+
 #include "gtest/gtest.h"
 
 #include <cstring>
@@ -108,9 +111,9 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
 
 TEST(PhysicalDeviceInfo,
      OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised) {
-  // (V4/C4/E22/H3) `robustBufferAccess`/`dualSrcBlend`/
-  // `textureCompressionASTC_LDR`/`multiViewport` are the only core
-  // features this milestone can honestly claim (see
+  // (V4/C4/E22/H3/H4b) `robustBufferAccess`/`dualSrcBlend`/
+  // `textureCompressionASTC_LDR`/`multiViewport`/`tessellationShader` are
+  // the only core features this milestone can honestly claim (see
   // PhysicalDeviceInfo.cpp's comment); every other `VkBool32` stays
   // false, since nothing else has been implemented that could back one
   // yet.
@@ -119,14 +122,30 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
   EXPECT_EQ(Info.Features.textureCompressionASTC_LDR, VK_TRUE);
   EXPECT_EQ(Info.Features.multiViewport, VK_TRUE);
+  EXPECT_EQ(Info.Features.tessellationShader, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
   Cleared.dualSrcBlend = VK_FALSE;
   Cleared.textureCompressionASTC_LDR = VK_FALSE;
   Cleared.multiViewport = VK_FALSE;
+  Cleared.tessellationShader = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
+}
+
+// Roadmap H4b: `maxTessellationPatchSize`/`maxTessellationGenerationLevel`
+// must never be advertised higher than this implementation's own honest
+// ceilings, `feme::graphics::MaxPatchControlPoints` (32, Graphics/Patch.h)
+// and `feme::graphics::DefaultMaxTessFactor` (64, Graphics/Tessellator.h)
+// respectively -- exceeding either would silently misreport what a real
+// pipeline creation/draw can actually do.
+TEST(PhysicalDeviceInfo, TessellationLimitsMatchImplementationCeilings) {
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  EXPECT_EQ(Info.Properties.limits.maxTessellationPatchSize,
+            feme::graphics::MaxPatchControlPoints);
+  EXPECT_EQ(Info.Properties.limits.maxTessellationGenerationLevel,
+            feme::graphics::DefaultMaxTessFactor);
 }
 
 TEST(PhysicalDeviceInfo, TextureCompressionASTCLDRIsAdvertised) {

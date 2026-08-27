@@ -391,6 +391,20 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // Executor.cpp) now genuinely supports multiple viewports/scissors, so
   // this can honestly flip to `VK_TRUE`.
   Info.Features.multiViewport = VK_TRUE;
+  // Roadmap H4b: `GraphicsPipeline.cpp`'s `vkCreateGraphicsPipelines` now
+  // accepts `VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT`/`_EVALUATION_BIT`,
+  // translates `patchControlPoints`, compiles both stages' modules into
+  // the hull/patch-constant/domain `CompiledStage`s
+  // `graphics::GraphicsPipeline::setTessellationStages` (which the
+  // executor already consumes, roadmap H4) requires, and enforces
+  // `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` exactly when they are present -- so
+  // this can honestly flip to `VK_TRUE`. `maxTessellationPatchSize` (32)
+  // and `maxTessellationGenerationLevel` (64) above already match this
+  // implementation's own honest ceilings, `feme::graphics::
+  // MaxPatchControlPoints` (Graphics/Patch.h) and `feme::graphics::
+  // DefaultMaxTessFactor` (Graphics/Tessellator.h) respectively, and were
+  // not raised for this milestone.
+  Info.Features.tessellationShader = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
