@@ -200,6 +200,20 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
 }
 )mlir";
 
+/// (Roadmap H4h) A genuinely-empty vertex stage -- no stage-IO globals at
+/// all, `void main (void) {}` -- exactly `dEQP-VK.tessellation.winding.*`'s
+/// own real vertex shader, legal whenever a tessellation-evaluation stage
+/// computes its own `SV_Position`/`gl_Position` purely from `gl_TessCoord`
+/// and never reads a per-vertex output back via `gl_in[]`.
+constexpr llvm::StringLiteral EmptyVertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main
+}
+)mlir";
+
 class GraphicsPipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -1669,6 +1683,52 @@ TEST_F(GraphicsPipelineTest,
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, TessEval, nullptr);
   vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H4h: a tessellation pipeline whose vertex stage is genuinely
+/// empty (`EmptyVertexSource`, no stage-IO globals at all) must still be
+/// accepted, since a tessellation-evaluation stage present in the pipeline
+/// is the one whose own `SV_Position` output the rasterizer reads --
+/// exactly `dEQP-VK.tessellation.winding.*`'s own real shape, previously
+/// rejected with "vertex stage does not write a 4-component SV_Position
+/// output" even though the *evaluation* stage (`TessEvalSource`) writes
+/// one.
+TEST_F(GraphicsPipelineTest, AcceptsTessellationPipelineWithEmptyVertexShader) {
+  VkShaderModule Vertex = createModule(EmptyVertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H4h: without a tessellation-evaluation stage, an empty vertex
+/// shader is still rejected -- the ordinary vertex -> fragment pipeline has
+/// no other producer of a rasterizer-visible position, so the pre-existing
+/// `SV_Position` requirement on the vertex stage is unaffected by this
+/// milestone's tessellation-specific relaxation.
+TEST_F(GraphicsPipelineTest, RejectsEmptyVertexShaderWithoutTessellation) {
+  VkShaderModule Vertex = createModule(EmptyVertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Handle, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 

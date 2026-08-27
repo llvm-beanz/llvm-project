@@ -449,9 +449,10 @@ getStageSignature(const feme::cpu::CompiledStage &Stage) {
 /// G0 produces: "Cross-stage interface matching is validated at pipeline
 /// creation ... and a mismatch is a pipeline-creation failure with a
 /// diagnostic, never a silently mislinked varying." Also checks the two
-/// interface obligations the executor itself has -- an `SV_Position` vertex
-/// output and one `SV_TargetN` fragment output per color attachment -- here,
-/// at creation, rather than leaving them for the first draw.
+/// interface obligations the executor itself has -- an `SV_Position`
+/// output from whichever stage the rasterizer actually reads it from, and
+/// one `SV_TargetN` fragment output per color attachment -- here, at
+/// creation, rather than leaving them for the first draw.
 ///
 /// \p FragmentStage is `nullptr` for a pipeline that legally omitted its
 /// fragment stage (roadmap H2j, only possible when \p ColorAttachmentCount
@@ -459,21 +460,43 @@ getStageSignature(const feme::cpu::CompiledStage &Stage) {
 /// condition): every fragment-side check below (varying linkage, per-
 /// attachment outputs) is skipped in that case, since there is no fragment
 /// signature to check them against.
+///
+/// \p DomainStage is non-`nullptr` for a pipeline with tessellation stages
+/// (roadmap H4b). When present, it -- not \p VertexStage -- is the stage
+/// whose own output is rasterized (`PatchPipeline.cpp`'s
+/// `runPatchPipeline`), so the `SV_Position` requirement below is checked
+/// against it instead: a tessellation-evaluation shader computes its own
+/// clip-space position from `gl_TessCoord`/patch data, and per
+/// `dEQP-VK.tessellation.winding.*`'s own real-world shape, the vertex
+/// stage feeding it may legally write nothing at all (an empty `void
+/// main(void) {}`) when the evaluation shader never reads a per-vertex
+/// input back via `gl_in[]` (roadmap H4h).
 Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                               const feme::cpu::CompiledStage *FragmentStage,
+                              const feme::cpu::CompiledStage *DomainStage,
                               uint32_t ColorAttachmentCount,
                               llvm::ArrayRef<VertexInputAttribute> Attributes) {
   Expected<feme::EntrySignature> VSSig = getStageSignature(VertexStage);
   if (!VSSig)
     return VSSig.takeError();
 
+  std::optional<feme::EntrySignature> DomainSig;
+  if (DomainStage) {
+    Expected<feme::EntrySignature> Parsed = getStageSignature(*DomainStage);
+    if (!Parsed)
+      return Parsed.takeError();
+    DomainSig = std::move(*Parsed);
+  }
+  const feme::EntrySignature &PositionSig = DomainSig ? *DomainSig : *VSSig;
+
   const feme::SignatureElement *Position =
-      findSystemValue(*VSSig, feme::SignatureDirection::Output,
+      findSystemValue(PositionSig, feme::SignatureDirection::Output,
                       feme::SignatureSystemValue::Position);
   if (!Position || Position->ComponentCount != 4)
-    return createStringError(inconvertibleErrorCode(),
-                             "vertex stage does not write a 4-component "
-                             "SV_Position output");
+    return createStringError(
+        inconvertibleErrorCode(), "%s stage does not write a 4-component "
+                                  "SV_Position output",
+        DomainStage ? "tessellation evaluation" : "vertex");
 
   if (FragmentStage) {
     Expected<feme::EntrySignature> FSSig = getStageSignature(*FragmentStage);
@@ -1538,6 +1561,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   }
 
   if (Error E = validateStageInterfaces(**VertexStage, FragmentStage.get(),
+                                        DomainStage.get(),
                                         ColorAttachmentCount, VertexAttributes))
     return std::move(E);
 
