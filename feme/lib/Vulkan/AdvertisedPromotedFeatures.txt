@@ -24,6 +24,14 @@ dualSrcBlend
 # ASTCDecode.h recognize, lay out and decode LDR ASTC data, and the
 # copy/blit/resolve paths address such an image a block at a time.
 textureCompressionASTC_LDR
+# multiViewport: roadmap H3 -- PhysicalDeviceInfo.h's MaxViewportCount (16)
+# replaces the old hard-coded maxViewports == 1, GraphicsPipeline.cpp's
+# translateViewportState validates/stores an array of that many
+# viewports/scissors, CommandBuffer.cpp's vkCmdSetViewport{,WithCount}
+# write into that same array, and Executor.cpp's resolvePrimitiveState
+# picks one array element per primitive from a vertex stage's
+# ViewportArrayIndex output.
+multiViewport
 #
 # --- Core Vulkan 1.1 (VkPhysicalDeviceVulkan11Features).
 #
@@ -52,6 +60,13 @@ subgroupBroadcastDynamicId
 hostQueryReset
 # timelineSemaphore: V3's Sync.{h,cpp} timeline semaphores.
 timelineSemaphore
+# shaderOutputViewportIndex/shaderOutputLayer: roadmap H3 (in lockstep
+# with H2's own gl_Layer) -- both gl_ViewportIndex and gl_Layer are real
+# vertex-stage outputs (Executor.cpp's VSViewportOut/VSLayerOut), and
+# there is no geometry stage for either bit's "no geometry shader
+# required" promise to be moot against.
+shaderOutputViewportIndex
+shaderOutputLayer
 #
 # --- Core Vulkan 1.3 (VkPhysicalDeviceVulkan13Features).
 #

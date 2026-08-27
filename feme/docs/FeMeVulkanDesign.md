@@ -1687,6 +1687,36 @@ specialization data. Two pipelines differing only in dynamic state that is
 genuinely dynamic must produce the same key; anything folded into generated
 code must not.
 
+**Status (roadmap H3): multiple viewports and scissors implemented.**
+`maxViewports` is now 16 (`PhysicalDeviceInfo.h`'s `MaxViewportCount`,
+Vulkan's mandatory multi-viewport floor) instead of a hard-coded 1;
+`translateViewportState` (GraphicsPipeline.cpp) accepts any static
+`viewportCount`/`scissorCount` up to that limit (rejecting 0 or anything
+larger), and `GraphicsPipelineState`/`DynamicGraphicsState` both carry a
+`Viewports`/`Scissors` array rather than a single element.
+`vkCmdSetViewport`/`vkCmdSetScissor` write a `first*`-relative sub-range of
+the currently-bound dynamic array; the new `vkCmdSetViewportWithCount`/
+`vkCmdSetScissorWithCount` (and their already-implemented `*EXT` aliases)
+replace the whole array starting at element 0, truncating it down as well
+as growing it (`RecordedCommand::ResetViewportOrScissorCount`). Per-
+primitive routing is new in the executor: a vertex stage's `ViewportArrayIndex`
+output (`gl_ViewportIndex`, SPIR-V `BuiltIn` 10) selects which array element
+(and its paired scissor) a triangle/line/point projects and clips through
+(`Executor.cpp`'s `resolvePrimitiveState`), with `resolveViewportArrayIndex`
+(LayeredRendering.h, alongside roadmap R34's own `resolveRenderTargetArrayLayer`)
+discarding a primitive whose index is negative or out of range rather than
+clamping or wrapping it into a valid slot -- the same rule
+`resolveRenderTargetArrayLayer` already applied to `RenderTargetArrayIndex`/
+`gl_Layer`. A vertex stage that writes no `ViewportArrayIndex` still resolves
+to array element 0, the long-standing single-viewport behavior. Both halves
+of `VK_EXT_shader_viewport_index_layer`'s promoted-to-1.2 feature pair,
+`shaderOutputViewportIndex` and `shaderOutputLayer`, are now advertised
+`VK_TRUE`: both `gl_ViewportIndex` and `gl_Layer` are real vertex-stage
+outputs, and this ICD has no geometry stage for either bit's "no geometry
+shader required" promise to be moot against. See
+`unittests/Vulkan/{GraphicsPipelineTest,DrawTest,PhysicalDeviceInfoTest}.cpp`'s
+new cases and "Roadmap H3: measured impact" in VulkanCTSReport.md.
+
 ### Draw commands and vertex data
 
 The command set from "Command Buffers" grows by:
@@ -2894,8 +2924,11 @@ Depends on G5.
   rendering if advertised.
 - Add layered rendering, viewport/layer array indexing, and multiple viewports
   and scissors (roadmap H2 closes layered rendering/`multiview`'s own
-  object-model and executor half; viewport/layer array indexing and
-  multiple viewports remain H3's own scope).
+  object-model and executor half; roadmap H3 closes multiple viewports and
+  scissors, including per-primitive `ViewportArrayIndex` routing; the
+  general, arbitrary-value per-primitive `RenderTargetArrayIndex`/`gl_Layer`
+  case -- as opposed to H2's own automatic "view index == layer index"
+  default -- remains unimplemented pending a real producer, roadmap H5).
 - Complete the format matrix for the advertised graphics profile, including
   render-target, blend, depth/stencil, and multisample capability bits.
 - Add secondary command buffers recorded inside a render pass.

@@ -63,8 +63,8 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | Status | Count |
 |---|---:|
 | Advertised | 31 |
-| Implemented (core, not advertised by name) | 17 |
-| Planned (in scope, not implemented) | 50 |
+| Implemented (core, not advertised by name) | 18 |
+| Planned (in scope, not implemented) | 49 |
 | Not implemented (out of scope) | 202 |
 
 - **The 31 advertised** are the ones a `deqp-vk` case enables by name
@@ -120,7 +120,11 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_KHR_uniform_buffer_standard_layout` and
   `VK_KHR_format_feature_flags2`. Most are roadmap C6/V3-era work whose
   extension-name consequences were never written down. None is newly
-  implemented by this edition.
+  implemented by this edition. Roadmap H3 adds an 18th:
+  `VK_EXT_shader_viewport_index_layer` (`shaderOutputViewportIndex`/
+  `shaderOutputLayer`, core-promoted into Vulkan 1.2), moving from
+  "Planned" now that both bits are genuinely backed by a real
+  `gl_ViewportIndex`/`gl_Layer` vertex-stage output.
 - **The 50 planned** decompose into three groups, and the membership rule
   is enforced by `PlannedExtensions.txt`'s own header rather than by
   judgement per row: every core-promoted (1.1-1.4) extension this ICD does
@@ -159,6 +163,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `pNext` chain link are still handled gracefully elsewhere), only that
   this specific named extension is not usable.
 
+| Extension | Status | Note |
 | Extension | Status | Note |
 |---|---|---|
 | `VK_EXT_4444_formats` | Advertised |  |
@@ -292,7 +297,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_EXT_shader_subgroup_vote` | Not implemented |  |
 | `VK_EXT_shader_tile_image` | Not implemented |  |
 | `VK_EXT_shader_uniform_buffer_unsized_array` | Not implemented |  |
-| `VK_EXT_shader_viewport_index_layer` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_EXT_shader_viewport_index_layer` | Implemented (core, not advertised by name) | roadmap H3: shaderOutputViewportIndex/shaderOutputLayer both reported true, and genuinely backed now -- gl_ViewportIndex and gl_Layer are real vertex-stage outputs (Executor.cpp's VSViewportOut/VSLayerOut), with no geometry stage in sight for either bit's "no geometry shader required" promise to be moot against |
 | `VK_EXT_subgroup_size_control` | Implemented (core, not advertised by name) | roadmap E7: VkPipelineShaderStageRequiredSubgroupSizeCreateInfo/VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT and the four related limit fields (minSubgroupSize/maxSubgroupSize/maxComputeWorkgroupSubgroups/requiredSubgroupSizeStages) implemented via the promoted VK_VERSION_1_3 aggregate struct; extension string itself never added to getSupportedDeviceExtensions (unlike VK_KHR_synchronization2/maintenance5/maintenance6/shader_integer_dot_product, no known CTS case was found requiring it by name regardless of apiVersion) |
 | `VK_EXT_subpass_merge_feedback` | Not implemented |  |
 | `VK_EXT_surface_maintenance1` | Not implemented |  |

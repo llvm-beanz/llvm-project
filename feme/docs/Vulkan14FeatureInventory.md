@@ -69,12 +69,12 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---|---|---|
-| 1.0 | 3 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
+| 1.0 | 4 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
 | 1.1 | 1 of 12 | n/a (see scope note) | 7 of 23 |
-| 1.2 | 7 of 47 | n/a (see scope note) | 7 of 24 |
+| 1.2 | 9 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
 | 1.4 | 20 of 21 | 25 | 15 of 16 |
-| **total** | **43 of 150** | **70** | **48 of 86** |
+| **total** | **46 of 150** | **70** | **48 of 86** |
 
 - **The 1.3 floor is nearly closed; the 1.1/1.2 floor was never audited
   until now, and the 1.4 floor is nearly closed too.** Roadmap E1-E28 drove
@@ -89,7 +89,9 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   (`pipelineProtectedAccess`), F10 (`pipelineRobustness`), F11
   (`hostImageCopy`) and F12 (`pushDescriptor`), bringing 1.4 to 20 of its
   21 bits -- only `shaderFloatControls2` remains, F3's own still-open
-  target -- while roadmap H2 has now closed `multiview`, the single bit
+  target -- while roadmap H2 has closed `multiview` and roadmap H3 has now
+  closed `multiViewport` (1.0) and `shaderOutputViewportIndex`/
+  `shaderOutputLayer` (1.2), the single bit
   1.1's own floor was missing the most: `variablePointers`,
   `samplerYcbcrConversion`, `shaderDrawParameters`, the 16-bit storage
   cluster and `protectedMemory` remain `VK_FALSE` (`multiviewGeometryShader`/
@@ -113,8 +115,8 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt`, understating
   the 1.4 extension row as 14 of 16 rather than its true 15 of 16; restored
   here alongside roadmap H2's own `multiview` update.
-- **17 of the 52 unimplemented 1.0 feature bits are graphics
-  capabilities** (`geometryShader`, `tessellationShader`, `multiViewport`,
+- **16 of the 51 unimplemented 1.0 feature bits are graphics
+  capabilities** (`geometryShader`, `tessellationShader`,
   `fillModeNonSolid`, `wideLines`, `largePoints`, `sampleRateShading`,
   `independentBlend`, `depthClamp`, `depthBiasClamp`, `depthBounds`,
   `imageCubeArray`, `shaderClipDistance`, `shaderCullDistance`,
@@ -278,7 +280,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `wideLines` | no |  |
 | feature | VK_VERSION_1_0 | `largePoints` | no |  |
 | feature | VK_VERSION_1_0 | `alphaToOne` | no |  |
-| feature | VK_VERSION_1_0 | `multiViewport` | no |  |
+| feature | VK_VERSION_1_0 | `multiViewport` | yes |  |
 | feature | VK_VERSION_1_0 | `samplerAnisotropy` | no |  |
 | feature | VK_VERSION_1_0 | `textureCompressionETC2` | no |  |
 | feature | VK_VERSION_1_0 | `textureCompressionASTC_LDR` | yes |  |
@@ -394,8 +396,8 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_2 | `vulkanMemoryModel` | no |  |
 | feature | VK_VERSION_1_2 | `vulkanMemoryModelDeviceScope` | no |  |
 | feature | VK_VERSION_1_2 | `vulkanMemoryModelAvailabilityVisibilityChains` | no |  |
-| feature | VK_VERSION_1_2 | `shaderOutputViewportIndex` | no |  |
-| feature | VK_VERSION_1_2 | `shaderOutputLayer` | no |  |
+| feature | VK_VERSION_1_2 | `shaderOutputViewportIndex` | yes |  |
+| feature | VK_VERSION_1_2 | `shaderOutputLayer` | yes |  |
 | feature | VK_VERSION_1_2 | `subgroupBroadcastDynamicId` | yes |  |
 | extension | VK_VERSION_1_2 | `VK_EXT_descriptor_indexing` | no |  |
 | extension | VK_VERSION_1_2 | `VK_EXT_host_query_reset` | yes | core, not advertised by name: roadmap C6, vkResetQueryPool (QueryPool.cpp) |

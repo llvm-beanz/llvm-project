@@ -30,7 +30,6 @@ VK_EXT_mesh_shader = roadmap H6
 VK_EXT_sampler_filter_minmax = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_EXT_scalar_block_layout = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_EXT_separate_stencil_usage = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
-VK_EXT_shader_viewport_index_layer = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_EXT_texture_compression_astc_hdr = roadmap E21: HDR block formats and decodeASTCBlockHDR exist, but no copy/blit/sampling path consumes one, so the feature bit stays false (E22's own closing note)
 VK_EXT_ycbcr_2plane_444_formats = roadmap E19 declined it while samplerYcbcrConversion is unimplemented; still part of the 1.3 mandatory floor, so it returns as roadmap 1.9.10 K-series work alongside VK_KHR_sampler_ycbcr_conversion
 VK_KHR_16bit_storage = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)

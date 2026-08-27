@@ -59,6 +59,7 @@ VK_KHR_copy_commands2 = core, not advertised by name: roadmap D0, all six vkCmd*
 VK_KHR_maintenance4 = core, not advertised by name: roadmap E4, vkGetDevice{Buffer,Image}MemoryRequirements + maxBufferSize
 VK_EXT_subgroup_size_control = core, not advertised by name: roadmap E7, VkPipelineShaderStageRequiredSubgroupSizeCreateInfo and its four limit fields
 VK_KHR_format_feature_flags2 = core, not advertised by name: roadmap E24/E25, chained VkFormatProperties3 (EntryPoints.cpp)
+VK_EXT_shader_viewport_index_layer = core, not advertised by name: roadmap H3, shaderOutputViewportIndex/shaderOutputLayer both VK_TRUE (Executor.cpp's VSViewportOut/VSLayerOut)
 VK_KHR_global_priority = roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family
 VK_KHR_shader_subgroup_rotate = roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern)
 VK_KHR_shader_expect_assume = roadmap F4: spirv.KHR.AssumeTrue/spirv.KHR.Expect conversion patterns (SPIRVToLLVMPatterns.cpp's AssumeTrueConversionPattern/ExpectConversionPattern)

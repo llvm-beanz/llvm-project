@@ -36,3 +36,4 @@ VK_KHR_shader_subgroup_extended_types = roadmap C6: reported true, and vacuously
 VK_KHR_timeline_semaphore = V3: vkGetSemaphoreCounterValue/vkWaitSemaphores/vkSignalSemaphore plus the feature and limit cases (Sync.cpp, EntryPoints.cpp)
 VK_KHR_uniform_buffer_standard_layout = roadmap C6: reported true, and honest -- no std140 layout restriction was ever enforced to relax (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp)
 VK_KHR_format_feature_flags2 = roadmap E24/E25: vkGetPhysicalDeviceFormatProperties2 fills a chained VkFormatProperties3 (EntryPoints.cpp)
+VK_EXT_shader_viewport_index_layer = roadmap H3: shaderOutputViewportIndex/shaderOutputLayer both reported true, and genuinely backed now -- gl_ViewportIndex and gl_Layer are real vertex-stage outputs (Executor.cpp's VSViewportOut/VSLayerOut), with no geometry stage in sight for either bit's "no geometry shader required" promise to be moot against

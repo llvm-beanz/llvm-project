@@ -6080,3 +6080,121 @@ from 1768/1827 before this row's own four new tests
 `.RejectsMissingFragmentStageWithColorAttachments`,
 `.AcceptsMissingFragmentStageWithMismatchedColorBlendState`,
 `ExecutorTest.RendersWithNoFragmentStage`).
+
+## Roadmap H3: measured impact (multiple viewports and scissors)
+
+`dEQP-VK.draw.*.shader_viewport_index.*` (`--deqp-case`, all four
+render-target-path variants: `renderpass`, `dynamic_rendering.primary_cmd_buff`,
+`dynamic_rendering.partial_secondary_cmd_buff`,
+`dynamic_rendering.complete_secondary_cmd_buff`; `vktDrawShaderViewportIndexTests.cpp`):
+196 cases.
+
+Before this milestone (`maxViewports == 1`, `multiViewport == VK_FALSE`,
+`vkCmdSetViewportWithCount`/the pipeline path both rejecting anything but
+one viewport):
+
+```
+Test case 'dEQP-VK.draw.renderpass.shader_viewport_index.vertex_shader_2'..
+NotSupported (Requested core feature is not supported: multiViewport at vktTestCase.cpp:1497)
+
+Test run totals:
+  Passed:          0/196 (0.0%)
+  Failed:          0/196 (0.0%)
+  Not supported: 196/196 (100.0%)
+```
+
+Every case in the group short-circuits at `checkSupport` on the
+`multiViewport` feature bit alone -- `deqp-vk` never even reaches a
+viewport count above 1, so this group measured nothing about this
+milestone's own code before it, only the bit's own absence.
+
+After `PhysicalDeviceInfo.h`'s `MaxViewportCount` (16) replacing the old
+hard-coded `maxViewports == 1`, `GraphicsPipeline.cpp`'s
+`translateViewportState`/`DynamicGraphicsState`/`GraphicsPipelineState`
+carrying full viewport/scissor arrays, `CommandBuffer.cpp`'s
+`vkCmdSetViewport{,WithCount}`/`vkCmdSetScissor{,WithCount}` writing into
+(and, for the `WithCount` pair, truncating) that same array,
+`Executor.cpp`'s `resolvePrimitiveState` routing each primitive through the
+array element its `ViewportArrayIndex` stage output names, and
+`PhysicalDeviceInfo.cpp` advertising `multiViewport = VK_TRUE`:
+
+```
+Test run totals:
+  Passed:         64/196 (32.7%)
+  Failed:         68/196 (34.7%)
+  Not supported:  64/196 (32.7%)
+```
+
+Every `vertex_shader_N` case (`gl_ViewportIndex` written from the vertex
+stage, read back only by the fixed-function viewport/scissor/clip
+transform, never by the fragment shader itself) now passes: 64/64 across
+all four render-target-path variants (16 each). The 64 `Not supported`
+are `geometry_shader_N`/`tessellation_*` variants this ICD has no
+geometry or tessellation stage to run yet (roadmap H4/H5, unchanged by
+this milestone).
+
+**Deviation**: the remaining 68 `Failed` are every `fragment_shader_N`
+case (17 each across the four render-target-path variants, including
+`fragment_shader_implicit`) -- these additionally read `gl_ViewportIndex`
+*back* as a flat-shaded fragment-shader input (`GL_ARB_shader_viewport_layer_array`'s
+other half: `out_color = color[gl_ViewportIndex]`), not merely write it
+from the vertex stage:
+
+```
+Test case 'dEQP-VK.draw.renderpass.shader_viewport_index.fragment_shader_2'..
+error: feme-cpu-wrap-fragment: fragment stage wrapper requires attached feme.signature metadata
+  Fail (vk.createGraphicsPipelines(device, pipelineCache, 1u, pCreateInfo, pAllocator, &object): VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37)
+```
+
+Root cause not yet isolated to a single line, but narrowed to the
+fragment-stage signature/metadata-attachment path (`FragmentWrapper.cpp`'s
+`lowerFragmentStageOps` finding no `feme.signature` metadata on the
+fragment entry function at all, rather than a metadata mismatch): every
+existing consumer of a `SignatureSystemValue` decorated builtin in this
+codebase is either an *output* (`Position`, `RenderTargetArrayIndex`,
+`ViewportArrayIndex` from a pre-rasterization stage) or one of the small
+set of fragment-stage builtin *inputs* already wired up before this
+milestone (`FragCoord`/`Position`, `FrontFacing`, `SampleId`, `SampleMask`);
+`ViewportArrayIndex` read back as a genuine fragment-stage input appears
+to be new, uncovered territory this milestone's own scope (the roadmap
+text names `ViewportIndex` only "as a stage output") did not include.
+Broken out as roadmap H3a to track and fix on its own, since root-causing
+and fixing the fragment-stage signature path is a materially separate
+piece of work from the viewport-count/pipeline/executor plumbing this row
+itself closes.
+
+`dEQP-VK.multiview.*` (838 cases, the same regression check every H2-series
+row above ran, since this milestone's `CommandBuffer.cpp`/`Executor.cpp`
+changes touch the same per-view attachment-slicing and per-primitive
+layer-resolution code multiview itself depends on):
+
+```
+Passed:        457/838 (54.5%)
+Failed:         42/838 (5.0%)
+Not supported: 339/838 (40.5%)
+```
+
+Unchanged from H2j's own 457/838 (54.5%, 42 `Failed`) baseline -- this
+milestone introduces no multiview regression, confirming the restored
+per-view `ResolveAttachments`/`DepthStencil` slicing (this row's own
+bugfix over the stashed partial progress it started from, needed to keep
+`Executor.cpp`'s `getDrawLayerCount()` agreeing with every attachment kind
+once again) is correct.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full, 1776/1835 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up
+from 1771/1830 before this row's own five new tests
+(`GraphicsPipelineTest.AcceptsMultipleViewportsAndScissors`,
+`.RejectsTooManyViewports`, `DrawTest.DynamicViewportWithCountRoutesInstancesToDifferentViewports`,
+`.OutOfRangeViewportIndexDiscardsThePrimitive`,
+`PhysicalDeviceInfoTest.ShaderViewportIndexLayerFeaturesAreTrue`, plus
+`OnlyRobustBufferAccessDualSrcBlendAndASTCLDRAreAdvertised` renamed/extended
+to `OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised`).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updated:
+`multiViewport` (1.0) and `shaderOutputViewportIndex`/`shaderOutputLayer`
+(1.2) move from `no`/`VK_FALSE` to `yes`/`VK_TRUE` (46 of 150 features
+advertised, up from 43); `VK_EXT_shader_viewport_index_layer` moves from
+"Planned" to "Implemented (core, not advertised by name)" (18 of 51
+core-but-unadvertised extensions, up from 17; 49 of 150 planned, down from
+50).
