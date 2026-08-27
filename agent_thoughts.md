@@ -36185,3 +36185,197 @@ ceilings). That is squarely the next session's job, and it is now
 unblocked: a real SPIR-V tessellation-control/evaluation module can be
 reflected end to end into the two FeMe hull phases plus the domain stage,
 with `TessellationState` readable from either compiled stage's attributes.
+
+# Roadmap H4b: `vkCreateGraphicsPipelines` tessellation acceptance
+
+## Starting point
+
+H4a (previous session) had already lifted `CanonicalizeStagePass`'s
+Vertex/Fragment-only filter, split a SPIR-V tessellation-control entry
+into FeMe's two D3D-shaped hull phases at its barrier, and mapped SPIR-V's
+tessellation execution modes/`BuiltIn`s onto `TessellationState`/
+`SignatureSystemValue`s. Nothing on the Vulkan-API side consumed any of
+it yet: `GraphicsPipeline.cpp`'s `mapStage`/stage-mask loop still only
+accepted `VK_SHADER_STAGE_VERTEX_BIT`/`VK_SHADER_STAGE_FRAGMENT_BIT`, and
+`PhysicalDeviceInfo.cpp` still reported `tessellationShader = VK_FALSE`.
+My task, per the prompt's own body, was exactly this remaining half: stage
+acceptance/validation, `patchControlPoints` translation, compiling the
+three tessellation `CompiledStage`s, calling `setTessellationStages`, and
+flipping the feature bit with its limits.
+
+## First discovery: H4a's barrier detection never actually fired
+
+Before writing any H4b code, I wanted to hand-verify what a real SPIR-V
+tessellation-control module looks like after `feme-opt
+--feme-convert-spirv-to-llvm`, since I'd need to write genuine test
+fixtures later. Doing that revealed `isSPIRVGroupSyncBarrier`
+(`CanonicalizeStage.cpp`) only recognized the `llvm.spv.*.barrier.with.
+group.sync` intrinsics -- the shape Clang's HLSL builtin path lowers a
+barrier call to -- not the mangled `_Z22__spirv_ControlBarrieriii` call
+that MLIR's real upstream `ControlBarrierPattern` (confirmed against
+`mlir/test/Conversion/SPIRVToLLVM/barrier-ops-to-llvm.mlir`) lowers
+`spirv.ControlBarrier` to. This meant `splitTessellationControlEntry`
+never fired for any real SPIR-V-imported tessellation-control shader --
+H4a's own tests all used the intrinsic form directly, since they were
+unit tests of the splitting logic in isolation, not full SPIR-V-to-LLVM
+pipelines. I fixed this first, as its own small commit, with a new
+`CanonicalizeStageTest.SplitsHullEntryAtMangledSPIRVControlBarrierCall`
+mirroring the existing intrinsic-based test.
+
+This is exactly the kind of gap that only surfaces once real,
+end-to-end-compiled shaders are exercised rather than synthetic IR built
+directly in a test file -- worth calling out because it recurred, in a
+different shape, at CTS time (see below).
+
+## Implementing H4b itself
+
+The design followed the milestone's own description closely:
+`mapStage`/`translateFixedFunctionState` gained the stage-mask/topology
+rules (exactly one control + one evaluation stage together, patch-list
+topology iff both present); `patchControlPoints` validated against
+`maxTessellationPatchSize` into `TessellationState::InputControlPointCount`;
+`compileAndValidateStages` compiles the tessellation-control module twice
+(once for its own control-point entry, once for H4a's `<entry>.
+patchconstant` phase) and the evaluation module once, merging their
+independently-optional `TessellationState` halves (no single SPIR-V entry
+point declares both control- and evaluation-side state, so `Optional`-style
+merging rather than requiring both from one place felt like the right
+match for H4a's own design); and the three resulting `CompiledStage`s feed
+`graphics::GraphicsPipeline::setTessellationStages`, which the executor
+had already consumed since H4/R34. `PhysicalDeviceInfo.cpp`'s feature flip
+was mechanical once the rest worked -- the limits were already correct.
+
+One design choice worth recording: I import and canonicalize the
+tessellation-control module twice (once per phase) rather than importing
+once and extracting two functions from a shared module. This matches the
+existing precedent (vertex/fragment stages are each imported once, no
+cross-call module sharing anywhere else in `compileAndValidateStages`)
+and kept the change simpler, at the cost of doing the SPIR-V-to-LLVM
+conversion and canonicalization work twice per tessellation pipeline
+compile. Given pipeline creation is not a hot path and pipeline caching
+already exists, I judged this an acceptable trade against the complexity
+of threading two entry points out of one shared `CompiledStage::create`
+call.
+
+Writing genuine end-to-end SPIR-V test fixtures (rather than testing
+against hand-built LLVM IR) took real iteration: combining a builtin
+(`TessLevelOuter`) + array type + `Input` storage class + `patch`
+decoration hit an unrelated `llvm.getelementptr` conversion bug, so I
+used a plain, non-builtin, scalar, `{patch}`-decorated `Location`-based
+variable instead (confirmed `isPatchOutputDecoration` only requires
+`D.Patch`, not the specific builtin, so this is a faithful substitute for
+what the test needs to exercise). I pre-validated both new SPIR-V module
+constants against `feme-opt --feme-convert-spirv-to-llvm` on scratch files
+before adding them to the real gtest suite, which avoided several
+build/run debugging cycles.
+
+`ninja check-feme` (assertions-enabled, ccache build): 1821/1880 passed
+(59 pre-existing, unrelated `Unsupported`, 0 `Failed`).
+
+## Running the Vulkan CTS: real progress, and two new real gaps
+
+`dEQP-VK.tessellation.*` (1114 cases) moved from H4a's own honest
+0 `Pass`/0 `Fail`/1114 `NotSupported` to 8 `Pass`/227 `Fail`/879
+`NotSupported`. That is a real result -- 8 genuine passes where there were
+none before, at the cost of 227 pipelines that now compile far enough to
+fail rather than being turned away at the door. I did not want to just
+report "227 Fail" without understanding it, so I wrote a small Python
+script against the `.qpa`-adjacent stdout log to pair each failing test
+case with its own first `error:`/JIT diagnostic line and categorize by
+that (normalizing numeric literals so near-identical messages group
+together). That triage found:
+
+- 88 + 74 = 162 cases hitting shapes already named in the existing
+  `VulkanCTSReport.md`'s C8 bucket (matrix/aggregate stage-IO
+  legalization, array-of-vector `getelementptr` conversion gaps) --
+  pre-existing, generic SPIR-V-to-LLVM limitations that block any
+  sufficiently complex shader regardless of stage type, simply never
+  reachable for this test group before because every case was
+  `NotSupported` outright.
+- 12 cases hitting `feme-cpu-wrap-vertex: vertex stage wrapper requires
+  attached feme.signature metadata` -- almost certainly the same root
+  cause as roadmap H3a's own (already-fixed) fragment-side finding
+  (`Function::Create`+`copyAttributesFrom` dropping metadata somewhere
+  upstream), just not yet independently confirmed/fixed for the vertex
+  side.
+- 24 cases hitting the diagnostic
+  `"tessellation-control SPIR-V entry point's patch-constant region
+  cannot yet capture SSA values defined before the barrier"` -- a real,
+  distinct limitation in H4a's own `splitTessellationControlEntry`. This
+  is not a bug I introduced; it is an explicitly-diagnosed shape H4a's own
+  splitting logic already refuses rather than mis-compiles, but it turns
+  out to be the *common* real GLSL shape (computing a tessellation factor
+  from control-point-body data and reading it back after the barrier), so
+  it blocks a meaningful fraction of real shaders. I filed this as
+  roadmap H4c rather than attempting to fix it in this same session:
+  fixing it properly needs either re-materializing pre-barrier computation
+  into the patch-constant phase (correct only when it doesn't itself
+  depend on another invocation's own output) or threading the value
+  through synthetic patch-scoped storage (more likely the right general
+  answer, mirroring how per-vertex outputs already cross the barrier) --
+  either one is a real design decision in its own right, not a quick fix
+  alongside H4b's own already-large diff.
+- 24 more cases (all of `dEQP-VK.tessellation.winding.*`) hitting a JIT
+  `"Symbols not found: [ spirv_var_N, spirv_var_N ]"` error at pipeline
+  creation, distinct from the SSA-capture diagnostic above (these shapes
+  don't trip that check at all). I confirmed each tessellation phase gets
+  its own fresh `LLJIT` (`CompiledStage::create`), so this isn't a
+  cross-phase symbol collision at the JIT level; my best guess, not yet
+  confirmed, is that splitting the module for one phase leaves a global
+  variable referenced-but-undefined once some later DCE-shaped pass runs
+  reachability analysis from only the phase's own new entry point rather
+  than the original one. I filed this as roadmap H4d rather than chasing
+  it further in this session -- it needs its own minimal-reproduction
+  investigation, and H4b's own scope (stage acceptance, translation,
+  compilation, feature bit) was otherwise complete and independently
+  valuable to land first.
+
+I also ran the established `dEQP-VK.draw.*` regression sample (every 15th
+case of the 29419-case mustpass list, `*viewport_height*` removed) against
+this session's build and got 12 `Pass`/139 `Fail`/1806 `NotSupported`,
+6 more `Fail`s than the H4 report's own recorded 133. A naive text diff of
+"which case names appear under a Fail heading" made this look like it
+might be a real regression touching unrelated, non-tessellation draw
+paths -- several case names differed between the two failing-case lists
+that had nothing to do with tessellation. I did not want to just assume
+this was noise, so I built the immediately-pre-H4b commit
+(`eb8ee3f12f52`) in a completely separate `git worktree` + build directory,
+re-ran the identical case list against it, and diffed **per-case status**
+(not "which lines happen to contain the word Fail") between the two runs.
+That showed the truth: only 6 cases actually changed status, and every
+one of them is a `tessellation_shader_N`-suffixed case (`shader_layer`/
+`shader_viewport_index` groups) that was `NotSupported` before (gated on
+the now-`VK_TRUE` feature bit) and is now a `Fail` hitting the exact same
+already-triaged gaps as the main tessellation group -- not a new failure
+mode, and not a regression in anything unrelated. The naive text-diff
+mismatch turned out to be a red herring from my own imprecise `grep`/`sed`
+extraction (word-matching "Fail" against lines that happened to contain
+it for unrelated reasons), not a real difference in the underlying
+per-case results -- a good reminder to verify a suspicious CTS delta with
+a structured per-case comparison before trusting a raw text diff, especially
+when a change is supposed to be narrowly scoped.
+
+## Documentation
+
+Updated, in order: `AdvertisedPromotedFeatures.txt`/
+`Vulkan14FeatureInventory.md` (added `tessellationShader`, regenerated the
+table row and the "N of M unimplemented" finding by hand rather than via
+the full generator script, since running the generator wholesale would
+have also silently "fixed" an unrelated, pre-existing
+`VK_EXT_shader_viewport_index_layer` table drift I noticed during
+regeneration -- out of scope for this session, so I left it alone and
+made only the one targeted edit the tessellation change actually needed);
+`VulkanExtensionInventory.md` confirmed to need no change (tessellation
+adds no extension of its own); `Roadmap.md` (struck through H4's own
+parent row and H4b, added H4c/H4d); `VulkanCTSReport.md` (new "Roadmap
+H4b: measured impact" section with the full triage table and regression
+comparison); `FeMeVulkanDesign.md` (updated the "Graphics pipeline
+state" table and added a status paragraph, updated the V7 milestone
+section to mark tessellation done).
+
+## What's left
+
+Roadmap H4c (patch-constant SSA capture across the barrier) and H4d (the
+JIT symbol-resolution gap) are real, open, and now tracked. Neither
+blocks H4b's own literal scope, which is complete and tested. Geometry
+stages (H5) remain entirely separate, untouched work.
