@@ -1662,7 +1662,7 @@ description. Every state block has an explicit owner:
 | Stages | One `CompiledStage` each, linked through `StageInterfaceMap` |
 | Vertex input bindings/attributes | Normalized vertex fetch description; formats resolved through the central format table |
 | Input assembly | Primitive topology and restart, validated against the advertised topologies |
-| Tessellation | Patch control points; requires G5 (V7) |
+| Tessellation | Patch control points, hull/patch-constant/domain `CompiledStage`s; implemented (roadmap H4a/H4b) |
 | Viewport/scissor | Normalized viewport transform and scissor rects |
 | Rasterization | Cull mode, front face, fill mode, depth bias, depth clamp/clip |
 | Multisample | Sample count, sample mask, alpha-to-coverage, sample shading |
@@ -1716,6 +1716,42 @@ outputs, and this ICD has no geometry stage for either bit's "no geometry
 shader required" promise to be moot against. See
 `unittests/Vulkan/{GraphicsPipelineTest,DrawTest,PhysicalDeviceInfoTest}.cpp`'s
 new cases and "Roadmap H3: measured impact" in VulkanCTSReport.md.
+
+**Status (roadmap H4a/H4b): tessellation control/evaluation stages
+implemented.** `vkCreateGraphicsPipelines`'s `mapStage`/stage-mask loop
+accepts `VK_SHADER_STAGE_TESSELLATION_{CONTROL,EVALUATION}_BIT`, requiring
+exactly one of each when either is present and rejecting any topology
+other than `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` for such a pipeline (and
+rejecting patch-list topology without them). `translateFixedFunctionState`
+validates `VkPipelineTessellationStateCreateInfo::patchControlPoints`
+against `maxTessellationPatchSize` and stores it into
+`graphics::TessellationState::InputControlPointCount`.
+`compileAndValidateStages` compiles the tessellation-control module twice
+-- once for its own control-point entry point, once for the
+`<entry>.patchconstant` phase `feme::graphics::CanonicalizeStagePass`'s
+`splitTessellationControlEntry` (roadmap H4a) produces by splitting the
+SPIR-V module's single entry point at its one required
+`OpControlBarrier` -- and the tessellation-evaluation module once, merging
+their independently-optional reflected `TessellationState` halves (no one
+SPIR-V entry point declares both control- and evaluation-side state) and
+validating the merged result via `feme::graphics::validatePatchControlPointCounts`.
+The resulting hull control-point, patch-constant and domain `CompiledStage`s
+are handed to `graphics::GraphicsPipeline::setTessellationStages`, which
+`Executor::executeDraws` has consumed since roadmap H4/R34's own
+graphics-executor half of this milestone. `PhysicalDeviceInfo.cpp`
+advertises `tessellationShader = VK_TRUE`, with `maxTessellationPatchSize`/
+`maxTessellationGenerationLevel` reporting this implementation's own honest
+ceilings, `feme::graphics::MaxPatchControlPoints` (32) and
+`DefaultMaxTessFactor` (64) respectively -- neither may be advertised
+higher without raising those first. See
+`unittests/Vulkan/{GraphicsPipelineTest,PhysicalDeviceInfoTest}.cpp`'s new
+cases and "Roadmap H4b: measured impact" in VulkanCTSReport.md for the
+real `dEQP-VK.tessellation.*` numbers this unlocked, and roadmap H4c/H4d
+for the two gaps that CTS run found still open in
+`splitTessellationControlEntry`'s own splitting logic (a patch-constant
+phase cannot yet capture an SSA value defined before the barrier, and a
+distinct JIT symbol-resolution failure on a separate set of
+tessellation-control shapes).
 
 ### Draw commands and vertex data
 
@@ -2914,21 +2950,19 @@ through the real Khronos loader.
 Depends on G5.
 
 - Add tessellation control/evaluation and geometry stages, their pipeline
-  state, and their signature and patch-constant reflection. The graphics-
-  library half of the tessellation stages is done (roadmap H4:
-  `feme::graphics::Executor::executeDraws` runs the hull, patch-constant,
-  fixed-function tessellator and domain stages for a `PatchList` draw and
-  rasterizes the domain stage's output). What is missing is entirely on this
-  side of the boundary: `CanonicalizeStage.cpp` reflects only `Vertex` and
-  `Fragment` entry points, so a SPIR-V `TessellationControl`/
-  `TessellationEvaluation` module cannot be imported at all, and one SPIR-V
-  control entry point must additionally be split into FeMe's two D3D-shaped
-  hull phases (roadmap H4a); `vkCreateGraphicsPipelines` then needs to accept
-  the two stage bits, translate `VkPipelineTessellationStateCreateInfo`, and
-  advertise `tessellationShader` plus the `maxTessellation*` limits (roadmap
-  H4b). `tessellationShader` is deliberately still `VK_FALSE` until H4a
-  lands, so that the whole `dEQP-VK.tessellation` group reports
-  `NotSupported` honestly rather than failing.
+  state, and their signature and patch-constant reflection. **Tessellation
+  is done** (roadmap H4/H4a/H4b): `feme::graphics::Executor::executeDraws`
+  runs the hull, patch-constant, fixed-function tessellator and domain
+  stages for a `PatchList` draw and rasterizes the domain stage's output
+  (H4); `CanonicalizeStage.cpp` reflects `TessellationControl`/
+  `TessellationEvaluation` entry points, splitting one SPIR-V
+  tessellation-control entry into FeMe's two D3D-shaped hull phases at its
+  one required barrier (H4a); and `vkCreateGraphicsPipelines` accepts the
+  two stage bits, translates `VkPipelineTessellationStateCreateInfo`, and
+  advertises `tessellationShader`/`maxTessellation*` (H4b). Geometry
+  (roadmap H5) remains open. See "Graphics pipeline state"'s own H4a/H4b
+  status note and roadmap H4c/H4d for the two splitting-logic gaps a real
+  CTS run found still open.
 - Implement transform feedback only if it is advertised; otherwise report it
   unsupported truthfully.
 - Add pipeline-statistics queries and any remaining occlusion-query state
