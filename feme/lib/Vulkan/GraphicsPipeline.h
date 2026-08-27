@@ -29,6 +29,7 @@
 #ifndef FEME_LIB_VULKAN_GRAPHICSPIPELINE_H
 #define FEME_LIB_VULKAN_GRAPHICSPIPELINE_H
 
+#include "PhysicalDeviceInfo.h"
 #include "Pipeline.h"
 
 #include "feme/Graphics/Pipeline.h"
@@ -36,6 +37,7 @@
 #include "feme/Target/CPU/RuntimeABI.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -155,8 +157,13 @@ enum DynamicStateBits : uint32_t {
 /// pointer"). A pipeline that declared a given state *static* ignores the
 /// corresponding member here and uses its own creation-time value instead.
 struct DynamicGraphicsState {
-  feme::graphics::ViewportState Viewport;
-  feme::graphics::ScissorRect Scissor;
+  DynamicGraphicsState() {
+    Viewports.push_back(feme::graphics::ViewportState{});
+    Scissors.push_back(feme::graphics::ScissorRect{});
+  }
+
+  llvm::SmallVector<feme::graphics::ViewportState, MaxViewportCount> Viewports;
+  llvm::SmallVector<feme::graphics::ScissorRect, MaxViewportCount> Scissors;
   std::array<float, 4> BlendConstants{0.0f, 0.0f, 0.0f, 0.0f};
   uint32_t StencilReference[2] = {0, 0}; // [front, back]
   uint32_t StencilCompareMask[2] = {0xFF, 0xFF};
@@ -213,6 +220,11 @@ struct GraphicsPipelineArtifact {
 /// resolves once, at creation. A plain record: `GraphicsPipeline` below is
 /// the Vulkan object that owns one.
 struct GraphicsPipelineState {
+  GraphicsPipelineState() {
+    Viewports.push_back(feme::graphics::ViewportState{});
+    Scissors.push_back(feme::graphics::ScissorRect{});
+  }
+
   std::shared_ptr<GraphicsPipelineArtifact> Artifact;
   feme::graphics::PrimitiveTopology Topology =
       feme::graphics::PrimitiveTopology::TriangleList;
@@ -230,8 +242,8 @@ struct GraphicsPipelineState {
   std::vector<feme::graphics::AttachmentFormat> Attachments;
   std::vector<VertexInputBinding> VertexBindings;
   std::vector<VertexInputAttribute> VertexAttributes;
-  feme::graphics::ViewportState Viewport;
-  feme::graphics::ScissorRect Scissor;
+  llvm::SmallVector<feme::graphics::ViewportState, MaxViewportCount> Viewports;
+  llvm::SmallVector<feme::graphics::ScissorRect, MaxViewportCount> Scissors;
   uint32_t DynamicStates = 0;
   /// (roadmap F10) Each stage's own resolved `PipelineRobustness` -- see
   /// that struct's own comment in Pipeline.h.
@@ -254,13 +266,19 @@ public:
 
   /// The viewport/scissor a draw uses: this pipeline's own static values,
   /// or \p Dynamic's when the pipeline declared them dynamic.
-  feme::graphics::ViewportState
+  llvm::ArrayRef<feme::graphics::ViewportState>
   resolveViewport(const DynamicGraphicsState &Dynamic) const {
-    return isDynamic(DynamicStateViewport) ? Dynamic.Viewport : State.Viewport;
+    return isDynamic(DynamicStateViewport)
+               ? llvm::ArrayRef<feme::graphics::ViewportState>(
+                     Dynamic.Viewports)
+               : llvm::ArrayRef<feme::graphics::ViewportState>(State.Viewports);
   }
-  feme::graphics::ScissorRect
+
+  llvm::ArrayRef<feme::graphics::ScissorRect>
   resolveScissor(const DynamicGraphicsState &Dynamic) const {
-    return isDynamic(DynamicStateScissor) ? Dynamic.Scissor : State.Scissor;
+    return isDynamic(DynamicStateScissor)
+               ? llvm::ArrayRef<feme::graphics::ScissorRect>(Dynamic.Scissors)
+               : llvm::ArrayRef<feme::graphics::ScissorRect>(State.Scissors);
   }
 
   bool isDynamic(DynamicStateBits Bit) const {

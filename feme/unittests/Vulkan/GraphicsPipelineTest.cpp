@@ -30,6 +30,7 @@
 
 #include "gtest/gtest.h"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -300,7 +301,7 @@ TEST_F(GraphicsPipelineTest, CompilesVertexAndFragmentStages) {
   EXPECT_EQ(Executor.getTopology(),
             feme::graphics::PrimitiveTopology::TriangleList);
   EXPECT_EQ(Executor.getColorBlends().size(), 1u);
-  EXPECT_EQ(Graphics->resolveViewport(Dynamic).Width, 4.0f);
+  EXPECT_EQ(Graphics->resolveViewport(Dynamic)[0].Width, 4.0f);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
@@ -432,11 +433,6 @@ TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   Raster.rasterizerDiscardEnable = VK_TRUE;
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
 
-  // Multiple viewports.
-  Info = makeCreateInfo(Vertex, Fragment);
-  ViewportState.viewportCount = 2;
-  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
-
   // A dynamic state with no implemented path.
   Info = makeCreateInfo(Vertex, Fragment);
   VkDynamicState Unsupported = VK_DYNAMIC_STATE_DEPTH_BIAS;
@@ -468,8 +464,69 @@ TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// Primitive restart is implemented for `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_
-/// STRIP`, and the pipeline records it for the executor to honor.
+// Roadmap H3: `maxViewports` (`MaxViewportCount`, 16) is the real limit now;
+// a pipeline declaring an in-range viewport/scissor count > 1 must succeed
+// and the executor pipeline must carry that many viewport/scissor entries.
+TEST_F(GraphicsPipelineTest, AcceptsMultipleViewportsAndScissors) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  std::array<VkViewport, 4> Viewports = {{
+      {0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f},
+      {4.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f},
+      {0.0f, 4.0f, 4.0f, 4.0f, 0.0f, 1.0f},
+      {4.0f, 4.0f, 4.0f, 4.0f, 0.0f, 1.0f},
+  }};
+  std::array<VkRect2D, 4> Scissors = {{
+      {{0, 0}, {4, 4}},
+      {{4, 0}, {4, 4}},
+      {{0, 4}, {4, 4}},
+      {{4, 4}, {4, 4}},
+  }};
+  ViewportState.viewportCount = static_cast<uint32_t>(Viewports.size());
+  ViewportState.pViewports = Viewports.data();
+  ViewportState.scissorCount = static_cast<uint32_t>(Scissors.size());
+  ViewportState.pScissors = Scissors.data();
+
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState Dynamic;
+  EXPECT_EQ(Graphics->resolveViewport(Dynamic).size(), Viewports.size());
+  EXPECT_EQ(Graphics->resolveScissor(Dynamic).size(), Scissors.size());
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+// Roadmap H3: a viewport/scissor count beyond `maxViewports`
+// (`MaxViewportCount`, 16) must still be rejected at pipeline creation.
+TEST_F(GraphicsPipelineTest, RejectsTooManyViewports) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  std::vector<VkViewport> Viewports(
+      MaxViewportCount + 1, VkViewport{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f});
+  std::vector<VkRect2D> Scissors(MaxViewportCount + 1,
+                                 VkRect2D{{0, 0}, {4, 4}});
+  ViewportState.viewportCount = static_cast<uint32_t>(Viewports.size());
+  ViewportState.pViewports = Viewports.data();
+  ViewportState.scissorCount = static_cast<uint32_t>(Scissors.size());
+  ViewportState.pScissors = Scissors.data();
+
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 TEST_F(GraphicsPipelineTest, AcceptsPrimitiveRestartOnTriangleStrip) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
@@ -919,11 +976,11 @@ TEST_F(GraphicsPipelineTest, ViewportWithCountIsTheSameDynamicStateAsViewport) {
 
   auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
   DynamicGraphicsState Dynamic;
-  Dynamic.Viewport = feme::graphics::ViewportState{1.0f, 2.0f, 8.0f, 8.0f,
-                                                   0.0f, 1.0f};
-  Dynamic.Scissor = feme::graphics::ScissorRect{0, 0, 8, 8};
-  EXPECT_EQ(Graphics->resolveViewport(Dynamic).Width, 8.0f);
-  EXPECT_EQ(Graphics->resolveScissor(Dynamic).Width, 8u);
+  Dynamic.Viewports[0] =
+      feme::graphics::ViewportState{1.0f, 2.0f, 8.0f, 8.0f, 0.0f, 1.0f};
+  Dynamic.Scissors[0] = feme::graphics::ScissorRect{0, 0, 8, 8};
+  EXPECT_EQ(Graphics->resolveViewport(Dynamic)[0].Width, 8.0f);
+  EXPECT_EQ(Graphics->resolveScissor(Dynamic)[0].Width, 8u);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);

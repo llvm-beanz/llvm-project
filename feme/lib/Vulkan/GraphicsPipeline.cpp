@@ -262,10 +262,9 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
   // (roadmap C4c) `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT` is the same
   // effective dynamic state as `VIEWPORT` (the Vulkan spec forbids a
   // pipeline from declaring both): `resolveViewport` already reads
-  // `DynamicGraphicsState::Viewport` whenever `DynamicStateViewport` is
-  // set, and `vkCmdSetViewportWithCountEXT` (this ICD's `maxViewports ==
-  // 1`, so "with count" carries no more information than the fixed-count
-  // command) writes into that same field.
+  // `DynamicGraphicsState::Viewports` whenever `DynamicStateViewport` is
+  // set, and `vkCmdSetViewportWithCount{,EXT}` writes into that same
+  // array state.
   case VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT:
     return DynamicStateViewport;
   case VK_DYNAMIC_STATE_SCISSOR:
@@ -965,27 +964,48 @@ Error translateViewportState(const VkPipelineViewportStateCreateInfo *Info,
   // field entirely" treatment (see `translateDepthStencilState`).
   bool ViewportDynamic = (Out.DynamicStates & DynamicStateViewport) != 0;
   bool ScissorDynamic = (Out.DynamicStates & DynamicStateScissor) != 0;
-  // Multiple viewports/scissors need viewport array indexing (V7); a
-  // pipeline declaring more than one is rejected rather than silently
-  // rasterized through the first.
-  if ((!ViewportDynamic && Info->viewportCount != 1) ||
-      (!ScissorDynamic && Info->scissorCount != 1))
-    return createStringError(inconvertibleErrorCode(),
-                             "exactly one viewport and one scissor are "
-                             "implemented (maxViewports is 1)");
-  if (Info->pViewports) {
-    const VkViewport &Src = *Info->pViewports;
-    if (Src.width > float(Limits.maxViewportDimensions[0]) ||
-        Src.height > float(Limits.maxViewportDimensions[1]))
+
+  auto validateCount = [&](uint32_t Count, const char *Name) -> Error {
+    if (Count == 0 || Count > Limits.maxViewports)
       return createStringError(inconvertibleErrorCode(),
-                               "viewport exceeds maxViewportDimensions");
-    Out.Viewport = feme::graphics::ViewportState{
-        Src.x, Src.y, Src.width, Src.height, Src.minDepth, Src.maxDepth};
+                               "%s count %u is out of range for maxViewports "
+                               "(%u)",
+                               Name, Count, Limits.maxViewports);
+    return Error::success();
+  };
+
+  if (!ViewportDynamic) {
+    if (Error E = validateCount(Info->viewportCount, "viewport"))
+      return E;
+    if (!Info->pViewports)
+      return createStringError(inconvertibleErrorCode(),
+                               "static viewport state needs pViewports");
+    Out.Viewports.clear();
+    Out.Viewports.reserve(Info->viewportCount);
+    for (uint32_t I = 0; I != Info->viewportCount; ++I) {
+      const VkViewport &Src = Info->pViewports[I];
+      if (Src.width > float(Limits.maxViewportDimensions[0]) ||
+          Src.height > float(Limits.maxViewportDimensions[1]))
+        return createStringError(inconvertibleErrorCode(),
+                                 "viewport %u exceeds maxViewportDimensions",
+                                 I);
+      Out.Viewports.push_back(feme::graphics::ViewportState{
+          Src.x, Src.y, Src.width, Src.height, Src.minDepth, Src.maxDepth});
+    }
   }
-  if (Info->pScissors) {
-    const VkRect2D &Src = *Info->pScissors;
-    Out.Scissor = feme::graphics::ScissorRect{
-        Src.offset.x, Src.offset.y, Src.extent.width, Src.extent.height};
+  if (!ScissorDynamic) {
+    if (Error E = validateCount(Info->scissorCount, "scissor"))
+      return E;
+    if (!Info->pScissors)
+      return createStringError(inconvertibleErrorCode(),
+                               "static scissor state needs pScissors");
+    Out.Scissors.clear();
+    Out.Scissors.reserve(Info->scissorCount);
+    for (uint32_t I = 0; I != Info->scissorCount; ++I) {
+      const VkRect2D &Src = Info->pScissors[I];
+      Out.Scissors.push_back(feme::graphics::ScissorRect{
+          Src.offset.x, Src.offset.y, Src.extent.width, Src.extent.height});
+    }
   }
   return Error::success();
 }
@@ -1091,16 +1111,22 @@ serializeFixedFunctionState(const GraphicsPipelineState &State) {
   appendScalar(Out, State.Stencil.TestEnable);
   appendStencilFace(Out, State.Stencil.Front);
   appendStencilFace(Out, State.Stencil.Back);
-  appendScalar(Out, State.Viewport.X);
-  appendScalar(Out, State.Viewport.Y);
-  appendScalar(Out, State.Viewport.Width);
-  appendScalar(Out, State.Viewport.Height);
-  appendScalar(Out, State.Viewport.MinDepth);
-  appendScalar(Out, State.Viewport.MaxDepth);
-  appendScalar(Out, State.Scissor.X);
-  appendScalar(Out, State.Scissor.Y);
-  appendScalar(Out, State.Scissor.Width);
-  appendScalar(Out, State.Scissor.Height);
+  appendScalar(Out, State.Viewports.size());
+  for (const feme::graphics::ViewportState &Viewport : State.Viewports) {
+    appendScalar(Out, Viewport.X);
+    appendScalar(Out, Viewport.Y);
+    appendScalar(Out, Viewport.Width);
+    appendScalar(Out, Viewport.Height);
+    appendScalar(Out, Viewport.MinDepth);
+    appendScalar(Out, Viewport.MaxDepth);
+  }
+  appendScalar(Out, State.Scissors.size());
+  for (const feme::graphics::ScissorRect &Scissor : State.Scissors) {
+    appendScalar(Out, Scissor.X);
+    appendScalar(Out, Scissor.Y);
+    appendScalar(Out, Scissor.Width);
+    appendScalar(Out, Scissor.Height);
+  }
   appendScalar(Out, State.VertexBindings.size());
   for (const VertexInputBinding &B : State.VertexBindings)
     appendVertexBinding(Out, B);
