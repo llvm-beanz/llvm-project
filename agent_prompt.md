@@ -33,21 +33,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H4c?
+Can you work on milestone H4d?
 
-> **`splitTessellationControlEntry` (H4a) explicitly rejects a
-> tessellation-control shader whose patch-constant phase reads back an SSA value
-> computed before the barrier** (24 of H4b's own measured 227
-> `dEQP-VK.tessellation.*` `Fail`s, diagnosed rather than mis-compiled:
-> `"tessellation-control SPIR-V entry point's patch-constant region cannot yet
-> capture SSA values defined before the barrier"`), yet this is the common, real
-> GLSL-compiled shape -- computing a per-patch tessellation factor from data
-> derived from the control-point body (e.g. control-point output positions) and
-> referencing it after `OpControlBarrier`. Needs the split to either
-> re-materialize/clone the relevant pre-barrier computation into the
-> patch-constant phase (correct only when that computation reads no other
-> invocation's per-vertex output, i.e. is not itself a cross-invocation
-> reduction) or thread the captured value through a synthetic patch-scoped
-> storage location both phases can address (likely the right shape in general,
-> since it mirrors how the control-point phase's own per-vertex outputs already
-> cross the barrier through patch-shared storage)
+> **A JIT-time `"Symbols not found: [ spirv_var_N, spirv_var_N ]"` error rejects
+> some tessellation-control shaders that do *not* hit H4c's SSA-capture
+> diagnostic** (24 of H4b's own measured 227 `dEQP-VK.tessellation.*` `Fail`s,
+> e.g. all of `dEQP-VK.tessellation.winding.*`): the control-point and
+> patch-constant phases each get their own `CompiledStage::create`/`LLJIT`
+> (H4b's own design, matching every other stage), so this is not a cross-phase
+> symbol collision; more likely `splitTessellationControlEntry`'s clone of the
+> module for one phase leaves a global variable referenced-but-undefined after
+> some later pass (a `GlobalDCE`-shaped pass reachable only from the phase's own
+> new entry point, not the original one) strips its definition while a reference
+> to it survives. Root cause not yet isolated -- needs its own investigation,
+> likely starting from a minimal reproduction of
+> `dEQP-VK.tessellation.winding.default_domain.glsl_quads_ccw`'s own
+> tessellation-control module reduced through the same
+> `feme-convert-spirv-to-llvm`/`feme-canonicalize-stage` pipeline H4b's own
+> tests used to hand-verify shapes
