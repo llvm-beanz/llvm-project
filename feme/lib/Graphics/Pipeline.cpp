@@ -42,6 +42,13 @@ void GraphicsPipeline::setTessellationStages(
   this->Tessellation = State;
 }
 
+void GraphicsPipeline::setGeometryStage(
+    std::shared_ptr<cpu::CompiledStage> GeometryStage, GeometryState State) {
+  assert(GeometryStage && "a geometry-enabled pipeline needs its stage");
+  this->GeometryStage = std::move(GeometryStage);
+  this->Geometry = State;
+}
+
 bool feme::graphics::topologyHasAdjacency(PrimitiveTopology Topology) {
   switch (Topology) {
   case PrimitiveTopology::LineListWithAdjacency:

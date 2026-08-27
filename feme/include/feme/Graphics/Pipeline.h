@@ -23,6 +23,7 @@
 #ifndef FEME_GRAPHICS_PIPELINE_H
 #define FEME_GRAPHICS_PIPELINE_H
 
+#include "feme/Graphics/Geometry.h"
 #include "feme/Graphics/PatchPipeline.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/RuntimeABI.h"
@@ -467,6 +468,28 @@ public:
   /// Only valid to call when `hasTessellationStages()` is true.
   const TessellationState &getTessellationState() const { return Tessellation; }
 
+  /// Attaches the compiled geometry stage a pipeline runs between its
+  /// assembled primitives (with adjacency vertices, for one of the four
+  /// `*WithAdjacency` topologies) and rasterization, along with its
+  /// declared shape (input/output primitive class, invocation count,
+  /// maximum emitted vertex count -- roadmap H5d, mirroring
+  /// `setTessellationStages`'s role for the hull/domain pair). `executeDraws`
+  /// then assembles each draw's primitives, runs them through
+  /// `GeometryStage`, and rasterizes the merged emitted stream's own strips
+  /// in place of the vertex/domain stage's output -- the same "last
+  /// pre-rasterization stage" substitution `setTessellationStages`'s own
+  /// `RasterSig` chaining already established.
+  void setGeometryStage(std::shared_ptr<cpu::CompiledStage> GeometryStage,
+                        GeometryState State);
+
+  /// Whether this pipeline runs a geometry stage (roadmap H5d). True
+  /// exactly when `setGeometryStage` has been called.
+  bool hasGeometryStages() const { return GeometryStage != nullptr; }
+  /// Only valid to call when `hasGeometryStages()` is true.
+  const cpu::CompiledStage &getGeometryStage() const { return *GeometryStage; }
+  /// Only valid to call when `hasGeometryStages()` is true.
+  const GeometryState &getGeometryState() const { return Geometry; }
+
 private:
   std::shared_ptr<cpu::CompiledStage> VertexStage;
   std::shared_ptr<cpu::CompiledStage> FragmentStage;
@@ -474,6 +497,8 @@ private:
   std::shared_ptr<cpu::CompiledStage> PatchConstantStage;
   std::shared_ptr<cpu::CompiledStage> DomainStage;
   TessellationState Tessellation;
+  std::shared_ptr<cpu::CompiledStage> GeometryStage;
+  GeometryState Geometry;
   PrimitiveTopology Topology;
   RasterState Raster;
   DepthState Depth;
