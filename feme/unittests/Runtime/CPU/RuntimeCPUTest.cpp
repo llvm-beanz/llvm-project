@@ -609,4 +609,97 @@ TEST_F(RuntimeCPUTest, StructuredBufferKindIsAccepted) {
   EXPECT_FLOAT_EQ(Result, 3.5f);
 }
 
+// Regression tests for roadmap H3a: ResourceCalls.cpp's mangleResourceCallName
+// generically supports vector-typed raw/structured buffer element loads (e.g.
+// a whole-`vec4` load out of a UBO/SSBO, as `out_color = color[idx]` lowers
+// to), but until this milestone the CPU runtime only defined the scalar
+// `feme.cpu.resource.load.raw.i32`/`.f32` helpers -- so any shader lowering
+// to a vector raw load hit a late JIT "Symbols not found" failure. Verify the
+// new `feme.cpu.resource.load.raw.v4f32`/`.store.raw.v4f32` helpers round-trip
+// a whole `<4 x float>` correctly.
+TEST_F(RuntimeCPUTest, RawLoadV4F32IdentityFormat) {
+  float Storage[4] = {1.0f, -2.0f, 3.5f, -4.5f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+
+  LoadFn Load = getLoadWrapper("test_raw_load_v4f32",
+                               "feme.cpu.resource.load.raw.v4f32");
+  ASSERT_TRUE(Load);
+  float Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_FLOAT_EQ(Result[0], 1.0f);
+  EXPECT_FLOAT_EQ(Result[1], -2.0f);
+  EXPECT_FLOAT_EQ(Result[2], 3.5f);
+  EXPECT_FLOAT_EQ(Result[3], -4.5f);
+}
+
+TEST_F(RuntimeCPUTest, RawLoadV4F32InactiveMaskReadsZero) {
+  float Storage[4] = {9.0f, 9.0f, 9.0f, 9.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+
+  LoadFn Load = getLoadWrapper("test_raw_load_v4f32_inactive_mask",
+                               "feme.cpu.resource.load.raw.v4f32");
+  ASSERT_TRUE(Load);
+  float Result[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Load(Heap, 1, 0, 0, /*mask=*/false, Result);
+  EXPECT_FLOAT_EQ(Result[0], 0.0f);
+}
+
+TEST_F(RuntimeCPUTest, RawStoreV4F32RoundTrips) {
+  float Storage[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  StoreFn Store = getStoreWrapper(
+      "test_raw_store_v4f32", "feme.cpu.resource.store.raw.v4f32",
+      FixedVectorType::get(Type::getFloatTy(Ctx), 4));
+  ASSERT_TRUE(Store);
+  float ToStore[4] = {2.0f, 4.0f, 6.0f, 8.0f};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_FLOAT_EQ(Storage[0], 2.0f);
+  EXPECT_FLOAT_EQ(Storage[1], 4.0f);
+  EXPECT_FLOAT_EQ(Storage[2], 6.0f);
+  EXPECT_FLOAT_EQ(Storage[3], 8.0f);
+}
+
+TEST_F(RuntimeCPUTest, RawStoreV4F32DroppedWithoutUavFlag) {
+  float Storage[4] = {3.0f, 3.0f, 3.0f, 3.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+
+  StoreFn Store = getStoreWrapper(
+      "test_raw_store_v4f32_no_uav", "feme.cpu.resource.store.raw.v4f32",
+      FixedVectorType::get(Type::getFloatTy(Ctx), 4));
+  ASSERT_TRUE(Store);
+  float ToStore[4] = {9.0f, 9.0f, 9.0f, 9.0f};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_FLOAT_EQ(Storage[0], 3.0f);
+}
+
+TEST_F(RuntimeCPUTest, RawLoadV4F32StructuredKindIsAccepted) {
+  float Storage[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Structured);
+
+  LoadFn Load = getLoadWrapper("test_raw_load_v4f32_structured",
+                               "feme.cpu.resource.load.raw.v4f32");
+  ASSERT_TRUE(Load);
+  float Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_FLOAT_EQ(Result[0], 1.0f);
+  EXPECT_FLOAT_EQ(Result[3], 4.0f);
+}
+
 } // namespace

@@ -604,6 +604,59 @@ femeCpuResourceStoreRawF32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   __builtin_memcpy(Ptr, &Value, sizeof(Value));
 }
 
+// `feme.cpu.resource.load.raw.v4f32`: read a whole `<4 x float>` (e.g. a
+// GLSL `vec4` member of a uniform/storage block) through a bindless raw or
+// structured buffer descriptor in one call -- the same descriptor/bounds
+// check the scalar `.f32` variant above performs, just for a 16-byte
+// element instead of a 4-byte one. `feme::cpu::mangleResourceCallName`
+// already mangles any fixed-vector element type generically (see
+// ResourceCalls.cpp), so `feme::cpu::SPIRVResourceLoweringPass` was always
+// able to *emit* a call to this name; only this runtime definition itself
+// was missing (roadmap H3a: this was the last of a chain of latent gaps
+// H3a's `gl_ViewportIndex`-as-fragment-input repro surfaced, the actual
+// CTS cases needing a whole-`vec4` load out of a `uniform Colors { vec4
+// color[N]; }` block rather than a single scalar).
+FemeRTv4f32
+femeCpuResourceLoadRawV4F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                            uint32_t DescriptorIndex, uint64_t ByteOffset,
+                            _Bool Mask) asm("feme.cpu.resource.load.raw.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuResourceLoadRawV4F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 16);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 16);
+  if (!((OkRaw || OkStructured) && Mask))
+    return (FemeRTv4f32){0.0f, 0.0f, 0.0f, 0.0f};
+  const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  return *(const FemeRTv4f32Unaligned *)Ptr;
+}
+
+void femeCpuResourceStoreRawV4F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv4f32 Value,
+    _Bool Mask) asm("feme.cpu.resource.store.raw.v4f32");
+
+__attribute__((always_inline)) void femeCpuResourceStoreRawV4F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv4f32 Value, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 16);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 16);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!((OkRaw || OkStructured) && Mask && IsUAV))
+    return;
+  unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  *(FemeRTv4f32Unaligned *)Ptr = (FemeRTv4f32Unaligned)Value;
+}
+
 //--- Images and samplers (roadmap R30) ----------------------------------------
 
 // Mirrors `feme::cpu::FemeImageSubresourceLayout` (RuntimeABI.h): { Offset,
