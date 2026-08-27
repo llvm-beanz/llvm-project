@@ -30,6 +30,7 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Error.h"
 
 #include <array>
@@ -248,11 +249,15 @@ struct RecordedCommand {
   std::vector<VkImageBlit> BlitRegions;
   std::vector<VkImageResolve> ResolveRegions;
   VkFilter BlitFilter = VK_FILTER_NEAREST;
-  /// (V6) `SetViewport`/`SetScissor`/`SetBlendConstants`/`SetStencil*`: the
-  /// dynamic state this command records, snapshotted into the next draw
-  /// (see "Dynamic state is what makes the prepared draw a snapshot").
-  VkViewport ViewportValue{};
-  VkRect2D ScissorValue{};
+  /// (V6/H3) `SetViewport`/`SetScissor`: the dynamic viewport/scissor array
+  /// update this command records, written starting at `FirstViewport`/
+  /// `FirstScissor` and covering the owned `ViewportsValue`/`ScissorsValue`
+  /// payload. `SetBlendConstants`/`SetStencil*` share this comment's
+  /// "snapshotted into the next draw" rule but use the scalar fields below.
+  uint32_t FirstViewport = 0;
+  uint32_t FirstScissor = 0;
+  llvm::SmallVector<VkViewport, MaxViewportCount> ViewportsValue;
+  llvm::SmallVector<VkRect2D, MaxViewportCount> ScissorsValue;
   std::array<float, 4> BlendConstants{0.0f, 0.0f, 0.0f, 0.0f};
   VkStencilFaceFlags StencilFaceMask = 0;
   uint32_t StencilValue = 0;
@@ -653,17 +658,21 @@ public:
     Cmd.DstSize = Size;
     Commands.push_back(Cmd);
   }
-  /// (V6) `vkCmdSetViewport`/`vkCmdSetScissor`.
-  void setViewport(const VkViewport &Viewport) {
+  /// (V6/H3) `vkCmdSetViewport`/`vkCmdSetViewportWithCount*`.
+  void setViewports(uint32_t FirstViewport,
+                    llvm::ArrayRef<VkViewport> Viewports) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::SetViewport;
-    Cmd.ViewportValue = Viewport;
+    Cmd.FirstViewport = FirstViewport;
+    Cmd.ViewportsValue.assign(Viewports.begin(), Viewports.end());
     Commands.push_back(Cmd);
   }
-  void setScissor(const VkRect2D &Scissor) {
+  /// (V6/H3) `vkCmdSetScissor`/`vkCmdSetScissorWithCount*`.
+  void setScissors(uint32_t FirstScissor, llvm::ArrayRef<VkRect2D> Scissors) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::SetScissor;
-    Cmd.ScissorValue = Scissor;
+    Cmd.FirstScissor = FirstScissor;
+    Cmd.ScissorsValue.assign(Scissors.begin(), Scissors.end());
     Commands.push_back(Cmd);
   }
   /// (V6) `vkCmdSetBlendConstants`.

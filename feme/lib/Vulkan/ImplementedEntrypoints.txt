@@ -213,6 +213,8 @@ vkCmdBindIndexBuffer
 vkCmdBindIndexBuffer2
 vkCmdSetViewport
 vkCmdSetScissor
+vkCmdSetViewportWithCount
+vkCmdSetScissorWithCount
 vkCmdSetBlendConstants
 vkCmdSetStencilReference
 vkCmdSetStencilCompareMask

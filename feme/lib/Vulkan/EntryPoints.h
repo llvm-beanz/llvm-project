@@ -620,9 +620,14 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer,
                                            uint32_t scissorCount,
                                            const VkRect2D *pScissors);
 VKAPI_ATTR void VKAPI_CALL
-vkCmdSetViewportWithCountEXT(VkCommandBuffer commandBuffer,
-                            uint32_t viewportCount,
-                            const VkViewport *pViewports);
+vkCmdSetViewportWithCount(VkCommandBuffer commandBuffer, uint32_t viewportCount,
+                          const VkViewport *pViewports);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetScissorWithCount(VkCommandBuffer commandBuffer, uint32_t scissorCount,
+                         const VkRect2D *pScissors);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetViewportWithCountEXT(
+    VkCommandBuffer commandBuffer, uint32_t viewportCount,
+    const VkViewport *pViewports);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetScissorWithCountEXT(VkCommandBuffer commandBuffer,
                            uint32_t scissorCount, const VkRect2D *pScissors);

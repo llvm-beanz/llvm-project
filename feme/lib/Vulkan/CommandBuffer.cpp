@@ -1398,26 +1398,36 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   Resources.BoundSamplers = Materialized.SamplerBindings;
   Resources.RootConstants = PushConstants;
 
-  // The scissor a draw actually rasterizes against is the intersection of
-  // the pipeline's (or `vkCmdSetScissor`'s) rectangle and the render area:
-  // "the render area" is part of the render-target binding, and nothing
-  // outside it may be written.
-  feme::graphics::ScissorRect Scissor = Pipeline.resolveScissor(Gfx.Dynamic);
+  // The scissor array a draw actually rasterizes against is the intersection
+  // of the pipeline's (or `vkCmdSetScissor*`'s) rectangles and the render
+  // area: "the render area" is part of the render-target binding, and
+  // nothing outside it may be written.
+  llvm::ArrayRef<feme::graphics::ScissorRect> ResolvedScissors =
+      Pipeline.resolveScissor(Gfx.Dynamic);
   const VkRect2D &Area = Gfx.Binding.RenderArea;
-  int32_t MinX = std::max(Scissor.X, Area.offset.x);
-  int32_t MinY = std::max(Scissor.Y, Area.offset.y);
-  int64_t MaxX = std::min<int64_t>(int64_t(Scissor.X) + Scissor.Width,
-                                   int64_t(Area.offset.x) + Area.extent.width);
-  int64_t MaxY = std::min<int64_t>(int64_t(Scissor.Y) + Scissor.Height,
-                                   int64_t(Area.offset.y) + Area.extent.height);
-  Scissor.X = MinX;
-  Scissor.Y = MinY;
-  Scissor.Width = MaxX > MinX ? uint32_t(MaxX - MinX) : 0;
-  Scissor.Height = MaxY > MinY ? uint32_t(MaxY - MinY) : 0;
+  llvm::SmallVector<feme::graphics::ScissorRect, MaxViewportCount> Scissors;
+  Scissors.reserve(ResolvedScissors.size());
+  for (const feme::graphics::ScissorRect &Resolved : ResolvedScissors) {
+    feme::graphics::ScissorRect Clipped = Resolved;
+    int32_t MinX = std::max(Clipped.X, Area.offset.x);
+    int32_t MinY = std::max(Clipped.Y, Area.offset.y);
+    int64_t MaxX =
+        std::min<int64_t>(int64_t(Clipped.X) + Clipped.Width,
+                          int64_t(Area.offset.x) + Area.extent.width);
+    int64_t MaxY =
+        std::min<int64_t>(int64_t(Clipped.Y) + Clipped.Height,
+                          int64_t(Area.offset.y) + Area.extent.height);
+    Clipped.X = MinX;
+    Clipped.Y = MinY;
+    Clipped.Width = MaxX > MinX ? uint32_t(MaxX - MinX) : 0;
+    Clipped.Height = MaxY > MinY ? uint32_t(MaxY - MinY) : 0;
+    Scissors.push_back(Clipped);
+  }
 
   feme::graphics::PreparedDraw Prepared;
-  Prepared.Viewport = Pipeline.resolveViewport(Gfx.Dynamic);
-  Prepared.Scissor = Scissor;
+  Prepared.Viewports.assign(Pipeline.resolveViewport(Gfx.Dynamic).begin(),
+                            Pipeline.resolveViewport(Gfx.Dynamic).end());
+  Prepared.Scissors.assign(Scissors.begin(), Scissors.end());
   Prepared.VertexBuffers = VertexBuffers;
   Prepared.IndexBuffer = IndexBinding;
   Prepared.Resources = Resources;
@@ -1453,6 +1463,18 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
     ViewAttachments.reserve(Attachments.size());
     for (const feme::graphics::AttachmentView &A : Attachments)
       ViewAttachments.push_back(sliceAttachmentLayer(A, ViewIndex));
+    std::vector<feme::graphics::AttachmentView> ViewSubpassInputs;
+    ViewSubpassInputs.reserve(SubpassInputs.size());
+    for (const feme::graphics::AttachmentView &A : SubpassInputs)
+      ViewSubpassInputs.push_back(sliceAttachmentLayer(A, ViewIndex));
+
+    // (Roadmap H2) Resolve attachments and the depth/stencil attachment are
+    // multiview-array images too, exactly like the color attachments sliced
+    // into `ViewAttachments` above; slicing only `Attachments` and leaving
+    // `ResolveAttachments`/`DepthStencil` pointed at every view's own shared,
+    // unsliced (layer 0) image regresses every case that reads depth/stencil
+    // or a resolve target back per view (e.g. multiview occlusion queries,
+    // which read `DepthStencil` for the early depth/stencil test).
     std::vector<feme::graphics::AttachmentView> ViewResolveAttachments;
     ViewResolveAttachments.reserve(ResolveAttachments.size());
     for (const feme::graphics::AttachmentView &A : ResolveAttachments)
@@ -1462,10 +1484,6 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
         sliceAttachmentLayer(DepthStencil.Depth, ViewIndex);
     ViewDepthStencil.Stencil =
         sliceAttachmentLayer(DepthStencil.Stencil, ViewIndex);
-    std::vector<feme::graphics::AttachmentView> ViewSubpassInputs;
-    ViewSubpassInputs.reserve(SubpassInputs.size());
-    for (const feme::graphics::AttachmentView &A : SubpassInputs)
-      ViewSubpassInputs.push_back(sliceAttachmentLayer(A, ViewIndex));
 
     std::vector<feme::cpu::FemeImageDescriptor> SubpassInputHeap;
     std::vector<feme::cpu::FemeImageSubresourceLayout> SubpassInputLayouts;
@@ -1959,15 +1977,30 @@ Error executeCommandsInto(
       Gfx.IndexBufferSize = Cmd.DstSize;
       break;
     case RecordedCommand::Kind::SetViewport:
-      Gfx.Dynamic.Viewport = feme::graphics::ViewportState{
-          Cmd.ViewportValue.x,        Cmd.ViewportValue.y,
-          Cmd.ViewportValue.width,    Cmd.ViewportValue.height,
-          Cmd.ViewportValue.minDepth, Cmd.ViewportValue.maxDepth};
+      if (Gfx.Dynamic.Viewports.size() <
+          Cmd.FirstViewport + Cmd.ViewportsValue.size())
+        Gfx.Dynamic.Viewports.resize(Cmd.FirstViewport +
+                                     Cmd.ViewportsValue.size());
+      for (size_t I = 0; I != Cmd.ViewportsValue.size(); ++I) {
+        const VkViewport &Viewport = Cmd.ViewportsValue[I];
+        Gfx.Dynamic.Viewports[Cmd.FirstViewport + I] =
+            feme::graphics::ViewportState{Viewport.x,        Viewport.y,
+                                          Viewport.width,    Viewport.height,
+                                          Viewport.minDepth, Viewport.maxDepth};
+      }
       break;
     case RecordedCommand::Kind::SetScissor:
-      Gfx.Dynamic.Scissor = feme::graphics::ScissorRect{
-          Cmd.ScissorValue.offset.x, Cmd.ScissorValue.offset.y,
-          Cmd.ScissorValue.extent.width, Cmd.ScissorValue.extent.height};
+      if (Gfx.Dynamic.Scissors.size() <
+          Cmd.FirstScissor + Cmd.ScissorsValue.size())
+        Gfx.Dynamic.Scissors.resize(Cmd.FirstScissor +
+                                    Cmd.ScissorsValue.size());
+      for (size_t I = 0; I != Cmd.ScissorsValue.size(); ++I) {
+        const VkRect2D &Scissor = Cmd.ScissorsValue[I];
+        Gfx.Dynamic.Scissors[Cmd.FirstScissor + I] =
+            feme::graphics::ScissorRect{Scissor.offset.x, Scissor.offset.y,
+                                        Scissor.extent.width,
+                                        Scissor.extent.height};
+      }
       break;
     case RecordedCommand::Kind::SetBlendConstants:
       Gfx.Dynamic.BlendConstants = Cmd.BlendConstants;
@@ -3039,46 +3072,84 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer2(VkCommandBuffer commandBuffer,
                         size);
 }
 
+// Shared implementation for
+// `vkCmdSetViewport`/`vkCmdSetViewportWithCount{,EXT}` (roadmap C4c/H3):
+// factored out of the `VKAPI_CALL` entry points below so that
+// `vkCmdSetViewportWithCount` doesn't need to call `vkCmdSetViewport` by its
+// unqualified name, which is ambiguous against `vulkan/vulkan_core.h`'s own
+// extern "C" declaration of the same name.
+static void setViewportImpl(VkCommandBuffer commandBuffer,
+                            uint32_t firstViewport, uint32_t viewportCount,
+                            const VkViewport *pViewports) {
+  auto *Cmd = fromHandle<vulkan::CommandBuffer>(commandBuffer);
+  const PhysicalDeviceInfo *Info = Cmd->getPhysicalDeviceInfo();
+  if (!Info || viewportCount == 0 || !pViewports)
+    return;
+  uint32_t MaxViewports = Info->Properties.limits.maxViewports;
+  if (firstViewport >= MaxViewports ||
+      viewportCount > MaxViewports - firstViewport)
+    return;
+  Cmd->setViewports(firstViewport,
+                    llvm::ArrayRef<VkViewport>(pViewports, viewportCount));
+}
+
+// Shared implementation for `vkCmdSetScissor`/`vkCmdSetScissorWithCount{,EXT}`;
+// see `setViewportImpl`'s comment above for why this is factored out.
+static void setScissorImpl(VkCommandBuffer commandBuffer, uint32_t firstScissor,
+                           uint32_t scissorCount, const VkRect2D *pScissors) {
+  auto *Cmd = fromHandle<vulkan::CommandBuffer>(commandBuffer);
+  const PhysicalDeviceInfo *Info = Cmd->getPhysicalDeviceInfo();
+  if (!Info || scissorCount == 0 || !pScissors)
+    return;
+  uint32_t MaxScissors = Info->Properties.limits.maxViewports;
+  if (firstScissor >= MaxScissors || scissorCount > MaxScissors - firstScissor)
+    return;
+  Cmd->setScissors(firstScissor,
+                   llvm::ArrayRef<VkRect2D>(pScissors, scissorCount));
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(VkCommandBuffer commandBuffer,
                                             uint32_t firstViewport,
                                             uint32_t viewportCount,
                                             const VkViewport *pViewports) {
-  // Only one viewport is advertised (`maxViewports` is 1), so a call naming
-  // any other slot has nothing to set.
-  if (firstViewport != 0 || viewportCount == 0)
-    return;
-  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setViewport(pViewports[0]);
+  setViewportImpl(commandBuffer, firstViewport, viewportCount, pViewports);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer,
                                            uint32_t firstScissor,
                                            uint32_t scissorCount,
                                            const VkRect2D *pScissors) {
-  if (firstScissor != 0 || scissorCount == 0)
-    return;
-  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setScissor(pScissors[0]);
+  setScissorImpl(commandBuffer, firstScissor, scissorCount, pScissors);
 }
 
-// (roadmap C4c) `vkCmdSetViewportWithCountEXT`/`vkCmdSetScissorWithCountEXT`:
-// the "with count" spelling `VK_EXT_extended_dynamic_state` adds, with no
-// `first*` parameter (a pipeline may only ever use one or the other of a
-// state/its "with count" counterpart, never both). Reuses `setViewport`/
-// `setScissor` directly: `maxViewports == 1` means "with count" carries no
-// more information than the fixed-count commands above already do.
+// (roadmap C4c/H3) `vkCmdSetViewportWithCount{,EXT}`/
+// `vkCmdSetScissorWithCount{,EXT}`: the "with count" spellings reset the
+// whole viewport/scissor array starting at element 0, unlike `vkCmdSetViewport`
+// /`vkCmdSetScissor`'s partial update.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetViewportWithCount(VkCommandBuffer commandBuffer, uint32_t viewportCount,
+                          const VkViewport *pViewports) {
+  setViewportImpl(commandBuffer, /*firstViewport=*/0, viewportCount,
+                  pViewports);
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewportWithCountEXT(
     VkCommandBuffer commandBuffer, uint32_t viewportCount,
     const VkViewport *pViewports) {
-  if (viewportCount == 0)
-    return;
-  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setViewport(pViewports[0]);
+  setViewportImpl(commandBuffer, /*firstViewport=*/0, viewportCount,
+                  pViewports);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetScissorWithCount(VkCommandBuffer commandBuffer, uint32_t scissorCount,
+                         const VkRect2D *pScissors) {
+  setScissorImpl(commandBuffer, /*firstScissor=*/0, scissorCount, pScissors);
 }
 
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetScissorWithCountEXT(VkCommandBuffer commandBuffer,
                             uint32_t scissorCount, const VkRect2D *pScissors) {
-  if (scissorCount == 0)
-    return;
-  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setScissor(pScissors[0]);
+  setScissorImpl(commandBuffer, /*firstScissor=*/0, scissorCount, pScissors);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetBlendConstants(
