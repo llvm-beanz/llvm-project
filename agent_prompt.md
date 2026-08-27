@@ -33,9 +33,26 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5?
+Can you work on milestone H5b?
 
-> **Geometry stage.** Same rejection as H4, same milestone (G5), but an
-> independent feature bit (`geometryShader`), an independent limit block
-> (`maxGeometry*`), stream output, and `multiviewGeometryShader` now that H2 has
-> landed. Whole `dEQP-VK.geometry` group
+> **Thread a non-constant, dynamically-indexed SPIR-V array index into
+> `feme.stage.input.load`'s `Vertex` operand**, the gap H5a's own investigation
+> found: a geometry entry point's per-vertex inputs (`gl_in[]`-shaped) are read
+> via `gl_in[i]` for a loop-carried `i`, but `loadStageIOValue`'s existing
+> recursion always passes a constant `Zero` for `Vertex` -- there is no code
+> path today that recognizes a SPIR-V array-typed `Input`-storage-class global
+> being indexed by a real SSA value (as opposed to the constant-offset-only
+> `getStageIOBaseAndOffset`/`resolveStageIOAccess` byte-offset resolution H2d
+> built for a builtin interface block's own *member* access) and threads that
+> index through as `Vertex` instead of `Row`/`Component`. Needs: recognizing an
+> array-of-per-vertex-block SPIR-V `Input` global (distinct from a matrix's
+> `Row` dimension, which is a compile-time-fixed shape, not a genuine "the
+> pipeline supplies N of these, addressed by this stage's own bounded loop
+> variable" one); extracting the outer (vertex) index as a `Value*` rather than
+> requiring it constant; and validating (`ValidateStagePass`, itself still not
+> extended to Geometry -- see H5e) that a non-constant `Vertex` operand is only
+> ever legal for a stage whose ABI actually supports it (`FemeGeometryArgs`'s
+> primitive-major `Inputs` layout), diagnosed otherwise.
+> `CanonicalizeStagePass::run` must not accept `ShaderStage::Geometry` until
+> this lands (H5a's own report explains why). Whole `dEQP-VK.geometry` group
+> remains blocked on this
