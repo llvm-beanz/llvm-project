@@ -33,32 +33,26 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H4a? The last agent stopped part way through without
-committing its progress. I've stashed its changes, you can restore them with
-`git stash pop`.
+Can you work on milestone H4b?
 
-> **No SPIR-V tessellation-control or tessellation-evaluation entry point can be
-> reflected, so H4b has nothing to compile.**
-> `feme::graphics::CanonicalizeStagePass::run`
-> (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`, ~line 1200) skips every
-> function whose `feme::getShaderStage` is not `Vertex` or `Fragment`, so a
-> `TessellationControl`/`TessellationEvaluation` entry point reaches code
-> generation with no `EntrySignature` attached and cannot be wrapped. Lifting
-> that filter is necessary but nowhere near sufficient: FeMe's hull ABI is
-> D3D-shaped and needs **two** separately compiled entry points -- a
-> control-point phase for `HullWrapperPass` and a patch-constant phase for
-> `PatchConstantWrapperPass`, discriminated by
-> `feme::cpu::isPatchConstantPhase`'s `SignatureDirection::PatchOutput` test --
-> whereas GLSL/SPIR-V compiles a tessellation-control shader to a **single**
-> entry point that writes both its per-vertex outputs and
-> `gl_TessLevelOuter`/`gl_TessLevelInner`, typically with an intervening
-> `OpControlBarrier`. Splitting that one entry into the two FeMe phases is
-> exactly R34's own still-deferred "generalize `EntryWrapperPass`'s
-> barrier-region splitting to the control-point batch ABI" item, and is the real
-> work here. Also needs SPIR-V's tessellation execution modes
-> (`Triangles`/`Quads`/`Isolines`,
-> `SpacingEqual`/`SpacingFractionalEven`/`SpacingFractionalOdd`,
-> `VertexOrderCw`/`VertexOrderCcw`, `PointMode`, `OutputVertices`) mapped onto
-> `feme::graphics::TessellationState`, and `BuiltIn`
-> `TessLevelOuter`/`TessLevelInner`/`TessCoord`/`PatchVertices`/`InvocationId`
-> mapped onto the corresponding `SignatureSystemValue`s
+> **`vkCreateGraphicsPipelines` still rejects
+> `VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT`/`VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT`,
+> and `tessellationShader` is still `VK_FALSE`.** `GraphicsPipeline.cpp`'s
+> `mapStage`/stage-mask loop (~lines 1157-1174) needs to accept the two bits,
+> require exactly one of each when either is present, reject any topology other
+> than `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` for such a pipeline (and reject
+> patch-list topology without them), translate
+> `VkPipelineTessellationStateCreateInfo::patchControlPoints` into
+> `graphics::TessellationState::InputControlPointCount` after validating it
+> against `maxTessellationPatchSize`, compile the tessellation modules into the
+> hull control-point, patch-constant and domain `CompiledStage`s, and call
+> `graphics::GraphicsPipeline::setTessellationStages` -- all of which the
+> executor already consumes. `PhysicalDeviceInfo.cpp` then advertises
+> `tessellationShader = VK_TRUE` and real `maxTessellation*` limits; note that
+> the implementation's own honest ceilings are
+> `feme::graphics::MaxPatchControlPoints` (32, `Graphics/Patch.h`) for
+> `maxTessellationPatchSize` and `feme::graphics::DefaultMaxTessFactor` (64,
+> `Graphics/Tessellator.h`) for `maxTessellationGenerationLevel`, so neither may
+> be advertised higher without raising those first. Blocked on H4a: flipping the
+> feature bit before a tessellation module can even be reflected would turn the
+> group's 1114 honest `NotSupported`s into 1114 `Fail`s
