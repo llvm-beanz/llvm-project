@@ -33,31 +33,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H4f?
+Can you work on milestone H4h?
 
-> **`splitTessellationControlEntry` (H4a/H4c) only clones a
-> `<entry>.patchconstant` phase when it finds a barrier -- a
-> tessellation-control shader with none (legally the case whenever
-> `OutputVertices == 1`, since a single control-point invocation needs no
-> cross-invocation synchronization, `dEQP-VK.tessellation.winding.*`'s own
-> shape) leaves `PatchConstantPhase == nullptr`, but `compileAndValidateStages`
-> (H4b) unconditionally expects a `.patchconstant` sibling to exist and compiles
-> it as a second stage regardless** (24 of H4d's own re-measured
-> `dEQP-VK.tessellation.*` `Fail`s, all of `dEQP-VK.tessellation.winding.*`'s
-> glsl variants -- confirmed via a real `deqp-vk` run, root-caused and isolated
-> as part of H4d's own investigation but deliberately not fixed there, since it
-> is a distinct gap in the barrier-split design itself, not the
-> `resolveStageIOAccess` array-addressing bug H4d fixed). The whole entry, in
-> this no-barrier shape, is semantically already "the patch-constant phase" for
-> `OutputVertices == 1` (there is only one control point, so nothing
-> meaningfully distinguishes "per control point" from "per patch" here) -- needs
-> either (a) treating a no-barrier entry as *solely* a patch-constant phase
-> whenever every one of its stage-IO writes is patch-frequency
-> (`Patch`-decorated or a tess-factor `BuiltIn`), with an empty/trivial
-> control-point phase synthesized instead, or (b) the more general fix of
-> cloning the *whole* function as `<entry>.patchconstant` unconditionally when
-> there is no barrier (sound only when `OutputVertices == 1`, since with more
-> than one output control point and no barrier there is by definition no legal
-> way for one invocation to see another's data, so nothing but the current
-> invocation's own patch-frequency writes could safely be duplicated this way
-> either -- needs care not to naively assume general soundness)
+> **Fixing H4f and H4g still does not turn any of
+> `dEQP-VK.tessellation.winding.*`'s glsl cases green -- all 24 now fail at a
+> third, later blocker: `validateStageInterfaces` (`GraphicsPipeline.cpp`)
+> unconditionally requires the *vertex* stage to write a 4-component
+> `SV_Position`/`gl_Position` output** (`findSystemValue(*VSSig,
+> SignatureDirection::Output, SignatureSystemValue::Position)`), which is
+> correct for the ordinary vertex -> fragment pipeline (the rasterizer needs a
+> clip-space position from *somewhere*, and without a domain stage the vertex
+> stage is the only producer) but is not a real requirement once a tessellation
+> evaluation stage exists: the CTS's own `winding` test's vertex shader is
+> deliberately and legally empty (`void main (void) {}`; confirmed by reading
+> `vktTessellationWindingTests.cpp` directly), because its tessellation
+> evaluation shader computes `gl_Position` purely from `gl_TessCoord`
+> (`gl_Position = vec4(gl_TessCoord.xy*2.0 - 1.0, 0.0, 1.0);`) and never reads
+> back any vertex-stage output via `gl_in[]`. `validateStageInterfaces` needs to
+> skip (or relax) its `SV_Position` requirement on the vertex stage specifically
+> when a tessellation evaluation stage is present in the pipeline, since in that
+> shape the *domain* stage's own output is what gets rasterized (per
+> `PatchPipeline.cpp`'s `runPatchPipeline`/`Executor.cpp`), not the vertex
+> stage's -- root-caused and isolated as part of H4f/H4g's own re-measurement
+> but deliberately not fixed here, since it is a distinct validation-layer gap,
+> not a stage-splitting or signature-serialization one. Confirmed via a real
+> `deqp-vk` run with `FEME_VULKAN_LOG_CREATION_ERRORS=1`: all 24
+> `dEQP-VK.tessellation.winding.*` glsl cases now fail with exactly `"vertex
+> stage does not write a 4-component SV_Position output"` (0 occurrences of
+> either of H4f/H4g's own former blockers)
