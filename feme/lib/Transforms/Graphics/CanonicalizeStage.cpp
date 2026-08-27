@@ -842,6 +842,30 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
   return std::make_pair(GV, Offset.getZExtValue());
 }
 
+/// (Roadmap H5b/H5f) Whether \p GV is the exact shape a geometry entry's
+/// per-vertex-arrayed `Input` global takes (`gl_in[]`-shaped: either the
+/// `gl_PerVertex` builtin block itself, or a plain user-defined varying --
+/// GLSL/SPIR-V always arrays *every* input of a geometry entry point at
+/// `VerticesPerPrimitive`-many elements for that stage): a stage-IO
+/// `Input`-storage-class (address space 7) global whose own declared type
+/// is directly an `ArrayType`. This is a purely structural check -- it
+/// cannot (and, matching `getDynamicVertexIndexedAccess`'s own precedent,
+/// does not try to) tell this shape apart from a real per-vertex matrix
+/// attribute of some other stage, which takes the exact same IR shape;
+/// `feme::graphics::ValidateStagePass`'s `validateVertex` is what actually
+/// diagnoses a non-Geometry stage's use of the resulting non-constant
+/// `Vertex` operand. Shared between `getDynamicVertexIndexedAccess`'s own
+/// non-constant-index recognition and `resolveStageIOAccess`'s ordinary
+/// constant-offset path, so a *constant* `gl_in[k]` index is folded into
+/// the same `Vertex` operand a non-constant one is (roadmap H5f), not
+/// into `Row`. Sets \p AddrSpace to \p GV's address space when true.
+bool isPerVertexArrayInputGlobal(const GlobalVariable *GV,
+                                 unsigned &AddrSpace) {
+  if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 7)
+    return false;
+  return isa<ArrayType>(GV->getValueType());
+}
+
 /// (Roadmap H5b) A geometry entry point's own per-vertex inputs
 /// (`gl_in[]`-shaped: either the `gl_PerVertex` builtin block itself, or a
 /// plain user-defined varying -- GLSL/SPIR-V always arrays *every* input
@@ -864,9 +888,12 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
 /// member, or a matrix row within that one vertex's own value), resolved
 /// into a byte offset the same way `resolveRowComponent` already does for
 /// the ordinary constant-offset path, just starting one array dimension
-/// in. A constant vertex index is deliberately left to
-/// `getStageIOBaseAndOffset`'s own path instead (it folds into an ordinary
-/// constant byte offset there, needing no `Vertex` operand at all).
+/// in. (Roadmap H5f) A constant vertex index is *not* left unresolved
+/// here: `resolveStageIOAccess`'s own ordinary constant-offset path
+/// (`getStageIOBaseAndOffset`) folds it in too, using
+/// `isPerVertexArrayInputGlobal` (below) to recognize the same global
+/// shape and route that constant index through `Vertex` there as well,
+/// for consistency with the dynamic case this function handles.
 /// Returns `std::nullopt` if \p Ptr is not this exact shape.
 std::optional<std::tuple<GlobalVariable *, Value *, uint64_t>>
 getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
@@ -875,10 +902,10 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
     return std::nullopt;
   auto *GV = dyn_cast<GlobalVariable>(GEP->getPointerOperand());
   unsigned AddrSpace = 0;
-  if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 7)
+  if (!isPerVertexArrayInputGlobal(GV, AddrSpace))
     return std::nullopt;
-  auto *ArrTy = dyn_cast<ArrayType>(GV->getValueType());
-  if (!ArrTy || GEP->getNumIndices() < 2)
+  auto *ArrTy = cast<ArrayType>(GV->getValueType());
+  if (GEP->getNumIndices() < 2)
     return std::nullopt;
 
   auto IdxIt = GEP->idx_begin();
@@ -1484,9 +1511,14 @@ StageIOAccess resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
 /// `getDynamicVertexIndexedAccess`'s dynamically-vertex-indexed shape
 /// (roadmap H5b) first, falling back to `getStageIOBaseAndOffset`'s
 /// ordinary constant-byte-offset one -- see `resolveOffsetWithinElement`'s
-/// own comment for how each resolves from there. \p OutputGlobals
-/// (roadmap H2e) is checked to set the result's `IsOutput`, so a caller can
-/// tell a genuinely-input load from an `Output`-direction read-back.
+/// own comment for how each resolves from there. (Roadmap H5f) The
+/// constant-offset fallback itself peels a per-vertex-arrayed `Input`
+/// global's own outer array dimension into `Vertex` too, via
+/// `isPerVertexArrayInputGlobal`, so a *constant* `gl_in[k]` index is
+/// routed the same way a non-constant one already is, rather than folding
+/// into `Row`. \p OutputGlobals (roadmap H2e) is checked to set the
+/// result's `IsOutput`, so a caller can tell a genuinely-input load from
+/// an `Output`-direction read-back.
 std::optional<StageIOAccess> resolveStageIOAccess(
     Value *Ptr, Type *ValueTy, const DataLayout &DL,
     const DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> &ElementIDs,
@@ -1511,6 +1543,34 @@ std::optional<StageIOAccess> resolveStageIOAccess(
   auto It = ElementIDs.find(GV);
   if (It == ElementIDs.end())
     return std::nullopt;
+
+  // (Roadmap H5f) A *constant*-indexed `gl_in[k]`-shaped access folds
+  // entirely into a plain byte offset above -- `getStageIOBaseAndOffset`'s
+  // constant-offset walk has no trouble with a constant array index --
+  // landing here rather than `getDynamicVertexIndexedAccess`'s own
+  // non-constant path. Peel that same outer per-vertex array dimension
+  // for consistency: fold the constant vertex index into `Vertex`, not an
+  // ordinary `Row` the way `resolveOffsetWithinElement` below would
+  // otherwise read it as (exactly what this global's shape did before
+  // this row). Left alone for a whole-global aggregate access (\p ValueTy
+  // names the entire array, e.g. copying every vertex's value at once),
+  // which has no single vertex to peel out.
+  unsigned AddrSpace = 0;
+  if (isPerVertexArrayInputGlobal(GV, AddrSpace) &&
+      ValueTy != GV->getValueType()) {
+    auto *ArrTy = cast<ArrayType>(GV->getValueType());
+    Type *ElemTy = ArrTy->getElementType();
+    uint64_t VertexSize = DL.getTypeAllocSize(ElemTy);
+    if (VertexSize) {
+      uint64_t VertexIdx = ByteOffset / VertexSize;
+      uint64_t Residual = ByteOffset % VertexSize;
+      Value *Vertex =
+          ConstantInt::get(Type::getInt32Ty(GV->getContext()), VertexIdx);
+      return resolveOffsetWithinElement(ElemTy, It->second, Residual, ValueTy,
+                                        DL, OutputGlobals.contains(GV), Vertex);
+    }
+  }
+
   return resolveOffsetWithinElement(GV->getValueType(), It->second, ByteOffset,
                                     ValueTy, DL, OutputGlobals.contains(GV),
                                     /*Vertex=*/nullptr);
@@ -1565,9 +1625,18 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     // Appends one `SignatureElement` for \p GV (or one of its struct
     // members, for a builtin interface block -- see the `addElements`
     // lambda below), sourced from \p D's decorations and \p ValueTy's own
-    // scalar/vector/matrix/single-member-struct shape.
+    // scalar/vector/matrix/single-member-struct shape. (Roadmap H5f) \p
+    // RowCountIsVertexArray records whether \p ValueTy's own outer array
+    // dimension (folded into `RowCount` below by `getStageIORowShape`) is
+    // actually a geometry entry's per-vertex array rather than a real
+    // matrix's row dimension -- true only for a whole (non-block)
+    // per-vertex-arrayed `Input` global (`isPerVertexArrayInputGlobal`),
+    // never for a builtin interface block's own per-member element, whose
+    // `ValueTy` has already had that same dimension peeled off by the
+    // caller before it ever reaches here.
     auto addElement = [&](GlobalVariable *GV, unsigned AddrSpace,
-                          const ParsedSPIRVDecorations &D, Type *ValueTy) {
+                          const ParsedSPIRVDecorations &D, Type *ValueTy,
+                          bool RowCountIsVertexArray = false) {
       SPIRVElementInfo Info = classifySPIRVElement(Stage, Phase, AddrSpace, D);
       SignatureElement Elt;
       Elt.ElementID = NextID;
@@ -1583,6 +1652,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       Elt.FirstComponent = D.Component.value_or(0);
       Elt.ComponentCount = Shape.ComponentCount;
       Elt.RowCount = Shape.RowCount;
+      Elt.RowCountIsVertexArray = RowCountIsVertexArray;
       Elt.Interpolation = getInterpolationMode(D);
       Elt.Frequency = Info.Frequency;
       Elt.FromInputPatch = Info.FromInputPatch;
@@ -1622,9 +1692,21 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
                        ST->getElementType(I));
           continue;
         }
+        // (Roadmap H5f) A plain (non-block) per-vertex-arrayed `Input`
+        // global's whole declared type -- including its outer per-vertex
+        // array dimension -- still becomes this element's `RowCount` via
+        // `getStageIORowShape` below, exactly as before H5b; `Elt.
+        // RowCountIsVertexArray` marks that dimension as a per-vertex
+        // array's own extent rather than a real matrix's row count, so a
+        // consumer can tell the two apart regardless of whether the
+        // shader's own index into it happens to be constant (folded into
+        // `Row` by `resolveOffsetWithinElement`) or dynamic (`Vertex`).
+        unsigned UnusedAddrSpace = 0;
         ParsedSPIRVDecorations D =
             parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
-        addElement(GV, AddrSpace, D, GV->getValueType());
+        addElement(GV, AddrSpace, D, GV->getValueType(),
+                   /*RowCountIsVertexArray=*/
+                   isPerVertexArrayInputGlobal(GV, UnusedAddrSpace));
       }
     };
     addElements(InputGlobals);

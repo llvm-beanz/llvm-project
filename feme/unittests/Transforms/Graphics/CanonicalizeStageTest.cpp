@@ -670,6 +670,9 @@ TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoInputLoad) {
   // indexed access threads that dimension's own index through as.
   EXPECT_EQ(Sig->Elements[0].RowCount, 3u);
   EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+  // (Roadmap H5f) The signature marks that `RowCount` as a per-vertex
+  // array's own extent, not a real matrix's row count.
+  EXPECT_TRUE(Sig->Elements[0].RowCountIsVertexArray);
 
   unsigned SeenLoads = 0;
   for (Instruction &I : instructions(F)) {
@@ -733,6 +736,11 @@ TEST(CanonicalizeStageTest,
   // per-vertex array dimension is not folded into it.
   EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
   EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+  // (Roadmap H5f) Unlike the plain (non-block) case, a builtin interface
+  // block's own per-member `RowCount` is never a per-vertex array's own
+  // extent to begin with -- the outer array dimension is peeled off
+  // before `addElement` ever sees this member's type.
+  EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
 
   unsigned SeenLoads = 0;
   for (Instruction &I : instructions(F)) {
@@ -745,6 +753,124 @@ TEST(CanonicalizeStageTest,
               Sig->Elements[0].ElementID);
     EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 0u);
     EXPECT_EQ(CI->getArgOperand(3), IArg);
+  }
+  EXPECT_EQ(SeenLoads, 4u);
+}
+
+/// (Roadmap H5f) The *constant*-index counterpart of
+/// `ThreadsDynamicVertexIndexIntoInputLoad`: `gl_in[k]`-shaped (or any
+/// other per-vertex-arrayed `Input` global's) access with a compile-time
+/// constant `k` used to fold entirely into `Row` via the ordinary
+/// `getStageIOBaseAndOffset`/`resolveRowComponent` byte-offset path,
+/// indistinguishable in the rewritten IR from a real matrix's constant row
+/// index (`RewritesSPIRVMatrixInputLoadOneRowAtATime` above). This exact
+/// same plain (non-block) per-vertex-arrayed varying, now indexed by a
+/// constant `1` instead of a loop-carried `%i`, must be threaded through
+/// as `Vertex` (a constant `i32 1`) exactly like the non-constant case is,
+/// not folded into `Row` (which must stay the default constant 0, there
+/// being no further row within one vertex's own `<4 x float>` value) --
+/// for consistency with `ThreadsDynamicVertexIndexIntoInputLoad`, and so
+/// `Sig->Elements[0].RowCountIsVertexArray` (also asserted here) lets a
+/// consumer recognize this element's `RowCount` as the per-vertex array's
+/// own extent regardless of how the shader happens to index it.
+TEST(CanonicalizeStageTest, FoldsConstantVertexIndexIntoVertexOperand) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_texcoord = external addrspace(7) constant [3 x <4 x float>], !spirv.Decorations !0
+    define <4 x float> @main() #0 {
+      %p = getelementptr inbounds [3 x <4 x float>], ptr addrspace(7) @in_texcoord, i32 0, i32 1
+      %v = load <4 x float>, ptr addrspace(7) %p
+      ret <4 x float> %v
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 3u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+  EXPECT_TRUE(Sig->Elements[0].RowCountIsVertexArray);
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    ++SeenLoads;
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 0u);
+    std::optional<uint64_t> Vertex =
+        getStageOpConstantOperand(*CI, /*Vertex=*/3);
+    ASSERT_TRUE(Vertex.has_value());
+    EXPECT_EQ(*Vertex, 1u);
+  }
+  EXPECT_EQ(SeenLoads, 4u);
+
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<LoadInst>(&I));
+}
+
+/// (Roadmap H5f) The constant-index counterpart of
+/// `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad`: a builtin
+/// interface block's own per-vertex-arrayed access (`gl_in[k].
+/// gl_Position`) with a constant `k` folds into `Vertex` the same way the
+/// dynamic case does, not into an ordinary `Row`.
+TEST(CanonicalizeStageTest,
+     FoldsConstantVertexIndexIntoInterfaceBlockArrayMemberVertexOperand) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_in = external addrspace(7) global [3 x { <4 x float>, float, [1 x float], [1 x float] }], !feme.spirv.MemberDecorations !10
+    define <4 x float> @main() #0 {
+      %p = getelementptr inbounds [3 x { <4 x float>, float, [1 x float], [1 x float] }], ptr addrspace(7) @gl_in, i32 0, i32 2, i32 0
+      %v = load <4 x float>, ptr addrspace(7) %p
+      ret <4 x float> %v
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !10 = !{!11, !12, !13, !14}
+    !11 = !{i32 0, !15}
+    !12 = !{i32 1, !16}
+    !13 = !{i32 2, !17}
+    !14 = !{i32 3, !18}
+    !15 = !{!19}
+    !19 = !{i32 11, i32 0}
+    !16 = !{!20}
+    !20 = !{i32 11, i32 1}
+    !17 = !{!21}
+    !21 = !{i32 11, i32 3}
+    !18 = !{!22}
+    !22 = !{i32 11, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 4u);
+  EXPECT_EQ(Sig->Elements[0].SystemValue, SignatureSystemValue::Position);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
+  EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    ++SeenLoads;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[0].ElementID);
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 0u);
+    std::optional<uint64_t> Vertex =
+        getStageOpConstantOperand(*CI, /*Vertex=*/3);
+    ASSERT_TRUE(Vertex.has_value());
+    EXPECT_EQ(*Vertex, 2u);
   }
   EXPECT_EQ(SeenLoads, 4u);
 }
