@@ -38792,3 +38792,136 @@ boundary.
    `Vulkan14FeatureInventory.md`'s table/summary updates,
    `FeMeGraphicsDesign.md`'s closing paragraph.
 6. This entry.
+
+# Milestone H5e-a: `spirv.EmitVertex`/`spirv.EndPrimitive` lowering
+
+## Task
+
+Roadmap H5e's own report flagged the dominant cause of `dEQP-VK.geometry.*`
+failure (122 of 167): `ConvertSPIRVToLLVMPass`/`SPIRVToLLVMPatterns` had no
+conversion pattern for SPIR-V's `spirv.EmitVertex`/`spirv.EndPrimitive` ops
+at all, confirmed by grepping the whole `lib/`/`include/` tree for
+`EmitVertexOp`/`EndPrimitiveOp` and finding zero hits outside MLIR's own
+upstream dialect definition. H5e-a's job: add that pattern, routing each op
+into the same `feme.stage.stream.emit`/`.cut` intrinsics
+`feme::cpu::lowerGeometryStreamEmit`/`lowerGeometryStreamCut`
+(GeometryWrapper.cpp, built and tested since roadmap G5) already know how
+to lower, then re-run `dEQP-VK.geometry.*` to re-triage whatever remains.
+
+## Investigation
+
+Confirmed both `mlir::spirv::EmitVertexOp`/`EndPrimitiveOp` already exist
+in-tree (`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVPrimitiveOps.td`): both
+zero-operand, zero-result, non-terminator ops (`hasVerifier = 0`, plain
+`(ins)`/`(outs)`), each gated on SPIR-V's `Geometry` capability and
+restricted by their own spec text to "only ... when only one stream is
+present" -- so no multi-stream operand threading is needed yet, matching
+`GeometryState`/`FemeGeometryArgs`'s current single-stream-only support.
+
+`feme::StageOpKind::StreamEmit`/`StreamCut` and their builders
+(`createStageStreamEmit`/`createStageStreamCut`, `StageOps.h`/`.cpp`)
+already existed, built for `GeometryWrapperPass` under G5 and unused by
+anything upstream of it -- exactly the gap H5e-a's own roadmap text
+described. `SPIRVToLLVMPatterns.cpp` builds *MLIR* IR (the `mlir::LLVM`
+dialect), not raw `llvm::IRBuilder`-shaped LLVM IR the way
+`createStageStreamEmit`/`Cut` do, so those existing C++ builders are not
+directly callable from a conversion pattern here; the precedent to follow
+instead is `SubpassLoadPattern`'s `getOrInsertSubpassLoadFunc`, which
+declares (or finds) a plain `feme.stage.subpass.load.f32` `LLVMFuncOp` and
+calls it directly, exactly the shape `feme.stage.stream.emit`/`.cut` need
+too (except unmangled, since neither is `isStageOpKindOverloaded`).
+
+## Change
+
+`SPIRVToLLVMPatterns.cpp` gains:
+- `getOrInsertStreamOpFunc`: declares (or finds) a `(i32) -> void`
+  `LLVMFuncOp` for a given `feme.stage.stream.*` name, mirroring
+  `getOrInsertSubpassLoadFunc`'s shape but with no type-mangling suffix
+  (`StreamEmit`/`StreamCut` are not overloaded).
+- `EmitVertexConversionPattern`/`EndPrimitiveConversionPattern`: each
+  converts its op into a constant-`0` `i32` operand and a call to
+  `feme.stage.stream.emit`/`.cut` respectively, then erases the
+  (non-terminator) op in place -- mirroring
+  `DemoteToHelperInvocationConversionPattern`'s own "erase in place, not a
+  terminator" shape exactly.
+
+Both registered in `populateSPIRVToLLVMTargetPatterns`'s existing pattern
+list at the default `FeMeBenefit`; no `ConvertSPIRVToLLVMPass.cpp` change
+was needed since it already marks the *whole* `spirv` dialect illegal
+(`Target.addIllegalDialect<mlir::spirv::SPIRVDialect>()`) -- a new pattern
+alone is sufficient for these ops to stop being "no pattern for this
+illegal op" legalization failures.
+
+New lit test `spirv-to-llvm-geometry-stream.mlir`: a plain
+`EmitVertex`/`EndPrimitive` pair, and a three-`EmitVertex`-then-`cut` case
+confirming multiple `EmitVertex` calls share one `feme.stage.stream.emit`
+declaration (not one per call, since the op is not overloaded).
+
+## Formatting note
+
+Running plain `clang-format -i` on the whole file reformatted ~140 lines
+of pre-existing, unrelated code (evidently this checkout's `.clang-format`
+config/version combination disagrees slightly with whatever produced the
+file's current formatting) -- reverted that and used `git clang-format
+HEAD` instead, which only reformats lines actually changed in the working
+tree, keeping the diff scoped to this row's own new code (a ~13-line
+reformat of the new patterns themselves, mostly wrapping call argument
+lists at a slightly different column).
+
+## Verification
+
+`ninja check-feme` (assertions-enabled, ccache build): 1863/1922 (59
+pre-existing, unrelated `Unsupported`, 0 `Failed`), up from H5e's own
+1862/1921 by exactly the 1 new lit test this row adds.
+
+A real `dEQP-VK.geometry.*` re-run (200 cases): `Passed` rises from 0 to
+1/200 (`dEQP-VK.geometry.varying.vertex_no_op_geometry_out_1`), `Not
+supported` stays byte-identical at 33/200, and -- confirmed by grepping
+the new log for `spirv.EmitVertex`/`spirv.EndPrimitive` and finding zero
+matches -- the dominant 122-case failure bucket this row targeted is
+completely gone, redistributing into: a new 60-case
+`getelementptr`-on-array-of-struct/vector bucket (geometry per-invocation
+output-vertex storage lowering to a plain array type, not a
+pointer-indexable one -- not yet isolated), the pre-existing 24-case
+`LinearizePass` internal-branch limitation, the same 21-case silent
+`vkCreateGraphicsPipelines` failure H5e's own report already flagged
+(unchanged), a new 18-case `vkQueueSubmit`-time failure specific to
+layered 1D/2D-array geometry draws, the pre-existing 14-case
+`layered.3d` image-creation gap and 8-case fragment-layer gap, the
+pre-existing 9-case `SIMDize` divergent-value limitation (now fully
+counted, was undercounted at 1 while `EmitVertex` masked the rest), a new
+6-case missing-`feme.signature`-metadata `GeometryWrapperPass` failure,
+a new 6-case wrong-image rendering bug, and the remaining pre-existing
+`NotSupported`-gated limit/feature/format cases. Full breakdown recorded
+in "Roadmap H5e-a: measured impact" in `VulkanCTSReport.md`.
+
+`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample: 12
+Pass / 155 Fail / 1790 NotSupported, byte-identical to H5e's own
+baseline -- expected, since no case in that sample exercises a geometry
+stage that calls `EmitVertex`/`EndPrimitive`.
+
+Four new lettered rows spun off in `Roadmap.md` for the newly-isolated
+failure buckets this re-triage found (mirroring H5a/H5e's own precedent
+of spinning off whatever a re-triage discovers rather than folding it
+back into the row that found it): H5e-b (the unchanged 21-case silent
+pipeline-creation failure), H5e-c (the new 18-case layered
+`vkQueueSubmit` failure), H5e-d (the new 6-case missing-signature-metadata
+failure), and H5e-e (the new 6-case wrong-image rendering bug). The
+60-case `getelementptr` bucket and the already-documented/pre-existing
+buckets were left uncategorized into a new row, since they are either
+already tracked elsewhere or too large/unisolated to scope without
+further investigation of their own.
+
+`FeMeGraphicsDesign.md`'s "Tessellation and geometry stage model" section
+is updated in place (not a new paragraph) to reflect that the
+`EmitVertex`/`EndPrimitive` gap it previously described as still-open is
+now closed, pointing at the new report section for the follow-on buckets.
+
+## Commits
+
+1. `SPIRVToLLVMPatterns.cpp`: the new conversion patterns.
+2. `spirv-to-llvm-geometry-stream.mlir`: the new lit test.
+3. Docs: `Roadmap.md`'s H5e-a row struck through plus new H5e-b/c/d/e
+   rows, `VulkanCTSReport.md`'s new "Roadmap H5e-a: measured impact"
+   section, `FeMeGraphicsDesign.md`'s updated closing paragraph.
+4. This entry.
