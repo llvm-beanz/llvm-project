@@ -1,6 +1,7 @@
 add_feme_library(FeMeGraphics
   DomainInvocations.cpp
   Executor.cpp
+  Geometry.cpp
   GeometryInputs.cpp
   GeometryStream.cpp
   GeometryStreamCollection.cpp
