@@ -33,26 +33,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H4b?
+Can you work on milestone H4c?
 
-> **`vkCreateGraphicsPipelines` still rejects
-> `VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT`/`VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT`,
-> and `tessellationShader` is still `VK_FALSE`.** `GraphicsPipeline.cpp`'s
-> `mapStage`/stage-mask loop (~lines 1157-1174) needs to accept the two bits,
-> require exactly one of each when either is present, reject any topology other
-> than `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` for such a pipeline (and reject
-> patch-list topology without them), translate
-> `VkPipelineTessellationStateCreateInfo::patchControlPoints` into
-> `graphics::TessellationState::InputControlPointCount` after validating it
-> against `maxTessellationPatchSize`, compile the tessellation modules into the
-> hull control-point, patch-constant and domain `CompiledStage`s, and call
-> `graphics::GraphicsPipeline::setTessellationStages` -- all of which the
-> executor already consumes. `PhysicalDeviceInfo.cpp` then advertises
-> `tessellationShader = VK_TRUE` and real `maxTessellation*` limits; note that
-> the implementation's own honest ceilings are
-> `feme::graphics::MaxPatchControlPoints` (32, `Graphics/Patch.h`) for
-> `maxTessellationPatchSize` and `feme::graphics::DefaultMaxTessFactor` (64,
-> `Graphics/Tessellator.h`) for `maxTessellationGenerationLevel`, so neither may
-> be advertised higher without raising those first. Blocked on H4a: flipping the
-> feature bit before a tessellation module can even be reflected would turn the
-> group's 1114 honest `NotSupported`s into 1114 `Fail`s
+> **`splitTessellationControlEntry` (H4a) explicitly rejects a
+> tessellation-control shader whose patch-constant phase reads back an SSA value
+> computed before the barrier** (24 of H4b's own measured 227
+> `dEQP-VK.tessellation.*` `Fail`s, diagnosed rather than mis-compiled:
+> `"tessellation-control SPIR-V entry point's patch-constant region cannot yet
+> capture SSA values defined before the barrier"`), yet this is the common, real
+> GLSL-compiled shape -- computing a per-patch tessellation factor from data
+> derived from the control-point body (e.g. control-point output positions) and
+> referencing it after `OpControlBarrier`. Needs the split to either
+> re-materialize/clone the relevant pre-barrier computation into the
+> patch-constant phase (correct only when that computation reads no other
+> invocation's per-vertex output, i.e. is not itself a cross-invocation
+> reduction) or thread the captured value through a synthetic patch-scoped
+> storage location both phases can address (likely the right shape in general,
+> since it mirrors how the control-point phase's own per-vertex outputs already
+> cross the barrier through patch-shared storage)
