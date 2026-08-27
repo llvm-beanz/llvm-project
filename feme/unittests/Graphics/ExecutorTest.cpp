@@ -2790,6 +2790,118 @@ TEST(ExecutorTest, GeometryStagePassesThroughATriangleCoveringTheViewport) {
   }
 }
 
+// (Roadmap H5e-b) A geometry entry point that emits no vertices at all --
+// `dEQP-VK.geometry.emit.*_emit_0_end_0`'s degenerate `void main(void) {}`
+// bodies, which call neither `feme.stage.stream.emit` nor
+// `feme.stage.stream.cut` -- reads nothing and writes nothing.
+constexpr char EmptyGeometryShaderIR[] = R"(
+define void @gs_main() #0 {
+  ret void
+}
+attributes #0 = { "feme.shader.stage"="geometry" }
+)";
+
+/// Builds a vertex/geometry/fragment `GraphicsPipeline` whose geometry
+/// stage (`EmptyGeometryShaderIR`) has an entirely empty `EntrySignature`
+/// -- mirroring `dEQP-VK.geometry.emit.*_emit_0_end_0`'s reflected shape,
+/// where SPIR-V's own "only the entry point's *used* interface variables
+/// are listed" rule means a shader that writes nothing produces no
+/// signature elements at all, not just a missing `SV_Position`.
+Expected<GraphicsPipeline>
+buildNoEmitGeometryPipeline(Context &Ctx, uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature GSSig; // Deliberately empty: this stage emits nothing.
+  Expected<std::shared_ptr<CompiledStage>> GS = compileStage(
+      Ctx, EmptyGeometryShaderIR, "gs_main", GSSig, ShaderStage::Geometry);
+  if (!GS)
+    return GS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  GeometryState Geom;
+  Geom.InputPrimitive = GeometryInputPrimitive::Triangles;
+  Geom.OutputPrimitive = GeometryOutputPrimitive::TriangleStrip;
+  Geom.MaxOutputVertices = 0;
+  Pipeline.setGeometryStage(std::move(*GS), Geom);
+  return Pipeline;
+}
+
+// (Roadmap H5e-b) A draw against a pipeline whose geometry stage's own
+// signature is entirely empty must be a legal no-op: before this fix,
+// `executeDraws` unconditionally rejected any pre-rasterization stage
+// missing an `SV_Position` output, including this one, with "the last
+// pre-rasterization stage does not write an SV_Position output" -- even
+// though a stage that emits nothing can never contribute anything to
+// rasterization regardless.
+TEST(ExecutorTest, ExecutesDrawsAsNoOpWhenGeometryStageNeverEmits) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildNoEmitGeometryPipeline(Ctx, /*AttachmentSize=*/4);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  uint32_t Size = 4;
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // No error, and the color attachment stays untouched: a geometry stage
+  // that emits nothing must never rasterize a single pixel.
+  for (uint8_t Byte : Storage)
+    EXPECT_EQ(Byte, 0);
+}
+
 // (Roadmap H5d-a) A geometry stage declaring `GeometryState::Invocations ==
 // 2`: reads its own `gl_InvocationID` (element 2) and emits a full-viewport
 // triangle strip colored red for invocation 0, green for invocation 1 --

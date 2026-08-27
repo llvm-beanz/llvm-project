@@ -538,7 +538,19 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
   const feme::SignatureElement *Position =
       findSystemValue(PositionSig, feme::SignatureDirection::Output,
                       feme::SignatureSystemValue::Position);
-  if (!Position || Position->ComponentCount != 4)
+  // (roadmap H5e-b) A geometry entry point that emits no vertices at all
+  // (e.g. `dEQP-VK.geometry.emit.*_emit_0_end_0`'s degenerate `void
+  // main(void) {}` bodies, which call neither `EmitVertex` nor
+  // `EndPrimitive`) has no output signature to speak of: SPIR-V only lists
+  // an entry point's *used* interface variables, so an unwritten
+  // `gl_Position` simply never appears at all -- `PositionSig.Elements` is
+  // empty, not just missing `Position`. Nothing is ever rasterized from
+  // such a stage regardless of whether it wrote a position, so this is
+  // legal, unlike a geometry stage that writes some other output (a
+  // varying) but genuinely forgets `gl_Position`, which is still rejected
+  // below.
+  bool GeometryNeverWrites = GeometryStage && PositionSig.Elements.empty();
+  if (!GeometryNeverWrites && (!Position || Position->ComponentCount != 4))
     return createStringError(
         inconvertibleErrorCode(), "%s stage does not write a 4-component "
                                   "SV_Position output",
@@ -550,29 +562,39 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
     if (!FSSig)
       return FSSig.takeError();
 
-    for (const feme::SignatureElement &FSIn : FSSig->Elements) {
-      if (FSIn.Direction != feme::SignatureDirection::Input ||
-          FSIn.SystemValue != feme::SignatureSystemValue::None)
-        continue;
-      if (!FSIn.Location)
-        return createStringError(inconvertibleErrorCode(),
-                                 "fragment input element %u has no location "
-                                 "to link against a vertex output",
-                                 FSIn.ElementID);
-      const feme::SignatureElement *VSOut = findLocation(
-          PositionSig, feme::SignatureDirection::Output, *FSIn.Location);
-      if (!VSOut)
-        return createStringError(inconvertibleErrorCode(),
-                                 "fragment input location %u has no matching "
-                                 "vertex stage output",
-                                 *FSIn.Location);
-      if (VSOut->ComponentCount != FSIn.ComponentCount ||
-          VSOut->ComponentType != FSIn.ComponentType)
-        return createStringError(inconvertibleErrorCode(),
-                                 "vertex output and fragment input at "
-                                 "location %u disagree on component "
-                                 "count/type",
-                                 *FSIn.Location);
+    // (roadmap H5e-b) Mirrors the `GeometryNeverWrites` relaxation above:
+    // a geometry stage that emits no vertices at all never reaches the
+    // fragment stage in the first place, so its own empty output
+    // signature has nothing sensible to link a fragment input against
+    // either. Skipping the whole location-linkage loop (rather than just
+    // the lookup) also skips the fragment input's own "has no location"
+    // check, which is fine -- that check exists to make the lookup below
+    // meaningful, and there is no lookup to make meaningful here.
+    if (!GeometryNeverWrites) {
+      for (const feme::SignatureElement &FSIn : FSSig->Elements) {
+        if (FSIn.Direction != feme::SignatureDirection::Input ||
+            FSIn.SystemValue != feme::SignatureSystemValue::None)
+          continue;
+        if (!FSIn.Location)
+          return createStringError(inconvertibleErrorCode(),
+                                   "fragment input element %u has no location "
+                                   "to link against a vertex output",
+                                   FSIn.ElementID);
+        const feme::SignatureElement *VSOut = findLocation(
+            PositionSig, feme::SignatureDirection::Output, *FSIn.Location);
+        if (!VSOut)
+          return createStringError(inconvertibleErrorCode(),
+                                   "fragment input location %u has no matching "
+                                   "vertex stage output",
+                                   *FSIn.Location);
+        if (VSOut->ComponentCount != FSIn.ComponentCount ||
+            VSOut->ComponentType != FSIn.ComponentType)
+          return createStringError(inconvertibleErrorCode(),
+                                   "vertex output and fragment input at "
+                                   "location %u disagree on component "
+                                   "count/type",
+                                   *FSIn.Location);
+      }
     }
 
     for (uint32_t I = 0; I != ColorAttachmentCount; ++I) {

@@ -240,6 +240,47 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Geometry], []> {
 }
 )mlir";
 
+/// (Roadmap H5e-b) A geometry entry point that emits no vertices at all --
+/// `void main(void) {}`, calling neither `spirv.EmitVertex` nor
+/// `spirv.EndPrimitive` -- exactly `dEQP-VK.geometry.emit.*_emit_0_end_0`'s
+/// degenerate shape. Still declares its input/output primitive class
+/// execution modes (SPIR-V requires them regardless of whether the entry
+/// point's body does anything), but its interface lists no globals at
+/// all: SPIR-V only lists an entry point's *used* interface variables, and
+/// this one uses none.
+constexpr llvm::StringLiteral EmptyGeometrySource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Geometry], []> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "Geometry" @main
+  spirv.ExecutionMode @main "Triangles"
+  spirv.ExecutionMode @main "OutputTriangleStrip"
+  spirv.ExecutionMode @main "OutputVertices", 1
+}
+)mlir";
+
+/// A fragment stage reading a `vec4` varying at location 0 and writing it
+/// straight to `SV_Target0` -- the shape needed to exercise
+/// `AcceptsGeometryStageThatNeverEmits`'s own fragment-input-linkage
+/// relaxation (`dEQP-VK.geometry.emit.*_emit_0_end_0` reads back its own
+/// `v_frag_FragColor` varying this way).
+constexpr llvm::StringLiteral VaryingFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @varying {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Input>
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %vp = spirv.mlir.addressof @varying : !spirv.ptr<vector<4xf32>, Input>
+    %v = spirv.Load "Input" %vp : vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %v : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @varying, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
 class GraphicsPipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -2097,6 +2138,36 @@ TEST_F(GraphicsPipelineTest, AcceptsPrimitiveRestartOnStripAndFanTopologies) {
   TestTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY,
               /*NeedsGeometry=*/true);
 
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Geometry, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H5e-b: a geometry entry point that emits no vertices at all
+/// (`dEQP-VK.geometry.emit.*_emit_0_end_0`'s degenerate shape) has an
+/// entirely empty signature -- SPIR-V only lists an entry point's *used*
+/// interface variables -- rather than one merely missing `SV_Position`.
+/// Before this fix, `validateStageInterfaces` rejected this
+/// unconditionally ("the geometry stage does not write a 4-component
+/// SV_Position output"), and the fragment stage's own unmatched
+/// location-0 varying input would have been rejected too ("fragment
+/// input location 0 has no matching vertex stage output") once that
+/// first check was relaxed. Nothing is ever rasterized from a stage that
+/// emits nothing, regardless of whether it wrote a position or any
+/// varying, so pipeline creation must succeed.
+TEST_F(GraphicsPipelineTest, AcceptsGeometryStageThatNeverEmits) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Geometry = createModule(EmptyGeometrySource);
+  VkShaderModule Fragment = createModule(VaryingFragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeGeometryCreateInfo(Vertex, Geometry, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+  ASSERT_NE(Handle, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Geometry, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);

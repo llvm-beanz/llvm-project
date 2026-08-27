@@ -1132,6 +1132,20 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   }
   const EntrySignature &RasterSig = GSSig ? *GSSig : PreGeometrySig;
 
+  // (roadmap H5e-b) A geometry stage that emits no vertices at all --
+  // `dEQP-VK.geometry.emit.*_emit_0_end_0`'s degenerate `void main(void)
+  // {}` bodies, which call neither `EmitVertex` nor `EndPrimitive` -- has
+  // an entirely empty signature: SPIR-V only lists an entry point's
+  // *used* interface variables, and this shape uses none at all (mirrors
+  // `GraphicsPipeline.cpp`'s `validateStageInterfaces`'s own
+  // `GeometryNeverWrites` relaxation, made at pipeline-creation time for
+  // the same reason). Such a stage can never contribute a single vertex
+  // to the rasterizer on any invocation, for any draw, so every draw
+  // command against this pipeline is legally a no-op rather than "the
+  // last pre-rasterization stage does not write an SV_Position output".
+  if (GSSig && GSSig->Elements.empty())
+    return Error::success();
+
   const SignatureElement *VSPosition = findElement(
       RasterSig, SignatureDirection::Output, SignatureSystemValue::Position);
   const SignatureElement *VSLayerOut =
