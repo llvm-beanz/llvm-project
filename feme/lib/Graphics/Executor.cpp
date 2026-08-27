@@ -1113,16 +1113,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "primitive");
     GeomVerticesPerPrimitive = getVerticesPerPrimitive(GeomExpectedInput);
 
-    // Links every geometry-input element (except `SV_PrimitiveID`, sourced
-    // from `FemeGeometryInvocation` instead) to the producing stage's
-    // matching output by `Location`/system value (e.g. `SV_Position`),
-    // mirroring the fragment-input varying linkage below.
+    // Links every geometry-input element (except `SV_PrimitiveID`/
+    // `gl_InvocationID`, both sourced from `FemeGeometryInvocation`
+    // instead, roadmap H5d-a) to the producing stage's matching output by
+    // `Location`/system value (e.g. `SV_Position`), mirroring the
+    // fragment-input varying linkage below.
     Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
         PreGeometrySig, SignatureDirection::Output, *GSSig,
         SignatureDirection::Input,
         "vertex/domain stage output -> geometry stage input",
         [](const SignatureElement &Elt) {
-          return Elt.SystemValue != SignatureSystemValue::PrimitiveID;
+          return Elt.SystemValue != SignatureSystemValue::PrimitiveID &&
+                Elt.SystemValue != SignatureSystemValue::InvocationID;
         });
     if (!Links)
       return Links.takeError();
@@ -1964,40 +1966,63 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         }
 
       uint32_t PrimitiveCount = static_cast<uint32_t>(Primitives.size());
+      // (Roadmap H5d-a) SPIR-V's `Invocations` execution mode: how many
+      // times the geometry entry point runs per assembled input primitive
+      // (`gl_InvocationID` ranges `[0, Invocations)`), defaulting to 1 the
+      // same way `GeometryState::Invocations` itself does. Every one of a
+      // primitive's `Invocations` rows below reuses that primitive's own
+      // input vertex attributes (`Inputs` repeats them), but gets its own
+      // `FemeGeometryInvocation` record so `gl_InvocationID` distinguishes
+      // it from its siblings.
+      uint32_t Invocations = std::max(GState.Invocations, 1u);
+      uint32_t RowCount = PrimitiveCount * Invocations;
+      // `Combined`'s own bound must be every row's own emitted-vertex
+      // budget summed, not one row's alone (`GState.MaxOutputVertices` is
+      // a *per-invocation* limit) -- otherwise `mergeGeometryStreamsInLaneOrder`'s
+      // checked prefix sum truncates every row after the first that
+      // reaches that single-row bound, silently dropping every later
+      // primitive's (or, since H5d-a, later invocation's) own emissions.
       GeometryStreamBuilder Combined(/*StreamCount=*/1,
-                                     GState.MaxOutputVertices);
-      if (PrimitiveCount != 0) {
+                                     RowCount * GState.MaxOutputVertices);
+      if (RowCount != 0) {
         Expected<StageStorage> GSInput =
             buildStageStorage(*GSSig, SignatureDirection::Input,
-                              PrimitiveCount * GeomVerticesPerPrimitive);
+                              RowCount * GeomVerticesPerPrimitive);
         if (!GSInput)
           return GSInput.takeError();
         SmallVector<uint32_t, 32> SourceInvocations;
-        SourceInvocations.reserve(PrimitiveCount * GeomVerticesPerPrimitive);
+        SourceInvocations.reserve(RowCount * GeomVerticesPerPrimitive);
         for (const SmallVector<uint32_t, 6> &Prim : Primitives)
-          for (uint32_t V : Prim)
-            SourceInvocations.push_back(V);
+          for (uint32_t Inv = 0; Inv != Invocations; ++Inv)
+            for (uint32_t V : Prim)
+              SourceInvocations.push_back(V);
         copyLinkedElements(*RasterOut, *GSInput, GeomInputLinks,
-                           PrimitiveCount * GeomVerticesPerPrimitive,
+                           RowCount * GeomVerticesPerPrimitive,
                            SourceInvocations);
 
-        Expected<StageStorage> GSScratch = buildStageStorage(
-            *GSSig, SignatureDirection::Output, PrimitiveCount);
+        Expected<StageStorage> GSScratch =
+            buildStageStorage(*GSSig, SignatureDirection::Output, RowCount);
         if (!GSScratch)
           return GSScratch.takeError();
 
-        std::vector<uint32_t> PrimitiveIDs(PrimitiveCount);
-        std::iota(PrimitiveIDs.begin(), PrimitiveIDs.end(), 0u);
+        std::vector<uint32_t> PrimitiveIDs(RowCount);
+        std::vector<uint32_t> InvocationIDs(RowCount);
+        for (uint32_t P = 0; P != PrimitiveCount; ++P)
+          for (uint32_t Inv = 0; Inv != Invocations; ++Inv) {
+            uint32_t Row = P * Invocations + Inv;
+            PrimitiveIDs[Row] = P;
+            InvocationIDs[Row] = Inv;
+          }
         std::vector<cpu::FemeGeometryInvocation> GeomInvocations =
-            buildGeometryInvocations(PrimitiveIDs);
+            buildGeometryInvocations(PrimitiveIDs, InvocationIDs);
 
-        std::vector<float> EmittedVertices((size_t)PrimitiveCount *
+        std::vector<float> EmittedVertices((size_t)RowCount *
                                                GState.MaxOutputVertices *
                                                OutputScalarsPerVertex,
                                            0.0f);
-        std::vector<uint32_t> EmittedVertexCounts(PrimitiveCount, 0);
+        std::vector<uint32_t> EmittedVertexCounts(RowCount, 0);
         std::vector<uint8_t> StripEndsAfter(
-            (size_t)PrimitiveCount * GState.MaxOutputVertices, 0);
+            (size_t)RowCount * GState.MaxOutputVertices, 0);
 
         cpu::FemeStageLayout GSInLayout = GSInput->layout();
         cpu::FemeStageLayout GSOutLayout = GSScratch->layout();

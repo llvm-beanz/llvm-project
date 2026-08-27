@@ -2790,6 +2790,169 @@ TEST(ExecutorTest, GeometryStagePassesThroughATriangleCoveringTheViewport) {
   }
 }
 
+// (Roadmap H5d-a) A geometry stage declaring `GeometryState::Invocations ==
+// 2`: reads its own `gl_InvocationID` (element 2) and emits a full-viewport
+// triangle strip colored red for invocation 0, green for invocation 1 --
+// both from the *same* single input triangle, so this only produces two
+// invocations' worth of output (not one) if `Executor::executeDraws`
+// widens its invocation-building loop by `Invocations` as H5d-a requires.
+// Since both invocations' triangles cover the same pixels and painting is
+// `BlendMode::Replace`, the final image is whichever invocation's strip
+// `mergeGeometryStreamsInLaneOrder` places *last* -- solid green only if
+// invocation 1 (lane 1) is correctly ordered after invocation 0 (lane 0),
+// confirming "N invocations per primitive means N lanes per primitive"
+// with a real test rather than assuming it.
+constexpr char InvocationIDGeometryShaderIR[] = R"(
+  define void @gs_main() #0 {
+    %iid = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+    %isinv0 = icmp eq i32 %iid, 0
+    %selr = select i1 %isinv0, float 1.0, float 0.0
+    %selg = select i1 %isinv0, float 0.0, float 1.0
+
+    %p0x = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %p0y = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %p0z = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %p0x, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %p0y, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %p0z, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %selr, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 1, float %selg, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+
+    %p1x = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 1)
+    %p1y = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 1)
+    %p1z = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 1)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %p1x, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %p1y, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %p1z, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %selr, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 1, float %selg, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+
+    %p2x = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 2)
+    %p2y = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 2)
+    %p2z = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 2)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %p2x, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %p2y, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %p2z, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %selr, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 1, float %selg, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.cut(i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.stream.emit(i32)
+  declare void @feme.stage.stream.cut(i32)
+  attributes #0 = { "feme.shader.stage"="geometry" }
+)";
+
+TEST(ExecutorTest, GeometryStageInvocationsRunOncePerDeclaredInvocationCount) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 3, /*Location=*/1),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, TessVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature GSSig;
+  SignatureElement InvocationID =
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::InvocationID);
+  InvocationID.ComponentType = SignatureComponentType::UInt;
+  GSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/1),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/0),
+      InvocationID,
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> GS =
+      compileStage(Ctx, InvocationIDGeometryShaderIR, "gs_main", GSSig,
+                   ShaderStage::Geometry);
+  ASSERT_THAT_EXPECTED(GS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  uint32_t Size = 8;
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, Size, Size}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  GeometryState Geom;
+  Geom.InputPrimitive = GeometryInputPrimitive::Triangles;
+  Geom.OutputPrimitive = GeometryOutputPrimitive::TriangleStrip;
+  Geom.Invocations = 2;
+  Geom.MaxOutputVertices = 3;
+  Pipeline.setGeometryStage(std::move(*GS), Geom);
+
+  // One triangle covering the whole [-1, 1] NDC square.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Solid green: invocation 1's strip must be the last one painted, i.e.
+  // must come after invocation 0's in the merged stream's own lane order.
+  for (uint32_t I = 0; I != Size * Size; ++I) {
+    const uint8_t *Texel = Storage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 0) << "texel " << I;
+    EXPECT_EQ(Texel[1], 255) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
+}
+
 TEST(ExecutorTest, RejectsAdjacencyTopologyWithoutAGeometryStage) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
