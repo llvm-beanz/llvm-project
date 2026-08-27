@@ -36889,3 +36889,185 @@ own scope, unchanged by this row. The 32 cases this row's own measured
 impact covers (24 winding-hlsl + 8 shader_input_output) still `Fail`;
 only the *mechanism* by which they fail changed, from a process-ending
 crash to a clean, isolated diagnostic.
+
+# Session: Roadmap H4f (barrier-less tessellation-control patch-constant split)
+
+## The request
+
+Work on roadmap milestone H4f: `splitTessellationControlEntry` (H4a/H4c)
+only clones a `<entry>.patchconstant` phase when it finds a barrier, but a
+tessellation-control shader with `OutputVertices == 1` legally has none (a
+single control-point invocation needs no cross-invocation synchronization
+at all), leaving `PatchConstantPhase == nullptr` even though
+`compileAndValidateStages` (H4b) unconditionally expects that sibling to
+exist. The row's own text offered two options: (a) treat a no-barrier,
+all-patch-frequency-write entry as *solely* a patch-constant phase, with a
+trivial control-point stub synthesized, or (b) unconditionally clone the
+whole function as `<entry>.patchconstant` whenever there is no barrier
+(claimed sound only for `OutputVertices == 1`, with an explicit warning
+not to assume general soundness).
+
+## Option (a) vs option (b)
+
+I first verified against the actual CTS source
+(`vktTessellationWindingTests.cpp`) that the real failing shader
+(`layout(vertices = 1) out;`) writes *only* `gl_TessLevelInner`/
+`gl_TessLevelOuter` -- patch-frequency data -- and never touches
+`gl_out[]`. That is exactly option (a)'s condition, so I started there.
+
+But before committing to (a) over (b), I traced why (b) -- textually the
+"more general" fix -- is actually *unsound* in a way the roadmap text
+only hints at ("needs care not to naively assume general soundness"),
+even restricted to `OutputVertices == 1`: `classifySPIRVElement`'s
+`HullPatchConstant`-phase branch classifies any address-space-8 write
+that is *not* `Patch`-decorated as `Direction::Input`, not `Output` --
+because in the barrier-found path, anything the patch-constant phase
+references that isn't itself patch-frequency is, by construction, a
+*read-back* of a captured cross-invocation value (H4c's synthetic
+capture globals), never a fresh store. If I cloned the whole function
+unconditionally (option (b)) and the entry happened to contain an
+ordinary per-vertex output store alongside patch-frequency ones, that
+store would get misclassified with the wrong direction inside the cloned
+patch-constant phase, and `ValidateStagePass`'s `OutputStore` check
+(which requires `Direction::Output`) would fail -- a real, not merely
+theoretical, correctness bug. Option (a)'s gate (every write must be
+patch-frequency, or don't split this way at all) sidesteps this entirely:
+if the entry doesn't qualify, it's simply left as before, unhandled by
+this row, rather than silently mis-split.
+
+This is why `isPatchConstantOnlyEntry` bails out on *any* non-patch-
+frequency address-space-8 write, not just tess-factor builtins -- it is a
+conservative "opt in only when clearly safe" gate. I also had it bail out
+conservatively on any global carrying `feme.spirv.MemberDecorations` (an
+interface-block member like `gl_PerVertex`) rather than teach it deeper
+per-member decoration lookup, since I confirmed via the CTS source that
+real GLSL tess-factor writes are always plain globals, never
+interface-block members -- there was no real shape to generalize for yet.
+
+## The implementation
+
+`isPatchConstantOnlyEntry(Function &F)`: scans every store to an
+address-space-8 global the entry makes; returns `true` only if at least
+one such store exists and every one targets a patch-frequency global
+(`isPatchOutputDecoration`, an existing helper). `splitBarrierlessTessellationControlEntry(Function &F, Function *&PatchConstantPhase)`:
+when the gate holds, creates `<name>.patchconstant` via
+`Function::Create` + `setComdat` + `CloneFunctionInto(...,
+CloneFunctionChangeType::LocalChangesOnly, ...)` (which already copies
+function attributes and metadata, so no manual copy loop was needed --
+only `Comdat` needed setting by hand), then clears the original
+function's body (`F.deleteBody()`) and gives it a single trivial
+`ret void` block. `splitTessellationControlEntry`'s no-barrier branch
+changed from a bare `return true;` to dispatching into this new function.
+
+## Discovering H4g while validating H4f
+
+Once the unit test passed, I rebuilt and ran the real `deqp-vk` CTS
+against `dEQP-VK.tessellation.winding.default_domain.glsl_*` with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` -- and hit a *new* error, "compiled
+stage carries no signature reflection", not the split-related failure I
+expected to have fixed. This is the same "fix one gap, immediately hit
+the next" pattern every prior H4 sub-row (H4b -> H4c -> H4d -> H4e)
+already established, so I was not surprised, but I did have to root-cause
+it fresh: `canonicalizeSPIRVStage`'s guard for attaching `!feme.signature`
+metadata only fires when a function has at least one stage-IO global
+(`if (!InputGlobals.empty() || !OutputGlobals.empty())`) -- a condition
+that is false both for my new trivial control-point stub (deliberately
+empty) *and*, independently, for winding's own genuinely-empty vertex
+shader (`void main (void) {}`, which the CTS uses because its tessellation
+evaluation shader computes `gl_Position` purely from `gl_TessCoord` and
+never needs a vertex-stage input). Downstream, `CompiledStage::create`
+only serializes a `Signature` byte vector when a signature is present,
+and `getStageSignature` in `GraphicsPipeline.cpp` treats an empty byte
+vector as a hard error -- reached unconditionally via
+`validateStageInterfaces`'s `getStageSignature(VertexStage)` call.
+
+My first fix attempt was too broad: I added an `else if
+(!dxil::getEntrySignature(F))` branch to `canonicalizeSPIRVStage` itself,
+attaching an explicit empty signature whenever no stage-IO globals were
+found and none already existed. This looked right until I noticed it
+would flip `Changed` and attach a spurious signature for the pre-existing
+`UnresolvableLoadInputIsLeftAlone` test -- a DXIL-origin fragment entry
+with *no* `!feme.signature` metadata, which the test deliberately
+constructs to assert `run(*M)` returns `false` (no change). The pass has
+no reliable local way to distinguish "a genuinely-empty SPIR-V entry"
+from "an unresolved DXIL entry that hasn't been processed yet" -- both
+present identically to `canonicalizeSPIRVStage` at that point. Rather than
+try to add a way to distinguish them (which risks its own new bugs), I
+reverted this approach entirely and moved the fix to a narrower, safer
+layer: `CompiledStage::create`'s own serialization step now always
+serializes `feme::dxil::getEntrySignature(**Entry).value_or(
+EntrySignature{})`, treating an absent signature as an empty one *only*
+at the point where a byte vector is about to be produced for the
+compiled-artifact cache -- never touching `canonicalizeSPIRVStage`'s own
+rewriting/`Changed` semantics. This is also more consistent with
+`CanonicalizeStagePass::run`'s own already-documented philosophy that "an
+absent signature is treated as an empty one" -- I was essentially
+enforcing that philosophy at the one layer where it had not yet actually
+been applied, rather than inventing new policy.
+
+## What I verified before treating H4f/H4g as done
+
+- All existing and new unit tests pass:
+  `CanonicalizeStageTest.NoBarrierPatchConstantOnlyEntryIsSplitWhole` (new),
+  `HullStageWithNoBarrierIsNotSplit` (pre-existing, confirms the gate
+  isn't over-broad), `UnresolvableLoadInputIsLeftAlone` (pre-existing,
+  confirms the reverted general fix's regression risk is actually gone
+  now that the fix lives elsewhere).
+- Full `ninja check-feme` (assertions on, ccache): 1829/1888, 59
+  pre-existing `Unsupported`, 0 `Failed` -- both before and after the
+  `CompiledStage.cpp` change (the second run confirms it introduced no
+  regression anywhere in the suite).
+- A real `deqp-vk` run against the full `dEQP-VK.tessellation.*` group
+  (1114 cases) confirms both of the old blockers are gone entirely: 0
+  occurrences of "no hull entry point named" and 0 occurrences of
+  "compiled stage carries no signature reflection" anywhere in the run.
+- The `dEQP-VK.draw.*` regression sample (1957 cases, the same sample
+  every prior H4 row used) is byte-identical (12/139/1806) both before
+  and after these two fixes -- no regressions.
+
+## What I deliberately did *not* fix in this session
+
+The full tessellation group's headline totals are unchanged (still
+8 `Pass`/227 `Fail`/879 `NotSupported`) -- neither H4f nor H4g alone turns
+any winding-glsl case green. Re-running with error logging after both
+fixes shows all 24 winding-glsl cases now fail at a *third*, later
+validation step: `validateStageInterfaces` unconditionally requires the
+vertex stage to write a 4-component `SV_Position`/`gl_Position` output,
+which is the right requirement for an ordinary vertex -> fragment
+pipeline (the rasterizer needs a position from somewhere) but is wrong
+once a tessellation evaluation stage exists and computes `gl_Position`
+itself from `gl_TessCoord`, exactly winding's own shape. I confirmed via
+reading `vktTessellationWindingTests.cpp` directly that the vertex shader
+is deliberately, legally empty and the tessellation evaluation shader
+never reads any vertex-stage output back through `gl_in[]`, so this is a
+real, distinct gap in `validateStageInterfaces`, not part of H4f's or
+H4g's own described scope (stage-splitting and signature-serialization,
+respectively). I spun this off as a new, not-yet-fixed roadmap row (H4h)
+rather than fixing it here, matching the project's established pattern
+of keeping each row's own diff small and its own claims narrowly, exactly
+true -- and to avoid scope creep into a part of the pipeline-validation
+code I had not yet fully traced for other pipeline shapes (e.g. whether
+a similar relaxation is needed for geometry-stage pipelines once H5
+lands).
+
+## Documentation updates made alongside the code
+
+- `feme/docs/Roadmap.md`: struck through H4f with a "done" note
+  describing the fix, rejection rationale for option (b), and pointers to
+  H4g/H4h; added H4g as a new, also-struck-through row for the
+  signature-serialization fix; added H4h as a new, open row for the
+  `SV_Position` validation gap.
+- `feme/docs/VulkanCTSReport.md`: added "Roadmap H4f: measured impact" and
+  "Roadmap H4g: measured impact" sections, following the exact structure
+  of the pre-existing H4a-H4e sections (what changed, unit test coverage,
+  `check-feme` counts, full-group and regression-sample CTS numbers,
+  feature/extension inventory notes, reproduction command).
+- `feme/docs/Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+  checked, no change needed -- `tessellationShader` was already flipped
+  by H4/H4b, and neither H4f nor H4g touches a feature bit or extension.
+- `feme/docs/FeMeGraphicsDesign.md`: updated the `splitTessellationControlEntry`
+  design description, which previously stated the pass "requires exactly
+  one group-sync barrier call in the entry" without qualification --
+  now describes the no-barrier, `OutputVertices == 1` case H4f added
+  support for, since the old text was a real deviation from the code's
+  new behavior.
