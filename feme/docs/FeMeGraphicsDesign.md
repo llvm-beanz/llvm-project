@@ -1412,10 +1412,14 @@ two instances of one patch derive their tessellation factors from their own
 control points and need not emit the same vertex count.
 
 Chaining the geometry stage on top of `runPatchPipeline`'s result remains
-open, as does the whole Vulkan-API surface: `CanonicalizeStage.cpp` reflects
-only `Vertex` and `Fragment` entry points, so a SPIR-V tessellation module
-cannot be imported, and `vkCreateGraphicsPipelines` still rejects the two
-tessellation stage bits (roadmap H4a/H4b).
+open (roadmap H5d), as does the rest of the Vulkan-API surface: as of
+roadmap H5a, `ConvertSPIRVToLLVMPass` captures a geometry entry point's
+declared shape (`feme::graphics::GeometryState`, mirroring
+`TessellationState`), but `CanonicalizeStage.cpp` still reflects only
+`Vertex`/`Fragment`/`Hull`/`Domain` entry points -- not yet `Geometry`,
+pending H5b's own per-vertex dynamic-index addressing fix -- and
+`vkCreateGraphicsPipelines` still rejects the geometry stage bit (roadmap
+H5c/H5e).
 
 ### Amplification and mesh wrappers
 

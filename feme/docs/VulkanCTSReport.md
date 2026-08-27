@@ -7581,3 +7581,116 @@ own report entry documents (`--deqp-case="dEQP-VK.tessellation.*"`, and
 `grep -v viewport_height draw.txt | awk 'NR%15==1'` against
 `external/vulkancts/mustpass/main/vk-default/draw.txt` for the draw
 sample's case list).
+
+## Roadmap H5a: measured impact (SPIR-V geometry entry-point execution-mode reflection)
+
+**Still 0/0/200, and that is the correct, expected result** -- the same
+shape H4a's own report entry recorded for tessellation. H5a adds
+`feme::graphics::GeometryState`/`Geometry.h` (mirroring
+`TessellationState`/`Tessellation.h`) and teaches
+`ConvertSPIRVToLLVMPass::collectEntryPoints` to capture a geometry entry
+point's input primitive class (`InputPoints`/`InputLines`/
+`InputLinesAdjacency`/`Triangles`/`InputTrianglesAdjacency`), output
+primitive class (`OutputPoints`/`OutputLineStrip`/`OutputTriangleStrip`),
+instance count (`Invocations`, defaulting to 1) and maximum emitted vertex
+count (`OutputVertices`) into `feme.geometry.*` passthrough attributes,
+disambiguating the two SPIR-V enumerant values geometry shares with
+tessellation (`Triangles`, also a tessellation-evaluation domain; and
+`OutputVertices`, also a hull stage's output control point count) by the
+declaring entry point's own `Stage`. Unlike H4a, this row does **not** yet
+lift `CanonicalizeStagePass::run`'s stage filter to include
+`ShaderStage::Geometry` -- see "Roadmap H5: what H5a found, and why it
+stops here" below for why that turned out not to be safe to do yet, and
+new roadmap rows H5b-H5e for the remaining work. Nothing in
+`vkCreateGraphicsPipelines` or `PhysicalDeviceInfo.cpp` changes at all, so
+`dEQP-VK.geometry.*` is unaffected:
+
+```
+Test run totals:
+  Passed:        0/200 (0.0%)
+  Failed:        0/200 (0.0%)
+  Not supported: 200/200 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no change:
+`geometryShader` stays `VK_FALSE`, and this row advertises nothing new.
+
+**Regression sample.** This row's only new code paths are
+`feme::graphics::getGeometryState`/`Geometry.cpp` (a new file nothing else
+calls yet) and `ConvertSPIRVToLLVMPass`'s new `EntryPointInfo` fields/
+execution-mode cases (populated only for a `Geometry`-stage entry point, or
+read only when disambiguating `Triangles`/`OutputVertices` by `Stage` --
+both branches confirmed by the new lit test to leave a non-geometry entry's
+own attributes unchanged). The same `dEQP-VK.draw.*` 1957-case sample this
+report has used since H4:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        133/1957 (6.8%)
+  Not supported: 1812/1957 (92.6%)
+```
+
+Byte-identical to H4a's own recorded totals. **0 regressions, 0 new
+passes.**
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1843/1902** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from H4j's own **1835/1894** baseline by exactly the 8 new tests this row
+adds -- `GeometryTest.cpp`'s 7 (new file, `getGeometryState` round-trip
+coverage, mirroring `TessellationTest.cpp`) and one new
+`spirv-to-llvm-geometry-execution-modes.mlir` lit test (4 `RUN`/`CHECK`
+blocks in one `lit` test, including the `Triangles`/`OutputVertices`
+disambiguation case).
+
+**Reproducing.**
+
+```
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.geometry.*" --deqp-log-filename=geom.qpa
+```
+
+and, for the draw regression sample, the same invocation H4a's own report
+entry documents.
+
+## Roadmap H5: what H5a found, and why it stops here
+
+Investigating H5's full scope (mirroring H4a+H4b) before writing any code
+found that geometry's own Vulkan-API surface needs *more* new machinery
+than H4a/H4b's tessellation precedent suggested, for one specific reason:
+a geometry entry point's per-vertex inputs (SPIR-V's `gl_in[]`-shaped
+arrayed `Input` variable, one array element per assembled primitive
+vertex) are read with a **dynamic, non-constant SPIR-V array index** in
+the general case (`for (int i = 0; i < gl_in.length(); i++) ... gl_in[i]
+...`), not the single implicit "this invocation's own control point"
+index a hull control-point-phase entry's own per-control-point inputs are
+restricted to (`classifySPIRVElement`'s `FromInputPatch` handling, Hull-
+stage-only). `loadStageIOValue`/`storeStageIOValue`'s existing recursive
+per-(struct member, row, component) decomposition (built for a matrix/
+aggregate value, C8a) always passes a constant `Zero` as
+`feme.stage.input.load`'s `Vertex` operand -- there is no code path today
+that threads a real, non-constant SPIR-V array-index SSA value into that
+operand at all, even though `createStageInputLoad`'s signature already
+has a `Vertex` parameter for exactly this purpose, and even though
+`feme::cpu::GeometryWrapperPass` (built already, under G5, prior to this
+milestone) already consumes that operand generically ("`lowerGeometryInputLoad`
+... places no restriction on that operand", GeometryWrapper.cpp's own file
+comment) -- it has simply never had a producer.
+
+Lifting `CanonicalizeStagePass::run`'s stage filter to accept
+`ShaderStage::Geometry` *before* that producer exists would not fail loudly
+the way this codebase's own precedent (H2a discovering H2c/H2d, H4c/H4d
+diagnosing rather than mis-splitting) insists on: a geometry entry point's
+`gl_in[i]` access would silently resolve through the existing "always
+`Vertex = 0`" path, always reading input vertex 0 regardless of `i` --
+wrong output, not a diagnostic, for every real GLSL geometry shader (they
+essentially all loop over `gl_in`). Per this codebase's stated preference
+for a real, tested diagnostic over a silent wrong answer, H5a stops at
+capturing the execution modes (self-contained, real, and independently
+useful for H5b) and does not flip the stage filter. The array-indexed
+per-vertex input read is broken out as roadmap H5b below, which needs to
+land before `CanonicalizeStagePass::run` can safely accept
+`ShaderStage::Geometry` at all.
