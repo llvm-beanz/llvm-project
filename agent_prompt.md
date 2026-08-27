@@ -33,21 +33,25 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5e?
+Can you work on milestone H5e-a?
 
-> **`vkCreateGraphicsPipelines` accepts `VK_SHADER_STAGE_GEOMETRY_BIT`, and
-> `geometryShader`/`maxGeometry*`/`multiviewGeometryShader` are advertised.**
-> `GraphicsPipeline.cpp`'s `translateFixedFunctionState` still rejects any stage
-> bit besides vertex/fragment/tessellation (the `default:` case's own comment
-> already names this row); needs a `GeometryInfo` output parameter mirroring
-> `TessControlInfo`/`TessEvalInfo`, `PhysicalDeviceInfo.cpp`'s `geometryShader`
-> feature bit and
-> `maxGeometryShaderInvocations`/`maxGeometryInputComponents`/`maxGeometryOutputComponents`/`maxGeometryOutputVertices`/`maxGeometryTotalOutputComponents`
-> limits (all currently either `VK_FALSE`/0 or absent), and -- now that H2 has
-> landed multiview -- `multiviewGeometryShader` in the same
-> `VkPhysicalDeviceMultiviewFeatures`/aggregate-1.2-struct H2's own row added
-> `multiviewTessellationShader` to (still `VK_FALSE` pending H4's own remaining
-> rows). A real `dEQP-VK.geometry.*` run (200 cases) and the standard
-> `dEQP-VK.draw.*` regression sample close this row's own measurement, matching
-> H4b's own precedent of reporting the real, possibly-partial
-> pass/fail/not-supported breakdown rather than assuming "whole group"
+> **`ConvertSPIRVToLLVMPass`/`SPIRVToLLVMPatterns` have no conversion pattern
+> for SPIR-V's `spirv.EmitVertex`/`spirv.EndPrimitive` ops at all** (confirmed
+> absent by grepping the whole `lib/`/`include/` tree for
+> `EmitVertexOp`/`EndPrimitiveOp`), the root cause behind 122 of H5e's own
+> measured 167 `dEQP-VK.geometry.*` failures (`error: failed to legalize
+> operation 'spirv.EmitVertex'`/`'spirv.EndPrimitive'` -- virtually every real
+> GLSL geometry shader calls both, since without them a geometry stage can emit
+> no output vertices at all). Needs a new pattern turning each op into a call to
+> the same `feme.stage.stream.emit`/`feme.stage.stream.cut` intrinsics
+> `GeometryWrapperPass::lowerGeometryStreamEmit`/`lowerGeometryStreamCut` (built
+> under G5, already fully implemented and tested) already know how to lower,
+> mirroring how every other stage-IO SPIR-V op already routes through a
+> `feme.stage.*` intrinsic rather than a bespoke LLVM IR shape. A real
+> `dEQP-VK.geometry.*` re-run after this row lands should re-triage the
+> remaining, still-unexplained ~21-case "silent
+> `VK_ERROR_INITIALIZATION_FAILED`, no diagnostic emitted" bucket H5e's own
+> report flagged (degenerate zero-emit shaders and the
+> `triangle_strip_adjacency`/`basic_primitive` input-primitive-class shapes)
+> once the dominant EmitVertex/EndPrimitive noise is gone, splitting out further
+> lettered rows for whatever remains
