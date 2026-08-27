@@ -1399,6 +1399,61 @@ Error translateFixedFunctionState(
   return Error::success();
 }
 
+/// Whether \p Tessellation's own `pNext` chains a
+/// `VkPipelineTessellationDomainOriginStateCreateInfo` requesting
+/// `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT` -- the only domain origin
+/// `flipTessellationWindingForDomainOrigin` (below) needs to know about.
+/// Absent entirely, a pipeline keeps the spec's own default,
+/// `VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT`.
+bool hasLowerLeftTessellationDomainOrigin(
+    const VkPipelineTessellationStateCreateInfo &Tessellation) {
+  for (const VkBaseInStructure *Next =
+           reinterpret_cast<const VkBaseInStructure *>(Tessellation.pNext);
+       Next; Next = Next->pNext) {
+    if (Next->sType !=
+        VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO)
+      continue;
+    const auto *DomainOrigin =
+        reinterpret_cast<const VkPipelineTessellationDomainOriginStateCreateInfo *>(
+            Next);
+    return DomainOrigin->domainOrigin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+  }
+  return false;
+}
+
+/// (roadmap H4i) `feme::graphics::TessOutputPrimitive::TriangleCw`/
+/// `TriangleCcw` are derived purely from the domain shader's own
+/// `VertexOrderCw`/`VertexOrderCcw` execution mode
+/// (`ConvertSPIRVToLLVMPass.cpp`), which says nothing about
+/// `VkTessellationDomainOrigin`: the tessellator's own fixed winding
+/// convention (`Tessellator.cpp`'s `appendTriangle`) is only correct
+/// relative to the spec's default domain origin,
+/// `VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT`. Selecting
+/// `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT` mirrors the domain's own
+/// coordinate frame, which reverses every generated triangle's winding as
+/// a side effect (a mirror transform always reverses 2D orientation) --
+/// so a `VertexOrderCw`-declaring shader under a lower-left domain origin
+/// needs the *opposite* of what the tessellator would emit for it under
+/// the (assumed) upper-left one, and vice versa. This flips which of the
+/// two winding senses the tessellator is told to use to compensate,
+/// restoring the shader's own declared vertex order relative to
+/// whichever domain origin the pipeline actually requested rather than
+/// always relative to the upper-left one the tessellator itself assumes.
+/// `Point`/`Line` have no winding to flip.
+feme::graphics::TessOutputPrimitive
+flipTessellationWindingForDomainOrigin(feme::graphics::TessOutputPrimitive Primitive) {
+  switch (Primitive) {
+  case feme::graphics::TessOutputPrimitive::TriangleCw:
+    return feme::graphics::TessOutputPrimitive::TriangleCcw;
+  case feme::graphics::TessOutputPrimitive::TriangleCcw:
+    return feme::graphics::TessOutputPrimitive::TriangleCw;
+  case feme::graphics::TessOutputPrimitive::Point:
+  case feme::graphics::TessOutputPrimitive::Line:
+    return Primitive;
+  }
+  llvm_unreachable("unhandled TessOutputPrimitive");
+}
+
 /// Compiles both stages, validates them against \p Layout and each other,
 /// and builds the shareable artifact -- everything a pipeline-cache miss
 /// still has to do that a hit skips entirely.
@@ -1670,6 +1725,20 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
       Cache->insertGraphics(*Key, Artifact);
   }
   Result.Artifact = std::move(Artifact);
+  // (roadmap H4i) `VkTessellationDomainOrigin` is a pipeline-level create
+  // parameter, not something a compiled shader's own reflection carries
+  // (`compileAndValidateStages`'s `Result.Tessellation.OutputPrimitive`
+  // above says nothing about it) -- and, for a cache hit, isn't repeated
+  // per compile at all -- so it is applied once here, unconditionally,
+  // against whatever `OutputPrimitive` this pipeline ended up with either
+  // way. `CreateInfo.pTessellationState` is non-null whenever
+  // `TessControlInfo` is (`translateFixedFunctionState` already required
+  // it above).
+  if (TessControlInfo &&
+      hasLowerLeftTessellationDomainOrigin(*CreateInfo.pTessellationState))
+    Result.Tessellation.OutputPrimitive =
+        flipTessellationWindingForDomainOrigin(
+            Result.Tessellation.OutputPrimitive);
   return Result;
 }
 

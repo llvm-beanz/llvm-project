@@ -1659,6 +1659,88 @@ TEST_F(GraphicsPipelineTest, AcceptsTessellationStages) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap H4i: `VkPipelineTessellationDomainOriginStateCreateInfo`
+/// chained onto `pTessellationState`'s own `pNext`, requesting
+/// `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT`, must flip the merged
+/// `TessellationState::OutputPrimitive` from what `TessEvalSource`'s own
+/// `VertexOrderCcw` execution mode would otherwise produce
+/// (`TriangleCcw`, confirmed unflipped by `AcceptsTessellationStages`
+/// above) to its opposite (`TriangleCw`) -- the tessellator's own winding
+/// convention (`Tessellator.cpp`'s `appendTriangle`) is only correct
+/// relative to the spec's default, upper-left, domain origin; selecting
+/// the lower-left one mirrors the domain's coordinate frame, which
+/// reverses every generated triangle's winding as a side effect (a
+/// mirror transform always reverses 2D orientation), so this restores
+/// the shader's own declared vertex order relative to whichever domain
+/// origin the pipeline actually requested.
+TEST_F(GraphicsPipelineTest, FlipsTessellationWindingForLowerLeftDomainOrigin) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+  VkPipelineTessellationDomainOriginStateCreateInfo DomainOrigin{};
+  DomainOrigin.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO;
+  DomainOrigin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+  Tessellation.pNext = &DomainOrigin;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  EXPECT_EQ(Executor.getTessellationState().OutputPrimitive,
+            feme::graphics::TessOutputPrimitive::TriangleCw);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H4i: an *explicit*
+/// `VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT` must behave exactly like
+/// omitting `VkPipelineTessellationDomainOriginStateCreateInfo` entirely
+/// (`AcceptsTessellationStages`'s own unflipped `TriangleCcw`) -- confirms
+/// `hasLowerLeftTessellationDomainOrigin` (GraphicsPipeline.cpp) checks
+/// the chained struct's own `domainOrigin` field rather than merely its
+/// presence.
+TEST_F(GraphicsPipelineTest,
+       KeepsTessellationWindingForExplicitUpperLeftDomainOrigin) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+  VkPipelineTessellationDomainOriginStateCreateInfo DomainOrigin{};
+  DomainOrigin.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO;
+  DomainOrigin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT;
+  Tessellation.pNext = &DomainOrigin;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  EXPECT_EQ(Executor.getTessellationState().OutputPrimitive,
+            feme::graphics::TessOutputPrimitive::TriangleCcw);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// Roadmap H4d: a tessellation-control entry point writing more than one
 /// element of a bare (non-block) array-typed `BuiltIn` output --
 /// `TessControlMultiElementArraySource`'s own `gl_TessLevelOuter`-shaped
