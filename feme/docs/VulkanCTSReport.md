@@ -8361,3 +8361,110 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_sample.qpa
 ```
 
+## Roadmap H5e-a: measured impact (`spirv.EmitVertex`/`spirv.EndPrimitive` lowering)
+
+**Change.** `SPIRVToLLVMPatterns.cpp` gains `EmitVertexConversionPattern`/
+`EndPrimitiveConversionPattern`, converting `spirv.EmitVertex`/
+`spirv.EndPrimitive` (both zero-operand, zero-result, non-terminator ops,
+confirmed present in MLIR's own SPIR-V dialect by
+`SPIRVPrimitiveOps.td`) into a call to `feme.stage.stream.emit(0)`/
+`feme.stage.stream.cut(0)` respectively -- the same
+`feme::StageOpKind::StreamEmit`/`StreamCut` intrinsics
+`feme::cpu::lowerGeometryStreamEmit`/`lowerGeometryStreamCut`
+(GeometryWrapper.cpp, built and fully tested under roadmap G5) already
+know how to lower into a `GeometryStreamBuilder::emit`/`cut` call. The
+stream operand is always the constant `0`, matching both ops' own SPIR-V
+spec text ("must only be used when only one stream is present") and
+`GeometryState`/`FemeGeometryArgs`'s current single-output-stream-only
+support. Mirrors `SubpassLoadPattern`'s existing precedent of calling a
+`feme.stage.*` function directly (an ordinary named call, not an
+`llvm.spv.*` intrinsic) rather than adding a bespoke LLVM IR shape.
+`ninja check-feme` gains one new lit test,
+`spirv-to-llvm-geometry-stream.mlir` (two cases: a plain emit-then-cut,
+and three emits sharing one `feme.stage.stream.emit` declaration).
+
+**`dEQP-VK.geometry.*` re-run (200 cases), before/after:**
+
+```
+Before (H5e's own baseline):
+  Passed:        0/200 (0.0%)
+  Failed:        167/200 (83.5%)
+  Not supported: 33/200 (16.5%)
+
+After (this row):
+  Passed:        1/200 (0.5%)
+  Failed:        166/200 (83.0%)
+  Not supported: 33/200 (16.5%)
+```
+
+`NotSupported` is byte-identical (still the same pre-existing,
+geometry-unrelated feature/limit/format gates); one previously-failing
+case now passes outright
+(`dEQP-VK.geometry.varying.vertex_no_op_geometry_out_1`, a shader that
+declares varyings but never actually calls `EmitVertex`/`EndPrimitive`
+conditionally in a way the old "always fail to legalize" gap would have
+blocked regardless -- now it reaches real rendering and matches).
+
+**The dominant `EmitVertex`/`EndPrimitive` failure bucket (122 cases,
+73% of H5e's 167) is completely gone**, confirmed by grepping the new
+log for `spirv.EmitVertex`/`spirv.EndPrimitive`: zero matches. Every one
+of those 122 cases now proceeds further into the pipeline and lands in
+one of the buckets below -- this is the "re-triage the whole group" this
+row's roadmap entry called for, not a re-count of the same failures:
+
+| Count | Root cause | Bucket |
+|---|---|---|
+| 60 | `error: 'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but got '!llvm.array<N x struct<...>>'`/`'!llvm.array<N x vector<4xf32>>'` (`dEQP-VK.geometry.basic.*`, `varying.*`) | New (was masked by `EmitVertex`): a geometry stage's per-invocation output-vertex-array storage (an `N`-element array of a vertex's own output signature, addressed once per `EmitVertex`) lowers to a plain LLVM array type rather than a pointer-typed alloca/global a `getelementptr` can index -- a geometry-specific stack/storage-allocation gap, not a SPIR-V-conversion one. Root cause not yet isolated to a single file; flagged for a follow-on row |
+| 24 | `error: feme-cpu-linearize: function 'main': loop at '' has an internal branch in 'Flow'; unsupported (roadmap milestone 6 deviation)` (`dEQP-VK.geometry.layered.*.readback`) | Pre-existing, documented `LinearizePass` limitation (roadmap milestone 6 deviation), unrelated to geometry or this row |
+| 21 | `Fail (vk.createGraphicsPipelines(...))`, no diagnostic (`dEQP-VK.geometry.builtin_variable.in_block.primitive_id_in*`, `input.basic_primitive.{line_strip,line_strip_adjacency,triangle_fan}`, `input.triangle_strip_adjacency.vertex_count_*`, `emit.*_emit_0_end_0`) | Exactly H5e's own flagged "~21-case silent `VK_ERROR_INITIALIZATION_FAILED`" bucket, unchanged in composition and count now that the `EmitVertex`/`EndPrimitive` noise is gone -- still not individually isolated, spun off below as H5e-b |
+| 20 | `NotSupported (Requested core feature is not supported: fragmentStoresAndAtomics ...)` (`dEQP-VK.geometry.layered.*.secondary_cmd_buffer`) | Pre-existing, unrelated feature gate |
+| 18 | `Fail (vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED ...)` (`dEQP-VK.geometry.layered.{1d_array,2d_array}.*.multiple_layers_per_invocation`/`render_to_one`/`render_to_default_layer`/`render_to_all`) | New (was masked by `EmitVertex`): layered-rendering-specific geometry execution failure at submit time, distinct from the `basic`/`varying` `getelementptr` bucket above (these use `gl_Layer` output, not just varying output-array storage). Not yet isolated; spun off below as H5e-c |
+| 14 | `Fail (vk.createImage(...): VK_ERROR_INITIALIZATION_FAILED ...)` (`dEQP-VK.geometry.layered.3d.*`) | Pre-existing, unrelated to geometry-stage compilation at all (image creation, before any geometry shader is touched) -- unchanged from H5e's own report |
+| 9 | `error: feme-cpu-simdize: ... divergent value ... (roadmap milestone 7 deviation)` | Pre-existing `SIMDize` limitation, already documented, unrelated to geometry (was previously undercounted at 1 while `EmitVertex` masked the rest of this bucket) |
+| 8 | `error: feme-cpu-wrap-fragment: unsupported fragment system value for element 0` (`dEQP-VK.geometry.layered.*.fragment_layer`) | Pre-existing layered-rendering fragment-input gap, unchanged from H5e's own report |
+| 6 | `error: feme-cpu-wrap-geometry: geometry stage wrapper requires attached feme.signature metadata` (`dEQP-VK.geometry.emit.*_emit_0_end_1`) | New (was masked by `EmitVertex`): a geometry entry point compiled from one of these specific `emit`-count shapes reaches `GeometryWrapperPass` without the `feme.signature` metadata it requires -- a reflection/attachment gap upstream of the wrapper, not this row's own lowering. Not yet isolated; spun off below as H5e-d |
+| 6 | `Fail (Rendered images are incorrect)` (`dEQP-VK.geometry.layered.2d_array.*.multiple_layers_per_invocation` variants) | New (was masked by `EmitVertex`): pipeline now runs to completion and produces a wrong image -- a genuine rendering-correctness bug, not a legalization/creation failure. Not yet isolated; spun off below as H5e-e |
+| 4+4 | `NotSupported (Unsupported limit: maxGeometryShaderInvocations < {64,127})` | Pre-existing, unrelated limit gate (`GeometryLimitsMeetCore10Minimums`'s own advertised minimum is smaller than these two cases request) |
+| 2 | `NotSupported (Requested core feature is not supported: vertexPipelineStoresAndAtomics ...)` | Pre-existing, unrelated feature gate |
+| 2 | `NotSupported (Depth/stencil format is not supported ...)` | Pre-existing, unrelated format gate |
+| 1 | `NotSupported (Requested core feature is not supported: shaderTessellationAndGeometryPointSize ...)` | Pre-existing, unrelated feature gate |
+| 1 | `Pass` | `dEQP-VK.geometry.varying.vertex_no_op_geometry_out_1` -- the one case this row newly turns into an outright pass |
+
+Total: 1 (Pass) + 166 (Fail) + 33 (NotSupported) = 200, matching the run.
+
+**New lettered rows spun off from this re-triage** (added to
+Roadmap.md, mirroring H5a/H5e's own precedent of spinning off whatever a
+re-triage finds rather than folding it back into the row that found it):
+H5e-b (the 21-case silent `vkCreateGraphicsPipelines` failure, unchanged
+from H5e's own flagged bucket), H5e-c (the 18-case layered
+`vkQueueSubmit` failure), H5e-d (the 6-case missing `feme.signature`
+metadata in `GeometryWrapperPass`), and H5e-e (the 6-case wrong-image
+rendering bug). The 60-case `getelementptr`/output-array-storage bucket
+and the pre-existing/already-documented buckets (`LinearizePass`,
+`SIMDize`, fragment-layer, layered.3d image creation, and the various
+`NotSupported` feature/limit/format gates) are left uncategorized into a
+new row for now, since they are either already tracked elsewhere or too
+large/unisolated to scope into one lettered row without further
+investigation.
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt`
+sample, same file H5e's own report used:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        155/1957 (7.9%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical to H5e's own baseline (12/155/1790, 0 regressions) --
+expected, since `EmitVertex`/`EndPrimitive` calls only ever occur inside
+a geometry-stage shader module, and no `dEQP-VK.draw.*` case in this
+sample exercises one.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1863/1922** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H5e's own **1862/1921** baseline by exactly the 1 new
+lit test this row adds (`spirv-to-llvm-geometry-stream.mlir`, 2 `RUN`
+splits counted as 1 discovered test file with 2 `CHECK` blocks under
+`--split-input-file`).

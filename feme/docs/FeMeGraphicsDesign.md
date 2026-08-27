@@ -967,15 +967,23 @@ side above has been ready to consume them since H5d); and
 `PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` advertise `geometryShader`,
 `maxGeometry*` (already true, unbounded-by-design ceilings -- see this
 row's own `PhysicalDeviceInfo.cpp` comment -- so left at core 1.0's own
-mandatory minimums) and `multiviewGeometryShader`. This is deliberately
-*not* the point at which real `dEQP-VK.geometry.*` shaders start passing:
-`ConvertSPIRVToLLVMPass`/`SPIRVToLLVMPatterns` still have no lowering for
+mandatory minimums) and `multiviewGeometryShader`. This was deliberately
+*not* the point at which real `dEQP-VK.geometry.*` shaders started passing:
+`ConvertSPIRVToLLVMPass`/`SPIRVToLLVMPatterns` had no lowering for
 SPIR-V's `spirv.EmitVertex`/`spirv.EndPrimitive` ops into the
 `feme.stage.stream.emit`/`.cut` intrinsics this section's own paragraph
 above already describes as fully implemented -- almost every real
-geometry shader calls both, so this remains the dominant blocker,
-broken out as roadmap H5e-a (see `VulkanCTSReport.md`'s "Roadmap H5e:
-measured impact" for the measured breakdown).
+geometry shader calls both, so this was the dominant blocker (122 of
+H5e's own measured 167 failures). Roadmap H5e-a closes that gap:
+`EmitVertexConversionPattern`/`EndPrimitiveConversionPattern`
+(`SPIRVToLLVMPatterns.cpp`) convert each op directly into a call to
+`feme.stage.stream.emit(0)`/`feme.stage.stream.cut(0)`, the constant
+stream index matching both ops' own SPIR-V restriction to "only one
+stream present". A real `dEQP-VK.geometry.*` re-run confirms the
+`EmitVertex`/`EndPrimitive` failure bucket is gone entirely,
+redistributing into several smaller, still-open buckets (roadmap H5e-b
+through H5e-e; see `VulkanCTSReport.md`'s "Roadmap H5e-a: measured
+impact" for the full breakdown).
 
 ### Amplification/task and mesh stage model
 
