@@ -33,30 +33,27 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H4i?
+Can you work on milestone H4j?
 
-> **With H4h's own `SV_Position` relaxation in place, all 24
-> `dEQP-VK.tessellation.winding.*` glsl cases now reach real rendering and fail
-> at a fourth, later blocker: a systematic front-face/winding-orientation
-> mismatch in the rasterized image**, not a pipeline-creation error. A real
-> `deqp-vk` run (`dEQP-VK.tessellation.winding.*glsl*`, 24 cases) shows a
-> consistent pattern across every `_ccw`/`_cw` pair: where the CTS expects a
-> full-viewport quad/triangle of one color, the renderer instead produces the
-> *complementary* culled/uncultured result (e.g. `glsl_quads_ccw` gets "Note:
-> got 4081 white and 15 red pixels" / "Failure: expected only white pixels
-> (full-viewport quad)" while its `_cw` sibling gets "got 0 white and 4096 red
-> pixels" for the same expectation, and the `glsl_triangles_*` cases fail with
-> "triangle orientation is incorrect" at roughly a 50/50 pixel split) -- the
-> shape of a front-face or vertex-winding-order inversion specific to
-> tessellated primitives (the domain stage's own emitted vertex order per
-> `gl_TessCoord`/`VertexOrderCcw`/`VertexOrderCw`, or how the executor's
-> rasterizer classifies a tessellated triangle's front face, likely in
-> `PatchPipeline.cpp`/`Executor.cpp`), rather than a per-fragment color or depth
-> bug (the two colors present in every failing image are always exactly the two
-> the test itself defines for "correctly wound" vs "incorrectly wound"). Root
-> cause not yet isolated -- needs its own investigation, likely starting from
-> `vktTessellationWindingTests.cpp`'s own pass/fail image classification
-> alongside `PatchPipeline.cpp`'s tessellator-output vertex ordering for each of
-> `VertexOrderCcw`/`VertexOrderCw` and `Triangles`/`Quads`, and how that
-> interacts with `VkPipelineRasterizationStateCreateInfo::frontFace`/`cullMode`
-> translation the ordinary (non-tessellated) path already implements
+> **All 24 `dEQP-VK.tessellation.winding.*glsl*` cases still fail even after
+> H4i's own domain-origin fix, now uniformly at a small, distinct
+> rasterization-precision defect**: exactly 15/4096 stray red pixels along what
+> looks like a diagonal/seam pattern for `glsl_quads_*` (coordinates cluster
+> near a corner and along a `y == x` diagonal, e.g.
+> `(14,14),(15,15),(16,16),(17,17)` and `(45,45),(47,47),(55,55),(57,57)`, plus
+> a small run near one corner like `(62,0),(63,0),(62,1),(61,2),(60,3),(59,4)`),
+> and a 1-pixel-row-fill boundary discrepancy for `glsl_triangles_*`
+> (`verifyResultImage`'s top/bottom-row white-pixel-count check is off by
+> exactly one: 64/64 filled where 63 is expected, or 1/64 filled where 0 is
+> expected). Only ever appears on the pipeline of each `_ccw`/`_cw` test-case
+> pair that is supposed to render visibly (never the one supposed to be fully
+> culled), identically across
+> `default_domain`/`lower_left_domain`/`upper_left_domain` -- i.e. it does not
+> correlate with front-face, winding, or domain origin at all, confirming it is
+> a rasterizer tie-break/rounding or tessellator crack-free-bridging-seam issue,
+> not a winding bug. Root cause not yet isolated -- candidates to investigate
+> first: the tessellator's own "crack-free" boundary-ring-to-inset-core bridging
+> (`Tessellator.cpp`'s `appendTriangleLattice`/`tessellateQuad`, whether the
+> seam between the two regions is truly watertight at every sample point) and
+> the rasterizer's own top-left fill-rule edge-ownership tie-break for two
+> triangles sharing an exact edge (`Executor.cpp`'s `edgeFn`/coverage test)
