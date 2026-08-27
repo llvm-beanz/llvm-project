@@ -33,26 +33,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5b?
+Can you work on milestone H5f?
 
-> **Thread a non-constant, dynamically-indexed SPIR-V array index into
-> `feme.stage.input.load`'s `Vertex` operand**, the gap H5a's own investigation
-> found: a geometry entry point's per-vertex inputs (`gl_in[]`-shaped) are read
-> via `gl_in[i]` for a loop-carried `i`, but `loadStageIOValue`'s existing
-> recursion always passes a constant `Zero` for `Vertex` -- there is no code
-> path today that recognizes a SPIR-V array-typed `Input`-storage-class global
-> being indexed by a real SSA value (as opposed to the constant-offset-only
-> `getStageIOBaseAndOffset`/`resolveStageIOAccess` byte-offset resolution H2d
-> built for a builtin interface block's own *member* access) and threads that
-> index through as `Vertex` instead of `Row`/`Component`. Needs: recognizing an
-> array-of-per-vertex-block SPIR-V `Input` global (distinct from a matrix's
-> `Row` dimension, which is a compile-time-fixed shape, not a genuine "the
-> pipeline supplies N of these, addressed by this stage's own bounded loop
-> variable" one); extracting the outer (vertex) index as a `Value*` rather than
-> requiring it constant; and validating (`ValidateStagePass`, itself still not
-> extended to Geometry -- see H5e) that a non-constant `Vertex` operand is only
-> ever legal for a stage whose ABI actually supports it (`FemeGeometryArgs`'s
-> primitive-major `Inputs` layout), diagnosed otherwise.
-> `CanonicalizeStagePass::run` must not accept `ShaderStage::Geometry` until
-> this lands (H5a's own report explains why). Whole `dEQP-VK.geometry` group
-> remains blocked on this
+> **A *constant*-indexed `gl_in[k]`-shaped access (or any other
+> per-vertex-arrayed `Input` global) still resolves through the pre-existing
+> `getStageIOBaseAndOffset`/`resolveRowComponent` byte-offset path exactly as
+> before H5b, folding that constant array index into the accessed member's own
+> `Row` operand instead of `Vertex`**, and the corresponding
+> `SignatureElement.RowCount` for such a global still reports the per-vertex
+> array's own extent (e.g. 3 for a triangle's `gl_in[3]`) rather than a real
+> matrix's row count -- the two are indistinguishable in the signature today,
+> which H5b's own investigation found and deliberately left alone (out of that
+> row's own scope, which asked only for the non-constant case). Needs a way for
+> a `SignatureElement` (or a sibling flag alongside it) to record "this
+> dimension is a per-vertex array, not a matrix row" so a real consumer (H5c's
+> own geometry-entry canonicalization, or a future one) can tell the two apart
+> regardless of whether the shader's own index into it happens to be constant,
+> and route a constant index through `Vertex` (not `Row`) for consistency with
+> the non-constant case H5b already handles
