@@ -6993,3 +6993,147 @@ already-known 24-case family) needs the "any unterminated block is a
 `Fail`" generalization to reproduce the correct total without hand-listing
 every crash point in advance. The draw sample and `check-feme` reproduce
 exactly as H4b/H4c's own entries describe.
+
+## Roadmap H4e: measured impact (`MaskIntrinsics.cpp` graceful diagnostic instead of `llvm_unreachable`)
+
+**What changed.** `feme/lib/Transforms/CPU/MaskIntrinsics.cpp`'s
+`appendScalarMangling` (the helper `mangleMaskedMemOpName` uses to build a
+`feme.cpu.masked.load`/`.store`/`.atomicrmw`'s type-mangled declaration
+name) called `llvm_unreachable("unsupported feme.cpu.masked.* element
+type")` for any element type it did not recognize -- reached, per H4c's
+and H4d's own reports, by all 24 `dEQP-VK.tessellation.winding.*.hlsl_*`
+cases and the 8 `dEQP-VK.tessellation.shader_input_output.*` cases those
+two rows respectively unblocked into this exact gap, a `SIGABRT` that
+killed `deqp-vk`'s entire remaining test run rather than a per-case
+`Fail`. Fixed by making `appendScalarMangling` return `bool`, reporting an
+unsupported `Type` (with its LLVM IR spelling) through its own
+`LLVMContext::emitError` and returning `false` instead of asserting
+unreachable; `mangleMaskedMemOpName` now returns `std::optional<std::
+string>` (propagating that failure as `std::nullopt`); and
+`getOrInsertMaskedLoad`/`getOrInsertMaskedStore`/
+`getOrInsertMaskedAtomicRMW` and their `createMasked*` wrappers all
+propagate a `nullptr` in turn. `feme::cpu::LinearizePass`'s
+`applyStageMasks` (Linearize.cpp) -- the only caller of the three
+`createMasked*` entry points -- now checks each for `nullptr` and, when
+one is returned, leaves the original `load`/`store`/`atomicrmw`
+un-rewritten and un-erased rather than dereferencing a null `CallInst *`,
+so the rest of the block keeps being processed. `LLVMContext::emitError`
+is already caught, module-wide, by `feme::cpu::runPipeline`'s
+`ErrorDiagnosticGuard` (Pipeline.cpp), which turns "a pass printed a
+diagnostic" into "`runPipeline` returns a graceful `llvm::Error`" -- the
+same mechanism every other diagnosed-rather-than-asserted gap in this
+codebase already relies on -- so no new plumbing was needed to turn this
+row's diagnostic into a clean pipeline failure instead of a crash.
+
+This is the "harden `appendScalarMangling` to `emitError`+return a
+null/sentinel" half of H4e's own roadmap description; the "root
+legalization fix" half (actually teaching `feme::cpu::SIMDizePass`/
+`feme.cpu.masked.*` how to widen a matrix/aggregate-typed masked memory
+access) remains C8's own scope and is not attempted here -- these 32
+cases still `Fail`, just cleanly instead of crashing the process.
+
+Locked down by three new `MaskIntrinsicsTest` cases (one per
+`createMasked*` entry point, each asserting a `nullptr` result and a
+captured `DS_Error` diagnostic mentioning "unsupported feme.cpu.masked.*
+element type" for a struct-typed operand -- a `{float, float}` standing in
+for the matrix/aggregate shapes this milestone does not yet decompose) and
+one new `LinearizeTest` case (`UnsupportedAggregateMaskedStoreDiagnosesGracefullyInsteadOfCrashing`:
+a `store {float, float}` under a divergent `feme.stage.discard` mask
+that must diagnose and survive as a plain, unmasked `StoreInst` rather
+than crash `LinearizePass`, checked by running the full pass rather than
+calling `MaskIntrinsics.cpp` directly, so a regression in either layer
+would be caught). `ninja check-feme` (assertions-enabled, ccache build)
+passes in full, 1828/1887 (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`).
+
+**Measured impact.** Reproduced with the same 24-case
+`dEQP-VK.tessellation.winding.*hlsl*` case list H4c's own report used to
+first find this gap:
+
+```
+Test run totals:
+  Passed:         0/24 (0.0%)
+  Failed:        24/24 (100.0%)
+  Not supported:  0/24 (0.0%)
+```
+
+Byte-identical *headline* totals to H4c/H4d's own recorded numbers for
+this same 24-case list (all still `Fail`), but the qualitative difference
+this row exists for: `deqp-vk` no longer aborts partway through the run.
+Before this fix, the process died with `SIGABRT` on the first of these 24
+cases and every case after it in the same run was lost (H4c's own
+"per-case-resume methodology" existed only to work around this); after
+this fix, `deqp-vk` prints a clean `error: feme-cpu-masked-mem-op:
+unsupported feme.cpu.masked.* element type '{ [4 x float], [2 x float]
+}' ...` diagnostic and a `Fail` result line for all 24 cases in a single,
+uninterrupted run, then reaches `DONE!` and prints its own totals summary
+normally (the harness's own unrelated post-`DONE!` `tcu::NotSupportedError:
+Device fault tests execution not supported in Linux-like OSs` teardown
+exception, already present in every prior report in this file, is the only
+thing that still makes the process exit non-zero).
+
+**Full group.** `dEQP-VK.tessellation.*` (1114 cases):
+
+```
+Test run totals:
+  Passed:          8/1114 (0.7%)
+  Failed:        227/1114 (20.4%)
+  Not supported: 879/1114 (78.9%)
+```
+
+Byte-identical to H4b/H4c/H4d's own recorded totals, as expected: this row
+converts a crash into a `Fail` for the 32 cases (24 winding-hlsl + 8
+shader_input_output) H4c/H4d's own fixes newly routed into this gap, which
+does not by itself move any of the three headline buckets -- the same
+"`Fail` is `Fail` either way" conclusion H4c's and H4d's own reports
+already reached for their own newly-unblocked cases. The practical benefit
+is entirely in *how* the run reaches those 32 `Fail`s (a clean diagnostic
+and a surviving process, not a lost remainder of the run), which the
+24-case reproduction above demonstrates directly and the full-group
+byte-identical totals confirm did not regress anything else.
+
+**Regression sample.** The same `dEQP-VK.draw.*` sample H4/H4a/H4b/H4c/
+H4d's own reports use (1957 of the 29419-case mustpass list, every 15th
+case with `*viewport_height*` removed):
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        139/1957 (7.1%)
+  Not supported: 1806/1957 (92.3%)
+```
+
+Byte-identical to H4b/H4c/H4d's own recorded totals. **0 regressions, 0
+new passes** -- expected, since no non-tessellation pipeline in this
+codebase's own test corpus creates a masked memory access over a
+matrix/aggregate-typed value in the first place (the only reachable
+callers of `feme.cpu.masked.*` are `feme::cpu::LinearizePass`'s own
+`applyStageMasks`, gated on a genuinely divergent mask), so this sample
+never exercised the crash this row fixes either before or after it.
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change for this row: it neither flips a feature bit nor touches an
+extension, only hardens an existing diagnostic path (matching H4c's and
+H4d's own "no change needed" conclusion for the same reason).
+
+**Reproducing this row.** Same ICD build and case-list generation as the
+rest of this report (see "Reproducing this report" above):
+
+```shell
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.tessellation.winding.*hlsl*" \
+    --deqp-log-filename=winding_hlsl.qpa
+```
+
+now completes in one pass with no crash and no need for H4c's own
+per-case-resume loop; the full `dEQP-VK.tessellation.*` group and the draw
+sample (`grep -v viewport_height draw.txt | awk 'NR%15==1'` against
+`external/vulkancts/mustpass/main/vk-default/draw.txt`, then
+`--deqp-caselist-file=draw_sample.txt`) both also complete directly, with
+no resume loop needed at all -- the resume-loop methodology H4c/H4d's own
+reports required is itself made obsolete by this row for every case that
+used to hit this specific abort (any case that still crashes after this
+fix would indicate a different, not-yet-tracked abort site, none of which
+were observed in this reproduction).
