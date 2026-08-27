@@ -905,10 +905,40 @@ adjacency topologies (Pipeline.h), and geometry stream builder
 hull/domain/geometry entry point into an invokable `CompiledStage` batch --
 this section's "wrappers" -- is now done for all three stages
 (`HullWrapperPass`/`PatchConstantWrapperPass`/`DomainWrapperPass`/
-`GeometryWrapperPass`); driving the tessellator/stream builder from one
-through `feme::graphics::executeDraws` remains open. See each header's own
-file comment and G5's status note under "Implementation Milestones" for the
-exact scope split.
+`GeometryWrapperPass`); driving the tessellator through
+`feme::graphics::executeDraws` (roadmap H4) and, in turn, driving the
+geometry stage's stream builder from *its* output (roadmap H5d) are now both
+done. `GraphicsPipeline::setGeometryStage`/`hasGeometryStages` mirror
+`setTessellationStages`/`hasTessellationStages`; when bound, the geometry
+stage's own signature becomes the new "last pre-rasterization stage" exactly
+as the domain stage already does for a tessellating pipeline, and its merged
+emitted-vertex stream (`feme::cpu::collectGeometryStreams`,
+`feme::graphics::mergeGeometryStreamsInLaneOrder`) replaces the vertex/domain
+stage's output for clipping, the viewport transform and the interpolator.
+
+Deviation from a literal reading of the roadmap: `Executor::executeDraws`
+gathers a geometry stage's per-primitive input vertex attributes with
+`feme::graphics::linkStageElements`/`copyLinkedElements` (StageLink.h, the
+general cross-stage attribute linker H4's own patch-pipeline chaining
+introduced) rather than `feme::graphics::buildGeometryInputs`
+(GeometryInputs.h). `buildGeometryInputs` takes a flat, already-ordered
+scalar array and a caller-supplied `ScalarsPerVertex`; deriving the scalar
+order it requires still needs a `Location`/system-value-based match between
+the producing stage's output signature and the geometry stage's own input
+signature -- exactly what `linkStageElements` already implements and what
+every other stage transition in this codebase (vertex output -> fragment
+input, hull output -> domain input) already uses. `buildGeometryInputs`
+remains available for a caller that already has its own flat scalar layout
+in hand; `buildGeometryInvocations` (the same header) is still used here to
+build the per-primitive `FemeGeometryInvocation` records.
+
+Scope note: `GeometryState::Invocations` (SPIR-V's `Invocations` execution
+mode / `gl_InvocationID`, letting one geometry entry point run more than
+once per assembled input primitive) is not modeled at the
+`FemeGeometryArgs`/`FemeGeometryInvocation` ABI level yet -- there is no
+`InvocationID` field, only `SV_PrimitiveID` -- so `executeDraws` only ever
+drives exactly one geometry invocation per input primitive, matching
+`GeometryWrapperPass`'s own current implementation. See Roadmap.md H5d-a.
 
 ### Amplification/task and mesh stage model
 

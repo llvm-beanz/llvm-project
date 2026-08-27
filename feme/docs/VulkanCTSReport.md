@@ -8047,3 +8047,81 @@ rather than adding a new one).
 **Reproducing.** Same invocation as H5b/H5f's own editions above
 (`dEQP-VK.geometry.*` and the `draw_sample.txt` caselist); no new command
 needed.
+
+## Roadmap H5d: measured impact (geometry stage chained into `Executor::executeDraws`)
+
+`dEQP-VK.geometry.*`: 200 cases, run against this driver before and after
+this row's three commits.
+
+**Before** and **after**, identically:
+
+```
+Test run totals:
+  Passed:        0/200 (0.0%)
+  Failed:        0/200 (0.0%)
+  Not supported: 200/200 (100.0%)
+  Warnings:      0/200 (0.0%)
+  Waived:        0/200 (0.0%)
+```
+
+Every case still reports `NotSupported (Requested core feature is not
+supported: geometryShader)`, i.e. `deqp-vk` still gates the whole group on
+`VkPhysicalDeviceFeatures::geometryShader`, which `PhysicalDeviceInfo.cpp`
+still reports as `VK_FALSE`. **This is the intended outcome for this row**,
+matching H4's own precedent for the tessellation executor half: this row is
+the graphics-executor side of geometry-stage support (`Executor::
+executeDraws` now actually assembles a draw's primitives -- including the
+four adjacency topologies -- gathers their vertex attributes into a
+compiled geometry stage's own input batch, invokes it, and rasterizes its
+merged emitted-vertex stream), but none of it is reachable from
+`vkCreateGraphicsPipelines` yet: `GraphicsPipeline.cpp`'s
+`translateFixedFunctionState` still rejects `VK_SHADER_STAGE_GEOMETRY_BIT`
+outright (H5e's own job), so no real Vulkan geometry pipeline can be
+created to exercise this row's new code path today. Flipping
+`geometryShader` to `VK_TRUE` ahead of H5e would convert 200 honest
+`NotSupported`s into (at best) 200 `Fail`s, so it was deliberately left
+alone; `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+consequently need no change for this row, same as H5a/H5b/H5c/H5f/H5g.
+
+**Regression sample.** `Graphics/Executor.cpp` is shared by every draw, and
+this row extends its post-vertex-stage plumbing again (the `RasterSig`/
+`RasterOut`/`RasterClass` indirection H4's own tessellation chaining
+introduced now also considers a bound geometry stage, and the topology
+validation switch's four `*WithAdjacency` cases now conditionally accept
+rather than unconditionally reject), so the same `draw_sample.txt`
+1957-case sample this report has used since H4 was run again:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        139/1957 (7.1%)
+  Not supported: 1806/1957 (92.3%)
+```
+
+and the sorted list of failing case names is byte-identical to H5c/H5f/
+H5g's own baseline (139 distinct names, `diff`-clean via a small Python
+`TestCaseResult`/`Result StatusCode` parse rather than raw `diff`, since the
+`.qpa` XML is not line-stable across runs). **0 regressions, 0 new passes**
+-- expected, since a pipeline with no geometry stage (every case in this
+sample) takes exactly the paths it took before, with `RasterSig`/
+`RasterOut`/`RasterClass` all still bound to the vertex/domain stage's own
+signature and output block, and every adjacency-topology draw in the
+sample (there are none) would otherwise still need a bound geometry stage
+to pass validation, same as before this row.
+
+**Unit coverage.** `ExecutorTest.cpp` gains two hand-compiled cases:
+`GeometryStagePassesThroughATriangleCoveringTheViewport` (a geometry stage
+that writes `SV_Position` itself and passes every vertex through
+unchanged, checked against the same full-viewport solid-color fill
+`FillsFullyCoveredTriangleWithSolidColor` already checks for the ordinary
+vertex/fragment-only pipeline -- the merged stream really did reach
+rasterization only if this matches) and
+`RejectsAdjacencyTopologyWithoutAGeometryStage` (an adjacency-topology draw
+still errors with no geometry stage bound). `ninja check-feme`
+(`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in full: **1853/1912**
+(59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from H5c's own
+**1851/1910** baseline by exactly the 2 new tests this row adds.
+
+**Reproducing.** Same invocation as H5b/H5f/H5g's own editions above
+(`dEQP-VK.geometry.*` and the `draw_sample.txt` caselist); no new command
+needed.
