@@ -12,6 +12,9 @@
 #include "gtest/gtest.h"
 
 #include <cmath>
+#include <map>
+#include <string>
+#include <utility>
 
 using namespace feme::graphics;
 
@@ -291,6 +294,116 @@ TEST(TessellatorTest, QuadPointModeGeneratesNoIndices) {
                  TessOutputPrimitive::Point, Factors);
   EXPECT_FALSE(Patch.Points.empty());
   EXPECT_TRUE(Patch.Indices.empty());
+}
+
+/// Checks that \p Patch's triangles form one consistently wound, non-
+/// overlapping, crack-free cover of its domain, and returns a description
+/// of the first violation found (or an empty string when there is none).
+///
+/// The check is combinatorial rather than metric, because a crack and the
+/// fold that produced it have equal area and so cancel out of any
+/// area-based test. Two properties together are exactly "watertight":
+///
+///  - every *directed* edge appears at most once, which fails as soon as
+///    two triangles overlap with the same winding (the shape a ring-walk
+///    regression in `bridgeRingsByEdge` produces: a "bowtie" quad whose two
+///    halves fold back across their shared edge); and
+///  - every directed edge whose reverse is absent lies on the domain
+///    boundary, which fails as soon as an interior crack or T-junction
+///    leaves an unpaired interior edge behind.
+std::string findNonManifoldEdge(const TessellatedPatch &Patch,
+                                TessellatorDomain Domain) {
+  std::map<std::pair<uint32_t, uint32_t>, uint32_t> Directed;
+  for (size_t I = 0; I + 2 < Patch.Indices.size(); I += 3) {
+    uint32_t V[3] = {Patch.Indices[I], Patch.Indices[I + 1],
+                     Patch.Indices[I + 2]};
+    for (unsigned K = 0; K != 3; ++K) {
+      auto Edge = std::make_pair(V[K], V[(K + 1) % 3]);
+      if (++Directed[Edge] > 1)
+        return "directed edge " + std::to_string(Edge.first) + " -> " +
+               std::to_string(Edge.second) +
+               " is used by more than one "
+               "triangle (overlapping fold)";
+    }
+  }
+  auto onBoundary = [&](const DomainPoint &P) {
+    constexpr float Tol = 1e-4f;
+    if (Domain == TessellatorDomain::Triangle)
+      return P.U <= Tol || P.V <= Tol || P.W <= Tol;
+    return P.U <= Tol || P.V <= Tol || P.U >= 1.0f - Tol || P.V >= 1.0f - Tol;
+  };
+  for (const auto &Entry : Directed) {
+    if (Directed.count({Entry.first.second, Entry.first.first}))
+      continue;
+    const DomainPoint &A = Patch.Points[Entry.first.first];
+    const DomainPoint &B = Patch.Points[Entry.first.second];
+    if (onBoundary(A) && onBoundary(B))
+      continue;
+    return "interior edge " + std::to_string(Entry.first.first) + " -> " +
+           std::to_string(Entry.first.second) +
+           " has no opposite-facing neighbor (crack)";
+  }
+  return "";
+}
+
+TEST(TessellatorTest, TriangleTessellationIsCrackFreeAtEveryFactor) {
+  // A regression in `bridgeRingsByEdge`'s outer/core ring walk -- notably
+  // wrapping an exhausted edge back to its own first vertex instead of
+  // advancing to the corner it shares with the next edge -- folds the last
+  // bridging triangles of every edge back across the strip, leaving a
+  // wedge-shaped crack of exactly the folded triangle's own area behind
+  // them.
+  for (float Edge : {1.0f, 2.0f, 3.0f, 4.0f, 7.0f, 16.0f}) {
+    TessFactors Factors;
+    Factors.Inside = {Edge, 0.0f};
+    Factors.Edges = {Edge, Edge, Edge, 0.0f};
+    TessellatedPatch Patch =
+        tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
+                   TessOutputPrimitive::TriangleCcw, Factors);
+    ASSERT_FALSE(Patch.Indices.empty()) << "edge factor " << Edge;
+    EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Triangle), "")
+        << "edge factor " << Edge;
+  }
+}
+
+TEST(TessellatorTest, TriangleTessellationIsCrackFreeWithUnequalEdgeFactors) {
+  // The interesting case for `bridgeRingsByEdge`: each boundary edge has a
+  // different vertex count from the others *and* from the inset core ring
+  // it bridges to, so the two rings are walked at genuinely different
+  // rates.
+  TessFactors Factors;
+  Factors.Inside = {5.0f, 0.0f};
+  Factors.Edges = {2.0f, 3.0f, 4.0f, 0.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  ASSERT_FALSE(Patch.Indices.empty());
+  EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Triangle), "");
+}
+
+TEST(TessellatorTest, QuadTessellationIsCrackFreeAtEveryFactor) {
+  for (float Edge : {1.0f, 2.0f, 3.0f, 5.0f, 12.0f}) {
+    TessFactors Factors;
+    Factors.Inside = {Edge, Edge};
+    Factors.Edges = {Edge, Edge, Edge, Edge};
+    TessellatedPatch Patch =
+        tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                   TessOutputPrimitive::TriangleCcw, Factors);
+    ASSERT_FALSE(Patch.Indices.empty()) << "edge factor " << Edge;
+    EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "")
+        << "edge factor " << Edge;
+  }
+}
+
+TEST(TessellatorTest, QuadTessellationIsCrackFreeWithUnequalEdgeFactors) {
+  TessFactors Factors;
+  Factors.Inside = {6.0f, 3.0f};
+  Factors.Edges = {2.0f, 5.0f, 3.0f, 4.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  ASSERT_FALSE(Patch.Indices.empty());
+  EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "");
 }
 
 } // namespace

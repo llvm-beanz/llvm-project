@@ -78,19 +78,26 @@ void bridgeRingsByEdge(TessellatedPatch &Patch, const RingEdges &Outer,
     size_t Mo = OuterEdge.size();
     size_t Mi = InnerEdge.size();
     size_t I = 0, J = 0;
+    // Each step advances exactly one ring by one vertex and emits the
+    // triangle spanning that step and the *other* ring's current vertex.
+    // Once a ring is exhausted its "current vertex" is the shared corner
+    // the next edge starts at, not a wrap back to this edge's own first
+    // vertex: the annulus being triangulated runs from one shared corner
+    // pair to the next, so wrapping would fold the last triangles of every
+    // edge back across the strip and leave a crack behind them.
     while (I < Mo || J < Mi) {
+      uint32_t OuterAt = I < Mo ? OuterEdge[I] : OuterNextCorner;
+      uint32_t InnerAt = J < Mi ? InnerEdge[J] : InnerNextCorner;
       if (J >= Mi || (I < Mo && static_cast<double>(I + 1) / Mo <=
                                     static_cast<double>(J + 1) / Mi)) {
-        uint32_t OuterCur = OuterEdge[I];
         uint32_t OuterNext = (I + 1 < Mo) ? OuterEdge[I + 1] : OuterNextCorner;
-        appendTriangle(Patch, OuterCur, OuterNext, InnerEdge[J % Mi], Cw);
+        appendTriangle(Patch, OuterAt, OuterNext, InnerAt, Cw);
         ++I;
-      } else {
-        uint32_t InnerCur = InnerEdge[J];
-        uint32_t InnerNext = (J + 1 < Mi) ? InnerEdge[J + 1] : InnerNextCorner;
-        appendTriangle(Patch, InnerCur, OuterEdge[I % Mo], InnerNext, Cw);
-        ++J;
+        continue;
       }
+      uint32_t InnerNext = (J + 1 < Mi) ? InnerEdge[J + 1] : InnerNextCorner;
+      appendTriangle(Patch, InnerAt, OuterAt, InnerNext, Cw);
+      ++J;
     }
   }
 }
