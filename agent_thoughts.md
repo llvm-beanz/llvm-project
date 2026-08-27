@@ -35277,3 +35277,235 @@ and testing green:
 
 This file's own new heading is committed separately afterward, per the
 standing instruction to keep `agent_thoughts.md` in its own commit.
+
+# Roadmap H3: multiple viewports and scissors (recovering a failed agent's stash)
+
+## Starting point
+
+Told the previous agent working this milestone had failed, with its
+partial progress stashed. `git stash pop` restored 17 changed files
+(~488/-223 lines): `LayeredRendering.{h,cpp}` (a new
+`resolveViewportArrayIndex`, mirroring `resolveRenderTargetArrayLayer`),
+`PreparedDraw.h` (`Viewport`/`Scissor` singular fields converted to
+`Viewports`/`Scissors` arrays), `Executor.cpp` (per-primitive viewport/
+scissor/layer resolution), `PhysicalDeviceInfo.{h,cpp}` (`maxViewports`
+raised from 1 to a new `MaxViewportCount = 16`), `GraphicsPipeline.{h,cpp}`
+(viewport/scissor state as arrays), `CommandBuffer.{h,cpp}` (new
+`vkCmdSetViewportWithCount`/`vkCmdSetScissorWithCount`, array-aware
+replay), `EntryPoints.h`/`ImplementedEntrypoints.txt` (the two new entry
+points), `feme-render.cpp` (mechanical adaptation), and three unit test
+files with mechanical `Draw.Viewport` -> `Draw.Viewports[0]` renames plus
+two new `LayeredRenderingTest.cpp` cases for `resolveViewportArrayIndex`.
+
+## Reviewing the stash
+
+Read through all 17 files' diffs before touching anything. The shape was
+sound -- per-primitive `ViewportArrayIndex`/`RenderTargetArrayIndex`
+resolution in the executor, array-valued pipeline/dynamic state, a
+truncate-capable `vkCmdSetViewportWithCount` -- but it did not build, and
+even once built, no test exercised any of the actual new multi-viewport
+*behavior* (every test change was a mechanical rename of the old
+single-viewport API).
+
+## Bugs found and fixed while making the stash build and pass
+
+1. **Ambiguous overload compile error.** The stash's four
+   `vkCmdSetViewport{,WithCount}{,EXT}`/`vkCmdSetScissor{,WithCount}{,EXT}`
+   entry points called each other unqualified (e.g. the `EXT` alias calling
+   the core-promoted name), colliding with `vulkan_core.h`'s own
+   declarations of the same core-promoted symbols and producing "ambiguous
+   call" errors. Every other place in this codebase that shares logic
+   between two `VKAPI_CALL` entry points already uses a private/static
+   helper rather than one entry point calling another (the ambiguity is
+   apparently a Clang quirk when a `.cpp` both defines and internally calls
+   a symbol a system header separately declares). Fixed by extracting
+   `setViewportImpl`/`setScissorImpl` static helpers in `CommandBuffer.cpp`
+   that all four public entry points call.
+
+2. **`WithCount` truncation bug.** `vkCmdSetViewportWithCount`/
+   `ScissorWithCount` must *replace* the whole active array (shrinking it
+   as well as growing it), but the replay logic in `executeCommandsInto`
+   only ever grew the array via `resize()`. Added a
+   `RecordedCommand::ResetViewportOrScissorCount` flag (and a `ResetCount`
+   parameter to `setViewports`/`setScissors`) so the replay switch can
+   `resize()` down to exactly the recorded array's own size when the flag
+   is set, distinguishing "replace the whole array" from "write a
+   `first*`-relative sub-range" (`vkCmdSetViewport`/`vkCmdSetScissor`'s own
+   semantics, which must never truncate an array a later call made
+   larger).
+
+3. **Multiview regression (3 failing `DrawTest` cases).** The stash's
+   `CommandBuffer.cpp::runDraw` per-view loop stopped pre-slicing
+   `DepthStencil`/`ResolveAttachments` per view while still pre-slicing
+   color `Attachments` to one layer. `Executor.cpp`'s `getDrawLayerCount()`
+   infers the total layer count from the first color attachment (already
+   sliced to 1), so the default requested layer for view 1+ (`Draw.
+   ViewIndex`) failed `resolveRenderTargetArrayLayer(ViewIndex, 1)` ->
+   `nullopt`, silently discarding every primitive past view 0. Fixed by (a)
+   restoring per-view slicing for `ResolveAttachments`/`DepthStencil` to
+   match color attachments, and (b) changing the executor's default
+   `RequestedLayer` (no `RenderTargetArrayIndex` output) from `Draw.
+   ViewIndex` to `0`, since attachments arrive at the executor already
+   sliced to the current view -- `Draw.ViewIndex` is only for sourcing the
+   `gl_ViewIndex` *input*, not for re-deriving an attachment offset that
+   already happened upstream.
+
+4. **`GraphicsPipelineTest.RejectsUnimplementedStateCombinations`
+   regression.** Its "Multiple viewports" sub-case asserted `viewportCount
+   == 2` was rejected -- no longer true under H3, and the sub-case had its
+   own latent OOB bug (`pViewports` pointing at only one `VkViewport` while
+   `viewportCount == 2`). Removed the sub-case, pointing at the new
+   acceptance tests instead.
+
+After these four fixes, `ninja check-feme` passed in full (1830 total,
+1771 passed, 59 unsupported, 0 failed).
+
+## New tests added (the stash had none for the actual new behavior)
+
+- `GraphicsPipelineTest.AcceptsMultipleViewportsAndScissors` /
+  `.RejectsTooManyViewports`: pipeline-creation-level coverage of the new
+  array validation (3 static viewports/scissors accepted and returned in
+  order; 17 > `MaxViewportCount` rejected).
+- `DrawTest.DynamicViewportWithCountRoutesInstancesToDifferentViewports` /
+  `.OutOfRangeViewportIndexDiscardsThePrimitive`: real end-to-end coverage,
+  a hand-written SPIR-V vertex shader (`FullscreenPerInstanceViewportVertexSource`)
+  writing `gl_ViewportIndex` (`BuiltIn` 10, capability `ShaderViewportIndex`)
+  from `gl_InstanceIndex`, run through `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT`/
+  `_SCISSOR_WITH_COUNT` pipelines. Confirms two instances land in two
+  different half-viewports, and that an out-of-range `gl_ViewportIndex`
+  discards the primitive rather than clamping it.
+
+## The missing `multiViewport` feature bit (found via a real CTS run, not code review)
+
+Before running the real CTS, I assumed the array plumbing plus
+`maxViewports` was the whole gap the roadmap named. Running
+`dEQP-VK.draw.*.shader_viewport_index.*` (196 cases) found otherwise: every
+single case, including plain single-viewport-equivalent ones, failed
+`checkSupport` with `NotSupported (Requested core feature is not
+supported: multiViewport)`. `VkPhysicalDeviceFeatures::multiViewport` --
+distinct from the `maxViewports` *limit* -- was never set anywhere in this
+codebase; a `grep -rn multiViewport feme/lib` came back completely empty.
+Fixed by adding `Info.Features.multiViewport = VK_TRUE;` in
+`PhysicalDeviceInfo.cpp` alongside the other honestly-implemented Vulkan
+1.0 feature bits, plus a renamed/extended
+`PhysicalDeviceInfoTest.OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised`
+covering it. This is exactly the kind of gap the task's own instruction to
+"run the Vulkan CTS after each change" exists to catch -- code review alone
+would not have found it, since the array plumbing all looked complete and
+every unit test I wrote passed without it (unit tests never call
+`vkGetPhysicalDeviceFeatures`/enforce it the way a real `deqp-vk`
+`checkSupport` does).
+
+## `shaderOutputViewportIndex`/`shaderOutputLayer`
+
+Raised both from `VK_FALSE` to `VK_TRUE` in `EntryPoints.cpp`'s aggregate
+`VkPhysicalDeviceVulkan12Features` case, per the roadmap's own "in
+lockstep with H2" instruction: both `gl_ViewportIndex` (this row) and
+`gl_Layer` (H2) are real vertex-stage outputs now, and there is no
+geometry stage for either bit's "no geometry shader required" promise to
+be moot against. Added
+`PhysicalDeviceInfoTest.ShaderViewportIndexLayerFeaturesAreTrue` (modeled
+on the existing `multiview`-feature test's memset-then-check pattern) and
+updated `AdvertisedPromotedFeatures.txt`/`AdvertisedPromotedExtensions.txt`/
+`CorePromotedNotAdvertisedExtensions.txt`/`PlannedExtensions.txt` so
+`VK_EXT_shader_viewport_index_layer` moves from "Planned" to "Implemented
+(core, not advertised by name)" -- regenerated
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` via their own
+generator scripts (`vk_gen_feature_inventory.py`/
+`vk_gen_extension_inventory.py`) against VK-GL-CTS's own `vk.xml` rather
+than hand-editing the tables, then hand-updated the surrounding prose
+summary counts and bullet lists the scripts do not touch.
+
+## CTS results
+
+`dEQP-VK.draw.*.shader_viewport_index.*` (196 cases): 0/196 passed before
+the `multiViewport` fix (100% `NotSupported`, gated on that one feature
+bit regardless of anything else); 64/196 passed after, 68 `Failed`, 64
+`NotSupported` (`geometry_shader`/`tessellation_*` variants, H4/H5, not
+this row's scope). Every `vertex_shader_N` case (`gl_ViewportIndex`
+written by the vertex stage only, consumed downstream of it) passes 64/64.
+Every `fragment_shader_N` case additionally reads `gl_ViewportIndex` back
+as a fragment-shader input and still fails,
+`VK_ERROR_INITIALIZATION_FAILED`/"fragment stage wrapper requires attached
+feme.signature metadata" -- root-caused to the fragment-stage
+signature-attachment path not seeing this builtin as an input at all
+(`CanonicalizeStage.cpp`'s `getSystemValueForBuiltIn` maps SPIR-V `BuiltIn`
+10 to `ViewportArrayIndex` regardless of storage class, but something
+upstream of it in the fragment stage's own globals-collection loop
+appears not to reach this variable), not yet fixed. This is a materially
+separate piece of work from the viewport-count/pipeline/executor plumbing
+this row itself closes (the roadmap's own H3 text names `ViewportIndex`
+only "as a stage output", not as a fragment-stage input), so broken out as
+new roadmap row H3a rather than folded in here.
+
+Also ran `dEQP-VK.multiview.*` (838 cases) as a regression check, since
+this row's own `CommandBuffer.cpp`/`Executor.cpp` fixes touch the same
+per-view attachment-slicing/per-primitive layer-resolution code multiview
+depends on: 457/838 (54.5%) passed, unchanged from H2j's own baseline --
+confirms the restored per-view slicing (bug 3 above) is correct and this
+row introduces no multiview regression.
+
+`ninja check-feme` (assertions-enabled, ccache build): 1776/1835 passed,
+59 unsupported (pre-existing, unrelated), 0 failed.
+
+## Deviation and follow-up
+
+Two things this row's own text and this session's review flagged but did
+not fix, both deliberately deferred rather than folded in:
+
+- **New roadmap row H3a**: the fragment-shader-input `gl_ViewportIndex`
+  gap above.
+- **Noted but not spun off a roadmap row for**: a pipeline declaring
+  `VK_DYNAMIC_STATE_VIEWPORT` (not `_WITH_COUNT`) with a *fixed*
+  `viewportCount > 1` at creation time (the Vulkan spec still requires the
+  *count* to be fixed even though the dynamic state makes the *values*
+  dynamic) is not validated/tracked against `Info->viewportCount` at all
+  by `translateViewportState`'s current `if (!ViewportDynamic)`-gated
+  block -- this matches how the pre-H3 single-viewport code already
+  behaved (no regression), and no CTS case in the two groups run above
+  exercised it, so left as-is rather than speculatively fixed without a
+  failing case driving it.
+- The pre-existing `dEQP-VK.draw.*.shader_layer.*` failures (24/56, all
+  `vertex_shader_N` cases writing an arbitrary `gl_Layer` value outside any
+  multiview render pass) are unrelated to this row -- they exercise the
+  "general, arbitrary per-primitive `RenderTargetArrayIndex` case" the
+  design doc already documents as unimplemented pending a real producer
+  (roadmap H5), not anything this row's own viewport-count changes touch.
+  Confirmed via the CTS run itself (zero overlap with the `shader_viewport_
+  index` failures) rather than left as an assumption.
+
+## Design doc
+
+Added a "Status (roadmap H3)" paragraph to `FeMeVulkanDesign.md`'s
+"Graphics pipeline state" section (mirroring H2's own status-note
+convention elsewhere in the file), and updated the forward-looking
+"remaining gaps" bullet list to say H3 is closed rather than pending.
+Left the frozen historical "V6 status snapshot" paragraph (the one
+originally listing "multiple viewports/scissors" among many rejected
+state combinations) untouched, matching how H2's own "layered
+framebuffers" closure was handled -- that paragraph is a still-frozen
+historical record, not maintained prose.
+
+## Commit breakdown
+
+Split into commits, each independently building and testing:
+1. `PhysicalDeviceInfo.{h,cpp}`'s `MaxViewportCount`/`maxViewports`/
+   `multiViewport` plus its test.
+2. `GraphicsPipeline.{h,cpp}`'s array-valued viewport/scissor state plus
+   its two new tests, and the `RejectsUnimplementedStateCombinations` fix.
+3. `CommandBuffer.{h,cpp}`'s `vkCmdSetViewportWithCount`/
+   `vkCmdSetScissorWithCount`, the ambiguous-overload fix, the truncation
+   fix, and the multiview-slicing regression fix (all tightly coupled to
+   the same file/mechanism).
+4. `Executor.cpp`/`LayeredRendering.{h,cpp}`'s per-primitive resolution
+   plus `PreparedDraw.h`'s array fields, `feme-render.cpp`'s adaptation,
+   and the new end-to-end `DrawTest` cases.
+5. `EntryPoints.cpp`'s `shaderOutputViewportIndex`/`shaderOutputLayer` plus
+   its test.
+6. Doc/inventory updates (`Roadmap.md` strikethrough plus new H3a row,
+   `VulkanCTSReport.md`'s new section, `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md` regeneration, `FeMeVulkanDesign.md`'s new
+   status paragraph, the four extension-list `.txt` files).
+
+This file's own new heading is committed separately afterward, per the
+standing instruction to keep `agent_thoughts.md` in its own commit.
