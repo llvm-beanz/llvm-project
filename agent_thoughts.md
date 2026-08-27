@@ -36379,3 +36379,183 @@ Roadmap H4c (patch-constant SSA capture across the barrier) and H4d (the
 JIT symbol-resolution gap) are real, open, and now tracked. Neither
 blocks H4b's own literal scope, which is complete and tested. Geometry
 stages (H5) remain entirely separate, untouched work.
+
+# Roadmap H4c: threading a captured SSA value across the tessellation-control barrier
+
+## The problem, restated precisely
+
+`splitTessellationControlEntry` (H4a) splits one SPIR-V
+tessellation-control entry point at its single required `OpControlBarrier`
+into FeMe's two D3D-shaped phases: a control-point phase (`HullWrapperPass`
+shape) and a `<name>.patchconstant` phase (`PatchConstantWrapperPass`
+shape). Before this change, if the cloned post-barrier region still
+referenced any SSA value defined in the pre-barrier region -- i.e., the
+`RemapInstruction` pass over the clone found an operand it could not remap
+because `VMap` had no entry for it -- the pass just diagnosed and bailed:
+`"tessellation-control SPIR-V entry point's patch-constant region cannot
+yet capture SSA values defined before the barrier"`. H4b's own CTS
+measurement found this hit exactly 24 of 227 `dEQP-VK.tessellation.*`
+`Fail`s, all real, common GLSL-compiled shapes: a per-patch tessellation
+factor computed from data derived from the control-point body (e.g. an
+edge length derived from `gl_out[]` positions written earlier in the same
+function) and referenced again after the barrier, when SPIR-V structures
+the whole thing as one function rather than FeMe's two.
+
+## Why storage-threading and not re-materialization
+
+The roadmap row itself named two candidate designs and hinted at which one
+was "likely right in general": re-materializing (cloning) the pre-barrier
+computation into the patch-constant phase, or threading the value through
+a synthetic patch-scoped storage location both phases can address.
+
+I chose storage-threading, and specifically did *not* attempt
+re-materialization, for a soundness reason the roadmap row itself
+gestures at but that's worth spelling out precisely: SPIR-V (like GLSL's
+own tessellation-control model) gives cross-invocation reads of another
+invocation's per-vertex output well-defined behavior *only after* a
+barrier. A value defined *before* the one barrier this pass splits at is
+therefore, by construction, computed from data available to the *current*
+invocation alone -- it cannot itself be a cross-invocation reduction,
+because reading another invocation's output before the barrier would
+already be undefined behavior in the source shader, not something this
+pass needs to worry about introducing. That means blindly cloning the
+defining instructions into the patch-constant phase would actually be
+sound too, for this exact case -- *but only because of that invariant*,
+which is subtle enough that getting it wrong (e.g. missing a case where
+the "pre-barrier" region is reached from a loop that also, elsewhere,
+touches cross-invocation state through some indirection I did not
+enumerate) would silently miscompile rather than diagnose. Storage
+threading has no such caveat: it is unconditionally correct regardless of
+what the captured value depends on, because it does exactly what SPIR-V
+already guarantees is safe -- write to patch-shared storage before the
+barrier, read it back after -- mirroring how the control-point phase's own
+*named* per-vertex outputs already cross the same barrier. Given a choice
+between "always correct" and "correct only under an invariant I'd have to
+convince myself holds in every case," always-correct wins, especially for
+a change whose only regression test is my own unit test, not a full
+CTS-shape fuzzer.
+
+## The key implementation discovery: one global, not two
+
+My first draft plan (before I looked closely at `classifySPIRVElement`)
+assumed I'd need two new globals -- an address-space-8 "output" global in
+the control-point phase's own function, and a separate address-space-7
+"input" global in the patch-constant phase's function -- reasoning
+naively from "output crosses to input." Reading `classifySPIRVElement`
+closely (specifically its `Stage == Hull, Phase == HullPatchConstant`
+branch) showed this was backwards: an address-space-7 global in the
+patch-constant phase is classified as `FromInputPatch = true` when its
+system value is `None` or `PatchVertices` -- meaning it's understood as an
+*original vertex-stage input*, re-read in the patch-constant phase (the
+literal "InputPatch" SPIR-V/HLSL concept), not as something written by
+this same shader's own control-point phase. Using address space 7 for my
+synthetic capture would have silently misrouted it through the wrong link
+(`Link.VertexToHullControlPoint`-shaped, expecting the vertex stage to
+produce it) instead of `Link.HullToPatchConstant`.
+
+The actual answer is simpler than either draft: **one single
+`GlobalVariable`, address space 8, shared unchanged by both cloned
+functions** (a `Store` in the control-point phase, a `Load` in the
+patch-constant phase). `classifySPIRVElement`'s default case (reached by
+both `HullControlPoint` and, for an address-space-8 global with no
+`Patch`/tess-factor `BuiltIn`, `HullPatchConstant` too) treats it as an
+ordinary per-vertex output in one phase and an ordinary, non-`FromInputPatch`
+input (the "OutputPatch" bucket, `isOutputPatchElement`) in the other --
+exactly the shape a genuine `gl_out[]` read-back already takes. This means
+the fix needed zero changes to `PatchPipeline.cpp` or `StageLink.cpp`: the
+existing `HullToPatchConstant` link, built by matching `Location` via
+`findElementByLocation`, picks up the new pair the moment
+`canonicalizeSPIRVStage` reflects each phase (which already runs
+independently per phase, after the split). I only needed to (a) invent a
+`Location` value guaranteed not to collide with any real stage-IO element
+already on the module (`computeNextSyntheticLocation`, scanning both
+whole-variable and per-member decorations for the current maximum), and
+(b) hand-build the one-entry `!spirv.Decorations` MDNode shape
+(`createLocationDecoration`) `parseSPIRVDecorations` already knows how to
+read back.
+
+## Two LLVM-fork-specific implementation snags
+
+1. This fork does not have a plain `BranchInst` class -- branches are
+   split into `UncondBrInst`/`CondBrInst`. I needed
+   `UncondBrInst::Create(Target, InsertAtEndBlock)` to append the jump
+   from the new `patchconst.captures` block into the cloned post-barrier
+   entry.
+2. `Instruction::getInsertionPointAfterDef()` (used to find where to insert
+   the `Store` right after a captured value's own definition) returns an
+   iterator whose *parent block* is not always the defining instruction's
+   own parent: for a `PHINode` it's the phi's own block's first insertion
+   point (fine, same block), but for an `InvokeInst` it's the *normal
+   destination* block's first insertion point (the invoke's result is only
+   live down that edge) -- so I had to track the correct `BasicBlock*`
+   explicitly rather than assuming `Inst->getParent()`.
+
+## The CTS measurement almost went wrong twice
+
+First, I ran the full `dEQP-VK.tessellation.*` group in one `deqp-vk`
+invocation the way H4b's own report did, and it aborted (`SIGABRT`)
+partway through, at `dEQP-VK.tessellation.winding.default_domain.
+hlsl_quads_ccw`, inside `MaskIntrinsics.cpp`'s `appendScalarMangling`
+(`llvm_unreachable("unsupported feme.cpu.masked.* element type")`). To
+find out whether my own change caused this, I stashed my changes,
+rebuilt, and reran that one case in isolation -- confirming it was a
+graceful `Fail` (the old SSA-capture diagnostic) before my change, and
+this new crash after. I popped the stash back... and then, without
+rebuilding, went on to run the rest of the CTS measurement. Every
+subsequent run for a while was silently against the *old, pre-fix*
+binary, not my actual change -- I only caught this because the log still
+showed the old diagnostic string verbatim ("cannot yet capture SSA
+values...") for cases I expected my fix to have already resolved. Lesson
+re-learned the hard way: after any `git stash pop` that follows a
+build-and-test cycle done specifically *without* the stashed changes,
+rebuild before trusting the next result, even if the working tree looks
+right. I rebuilt `bin/feme`/`lib/libfeme_vulkan.so` again and redid the
+whole measurement from that point.
+
+Second, once genuinely measuring the fixed build, the same
+`MaskIntrinsics.cpp` abort kept truncating the group. Rather than treating
+that as a blocker, I built a small resume loop: generate the group's full
+case list once (`--deqp-runmode=txt-caselist`), then repeatedly run
+`--deqp-caselist-file=<remaining>`, and on each abort, find the last
+`Test case '...'..` line with no completion line after it (that's the one
+that crashed), move it to an exclusion list, and rerun the rest. This
+found exactly 24 crashing cases -- the same 24 named by H4c's own roadmap
+row -- and let the rest of the group (1090 cases) run to a clean `DONE!`.
+Summing the two gives the same headline the group had before this
+change (8 `Pass`/227 `Fail`/879 `NotSupported`): the 24 no longer hit the
+old diagnostic, but every one of them now hits this different, pre-existing
+`MaskIntrinsics.cpp` gap one step further into codegen instead -- so the
+fix is real (confirmed by the unit test and by the diagnostic's absence)
+even though the CTS headline can't show it move yet.
+
+## The decision not to fix `MaskIntrinsics.cpp`
+
+I considered hardening `appendScalarMangling`'s `llvm_unreachable` into a
+graceful diagnostic, since a process-aborting crash blocking the rest of a
+CTS run is a real, unwelcome severity regression that my own change is
+what first reaches. I decided against folding it into this commit: the
+actual gap -- masked SIMD load/store has no legalization for a
+matrix/aggregate element type -- is CPU-backend masked-memory-op
+legalization, the same underlying bucket as C8's already-tracked
+matrix/aggregate stage-IO gap (88+74 cases in H4b's own triage table),
+already explicitly scoped as "best attacked after C2/C3" in the roadmap.
+Reaching it via a different code path this milestone doesn't make fixing
+it tessellation-control-splitting work, and a real fix likely needs
+`SIMDizePass` and `MaskIntrinsics.cpp` to agree on a graceful-failure
+contract, not just a one-line `emitError` substitution. I recorded it as
+its own roadmap row (H4e) instead, cross-referencing both C8 (the root
+legalization gap) and H4c (why it's reachable now), and explicitly named
+the severity concern (crash vs. diagnostic) as the more urgent half of
+that row even though the size of the underlying legalization gap is the
+larger one.
+
+## What "done" means for this row
+
+H4c's own diagnostic is gone, the split now produces a correctly linked
+module for the shape it names, and that's locked down by a real IR-level
+unit test (`CanonicalizeStageTest.
+SplitsHullEntryThreadingCapturedSSAValue`) plus a clean `ninja check-feme`
+(1822/1881, 0 `Failed`). I struck it through on the roadmap. The CTS
+headline not moving is expected and documented, not a sign of an
+incomplete fix -- it's H4e's job (and, ultimately, C8's) to move it
+further.
