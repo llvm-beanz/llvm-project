@@ -7274,3 +7274,71 @@ change for this row, for the same reason as H4f's own.
 
 **Reproducing this row.** Identical reproduction command to H4f's own
 row above; the "no signature reflection" error is what to check is gone.
+
+## Roadmap H4h: measured impact (relaxing `SV_Position` to the domain stage under tessellation)
+
+**What changed.** H4f and H4g's own fixes let a `dEQP-VK.tessellation.
+winding.*` glsl pipeline reach `validateStageInterfaces`
+(`GraphicsPipeline.cpp`), which unconditionally required the *vertex*
+stage's own signature to carry a 4-component `SV_Position`/`gl_Position`
+output -- correct for the ordinary vertex -> fragment pipeline, but wrong
+once a tessellation-evaluation stage exists: `winding`'s own vertex
+shader is a genuinely empty `void main (void) {}`, and its evaluation
+shader computes `gl_Position` purely from `gl_TessCoord`, never reading
+any vertex-stage output back via `gl_in[]`.
+
+Fixed by threading the already-compiled `DomainStage` (`compileAndValidateStages`
+already has it, for the tessellation-state merge) through as a new,
+optional parameter to `validateStageInterfaces`: when non-`nullptr`, the
+`SV_Position` check now parses and inspects *its* signature instead of
+the vertex stage's, leaving every other check in the function (fragment
+varying linkage against the vertex stage's own outputs, per-attachment
+`SV_TargetN` outputs, vertex-input-attribute coverage) completely
+unchanged. An ordinary two-stage pipeline (`DomainStage == nullptr`)
+still checks the vertex stage exactly as before.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+1831/1890 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from
+1829/1888 before this row -- the two new `GraphicsPipelineTest` cases:
+`AcceptsTessellationPipelineWithEmptyVertexShader` (a real four-stage
+tessellation pipeline with a genuinely empty vertex module now creates
+successfully) and `RejectsEmptyVertexShaderWithoutTessellation` (the same
+empty vertex module, no domain stage, is still correctly rejected,
+confirming the relaxation doesn't leak into the non-tessellation path).
+
+**Measured impact.** Reproduced against
+`dEQP-VK.tessellation.winding.*glsl*` (24 cases,
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`): the `"vertex stage does not write a
+4-component SV_Position output"` error is gone entirely (0 occurrences,
+down from all 24), and every one of the 24 cases now reaches
+`vkCreateGraphicsPipelines` success and produces a rendered image --
+still all 24 `Fail`, but now at a pixel-comparison mismatch inside the
+test's own image verification (e.g. `dEQP-VK.tessellation.winding.
+default_domain.glsl_quads_ccw`: "Note: got 4081 white and 15 red pixels" /
+"Failure: expected only white pixels (full-viewport quad)"), a distinct,
+later bug tracked as roadmap H4i, not a pipeline-creation error.
+
+**Full group** (`dEQP-VK.tessellation.*`, 1114 cases) is byte-identical
+to H4g's own recorded totals (8 `Pass`/227 `Fail`/879 `NotSupported`) --
+expected, since none of these 24 cases turn green yet, they only move
+from a creation-time `Fail` to a render-time `Fail`. **Regression
+sample**: the same `dEQP-VK.draw.*` 1957-case sample used throughout this
+report is also byte-identical (12 `Pass`/139 `Fail`/1806 `NotSupported`)
+-- 0 regressions, expected, since no non-tessellation pipeline in this
+codebase's own test corpus passes a non-`nullptr` `DomainStage` into
+`validateStageInterfaces`.
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change for this row, for the same reason as H4f/H4g's own: no feature bit
+or extension is added or removed, only a validation-layer relaxation.
+
+**Reproducing this row.** Same ICD build as the rest of this report:
+
+```shell
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  deqp-vk --deqp-case="dEQP-VK.tessellation.winding.*glsl*" \
+    --deqp-log-filename=winding_glsl.qpa
+```
