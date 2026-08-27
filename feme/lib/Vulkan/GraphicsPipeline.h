@@ -213,6 +213,15 @@ struct GraphicsPipelineArtifact {
   std::unique_ptr<feme::Context> Ctx;
   std::shared_ptr<feme::cpu::CompiledStage> VertexStage;
   std::shared_ptr<feme::cpu::CompiledStage> FragmentStage;
+  /// (roadmap H4b) Set only for a pipeline declaring
+  /// `VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT`/`_EVALUATION_BIT`: the
+  /// tessellation-control module's two split phases (roadmap H4a's control-
+  /// point phase, kept under `HullStage`, and its `PatchConstantStage`
+  /// sibling) plus the tessellation-evaluation module's `DomainStage`.
+  /// Either all three are set, or none are.
+  std::shared_ptr<feme::cpu::CompiledStage> HullStage;
+  std::shared_ptr<feme::cpu::CompiledStage> PatchConstantStage;
+  std::shared_ptr<feme::cpu::CompiledStage> DomainStage;
 };
 
 /// One graphics pipeline's compiled stages plus its whole translated,
@@ -249,6 +258,14 @@ struct GraphicsPipelineState {
   /// that struct's own comment in Pipeline.h.
   PipelineRobustness VertexRobustness;
   PipelineRobustness FragmentRobustness;
+  /// (roadmap H4b) Set only when `Artifact->HullStage` is (i.e. the
+  /// pipeline declares tessellation stages): the tessellator state
+  /// `buildExecutorPipeline` hands to `graphics::GraphicsPipeline::
+  /// setTessellationStages`, assembled from `VkPipelineTessellationState
+  /// CreateInfo::patchControlPoints` (`InputControlPointCount`) and each
+  /// compiled stage's own `feme.tessellation.*` reflection (everything
+  /// else).
+  feme::graphics::TessellationState Tessellation;
 };
 
 /// A `VkPipeline` graphics pipeline: the compiled stages plus the
@@ -329,6 +346,10 @@ public:
   }
   const PipelineRobustness &fragmentRobustness() const {
     return State.FragmentRobustness;
+  }
+  /// (roadmap H4b) Whether this pipeline declares tessellation stages.
+  bool hasTessellationStages() const {
+    return State.Artifact->HullStage != nullptr;
   }
 
 private:

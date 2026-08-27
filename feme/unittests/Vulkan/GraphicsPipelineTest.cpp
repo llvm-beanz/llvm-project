@@ -22,6 +22,8 @@
 #include "Objects.h"
 #include "RenderPass.h"
 
+#include "feme/Graphics/Patch.h"
+
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -112,6 +114,54 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.EntryPoint "Fragment" @main, @depth
   spirv.ExecutionMode @main "OriginUpperLeft"
   spirv.ExecutionMode @main "DepthReplacing"
+}
+)mlir";
+
+/// (Roadmap H4b) A tessellation-control entry point declaring 3 output
+/// control points (`OutputVertices`), writing its own control-point
+/// `Position`, then splitting at a real SPIR-V-imported
+/// `spirv.ControlBarrier` (roadmap H4a's `splitTessellationControlEntry`,
+/// see its own comment and this file's `CanonicalizeStageTest` sibling for
+/// why the mangled-call-lowered form matters) into a patch-constant phase
+/// writing one `patch`-decorated output.
+constexpr llvm::StringLiteral TessControlSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @patch_out {location = 0 : i32, patch} : !spirv.ptr<f32, Output>
+  spirv.func @main() -> () "None" {
+    %p = spirv.Constant dense<[0.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.ControlBarrier <Workgroup>, <Workgroup>, <AcquireRelease|WorkgroupMemory>
+    %f = spirv.Constant 1.000000e+00 : f32
+    %outp = spirv.mlir.addressof @patch_out : !spirv.ptr<f32, Output>
+    spirv.Store "Output" %outp, %f : f32
+    spirv.Return
+  }
+  spirv.EntryPoint "TessellationControl" @main, @out_pos, @patch_out
+  spirv.ExecutionMode @main "OutputVertices", 3
+}
+)mlir";
+
+/// (Roadmap H4b) A tessellation-evaluation entry point declaring a
+/// triangle domain, reading the control stage's `patch`-decorated output
+/// back, and writing its own `Position`.
+constexpr llvm::StringLiteral TessEvalSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
+  spirv.GlobalVariable @patch_in {location = 0 : i32, patch} : !spirv.ptr<f32, Input>
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %inp = spirv.mlir.addressof @patch_in : !spirv.ptr<f32, Input>
+    %f = spirv.Load "Input" %inp : f32
+    %v = spirv.CompositeConstruct %f, %f, %f, %f : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %v : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "TessellationEvaluation" @main, @patch_in, @out_pos
+  spirv.ExecutionMode @main "Triangles"
+  spirv.ExecutionMode @main "SpacingFractionalOdd"
+  spirv.ExecutionMode @main "VertexOrderCcw"
 }
 )mlir";
 
@@ -254,6 +304,40 @@ protected:
     return vkCreateGraphicsPipelines(Device, Cache, 1, &Info, nullptr, &Out);
   }
 
+  /// (Roadmap H4b) `makeCreateInfo`'s tessellation-enabled sibling: a
+  /// four-stage `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` pipeline with
+  /// `patchControlPoints` set to 3, over `TessStages` rather than `Stages`
+  /// (so a caller wanting both a tessellating and a non-tessellating
+  /// pipeline alive at once, e.g. to compare cache keys, can).
+  VkGraphicsPipelineCreateInfo makeTessellationCreateInfo(
+      VkShaderModule Vertex, VkShaderModule TessControl,
+      VkShaderModule TessEval, VkShaderModule Fragment) {
+    VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+    TessStages[0] = Stages[0];
+    TessStages[1] = {};
+    TessStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    TessStages[1].stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+    TessStages[1].module = TessControl;
+    TessStages[1].pName = "main";
+    TessStages[2] = {};
+    TessStages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    TessStages[2].stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    TessStages[2].module = TessEval;
+    TessStages[2].pName = "main";
+    TessStages[3] = Stages[1];
+
+    InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    Tessellation = {};
+    Tessellation.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+    Tessellation.patchControlPoints = 3;
+
+    Info.stageCount = 4;
+    Info.pStages = TessStages;
+    Info.pTessellationState = &Tessellation;
+    return Info;
+  }
+
   VkInstance Instance = VK_NULL_HANDLE;
   VkPhysicalDevice Physical = VK_NULL_HANDLE;
   VkDevice Device = VK_NULL_HANDLE;
@@ -262,6 +346,8 @@ protected:
   VkRenderPass PassWithDepth = VK_NULL_HANDLE;
 
   VkPipelineShaderStageCreateInfo Stages[2]{};
+  VkPipelineShaderStageCreateInfo TessStages[4]{};
+  VkPipelineTessellationStateCreateInfo Tessellation{};
   VkPipelineVertexInputStateCreateInfo VertexInput{};
   VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
   VkViewport Viewport{};
@@ -1479,6 +1565,143 @@ TEST_F(GraphicsPipelineTest, RejectsInvalidPipelineRobustnessBehavior) {
   EXPECT_EQ(Handle, VK_NULL_HANDLE);
 
   vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H4b: a real, four-stage `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST`
+/// pipeline -- vertex, tessellation-control (splitting into control-point
+/// and patch-constant phases at a real SPIR-V-imported
+/// `spirv.ControlBarrier`), tessellation-evaluation, and fragment -- must
+/// be accepted, and the resulting executor pipeline must carry all three
+/// tessellation-stage `CompiledStage`s and the merged `TessellationState`
+/// (`patchControlPoints` from the pipeline, `OutputControlPointCount`/
+/// `Domain`/`Partitioning`/`OutputPrimitive` from the two stages' own
+/// reflection).
+TEST_F(GraphicsPipelineTest, AcceptsTessellationStages) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  ASSERT_TRUE(Executor.hasTessellationStages());
+  EXPECT_EQ(Executor.getTopology(), feme::graphics::PrimitiveTopology::PatchList);
+  EXPECT_EQ(Executor.getTessellationState().InputControlPointCount, 3u);
+  EXPECT_EQ(Executor.getTessellationState().OutputControlPointCount, 3u);
+  EXPECT_EQ(Executor.getTessellationState().Domain,
+            feme::graphics::TessellatorDomain::Triangle);
+  EXPECT_EQ(Executor.getTessellationState().Partitioning,
+            feme::graphics::TessPartitioning::FractionalOdd);
+  EXPECT_EQ(Executor.getTessellationState().OutputPrimitive,
+            feme::graphics::TessOutputPrimitive::TriangleCcw);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H4b: a tessellation-control stage without its
+/// tessellation-evaluation sibling (and vice versa) is rejected -- neither
+/// has a tessellator state to run with alone.
+TEST_F(GraphicsPipelineTest, RejectsUnpairedTessellationStage) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+  Info.stageCount = 3;
+  VkPipelineShaderStageCreateInfo OnlyControl[3] = {
+      TessStages[0], TessStages[1], TessStages[3]};
+  Info.pStages = OnlyControl;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  VkPipelineShaderStageCreateInfo OnlyEval[3] = {
+      TessStages[0], TessStages[2], TessStages[3]};
+  Info.pStages = OnlyEval;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H4b: `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` requires a
+/// tessellation-control/evaluation stage pair, and that pair requires
+/// `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` -- each direction of the mismatch is
+/// rejected.
+TEST_F(GraphicsPipelineTest, RejectsTopologyTessellationStageMismatch) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  // A tessellating pipeline naming a non-patch-list topology.
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  // A patch-list topology with no tessellation stages at all.
+  VkGraphicsPipelineCreateInfo NonTessInfo = makeCreateInfo(Vertex, Fragment);
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+  EXPECT_EQ(create(NonTessInfo, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H4b: a tessellating pipeline needs
+/// `VkPipelineTessellationStateCreateInfo`, and its `patchControlPoints`
+/// must be in `[1, maxTessellationPatchSize]` (32, `feme::graphics::
+/// MaxPatchControlPoints`) -- zero, and one past the limit, are both
+/// rejected; missing the struct entirely is too.
+TEST_F(GraphicsPipelineTest, RejectsInvalidPatchControlPoints) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+  Info.pTessellationState = nullptr;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  Info = makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+  Tessellation.patchControlPoints = 0;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  Info = makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+  Tessellation.patchControlPoints = feme::graphics::MaxPatchControlPoints + 1;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
