@@ -7910,3 +7910,75 @@ plus `SignatureTest.cpp`'s existing `SerializeParseRoundTrips` extended
 
 **Reproducing.** Same invocation as H5b's own edition above (`dEQP-VK.
 geometry.*` and the `draw_sample.txt` caselist); no new command needed.
+
+## Roadmap H5g: measured impact (`StageIOGlobalVariablePattern` array-of-block member decorations)
+
+**Still 0/0/200 on `dEQP-VK.geometry.*` -- correctly so**, same reason as
+H5b/H5f above: `CanonicalizeStagePass::run` still does not accept
+`ShaderStage::Geometry` (H5c's own job), so a geometry entry never reaches
+`CanonicalizeStage.cpp` at all regardless of what metadata now reaches it:
+
+```
+Test run totals:
+  Passed:        0/200 (0.0%)
+  Failed:        0/200 (0.0%)
+  Not supported: 200/200 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no change:
+this row advertises nothing new, same as H5a/H5b/H5f.
+
+**What this row actually adds.** `StageIOGlobalVariablePattern::
+matchAndRewrite` (`SPIRVToLLVMPatterns.cpp`) only ever looked for a bare
+`mlir::spirv::StructType` pointee to attach `feme.spirv.MemberDecorations`
+metadata to -- correct for `gl_PerVertex`-shaped outputs, but not for a
+geometry entry's own `gl_in[]`-shaped *input*, whose pointee is an
+`mlir::spirv::ArrayType` **of** that same per-vertex block struct (SPIR-V
+still decorates the inner struct's own members, not the array wrapping
+it). Before this row, such a global reached `CanonicalizeStage.cpp` with
+no member-decoration metadata at all -- H5b's own `addElements` peeling
+logic (the `if (auto *ArrTy = dyn_cast<ArrayType>(BlockTy)) BlockTy =
+ArrTy->getElementType();` step) had nothing to peel in front of, silently
+falling through to the single-element, whole-global path instead of the
+per-member one a real `gl_in[]` needs. The fix peels the pointee's own
+outer `ArrayType` (if present) before checking for a `StructType`,
+attaching the inner struct's per-member decorations unconditionally of
+which of the two shapes wraps it -- matching `addElements`'s own existing
+"peel one array dimension, then look for `MemberDecorations`" precedent
+exactly, just on the producing side instead of the consuming one.
+
+**Regression sample.** Two new tests cover this directly:
+`SPIRVToLLVMTest.PerVertexArrayInterfaceBlockPreservesMemberDecorations`
+(gtest, asserting the metadata attribute is present and the ordinary
+whole-variable decoration attribute is not, mirroring the existing bare
+-block `BuiltinInterfaceBlockPreservesMemberDecorations` case) and a new
+`CHECK` block in `spirv-to-llvm-stage-io.mlir` (lit, asserting the exact
+`feme.spirv.member.decorations` attribute shape for an `Input`
+array-of-struct global). The same `dEQP-VK.draw.*` 1957-case sample this
+report has used since H4 is byte-identical to H5f's own baseline:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        139/1957 (7.1%)
+  Not supported: 1806/1957 (92.3%)
+```
+
+**0 regressions, 0 new passes on `draw`** -- expected, since no
+`dEQP-VK.draw.*` shader declares an array-of-block stage-IO global; this
+row's effect is only observable once H5c lets a real geometry entry reach
+`CanonicalizeStage.cpp` at all.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1850/1909** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H5f's own **1849/1908** baseline by exactly the 1 new
+test this row adds under `check-feme` (the lit `CHECK` block is a new
+`RUN` split within an existing test file, not a new file, so it does not
+add a second discovered test the way the gtest case does -- FileCheck
+counts one `RUN` line per test regardless of how many `CHECK` blocks it
+verifies, and this row appended to an existing `RUN` line's own file
+rather than adding a new one).
+
+**Reproducing.** Same invocation as H5b/H5f's own editions above
+(`dEQP-VK.geometry.*` and the `draw_sample.txt` caselist); no new command
+needed.

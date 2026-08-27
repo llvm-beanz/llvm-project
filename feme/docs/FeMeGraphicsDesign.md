@@ -1435,10 +1435,15 @@ that same `Vertex` operand too (not the older `Row`-based path), and
 per-vertex-arrayed `Input` global's own signature element, that its
 `RowCount` is that array's own extent rather than a real matrix's row
 count -- the two are otherwise indistinguishable in the signature.
-`SPIRVToLLVMPatterns.cpp` does not yet attach the member-decoration
-metadata a real `gl_in[]` builtin block needs for any of this to see real
-input (roadmap H5g); `CanonicalizeStagePass::run` itself still does not
-accept `ShaderStage::Geometry` (roadmap H5c).
+Roadmap H5g has since closed the last gap between all of the above and a
+real `gl_in[]` builtin block: `StageIOGlobalVariablePattern` in
+`SPIRVToLLVMPatterns.cpp` now recognizes an `Input` global whose pointee is
+an `mlir::spirv::ArrayType` of a `StructType` (not just a bare `StructType`,
+the only shape it recognized before), attaching the inner struct's own
+per-member decorations either way -- exactly the shape `gl_in[]` actually
+takes. `CanonicalizeStagePass::run` itself still does not accept
+`ShaderStage::Geometry` (roadmap H5c), the one thing left before a real
+geometry entry point exercises any of this end to end.
 
 ### Amplification and mesh wrappers
 
