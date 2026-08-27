@@ -1001,6 +1001,44 @@ bool usesSPIRVStageIO(Function &F) {
   return false;
 }
 
+/// The synthetic `Location` `splitTessellationControlEntry` (roadmap H4c)
+/// should hand out to the first captured pre-barrier value it threads
+/// through a new patch-shared global -- one past the highest `Location`
+/// already decorating any stage-IO global (address space 7/8) anywhere in
+/// \p M -- so a fabricated `Location` can never collide with a real
+/// varying's own, in either the control-point or the patch-constant
+/// phase's own independently-numbered signature.
+unsigned computeNextSyntheticLocation(Module &M) {
+  unsigned NextLocation = 0;
+  auto Bump = [&](const ParsedSPIRVDecorations &D) {
+    if (D.Location)
+      NextLocation = std::max(NextLocation, *D.Location + 1);
+  };
+  for (const GlobalVariable &GV : M.globals()) {
+    unsigned AddrSpace = 0;
+    if (!isSPIRVStageIOGlobal(&GV, AddrSpace))
+      continue;
+    Bump(parseSPIRVDecorations(GV.getMetadata("spirv.Decorations")));
+    if (const MDNode *MemberMD = GV.getMetadata("feme.spirv.MemberDecorations"))
+      for (const auto &KV : parseSPIRVMemberDecorations(MemberMD))
+        Bump(KV.second);
+  }
+  return NextLocation;
+}
+
+/// A `!spirv.Decorations` metadata node carrying a single `Location`
+/// decoration, the same `{(code, arg)...}` shape `parseSPIRVDecorations`
+/// reads (see `SPIRVDecorationCode`) -- built by hand here rather than by
+/// the SPIR-V-to-LLVM conversion this pass otherwise only ever consumes,
+/// since \p Location names a global this pass itself fabricates.
+MDNode *createLocationDecoration(LLVMContext &Ctx, uint32_t Location) {
+  Type *I32 = Type::getInt32Ty(Ctx);
+  Metadata *Entry[] = {
+      ConstantAsMetadata::get(ConstantInt::get(I32, SPIRVDecorationLocation)),
+      ConstantAsMetadata::get(ConstantInt::get(I32, Location))};
+  return MDNode::get(Ctx, {MDNode::get(Ctx, Entry)});
+}
+
 bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
   PatchConstantPhase = nullptr;
   SmallVector<CallInst *, 2> Barriers;
@@ -1049,17 +1087,27 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
         return false;
       }
 
+  // (Roadmap H4c) Every SSA value the patch-constant region reads back
+  // that was defined before the barrier -- the common shape a GLSL-
+  // compiled tessellation-control shader's own per-patch tessellation
+  // factor takes, computed from data derived from the control-point body
+  // (e.g. its own output position) and read back after `OpControlBarrier`
+  // once `PromoteMemToReg` (or the SPIR-V producer's own optimizer) has
+  // turned what would otherwise be a reload of that invocation's own
+  // stored output into a bare cross-barrier SSA use. Collected in
+  // first-use order, deduplicated by value, so each is threaded through
+  // exactly one new patch-shared global below rather than erroring as
+  // before.
+  SmallVector<Instruction *, 4> Captured;
+  SmallPtrSet<Instruction *, 4> CapturedSeen;
   for (BasicBlock *BB : Region)
     for (Instruction &I : *BB)
       for (Value *Op : I.operands()) {
         auto *OpI = dyn_cast<Instruction>(Op);
         if (!OpI || Region.contains(OpI->getParent()))
           continue;
-        F.getContext().emitError(
-            &I, "feme-canonicalize-stage: tessellation-control SPIR-V entry "
-                "point's patch-constant region cannot yet capture SSA values "
-                "defined before the barrier");
-        return false;
+        if (CapturedSeen.insert(OpI).second)
+          Captured.push_back(OpI);
       }
 
   PatchConstantPhase =
@@ -1078,6 +1126,64 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
     VMap[&OldArg] = &NewArg;
   }
 
+  // (Roadmap H4c) Thread each captured value through one new address-space-8
+  // (`Output`) global, given a synthetic `Location` decoration: a store
+  // right after the value's own definition, still in the control-point
+  // phase that has it as an SSA value, paired with a load at the very
+  // start of the patch-constant phase. This is exactly the shape a real
+  // per-vertex output (e.g. `gl_out[i].gl_Position`) already takes when
+  // its own patch-constant-phase read-back falls through
+  // `classifySPIRVElement`'s default case below (address space 8, no
+  // `Patch`/tess-factor `BuiltIn` decoration) -- so `canonicalizeSPIRVStage`
+  // (run separately on each phase once this split returns) reflects both
+  // ends as an ordinary linked `Output` (control-point phase) /
+  // `SignatureDirection::Input`, non-`FromInputPatch` (patch-constant
+  // phase) `SignatureElement` pair, and
+  // `feme::graphics::linkStageElements`'s existing hull-output ->
+  // patch-constant-`OutputPatch` linkage (`PatchPipeline.cpp`) carries the
+  // value across for free, with no new linkage mechanism needed. This is
+  // always sound regardless of whether the captured computation itself
+  // reads another invocation's own output: SPIR-V only gives that read
+  // defined behavior *after* a barrier establishes visibility, so any
+  // value defined *before* the one barrier this pass splits at can only
+  // ever depend on this invocation's own state.
+  if (!Captured.empty()) {
+    BasicBlock *CaptureEntry =
+        BasicBlock::Create(F.getContext(), "patchconst.captures", PatchConstantPhase);
+    IRBuilder<> CaptureBuilder(CaptureEntry);
+    unsigned NextLocation = computeNextSyntheticLocation(*F.getParent());
+    for (Instruction *V : Captured) {
+      Type *Ty = V->getType();
+      unsigned Location = NextLocation++;
+      MDNode *Decoration = createLocationDecoration(F.getContext(), Location);
+      auto *GV = new GlobalVariable(
+          *F.getParent(), Ty, /*isConstant=*/false,
+          GlobalValue::PrivateLinkage, UndefValue::get(Ty),
+          F.getName() + ".patchconst.capture." + Twine(Location),
+          /*InsertBefore=*/nullptr, GlobalValue::NotThreadLocal,
+          /*AddressSpace=*/8);
+      GV->setMetadata("spirv.Decorations", Decoration);
+
+      std::optional<BasicBlock::iterator> InsertPt =
+          V->getInsertionPointAfterDef();
+      assert(InsertPt && "captured value has no valid insertion point");
+      // `getInsertionPointAfterDef` may name a different block than
+      // `V`'s own (a `PHINode`/`InvokeInst`'s result is only available in
+      // its parent/normal-destination block respectively).
+      BasicBlock *InsertBB;
+      if (auto *PN = dyn_cast<PHINode>(V))
+        InsertBB = PN->getParent();
+      else if (auto *II = dyn_cast<InvokeInst>(V))
+        InsertBB = II->getNormalDest();
+      else
+        InsertBB = V->getParent();
+      IRBuilder<> StoreBuilder(InsertBB, *InsertPt);
+      StoreBuilder.CreateStore(V, GV);
+
+      VMap[V] = CaptureBuilder.CreateLoad(Ty, GV, V->getName() + ".captured");
+    }
+  }
+
   SmallVector<BasicBlock *, 8> OrderedRegion;
   for (BasicBlock &BB : F)
     if (Region.contains(&BB))
@@ -1089,6 +1195,15 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
     for (Instruction &I : *Cloned)
       RemapInstruction(&I, VMap, RF_NoModuleLevelChanges);
   }
+
+  // The captures block (if any) is the function's real entry; branch it
+  // into the cloned post-barrier region, which -- since `OrderedRegion`
+  // preserves `F`'s own block order and `PatchEntry` is always the first
+  // block in `Region` by construction -- is `PatchConstantPhase`'s first
+  // *cloned* block.
+  if (!Captured.empty())
+    UncondBrInst::Create(cast<BasicBlock>(VMap[PatchEntry]),
+                         &PatchConstantPhase->front());
 
   Barrier->eraseFromParent();
   Instruction *OldTerm = BarrierBlock->getTerminator();

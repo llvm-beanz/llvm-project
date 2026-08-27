@@ -851,6 +851,94 @@ TEST(CanonicalizeStageTest, SplitsHullEntryAtMangledSPIRVControlBarrierCall) {
             SignatureSystemValue::TessFactorEdge);
 }
 
+/// (Roadmap H4c) The common, real GLSL-compiled shape
+/// `SplitsHullEntryAtGroupSyncBarrier` above does not cover: a per-patch
+/// tessellation factor computed from an SSA value derived from the
+/// control-point body (here, `%scaled`) and read back *after*
+/// `OpControlBarrier`, rather than reloaded through a fresh stage-IO
+/// access. `splitTessellationControlEntry` must thread `%scaled` through a
+/// new synthetic patch-shared global instead of diagnosing it as
+/// unsplittable: the control-point phase gains an extra `Output`-direction
+/// element (the store this pass inserts right after `%scaled`'s own
+/// definition) and the patch-constant phase gains a matching `Input`-
+/// direction, non-`FromInputPatch` element (the load this pass inserts at
+/// its own new entry block) -- exactly the shape a genuine per-vertex
+/// output's own read-back already takes, so no new stage-linking mechanism
+/// is needed for `feme::graphics::linkStageElements` to carry the value
+/// across.
+TEST(CanonicalizeStageTest, SplitsHullEntryThreadingCapturedSSAValue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+    @gl_in_pos = external addrspace(7) constant <4 x float>, !spirv.Decorations !1
+    @gl_TessLevelOuter = external addrspace(8) global [4 x float], !spirv.Decorations !3
+    define void @main() #0 {
+      %v = load <4 x float>, ptr addrspace(7) @gl_in_pos
+      %scaled = fmul <4 x float> %v, %v
+      store <4 x float> %scaled, ptr addrspace(8) @gl_out_pos
+      call void @llvm.spv.group.memory.barrier.with.group.sync()
+      %factor = extractelement <4 x float> %scaled, i32 0
+      store float %factor, ptr addrspace(8) @gl_TessLevelOuter
+      ret void
+    }
+    declare void @llvm.spv.group.memory.barrier.with.group.sync()
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!2}
+    !1 = !{!2}
+    !2 = !{i32 11, i32 0}
+    !3 = !{!4}
+    !4 = !{i32 11, i32 11}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // The control-point phase keeps its own two real elements, plus one new
+  // synthetic `Output` element -- the captured value's own store.
+  std::optional<EntrySignature> CPSig = dxil::getEntrySignature(*ControlPoint);
+  ASSERT_TRUE(CPSig.has_value());
+  ASSERT_EQ(CPSig->Elements.size(), 3u);
+  unsigned CPOutputs = 0;
+  const SignatureElement *CapturedOutput = nullptr;
+  for (const SignatureElement &Elt : CPSig->Elements)
+    if (Elt.Direction == SignatureDirection::Output) {
+      ++CPOutputs;
+      if (Elt.ComponentCount == 4)
+        CapturedOutput = &Elt;
+    }
+  EXPECT_EQ(CPOutputs, 2u);
+  ASSERT_TRUE(CapturedOutput);
+  EXPECT_EQ(CapturedOutput->ComponentType, SignatureComponentType::Float);
+  EXPECT_EQ(CapturedOutput->RowCount, 1u);
+
+  // The patch-constant phase gains a matching `Input`, non-`FromInputPatch`
+  // element (the captured value's own read-back) alongside its real
+  // `TessLevelOuter` `PatchOutput` write; the captured value's use no
+  // longer references anything defined in the control-point phase.
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 2u);
+  const SignatureElement *CapturedInput = nullptr;
+  for (const SignatureElement &Elt : PCSig->Elements)
+    if (Elt.Direction == SignatureDirection::Input)
+      CapturedInput = &Elt;
+  ASSERT_TRUE(CapturedInput);
+  EXPECT_FALSE(CapturedInput->FromInputPatch);
+  EXPECT_EQ(CapturedInput->ComponentCount, 4u);
+  EXPECT_EQ(CapturedInput->ComponentType, SignatureComponentType::Float);
+
+  for (Instruction &I : instructions(PatchConstant))
+    for (Value *Op : I.operands())
+      if (auto *OpI = dyn_cast<Instruction>(Op))
+        EXPECT_EQ(OpI->getFunction(), PatchConstant)
+            << "patch-constant phase must not reference any value still "
+               "defined in the control-point phase";
+}
+
 /// (Roadmap H4a) `BuiltIn InvocationId` (SPIR-V code 8, `gl_InvocationID`)
 /// maps to `SignatureSystemValue::InvocationID`, and `BuiltIn
 /// PatchVertices` (code 14, `gl_PatchVerticesIn`) to `SignatureSystemValue
