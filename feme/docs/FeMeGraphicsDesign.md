@@ -743,6 +743,62 @@ R19's SPIR-V conversion already has); and mesh output-count/ray
 payload-size uniformity validation, which needs those later operation
 families to exist first.
 
+Roadmap H4a extended `CanonicalizeStagePass` from the vertex/fragment-only
+`run` filter above to also reflect `TessellationControl`/
+`TessellationEvaluation` entry points, closing R19's own tessellation gap
+the same way this milestone closed it for vertex/fragment. A domain
+(tessellation-evaluation) entry point needs no new mechanism -- it is
+already a single FeMe stage, `DomainWrapperPass`'s -- but a SPIR-V
+tessellation-*control* entry point is not: it is one SPIR-V function that
+writes both its own per-vertex outputs and the patch-constant
+`TessLevelOuter`/`TessLevelInner` factors, typically separated by one
+`OpControlBarrier` (imported as
+`llvm.spv.group.memory.barrier.with.group.sync`), whereas FeMe's D3D-shaped
+hull ABI needs *two* separately compiled entries, discriminated by
+`feme::cpu::isPatchConstantPhase`'s `SignatureDirection::PatchOutput` test
+(`HullWrapperPass` for the control-point phase, `PatchConstantWrapperPass`
+for the patch-constant phase). `splitTessellationControlEntry`
+(CanonicalizeStage.cpp) performs that split at reflection time, before
+either CPU wrapper ever sees the function: it requires exactly one
+group-sync barrier call in the entry, splits the CFG at that call via
+`splitBasicBlock`/`CloneBasicBlock`, and clones the post-barrier region into
+a new `<name>.patchconstant` function, diagnosing (rather than
+mis-splitting) zero-or-multiple barriers, no post-barrier region, multiple
+entry edges into the post-barrier region, or any SSA value crossing the
+split boundary (not yet supported -- a control point's own outputs do not
+generally need to survive into the patch-constant phase, since that phase
+reads the *completed* `OutputPatch` from stage storage, not SSA values).
+This is a different mechanism from the "generalize `EntryWrapperPass`'s
+barrier-region-splitting machinery to the control-point batch ABI" item
+`HullWrapperPass`'s own file comment and the G5 section above still list as
+deferred: that item is about a control-point phase (as *received* by
+`HullWrapperPass`, already a single FeMe-shaped entry) that itself contains
+a barrier because one control point must read a sibling's output;
+`splitTessellationControlEntry` instead removes SPIR-V's barrier before
+`HullWrapperPass` ever runs, by construction (a real tessellation-control
+shader's barrier always separates the per-vertex phase from the
+patch-constant phase, never occurs *within* the per-vertex phase alone), so
+it does not close that deferred item -- `HullWrapperPass` still diagnoses a
+barrier reaching it as unsupported, exactly as before. `CanonicalizeStage.cpp`
+also now maps SPIR-V's tessellation execution modes (`Triangles`/`Quads`/
+`Isolines`, `SpacingEqual`/`SpacingFractionalEven`/`SpacingFractionalOdd`,
+`VertexOrderCw`/`VertexOrderCcw`, `PointMode`, `OutputVertices`, captured by
+`ConvertSPIRVToLLVMPass`'s `collectEntryPoints`/`applyEntryPointAttributes`
+into `feme.tessellation.*` passthrough attributes) onto
+`feme::graphics::TessellationState` fields via
+`feme::graphics::getTessellationState` (Graphics/Tessellation.h/.cpp) --
+returning only the subset of fields one entry point's attributes can
+supply, since the evaluation-only fields (domain/spacing/winding/point
+mode) and the control-only field (output control point count) never
+co-occur on the same SPIR-V entry point; assembling a complete
+`TessellationState` from both compiled stages plus
+`VkPipelineTessellationStateCreateInfo::patchControlPoints` is H4b's job --
+and `BuiltIn` `TessLevelOuter`/`TessLevelInner`/`TessCoord`/`PatchVertices`/
+`InvocationId` onto `SignatureSystemValue::TessFactorEdge`/`TessFactorInside`/
+`DomainLocation`/`PatchVertices`/`OutputControlPointID` (the latter two pairs
+literal enumerator aliases, matching SPIR-V's spelling to the existing
+D3D-derived system values one-for-one rather than adding parallel ones).
+
 ### Builtins and system values
 
 System values use the same signature model when they are stage inputs or

@@ -6437,3 +6437,87 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 `tcu::NotSupportedError: Device fault tests execution not supported in
 Linux-like OSs`; that is a CTS teardown quirk unrelated to this driver, and
 the totals printed before it are the real result.
+
+## Roadmap H4a: measured impact (SPIR-V tessellation entry-point reflection)
+
+**Still 0/0/1114, and that is the correct, expected result.** H4a makes
+`feme::graphics::CanonicalizeStagePass` reflect `TessellationControl`/
+`TessellationEvaluation` SPIR-V entry points at all (splitting a single
+tessellation-control entry into FeMe's two D3D-shaped hull phases at its one
+required group-sync barrier, capturing SPIR-V's tessellation execution
+modes into `feme::graphics::TessellationState`, and mapping the
+tessellation `BuiltIn`s onto `SignatureSystemValue`s), but nothing in
+`vkCreateGraphicsPipelines` calls any of that yet: `GraphicsPipeline.cpp`
+still accepts only `VK_SHADER_STAGE_VERTEX_BIT`/`VK_SHADER_STAGE_FRAGMENT_BIT`
+and `PhysicalDeviceInfo.cpp` still reports `tessellationShader = VK_FALSE`
+(both H4b). `dEQP-VK.tessellation.*` therefore still gates on
+`VkPhysicalDeviceFeatures::tessellationShader` before it ever reaches a
+pipeline, exactly as under H4:
+
+```
+Test run totals:
+  Passed:        0/1114 (0.0%)
+  Failed:        0/1114 (0.0%)
+  Not supported: 1114/1114 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change for this row, for the same reason H4's own report entry gives:
+flipping `tessellationShader` ahead of H4b would convert these 1114 honest
+`NotSupported`s into 1114 `Fail`s.
+
+**Regression sample.** None of this row's changes touch any code on the
+vertex/fragment-only path that every other `dEQP-VK.draw.*` case still
+takes (`CanonicalizeStagePass::run`'s Hull/Domain branch is new code, not a
+rewrite of the Vertex/Fragment one; `StageArgsLayout.h`'s `getPatchArgsType`
+fix and the CPU hull/domain/patch-constant wrapper additions are likewise
+new/patch-stage-only code paths that a non-tessellated pipeline never
+reaches), but the same `dEQP-VK.draw.*` sample this report has used since H4
+was re-run anyway, as a cheap confidence check on the shared `Executor.cpp`
+plumbing:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        133/1957 (6.8%)
+  Not supported: 1812/1957 (92.6%)
+```
+
+Byte-identical to H4's own recorded totals for the same 1957-case sample
+(every 15th case of `dEQP-VK.draw.*`'s 29419 cases with the
+`*viewport_height*` families removed). **0 regressions, 0 new passes.**
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1815/1874** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from H4's own **1800/1859** baseline by exactly the 15 new tests this row
+adds -- `CanonicalizeStageTest.cpp`'s 4
+(`HullStageWithNoBarrierIsNotSplit`, `SplitsHullEntryAtGroupSyncBarrier`,
+`HullStageMapsInvocationIdAndPatchVertices`,
+`DomainStageMapsTessCoordAndPatchInput`), `TessellationTest.cpp`'s 6 (new
+file, `getTessellationState` round-trip coverage), one new
+`spirv-to-llvm-tessellation-execution-modes.mlir` lit test (4
+`RUN`/`CHECK` blocks in one `lit` test), and four new CPU wrapper tests
+covering the genuinely new lowering paths this row adds --
+`HullWrapperTest.LowersPatchVerticesInput`,
+`DomainWrapperTest.LowersPatchVerticesInput`,
+`PatchConstantWrapperTest.LowersOutputControlPointIDAsZero`, and
+`PatchConstantWrapperTest.LowersInputPatchVerticesCount`.
+
+**Reproducing.** Same invocation as the rest of this report:
+
+```
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.tessellation.*" --deqp-log-filename=tess.qpa
+```
+
+and, for the draw sample, a case list built the same way H4's report built
+it (`grep -v viewport_height draw.txt | awk 'NR%15==1'` against
+`external/vulkancts/mustpass/main/vk-default/draw.txt`), then
+`--deqp-caselist-file=draw_sample.txt`. `deqp-vk` still exits non-zero after
+printing `DONE!` and the totals (the same `tcu::NotSupportedError: Device
+fault tests execution not supported in Linux-like OSs` teardown quirk this
+report already documents); the totals printed before it are the real
+result.
