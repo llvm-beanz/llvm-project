@@ -236,6 +236,8 @@ EntrySignature makeRichSignature() {
   Varying.RowCount = 3;
   Varying.Interpolation = SignatureInterpolationMode::NoPerspectiveSample;
   Varying.Frequency = SignatureFrequency::PerSample;
+  // (Roadmap H5f) Exercises `RowCountIsVertexArray`'s round trip.
+  Varying.RowCountIsVertexArray = true;
   Sig.Elements.push_back(Varying);
 
   SignatureElement Patch = validInputElement(2);
@@ -290,6 +292,7 @@ TEST(SignatureTest, SerializeParseRoundTrips) {
     EXPECT_EQ(Got.Frequency, Want.Frequency);
     EXPECT_EQ(Got.Stream, Want.Stream);
     EXPECT_EQ(Got.FromInputPatch, Want.FromInputPatch);
+    EXPECT_EQ(Got.RowCountIsVertexArray, Want.RowCountIsVertexArray);
   }
 }
 

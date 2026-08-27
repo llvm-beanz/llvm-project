@@ -202,6 +202,21 @@ struct SignatureElement {
   /// element spans.
   uint32_t RowCount = 1;
 
+  /// (Roadmap H5f) Whether `RowCount` above actually counts a per-vertex
+  /// array's own extent (a geometry entry's `gl_in[]`-shaped `Input`, e.g.
+  /// 3 for a triangle) rather than a real matrix's row count. The two are
+  /// structurally identical in SPIR-V/LLVM IR -- both an `ArrayType`
+  /// wrapping the per-row/per-vertex value -- and `RowCount` alone cannot
+  /// tell them apart; a consumer that must (e.g. canonicalizing a
+  /// geometry entry's own per-vertex addressing, as opposed to widening a
+  /// real matrix one row at a time) needs this flag instead. False for
+  /// every element that is not this shape, including a builtin interface
+  /// block's own per-member elements (e.g. `gl_in[].gl_Position`), whose
+  /// `RowCount` already reflects only that member's own shape -- the
+  /// outer per-vertex array dimension is peeled off before those are
+  /// built and never folds into any member's `RowCount` to begin with.
+  bool RowCountIsVertexArray = false;
+
   SignatureInterpolationMode Interpolation =
       SignatureInterpolationMode::Perspective;
   SignatureFrequency Frequency = SignatureFrequency::PerVertex;
@@ -251,8 +266,9 @@ bool verifySignature(const EntrySignature &Sig,
 /// value rather than guessing at a different field order.
 ///
 /// Version 2 appends `SignatureElement::FromInputPatch`. Version 3 appends
-/// `SignatureElement::Index`.
-constexpr uint32_t SignatureAbiVersion = 3;
+/// `SignatureElement::Index`. Version 4 appends
+/// `SignatureElement::RowCountIsVertexArray`.
+constexpr uint32_t SignatureAbiVersion = 4;
 
 /// Serializes \p Sig to the byte layout `parseSignature` reads back: a
 /// little-endian `SignatureAbiVersion`, the element count, then each
