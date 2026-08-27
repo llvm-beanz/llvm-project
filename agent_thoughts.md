@@ -37203,3 +37203,201 @@ recorded totals (8/227/879 and 12/139/1806 respectively).
   own tessellation section already documented the domain-stage-owns-
   SV_Position rule correctly ahead of this fix; the gap was purely that
   the validation code hadn't caught up to it yet.
+
+# Milestone H4i: `VkTessellationDomainOrigin` and the winding-orientation mismatch
+
+## Starting point
+
+H4h left all 24 `dEQP-VK.tessellation.winding.*glsl*` cases reaching real
+rendering and failing at a "systematic front-face/winding-orientation
+mismatch" -- the CTS expects a full-viewport quad/triangle of one color
+and instead gets the complementary culled/uncultured result, on every
+`_ccw`/`_cw` pair. H4i's own roadmap framing pointed at the domain
+stage's own emitted vertex order or the executor's rasterizer front-face
+classification, `PatchPipeline.cpp`/`Executor.cpp`.
+
+## First hypothesis (wrong, but caught before landing)
+
+`Tessellator.cpp`'s `appendTriangle` helper swaps its two non-provoking
+operands based on a `Cw` bool derived from `TessOutputPrimitive::TriangleCw`.
+`TessellatorTest.cpp`'s own comments admit the resulting convention "is
+not the standard convention" for signed area. That looked like exactly
+the kind of inverted-convention bug this milestone was hunting for, so I
+worked through the lattice-point generation (`appendTriangleLattice`,
+`tessellateQuad`) by hand with signed-area/cross-product math and
+concluded the Cw/Ccw operand-swap branches were backwards relative to
+true `VertexOrderCw`/`VertexOrderCcw` SPIR-V semantics.
+
+I edited `appendTriangle` to swap the branches, updated the doc comment,
+and swapped the matching `EXPECT_LT`/`EXPECT_GT` assertions in
+`TessellatorTest.cpp`'s two winding-consistency tests to match. `ninja
+check-feme` passed 1831/1890 (identical headline to before) -- which
+proves nothing on its own, since both the implementation and its test
+changed together in lockstep; a self-consistent pair of changes always
+"passes" regardless of which one is actually correct relative to the
+outside world (SPIR-V/Vulkan semantics), so this was not the signal to
+trust.
+
+**The check that actually mattered**: I ran a real `deqp-vk` reproduction
+of the 24-case `dEQP-VK.tessellation.winding.*glsl*` group with the
+"fixed" `Tessellator.cpp`. It still showed all 24 failing -- but a closer
+per-case comparison against the pre-fix numbers showed the *pattern of
+which subgroup was broken had flipped*: before my change,
+`default_domain`/`upper_left_domain` (16 of 24 cases) were already
+nearly correct (only a small ~15-pixel defect per image), while
+`lower_left_domain` (8 of 24) showed a genuine, complete front-face
+inversion. After my change, that flipped exactly: `lower_left_domain`
+became nearly-correct and `default_domain`/`upper_left_domain` became
+fully inverted.
+
+That is not a fix, it's a lateral move -- swapping which 8 or 16 cases
+are broken, net zero. To be completely sure this wasn't measurement
+noise, I used `git stash push -- feme/lib/Graphics/Tessellator.cpp` to
+pull just that one file's change back out, rebuilt only `feme_vulkan`
+(fast, not a full `ninja check-feme`), and reran the same `deqp-vk`
+group as a direct "before" baseline for comparison against the "after"
+run I'd already captured. The A/B was unambiguous: my change was wrong.
+I reverted both files via `git checkout` and moved on.
+
+**Lesson reinforced**: for a task whose own definition of "done" is a
+real CTS pass/fail outcome, a passing internal regression suite proves
+only "self-consistency", never "correctness relative to the external
+spec/oracle". The moment I had two plausible-looking fixes, the fast
+`git stash` + targeted-target-rebuild + real-`deqp-vk`-rerun loop was
+what actually discriminated between them -- much cheaper than a full
+`ninja check-feme` cycle, and the only thing that caught the mistake
+before it got committed.
+
+## Root cause, once actually isolated
+
+The subgroup-flip pattern is the fingerprint of a *conditional* bug, not
+a global convention bug: something distinguishes `lower_left_domain`
+from `default_domain`/`upper_left_domain` specifically (which, per the
+Vulkan spec, are supposed to be identical to each other, since
+`VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT` is the spec's own default when
+the struct is omitted -- and indeed `default_domain` and
+`upper_left_domain`'s numbers were byte-identical at every step of this
+investigation, which is itself a small self-consistency check worth
+keeping in mind).
+
+`grep -r "DomainOrigin" feme/lib feme/include` (case-sensitive and
+case-insensitive) returned nothing. FeMe had never once parsed
+`VkTessellationDomainOrigin` or the
+`VkPipelineTessellationDomainOriginStateCreateInfo` struct that carries
+it. Every pipeline, regardless of what it requested, was treated as
+upper-left.
+
+Reading `vktTessellationWindingTests.cpp`'s own `verifyResultImage`/
+`expectVisiblePrimitive` confirmed the CTS's own pass/fail formula is a
+direct function of `domainOrigin`:
+`((frontFaceWinding == winding) == (domainOrigin == UPPER_LEFT)) != yFlip`.
+A websearch on `VkTessellationDomainOrigin` semantics confirmed the
+lower-left domain origin mirrors the tessellator's own `(u,v)` parameter
+frame relative to upper-left -- and a mirror transform always reverses
+2D orientation, so every triangle the tessellator emits under a
+lower-left-origin pipeline has its winding reversed relative to what the
+same shader would produce under upper-left, *regardless of whether the
+tessellator's own Cw/Ccw convention is itself correct*. This is exactly
+why my first hypothesis (touching the tessellator's convention globally)
+could only ever trade which subgroup was broken: it changed the
+convention for *every* pipeline, when the actual bug was that *one*
+specific subgroup (lower-left) needed a compensating flip that the other
+two (which happen to already match the tessellator's assumed default)
+did not.
+
+## The real fix
+
+Implemented entirely in `feme/lib/Vulkan/GraphicsPipeline.cpp`, at the
+Vulkan-API layer, not in the API-neutral `Tessellator.cpp`/
+`PatchPipeline.h`:
+
+- `hasLowerLeftTessellationDomainOrigin`: walks
+  `VkPipelineTessellationStateCreateInfo::pNext` for a chained
+  `VkPipelineTessellationDomainOriginStateCreateInfo`, returning `true`
+  only when its `domainOrigin` field is explicitly
+  `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT`.
+- `flipTessellationWindingForDomainOrigin`: swaps
+  `TessOutputPrimitive::TriangleCw`/`TriangleCcw` (leaving `Point`/`Line`
+  untouched, since neither has a winding sense at all).
+- Wired into `compileGraphicsPipeline`, applied once, unconditionally, at
+  the very end (right before `return Result;`), whenever a tessellation-
+  control stage is present and the lower-left origin was requested. This
+  runs on both a cache miss (freshly compiled `Result.Tessellation`) and
+  a cache hit (whatever `Result.Tessellation` already held from
+  `translateFixedFunctionState`) equally, since `VkTessellationDomainOrigin`
+  is a pipeline-creation-time parameter, not something a compiled
+  shader's own reflection could ever carry.
+
+I deliberately did not add a `DomainOrigin` field to the API-neutral
+`feme::graphics::TessellationState` (`PatchPipeline.h`) -- the flip's
+effect (which of `TriangleCw`/`TriangleCcw` the tessellator is told to
+use) is already fully representable in the existing, API-neutral
+`OutputPrimitive` field, so there was nothing Vulkan-specific that needed
+to leak into the graphics-executor layer at all.
+
+## Verifying the fix
+
+Same before/after `deqp-vk` A/B technique that caught the wrong
+hypothesis, now used to confirm the right one: before the fix,
+`lower_left_domain`'s 8 cases showed the complete front-face inversion
+(a pipeline in that subgroup rendering exactly the opposite of the same
+shape of pipeline in `default_domain`/`upper_left_domain`); after the
+fix, all three domain-origin subgroups show byte-identical per-case
+pixel counts. `lower_left_domain`'s own systematic inversion is gone.
+
+All 24 cases still technically `Fail` -- but now uniformly, for a small,
+distinct defect: exactly 15/4096 stray pixels for the quad cases
+(clustered near one corner and along a rough diagonal), and a 1-pixel
+row-fill-count discrepancy for the triangle cases (`verifyResultImage`'s
+own top/bottom-row check, off by exactly one pixel from the tolerance
+window). Crucially, this residual defect only ever appears on the
+pipeline of each `_ccw`/`_cw` pair that the test expects to render
+*visibly* -- the pipeline expected to be fully culled is always exactly
+right (0 white/4096 red or its exact complement) in every single case,
+across every domain-origin subgroup. That is the signature of a
+rasterization-precision/tie-break bug (most likely the tessellator's own
+"crack-free" boundary-ring-to-inset-core seam, or the rasterizer's
+top-left fill-rule edge ownership at an exact shared-edge tie), not a
+front-face/winding bug: it doesn't correlate with front-face, winding, or
+domain origin at all. I scoped this out of H4i (whose own title and
+description are specifically about front-face/winding) and into a new
+roadmap row, H4j, rather than either falsely claiming H4i "fully" fixed
+the group or blowing H4i's own diff up to also chase an unrelated
+rasterizer bug.
+
+## Validation performed
+
+- Added `GraphicsPipelineTest.FlipsTessellationWindingForLowerLeftDomainOrigin`
+  and `.KeepsTessellationWindingForExplicitUpperLeftDomainOrigin`,
+  covering both the flip itself and that an *explicit*
+  `VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT` behaves identically to
+  omitting the struct (i.e., the check reads the field's value, not
+  merely the struct's presence) -- alongside the pre-existing
+  `AcceptsTessellationStages`'s own assertion that the unflipped default
+  is `TriangleCcw`.
+- `ninja check-feme` (assertions-enabled, ccache build): 1833/1892 passed
+  (59 pre-existing `Unsupported`, 0 `Failed`), up from 1831/1890 -- the
+  two new tests, no regressions.
+- Full `dEQP-VK.tessellation.*` (1114 cases) and the `dEQP-VK.draw.*`
+  1957-case regression sample: both byte-identical to H4h's own recorded
+  totals (8/227/879 and 12/139/1806) -- 0 regressions, as expected since
+  the fix is a no-op for every pipeline that doesn't chain the lower-left
+  domain-origin struct.
+- Checked `Vulkan14FeatureInventory.md`: no change needed (no feature bit
+  touched). Updated `VulkanExtensionInventory.md`: `VK_KHR_maintenance2`
+  moves from "Planned (in scope, not implemented)" to "Partially
+  implemented", since this struct is one (but not all) of that
+  extension's pieces, now genuinely honored rather than silently ignored.
+- Added a short "Status (roadmap H4i)" note to `FeMeVulkanDesign.md`
+  next to the existing tessellation pipeline-state description.
+- Roadmap.md: struck through H4i with the full narrative (including the
+  wrong hypothesis and how it was caught); added H4j for the residual
+  rasterizer-precision defect.
+
+## Commits
+
+1. `feme/lib/Vulkan/GraphicsPipeline.cpp` fix + its two new
+   `GraphicsPipelineTest` cases.
+2. Documentation updates (Roadmap.md, VulkanCTSReport.md,
+   VulkanExtensionInventory.md, FeMeVulkanDesign.md).
+3. This `agent_thoughts.md` entry (own commit, per instructions).
