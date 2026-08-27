@@ -33,7 +33,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H3?
+Can you work on milestone H3? The previous agent failed. I stashed it's partial
+progress in the git repo. You an restore it by running `git stash pop`.
 
 > **Multiple viewports and scissors.** `maxViewports` is hard-coded to 1
 > (`PhysicalDeviceInfo.cpp:247`) and `vkCmdSetViewportWithCount` and the
@@ -41,4 +42,3 @@ Can you work on milestone H3?
 > per-primitive viewport index in the executor, `ViewportIndex` as a stage
 > output, and `shaderOutputViewportIndex`/`shaderOutputLayer` (both `VK_FALSE`
 > in the aggregate 1.2 struct today) raised in lockstep with H2
-
