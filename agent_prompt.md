@@ -33,24 +33,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5d-a?
+Can you work on milestone H5e?
 
-> **`GeometryState` has no `Invocations` field, and `Executor.cpp`'s new
-> geometry-chaining block (H5d) always invokes a bound geometry stage exactly
-> once per input primitive** -- correct for GLSL's default `layout(invocations =
-> 1)`, but not for a real shader that declares `layout(invocations = N)` for `N
-> > 1`, which SPIR-V/GLSL geometry shaders can and do use to invoke the same
-> entry point `N` times per primitive, each with a distinct `gl_InvocationID`
-> (`SystemValue::InvocationID`, already representable in a `Signature` per
-> `getSystemValueForBuiltIn`, but never populated into a real invocation record
-> by H5d's own `FemeGeometryInvocation`-building loop, which has no
-> per-invocation-index dimension at all today). Needs: a
-> `GeometryState::Invocations` field (mirroring `TessellationState`'s own
-> shape), `Executor.cpp`'s invocation-building loop widened to build
-> `Invocations * PrimitiveCount` records instead of `PrimitiveCount`, each
-> stamped with its own `gl_InvocationID`, and
-> `collectGeometryStreams`/`mergeGeometryStreamsInLaneOrder`'s own lane-ordering
-> contract re-checked against multiple invocations per primitive (today one
-> invocation is one lane; N invocations per primitive means N lanes per
-> primitive, which the merge's existing "lane order" concept may already
-> tolerate, needs confirming with a real test rather than assumed)
+> **`vkCreateGraphicsPipelines` accepts `VK_SHADER_STAGE_GEOMETRY_BIT`, and
+> `geometryShader`/`maxGeometry*`/`multiviewGeometryShader` are advertised.**
+> `GraphicsPipeline.cpp`'s `translateFixedFunctionState` still rejects any stage
+> bit besides vertex/fragment/tessellation (the `default:` case's own comment
+> already names this row); needs a `GeometryInfo` output parameter mirroring
+> `TessControlInfo`/`TessEvalInfo`, `PhysicalDeviceInfo.cpp`'s `geometryShader`
+> feature bit and
+> `maxGeometryShaderInvocations`/`maxGeometryInputComponents`/`maxGeometryOutputComponents`/`maxGeometryOutputVertices`/`maxGeometryTotalOutputComponents`
+> limits (all currently either `VK_FALSE`/0 or absent), and -- now that H2 has
+> landed multiview -- `multiviewGeometryShader` in the same
+> `VkPhysicalDeviceMultiviewFeatures`/aggregate-1.2-struct H2's own row added
+> `multiviewTessellationShader` to (still `VK_FALSE` pending H4's own remaining
+> rows). A real `dEQP-VK.geometry.*` run (200 cases) and the standard
+> `dEQP-VK.draw.*` regression sample close this row's own measurement, matching
+> H4b's own precedent of reporting the real, possibly-partial
+> pass/fail/not-supported breakdown rather than assuming "whole group"
