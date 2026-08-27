@@ -38,12 +38,14 @@ feme::graphics::buildGeometryInputs(llvm::ArrayRef<uint32_t> VertexSlots,
 
 std::vector<feme::cpu::FemeGeometryInvocation>
 feme::graphics::buildGeometryInvocations(
-    llvm::ArrayRef<uint32_t> PrimitiveIDs) {
+    llvm::ArrayRef<uint32_t> PrimitiveIDs,
+    llvm::ArrayRef<uint32_t> InvocationIDs) {
   std::vector<cpu::FemeGeometryInvocation> Invocations;
   Invocations.reserve(PrimitiveIDs.size());
-  for (uint32_t PrimitiveID : PrimitiveIDs) {
+  for (size_t I = 0; I != PrimitiveIDs.size(); ++I) {
     cpu::FemeGeometryInvocation Invocation{};
-    Invocation.PrimitiveID = PrimitiveID;
+    Invocation.PrimitiveID = PrimitiveIDs[I];
+    Invocation.InvocationID = I < InvocationIDs.size() ? InvocationIDs[I] : 0;
     Invocations.push_back(Invocation);
   }
   return Invocations;

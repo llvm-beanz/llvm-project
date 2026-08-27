@@ -68,11 +68,16 @@ std::vector<float> buildGeometryInputs(llvm::ArrayRef<uint32_t> VertexSlots,
                                        uint32_t ScalarsPerVertex);
 
 /// Builds one `feme::cpu::FemeGeometryInvocation` per entry of \p
-/// PrimitiveIDs, recording that entry as the invocation's `SV_PrimitiveID`,
-/// in the same order, for use as a `FemeGeometryArgs::Invocations` array
-/// (see FemeGeometryArgs's comment).
+/// PrimitiveIDs, recording that entry as the invocation's `SV_PrimitiveID`
+/// and (roadmap H5d-a) the matching entry of \p InvocationIDs as its
+/// `gl_InvocationID`, in the same order, for use as a
+/// `FemeGeometryArgs::Invocations` array (see FemeGeometryArgs's comment).
+/// \p InvocationIDs must be the same size as \p PrimitiveIDs; pass an
+/// all-zero array (or an empty one, treated as all-zero) for a shader with
+/// `GeometryState::Invocations` == 1, matching SPIR-V's own default.
 std::vector<cpu::FemeGeometryInvocation>
-buildGeometryInvocations(llvm::ArrayRef<uint32_t> PrimitiveIDs);
+buildGeometryInvocations(llvm::ArrayRef<uint32_t> PrimitiveIDs,
+                         llvm::ArrayRef<uint32_t> InvocationIDs = {});
 
 } // namespace feme::graphics
 

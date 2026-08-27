@@ -84,6 +84,34 @@ TEST(GeometryInputsTest, BuildsOneInvocationPerPrimitiveIdInOrder) {
   EXPECT_EQ(Invocations[0].PrimitiveID, 5u);
   EXPECT_EQ(Invocations[1].PrimitiveID, 2u);
   EXPECT_EQ(Invocations[2].PrimitiveID, 9u);
+  // No invocation IDs supplied: every record defaults to gl_InvocationID 0,
+  // matching a `layout(invocations = 1)` (or unspecified) shader.
+  EXPECT_EQ(Invocations[0].InvocationID, 0u);
+  EXPECT_EQ(Invocations[1].InvocationID, 0u);
+  EXPECT_EQ(Invocations[2].InvocationID, 0u);
+}
+
+// (Roadmap H5d-a) Two primitives, each declaring two geometry-shader
+// invocations: `PrimitiveIDs`/`InvocationIDs` pair up row-by-row, matching
+// how `Executor.cpp` fans one real primitive out into
+// `GeometryState::Invocations` ABI rows that all share the same
+// `PrimitiveID` but carry a distinct `InvocationID`.
+TEST(GeometryInputsTest, BuildsDistinctInvocationIDsForRepeatedPrimitives) {
+  std::vector<uint32_t> PrimitiveIDs = {3, 3, 7, 7};
+  std::vector<uint32_t> InvocationIDs = {0, 1, 0, 1};
+
+  std::vector<FemeGeometryInvocation> Invocations =
+      buildGeometryInvocations(PrimitiveIDs, InvocationIDs);
+
+  ASSERT_EQ(Invocations.size(), 4u);
+  EXPECT_EQ(Invocations[0].PrimitiveID, 3u);
+  EXPECT_EQ(Invocations[0].InvocationID, 0u);
+  EXPECT_EQ(Invocations[1].PrimitiveID, 3u);
+  EXPECT_EQ(Invocations[1].InvocationID, 1u);
+  EXPECT_EQ(Invocations[2].PrimitiveID, 7u);
+  EXPECT_EQ(Invocations[2].InvocationID, 0u);
+  EXPECT_EQ(Invocations[3].PrimitiveID, 7u);
+  EXPECT_EQ(Invocations[3].InvocationID, 1u);
 }
 
 } // namespace
