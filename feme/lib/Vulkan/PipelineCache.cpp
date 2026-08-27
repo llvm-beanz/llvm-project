@@ -101,7 +101,9 @@ PipelineCacheKey feme::vulkan::computeGraphicsPipelineCacheKey(
     ArrayRef<uint32_t> FragmentShaderWords, StringRef FragmentEntry,
     ArrayRef<const DescriptorSetLayout *> SetLayouts,
     ArrayRef<VkPushConstantRange> PushConstantRanges,
-    ArrayRef<uint8_t> FixedFunctionState) {
+    ArrayRef<uint8_t> FixedFunctionState,
+    ArrayRef<uint32_t> TessControlShaderWords, StringRef TessControlEntry,
+    ArrayRef<uint32_t> TessEvalShaderWords, StringRef TessEvalEntry) {
   SHA256 Hash;
   Hash.update(ArrayRef(DeviceUUID, VK_UUID_SIZE));
   Hash.update(
@@ -112,6 +114,16 @@ PipelineCacheKey feme::vulkan::computeGraphicsPipelineCacheKey(
       ArrayRef(reinterpret_cast<const uint8_t *>(FragmentShaderWords.data()),
                FragmentShaderWords.size() * sizeof(uint32_t)));
   Hash.update(FragmentEntry);
+  // (roadmap H4b) Empty for a pipeline with no tessellation stages, exactly
+  // like `FragmentShaderWords`/`FragmentEntry` are for a fragment-less one.
+  Hash.update(ArrayRef(
+      reinterpret_cast<const uint8_t *>(TessControlShaderWords.data()),
+      TessControlShaderWords.size() * sizeof(uint32_t)));
+  Hash.update(TessControlEntry);
+  Hash.update(
+      ArrayRef(reinterpret_cast<const uint8_t *>(TessEvalShaderWords.data()),
+               TessEvalShaderWords.size() * sizeof(uint32_t)));
+  Hash.update(TessEvalEntry);
   hashSetLayoutsAndPushConstants(Hash, SetLayouts, PushConstantRanges);
   Hash.update(FixedFunctionState);
   return Hash.final();

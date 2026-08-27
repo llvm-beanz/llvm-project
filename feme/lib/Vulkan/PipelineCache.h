@@ -47,6 +47,7 @@
 #define FEME_LIB_VULKAN_PIPELINECACHE_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -94,23 +95,32 @@ computePipelineCacheKey(const uint8_t (&DeviceUUID)[VK_UUID_SIZE],
                         VkPipelineShaderStageCreateFlags StageCreateFlags);
 
 /// Computes the strong key for one graphics pipeline creation: the two
-/// stages' SPIR-V words and entry points (a graphics stage has no
-/// specialization data to fold in -- it is rejected outright at creation,
-/// see GraphicsPipeline.cpp's `compileGraphicsStage`), the pipeline
-/// layout's binding map and push-constant ranges, \p DeviceUUID (as
-/// `computePipelineCacheKey` above), and \p FixedFunctionState -- a
-/// caller-serialized encoding of every piece of translated fixed-function
-/// pipeline state (topology, vertex input, raster/viewport/depth-stencil/
-/// blend state, dynamic-state selection, sample count, and attachment
-/// formats): a hit must be identical in everything a draw through either
-/// pipeline could observe, not only in the two stages' bytes.
+/// mandatory stages' SPIR-V words and entry points, plus (roadmap H4b) the
+/// tessellation-control/evaluation stages' own words and entry points --
+/// empty when the pipeline declares no tessellation stages, exactly like
+/// \p FragmentShaderWords/\p FragmentEntry are for a fragment-less pipeline
+/// (roadmap H2j) -- (a graphics stage has no specialization data to fold
+/// in -- it is rejected outright at creation, see GraphicsPipeline.cpp's
+/// `compileGraphicsStage`), the pipeline layout's binding map and
+/// push-constant ranges, \p DeviceUUID (as `computePipelineCacheKey`
+/// above), and \p FixedFunctionState -- a caller-serialized encoding of
+/// every piece of translated fixed-function pipeline state (topology,
+/// vertex input, raster/viewport/depth-stencil/blend state, dynamic-state
+/// selection, sample count, attachment formats, and the tessellation
+/// input control point count): a hit must be identical in everything a
+/// draw through either pipeline could observe, not only in the stages'
+/// bytes.
 PipelineCacheKey computeGraphicsPipelineCacheKey(
     const uint8_t (&DeviceUUID)[VK_UUID_SIZE],
     llvm::ArrayRef<uint32_t> VertexShaderWords, llvm::StringRef VertexEntry,
     llvm::ArrayRef<uint32_t> FragmentShaderWords, llvm::StringRef FragmentEntry,
     llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts,
     llvm::ArrayRef<VkPushConstantRange> PushConstantRanges,
-    llvm::ArrayRef<uint8_t> FixedFunctionState);
+    llvm::ArrayRef<uint8_t> FixedFunctionState,
+    llvm::ArrayRef<uint32_t> TessControlShaderWords = {},
+    llvm::StringRef TessControlEntry = {},
+    llvm::ArrayRef<uint32_t> TessEvalShaderWords = {},
+    llvm::StringRef TessEvalEntry = {});
 
 /// Whether persistent (serialized) pipeline-cache data is ever trusted as
 /// `vkCreatePipelineCache` input, per `FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA`
