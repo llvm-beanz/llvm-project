@@ -38463,3 +38463,142 @@ Full write-up: "Roadmap H5d: measured impact" in `VulkanCTSReport.md`.
    strikethrough + new H5d-a row, `VulkanCTSReport.md`'s new "Roadmap H5d:
    measured impact" section.
 5. This entry.
+
+# Milestone H5d-a: `GeometryState::Invocations` / `gl_InvocationID`
+
+## Task
+
+Roadmap row H5d-a: `GeometryState` was described as having no `Invocations`
+field, and `Executor.cpp`'s H5d geometry-chaining block always invoking a
+bound geometry stage exactly once per input primitive -- correct for
+GLSL's default `layout(invocations = 1)` but not for a real
+`layout(invocations = N)` shader. Needed: a `GeometryState::Invocations`
+field, `Executor.cpp`'s invocation-building loop widened to
+`Invocations * PrimitiveCount` records with per-invocation
+`gl_InvocationID`, and `collectGeometryStreams`/
+`mergeGeometryStreamsInLaneOrder`'s lane-ordering contract re-checked with
+a real test.
+
+## First finding: the field already existed
+
+Before touching anything, I searched `Geometry.h` for `Invocations` and
+found it already there -- added by a prior H5a commit
+(`2d2e3b3290be`), which apparently added the field speculatively (or the
+roadmap text predates that commit and was never refreshed). So the actual
+gap was narrower than the roadmap wording suggested: nothing downstream of
+the field actually *used* it. `FemeGeometryInvocation` had no
+`InvocationID` field at all, `GeometryWrapperPass` had no lowering path for
+`SystemValue::InvocationID`, `buildGeometryInvocations` had no way to stamp
+a non-zero invocation ID into a record, and `Executor.cpp`'s row-building
+loop had no invocation dimension. I decided not to "fix" the roadmap
+wording itself (out of scope) but to note the discrepancy here and in the
+roadmap's own "(done: ...)" summary.
+
+## Design decision: duplicate primitive inputs per invocation
+
+The cleanest way to model "N invocations of the same primitive" within the
+existing ABI is to treat `FemeGeometryArgs::PrimitiveCount` as literally
+"ABI row count" (matching how `PreparedGeometryBatch::args()` already sets
+it from `Invocations.size()`), and have `Executor.cpp` duplicate each
+primitive's own input vertex attributes once per invocation, rather than
+introducing a separate "primitive table" and a "invocation -> primitive"
+indirection. This costs some memory (each invocation gets its own full
+copy of the primitive's vertex data) but requires zero changes to
+`GeometryWrapper.cpp`'s existing `lowerGeometryInputLoad`, which already
+treats the flat wave-lane index as directly indexing into `Inputs`. Given
+`layout(invocations = N)` is rarely large in practice (typically <= 4-6),
+this trade-off seemed clearly worth the simplicity.
+
+## `InvocationID` shares an enum value with `OutputControlPointID`
+
+`SignatureSystemValue::InvocationID` and `::OutputControlPointID` share the
+same enum value in `Signature.h` (both come from SPIR-V's `InvocationId`
+builtin, disambiguated by which stage they appear in). This meant
+`GeometryWrapper.cpp`'s `InputLoad` switch needed a `case` for
+`InvocationID` alongside `PrimitiveID`, exactly mirroring how
+`HullWrapperPass` already handles `OutputControlPointID` for hull's own
+per-control-point ID. I factored the two field lowerings
+(`lowerGeometryPrimitiveID`/`lowerGeometryInvocationID`) through one shared
+`lowerGeometryInvocationField` helper parameterized by field index, since
+they're otherwise identical (load the `Args.Invocations[lane].<field>`
+scalar).
+
+## Confirming the lane-ordering contract needed a real test, not just reading code
+
+`collectGeometryStreams`/`mergeGeometryStreamsInLaneOrder` needed no code
+changes at all -- both already iterate `Args.PrimitiveCount` generically as
+"row count" and merge lanes in array order. Reading the code convinced me
+this was *probably* fine for N invocations per primitive (N consecutive
+lanes instead of 1), but the roadmap explicitly called out that this
+needed confirming with a real test rather than assumed, so I wrote one:
+`ExecutorTest.GeometryStageInvocationsRunOncePerDeclaredInvocationCount`.
+Single triangle, `Invocations = 2`, geometry shader emits a full-viewport
+strip colored red for invocation 0 and green for invocation 1 (via
+`select` on `icmp eq i32 %iid, 0`, deliberately avoiding branching so
+`LinearizePass`'s control-flow lowering can't complicate the picture), with
+`BlendMode::Replace` (plain last-write-wins overwrite). If lane order is
+"primitive-major, invocation-minor, in ascending order" as intended, the
+final pixel color should be solid green (invocation 1's write lands last).
+
+This test **failed the first time**, coming back solid red -- the *first*
+lane's color won, not the last. This was a genuine surprise, and I spent a
+while ruling out the obvious suspects: rasterizer bin/tile iteration order,
+the blend/write-mask logic in `mergeColor`, quad/lane iteration order in the
+rasterizer -- all confirmed correct (triangles were processed in
+insertion order, `BlendMode::Replace` really is a plain overwrite). The
+actual root cause was upstream of all of that: `GeometryStreamBuilder
+Combined(/*StreamCount=*/1, GState.MaxOutputVertices)` sized the merged
+output stream's own capacity from a single row's own per-invocation
+`MaxOutputVertices` bound, not the combined total every row could
+together emit. With `RowCount = 2` and 3 vertices per row, the combined
+capacity (3) was *exactly* enough for lane 0 (red) alone;
+`mergeGeometryStreamsInLaneOrder`'s checked-prefix-sum truncation logic
+then silently dropped lane 1 (green) entirely once the shared budget ran
+out, so only red ever reached the rasterizer. This is a genuinely
+pre-existing bug (present since H5d, not something H5d-a introduced) that
+simply had no way to be exercised before, since every prior geometry test
+used exactly one primitive with exactly one invocation (so "total emitted
+vertices" and "one row's own max" were always numerically identical).
+Fixing the capacity to `RowCount * GState.MaxOutputVertices` made the test
+pass on the very next run with no further changes -- confirming the
+lane-ordering logic itself was correct all along, and the roadmap's own
+hedge ("may already tolerate, needs confirming") turned out to be right in
+the optimistic direction, just gated behind an unrelated capacity bug.
+
+## Verification
+
+- `ninja check-feme` (assertions-enabled, ccache build): **1857/1916**
+  passed (59 pre-existing unrelated `Unsupported`, 0 `Failed`), up from
+  H5d's own 1853/1912 by exactly the 4 new tests this milestone adds.
+- Vulkan CTS (`/home/dev/dev/VK-GL-CTS/build/.../deqp-vk`, feme's own
+  `feme_icd.json`): `dEQP-VK.geometry.*` stays byte-identical 0/0/200
+  (still gated on `geometryShader`, H5e's own job -- expected, since none
+  of this row is reachable via `vkCreateGraphicsPipelines` yet). The
+  `draw_sample.txt` 1957-case regression sample came back byte-identical
+  to H5d's own baseline: 12 Pass/139 Fail/1806 NotSupported, and the
+  sorted set of 139 failing case names matched exactly (Python
+  `TestCaseResult`/`StatusCode` parse, not raw `diff`, since `.qpa` XML
+  isn't line-stable run to run). Zero regressions, zero new passes --
+  expected, since no case in that sample binds a geometry stage.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no changes
+  needed, confirmed rather than assumed -- this row is purely a CPU-backend
+  ABI/compiler-internals change with no surface reachable from
+  `vkCreateGraphicsPipelines` yet (H5e's own job).
+
+## Commits
+
+1. `RuntimeABI.h`/`StageArgsLayout.h`/`GeometryWrapper.cpp` +
+   `GeometryWrapperTest.cpp`/`CompiledStageTest.cpp`: `InvocationID` ABI
+   field and its IR-level lowering, with an IR-level and a JIT-compiled
+   end-to-end test.
+2. `GeometryInputs.h`/`.cpp` + `GeometryInputsTest.cpp`:
+   `buildGeometryInvocations`'s new optional `InvocationIDs` parameter.
+3. `Executor.cpp` + `ExecutorTest.cpp`: the widened
+   `Invocations * PrimitiveCount` row-building loop, the coupled
+   `GeometryStreamBuilder` capacity bug fix, and the new
+   lane-ordering-confirming end-to-end test.
+4. Docs: `FeMeGraphicsDesign.md`'s scope note rewritten to describe
+   `InvocationID` as modeled, `Roadmap.md`'s H5d-a row struck through with
+   a "(done: ...)" summary, `VulkanCTSReport.md`'s new "Roadmap H5d-a:
+   measured impact" section.
+5. This entry.
