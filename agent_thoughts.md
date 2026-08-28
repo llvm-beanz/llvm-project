@@ -39647,3 +39647,127 @@ paragraph (mirroring G5's own); `VulkanCTSReport.md` gained a new
 3. `MeshTest.cpp`.
 4. Docs (`Roadmap.md`, `FeMeGraphicsDesign.md`, `VulkanCTSReport.md`).
 5. This entry.
+
+# Milestone H6b: mesh output-array dynamic vertex/primitive indexing
+
+## Task as given
+
+Lift `CanonicalizeStagePass::run`'s stage filter to accept
+`ShaderStage::Mesh`/`ShaderStage::Amplification`, plus canonicalize a mesh
+entry's bounded per-vertex/per-primitive output-array writes
+(`PerVertexEXT`/`PerPrimitiveEXT`-decorated `Output` storage-class arrays)
+and a task entry's bounded payload write (`TaskPayloadWorkgroupEXT`
+storage class) into new `feme.stage.*` ops -- explicitly instructed to
+investigate first (mirroring H5a) rather than assume this is a mechanical
+repeat of H5b/H5c.
+
+## Investigation
+
+Read H6a (already landed: mesh/task execution-mode reflection into
+`feme.mesh.*` attributes, explicitly deferring everything in H6b's
+description) and the "Roadmap H5: what H5a found, and why it stops here"
+section of VulkanCTSReport.md in full, since the task explicitly points at
+it as the model for how to investigate.
+
+Traced the existing per-vertex machinery H5b/H5f built for geometry's
+`gl_in[i]`-shaped `Input` reads: `isPerVertexArrayInputGlobal` (address
+space 7 only), `getDynamicVertexIndexedAccess` (recognizes a GEP with a
+non-constant second index into such a global), and `resolveStageIOAccess`'s
+constant-offset fallback (H5f: folds even a *constant* per-vertex index
+into `Vertex` rather than `Row`, for consistency).
+
+This is where the "not a mechanical repeat" warning paid off. I first
+tried the obvious mirror: widen `isPerVertexArrayInputGlobal` to accept
+address space 8 (`Output`) as well, since a mesh entry's own
+`gl_MeshVerticesEXT[]`/`gl_MeshPrimitivesEXT[]` are `Output`-storage-class
+arrays written with a dynamic per-invocation index -- structurally the
+store-side mirror of geometry's own read. Built it, added four new unit
+tests mirroring the geometry ones (dynamic + constant index, plain array +
+interface-block-member shapes), ran `check-feme-unit`, and got a real
+regression: `RewritesSPIRVArrayOutputStorePerElementByteOffset` (a
+pre-existing, real test) started failing.
+
+Root cause: `Output` storage already has a legitimate, tested, production
+access pattern that `Input` does not -- writing an ordinary matrix output
+one row at a time via a *constant* GEP index
+(`RewritesSPIRVArrayOutputStorePerElementByteOffset`,
+`RewritesSPIRVMatrixOutputStoreOneRowAtATime`). `Input`'s own matrix loads
+never take this shape (`RewritesSPIRVMatrixInputLoadOneRowAtATime` always
+loads the whole array in one instruction and lets `loadStageIOValue`'s own
+recursion decompose it afterward), which is exactly why H5f's "fold a
+constant vertex index into `Vertex`" extension was safe for `Input` and
+is *not* safe to blindly mirror onto `Output`: doing so silently misroutes
+a real matrix row index away from `Row`, corrupting genuine non-mesh
+output canonicalization that has nothing to do with mesh shading at all.
+
+Fix: keep `isPerVertexArrayInputGlobal` (and everything keyed off it --
+`RowCountIsVertexArray`, the constant-offset-fold path) strictly
+`Input`-only, and add a new, narrower `isDynamicIndexedArrayGlobal`
+helper (address space 7 *or* 8) used *only* by
+`getDynamicVertexIndexedAccess`'s genuinely-non-constant-index
+recognition. A real shader's constant array/matrix index is essentially
+always compile-time-folded already, so treating a non-constant index as a
+per-vertex/per-primitive access regardless of storage class is safe,
+without touching the constant-index path (and its real matrix-output use)
+at all.
+
+Rebuilding after that fix surfaced a second, independent latent bug while
+re-running the corrected tests: the store-rewrite loop in
+`canonicalizeSPIRVStage` never threaded `StageIOAccess::Vertex` through to
+`storeStageIOBlockValue` at all -- it always passed a constant `Zero`,
+unlike the load path's own `Access->Vertex ? Access->Vertex : Zero`. This
+was silently unreachable dead code before this row (no prior caller of
+`resolveStageIOAccess` for a store ever produced a non-null `Vertex`), and
+my own new tests were the first thing to exercise it and catch the gap.
+Fixed by mirroring the load path's own ternary.
+
+Second blocker, found for the task-payload half of the milestone: SPIR-V's
+`TaskPayloadWorkgroupEXT` storage class (enum 5402) has no address-space
+mapping at all in LLVM's own upstream SPIR-V backend
+(`storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h` hits
+its `report_fatal_error` default case) -- unlike `Input`/`Output`/
+`Workgroup`/`PushConstant`, which FeMe's own SPIRVToLLVM patterns already
+reuse from that fixed mapping. This means a task entry's payload variable
+cannot even be imported as an LLVM global today, let alone canonicalized;
+it is a genuine upstream gap sitting entirely outside
+`CanonicalizeStage.cpp`'s file scope, requiring a new address-space
+convention and a new global-variable pattern (mirroring
+`WorkgroupGlobalVariablePattern`/`PushConstantGlobalVariablePattern`)
+before there is anything for `canonicalizeSPIRVStage` to even see.
+
+## Decision
+
+Given both blockers, and per the task's own explicit warning against
+assuming a mechanical repeat, I landed only the safely-generalizable
+mesh-output half (the dynamic-index machinery + the store-path Vertex-
+threading fix), left task-payload import as its own new roadmap row
+(H6h), and left the stage-filter flip itself as another new row (H6i,
+depending on this row and H6h) -- exactly mirroring how H5b built
+geometry's per-vertex machinery before H5c actually flipped the filter,
+rather than flipping the filter early and risking the same "silent wrong
+answer instead of a diagnostic" failure mode H5's own investigation
+warned against for geometry.
+
+## Validation
+
+- `ninja check-feme-unit`: 1194/1194 passed (0 failed), including the 2
+  net-new tests this row adds (a third candidate test asserting constant-
+  index `Output` folding was written, found to encode the rejected
+  design, and deleted).
+- `ninja check-feme`: 1881/1940 passed, 59 pre-existing unrelated
+  Unsupported, 0 Failed -- up from H6a's 1879/1938 by exactly the 2 new
+  tests.
+- Vulkan CTS (via `/home/dev/dev/VK-GL-CTS` checkout, FeMe's own ICD at
+  `build/tools/feme/tools/feme-vulkan/feme_icd.json`):
+  `dEQP-VK.mesh_shader.*` stays 0/0/28044 (stage filter not flipped, so
+  nothing routes through the new code yet); the 1957-case
+  `dEQP-VK.draw.*` regression sample stays byte-identical to H6a's own
+  baseline (14/153/1790) -- 0 regressions.
+- Docs updated: `Roadmap.md` (H6b's description narrowed to what was
+  actually delivered and struck through, H6h/H6i added, H6c's
+  Depends-On updated from H6b to H6i), `VulkanCTSReport.md` (new
+  "Roadmap H6: what H6b found, and why it stops here" +
+  "Roadmap H6b: measured impact" sections). `Vulkan14FeatureInventory.md`/
+  `VulkanExtensionInventory.md` need no change (nothing new advertised,
+  matching H6a's own precedent of not adding an entry for a
+  non-advertising row).
