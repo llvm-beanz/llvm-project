@@ -94,6 +94,8 @@ using PatchEntryPointFn = void (*)(const FemePatchArgs *);
 using PatchConstantEntryPointFn = void (*)(const FemePatchConstantArgs *);
 using DomainEntryPointFn = void (*)(const FemeDomainArgs *);
 using GeometryEntryPointFn = void (*)(const FemeGeometryArgs *);
+using MeshEntryPointFn = void (*)(const FemeMeshArgs *);
+using TaskEntryPointFn = void (*)(const FemeTaskArgs *);
 
 class PreparedDispatch {
 public:
@@ -493,6 +495,145 @@ private:
   llvm::MutableArrayRef<float> EmittedVertices;
   llvm::MutableArrayRef<uint32_t> EmittedVertexCounts;
   llvm::MutableArrayRef<uint8_t> StripEndsAfter;
+};
+
+/// Caller-owned storage for one mesh workgroup invocation (roadmap H6c):
+/// unlike `GeometryResources`' per-primitive batch, a mesh entry point
+/// dispatches one workgroup at a time exactly like `DispatchResources`, so
+/// this bundles that workgroup's own `GroupID`/`GroupCount`/`GroupShared`
+/// alongside its bounded per-vertex/per-primitive output storage
+/// (`feme::graphics::MeshOutputBuilder`'s host-side mirror -- see
+/// `FemeMeshArgs`'s own comment for what each field means and what remains
+/// unwired pending H6h/H6i).
+struct MeshResources {
+  llvm::ArrayRef<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<BoundResourceBinding> BoundResources;
+  llvm::ArrayRef<BoundImageBinding> BoundImages;
+  llvm::ArrayRef<BoundSamplerBinding> BoundSamplers;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  std::array<uint32_t, 3> GroupID{};
+  std::array<uint32_t, 3> GroupCount{};
+  llvm::MutableArrayRef<uint8_t> GroupShared;
+  uint32_t MaxOutputVertices = 0;
+  uint32_t MaxOutputPrimitives = 0;
+  /// `feme::graphics::MeshOutputTopology`'s enumerator value.
+  uint32_t OutputTopology = 0;
+  const FemeStageLayout *VertexOutputLayout = nullptr;
+  llvm::MutableArrayRef<uint8_t> VertexOutputs;
+  const FemeStageLayout *PrimitiveOutputLayout = nullptr;
+  llvm::MutableArrayRef<uint8_t> PrimitiveOutputs;
+  llvm::MutableArrayRef<uint32_t> PrimitiveIndices;
+  uint32_t *ActualVertexCount = nullptr;
+  uint32_t *ActualPrimitiveCount = nullptr;
+  const FemeStageLayout *PayloadLayout = nullptr;
+  llvm::ArrayRef<uint8_t> Payload;
+};
+
+/// One prepared mesh batch: materialized resources plus one workgroup's own
+/// borrowed storage. The caller owns every referenced block and must keep
+/// them alive through the `invokeMesh` call that consumes this object.
+class PreparedMeshBatch {
+public:
+  static PreparedMeshBatch create(const ResourceInfo &Info,
+                                  const MeshResources &Resources);
+
+  FemeMeshArgs args() const;
+
+private:
+  PreparedMeshBatch(std::vector<FemeDescriptor> ResourceHeap,
+                    std::vector<FemeImageDescriptor> ImageHeap,
+                    std::vector<FemeSamplerDescriptor> SamplerHeap,
+                    llvm::ArrayRef<uint8_t> RootConstants,
+                    std::array<uint32_t, 3> GroupID,
+                    std::array<uint32_t, 3> GroupCount,
+                    llvm::MutableArrayRef<uint8_t> GroupShared,
+                    uint32_t MaxOutputVertices, uint32_t MaxOutputPrimitives,
+                    uint32_t OutputTopology,
+                    const FemeStageLayout *VertexOutputLayout,
+                    llvm::MutableArrayRef<uint8_t> VertexOutputs,
+                    const FemeStageLayout *PrimitiveOutputLayout,
+                    llvm::MutableArrayRef<uint8_t> PrimitiveOutputs,
+                    llvm::MutableArrayRef<uint32_t> PrimitiveIndices,
+                    uint32_t *ActualVertexCount,
+                    uint32_t *ActualPrimitiveCount,
+                    const FemeStageLayout *PayloadLayout,
+                    llvm::ArrayRef<uint8_t> Payload);
+
+  std::vector<FemeDescriptor> ResourceHeap;
+  std::vector<FemeImageDescriptor> ImageHeap;
+  std::vector<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  FemeShaderResources ShaderResources{};
+  std::array<uint32_t, 3> GroupID{};
+  std::array<uint32_t, 3> GroupCount{};
+  llvm::MutableArrayRef<uint8_t> GroupShared;
+  uint32_t MaxOutputVertices = 0;
+  uint32_t MaxOutputPrimitives = 0;
+  uint32_t OutputTopology = 0;
+  const FemeStageLayout *VertexOutputLayout = nullptr;
+  llvm::MutableArrayRef<uint8_t> VertexOutputs;
+  const FemeStageLayout *PrimitiveOutputLayout = nullptr;
+  llvm::MutableArrayRef<uint8_t> PrimitiveOutputs;
+  llvm::MutableArrayRef<uint32_t> PrimitiveIndices;
+  uint32_t *ActualVertexCount = nullptr;
+  uint32_t *ActualPrimitiveCount = nullptr;
+  const FemeStageLayout *PayloadLayout = nullptr;
+  llvm::ArrayRef<uint8_t> Payload;
+};
+
+/// Caller-owned storage for one task workgroup invocation (roadmap H6c):
+/// mirrors `MeshResources`, but for the task (amplification) stage's own
+/// bounded payload output rather than a mesh stage's per-vertex/per-
+/// primitive one -- see `FemeTaskArgs`'s own comment for what remains
+/// unwired pending H6h/H6i.
+struct TaskResources {
+  llvm::ArrayRef<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<BoundResourceBinding> BoundResources;
+  llvm::ArrayRef<BoundImageBinding> BoundImages;
+  llvm::ArrayRef<BoundSamplerBinding> BoundSamplers;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  std::array<uint32_t, 3> GroupID{};
+  std::array<uint32_t, 3> GroupCount{};
+  llvm::MutableArrayRef<uint8_t> GroupShared;
+  llvm::MutableArrayRef<uint8_t> Payload;
+  uint32_t *MeshGroupCount = nullptr;
+};
+
+/// One prepared task batch: materialized resources plus one workgroup's own
+/// borrowed storage. The caller owns every referenced block and must keep
+/// them alive through the `invokeTask` call that consumes this object.
+class PreparedTaskBatch {
+public:
+  static PreparedTaskBatch create(const ResourceInfo &Info,
+                                  const TaskResources &Resources);
+
+  FemeTaskArgs args() const;
+
+private:
+  PreparedTaskBatch(std::vector<FemeDescriptor> ResourceHeap,
+                    std::vector<FemeImageDescriptor> ImageHeap,
+                    std::vector<FemeSamplerDescriptor> SamplerHeap,
+                    llvm::ArrayRef<uint8_t> RootConstants,
+                    std::array<uint32_t, 3> GroupID,
+                    std::array<uint32_t, 3> GroupCount,
+                    llvm::MutableArrayRef<uint8_t> GroupShared,
+                    llvm::MutableArrayRef<uint8_t> Payload,
+                    uint32_t *MeshGroupCount);
+
+  std::vector<FemeDescriptor> ResourceHeap;
+  std::vector<FemeImageDescriptor> ImageHeap;
+  std::vector<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  FemeShaderResources ShaderResources{};
+  std::array<uint32_t, 3> GroupID{};
+  std::array<uint32_t, 3> GroupCount{};
+  llvm::MutableArrayRef<uint8_t> GroupShared;
+  llvm::MutableArrayRef<uint8_t> Payload;
+  uint32_t *MeshGroupCount = nullptr;
 };
 
 } // namespace feme::cpu

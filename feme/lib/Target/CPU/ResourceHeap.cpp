@@ -496,4 +496,139 @@ FemeGeometryArgs PreparedGeometryBatch::args() const {
   return Args;
 }
 
+PreparedMeshBatch::PreparedMeshBatch(
+    std::vector<FemeDescriptor> ResourceHeap,
+    std::vector<FemeImageDescriptor> ImageHeap,
+    std::vector<FemeSamplerDescriptor> SamplerHeap,
+    ArrayRef<uint8_t> RootConstants, std::array<uint32_t, 3> GroupID,
+    std::array<uint32_t, 3> GroupCount, MutableArrayRef<uint8_t> GroupShared,
+    uint32_t MaxOutputVertices, uint32_t MaxOutputPrimitives,
+    uint32_t OutputTopology, const FemeStageLayout *VertexOutputLayout,
+    MutableArrayRef<uint8_t> VertexOutputs,
+    const FemeStageLayout *PrimitiveOutputLayout,
+    MutableArrayRef<uint8_t> PrimitiveOutputs,
+    MutableArrayRef<uint32_t> PrimitiveIndices, uint32_t *ActualVertexCount,
+    uint32_t *ActualPrimitiveCount, const FemeStageLayout *PayloadLayout,
+    ArrayRef<uint8_t> Payload)
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
+      SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
+      GroupID(GroupID), GroupCount(GroupCount), GroupShared(GroupShared),
+      MaxOutputVertices(MaxOutputVertices),
+      MaxOutputPrimitives(MaxOutputPrimitives), OutputTopology(OutputTopology),
+      VertexOutputLayout(VertexOutputLayout), VertexOutputs(VertexOutputs),
+      PrimitiveOutputLayout(PrimitiveOutputLayout),
+      PrimitiveOutputs(PrimitiveOutputs), PrimitiveIndices(PrimitiveIndices),
+      ActualVertexCount(ActualVertexCount),
+      ActualPrimitiveCount(ActualPrimitiveCount), PayloadLayout(PayloadLayout),
+      Payload(Payload) {
+  ShaderResources.ResourceHeap = this->ResourceHeap.data();
+  ShaderResources.ResourceHeapCount =
+      static_cast<uint32_t>(this->ResourceHeap.size());
+  ShaderResources.ImageHeap = this->ImageHeap.data();
+  ShaderResources.ImageHeapCount =
+      static_cast<uint32_t>(this->ImageHeap.size());
+  ShaderResources.SamplerHeap = this->SamplerHeap.data();
+  ShaderResources.SamplerHeapCount =
+      static_cast<uint32_t>(this->SamplerHeap.size());
+  ShaderResources.RootConstants = this->RootConstants.data();
+  ShaderResources.RootConstantSize =
+      static_cast<uint32_t>(this->RootConstants.size());
+}
+
+PreparedMeshBatch PreparedMeshBatch::create(const ResourceInfo &Info,
+                                            const MeshResources &Resources) {
+  return PreparedMeshBatch(
+      materializeResourceHeap(Info, Resources.BoundResources,
+                              Resources.ResourceHeap),
+      materializeImageHeap(Info, Resources.BoundImages, Resources.ImageHeap),
+      materializeSamplerHeap(Info, Resources.BoundSamplers,
+                             Resources.SamplerHeap),
+      Resources.RootConstants, Resources.GroupID, Resources.GroupCount,
+      Resources.GroupShared, Resources.MaxOutputVertices,
+      Resources.MaxOutputPrimitives, Resources.OutputTopology,
+      Resources.VertexOutputLayout, Resources.VertexOutputs,
+      Resources.PrimitiveOutputLayout, Resources.PrimitiveOutputs,
+      Resources.PrimitiveIndices, Resources.ActualVertexCount,
+      Resources.ActualPrimitiveCount, Resources.PayloadLayout,
+      Resources.Payload);
+}
+
+FemeMeshArgs PreparedMeshBatch::args() const {
+  FemeMeshArgs Args{};
+  Args.Resources = ShaderResources;
+  Args.GroupID[0] = GroupID[0];
+  Args.GroupID[1] = GroupID[1];
+  Args.GroupID[2] = GroupID[2];
+  Args.GroupCount[0] = GroupCount[0];
+  Args.GroupCount[1] = GroupCount[1];
+  Args.GroupCount[2] = GroupCount[2];
+  Args.GroupShared = GroupShared.data();
+  Args.MaxOutputVertices = MaxOutputVertices;
+  Args.MaxOutputPrimitives = MaxOutputPrimitives;
+  Args.OutputTopology = OutputTopology;
+  Args.VertexOutputLayout = VertexOutputLayout;
+  Args.VertexOutputs = VertexOutputs.data();
+  Args.PrimitiveOutputLayout = PrimitiveOutputLayout;
+  Args.PrimitiveOutputs = PrimitiveOutputs.data();
+  Args.PrimitiveIndices = PrimitiveIndices.data();
+  Args.ActualVertexCount = ActualVertexCount;
+  Args.ActualPrimitiveCount = ActualPrimitiveCount;
+  Args.PayloadLayout = PayloadLayout;
+  Args.Payload = Payload.data();
+  return Args;
+}
+
+PreparedTaskBatch::PreparedTaskBatch(
+    std::vector<FemeDescriptor> ResourceHeap,
+    std::vector<FemeImageDescriptor> ImageHeap,
+    std::vector<FemeSamplerDescriptor> SamplerHeap,
+    ArrayRef<uint8_t> RootConstants, std::array<uint32_t, 3> GroupID,
+    std::array<uint32_t, 3> GroupCount, MutableArrayRef<uint8_t> GroupShared,
+    MutableArrayRef<uint8_t> Payload, uint32_t *MeshGroupCount)
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
+      SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
+      GroupID(GroupID), GroupCount(GroupCount), GroupShared(GroupShared),
+      Payload(Payload), MeshGroupCount(MeshGroupCount) {
+  ShaderResources.ResourceHeap = this->ResourceHeap.data();
+  ShaderResources.ResourceHeapCount =
+      static_cast<uint32_t>(this->ResourceHeap.size());
+  ShaderResources.ImageHeap = this->ImageHeap.data();
+  ShaderResources.ImageHeapCount =
+      static_cast<uint32_t>(this->ImageHeap.size());
+  ShaderResources.SamplerHeap = this->SamplerHeap.data();
+  ShaderResources.SamplerHeapCount =
+      static_cast<uint32_t>(this->SamplerHeap.size());
+  ShaderResources.RootConstants = this->RootConstants.data();
+  ShaderResources.RootConstantSize =
+      static_cast<uint32_t>(this->RootConstants.size());
+}
+
+PreparedTaskBatch PreparedTaskBatch::create(const ResourceInfo &Info,
+                                            const TaskResources &Resources) {
+  return PreparedTaskBatch(
+      materializeResourceHeap(Info, Resources.BoundResources,
+                              Resources.ResourceHeap),
+      materializeImageHeap(Info, Resources.BoundImages, Resources.ImageHeap),
+      materializeSamplerHeap(Info, Resources.BoundSamplers,
+                             Resources.SamplerHeap),
+      Resources.RootConstants, Resources.GroupID, Resources.GroupCount,
+      Resources.GroupShared, Resources.Payload, Resources.MeshGroupCount);
+}
+
+FemeTaskArgs PreparedTaskBatch::args() const {
+  FemeTaskArgs Args{};
+  Args.Resources = ShaderResources;
+  Args.GroupID[0] = GroupID[0];
+  Args.GroupID[1] = GroupID[1];
+  Args.GroupID[2] = GroupID[2];
+  Args.GroupCount[0] = GroupCount[0];
+  Args.GroupCount[1] = GroupCount[1];
+  Args.GroupCount[2] = GroupCount[2];
+  Args.GroupShared = GroupShared.data();
+  Args.MaxPayloadBytes = static_cast<uint32_t>(Payload.size());
+  Args.Payload = Payload.data();
+  Args.MeshGroupCount = MeshGroupCount;
+  return Args;
+}
+
 } // namespace feme::cpu
