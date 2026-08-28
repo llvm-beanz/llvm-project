@@ -33,12 +33,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete and close out milestone H6c-a-b?
+Can you complete and close out milestone H6c-a-a-i?
 
-> **Wire `TaskPayloadBuilder` into a task entry's canonicalized payload-store
-> operation**, once `TaskPayloadWorkgroupEXT` has an address-space convention
-> and import pattern (H6h), `CanonicalizeStagePass::run` accepts
-> `ShaderStage::Amplification` and canonicalizes a payload write into a new
-> `feme.stage.*` op (H6i), and a task entry's checked `EmitMeshTasksEXT`
-> dispatch queue (H6d) gives the payload somewhere real to be read from by the
-> mesh workgroups it dispatches
+> **Canonicalize `SetMeshOutputsEXT` into a new `feme.stage.*` op and wire it
+> into `MeshOutputWrapperPass`/`EntryWrapperPass`** so
+> `FemeMeshArgs::ActualVertexCount`/`ActualPrimitiveCount` reflect a mesh
+> workgroup's real declared output counts instead of always reading 0
+> (discovered by H6c-a-a's own closing re-run: without this,
+> `feme::graphics::MeshOutputBuilder::assembleMeshlet` always trims to an empty
+> meshlet, regardless of how much real per-vertex/per-primitive data
+> `MeshOutputWrapperPass` itself correctly writes)
