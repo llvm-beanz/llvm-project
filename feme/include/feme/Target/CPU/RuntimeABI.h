@@ -1217,11 +1217,14 @@ struct FemeMeshArgs {
 /// `FemeMeshArgs`'s own comment gives.
 ///
 /// **Left open by roadmap H6c**, mirroring `FemeMeshArgs`'s own note:
-/// nothing yet writes to `Payload` from real compiled IR (SPIR-V's
-/// `TaskPayloadWorkgroupEXT` storage class has no address-space mapping at
-/// all yet, roadmap H6h, so there is no global variable pattern for a
-/// payload write to even target) or to `MeshGroupCount` (`EmitMeshTasksEXT`,
-/// left to roadmap H6d's "checked amplification dispatch queues").
+/// nothing yet writes to `MeshGroupCount` (`EmitMeshTasksEXT` has no
+/// canonicalized `feme.stage.*` form yet -- left to a future roadmap row).
+/// `Payload` is wired as of roadmap H6c-a-b: `feme::cpu::
+/// TaskPayloadWrapperPass` lowers a canonicalized `feme.stage.task.
+/// payload.store` (H6i) into a real store here, and
+/// `feme::graphics::Executor::executeDraws` backs this field with a live
+/// `feme::graphics::TaskPayloadBuilder` before invoking a compiled task
+/// stage.
 struct FemeTaskArgs {
   /// Identical in position and meaning to `FemeDispatchArgs::Resources`.
   FemeShaderResources Resources;
@@ -1240,8 +1243,10 @@ struct FemeTaskArgs {
   /// Reserved 32-bit field to keep pointer fields naturally aligned.
   uint32_t Reserved32;
   /// This workgroup's payload storage, `MaxPayloadBytes` bytes, written by
-  /// (once wired) a canonicalized `TaskPayloadWorkgroupEXT` store and read
-  /// back by every mesh workgroup `EmitMeshTasksEXT` dispatches.
+  /// a canonicalized `TaskPayloadWorkgroupEXT` store
+  /// (`feme::cpu::TaskPayloadWrapperPass`, roadmap H6c-a-b) and read back
+  /// by every mesh workgroup `EmitMeshTasksEXT` dispatches (once that
+  /// dispatch itself is canonicalized -- see the struct's own comment).
   void *Payload;
   /// Written once by this workgroup's own `EmitMeshTasksEXT` call: the mesh
   /// workgroup group count it requests. Zero-initialized by the caller;
