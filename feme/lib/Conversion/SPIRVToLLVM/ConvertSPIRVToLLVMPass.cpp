@@ -10,6 +10,7 @@
 
 #include "feme/Core/ShaderStage.h"
 #include "feme/Graphics/Geometry.h"
+#include "feme/Graphics/Mesh.h"
 #include "feme/Graphics/Tessellation.h"
 
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
@@ -112,6 +113,17 @@ struct EntryPointInfo {
   /// (`GeometryState::Invocations`'s own comment) when a geometry entry
   /// point's module never declares it explicitly.
   uint32_t GeometryInvocations = 1;
+  /// (Roadmap H6a) A mesh entry point's declared shape: its output
+  /// topology (SPIR-V's `OutputPoints`/`OutputLinesEXT`/
+  /// `OutputTrianglesEXT` execution modes -- `OutputPoints` shared, at the
+  /// SPIR-V enumerant level, with a geometry entry's own point-output
+  /// mode), maximum emitted vertex count (`OutputVertices` -- shared with
+  /// both a hull entry's output control point count and a geometry
+  /// entry's own maximum emitted vertex count) and maximum emitted
+  /// primitive count (`OutputPrimitivesEXT`).
+  std::optional<feme::graphics::MeshOutputTopology> MeshTopology;
+  std::optional<uint32_t> MeshMaxOutputVertices;
+  std::optional<uint32_t> MeshMaxOutputPrimitives;
   /// The bit widths (16/32/64) `VK_KHR_shader_float_controls`'s
   /// `RoundingModeRTZ` execution mode was declared for (roadmap F15a): each
   /// arithmetic FP op conversion pattern of that width in this entry point
@@ -255,6 +267,19 @@ std::string formatGeometryOutputPrimitive(
   llvm_unreachable("unhandled GeometryOutputPrimitive");
 }
 
+std::string
+formatMeshOutputTopology(feme::graphics::MeshOutputTopology Topology) {
+  switch (Topology) {
+  case feme::graphics::MeshOutputTopology::Points:
+    return "points";
+  case feme::graphics::MeshOutputTopology::Lines:
+    return "lines";
+  case feme::graphics::MeshOutputTopology::Triangles:
+    return "triangles";
+  }
+  llvm_unreachable("unhandled MeshOutputTopology");
+}
+
 /// Returns whether \p Func's body contains an arithmetic FP op
 /// (`spirv.FAdd`/`FSub`/`FMul`/`FDiv`/`FRem`) carrying an `fp_rounding_mode`
 /// decoration (`VK_KHR_shader_float_controls2`'s per-instruction
@@ -369,14 +394,18 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
           feme::graphics::TessOutputPrimitive::TriangleCcw;
       break;
     case mlir::spirv::ExecutionMode::OutputVertices:
-      // (Roadmap H5a) Shared, at the SPIR-V enumerant level, between a
-      // hull entry's output control point count and a geometry entry's
-      // maximum emitted vertex count; `Stage` disambiguates, exactly as
-      // for `Triangles` above.
+      // (Roadmap H5a/H6a) Shared, at the SPIR-V enumerant level, between a
+      // hull entry's output control point count, a geometry entry's
+      // maximum emitted vertex count and a mesh entry's own maximum
+      // emitted vertex count; `Stage` disambiguates, exactly as for
+      // `Triangles` above.
       assert(Mode.getValues().size() == 1 &&
              "verified OutputVertices has one literal operand");
       if (It->second.Stage == feme::ShaderStage::Geometry)
         It->second.GeometryMaxOutputVertices = static_cast<uint32_t>(
+            mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
+      else if (It->second.Stage == feme::ShaderStage::Mesh)
+        It->second.MeshMaxOutputVertices = static_cast<uint32_t>(
             mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
       else
         It->second.TessOutputControlPointCount = static_cast<uint32_t>(
@@ -397,8 +426,15 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
           feme::graphics::GeometryInputPrimitive::TrianglesAdjacency;
       break;
     case mlir::spirv::ExecutionMode::OutputPoints:
-      It->second.GeometryOutput =
-          feme::graphics::GeometryOutputPrimitive::Points;
+      // (Roadmap H6a) Shared, at the SPIR-V enumerant level, between a
+      // geometry entry's own point-output mode and a mesh entry's output
+      // topology; `Stage` disambiguates, exactly as for `OutputVertices`
+      // above.
+      if (It->second.Stage == feme::ShaderStage::Mesh)
+        It->second.MeshTopology = feme::graphics::MeshOutputTopology::Points;
+      else
+        It->second.GeometryOutput =
+            feme::graphics::GeometryOutputPrimitive::Points;
       break;
     case mlir::spirv::ExecutionMode::OutputLineStrip:
       It->second.GeometryOutput =
@@ -407,6 +443,18 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
     case mlir::spirv::ExecutionMode::OutputTriangleStrip:
       It->second.GeometryOutput =
           feme::graphics::GeometryOutputPrimitive::TriangleStrip;
+      break;
+    case mlir::spirv::ExecutionMode::OutputLinesEXT:
+      It->second.MeshTopology = feme::graphics::MeshOutputTopology::Lines;
+      break;
+    case mlir::spirv::ExecutionMode::OutputTrianglesEXT:
+      It->second.MeshTopology = feme::graphics::MeshOutputTopology::Triangles;
+      break;
+    case mlir::spirv::ExecutionMode::OutputPrimitivesEXT:
+      assert(Mode.getValues().size() == 1 &&
+             "verified OutputPrimitivesEXT has one literal operand");
+      It->second.MeshMaxOutputPrimitives = static_cast<uint32_t>(
+          mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
       break;
     case mlir::spirv::ExecutionMode::Invocations:
       assert(Mode.getValues().size() == 1 &&
@@ -563,6 +611,23 @@ void applyEntryPointAttributes(
       addPassthroughAttribute(Func,
                               feme::graphics::getGeometryInvocationsAttrName(),
                               std::to_string(It->second.GeometryInvocations));
+    }
+    // (Roadmap H6a) A mesh entry point's output topology, maximum
+    // emitted vertex count and maximum emitted primitive count always
+    // arrive together -- the SPIR-V spec requires exactly one of each per
+    // mesh entry point -- so `feme::graphics::getMeshState` can rely on
+    // seeing all three or none.
+    if (It->second.MeshTopology && It->second.MeshMaxOutputVertices &&
+        It->second.MeshMaxOutputPrimitives) {
+      addPassthroughAttribute(
+          Func, feme::graphics::getMeshOutputTopologyAttrName(),
+          formatMeshOutputTopology(*It->second.MeshTopology));
+      addPassthroughAttribute(
+          Func, feme::graphics::getMeshMaxOutputVerticesAttrName(),
+          std::to_string(*It->second.MeshMaxOutputVertices));
+      addPassthroughAttribute(
+          Func, feme::graphics::getMeshMaxOutputPrimitivesAttrName(),
+          std::to_string(*It->second.MeshMaxOutputPrimitives));
     }
     // A function containing any `llvm.experimental.constrained.*` intrinsic
     // call -- which `FloatControlArithmeticPattern`
