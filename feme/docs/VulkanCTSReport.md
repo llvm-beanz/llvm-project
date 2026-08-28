@@ -10576,3 +10576,114 @@ VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   deqp-vk --deqp-caselist-file=draw_sample.txt \
     --deqp-log-filename=draw_h6c_a_a_ii.qpa
 ```
+
+## Roadmap H6c-a-a-iii: measured impact (fix `resolveOffsetWithinElement`'s arrayed-builtin-block crash)
+
+**Root cause, confirmed by reverting the fix and re-running the new
+test.** `resolveOffsetWithinElement` reaches a multi-`ElementID` builtin
+interface block (`IDs.size() != 1`) two ways: `resolveStageIOAccess`'s
+`getDynamicVertexIndexedAccess` path -- which always peels one array
+dimension into a per-vertex/per-primitive `ElemTy` before calling in, so
+`ElemTy` is always a plain struct there -- and its own ordinary
+constant-offset fallback, which does *not* peel that dimension for
+`Output`-storage globals (`isPerVertexArrayInputGlobal` is deliberately
+`Input`-only, per H6b's own comment on why a constant `Output`-array
+index must not be folded into `Vertex` the same way). A **constant**-
+indexed access into a mesh entry's arrayed `Output` builtin block (e.g.
+`gl_MeshPrimitivesEXT[1].gl_PrimitiveID = ...`, exactly the shape a real
+unrolled GLSL-compiled per-primitive write takes) therefore lands in
+that fallback with `ElemTy` still the whole array-of-struct, not a
+struct -- hitting `cast<StructType>` head-on. Confirmed directly:
+reverting just the `dyn_cast`/`cast` change below and re-running the new
+`CanonicalizeStageTest.cpp` case reproduces the assertion failure
+(aborting the whole test binary), immediately.
+
+**The fix.** `resolveOffsetWithinElement` now returns
+`std::optional<StageIOAccess>` instead of `StageIOAccess`, and its
+`IDs.size() != 1` branch uses `dyn_cast<StructType>` instead of
+`cast<StructType>`, returning `std::nullopt` when `ElemTy` is not a
+struct -- the same "leave this access unrewritten, `ValidateStagePass`
+diagnoses it later" treatment every other unmodeled shape in this file
+already gets (`UnresolvableLoadInputIsLeftAlone`'s own precedent). No
+call-site change was needed beyond the signature update:
+`resolveStageIOAccess` (the function's only caller) already returns
+`std::optional<StageIOAccess>` itself, and both of its own call sites
+(`return resolveOffsetWithinElement(...)`) already forward the result
+directly.
+
+**New test.** `CanonicalizeStageTest.cpp`'s
+`ConstantIndexIntoArrayedBuiltinInterfaceBlockIsLeftUnrewritten`: a
+multi-`ElementID` builtin interface block (`!feme.spirv.MemberDecorations`,
+2 members) declared as an array of that struct (address space 8,
+mirroring `gl_MeshPrimitivesEXT[]`'s own shape), stored into through a
+constant array index (`getelementptr ... i32 0, i32 1, i32 0`) -- the
+exact shape that used to crash. Confirms the store is left as a raw,
+unrewritten `StoreInst` (no `feme.stage.output.store` call) after the
+fix, and (by reverting the fix, above) that it crashed before.
+
+`ninja check-feme` (assertions-enabled, ccache build):
+
+```
+Total Discovered Tests: 2009
+  Unsupported:   59 (2.94%)
+  Passed     : 1950 (97.06%)
+```
+
+**2009/2009** discovered, **1950** passing (59 pre-existing, unrelated
+`Unsupported`, 0 `Failed`), up from H6c-a-a-ii's own 2008/1949 baseline
+by exactly the 1 new test this row adds.
+
+**`dEQP-VK.mesh_shader.*`'s own 28044-case group**, a real full re-run
+using the identical resume-loop methodology H6c-a-a-i/H6c-a-a-ii's own
+entries established (this time completing in a single iteration, with an
+empty blacklist -- **0 crashes**):
+
+```
+Result counts: {'Fail': 337, 'NotSupported': 27706, 'Pass': 1}
+Blacklisted (crashed): 0
+```
+
+`Passed` stays byte-identical at 1/28044. `Failed` rises from H6c-a-a-ii's
+own baseline of 328 to **337** -- exactly the 9 cases H6c-a-a-ii's own
+report found still crashing (`cull_primitives`,
+`draw_index_in_{mesh,task}`, `local_invocation_{id,index}_in_task`,
+`position`, `primitive_id_glsl`, `work_group_id_in_{mesh,task}`), now
+resolving as a clean `Fail (retcode: VK_ERROR_INITIALIZATION_FAILED at
+vkPipelineConstructionUtil.cpp:176)` instead of aborting the whole
+process. `NotSupported` stays byte-identical at 27706/28044. **0
+`Pass`/`Fail` regressions** -- exactly the milestone's own "same
+failing-case set, just a worse failure mode" framing, now resolved back
+to the better mode: a `deqp-vk` run (or a fuzzer) no longer loses any
+case past one of these 9, and no resume-loop workaround is needed for
+this group any more.
+
+**`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample**
+stays byte-identical to every prior row's own recorded totals:
+
+```
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+**0 regressions** (expected: this fix only changes what happens when an
+unmodeled shape is *reached*, not any already-modeled one
+`dEQP-VK.draw.*` exercises).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this row changes no advertised feature bit or extension,
+only a robustness fix to existing CPU-side canonicalization.
+
+**Reproducing this row.** Same ICD build as the rest of this report. The
+full group can now be run in one `deqp-vk` invocation without losing any
+case, no resume loop required any more:
+
+```shell
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.mesh_shader.*" --deqp-runmode=txt-caselist
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=dEQP-VK-cases.txt --deqp-log-filename=mesh_h6c_a_a_iii.qpa
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-filename=draw_h6c_a_a_iii.qpa
+```
