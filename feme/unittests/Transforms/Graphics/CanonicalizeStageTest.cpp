@@ -996,6 +996,58 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenStores, 1u);
 }
 
+/// (Roadmap H6c-a-a-iii) A multi-`ElementID` builtin interface block
+/// whose own value type is an arrayed `StructType` (a mesh entry's own
+/// `PerPrimitiveEXT`/`PerVertexEXT`-decorated block, e.g.
+/// `gl_MeshPrimitivesEXT[]`), accessed through a *constant* array index
+/// rather than `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore`'s
+/// dynamic one: unlike a dynamic index, a constant one does not go
+/// through `getDynamicVertexIndexedAccess` at all (that helper explicitly
+/// rejects a constant index, deferring to the ordinary constant-offset
+/// path), and unlike `Input`'s own per-vertex array
+/// (`isPerVertexArrayInputGlobal`, roadmap H5f), a constant `Output`-array
+/// index is deliberately *not* folded into `Vertex` either (roadmap H6b, to
+/// avoid misrouting a real matrix output's own constant row index) -- so this
+/// shape reaches `resolveOffsetWithinElement` with the whole array-of-struct
+/// (`GV->getValueType()`) as `ElemTy` and more than one `ElementID`,
+/// previously asserting via `cast<StructType>` (a shape that could not be
+/// reached before H6c-a-a-i made `SetMeshOutputsEXT` conversion succeed,
+/// since every case exercising it failed earlier at SPIR-V-to-LLVM
+/// conversion). Confirms the fixed function now gracefully leaves this
+/// store unrewritten instead of crashing the whole process.
+TEST(CanonicalizeStageTest,
+     ConstantIndexIntoArrayedBuiltinInterfaceBlockIsLeftUnrewritten) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_mesh_prims = external addrspace(8) global [4 x { i32, i32 }], !feme.spirv.MemberDecorations !10
+    define void @main(i32 %v) #0 {
+      %p = getelementptr inbounds [4 x { i32, i32 }], ptr addrspace(8) @gl_mesh_prims, i32 0, i32 1, i32 0
+      store i32 %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !10 = !{!11, !12}
+    !11 = !{i32 0, !13}
+    !12 = !{i32 1, !14}
+    !13 = !{!15}
+    !15 = !{i32 11, i32 7}
+    !14 = !{!16}
+    !16 = !{i32 5271}
+  )");
+  ASSERT_TRUE(M);
+  run(*M);
+  Function *F = M->getFunction("main");
+
+  bool SawRawStore = false;
+  for (Instruction &I : instructions(F)) {
+    if (isa<StoreInst>(&I))
+      SawRawStore = true;
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI));
+  }
+  EXPECT_TRUE(SawRawStore);
+}
+
 /// (Roadmap C8) glslang wraps a `varying`-block *member* -- even a matrix
 /// one -- in an outer single-member struct at the SPIR-V level
 /// (`dEQP-VK.glsl.linkage.varying.struct.*`'s own shape: a `mat4x2` member
