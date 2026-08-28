@@ -949,5 +949,111 @@ TEST(SIMDizeTest, DecomposesVectorComparisonIntoPerLaneSelectCondition) {
   EXPECT_EQ(SelectCount, 4u);
 }
 
+TEST(SIMDizeTest, DecomposesVectorComparisonIntoReduceAnd) {
+  // Roadmap H6g-b-a-i-a-i-b: a `llvm.vector.reduce.and` call folding a
+  // divergent, per-lane-decomposed `fcmp`'s components together is a
+  // supported consumer shape -- the shape glslang's `all(lessThanEqual(...))`
+  // GLSL builtin takes over a component-wise vector comparison (see
+  // `isSupportedVectorReduceIntrinsic`/`widenVectorReduce` in SIMDize.cpp,
+  // and `simdize-vector-reduce.ll`).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %a0 = insertelement <4 x float> poison, float %tidf, i32 0
+      %b0 = insertelement <4 x float> poison, float 1.000000e+00, i32 0
+      %cond = fcmp ole <4 x float> %a0, %b0
+      %all = call i1 @llvm.vector.reduce.and.v4i1(<4 x i1> %cond)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i1 @llvm.vector.reduce.and.v4i1(<4 x i1>)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned FCmpCount = 0;
+  unsigned AndCount = 0;
+  for (Instruction &I : instructions(F)) {
+    // Never build an illegal vector-of-vector type.
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (isa<FCmpInst>(&I))
+      ++FCmpCount;
+    // The reduce call's own result folds back down to a lane-wise
+    // `<W x i1>` scalar-shaped value, not a vector: a plain `and`
+    // `BinaryOperator` combining the decomposed components pairwise, not
+    // another `llvm.vector.reduce.*` call.
+    if (auto *BO = dyn_cast<BinaryOperator>(&I))
+      if (BO->getOpcode() == Instruction::And &&
+          BO->getType() == FixedVectorType::get(Type::getInt1Ty(Ctx), 4))
+        ++AndCount;
+    if (auto *RCI = dyn_cast<CallInst>(&I)) {
+      Function *Callee = RCI->getCalledFunction();
+      EXPECT_FALSE(Callee &&
+                   Callee->getIntrinsicID() == Intrinsic::vector_reduce_and);
+    }
+  }
+  EXPECT_EQ(FCmpCount, 4u);
+  EXPECT_EQ(AndCount, 3u);
+}
+
+TEST(SIMDizeTest, DecomposesHomogeneousVectorizableIntrinsicCall) {
+  // Roadmap H6g-b-a-i-a-i-b: `llvm.maxnum` (and `llvm.minnum`/`llvm.smin`/
+  // `llvm.smax`/...) over an already-decomposed divergent vector operand --
+  // the shape a GLSL `min`/`max`/`clamp` builtin over a vec-typed value
+  // takes -- is the shape that actually dominates this row's own cited
+  // `dEQP-VK.mesh_shader.ext.in_out.*` bucket once the row's own initial
+  // `fcmp`/`icmp`/`select` fix lets those cases progress far enough to
+  // reach it (see `simdize-vector-intrinsic.ll` and `agent_thoughts.md`).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %va = insertelement <4 x float> poison, float %tidf, i32 0
+      %vb = insertelement <4 x float> poison, float 1.000000e+00, i32 0
+      %clamped = call <4 x float> @llvm.maxnum.v4f32(<4 x float> %va, <4 x float> %vb)
+      %e0 = extractelement <4 x float> %clamped, i32 0
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare <4 x float> @llvm.maxnum.v4f32(<4 x float>, <4 x float>)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned MaxNumCount = 0;
+  for (Instruction &I : instructions(F)) {
+    // Never build an illegal vector-of-vector type.
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    Function *Callee = CI->getCalledFunction();
+    if (Callee && Callee->getIntrinsicID() == Intrinsic::maxnum) {
+      // Each per-component call keeps the widened `<W x float>` overload,
+      // not a scalar `float` one: "vectors become components, not nested
+      // vectors" widens each original vector *lane* into a whole
+      // `<W x elemT>` component, it does not scalarize per-SIMD-lane.
+      EXPECT_EQ(CI->getType(), FixedVectorType::get(Type::getFloatTy(Ctx), 4));
+      ++MaxNumCount;
+    }
+  }
+  EXPECT_EQ(MaxNumCount, 4u);
+}
+
 } // namespace
 
