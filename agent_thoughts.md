@@ -41968,3 +41968,198 @@ every prior row in this chain.
 no change needed -- this is a pure MLIR SPIR-V dialect
 deserialization/serialization fix, touching no `feme`-advertised
 feature bit or extension surface at all.
+
+# H6g-b-a-i: Vulkan array-stride correctness in `VulkanLayoutUtils`/`ConvertSPIRVToLLVMPass`
+
+Task: complete roadmap row `H6g-b-a-i`, whose own ask was to isolate
+which `spirv.AccessChain` shape MLIR's SPIRVToLLVM conversion patterns
+don't cover -- specifically a per-primitive-block member access
+through a `PerPrimitiveEXT`-decorated pointer (given the row's own
+prerequisite, `H6g-b-a`), or something broader -- and decide whether
+the fix belongs in a new/extended conversion pattern or a
+legalization-target adjustment. It was the dominant single cause (80
+of 218 cases) blocking `H6g-b-a`'s own re-run bucket.
+
+**Investigation approach: reproduce for real, don't theorize.** Given
+this row's own explicit "root cause not yet isolated" framing and two
+plausible hypotheses (mesh-specific `PerPrimitiveEXT` access vs.
+something broader), the only reliable way to tell them apart was to
+reproduce the actual failure with the real toolchain rather than guess
+from the roadmap text alone. Found the prior session's build
+(`/home/dev/dev/llvm-project/build`, Release + assertions + ccache via
+compiler-launcher) and CTS checkout/run artifacts
+(`VK-GL-CTS/run/resume_run.py`, `mesh_h6g_b_a_*.qpa`) already in place,
+and the exact 218-case bucket recoverable by parsing those `.qpa` logs
+for cases whose result block mentions `vkRefUtil.cpp:37`.
+
+**First rerun attempt was silently wrong.** Ran the 218-case list with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` and got 218/218 **Pass** --
+immediately suspicious, since this bucket is supposed to be 100%
+failing by construction. Root cause: the shell's default
+`VK_ICD_FILENAMES` pointed at `/usr/share/vulkan/icd.d/lvp_icd.json`
+(Mesa lavapipe), not feme's own driver, so the whole run silently
+exercised a completely different (and, for these purposes, irrelevant)
+Vulkan implementation. Re-ran with
+`VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json`
+explicitly set and got the real 218/218 **Fail**, with a legalization
+error breakdown of 80 `spirv.AccessChain` / 11 `spirv.MemoryBarrier` /
+4 `spirv.AtomicExchange` / 1 `spirv.EXT.EmitMeshTasks` / 1 `spirv.Any`
+/ 1 `spirv.All` -- the 80 figure matches this row's own cited count
+exactly, confirming the real bucket. Worth remembering for any future
+row: always double-check `VK_ICD_FILENAMES` explicitly before trusting
+a CTS re-run's pass/fail counts.
+
+**Root cause: not `PerPrimitiveEXT`-specific at all.** Pulled a full
+`spirv.AccessChain` diagnostic and looked at the base pointer type
+directly rather than guessing: a `StorageBuffer`/`Block`-decorated
+struct with dozens of members, many `!spirv.array<4 x vector<3xf32>,
+stride=16>` (and similar vec2/vec4 array shapes) -- an ordinary CTS
+vertex-attribute SSBO (positions/normals/texcoords), not mesh-specific
+content in any way. This immediately ruled out the
+`PerPrimitiveEXT`-specific hypothesis and pointed at something broader
+in ordinary array/struct conversion. Read `convertArrayType` in
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`: it validates a
+declared `ArrayStride` against `cast<spirv::SPIRVType>(elementType)
+.getSizeInBytes()`, the element's *compact* size -- 12 bytes for
+`vector<3xf32>`. But the Vulkan spec's std430/std140 rules define an
+array's stride as a multiple of its element's *base alignment*, not
+its compact size, and a 3-component vector's base alignment is rounded
+up to that of a 4-component one (16 bytes) specifically because
+3-component vectors are otherwise awkward to pack -- so every real
+SPIR-V producer (glslang included) emits `ArrayStride=16` for
+`array<N x vec3<f32>>`, and this compact-size check was spuriously
+rejecting every one of them.
+
+Double-checked this wasn't just a convenient-sounding theory: built a
+tiny standalone reproduction (`!spirv.array<4 x vector<3xf32>,
+stride=16>` alone, no struct) and confirmed via `mlir-opt
+-convert-spirv-to-llvm` that it really does fail today, and that
+`mlir::DataLayout`'s own vector-size computation
+(`getDefaultTypeSizeInBits` in `DataLayoutInterfaces.cpp`) already
+rounds a vector's innermost dimension up to the next power of 2 before
+computing bits -- meaning a genuine, unpadded
+`!llvm.array<N x vector<3xf32>>`'s real per-element size in LLVM's own
+data layout is already 16 bytes, so rejecting the SPIR-V array as
+"unnatural" was actively wrong, not merely conservative.
+
+**A second, independent copy of the same bug.** While tracing every
+caller of the relevant size/stride logic, found
+`VulkanLayoutUtils::decorateType(spirv::ArrayType, Size&, Size&)` in
+`mlir/lib/Dialect/SPIRV/Utils/LayoutUtils.cpp` has an analogous flaw:
+it computes the canonical `ArrayStride` it assigns an undecorated array
+as the raw `elementSize` (unrounded), not
+`alignTo(elementSize, elementAlignment)`. This function backs
+`SPIRVCompositeTypeLayoutPass` (which emits real `ArrayStride`
+decorations into SPIR-V -- meaning it has likely been emitting
+too-small strides for vec3 arrays for as long as it's existed) and
+`convertStructTypeWithOffset`'s own struct-identity check (not used by
+`feme`, which has its own struct converter for an unrelated,
+already-documented reason, but a real, independent consumer of the
+same shared utility nonetheless). Fixing only `convertArrayType` and
+leaving this second copy of the bug in place would have left a latent,
+still-broken sibling path -- decided to fix both, since they are the
+same root defect (using compact size instead of base-alignment-rounded
+size) in two places, not two unrelated bugs.
+
+**The fix, in three small pieces.** (1) Added
+`VulkanLayoutUtils::getNaturalArrayStride(Type elementType)`, a small
+new public helper that reuses the existing private
+`decorateType(Type, Size&, Size&)` overload to compute the element's
+size and alignment, then returns `alignTo(size, alignment)`. (2)
+Wired it into `convertArrayType`'s stride-validity check in place of
+the raw `SPIRVType::getSizeInBytes()` call. (3) Fixed
+`VulkanLayoutUtils::decorateType(spirv::ArrayType, ...)` itself to
+compute its own stride the same way. While implementing (3), found
+*another* bug one line below the stride fix: the function's own `size`
+out-parameter (the array's total byte size, used to place whatever
+struct member follows it) was still computed as
+`elementSize * numElements` -- the *unrounded* compact size times the
+element count -- rather than `stride * numElements`. Caught this via a
+lit test I wrote for exactly this (a struct with an undecorated
+`array<4xvector<3xf32>>` member followed by an `f32`): first attempt
+after only fixing the stride field showed the correct `stride=16` on
+the array itself, but the trailing `f32` was still offset at 48
+(`12 * 4`) instead of the correct 64 (`16 * 4`) -- a `FileCheck`
+mismatch that caught a real, would-have-shipped-broken bug before it
+reached any consumer. Fixed by computing `size` from the corrected
+`stride`, not the raw `elementSize`.
+
+**Testing.** Four new test cases, one per affected file/consumer,
+matching the existing style/conventions of each:
+`mlir/test/Conversion/SPIRVToLLVM/spirv-types-to-llvm.mlir`
+(`array_with_natural_vector3_stride`, positive case),
+`spirv-types-to-llvm-invalid.mlir`
+(`array_with_unnatural_vector3_stride`, `stride=12` for the same
+element still correctly rejected -- guards against the fix becoming
+overly permissive, not just fixing the one shape it needs to),
+`mlir/test/Dialect/SPIRV/Transforms/layout-decoration.mlir` (the
+struct-offset case above, which is what caught the second `size`
+bug), and `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-storage-buffer.mlir`
+(`read_vec3_array_element`, the actual real-world shape --
+a `StorageBuffer` block with a fixed-size vec3-array member --
+converting all the way through feme's own resource-handle conversion
+path, mirroring the file's existing `rtarray`-based cases). Ran
+`ninja check-mlir-target-spirv check-mlir-dialect-spirv
+check-mlir-conversion-spirvtollvm`: all passing, 0 regressions (lit
+counts test *files*, not `RUN`-split cases within them, so discovered
+totals don't change even though new cases were added to existing
+files). Also ran the standalone `MLIRSPIRVToLLVMTests` gtest binary
+directly (3/3, unaffected -- unrelated sampled-image tests). `ninja
+check-feme` (assertions-enabled, ccache build): unchanged at
+1950/2009 passing (59 pre-existing `Unsupported`, 0 `Failed`), same
+reasoning (new `RUN`-split case in an existing file).
+
+**Open question resolved (scoped out, not ignored).** Manually
+checked whether plain upstream `mlir-opt -convert-spirv-to-llvm`'s own
+`convertStructTypeWithOffset` path (distinct from `feme`'s own struct
+converter) now also accepts a `Block`-decorated struct with a vec3
+array member, since `VulkanLayoutUtils::decorateType(StructType)` is
+what that path's own struct-identity check calls, and it now
+(transitively, via the array fix) computes a self-consistent layout.
+Found it still rejects the struct -- but for an entirely separate,
+pre-existing reason already documented in
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`'s own
+comment on `convertOffsetStructTypeIgnoringDecorations`: MLIR's
+`convertStructTypeWithOffset` re-derives a struct's "canonical" layout
+via `decorateType` and compares it to the original, which spuriously
+fails for any `Block`-decorated struct because `decorateType` doesn't
+re-attach the `Block` decoration itself to the type it returns for
+comparison -- a different, already-known, already-worked-around gap
+that predates this row and is exactly why `feme` has its own struct
+converter in the first place. Confirmed this is genuinely unrelated to
+today's fix (not something today's fix should have also closed) and
+left it alone, out of this row's own scope.
+
+**CTS re-run.** Reused `resume_run.py` and re-ran the exact 218-case
+bucket through feme's real ICD with diagnostics on. Confirmed the fix
+directly: **0** `spirv.AccessChain` legalization failures (down from
+80), with the newly-progressing 80 cases landing squarely in a new
+dominant cause, `spirv.All` failing to legalize (81 of 218, up from a
+pre-existing 1) -- a clean single-cause hand-off, consistent with this
+milestone's established pattern. Added new roadmap row `H6g-b-a-i-a`
+for it rather than chasing it as part of this same change (out of
+this row's own stated scope, same "one row per newly-discovered
+dominant cause" discipline every prior row in this chain has used).
+Re-ran the 1957-case `draw_sample.txt` regression sample: byte-
+identical to every prior row (14/153/1790), 0 regressions, as expected
+since this fix only makes previously over-rejected, spec-conformant
+SPIR-V accepted -- it never changes behavior for SPIR-V this sample
+already exercised successfully.
+
+Updated the roadmap: `H6g-b-a-i` struck through (its own literal ask
+-- isolate and fix the root cause -- is done, and confirmed broader
+than the row's own two named hypotheses: neither
+`PerPrimitiveEXT`-specific nor an isolated missing pattern, but a
+general Vulkan-layout correctness bug affecting any 3-/4-component
+vector array), the `H6` milestone summary updated to reference the new
+blocker instead of the old one, and new row `H6g-b-a-i-a` added for
+the freshly surfaced `spirv.All` legalization gap. Also updated
+`Design.md`'s existing "std140 uniform buffer array" deviation entry,
+which had claimed the pre-fix `convertArrayType` stride check was
+"always true for a std430 storage buffer array" -- true for scalars
+and 2-/4-component vectors, but false for 3-component ones, so that
+claim needed correcting alongside adding a new deviation entry for
+this fix itself. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+confirmed no change needed -- this is a pure MLIR SPIR-V
+layout/type-conversion correctness fix, touching no `feme`-advertised
+feature bit or extension surface at all.
