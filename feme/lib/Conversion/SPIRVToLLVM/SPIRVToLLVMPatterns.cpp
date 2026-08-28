@@ -2089,6 +2089,58 @@ public:
   }
 };
 
+/// Declares (or finds) the `feme.stage.set_mesh_outputs` function: `(i32
+/// vertex_count, i32 primitive_count) -> void`, matching
+/// `feme::StageOpKind::SetMeshOutputs`'s shape (StageOps.h) -- an ordinary
+/// named call, not overloaded (both operands are always `i32`, mirroring
+/// `getOrInsertStreamOpFunc`'s own single-name-no-mangling convention for
+/// `StreamEmit`/`StreamCut`), so \p Module gets at most one declaration of
+/// it.
+mlir::LLVM::LLVMFuncOp
+getOrInsertSetMeshOutputsFunc(mlir::ConversionPatternRewriter &Rewriter,
+                              mlir::ModuleOp Module) {
+  constexpr llvm::StringLiteral Name = "feme.stage.set_mesh_outputs";
+  if (auto Existing = Module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
+    return Existing;
+  mlir::OpBuilder::InsertionGuard Guard(Rewriter);
+  Rewriter.setInsertionPointToStart(Module.getBody());
+  auto FuncTy = mlir::LLVM::LLVMFunctionType::get(
+      mlir::LLVM::LLVMVoidType::get(Rewriter.getContext()),
+      {Rewriter.getI32Type(), Rewriter.getI32Type()});
+  return mlir::LLVM::LLVMFuncOp::create(Rewriter, Module.getLoc(), Name, FuncTy,
+                                        mlir::LLVM::Linkage::External);
+}
+
+/// Converts `spirv.SetMeshOutputsEXT` (roadmap H6c-a-a-i) into a call to
+/// `feme.stage.set_mesh_outputs(vertexCount, primitiveCount)`, the same
+/// "route straight into a `feme.stage.*` intrinsic rather than a bespoke
+/// LLVM IR shape" treatment `EmitVertexConversionPattern`/
+/// `EndPrimitiveConversionPattern` above already give the geometry stage's
+/// own no-signature-element ops. `feme::cpu::MeshOutputWrapperPass`
+/// (MeshOutputWrapper.cpp) is what actually lowers the resulting call, into
+/// `FemeMeshArgs::ActualVertexCount`/`ActualPrimitiveCount`. Not a
+/// terminator -- like `EmitVertex`/`EndPrimitive`, this op is simply erased
+/// in place once its call is emitted.
+class SetMeshOutputsEXTConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::EXTSetMeshOutputsOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::EXTSetMeshOutputsOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::EXTSetMeshOutputsOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Location Loc = Op.getLoc();
+    mlir::LLVM::LLVMFuncOp Callee = getOrInsertSetMeshOutputsFunc(
+        Rewriter, Op->getParentOfType<mlir::ModuleOp>());
+    mlir::LLVM::CallOp::create(Rewriter, Loc, Callee,
+                               mlir::ValueRange{Adaptor.getVertexCount(),
+                                                Adaptor.getPrimitiveCount()});
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 /// Converts a `spirv.ImageFetch` with the `Lod` image operand (optionally
 /// combined with the discarded `Nontemporal` bit, see `hasImageOperands`
 /// above) into the `llvm.spv.resource.load.level` intrinsic call, mirroring
@@ -3385,11 +3437,11 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       RotateConversionPattern, SampledImagePattern, SDotConversionPattern,
       UDotConversionPattern, SUDotConversionPattern,
       SDotAccSatConversionPattern, UDotAccSatConversionPattern,
-      SUDotAccSatConversionPattern, SpecConstantErasurePattern,
-      StageIOGlobalVariablePattern, SwitchConversionPattern,
-      TaskPayloadGlobalVariablePattern, TerminateInvocationConversionPattern,
-      WorkgroupGlobalVariablePattern>(Patterns.getContext(), TypeConverter,
-                                      FeMeBenefit);
+      SUDotAccSatConversionPattern, SetMeshOutputsEXTConversionPattern,
+      SpecConstantErasurePattern, StageIOGlobalVariablePattern,
+      SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
+      TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
                ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
