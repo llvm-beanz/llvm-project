@@ -9069,3 +9069,157 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 
 and, for the draw regression sample, the same invocation H4a's own report
 entry documents.
+
+## Roadmap H6: what H6b found, and why it stops here
+
+Investigating H6b's full stated scope (lift `CanonicalizeStagePass::run`'s
+stage filter to accept `ShaderStage::Mesh`/`ShaderStage::Amplification`,
+plus canonicalize both a mesh entry's bounded per-vertex/per-primitive
+output-array writes *and* a task entry's bounded payload write) before
+writing any code, mirroring H5a's own investigation, found this milestone
+is not a mechanical repeat of H5b/H5c's own geometry precedent -- it hits
+**two** real blockers, one of them a genuine regression trap rather than a
+missing-producer gap like H5b's:
+
+1. **A mesh entry's `Output`-array write is the store-side mirror of
+   H5b's `Input`-array read, but `Output` storage already has a real,
+   legitimate constant-index use that `Input` does not.**
+   `getDynamicVertexIndexedAccess`/`isPerVertexArrayInputGlobal` (the
+   machinery H5b built and H5f extended) is `Input`-only (address space
+   7): a mesh entry's own `gl_MeshVerticesEXT[]`/`gl_MeshPrimitivesEXT[]`
+   writes to an `Output`-storage-class array (address space 8) instead,
+   and hit exactly `getDynamicVertexIndexedAccess`'s own "not recognized"
+   fallback the same way `gl_in[i]` did before H5b. The tempting fix --
+   simply widening `isPerVertexArrayInputGlobal`/H5f's constant-index-fold
+   path to accept address space 8 too, mirroring H5b/H5f verbatim -- was
+   tried first, and it **regressed a pre-existing, real test**:
+   `RewritesSPIRVArrayOutputStorePerElementByteOffset`. Unlike `Input`
+   (whose own matrix loads, `RewritesSPIRVMatrixInputLoadOneRowAtATime`,
+   always load the *whole* array in one instruction and let
+   `loadStageIOValue`'s own recursion decompose it), `Output` storage
+   already has legitimate, tested, production **constant**-per-row
+   `getelementptr` access patterns for an ordinary matrix output written
+   one row at a time. Folding a constant `Output`-array index into
+   `Vertex` (as H5f safely does for `Input`) silently misroutes that real
+   matrix row index away from `Row`, corrupting genuine non-mesh output
+   canonicalization. The fix landed instead: `isPerVertexArrayInputGlobal`
+   (and the things that key off it -- `RowCountIsVertexArray`, the
+   constant-offset-fold path in `resolveStageIOAccess`) stay strictly
+   `Input`-only, and a new, narrower `isDynamicIndexedArrayGlobal` helper
+   (address space 7 *or* 8) is introduced and used *only* by
+   `getDynamicVertexIndexedAccess`'s genuinely-non-constant-index
+   recognition -- since a real shader's own constant array/matrix index is
+   essentially always compile-time-folded already, a non-constant index is
+   safe to treat generically as a per-vertex/per-primitive write regardless
+   of storage class, without touching the constant-index path at all.
+   Landing this also surfaced a second, independent latent bug: the
+   store-rewrite loop in `canonicalizeSPIRVStage` had never threaded
+   `StageIOAccess::Vertex` through to `storeStageIOBlockValue` at all --
+   it always passed a constant `Zero`, unlike the load path's own
+   `Access->Vertex ? Access->Vertex : Zero` -- so store-side dynamic
+   vertex/primitive indexing was dead code until this row's own new tests
+   exercised it for the first time and caught it.
+
+2. **A task entry's payload write cannot be canonicalized at all today,
+   because it cannot even be *imported* as an LLVM global.**
+   `TaskPayloadWorkgroupEXT` (SPIR-V storage class enum 5402) has **no
+   address-space mapping whatsoever** in LLVM's own SPIR-V backend
+   (`storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h`
+   hits its `default: report_fatal_error(...)` case) -- unlike
+   `Input`(7)/`Output`(8)/`Workgroup`(3)/`PushConstant`(13), which FeMe's
+   own `StageIOGlobalVariablePattern`/`WorkgroupGlobalVariablePattern`/
+   `PushConstantGlobalVariablePattern`
+   (`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`) already
+   reuse straight from that fixed mapping. This is a genuine upstream gap,
+   not something any of FeMe's own passes introduced, and it sits at the
+   SPIRVToLLVM conversion layer entirely outside `CanonicalizeStage.cpp`'s
+   file scope: before `canonicalizeSPIRVStage` has anything to
+   canonicalize a payload write *into*, a task entry's payload variable
+   needs its own address-space convention and a new
+   `TaskPayloadGlobalVariablePattern` (mirroring the two precedents named
+   above) so it can be imported as an LLVM global at all.
+
+Per this codebase's stated preference for a real, tested fix over a
+mechanical port that happens to also (silently) regress something else,
+H6b lands only the safely-generalizable half of its stated scope: the
+mesh `Output`-array dynamic-index machinery (finding 1, above, entirely
+within `CanonicalizeStage.cpp`/`ValidateStage.cpp`). It does **not** touch
+task payload import (finding 2, broken out as roadmap H6h, a
+SPIRVToLLVM-layer prerequisite), and it does **not** lift
+`CanonicalizeStagePass::run`'s stage filter to accept
+`ShaderStage::Mesh`/`ShaderStage::Amplification` (broken out as roadmap
+H6i, which depends on both this row and H6h) -- mirroring how H5b built
+geometry's own per-vertex machinery before H5c actually flipped the
+filter, rather than flipping it early and risking the same kind of silent
+wrong-output class of bug H5's own investigation (above) warned against.
+
+## Roadmap H6b: measured impact (mesh `Output`-array dynamic vertex/primitive indexing)
+
+**Still 0/0/28044 on `dEQP-VK.mesh_shader.*`, and that is the correct,
+expected result** -- `CanonicalizeStagePass::run`'s stage filter is
+deliberately *not* lifted by this row (see above), so no mesh or task
+entry is routed through `canonicalizeSPIRVStage` yet; this row's new
+machinery is exercised only by its own new unit tests (which, mirroring
+`ThreadsDynamicVertexIndexIntoInputLoad`'s own H5b precedent, deliberately
+tag their test module `"feme.shader.stage"="vertex"` rather than
+`"mesh"`, since Mesh is not in the real filter to route through yet
+either):
+
+```
+Test run totals:
+  Passed:        0/28044 (0.0%)
+  Failed:        0/28044 (0.0%)
+  Not supported: 28044/28044 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: `VK_EXT_mesh_shader` stays absent, and this row advertises
+nothing new.
+
+**Regression sample.** This row's only new/changed code paths are gated
+behind `getDynamicVertexIndexedAccess` recognizing a genuinely
+non-constant index into an `Output`-storage-class array (address space
+8) -- a shape that, per finding 1 above, real non-mesh `Output` writes
+never take (they use a constant per-row index, handled by an entirely
+separate, untouched path) -- plus the store-rewrite loop's now-correct
+`Vertex` threading, which only changes behavior when `Access->Vertex` is
+non-null (previously impossible for any stage this codebase's own
+`canonicalizeSPIRVStage` callers reach). `dEQP-VK.draw.*`'s 1957-case
+`draw_sample.txt` sample, same file every prior row's own report used:
+
+```
+Before (H6a's own baseline):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical to H6a's own recorded totals. **0 regressions, 0 new
+passes.**
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1881/1940** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6a's own **1879/1938** baseline by exactly the 2 net
+new tests this row adds to `CanonicalizeStageTest.cpp`
+(`ThreadsDynamicVertexIndexIntoOutputStore`,
+`ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore` -- a third
+candidate test, asserting a constant `Output`-array index also folds into
+`Vertex`, was written, found to encode finding 1's own now-rejected
+design, and deleted rather than landed).
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6b.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6b.qpa
+```
