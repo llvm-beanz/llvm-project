@@ -39256,3 +39256,113 @@ that was simply too narrow.
    new "Roadmap H5e-c: measured impact" section, `FeMeVulkanDesign.md`'s
    new status note, `FeMeGraphicsDesign.md`'s new paragraph.
 4. This entry.
+
+# Milestone H5e-d: `GeometryWrapperPass` missing-signature bucket
+
+## Reading the row
+
+H5e-d's own text: 6 `dEQP-VK.geometry.emit.*_emit_0_end_1` cases fail with
+`feme-cpu-wrap-geometry: geometry stage wrapper requires attached
+feme.signature metadata`, newly exposed by H5e-a. Flagged as likely
+`CanonicalizeStagePass` or SPIR-V import, not `GeometryWrapperPass`'s own
+lowering. Root cause not yet isolated.
+
+## Investigation
+
+Built `check-feme` first to confirm the starting baseline matched H5e-c's
+own report exactly: 1870/1929. Read `GeometryWrapper.cpp`'s
+`lowerGeometryStageOps` to see exactly what triggers the error: it scans
+for any stage op (`isStageOpCall`/`isMaskedOutputStoreCall`/
+`isMaskedStreamEmitCall`/`isMaskedStreamCutCall`), and if any are present
+at all, hard-requires `feme::dxil::getEntrySignature(F)` to be non-`nullopt`
+-- erroring out otherwise rather than tolerating an absent signature the
+way ordinary `loadInput`/`storeOutput` resolution does elsewhere.
+
+Read the CTS source (`vktGeometryEmitGeometryShaderTests.cpp`) to
+understand what an `emit_0_end_1`-shaped shader's IR actually looks like:
+`EmitTest::shaderGeometry` generates its `gl_in[]`-reading, `gl_Position`-
+writing loop body exactly `emitCountA` times in the shader source, so
+`emitCountA == 0` means that loop contributes *zero* lines -- the whole
+shader body is just a few `EndPrimitive()` calls (already lowered to
+`feme.stage.stream.cut` by roadmap H5e-a's own `SPIRVToLLVMPatterns` fix)
+and no gl_in/gl_Position/varying access whatsoever.
+
+This immediately reminded me of roadmap H4g's own bug shape (a stage-IO-
+free entry never gets `!feme.signature` attached at all) -- and sure
+enough, `canonicalizeSPIRVStage`'s signature-building branch
+(`CanonicalizeStage.cpp`) is still scoped to `if (!InputGlobals.empty() ||
+!OutputGlobals.empty())`, exactly the same guard H4g's own investigation
+flagged. For a `emitCountA == 0` geometry entry, both vectors are empty,
+so `dxil::setEntrySignature` is never called and `GeometryWrapperPass`
+finds nothing.
+
+The key question was whether to fix this the same way H4g did (at
+`CompiledStage::create`'s serialization boundary) or directly in
+`canonicalizeSPIRVStage` itself. H4g's own report explains it tried the
+latter first and reverted it, specifically because `canonicalizeSPIRVStage`
+runs on `Vertex`/`Fragment` entries too (per `CanonicalizeStagePass::run`'s
+own dispatch, alongside `canonicalizeDXILStage`), and cannot tell a
+genuinely-empty SPIR-V entry apart from an unresolved DXIL-origin one
+using only its own local view -- unconditionally attaching an empty
+signature there broke `CanonicalizeStageTest.
+UnresolvableLoadInputIsLeftAlone`'s DXIL-origin fragment entry, which
+relies on staying signature-less.
+
+But `GeometryWrapperPass` is a *function-level* metadata consumer
+(`feme::dxil::getEntrySignature(F)` on the raw `Function`, not a
+`CompiledStage`-level artifact), so H4g's own chosen fix layer
+(`CompiledStage::create`) doesn't help here at all -- the metadata itself
+has to exist on `F` by the time `GeometryWrapperPass` runs, well before any
+`CompiledStage` is built. Checked `CanonicalizeStagePass::run`'s dispatch
+again: `Geometry` is *never* routed through `canonicalizeDXILStage`, only
+through `canonicalizeSPIRVStage` -- so the DXIL-origin ambiguity H4g's own
+reverted attempt ran into simply does not exist for this one stage. That
+made the fix safe to land exactly where H4g's first instinct wanted to,
+just scoped narrowly enough to avoid the case that sank it there.
+
+Added a new `else if (Stage == ShaderStage::Geometry)` branch attaching an
+explicit empty `EntrySignature` whenever the existing branch doesn't fire.
+Confirmed via `lowerGeometryStageOps`'s own code that an empty signature is
+*correct*, not just tolerated, for this shape: it only ever looks an
+`ElementID` up in `Sig` for an actual input-load/output-store/stream-emit
+call, none of which an `EndPrimitive`-only shader has.
+
+Added `CanonicalizeStageTest.GeometryStreamCutOnlyEntryStillGetsASignature`
+(a geometry entry with only a bare `feme.stage.stream.cut` call and no
+stage-IO globals, confirming it now gets an attached, empty
+`!feme.signature`) and reran the pre-existing `UnresolvableLoadInputIsLeft
+Alone`/`GeometryStageMapsSystemValues` tests to confirm both the DXIL-
+ambiguity case this fix is scoped away from, and the ordinary geometry
+signature-building path, stayed untouched.
+
+Ran `ninja check-feme`: 1871/1930, up from H5e-c's own 1870/1929 by
+exactly the 1 new unit test.
+
+Ran a real `deqp-vk` pass against `dEQP-VK.geometry.emit.*emit_0_end_1*`
+(against `libfeme_vulkan.so`, rebuilt via the `feme_vulkan` ninja target):
+all 3 cases matching that literal name now pass (up from 0/3). A full
+`dEQP-VK.geometry.*` re-run (200 cases) found 6 new passes, not 3: the fix
+applies to *any* `emitCountA == 0` shape, so the `_emit_0_end_2` siblings
+(calling `EndPrimitive()` twice instead of once) flip too -- rising to
+10/200 pass (up from H5e-c's own 4/200), 157/200 fail (down from 163),
+33/200 not-supported (unchanged). `emit_0_end_0`'s own 3 cases were
+already fixed by roadmap H5e-b (a separate `vkCreateGraphicsPipelines`-time
+fix), accounting for the 4-case baseline. Zero
+`feme-cpu-wrap-geometry: ... requires attached feme.signature metadata`
+errors remain anywhere in the group. The `dEQP-VK.draw.*` 1957-case
+regression sample (`draw_sample.txt`) is byte-identical to H5e-c's own
+baseline (12/155/1790) -- 0 regressions, since no case in that sample
+exercises a geometry stage.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this is a pure reflection/metadata-attachment fix, touching
+no feature bit or extension.
+
+## Commits
+
+1. `CanonicalizeStage.cpp`'s new `Geometry`-scoped empty-signature-
+   attachment branch, plus `CanonicalizeStageTest.
+   GeometryStreamCutOnlyEntryStillGetsASignature`.
+2. Docs: `Roadmap.md`'s H5e-d row struck through, `VulkanCTSReport.md`'s
+   new "Roadmap H5e-d: measured impact" section.
+3. This entry.
