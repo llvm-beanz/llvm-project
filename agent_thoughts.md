@@ -41860,3 +41860,111 @@ asked for when a milestone can't actually be closed.
 no change needed (`VK_EXT_mesh_shader` was already `Advertised` since
 H6f; this fix is pure pipeline-validation robustness, no feature bit
 or extension surface changed).
+
+# H6g-b-a: `PerPrimitiveEXT` decoration deserialization gap
+
+Task: complete roadmap row `H6g-b-a`, whose whole point was to isolate
+*where* the "unhandled Decoration : 'PerPrimitiveEXT'" error actually
+comes from -- upstream MLIR's SPIR-V dialect, or some `feme`-local
+import shim sitting on top of it -- and fix it, since it was the
+dominant single cause (202 of 232 cases) blocking H6g-b's own
+235-case `vkCreateGraphicsPipelines` bucket.
+
+**Investigation.** Grepped `feme/` for anything shimming SPIR-V
+decoration import: nothing found -- `feme` consumes
+`mlir::spirv::Deserializer`/`ConvertSPIRVToLLVMPass` as-is, no local
+override of decoration handling. So the question reduced to: does
+upstream MLIR's `Deserializer.cpp` actually handle `PerPrimitiveEXT`?
+Read `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`'s
+`processDecoration`: a hand-written switch (its own comment admits
+it "should also be auto-generated") that groups all zero-operand
+"unit attribute" decorations (`Flat`, `NoPerspective`, `Patch`,
+`Coherent`, etc.) into one `case` block, falling through to a
+`default: return emitError(..., "unhandled Decoration : '") <<
+decorationName;` for anything not explicitly listed. `PerPrimitiveEXT`
+is defined in `SPIRVBase.td`'s `Decoration` enum (value 5271, gated on
+`SPV_EXT_mesh_shader`/`MeshShadingEXT`) but was simply never added to
+that unit-attribute case list -- confirmed this is the exact bug: a
+plain upstream MLIR omission, not anything `feme`-specific. Per the
+SPIR-V spec, `PerPrimitiveEXT` itself takes no operands, so it
+genuinely belongs in that same group as `Patch` et al.
+
+**The fix.** Added `spirv::Decoration::PerPrimitiveEXT` to
+`Deserializer.cpp`'s unit-attribute case group. Checked the
+serializer side too (`Serializer.cpp`) for symmetry and found the
+identical gap there (its own matching case-group list, used for the
+MLIR -> SPIR-V direction), plus a second, more subtle miss: the
+serializer's `getDecorationName` helper reconstructs a decoration's
+SPIR-V enum name from its MLIR attribute's `snake_case` spelling via
+`llvm::convertToCamelFromSnakeCase`, which cannot recover an all-caps
+acronym suffix -- exactly the same problem `fp_fast_math_mode`/
+`cache_control_load_intel` already needed explicit overrides for. Used
+a small standalone C++ snippet linked against the existing
+`libLLVMSupport.a` to confirm `convertToSnakeFromCamelCase` mangles
+`"PerPrimitiveEXT"` to `"per_primitive_ext"`, then added the matching
+reverse override (`per_primitive_ext` -> `"PerPrimitiveEXT"`) next to
+the existing `INTEL`-suffix ones, following the exact same pattern.
+
+**Testing.** Added a new split to the existing
+`mlir/test/Target/SPIRV/mesh-ops.mlir` (a `PerPrimitiveEXT`-decorated
+`GlobalVariable` in a `MeshShadingEXT` module), reusing the file's
+existing `--test-spirv-roundtrip` and (where available)
+`--serialize-spirv`/`spirv-val` `RUN` lines rather than writing new
+test infrastructure -- this exercises both the deserializer and
+serializer fixes together, plus real SPIR-V binary validation via
+`spirv-val`. Iterated once: first attempt round-tripped through MLIR's
+in-memory `--test-spirv-roundtrip` path fine after the deserializer
+fix alone, but real `--serialize-spirv` failed with a *different*
+error ("non-argument attributes expected to have snake-case-ified
+decoration name, unhandled attribute with name : per_primitive_ext"),
+which is what led to finding the `getDecorationName` reverse-mapping
+gap on the serializer side. `ninja check-mlir-target-spirv` (58/58,
++1 new) and `check-mlir-dialect-spirv` (52/52) both pass; `ninja
+check-feme` stays byte-identical to `H6g-b`'s own baseline
+(1950/2009, 0 `Failed`), as expected for a pure upstream-MLIR change.
+
+**CTS re-run.** Wrote `VK-GL-CTS/run/resume_run.py`, a small
+resume-loop harness (parses each `.qpa` log for
+`#beginTestCaseResult`/`#endTestCaseResult` pairs to detect where
+`deqp-vk` aborted mid-case, blacklists that case, and resumes with the
+remaining case list) since no such script was checked into the CTS
+checkout and this row's own predecessor rows clearly used one. Ran the
+full 28044-case `dEQP-VK.mesh_shader.*` suite:
+`{'Fail': 323, 'NotSupported': 27706, 'Pass': 1}`, 14 blacklisted
+(crashed) cases, up from `H6g-b`'s own recorded 3. Re-ran exactly the
+original 232-case `vkRefUtil.cpp:37` bucket with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` and confirmed **zero** remaining
+`"unhandled Decoration"` occurrences -- this row's own named bug is
+fully and directly confirmed fixed. Traced where the 202 previously
+`PerPrimitiveEXT`-blocked cases ended up: 3 progress past pipeline
+creation to a new failure point entirely (a real forward-progress
+signal), 11 now reach far enough to hit `H6g-b-b`'s own already-known
+`FunctionWidener::widenMaskedStore` assertion (confirmed via `gdb`
+backtrace on `barrier_in_task` -- identical stack to `H6g-b-b`'s
+originally-reported 3 cases, so this doesn't need a new roadmap row,
+just an updated crash count on the existing one), and the remaining
+188 (plus the 30 `H6g-b` already called out-of-scope) now fail for
+further, more varied downstream reasons. A follow-up diagnostic re-run
+of that resulting 218-case bucket found the new single dominant cause
+is `ConvertSPIRVToLLVMPass` failing to legalize `spirv.AccessChain`
+(80 of 218 cases) -- added as new roadmap row `H6g-b-a-i`, since it's
+now the next real blocker in the same "single dominant cause" pattern
+this row itself was tracking, rather than trying to root-cause and fix
+it as part of this same change (out of this row's own stated scope).
+Also re-ran the 1957-case `draw_sample.txt` regression sample:
+byte-identical to every prior row (14/153/1790), 0 regressions, as
+expected since this fix only touches a mesh-shading-only SPIR-V
+decoration.
+
+Updated the roadmap: `H6g-b-a` struck through (its own literal ask --
+isolate and fix the root cause -- is done), `H6g-b-b`'s text updated
+in place to record its crash count growing from 3 to 14 as a direct,
+expected consequence, and new row `H6g-b-a-i` added for the freshly
+surfaced `spirv.AccessChain` legalization gap. Milestone `H6` itself
+stays open (not struck through), same honest non-closure pattern as
+every prior row in this chain.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+no change needed -- this is a pure MLIR SPIR-V dialect
+deserialization/serialization fix, touching no `feme`-advertised
+feature bit or extension surface at all.
