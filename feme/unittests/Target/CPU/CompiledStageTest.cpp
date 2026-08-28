@@ -1150,6 +1150,51 @@ TEST(CompiledStageTest, InvokeMeshWritesPerVertexOutputStore) {
   EXPECT_EQ(VertexOutputs, (std::vector<float>{-1.0f, -1.0f, 2.0f, -1.0f}));
 }
 
+// Roadmap H6c-a-a-i: a mesh entry's own canonicalized
+// `feme.stage.set_mesh_outputs` -- the form SPIR-V's `SetMeshOutputsEXT`
+// converts directly into at the MLIR conversion level
+// (`SetMeshOutputsEXTConversionPattern`, SPIRVToLLVMPatterns.cpp) -- reaches
+// `MeshOutputWrapperPass`'s new lowering and lands in `FemeMeshArgs::
+// ActualVertexCount`/`ActualPrimitiveCount`: the real counts
+// `feme::graphics::MeshOutputBuilder::assembleMeshlet` (H6d) trims a
+// meshlet's own vertex/primitive arrays down to, instead of always reading
+// 0 (the gap H6c-a-a's own closing re-run discovered).
+constexpr char MeshSetOutputsShaderIR[] = R"(
+  define void @ms_main() #0 {
+    call void @feme.stage.set_mesh_outputs(i32 3, i32 1)
+    ret void
+  }
+  declare void @feme.stage.set_mesh_outputs(i32, i32)
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+TEST(CompiledStageTest, InvokeMeshWritesSetMeshOutputs) {
+  Context Ctx;
+  EntrySignature Sig;
+
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      compileMeshStage(Ctx, MeshSetOutputsShaderIR, "ms_main", Sig);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Mesh);
+
+  uint32_t ActualVertexCount = 0xFFFFFFFFu;
+  uint32_t ActualPrimitiveCount = 0xFFFFFFFFu;
+
+  MeshResources Resources;
+  Resources.GroupID = {0, 0, 0};
+  Resources.GroupCount = {1, 1, 1};
+  Resources.MaxOutputVertices = 64;
+  Resources.MaxOutputPrimitives = 126;
+  Resources.ActualVertexCount = &ActualVertexCount;
+  Resources.ActualPrimitiveCount = &ActualPrimitiveCount;
+  PreparedMeshBatch Prepared =
+      PreparedMeshBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeMesh(Prepared), Succeeded());
+  EXPECT_EQ(ActualVertexCount, 3u);
+  EXPECT_EQ(ActualPrimitiveCount, 1u);
+}
+
 TEST(CompiledStageTest, InvokeTaskReusesComputeGroupSharedAndBarrierLowering) {
   Context Ctx;
   Expected<std::unique_ptr<CompiledStage>> Stage = compileStage(
