@@ -11295,3 +11295,157 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   deqp-vk --deqp-caselist-file=draw_sample.txt \
     --deqp-log-filename=draw_h6g_b_a_i_a.qpa
 ```
+
+## Roadmap H6g-b-a-i-a-i: measured impact (lower direct struct-typed `StorageBuffer` field/array accesses in `SPIRVResourceLoweringPass`)
+
+**Starting point.** H6g-b-a-i-a's own diagnostic re-run of the exact
+218-case `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket found a
+new dominant single cause: 82 cases hit
+`feme::cpu::UnsupportedOps`'s register-bound-resource-handle rejection,
+up from a pre-existing, already-out-of-scope 1 once H6g-b-a-i-a's own
+`spirv.All`/`spirv.Any` fix let the other 81 cases progress far enough
+to reach `feme-cpu`'s resource-handle normalization. This row's own ask
+was to isolate which resource-declaration/use shape the CPU target still
+failed to normalize, and whether the fix belonged in
+`UnsupportedOps`/`RootConstantLowering` or earlier.
+
+**Root cause.** The rejection was only the reporter. The real gap lived
+in `feme::cpu::SPIRVResourceLoweringPass`'s all-or-nothing
+`collectHandles`/`hasOnlySupportedUses` classification. Importing one of
+the real failing fragment shaders from the bucket (a glslang-generated
+`layout(set=0,binding=*) std430 readonly buffer { ... }` block with
+many fixed-size array members) showed that
+`ConvertSPIRVToLLVMPass` had already lowered each SPIR-V
+`AccessChain` into exactly:
+
+1. a `llvm.spv.resource.handlefrombinding` for a struct-typed
+   `spirv.VulkanBuffer` in SPIR-V storage class `StorageBuffer` (12),
+2. a `llvm.spv.resource.getpointer` selecting a **constant struct field**,
+   then
+3. an ordinary LLVM `getelementptr` chain indexing within that field's
+   fixed-size array/vector content before the final load.
+
+`SPIRVResourceLowering.cpp` only accepted a flat direct load/store user
+of the `getpointer` result. Any further GEP into the selected field made
+the pass reject that handle, and because the pass is all-or-nothing per
+function, one such use left every bound resource in the same function
+untouched to be rejected later by `UnsupportedOps`. The fix therefore
+belongs in `SPIRVResourceLoweringPass` itself, not in the later
+`UnsupportedOps`/`RootConstantLowering` reporters.
+
+**Fix.** `SPIRVResourceLowering.cpp` now recognizes direct
+struct-typed `spirv.VulkanBuffer` handles in SPIR-V
+`StorageBuffer` class as their own kind (distinct from the pre-existing
+uniform/root-constant struct path), validates ordinary constant/affine
+LLVM `getelementptr` chains rooted at their
+`llvm.spv.resource.getpointer` result, and lowers those GEP chains
+recursively by folding the computed byte offset into the existing raw
+resource byte offset before calling the already-existing
+`feme.cpu.resource.load.raw.*` / `store.raw.*` helpers. The negative
+shape this row intentionally leaves unsupported -- a **dynamic top-level
+field selector** on a direct storage block -- still stays rejected.
+
+**Tests.** New `SPIRVResourceLoweringTest.cpp` coverage:
+
+- `LowersDirectStorageBlockFieldAndNestedArrayAccessToResourceLoad`
+- `LowersStructuredStorageBufferFieldAccessToFieldOffset`
+- `LeavesDirectStorageBlockDynamicFieldSelectorUnchanged`
+
+and the existing lit regression
+`feme/test/Transforms/CPU/spirv-resource-lowering-unsupported.ll`
+updated so its `field_access` case now checks for the lowered raw
+resource load while the still-unsupported image/sampler and unbounded
+descriptor-array cases remain untouched.
+
+```
+ninja check-feme (assertions-enabled, ccache build):
+Total Discovered Tests: 2012
+  Unsupported:   59 (2.93%)
+  Passed     : 1953 (97.07%)
+
+Targeted follow-up:
+  FeMeTransformsCPUTests / SPIRVResourceLoweringTest:
+    3/3 new row-specific tests passing
+  FEME :: Transforms/CPU/spirv-resource-lowering-unsupported.ll:
+    1/1 passing after updating the existing expectation
+```
+
+The discovered-test total rises from H6g-b-a-i-a's 2009 to 2012 by
+exactly the 3 new `SPIRVResourceLoweringTest` cases this row adds; the
+lit file remains a single discovered test.
+
+**A real ICD re-run of the exact 218-case `vkRefUtil.cpp:37` bucket**
+confirms the named blocker is cleared almost completely. H6g-b-a-i-a's
+own 82 register-bound-handle rejections drop to **1** (the lone
+remainder is a pre-existing sampled-image/sampler combined-handle shape,
+already outside this row's storage-buffer scope), so the 81
+newly-unblocked storage-buffer cases all progress further. To make the
+hand-off explicit, I repeated the rerun with a single combined
+stdout/stderr log and classified each case by the **first** emitted
+FeMe/MLIR diagnostic when present:
+
+```
+| Count | First emitted FeMe/MLIR diagnostic after this row's fix |
+|---|---|
+| 148 | `feme-cpu-simdize` divergent-vector-value rejection (new dominant cause; tracked as H6g-b-a-i-a-i-a) |
+| 15 | `feme-cpu-wrap-mesh-output` metadata-missing rejection |
+| 13 | `feme-cpu-linearize` unsupported-control-flow-shape rejection |
+| 11 | `spirv.MemoryBarrier` legalization failure |
+| 11 | no FeMe/MLIR diagnostic emitted before failure / `deqp-vk`'s own Linux-only device-fault-test abort path |
+| 7  | specialization constants unsupported |
+| 5  | `Symbols not found` (already tracked as H6g-b-c) |
+| 4  | `spirv.AtomicExchange` legalization failure |
+| 2  | `feme-cpu-wrap-fragment` metadata-missing rejection |
+| 1  | `spirv.EXT.EmitMeshTasks` legalization failure |
+| 1  | remaining sampled-image/sampler `UnsupportedOps` rejection |
+```
+
+That table totals the full 218 cases. The key point for this row is the
+direct before/after on its own named cause:
+
+```
+register-bound resource-handle rejections: 82 -> 1
+```
+
+-- the same "fix one dominant blocker, expose the next" progression the
+earlier H6g-b-a-* rows already established.
+
+**`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample**
+stays byte-identical to H6g-b-a-i-a's own baseline:
+
+```
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+**0 regressions** -- and the per-case status map is identical to
+`draw_h6g_b_a_i_a.qpa`, not only the totals.
+
+`FeMeCPUDesign.md` needs no update: this is a completeness fix inside
+the design's already-documented resource-normalization model, not a new
+resource model. `Vulkan14FeatureInventory.md` and
+`VulkanExtensionInventory.md` also need no update: no advertised Vulkan
+feature bit or extension changed.
+
+**Milestone H6 does not close.** This row's own fix clears the dominant
+storage-buffer-handle blocker it named, but the same rerun surfaces a
+new dominant blocker in its place -- `feme-cpu-simdize` divergent vector
+values, tracked as new roadmap row H6g-b-a-i-a-i-a -- alongside the
+already-tracked H6g-b-b and H6g-b-c.
+
+**Reproducing this row.** Same ICD build and methodology as every prior
+mesh-shading row, run from `VK-GL-CTS/run` (relative shader-source
+resource paths require it):
+
+```shell
+cd /path/to/VK-GL-CTS/run
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  deqp-vk --deqp-caselist-file=<218-case-bucket>.txt \
+    --deqp-log-filename=diag_h6g_b_a_i_a_i.qpa \
+    > diag_h6g_b_a_i_a_i_combined.log 2>&1
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-filename=draw_h6g_b_a_i_a_i.qpa
+```
