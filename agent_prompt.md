@@ -33,9 +33,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H6?
+Can you work on milestone H6b?
 
-> **Mesh and task (amplification) shading**, `VK_EXT_mesh_shader`: G6's stage
-> model plus the Vulkan-side pipeline/draw entry points (`vkCmdDrawMeshTasks*`),
-> bounded payload/output limits reported truthfully, and the mesh path through
-> the same prepared-draw code. Whole `dEQP-VK.mesh_shader` group
+> **Lift `CanonicalizeStagePass::run`'s stage filter to accept
+> `ShaderStage::Mesh`/`ShaderStage::Amplification`**, plus canonicalize a mesh
+> entry's bounded per-vertex/per-primitive output-array writes (SPIR-V's
+> `PerVertexEXT`/`PerPrimitiveEXT`-decorated `Output` storage-class arrays) and
+> a task entry's bounded payload write (`TaskPayloadWorkgroupEXT` storage class)
+> into new `feme.stage.*` ops, mirroring how H5b/H5c found and closed geometry's
+> own per-vertex dynamic-index gap before lifting its filter. Investigate first,
+> the way H5's own investigation (see "Roadmap H5: what H5a found, and why it
+> stops here" in VulkanCTSReport.md) found real blockers before writing code --
+> do not assume this is a mechanical repeat of H5b/H5c
