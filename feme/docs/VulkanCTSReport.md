@@ -9299,3 +9299,72 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6c.qpa
 ```
+
+## Roadmap H6c-a: why this row could not land
+
+Investigating H6c-a's stated scope before writing any code (mirroring
+every prior row's own "investigate first" discipline) found it is not
+merely *incomplete* the way H6b was -- it has **no independently-landable
+content at all** yet. `feme::graphics::MeshOutputBuilder`/
+`TaskPayloadBuilder` (H6c) are bounded, tested, in-memory builders with
+no producer wired to them; H6c-a's own ask is to wire that producer in,
+but the producer does not exist:
+
+1. `feme/include/feme/Core/StageOps.h`'s `StageOpKind` enum (the
+   complete, closed vocabulary of every `feme.stage.*` operation this
+   codebase can canonicalize a SPIR-V/DXIL entry into) has no
+   mesh-output-store or task-payload-store enumerator at all -- confirmed
+   by reading the enum in full, not merely grepping for a name that might
+   not match. The nearest existing op, `OutputStore`, already covers
+   mesh's per-vertex/per-primitive `Output`-array writes (H6b's own
+   `Vertex`-operand generalization), so no new op is actually needed for
+   *mesh* output specifically; a task entry's payload write has no op of
+   any kind yet, new or old.
+2. `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` has no
+   `TaskPayloadGlobalVariablePattern` and no address-space convention for
+   `TaskPayloadWorkgroupEXT` (confirmed absent, matching H6b's own
+   finding 2) -- a task entry's payload variable still cannot be imported
+   as an LLVM global at all, so there is nothing for any canonicalization
+   pass to read a payload write's operands from.
+3. `CanonicalizeStagePass::run`'s stage filter (`CanonicalizeStage.cpp`)
+   still does not accept `ShaderStage::Mesh`/`Amplification` (confirmed
+   by reading the filter directly) -- even mesh output's own
+   already-existing `OutputStore` generalization (H6b) is never reached
+   for a real mesh entry today, since nothing routes a mesh module
+   through `canonicalizeSPIRVStage` at all yet.
+
+All three are exactly the prerequisites H6c-a's own dependency list
+already named (H6d, H6h, H6i); this investigation's value is confirming
+none of the three has landed since H6c wrote that list, rather than
+assuming so and mechanically attempting a wiring that has nothing to
+attach to. Unlike H6b, which found a real, independently-shippable fix
+inside a superficially-blocked scope, this row's stated scope truly has
+none: every code path `MeshOutputBuilder`/`TaskPayloadBuilder` would need
+to be wired into is either entirely unwritten (task payload's op and
+import pattern) or unreachable from any real entry point (mesh output's
+`OutputStore` generalization, gated behind the same stage filter).
+
+**A useful narrower finding, though: mesh output and task payload do not
+share the same blocker set.** Mesh output's canonicalization already
+exists (H6b); it is blocked only on H6d (so a mesh workgroup's emitted
+outputs become a consumable meshlet) and H6i (so a mesh entry is
+canonicalized at all) -- not on H6h, which is entirely about
+`TaskPayloadWorkgroupEXT` import and has no bearing on mesh output.
+Task payload needs all three, since H6i's own payload-canonicalization
+half cannot exist before H6h's import prerequisite does. H6c-a is split
+into H6c-a-a (mesh output, depends on H6d/H6i) and H6c-a-b (task payload,
+depends on H6d/H6h/H6i) in the Roadmap to track this distinction, rather
+than leaving one deceptively-monolithic row whose two halves actually
+unblock at different times.
+
+No code changes result from this investigation (there is nothing safe or
+correct to land yet, per the analysis above); `ninja check-feme`
+(`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) was re-run to confirm the
+tree is still at H6c's own recorded baseline, unaffected by a
+documentation-only change: **1897/1956** (59 pre-existing, unrelated
+`Unsupported`, 0 `Failed`), byte-identical to H6c's own totals. Since no
+product code changed, `dEQP-VK.mesh_shader.*` (still 0/0/28044) and the
+`dEQP-VK.draw.*` 1957-case regression sample are guaranteed unaffected
+and were not re-run; `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no change (`VK_EXT_mesh_shader` stays
+absent, nothing new is advertised).
