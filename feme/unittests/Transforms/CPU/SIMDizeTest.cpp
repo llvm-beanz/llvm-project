@@ -796,6 +796,73 @@ TEST(SIMDizeTest, RewritesGroupSharedMaskedStoreAtUniformAddress) {
   EXPECT_TRUE(FoundScatter);
 }
 
+// Roadmap H6g-b-a-i-a-i-a: a mesh entry point's own
+// `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)` write has no
+// canonicalized `feme.stage.*` op of its own to become a
+// `feme.cpu.resource.*`/masked-output-store call instead (see
+// MeshOutputWrapper.h's file comment), so it survives as an ordinary
+// `store` of a divergent vector value that `feme::cpu::LinearizePass`
+// masks into a `feme.cpu.masked.store.*` call exactly like a scalar one.
+// `checkVectorDecompositionSupported` must accept that call's stored-value
+// operand as a supported consumer of the decomposed vector (mirroring a
+// matched resource-store call's), and `FunctionWidener::widenMaskedStore`
+// must reassemble each lane's own vector from the decomposed components
+// rather than try to broadcast the whole vector into an illegal
+// `<W x <3 x i32>>` -- `llvm.masked.scatter` has no vector-of-vector-
+// element form to lower that to anyway, so each lane is written
+// individually, guarded by a load-select-store idiom.
+TEST(SIMDizeTest, DecomposesInsertElementChainIntoMaskedVectorStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %p) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %base = mul i32 %tid, 3
+      %e1 = add i32 %base, 1
+      %e2 = add i32 %base, 2
+      %cond = icmp eq i32 %tid, 0
+      br i1 %cond, label %t, label %f
+    t:
+      %off = zext i32 %tid to i64
+      %addr = getelementptr <3 x i32>, ptr %p, i64 %off
+      %v0 = insertelement <3 x i32> poison, i32 %base, i32 0
+      %v1 = insertelement <3 x i32> %v0, i32 %e1, i32 1
+      %v2 = insertelement <3 x i32> %v1, i32 %e2, i32 2
+      store <3 x i32> %v2, ptr %addr
+      br label %end
+    f:
+      br label %end
+    end:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Decomposition never builds an illegal `<4 x <3 x i32>>`, and each lane
+  // gets its own real `<3 x i32>` store, reassembled from the widened
+  // per-component values.
+  unsigned VectorStoreCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      if (SI->getValueOperand()->getType() ==
+          FixedVectorType::get(Type::getInt32Ty(Ctx), 3))
+        ++VectorStoreCount;
+  }
+  EXPECT_EQ(VectorStoreCount, 4u);
+}
+
 // A *nested* `getelementptr` (one level deeper than a single index --
 // e.g. a groupshared array of arrays) remains outside roadmap step R23's
 // scope and must still be diagnosed, not silently miscompiled.
