@@ -33,17 +33,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6g-b-a?
+Can you complete H6g-b-a-i?
 
-> **`ConvertSPIRVToLLVMPass`/the MLIR SPIR-V dialect deserializer rejects
-> `PerPrimitiveEXT` with `error: unhandled Decoration : 'PerPrimitiveEXT'`,
-> failing SPIR-V module deserialization outright** before `feme` ever sees the
-> module -- the single dominant cause found within H6g-b's own 235-case
-> `vkCreateGraphicsPipelines` bucket (202 of 232 cases still failing there hit
-> exactly this, per a diagnostic-logged re-run of that bucket alone), and a
-> prerequisite for any mesh entry with a real `PerPrimitiveEXT`-decorated
-> per-primitive output block (the same shape `H6c-a-a-iii`'s own fix already had
-> to reason about downstream, but never gets the chance to reach, since
-> deserialization fails first). Root cause not yet isolated (upstream MLIR
-> SPIR-V dialect decoration table, or a `feme`-local import shim over it -- not
-> yet determined which)
+> **`ConvertSPIRVToLLVMPass` fails to legalize `spirv.AccessChain` outright
+> ("failed to legalize operation 'spirv.AccessChain' that was explicitly marked
+> illegal")**, now the single dominant cause found within H6g-b-a's own
+> newly-shrunk 218-case `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket
+> (80 of 218 cases still failing there hit exactly this, per a diagnostic-logged
+> re-run of that bucket alone), and newly reachable only now that H6g-b-a's own
+> fix lets `PerPrimitiveEXT`-decorated per-primitive-block SPIR-V actually
+> deserialize far enough to reach legalization at all. Root cause not yet
+> isolated (which `spirv.AccessChain` shape the existing conversion patterns
+> don't cover -- a per-primitive-block member access through a
+> `PerPrimitiveEXT`-decorated pointer specifically, given this row's own
+> prerequisite, or something broader -- and whether the fix belongs in a
+> new/extended conversion pattern or a legalization-target adjustment)
