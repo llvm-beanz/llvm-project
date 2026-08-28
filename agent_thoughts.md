@@ -39985,3 +39985,111 @@ Landed as four separate commits: (1) `MeshOutputBuilder`/
 updates (Roadmap.md/FeMeGraphicsDesign.md/VulkanCTSReport.md). This
 `agent_thoughts.md` entry is committed separately, as its own final commit,
 per the standing instruction.
+
+# Session: Milestone H6c-a
+
+## Task
+
+Requested milestone: H6c-a, "Wire `MeshOutputBuilder`/`TaskPayloadBuilder`
+into real `feme.stage.*` mesh-output-store/task-payload-store operations
+reaching the reused `EntryWrapperPass` path, once those ops exist (H6d)
+and, for task payload specifically, once it can be imported from SPIR-V
+`TaskPayloadWorkgroupEXT` at all (H6h) and canonicalized (H6i)."
+
+## Investigation, before writing any code
+
+The row's own text already names three prerequisites -- H6d, H6h, H6i --
+none of which appear (from the Roadmap's own strikethrough convention) to
+have landed yet. Rather than assume the row's dependency list is stale
+(it was written by a prior session working H6c, and roadmap text can lag
+reality), I verified each directly against the current tree instead of
+trusting the prose:
+
+1. `feme/include/feme/Core/StageOps.h`'s `StageOpKind` enum -- the
+   complete, closed vocabulary of every `feme.stage.*` op this codebase
+   can canonicalize a SPIR-V/DXIL entry into (`InputLoad`, `OutputStore`,
+   `Discard`, `Demote`, `IsHelper`, four `Derivative*`, `QuadRead`, three
+   `Interpolate*`, `StreamEmit`, `StreamCut`, `SubpassLoad`) -- read in
+   full. No mesh-output-store or task-payload-store enumerator exists.
+   H6d (which is what would add such an op, or repurpose `OutputStore`
+   the way H6b already did for mesh) has not landed.
+2. Grepped `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` and
+   the whole tree for `TaskPayloadWorkgroupEXT`/`TaskPayloadGlobalVariablePattern`:
+   only found in `TaskPayload.h`'s own file comment (documenting the gap)
+   and the Roadmap/report prose describing it. No address-space
+   convention or import pattern exists. H6h has not landed.
+3. Re-read `CanonicalizeStagePass::run`'s stage filter in
+   `CanonicalizeStage.cpp`: still does not accept `ShaderStage::Mesh`/
+   `Amplification`. H6i has not landed.
+4. Confirmed `feme::graphics::MeshOutputBuilder`/`TaskPayloadBuilder`
+   (H6c, already landed) are exactly what their own Roadmap row describes:
+   bounded, tested, in-memory builders with zero production callers --
+   grepped every reference across `include/`/`lib/`/`unittests/` and found
+   only their own header/impl/test files, plus `RuntimeABI.h`/
+   `ResourceHeap.h`'s ABI plumbing (`FemeMeshArgs`/`FemeTaskArgs`,
+   `MeshResources`/`TaskResources`) that carries them but still never
+   invokes them from a real canonicalized op.
+
+**Conclusion: H6c-a has zero independently-landable content right now.**
+Every one of its three named prerequisites is still completely
+unimplemented, confirmed by direct inspection rather than by trusting the
+Roadmap's own dependency list at face value. This differs from H6b's own
+situation (investigated a seemingly-blocked row and found a real,
+independently-shippable fix inside it) -- here there is no such fix:
+`MeshOutputBuilder`/`TaskPayloadBuilder` have nothing to be wired *to*
+yet, since no canonicalized mesh-output-store/task-payload-store
+operation reaches any pass that could call them. Writing speculative
+wiring code against an op that doesn't exist, or a global-variable import
+pattern that doesn't exist, would not be a real implementation of this
+row -- it would be dead code guessing at an interface three other,
+larger, separately-tracked milestones (H6d/H6h/H6i) haven't defined yet,
+and would risk exactly the kind of silent-wrong-behavior trap this
+codebase's own stated preference (a real, tested fix over a mechanical
+port that happens to also regress or fabricate something) warns against.
+
+## What I did instead
+
+Did not force speculative code. Instead:
+
+1. Found and recorded one genuinely new, useful fact this investigation
+   surfaced beyond what H6c-a's own text already said: mesh output and
+   task payload do **not** actually share the same blocker set. Mesh
+   output's canonicalization already exists (H6b's `feme.stage.output.store`
+   `Vertex` operand); its wiring is blocked only on H6d (meshlet assembly
+   to consume it) and H6i (lifting the stage filter so a mesh entry is
+   canonicalized at all) -- it has no dependency on H6h at all, since mesh
+   output never touches `TaskPayloadWorkgroupEXT`. Task payload alone
+   needs all three (H6h before H6i can even canonicalize a payload write
+   into anything).
+2. Split the single H6c-a row into two narrower, independently-trackable
+   rows in `Roadmap.md`: **H6c-a-a** (mesh output wiring, depends on
+   H6d/H6i only) and **H6c-a-b** (task payload wiring, depends on
+   H6d/H6h/H6i), leaving H6c-a itself un-struck-through but annotated with
+   this investigation's findings and a pointer to the split, mirroring how
+   H5e-a's own re-triage spun off H5e-b through H5e-e for its own
+   still-unexplained buckets rather than leaving one row.
+3. Added a new "Roadmap H6c-a: why this row could not land" section to
+   `VulkanCTSReport.md`, mirroring the "Roadmap H6: what H6b found, and
+   why it stops here" section's own precedent, with the full investigation
+   writeup above.
+4. Did not touch `FeMeGraphicsDesign.md`'s G6 status paragraph -- re-read
+   it and confirmed it already accurately describes today's state (mesh
+   output/task payload builders exist but are "not yet wired to any real
+   `feme.stage.*` mesh-output-store/task-payload-store operation," and
+   names H6c-a as tracking exactly that gap), so no update was needed
+   there; the design doc was already correct before this session started.
+5. Re-ran `ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build)
+   to confirm the tree is unaffected by this documentation-only session:
+   1897/1956, byte-identical to H6c's own recorded baseline. Did not
+   re-run the Vulkan CTS mesh-shader/draw-sample suites, since no product
+   code changed at all this session and their result is therefore
+   guaranteed identical to H6c's own already-recorded totals -- re-running
+   them would only burn time confirming a result this investigation
+   already establishes analytically. `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md` need no update for the same reason.
+
+## Commits
+
+This session lands two commits: (1) the `Roadmap.md`/`VulkanCTSReport.md`
+documentation updates above, and (2) this `agent_thoughts.md` entry, per
+the standing instruction to commit it separately as the final commit.
