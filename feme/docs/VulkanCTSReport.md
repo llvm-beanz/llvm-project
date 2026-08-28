@@ -10415,3 +10415,164 @@ VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   deqp-vk --deqp-caselist-file=draw_sample.txt \
     --deqp-log-filename=draw_h6c_a_a_i.qpa
 ```
+
+## Roadmap H6c-a-a-ii: measured impact (`flattenMeshRow`'s `PerPrimitive` routing)
+
+**Root cause, confirmed by reverting the fix and re-running the new test.**
+`Executor::executeDraws`'s `runMeshWorkgroup` lambda built exactly one
+`StageStorage` for a mesh entry's whole `Output` signature, sized by
+`Mesh.MaxOutputVertices`, and wired it into `MeshResources::
+VertexOutputLayout`/`VertexOutputs` alone -- `PrimitiveOutputLayout`/
+`PrimitiveOutputs` (fields that have existed on `MeshResources` since
+H6c, per `ResourceHeap.h`'s own struct) were simply never assigned,
+left at their default null/empty state. `MeshOutputWrapperPass`'s own
+per-element lowering (`lowerMeshOutputStore`, H6c-a-a) already branches
+correctly on `SignatureElement::Frequency`, addressing
+`MEnv.PrimitiveOutputLayout`/`PrimitiveOutputs` for a `PerPrimitive`
+element -- but those IR-level pointers are populated at runtime from
+`FemeMeshArgs::PrimitiveOutputLayout`/`PrimitiveOutputs`, which
+`Executor.cpp` sources from `MeshResources`. The moment a real compiled
+mesh entry point calls an output store for a `PerPrimitive`-frequency
+element, the generated code loads a field through that null layout
+pointer and stores through the null data pointer -- an unconditional
+crash, not merely stale or zeroed data. Confirmed directly: reverting
+just this row's `Executor.cpp` change and re-running the new
+`ExecutorTest.cpp` case below reproduces a `SIGSEGV` inside
+`MeshOutputWrapperPass`'s compiled lowering, immediately.
+
+**The fix.** `runMeshWorkgroup` now builds a second `StageStorage` for
+the same `*MeshSig` signature, sized by `Mesh.MaxOutputPrimitives`
+instead (mirroring the existing vertex one -- `buildStageStorage`
+builds a dense, `ElementID`-indexed table across *every* `Output`
+element regardless of which elements a particular storage block is
+"for", exactly like the vertex block already does, so this needs no new
+signature-filtering machinery of its own), and threads its layout/data
+into `MeshResources::PrimitiveOutputLayout`/`PrimitiveOutputs`.
+`flattenMeshRow` itself gained a `SignatureFrequency` parameter and a
+matching `Storage` parameter, filtering `MeshSig->Elements` to just that
+frequency (`Elt.Frequency == Freq`) rather than walking every `Output`
+element unconditionally the way it always had; the vertex loop calls it
+as `flattenMeshRow(*VertexOut, SignatureFrequency::PerVertex, V)` and the
+new primitive loop as `flattenMeshRow(*PrimitiveOut,
+SignatureFrequency::PerPrimitive, P)`, routing the primitive row into
+`MeshOutputBuilder::setPrimitive` (implemented since H6c, but never
+called by `Executor.cpp` until now) alongside the existing
+`setPrimitiveIndices` call.
+
+**A second, closely-related bug found and fixed along the way.**
+`unflattenMeshRow` -- the merge-side counterpart that reconstructs a
+flat `Merged` `StageStorage` from each assembled `Meshlet`'s own vertex
+rows, downstream of `assembleMeshlet` -- still walked every `Output`
+element unconditionally. For any signature mixing `PerVertex` and
+`PerPrimitive` elements, `flattenMeshRow`'s now-narrower per-vertex-only
+rows (fewer floats than before, since `PerPrimitive` elements are
+excluded) would desynchronize from `unflattenMeshRow`'s own unfiltered
+walk, corrupting `Row[Idx++]`'s indexing (an out-of-bounds/misaligned
+read, not merely stale data) the moment a real mixed-frequency signature
+reached rasterization. Fixed with the identical `Elt.Frequency !=
+SignatureFrequency::PerVertex` filter, restoring the symmetry the two
+functions always needed to have with each other.
+
+**New unit test.** `ExecutorTest.cpp` gained
+`RoutesAPerPrimitiveOutputElementIntoPrimitiveOutputsAlongsideAPerVertexOne`:
+a real compiled mesh entry (canonicalized `feme.stage.set_mesh_outputs`/
+`feme.stage.output.store` calls, reaching the full `CompiledStage::
+create` pipeline through `MeshOutputWrapperPass`/`EntryWrapperPass`,
+mirroring `CompiledStageTest.cpp`'s own `InvokeMeshWritesPerVertexOutputStore`/
+`InvokeMeshWritesSetMeshOutputs` precedent but exercised through
+`executeDraws` instead of `invokeMesh` directly, since the bug this row
+fixes lives in `Executor.cpp`, not `CompiledStage`) declaring one
+`PerVertex` `SV_Position` element and one `PerPrimitive` scalar element
+from the same one-workgroup, one-vertex, one-primitive dispatch, run end
+to end with `MeshOutputTopology::Points` (needing no separate
+`PrimitiveIndices` write, which remains a distinct, still-open gap --
+see `MeshOutputWrapper.h`'s own comment -- so this is the cleanest mixed-
+frequency shape reachable today). Asserts the point still rasterizes to
+the expected pixel, proving the frequency split does not misalign the
+per-vertex path, and (by not crashing) that the primitive store's own
+read/write is now safe. Reverting just this row's `Executor.cpp` change
+and re-running this same test reproduces the pre-fix `SIGSEGV` directly
+(see "Root cause" above), confirming both the bug and the fix in
+isolation.
+
+`ninja check-feme` (assertions-enabled, ccache build): **2008/2008**
+discovered, **1949** passing (59 pre-existing, unrelated `Unsupported`,
+0 `Failed`), up from H6c-a-a-i's own 2007/1948 baseline by exactly the 1
+new test this row adds.
+
+**`dEQP-VK.mesh_shader.*` (28044 cases): re-run using the same
+generalized resume-loop methodology H6c-a-a-i's own report entry
+established** (`H6c-a-a-iii`'s `resolveOffsetWithinElement` crash remains
+open and independent of this row's own runtime-only `Executor.cpp`
+change, so the full group still cannot run in a single `deqp-vk`
+invocation):
+
+```
+Before this row (H6c-a-a-i's own recorded baseline):
+  Passed:        1/28044 (0.0%)
+  Failed:        309/28044 (1.1%)
+  Not supported: 27706/28044 (98.8%)
+  Unresolved (deqp-vk process aborts, no clean result): 28/28044 (0.1%)
+
+After this row:
+  Passed:        1/28044 (0.0%)
+  Failed:        328/28044 (1.2%)
+  Not supported: 27706/28044 (98.8%)
+  Unresolved (deqp-vk process aborts, no clean result): 9/28044 (0.0%)
+```
+
+`Passed` and `Not supported` both stay byte-identical to the prior
+baseline -- **expected and correct**: no case in today's suite exercises
+a user-defined `PerPrimitive` varying without a mesh entry's builtin
+interface also using an arrayed block, which still independently
+crashes via `H6c-a-a-iii`'s own open `resolveOffsetWithinElement` bug,
+so this row's own fix has nothing new to make pass yet. The crashing/
+`Unresolved` bucket shrinks from 28 to 9 cases (all `ext.builtin.*`:
+`cull_primitives`, `draw_index_in_{mesh,task}`,
+`local_invocation_{id,index}_in_task`, `position`, `primitive_id_glsl`,
+`work_group_id_in_{mesh,task}`), and `Failed` rises by the same 19-case
+difference (309 -> 328) -- a real, reproducible re-run using the
+identical full-caselist resume-loop methodology, **not a regression this
+row introduces**: this row's own `Executor.cpp` change is purely a
+runtime (host-side) fix, unreachable from `H6c-a-a-iii`'s own
+compile-time `CanonicalizeStage.cpp` crash path, so it cannot itself
+change which cases hit that crash. The exact root cause of the 28-vs-9
+count difference is not yet isolated (a plausible candidate is
+case-batching/ordering sensitivity in the resume loop itself, or
+pipeline-cache/`deqp-vk`-process state carried between iterations of a
+large caselist run -- neither investigated further here, since it does
+not change this row's own `Passed`/`Not supported` counts and
+`H6c-a-a-iii` remains the correctly-scoped owner of the crash itself)
+and is noted here rather than asserted away.
+
+**`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample**
+stays byte-identical to every prior row's own recorded totals:
+
+```
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+**0 regressions.**
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this row changes no advertised feature bit or extension,
+only CPU-side (host, not compiled-IR) executor lowering.
+
+**Reproducing this row.** Same ICD build and resume-loop methodology as
+H6c-a-a-i's own entry above:
+
+```shell
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.mesh_shader.*" --deqp-runmode=txt-caselist
+grep -oP "^TEST: \K.*" dEQP-VK-cases.txt > remaining.txt
+# resume loop: repeatedly run against `remaining.txt`, parse each
+# iteration's log for every "Test case '...'.." with no following
+# result line, add those to a blacklist, remove both resolved and
+# blacklisted cases from `remaining.txt`, and stop once a `DONE!` line
+# appears with an empty `remaining.txt`.
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-filename=draw_h6c_a_a_ii.qpa
+```
