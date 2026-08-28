@@ -8832,3 +8832,156 @@ change needed: this is a pure reflection/metadata-attachment fix inside
 `canonicalizeSPIRVStage`, touching no feature bit or extension (the
 `geometryShader` feature bit was already advertised, and the failure mode
 this row fixes is unrelated to capability advertisement).
+
+## Roadmap H5e-e: measured impact (non-multiview layered-rendering `gl_Layer` routing)
+
+**Change.** Two independent fixes in `feme/lib/Vulkan/CommandBuffer.cpp`:
+
+1. A new `fullLayerMask(uint32_t Layers)` helper (returns an all-ones mask
+   over `Layers` bits, saturating at `~0u` once `Layers >= 32`), used by
+   `applyLoadOps` in place of the previous unconditional `1u` fallback
+   whenever a render-target binding's `ViewMask` is `0` (no multiview).
+2. `runDraw`'s per-view loop now only calls `sliceAttachmentLayer` on
+   `Attachments`/`SubpassInputs`/`ResolveAttachments`/`DepthStencil` when
+   `Gfx.Binding.ViewMask != 0` (a genuine multiview instance); a plain
+   (non-multiview) draw instead passes every attachment through with its
+   full, unsliced layer range untouched.
+
+**Root cause.** This row's own text suspected `gl_Layer` routing,
+per-invocation output-vertex addressing, or stream-merge ordering under
+`Invocations > 1` -- none of those. The actual bucket this row owns is
+broader than its own "6 `2d_array`" framing (24 cases: `render_to_one`,
+`render_to_default_layer`, `multiple_layers_per_invocation`, across all 4
+non-`3d` view types x 2 sizes), and both real bugs live entirely in
+`CommandBuffer.cpp`, upstream of any geometry-stage-specific logic:
+
+- **`applyLoadOps`'s clear mask.** `uint32_t ViewMask = Binding.ViewMask ?
+  Binding.ViewMask : 1u;` collapsed to a single bit for any non-multiview
+  render pass, regardless of the attachment's real array-layer count
+  (`Binding.Layers`, already correctly populated from `Fb.layers()`/
+  `pRenderingInfo->layerCount` but never consulted for this). Per Vulkan
+  semantics, `VK_ATTACHMENT_LOAD_OP_CLEAR` on a layered (even
+  non-multiview) attachment must clear *every* layer up front, since a
+  geometry (or vertex, per below) stage's `gl_Layer` output can route to
+  any of them -- this left layers 1..N with whatever bytes the image's
+  backing memory happened to start with.
+- **`runDraw`'s per-view attachment slicing.** The per-view loop
+  unconditionally called `sliceAttachmentLayer(A, ViewIndex)` on every
+  attachment for every draw -- correct and necessary for true multiview
+  (each view bit maps to one specific layer via `gl_ViewIndex`, no
+  shader-side `gl_Layer` write involved), but the loop still ran once
+  (`ViewIndex == 0`) for the overwhelmingly common non-multiview case too,
+  permanently slicing every attachment down to exactly 1 layer (layer 0)
+  *before* `Executor.cpp` ever got a chance to run its own,
+  already-correct per-primitive `gl_Layer`-driven layer routing
+  (`resolvePrimitiveState`/`resolveRenderTargetArrayLayer`). The result:
+  `getDrawLayerCount(Draw)` always saw `Attachment.ArrayLayers == 1`, so
+  `resolveRenderTargetArrayLayer(RequestedLayer, 1)` rejected any
+  non-zero requested layer outright, silently discarding the primitive.
+  Confirmed directly with temporary debug instrumentation in
+  `resolvePrimitiveState` (since removed): `RequestedLayer=3,
+  DrawLayerCount=1` for a `2d_array` 6-layer image with `targetLayer=3`.
+
+Fixing (1) alone (verified independently mid-investigation) turned every
+`render_to_default_layer` case (8 of the 24) from "layers 1..N render as
+random garbage" to a full pass, since that test type never writes
+`gl_Layer` at all and only depends on the clear being complete. Fixing
+(2) is what unblocks the remaining 16 `render_to_one`/
+`multiple_layers_per_invocation` cases, which do write a non-zero
+`gl_Layer` from the geometry stage.
+
+**Unit test.** `DrawTest.
+GeometryStageLayerOutputRoutesToANonMultiviewLayer`: a real (not just
+pipeline-creation-only, unlike `GraphicsPipelineTest.cpp`'s
+`GeometrySource`/`EmptyGeometrySource`) `EmitVertex`/`EndPrimitive`-driven
+geometry stage writes a constant `gl_Layer = 1` and emits one
+oversized-triangle-strip primitive, over a plain (`viewMask == 0`,
+non-multiview) two-layer render pass. Confirms both fixes at once: layer
+0 (never the geometry stage's target) must read back as
+`LOAD_OP_CLEAR`'s own solid black, not garbage (fix 1); layer 1 (the
+`gl_Layer` target) must read back the fragment stage's solid red, not
+have been silently discarded (fix 2). Verified this test fails without
+either fix present (reverting just the `CommandBuffer.cpp` changes
+reproduces exactly the predicted garbage-bytes failure in layer 1).
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+**1872/1931** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up
+from H5e-d's own **1871/1930** by exactly the 1 new unit test this row
+adds.
+
+**`dEQP-VK.geometry.layered.*` re-run (100 cases), before/after:**
+
+```
+Before (H5e-c's own baseline):
+  Passed:         0/100 (0.0%)
+  Failed:        78/100 (78.0%)
+  Not supported: 22/100 (22.0%)
+
+After fix (1) only (intermediate; not committed on its own):
+  Passed:         8/100 (8.0%)
+  Failed:        70/100 (70.0%)
+  Not supported: 22/100 (22.0%)
+
+After both fixes (this row):
+  Passed:        24/100 (24.0%)
+  Failed:        54/100 (54.0%)
+  Not supported: 22/100 (22.0%)
+```
+
+All 24 of this row's own target cases (`render_to_one`,
+`render_to_default_layer`, `multiple_layers_per_invocation` x
+`1d_array`/`2d_array`/`cube`/`cube_array` x 2 sizes) now pass. The
+remaining 54 `Fail`/22 `NotSupported` are entirely `layered.3d.*`'s
+pre-existing, unrelated `vkCreateImage` gap and the other,
+already-separately-tracked test types (`render_to_all`, `fragment_layer`,
+`invocation_per_layer`, `readback`, `secondary_cmd_buffer*`) -- none of
+which this row owns.
+
+**`dEQP-VK.geometry.*` re-run (200 cases), before/after:**
+
+```
+Before (H5e-d's own baseline):
+  Passed:        10/200 (5.0%)
+  Failed:        157/200 (78.5%)
+  Not supported: 33/200 (16.5%)
+
+After (this row):
+  Passed:        34/200 (17.0%)
+  Failed:        133/200 (66.5%)
+  Not supported: 33/200 (16.5%)
+```
+
+Exactly 24 new passes, matching this row's own target bucket precisely.
+`NotSupported` stays byte-identical (33/200), confirming 0 regressions.
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt`
+sample, same file every prior row's own report used:
+
+```
+Before (H5e-d's own baseline):
+  Passed:        12/1957 (0.6%)
+  Failed:        155/1957 (7.9%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+2 new passes, 0 regressions: `dEQP-VK.draw.*shader_layer.vertex_shader_5`
+(the `renderpass` and `partial_secondary_cmd_buff` variants sampled),
+which route a *vertex*-shader-written `gl_Layer` into a non-multiview
+layered render target -- confirming fix (2) is not specific to a
+geometry stage at all, but to any pre-rasterization stage's `gl_Layer`
+output. The sample's own `shader_layer.tessellation_shader_*` cases
+remain `Fail` at `vkCreateGraphicsPipelines`, an unrelated,
+pre-existing tessellation-pipeline gap this row does not touch.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this is a pure rendering-correctness bug fix inside
+`CommandBuffer.cpp`'s render-target-binding/draw-recording path, touching
+no feature bit or extension (layered rendering itself was already
+advertised and already partly working, e.g. `render_to_default_layer`'s
+clear-only path and true multiview both already had working, if
+incomplete, support before this row).

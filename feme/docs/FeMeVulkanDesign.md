@@ -1452,23 +1452,30 @@ instead of only layer 0, addressed layer-major via the existing
 plumbing roadmap R34 had already built standalone (`LayeredRendering.h`)
 but never wired to a real draw.
 
-The executor side is a per-view loop, not a per-primitive one:
-`CommandBuffer.cpp`'s `runDraw` iterates one draw per set bit of
-`RenderTargetBinding::ViewMask` (or exactly once, at view 0, for the
-non-multiview -- `ViewMask == 0` -- common case), slicing every color/
-depth/stencil `AttachmentView` down to that view's own array layer
-(`sliceAttachmentLayer`) before calling `feme::graphics::executeDraws`,
-and setting the new `PreparedDraw::ViewIndex` field so the compiled
-stages can source `gl_ViewIndex`. This is deliberately narrower than a
-general "any stage may route a primitive to an arbitrary layer" model:
-per Vulkan's own multiview rule, a view with no explicit
+The executor side is a per-view loop for true multiview, and a
+per-primitive one otherwise: `CommandBuffer.cpp`'s `runDraw` iterates one
+draw per set bit of `RenderTargetBinding::ViewMask` when that mask is
+nonzero, slicing every color/depth/stencil `AttachmentView` down to that
+view's own array layer (`sliceAttachmentLayer`) before calling
+`feme::graphics::executeDraws` and setting the new `PreparedDraw::
+ViewIndex` field so the compiled stages can source `gl_ViewIndex` --
+matching Vulkan's own multiview rule that a view with no explicit
 `RenderTargetArrayIndex`/`gl_Layer` output writes into the array layer
-numbered the same as its view index, which is exactly what this loop
-does without needing a vertex/geometry stage to write anything -- the
-*general* per-primitive case (an explicit `gl_Layer` write routing a
-primitive to a layer other than its view index) still has nowhere to
-come from, since no stage can write it yet (`shaderOutputLayer` is
-`VK_FALSE`, no geometry stage exists) -- see H3/H5's own rows.
+numbered the same as its view index. For the non-multiview (`ViewMask ==
+0`) common case, `runDraw` instead passes every attachment through with
+its full, unsliced layer range: this is what lets the *general*
+per-primitive case -- an explicit `gl_Layer`/`RenderTargetArrayIndex`
+write from a vertex or geometry stage routing a primitive to an
+arbitrary layer, independent of any view index -- reach
+`Executor.cpp`'s own already-existing per-primitive routing
+(`resolvePrimitiveState`/`resolveRenderTargetArrayLayer`), rather than
+being collapsed to a single layer before that logic ever runs (roadmap
+H5e-e; see `VulkanCTSReport.md`'s "Roadmap H5e-e: measured impact"
+section for the full before/after). `applyLoadOps`'s `LOAD_OP_CLEAR`
+path is symmetric: a non-multiview layered attachment's `ViewMask`
+fallback is `fullLayerMask(Binding.Layers)`, clearing every one of the
+attachment's layers up front (since any of them may end up as some
+primitive's `gl_Layer` target), not just layer 0.
 
 Two new stage system values complete the wiring: `SignatureSystemValue::
 ViewIndex` (`Core/Signature.h`), mapped from SPIR-V `BuiltIn ViewIndex`
@@ -1477,10 +1484,9 @@ ViewIndex` (`Core/Signature.h`), mapped from SPIR-V `BuiltIn ViewIndex`
 `FemeFragmentInvocation::ViewIndex` ABI field (the same value for every
 invocation of one draw, unlike a real per-invocation system value); and
 `RenderTargetArrayIndex`/`gl_Layer`, whose SPIR-V import mapping already
-existed (`BuiltIn Layer`, code 9) but had no consumer -- still true after
-this row, since only a vertex stage could write it today, and no test
-exercises that combination without the still-`VK_FALSE`
-`shaderOutputLayer` feature.
+existed (`BuiltIn Layer`, code 9) and is now a working consumer for both
+a vertex stage's and a geometry stage's own output (roadmap H5e-e), for
+the non-multiview case described above.
 
 `multiview` is now advertised `VK_TRUE` (both
 `VkPhysicalDeviceMultiviewFeatures` and the aggregate
