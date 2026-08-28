@@ -40791,3 +40791,158 @@ Committed in small, separately-reviewable commits: (1) the
 the new lit test, (3) the design-doc updates (`Design.md`/
 `FeMeGraphicsDesign.md`), (4) the `Roadmap.md`/`VulkanCTSReport.md`
 updates, and (5) this `agent_thoughts.md` entry.
+
+# H6i: `CanonicalizeStagePass` accepts `ShaderStage::Mesh`/`Amplification`, task payload store canonicalization
+
+## Task
+
+Close roadmap H6i: lift `CanonicalizeStagePass::run`'s stage filter to
+accept `ShaderStage::Mesh`/`ShaderStage::Amplification`, canonicalize a
+task entry's bounded payload write (`TaskPayloadWorkgroupEXT`, importable
+per H6h) into a new `feme.stage.*` op, and route entries reaching
+`canonicalizeSPIRVStage` through it -- mirroring how H5c flipped
+geometry's own filter only once H5b's (and H5f's) prerequisite machinery
+had landed.
+
+## Investigation
+
+Read H6b's own commit and roadmap text closely first: it explicitly left
+two things open, tracked as H6h (an address-space convention/import
+pattern for `TaskPayloadWorkgroupEXT`, since LLVM's own SPIR-V backend has
+no mapping at all for that storage class) and H6i (this row). H6h landed
+separately and gave a task payload variable an ordinary address-space-14
+`llvm.mlir.global` shape, converted by `TaskPayloadGlobalVariablePattern`.
+That closes the *import* half; H6i is the *canonicalization* half:
+`CanonicalizeStage.cpp` needs to actually turn a store through that global
+into something a later pass can consume, and `CanonicalizeStagePass::run`
+needs to actually route Mesh/Amplification entries through
+`canonicalizeSPIRVStage` at all.
+
+Checked what H6b already built for Mesh specifically: it generalized
+`getDynamicVertexIndexedAccess`/`isDynamicIndexedArrayGlobal` to accept
+`Output`-storage-class (address space 8) arrays too, so a mesh entry's own
+per-vertex/per-primitivearray writes already thread through
+`feme.stage.output.store`'s `Vertex` operand -- but this was dead code
+until now, since `CanonicalizeStagePass::run`'s stage filter never reached
+a `Mesh`-tagged function, so H6b's own tests had to stand in with a
+`"vertex"`-tagged entry point instead. That means half of H6i (Mesh) is
+"just" the filter change -- no new canonicalization logic needed there at
+all.
+
+The other half (task payload) needed a genuinely new op. Looked at how a
+task payload store would actually appear in the LLVM IR
+`canonicalizeSPIRVStage` sees, given `TaskPayloadGlobalVariablePattern`'s
+own conversion shape: an ordinary `store` through a (possibly GEP'd)
+pointer into an address-space-14 global, exactly the same IR shape a
+stage-IO store takes except the global carries no `!spirv.Decorations`/
+`!feme.spirv.MemberDecorations` metadata and is not a signature element at
+all -- it's raw, task-defined memory shared verbatim with the mesh
+workgroups the task entry dispatches. `resolveStageIOAccess` correctly
+returns `std::nullopt` for it (no `ElementIDs` entry exists for this
+global), so the existing store-rewrite loop's `if (!Access) continue;`
+was the right place to add a second, narrower resolution attempt rather
+than building an entirely parallel discovery/access-resolution pipeline:
+`getStageIOBaseAndOffset` is already fully generic over any address space
+(it just walks `stripAndAccumulateConstantOffsets` from a pointer down to
+a `GlobalVariable`+byte-offset pair), so reusing it directly against a new
+`isTaskPayloadGlobal` (address space 14) check was enough -- no new offset
+-resolution logic needed.
+
+Designed the new op, `feme.stage.task.payload.store(offset, value)`, to
+carry a plain byte offset rather than an `ElementID`/`Row`/`Component`
+triple like `OutputStore`: a task payload has no `SignatureElement` of its
+own (it's not vertex/fragment-style vertex-in-primitive interpolation
+data), so reusing that triple would have implied a structure this op does
+not have. Mirrored `OutputStore`'s existing special case in
+`getOrInsertStageOp` (the type that varies across an overload is not the
+result but a specific operand) for the new op's own `value` operand
+(second argument, not `OutputStore`'s fourth).
+
+Only wrote the *store* side, matching the roadmap text's own scope
+("canonicalize a task entry's bounded payload write") -- a task entry only
+ever writes its own payload (a mesh entry reads it back, a different
+function/module context this row does not touch), so there was no load
+side to canonicalize here at all; nothing in this row's scope needed one.
+
+## Implementation
+
+- `StageOps.h`/`StageOps.cpp`: new `StageOpKind::TaskPayloadStore`,
+  `getStageOpName`/`isStageOpKindOverloaded` table entry, and
+  `createStageTaskPayloadStore` builder.
+- `CanonicalizeStage.cpp`: new `isTaskPayloadGlobal` helper (address space
+  14, no metadata check needed -- unlike stage-IO globals, address space
+  alone identifies it); in the store-rewrite loop, when
+  `resolveStageIOAccess` fails, try `getStageIOBaseAndOffset` against
+  `isTaskPayloadGlobal` before giving up, emitting
+  `feme.stage.task.payload.store` by the resolved offset. Lifted
+  `CanonicalizeStagePass::run`'s stage filter to also accept
+  `ShaderStage::Mesh`/`ShaderStage::Amplification` -- both fall through to
+  the existing `canonicalizeSPIRVStage(*F, *Stage,
+  SPIRVCanonicalPhase::Ordinary)` call, needing no new dispatch branch
+  (neither needs Hull's barrier-splitting).
+- `ValidateStage.cpp`/`WaveUniformity.cpp`/`SIMDize.cpp`: added an explicit
+  `TaskPayloadStore` case to each of their exhaustive `switch`es over
+  `StageOpKind` (the coding standard here forbids a `default` label on a
+  fully-covered enum switch), matching each switch's existing "not yet
+  reachable" precedent for `StreamEmit`/`StreamCut` before geometry
+  validation landed -- none of the three actually processes this op yet
+  (`ValidateStagePass::run` does not validate Amplification, and neither
+  `WaveUniformity`/`SIMDize` has a real caller to exercise until H6c-a-b
+  wires `TaskPayloadBuilder` into `EntryWrapperPass`).
+
+## Testing
+
+New tests: `TaskPayloadStoreIsVoidAndOverloadedOnValue` (StageOpsTest.cpp),
+`MeshStageCanonicalizesOutputArrayStore` (re-running H6b's own
+`ThreadsDynamicVertexIndexIntoOutputStore` shape through a genuine
+`"mesh"`-tagged entry point, now reachable through the full pass) and
+`AmplificationStageCanonicalizesTaskPayloadStore` (a two-field payload
+struct store, confirming both fields' resolved offsets, no
+`!feme.signature` attached, and every raw `store` rewritten) in
+CanonicalizeStageTest.cpp.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: 1934/1993 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up
+from H6h's own 1931/1990 baseline by exactly these 3 new tests. Confirmed
+the -Wswitch warnings the new enumerator introduced in
+`ValidateStage.cpp`/`WaveUniformity.cpp`/`SIMDize.cpp` were fully resolved
+by adding explicit cases (rebuilt clean, no warnings).
+
+Re-ran the full `dEQP-VK.mesh_shader.*` group
+(`VK_DRIVER_FILES=.../feme_icd.json deqp-vk
+--deqp-case="dEQP-VK.mesh_shader.*"`): byte-identical to H6h's own
+recorded baseline (1/28044 passed, 337/28044 failed, 27706/28044 not
+supported). Expected and confirmed: `feme.stage.task.payload.store` has
+no caller reachable from `EntryWrapperPass`/`CompiledStage::invokeTask`
+yet (that wiring is H6c-a-b, itself still blocked on H6d's own checked
+dispatch queue), so this row cannot yet move any of H6g's tracked content
+-compilation failures.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed no
+update needed -- this row touches no feature bit, limit, or extension, the
+same shape H6b/H6h's own entries recorded.
+
+## Documentation updates
+
+- `Roadmap.md`: struck through H6i with a `done:` writeup summarizing the
+  filter change, the new op, the switch-exhaustiveness fixes, the test
+  coverage, and the measured (null, as expected) CTS impact.
+- `VulkanCTSReport.md`: new "Roadmap H6i: measured impact" section with
+  the before/after `dEQP-VK.mesh_shader.*` totals (identical), the
+  `check-feme` totals, and a reproduction recipe.
+- `FeMeGraphicsDesign.md`: updated the G6 status paragraph to describe
+  H6i's own closed filter/task-payload-store gap, replacing the previous
+  "blocked on H6h/H6i" phrasing.
+- `FeMeVulkanDesign.md`: updated its own "tracked separately (roadmap
+  H6h/H6i)" reference to H6c-a-a/H6c-a-b, the actual remaining blockers
+  now that both H6h and H6i are closed, and dropped a now-stale claim
+  that per-vertex/per-primitive output writes are unimplemented (H6b
+  already closed that).
+
+Committed in small, separately-reviewable commits: (1) the new
+`TaskPayloadStore` op/builder/table entry and its unit test, (2) the
+three exhaustive-switch fixes, (3) the `CanonicalizeStage.cpp` filter
+change and task-payload-store canonicalization with its unit tests, (4)
+the `Roadmap.md`/`FeMeGraphicsDesign.md`/`VulkanCTSReport.md` updates,
+(5) the `FeMeVulkanDesign.md` tracking-reference fix, and (6) this
+`agent_thoughts.md` entry.
