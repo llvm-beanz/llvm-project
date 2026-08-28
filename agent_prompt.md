@@ -33,18 +33,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete and close out milestone H6h?
+Can you complete and close out milestone H6i?
 
-> **Give `TaskPayloadWorkgroupEXT` an address-space convention and a
-> global-variable import pattern**: LLVM's own SPIR-V backend
-> (`storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h`) has no
-> mapping at all for `TaskPayloadWorkgroupEXT` (SPIR-V enum 5402) -- unlike
-> `Input`(7)/`Output`(8)/`Workgroup`(3)/`PushConstant`(13), which FeMe's own
-> `StageIOGlobalVariablePattern`/`WorkgroupGlobalVariablePattern`/`PushConstantGlobalVariablePattern`
-> (`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`) already reuse from
-> that fixed mapping -- so a task entry's payload variable cannot be imported as
-> an LLVM global at all today (found during H6b's own investigation). Needs a
-> new address space (any value FeMe's own conversion layer does not otherwise
-> use) and a `TaskPayloadGlobalVariablePattern` mirroring the two precedents
-> above, before `CanonicalizeStage.cpp` has anything to canonicalize a payload
-> write into
+> **Lift `CanonicalizeStagePass::run`'s stage filter to accept
+> `ShaderStage::Mesh`/`ShaderStage::Amplification`**, canonicalize a task
+> entry's bounded payload write (`TaskPayloadWorkgroupEXT`, now importable per
+> H6h) into a new `feme.stage.*` op, and route entries reaching
+> `canonicalizeSPIRVStage` through it, mirroring how H5c flipped geometry's own
+> filter only once H5b's (and, separately, H5f's) prerequisite machinery had
+> landed
