@@ -36,20 +36,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6g-b-a-i-a-i-a?
+Can you complete H6g-b-a-i-a-i-b?
 
-> **`feme-cpu-simdize` rejects a newly-unblocked divergent vector value in the
-> same 218-case `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket ("function
-> 'main' has a divergent vector value ... used outside a supported
+> **A divergent vector value used as a vector comparison (`fcmp`/`icmp`) operand
+> is rejected by `feme-cpu-simdize` in the same
+> `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket ("function 'main' has a
+> divergent vector value ... used outside a supported
 > insertelement-chain/resource-store/extractelement/select/shufflevector/phi/elementwise
 > pattern; component decomposition is not yet supported for this use")**, now
 > the new dominant first-emitted FeMe/MLIR diagnostic in that bucket once
-> H6g-b-a-i-a-i's own direct-storage-buffer-handle fix lets those shaders
-> progress further (148 of 218 cases in a combined stdout/stderr diagnostic
-> rerun land here first; H6g-b-a-i-a-i reduced its own named `UnsupportedOps`
-> bucket from 82 cases to a lone, out-of-scope sampled-image/sampler remainder).
-> Root cause not yet isolated: needs a real failing shader/IR reduction to
-> identify which divergent-vector use shape in the newly-unblocked mesh/fragment
-> content is still outside `SIMDizePass`'s supported decomposition patterns, and
-> whether the right fix belongs in `SIMDize.cpp` itself or in an earlier
-> canonicalization/legalization pass feeding it
+> H6g-b-a-i-a-i-a's own masked-store fix lets those shaders progress further (80
+> of 218 cases in a combined stdout/stderr diagnostic rerun land here, e.g.
+> `dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only`'s `%8 =
+> insertelement <4 x float> %6, float %7, i64 3` used by `%16 = fcmp ole <4 x
+> float> %8, %15`, confirmed via the same one-off
+> diagnostic-dump-and-single-case-rerun technique H6g-b-a-i-a-i-a used). Root
+> cause not yet isolated: a vector comparison producing a `<N x i1>` result is
+> not among `checkVectorDecompositionSupported`'s accepted consumer shapes at
+> all today (unlike a matched resource-store's or masked-store's stored-value
+> operand), and the design's own existing "a `select` with a per-lane `<N x i1>`
+> condition remains diagnosed" deviation (`checkVectorDecompositionSupported`'s
+> file comment) suggests decomposing a per-lane vector *condition* end-to-end --
+> not just a per-lane vector *value* -- may need broader work than a single
+> consumer-acceptance addition; needs a real failing shader/IR reduction to
+> confirm the exact GLSL/SPIR-V source shape (a component-wise
+> `lessThanEqual`/`greaterThan`-style comparison feeding a `select`, most
+> likely) and whether the right fix is a narrow `fcmp`/`icmp`
+> consumer-and-producer addition mirroring this row's own sibling, or the
+> broader per-lane-condition decomposition the file comment already anticipates
