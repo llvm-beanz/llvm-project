@@ -39516,3 +39516,134 @@ output with no consumer.
    new "Roadmap H5e-e: measured impact" section, `FeMeVulkanDesign.md`'s
    updated roadmap-H2 section.
 3. This entry.
+
+# Milestone H6a: SPIR-V mesh entry-point execution-mode reflection
+
+## Task
+
+Work on roadmap milestone H6, "Mesh and task (amplification) shading,
+`VK_EXT_mesh_shader`". Unlike H5 (geometry), which started this session
+with roadmap R34's own host-side tessellator/geometry-stream/patch core
+already landed and only the Vulkan-side wiring open, H6's own dependency
+(FeMeGraphicsDesign.md's G6 milestone) had *zero* prior implementation:
+no `MeshState`, no SPIR-V import handling for `MeshEXT`/`TaskEXT` beyond
+the bare `ShaderStage` mapping, no canonicalization, no CPU lowering, no
+executor path, and nothing in the Vulkan-side pipeline/draw code.
+
+Given that starting point, attempting the whole of G6/H6 in one session
+would repeat H4/H5's own mistake in reverse: those milestones' rows
+document, at length, why a "do it all at once" first attempt kept
+finding real, un-anticipated blockers (H4c/H4d/H4e/H4f/H4g/H4h/H4i/H4j
+for tessellation; H5b/H5c/H5f/H5g and the whole H5e-a..e bucket for
+geometry) that only a real investigation -- not a plan written before
+looking at the code -- could find. So this session follows the same
+opening move H5 itself used: land the smallest genuinely testable slice
+(execution-mode reflection into a new `MeshState`, mirroring
+`GeometryState`) as its own roadmap row (H6a), and use it to write the
+first, evidence-based breakdown of what remains (H6b-H6g) rather than
+guessing that breakdown from the design doc's bullet list alone.
+
+## What I changed, and in what order
+
+1. `feme::graphics::MeshState` (new `Graphics/Mesh.h`/`Mesh.cpp`),
+   mirroring `GeometryState`/`Geometry.h`: a `MeshOutputTopology` enum
+   (Points/Lines/Triangles), a `MeshState` struct (output topology,
+   maximum output vertex count, maximum output primitive count), and
+   `getMeshState`'s attribute round-trip, including the same "all three
+   attributes arrive together or none of them do" partial-set handling
+   `getGeometryState` already uses. Nothing consumed yet -- committed
+   standalone, exactly as H5a's own first commit was.
+2. `ConvertSPIRVToLLVMPass.cpp`: new `EntryPointInfo` fields
+   (`MeshTopology`/`MeshMaxOutputVertices`/`MeshMaxOutputPrimitives`),
+   new execution-mode cases for `OutputLinesEXT`/`OutputTrianglesEXT`/
+   `OutputPrimitivesEXT`, and two disambiguation additions to the
+   existing shared-enumerant handling: `OutputPoints` (previously
+   unconditionally geometry's own point-output mode) now checks `Stage
+   == Mesh` first, the same way `OutputVertices` already checked `Stage
+   == Geometry` before falling back to tessellation's own control-point
+   count -- extended to check `Stage == Mesh` too. A task entry point's
+   `LocalSize` was already captured generically (the existing
+   `hlsl.numthreads` attribute makes no stage distinction at all), so it
+   needed no new code; a task entry declares no other shape.
+3. A new lit test, `spirv-to-llvm-mesh-execution-modes.mlir`, covering:
+   a full triangle-output mesh entry (topology + counts + workgroup
+   size all present), every output-topology enumerator (points/lines/
+   triangles), the `CHECK-NOT` proving a mesh entry gets no
+   `feme.geometry.*`/`feme.tessellation.*` attributes and vice versa,
+   and a task entry point that gets `hlsl.numthreads` but no
+   `feme.mesh.*`/`feme.geometry.*` attributes at all.
+4. `unittests/Graphics/MeshTest.cpp` (6 cases, mirroring
+   `GeometryTest.cpp`): absent attributes, round-trip, every enumerator
+   spelling, an unrecognized topology spelling, a non-numeric count, and
+   a partial attribute set -- all treated as absent/malformed rather
+   than guessing a default, matching `getGeometryState`'s own contract.
+
+## Verification
+
+- `ninja feme-opt` + `llvm-lit` on the whole
+  `feme/test/Conversion/SPIRVToLLVM/` directory: 40/40 pass (39
+  pre-existing + the 1 new file, itself worth 4 `RUN` blocks).
+- `ninja FeMeGraphicsTests` and ran the full suite: 179/179 pass (173
+  pre-existing + the 6 new `MeshTest` cases).
+- `ninja check-feme` (assertions-enabled, ccache build): 1879/1938 (59
+  pre-existing, unrelated `Unsupported`, 0 `Failed`), up from H5e-e's own
+  1872/1931 baseline by exactly the 7 new tests (6 unit + 1 lit file).
+- Ran `dEQP-VK.mesh_shader.*` (28044 cases, both the `VK_EXT_mesh_shader`
+  and legacy `VK_NV_mesh_shader` sub-groups) against the built ICD:
+  0 `Pass`/0 `Fail`/28044 `NotSupported`, unchanged -- expected, since
+  this row advertises no extension and changes no Vulkan-API-visible
+  behavior at all.
+- Re-ran the `dEQP-VK.draw.*` 1957-case `draw_sample.txt` regression
+  sample every prior H-row's report has used: 14/153/1790, byte-identical
+  to H5e-e's own last recorded totals. 0 regressions.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: read both,
+  confirmed no change needed -- `VK_EXT_mesh_shader` stays absent and
+  this row advertises nothing new, the same conclusion H5a's own row
+  reached for geometry.
+
+## What's still open (roadmap H6b-H6g)
+
+Wrote the breakdown into `Roadmap.md` rather than guessing it from
+FeMeGraphicsDesign.md's G6 bullet list alone, following H5's own
+demonstrated pattern that the *shape* of the real remaining work only
+becomes visible once the previous step is actually implemented:
+
+- H6b: lift `CanonicalizeStagePass::run`'s stage filter to accept
+  `ShaderStage::Mesh`/`ShaderStage::Amplification`, and canonicalize a
+  mesh entry's bounded per-vertex/per-primitive output writes and a task
+  entry's bounded payload write into new `feme.stage.*` ops -- flagged
+  explicitly as needing its own investigation first (mirroring H5's own
+  "H5b found a real per-vertex dynamic-index blocker before H5c could
+  land" experience), not assumed to be a mechanical repeat.
+- H6c: reuse compute's workgroup/groupshared/barrier/wave lowering for
+  task and mesh entries, plus a bounded mesh-output builder (mirroring
+  `GeometryStreamBuilder`) and bounded task payload builder, and
+  `FemeMeshArgs`/`FemeTaskArgs`/`CompiledStage::invokeMesh`/`invokeTask`.
+- H6d: checked amplification dispatch queues and meshlet assembly with
+  topology validation.
+- H6e: chain the mesh path into `Executor::executeDraws` (mirroring
+  H5d's own geometry-chaining work).
+- H6f: `vkCreateGraphicsPipelines` mesh-pipeline acceptance,
+  `vkCmdDrawMeshTasksEXT`/`*IndirectEXT`/`*IndirectCountEXT` through the
+  same prepared-draw code, and `PhysicalDeviceInfo.cpp` advertising
+  `VK_EXT_mesh_shader` and every `VkPhysicalDeviceMeshShaderPropertiesEXT`
+  limit at this implementation's own honest ceilings.
+- H6g: triage whatever `dEQP-VK.mesh_shader.*` buckets a real H6f-era run
+  finds, left unlettered beyond `g` until there is a real measured run to
+  triage (mirroring H5e-a through H5e-e).
+
+## Docs
+
+`Roadmap.md`'s H6 row updated to point at the new H6a-H6g breakdown and
+H6a struck through; `FeMeGraphicsDesign.md`'s G6 section gained a Status
+paragraph (mirroring G5's own); `VulkanCTSReport.md` gained a new
+"Roadmap H6a: measured impact" section with the full reproduction.
+
+## Commits
+
+1. `feme::graphics::MeshState` (`Mesh.h`/`Mesh.cpp`), standalone.
+2. `ConvertSPIRVToLLVMPass.cpp`'s mesh execution-mode capture, plus the
+   new lit test.
+3. `MeshTest.cpp`.
+4. Docs (`Roadmap.md`, `FeMeGraphicsDesign.md`, `VulkanCTSReport.md`).
+5. This entry.
