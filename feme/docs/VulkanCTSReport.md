@@ -1,9 +1,9 @@
-# FeMe Vulkan ICD: Vulkan-CTS Status Report
+#FeMe Vulkan ICD : Vulkan - CTS Status Report
 
-This report is regenerated from scratch on every full Vulkan-CTS pass; it
-describes the *current* state of `libfeme_vulkan` against `deqp-vk`, not the
-history of how it got there. Previous editions of this file recorded a
-narrative of individual crash fixes; that narrative is now folded into
+This report is regenerated from scratch on every full Vulkan - CTS pass;
+it describes the *current *state of `libfeme_vulkan` against `deqp - vk`,
+    not the history of how it got there.Previous editions of this file recorded
+            a narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
@@ -437,10 +437,11 @@ FeMeCPUDesign.md's deviation note for the full, updated scope (a per-lane
 `<N x i1>`-condition `select` and every divergent aggregate remain
 diagnosed) and `test/Transforms/CPU/simdize-vector-{phi,select,
 shufflevector,dynamic-extractelement,elementwise}.ll`/`SIMDizeTest.{
-DecomposesVectorPHIAcrossUniformDiamond,DecomposesScalarConditionVectorSelect,
-DecomposesShuffleVectorAtCompileTime,
-WidensNonConstantIndexExtractElementIntoSelectChain,
-DecomposesElementwiseBinaryOpOnTwoDivergentVectors}` for the new coverage.
+  DecomposesVectorPHIAcrossUniformDiamond,
+      DecomposesScalarConditionVectorSelect,
+      DecomposesShuffleVectorAtCompileTime,
+      WidensNonConstantIndexExtractElementIntoSelectChain,
+      DecomposesElementwiseBinaryOpOnTwoDivergentVectors}` for the new coverage.
 
 **The headline barely moved: 10,520 passed (+1) and 26,924 failed (-1),
 `Not supported` unchanged.** That is a far smaller movement than the
@@ -547,7 +548,8 @@ updated status note describes.
 exact: every one of `dynamic_state.*.compute_transfer.single.{compute,
 transfer}.{cull_mode,front_face,depth_test_enable,depth_write_enable,
 depth_compare_op,stencil_test_enable,stencil_op,viewport_with_count,
-scissor_with_count}.{before,after}` now passes for real, having previously
+scissor_with_count}.{
+  before, after}` now passes for real, having previously
 been `NotSupported` outright because `vkEnumerateDeviceExtensionProperties`
 never listed the extension a conformant `deqp-vk` checks for before
 attempting any of them. This is the clearest possible confirmation that
@@ -558,7 +560,8 @@ against an independent, real conformance client.
 Four of the +63 newly-`Fail`ed cases are the same "stacked blockers"
 pattern C1/C3/C4a/C4b's own sections already established:
 `dynamic_state.monolithic.compute_transfer.single.{compute,transfer}.
-vertex_input_binding_stride.{before,after}` now get far enough to attempt
+vertex_input_binding_stride.{
+  before, after}` now get far enough to attempt
 `vkCreateGraphicsPipelines` (previously `NotSupported` for the missing
 extension) and fail there instead, on a gap this milestone does not touch
 at all -- `translateFixedFunctionState`'s pre-existing "a graphics
@@ -752,8 +755,8 @@ directly attributable rather than a mystery:
   triangle-fan pipeline is blocked by an unrelated, pre-existing stacked
   blocker, and the small number that reach real execution fail identically
   to an already-implemented topology (not a regression).**
-  `dEQP-VK.rasterization.provoking_vertex.draw.default.{line_list,
-  line_strip,triangle_fan,triangle_list,triangle_strip}` all fail
+  `dEQP-VK.rasterization.provoking_vertex.draw.default.{
+  line_list, line_strip, triangle_fan, triangle_list, triangle_strip}` all fail
   pipeline creation with the same `feme-cpu-simdize` "divergent vector
   value... used outside a supported... pattern" diagnostic (roadmap C8's
   own bucket) regardless of topology -- confirming this is a stage-IO
@@ -763,7 +766,8 @@ directly attributable rather than a mystery:
   `VK_FORMAT_D16_UNORM` alone, before topology is ever considered. The one
   case that *does* reach real image comparison for a new topology,
   `dEQP-VK.pipeline.monolithic.input_assembly.primitive_restart.
-  index_type_uint16.restart_disabled_{line_strip,triangle_fan}`, fails
+  index_type_uint16.restart_disabled_{
+  line_strip, triangle_fan}`, fails
   (`Fail (Fail)`, a genuine rendered-image mismatch) -- but so does
   `restart_disabled_triangle_strip`, a topology this ICD implemented long
   before C4d, with the identical result. Since the pre-existing topology
@@ -1076,7 +1080,8 @@ have anticipated. Dumping the actual imported global's LLVM type (a
 temporary `FEME_DEBUG_STAGEIO` environment-variable trace, removed before
 landing) showed why: glslang wraps a `varying`-block *member* -- even one
 that is itself a matrix -- in an outer one-member struct
-(`{ [4 x <2 x float>] }` for a `mat4x2` member), a shape neither the
+(`{
+  [4 x<2 x float>] }` for a `mat4x2` member), a shape neither the
 original matrix fix nor any of this row's own unit tests exercised.
 
 **A second bug was caught only by a real end-to-end triangle-draw test,
@@ -1465,7 +1470,8 @@ at the time.
 |---|---|---|
 | `spirv_assembly.instruction.compute` | 422 | Genuine regression, matches D0's own 417 closely. `SPIRVToLLVMPatterns.cpp`'s `ImageFetchPattern`/`ImageFetchLodPattern` (and the analogous `spirv.ImageSampleExplicitLod` patterns) each require an *exact* `image_operands` match (no operands, or exactly `Lod`) and reject everything else as illegal; SPIR-V 1.6 (which deqp-vk only emits once `apiVersion >= 1.3`, matching every one of these cases' pre-D0 `NotSupported ("Vulkan higher than or equal to 1.3 is required")`) adds a `Nontemporal` cache hint bit that combines with `Lod` or stands alone, and no pattern in this file tolerates it -- a pure cache hint with no defined effect on the result, currently unhandled anywhere in this ICD, not a semantic gap the way `ubo`'s is. |
 | `graphicsfuzz` | 72 | `VK_KHR_shader_terminate_invocation`, promoted to core at `VK_VERSION_1_3` per `Vulkan14FeatureInventory.md`'s row for it ("no" -- not yet implemented). deqp-vk's own extension-support check treats any extension promoted to core at or below the claimed `apiVersion` as present without querying this ICD's advertised extension list -- the identical mechanism D0's own `copy_commands2` finding already established, now hitting a different extension. These Amber tests exercise `OpTerminateInvocation`'s distinct-from-`discard` semantics, which this ICD does not actually implement differently, so they now run (instead of correctly reporting `NotSupported`) and produce a wrong image (`Fail (Fail)`, an image-comparison mismatch, not a pipeline-creation error). |
-| `api.info.*` | 18 | `dEQP-VK.api.info.vulkan1p3.{features,properties,feature_extensions_consistency}` and ten `get_physical_device_properties2.features.*_features` cases (`image_robustness`, `inline_uniform_block`, `maintenance4`, `pipeline_creation_cache_control`, `private_data`, `shader_demote_to_helper_invocation`, `shader_integer_dot_product`, `shader_terminate_invocation`, `subgroup_size_control`, `synchronization2`, `texture_compression_astc_hdr`, `vulkan13`, plus `vulkan1p3_limits_validation.max_inline_uniform_total_size`) -- exactly the "device_mandatory_features/vulkan1p3_consistency" shape D0's first draft guessed and discarded after checking the top-level `info` group alone (which only gained two new failures, as D0 recorded). It materializes instead in `api.info.*`, a separate subtree deqp-vk also uses for the same class of check; D0's report did not check that subtree. Root cause is D1's already-tracked finding that most of 1.3/1.4's mandatory feature bits are unimplemented, now caught by consistency checks that only run once `apiVersion >= 1.3` makes deqp-vk chain the aggregate `VkPhysicalDeviceVulkan13Features` blob alongside each feature's individual extension struct and compare them. |
+| `api.info.*` | 18 | `dEQP-VK.api.info.vulkan1p3.{
+  features, properties, feature_extensions_consistency}` and ten `get_physical_device_properties2.features.*_features` cases (`image_robustness`, `inline_uniform_block`, `maintenance4`, `pipeline_creation_cache_control`, `private_data`, `shader_demote_to_helper_invocation`, `shader_integer_dot_product`, `shader_terminate_invocation`, `subgroup_size_control`, `synchronization2`, `texture_compression_astc_hdr`, `vulkan13`, plus `vulkan1p3_limits_validation.max_inline_uniform_total_size`) -- exactly the "device_mandatory_features/vulkan1p3_consistency" shape D0's first draft guessed and discarded after checking the top-level `info` group alone (which only gained two new failures, as D0 recorded). It materializes instead in `api.info.*`, a separate subtree deqp-vk also uses for the same class of check; D0's report did not check that subtree. Root cause is D1's already-tracked finding that most of 1.3/1.4's mandatory feature bits are unimplemented, now caught by consistency checks that only run once `apiVersion >= 1.3` makes deqp-vk chain the aggregate `VkPhysicalDeviceVulkan13Features` blob alongside each feature's individual extension struct and compare them. |
 | `compute.pipeline.zero_initialize_workgroup_memory` | 7 | Same "promoted extension assumed implemented" shape as `graphicsfuzz`: `VK_KHR_zero_initialize_workgroup_memory` is promoted to `VK_VERSION_1_3` and, per `Vulkan14FeatureInventory.md`, not yet implemented (`shaderZeroInitializeWorkgroupMemory` feature bit: "no"). Pre-D0 these correctly reported `NotSupported`; post-D0 they run and fail. |
 | `robustness.oob_access` | 6 | `rba_texel_buffer_uniform_*` cases: pre-D0 these reported `NotSupported ("Format not supported for uniform texel buffers")`; post-D0 the same format now passes that check (a mandatory-format-table consequence, not traced further this pass) and reaches `vkCreateBufferView`, which throws `VK_ERROR_FORMAT_NOT_SUPPORTED` -- an internal inconsistency between what this ICD's format-support query reports and what its own `vkCreateBufferView` accepts, not yet root-caused past that point. |
 
@@ -1686,7 +1692,8 @@ Roadmap E3 ("`VK_KHR_synchronization2`/`synchronization2`") implements
 `vkCmdSetEvent2`/`vkCmdResetEvent2`/`vkCmdWaitEvents2`, translating
 `VkDependencyInfo`'s per-resource `VkMemoryBarrier2`/`VkBufferMemoryBarrier2`/
 `VkImageMemoryBarrier2` (2-stage-mask, 2-access-mask shape) down to the
-existing 1-mask `Sync.{h,cpp}`/`CommandBuffer.cpp` model -- the same "new
+existing 1-mask `Sync.{
+  h, cpp}`/`CommandBuffer.cpp` model -- the same "new
 entrypoint, old backing model" pattern roadmap C7 used for queue families.
 `synchronization2` now reads `VK_TRUE` from both the aggregate
 `VkPhysicalDeviceVulkan13Features` struct (E1's own case) and its own
@@ -6863,7 +6870,8 @@ AcceptsTessellationControlMultiElementArrayOutput` locks it down end to
 end: a real tessellation pipeline (`spirv.ControlBarrier`-split, matching
 `TessControlSource`'s own shape) whose control-point phase writes 2
 elements of a `gl_TessLevelOuter`-shaped `BuiltIn("TessLevelOuter")
-{patch}` global now `vkCreateGraphicsPipelines`-succeeds; confirmed, by
+{
+  patch}` global now `vkCreateGraphicsPipelines`-succeeds; confirmed, by
 reverting the fix and rebuilding, to reproduce the exact reported crash
 instead (`JIT session error: Symbols not found: [ tess_outer ]`,
 `VK_ERROR_INITIALIZATION_FAILED`). `ninja check-feme`
@@ -6903,10 +6911,10 @@ fixed in this row.
 **The same fix, applied at the `resolveStageIOAccess` level rather than
 winding-specifically, also unblocks 8 more cases**, discovered while
 resuming the full group's own crash-prone run (see "Reproducing this row"
-below): `dEQP-VK.tessellation.shader_input_output.{barrier,
-gl_position_tcs_to_tes,gl_position_vs_to_tcs,
-gl_position_vs_to_tcs_to_tes,patch_vertices_10_in_5_out,
-patch_vertices_5_in_10_out,primitive_id_tcs,primitive_id_tes}`. Before
+below): `dEQP-VK.tessellation.shader_input_output.{
+  barrier, gl_position_tcs_to_tes, gl_position_vs_to_tcs,
+      gl_position_vs_to_tcs_to_tes, patch_vertices_10_in_5_out,
+      patch_vertices_5_in_10_out, primitive_id_tcs, primitive_id_tes}`. Before
 this fix, all 8 hit a different, pre-existing `Fail` one step later in the
 pipeline (confirmed unchanged by an A/B rebuild with this fix reverted):
 `error: 'llvm.getelementptr' op operand #0 must be LLVM pointer type or
@@ -7038,7 +7046,8 @@ captured `DS_Error` diagnostic mentioning "unsupported feme.cpu.masked.*
 element type" for a struct-typed operand -- a `{float, float}` standing in
 for the matrix/aggregate shapes this milestone does not yet decompose) and
 one new `LinearizeTest` case (`UnsupportedAggregateMaskedStoreDiagnosesGracefullyInsteadOfCrashing`:
-a `store {float, float}` under a divergent `feme.stage.discard` mask
+a `store {
+  float, float}` under a divergent `feme.stage.discard` mask
 that must diagnose and survive as a plain, unmasked `StoreInst` rather
 than crash `LinearizePass`, checked by running the full pass rather than
 calling `MaskIntrinsics.cpp` directly, so a regression in either layer
@@ -7334,16 +7343,16 @@ or extension is added or removed, only a validation-layer relaxation.
 
 **Reproducing this row.** Same ICD build as the rest of this report:
 
-```shell
-mkdir run && cd run
-ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
-VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
-FEME_VULKAN_LOG_CREATION_ERRORS=1 \
-  deqp-vk --deqp-case="dEQP-VK.tessellation.winding.*glsl*" \
-    --deqp-log-filename=winding_glsl.qpa
+```shell mkdir run &&cd run ln - sfn / home / dev / dev / VK - GL -
+    CTS / external / vulkancts / data / vulkan vulkan VK_DRIVER_FILES =
+    <feme - build> / tools / feme / tools / feme -
+    vulkan / feme_icd.json FEME_VULKAN_LOG_CREATION_ERRORS =
+        1 deqp - vk-- deqp - case =
+            "dEQP-VK.tessellation.winding.*glsl*" --deqp - log - filename =
+                winding_glsl.qpa
 ```
 
-## Roadmap H4i: measured impact (`VkTessellationDomainOrigin` winding fix)
+                ##Roadmap H4i: measured impact (`VkTessellationDomainOrigin` winding fix)
 
 **What changed.** H4h's own relaxation let all 24
 `dEQP-VK.tessellation.winding.*glsl*` cases reach real rendering, where
@@ -7859,8 +7868,8 @@ file comment). `getSystemValueForBuiltIn` needed no new cases:
 `gl_PrimitiveIDIn`/`gl_PrimitiveID` (SPIR-V `BuiltIn PrimitiveId`, code 7,
 disambiguated by storage class rather than by value), `gl_InvocationID`
 (code 8), `gl_Layer` (code 9), and `gl_ViewportIndex` (code 10) already
-mapped onto `SignatureSystemValue::{PrimitiveID, InvocationID,
-RenderTargetArrayIndex, ViewportArrayIndex}` respectively, from H2/H4a's
+mapped onto `SignatureSystemValue::{
+  PrimitiveID, InvocationID, RenderTargetArrayIndex, ViewportArrayIndex}` respectively, from H2/H4a's
 own earlier work.
 
 **Regression sample.** `CanonicalizeStageTest.GeometryStageMapsSystemValues`
@@ -8416,7 +8425,8 @@ row's roadmap entry called for, not a re-count of the same failures:
 |---|---|---|
 | 60 | `error: 'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but got '!llvm.array<N x struct<...>>'`/`'!llvm.array<N x vector<4xf32>>'` (`dEQP-VK.geometry.basic.*`, `varying.*`) | New (was masked by `EmitVertex`): a geometry stage's per-invocation output-vertex-array storage (an `N`-element array of a vertex's own output signature, addressed once per `EmitVertex`) lowers to a plain LLVM array type rather than a pointer-typed alloca/global a `getelementptr` can index -- a geometry-specific stack/storage-allocation gap, not a SPIR-V-conversion one. Root cause not yet isolated to a single file; flagged for a follow-on row |
 | 24 | `error: feme-cpu-linearize: function 'main': loop at '' has an internal branch in 'Flow'; unsupported (roadmap milestone 6 deviation)` (`dEQP-VK.geometry.layered.*.readback`) | Pre-existing, documented `LinearizePass` limitation (roadmap milestone 6 deviation), unrelated to geometry or this row |
-| 21 | `Fail (vk.createGraphicsPipelines(...))`, no diagnostic (`dEQP-VK.geometry.builtin_variable.in_block.primitive_id_in*`, `input.basic_primitive.{line_strip,line_strip_adjacency,triangle_fan}`, `input.triangle_strip_adjacency.vertex_count_*`, `emit.*_emit_0_end_0`) | Exactly H5e's own flagged "~21-case silent `VK_ERROR_INITIALIZATION_FAILED`" bucket, unchanged in composition and count now that the `EmitVertex`/`EndPrimitive` noise is gone -- still not individually isolated, spun off below as H5e-b |
+| 21 | `Fail (vk.createGraphicsPipelines(...))`, no diagnostic (`dEQP-VK.geometry.builtin_variable.in_block.primitive_id_in*`, `input.basic_primitive.{
+  line_strip, line_strip_adjacency, triangle_fan}`, `input.triangle_strip_adjacency.vertex_count_*`, `emit.*_emit_0_end_0`) | Exactly H5e's own flagged "~21-case silent `VK_ERROR_INITIALIZATION_FAILED`" bucket, unchanged in composition and count now that the `EmitVertex`/`EndPrimitive` noise is gone -- still not individually isolated, spun off below as H5e-b |
 | 20 | `NotSupported (Requested core feature is not supported: fragmentStoresAndAtomics ...)` (`dEQP-VK.geometry.layered.*.secondary_cmd_buffer`) | Pre-existing, unrelated feature gate |
 | 18 | `Fail (vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED ...)` (`dEQP-VK.geometry.layered.{1d_array,2d_array}.*.multiple_layers_per_invocation`/`render_to_one`/`render_to_default_layer`/`render_to_all`) | New (was masked by `EmitVertex`): layered-rendering-specific geometry execution failure at submit time, distinct from the `basic`/`varying` `getelementptr` bucket above (these use `gl_Layer` output, not just varying output-array storage). Not yet isolated; spun off below as H5e-c |
 | 14 | `Fail (vk.createImage(...): VK_ERROR_INITIALIZATION_FAILED ...)` (`dEQP-VK.geometry.layered.3d.*`) | Pre-existing, unrelated to geometry-stage compilation at all (image creation, before any geometry shader is touched) -- unchanged from H5e's own report |
@@ -8494,8 +8504,10 @@ capability's validation into agreement with itself.
    `GraphicsPipeline.cpp`'s gate and `Executor.cpp`'s own
    `RestartEnabled` condition at it, so the two can never drift apart
    again. Accounts for 18 of the 21 cases
-   (`builtin_variable.in_block.primitive_id_in{,_restarted}`,
-   `input.basic_primitive.{line_strip,line_strip_adjacency,triangle_fan}`,
+   (`builtin_variable.in_block.primitive_id_in{
+  , _restarted}`,
+   `input.basic_primitive.{
+  line_strip, line_strip_adjacency, triangle_fan}`,
    `input.triangle_strip_adjacency.vertex_count_*`).
 2. **Degenerate zero-emit geometry shader rejected outright.**
    `dEQP-VK.geometry.emit.{line_strip,points,triangle_strip}_emit_0_end_0`
@@ -8701,3 +8713,122 @@ new unit tests this row adds: `RenderPassTest.
 ResolveAttachmentViewAcceptsOneDArrayView`, `RenderPassTest.
 ResolveAttachmentViewAcceptsCubeArrayView`, and `RenderPassTest.
 ResolveAttachmentViewRejects3DView`.
+
+## Roadmap H5e-d: measured impact (`GeometryWrapperPass` missing-signature bucket)
+
+**Change.** `canonicalizeSPIRVStage` (`feme/lib/Transforms/Graphics/
+CanonicalizeStage.cpp`) gains a new `else if (Stage == ShaderStage::
+Geometry)` branch, run whenever its existing signature-building branch
+(`if (!InputGlobals.empty() || !OutputGlobals.empty())`) does not fire,
+attaching an explicit empty `EntrySignature` via `dxil::setEntrySignature`.
+
+**Root cause.** This row's own text already named the shape correctly: a
+geometry entry compiled from an `emit`-count combination whose `emitCountA
+== 0` (the CTS's own `EmitTest::shaderGeometry` generates its
+`EmitVertex`/`gl_in[]`/output-writing loop body `emitCountA` times, so
+`emitCountA == 0` means that loop contributes *zero* IR instructions,
+leaving only a bare `EndPrimitive()` -- already lowered to
+`feme.stage.stream.cut` by roadmap H5e-a's own `SPIRVToLLVMPatterns` fix,
+independent of this row) discovers no `Input`/`Output` stage-IO globals at
+all during `canonicalizeSPIRVStage`'s own discovery loop. Its
+signature-building branch, guarded on at least one such global existing,
+never runs, so `dxil::setEntrySignature` is never called and the entry is
+left with no `!feme.signature` metadata whatsoever.
+`feme::cpu::GeometryWrapperPass` (`GeometryWrapper.cpp`)'s
+`lowerGeometryStageOps` then hard-requires that metadata for any geometry
+entry using so much as one stage op -- a stream cut included -- and
+errors out instead of tolerating its absence the way ordinary
+`loadInput`/`storeOutput` resolution elsewhere in this file does.
+
+This is the same underlying shape roadmap H4g's own tessellation
+investigation already found once (a genuinely stage-IO-free entry never
+gets a signature attached), but a different consumer's tolerance for it:
+H4g's own fix landed one layer further downstream, at
+`CompiledStage::create`'s serialization boundary, specifically *because*
+`canonicalizeSPIRVStage` cannot safely distinguish a genuinely-empty
+SPIR-V entry from an unresolved DXIL-origin one for `Vertex`/`Fragment`
+(both dispatched through this same function by
+`CanonicalizeStagePass::run`, alongside `canonicalizeDXILStage`) --
+attaching an unconditional empty signature there was tried and reverted
+for exactly that reason, since it broke `CanonicalizeStageTest.
+UnresolvableLoadInputIsLeftAlone`'s DXIL-origin fragment entry, which
+relies on *staying* signature-less. `Geometry` has no such ambiguity:
+`CanonicalizeStagePass::run` only ever routes a `Geometry`-stage function
+through `canonicalizeSPIRVStage`, never `canonicalizeDXILStage`, so this
+row's fix is scoped to `Stage == ShaderStage::Geometry` only, landing the
+fix at the same layer H4g's own first (reverted) attempt wanted to, but
+now provably safe to do so for this one stage.
+
+**Unit test.** `CanonicalizeStageTest.
+GeometryStreamCutOnlyEntryStillGetsASignature`: a geometry entry
+containing only a bare `feme.stage.stream.cut` call and no stage-IO
+globals at all, confirming `CanonicalizeStagePass::run` now reports
+`Changed` and attaches an empty (zero-element) `!feme.signature`, exactly
+the shape `GeometryWrapperPass` needs to see and previously never did.
+The pre-existing `CanonicalizeStageTest.UnresolvableLoadInputIsLeftAlone`
+and `GeometryStageMapsSystemValues` tests continue to pass unmodified,
+confirming the DXIL-origin-ambiguity case this row's fix is scoped away
+from, and the ordinary geometry-signature-building path, are both
+untouched.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+**1871/1930** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up
+from H5e-c's own **1870/1929** by exactly the 1 new unit test this row
+adds.
+
+**`dEQP-VK.geometry.emit.*_emit_0_end_1` re-run (3 cases), before/after:**
+
+```
+Before (H5e-c's own baseline, inherited unchanged from H5e-b):
+  Fail (feme-cpu-wrap-geometry: geometry stage wrapper requires attached
+        feme.signature metadata) -- all 3 cases
+
+After (this row):
+  Pass -- all 3 cases (3/3, 100%)
+```
+
+**`dEQP-VK.geometry.*` re-run (200 cases), before/after:**
+
+```
+Before (H5e-c's own baseline):
+  Passed:        4/200 (2.0%)
+  Failed:        163/200 (81.5%)
+  Not supported: 33/200 (16.5%)
+
+After (this row):
+  Passed:        10/200 (5.0%)
+  Failed:        157/200 (78.5%)
+  Not supported: 33/200 (16.5%)
+```
+
+Exactly 6 new passes, not 3: the fix is not specific to `endCountA == 1`
+the way this row's own title suggests -- it applies to *any*
+`emitCountA == 0` shape, so `dEQP-VK.geometry.emit.{line_strip,points,
+triangle_strip}_emit_0_end_2` (the `endCountA == 2` siblings, calling
+`EndPrimitive()` twice instead of once, otherwise identical) flip from
+the exact same failure to `Pass` alongside the 3 this row's own text
+named. (`emit_0_end_0`'s own 3 cases were already fixed by roadmap H5e-b,
+a separate `vkCreateGraphicsPipelines`-time fix, and are unaffected by
+this row -- accounting for the 4-case baseline above.) Zero
+`feme-cpu-wrap-geometry: ... requires attached feme.signature metadata`
+errors remain anywhere in the group.
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt`
+sample, same file every prior row's own report used:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        155/1957 (7.9%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical to H5e-c's own baseline (12/155/1790, 0 regressions) --
+expected, since no `dEQP-VK.draw.*` case in this sample exercises a
+geometry stage at all.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this is a pure reflection/metadata-attachment fix inside
+`canonicalizeSPIRVStage`, touching no feature bit or extension (the
+`geometryShader` feature bit was already advertised, and the failure mode
+this row fixes is unrelated to capability advertisement).
