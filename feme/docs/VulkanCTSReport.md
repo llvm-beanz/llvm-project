@@ -11809,3 +11809,164 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
     --deqp-log-filename=in_out_h6g_b_a_i_a_i_b.qpa \
     --deqp-log-images=disable --deqp-log-shader-sources=disable
 ```
+
+## Roadmap H6g-b-a-i-a-i-c: measured impact (missing `feme.cpu.resource.load.raw.v2f32`/`v3f32`/`v2i32`/`v3i32`/`v4i32` runtime overloads)
+
+**Starting point.** H6g-b-a-i-a-i-b's own real-ICD re-run of the named
+`dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only`
+case, and the full 560-case `dEQP-VK.mesh_shader.ext.in_out.*` bucket,
+found all 80 previously-`feme-cpu-simdize`-blocked cases now failing at
+`vkCreateGraphicsPipelines` time with a JIT-link "Symbols not found"
+error naming `feme.cpu.resource.load.raw.v2f32`/`v3f32`/`v3i32`/`v2i32`/
+`v4i32`. This row's own ask was to root-cause and fix that gap.
+
+**Root cause.** `feme/runtime/CPU/FeMeRuntimeCPU.c` defined only the
+scalar (`.i32`/`.f32`) and full-`<4 x T>`-width (`.v4f32`) raw-buffer
+overloads; the 2- and 3-component overloads a `vec2`/`vec3`/`ivec2`/
+`ivec3` mesh-shader input/output needs (and, it turned out, `.v4i32`
+too -- missing on both the load and store side, not just load as the
+row's own initial text guessed) were simply absent. `feme::cpu::
+ResourceCalls`/`ResourceLowering.cpp` needed no changes at all:
+`mangleResourceCallName` mangles any `FixedVectorType` generically by
+element type and width, so the compiler side already emitted calls to
+these names for every vector width; only the runtime definitions were
+missing.
+
+**Fix.** Added 10 new `asm`-labeled functions to `FeMeRuntimeCPU.c`:
+raw load and store for `v2f32`, `v3f32`, `v2i32`, `v3i32`, and `v4i32`,
+each mirroring the existing `v4f32` bindless-descriptor-lookup-then-
+masked-load/store shape exactly (new `FemeRTv2f32`/`FemeRTv3f32`/
+`FemeRTv2i32`/`FemeRTv3i32` vector typedefs, plus `...Unaligned`
+variants, alongside the pre-existing `FemeRTv4f32`/`v4i32` ones).
+
+**A related, real bug found and fixed while adding the v3-wide
+stores.** Clang's C ABI coerces a by-value `<3 x float>`/`<3 x i32>`
+parameter into a `<4 x i32>` register pair for the *function's own
+compiled definition*, and pads `sizeof()` to 16 (the next power of two
+above the 12 logical bytes). Writing the store body the same way the
+existing `v4f32`/`v4i32` functions do -- `*(Unaligned *)Ptr = Value;`,
+or even `__builtin_memcpy(Ptr, &Value, sizeof(Value))` -- both compile
+to a widened, out-of-bounds 16-byte `store <4 x T>` instead of the
+intended 12-byte one, verified directly via `opt -S` on the compiled
+bitcode. Fixed with `__builtin_memcpy(Ptr, &Value, 12)`, an explicit
+*literal* byte count (not `sizeof`), which produces an exact 12-byte
+store. The load side has no equivalent issue: a return value isn't
+ABI-coerced by Clang the same way a parameter is, so `load <3 x T>`
+already emits an exact 12-byte read.
+
+**Confirmed the ABI coercion mismatch does not affect the real
+production path.** The runtime's own *compiled definition* sees the
+coerced `<4 x i32>` parameter type, but the real caller
+(`feme::cpu::ResourceCalls::createRawStore`, reached via
+`ResourceLoweringPass`) declares and calls with the canonical,
+uncoerced `<3 x T>` type, and that declaration exists before
+`Linker::linkInModule` merges in the runtime bitcode
+(`Pipeline.cpp`/`CompiledStage.cpp`, `Linker::Flags::LinkOnlyNeeded`).
+Verified via `llvm-link` + `opt -passes=verify` that LLVM's linker/
+verifier does not catch this signature mismatch (opaque-pointer call
+sites are never re-validated against the callee's actual
+`FunctionType` after RAUW), and wrote a temporary probe test mimicking
+the real production flow end-to-end (declare canonical type in a
+caller module, link in the runtime bitcode, execute via MCJIT) that
+round-trips correctly on this host -- confirming the real pipeline is
+safe, and this ABI quirk only mattered for the runtime's own C source
+correctness, not the JIT-linked shader's.
+
+**Tests.** Added 5 new `TEST_F(RuntimeCPUTest, RawLoadStoreRoundTrip{
+V2F32,V3F32,V2I32,V3I32,V4I32})` round-trip tests to
+`RuntimeCPUTest.cpp`, generalizing its pre-existing `addStoreWrapper`
+helper to detect when the runtime `Function`'s actual (ABI-coerced)
+parameter type differs from the logical vector type and adapt
+(shufflevector-widen + bitcast) before calling, mirroring what a real
+coerced C call site does -- transparent for the pre-existing v2/v4
+tests (no coercion there), necessary for the new v3 ones. Added 10 new
+`CHECK-DAG` lines to `runtime-cpu-bitcode.test` for the new symbol
+names.
+
+```
+ninja check-feme (assertions-enabled, ccache build):
+Total Discovered Tests: 2025
+  Unsupported:   59 (2.91%)
+  Passed     : 1966 (97.09%)
+```
+
+Rises from H6g-b-a-i-a-i-b's own 2020/1961 by exactly the 5 new tests
+this row adds; 0 regressions.
+
+**A real ICD re-run confirms the exact reported blocker is gone.**
+Re-running this row's own named case
+(`dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only`)
+against the real `deqp-vk`/`feme` Vulkan ICD
+(`FEME_VULKAN_LOG_CREATION_ERRORS=1`) no longer hits the reported JIT
+symbol gap at all; it now fails at a different, unrelated point:
+
+```
+error: feme-cpu-wrap-mesh-output: unexpected stage op left for the mesh output wrapper
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37)
+```
+
+Re-running the full 560-case `dEQP-VK.mesh_shader.ext.in_out.*` bucket
+(same caselist source and technique as H6g-b-a-i-a-i-b):
+
+```
+Passed:        0/560 (0.0%)
+Failed:        80/560 (14.3%)
+Not supported: 480/560 (85.7%)
+```
+
+Unchanged from H6g-b-a-i-a-i-b's own 80-case count, but spot-checking
+every one of the 80 failures (not just the one named case) by grepping
+the run's combined log for both the resolved error string and every
+remaining error line confirms none of the 80 hit "Symbols not found"
+naming any `feme.cpu.resource.load.raw.*` name any more -- the specific
+blocker this row targeted is fully resolved for the whole bucket, not
+just the reduced case. The 80 split cleanly into two new causes,
+neither of which is this row's own concern:
+
+```
+     40 feme-cpu-wrap-mesh-output: unexpected stage op left for the mesh output wrapper
+     40 JIT session error: Symbols not found: [ spirv_var_NN ]  (NN varies per case)
+```
+
+The 40 `spirv_var_NN` cases are not a new blocker: they match
+H6g-b-c's own already-tracked description exactly (a mesh entry's
+unresolved arrayed-builtin-block access survives, uncanonicalized, all
+the way to the JIT because `ValidateStagePass::run` still does not
+validate `ShaderStage::Mesh`) -- this row's own re-run is further
+confirmation of that row's scope, not a new one. The other 40, a new
+`feme-cpu-wrap-mesh-output` diagnostic from
+`MeshOutputWrapperPass::lowerMeshStageOps`'s catch-all rejection of any
+surviving `feme.stage.*`/masked-output-store call that is neither
+`OutputStore` nor `SetMeshOutputs`, is genuinely new and is out of scope
+for this row -- tracked as new roadmap row H6g-b-d.
+
+`FeMeCPUDesign.md` checked: the "Runtime Support Library" section
+describes the runtime as providing "descriptor lookup ... for every
+supported format" generically, without enumerating specific vector
+widths, so it already accurately describes this row's fix with no
+wording change needed. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` confirmed no change needed: `VK_EXT_mesh_
+shader` was already "Advertised" (roadmap H6f) before and after this
+fix, since this row closes a runtime-symbol gap within the extension's
+existing scope rather than changing what is advertised.
+
+**Milestone H6 does not close.** This row's own fix lands and is
+confirmed complete for the exact symbol gap it targeted, but the same
+real-ICD re-run splits the bucket's 80 cases across two other blockers:
+the already-tracked H6g-b-c, and the newly discovered H6g-b-d.
+
+**Reproducing this row.** Same ICD build as every prior mesh-shading
+row:
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  ./deqp-vk --deqp-case=dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only \
+    --deqp-log-filename=single_h6g_b_a_i_a_i_c.qpa
+grep "^TEST: dEQP-VK.mesh_shader.ext.in_out\." dEQP-VK-cases.txt | sed 's/^TEST: //' > cases_h6g_b_a_i_a_i_c.txt
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=cases_h6g_b_a_i_a_i_c.txt \
+    --deqp-log-filename=in_out_h6g_b_a_i_a_i_c.qpa \
+    --deqp-log-images=disable --deqp-log-shader-sources=disable
+```
