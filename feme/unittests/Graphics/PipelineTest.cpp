@@ -16,12 +16,57 @@
 
 #include "feme/Graphics/Pipeline.h"
 
+#include "feme/Core/Context.h"
+#include "feme/Core/Module.h"
+#include "feme/Core/ShaderStage.h"
+#include "feme/Target/CPU/CompiledStage.h"
+
+#include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
 using namespace feme;
 using namespace feme::graphics;
+using namespace llvm;
 
 namespace {
+
+/// A minimal mesh entry point, compiled just far enough to attach to a
+/// `GraphicsPipeline` -- these tests only cover `setMeshStage`'s own
+/// plumbing, not stage execution (`ExecutorTest.cpp`'s mesh-chaining
+/// tests, roadmap H6e, cover that).
+constexpr char MinimalMeshShaderIR[] = R"(
+  define void @ms_main() #0 {
+    ret void
+  }
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+/// Same shape as `MinimalMeshShaderIR`, tagged as the task (amplification)
+/// stage instead.
+constexpr char MinimalTaskShaderIR[] = R"(
+  define void @ts_main() #0 {
+    ret void
+  }
+  attributes #0 = { "hlsl.shader"="amplification" "hlsl.numthreads"="1,1,1" }
+)";
+
+Expected<std::shared_ptr<cpu::CompiledStage>>
+compileMinimalStage(Context &Ctx, StringRef IR, ShaderStage Stage) {
+  SMDiagnostic Err;
+  auto M = parseAssemblyString(IR, Err, Ctx.getLLVMContext());
+  if (!M)
+    return createStringError(inconvertibleErrorCode(), "parse error: %s",
+                             Err.getMessage().str().c_str());
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(M));
+  cpu::StageCompileOptions Opts;
+  Opts.Stage = Stage;
+  Opts.WaveSize = 4;
+  return cpu::CompiledStage::create(Ctx, std::move(Mod), Opts);
+}
 
 TEST(GraphicsPipelineTest, DescribesFixedFunctionState) {
   std::vector<AttachmentFormat> Attachments = {
@@ -48,6 +93,68 @@ TEST(GraphicsPipelineTest, DescribesFixedFunctionState) {
   EXPECT_EQ(Pipeline.getAttachments()[0].Height, 4u);
 }
 
+// (Roadmap H6e) `setMeshStage`'s own plumbing: a mesh pipeline has no real
+// vertex stage of its own (`VertexStage=nullptr` below, mirroring how
+// `FragmentStage` may already be null for a depth/stencil-only pipeline,
+// roadmap H2j) -- `Executor::executeDraws` gates its own single
+// `getVertexStage()` call site behind `!hasMeshStages()` to make that safe.
+TEST(GraphicsPipelineTest, SetMeshStageRecordsTheMeshAndTaskStagesAndState) {
+  Context Ctx;
+  Expected<std::shared_ptr<cpu::CompiledStage>> MS =
+      compileMinimalStage(Ctx, MinimalMeshShaderIR, ShaderStage::Mesh);
+  ASSERT_THAT_EXPECTED(MS, Succeeded());
+  Expected<std::shared_ptr<cpu::CompiledStage>> TS =
+      compileMinimalStage(Ctx, MinimalTaskShaderIR, ShaderStage::Amplification);
+  ASSERT_THAT_EXPECTED(TS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, /*FragmentStage=*/nullptr,
+      PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, Attachments);
+  EXPECT_FALSE(Pipeline.hasMeshStages());
+
+  MeshState Mesh;
+  Mesh.OutputTopology = MeshOutputTopology::Triangles;
+  Mesh.MaxOutputVertices = 3;
+  Mesh.MaxOutputPrimitives = 1;
+  Pipeline.setMeshStage(*TS, *MS, Mesh);
+
+  EXPECT_TRUE(Pipeline.hasMeshStages());
+  EXPECT_TRUE(Pipeline.hasTaskStage());
+  EXPECT_EQ(&Pipeline.getMeshStage(), MS->get());
+  EXPECT_EQ(&Pipeline.getTaskStage(), TS->get());
+  EXPECT_EQ(Pipeline.getMeshState().OutputTopology,
+            MeshOutputTopology::Triangles);
+  EXPECT_EQ(Pipeline.getMeshState().MaxOutputVertices, 3u);
+  EXPECT_EQ(Pipeline.getMeshState().MaxOutputPrimitives, 1u);
+}
+
+// A mesh pipeline may legally omit its task (amplification) stage
+// (`vkCmdDrawMeshTasksEXT` with no task shader): `setMeshStage`'s own
+// `TaskStage` argument is the one allowed to be null, unlike `MeshStage`
+// itself.
+TEST(GraphicsPipelineTest, SetMeshStageAllowsAnOmittedTaskStage) {
+  Context Ctx;
+  Expected<std::shared_ptr<cpu::CompiledStage>> MS =
+      compileMinimalStage(Ctx, MinimalMeshShaderIR, ShaderStage::Mesh);
+  ASSERT_THAT_EXPECTED(MS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, /*FragmentStage=*/nullptr,
+      PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, Attachments);
+  Pipeline.setMeshStage(/*TaskStage=*/nullptr, *MS, MeshState{});
+
+  EXPECT_TRUE(Pipeline.hasMeshStages());
+  EXPECT_FALSE(Pipeline.hasTaskStage());
+}
+
 TEST(PrimitiveTopologyTest, HasAdjacencyIdentifiesTheFourAdjacencyKinds) {
   EXPECT_FALSE(topologyHasAdjacency(PrimitiveTopology::PointList));
   EXPECT_FALSE(topologyHasAdjacency(PrimitiveTopology::TriangleStrip));
@@ -64,13 +171,11 @@ TEST(PrimitiveTopologyTest, HasAdjacencyIdentifiesTheFourAdjacencyKinds) {
 /// to only allow that one, a stale check `Executor.cpp`'s own
 /// `RestartEnabled` condition had already outgrown as of roadmap H5d).
 TEST(PrimitiveTopologyTest,
-    SupportsPrimitiveRestartIdentifiesEveryStripAndFanKind) {
-  EXPECT_TRUE(
-      topologySupportsPrimitiveRestart(PrimitiveTopology::LineStrip));
+     SupportsPrimitiveRestartIdentifiesEveryStripAndFanKind) {
+  EXPECT_TRUE(topologySupportsPrimitiveRestart(PrimitiveTopology::LineStrip));
   EXPECT_TRUE(
       topologySupportsPrimitiveRestart(PrimitiveTopology::TriangleStrip));
-  EXPECT_TRUE(
-      topologySupportsPrimitiveRestart(PrimitiveTopology::TriangleFan));
+  EXPECT_TRUE(topologySupportsPrimitiveRestart(PrimitiveTopology::TriangleFan));
   EXPECT_TRUE(topologySupportsPrimitiveRestart(
       PrimitiveTopology::LineStripWithAdjacency));
   EXPECT_TRUE(topologySupportsPrimitiveRestart(
