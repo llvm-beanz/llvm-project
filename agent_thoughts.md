@@ -41516,3 +41516,118 @@ correctly and accounted for all 28044 cases with no gaps.
 - `EmitMeshTasksEXT` remains uncanonicalized (`Pipeline.cpp`'s own
   comment still notes this) -- a task-stage op, not this row's own mesh-
   stage scope.
+
+# H6c-a-a-ii: `flattenMeshRow`'s `PerPrimitive` routing
+
+## Scope and what I found
+
+The milestone asked me to teach `Executor::runMeshWorkgroup`'s
+`flattenMeshRow` to route a `PerPrimitive`-frequency `Output` element into
+`MeshResources::PrimitiveOutputs`/`PrimitiveOutputLayout` instead of
+treating every element as per-vertex. Reading `MeshResources` in
+`ResourceHeap.h` first: `PrimitiveOutputLayout`/`PrimitiveOutputs` fields
+already existed on the struct (added back at H6c), and
+`MeshOutputWrapperPass`'s own IR-level lowering (`lowerMeshOutputStore`,
+landed with H6c-a-a) already branches correctly on
+`Elt.Frequency == SignatureFrequency::PerPrimitive` to pick which pair of
+pointers to address. The actual gap was entirely on the host side:
+`Executor.cpp`'s `runMeshWorkgroup` built exactly one `StageStorage`
+(sized by `Mesh.MaxOutputVertices`) and wired only `VertexOutputLayout`/
+`VertexOutputs`, leaving `PrimitiveOutputLayout`/`PrimitiveOutputs` at
+their default null/empty state -- and `flattenMeshRow` itself walked
+every `Output` element in `MeshSig->Elements` unconditionally, with no
+frequency filter at all.
+
+This means the bug was not "data ends up in the wrong array" (a
+correctness bug you could quietly regression-test with wrong pixel
+colors) -- it was "the compiled wrapper dereferences a null pointer the
+moment a real entry point writes a `PerPrimitive` element", i.e. a crash.
+I confirmed this directly: after writing the fix, I `git stash`-ed just
+`Executor.cpp` (keeping the new test) and reran it -- immediate `SIGSEGV`
+inside the compiled lowering, exactly as expected. That felt like the
+right way to prove the bug is real without hand-waving, mirroring how
+H6c-a-a-i's own report proved its `resolveOffsetWithinElement` crash was
+pre-existing by stashing its own change and reproducing the old failure
+mode.
+
+## The fix, and a bug I found while writing it
+
+The direct fix: build a second `StageStorage` for `*MeshSig`, sized by
+`Mesh.MaxOutputPrimitives`, mirroring the existing vertex one exactly
+(same signature, same `buildStageStorage` call, just a different
+invocation count) and wire its layout/data into `MeshResources`. Then
+give `flattenMeshRow` a `SignatureFrequency` parameter (and a matching
+`Storage` parameter, since vertex and primitive data now live in two
+different `StageStorage` objects) and filter `MeshSig->Elements` down to
+just that frequency.
+
+While making that edit I noticed `unflattenMeshRow` -- the downstream
+counterpart that reconstructs `Merged` from each assembled `Meshlet`'s
+own vertex rows -- still walked every `Output` element unconditionally,
+with no frequency filter of its own. Once `flattenMeshRow` started
+producing *narrower* rows for a vertex invocation (only `PerVertex`
+elements, since `PerPrimitive` ones are now excluded and read into a
+separate row for `setPrimitive` instead), `unflattenMeshRow`'s
+`Row[Idx++]` indexing would silently walk off the end of that now-
+shorter `Row` for any signature mixing both frequencies -- a second,
+closely related alignment bug I would have introduced myself if I only
+fixed `flattenMeshRow` and left `unflattenMeshRow` alone. I fixed both in
+the same commit rather than leaving a freshly-introduced bug for a future
+row to discover, since it is really one bug (the pair's "same order,
+same filter" invariant) split across two functions.
+
+## Test design
+
+I wanted a test that actually exercises the fixed code path -- not just a
+`MeshOutputWrapperPass`-level unit test (that shape is already covered by
+`MeshOutputWrapperTest.cpp`'s own `LowersSetMeshOutputsCall`/per-frequency
+cases from H6c-a-a) but something that proves *`Executor.cpp`'s own*
+host-side wiring is correct. That meant going through the full
+`CompiledStage::create` pipeline and `executeDraws`, with a real mesh
+entry that declares one `PerVertex` position element and one
+`PerPrimitive` scalar element and writes both via canonicalized
+`feme.stage.output.store`/`feme.stage.set_mesh_outputs` calls -- mirroring
+`CompiledStageTest.cpp`'s own `InvokeMeshWritesPerVertexOutputStore`/
+`InvokeMeshWritesSetMeshOutputs` shapes, but through `executeDraws`
+instead of `invokeMesh` directly, since the bug lives one layer up.
+
+I picked `MeshOutputTopology::Points` deliberately: `PrimitiveIndices`
+(the `gl_PrimitiveTriangleIndicesEXT`-shaped index list) has no
+canonicalized op yet and stays unwired regardless of this row (a
+separate, already-documented gap in `MeshOutputWrapper.h`'s own
+comment), so a `Triangles`-topology test would need a real primitive
+index list to actually rasterize anything and prove the vertex data
+survived intact -- `Points` sidesteps that entirely, since a point-class
+draw rasterizes every one of its own vertices directly with no index
+list at all (`Executor.cpp`'s own existing comment already documents
+this). That let me write a clean, minimal test of exactly this row's own
+fix without also depending on the still-open `PrimitiveIndices` gap.
+
+## CTS re-run: an honest surprise I didn't fully explain
+
+Re-running the full `dEQP-VK.mesh_shader.*` group with the same
+generalized resume-loop methodology H6c-a-a-i's own report established,
+I expected the crashing/`Unresolved` bucket to stay at 28 cases (this
+row's change is purely runtime/host-side, and `H6c-a-a-iii`'s own crash
+lives entirely in `CanonicalizeStage.cpp`, a compile-time path my change
+never touches). It came back as 9 instead, with `Failed` correspondingly
+rising by the same 19-case difference. I do not have a confirmed root
+cause for this discrepancy -- my best guess is some kind of caselist-
+batching or process-state sensitivity in the resume loop itself (each
+iteration's `deqp-vk` invocation runs a shrinking subset of the full
+caselist, and I have not verified the underlying crash is fully
+input-order-independent), but I did not chase it further: it does not
+change this row's own `Passed`/`Not supported` counts (both stay
+byte-identical to baseline, confirming this row introduces 0 new passes
+and 0 regressions), and root-causing `H6c-a-a-iii`'s own crash precisely
+is that row's job, not this one's. I recorded the actual measured numbers
+in `VulkanCTSReport.md` rather than asserting the discrepancy away or
+quietly reporting only what I expected to see.
+
+## Deliberately deferred (not this row's job)
+
+- `H6c-a-a-iii` (`resolveOffsetWithinElement`'s arrayed-builtin-block
+  crash) -- untouched, remains the sole blocker on `H6g-b`.
+- `PrimitiveIndices` (a primitive's own vertex index list) -- still has
+  no canonicalized `feme.stage.*` op and stays unwired; noted in
+  `MeshOutputWrapper.h`'s own comment, not addressed here.
