@@ -1539,10 +1539,21 @@ resolveRowComponent(Type *MemberTy, uint64_t Residual, const DataLayout &DL) {
 /// `gl_Position`'s own per-component one) selected by \p ByteOffset into
 /// \p ElemTy's own `StructLayout`. \p IsOutput (roadmap H2e) lets a caller
 /// tell a genuinely-input load from an `Output`-direction read-back.
-StageIOAccess resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
-                                         uint64_t ByteOffset, Type *ValueTy,
-                                         const DataLayout &DL, bool IsOutput,
-                                         Value *Vertex) {
+///
+/// (Roadmap H6c-a-a-iii) A multi-`ElementID` builtin interface block is
+/// only ever modeled here as a plain (non-arrayed) `StructType` -- the
+/// shape every such block took until a mesh entry's arrayed
+/// `PerPrimitiveEXT`/`PerVertexEXT` builtin block (e.g. an array-of-struct
+/// per-primitive output block, one struct per primitive) reached this far
+/// for the first time via H6c-a-a-i's own closing re-run. That shape is
+/// simply not modeled yet: gracefully returns `std::nullopt` (leaving the
+/// access unrewritten, exactly like any other unrecognized pointer
+/// `resolveStageIOAccess` rejects) instead of asserting via
+/// `cast<StructType>`, which previously aborted the whole process outright.
+std::optional<StageIOAccess>
+resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
+                           uint64_t ByteOffset, Type *ValueTy,
+                           const DataLayout &DL, bool IsOutput, Value *Vertex) {
   LLVMContext &Ctx = ElemTy->getContext();
   auto AsConstant = [&](uint64_t V) -> Value * {
     return V ? ConstantInt::get(Type::getInt32Ty(Ctx), V) : nullptr;
@@ -1555,7 +1566,9 @@ StageIOAccess resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
                          IsOutput};
   }
 
-  auto *ST = cast<StructType>(ElemTy);
+  auto *ST = dyn_cast<StructType>(ElemTy);
+  if (!ST)
+    return std::nullopt;
   if (ValueTy == ST)
     return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
 
