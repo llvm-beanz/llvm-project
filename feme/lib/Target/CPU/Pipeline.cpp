@@ -27,6 +27,7 @@
 #include "feme/Transforms/CPU/SPIRVPushConstantLowering.h"
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 #include "feme/Transforms/CPU/SPIRVSubpassLowering.h"
+#include "feme/Transforms/CPU/TaskPayloadWrapper.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/CPU/VertexWrapper.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
@@ -392,14 +393,27 @@ Expected<PipelineResult> runPipeline(Module &M,
     // `IsMesh` handling, EntryWrapper.cpp).
     //
     // What is *not* yet wired here (left to a future roadmap row, see
-    // agent_thoughts.md's H6c-a-a entry): a task payload store,
-    // `SetMeshOutputsEXT`, or `EmitMeshTasksEXT` -- none of those has a
-    // `feme.stage.*` op reaching this pipeline yet, so
-    // `FemeMeshArgs::ActualVertexCount`/`ActualPrimitiveCount` remain 0
-    // (an assembled meshlet's declared counts) even once this pass's own
-    // output-store wiring lands, and an amplification entry's own task
-    // payload write is still unwired.
+    // agent_thoughts.md's H6c-a-a entry): `SetMeshOutputsEXT` or
+    // `EmitMeshTasksEXT` -- neither has a `feme.stage.*` op reaching this
+    // pipeline yet, so `FemeMeshArgs::ActualVertexCount`/
+    // `ActualPrimitiveCount` remain 0 (an assembled meshlet's declared
+    // counts) even once this pass's own output-store wiring lands.
+    //
+    // Roadmap H6c-a-b: an amplification (task) entry's own bounded
+    // payload write (`feme.stage.task.payload.store`, canonicalized with a
+    // constant byte offset, roadmap H6i) is likewise not one of
+    // `FemeDispatchArgs`'s shared fields, so `TaskPayloadWrapperPass` runs
+    // first here too, appending `FemeTaskArgs::Payload`/`MaxPayloadBytes`
+    // to the wave body by name and lowering every masked payload store
+    // into a store at `task_payload + offset` -- see
+    // TaskPayloadWrapper.h. `EntryWrapperPass` then builds the group-loop
+    // wrapper around the result exactly as before, just against
+    // `getTaskArgsType`'s longer struct instead of `getDispatchArgsType`'s
+    // (see `feme::cpu::buildWrapperEnv`'s own `IsTask` handling,
+    // EntryWrapper.cpp, mirroring `IsMesh`).
     case feme::ShaderStage::Amplification:
+      if (Error E = runAndCheck("wrapping", TaskPayloadWrapperPass()))
+        return std::move(E);
       if (Error E = runAndCheck("wrapping", EntryWrapperPass()))
         return std::move(E);
       break;
