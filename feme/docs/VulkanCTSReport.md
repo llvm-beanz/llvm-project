@@ -9368,3 +9368,80 @@ product code changed, `dEQP-VK.mesh_shader.*` (still 0/0/28044) and the
 and were not re-run; `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no change (`VK_EXT_mesh_shader` stays
 absent, nothing new is advertised).
+
+## Roadmap H6d: measured impact (checked amplification dispatch queues and meshlet assembly)
+
+**Still 0/0/28044 on `dEQP-VK.mesh_shader.*`, and that is the correct,
+expected result** -- this row adds two new `feme::graphics` classes,
+`AmplificationDispatchQueue` (`AmplificationDispatch.h`/`.cpp`) and
+`Meshlet`/`assembleMeshlet` (`Meshlet.h`/`.cpp`), and nothing else: no
+SPIR-V import path change, no `CanonicalizeStagePass`/`ValidateStagePass`
+filter change, no `Executor::executeDraws` chaining (left to H6e), and no
+`vkCreateGraphicsPipelines`/`PhysicalDeviceInfo.cpp` change. Nothing new is
+reachable from a real Vulkan mesh/task pipeline yet; both new classes are
+exercised only by their own new unit tests, which hand-build
+`MeshOutputBuilder`/group-count inputs directly, the same established
+strategy H6c's own `CompiledStageTest.cpp` cases already use for mesh/task
+IR.
+
+```
+Test run totals:
+  Passed:        0/28044 (0.0%)
+  Failed:        0/28044 (0.0%)
+  Not supported: 28044/28044 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: `VK_EXT_mesh_shader` stays absent, and this row advertises
+nothing new (`AmplificationDispatchLimits`'s fields are plain constructor
+parameters today, not read from any `PhysicalDeviceInfo`-advertised
+limit -- that wiring is H6f's own "advertise only what the
+implementation actually enforces" job, once a real Vulkan mesh pipeline
+exists to advertise limits for).
+
+**Regression sample.** This row touches no existing file except two
+`CMakeLists.txt` additions (new source/test file names); no existing
+class, function, or behavior changed. `dEQP-VK.draw.*`'s 1957-case
+`draw_sample.txt` sample, same file every prior row's own report used:
+
+```
+Before (H6c's own baseline):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical to H6c's own recorded totals. **0 regressions, 0 new
+passes.**
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1906/1965** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6c's own **1897/1956** baseline by exactly the 9 new
+tests this row adds: `AmplificationDispatchTest.cpp` (6, new file --
+`AcceptsAGroupCountWithinBothBounds`,
+`RejectsAPerDimensionCountBeyondTheLimit`,
+`RejectsATotalCountBeyondTheLimitEvenIfEachDimensionFits`,
+`ComputesTheProductWithoutA32BitOverflow`,
+`EnumeratesGroupIDsXFastestZSlowest`,
+`ZeroGroupCountIsAValidEmptyDispatch`) and `MeshletTest.cpp` (3, new file
+-- `AssemblesOnlyTheDeclaredActualCounts`,
+`EmptyOutputAssemblesToAnEmptyMeshlet`,
+`DiagnosesAnOutOfRangeVertexIndexRatherThanReadingOOB`).
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                                # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6d.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6d.qpa
+```
