@@ -36,31 +36,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6g-b-a-i-a-i-b?
+Can you complete H6g-b-a-i-a-i-c?
 
-> **A divergent vector value used as a vector comparison (`fcmp`/`icmp`) operand
-> is rejected by `feme-cpu-simdize` in the same
-> `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket ("function 'main' has a
-> divergent vector value ... used outside a supported
-> insertelement-chain/resource-store/extractelement/select/shufflevector/phi/elementwise
-> pattern; component decomposition is not yet supported for this use")**, now
-> the new dominant first-emitted FeMe/MLIR diagnostic in that bucket once
-> H6g-b-a-i-a-i-a's own masked-store fix lets those shaders progress further (80
-> of 218 cases in a combined stdout/stderr diagnostic rerun land here, e.g.
-> `dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only`'s `%8 =
-> insertelement <4 x float> %6, float %7, i64 3` used by `%16 = fcmp ole <4 x
-> float> %8, %15`, confirmed via the same one-off
-> diagnostic-dump-and-single-case-rerun technique H6g-b-a-i-a-i-a used). Root
-> cause not yet isolated: a vector comparison producing a `<N x i1>` result is
-> not among `checkVectorDecompositionSupported`'s accepted consumer shapes at
-> all today (unlike a matched resource-store's or masked-store's stored-value
-> operand), and the design's own existing "a `select` with a per-lane `<N x i1>`
-> condition remains diagnosed" deviation (`checkVectorDecompositionSupported`'s
-> file comment) suggests decomposing a per-lane vector *condition* end-to-end --
-> not just a per-lane vector *value* -- may need broader work than a single
-> consumer-acceptance addition; needs a real failing shader/IR reduction to
-> confirm the exact GLSL/SPIR-V source shape (a component-wise
-> `lessThanEqual`/`greaterThan`-style comparison feeding a `select`, most
-> likely) and whether the right fix is a narrow `fcmp`/`icmp`
-> consumer-and-producer addition mirroring this row's own sibling, or the
-> broader per-lane-condition decomposition the file comment already anticipates
+> **`vkCreateGraphicsPipelines` fails at JIT-link time with "Symbols not found:
+> [ feme.cpu.resource.load.raw.v2f32, feme.cpu.resource.load.raw.v3f32,
+> feme.cpu.resource.load.raw.v3i32, feme.cpu.resource.load.raw.v2i32,
+> feme.cpu.resource.load.raw.v4i32 ]"**, now the new dominant blocker in the
+> same 80-case `dEQP-VK.mesh_shader.ext.in_out.*` bucket H6g-b-a-i-a-i-b's own
+> `fcmp`/`icmp`/reduce/vectorizable-intrinsic fixes let those cases progress
+> past `feme-cpu-simdize` entirely (confirmed by re-running the full 560-case
+> bucket and spot-checking several individual cases with
+> `FEME_VULKAN_LOG_CREATION_ERRORS=1` against the real `deqp-vk`/`feme` Vulkan
+> ICD once H6g-b-a-i-a-i-b's own fix landed). Root cause isolated:
+> `feme/runtime/CPU/FeMeRuntimeCPU.c` only defines the scalar
+> (`feme.cpu.resource.load.raw.i32`/`.f32`) and full-`<4 x T>`-width
+> (`feme.cpu.resource.load.raw.v4f32`/`.v4i32`) raw-buffer-load overloads today
+> (see its own `asm("feme.cpu.resource.load.raw.v4f32")`-labeled function and
+> neighbors) -- the 2- and 3-component overloads a `vec2`/`vec3`/`ivec2`/`ivec3`
+> mesh-shader input/output actually needs are simply missing, so the JIT's
+> `orc::LLJIT` can't materialize a call to them at pipeline-creation time. The
+> store-side (`feme.cpu.resource.store.raw.*`) and typed-buffer
+> (`feme.cpu.resource.{load,store}.typed.v4{f32,i32}`) paths were not checked
+> for the same v2/v3 gap and may need the same fix. Not yet fixed: needs new
+> `feme.cpu.resource.load.raw.v2f32`/`.v3f32`/`.v2i32`/`.v3i32` (and likely the
+> store-side/typed-buffer counterparts, pending the same gap check) runtime
+> functions mirroring the existing `v4f32`/`v4i32` ones'
+> bindless-descriptor-lookup-then-masked-load shape, plus confirming
+> `feme::cpu::ResourceCalls`/`ResourceLowering.cpp` already emit calls to these
+> names for narrower vector widths (or need their own fix to do so)
