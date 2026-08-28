@@ -2858,15 +2858,30 @@ point's output topology (`OutputPoints`/`OutputLinesEXT`/
 maximum emitted primitive count (`OutputPrimitivesEXT`) into `feme.mesh.*`
 passthrough attributes, disambiguating the enumerant values mesh shares
 with geometry/tessellation (`OutputPoints`, `OutputVertices`) by the
-declaring entry point's own stage. Nothing else in this milestone's bullet
-list is implemented yet: `CanonicalizeStagePass::run` still does not accept
-`ShaderStage::Mesh`/`ShaderStage::Amplification` (roadmap H6b), so nothing
-canonicalizes a mesh entry's bounded per-vertex/per-primitive output
-writes or a task entry's bounded payload write; no mesh-output builder,
-amplification dispatch queue, or meshlet assembly exists (roadmap H6c/
-H6d); the executor has no mesh-chaining path (roadmap H6e); and
+declaring entry point's own stage. H6b canonicalizes a mesh entry's bounded
+per-vertex/per-primitive output writes (non-constant `Output`-array indices
+route through `feme.stage.output.store`'s `Vertex` operand, mirroring H5b's
+own per-vertex input work for geometry); it explicitly left a task entry's
+bounded payload write out of scope after finding `TaskPayloadWorkgroupEXT`
+has no address-space mapping at all in LLVM's own SPIR-V backend (roadmap
+H6h), and that `CanonicalizeStagePass::run`'s stage filter itself is not yet
+lifted to accept `ShaderStage::Mesh`/`Amplification` (roadmap H6i). H6c
+reuses the compute workgroup/groupshared/barrier lowering for mesh and task
+entries: `feme::cpu::EntryWrapperPass`, the same wrapper compute already
+uses, runs completely unmodified on a mesh- or task-tagged module because
+`FemeMeshArgs`/`FemeTaskArgs` (mirroring `FemeGeometryArgs`) deliberately
+share `FemeDispatchArgs`'s leading field layout; new bounded
+`feme::graphics::MeshOutputBuilder`/`TaskPayloadBuilder` (mirroring
+`GeometryStreamBuilder`, but structure-of-arrays rather than
+stream-ordered) and `CompiledStage::invokeMesh`/`invokeTask` (mirroring
+`invokeGeometry`) round out the ABI plumbing, but are not yet wired to any
+real `feme.stage.*` mesh-output-store/task-payload-store operation, since
+those operations do not exist yet (roadmap H6d) and task payload import
+remains blocked on H6h/H6i (tracked as roadmap H6c-a). No amplification
+dispatch queue or meshlet assembly exists yet (roadmap H6d); the executor
+has no mesh-chaining path (roadmap H6e); and
 `vkCreateGraphicsPipelines`/`PhysicalDeviceInfo.cpp` accept and advertise
-nothing mesh-shader-related (roadmap H6f). See Roadmap.md's H6a-H6g rows
+nothing mesh-shader-related (roadmap H6f). See Roadmap.md's H6a-H6i rows
 for the full remaining breakdown.
 
 ### G7: Ray-query and traversal foundations

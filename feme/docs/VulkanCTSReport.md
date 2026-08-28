@@ -9223,3 +9223,79 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6b.qpa
 ```
+
+## Roadmap H6c: measured impact (reuse compute group/groupshared/barrier lowering for mesh/task)
+
+**Still 0/0/28044 on `dEQP-VK.mesh_shader.*`, and that is the correct,
+expected result** -- this row adds no SPIR-V import path, no
+`CanonicalizeStagePass`/`ValidateStagePass` filter change, and no
+`vkCreateGraphicsPipelines`/`PhysicalDeviceInfo.cpp` change; nothing new is
+reachable from a real Vulkan mesh/task pipeline yet. This row only adds
+CPU-target-side infrastructure -- `feme::graphics::MeshOutputBuilder`/
+`TaskPayloadBuilder`, `FemeMeshArgs`/`FemeTaskArgs`, `MeshResources`/
+`TaskResources`/`PreparedMeshBatch`/`PreparedTaskBatch`,
+`CompiledStage::invokeMesh`/`invokeTask`, and `Pipeline.cpp`'s routing of
+`ShaderStage::Mesh`/`Amplification` through the existing, unmodified
+`feme::cpu::EntryWrapperPass` -- exercised only by this row's own new unit
+tests, which hand-build mesh/task-tagged IR directly (bypassing SPIR-V
+import and canonicalization entirely, the same established strategy
+`GeometryWrapperTest.cpp`/`CompiledStageTest.cpp`'s existing geometry cases
+already use):
+
+```
+Test run totals:
+  Passed:        0/28044 (0.0%)
+  Failed:        0/28044 (0.0%)
+  Not supported: 28044/28044 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no change:
+`VK_EXT_mesh_shader` stays absent, and this row advertises nothing new.
+
+**Regression sample.** This row's only new/changed non-additive code path
+is `Pipeline.cpp`'s stage-wrapper-selection switch, which previously had no
+`case` for `ShaderStage::Mesh`/`Amplification` at all (any module tagged
+with those stages would have hit the switch's default/unhandled path);
+adding cases that call the same `EntryWrapperPass()` compute already uses
+cannot change behavior for any `ShaderStage::Compute`/`Vertex`/`Fragment`/
+etc. module, since those stages' own `case`s are untouched.
+`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` sample, same file every
+prior row's own report used:
+
+```
+Before (H6b's own baseline):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical to H6b's own recorded totals. **0 regressions, 0 new
+passes.**
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1897/1956** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6b's own **1881/1940** baseline by exactly the 16 new
+tests this row adds: `MeshOutputTest.cpp` (7, new file), `TaskPayloadTest.cpp`
+(5, new file), and 4 new `CompiledStageTest.cpp` cases
+(`InvokeMeshReusesComputeGroupSharedAndBarrierLowering`,
+`InvokeMeshRejectsANonMeshStage`,
+`InvokeTaskReusesComputeGroupSharedAndBarrierLowering`,
+`InvokeTaskRejectsANonTaskStage`).
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                                # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6c.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6c.qpa
+```
