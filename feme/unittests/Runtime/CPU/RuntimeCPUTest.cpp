@@ -112,6 +112,21 @@ protected:
   /// heap_count, i32 descriptor_index, i64 offset, ptr value_ptr, i1 mask)`,
   /// loading the value to store from `value_ptr` (again sidestepping the
   /// vector-argument ABI question).
+  ///
+  /// A `ValueTy` that Clang's own C ABI lowering would pass by value
+  /// differently from its plain IR type -- e.g. `<3 x float>`/`<3 x i32>`,
+  /// which get coerced to a `<4 x i32>` register pair (roadmap
+  /// H6g-b-a-i-a-i-c: an odd vector width isn't a "natural" by-value
+  /// argument shape) -- needs its value adapted to `Target`'s *actual*
+  /// (coerced) parameter type before the call, exactly as a real coerced C
+  /// call site would: widen with an extra poison lane, then bitcast to the
+  /// coerced type. This matches how `feme::cpu::ResourceCalls`' own
+  /// generated calls survive being linked against this same coercion (see
+  /// "Descriptor formats" in FeMeCPUDesign.md): the call is only safe
+  /// because `feme::cpu::ResourceLoweringPass` builds it with the logical,
+  /// uncoerced type in the *caller* module before `Linker::linkInModule`
+  /// merges in this runtime bitcode -- not because the coercion doesn't
+  /// exist.
   Function *addStoreWrapper(StringRef Name, StringRef Callee, Type *ValueTy) {
     Function *Target = getRuntimeFunction(*M, Callee);
     assert(Target && "runtime function not found in libFeMeRuntimeCPU bitcode");
@@ -134,6 +149,18 @@ protected:
     Value *ValuePtr = &*ArgIt++;
     Value *Mask = &*ArgIt++;
     Value *Value_ = Builder.CreateLoad(ValueTy, ValuePtr);
+    Type *ActualParamTy = Target->getFunctionType()->getParamType(4);
+    if (ActualParamTy != ValueTy) {
+      auto *NarrowVecTy = cast<FixedVectorType>(ValueTy);
+      unsigned NarrowCount = NarrowVecTy->getNumElements();
+      SmallVector<int, 4> WidenMask;
+      for (unsigned I = 0; I < NarrowCount; ++I)
+        WidenMask.push_back(I);
+      WidenMask.push_back(-1); // One extra poison lane, matching Clang.
+      Value *Widened = Builder.CreateShuffleVector(
+          Value_, PoisonValue::get(ValueTy), WidenMask);
+      Value_ = Builder.CreateBitCast(Widened, ActualParamTy);
+    }
     Builder.CreateCall(Target, {Heap, HeapCount, Index, Offset, Value_, Mask});
     Builder.CreateRetVoid();
     return Wrapper;
@@ -701,5 +728,172 @@ TEST_F(RuntimeCPUTest, RawLoadV4F32StructuredKindIsAccepted) {
   EXPECT_FLOAT_EQ(Result[0], 1.0f);
   EXPECT_FLOAT_EQ(Result[3], 4.0f);
 }
+
+// Regression tests for roadmap H6g-b-a-i-a-i-c: a GLSL `vec2`/`vec3`/
+// `ivec2`/`ivec3` mesh-shader input/output (e.g. a whole-`vec2` load out of
+// a `uniform Foo { vec2 v[N]; }` block) needs a raw-buffer-load/store
+// overload narrower than `V4F32`'s whole `<4 x float>`, or an integer one
+// at all -- until this milestone the runtime only defined the scalar and
+// full-`<4 x float>`-width overloads, so any shader lowering to one of
+// these calls hit a late JIT "Symbols not found" failure at
+// `vkCreateGraphicsPipelines` time. Verify each new
+// `feme.cpu.resource.{load,store}.raw.{v2f32,v3f32,v2i32,v3i32,v4i32}`
+// helper round-trips its value correctly.
+TEST_F(RuntimeCPUTest, RawLoadStoreRoundTripV2F32) {
+  float Storage[2] = {0.0f, 0.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper = addStoreWrapper(
+      "test_raw_store_v2f32", "feme.cpu.resource.store.raw.v2f32",
+      FixedVectorType::get(Type::getFloatTy(Ctx), 2));
+  Function *LoadWrapper = addLoadWrapper("test_raw_load_v2f32",
+                                        "feme.cpu.resource.load.raw.v2f32");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  float ToStore[2] = {1.5f, -2.5f};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_FLOAT_EQ(Storage[0], 1.5f);
+  EXPECT_FLOAT_EQ(Storage[1], -2.5f);
+
+  float Result[2] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_FLOAT_EQ(Result[0], 1.5f);
+  EXPECT_FLOAT_EQ(Result[1], -2.5f);
+}
+
+TEST_F(RuntimeCPUTest, RawLoadStoreRoundTripV3F32) {
+  float Storage[3] = {0.0f, 0.0f, 0.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper = addStoreWrapper(
+      "test_raw_store_v3f32", "feme.cpu.resource.store.raw.v3f32",
+      FixedVectorType::get(Type::getFloatTy(Ctx), 3));
+  Function *LoadWrapper = addLoadWrapper("test_raw_load_v3f32",
+                                        "feme.cpu.resource.load.raw.v3f32");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  float ToStore[3] = {11.0f, 22.0f, 33.0f};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_FLOAT_EQ(Storage[0], 11.0f);
+  EXPECT_FLOAT_EQ(Storage[1], 22.0f);
+  EXPECT_FLOAT_EQ(Storage[2], 33.0f);
+
+  float Result[3] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_FLOAT_EQ(Result[0], 11.0f);
+  EXPECT_FLOAT_EQ(Result[1], 22.0f);
+  EXPECT_FLOAT_EQ(Result[2], 33.0f);
+}
+
+TEST_F(RuntimeCPUTest, RawLoadStoreRoundTripV2I32) {
+  int32_t Storage[2] = {0, 0};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper = addStoreWrapper(
+      "test_raw_store_v2i32", "feme.cpu.resource.store.raw.v2i32",
+      FixedVectorType::get(Type::getInt32Ty(Ctx), 2));
+  Function *LoadWrapper = addLoadWrapper("test_raw_load_v2i32",
+                                        "feme.cpu.resource.load.raw.v2i32");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  int32_t ToStore[2] = {7, -13};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_EQ(Storage[0], 7);
+  EXPECT_EQ(Storage[1], -13);
+
+  int32_t Result[2] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], 7);
+  EXPECT_EQ(Result[1], -13);
+}
+
+TEST_F(RuntimeCPUTest, RawLoadStoreRoundTripV3I32) {
+  int32_t Storage[3] = {0, 0, 0};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper = addStoreWrapper(
+      "test_raw_store_v3i32", "feme.cpu.resource.store.raw.v3i32",
+      FixedVectorType::get(Type::getInt32Ty(Ctx), 3));
+  Function *LoadWrapper = addLoadWrapper("test_raw_load_v3i32",
+                                        "feme.cpu.resource.load.raw.v3i32");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  int32_t ToStore[3] = {1, -2, 3};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_EQ(Storage[0], 1);
+  EXPECT_EQ(Storage[1], -2);
+  EXPECT_EQ(Storage[2], 3);
+
+  int32_t Result[3] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], 1);
+  EXPECT_EQ(Result[1], -2);
+  EXPECT_EQ(Result[2], 3);
+}
+
+TEST_F(RuntimeCPUTest, RawLoadStoreRoundTripV4I32) {
+  int32_t Storage[4] = {0, 0, 0, 0};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper = addStoreWrapper(
+      "test_raw_store_v4i32", "feme.cpu.resource.store.raw.v4i32",
+      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
+  Function *LoadWrapper = addLoadWrapper("test_raw_load_v4i32",
+                                        "feme.cpu.resource.load.raw.v4i32");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  int32_t ToStore[4] = {4, -3, 2, -1};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_EQ(Storage[0], 4);
+  EXPECT_EQ(Storage[3], -1);
+
+  int32_t Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], 4);
+  EXPECT_EQ(Result[3], -1);
+}
+
+// Inactive-mask/no-UAV/out-of-bounds behaviour is already covered by the
+// `TypedLoad*`/`RawLoad(Store)?V4F32*` tests above -- `femeRTLoadDescriptor`
+// and `femeRTCheckAccess` are shared by every `Raw`/`Structured` overload
+// regardless of element width, so those checks aren't re-tested per width;
+// this row only needs to confirm each new width's own descriptor-offset
+// size (`sizeof(FemeRTv2f32)`/etc.) and its call name are wired up
+// correctly, which the round-trip tests above already do.
 
 } // namespace
