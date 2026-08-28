@@ -2850,6 +2850,25 @@ Completion test: execute amplification fanout and mesh workgroups at several
 wave sizes, verify every emitted meshlet structurally, and render equivalent
 mesh and conventional pipelines to identical defined output.
 
+Status: roadmap H6a begins this milestone's SPIR-V import half, mirroring
+G5's own H5a first step for geometry: `feme::graphics::MeshState`
+(Mesh.h/.cpp) and `ConvertSPIRVToLLVMPass`'s new capture of a mesh entry
+point's output topology (`OutputPoints`/`OutputLinesEXT`/
+`OutputTrianglesEXT`), maximum emitted vertex count (`OutputVertices`) and
+maximum emitted primitive count (`OutputPrimitivesEXT`) into `feme.mesh.*`
+passthrough attributes, disambiguating the enumerant values mesh shares
+with geometry/tessellation (`OutputPoints`, `OutputVertices`) by the
+declaring entry point's own stage. Nothing else in this milestone's bullet
+list is implemented yet: `CanonicalizeStagePass::run` still does not accept
+`ShaderStage::Mesh`/`ShaderStage::Amplification` (roadmap H6b), so nothing
+canonicalizes a mesh entry's bounded per-vertex/per-primitive output
+writes or a task entry's bounded payload write; no mesh-output builder,
+amplification dispatch queue, or meshlet assembly exists (roadmap H6c/
+H6d); the executor has no mesh-chaining path (roadmap H6e); and
+`vkCreateGraphicsPipelines`/`PhysicalDeviceInfo.cpp` accept and advertise
+nothing mesh-shader-related (roadmap H6f). See Roadmap.md's H6a-H6g rows
+for the full remaining breakdown.
+
 ### G7: Ray-query and traversal foundations
 
 - Define canonical acceleration structures, deterministic builders, and

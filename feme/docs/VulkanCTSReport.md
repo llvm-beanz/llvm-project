@@ -8985,3 +8985,87 @@ no feature bit or extension (layered rendering itself was already
 advertised and already partly working, e.g. `render_to_default_layer`'s
 clear-only path and true multiview both already had working, if
 incomplete, support before this row).
+
+## Roadmap H6a: measured impact (SPIR-V mesh entry-point execution-mode reflection)
+
+**Still 0/0/28044, and that is the correct, expected result** -- the same
+shape H5a's own report entry recorded for geometry (and H4a's for
+tessellation). H6a adds `feme::graphics::MeshState`/`Mesh.h` (mirroring
+`GeometryState`/`Geometry.h`) and teaches
+`ConvertSPIRVToLLVMPass::collectEntryPoints` to capture a mesh entry
+point's output topology (`OutputPoints`/`OutputLinesEXT`/
+`OutputTrianglesEXT`), maximum emitted vertex count (`OutputVertices`) and
+maximum emitted primitive count (`OutputPrimitivesEXT`) into `feme.mesh.*`
+passthrough attributes, disambiguating the two SPIR-V enumerant values mesh
+shares with geometry/tessellation (`OutputPoints`, also a geometry entry's
+own point-output mode; `OutputVertices`, also a hull entry's output control
+point count and a geometry entry's own maximum emitted vertex count) by the
+declaring entry point's own `Stage`, the same way H5a already disambiguates
+`Triangles`/`OutputVertices` between tessellation and geometry. A task
+entry point's workgroup size is captured the same way a compute entry
+point's already is (`hlsl.numthreads`); it gets no `feme.mesh.*` attributes
+of its own, since it declares no output shape.
+
+This row does not lift `CanonicalizeStagePass::run`'s stage filter to
+include `ShaderStage::Mesh`/`ShaderStage::Amplification`, does not touch
+`vkCreateGraphicsPipelines`/`PhysicalDeviceInfo.cpp`, and does not
+advertise `VK_EXT_mesh_shader` -- see the new roadmap rows H6b onward for
+that remaining work. `dEQP-VK.mesh_shader.*` (both the `khr`/`VK_EXT_mesh_shader`
+and legacy `nv`/`VK_NV_mesh_shader` sub-groups) is entirely unaffected:
+
+```
+Test run totals:
+  Passed:        0/28044 (0.0%)
+  Failed:        0/28044 (0.0%)
+  Not supported: 28044/28044 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no change:
+`VK_EXT_mesh_shader` stays absent, and this row advertises nothing new.
+
+**Regression sample.** This row's only new code paths are
+`feme::graphics::getMeshState`/`Mesh.cpp` (a new file nothing else calls
+yet) and `ConvertSPIRVToLLVMPass`'s new `EntryPointInfo` fields/execution-
+mode cases (populated only for a `Mesh`-stage entry point, or read only
+when disambiguating `OutputPoints`/`OutputVertices` by `Stage` -- both
+branches confirmed by the new lit test to leave a non-mesh entry's own
+attributes unchanged, including a task entry point's, which gets no
+`feme.mesh.*` attribute at all). `dEQP-VK.draw.*`'s 1957-case
+`draw_sample.txt` sample, same file every prior row's own report used:
+
+```
+Before (H5e-e's own baseline):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical to H5e-e's own recorded totals. **0 regressions, 0 new
+passes.**
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1879/1938** (59 pre-existing, unrelated `Unsupported`, 0 `Failed`),
+up from H5e-e's own **1872/1931** baseline by exactly the 7 new tests this
+row adds -- `MeshTest.cpp`'s 6 (new file, `getMeshState` round-trip
+coverage, mirroring `GeometryTest.cpp`) and one new
+`spirv-to-llvm-mesh-execution-modes.mlir` lit test (4 `RUN`/`CHECK` blocks
+in one `lit` test, including the `OutputPoints`/`OutputVertices`
+disambiguation case and the task-entry no-attributes case).
+
+**Reproducing.**
+
+```
+mkdir run && cd run
+ln -sfn /home/dev/dev/VK-GL-CTS/external/vulkancts/data/vulkan vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh.qpa
+```
+
+and, for the draw regression sample, the same invocation H4a's own report
+entry documents.
