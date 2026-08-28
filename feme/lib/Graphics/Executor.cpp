@@ -2458,6 +2458,20 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         return VertexOut.takeError();
       cpu::FemeStageLayout VertexOutLayout = VertexOut->layout();
 
+      // (roadmap H6c-a-a-ii) A `PerPrimitive`-frequency `Output` element
+      // (e.g. a user-defined `perprimitiveEXT` varying, or
+      // `gl_PrimitiveID`) is a distinct structure-of-arrays block from a
+      // `PerVertex` one, sized by the workgroup's own declared primitive
+      // count rather than its vertex count -- `MeshOutputWrapperPass`
+      // (`MeshOutputWrapper.cpp`) already routes such a store's lowering
+      // into `MRes.PrimitiveOutputLayout`/`PrimitiveOutputs` by
+      // `SignatureElement::Frequency`; this is that storage's host side.
+      Expected<StageStorage> PrimitiveOut = buildStageStorage(
+          *MeshSig, SignatureDirection::Output, Mesh.MaxOutputPrimitives);
+      if (!PrimitiveOut)
+        return PrimitiveOut.takeError();
+      cpu::FemeStageLayout PrimitiveOutLayout = PrimitiveOut->layout();
+
       uint32_t PrimitiveIndexWidth = Mesh.MaxOutputPrimitives * VerticesPerPrim;
       std::vector<uint32_t> PrimitiveIndices(PrimitiveIndexWidth, 0);
       std::vector<uint8_t> GroupShared(
@@ -2481,6 +2495,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       MRes.OutputTopology = static_cast<uint32_t>(Mesh.OutputTopology);
       MRes.VertexOutputLayout = &VertexOutLayout;
       MRes.VertexOutputs = VertexOut->Data;
+      MRes.PrimitiveOutputLayout = &PrimitiveOutLayout;
+      MRes.PrimitiveOutputs = PrimitiveOut->Data;
       MRes.PrimitiveIndices = PrimitiveIndices;
       MRes.ActualVertexCount = &ActualVertexCount;
       MRes.ActualPrimitiveCount = &ActualPrimitiveCount;
@@ -2490,20 +2506,27 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       if (Error E = MSStage.invokeMesh(PMB))
         return std::move(E);
 
-      // Flattens/reconstructs one vertex row's scalars in `MeshSig`'s own
-      // Output-element declaration order (row-major, then component) --
-      // this milestone's own choice of `MeshOutputRow`'s "implementation-
-      // defined until a real compiled mesh entry point's own layout fixes
-      // it" flattening (`MeshOutput.h`'s own comment), consistently
-      // reversed by `unflattenMeshRow` below.
-      auto flattenMeshRow = [&](uint32_t Invocation) {
+      // Flattens/reconstructs one vertex or primitive row's scalars in
+      // `MeshSig`'s own Output-element declaration order (row-major, then
+      // component), reading only \p Freq-frequency elements out of
+      // \p Storage -- this milestone's own choice of `MeshOutputRow`'s
+      // "implementation-defined until a real compiled mesh entry point's
+      // own layout fixes it" flattening (`MeshOutput.h`'s own comment),
+      // consistently reversed by `unflattenMeshRow` below. (roadmap
+      // H6c-a-a-ii) A `PerVertex`/`PerPrimitive` element is read out of
+      // \p Storage (`VertexOut`/`PrimitiveOut` respectively), mirroring
+      // `MeshOutputWrapperPass`'s own store-side frequency routing -- a
+      // mixed signature no longer has every element misread as per-vertex.
+      auto flattenMeshRow = [&](const StageStorage &Storage,
+                                SignatureFrequency Freq, uint32_t Invocation) {
         MeshOutputRow Row;
         for (const SignatureElement &Elt : MeshSig->Elements) {
-          if (Elt.Direction != SignatureDirection::Output)
+          if (Elt.Direction != SignatureDirection::Output ||
+              Elt.Frequency != Freq)
             continue;
           for (uint32_t R = 0; R != Elt.RowCount; ++R)
             for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
-              Row.push_back(VertexOut->readFloat(
+              Row.push_back(Storage.readFloat(
                   Elt.ElementID, Elt.FirstComponent + C, Invocation, R));
         }
         return Row;
@@ -2513,11 +2536,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                 Mesh.MaxOutputPrimitives);
       if (Builder.setOutputCounts(ActualVertexCount, ActualPrimitiveCount)) {
         for (uint32_t V = 0; V != ActualVertexCount; ++V)
-          Builder.setVertex(V, flattenMeshRow(V));
-        for (uint32_t P = 0; P != ActualPrimitiveCount; ++P)
+          Builder.setVertex(
+              V, flattenMeshRow(*VertexOut, SignatureFrequency::PerVertex, V));
+        for (uint32_t P = 0; P != ActualPrimitiveCount; ++P) {
+          Builder.setPrimitive(
+              P, flattenMeshRow(*PrimitiveOut, SignatureFrequency::PerPrimitive,
+                                P));
           Builder.setPrimitiveIndices(
               P, llvm::ArrayRef(PrimitiveIndices)
                      .slice((size_t)P * VerticesPerPrim, VerticesPerPrim));
+        }
       }
       // An out-of-range `setOutputCounts` (a workgroup that never called
       // `SetMeshOutputsEXT`, or requested more than its declared maxima)
@@ -2590,9 +2618,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           if (!Queue)
             return Queue.takeError();
           for (uint64_t I = 0; I != Queue->size(); ++I) {
-            Expected<Meshlet> MeshletOut = runMeshWorkgroup(
-                Queue->getGroupID(I), Queue->getGroupCount(),
-                Payload.getBytes());
+            Expected<Meshlet> MeshletOut =
+                runMeshWorkgroup(Queue->getGroupID(I), Queue->getGroupCount(),
+                                 Payload.getBytes());
             if (!MeshletOut)
               return MeshletOut.takeError();
             Meshlets.push_back(std::move(*MeshletOut));
@@ -2621,11 +2649,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       if (!Merged)
         return Merged.takeError();
 
+      // (roadmap H6c-a-a-ii) Mirrors `flattenMeshRow`'s own `PerVertex`
+      // filter above: `M.getVertices()` rows are already narrowed to only
+      // that frequency's scalars, so this must walk the identical subset
+      // in the identical order to stay aligned, rather than every Output
+      // element (a `PerPrimitive` element's own data lives in
+      // `M.getPrimitives()` instead, not consumed by rasterization here).
       auto unflattenMeshRow = [&](llvm::ArrayRef<float> Row,
                                   uint32_t Invocation) {
         size_t Idx = 0;
         for (const SignatureElement &Elt : MeshSig->Elements) {
-          if (Elt.Direction != SignatureDirection::Output)
+          if (Elt.Direction != SignatureDirection::Output ||
+              Elt.Frequency != SignatureFrequency::PerVertex)
             continue;
           for (uint32_t R = 0; R != Elt.RowCount; ++R)
             for (uint32_t C = 0; C != Elt.ComponentCount; ++C)

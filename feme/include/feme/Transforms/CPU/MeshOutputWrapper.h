@@ -51,9 +51,11 @@
 // **Left open by this row**: a primitive's own vertex index list
 // (`PrimitiveIndices`, `gl_PrimitiveTriangleIndicesEXT`-shaped) has no
 // canonicalized `feme.stage.*` op to lower at all yet, so it is still not
-// written by this pass -- see roadmap H6c-a-a-ii for `flattenMeshRow`'s
-// own remaining `PerPrimitive` gap, and a future row for
-// `PrimitiveIndices` itself.
+// written by this pass -- (roadmap H6c-a-a-ii, now closed, fixed
+// `Executor.cpp`'s own `flattenMeshRow`/`unflattenMeshRow` to route a
+// `PerPrimitive`-frequency element into `PrimitiveOutputs` instead of
+// misreading it as per-vertex; `PrimitiveIndices` itself remains a
+// separate, still-open gap for a future row).
 //
 //===----------------------------------------------------------------------===//
 
