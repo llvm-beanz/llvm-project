@@ -11146,3 +11146,152 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   deqp-vk --deqp-caselist-file=draw_sample.txt \
     --deqp-log-filename=draw_h6g_b_a_i.qpa
 ```
+
+## Roadmap H6g-b-a-i-a: measured impact (register a `ConvertSPIRVToLLVMPass` conversion pattern for `spirv.All`/`spirv.Any`)
+
+**Starting point.** H6g-b-a-i's own re-run found the new dominant
+single cause of its 218-case
+`vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket (81 of 218
+cases, up from a pre-existing, already out-of-scope 1) was
+`ConvertSPIRVToLLVMPass` failing to legalize `spirv.All` outright
+("failed to legalize operation 'spirv.All' that was explicitly marked
+illegal"). This row's own ask was to isolate whether MLIR's
+SPIRVToLLVM conversion is simply missing a pattern for
+`spirv.All`/`spirv.Any` outright, or has one that doesn't cover this
+operand shape, and fix it.
+
+**Root cause.** `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`'s
+`populateSPIRVToLLVMConversionPatterns` has a `Logical ops` pattern
+section covering `spirv.LogicalAnd`, `spirv.LogicalOr`,
+`spirv.LogicalEqual`, `spirv.LogicalNotEqual`, and `spirv.LogicalNot`
+-- but never had an entry for `spirv.All` or `spirv.Any` at all. The
+conversion's target correctly marks both ops illegal for this same
+conversion (they must not survive into the LLVM dialect), but with no
+pattern registered to actually rewrite them, every occurrence hits the
+pass's generic "explicitly marked illegal" failure path regardless of
+operand shape or vector width -- confirming the first, simpler of this
+row's own two named alternatives, not a shape-specific gap in an
+existing pattern.
+
+**Fix.** `spirv.All`/`spirv.Any` each reduce a vector of `i1` values to
+a scalar `i1` (per their own `SPIRV_AllOp`/`SPIRV_AnyOp` definitions in
+`SPIRVLogicalOps.td`) -- exactly the shape the LLVM dialect's existing
+vector-reduction intrinsics already model
+(`llvm.intr.vector.reduce.and`/`llvm.intr.vector.reduce.or`, exposed as
+`LLVM::vector_reduce_and`/`LLVM::vector_reduce_or`, and already used
+the same way by `ConvertVectorToLLVM`'s own `vector.reduction`
+`AND`/`OR` lowering). Fixed by registering two new
+`DirectConversionPattern<spirv::AllOp, LLVM::vector_reduce_and>`/
+`DirectConversionPattern<spirv::AnyOp, LLVM::vector_reduce_or>`
+instantiations in the `Logical ops` pattern list -- the same
+one-line-per-op registration every other `DirectConversionPattern` use
+in this file already follows, needing no new pattern class.
+
+**Tests.** New lit test cases added to the existing
+`mlir/test/Conversion/SPIRVToLLVM/logical-ops-to-llvm.mlir`
+(`all_vector`/`any_vector`, each a `vector<4xi1>` `spirv.All`/
+`spirv.Any` converting to the expected
+`llvm.intr.vector.reduce.and`/`.or`).
+`mlir/docs/SPIRVToLLVMDialectConversion.md`'s "Logical ops" section
+updated with the new op-to-intrinsic mapping.
+
+```
+ninja check-mlir-conversion-spirvtollvm (SPIRVToLLVM lit suite): 23/23
+  passing (0 regressions; +2 new split-input-file cases added to an
+  existing file, so the discovered-test total is unchanged)
+ninja check-mlir-target-spirv: 58/58 passing (unaffected; this row
+  doesn't touch Target/SPIRV)
+ninja check-mlir-dialect-spirv: 52/52 passing (unaffected; this row
+  doesn't touch Dialect/SPIRV)
+MLIRSPIRVToLLVMTests (gtest unit suite): 3/3 passing, unaffected
+ninja check-feme (assertions-enabled, ccache build):
+Total Discovered Tests: 2009
+  Unsupported:   59 (2.94%)
+  Passed     : 1950 (97.06%)
+```
+
+`check-feme` stays byte-identical to H6g-b-a-i's own baseline
+(1950/2009, 0 `Failed`) -- this is a pure upstream-MLIR fix, touching
+no `feme`-local code at all.
+
+**A diagnostic-logged re-run of the exact 218-case `vkRefUtil.cpp:37`
+bucket** H6g-b-a-i's own text named, through feme's actual Vulkan ICD,
+confirms the fix directly: **0** `spirv.All`/`spirv.Any` legalization
+failures remain (down from 81), with all 81 formerly-blocked cases now
+progressing further. The bucket's `vkCreateGraphicsPipelines` failure
+causes now partition its full 218 cases into 9 distinct buckets:
+
+```
+| Count | Cause (before -> after this row's fix) |
+|---|---|
+| 1  -> 82 | `feme::cpu::UnsupportedOps` register-bound resource handle rejection (new dominant cause, tracked as H6g-b-a-i-a-i) |
+| ?  -> 68 | `feme-cpu-simdize` divergent-vector-value rejections (already out of scope) |
+| ?  -> 17 | `feme-cpu-wrap-mesh-output`/`feme-cpu-wrap-fragment` metadata-missing errors (already out of scope) |
+| 11 -> 17 | `spirv.MemoryBarrier` legalization failures (already out of scope; count includes both `spirv.MemoryBarrier` scope variants) |
+| ?  -> 12 | `feme-cpu-linearize` unsupported-control-flow-shape errors (already out of scope) |
+| ?  -> 7  | unimplemented specialization constants (already out of scope) |
+| ?  -> 7  | unimplemented rasterizer-discard/depth-clamp/depth-bias/non-fill polygon modes (already out of scope) |
+| ?  -> 5  | `Symbols not found` cases (already tracked by H6g-b-c) |
+| ?  -> 3  | pipeline declares more color-blend-state entries than its render target has color attachments (already out of scope) |
+```
+
+(`?` marks causes whose exact pre-fix count within this specific
+218-case bucket was not separately isolated by H6g-b-a-i's own
+diagnostic run, which only isolated the `spirv.AccessChain` and
+`spirv.All`/`spirv.Any` counts explicitly; all of these were already
+named as "out of this row's own scope" in that row's own text, and
+their bucket membership and 218-case total are unaffected either way.)
+
+The 81 formerly-`spirv.All`/`spirv.Any`-blocked cases progress further
+and land squarely in the new `feme::cpu::UnsupportedOps` bucket (82 =
+81 + the pre-existing 1) -- the same clean, single-cause hand-off
+pattern this milestone's investigation has shown at every prior step
+(fixing the dominant blocker in a bucket routes the same cases into
+whatever the next dominant blocker is). Overall bucket totals are
+unchanged (218/218 still fail, as expected: none of these cases can
+succeed until every remaining legalization/lowering gap in their
+shared SPIR-V content is closed), but the specific cause each one hits
+has moved strictly forward, confirming real progress. This is tracked
+as new roadmap row H6g-b-a-i-a-i.
+
+**`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample**
+stays byte-identical to every prior row's own recorded totals:
+
+```
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+**0 regressions** (expected: this fix only makes previously-rejected,
+spec-conformant `spirv.All`/`spirv.Any` legalize -- it never changes
+behavior for any SPIR-V this sample already exercised successfully,
+and none of `draw_sample.txt`'s cases exercise a mesh entry point at
+all).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed
+no change needed: this is a pure upstream MLIR SPIRVToLLVM
+conversion-pattern-coverage fix, touching no `feme`-advertised feature
+bit or extension.
+
+**Milestone H6 does not close.** This row's own fix directly clears
+the dominant cause it named, but the same re-run that confirms that
+also surfaces a new dominant cause in its place --
+`feme::cpu::UnsupportedOps` rejecting a register-bound resource
+handle, tracked as new roadmap row H6g-b-a-i-a-i -- alongside the
+already-tracked H6g-b-b and H6g-b-c.
+
+**Reproducing this row.** Same ICD build and methodology as every
+prior mesh-shading row, run from `VK-GL-CTS/run` (relative
+shader-source resource paths require it):
+
+```shell
+cd /path/to/VK-GL-CTS/run
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  deqp-vk --deqp-caselist-file=<218-case-bucket>.txt \
+    --deqp-log-filename=diag_h6g_b_a_i_a.qpa
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-filename=draw_h6g_b_a_i_a.qpa
+```
