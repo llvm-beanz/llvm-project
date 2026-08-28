@@ -891,4 +891,63 @@ TEST(SIMDizeTest, DiagnosesNestedGroupSharedGetElementPtr) {
   EXPECT_TRUE(SawError);
 }
 
+// Roadmap H6g-b-a-i-a-i-b: a divergent vector comparison (`fcmp`/`icmp`)
+// producing a `<N x i1>` result must decompose into `N` per-component
+// `<W x i1>` comparisons instead of the illegal `<W x <N x i1>>` a naive
+// broadcast would build, and that `<N x i1>` result must itself be a
+// supported *consumer* shape for a `select`'s now-per-lane vector
+// condition (`FunctionWidener::widenVectorSelect`'s per-component
+// condition decomposition), mirroring the exact
+// `dEQP-VK.mesh_shader.ext.in_out.32_bits_only` shape this row's own
+// investigation reduced a real failing shader down to: a component-wise
+// `lessThanEqual`-style comparison feeding a per-lane `select`/`mix`.
+TEST(SIMDizeTest, DecomposesVectorComparisonIntoPerLaneSelectCondition) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %a0 = insertelement <4 x float> poison, float %tidf, i32 0
+      %b0 = insertelement <4 x float> poison, float 1.000000e+00, i32 0
+      %t0 = insertelement <4 x float> poison, float 2.000000e+00, i32 0
+      %cond = fcmp ole <4 x float> %a0, %b0
+      %v = select <4 x i1> %cond, <4 x float> %t0, <4 x float> %a0
+      %e0 = extractelement <4 x float> %v, i32 0
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned FCmpCount = 0;
+  unsigned SelectCount = 0;
+  for (Instruction &I : instructions(F)) {
+    // Never build an illegal vector-of-vector type (a `<W x <N x T>>`
+    // this fix must avoid, for either the comparison's own boolean-vector
+    // result or the select's true/false vector operands).
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *Cmp = dyn_cast<FCmpInst>(&I)) {
+      EXPECT_TRUE(Cmp->getType() == FixedVectorType::get(
+                                        Type::getInt1Ty(Ctx), 4));
+      ++FCmpCount;
+    }
+    if (auto *Sel = dyn_cast<SelectInst>(&I)) {
+      // Each per-lane `select`'s own condition is one of the decomposed
+      // `fcmp`'s per-component results, not a single shared scalar.
+      EXPECT_TRUE(isa<FCmpInst>(Sel->getCondition()));
+      ++SelectCount;
+    }
+  }
+  EXPECT_EQ(FCmpCount, 4u);
+  EXPECT_EQ(SelectCount, 4u);
+}
+
 } // namespace
+
