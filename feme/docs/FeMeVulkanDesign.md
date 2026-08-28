@@ -1887,11 +1887,14 @@ and `PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` advertise
 `VkPhysicalDeviceMeshShaderPropertiesEXT` limit at this implementation's own
 honest, bounded ceilings, mirroring H4b/H5e's own "advertise only what the
 implementation actually enforces" discipline. What remains out of scope for
-H6f, tracked separately (roadmap H6h/H6i), is a mesh/task shader's *own
-compiled content*: `EmitMeshTasksEXT`/`SetMeshOutputsEXT`/per-vertex and
-per-primitive output writes, and `TaskPayloadWorkgroupEXT` storage-class
-lowering. A pipeline with only empty mesh/task stage bodies dispatches and
-draws correctly today (the mesh/task dispatch machinery, attachment
+H6f, tracked separately (roadmap H6c-a-a/H6c-a-b, now that H6h's payload
+address-space/import work and H6i's `CanonicalizeStagePass` mesh-stage
+filter/task-payload-store canonicalization have both landed), is a mesh/task
+shader's *own compiled content* actually reaching the compute-reused ABI:
+`MeshOutputBuilder`/`TaskPayloadBuilder` wired into a real dispatched
+meshlet/payload, and `EmitMeshTasksEXT`/`SetMeshOutputsEXT` themselves. A
+pipeline with only empty mesh/task stage bodies dispatches and draws
+correctly today (the mesh/task dispatch machinery, attachment
 resolution, and multiview handling are all real), but produces no mesh
 output content of its own yet -- the same "advertise the wiring, not
 unimplemented content" precedent `tessellationShader`/`geometryShader`
