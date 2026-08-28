@@ -33,17 +33,16 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5e-b?
+Can you work on milestone H5e-c?
 
-> **21 `dEQP-VK.geometry.*` cases fail `vkCreateGraphicsPipelines` with
-> `VK_ERROR_INITIALIZATION_FAILED` and no diagnostic printed at all**
-> (`builtin_variable.in_block.primitive_id_in`/`primitive_id_in_restarted`,
-> `input.basic_primitive.{line_strip,line_strip_adjacency,triangle_fan}`,
-> `input.triangle_strip_adjacency.vertex_count_*`,
-> `emit.{line_strip,points,triangle_strip}_emit_0_end_0`) -- exactly H5e's own
-> flagged bucket, unchanged in composition and count now that H5e-a's
-> `EmitVertex`/`EndPrimitive` noise is gone. Root cause not yet isolated at all:
-> needs bisecting which of `GraphicsPipeline.cpp`'s geometry-stage acceptance
-> checks, `GeometryWrapperPass`, or a still-missing
-> input-primitive-class/degenerate-zero-emit-shader code path silently rejects
-> pipeline creation with no error text reaching the log
+> **18 `dEQP-VK.geometry.layered.{1d_array,2d_array}.*` cases
+> (`multiple_layers_per_invocation`, `render_to_one`, `render_to_default_layer`,
+> `render_to_all`) fail at `vkQueueSubmit` with
+> `VK_ERROR_INITIALIZATION_FAILED`**, newly exposed by H5e-a (previously masked
+> by the `EmitVertex`/`EndPrimitive` legalization failure). Distinct from
+> H5e-b's pipeline-creation-time failure and from the pre-existing `layered.3d`
+> image-creation gap (`vk.createImage`, unrelated) and
+> `layered.*.fragment_layer` fragment-input gap (`feme-cpu-wrap-fragment`,
+> unrelated) -- this bucket is specific to a layered geometry-stage draw's own
+> execution, using `gl_Layer` output from the geometry stage rather than just
+> varying output-array storage. Root cause not yet isolated
