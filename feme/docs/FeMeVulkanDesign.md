@@ -1876,11 +1876,33 @@ Mesh shading (`VK_EXT_mesh_shader`) and ray tracing (`VK_KHR_ray_query`,
 through the same rule as everything else: not until the corresponding graphics
 milestone's completion test passes, and never partially.
 
-Both are inside this document's declared conformance scope (see "Conformance
-Target"), so "not advertised" is a tracked gap rather than a settled
-non-goal. Ray tracing in particular is not one extension but a dependency
-set, and advertising any member of it without the rest is exactly the
-partial exposure the rule above forbids:
+Mesh shading's own milestone (roadmap H6f) is complete: `vkCreateGraphics
+Pipelines` accepts a mesh pipeline (task stage optional, mesh stage required,
+no vertex-input/input-assembly state, `GraphicsPipeline.cpp`),
+`vkCmdDrawMeshTasksEXT`/`vkCmdDrawMeshTasksIndirectEXT`/
+`vkCmdDrawMeshTasksIndirectCountEXT` route through the same prepared-draw
+code `vkCmdDraw*` already uses (`CommandBuffer.cpp`'s `runPreparedDraw`),
+and `PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` advertise
+`VK_EXT_mesh_shader`, `taskShader`/`meshShader`, and every
+`VkPhysicalDeviceMeshShaderPropertiesEXT` limit at this implementation's own
+honest, bounded ceilings, mirroring H4b/H5e's own "advertise only what the
+implementation actually enforces" discipline. What remains out of scope for
+H6f, tracked separately (roadmap H6h/H6i), is a mesh/task shader's *own
+compiled content*: `EmitMeshTasksEXT`/`SetMeshOutputsEXT`/per-vertex and
+per-primitive output writes, and `TaskPayloadWorkgroupEXT` storage-class
+lowering. A pipeline with only empty mesh/task stage bodies dispatches and
+draws correctly today (the mesh/task dispatch machinery, attachment
+resolution, and multiview handling are all real), but produces no mesh
+output content of its own yet -- the same "advertise the wiring, not
+unimplemented content" precedent `tessellationShader`/`geometryShader`
+already established for their own still-partial stages.
+
+Ray tracing (`VK_KHR_ray_query`, `VK_KHR_ray_tracing_pipeline`,
+`VK_KHR_acceleration_structure`) remains inside this document's declared
+conformance scope (see "Conformance Target"), so "not advertised" is a
+tracked gap rather than a settled non-goal. It is not one extension but a
+dependency set, and advertising any member of it without the rest is
+exactly the partial exposure the rule above forbids:
 `VK_KHR_acceleration_structure` requires `VK_KHR_deferred_host_operations`
 and buffer device address (core since 1.2, currently reported false);
 `VK_KHR_ray_tracing_pipeline` additionally requires `VK_KHR_pipeline_library`

@@ -62,12 +62,12 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 
 | Status | Count |
 |---|---:|
-| Advertised | 31 |
+| Advertised | 32 |
 | Implemented (core, not advertised by name) | 18 |
-| Planned (in scope, not implemented) | 49 |
+| Planned (in scope, not implemented) | 48 |
 | Not implemented (out of scope) | 202 |
 
-- **The 31 advertised** are the ones a `deqp-vk` case enables by name
+- **The 32 advertised** are the ones a `deqp-vk` case enables by name
   regardless of the advertised `apiVersion`, plus the three that predate
   that discipline: `VK_KHR_dynamic_rendering`,
   `VK_EXT_extended_dynamic_state`, `VK_KHR_shader_integer_dot_product`,
@@ -86,26 +86,17 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_KHR_dynamic_rendering_local_read` (F8),
   `VK_EXT_pipeline_protected_access` (F9), `VK_EXT_pipeline_robustness`
   (F10), `VK_EXT_host_image_copy` (F11), `VK_KHR_push_descriptor` (F12),
-  and `VK_KHR_load_store_op_none` (F13), `VK_KHR_map_memory2` (F14), and
-  `VK_KHR_multiview` (H2). This edition's own addition,
-  `VK_KHR_load_store_op_none`, needed no new runtime code at all: it is the
-  first row in this file to move from "Planned" to "Advertised" purely by
-  recognizing behavior `applyClear`'s existing `LoadOp != CLEAR` check
-  (CommandBuffer.cpp) already had -- see Roadmap.md's F13 entry. This
-  edition also restores `AdvertisedExtensions.txt`/
-  `AdvertisedPromotedExtensions.txt`/`PlannedExtensions.txt` to agree with
-  `PhysicalDeviceInfo.cpp`, which had drifted out of sync with six
-  already-implemented roadmap rows (F2, F5, F7, F8, F9, F12) that were
-  still marked "planned" or missing from the advertised list entirely --
-  a bookkeeping gap this file's own regeneration exists to catch.
-  Roadmap H2's own regeneration found one more instance of the same drift:
-  `VK_KHR_map_memory2` (F14) was genuinely implemented (`Memory.cpp`) but
-  never added to `AdvertisedExtensions.txt`/`AdvertisedPromotedExtensions.txt`,
-  restored here alongside `VK_KHR_multiview`'s own move from "Planned" to
-  "Advertised" (`vkCreateFramebuffer`/`vkCreateRenderPass`/
-  `vkCreateRenderPass2` accepting `layers > 1`/a nonzero `viewMask`,
-  `CommandBuffer.cpp`'s `runDraw` running one draw per set view bit -- see
-  Roadmap.md's H2 entry).
+  and `VK_KHR_load_store_op_none` (F13), `VK_KHR_map_memory2` (F14),
+  `VK_KHR_multiview` (H2), and `VK_EXT_mesh_shader` (H6f). This edition's
+  own addition, `VK_EXT_mesh_shader`, moves from "Planned" to "Advertised"
+  now that `vkCreateGraphicsPipelines` accepts a mesh pipeline
+  (GraphicsPipeline.cpp), `vkCmdDrawMeshTasksEXT`/
+  `vkCmdDrawMeshTasksIndirectEXT`/`vkCmdDrawMeshTasksIndirectCountEXT`
+  (CommandBuffer.cpp) route through the same prepared-draw code
+  `vkCmdDraw*` already uses, and `taskShader`/`meshShader` plus every
+  `VkPhysicalDeviceMeshShaderPropertiesEXT` limit are advertised at this
+  implementation's own honest, bounded ceilings (EntryPoints.cpp,
+  PhysicalDeviceInfo.cpp) -- see Roadmap.md's H6f entry.
 - **The 17 core-but-unadvertised** were 3 until roadmap E-series' own
   audit. A full audit of every core-promoted extension against this ICD's
   own sources (rather than only the ones a roadmap row happened to name)
@@ -125,7 +116,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `shaderOutputLayer`, core-promoted into Vulkan 1.2), moving from
   "Planned" now that both bits are genuinely backed by a real
   `gl_ViewportIndex`/`gl_Layer` vertex-stage output.
-- **The 50 planned** decompose into three groups, and the membership rule
+- **The 49 planned** decompose into three groups, and the membership rule
   is enforced by `PlannedExtensions.txt`'s own header rather than by
   judgement per row: every core-promoted (1.1-1.4) extension this ICD does
   not implement (the mandatory floor a 1.4 claim inherits, including the
@@ -137,9 +128,10 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_KHR_pipeline_library`, `VK_KHR_buffer_device_address`,
   `VK_KHR_ray_tracing_maintenance1`,
   `VK_KHR_ray_tracing_position_fetch`, roadmap &sect;1.9.8); and the
-  graphics/WSI set (`VK_EXT_mesh_shader`,
-  `VK_KHR_surface`, `VK_KHR_swapchain`, `VK_EXT_headless_surface`,
-  `VK_KHR_get_surface_capabilities2`, roadmap &sect;1.9.7).
+  graphics/WSI set (`VK_KHR_surface`, `VK_KHR_swapchain`,
+  `VK_EXT_headless_surface`, `VK_KHR_get_surface_capabilities2`, roadmap
+  &sect;1.9.7). `VK_EXT_mesh_shader` leaves this group in this edition,
+  moving to "Advertised" above.
 - **The 202 out of scope** are what remains after that rule: every
   vendor-neutral extension for a capability class this ICD does not intend
   to provide -- video decode/encode, sparse residency, protected memory,
@@ -243,7 +235,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_EXT_memory_budget` | Not implemented |  |
 | `VK_EXT_memory_decompression` | Not implemented |  |
 | `VK_EXT_memory_priority` | Not implemented |  |
-| `VK_EXT_mesh_shader` | Planned (in scope, not implemented) | roadmap H6 |
+| `VK_EXT_mesh_shader` | Advertised | roadmap H6f |
 | `VK_EXT_metal_objects` | Not implemented |  |
 | `VK_EXT_metal_surface` | Not implemented |  |
 | `VK_EXT_multi_draw` | Not implemented |  |
