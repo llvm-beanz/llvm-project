@@ -1462,24 +1462,27 @@ Error translateFixedFunctionState(
 
   const VkPipelineInputAssemblyStateCreateInfo *InputAssembly =
       CreateInfo.pInputAssemblyState;
-  // (roadmap H6f) A mesh pipeline originates its own vertices/primitives
+  // (roadmap H6g-b) A mesh pipeline originates its own vertices/primitives
   // entirely from the mesh stage's own emitted output -- it has neither a
-  // vertex-input stage nor a fixed input-assembly topology to configure
-  // (`VUID-VkGraphicsPipelineCreateInfo-pStages-02096`/neighbors): both
-  // `pVertexInputState`/`pInputAssemblyState` must be null, and none of
-  // the topology/tessellation/adjacency checks below apply. `Result.
-  // Topology`/`Result.PrimitiveRestartEnable` are left at their defaults,
-  // unused (`Executor.cpp`'s mesh path drives entirely off `MeshState::
+  // vertex-input stage nor a fixed input-assembly topology to configure.
+  // Per spec, `pVertexInputState`/`pInputAssemblyState` are simply
+  // *ignored* if the pipeline includes a mesh shader stage (see the
+  // `VK_EXT_mesh_shader`/`VK_NV_mesh_shader` carve-out on both members'
+  // own doc comments) -- unlike a vertex-stage pipeline, neither is
+  // required to be null, and a real caller may well pass a non-null,
+  // otherwise-default one anyway (as the common `vkObjUtil.cpp`
+  // `makeGraphicsPipeline` helper `dEQP-VK.mesh_shader.*` itself builds on
+  // does, unconditionally, with no mesh-aware carve-out of its own).
+  // Originally this rejected any non-null pointer outright
+  // (`VK_ERROR_INITIALIZATION_FAILED`), which was stricter than the spec
+  // allows and broke every one of those otherwise-valid pipelines -- fixed
+  // by simply not reading either pointer below, exactly as the spec's own
+  // "ignored" wording requires. None of the topology/tessellation/
+  // adjacency checks below apply; `Result.Topology`/
+  // `Result.PrimitiveRestartEnable` are left at their defaults, unused
+  // (`Executor.cpp`'s mesh path drives entirely off `MeshState::
   // OutputTopology` instead -- see `Pipeline.h`'s `hasMeshStages`).
   if (MeshInfo) {
-    if (CreateInfo.pVertexInputState)
-      return createStringError(
-          inconvertibleErrorCode(),
-          "a mesh pipeline may not declare pVertexInputState");
-    if (InputAssembly)
-      return createStringError(
-          inconvertibleErrorCode(),
-          "a mesh pipeline may not declare pInputAssemblyState");
     Result.SampleCount = Targets->SampleCount;
   } else {
     if (!InputAssembly)

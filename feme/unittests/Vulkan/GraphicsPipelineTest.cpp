@@ -573,8 +573,10 @@ protected:
     Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     Info.stageCount = StageCount;
     Info.pStages = MeshStages;
-    // (roadmap H6f) A mesh pipeline declares neither -- both must be
-    // null (`translateFixedFunctionState`'s own check).
+    // (roadmap H6g-b) A mesh pipeline declares neither by default here;
+    // both are spec-ignored (not required to be null) for a mesh
+    // pipeline -- see `AcceptsMeshPipelineWith{VertexInput,InputAssembly}
+    // State` below for the non-null case.
     Info.pVertexInputState = nullptr;
     Info.pInputAssemblyState = nullptr;
     Info.pViewportState = &ViewportState;
@@ -2440,9 +2442,11 @@ TEST_F(GraphicsPipelineTest, RejectsTaskStageWithoutMeshStage) {
   vkDestroyShaderModule(Device, Task, nullptr);
 }
 
-/// (roadmap H6f) A mesh pipeline may not declare `pVertexInputState` --
-/// it has no vertex-input stage to configure at all.
-TEST_F(GraphicsPipelineTest, RejectsMeshPipelineWithVertexInputState) {
+/// (roadmap H6g-b) A mesh pipeline's `pVertexInputState` is spec-ignored,
+/// not rejected -- a non-null one (as a real caller's shared
+/// `makeGraphicsPipeline`-style helper may well pass, unconditionally,
+/// with no mesh-aware carve-out of its own) must still be accepted.
+TEST_F(GraphicsPipelineTest, AcceptsMeshPipelineWithVertexInputState) {
   VkShaderModule Mesh = createModule(MeshSource);
   VkShaderModule Fragment = createModule(FragmentSource);
 
@@ -2452,15 +2456,16 @@ TEST_F(GraphicsPipelineTest, RejectsMeshPipelineWithVertexInputState) {
   Info.pVertexInputState = &VertexInput;
 
   VkPipeline Handle = VK_NULL_HANDLE;
-  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(create(Info, Handle), VK_SUCCESS);
+  vkDestroyPipeline(Device, Handle, nullptr);
 
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Mesh, nullptr);
 }
 
-/// (roadmap H6f) A mesh pipeline may not declare `pInputAssemblyState`
-/// either -- it has no fixed input-assembly topology at all.
-TEST_F(GraphicsPipelineTest, RejectsMeshPipelineWithInputAssemblyState) {
+/// (roadmap H6g-b) Symmetric case for `pInputAssemblyState`: also
+/// spec-ignored, not rejected, for a mesh pipeline.
+TEST_F(GraphicsPipelineTest, AcceptsMeshPipelineWithInputAssemblyState) {
   VkShaderModule Mesh = createModule(MeshSource);
   VkShaderModule Fragment = createModule(FragmentSource);
 
@@ -2472,7 +2477,8 @@ TEST_F(GraphicsPipelineTest, RejectsMeshPipelineWithInputAssemblyState) {
   Info.pInputAssemblyState = &InputAssembly;
 
   VkPipeline Handle = VK_NULL_HANDLE;
-  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(create(Info, Handle), VK_SUCCESS);
+  vkDestroyPipeline(Device, Handle, nullptr);
 
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Mesh, nullptr);
