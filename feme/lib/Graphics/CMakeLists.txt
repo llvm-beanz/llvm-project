@@ -9,6 +9,7 @@ add_feme_library(FeMeGraphics
   ImageFixture.cpp
   LayeredRendering.cpp
   Mesh.cpp
+  Meshlet.cpp
   MeshOutput.cpp
   Patch.cpp
   PatchPipeline.cpp

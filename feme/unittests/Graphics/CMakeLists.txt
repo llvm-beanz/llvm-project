@@ -13,6 +13,7 @@ add_feme_unittest(FeMeGraphicsTests
   GeometryStreamTest.cpp
   GeometryTest.cpp
   MeshTest.cpp
+  MeshletTest.cpp
   MeshOutputTest.cpp
   ImageFixtureTest.cpp
   LayeredRenderingTest.cpp
