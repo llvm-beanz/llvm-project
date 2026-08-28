@@ -72,8 +72,9 @@ public:
     return Result;
   }
 
-  void addEntryPoint(uint32_t FnId, StringRef Name) {
-    SmallVector<uint32_t, 8> Operands{ExecutionModelGLCompute, FnId};
+  void addEntryPoint(uint32_t FnId, StringRef Name,
+                     uint32_t ExecutionModel = ExecutionModelGLCompute) {
+    SmallVector<uint32_t, 8> Operands{ExecutionModel, FnId};
     llvm::append_range(Operands, literalString(Name));
     addInstruction(OpEntryPoint, Operands);
   }
@@ -197,6 +198,35 @@ TEST(GroupSize, ErrorsWhenNoGroupSizeInformation) {
   Expected<std::array<uint32_t, 3>> Result =
       resolveComputeGroupSize(Builder.words(), "main", /*Overrides=*/{});
   ASSERT_THAT_ERROR(Result.takeError(), Failed());
+}
+
+// (roadmap H6f) `GraphicsPipeline.cpp`'s `validateMeshOrTaskGroupSize`
+// reuses this same scanner for a mesh or task entry point, whose
+// `OpEntryPoint` names the `MeshEXT`/`TaskEXT` execution model rather than
+// `GLCompute` -- these two tests confirm both are accepted alongside the
+// existing `GLCompute` coverage above, with the same `LocalSize` decoding.
+TEST(GroupSize, ResolvesFromLocalSizeForMeshEntryPoint) {
+  constexpr uint32_t ExecutionModelMeshEXT = 5365;
+  ModuleBuilder Builder;
+  Builder.addEntryPoint(/*FnId=*/10, "main", ExecutionModelMeshEXT);
+  Builder.addLocalSize(/*FnId=*/10, {128, 1, 1});
+
+  Expected<std::array<uint32_t, 3>> Result =
+      resolveComputeGroupSize(Builder.words(), "main", /*Overrides=*/{});
+  ASSERT_THAT_ERROR(Result.takeError(), Succeeded());
+  EXPECT_EQ(*Result, (std::array<uint32_t, 3>{128, 1, 1}));
+}
+
+TEST(GroupSize, ResolvesFromLocalSizeForTaskEntryPoint) {
+  constexpr uint32_t ExecutionModelTaskEXT = 5364;
+  ModuleBuilder Builder;
+  Builder.addEntryPoint(/*FnId=*/10, "main", ExecutionModelTaskEXT);
+  Builder.addLocalSize(/*FnId=*/10, {32, 2, 1});
+
+  Expected<std::array<uint32_t, 3>> Result =
+      resolveComputeGroupSize(Builder.words(), "main", /*Overrides=*/{});
+  ASSERT_THAT_ERROR(Result.takeError(), Succeeded());
+  EXPECT_EQ(*Result, (std::array<uint32_t, 3>{32, 2, 1}));
 }
 
 } // namespace

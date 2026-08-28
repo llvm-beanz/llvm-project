@@ -2509,4 +2509,62 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EX
   vkDestroyShaderModule(Device, Mesh, nullptr);
 }
 
+/// (roadmap H6f) `maxMeshWorkGroupSize`/`maxMeshWorkGroupInvocations` are
+/// enforced at pipeline creation too (`validateMeshOrTaskGroupSize`,
+/// `GraphicsPipeline.cpp`), mirroring the compute pipeline path's own
+/// `maxComputeWorkGroupSize`/`Invocations` check (`Pipeline.cpp`) -- a
+/// mesh entry's declared `LocalSize` one past the advertised ceiling
+/// (128 in every dimension) must be rejected, not silently accepted.
+TEST_F(GraphicsPipelineTest, RejectsMeshWorkGroupSizeExceedingLimits) {
+  constexpr llvm::StringLiteral OverLimitLocalSizeMeshSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "MeshEXT" @main
+  spirv.ExecutionMode @main "OutputTrianglesEXT"
+  spirv.ExecutionMode @main "OutputVertices", 1
+  spirv.ExecutionMode @main "OutputPrimitivesEXT", 1
+  spirv.ExecutionMode @main "LocalSize", 129, 1, 1
+}
+)mlir";
+  VkShaderModule Mesh = createModule(OverLimitLocalSizeMeshSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeMeshCreateInfo(Mesh, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// (roadmap H6f) The task stage's own counterpart to the previous test:
+/// `maxTaskWorkGroupSize`/`maxTaskWorkGroupInvocations` are enforced for a
+/// task entry point exactly the way they are for a mesh one.
+TEST_F(GraphicsPipelineTest, RejectsTaskWorkGroupSizeExceedingLimits) {
+  constexpr llvm::StringLiteral OverLimitLocalSizeTaskSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "TaskEXT" @main
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 129
+}
+)mlir";
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Task = createModule(OverLimitLocalSizeTaskSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeMeshCreateInfo(Mesh, Fragment, Task);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Task, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
 } // namespace

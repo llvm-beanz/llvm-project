@@ -139,6 +139,28 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (roadmap H6f) A minimal mesh entry point: declares its output topology/
+/// count execution modes and workgroup size but emits nothing (no
+/// `spirv.EmitMeshTasksEXT`/per-vertex writes -- real mesh output content
+/// is blocked on roadmap H6h/H6i). Enough to exercise
+/// `vkCmdDrawMeshTasksEXT`/`vkCmdDrawMeshTasksIndirectEXT`/
+/// `vkCmdDrawMeshTasksIndirectCountEXT` routing through the same
+/// prepared-draw code `vkCmdDraw*` already uses, mirroring
+/// `GraphicsPipelineTest.cpp`'s own `MeshSource`.
+constexpr llvm::StringLiteral MeshSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "MeshEXT" @main
+  spirv.ExecutionMode @main "OutputTrianglesEXT"
+  spirv.ExecutionMode @main "OutputVertices", 3
+  spirv.ExecutionMode @main "OutputPrimitivesEXT", 1
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
+
 /// Roadmap H3a: reads `gl_ViewportIndex` back as a *fragment*-shader
 /// `Input`-storage-class builtin (the other half of
 /// `GL_ARB_shader_viewport_layer_array`'s support, `dEQP-VK.draw.*.
@@ -687,6 +709,72 @@ protected:
       Info.pNext = Rendering;
     else
       Info.renderPass = Pass;
+
+    VkPipeline Pipe = VK_NULL_HANDLE;
+    EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
+                                        nullptr, &Pipe),
+              VK_SUCCESS);
+    return Pipe;
+  }
+
+  /// (roadmap H6f) A mesh pipeline (task stage optional, mesh stage
+  /// required, no vertex-input/input-assembly state), mirroring
+  /// `createPipeline` above but for `VK_SHADER_STAGE_MESH_BIT_EXT`/
+  /// `_TASK_BIT_EXT`.
+  VkPipeline createMeshPipeline(VkShaderModule Mesh, VkShaderModule Fragment,
+                                VkShaderModule Task = VK_NULL_HANDLE) {
+    VkPipelineShaderStageCreateInfo Stages[3]{};
+    uint32_t StageCount = 0;
+    if (Task) {
+      Stages[StageCount].sType =
+          VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      Stages[StageCount].stage = VK_SHADER_STAGE_TASK_BIT_EXT;
+      Stages[StageCount].module = Task;
+      Stages[StageCount].pName = "main";
+      ++StageCount;
+    }
+    Stages[StageCount].sType =
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[StageCount].stage = VK_SHADER_STAGE_MESH_BIT_EXT;
+    Stages[StageCount].module = Mesh;
+    Stages[StageCount].pName = "main";
+    ++StageCount;
+    Stages[StageCount].sType =
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[StageCount].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    Stages[StageCount].module = Fragment;
+    Stages[StageCount].pName = "main";
+    ++StageCount;
+
+    VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+    VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+    VkPipelineViewportStateCreateInfo ViewportState{};
+    ViewportState.viewportCount = 1;
+    ViewportState.pViewports = &Viewport;
+    ViewportState.scissorCount = 1;
+    ViewportState.pScissors = &Scissor;
+    VkPipelineRasterizationStateCreateInfo Raster{};
+    Raster.cullMode = VK_CULL_MODE_NONE;
+    Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    Raster.polygonMode = VK_POLYGON_MODE_FILL;
+    VkPipelineMultisampleStateCreateInfo Multisample{};
+    Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState BlendAttachment{};
+    BlendAttachment.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo Blend{};
+    Blend.attachmentCount = 1;
+    Blend.pAttachments = &BlendAttachment;
+
+    VkGraphicsPipelineCreateInfo Info{};
+    Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    Info.stageCount = StageCount;
+    Info.pStages = Stages;
+    Info.pViewportState = &ViewportState;
+    Info.pRasterizationState = &Raster;
+    Info.pMultisampleState = &Multisample;
+    Info.pColorBlendState = &Blend;
+    Info.layout = Layout;
+    Info.renderPass = Pass;
 
     VkPipeline Pipe = VK_NULL_HANDLE;
     EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
@@ -1978,6 +2066,203 @@ TEST_F(DrawTest, RejectsOutOfBoundsIndirectDraw) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap H6f) `vkCmdDrawMeshTasksEXT` routes through the same
+/// prepared-draw code (`runPreparedDraw`) `vkCmdDraw` does: it resolves
+/// attachments, binds resources, and drives the executor's rasterization
+/// tail exactly the same way, just with `PreparedDraw::MeshDraws` set
+/// instead of `PreparedDraw::Draws`. Since `MeshSource`'s entry point emits
+/// no real mesh output yet (blocked on roadmap H6h/H6i), the render pass's
+/// own clear color is left untouched -- the same "correctly wired but
+/// produces nothing yet" shape `ExecutorTest.cpp`'s own H6e-era mesh-draw
+/// cases already established, now proven reachable from the real
+/// `vkCmdDrawMeshTasksEXT` entry point rather than only `Executor.cpp`'s
+/// own unit-level `executeDraws` call.
+TEST_F(DrawTest, DrawMeshTasksRunsWithoutErrorAndProducesNoOutputYet) {
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createMeshPipeline(Mesh, Fragment);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawMeshTasksEXT(Cmd, 1, 1, 1);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(1, 2)[0], 0x00);
+  EXPECT_EQ(texel(1, 2)[3], 0xFF);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// A mesh pipeline with a bound task stage dispatches through
+/// `vkCmdDrawMeshTasksEXT` too (the task stage's own dispatch shape, per
+/// the specification): still no real output since `TaskSource`'s entry
+/// point never calls `EmitMeshTasksEXT` (roadmap H6h/H6i).
+TEST_F(DrawTest, DrawMeshTasksWithTaskStageRunsWithoutError) {
+  constexpr llvm::StringLiteral TaskSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "TaskEXT" @main
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Task = createModule(TaskSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createMeshPipeline(Mesh, Fragment, Task);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawMeshTasksEXT(Cmd, 1, 1, 1);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Task, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// `vkCmdDrawMeshTasksIndirectEXT` reads its
+/// `VkDrawMeshTasksIndirectCommandEXT` array from a bound buffer, mirroring
+/// `RendersIndirectDraw`'s own indirect-vertex-draw coverage.
+TEST_F(DrawTest, DrawMeshTasksIndirectReadsBuffer) {
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createMeshPipeline(Mesh, Fragment);
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkBuffer Indirect =
+      createBuffer(sizeof(VkDrawMeshTasksIndirectCommandEXT), Memory,
+                  VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkDrawMeshTasksIndirectCommandEXT Args{1, 1, 1};
+  std::memcpy(fromHandle<Buffer>(Indirect)->data(), &Args, sizeof(Args));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawMeshTasksIndirectEXT(Cmd, Indirect, 0, 1,
+                               sizeof(VkDrawMeshTasksIndirectCommandEXT));
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  vkDestroyBuffer(Device, Indirect, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// A `vkCmdDrawMeshTasksIndirectEXT` whose command array overruns its
+/// buffer is rejected, not clamped, mirroring
+/// `RejectsOutOfBoundsIndirectDraw`.
+TEST_F(DrawTest, RejectsOutOfBoundsIndirectMeshTasksDraw) {
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createMeshPipeline(Mesh, Fragment);
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkBuffer Indirect =
+      createBuffer(sizeof(VkDrawMeshTasksIndirectCommandEXT), Memory,
+                  VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  // Two commands in a one-command buffer.
+  vkCmdDrawMeshTasksIndirectEXT(Cmd, Indirect, 0, 2,
+                               sizeof(VkDrawMeshTasksIndirectCommandEXT));
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyBuffer(Device, Indirect, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// `vkCmdDrawMeshTasksIndirectCountEXT` clamps its actual draw count to the
+/// minimum of `maxDrawCount` and the `uint32_t` stored in its count buffer,
+/// per the specification.
+TEST_F(DrawTest, DrawMeshTasksIndirectCountClampsToCountBuffer) {
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createMeshPipeline(Mesh, Fragment);
+
+  VkDeviceMemory IndirectMemory = VK_NULL_HANDLE;
+  VkBuffer Indirect =
+      createBuffer(2 * sizeof(VkDrawMeshTasksIndirectCommandEXT),
+                  IndirectMemory, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkDrawMeshTasksIndirectCommandEXT Args[2] = {{1, 1, 1}, {1, 1, 1}};
+  std::memcpy(fromHandle<Buffer>(Indirect)->data(), Args, sizeof(Args));
+
+  VkDeviceMemory CountMemory = VK_NULL_HANDLE;
+  VkBuffer CountBuffer =
+      createBuffer(sizeof(uint32_t), CountMemory,
+                  VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  // The count buffer names only one draw, even though `maxDrawCount` (2)
+  // and the indirect buffer itself both have room for two.
+  uint32_t Count = 1;
+  std::memcpy(fromHandle<Buffer>(CountBuffer)->data(), &Count, sizeof(Count));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawMeshTasksIndirectCountEXT(
+      Cmd, Indirect, 0, CountBuffer, 0, 2,
+      sizeof(VkDrawMeshTasksIndirectCommandEXT));
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  vkDestroyBuffer(Device, CountBuffer, nullptr);
+  vkFreeMemory(Device, CountMemory, nullptr);
+  vkDestroyBuffer(Device, Indirect, nullptr);
+  vkFreeMemory(Device, IndirectMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// `vkCmdDrawMeshTasksEXT` with a non-mesh (vertex) pipeline bound is
+/// rejected: mesh dispatch commands require `GraphicsPipeline::
+/// hasMeshStages()`, exactly as a vertex `vkCmdDraw` bound to a mesh
+/// pipeline would be rejected by `Executor.cpp`'s own mutual-exclusion
+/// check the other way around.
+TEST_F(DrawTest, DrawMeshTasksRejectsANonMeshPipeline) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawMeshTasksEXT(Cmd, 1, 1, 1);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// `vkCmdDrawMeshTasksEXT` with no bound graphics pipeline at all is
+/// rejected, mirroring `RejectsDrawOutsideRenderPass`'s own "well-formed
+/// command stream, invalid state" shape.
+TEST_F(DrawTest, DrawMeshTasksWithoutBoundPipelineFails) {
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdDrawMeshTasksEXT(Cmd, 1, 1, 1);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+}
+
 /// An indexed draw whose index range overruns its bound index buffer is
 /// rejected before anything is fetched.
 TEST_F(DrawTest, RejectsOutOfBoundsIndexRange) {
@@ -2171,7 +2456,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 31u);
+  ASSERT_EQ(Count, 32u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
