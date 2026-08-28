@@ -33,11 +33,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete and close out milestone H6c-a-a-ii?
+Can you complete and close out milestone H6c-a-a-iii?
 
-> **Teach `feme::graphics::Executor::runMeshWorkgroup`'s `flattenMeshRow` to
-> route a `PerPrimitive`-frequency `Output` element into
-> `MeshResources::PrimitiveOutputs`/`PrimitiveOutputLayout`**, which it never
-> populates today (every element is currently treated as per-vertex regardless
-> of `SignatureElement::Frequency`), discovered by H6c-a-a's own closing re-run
-> alongside H6c-a-a-i
+> **Fix `CanonicalizeStage.cpp`'s `resolveOffsetWithinElement`, which asserts
+> (`cast<StructType>`) rather than gracefully rejecting an unmodeled shape when
+> a multi-`ElementID` builtin interface block's own value type is not a plain
+> (non-arrayed) `StructType`** -- reachable for the first time by H6c-a-a-i's
+> own closing re-run, since a mesh entry's `PerPrimitiveEXT`/other arrayed
+> builtin interface blocks (e.g. an array-of-struct per-primitive output block)
+> take exactly this shape, and previously never got this far because an
+> unconverted `SetMeshOutputsEXT` always failed earlier, at SPIR-V-to-LLVM
+> conversion. 28 of `dEQP-VK.mesh_shader.*`'s own cases now abort the whole
+> `deqp-vk` process with this assertion instead of failing cleanly with
+> `VK_ERROR_INITIALIZATION_FAILED` the way they did before H6c-a-a-i landed
+> (same failing-case *set*, just a worse failure *mode* -- 0 `Pass`/`Fail`
+> regressions, but a real robustness regression a fuzzer or a CTS run without
+> this report's own resume-loop workaround would trip over)
