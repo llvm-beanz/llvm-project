@@ -1069,6 +1069,86 @@ TEST(CompiledStageTest, InvokeMeshRejectsANonMeshStage) {
   EXPECT_THAT_ERROR((*Stage)->invokeMesh(Prepared), Failed());
 }
 
+// Roadmap H6c-a-a: a mesh entry's own canonicalized (H6b-shaped)
+// `feme.stage.output.store` with a dynamic `Vertex` operand (here, this
+// workgroup's own `GroupID`, standing in for a real `SetMeshOutputsEXT`-
+// bounded per-vertex loop variable) reaches `MeshOutputWrapperPass`'s new
+// lowering, through `EntryWrapperPass`'s reused compute-style group-loop
+// wrapper, and lands in `FemeMeshArgs::VertexOutputs` -- the same buffer
+// `feme::graphics::Executor::runMeshWorkgroup`'s already-built
+// `MeshOutputBuilder` consumer (Executor.cpp) reads from.
+constexpr char MeshOutputStoreShaderIR[] = R"(
+  define void @ms_main() #0 {
+    %gid = call i32 @llvm.dx.group.id(i32 0)
+    %gidf = uitofp i32 %gid to float
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float %gidf, i32 %gid)
+    ret void
+  }
+  declare i32 @llvm.dx.group.id(i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+Expected<std::unique_ptr<CompiledStage>>
+compileMeshStage(Context &Ctx, StringRef IR, StringRef EntryName,
+                 const EntrySignature &Sig) {
+  SMDiagnostic Err;
+  auto LLVMMod = parseAssemblyString(IR, Err, Ctx.getLLVMContext());
+  if (!LLVMMod)
+    return createStringError(inconvertibleErrorCode(), "parse error: %s",
+                             Err.getMessage().str().c_str());
+  dxil::setEntrySignature(*LLVMMod->getFunction(EntryName), Sig);
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
+  StageCompileOptions Opts;
+  Opts.Stage = ShaderStage::Mesh;
+  Opts.WaveSize = 4;
+  return CompiledStage::create(Ctx, std::move(Mod), Opts);
+}
+
+TEST(CompiledStageTest, InvokeMeshWritesPerVertexOutputStore) {
+  Context Ctx;
+  EntrySignature Sig;
+  SignatureElement Elt;
+  Elt.ElementID = 0;
+  Elt.Direction = SignatureDirection::Output;
+  Elt.ComponentType = SignatureComponentType::Float;
+  Elt.Frequency = SignatureFrequency::PerVertex;
+  Sig.Elements = {Elt};
+
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      compileMeshStage(Ctx, MeshOutputStoreShaderIR, "ms_main", Sig);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Mesh);
+
+  FemeStageElement VertexOutputElements[1] = {};
+  VertexOutputElements[0].ElementID = 0;
+  VertexOutputElements[0].FirstComponent = 0;
+  VertexOutputElements[0].ComponentCount = 1;
+  VertexOutputElements[0].RowCount = 1;
+  VertexOutputElements[0].InvocationStride = 4;
+  FemeStageLayout VertexOutputLayout{};
+  VertexOutputLayout.Elements = VertexOutputElements;
+  VertexOutputLayout.ElementCount = 1;
+
+  std::vector<float> VertexOutputs(4, -1.0f);
+
+  MeshResources Resources;
+  Resources.GroupID = {2, 0, 0};
+  Resources.GroupCount = {4, 1, 1};
+  Resources.MaxOutputVertices = 4;
+  Resources.VertexOutputLayout = &VertexOutputLayout;
+  Resources.VertexOutputs = MutableArrayRef<uint8_t>(
+      reinterpret_cast<uint8_t *>(VertexOutputs.data()),
+      VertexOutputs.size() * sizeof(float));
+  PreparedMeshBatch Prepared =
+      PreparedMeshBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeMesh(Prepared), Succeeded());
+  // This group's own workgroup (GroupID 2) writes its own id, as a float,
+  // at slot 2 of `VertexOutputs`; every other slot stays untouched.
+  EXPECT_EQ(VertexOutputs, (std::vector<float>{-1.0f, -1.0f, 2.0f, -1.0f}));
+}
+
 TEST(CompiledStageTest, InvokeTaskReusesComputeGroupSharedAndBarrierLowering) {
   Context Ctx;
   Expected<std::unique_ptr<CompiledStage>> Stage = compileStage(
