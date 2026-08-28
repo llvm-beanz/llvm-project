@@ -12,6 +12,7 @@ add_feme_unittest(FeMeGraphicsTests
   GeometryStreamTest.cpp
   GeometryTest.cpp
   MeshTest.cpp
+  MeshOutputTest.cpp
   ImageFixtureTest.cpp
   LayeredRenderingTest.cpp
   PatchPipelineTest.cpp
@@ -20,6 +21,7 @@ add_feme_unittest(FeMeGraphicsTests
   PreparedDrawTest.cpp
   SceneTest.cpp
   StageLinkTest.cpp
+  TaskPayloadTest.cpp
   TessellationTest.cpp
   TessellatorTest.cpp
   )
