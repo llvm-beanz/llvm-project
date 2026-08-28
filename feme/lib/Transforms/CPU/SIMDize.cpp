@@ -550,12 +550,20 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   // constant index reads a component directly; a non-constant one chains
   // selects across every component instead, see `widenExtractElement`), a
   // vector-typed `select`'s true/false operand, a `shufflevector`'s vector
-  // operand, a vector-typed `phi`'s incoming value, or another elementwise
-  // arithmetic/cast operand. Verify every divergent vector value matches
-  // one of those producer shapes, and every use of one matches one of the
-  // consumer shapes, up front and bail with a diagnostic, matching every
-  // other precondition this pass checks before mutating anything, rather
-  // than let a later step build an invalid nested vector type and assert.
+  // operand, a vector-typed `phi`'s incoming value, another elementwise
+  // arithmetic/cast operand, or (roadmap H6g-b-a-i-a-i-a) a matched
+  // `feme.cpu.masked.store.*` call's stored-value operand -- the same
+  // per-lane reassembly a matched resource-store call's stored-value
+  // operand already gets (see `widenMaskedStore`), needed for a write with
+  // no canonicalized `feme.stage.*`/`feme.cpu.resource.*` op of its own to
+  // become instead, e.g. a mesh entry point's own
+  // `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)` (see
+  // MeshOutputWrapper.h's file comment). Verify every divergent vector
+  // value matches one of those producer shapes, and every use of one
+  // matches one of the consumer shapes, up front and bail with a
+  // diagnostic, matching every other precondition this pass checks before
+  // mutating anything, rather than let a later step build an invalid
+  // nested vector type and assert.
   for (Instruction &I : instructions(*OldF)) {
     if (!UI.isDivergentAtDef(&I))
       continue;
@@ -638,6 +646,18 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       if (auto *UserCI = dyn_cast<CallInst>(U)) {
         std::optional<MatchedResourceCall> Matched = matchResourceCall(*UserCI);
         if (Matched && Matched->StoredValue == &I)
+          continue;
+        // A `feme.cpu.masked.store.*` call (see MaskIntrinsics.h) is
+        // `feme::cpu::LinearizePass`'s masked form of an ordinary `store`
+        // under divergent control flow -- the shape a mesh entry point's
+        // own `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)` write
+        // takes, since (unlike an output element write) it has no
+        // canonicalized `feme.stage.*` op to become a `feme.cpu.resource.*`/
+        // masked-output-store call instead (see MeshOutputWrapper.h's file
+        // comment). Its stored value is decomposed exactly like a matched
+        // resource-store call's (see `widenMaskedStore`).
+        std::optional<MatchedMaskedMemOp> MaskedStore = matchMaskedStore(*UserCI);
+        if (MaskedStore && MaskedStore->ValueOperand == &I)
           continue;
       }
       if (isa<ExtractElementInst>(U))
@@ -1339,6 +1359,45 @@ void FunctionWidener::widenMaskedStore(CallInst &CI,
   Value *EffectiveMask =
       Builder.CreateAnd(Env.SideEffectMask, WideMask, "masked.mask");
   Value *WidePtr = getWidened(Matched.Ptr, Builder);
+
+  // "Vectors become components, not nested vectors" (roadmap H6g-b-a-i-a-i-a):
+  // a vector-typed stored value -- a mesh entry point's own
+  // `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)`, the shape a
+  // dEQP-VK.mesh_shader.* re-run first surfaced this gap with -- is
+  // decomposed into per-component wide values exactly like a matched
+  // resource-store call's stored value (`widenResourceCall`), not one
+  // illegal `<W x <N x T>>` `getWidened` would otherwise try to broadcast.
+  // `llvm.masked.scatter` has no vector-of-vector-element form to lower
+  // that to anyway, so each lane's own reassembled vector is written
+  // individually instead, guarded by the same load-select-store idiom
+  // `MeshOutputWrapper.cpp`'s `lowerMeshOutputStore` already uses for its
+  // own per-lane conditional writes.
+  if (Matched.ValueOperand->getType()->isVectorTy()) {
+    SmallVector<Value *, 4> Components =
+        getVectorComponents(Matched.ValueOperand, Builder);
+    Type *ValueTy = Matched.ValueOperand->getType();
+    Align StoreAlign(Matched.Align ? Matched.Align : 1);
+    for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+      Value *LaneMask = Builder.CreateExtractElement(
+          EffectiveMask, Builder.getInt32(Lane), "lane.mask");
+      Value *LanePtr = Builder.CreateExtractElement(
+          WidePtr, Builder.getInt32(Lane), "lane.ptr");
+      Value *LaneVector = PoisonValue::get(ValueTy);
+      for (unsigned Component = 0, NumComponents = Components.size();
+           Component != NumComponents; ++Component) {
+        Value *LaneScalar = Builder.CreateExtractElement(
+            Components[Component], Builder.getInt32(Lane), "lane.value.elt");
+        LaneVector = Builder.CreateInsertElement(
+            LaneVector, LaneScalar, Builder.getInt32(Component));
+      }
+      Value *OldVal = Builder.CreateAlignedLoad(ValueTy, LanePtr, StoreAlign);
+      Value *NewVal = Builder.CreateSelect(LaneMask, LaneVector, OldVal);
+      Builder.CreateAlignedStore(NewVal, LanePtr, StoreAlign);
+    }
+    ToErase.push_back(&CI);
+    return;
+  }
+
   Value *WideVal = getWidened(Matched.ValueOperand, Builder);
 
   Builder.CreateMaskedScatter(WideVal, WidePtr,
