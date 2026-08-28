@@ -10687,3 +10687,124 @@ VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   deqp-vk --deqp-caselist-file=draw_sample.txt \
     --deqp-log-filename=draw_h6c_a_a_iii.qpa
 ```
+
+## Roadmap H6g-b: measured impact (re-run `dEQP-VK.mesh_shader.*`, confirm the 235/33-case content-compilation bucket clears)
+
+**Starting point.** With `H6c-a-a-iii` landed (0 crashes, `Fail`
+337/28044), this row's own literal ask was to re-run
+`dEQP-VK.mesh_shader.*` and confirm the 235 `vkCreateGraphicsPipelines`
+(`vkRefUtil.cpp:37`) / 33 `vkPipelineConstructionUtil.cpp:176` ->
+`VK_ERROR_INITIALIZATION_FAILED` bucket clears now that real mesh/task
+content can compile end to end.
+
+**What the re-run found.** It did not clear -- but not because
+`H6c-a-a-iii`'s own fix was wrong. Re-running just the 235-case
+`vkRefUtil.cpp:37` bucket with `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+found the actual diagnostic for a representative case
+(`dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.*`) was:
+
+```
+vkCreateGraphicsPipelines: a mesh pipeline may not declare pVertexInputState
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37)
+```
+
+`GraphicsPipeline.cpp`'s own mesh-stage carve-out rejected any non-null
+`pVertexInputState`/`pInputAssemblyState` outright, but the Vulkan spec
+(`VkGraphicsPipelineCreateInfo::pVertexInputState`/`pInputAssemblyState`,
+`VK_EXT_mesh_shader`/`VK_NV_mesh_shader` carve-out) only requires both
+be **ignored** when the pipeline includes a mesh shader stage, not null
+-- and `dEQP-VK.mesh_shader.*` itself builds every pipeline through the
+shared, non-mesh-aware `vkObjUtil.cpp` `makeGraphicsPipeline` helper,
+which unconditionally sets a non-null default `pVertexInputState`/
+`pInputAssemblyState` regardless of which stages are present. This was
+this row's own real, previously-unreported bug, found and fixed here.
+
+**The fix.** `GraphicsPipeline.cpp`'s `MeshInfo` branch no longer reads
+either pointer at all for a mesh pipeline -- simply not consulting them
+is exactly the spec's own "ignored" treatment, with no further check
+needed (neither pointer's contents feed anything else in this function
+for a mesh pipeline; `Executor.cpp`'s mesh path already drives entirely
+off `MeshState::OutputTopology`). `GraphicsPipelineTest.cpp`'s
+`RejectsMeshPipelineWith{VertexInput,InputAssembly}State` are replaced
+with `AcceptsMeshPipelineWith{VertexInput,InputAssembly}State`, now
+expecting `VK_SUCCESS` and a real, destroyed pipeline handle.
+
+```
+ninja check-feme (assertions-enabled, ccache build):
+Total Discovered Tests: 2009
+  Unsupported:   59 (2.94%)
+  Passed     : 1950 (97.06%)
+```
+
+**2009/2009** discovered, **1950** passing -- unchanged from
+`H6c-a-a-iii`'s own baseline (this row replaces 2 existing tests with 2
+new ones, rather than adding any).
+
+**A real `dEQP-VK.mesh_shader.*` re-run (28044 cases)** after the fix,
+same resume-loop methodology:
+
+```
+Result counts: {'Fail': 334, 'NotSupported': 27706, 'Pass': 1}
+Blacklisted (crashed): 3
+  dEQP-VK.mesh_shader.ext.misc.emit_in_control_flow
+  dEQP-VK.mesh_shader.ext.misc.emit_in_control_flow_bad_emit_last
+  dEQP-VK.mesh_shader.ext.misc.payload_not_accessed
+```
+
+`Passed` stays byte-identical at 1/28044. The 337-case `Fail` bucket
+breaks down as: 232 at `vkRefUtil.cpp:37`, 68 at `vkRefUtilImpl.inl:508`
+(the already-tracked `VK_ERROR_FORMAT_NOT_SUPPORTED` bucket, H6g-a/H8,
+untouched by this row), 33 at `vkPipelineConstructionUtil.cpp:176`, and
+1 at `vkQueryUtil.cpp:305`. Of this row's own named 235+33 bucket: **3**
+of the 235 moved into a brand-new crash bucket (H6g-b-b below); a
+diagnostic-logged re-run of the remaining 232 found 202 now fail with
+`error: unhandled Decoration : 'PerPrimitiveEXT'` (an MLIR SPIR-V
+dialect deserialization gap, H6g-b-a below, the dominant single cause)
+and the other 30 spread across roughly ten distinct, smaller gaps out
+of this row's own scope; all 33 of the `vkPipelineConstructionUtil.cpp`
+cases remain, now root-caused (via a representative case,
+`dEQP-VK.mesh_shader.ext.builtin.cull_primitives`) to `JIT session
+error: Symbols not found: [ spirv_var_16 ]` -- H6c-a-a-iii's own fix
+correctly left an unresolvable arrayed-builtin-block access unrewritten
+rather than crashing, but nothing downstream (`ValidateStagePass`,
+which still does not validate `ShaderStage::Mesh`) ever diagnoses that
+left-alone access before it reaches the JIT as a genuinely undefined
+symbol (H6g-b-c below).
+
+**`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample**
+stays byte-identical to every prior row's own recorded totals:
+
+```
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+**0 regressions** (expected: this fix only changes mesh-pipeline
+vertex-input/input-assembly-state handling, which no
+`dEQP-VK.draw.*` case exercises).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed
+no change needed: `VK_EXT_mesh_shader` was already `Advertised` (H6f);
+this is a pure pipeline-validation robustness fix, touching no
+advertised feature bit or extension.
+
+**Milestone H6 does not close.** This row's own re-run replaced one
+known blocker (the 235/33-case bucket, as originally framed) with three
+newly-isolated ones -- H6g-b-a, H6g-b-b, H6g-b-c -- added to the
+roadmap below.
+
+**Reproducing this row.** Same ICD build and resume-loop methodology as
+every prior mesh-shading row, run from `VK-GL-CTS/run` (relative
+shader-source resource paths require it):
+
+```shell
+cd /path/to/VK-GL-CTS/run
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.mesh_shader.*" --deqp-runmode=txt-caselist
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=dEQP-VK-cases.txt --deqp-log-filename=mesh_h6g_b.qpa
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-filename=draw_h6g_b.qpa
+```
