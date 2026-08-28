@@ -33,12 +33,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete and close out milestone H6c-a-a?
+Can you complete and close out milestone H6c-a-b?
 
-> **Wire `MeshOutputBuilder` into a mesh entry's canonicalized
-> `feme.stage.output.store` `Vertex`-operand writes (H6b)** reaching
-> `EntryWrapperPass`/`CompiledStage::invokeMesh`'s reused path, once
-> `CanonicalizeStagePass::run`'s stage filter accepts `ShaderStage::Mesh` (H6i)
-> and a mesh workgroup's assembled meshlet (H6d) gives the wiring somewhere real
-> to write into -- does not need H6h, since mesh output never touches
-> `TaskPayloadWorkgroupEXT`
+> **Wire `TaskPayloadBuilder` into a task entry's canonicalized payload-store
+> operation**, once `TaskPayloadWorkgroupEXT` has an address-space convention
+> and import pattern (H6h), `CanonicalizeStagePass::run` accepts
+> `ShaderStage::Amplification` and canonicalizes a payload write into a new
+> `feme.stage.*` op (H6i), and a task entry's checked `EmitMeshTasksEXT`
+> dispatch queue (H6d) gives the payload somewhere real to be read from by the
+> mesh workgroups it dispatches
