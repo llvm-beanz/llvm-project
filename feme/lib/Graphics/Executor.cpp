@@ -1191,6 +1191,20 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   if (GSSig && GSSig->Elements.empty())
     return Error::success();
 
+  // (roadmap H6f) The same relaxation, for a mesh stage: a mesh entry
+  // point that never writes a per-vertex output at all (SPIR-V only lists
+  // an entry point's *used* interface variables, so this shape's
+  // signature is entirely empty, exactly like a geometry stage that never
+  // emits) can never contribute a single vertex to the rasterizer either,
+  // so every mesh draw against it is legally a no-op too. This is the
+  // shape every mesh entry this implementation can compile today takes
+  // (real per-vertex output writes are blocked on roadmap H6h/H6i), and
+  // is what lets `vkCmdDrawMeshTasksEXT`/`vkCmdDrawMeshTasksIndirectEXT`/
+  // `vkCmdDrawMeshTasksIndirectCountEXT` route through this same
+  // prepared-draw path without error today.
+  if (MeshSig && MeshSig->Elements.empty())
+    return Error::success();
+
   const SignatureElement *VSPosition = findElement(
       RasterSig, SignatureDirection::Output, SignatureSystemValue::Position);
   const SignatureElement *VSLayerOut =
