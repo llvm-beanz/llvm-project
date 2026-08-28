@@ -393,11 +393,14 @@ Expected<PipelineResult> runPipeline(Module &M,
     // `IsMesh` handling, EntryWrapper.cpp).
     //
     // What is *not* yet wired here (left to a future roadmap row, see
-    // agent_thoughts.md's H6c-a-a entry): `SetMeshOutputsEXT` or
-    // `EmitMeshTasksEXT` -- neither has a `feme.stage.*` op reaching this
-    // pipeline yet, so `FemeMeshArgs::ActualVertexCount`/
-    // `ActualPrimitiveCount` remain 0 (an assembled meshlet's declared
-    // counts) even once this pass's own output-store wiring lands.
+    // agent_thoughts.md's H6c-a-a-i entry): `EmitMeshTasksEXT` -- it has no
+    // `feme.stage.*` op reaching this pipeline yet. `SetMeshOutputsEXT`
+    // itself, however, now does: it converts directly into a
+    // `feme.stage.set_mesh_outputs` call at the MLIR SPIR-V-to-LLVM
+    // conversion level (`SetMeshOutputsEXTConversionPattern`,
+    // SPIRVToLLVMPatterns.cpp), and `MeshOutputWrapperPass` lowers it
+    // alongside the output stores above, writing `FemeMeshArgs::
+    // ActualVertexCount`/`ActualPrimitiveCount` (roadmap H6c-a-a-i).
     //
     // Roadmap H6c-a-b: an amplification (task) entry's own bounded
     // payload write (`feme.stage.task.payload.store`, canonicalized with a

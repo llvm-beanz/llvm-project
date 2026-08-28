@@ -10,7 +10,9 @@
 // lowers a mesh entry point's canonicalized `feme.stage.output.store`
 // per-vertex/per-primitive writes (roadmap H6b's `Vertex` operand) into the
 // flat `VertexOutputs`/`PrimitiveOutputs` storage `FemeMeshArgs` (roadmap
-// H6c) already reserves for them.
+// H6c) already reserves for them, and (roadmap H6c-a-a-i) the canonicalized
+// `feme.stage.set_mesh_outputs` (SPIR-V's `SetMeshOutputsEXT`) call into
+// `FemeMeshArgs::ActualVertexCount`/`ActualPrimitiveCount`.
 //
 // Unlike `feme::cpu::GeometryWrapperPass`, this pass does *not* build the
 // `feme_cpu_entry_<name>` ABI wrapper itself: roadmap H6c already
@@ -37,16 +39,21 @@
 // `CompiledStage::invokeMesh`'s caller replays it -- see
 // `feme::graphics::Executor::executeDraws`'s own `runMeshWorkgroup`).
 //
-// **Left open by this row**, matching H6c-a-a's own scope (see
-// agent_thoughts.md): `SetMeshOutputsEXT` (which would write
-// `FemeMeshArgs::ActualVertexCount`/`ActualPrimitiveCount`) and a
-// primitive's own vertex index list (`PrimitiveIndices`,
-// `gl_PrimitiveTriangleIndicesEXT`-shaped) have no canonicalized
-// `feme.stage.*` op to lower at all yet, so neither is written by this
-// pass -- a mesh workgroup that never calls `SetMeshOutputsEXT` (every one
-// this milestone can compile) still assembles an empty meshlet, exactly
-// the same "wiring, not content" scope boundary H6c/H6d/H6e were each
-// explicit about.
+// A lowered `feme.stage.set_mesh_outputs(vertexCount, primitiveCount)` call
+// (roadmap H6c-a-a-i) writes both counts through the two `uint32_t*`
+// pointer fields this pass appends (mirroring `TaskPayloadWrapperPass`'s
+// own plain-pointer, no-`FemeStageLayout` treatment of `task_payload`):
+// unlike `VertexOutputs`/`PrimitiveOutputs`, `ActualVertexCount`/
+// `ActualPrimitiveCount` are single scalars, not structure-of-arrays
+// storage, since `SetMeshOutputsEXT` is called once (with identical
+// arguments) by the whole workgroup, not once per output slot.
+//
+// **Left open by this row**: a primitive's own vertex index list
+// (`PrimitiveIndices`, `gl_PrimitiveTriangleIndicesEXT`-shaped) has no
+// canonicalized `feme.stage.*` op to lower at all yet, so it is still not
+// written by this pass -- see roadmap H6c-a-a-ii for `flattenMeshRow`'s
+// own remaining `PerPrimitive` gap, and a future row for
+// `PrimitiveIndices` itself.
 //
 //===----------------------------------------------------------------------===//
 

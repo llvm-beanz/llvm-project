@@ -222,6 +222,12 @@ struct WrapperEnv {
   Value *MeshPrimitiveOutputs = nullptr;
   Value *MeshMaxOutputVertices = nullptr;
   Value *MeshMaxOutputPrimitives = nullptr;
+  /// (Roadmap H6c-a-a-i) `FemeMeshArgs::ActualVertexCount`/
+  /// `ActualPrimitiveCount`, the pair of `uint32_t*` pointers a compiled
+  /// entry's lowered `feme.stage.set_mesh_outputs` call writes through,
+  /// threaded by name exactly like `MeshVertexOutputLayout` et al. above.
+  Value *MeshActualVertexCount = nullptr;
+  Value *MeshActualPrimitiveCount = nullptr;
 
   /// The `FemeTaskArgs`-only fields `feme::cpu::TaskPayloadWrapperPass`
   /// (roadmap H6c-a-b) appends to a task entry's wave body before this
@@ -311,8 +317,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
   if (IsMesh) {
     Env.MeshVertexOutputLayout = loadArgsField(
         Entry, ArgsTy, Args, MeshArgsFieldVertexOutputLayout, PtrTy);
-    Env.MeshVertexOutputs = loadArgsField(Entry, ArgsTy, Args,
-                                          MeshArgsFieldVertexOutputs, PtrTy);
+    Env.MeshVertexOutputs =
+        loadArgsField(Entry, ArgsTy, Args, MeshArgsFieldVertexOutputs, PtrTy);
     Env.MeshPrimitiveOutputLayout = loadArgsField(
         Entry, ArgsTy, Args, MeshArgsFieldPrimitiveOutputLayout, PtrTy);
     Env.MeshPrimitiveOutputs = loadArgsField(
@@ -321,12 +327,16 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
         Entry, ArgsTy, Args, MeshArgsFieldMaxOutputVertices, I32Ty);
     Env.MeshMaxOutputPrimitives = loadArgsField(
         Entry, ArgsTy, Args, MeshArgsFieldMaxOutputPrimitives, I32Ty);
+    Env.MeshActualVertexCount = loadArgsField(
+        Entry, ArgsTy, Args, MeshArgsFieldActualVertexCount, PtrTy);
+    Env.MeshActualPrimitiveCount = loadArgsField(
+        Entry, ArgsTy, Args, MeshArgsFieldActualPrimitiveCount, PtrTy);
   }
   if (IsTask) {
     Env.TaskPayload =
         loadArgsField(Entry, ArgsTy, Args, TaskArgsFieldPayload, PtrTy);
-    Env.TaskMaxPayloadBytes = loadArgsField(
-        Entry, ArgsTy, Args, TaskArgsFieldMaxPayloadBytes, I32Ty);
+    Env.TaskMaxPayloadBytes =
+        loadArgsField(Entry, ArgsTy, Args, TaskArgsFieldMaxPayloadBytes, I32Ty);
   }
   return Env;
 }
@@ -414,6 +424,10 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       CallArgs.push_back(Env.MeshMaxOutputVertices);
     else if (Arg.getName() == "mesh_max_output_primitives")
       CallArgs.push_back(Env.MeshMaxOutputPrimitives);
+    else if (Arg.getName() == "mesh_actual_vertex_count")
+      CallArgs.push_back(Env.MeshActualVertexCount);
+    else if (Arg.getName() == "mesh_actual_primitive_count")
+      CallArgs.push_back(Env.MeshActualPrimitiveCount);
     else if (Arg.getName() == "task_payload")
       CallArgs.push_back(Env.TaskPayload);
     else if (Arg.getName() == "task_max_payload_bytes")
@@ -1230,7 +1244,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
   IRBuilder<> Entry(EntryBB);
   WrapperEnv WEnv = buildWrapperEnv(Entry, ArgsTy, Args, GSLayout, SpillTy,
-                                   WavesPerGroup, IsMesh, IsTask);
+                                    WavesPerGroup, IsMesh, IsTask);
 
   // The prefix region's own wave loop runs before the wrapper's scalar
   // loop phi(s) exist; it never actually reads its `loopvarN` parameter
@@ -1499,9 +1513,9 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
 
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
   IRBuilder<> Entry(EntryBB);
-  WrapperEnv WEnv = buildWrapperEnv(Entry, ArgsTy, Args, GSLayout,
-                                    /*SpillTy=*/nullptr, WavesPerGroup, IsMesh,
-                                    IsTask);
+  WrapperEnv WEnv =
+      buildWrapperEnv(Entry, ArgsTy, Args, GSLayout,
+                      /*SpillTy=*/nullptr, WavesPerGroup, IsMesh, IsTask);
 
   BasicBlock *Pred = EntryBB;
   if (PrefixFn)
@@ -1692,7 +1706,7 @@ Function *buildWrapper(Function &WaveBodyIn) {
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
   IRBuilder<> Entry(EntryBB);
   WrapperEnv WEnv = buildWrapperEnv(Entry, ArgsTy, Args, GSLayout, SpillTy,
-                                   WavesPerGroup, IsMesh, IsTask);
+                                    WavesPerGroup, IsMesh, IsTask);
 
   BasicBlock *Pred = EntryBB;
   for (unsigned R = 0, E = Regions.size(); R != E; ++R) {

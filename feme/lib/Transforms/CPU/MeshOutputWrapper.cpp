@@ -43,10 +43,12 @@ constexpr StringLiteral VertexOutputsParamName = "mesh_vertex_outputs";
 constexpr StringLiteral PrimitiveOutputLayoutParamName =
     "mesh_primitive_output_layout";
 constexpr StringLiteral PrimitiveOutputsParamName = "mesh_primitive_outputs";
-constexpr StringLiteral MaxOutputVerticesParamName =
-    "mesh_max_output_vertices";
+constexpr StringLiteral MaxOutputVerticesParamName = "mesh_max_output_vertices";
 constexpr StringLiteral MaxOutputPrimitivesParamName =
     "mesh_max_output_primitives";
+constexpr StringLiteral ActualVertexCountParamName = "mesh_actual_vertex_count";
+constexpr StringLiteral ActualPrimitiveCountParamName =
+    "mesh_actual_primitive_count";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -68,6 +70,12 @@ struct MeshOutputStageEnv {
   Value *PrimitiveOutputs = nullptr;
   Value *MaxOutputVertices = nullptr;
   Value *MaxOutputPrimitives = nullptr;
+  /// (Roadmap H6c-a-a-i) `FemeMeshArgs::ActualVertexCount`/
+  /// `ActualPrimitiveCount`, the single-scalar pointers a lowered
+  /// `feme.stage.set_mesh_outputs` writes through -- see the file
+  /// comment.
+  Value *ActualVertexCount = nullptr;
+  Value *ActualPrimitiveCount = nullptr;
 };
 
 std::optional<MeshOutputStageEnv> getMeshOutputStageEnv(Function &F) {
@@ -86,6 +94,10 @@ std::optional<MeshOutputStageEnv> getMeshOutputStageEnv(Function &F) {
       Env.MaxOutputVertices = &Arg, Found = true;
     else if (Arg.getName() == MaxOutputPrimitivesParamName)
       Env.MaxOutputPrimitives = &Arg, Found = true;
+    else if (Arg.getName() == ActualVertexCountParamName)
+      Env.ActualVertexCount = &Arg, Found = true;
+    else if (Arg.getName() == ActualPrimitiveCountParamName)
+      Env.ActualPrimitiveCount = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -101,7 +113,7 @@ Function *appendMeshOutputParams(Function &F) {
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 8> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty});
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, PtrTy, PtrTy});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -127,6 +139,8 @@ Function *appendMeshOutputParams(Function &F) {
   (&*ArgIt++)->setName(PrimitiveOutputsParamName);
   (&*ArgIt++)->setName(MaxOutputVerticesParamName);
   (&*ArgIt++)->setName(MaxOutputPrimitivesParamName);
+  (&*ArgIt++)->setName(ActualVertexCountParamName);
+  (&*ArgIt++)->setName(ActualPrimitiveCountParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -198,22 +212,23 @@ Value *computeMeshOutputAddress(IRBuilder<> &Builder, Value *LayoutArg,
 /// Clamps \p SlotIndex into `[0, Max)`, defensively: unlike an ordinary
 /// vertex/fragment invocation's own flat index (always in range by
 /// construction), a mesh output store's `Vertex` operand is the compiled
-/// entry point's own runtime value, and nothing yet validates it against
-/// the workgroup's *actual* (`SetMeshOutputsEXT`-declared) output count --
-/// that op has no canonicalized `feme.stage.*` form yet (roadmap H6c-a-a's
-/// own scope note, MeshOutputWrapper.h). Clamping to the declared *maximum*
+/// entry point's own runtime value. Clamping to the declared *maximum*
 /// here is what keeps an out-of-range write from corrupting host memory
 /// beyond `VertexOutputs`/`PrimitiveOutputs`'s own bounds; a *tighter*
-/// bound against the real declared count is left to whichever future row
-/// wires `SetMeshOutputsEXT` itself.
+/// bound against the workgroup's real declared output count (now written
+/// through `ActualVertexCount`/`ActualPrimitiveCount` by
+/// `lowerSetMeshOutputs`, roadmap H6c-a-a-i) is left to a future row, since
+/// nothing here threads that value back into an earlier-lowered store --
+/// `feme::graphics::Meshlet::assembleMeshlet` (roadmap H6d) is what
+/// actually re-validates a real workgroup's output against it.
 Value *clampSlotIndex(IRBuilder<> &Builder, Value *SlotIndex, Value *Max) {
   Value *Zero = Builder.getInt32(0);
   Value *MaxIndex = Builder.CreateSub(Max, Builder.getInt32(1), "max.index");
   Value *MaxIsZero = Builder.CreateICmpEQ(Max, Zero, "max.iszero");
   Value *SafeMaxIndex =
       Builder.CreateSelect(MaxIsZero, Zero, MaxIndex, "safe.max.index");
-  return Builder.CreateBinaryIntrinsic(Intrinsic::umin, SlotIndex,
-                                       SafeMaxIndex, nullptr, "slot.clamped");
+  return Builder.CreateBinaryIntrinsic(Intrinsic::umin, SlotIndex, SafeMaxIndex,
+                                       nullptr, "slot.clamped");
 }
 
 /// Lowers `feme.cpu.masked.stage.output.store` for a mesh entry's per-vertex
@@ -227,11 +242,10 @@ void lowerMeshOutputStore(CallInst &CI, const SignatureElement &Elt,
   unsigned WaveSize =
       cast<FixedVectorType>(CI.getArgOperand(3)->getType())->getNumElements();
   bool PerPrimitive = Elt.Frequency == SignatureFrequency::PerPrimitive;
-  Value *Layout = PerPrimitive ? MEnv.PrimitiveOutputLayout
-                               : MEnv.VertexOutputLayout;
+  Value *Layout =
+      PerPrimitive ? MEnv.PrimitiveOutputLayout : MEnv.VertexOutputLayout;
   Value *Base = PerPrimitive ? MEnv.PrimitiveOutputs : MEnv.VertexOutputs;
-  Value *Max =
-      PerPrimitive ? MEnv.MaxOutputPrimitives : MEnv.MaxOutputVertices;
+  Value *Max = PerPrimitive ? MEnv.MaxOutputPrimitives : MEnv.MaxOutputVertices;
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Value *Mask = extractLaneOrScalar(Builder, CI.getArgOperand(5), Lane);
     auto *MaskConst = dyn_cast<ConstantInt>(Mask);
@@ -242,9 +256,8 @@ void lowerMeshOutputStore(CallInst &CI, const SignatureElement &Elt,
     Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
     Value *Slot = extractLaneOrScalar(Builder, CI.getArgOperand(4), Lane);
     Value *ClampedSlot = clampSlotIndex(Builder, Slot, Max);
-    Value *Addr = computeMeshOutputAddress(Builder, Layout, Base,
-                                           Elt.ElementID, Elt, Row, Component,
-                                           ClampedSlot);
+    Value *Addr = computeMeshOutputAddress(Builder, Layout, Base, Elt.ElementID,
+                                           Elt, Row, Component, ClampedSlot);
     Value *LaneVal = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
     if (!(MaskConst && MaskConst->isOne())) {
       Value *OldVal = Builder.CreateLoad(LaneVal->getType(), Addr);
@@ -254,16 +267,58 @@ void lowerMeshOutputStore(CallInst &CI, const SignatureElement &Elt,
   }
 }
 
-/// Lowers every masked mesh output store in \p F, or diagnoses and returns
-/// false if \p F uses a `feme.stage.*` op this pass does not support (any
-/// op other than `OutputStore` -- a mesh entry point has no ordinary
-/// stage-IO input to read, and `SetMeshOutputsEXT`/`EmitMeshTasksEXT` have
-/// no canonicalized form yet, see the file comment).
+/// Lowers `feme.cpu.masked.set_mesh_outputs` (roadmap H6c-a-a-i): writes
+/// each active lane's `(vertexCount, primitiveCount)` through
+/// `MEnv.ActualVertexCount`/`ActualPrimitiveCount`. Unlike
+/// `lowerMeshOutputStore`, there is no per-slot addressing at all -- every
+/// active lane targets the same pair of scalar pointers, which is correct
+/// (not merely tolerated) here: the SPIR-V spec requires every invocation
+/// that reaches this call to pass identical arguments, so repeatedly
+/// storing each active lane's own value is idempotent rather than a race.
+void lowerSetMeshOutputs(CallInst &CI, const MeshOutputStageEnv &MEnv) {
+  IRBuilder<> Builder(&CI);
+  Value *VertexCountArg = CI.getArgOperand(0);
+  auto *WideTy = dyn_cast<FixedVectorType>(VertexCountArg->getType());
+  unsigned WaveSize = WideTy ? WideTy->getNumElements() : 1;
+  Type *ScalarTy =
+      WideTy ? WideTy->getElementType() : VertexCountArg->getType();
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Mask = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
+    auto *MaskConst = dyn_cast<ConstantInt>(Mask);
+    if (MaskConst && MaskConst->isZero())
+      continue;
+
+    Value *LaneVertexCount =
+        extractLaneOrScalar(Builder, CI.getArgOperand(0), Lane);
+    Value *LanePrimitiveCount =
+        extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
+    if (!(MaskConst && MaskConst->isOne())) {
+      Value *OldVertexCount =
+          Builder.CreateLoad(ScalarTy, MEnv.ActualVertexCount);
+      Value *OldPrimitiveCount =
+          Builder.CreateLoad(ScalarTy, MEnv.ActualPrimitiveCount);
+      LaneVertexCount =
+          Builder.CreateSelect(Mask, LaneVertexCount, OldVertexCount);
+      LanePrimitiveCount =
+          Builder.CreateSelect(Mask, LanePrimitiveCount, OldPrimitiveCount);
+    }
+    Builder.CreateStore(LaneVertexCount, MEnv.ActualVertexCount);
+    Builder.CreateStore(LanePrimitiveCount, MEnv.ActualPrimitiveCount);
+  }
+}
+
+/// Lowers every masked mesh output store and `set_mesh_outputs` call in
+/// \p F, or diagnoses and returns false if \p F uses a `feme.stage.*` op
+/// this pass does not support (any op other than `OutputStore`/
+/// `SetMeshOutputs` -- a mesh entry point has no ordinary stage-IO input to
+/// read, and `EmitMeshTasksEXT` has no canonicalized form yet, see the file
+/// comment).
 bool lowerMeshStageOps(Function &F) {
   bool UsesStageOps = false;
   for (Instruction &I : instructions(F))
     if (auto *CI = dyn_cast<CallInst>(&I))
-      UsesStageOps |= isStageOpCall(*CI) || isMaskedOutputStoreCall(*CI);
+      UsesStageOps |= isStageOpCall(*CI) || isMaskedOutputStoreCall(*CI) ||
+                      isMaskedSetMeshOutputsCall(*CI);
   if (!UsesStageOps)
     return true;
 
@@ -300,6 +355,11 @@ bool lowerMeshStageOps(Function &F) {
       CI->eraseFromParent();
       continue;
     }
+    if (isMaskedSetMeshOutputsCall(*CI)) {
+      lowerSetMeshOutputs(*CI, *MEnv);
+      CI->eraseFromParent();
+      continue;
+    }
     F.getContext().emitError(
         CI, "feme-cpu-wrap-mesh-output: unexpected stage op left for the "
             "mesh output wrapper");
@@ -315,7 +375,8 @@ PreservedAnalyses MeshOutputWrapperPass::run(Module &M,
   bool Changed = false;
   SmallVector<Function *, 4> Candidates;
   for (Function &F : M)
-    if (!F.isDeclaration() && feme::getShaderStage(F) == feme::ShaderStage::Mesh)
+    if (!F.isDeclaration() &&
+        feme::getShaderStage(F) == feme::ShaderStage::Mesh)
       Candidates.push_back(&F);
 
   for (Function *F : Candidates) {

@@ -156,9 +156,9 @@ TEST(MeshOutputWrapperTest, LowersPerPrimitiveOutputStore) {
 }
 
 // A mesh entry with no output store at all (e.g. one that only ever writes
-// `SetMeshOutputsEXT`-declared counts, out of this pass's scope, see
-// MeshOutputWrapper.h) is left completely alone: this pass's own params are
-// only useful once `EntryWrapperPass` runs, and appending them
+// `SetMeshOutputsEXT`-declared counts, which this pass now also lowers, see
+// `LowersSetMeshOutputsCall` below) is left completely alone: this pass's own
+// params are only useful once `EntryWrapperPass` runs, and appending them
 // unconditionally to every mesh entry, used or not, is still harmless but
 // unnecessary; today it still appends them (matching every other stage
 // wrapper's "always append params, conditionally lower" convention, see
@@ -225,6 +225,62 @@ TEST(MeshOutputWrapperTest, ChainsIntoEntryWrapperPass) {
   ASSERT_TRUE(Wrapper);
   EXPECT_EQ(Wrapper->arg_size(), 1u);
   EXPECT_TRUE(Wrapper->getArg(0)->getType()->isPointerTy());
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// (Roadmap H6c-a-a-i) A mesh entry's canonicalized
+// `feme.stage.set_mesh_outputs` call lowers into a pair of stores through
+// this pass's new `mesh_actual_vertex_count`/`mesh_actual_primitive_count`
+// trailing params, and every lane sees no leftover stage op.
+TEST(MeshOutputWrapperTest, LowersSetMeshOutputsCall) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ms_main() #0 {
+      call void @feme.stage.set_mesh_outputs(i32 3, i32 1)
+      ret void
+    }
+    declare void @feme.stage.set_mesh_outputs(i32, i32)
+    attributes #0 = { "feme.shader.stage"="mesh" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  // No output store here, so no signature elements are needed, but the
+  // wrapper still requires attached (possibly empty) signature metadata
+  // whenever any stage op is present -- see `lowerMeshStageOps`'s own
+  // comment.
+  dxil::setEntrySignature(*M->getFunction("ms_main"), EntrySignature{});
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  MeshOutputWrapperPass().run(*M, MAM);
+
+  Function *Body = M->getFunction("ms_main");
+  ASSERT_TRUE(Body);
+  bool SawActualVertexCount = false, SawActualPrimitiveCount = false;
+  Argument *ActualVertexCountArg = nullptr;
+  Argument *ActualPrimitiveCountArg = nullptr;
+  for (Argument &Arg : Body->args()) {
+    if (Arg.getName() == "mesh_actual_vertex_count") {
+      SawActualVertexCount = true;
+      ActualVertexCountArg = &Arg;
+    } else if (Arg.getName() == "mesh_actual_primitive_count") {
+      SawActualPrimitiveCount = true;
+      ActualPrimitiveCountArg = &Arg;
+    }
+  }
+  EXPECT_TRUE(SawActualVertexCount);
+  EXPECT_TRUE(SawActualPrimitiveCount);
+  ASSERT_TRUE(ActualVertexCountArg);
+  ASSERT_TRUE(ActualPrimitiveCountArg);
+  EXPECT_FALSE(ActualVertexCountArg->use_empty());
+  EXPECT_FALSE(ActualPrimitiveCountArg->use_empty());
+
+  for (const Instruction &I : instructions(*Body))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
 
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }

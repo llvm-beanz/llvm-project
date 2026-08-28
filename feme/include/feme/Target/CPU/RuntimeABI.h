@@ -1130,18 +1130,19 @@ struct FemeDispatchArgs {
 /// workgroup populates (`feme::graphics::MeshOutputBuilder`'s host-side
 /// mirror) and, if a task stage is bound, that task's own payload.
 ///
-/// **Left open by roadmap H6c** (see agent_thoughts.md's H6c entry and
-/// roadmap rows H6h/H6i/H6d): nothing yet writes `ActualVertexCount`/
-/// `ActualPrimitiveCount` (SPIR-V's `SetMeshOutputsEXT`, still
-/// uncanonicalized) or reads/writes `VertexOutputs`/`PrimitiveOutputs`/
-/// `PrimitiveIndices` from real compiled IR (a per-vertex/per-primitive
-/// output store's own canonicalization landed in H6b, but
+/// **Left open by roadmap H6c** (see agent_thoughts.md's H6c entries and
+/// roadmap rows H6h/H6i/H6d): `ActualVertexCount`/`ActualPrimitiveCount` are
+/// now written by `MeshOutputWrapperPass`'s lowering of a canonicalized
+/// `feme.stage.set_mesh_outputs` call (roadmap H6c-a-a-i, wired from SPIR-V's
+/// `SetMeshOutputsEXT` at the MLIR conversion level,
+/// `SetMeshOutputsEXTConversionPattern` in SPIRVToLLVMPatterns.cpp), and
+/// `VertexOutputs`/`PrimitiveOutputs` are written by a per-vertex/per-
+/// primitive output store's own canonicalization (H6b). `PrimitiveIndices`
+/// remains unwritten by any compiled shape (roadmap H6c-a-a-ii), and
 /// `CanonicalizeStagePass::run`'s stage filter itself does not yet accept
-/// `ShaderStage::Mesh`, roadmap H6i) -- every mesh entry point this
-/// milestone can compile and invoke end-to-end is therefore one that reads
-/// only ordinary bound resources/root constants and cooperates via
-/// groupshared/barriers, exactly like a compute shader tagged with the mesh
-/// stage, which is what `CompiledStageTest`'s new mesh-stage cases exercise.
+/// `ShaderStage::Mesh` for the raw-IR canonicalization patterns that still
+/// need it (roadmap H6i) -- ops converted directly at the MLIR level (like
+/// `SetMeshOutputsEXT`) are unaffected by that gap.
 struct FemeMeshArgs {
   /// The resource/image/sampler descriptor heaps and root constant block,
   /// identical in position and meaning to `FemeDispatchArgs::Resources`.
@@ -1187,8 +1188,9 @@ struct FemeMeshArgs {
   uint32_t *PrimitiveIndices;
   /// Written once by this workgroup's own `SetMeshOutputsEXT` call: the
   /// actual (`<= MaxOutputVertices`/`MaxOutputPrimitives`) counts it
-  /// populated. Zero-initialized by the caller; still unwritten by any
-  /// compiled shape this milestone supports (see the struct's own comment).
+  /// populated. Zero-initialized by the caller; written by
+  /// `MeshOutputWrapperPass`'s lowering (roadmap H6c-a-a-i, see the struct's
+  /// own comment).
   uint32_t *ActualVertexCount;
   uint32_t *ActualPrimitiveCount;
   /// Layout describing `Payload`; null if no task stage is bound.
