@@ -2877,7 +2877,12 @@ stream-ordered) and `CompiledStage::invokeMesh`/`invokeTask` (mirroring
 `invokeGeometry`) round out the ABI plumbing, but are not yet wired to any
 real `feme.stage.*` mesh-output-store/task-payload-store operation, since
 those operations do not exist yet (roadmap H6d) and task payload import
-remains blocked on H6h/H6i (tracked as roadmap H6c-a). No amplification
+remains blocked on H6i's own `CanonicalizeStagePass` mesh-stage support
+(tracked as roadmap H6c-a) -- H6h has since closed the other half of that
+blocker, giving `TaskPayloadWorkgroupEXT` an address-space convention
+(address space 14) and a `TaskPayloadGlobalVariablePattern` global-variable
+import pattern, mirroring `WorkgroupGlobalVariablePattern`/
+`PushConstantGlobalVariablePattern`. No amplification
 dispatch queue or meshlet assembly exists yet (roadmap H6d); the executor
 has no mesh-chaining path (roadmap H6e); and
 `vkCreateGraphicsPipelines`/`PhysicalDeviceInfo.cpp` accept and advertise
