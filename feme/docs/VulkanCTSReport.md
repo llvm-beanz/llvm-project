@@ -8587,3 +8587,117 @@ new unit tests this row adds:
 `GraphicsPipelineTest.AcceptsGeometryStageThatNeverEmits`,
 `PrimitiveTopologyTest.SupportsPrimitiveRestartIdentifiesEveryStripAndFanKind`,
 and `ExecutorTest.ExecutesDrawsAsNoOpWhenGeometryStageNeverEmits`.
+
+## Roadmap H5e-c: measured impact (layered geometry-draw `vkQueueSubmit` failure bucket)
+
+**Change.** Two independent, small fixes, landed as two commits.
+
+1. **`vkQueueSubmit`'s own error path now logs, instead of silently
+   discarding, a failed command buffer's `llvm::Error`.**
+   `executeCommandBuffers` (`Sync.cpp`, shared by `vkQueueSubmit`/
+   `vkQueueSubmit2`) called a bare `consumeError` on the `llvm::Error`
+   `executeCommandBuffer` returned, unlike `vkCreateGraphicsPipelines`'s
+   own creation-failure path, which already routes through
+   `feme::vulkan::logCreationFailure` so the existing opt-in
+   `FEME_VULKAN_LOG_CREATION_ERRORS` env var can surface the real
+   diagnostic. This alone is why this row's own flagged bucket looked
+   like it had "no diagnostic emitted" -- the diagnostic was simply never
+   given a channel to reach, not actually absent.
+2. **`resolveAttachmentView` (`RenderPass.cpp`) now accepts a
+   `VK_IMAGE_VIEW_TYPE_1D`/`_1D_ARRAY`/`_CUBE`/`_CUBE_ARRAY` render-target
+   view, not only `_2D`/`_2D_ARRAY`.** With (1) landed, re-running the
+   exact failing case list with `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+   immediately surfaced the real root cause directly:
+
+   ```
+   vkQueueSubmit: only a 2D or 2D-array image view may be a render target
+     Fail (vk.queueSubmit(queue, 1u, &submitInfo, *fence): VK_ERROR_INITIALIZATION_FAILED at vkCmdUtil.cpp:338)
+   ```
+
+   All four of `VK_IMAGE_VIEW_TYPE_1D`/`_1D_ARRAY`/`_CUBE`/`_CUBE_ARRAY`
+   are legal Vulkan color-attachment view types; `resolveAttachmentView`
+   rejected every one of them outright. Fixed by accepting all four
+   alongside the already-accepted `_2D`/`_2D_ARRAY`, addressed identically
+   (`Image` itself never has a "1D" or "cube" dimension -- only the
+   *view's* own `ImageDimension` records the addressing convention, and
+   the existing layer-major `Img.data() + baseArrayLayer * SlicePitch`
+   addressing already honors it with no change).
+
+**This row's own "1d_array,2d_array" framing undercounted the actual
+scope.** A targeted re-run of `dEQP-VK.geometry.layered.{1d_array,
+2d_array}.*` (40 cases, before fix (1) alone, just to confirm the
+diagnostic wiring):
+
+```
+1d_array.*: 6 Fail (vk.queueSubmit ... VK_ERROR_INITIALIZATION_FAILED)
+2d_array.*: 0 Fail (vk.queueSubmit ...) -- already Fail (Rendered images are incorrect) or Fail (vk.createGraphicsPipelines ...)
+```
+
+Only `1d_array` actually hit a `vkQueueSubmit` failure; `2d_array`'s
+`Texture2DArray` dimension was already accepted, so its own
+`multiple_layers_per_invocation`/`render_to_one`/`render_to_default_layer`
+cases were already landing in roadmap H5e-e's "Rendered images are
+incorrect" bucket by the time this row was investigated (a genuine,
+still-open rendering-correctness bug, left there). A full
+`dEQP-VK.geometry.*` re-run found the other 12 cases this row's own "18"
+headline count implied: `dEQP-VK.geometry.layered.cube.*` and
+`cube_array.*` hit the *identical* `resolveAttachmentView` rejection
+(their own render-target view is `VK_IMAGE_VIEW_TYPE_CUBE`/
+`_CUBE_ARRAY`, never even considered by this row's own text), for exactly
+6 cases each:
+
+```
+Before (fix (2) applied):
+  1d_array.{12_1_6,64_1_4}.{multiple_layers_per_invocation,render_to_default_layer,render_to_one}: 6 cases
+  cube.{36_36_6,64_64_6}.{multiple_layers_per_invocation,render_to_default_layer,render_to_one}: 6 cases
+  cube_array.{36_36_12,64_64_12}.{multiple_layers_per_invocation,render_to_default_layer,render_to_one}: 6 cases
+  Total: 18 cases, all Fail (vk.queueSubmit ... VK_ERROR_INITIALIZATION_FAILED)
+```
+
+**`dEQP-VK.geometry.*` re-run (200 cases), before/after fix (2):**
+
+```
+Before (H5e-b's own baseline):
+  Passed:        4/200 (2.0%)
+  Failed:        163/200 (81.5%)
+  Not supported: 33/200 (16.5%)
+
+After (this row):
+  Passed:        4/200 (2.0%)
+  Failed:        163/200 (81.5%)
+  Not supported: 33/200 (16.5%)
+```
+
+Byte-identical totals -- expected, since every one of the 18 cases moves
+from one `Fail` reason to another, not out of `Failed` entirely. All 18
+were individually re-examined after the fix: every one now runs to
+completion and lands in `Fail (Rendered images are incorrect)`, the same
+bucket roadmap H5e-e already tracks (previously scoped to 6
+`2d_array.*.multiple_layers_per_invocation` variants; now 24 cases across
+`1d_array`/`2d_array`/`cube`/`cube_array`, still a genuine
+rendering-correctness bug, left to H5e-e). This row's own literal ask --
+stop these 18 cases from failing at `vkQueueSubmit` with no diagnostic --
+is complete: zero `vkQueueSubmit` failures remain anywhere in the
+`dEQP-VK.geometry.*` group.
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt`
+sample, same file every prior row's own report used:
+
+```
+Test run totals:
+  Passed:        12/1957 (0.6%)
+  Failed:        155/1957 (7.9%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical to H5e-b's own baseline (12/155/1790, 0 regressions) --
+expected, since no `dEQP-VK.draw.*` case in this sample exercises a
+geometry stage or a 1D/cube(-array) render target.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1870/1929** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H5e-b's own **1867/1926** baseline by exactly the 3
+new unit tests this row adds: `RenderPassTest.
+ResolveAttachmentViewAcceptsOneDArrayView`, `RenderPassTest.
+ResolveAttachmentViewAcceptsCubeArrayView`, and `RenderPassTest.
+ResolveAttachmentViewRejects3DView`.

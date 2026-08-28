@@ -1650,6 +1650,35 @@ discard-on-store optimization to skip, so `STORE`/`DONT_CARE`/`NONE` are
 indistinguishable outcomes. The extension is now simply advertised
 (`PhysicalDeviceInfo.cpp`).
 
+**Status (roadmap H5e-c): `resolveAttachmentView` accepts a 1D/1D-array/
+cube/cube-array render-target view, not only 2D/2D-array.** Vulkan
+permits `VK_IMAGE_VIEW_TYPE_1D`, `_1D_ARRAY`, `_CUBE`, and `_CUBE_ARRAY`
+as a color (or depth/stencil) attachment's own view type, alongside the
+already-accepted `_2D`/`_2D_ARRAY`; `resolveAttachmentView` rejected
+every other dimension outright, which silently failed every draw into
+such an attachment at `vkQueueSubmit` time (`VK_ERROR_INITIALIZATION_
+FAILED`, previously with no attributable diagnostic even with
+`FEME_VULKAN_LOG_CREATION_ERRORS` set -- `vkQueueSubmit`'s own error path,
+`Sync.cpp`, discarded the failure with a bare `consumeError` instead of
+routing it through `logCreationFailure` the way `vkCreateGraphicsPipelines`
+already does; both are now fixed together). All four newly-accepted
+dimensions are addressed exactly like the existing 2D/2D-array case:
+`Image` itself never has a "1D" or "cube" dimension of its own
+(`mapImageDimension` only ever derives `Texture1D(Array)`/`Texture2D
+(Array)`/`Texture3D` from a `VkImageType` plus array-layer count) -- a 1D
+image's `extent.height` is always 1, and a cube(-array)'s six faces per
+cube are simply consecutive array layers of a `VK_IMAGE_CREATE_CUBE_
+COMPATIBLE_BIT` 2D image; only the *view's* own `ImageDimension`
+(`TextureCube`/`TextureCubeArray`) records the addressing convention,
+and `resolveAttachmentView`'s existing layer-major addressing needs no
+change to honor it. Found via `dEQP-VK.geometry.layered.{1d_array,
+2d_array,cube,cube_array}.*`'s own `multiple_layers_per_invocation`/
+`render_to_one`/`render_to_default_layer` cases (a geometry stage's own
+`gl_Layer` output into such a render target), though the gap itself has
+nothing to do with the geometry stage -- any stage's draw into a 1D/cube
+render target hit it. See "Roadmap H5e-c: measured impact" in
+VulkanCTSReport.md for the full breakdown.
+
 ### Graphics pipeline state
 
 `vkCreateGraphicsPipelines` compiles each stage through the same flow the

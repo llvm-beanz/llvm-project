@@ -983,7 +983,23 @@ stream present". A real `dEQP-VK.geometry.*` re-run confirms the
 `EmitVertex`/`EndPrimitive` failure bucket is gone entirely,
 redistributing into several smaller, still-open buckets (roadmap H5e-b
 through H5e-e; see `VulkanCTSReport.md`'s "Roadmap H5e-a: measured
-impact" for the full breakdown).
+impact" for the full breakdown). Roadmap H5e-c closes one of those:
+every `dEQP-VK.geometry.layered.{1d_array,2d_array,cube,cube_array}.*`
+case using a geometry stage's own `gl_Layer` output (`multiple_layers_
+per_invocation`, `render_to_one`, `render_to_default_layer`) failed at
+`vkQueueSubmit`, not because of anything geometry-stage-specific at all,
+but because `RenderPass.cpp`'s `resolveAttachmentView` (see "Render
+passes and dynamic rendering" in `FeMeVulkanDesign.md`) rejected any
+render-target view whose dimension was not 2D/2D-array outright -- a
+`VK_IMAGE_VIEW_TYPE_1D`/`_1D_ARRAY`/`_CUBE`/`_CUBE_ARRAY` attachment (all
+four of which Vulkan permits as a color attachment) never had a chance to
+render regardless of whether a geometry stage ever wrote `gl_Layer` into
+it. Fixed by accepting all four dimensions, addressed identically to the
+already-accepted 2D/2D-array case (see `FeMeVulkanDesign.md`'s own updated
+status note). All 18 cases this row flagged now run to completion,
+reclassified into the pre-existing `Rendered images are incorrect`
+bucket roadmap H5e-e already tracks -- a real rendering-correctness gap,
+left to that row.
 
 ### Amplification/task and mesh stage model
 
