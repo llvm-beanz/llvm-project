@@ -40641,3 +40641,153 @@ plus the new `GroupSize.h`/`GraphicsPipeline.h` group-size-enforcement
 machinery it depends on, (4) the extension-bookkeeping and design-doc
 updates, (5) the new/updated unit tests, (6) the `VulkanCTSReport.md`
 and `Roadmap.md` updates, and (7) this `agent_thoughts.md` entry.
+
+# H6h: `TaskPayloadWorkgroupEXT` address-space convention and global-variable import pattern
+
+## Task
+
+Close out roadmap milestone H6h: LLVM's own SPIR-V backend
+(`storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h`) has no
+mapping at all for `TaskPayloadWorkgroupEXT` (SPIR-V enum 5402), the storage
+class a task entry's bounded payload variable uses -- unlike `Input`(7)/
+`Output`(8)/`Workgroup`(3)/`PushConstant`(13), which FeMe's own
+`StageIOGlobalVariablePattern`/`WorkgroupGlobalVariablePattern`/
+`PushConstantGlobalVariablePattern` (`SPIRVToLLVMPatterns.cpp`) already reuse
+from that fixed mapping. H6b's own investigation found this and deliberately
+scoped a task entry's payload write out of its own work, leaving it for this
+row: a new address space (any value FeMe's own conversion layer does not
+otherwise use) and a `TaskPayloadGlobalVariablePattern` mirroring the two
+precedents above, before `CanonicalizeStage.cpp` (H6i) has anything to
+canonicalize a payload write into.
+
+## Investigation
+
+Read the H6b/H6c/H6g roadmap rows and `TaskPayload.h`/`RuntimeABI.h`'s own
+comments (all of which already point at this exact gap) plus
+`storageClassToAddressSpace` itself (confirmed it really does hit
+`report_fatal_error`'s default case for `TaskPayloadWorkgroupEXT`, with no
+case at all -- not even a wrong one). Read `WorkgroupGlobalVariablePattern`
+and `PushConstantGlobalVariablePattern` in full, since the roadmap text names
+both as the precedents to mirror, along with their corresponding
+`TypeConverter.addConversion` registrations in
+`populateSPIRVToLLVMTargetTypeConversions` and pattern-list entries in
+`populateSPIRVToLLVMTargetPatterns`. Confirmed `mlir::spirv::StorageClass::
+TaskPayloadWorkgroupEXT` already exists as a real enumerant in MLIR's own
+SPIR-V dialect (`SPIRVBase.td`, value 5402) with existing round-trip test
+coverage in `mlir/test/Target/SPIRV/mesh-ops.mlir` -- so the only gap really
+is on FeMe's own conversion-layer side, exactly as the roadmap text says.
+
+Existing feme address-space usage in this file: 3 (`Workgroup`), 7 (`Input`),
+8 (`Output`), 11 (`StorageBuffer`), 12 (`Uniform`), 13 (`PushConstant`) --
+all of which happen to already be exactly what LLVM's own
+`storageClassToAddressSpace` maps those same storage classes to. Since that
+switch has nothing at all for `TaskPayloadWorkgroupEXT`, and the roadmap
+text explicitly says "any value FeMe's own conversion layer does not
+otherwise use" is acceptable, picked 14 -- the next integer after the
+highest one that switch does define (13), and not used anywhere else in
+this file.
+
+## Implementation
+
+Two additions to `SPIRVToLLVMPatterns.cpp`, both placed immediately after
+their `Workgroup` precedent counterparts (the roadmap text's second-named
+mirror target, and the most similar in shape -- like `Workgroup`, a payload
+variable is real, read-write memory, never constant, with no zero-init
+convention of its own):
+
+1. `TaskPayloadGlobalVariablePattern`: converts a `TaskPayloadWorkgroupEXT`
+   `spirv.GlobalVariable` to an ordinary `llvm.mlir.global` in address space
+   14, `External` linkage, no initializer -- structurally identical to
+   `PushConstantGlobalVariablePattern` minus the `isConstant`/offset-layout
+   handling (a payload has no `Block`/`Offset` decoration convention the way
+   a push-constant or uniform block does; it is just plain memory).
+2. A `spirv::PointerType` conversion in
+   `populateSPIRVToLLVMTargetTypeConversions` routing any
+   `TaskPayloadWorkgroupEXT` pointer (the global's own type, or an access
+   chain result reaching into it) to an ordinary `!llvm.ptr<14>`, mirroring
+   the `Workgroup`/`PushConstant` pointer conversions immediately above it.
+
+Registered the new pattern in `populateSPIRVToLLVMTargetPatterns`'s
+alphabetized `Patterns.add<...>` list, between `SwitchConversionPattern` and
+`TerminateInvocationConversionPattern`. No `StageIOAddressOfPattern`-style
+special-casing is needed for the `spirv.mlir.addressof` site itself:
+unlike `Input`/`Output` (which need special handling because a builtin
+variable of either storage class collapses to the identical converted
+type, and `Input` additionally converts to a bare value rather than a
+pointer), a `TaskPayloadWorkgroupEXT` variable is unambiguous and converts
+to an ordinary pointer, so MLIR's own generic `spirv.mlir.addressof`/
+`spirv.AccessChain`/`spirv.Load`/`spirv.Store` patterns already handle it
+correctly off the type conversion alone -- exactly the same reason
+`WorkgroupGlobalVariablePattern` itself needs no such companion pattern.
+
+Deliberately did *not* touch `CanonicalizeStage.cpp`, `TaskPayloadBuilder`,
+or `RuntimeABI.h`: wiring a real payload write/read into a `feme.stage.*`
+op and threading it through `CanonicalizeStagePass::run`'s (currently
+Mesh/Amplification-blind) stage filter is H6i's own explicitly separate
+scope, not this row's.
+
+## Testing
+
+New `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-task-payload.mlir` lit
+test, mirroring `spirv-to-llvm-workgroup.mlir`'s own shape and CHECK style:
+one `RUN`/`CHECK` block storing through a payload array element via
+`spirv.AccessChain`, and a second reading a bare scalar payload variable
+directly -- both confirm the `llvm.mlir.global`'s `addr_space = 14` and
+every `!llvm.ptr<14>` along the way. Ran `feme-opt --feme-convert-spirv-to-
+llvm` on the test file manually piped through `FileCheck` first to confirm
+it passes standalone before trusting the full suite run.
+
+`ninja check-feme` (assertions-enabled, ccache build, pre-existing build
+tree): 1931/1990 passing (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6f's own recorded 1930/1989 baseline by exactly the 1
+new lit test this row adds. Ran clang-format-diff on the change (one
+reflow inside the now-longer alphabetized pattern list); rebuilt and
+re-ran `check-feme` afterward to confirm the reformat changed nothing
+behaviorally.
+
+Also built (`deqp-vk` was already built in this tree) and ran a real
+`dEQP-VK.mesh_shader.*` CTS pass (28044 cases) against the rebuilt ICD:
+1/337/27706, byte-identical to H6f's own recorded baseline. This is the
+expected outcome, not a surprise -- this row is pure conversion-layer
+plumbing with no caller reachable from any entry point
+`CanonicalizeStagePass`/the mesh pipeline actually processes yet (H6i has
+not landed), so nothing in the mesh/task content-compilation path could
+possibly change yet. Recorded this expected-and-confirmed-null result as
+a new "Roadmap H6h: measured impact" section in `VulkanCTSReport.md`,
+following the same before/after-numbers format every prior H6* entry
+uses, rather than skipping the CTS run just because a null result was
+predictable.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed no
+update needed. This row adds no new advertised feature bit, limit, or
+extension -- it is purely an SPIR-V-to-LLVM conversion-layer addition, the
+same shape H5e-d's own entry recorded as not needing an inventory update
+for an analogous reflection/metadata-only fix.
+
+## Documentation updates
+
+- `Roadmap.md`: struck through H6h with a `done:` writeup summarizing the
+  pattern, the address-space choice and why, the test coverage, and the
+  measured (null, as expected) CTS impact.
+- `VulkanCTSReport.md`: new "Roadmap H6h: measured impact" section with the
+  before/after `dEQP-VK.mesh_shader.*` totals (identical), the
+  `check-feme` totals, and a reproduction recipe.
+- `Design.md`: added a `TaskPayloadWorkgroupEXT` row to the SPIR-V-to-LLVM
+  conversion table (next to the `PushConstant` row it was already
+  documented as missing relative to), since that table is the one place
+  this file's own per-storage-class conversion behavior is summarized for
+  a reader who does not want to read `SPIRVToLLVMPatterns.cpp` itself.
+- `FeMeGraphicsDesign.md`: updated the mesh-shading milestone status
+  paragraph (which previously said task payload import "remains blocked on
+  H6h/H6i") to reflect that H6h's own half of that blocker is now closed,
+  leaving only H6i's `CanonicalizeStagePass` mesh-stage support.
+- `FeMeVulkanDesign.md`: left its own H6h/H6i reference untouched -- it
+  already correctly describes both as "tracked separately," which remains
+  accurate since H6i has not landed and mesh/task shader *content* still
+  does not compile end to end yet.
+
+Committed in small, separately-reviewable commits: (1) the
+`SPIRVToLLVMPatterns.cpp` pattern/type-converter/pattern-list change, (2)
+the new lit test, (3) the design-doc updates (`Design.md`/
+`FeMeGraphicsDesign.md`), (4) the `Roadmap.md`/`VulkanCTSReport.md`
+updates, and (5) this `agent_thoughts.md` entry.
