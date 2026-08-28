@@ -189,6 +189,15 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
           createMaskedStreamCut(B, Call->getArgOperand(0), Masks.SideEffect);
           Call->eraseFromParent();
           continue;
+        case feme::StageOpKind::TaskPayloadStore:
+          // (Roadmap H6c-a-b) `offset` (operand 0) stays a plain constant,
+          // mirroring `OutputStore`'s own `ElementID` above; only `value`
+          // (operand 1) is a genuine per-lane value.
+          createMaskedTaskPayloadStore(B, Call->getArgOperand(0),
+                                      Call->getArgOperand(1),
+                                      Masks.SideEffect);
+          Call->eraseFromParent();
+          continue;
         default:
           break; // Not a mask-affecting stage op; fall through below.
         }
@@ -262,8 +271,9 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
 
 /// Whether \p F calls any of the mask-affecting `feme.stage.*`
 /// operations `applyStageMasks` lowers (`discard`/`demote`/`is_helper`/
-/// `output.store`/roadmap R34's `stream.emit`/`stream.cut`) -- unlike a
-/// divergent branch, these can appear in an otherwise fully uniform,
+/// `output.store`/roadmap R34's `stream.emit`/`stream.cut`/roadmap
+/// H6c-a-b's `task.payload.store`) -- unlike a divergent branch, these can
+/// appear in an otherwise fully uniform,
 /// straight-line function (e.g. an unconditional `feme.stage.discard`),
 /// which still needs `DiamondFlattener` to walk it and lower them rather
 /// than being left untouched as "nothing to do".
@@ -277,7 +287,8 @@ bool hasStageMaskOps(Function &F) {
          Kind == feme::StageOpKind::IsHelper ||
          Kind == feme::StageOpKind::OutputStore ||
          Kind == feme::StageOpKind::StreamEmit ||
-         Kind == feme::StageOpKind::StreamCut))
+         Kind == feme::StageOpKind::StreamCut ||
+         Kind == feme::StageOpKind::TaskPayloadStore))
       return true;
   }
   return false;

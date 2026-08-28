@@ -147,3 +147,29 @@ bool feme::cpu::isReturnMasksCall(const CallInst &CI) {
   const Function *Callee = CI.getCalledFunction();
   return Callee && Callee->getName().starts_with(ReturnMasksPrefix);
 }
+
+FunctionCallee feme::cpu::getOrInsertMaskedTaskPayloadStore(Module &M,
+                                                            Type *ValueTy,
+                                                            Type *MaskTy) {
+  SmallString<64> Name(MaskedTaskPayloadStorePrefix);
+  Name.push_back('.');
+  appendTypeSuffix(Name, ValueTy);
+  FunctionType *FTy = FunctionType::get(
+      Type::getVoidTy(M.getContext()),
+      {Type::getInt32Ty(M.getContext()), ValueTy, MaskTy}, /*isVarArg=*/false);
+  return M.getOrInsertFunction(Name, FTy);
+}
+
+CallInst *feme::cpu::createMaskedTaskPayloadStore(IRBuilderBase &B,
+                                                  Value *Offset, Value *Val,
+                                                  Value *Mask) {
+  Module *M = B.GetInsertBlock()->getModule();
+  FunctionCallee Callee =
+      getOrInsertMaskedTaskPayloadStore(*M, Val->getType(), Mask->getType());
+  return B.CreateCall(Callee, {Offset, Val, Mask});
+}
+
+bool feme::cpu::isMaskedTaskPayloadStoreCall(const CallInst &CI) {
+  const Function *Callee = CI.getCalledFunction();
+  return Callee && Callee->getName().starts_with(MaskedTaskPayloadStorePrefix);
+}

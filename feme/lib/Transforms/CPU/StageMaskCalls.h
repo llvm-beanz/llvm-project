@@ -46,6 +46,13 @@ inline constexpr llvm::StringLiteral MaskedStreamCutPrefix =
     "feme.cpu.masked.stage.stream.cut";
 inline constexpr llvm::StringLiteral ReturnMasksPrefix =
     "feme.cpu.stage.return.masks";
+/// Roadmap H6c-a-b: `feme.stage.task.payload.store` is side-effecting the
+/// same way `feme.stage.output.store` is (a task workgroup's bounded
+/// payload write, per `StageOpKind::TaskPayloadStore`'s own comment), so
+/// `LinearizePass` threads the same per-lane side-effect mask onto a
+/// masked variant of it too.
+inline constexpr llvm::StringLiteral MaskedTaskPayloadStorePrefix =
+    "feme.cpu.masked.task.payload.store";
 
 inline llvm::StringRef getMaskedOutputStoreName() {
   return MaskedOutputStorePrefix;
@@ -84,10 +91,24 @@ llvm::FunctionCallee getOrInsertReturnMasks(llvm::Module &M, llvm::Type *LiveTy,
 llvm::CallInst *createReturnMasks(llvm::IRBuilderBase &B, llvm::Value *Live,
                                   llvm::Value *SideEffect);
 
+/// `feme.cpu.masked.task.payload.store(offset, value, mask)`: \p Offset is
+/// the constant byte offset `StageOpKind::TaskPayloadStore`'s own comment
+/// documents, carried through unchanged (mirroring `Element` in
+/// `createMaskedOutputStore`, also never widened).
+llvm::FunctionCallee getOrInsertMaskedTaskPayloadStore(llvm::Module &M,
+                                                       llvm::Type *ValueTy,
+                                                       llvm::Type *MaskTy);
+
+llvm::CallInst *createMaskedTaskPayloadStore(llvm::IRBuilderBase &B,
+                                             llvm::Value *Offset,
+                                             llvm::Value *Value,
+                                             llvm::Value *Mask);
+
 bool isMaskedOutputStoreCall(const llvm::CallInst &CI);
 bool isMaskedStreamEmitCall(const llvm::CallInst &CI);
 bool isMaskedStreamCutCall(const llvm::CallInst &CI);
 bool isReturnMasksCall(const llvm::CallInst &CI);
+bool isMaskedTaskPayloadStoreCall(const llvm::CallInst &CI);
 
 } // namespace feme::cpu
 

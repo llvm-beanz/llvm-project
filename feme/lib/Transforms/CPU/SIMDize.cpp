@@ -455,6 +455,7 @@ private:
   void widenMaskedOutputStore(CallInst &CI, IRBuilder<> &Builder);
   void widenMaskedStreamEmit(CallInst &CI, IRBuilder<> &Builder);
   void widenMaskedStreamCut(CallInst &CI, IRBuilder<> &Builder);
+  void widenMaskedTaskPayloadStore(CallInst &CI, IRBuilder<> &Builder);
   void widenReturnMasks(CallInst &CI, IRBuilder<> &Builder);
   void replaceGroupIdCall(CallInst &CI);
   void widenResourceCall(CallInst &CI, const MatchedResourceCall &Matched,
@@ -1002,6 +1003,26 @@ void FunctionWidener::widenMaskedStreamCut(CallInst &CI, IRBuilder<> &Builder) {
   FunctionCallee Callee =
       getOrInsertMaskedStreamCut(*M, Stream->getType(), Mask->getType());
   Builder.CreateCall(Callee, {Stream, Mask});
+  ToErase.push_back(&CI);
+}
+
+// (Roadmap H6c-a-b) `Offset` (operand 0) stays scalar -- it is the same
+// compile-time constant byte offset for every lane of this call, unlike
+// `widenMaskedOutputStore`'s per-lane `Row`/`Component`/`Vertex` -- only
+// `Value` (operand 1) is widened, mirroring `widenMaskedOutputStore`'s own
+// treatment of its `Element` operand.
+void FunctionWidener::widenMaskedTaskPayloadStore(CallInst &CI,
+                                                  IRBuilder<> &Builder) {
+  Module *M = NewF->getParent();
+  Value *Offset = CI.getArgOperand(0);
+  Value *ValueArg = getWidened(CI.getArgOperand(1), Builder);
+  Value *Mask = Builder.CreateAnd(Env.SideEffectMask,
+                                  getWidened(CI.getArgOperand(2), Builder),
+                                  "task.payload.store.mask");
+  FunctionCallee Callee =
+      getOrInsertMaskedTaskPayloadStore(*M, ValueArg->getType(),
+                                        Mask->getType());
+  Builder.CreateCall(Callee, {Offset, ValueArg, Mask});
   ToErase.push_back(&CI);
 }
 
@@ -1830,6 +1851,10 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     }
     if (isMaskedStreamCutCall(*CI)) {
       widenMaskedStreamCut(*CI, Builder);
+      return true;
+    }
+    if (isMaskedTaskPayloadStoreCall(*CI)) {
+      widenMaskedTaskPayloadStore(*CI, Builder);
       return true;
     }
     if (isReturnMasksCall(*CI)) {
