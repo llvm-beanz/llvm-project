@@ -33,13 +33,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete and close out milestone H6c-a-a-i?
+Can you complete and close out milestone H6c-a-a-ii?
 
-> **Canonicalize `SetMeshOutputsEXT` into a new `feme.stage.*` op and wire it
-> into `MeshOutputWrapperPass`/`EntryWrapperPass`** so
-> `FemeMeshArgs::ActualVertexCount`/`ActualPrimitiveCount` reflect a mesh
-> workgroup's real declared output counts instead of always reading 0
-> (discovered by H6c-a-a's own closing re-run: without this,
-> `feme::graphics::MeshOutputBuilder::assembleMeshlet` always trims to an empty
-> meshlet, regardless of how much real per-vertex/per-primitive data
-> `MeshOutputWrapperPass` itself correctly writes)
+> **Teach `feme::graphics::Executor::runMeshWorkgroup`'s `flattenMeshRow` to
+> route a `PerPrimitive`-frequency `Output` element into
+> `MeshResources::PrimitiveOutputs`/`PrimitiveOutputLayout`**, which it never
+> populates today (every element is currently treated as per-vertex regardless
+> of `SignatureElement::Frequency`), discovered by H6c-a-a's own closing re-run
+> alongside H6c-a-a-i
