@@ -16,7 +16,9 @@
 // R34's initial landing, the patch-constant phase's own single-invocation
 // batch ABI (`FemePatchConstantArgs`), the domain/evaluation stage's
 // per-domain-point batch ABI (`FemeDomainArgs`), and the geometry stage's
-// per-primitive batch ABI (`FemeGeometryArgs`), plus the
+// per-primitive batch ABI (`FemeGeometryArgs`), plus roadmap H6c's mesh and
+// task (amplification) stage workgroup-batch ABIs (`FemeMeshArgs`,
+// `FemeTaskArgs`), plus the
 // descriptor/layout/system-value enumerators that give those structs' fields
 // meaning. R29 also folded `FemeShaderResources` into `FemeDispatchArgs` and
 // retyped `FemeShaderResources::SamplerHeap`, breaking the ABI on purpose
@@ -1099,6 +1101,155 @@ struct FemeDispatchArgs {
   /// ABI headroom for fields a future revision may add without breaking
   /// binary compatibility with already-compiled shaders.
   void *Reserved[4];
+};
+
+/// The single argument a compiled mesh entry point takes:
+///
+/// \code
+///   void feme_cpu_entry_<name>(const FemeMeshArgs *Args);
+/// \endcode
+///
+/// Roadmap H6c: the mesh stage's counterpart to `FemeGeometryArgs`, but
+/// dispatched as a bounded *workgroup* exactly like `FemeDispatchArgs`
+/// (`VK_EXT_mesh_shader`'s `MeshEXT` execution model shares compute's own
+/// `LocalSize`/`gl_WorkGroupID` model, not geometry's one-invocation-per-
+/// primitive batch) rather than as a batch of independent per-primitive
+/// invocations -- which is why this struct's leading fields (`Resources`
+/// through `GroupShared`) are laid out identically to `FemeDispatchArgs`'s
+/// own, field-for-field: `feme::cpu::EntryWrapperPass` (Phase 6's group
+/// loop, groupshared allocation and barrier-region splitting) builds this
+/// struct's wrapper exactly the way it builds a compute one already,
+/// reading only that shared prefix, per roadmap H6c's "reuse the compute
+/// workgroup/groupshared/barrier/wave lowering" directive -- see
+/// `feme::cpu::getDispatchArgsType`'s own comment (DispatchArgsLayout.h)
+/// for why a shorter, shared-prefix struct type is safe to build a GEP
+/// against even though the real argument is this longer one.
+///
+/// The fields after `GroupShared` are new relative to `FemeDispatchArgs`,
+/// holding the bounded per-vertex/per-primitive output storage a mesh
+/// workgroup populates (`feme::graphics::MeshOutputBuilder`'s host-side
+/// mirror) and, if a task stage is bound, that task's own payload.
+///
+/// **Left open by roadmap H6c** (see agent_thoughts.md's H6c entry and
+/// roadmap rows H6h/H6i/H6d): nothing yet writes `ActualVertexCount`/
+/// `ActualPrimitiveCount` (SPIR-V's `SetMeshOutputsEXT`, still
+/// uncanonicalized) or reads/writes `VertexOutputs`/`PrimitiveOutputs`/
+/// `PrimitiveIndices` from real compiled IR (a per-vertex/per-primitive
+/// output store's own canonicalization landed in H6b, but
+/// `CanonicalizeStagePass::run`'s stage filter itself does not yet accept
+/// `ShaderStage::Mesh`, roadmap H6i) -- every mesh entry point this
+/// milestone can compile and invoke end-to-end is therefore one that reads
+/// only ordinary bound resources/root constants and cooperates via
+/// groupshared/barriers, exactly like a compute shader tagged with the mesh
+/// stage, which is what `CompiledStageTest`'s new mesh-stage cases exercise.
+struct FemeMeshArgs {
+  /// The resource/image/sampler descriptor heaps and root constant block,
+  /// identical in position and meaning to `FemeDispatchArgs::Resources`.
+  FemeShaderResources Resources;
+  /// This workgroup's 3D group coordinate, identical in position and
+  /// meaning to `FemeDispatchArgs::GroupID`.
+  uint32_t GroupID[3];
+  /// The full dispatch's 3D group count (mirrors `FemeDispatchArgs::
+  /// GroupCount`; for a mesh workgroup dispatched directly by
+  /// `vkCmdDrawMeshTasksEXT` rather than a task's `EmitMeshTasksEXT`, this
+  /// is that command's own `groupCountX/Y/Z`).
+  uint32_t GroupCount[3];
+  /// Group-shared storage for this workgroup, identical in position and
+  /// meaning to `FemeDispatchArgs::GroupShared`.
+  void *GroupShared;
+  /// SPIR-V's `OutputVertices`/`OutputPrimitivesEXT` execution modes: the
+  /// declared bounds `VertexOutputs`/`PrimitiveOutputs`/`PrimitiveIndices`
+  /// below are sized to (`feme::graphics::MeshState`'s own fields).
+  uint32_t MaxOutputVertices;
+  uint32_t MaxOutputPrimitives;
+  /// The output topology (`feme::graphics::MeshOutputTopology`'s
+  /// enumerator value), fixing how many vertex indices one row of
+  /// `PrimitiveIndices` holds (`feme::graphics::getVerticesPerPrimitive`).
+  uint32_t OutputTopology;
+  /// Reserved 32-bit field to keep pointer fields naturally aligned.
+  uint32_t Reserved32;
+  /// Layout describing `VertexOutputs`.
+  const FemeStageLayout *VertexOutputLayout;
+  /// Structure-of-arrays storage for this workgroup's per-vertex outputs,
+  /// `MaxOutputVertices` slots (`feme::graphics::MeshOutputBuilder::
+  /// getVertices`'s host-side mirror).
+  void *VertexOutputs;
+  /// Layout describing `PrimitiveOutputs`.
+  const FemeStageLayout *PrimitiveOutputLayout;
+  /// Structure-of-arrays storage for this workgroup's per-primitive
+  /// outputs (e.g. `gl_PrimitiveID`, a user `perprimitiveEXT` varying),
+  /// `MaxOutputPrimitives` slots.
+  void *PrimitiveOutputs;
+  /// Flat `MaxOutputPrimitives * getVerticesPerPrimitive(OutputTopology)`
+  /// storage for each primitive's own vertex index list, primitive-major
+  /// (`feme::graphics::MeshOutputBuilder::getPrimitiveIndices`'s host-side
+  /// mirror).
+  uint32_t *PrimitiveIndices;
+  /// Written once by this workgroup's own `SetMeshOutputsEXT` call: the
+  /// actual (`<= MaxOutputVertices`/`MaxOutputPrimitives`) counts it
+  /// populated. Zero-initialized by the caller; still unwritten by any
+  /// compiled shape this milestone supports (see the struct's own comment).
+  uint32_t *ActualVertexCount;
+  uint32_t *ActualPrimitiveCount;
+  /// Layout describing `Payload`; null if no task stage is bound.
+  const FemeStageLayout *PayloadLayout;
+  /// Read-only storage for the bound task stage's payload (`feme::graphics
+  /// ::TaskPayloadBuilder`'s host-side mirror), or null if no task stage is
+  /// bound (`vkCmdDrawMeshTasksEXT` with no task shader).
+  const void *Payload;
+  /// ABI headroom for later mesh-batch metadata.
+  void *Reserved[2];
+};
+
+/// The single argument a compiled task (amplification) entry point takes:
+///
+/// \code
+///   void feme_cpu_entry_<name>(const FemeTaskArgs *Args);
+/// \endcode
+///
+/// Roadmap H6c's task-stage counterpart to `FemeMeshArgs`: a task entry
+/// point dispatches as a bounded workgroup exactly like compute (the same
+/// `LocalSize`/`gl_WorkGroupID` model, per `MeshState`'s own file comment
+/// on why the task stage has no shape of its own beyond its workgroup
+/// size), so this struct's leading fields also mirror `FemeDispatchArgs`
+/// field-for-field, for the same "reuse the compute wrapper's group loop,
+/// groupshared allocation and barrier splitting unchanged" reason
+/// `FemeMeshArgs`'s own comment gives.
+///
+/// **Left open by roadmap H6c**, mirroring `FemeMeshArgs`'s own note:
+/// nothing yet writes to `Payload` from real compiled IR (SPIR-V's
+/// `TaskPayloadWorkgroupEXT` storage class has no address-space mapping at
+/// all yet, roadmap H6h, so there is no global variable pattern for a
+/// payload write to even target) or to `MeshGroupCount` (`EmitMeshTasksEXT`,
+/// left to roadmap H6d's "checked amplification dispatch queues").
+struct FemeTaskArgs {
+  /// Identical in position and meaning to `FemeDispatchArgs::Resources`.
+  FemeShaderResources Resources;
+  /// Identical in position and meaning to `FemeDispatchArgs::GroupID`.
+  uint32_t GroupID[3];
+  /// Identical in position and meaning to `FemeDispatchArgs::GroupCount`.
+  uint32_t GroupCount[3];
+  /// Identical in position and meaning to `FemeDispatchArgs::GroupShared`.
+  void *GroupShared;
+  /// The bound (`VkPhysicalDeviceMeshShaderPropertiesEXT::
+  /// maxTaskPayloadSize`, or the task shader's own declared payload type
+  /// size if smaller) `Payload` below is sized to
+  /// (`feme::graphics::TaskPayloadBuilder::getMaxPayloadBytes`'s host-side
+  /// mirror).
+  uint32_t MaxPayloadBytes;
+  /// Reserved 32-bit field to keep pointer fields naturally aligned.
+  uint32_t Reserved32;
+  /// This workgroup's payload storage, `MaxPayloadBytes` bytes, written by
+  /// (once wired) a canonicalized `TaskPayloadWorkgroupEXT` store and read
+  /// back by every mesh workgroup `EmitMeshTasksEXT` dispatches.
+  void *Payload;
+  /// Written once by this workgroup's own `EmitMeshTasksEXT` call: the mesh
+  /// workgroup group count it requests. Zero-initialized by the caller;
+  /// still unwritten by any compiled shape this milestone supports (see
+  /// the struct's own comment).
+  uint32_t *MeshGroupCount;
+  /// ABI headroom for later task-batch metadata.
+  void *Reserved[2];
 };
 
 } // namespace feme::cpu
