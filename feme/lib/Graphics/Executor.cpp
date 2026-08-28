@@ -1403,282 +1403,26 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   }
   uint32_t PrimitiveCounter = 0;
 
-  for (const DrawCommand &Cmd : Draw.Draws) {
-    if (Cmd.VertexCount == 0 || Cmd.InstanceCount == 0)
-      continue;
+  // (roadmap H6e) Shared by every pre-rasterization stage chain -- vertex,
+  // tessellation, geometry, and now mesh: clips, viewport-transforms,
+  // culls, bins into tiles and rasterizes \p AbsTriIndices/\p
+  // AbsLineIndices' primitives (or every one of \p RasterOutRef's own
+  // invocations, for a point-class \p RasterClass) against the bound
+  // fragment stage. Exactly the same "last pre-rasterization stage's own
+  // vertex storage substitutes for the vertex stage's" pattern
+  // tessellation (`TessOutput`/`RasterOut`) and geometry
+  // (`GeomStreamOutput`/`RasterOut`, roadmap H5d) already established --
+  // the mesh path (roadmap H6e) feeds its own assembled meshlets' merged
+  // storage through this exact same function rather than a fourth copy
+  // of it, per this milestone's own "same clipping/rasterization path"
+  // charter.
+  auto RasterizePrimitives =
+      [&](const StageStorage &RasterOutRef,
+          llvm::ArrayRef<std::array<uint32_t, 3>> AbsTriIndices,
+          llvm::ArrayRef<std::array<uint32_t, 2>> AbsLineIndices,
+          RasterPrimitiveClass RasterClass) -> Error {
+    const StageStorage *RasterOut = &RasterOutRef;
 
-    uint32_t PerInstance = Cmd.VertexCount;
-    uint32_t Total = PerInstance * Cmd.InstanceCount;
-
-    // Primitive restart (`primitiveRestartEnable`) only applies to an
-    // indexed strip/fan draw: a special index value ends the current
-    // strip/fan and starts a new one, exactly as an unindexed strip/fan
-    // would begin fresh. `topologySupportsPrimitiveRestart` is the single
-    // source of truth for which topologies that covers, shared with
-    // `GraphicsPipeline.cpp`'s own creation-time acceptance check.
-    bool RestartEnabled =
-        Cmd.Indexed && Pipeline.getPrimitiveRestartEnable() &&
-        topologySupportsPrimitiveRestart(Pipeline.getTopology());
-    // The primitive-restart marker is the index type's own all-1-bits value
-    // (`0xFF`/`0xFFFF`/`0xFFFFFFFF`), matching the raw index's own width.
-    uint32_t RestartValue = Draw.IndexBuffer.Type == IndexType::UInt8 ? 0xFFu
-                            : Draw.IndexBuffer.Type == IndexType::UInt16
-                                ? 0xFFFFu
-                                : 0xFFFFFFFFu;
-    std::vector<bool> IsRestart(PerInstance, false);
-
-    // --- Vertex/index fetch: assemble invocation keys. ---
-    std::vector<cpu::FemeVertexInvocation> Invocations(Total);
-    std::vector<uint32_t> VertexIndices(Total);
-    for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
-      for (uint32_t J = 0; J != PerInstance; ++J) {
-        uint32_t Flat = Inst * PerInstance + J;
-        uint32_t VertexIndex;
-        if (Cmd.Indexed) {
-          uint32_t IndexPos = Cmd.FirstIndex + J;
-          size_t ElemSize = Draw.IndexBuffer.Type == IndexType::UInt8    ? 1
-                            : Draw.IndexBuffer.Type == IndexType::UInt16 ? 2
-                                                                         : 4;
-          size_t Off = (size_t)IndexPos * ElemSize;
-          if (Off + ElemSize > Draw.IndexBuffer.Data.size())
-            return createStringError(inconvertibleErrorCode(),
-                                     "index buffer read is out of bounds");
-          uint32_t RawIndex;
-          if (ElemSize == 1) {
-            RawIndex = Draw.IndexBuffer.Data[Off];
-          } else if (ElemSize == 2) {
-            uint16_t V;
-            memcpy(&V, Draw.IndexBuffer.Data.data() + Off, 2);
-            RawIndex = V;
-          } else {
-            memcpy(&RawIndex, Draw.IndexBuffer.Data.data() + Off, 4);
-          }
-          if (RestartEnabled && RawIndex == RestartValue)
-            IsRestart[J] = true;
-          VertexIndex = static_cast<uint32_t>(static_cast<int64_t>(RawIndex) +
-                                              Cmd.VertexOffset);
-        } else {
-          VertexIndex = Cmd.FirstVertex + J;
-        }
-        VertexIndices[Flat] = VertexIndex;
-        cpu::FemeVertexInvocation &Inv = Invocations[Flat];
-        Inv.VertexID = VertexIndex;
-        Inv.InstanceID = Cmd.FirstInstance + Inst;
-        Inv.BaseVertex = Cmd.Indexed ? Cmd.VertexOffset
-                                     : static_cast<int32_t>(Cmd.FirstVertex);
-        Inv.BaseInstance = Cmd.FirstInstance;
-        Inv.DrawID = 0;
-        Inv.ViewIndex = Draw.ViewIndex;
-      }
-    }
-
-    // --- Fetch/convert vertex attributes into the vertex-input block. ---
-    Expected<StageStorage> VSInput =
-        buildStageStorage(*VSSig, SignatureDirection::Input, Total);
-    if (!VSInput)
-      return VSInput.takeError();
-    for (const SignatureElement &Elt : VSSig->Elements) {
-      if (Elt.Direction != SignatureDirection::Input ||
-          Elt.SystemValue != SignatureSystemValue::None)
-        continue;
-      if (!Elt.Location)
-        return createStringError(inconvertibleErrorCode(),
-                                 "vertex input element %u has no location "
-                                 "to bind a vertex buffer attribute",
-                                 Elt.ElementID);
-      // A matrix vertex *attribute* needs one
-      // `VkVertexInputAttributeDescription` per column, at consecutive
-      // locations (unlike a matrix varying/ `Output`, which this executor's
-      // `StageStorage`/`readRaw`/`writeRaw` now support directly via `Row`) --
-      // that per-column attribute splitting is not implemented yet, so this is
-      // still rejected explicitly rather than silently binding only row 0's
-      // data.
-      if (Elt.RowCount != 1)
-        return createStringError(
-            inconvertibleErrorCode(),
-            "vertex input element %u spans %u rows; matrix vertex "
-            "attributes are not implemented yet",
-            Elt.ElementID, Elt.RowCount);
-      const VertexBufferBinding *Binding = nullptr;
-      const VertexAttribute *Attr = nullptr;
-      for (const VertexBufferBinding &VB : Draw.VertexBuffers)
-        for (const VertexAttribute &A : VB.Attributes)
-          if (A.Location == *Elt.Location) {
-            Binding = &VB;
-            Attr = &A;
-          }
-      if (!Binding)
-        return createStringError(inconvertibleErrorCode(),
-                                 "vertex input location %u has no bound "
-                                 "vertex buffer attribute",
-                                 *Elt.Location);
-
-      for (uint32_t Flat = 0; Flat != Total; ++Flat) {
-        // A restart-marker index fetches no vertex at all (its lane never
-        // appears in an assembled primitive below), and the raw index
-        // arithmetic above is not a valid array index for it.
-        if (RestartEnabled && IsRestart[Flat % PerInstance])
-          continue;
-        // A per-instance binding advances once per instance rather than
-        // once per vertex (`VkVertexInputRate::VK_VERTEX_INPUT_RATE_
-        // INSTANCE`): it is indexed by the invocation's instance index, not
-        // its vertex index. (roadmap F6) `VK_KHR_vertex_attribute_divisor`
-        // generalizes that one-fetch-per-instance step to one fetch every
-        // `Divisor` instances (`Divisor == 1`, the default, is exactly the
-        // plain per-instance case above), and `Divisor == 0`
-        // (`vertexAttributeInstanceRateZeroDivisor`) is the one further
-        // case where every instance reads the same vertex, at
-        // `firstInstance` -- not a new fetch mechanism, just this same
-        // formula's own degenerate divide-by-zero case spelled out
-        // explicitly.
-        uint32_t FetchIndex;
-        if (!Binding->PerInstance) {
-          FetchIndex = VertexIndices[Flat];
-        } else if (Binding->Divisor == 0) {
-          FetchIndex = Invocations[Flat].BaseInstance;
-        } else {
-          uint32_t FirstInstance = Invocations[Flat].BaseInstance;
-          FetchIndex =
-              FirstInstance +
-              (Invocations[Flat].InstanceID - FirstInstance) / Binding->Divisor;
-        }
-        uint64_t SrcOff = (uint64_t)Binding->Stride * FetchIndex + Attr->Offset;
-        Expected<uint32_t> CompByteSize =
-            attributeComponentByteSize(Attr->Format);
-        if (!CompByteSize)
-          return CompByteSize.takeError();
-        // (roadmap F10) `VkPipelineRobustnessCreateInfo::vertexInputs` /
-        // `robustBufferAccess` (unconditionally on, see
-        // `PhysicalDeviceInfo.cpp`'s own comment): an out-of-bounds vertex
-        // attribute read must return zero per component -- like the
-        // descriptor-bound helper path's own "For a vector access the check
-        // is per-component" convention ("Bounds checking" in
-        // FeMeCPUDesign.md) -- rather than fail the whole draw. Only the
-        // components that actually fit within `Binding->Data` are decoded;
-        // `Bits` is already zero-initialized for the rest.
-        uint64_t AvailableBytes =
-            SrcOff < Binding->Data.size() ? Binding->Data.size() - SrcOff : 0;
-        uint32_t InBoundsComponents = static_cast<uint32_t>(std::min<uint64_t>(
-            Elt.ComponentCount, AvailableBytes / *CompByteSize));
-        std::array<uint32_t, 4> Bits{};
-        if (InBoundsComponents != 0) {
-          if (Error E =
-                  decodeAttribute(Attr->Format, Binding->Data.data() + SrcOff,
-                                  InBoundsComponents, Elt.ComponentType, Bits))
-            return E;
-        }
-        for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
-          VSInput->writeRaw(Elt.ElementID, Elt.FirstComponent + C, Flat,
-                            Bits[C]);
-      }
-    }
-
-    Expected<StageStorage> VSOutput =
-        buildStageStorage(*VSSig, SignatureDirection::Output, Total);
-    if (!VSOutput)
-      return VSOutput.takeError();
-
-    cpu::FemeStageLayout VSInLayout = VSInput->layout();
-    cpu::FemeStageLayout VSOutLayout = VSOutput->layout();
-    cpu::VertexResources VRes;
-    VRes.ResourceHeap = Draw.Resources.ResourceHeap;
-    VRes.BoundResources = Draw.Resources.BoundResources;
-    VRes.ImageHeap = Draw.Resources.ImageHeap;
-    VRes.SamplerHeap = Draw.Resources.SamplerHeap;
-    VRes.RootConstants = Draw.Resources.RootConstants;
-    VRes.InputLayout = &VSInLayout;
-    VRes.Inputs = VSInput->Data.data();
-    VRes.OutputLayout = &VSOutLayout;
-    VRes.Outputs = VSOutput->Data.data();
-    VRes.Invocations = Invocations;
-    cpu::PreparedVertexBatch PVB =
-        cpu::PreparedVertexBatch::create(VS.getResourceInfo(), VRes);
-    if (Error E = VS.invokeVertices(PVB))
-      return E;
-
-    // --- Tessellation (roadmap H4). ---
-    //
-    // Each patch of the patch-list draw is run through its own
-    // hull/patch-constant/tessellator/domain chain
-    // (`feme::graphics::runPatchPipeline`), and every patch's domain-stage
-    // output is concatenated into one flat block whose invocation indices
-    // the assembled `TessTris`/`TessLines` below already refer to
-    // absolutely -- instancing folded in, since a patch's tessellation
-    // factors are computed from its own instance's control points and so
-    // two instances of the same patch need not produce the same number of
-    // domain points at all.
-    //
-    // `RasterOut` is what everything downstream (clipping, the viewport
-    // transform, the interpolator) reads: the domain stage's own outputs
-    // when tessellating, the vertex stage's otherwise.
-    const StageStorage *RasterOut = &*VSOutput;
-    StageStorage TessOutput;
-    SmallVector<std::array<uint32_t, 3>, 8> TessTris;
-    SmallVector<std::array<uint32_t, 2>, 8> TessLines;
-    if (TessLink) {
-      const TessellationState &Tess = Pipeline.getTessellationState();
-      if (Tess.InputControlPointCount == 0 ||
-          PerInstance % Tess.InputControlPointCount != 0)
-        return createStringError(inconvertibleErrorCode(),
-                                 "a patch-list draw's vertex count (%u) must "
-                                 "be a non-zero multiple of the pipeline's "
-                                 "patch control point count (%u)",
-                                 PerInstance, Tess.InputControlPointCount);
-      PatchPipelineStages Stages{Pipeline.getHullStage(),
-                                 Pipeline.getPatchConstantStage(),
-                                 Pipeline.getDomainStage()};
-      uint32_t PatchesPerInstance = PerInstance / Tess.InputControlPointCount;
-      std::vector<PatchPipelineResult> Patches;
-      SmallVector<uint32_t, 8> PatchBases;
-      SmallVector<uint32_t, 8> ControlPointInvocations;
-      uint32_t TotalPoints = 0;
-      for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
-        for (uint32_t P = 0; P != PatchesPerInstance; ++P) {
-          ControlPointInvocations.clear();
-          for (uint32_t C = 0; C != Tess.InputControlPointCount; ++C)
-            ControlPointInvocations.push_back(
-                Inst * PerInstance + P * Tess.InputControlPointCount + C);
-          Expected<PatchPipelineResult> Patch =
-              runPatchPipeline(Stages, *TessLink, Tess, *VSOutput,
-                               ControlPointInvocations, &Draw.Resources);
-          if (!Patch)
-            return Patch.takeError();
-          PatchBases.push_back(TotalPoints);
-          TotalPoints +=
-              static_cast<uint32_t>(Patch->Tessellated.Points.size());
-          Patches.push_back(std::move(*Patch));
-        }
-      }
-
-      Expected<StageStorage> Flat = buildStageStorage(
-          TessLink->DomainSig, SignatureDirection::Output, TotalPoints);
-      if (!Flat)
-        return Flat.takeError();
-      TessOutput = std::move(*Flat);
-      for (size_t I = 0; I != Patches.size(); ++I) {
-        // A patch the tessellator culled entirely still carries a
-        // minimally-sized (one-invocation) output block rather than an
-        // empty one, so guard on its own point count rather than on that
-        // block's invocation count.
-        if (Patches[I].Tessellated.Points.empty())
-          continue;
-        appendStageInvocations(Patches[I].DomainOutputs, TessOutput,
-                               PatchBases[I]);
-        uint32_t Base = PatchBases[I];
-        ArrayRef<uint32_t> Indices = Patches[I].Tessellated.Indices;
-        if (Tess.OutputPrimitive == TessOutputPrimitive::Line) {
-          for (size_t K = 0; K + 2 <= Indices.size(); K += 2)
-            TessLines.push_back({Base + Indices[K], Base + Indices[K + 1]});
-        } else if (Tess.OutputPrimitive != TessOutputPrimitive::Point) {
-          for (size_t K = 0; K + 3 <= Indices.size(); K += 3)
-            TessTris.push_back({Base + Indices[K], Base + Indices[K + 1],
-                                Base + Indices[K + 2]});
-        }
-      }
-      RasterOut = &TessOutput;
-    }
-
-    // --- Assemble primitives, clip, viewport-transform, cull. ---
     auto vertexAt = [&](uint32_t Flat) {
       RasterVertex V;
       for (unsigned C = 0; C != 4; ++C)
@@ -1761,355 +1505,6 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       Depth =
           Viewport.MinDepth + NdcZ * (Viewport.MaxDepth - Viewport.MinDepth);
     };
-
-    // Assembles one strip segment [Start, End)'s triangles, alternating
-    // winding order starting fresh at each segment -- exactly what a
-    // restart does to an unindexed strip, and what a strip with no restart
-    // markers does over its one whole segment.
-    auto emitStripSegment = [](uint32_t Start, uint32_t End,
-                               SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
-      uint32_t Local = 0;
-      for (uint32_t T = Start; T + 3 <= End; ++T, ++Local)
-        Out.push_back(Local % 2 == 0
-                          ? std::array<uint32_t, 3>{T, T + 1, T + 2}
-                          : std::array<uint32_t, 3>{T + 1, T, T + 2});
-    };
-
-    // Assembles one fan segment [Start, End)'s triangles: `Start` (the
-    // segment's first vertex) is every triangle's shared pivot, exactly
-    // as an unindexed fan pivots on its first vertex and a restart begins
-    // a fresh fan (with a fresh pivot) at the next segment.
-    auto emitFanSegment = [](uint32_t Start, uint32_t End,
-                             SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
-      for (uint32_t T = Start + 1; T + 2 <= End; ++T)
-        Out.push_back({Start, T, T + 1});
-    };
-
-    SmallVector<std::array<uint32_t, 3>, 8> TriIndices;
-    if (Pipeline.getTopology() == PrimitiveTopology::TriangleList) {
-      for (uint32_t T = 0; T + 3 <= PerInstance; T += 3)
-        TriIndices.push_back({T, T + 1, T + 2});
-    } else if (Pipeline.getTopology() == PrimitiveTopology::TriangleFan) {
-      if (RestartEnabled) {
-        uint32_t SegStart = 0;
-        for (uint32_t J = 0; J != PerInstance; ++J) {
-          if (!IsRestart[J])
-            continue;
-          emitFanSegment(SegStart, J, TriIndices);
-          SegStart = J + 1;
-        }
-        emitFanSegment(SegStart, PerInstance, TriIndices);
-      } else {
-        emitFanSegment(0, PerInstance, TriIndices);
-      }
-    } else if (Pipeline.getTopology() == PrimitiveTopology::TriangleStrip) {
-      if (RestartEnabled) {
-        uint32_t SegStart = 0;
-        for (uint32_t J = 0; J != PerInstance; ++J) {
-          if (!IsRestart[J])
-            continue;
-          emitStripSegment(SegStart, J, TriIndices);
-          SegStart = J + 1;
-        }
-        emitStripSegment(SegStart, PerInstance, TriIndices);
-      } else {
-        emitStripSegment(0, PerInstance, TriIndices);
-      }
-    }
-
-    // Assembles a line-list/line-strip topology's line segments (as
-    // vertex-index pairs), honoring restart on a strip exactly as the
-    // triangle assembly above does.
-    SmallVector<std::array<uint32_t, 2>, 8> LineIndices;
-    if (Pipeline.getTopology() == PrimitiveTopology::LineList) {
-      for (uint32_t T = 0; T + 2 <= PerInstance; T += 2)
-        LineIndices.push_back({T, T + 1});
-    } else if (Pipeline.getTopology() == PrimitiveTopology::LineStrip) {
-      auto emitLineStripSegment =
-          [](uint32_t Start, uint32_t End,
-             SmallVectorImpl<std::array<uint32_t, 2>> &Out) {
-            for (uint32_t T = Start; T + 2 <= End; ++T)
-              Out.push_back({T, T + 1});
-          };
-      if (RestartEnabled) {
-        uint32_t SegStart = 0;
-        for (uint32_t J = 0; J != PerInstance; ++J) {
-          if (!IsRestart[J])
-            continue;
-          emitLineStripSegment(SegStart, J, LineIndices);
-          SegStart = J + 1;
-        }
-        emitLineStripSegment(SegStart, PerInstance, LineIndices);
-      } else {
-        emitLineStripSegment(0, PerInstance, LineIndices);
-      }
-    }
-
-    // (roadmap H4) The primitive index lists everything below actually
-    // rasterizes, in absolute (already instance-offset) invocation
-    // indices: the topology-assembled per-instance lists above biased by
-    // each instance's own base invocation, or the tessellator's own
-    // connectivity, which spans every instance already -- each patch
-    // produced its own point count, so a tessellated draw has no single
-    // per-instance stride to bias by.
-    SmallVector<std::array<uint32_t, 3>, 8> AbsTriIndices;
-    SmallVector<std::array<uint32_t, 2>, 8> AbsLineIndices;
-    if (TessLink) {
-      AbsTriIndices = std::move(TessTris);
-      AbsLineIndices = std::move(TessLines);
-    } else {
-      for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
-        uint32_t Base = Inst * PerInstance;
-        for (std::array<uint32_t, 3> T : TriIndices)
-          AbsTriIndices.push_back({Base + T[0], Base + T[1], Base + T[2]});
-        for (std::array<uint32_t, 2> L : LineIndices)
-          AbsLineIndices.push_back({Base + L[0], Base + L[1]});
-      }
-    }
-
-    // --- Geometry stage (roadmap H5d). ---
-    //
-    // Assembles this draw's own input primitives (adjacency vertices
-    // included, for one of the four `*WithAdjacency` topologies) out of
-    // `RasterOut`'s already-instance-biased invocation positions, runs the
-    // compiled geometry stage over the whole batch, and replays its flat
-    // emitted-vertex/strip-boundary records back into one merged stream
-    // whose own strips take over `AbsTriIndices`/`AbsLineIndices` and whose
-    // own vertex storage takes over `RasterOut` -- the same "last
-    // pre-rasterization stage" substitution `TessOutput`/`RasterOut` above
-    // already established for tessellation.
-    StageStorage GeomStreamOutput;
-    if (GSSig) {
-      const GeometryState &GState = Pipeline.getGeometryState();
-
-      // Every input primitive's vertices, as absolute (already
-      // instance-biased) invocation indices into `RasterOut`, in the
-      // primitive's own declared `gl_in[]` vertex order -- adjacency
-      // vertices interleaved back into that order, since
-      // `splitListPrimitiveAdjacency`/`splitStripPrimitiveAdjacency`
-      // instead return primitive/adjacent vertices grouped separately
-      // (see their own comments in Pipeline.h).
-      SmallVector<SmallVector<uint32_t, 6>, 8> Primitives;
-      auto reorderAdjacency = [](const SplitPrimitiveAdjacency &Split) {
-        SmallVector<uint32_t, 6> Order;
-        if (Split.Adjacent.size() == 2) { // a *lines*-with-adjacency window
-          Order = {Split.Adjacent[0], Split.Primitive[0], Split.Primitive[1],
-                   Split.Adjacent[1]};
-        } else { // a triangle-with-adjacency window
-          Order = {Split.Primitive[0], Split.Adjacent[0],  Split.Primitive[1],
-                   Split.Adjacent[1],  Split.Primitive[2], Split.Adjacent[2]};
-        }
-        return Order;
-      };
-
-      PrimitiveTopology Topology = Pipeline.getTopology();
-      if (topologyHasAdjacency(Topology)) {
-        bool IsStrip =
-            Topology == PrimitiveTopology::LineStripWithAdjacency ||
-            Topology == PrimitiveTopology::TriangleStripWithAdjacency;
-        // Restart delimits an adjacency strip's own windows exactly as it
-        // does every other strip topology above: each segment between
-        // restart markers assembles its primitives independently, never
-        // sliding an adjacency window across the boundary.
-        SmallVector<std::pair<uint32_t, uint32_t>, 4> Segments;
-        if (IsStrip && RestartEnabled) {
-          uint32_t SegStart = 0;
-          for (uint32_t J = 0; J != PerInstance; ++J) {
-            if (!IsRestart[J])
-              continue;
-            Segments.push_back({SegStart, J});
-            SegStart = J + 1;
-          }
-          Segments.push_back({SegStart, PerInstance});
-        } else {
-          Segments.push_back({0, PerInstance});
-        }
-        for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
-          uint32_t Base = Inst * PerInstance;
-          if (IsStrip) {
-            for (std::pair<uint32_t, uint32_t> Seg : Segments) {
-              SmallVector<uint32_t, 16> Window;
-              for (uint32_t J = Seg.first; J != Seg.second; ++J)
-                Window.push_back(Base + J);
-              uint32_t Count = getStripPrimitiveCount(
-                  Topology, static_cast<uint32_t>(Window.size()));
-              for (uint32_t P = 0; P != Count; ++P)
-                Primitives.push_back(reorderAdjacency(
-                    splitStripPrimitiveAdjacency(Topology, Window, P)));
-            }
-          } else {
-            uint32_t VertsPerPrim = getListPrimitiveVertexCount(Topology);
-            for (uint32_t P = 0; P + VertsPerPrim <= PerInstance;
-                 P += VertsPerPrim) {
-              SmallVector<uint32_t, 6> Window;
-              for (uint32_t K = 0; K != VertsPerPrim; ++K)
-                Window.push_back(Base + P + K);
-              Primitives.push_back(reorderAdjacency(
-                  splitListPrimitiveAdjacency(Topology, Window)));
-            }
-          }
-        }
-      } else if (GeomExpectedInput == GeometryInputPrimitive::Points) {
-        for (uint32_t J = 0; J != RasterOut->InvocationCount; ++J)
-          Primitives.push_back({J});
-      } else if (GeomExpectedInput == GeometryInputPrimitive::Lines) {
-        for (std::array<uint32_t, 2> Ln : AbsLineIndices)
-          Primitives.push_back({Ln[0], Ln[1]});
-      } else { // Triangles
-        for (std::array<uint32_t, 3> Tri : AbsTriIndices)
-          Primitives.push_back({Tri[0], Tri[1], Tri[2]});
-      }
-
-      // Every `Output`-direction element of the geometry stage's own
-      // signature, in signature order: the exact flattening order
-      // GeometryWrapper.cpp's `lowerGeometryStreamEmit` writes one emitted
-      // vertex record's scalars in, which this must mirror to read them
-      // back correctly.
-      SmallVector<const SignatureElement *, 8> GSOutputElements;
-      uint32_t OutputScalarsPerVertex = 0;
-      for (const SignatureElement &Elt : GSSig->Elements)
-        if (Elt.Direction == SignatureDirection::Output) {
-          GSOutputElements.push_back(&Elt);
-          OutputScalarsPerVertex += Elt.ComponentCount * Elt.RowCount;
-        }
-
-      uint32_t PrimitiveCount = static_cast<uint32_t>(Primitives.size());
-      // (Roadmap H5d-a) SPIR-V's `Invocations` execution mode: how many
-      // times the geometry entry point runs per assembled input primitive
-      // (`gl_InvocationID` ranges `[0, Invocations)`), defaulting to 1 the
-      // same way `GeometryState::Invocations` itself does. Every one of a
-      // primitive's `Invocations` rows below reuses that primitive's own
-      // input vertex attributes (`Inputs` repeats them), but gets its own
-      // `FemeGeometryInvocation` record so `gl_InvocationID` distinguishes
-      // it from its siblings.
-      uint32_t Invocations = std::max(GState.Invocations, 1u);
-      uint32_t RowCount = PrimitiveCount * Invocations;
-      // `Combined`'s own bound must be every row's own emitted-vertex
-      // budget summed, not one row's alone (`GState.MaxOutputVertices` is
-      // a *per-invocation* limit) -- otherwise `mergeGeometryStreamsInLaneOrder`'s
-      // checked prefix sum truncates every row after the first that
-      // reaches that single-row bound, silently dropping every later
-      // primitive's (or, since H5d-a, later invocation's) own emissions.
-      GeometryStreamBuilder Combined(/*StreamCount=*/1,
-                                     RowCount * GState.MaxOutputVertices);
-      if (RowCount != 0) {
-        Expected<StageStorage> GSInput =
-            buildStageStorage(*GSSig, SignatureDirection::Input,
-                              RowCount * GeomVerticesPerPrimitive);
-        if (!GSInput)
-          return GSInput.takeError();
-        SmallVector<uint32_t, 32> SourceInvocations;
-        SourceInvocations.reserve(RowCount * GeomVerticesPerPrimitive);
-        for (const SmallVector<uint32_t, 6> &Prim : Primitives)
-          for (uint32_t Inv = 0; Inv != Invocations; ++Inv)
-            for (uint32_t V : Prim)
-              SourceInvocations.push_back(V);
-        copyLinkedElements(*RasterOut, *GSInput, GeomInputLinks,
-                           RowCount * GeomVerticesPerPrimitive,
-                           SourceInvocations);
-
-        Expected<StageStorage> GSScratch =
-            buildStageStorage(*GSSig, SignatureDirection::Output, RowCount);
-        if (!GSScratch)
-          return GSScratch.takeError();
-
-        std::vector<uint32_t> PrimitiveIDs(RowCount);
-        std::vector<uint32_t> InvocationIDs(RowCount);
-        for (uint32_t P = 0; P != PrimitiveCount; ++P)
-          for (uint32_t Inv = 0; Inv != Invocations; ++Inv) {
-            uint32_t Row = P * Invocations + Inv;
-            PrimitiveIDs[Row] = P;
-            InvocationIDs[Row] = Inv;
-          }
-        std::vector<cpu::FemeGeometryInvocation> GeomInvocations =
-            buildGeometryInvocations(PrimitiveIDs, InvocationIDs);
-
-        std::vector<float> EmittedVertices((size_t)RowCount *
-                                               GState.MaxOutputVertices *
-                                               OutputScalarsPerVertex,
-                                           0.0f);
-        std::vector<uint32_t> EmittedVertexCounts(RowCount, 0);
-        std::vector<uint8_t> StripEndsAfter(
-            (size_t)RowCount * GState.MaxOutputVertices, 0);
-
-        cpu::FemeStageLayout GSInLayout = GSInput->layout();
-        cpu::FemeStageLayout GSOutLayout = GSScratch->layout();
-        cpu::GeometryResources GRes;
-        GRes.ResourceHeap = Draw.Resources.ResourceHeap;
-        GRes.BoundResources = Draw.Resources.BoundResources;
-        GRes.BoundImages = Draw.Resources.BoundImages;
-        GRes.BoundSamplers = Draw.Resources.BoundSamplers;
-        GRes.ImageHeap = Draw.Resources.ImageHeap;
-        GRes.SamplerHeap = Draw.Resources.SamplerHeap;
-        GRes.RootConstants = Draw.Resources.RootConstants;
-        GRes.InputLayout = &GSInLayout;
-        GRes.Inputs = GSInput->Data.data();
-        GRes.OutputLayout = &GSOutLayout;
-        GRes.Outputs = GSScratch->Data.data();
-        GRes.Invocations = GeomInvocations;
-        GRes.VerticesPerPrimitive = GeomVerticesPerPrimitive;
-        GRes.MaxVerticesPerStream = GState.MaxOutputVertices;
-        GRes.OutputScalarsPerVertex = OutputScalarsPerVertex;
-        GRes.EmittedVertices = EmittedVertices;
-        GRes.EmittedVertexCounts = EmittedVertexCounts;
-        GRes.StripEndsAfter = StripEndsAfter;
-        cpu::PreparedGeometryBatch Prepared =
-            cpu::PreparedGeometryBatch::create(
-                Pipeline.getGeometryStage().getResourceInfo(), GRes);
-        if (Error E = Pipeline.getGeometryStage().invokeGeometry(Prepared))
-          return E;
-
-        collectGeometryStreams(Prepared.args(), Combined);
-      }
-
-      // Rebuilds the merged stream's flat vertex records into a
-      // `StageStorage` shaped like `GSSig`'s own outputs, so everything
-      // downstream (clipping, the viewport transform, the interpolator)
-      // reads it exactly as it already reads `RasterOut`.
-      llvm::ArrayRef<StreamVertex> MergedVerts = Combined.getVertices(0);
-      Expected<StageStorage> Flat =
-          buildStageStorage(*GSSig, SignatureDirection::Output,
-                            static_cast<uint32_t>(MergedVerts.size()));
-      if (!Flat)
-        return Flat.takeError();
-      GeomStreamOutput = std::move(*Flat);
-      for (uint32_t Slot = 0; Slot != MergedVerts.size(); ++Slot) {
-        const StreamVertex &Vtx = MergedVerts[Slot];
-        uint32_t Cursor = 0;
-        for (const SignatureElement *Elt : GSOutputElements)
-          for (uint32_t Row = 0; Row != Elt->RowCount; ++Row)
-            for (uint32_t Comp = 0; Comp != Elt->ComponentCount; ++Comp)
-              GeomStreamOutput.writeFloat(Elt->ElementID,
-                                          Elt->FirstComponent + Comp, Slot,
-                                          Vtx[Cursor++], Row);
-      }
-
-      // Rebuilds the primitive lists rasterization consumes from the
-      // merged stream's own strips: `Points` needs none (the point
-      // rasterization loop below already just iterates `RasterOut`'s
-      // whole invocation range).
-      AbsTriIndices.clear();
-      AbsLineIndices.clear();
-      switch (GState.OutputPrimitive) {
-      case GeometryOutputPrimitive::Points:
-        break;
-      case GeometryOutputPrimitive::LineStrip:
-        for (const StreamStrip &S : Combined.getStrips(0))
-          for (uint32_t I = S.Begin; I + 2 <= S.End; ++I)
-            AbsLineIndices.push_back({I, I + 1});
-        break;
-      case GeometryOutputPrimitive::TriangleStrip:
-        for (const StreamStrip &S : Combined.getStrips(0)) {
-          uint32_t Local = 0;
-          for (uint32_t I = S.Begin; I + 3 <= S.End; ++I, ++Local)
-            AbsTriIndices.push_back(
-                Local % 2 == 0 ? std::array<uint32_t, 3>{I, I + 1, I + 2}
-                               : std::array<uint32_t, 3>{I + 1, I, I + 2});
-        }
-        break;
-      }
-      RasterOut = &GeomStreamOutput;
-    }
 
     // Screen-space triangles plus their owning varying storage, binned into
     // tiles for the deferred per-tile rasterization pass below.
@@ -2273,7 +1668,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     };
 
     if (RasterClass == RasterPrimitiveClass::Point) {
-      uint32_t PointCount = TessLink ? TessOutput.InvocationCount : Total;
+      uint32_t PointCount = RasterOutRef.InvocationCount;
       for (uint32_t J = 0; J != PointCount; ++J) {
         std::optional<PrimitiveState> Primitive = resolvePrimitiveState(J);
         if (!Primitive)
@@ -2427,7 +1822,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     int32_t MaxX = static_cast<int32_t>(ExtentWidth);
     int32_t MaxY = static_cast<int32_t>(ExtentHeight);
     if (MinX >= MaxX || MinY >= MaxY)
-      continue;
+      return Error::success();
     int32_t TilesX = (MaxX - MinX + TileSize - 1) / TileSize;
     int32_t TilesY = (MaxY - MinY + TileSize - 1) / TileSize;
     std::vector<std::vector<uint32_t>> Bins((size_t)std::max(TilesX, 0) *
@@ -2939,6 +2334,639 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         return createStringError(inconvertibleErrorCode(), "%s",
                                  ErrorMessages.front().c_str());
     }
+
+    return Error::success();
+  };
+
+  for (const DrawCommand &Cmd : Draw.Draws) {
+    if (Cmd.VertexCount == 0 || Cmd.InstanceCount == 0)
+      continue;
+
+    uint32_t PerInstance = Cmd.VertexCount;
+    uint32_t Total = PerInstance * Cmd.InstanceCount;
+
+    // Primitive restart (`primitiveRestartEnable`) only applies to an
+    // indexed strip/fan draw: a special index value ends the current
+    // strip/fan and starts a new one, exactly as an unindexed strip/fan
+    // would begin fresh. `topologySupportsPrimitiveRestart` is the single
+    // source of truth for which topologies that covers, shared with
+    // `GraphicsPipeline.cpp`'s own creation-time acceptance check.
+    bool RestartEnabled =
+        Cmd.Indexed && Pipeline.getPrimitiveRestartEnable() &&
+        topologySupportsPrimitiveRestart(Pipeline.getTopology());
+    // The primitive-restart marker is the index type's own all-1-bits value
+    // (`0xFF`/`0xFFFF`/`0xFFFFFFFF`), matching the raw index's own width.
+    uint32_t RestartValue = Draw.IndexBuffer.Type == IndexType::UInt8 ? 0xFFu
+                            : Draw.IndexBuffer.Type == IndexType::UInt16
+                                ? 0xFFFFu
+                                : 0xFFFFFFFFu;
+    std::vector<bool> IsRestart(PerInstance, false);
+
+    // --- Vertex/index fetch: assemble invocation keys. ---
+    std::vector<cpu::FemeVertexInvocation> Invocations(Total);
+    std::vector<uint32_t> VertexIndices(Total);
+    for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+      for (uint32_t J = 0; J != PerInstance; ++J) {
+        uint32_t Flat = Inst * PerInstance + J;
+        uint32_t VertexIndex;
+        if (Cmd.Indexed) {
+          uint32_t IndexPos = Cmd.FirstIndex + J;
+          size_t ElemSize = Draw.IndexBuffer.Type == IndexType::UInt8    ? 1
+                            : Draw.IndexBuffer.Type == IndexType::UInt16 ? 2
+                                                                         : 4;
+          size_t Off = (size_t)IndexPos * ElemSize;
+          if (Off + ElemSize > Draw.IndexBuffer.Data.size())
+            return createStringError(inconvertibleErrorCode(),
+                                     "index buffer read is out of bounds");
+          uint32_t RawIndex;
+          if (ElemSize == 1) {
+            RawIndex = Draw.IndexBuffer.Data[Off];
+          } else if (ElemSize == 2) {
+            uint16_t V;
+            memcpy(&V, Draw.IndexBuffer.Data.data() + Off, 2);
+            RawIndex = V;
+          } else {
+            memcpy(&RawIndex, Draw.IndexBuffer.Data.data() + Off, 4);
+          }
+          if (RestartEnabled && RawIndex == RestartValue)
+            IsRestart[J] = true;
+          VertexIndex = static_cast<uint32_t>(static_cast<int64_t>(RawIndex) +
+                                              Cmd.VertexOffset);
+        } else {
+          VertexIndex = Cmd.FirstVertex + J;
+        }
+        VertexIndices[Flat] = VertexIndex;
+        cpu::FemeVertexInvocation &Inv = Invocations[Flat];
+        Inv.VertexID = VertexIndex;
+        Inv.InstanceID = Cmd.FirstInstance + Inst;
+        Inv.BaseVertex = Cmd.Indexed ? Cmd.VertexOffset
+                                     : static_cast<int32_t>(Cmd.FirstVertex);
+        Inv.BaseInstance = Cmd.FirstInstance;
+        Inv.DrawID = 0;
+        Inv.ViewIndex = Draw.ViewIndex;
+      }
+    }
+
+    // --- Fetch/convert vertex attributes into the vertex-input block. ---
+    Expected<StageStorage> VSInput =
+        buildStageStorage(*VSSig, SignatureDirection::Input, Total);
+    if (!VSInput)
+      return VSInput.takeError();
+    for (const SignatureElement &Elt : VSSig->Elements) {
+      if (Elt.Direction != SignatureDirection::Input ||
+          Elt.SystemValue != SignatureSystemValue::None)
+        continue;
+      if (!Elt.Location)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vertex input element %u has no location "
+                                 "to bind a vertex buffer attribute",
+                                 Elt.ElementID);
+      // A matrix vertex *attribute* needs one
+      // `VkVertexInputAttributeDescription` per column, at consecutive
+      // locations (unlike a matrix varying/ `Output`, which this executor's
+      // `StageStorage`/`readRaw`/`writeRaw` now support directly via `Row`) --
+      // that per-column attribute splitting is not implemented yet, so this is
+      // still rejected explicitly rather than silently binding only row 0's
+      // data.
+      if (Elt.RowCount != 1)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "vertex input element %u spans %u rows; matrix vertex "
+            "attributes are not implemented yet",
+            Elt.ElementID, Elt.RowCount);
+      const VertexBufferBinding *Binding = nullptr;
+      const VertexAttribute *Attr = nullptr;
+      for (const VertexBufferBinding &VB : Draw.VertexBuffers)
+        for (const VertexAttribute &A : VB.Attributes)
+          if (A.Location == *Elt.Location) {
+            Binding = &VB;
+            Attr = &A;
+          }
+      if (!Binding)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vertex input location %u has no bound "
+                                 "vertex buffer attribute",
+                                 *Elt.Location);
+
+      for (uint32_t Flat = 0; Flat != Total; ++Flat) {
+        // A restart-marker index fetches no vertex at all (its lane never
+        // appears in an assembled primitive below), and the raw index
+        // arithmetic above is not a valid array index for it.
+        if (RestartEnabled && IsRestart[Flat % PerInstance])
+          continue;
+        // A per-instance binding advances once per instance rather than
+        // once per vertex (`VkVertexInputRate::VK_VERTEX_INPUT_RATE_
+        // INSTANCE`): it is indexed by the invocation's instance index, not
+        // its vertex index. (roadmap F6) `VK_KHR_vertex_attribute_divisor`
+        // generalizes that one-fetch-per-instance step to one fetch every
+        // `Divisor` instances (`Divisor == 1`, the default, is exactly the
+        // plain per-instance case above), and `Divisor == 0`
+        // (`vertexAttributeInstanceRateZeroDivisor`) is the one further
+        // case where every instance reads the same vertex, at
+        // `firstInstance` -- not a new fetch mechanism, just this same
+        // formula's own degenerate divide-by-zero case spelled out
+        // explicitly.
+        uint32_t FetchIndex;
+        if (!Binding->PerInstance) {
+          FetchIndex = VertexIndices[Flat];
+        } else if (Binding->Divisor == 0) {
+          FetchIndex = Invocations[Flat].BaseInstance;
+        } else {
+          uint32_t FirstInstance = Invocations[Flat].BaseInstance;
+          FetchIndex =
+              FirstInstance +
+              (Invocations[Flat].InstanceID - FirstInstance) / Binding->Divisor;
+        }
+        uint64_t SrcOff = (uint64_t)Binding->Stride * FetchIndex + Attr->Offset;
+        Expected<uint32_t> CompByteSize =
+            attributeComponentByteSize(Attr->Format);
+        if (!CompByteSize)
+          return CompByteSize.takeError();
+        // (roadmap F10) `VkPipelineRobustnessCreateInfo::vertexInputs` /
+        // `robustBufferAccess` (unconditionally on, see
+        // `PhysicalDeviceInfo.cpp`'s own comment): an out-of-bounds vertex
+        // attribute read must return zero per component -- like the
+        // descriptor-bound helper path's own "For a vector access the check
+        // is per-component" convention ("Bounds checking" in
+        // FeMeCPUDesign.md) -- rather than fail the whole draw. Only the
+        // components that actually fit within `Binding->Data` are decoded;
+        // `Bits` is already zero-initialized for the rest.
+        uint64_t AvailableBytes =
+            SrcOff < Binding->Data.size() ? Binding->Data.size() - SrcOff : 0;
+        uint32_t InBoundsComponents = static_cast<uint32_t>(std::min<uint64_t>(
+            Elt.ComponentCount, AvailableBytes / *CompByteSize));
+        std::array<uint32_t, 4> Bits{};
+        if (InBoundsComponents != 0) {
+          if (Error E =
+                  decodeAttribute(Attr->Format, Binding->Data.data() + SrcOff,
+                                  InBoundsComponents, Elt.ComponentType, Bits))
+            return E;
+        }
+        for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
+          VSInput->writeRaw(Elt.ElementID, Elt.FirstComponent + C, Flat,
+                            Bits[C]);
+      }
+    }
+
+    Expected<StageStorage> VSOutput =
+        buildStageStorage(*VSSig, SignatureDirection::Output, Total);
+    if (!VSOutput)
+      return VSOutput.takeError();
+
+    cpu::FemeStageLayout VSInLayout = VSInput->layout();
+    cpu::FemeStageLayout VSOutLayout = VSOutput->layout();
+    cpu::VertexResources VRes;
+    VRes.ResourceHeap = Draw.Resources.ResourceHeap;
+    VRes.BoundResources = Draw.Resources.BoundResources;
+    VRes.ImageHeap = Draw.Resources.ImageHeap;
+    VRes.SamplerHeap = Draw.Resources.SamplerHeap;
+    VRes.RootConstants = Draw.Resources.RootConstants;
+    VRes.InputLayout = &VSInLayout;
+    VRes.Inputs = VSInput->Data.data();
+    VRes.OutputLayout = &VSOutLayout;
+    VRes.Outputs = VSOutput->Data.data();
+    VRes.Invocations = Invocations;
+    cpu::PreparedVertexBatch PVB =
+        cpu::PreparedVertexBatch::create(VS.getResourceInfo(), VRes);
+    if (Error E = VS.invokeVertices(PVB))
+      return E;
+
+    // --- Tessellation (roadmap H4). ---
+    //
+    // Each patch of the patch-list draw is run through its own
+    // hull/patch-constant/tessellator/domain chain
+    // (`feme::graphics::runPatchPipeline`), and every patch's domain-stage
+    // output is concatenated into one flat block whose invocation indices
+    // the assembled `TessTris`/`TessLines` below already refer to
+    // absolutely -- instancing folded in, since a patch's tessellation
+    // factors are computed from its own instance's control points and so
+    // two instances of the same patch need not produce the same number of
+    // domain points at all.
+    //
+    // `RasterOut` is what everything downstream (clipping, the viewport
+    // transform, the interpolator) reads: the domain stage's own outputs
+    // when tessellating, the vertex stage's otherwise.
+    const StageStorage *RasterOut = &*VSOutput;
+    StageStorage TessOutput;
+    SmallVector<std::array<uint32_t, 3>, 8> TessTris;
+    SmallVector<std::array<uint32_t, 2>, 8> TessLines;
+    if (TessLink) {
+      const TessellationState &Tess = Pipeline.getTessellationState();
+      if (Tess.InputControlPointCount == 0 ||
+          PerInstance % Tess.InputControlPointCount != 0)
+        return createStringError(inconvertibleErrorCode(),
+                                 "a patch-list draw's vertex count (%u) must "
+                                 "be a non-zero multiple of the pipeline's "
+                                 "patch control point count (%u)",
+                                 PerInstance, Tess.InputControlPointCount);
+      PatchPipelineStages Stages{Pipeline.getHullStage(),
+                                 Pipeline.getPatchConstantStage(),
+                                 Pipeline.getDomainStage()};
+      uint32_t PatchesPerInstance = PerInstance / Tess.InputControlPointCount;
+      std::vector<PatchPipelineResult> Patches;
+      SmallVector<uint32_t, 8> PatchBases;
+      SmallVector<uint32_t, 8> ControlPointInvocations;
+      uint32_t TotalPoints = 0;
+      for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+        for (uint32_t P = 0; P != PatchesPerInstance; ++P) {
+          ControlPointInvocations.clear();
+          for (uint32_t C = 0; C != Tess.InputControlPointCount; ++C)
+            ControlPointInvocations.push_back(
+                Inst * PerInstance + P * Tess.InputControlPointCount + C);
+          Expected<PatchPipelineResult> Patch =
+              runPatchPipeline(Stages, *TessLink, Tess, *VSOutput,
+                               ControlPointInvocations, &Draw.Resources);
+          if (!Patch)
+            return Patch.takeError();
+          PatchBases.push_back(TotalPoints);
+          TotalPoints +=
+              static_cast<uint32_t>(Patch->Tessellated.Points.size());
+          Patches.push_back(std::move(*Patch));
+        }
+      }
+
+      Expected<StageStorage> Flat = buildStageStorage(
+          TessLink->DomainSig, SignatureDirection::Output, TotalPoints);
+      if (!Flat)
+        return Flat.takeError();
+      TessOutput = std::move(*Flat);
+      for (size_t I = 0; I != Patches.size(); ++I) {
+        // A patch the tessellator culled entirely still carries a
+        // minimally-sized (one-invocation) output block rather than an
+        // empty one, so guard on its own point count rather than on that
+        // block's invocation count.
+        if (Patches[I].Tessellated.Points.empty())
+          continue;
+        appendStageInvocations(Patches[I].DomainOutputs, TessOutput,
+                               PatchBases[I]);
+        uint32_t Base = PatchBases[I];
+        ArrayRef<uint32_t> Indices = Patches[I].Tessellated.Indices;
+        if (Tess.OutputPrimitive == TessOutputPrimitive::Line) {
+          for (size_t K = 0; K + 2 <= Indices.size(); K += 2)
+            TessLines.push_back({Base + Indices[K], Base + Indices[K + 1]});
+        } else if (Tess.OutputPrimitive != TessOutputPrimitive::Point) {
+          for (size_t K = 0; K + 3 <= Indices.size(); K += 3)
+            TessTris.push_back({Base + Indices[K], Base + Indices[K + 1],
+                                Base + Indices[K + 2]});
+        }
+      }
+      RasterOut = &TessOutput;
+    }
+
+    // --- Assemble primitives, clip, viewport-transform, cull. ---
+
+    // Assembles one strip segment [Start, End)'s triangles, alternating
+    // winding order starting fresh at each segment -- exactly what a
+    // restart does to an unindexed strip, and what a strip with no restart
+    // markers does over its one whole segment.
+    auto emitStripSegment = [](uint32_t Start, uint32_t End,
+                               SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
+      uint32_t Local = 0;
+      for (uint32_t T = Start; T + 3 <= End; ++T, ++Local)
+        Out.push_back(Local % 2 == 0
+                          ? std::array<uint32_t, 3>{T, T + 1, T + 2}
+                          : std::array<uint32_t, 3>{T + 1, T, T + 2});
+    };
+
+    // Assembles one fan segment [Start, End)'s triangles: `Start` (the
+    // segment's first vertex) is every triangle's shared pivot, exactly
+    // as an unindexed fan pivots on its first vertex and a restart begins
+    // a fresh fan (with a fresh pivot) at the next segment.
+    auto emitFanSegment = [](uint32_t Start, uint32_t End,
+                             SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
+      for (uint32_t T = Start + 1; T + 2 <= End; ++T)
+        Out.push_back({Start, T, T + 1});
+    };
+
+    SmallVector<std::array<uint32_t, 3>, 8> TriIndices;
+    if (Pipeline.getTopology() == PrimitiveTopology::TriangleList) {
+      for (uint32_t T = 0; T + 3 <= PerInstance; T += 3)
+        TriIndices.push_back({T, T + 1, T + 2});
+    } else if (Pipeline.getTopology() == PrimitiveTopology::TriangleFan) {
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitFanSegment(SegStart, J, TriIndices);
+          SegStart = J + 1;
+        }
+        emitFanSegment(SegStart, PerInstance, TriIndices);
+      } else {
+        emitFanSegment(0, PerInstance, TriIndices);
+      }
+    } else if (Pipeline.getTopology() == PrimitiveTopology::TriangleStrip) {
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitStripSegment(SegStart, J, TriIndices);
+          SegStart = J + 1;
+        }
+        emitStripSegment(SegStart, PerInstance, TriIndices);
+      } else {
+        emitStripSegment(0, PerInstance, TriIndices);
+      }
+    }
+
+    // Assembles a line-list/line-strip topology's line segments (as
+    // vertex-index pairs), honoring restart on a strip exactly as the
+    // triangle assembly above does.
+    SmallVector<std::array<uint32_t, 2>, 8> LineIndices;
+    if (Pipeline.getTopology() == PrimitiveTopology::LineList) {
+      for (uint32_t T = 0; T + 2 <= PerInstance; T += 2)
+        LineIndices.push_back({T, T + 1});
+    } else if (Pipeline.getTopology() == PrimitiveTopology::LineStrip) {
+      auto emitLineStripSegment =
+          [](uint32_t Start, uint32_t End,
+             SmallVectorImpl<std::array<uint32_t, 2>> &Out) {
+            for (uint32_t T = Start; T + 2 <= End; ++T)
+              Out.push_back({T, T + 1});
+          };
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitLineStripSegment(SegStart, J, LineIndices);
+          SegStart = J + 1;
+        }
+        emitLineStripSegment(SegStart, PerInstance, LineIndices);
+      } else {
+        emitLineStripSegment(0, PerInstance, LineIndices);
+      }
+    }
+
+    // (roadmap H4) The primitive index lists everything below actually
+    // rasterizes, in absolute (already instance-offset) invocation
+    // indices: the topology-assembled per-instance lists above biased by
+    // each instance's own base invocation, or the tessellator's own
+    // connectivity, which spans every instance already -- each patch
+    // produced its own point count, so a tessellated draw has no single
+    // per-instance stride to bias by.
+    SmallVector<std::array<uint32_t, 3>, 8> AbsTriIndices;
+    SmallVector<std::array<uint32_t, 2>, 8> AbsLineIndices;
+    if (TessLink) {
+      AbsTriIndices = std::move(TessTris);
+      AbsLineIndices = std::move(TessLines);
+    } else {
+      for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+        uint32_t Base = Inst * PerInstance;
+        for (std::array<uint32_t, 3> T : TriIndices)
+          AbsTriIndices.push_back({Base + T[0], Base + T[1], Base + T[2]});
+        for (std::array<uint32_t, 2> L : LineIndices)
+          AbsLineIndices.push_back({Base + L[0], Base + L[1]});
+      }
+    }
+
+    // --- Geometry stage (roadmap H5d). ---
+    //
+    // Assembles this draw's own input primitives (adjacency vertices
+    // included, for one of the four `*WithAdjacency` topologies) out of
+    // `RasterOut`'s already-instance-biased invocation positions, runs the
+    // compiled geometry stage over the whole batch, and replays its flat
+    // emitted-vertex/strip-boundary records back into one merged stream
+    // whose own strips take over `AbsTriIndices`/`AbsLineIndices` and whose
+    // own vertex storage takes over `RasterOut` -- the same "last
+    // pre-rasterization stage" substitution `TessOutput`/`RasterOut` above
+    // already established for tessellation.
+    StageStorage GeomStreamOutput;
+    if (GSSig) {
+      const GeometryState &GState = Pipeline.getGeometryState();
+
+      // Every input primitive's vertices, as absolute (already
+      // instance-biased) invocation indices into `RasterOut`, in the
+      // primitive's own declared `gl_in[]` vertex order -- adjacency
+      // vertices interleaved back into that order, since
+      // `splitListPrimitiveAdjacency`/`splitStripPrimitiveAdjacency`
+      // instead return primitive/adjacent vertices grouped separately
+      // (see their own comments in Pipeline.h).
+      SmallVector<SmallVector<uint32_t, 6>, 8> Primitives;
+      auto reorderAdjacency = [](const SplitPrimitiveAdjacency &Split) {
+        SmallVector<uint32_t, 6> Order;
+        if (Split.Adjacent.size() == 2) { // a *lines*-with-adjacency window
+          Order = {Split.Adjacent[0], Split.Primitive[0], Split.Primitive[1],
+                   Split.Adjacent[1]};
+        } else { // a triangle-with-adjacency window
+          Order = {Split.Primitive[0], Split.Adjacent[0],  Split.Primitive[1],
+                   Split.Adjacent[1],  Split.Primitive[2], Split.Adjacent[2]};
+        }
+        return Order;
+      };
+
+      PrimitiveTopology Topology = Pipeline.getTopology();
+      if (topologyHasAdjacency(Topology)) {
+        bool IsStrip =
+            Topology == PrimitiveTopology::LineStripWithAdjacency ||
+            Topology == PrimitiveTopology::TriangleStripWithAdjacency;
+        // Restart delimits an adjacency strip's own windows exactly as it
+        // does every other strip topology above: each segment between
+        // restart markers assembles its primitives independently, never
+        // sliding an adjacency window across the boundary.
+        SmallVector<std::pair<uint32_t, uint32_t>, 4> Segments;
+        if (IsStrip && RestartEnabled) {
+          uint32_t SegStart = 0;
+          for (uint32_t J = 0; J != PerInstance; ++J) {
+            if (!IsRestart[J])
+              continue;
+            Segments.push_back({SegStart, J});
+            SegStart = J + 1;
+          }
+          Segments.push_back({SegStart, PerInstance});
+        } else {
+          Segments.push_back({0, PerInstance});
+        }
+        for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+          uint32_t Base = Inst * PerInstance;
+          if (IsStrip) {
+            for (std::pair<uint32_t, uint32_t> Seg : Segments) {
+              SmallVector<uint32_t, 16> Window;
+              for (uint32_t J = Seg.first; J != Seg.second; ++J)
+                Window.push_back(Base + J);
+              uint32_t Count = getStripPrimitiveCount(
+                  Topology, static_cast<uint32_t>(Window.size()));
+              for (uint32_t P = 0; P != Count; ++P)
+                Primitives.push_back(reorderAdjacency(
+                    splitStripPrimitiveAdjacency(Topology, Window, P)));
+            }
+          } else {
+            uint32_t VertsPerPrim = getListPrimitiveVertexCount(Topology);
+            for (uint32_t P = 0; P + VertsPerPrim <= PerInstance;
+                 P += VertsPerPrim) {
+              SmallVector<uint32_t, 6> Window;
+              for (uint32_t K = 0; K != VertsPerPrim; ++K)
+                Window.push_back(Base + P + K);
+              Primitives.push_back(reorderAdjacency(
+                  splitListPrimitiveAdjacency(Topology, Window)));
+            }
+          }
+        }
+      } else if (GeomExpectedInput == GeometryInputPrimitive::Points) {
+        for (uint32_t J = 0; J != RasterOut->InvocationCount; ++J)
+          Primitives.push_back({J});
+      } else if (GeomExpectedInput == GeometryInputPrimitive::Lines) {
+        for (std::array<uint32_t, 2> Ln : AbsLineIndices)
+          Primitives.push_back({Ln[0], Ln[1]});
+      } else { // Triangles
+        for (std::array<uint32_t, 3> Tri : AbsTriIndices)
+          Primitives.push_back({Tri[0], Tri[1], Tri[2]});
+      }
+
+      // Every `Output`-direction element of the geometry stage's own
+      // signature, in signature order: the exact flattening order
+      // GeometryWrapper.cpp's `lowerGeometryStreamEmit` writes one emitted
+      // vertex record's scalars in, which this must mirror to read them
+      // back correctly.
+      SmallVector<const SignatureElement *, 8> GSOutputElements;
+      uint32_t OutputScalarsPerVertex = 0;
+      for (const SignatureElement &Elt : GSSig->Elements)
+        if (Elt.Direction == SignatureDirection::Output) {
+          GSOutputElements.push_back(&Elt);
+          OutputScalarsPerVertex += Elt.ComponentCount * Elt.RowCount;
+        }
+
+      uint32_t PrimitiveCount = static_cast<uint32_t>(Primitives.size());
+      // (Roadmap H5d-a) SPIR-V's `Invocations` execution mode: how many
+      // times the geometry entry point runs per assembled input primitive
+      // (`gl_InvocationID` ranges `[0, Invocations)`), defaulting to 1 the
+      // same way `GeometryState::Invocations` itself does. Every one of a
+      // primitive's `Invocations` rows below reuses that primitive's own
+      // input vertex attributes (`Inputs` repeats them), but gets its own
+      // `FemeGeometryInvocation` record so `gl_InvocationID` distinguishes
+      // it from its siblings.
+      uint32_t Invocations = std::max(GState.Invocations, 1u);
+      uint32_t RowCount = PrimitiveCount * Invocations;
+      // `Combined`'s own bound must be every row's own emitted-vertex
+      // budget summed, not one row's alone (`GState.MaxOutputVertices` is
+      // a *per-invocation* limit) -- otherwise `mergeGeometryStreamsInLaneOrder`'s
+      // checked prefix sum truncates every row after the first that
+      // reaches that single-row bound, silently dropping every later
+      // primitive's (or, since H5d-a, later invocation's) own emissions.
+      GeometryStreamBuilder Combined(/*StreamCount=*/1,
+                                     RowCount * GState.MaxOutputVertices);
+      if (RowCount != 0) {
+        Expected<StageStorage> GSInput =
+            buildStageStorage(*GSSig, SignatureDirection::Input,
+                              RowCount * GeomVerticesPerPrimitive);
+        if (!GSInput)
+          return GSInput.takeError();
+        SmallVector<uint32_t, 32> SourceInvocations;
+        SourceInvocations.reserve(RowCount * GeomVerticesPerPrimitive);
+        for (const SmallVector<uint32_t, 6> &Prim : Primitives)
+          for (uint32_t Inv = 0; Inv != Invocations; ++Inv)
+            for (uint32_t V : Prim)
+              SourceInvocations.push_back(V);
+        copyLinkedElements(*RasterOut, *GSInput, GeomInputLinks,
+                           RowCount * GeomVerticesPerPrimitive,
+                           SourceInvocations);
+
+        Expected<StageStorage> GSScratch =
+            buildStageStorage(*GSSig, SignatureDirection::Output, RowCount);
+        if (!GSScratch)
+          return GSScratch.takeError();
+
+        std::vector<uint32_t> PrimitiveIDs(RowCount);
+        std::vector<uint32_t> InvocationIDs(RowCount);
+        for (uint32_t P = 0; P != PrimitiveCount; ++P)
+          for (uint32_t Inv = 0; Inv != Invocations; ++Inv) {
+            uint32_t Row = P * Invocations + Inv;
+            PrimitiveIDs[Row] = P;
+            InvocationIDs[Row] = Inv;
+          }
+        std::vector<cpu::FemeGeometryInvocation> GeomInvocations =
+            buildGeometryInvocations(PrimitiveIDs, InvocationIDs);
+
+        std::vector<float> EmittedVertices((size_t)RowCount *
+                                               GState.MaxOutputVertices *
+                                               OutputScalarsPerVertex,
+                                           0.0f);
+        std::vector<uint32_t> EmittedVertexCounts(RowCount, 0);
+        std::vector<uint8_t> StripEndsAfter(
+            (size_t)RowCount * GState.MaxOutputVertices, 0);
+
+        cpu::FemeStageLayout GSInLayout = GSInput->layout();
+        cpu::FemeStageLayout GSOutLayout = GSScratch->layout();
+        cpu::GeometryResources GRes;
+        GRes.ResourceHeap = Draw.Resources.ResourceHeap;
+        GRes.BoundResources = Draw.Resources.BoundResources;
+        GRes.BoundImages = Draw.Resources.BoundImages;
+        GRes.BoundSamplers = Draw.Resources.BoundSamplers;
+        GRes.ImageHeap = Draw.Resources.ImageHeap;
+        GRes.SamplerHeap = Draw.Resources.SamplerHeap;
+        GRes.RootConstants = Draw.Resources.RootConstants;
+        GRes.InputLayout = &GSInLayout;
+        GRes.Inputs = GSInput->Data.data();
+        GRes.OutputLayout = &GSOutLayout;
+        GRes.Outputs = GSScratch->Data.data();
+        GRes.Invocations = GeomInvocations;
+        GRes.VerticesPerPrimitive = GeomVerticesPerPrimitive;
+        GRes.MaxVerticesPerStream = GState.MaxOutputVertices;
+        GRes.OutputScalarsPerVertex = OutputScalarsPerVertex;
+        GRes.EmittedVertices = EmittedVertices;
+        GRes.EmittedVertexCounts = EmittedVertexCounts;
+        GRes.StripEndsAfter = StripEndsAfter;
+        cpu::PreparedGeometryBatch Prepared =
+            cpu::PreparedGeometryBatch::create(
+                Pipeline.getGeometryStage().getResourceInfo(), GRes);
+        if (Error E = Pipeline.getGeometryStage().invokeGeometry(Prepared))
+          return E;
+
+        collectGeometryStreams(Prepared.args(), Combined);
+      }
+
+      // Rebuilds the merged stream's flat vertex records into a
+      // `StageStorage` shaped like `GSSig`'s own outputs, so everything
+      // downstream (clipping, the viewport transform, the interpolator)
+      // reads it exactly as it already reads `RasterOut`.
+      llvm::ArrayRef<StreamVertex> MergedVerts = Combined.getVertices(0);
+      Expected<StageStorage> Flat =
+          buildStageStorage(*GSSig, SignatureDirection::Output,
+                            static_cast<uint32_t>(MergedVerts.size()));
+      if (!Flat)
+        return Flat.takeError();
+      GeomStreamOutput = std::move(*Flat);
+      for (uint32_t Slot = 0; Slot != MergedVerts.size(); ++Slot) {
+        const StreamVertex &Vtx = MergedVerts[Slot];
+        uint32_t Cursor = 0;
+        for (const SignatureElement *Elt : GSOutputElements)
+          for (uint32_t Row = 0; Row != Elt->RowCount; ++Row)
+            for (uint32_t Comp = 0; Comp != Elt->ComponentCount; ++Comp)
+              GeomStreamOutput.writeFloat(Elt->ElementID,
+                                          Elt->FirstComponent + Comp, Slot,
+                                          Vtx[Cursor++], Row);
+      }
+
+      // Rebuilds the primitive lists rasterization consumes from the
+      // merged stream's own strips: `Points` needs none (the point
+      // rasterization loop below already just iterates `RasterOut`'s
+      // whole invocation range).
+      AbsTriIndices.clear();
+      AbsLineIndices.clear();
+      switch (GState.OutputPrimitive) {
+      case GeometryOutputPrimitive::Points:
+        break;
+      case GeometryOutputPrimitive::LineStrip:
+        for (const StreamStrip &S : Combined.getStrips(0))
+          for (uint32_t I = S.Begin; I + 2 <= S.End; ++I)
+            AbsLineIndices.push_back({I, I + 1});
+        break;
+      case GeometryOutputPrimitive::TriangleStrip:
+        for (const StreamStrip &S : Combined.getStrips(0)) {
+          uint32_t Local = 0;
+          for (uint32_t I = S.Begin; I + 3 <= S.End; ++I, ++Local)
+            AbsTriIndices.push_back(
+                Local % 2 == 0 ? std::array<uint32_t, 3>{I, I + 1, I + 2}
+                               : std::array<uint32_t, 3>{I + 1, I, I + 2});
+        }
+        break;
+      }
+      RasterOut = &GeomStreamOutput;
+    }
+
+    if (Error E = RasterizePrimitives(*RasterOut, AbsTriIndices, AbsLineIndices,
+                                      RasterClass))
+      return E;
   }
 
   // --- Multisample resolve (roadmap R33): box-filter average every
