@@ -33,9 +33,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H6e?
+Can you work on milestone H6f?
 
-> **Chain the mesh path into `Executor::executeDraws`**, feeding assembled
-> meshlets into the same clipping/rasterization path vertex/geometry primitives
-> already use (mirroring H5d's own geometry-chaining work), with a task entry
-> point's dispatch driving which mesh workgroups run when one is bound
+> **`vkCreateGraphicsPipelines` accepts a mesh pipeline** (task stage optional,
+> mesh stage required, no vertex-input/input-assembly state),
+> **`vkCmdDrawMeshTasksEXT`/`vkCmdDrawMeshTasksIndirectEXT`/`vkCmdDrawMeshTasksIndirectCountEXT`
+> route through the same prepared-draw code `vkCmdDraw*` already uses**, and
+> `PhysicalDeviceInfo.cpp` advertises `VK_EXT_mesh_shader`,
+> `taskShader`/`meshShader`, and every `VkPhysicalDeviceMeshShaderPropertiesEXT`
+> limit at this implementation's own honest, bounded ceilings (mirroring
+> H4b/H5e's own "advertise only what the implementation actually enforces"
+> discipline
