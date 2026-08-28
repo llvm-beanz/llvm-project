@@ -118,6 +118,33 @@ constexpr uint32_t MaxMeshWorkGroupTotalCount = 4194304;
 constexpr std::array<uint32_t, 3> MaxTaskWorkGroupCount = {65535, 65535, 65535};
 constexpr uint32_t MaxTaskWorkGroupTotalCount = 4194304;
 
+/// (roadmap H6f) `maxMeshWorkGroupSize`/`maxMeshWorkGroupInvocations` and
+/// their task-stage counterparts: unlike `MaxMeshWorkGroupCount` above (the
+/// dispatched *group count*, genuinely shared with compute's own dispatch
+/// machinery), a mesh or task entry point's own per-workgroup *invocation*
+/// size (its `LocalSize`/`hlsl.numthreads`) was not previously checked
+/// against anything at pipeline-creation time -- mirroring
+/// `Info.Properties.limits.maxComputeWorkGroupSize`/`Invocations` here
+/// would have been dishonest, since that pair's dimension-2 component (64)
+/// sits below `VK_EXT_mesh_shader`'s own specification-mandated floor of
+/// 128 for every dimension. Rather than advertise an inflated number nothing
+/// enforces, `compileAndValidateStages` (`GraphicsPipeline.cpp`) resolves
+/// each mesh/task entry's declared group size (`resolveComputeGroupSize`,
+/// `GroupSize.h`, extended to accept the `MeshEXT`/`TaskEXT` execution
+/// models alongside `GLCompute`) and rejects a pipeline whose entry exceeds
+/// these constants, so this ceiling is genuinely checked rather than merely
+/// claimed -- exactly the discipline `MaxMeshOutputVertices` above already
+/// follows for its own pair. The values themselves are the specification's
+/// own mandatory minimum for a conformant `VK_EXT_mesh_shader`
+/// implementation (`vktMeshShaderPropertyTestsEXT.cpp`'s
+/// `CHECK_LIMITS_MIN`), chosen because nothing in this implementation's
+/// mesh/task dispatch path (a plain nested-loop invocation walk, no
+/// fixed-size per-invocation buffer) actually breaks at that size either.
+constexpr std::array<uint32_t, 3> MaxMeshWorkGroupSize = {128, 128, 128};
+constexpr uint32_t MaxMeshWorkGroupInvocations = 128;
+constexpr std::array<uint32_t, 3> MaxTaskWorkGroupSize = {128, 128, 128};
+constexpr uint32_t MaxTaskWorkGroupInvocations = 128;
+
 /// The `VkDynamicState` subset this driver implements, as a bitmask. A
 /// pipeline naming any other dynamic state fails creation (see the file
 /// comment above), since silently treating it as static would render the

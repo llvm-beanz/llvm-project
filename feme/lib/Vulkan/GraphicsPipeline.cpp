@@ -10,6 +10,7 @@
 #include "Descriptor.h"
 #include "Diagnostics.h"
 #include "Format.h"
+#include "GroupSize.h"
 #include "Icd.h"
 #include "Objects.h"
 #include "PhysicalDeviceInfo.h"
@@ -352,6 +353,36 @@ bool isSupportedVertexAttributeFormat(feme::cpu::ResourceFormat Format) {
   default:
     return false;
   }
+}
+
+/// (roadmap H6f) Validates \p StageInfo's own declared group size (its
+/// `LocalSize`/`LocalSizeId`/`BuiltIn WorkgroupSize` execution mode) against
+/// \p MaxSize/\p MaxInvocations, mirroring `Pipeline.cpp`'s
+/// `compileComputePipeline` own check against `maxComputeWorkGroupSize`/
+/// `Invocations` -- the mesh/task counterpart `GraphicsPipeline.h`'s
+/// `MaxMeshWorkGroupSize`/`MaxTaskWorkGroupSize` comment explains was
+/// missing until now. \p StageName names the stage in the returned error
+/// ("mesh"/"task"), and \p LimitName names the offending property
+/// ("maxMeshWorkGroupSize/Invocations"/"maxTaskWorkGroupSize/Invocations").
+Error validateMeshOrTaskGroupSize(const VkPipelineShaderStageCreateInfo &StageInfo,
+                                  llvm::ArrayRef<uint32_t> MaxSize,
+                                  uint32_t MaxInvocations,
+                                  llvm::StringRef StageName,
+                                  llvm::StringRef LimitName) {
+  auto *Module = fromHandle<ShaderModule>(StageInfo.module);
+  std::string EntryPoint = StageInfo.pName ? StageInfo.pName : "main";
+  Expected<std::array<uint32_t, 3>> GroupSize =
+      resolveComputeGroupSize(Module->words(), EntryPoint, {});
+  if (!GroupSize)
+    return GroupSize.takeError();
+  uint64_t Invocations =
+      uint64_t(GroupSize->at(0)) * GroupSize->at(1) * GroupSize->at(2);
+  if ((*GroupSize)[0] > MaxSize[0] || (*GroupSize)[1] > MaxSize[1] ||
+      (*GroupSize)[2] > MaxSize[2] || Invocations > MaxInvocations)
+    return createStringError(inconvertibleErrorCode(),
+                             "the %s stage's declared group size exceeds %s",
+                             StageName.str().c_str(), LimitName.str().c_str());
+  return Error::success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1877,6 +1908,12 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
           MeshShapeState->MaxOutputPrimitives, MaxMeshOutputPrimitives);
     Mesh = *MeshShapeState;
 
+    if (Error Err = validateMeshOrTaskGroupSize(
+            *MeshInfo, feme::vulkan::MaxMeshWorkGroupSize,
+            feme::vulkan::MaxMeshWorkGroupInvocations, "mesh",
+            "maxMeshWorkGroupSize/Invocations"))
+      return std::move(Err);
+
     if (TaskInfo) {
       Expected<std::shared_ptr<feme::cpu::CompiledStage>> TaskCompiled =
           compileGraphicsStage(*Ctx, *TaskInfo,
@@ -1884,6 +1921,12 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
       if (!TaskCompiled)
         return TaskCompiled.takeError();
       TaskStageCompiled = std::move(*TaskCompiled);
+
+      if (Error Err = validateMeshOrTaskGroupSize(
+              *TaskInfo, feme::vulkan::MaxTaskWorkGroupSize,
+              feme::vulkan::MaxTaskWorkGroupInvocations, "task",
+              "maxTaskWorkGroupSize/Invocations"))
+        return std::move(Err);
     }
   }
 

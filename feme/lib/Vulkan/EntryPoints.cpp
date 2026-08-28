@@ -971,6 +971,121 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
           VK_TRUE;
       break;
     }
+    // (roadmap H6f) `VK_EXT_mesh_shader`'s own properties struct. The
+    // work-group *count* fields mirror `feme::vulkan::MaxMeshWorkGroupCount`/
+    // `MaxTaskWorkGroupCount`/`MaxMeshWorkGroupTotalCount`/
+    // `MaxTaskWorkGroupTotalCount` (`GraphicsPipeline.h`), the same
+    // constants `AmplificationDispatchLimits` enforces at draw time
+    // (`Executor.cpp`), so validation and advertisement can never
+    // disagree. The work-group *size*/*invocations* fields mirror
+    // `feme::vulkan::MaxMeshWorkGroupSize`/`MaxMeshWorkGroupInvocations`/
+    // `MaxTaskWorkGroupSize`/`MaxTaskWorkGroupInvocations`
+    // (`GraphicsPipeline.h`), which `compileAndValidateStages`
+    // (`GraphicsPipeline.cpp`) genuinely enforces against a mesh/task
+    // entry's own declared group size at pipeline-creation time
+    // (`validateMeshOrTaskGroupSize`) -- unlike an earlier revision of this
+    // code, these are *not* mirrors of `maxComputeWorkGroupSize`/
+    // `Invocations`, since that pair's dimension-2 component (64) sits
+    // below `VK_EXT_mesh_shader`'s own specification-mandated floor (128
+    // for every dimension); see `MaxMeshWorkGroupSize`'s own comment for
+    // why advertising the higher, spec-mandated floor here is honest
+    // rather than inflated. `maxTaskPayloadSize` is the specification's
+    // own floor (16384 bytes): `TaskPayloadBuilder`
+    // (`Graphics/TaskPayload.cpp`) accepts an arbitrary payload size at
+    // construction with no fixed ceiling of its own to mirror honestly,
+    // since `TaskPayloadWorkgroupEXT` storage-class lowering does not
+    // exist yet (blocked on roadmap H6h), so nothing ever writes to or
+    // checks a larger size -- the same "advertise no more than what's
+    // genuinely bounded" discipline `maxGeometryOutputVertices` above
+    // already follows. `maxMeshOutputVertices`/`Primitives` mirror
+    // `feme::vulkan::MaxMeshOutputVertices`/`MaxMeshOutputPrimitives`
+    // (`GraphicsPipeline.h`), this implementation's own enforced ceiling,
+    // matching `maxGeometryOutputVertices`'s own precedent (H5e) of no
+    // larger fixed buffer existing. `maxMeshOutputComponents`,
+    // `maxMeshOutputMemorySize`, `maxMeshPayloadAndOutputMemorySize`, and
+    // `maxMeshOutputLayers` are each set to `VK_EXT_mesh_shader`'s own
+    // specification-mandated floor (128, 32768, 48128, and 8
+    // respectively, `vktMeshShaderPropertyTestsEXT.cpp`'s
+    // `CHECK_LIMITS_MIN`) rather than a smaller, unverified guess: this
+    // implementation's actual per-vertex/per-primitive output storage
+    // (`feme::graphics::MeshOutputBuilder`, `Graphics/MeshOutput.h`) is a
+    // dynamically-sized `std::vector<float>` per row with no fixed
+    // component-count or memory-size ceiling of its own to mirror below
+    // the specification's floor, and layered framebuffer rendering is
+    // already generally supported (`maxFramebufferLayers` above, roadmap
+    // H2) even though no mesh entry can yet select a layer per primitive
+    // (blocked on H6h/H6i) -- so advertising the floor is the honest
+    // choice here, not an inflated one, matching `maxMeshOutputVertices`'s
+    // own "advertise a genuinely-unbounded quantity at the specification's
+    // floor" precedent one section up. Every invocation-indexed-output
+    // "prefers*" optimization and `maxMeshMultiviewViewCount` are not
+    // implemented, so those stay at the specification's own floor (0 or
+    // `VK_FALSE` as applicable) rather than a value this driver cannot
+    // honor.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT: {
+      auto *MeshShader =
+          reinterpret_cast<VkPhysicalDeviceMeshShaderPropertiesEXT *>(Base);
+      MeshShader->maxTaskWorkGroupTotalCount =
+          feme::vulkan::MaxTaskWorkGroupTotalCount;
+      MeshShader->maxTaskWorkGroupCount[0] =
+          feme::vulkan::MaxTaskWorkGroupCount[0];
+      MeshShader->maxTaskWorkGroupCount[1] =
+          feme::vulkan::MaxTaskWorkGroupCount[1];
+      MeshShader->maxTaskWorkGroupCount[2] =
+          feme::vulkan::MaxTaskWorkGroupCount[2];
+      MeshShader->maxTaskWorkGroupInvocations =
+          feme::vulkan::MaxTaskWorkGroupInvocations;
+      MeshShader->maxTaskWorkGroupSize[0] =
+          feme::vulkan::MaxTaskWorkGroupSize[0];
+      MeshShader->maxTaskWorkGroupSize[1] =
+          feme::vulkan::MaxTaskWorkGroupSize[1];
+      MeshShader->maxTaskWorkGroupSize[2] =
+          feme::vulkan::MaxTaskWorkGroupSize[2];
+      MeshShader->maxTaskPayloadSize = 16384;
+      MeshShader->maxTaskSharedMemorySize =
+          Info.Properties.limits.maxComputeSharedMemorySize;
+      MeshShader->maxTaskPayloadAndSharedMemorySize =
+          MeshShader->maxTaskPayloadSize + MeshShader->maxTaskSharedMemorySize;
+      MeshShader->maxMeshWorkGroupTotalCount =
+          feme::vulkan::MaxMeshWorkGroupTotalCount;
+      MeshShader->maxMeshWorkGroupCount[0] =
+          feme::vulkan::MaxMeshWorkGroupCount[0];
+      MeshShader->maxMeshWorkGroupCount[1] =
+          feme::vulkan::MaxMeshWorkGroupCount[1];
+      MeshShader->maxMeshWorkGroupCount[2] =
+          feme::vulkan::MaxMeshWorkGroupCount[2];
+      MeshShader->maxMeshWorkGroupInvocations =
+          feme::vulkan::MaxMeshWorkGroupInvocations;
+      MeshShader->maxMeshWorkGroupSize[0] =
+          feme::vulkan::MaxMeshWorkGroupSize[0];
+      MeshShader->maxMeshWorkGroupSize[1] =
+          feme::vulkan::MaxMeshWorkGroupSize[1];
+      MeshShader->maxMeshWorkGroupSize[2] =
+          feme::vulkan::MaxMeshWorkGroupSize[2];
+      MeshShader->maxMeshSharedMemorySize =
+          Info.Properties.limits.maxComputeSharedMemorySize;
+      MeshShader->maxMeshPayloadAndSharedMemorySize =
+          MeshShader->maxTaskPayloadSize + MeshShader->maxMeshSharedMemorySize;
+      MeshShader->maxMeshOutputMemorySize = 32768;
+      MeshShader->maxMeshPayloadAndOutputMemorySize = 48128;
+      MeshShader->maxMeshOutputComponents = 128;
+      MeshShader->maxMeshOutputVertices = feme::vulkan::MaxMeshOutputVertices;
+      MeshShader->maxMeshOutputPrimitives =
+          feme::vulkan::MaxMeshOutputPrimitives;
+      MeshShader->maxMeshOutputLayers = 8;
+      MeshShader->maxMeshMultiviewViewCount = 0;
+      MeshShader->meshOutputPerVertexGranularity = 1;
+      MeshShader->meshOutputPerPrimitiveGranularity = 1;
+      MeshShader->maxPreferredTaskWorkGroupInvocations =
+          MeshShader->maxTaskWorkGroupInvocations;
+      MeshShader->maxPreferredMeshWorkGroupInvocations =
+          MeshShader->maxMeshWorkGroupInvocations;
+      MeshShader->prefersLocalInvocationVertexOutput = VK_FALSE;
+      MeshShader->prefersLocalInvocationPrimitiveOutput = VK_FALSE;
+      MeshShader->prefersCompactVertexOutput = VK_FALSE;
+      MeshShader->prefersCompactPrimitiveOutput = VK_FALSE;
+      break;
+    }
     default:
       break;
     }
@@ -1710,6 +1825,30 @@ void fillFeatures2Chain(void *pNext) {
           reinterpret_cast<VkPhysicalDevice4444FormatsFeaturesEXT *>(Base);
       Features->formatA4R4G4B4 = VK_TRUE;
       Features->formatA4B4G4R4 = VK_TRUE;
+      break;
+    }
+    // (roadmap H6f) `VK_EXT_mesh_shader`'s own feature struct:
+    // `GraphicsPipeline.cpp`'s `vkCreateGraphicsPipelines` genuinely
+    // accepts and compiles both a mesh stage (required) and a task stage
+    // (optional), and `CommandBuffer.cpp`'s `vkCmdDrawMeshTasksEXT`/
+    // `vkCmdDrawMeshTasksIndirectEXT`/`vkCmdDrawMeshTasksIndirectCountEXT`
+    // dispatch them through the same prepared-draw path `vkCmdDraw*`
+    // already uses, so `taskShader`/`meshShader` are unconditionally true
+    // -- mirroring `geometryShader`/`tessellationShader`'s own "advertise
+    // the wiring, not unimplemented content" precedent (PhysicalDeviceInfo.
+    // cpp): real mesh/task shader *content* generation is still blocked on
+    // roadmap H6h/H6i, exactly as those two stages' own bodies are today.
+    // Every other bit here names a feature this implementation does not
+    // have (multiview mesh output, primitive-shading-rate-from-mesh, and
+    // the mesh/task query pool counters), so those stay `VK_FALSE`.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceMeshShaderFeaturesEXT *>(Base);
+      Features->taskShader = VK_TRUE;
+      Features->meshShader = VK_TRUE;
+      Features->multiviewMeshShader = VK_FALSE;
+      Features->primitiveFragmentShadingRateMeshShader = VK_FALSE;
+      Features->meshShaderQueries = VK_FALSE;
       break;
     }
     default:

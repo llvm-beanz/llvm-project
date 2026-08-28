@@ -34,8 +34,15 @@ enum : uint32_t {
   OpExecutionModeId = 331,
 };
 
+// (roadmap H6f) `MeshEXT`/`TaskEXT` are `VK_EXT_mesh_shader`'s own execution
+// models (SPIRVBase.td's `SPIRV_EM_TaskEXT`/`SPIRV_EM_MeshEXT`): a mesh or
+// task entry point's group size is encoded identically to a compute entry
+// point's (see this file's header comment), so accepting them here as well
+// as `GLCompute` is all `resolveComputeGroupSize` needs to serve both.
 enum : uint32_t {
   ExecutionModelGLCompute = 5,
+  ExecutionModelTaskEXT = 5364,
+  ExecutionModelMeshEXT = 5365,
 };
 
 enum : uint32_t {
@@ -138,7 +145,9 @@ Expected<std::array<uint32_t, 3>> feme::vulkan::resolveComputeGroupSize(
   for (const Instruction &Insn : Instructions) {
     if (Insn.Opcode != OpEntryPoint || Insn.Operands.size() < 3)
       continue;
-    if (Insn.Operands[0] != ExecutionModelGLCompute)
+    if (Insn.Operands[0] != ExecutionModelGLCompute &&
+        Insn.Operands[0] != ExecutionModelTaskEXT &&
+        Insn.Operands[0] != ExecutionModelMeshEXT)
       continue;
     size_t NameIndex = 2;
     std::string Name = decodeLiteralString(Insn.Operands, NameIndex);
@@ -149,9 +158,10 @@ Expected<std::array<uint32_t, 3>> feme::vulkan::resolveComputeGroupSize(
     break;
   }
   if (!FoundEntry)
-    return createStringError(inconvertibleErrorCode(),
-                             "no GLCompute OpEntryPoint named '%s'",
-                             EntryPoint.str().c_str());
+    return createStringError(
+        inconvertibleErrorCode(),
+        "no GLCompute/TaskEXT/MeshEXT OpEntryPoint named '%s'",
+        EntryPoint.str().c_str());
 
   // Pass 2: collect every constant's default value and, for
   // constant-composite ids, their constituent ids; collect SpecId and

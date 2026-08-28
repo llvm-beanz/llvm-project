@@ -60,8 +60,20 @@ struct SpecializationOverride {
 /// SPIR-V binary module (the same word array `feme::SPIRVImporter` consumes
 /// -- see its `import` implementation), applying \p Overrides to any
 /// specialization constant the resolution depends on. Returns an error if
-/// \p EntryPoint cannot be found, declares no `GLCompute` execution model,
-/// or declares none of `LocalSize`/`LocalSizeId`/`BuiltIn WorkgroupSize`.
+/// \p EntryPoint cannot be found, declares none of `GLCompute`/`MeshEXT`/
+/// `TaskEXT` execution models, or declares none of `LocalSize`/
+/// `LocalSizeId`/`BuiltIn WorkgroupSize`.
+///
+/// (roadmap H6f) The `MeshEXT`/`TaskEXT` acceptance is what lets
+/// `GraphicsPipeline.cpp`'s `compileAndValidateStages` reuse this same
+/// scanner to validate a mesh or task entry point's own declared group size
+/// against `feme::vulkan::MaxMeshWorkGroupSize`/`MaxTaskWorkGroupSize`
+/// (`GraphicsPipeline.h`) at pipeline-creation time, exactly the way
+/// `Pipeline.cpp`'s `compileComputePipeline` already validates a compute
+/// entry's group size against `maxComputeWorkGroupSize`/`Invocations` --
+/// the two stages dispatch as bounded workgroups the same way (see this
+/// file's own header comment), so their group-size *encoding* in SPIR-V is
+/// identical; only the accepted execution model differs.
 llvm::Expected<std::array<uint32_t, 3>>
 resolveComputeGroupSize(llvm::ArrayRef<uint32_t> Words,
                         llvm::StringRef EntryPoint,

@@ -805,6 +805,19 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // cases enable this extension by name regardless of the advertised
       // `apiVersion`, so it must be listed here too.
       {VK_KHR_MULTIVIEW_EXTENSION_NAME, VK_KHR_MULTIVIEW_SPEC_VERSION},
+      // (roadmap H6f) `vkCreateGraphicsPipelines` accepts a mesh pipeline
+      // (GraphicsPipeline.cpp), `vkCmdDrawMeshTasksEXT`/
+      // `vkCmdDrawMeshTasksIndirectEXT`/`vkCmdDrawMeshTasksIndirectCountEXT`
+      // (CommandBuffer.cpp) route through the same prepared-draw code
+      // `vkCmdDraw*` already uses, and this driver advertises
+      // `taskShader`/`meshShader` plus every `VkPhysicalDeviceMeshShader
+      // PropertiesEXT` limit at its own honest, bounded ceilings (see
+      // `EntryPoints.cpp`'s features2/properties2 cases below, mirroring
+      // H4b/H5e's own "advertise only what the implementation actually
+      // enforces" discipline). `dEQP-VK.mesh_shader.*` enables this
+      // extension by name regardless of the advertised `apiVersion`, so it
+      // must be listed here too.
+      {VK_EXT_MESH_SHADER_EXTENSION_NAME, VK_EXT_MESH_SHADER_SPEC_VERSION},
   };
   return Extensions;
 }
