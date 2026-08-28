@@ -59,12 +59,16 @@
 #include "feme/Graphics/Executor.h"
 
 #include "feme/Core/Signature.h"
+#include "feme/Graphics/AmplificationDispatch.h"
 #include "feme/Graphics/Geometry.h"
 #include "feme/Graphics/GeometryInputs.h"
 #include "feme/Graphics/GeometryStream.h"
 #include "feme/Graphics/GeometryStreamCollection.h"
 #include "feme/Graphics/ImageFixture.h"
 #include "feme/Graphics/LayeredRendering.h"
+#include "feme/Graphics/Mesh.h"
+#include "feme/Graphics/MeshOutput.h"
+#include "feme/Graphics/Meshlet.h"
 #include "feme/Graphics/Pipeline.h"
 #include "feme/Graphics/PreparedDraw.h"
 #include "feme/Graphics/StageLink.h"
@@ -969,42 +973,69 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                              "the draw has %zu color attachment(s)",
                              Pipeline.getColorBlends().size(),
                              Draw.Attachments.size());
-  switch (Pipeline.getTopology()) {
-  case PrimitiveTopology::PointList:
-  case PrimitiveTopology::LineList:
-  case PrimitiveTopology::LineStrip:
-  case PrimitiveTopology::TriangleList:
-  case PrimitiveTopology::TriangleStrip:
-  case PrimitiveTopology::TriangleFan:
-    if (Pipeline.hasTessellationStages())
+  // (roadmap H6e) A mesh pipeline has no vertex-input/input-assembly state
+  // at all (roadmap H6f): `Pipeline.getTopology()` is meaningless for one,
+  // and `Draw.MeshDraws`' own group-count draws below replace `Draw.Draws`
+  // entirely, so this topology/tessellation/geometry-adjacency acceptance
+  // check -- along with every other vertex-pipeline-only check up to the
+  // mesh-path branch further down -- only applies to a conventional
+  // pipeline.
+  if (!Pipeline.hasMeshStages()) {
+    switch (Pipeline.getTopology()) {
+    case PrimitiveTopology::PointList:
+    case PrimitiveTopology::LineList:
+    case PrimitiveTopology::LineStrip:
+    case PrimitiveTopology::TriangleList:
+    case PrimitiveTopology::TriangleStrip:
+    case PrimitiveTopology::TriangleFan:
+      if (Pipeline.hasTessellationStages())
+        return createStringError(inconvertibleErrorCode(),
+                                 "a pipeline with tessellation stages must "
+                                 "use the patch-list topology");
+      break;
+    case PrimitiveTopology::PatchList:
+      if (!Pipeline.hasTessellationStages())
+        return createStringError(inconvertibleErrorCode(),
+                                 "the patch-list topology requires a "
+                                 "pipeline with tessellation stages");
+      break;
+    case PrimitiveTopology::LineListWithAdjacency:
+    case PrimitiveTopology::LineStripWithAdjacency:
+    case PrimitiveTopology::TriangleListWithAdjacency:
+    case PrimitiveTopology::TriangleStripWithAdjacency:
+      // (roadmap H5d) An adjacency topology's whole purpose is handing a
+      // geometry stage its primitives' neighboring vertices; without one
+      // there is nowhere for that adjacency data to go.
+      if (!Pipeline.hasGeometryStages())
+        return createStringError(inconvertibleErrorCode(),
+                                 "an adjacency topology requires a pipeline "
+                                 "with a geometry stage");
+      break;
+    }
+    if (!Draw.MeshDraws.empty())
       return createStringError(inconvertibleErrorCode(),
-                               "a pipeline with tessellation stages must use "
-                               "the patch-list topology");
-    break;
-  case PrimitiveTopology::PatchList:
-    if (!Pipeline.hasTessellationStages())
-      return createStringError(inconvertibleErrorCode(),
-                               "the patch-list topology requires a pipeline "
-                               "with tessellation stages");
-    break;
-  case PrimitiveTopology::LineListWithAdjacency:
-  case PrimitiveTopology::LineStripWithAdjacency:
-  case PrimitiveTopology::TriangleListWithAdjacency:
-  case PrimitiveTopology::TriangleStripWithAdjacency:
-    // (roadmap H5d) An adjacency topology's whole purpose is handing a
-    // geometry stage its primitives' neighboring vertices; without one
-    // there is nowhere for that adjacency data to go.
-    if (!Pipeline.hasGeometryStages())
-      return createStringError(inconvertibleErrorCode(),
-                               "an adjacency topology requires a pipeline "
-                               "with a geometry stage");
-    break;
+                               "a non-mesh pipeline's draw cannot supply "
+                               "MeshDraws; use Draws instead");
+  } else if (!Draw.Draws.empty()) {
+    return createStringError(inconvertibleErrorCode(),
+                             "a mesh pipeline's draw cannot supply Draws; "
+                             "use MeshDraws instead");
   }
 
-  const cpu::CompiledStage &VS = Pipeline.getVertexStage();
-  Expected<EntrySignature> VSSig = getStageSignature(VS);
-  if (!VSSig)
-    return VSSig.takeError();
+  // (roadmap H6e) A mesh pipeline runs no vertex stage at all -- its
+  // compiled mesh (and, optionally, task) stage is the entire
+  // pre-rasterization chain -- so `VSSigValue` stays an unused, empty
+  // signature in that case; `RasterSig`'s own computation further down
+  // substitutes the mesh stage's signature instead in that case, never
+  // reading `PreGeometrySig`/`VSSigValue`.
+  EntrySignature VSSigValue;
+  if (!Pipeline.hasMeshStages()) {
+    Expected<EntrySignature> VSSig =
+        getStageSignature(Pipeline.getVertexStage());
+    if (!VSSig)
+      return VSSig.takeError();
+    VSSigValue = std::move(*VSSig);
+  }
   // (roadmap H2j) A depth/stencil-only pipeline may legally omit its
   // fragment stage entirely; `FSSig` is then left with no elements at all,
   // which every loop below over `FSSig.Elements` (varying linkage, color
@@ -1033,7 +1064,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     PatchPipelineStages Stages{Pipeline.getHullStage(),
                                Pipeline.getPatchConstantStage(),
                                Pipeline.getDomainStage()};
-    Expected<PatchPipelineLinkage> Link = linkPatchPipeline(*VSSig, Stages);
+    Expected<PatchPipelineLinkage> Link = linkPatchPipeline(VSSigValue, Stages);
     if (!Link)
       return Link.takeError();
     TessLink = std::move(*Link);
@@ -1043,7 +1074,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // pipeline, otherwise the vertex stage's own -- the same "last
   // pre-vertex-stage-chain output" `TessLink` above already names.
   const EntrySignature &PreGeometrySig =
-      TessLink ? TessLink->DomainSig : *VSSig;
+      TessLink ? TessLink->DomainSig : VSSigValue;
 
   // (roadmap H5d) A geometry stage, if present, becomes the new "last
   // pre-rasterization stage": every lookup below that used to read the
@@ -1124,13 +1155,27 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         "vertex/domain stage output -> geometry stage input",
         [](const SignatureElement &Elt) {
           return Elt.SystemValue != SignatureSystemValue::PrimitiveID &&
-                Elt.SystemValue != SignatureSystemValue::InvocationID;
+                 Elt.SystemValue != SignatureSystemValue::InvocationID;
         });
     if (!Links)
       return Links.takeError();
     GeomInputLinks = std::move(*Links);
   }
-  const EntrySignature &RasterSig = GSSig ? *GSSig : PreGeometrySig;
+  // (roadmap H6e) On a mesh pipeline, the mesh stage's own output
+  // signature is the "last pre-rasterization stage" (there is no
+  // vertex/tessellation/geometry chain at all to substitute), so it takes
+  // priority over `GSSig`/`PreGeometrySig`, neither of which is ever
+  // populated for a mesh pipeline (`Pipeline.hasGeometryStages()` and
+  // `Pipeline.hasTessellationStages()` are both false on one).
+  std::optional<EntrySignature> MeshSig;
+  if (Pipeline.hasMeshStages()) {
+    Expected<EntrySignature> Sig = getStageSignature(Pipeline.getMeshStage());
+    if (!Sig)
+      return Sig.takeError();
+    MeshSig = std::move(*Sig);
+  }
+  const EntrySignature &RasterSig =
+      MeshSig ? *MeshSig : (GSSig ? *GSSig : PreGeometrySig);
 
   // (roadmap H5e-b) A geometry stage that emits no vertices at all --
   // `dEQP-VK.geometry.emit.*_emit_0_end_0`'s degenerate `void main(void)
@@ -1379,6 +1424,22 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       RasterClass = RasterPrimitiveClass::Line;
       break;
     case GeometryOutputPrimitive::TriangleStrip:
+      RasterClass = RasterPrimitiveClass::Triangle;
+      break;
+    }
+  } else if (Pipeline.hasMeshStages()) {
+    // (roadmap H6e) A mesh pipeline has no topology/tessellation/geometry
+    // state at all -- its own `MeshState::OutputTopology` is the sole
+    // source of the rasterized primitive class, mirroring how `GSSig`
+    // above supersedes the topology for a geometry pipeline.
+    switch (Pipeline.getMeshState().OutputTopology) {
+    case MeshOutputTopology::Points:
+      RasterClass = RasterPrimitiveClass::Point;
+      break;
+    case MeshOutputTopology::Lines:
+      RasterClass = RasterPrimitiveClass::Line;
+      break;
+    case MeshOutputTopology::Triangles:
       RasterClass = RasterPrimitiveClass::Triangle;
       break;
     }
@@ -2338,6 +2399,240 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     return Error::success();
   };
 
+  // (roadmap H6e) The mesh path: a task entry point's own dispatch (if
+  // bound) drives which mesh workgroups actually run, mirroring this
+  // milestone's own "a task entry point's dispatch driving which mesh
+  // workgroups run when one is bound" charter; with no task stage, each
+  // `PreparedDraw::MeshDraws` entry's own group count is the mesh stage's
+  // direct dispatch instead (`vkCmdDrawMeshTasksEXT`'s own shape). Every
+  // dispatched workgroup's completed output is assembled into a
+  // `feme::Meshlet` (roadmap H6d) and every meshlet from every
+  // dispatched workgroup of one `MeshDrawCommand`, in dispatch order, is
+  // merged into one flat `StageStorage` plus absolute triangle/line index
+  // lists -- exactly the same "concatenate each sub-unit's own vertex
+  // output into one flat rasterizable block" shape tessellation's own
+  // per-patch domain output (H4) and a geometry stream's own strips (H5d)
+  // already use -- then fed through `RasterizePrimitives` above, the same
+  // clipping/rasterization path a vertex/tessellation/geometry primitive
+  // already uses.
+  if (Pipeline.hasMeshStages()) {
+    // (roadmap H6f leaves this) Nothing yet advertises `VK_EXT_mesh_
+    // shader`, so there is no real `VkPhysicalDeviceMeshShaderPropertiesEXT`
+    // to source these bounds from; a permissive placeholder is used
+    // instead, wide enough that no dispatch shape this milestone can
+    // exercise ever exceeds it.
+    AmplificationDispatchLimits MeshLimits;
+    MeshLimits.MaxGroupCount = {65535, 65535, 65535};
+    MeshLimits.MaxTotalGroupCount = 4194304;
+
+    const cpu::CompiledStage &MSStage = Pipeline.getMeshStage();
+    const MeshState &Mesh = Pipeline.getMeshState();
+    uint32_t VerticesPerPrim = getVerticesPerPrimitive(Mesh.OutputTopology);
+
+    // Runs one mesh workgroup at \p GroupID (of a dispatch whose full
+    // extent is \p DispatchGroupCount, `FemeMeshArgs::GroupCount`'s own
+    // meaning), with \p Payload bound if a task stage requested it, and
+    // returns its assembled meshlet.
+    auto runMeshWorkgroup =
+        [&](std::array<uint32_t, 3> GroupID,
+            std::array<uint32_t, 3> DispatchGroupCount,
+            llvm::ArrayRef<uint8_t> Payload) -> Expected<Meshlet> {
+      Expected<StageStorage> VertexOut = buildStageStorage(
+          *MeshSig, SignatureDirection::Output, Mesh.MaxOutputVertices);
+      if (!VertexOut)
+        return VertexOut.takeError();
+      cpu::FemeStageLayout VertexOutLayout = VertexOut->layout();
+
+      uint32_t PrimitiveIndexWidth = Mesh.MaxOutputPrimitives * VerticesPerPrim;
+      std::vector<uint32_t> PrimitiveIndices(PrimitiveIndexWidth, 0);
+      std::vector<uint8_t> GroupShared(
+          MSStage.getArtifactInfo().GroupSharedSize);
+      uint32_t ActualVertexCount = 0;
+      uint32_t ActualPrimitiveCount = 0;
+
+      cpu::MeshResources MRes;
+      MRes.ResourceHeap = Draw.Resources.ResourceHeap;
+      MRes.BoundResources = Draw.Resources.BoundResources;
+      MRes.BoundImages = Draw.Resources.BoundImages;
+      MRes.BoundSamplers = Draw.Resources.BoundSamplers;
+      MRes.ImageHeap = Draw.Resources.ImageHeap;
+      MRes.SamplerHeap = Draw.Resources.SamplerHeap;
+      MRes.RootConstants = Draw.Resources.RootConstants;
+      MRes.GroupID = GroupID;
+      MRes.GroupCount = DispatchGroupCount;
+      MRes.GroupShared = GroupShared;
+      MRes.MaxOutputVertices = Mesh.MaxOutputVertices;
+      MRes.MaxOutputPrimitives = Mesh.MaxOutputPrimitives;
+      MRes.OutputTopology = static_cast<uint32_t>(Mesh.OutputTopology);
+      MRes.VertexOutputLayout = &VertexOutLayout;
+      MRes.VertexOutputs = VertexOut->Data;
+      MRes.PrimitiveIndices = PrimitiveIndices;
+      MRes.ActualVertexCount = &ActualVertexCount;
+      MRes.ActualPrimitiveCount = &ActualPrimitiveCount;
+      MRes.Payload = Payload;
+      cpu::PreparedMeshBatch PMB =
+          cpu::PreparedMeshBatch::create(MSStage.getResourceInfo(), MRes);
+      if (Error E = MSStage.invokeMesh(PMB))
+        return std::move(E);
+
+      // Flattens/reconstructs one vertex row's scalars in `MeshSig`'s own
+      // Output-element declaration order (row-major, then component) --
+      // this milestone's own choice of `MeshOutputRow`'s "implementation-
+      // defined until a real compiled mesh entry point's own layout fixes
+      // it" flattening (`MeshOutput.h`'s own comment), consistently
+      // reversed by `unflattenMeshRow` below.
+      auto flattenMeshRow = [&](uint32_t Invocation) {
+        MeshOutputRow Row;
+        for (const SignatureElement &Elt : MeshSig->Elements) {
+          if (Elt.Direction != SignatureDirection::Output)
+            continue;
+          for (uint32_t R = 0; R != Elt.RowCount; ++R)
+            for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
+              Row.push_back(VertexOut->readFloat(
+                  Elt.ElementID, Elt.FirstComponent + C, Invocation, R));
+        }
+        return Row;
+      };
+
+      MeshOutputBuilder Builder(Mesh.OutputTopology, Mesh.MaxOutputVertices,
+                                Mesh.MaxOutputPrimitives);
+      if (Builder.setOutputCounts(ActualVertexCount, ActualPrimitiveCount)) {
+        for (uint32_t V = 0; V != ActualVertexCount; ++V)
+          Builder.setVertex(V, flattenMeshRow(V));
+        for (uint32_t P = 0; P != ActualPrimitiveCount; ++P)
+          Builder.setPrimitiveIndices(
+              P, llvm::ArrayRef(PrimitiveIndices)
+                     .slice((size_t)P * VerticesPerPrim, VerticesPerPrim));
+      }
+      // An out-of-range `setOutputCounts` (a workgroup that never called
+      // `SetMeshOutputsEXT`, or requested more than its declared maxima)
+      // leaves `Builder` with its default zero counts -- `assembleMeshlet`
+      // below then legitimately assembles an empty meshlet, mirroring how
+      // a geometry invocation that never emits produces an empty stream.
+      return assembleMeshlet(Builder);
+    };
+
+    for (const MeshDrawCommand &MDC : Draw.MeshDraws) {
+      SmallVector<Meshlet, 4> Meshlets;
+
+      if (Pipeline.hasTaskStage()) {
+        const cpu::CompiledStage &TS = Pipeline.getTaskStage();
+        for (uint32_t Z = 0; Z != MDC.GroupCount[2]; ++Z)
+          for (uint32_t Y = 0; Y != MDC.GroupCount[1]; ++Y)
+            for (uint32_t X = 0; X != MDC.GroupCount[0]; ++X) {
+              std::array<uint32_t, 3> GroupID{X, Y, Z};
+              std::vector<uint8_t> GroupShared(
+                  TS.getArtifactInfo().GroupSharedSize);
+              uint32_t RequestedMeshGroupCount[3] = {0, 0, 0};
+
+              cpu::TaskResources TRes;
+              TRes.ResourceHeap = Draw.Resources.ResourceHeap;
+              TRes.BoundResources = Draw.Resources.BoundResources;
+              TRes.BoundImages = Draw.Resources.BoundImages;
+              TRes.BoundSamplers = Draw.Resources.BoundSamplers;
+              TRes.ImageHeap = Draw.Resources.ImageHeap;
+              TRes.SamplerHeap = Draw.Resources.SamplerHeap;
+              TRes.RootConstants = Draw.Resources.RootConstants;
+              TRes.GroupID = GroupID;
+              TRes.GroupCount = MDC.GroupCount;
+              TRes.GroupShared = GroupShared;
+              // `MeshGroupCount` addresses one contiguous 3-uint32 block;
+              // `TaskResources`/`FemeTaskArgs` only need its address.
+              TRes.MeshGroupCount = RequestedMeshGroupCount;
+              cpu::PreparedTaskBatch PTB =
+                  cpu::PreparedTaskBatch::create(TS.getResourceInfo(), TRes);
+              if (Error E = TS.invokeTask(PTB))
+                return E;
+
+              std::array<uint32_t, 3> MeshGroupCount{
+                  RequestedMeshGroupCount[0], RequestedMeshGroupCount[1],
+                  RequestedMeshGroupCount[2]};
+              Expected<AmplificationDispatchQueue> Queue =
+                  AmplificationDispatchQueue::create(MeshGroupCount,
+                                                     MeshLimits);
+              if (!Queue)
+                return Queue.takeError();
+              for (uint64_t I = 0; I != Queue->size(); ++I) {
+                Expected<Meshlet> MeshletOut = runMeshWorkgroup(
+                    Queue->getGroupID(I), Queue->getGroupCount(),
+                    /*Payload=*/{});
+                if (!MeshletOut)
+                  return MeshletOut.takeError();
+                Meshlets.push_back(std::move(*MeshletOut));
+              }
+            }
+      } else {
+        Expected<AmplificationDispatchQueue> Queue =
+            AmplificationDispatchQueue::create(MDC.GroupCount, MeshLimits);
+        if (!Queue)
+          return Queue.takeError();
+        for (uint64_t I = 0; I != Queue->size(); ++I) {
+          Expected<Meshlet> MeshletOut = runMeshWorkgroup(
+              Queue->getGroupID(I), Queue->getGroupCount(), /*Payload=*/{});
+          if (!MeshletOut)
+            return MeshletOut.takeError();
+          Meshlets.push_back(std::move(*MeshletOut));
+        }
+      }
+
+      uint32_t TotalVertices = 0;
+      for (const Meshlet &M : Meshlets)
+        TotalVertices += M.getVertexCount();
+
+      Expected<StageStorage> Merged = buildStageStorage(
+          *MeshSig, SignatureDirection::Output, TotalVertices);
+      if (!Merged)
+        return Merged.takeError();
+
+      auto unflattenMeshRow = [&](llvm::ArrayRef<float> Row,
+                                  uint32_t Invocation) {
+        size_t Idx = 0;
+        for (const SignatureElement &Elt : MeshSig->Elements) {
+          if (Elt.Direction != SignatureDirection::Output)
+            continue;
+          for (uint32_t R = 0; R != Elt.RowCount; ++R)
+            for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
+              Merged->writeFloat(Elt.ElementID, Elt.FirstComponent + C,
+                                 Invocation, Row[Idx++], R);
+        }
+      };
+
+      SmallVector<std::array<uint32_t, 3>, 8> AbsTriIndices;
+      SmallVector<std::array<uint32_t, 2>, 8> AbsLineIndices;
+      uint32_t VertexBase = 0;
+      for (const Meshlet &M : Meshlets) {
+        for (uint32_t V = 0; V != M.getVertexCount(); ++V)
+          unflattenMeshRow(M.getVertices()[V], VertexBase + V);
+        for (uint32_t P = 0; P != M.getPrimitiveCount(); ++P) {
+          llvm::ArrayRef<uint32_t> Idx = M.getPrimitiveIndices(P);
+          switch (Mesh.OutputTopology) {
+          case MeshOutputTopology::Triangles:
+            AbsTriIndices.push_back({VertexBase + Idx[0], VertexBase + Idx[1],
+                                     VertexBase + Idx[2]});
+            break;
+          case MeshOutputTopology::Lines:
+            AbsLineIndices.push_back(
+                {VertexBase + Idx[0], VertexBase + Idx[1]});
+            break;
+          case MeshOutputTopology::Points:
+            // A point's own "index list" is a single, implicit
+            // self-reference -- `RasterizePrimitives` rasterizes every one
+            // of a point-class draw's own invocations directly (this
+            // meshlet's own vertices, already merged into `Merged`), so
+            // there is no separate index to record here.
+            break;
+          }
+        }
+        VertexBase += M.getVertexCount();
+      }
+
+      if (Error E = RasterizePrimitives(*Merged, AbsTriIndices, AbsLineIndices,
+                                        RasterClass))
+        return E;
+    }
+    return Error::success();
+  }
+
   for (const DrawCommand &Cmd : Draw.Draws) {
     if (Cmd.VertexCount == 0 || Cmd.InstanceCount == 0)
       continue;
@@ -2409,10 +2704,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
     // --- Fetch/convert vertex attributes into the vertex-input block. ---
     Expected<StageStorage> VSInput =
-        buildStageStorage(*VSSig, SignatureDirection::Input, Total);
+        buildStageStorage(VSSigValue, SignatureDirection::Input, Total);
     if (!VSInput)
       return VSInput.takeError();
-    for (const SignatureElement &Elt : VSSig->Elements) {
+    for (const SignatureElement &Elt : VSSigValue.Elements) {
       if (Elt.Direction != SignatureDirection::Input ||
           Elt.SystemValue != SignatureSystemValue::None)
         continue;
@@ -2509,7 +2804,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     }
 
     Expected<StageStorage> VSOutput =
-        buildStageStorage(*VSSig, SignatureDirection::Output, Total);
+        buildStageStorage(VSSigValue, SignatureDirection::Output, Total);
     if (!VSOutput)
       return VSOutput.takeError();
 
@@ -2526,16 +2821,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     VRes.OutputLayout = &VSOutLayout;
     VRes.Outputs = VSOutput->Data.data();
     VRes.Invocations = Invocations;
-    cpu::PreparedVertexBatch PVB =
-        cpu::PreparedVertexBatch::create(VS.getResourceInfo(), VRes);
-    if (Error E = VS.invokeVertices(PVB))
+    cpu::PreparedVertexBatch PVB = cpu::PreparedVertexBatch::create(
+        Pipeline.getVertexStage().getResourceInfo(), VRes);
+    if (Error E = Pipeline.getVertexStage().invokeVertices(PVB))
       return E;
 
     // --- Tessellation (roadmap H4). ---
     //
     // Each patch of the patch-list draw is run through its own
     // hull/patch-constant/tessellator/domain chain
-    // (`feme::graphics::runPatchPipeline`), and every patch's domain-stage
+    // (`feme::runPatchPipeline`), and every patch's domain-stage
     // output is concatenated into one flat block whose invocation indices
     // the assembled `TessTris`/`TessLines` below already refer to
     // absolutely -- instancing folded in, since a patch's tessellation
@@ -2839,10 +3134,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       uint32_t RowCount = PrimitiveCount * Invocations;
       // `Combined`'s own bound must be every row's own emitted-vertex
       // budget summed, not one row's alone (`GState.MaxOutputVertices` is
-      // a *per-invocation* limit) -- otherwise `mergeGeometryStreamsInLaneOrder`'s
-      // checked prefix sum truncates every row after the first that
-      // reaches that single-row bound, silently dropping every later
-      // primitive's (or, since H5d-a, later invocation's) own emissions.
+      // a *per-invocation* limit) -- otherwise
+      // `mergeGeometryStreamsInLaneOrder`'s checked prefix sum truncates every
+      // row after the first that reaches that single-row bound, silently
+      // dropping every later primitive's (or, since H5d-a, later invocation's)
+      // own emissions.
       GeometryStreamBuilder Combined(/*StreamCount=*/1,
                                      RowCount * GState.MaxOutputVertices);
       if (RowCount != 0) {
