@@ -198,6 +198,17 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
                                       Masks.SideEffect);
           Call->eraseFromParent();
           continue;
+        case feme::StageOpKind::SetMeshOutputs:
+          // (Roadmap H6c-a-a-i) Unlike `TaskPayloadStore`, both operands
+          // (`vertex_count`/`primitive_count`) are genuine per-lane values
+          // here -- the SPIR-V spec guarantees they are identical across
+          // every invocation that reaches this call, but nothing upstream
+          // of this pass has verified that, so both are still masked and
+          // widened like any other stage-op operand.
+          createMaskedSetMeshOutputs(B, Call->getArgOperand(0),
+                                     Call->getArgOperand(1), Masks.SideEffect);
+          Call->eraseFromParent();
+          continue;
         default:
           break; // Not a mask-affecting stage op; fall through below.
         }
@@ -272,7 +283,8 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
 /// Whether \p F calls any of the mask-affecting `feme.stage.*`
 /// operations `applyStageMasks` lowers (`discard`/`demote`/`is_helper`/
 /// `output.store`/roadmap R34's `stream.emit`/`stream.cut`/roadmap
-/// H6c-a-b's `task.payload.store`) -- unlike a divergent branch, these can
+/// H6c-a-b's `task.payload.store`/roadmap H6c-a-a-i's
+/// `set_mesh_outputs`) -- unlike a divergent branch, these can
 /// appear in an otherwise fully uniform,
 /// straight-line function (e.g. an unconditional `feme.stage.discard`),
 /// which still needs `DiamondFlattener` to walk it and lower them rather
@@ -288,7 +300,8 @@ bool hasStageMaskOps(Function &F) {
          Kind == feme::StageOpKind::OutputStore ||
          Kind == feme::StageOpKind::StreamEmit ||
          Kind == feme::StageOpKind::StreamCut ||
-         Kind == feme::StageOpKind::TaskPayloadStore))
+         Kind == feme::StageOpKind::TaskPayloadStore ||
+         Kind == feme::StageOpKind::SetMeshOutputs))
       return true;
   }
   return false;

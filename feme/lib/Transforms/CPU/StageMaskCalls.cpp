@@ -173,3 +173,30 @@ bool feme::cpu::isMaskedTaskPayloadStoreCall(const CallInst &CI) {
   const Function *Callee = CI.getCalledFunction();
   return Callee && Callee->getName().starts_with(MaskedTaskPayloadStorePrefix);
 }
+
+FunctionCallee feme::cpu::getOrInsertMaskedSetMeshOutputs(Module &M,
+                                                          Type *CountTy,
+                                                          Type *MaskTy) {
+  SmallString<64> Name(MaskedSetMeshOutputsPrefix);
+  Name.push_back('.');
+  appendTypeSuffix(Name, MaskTy);
+  FunctionType *FTy =
+      FunctionType::get(Type::getVoidTy(M.getContext()),
+                        {CountTy, CountTy, MaskTy}, /*isVarArg=*/false);
+  return M.getOrInsertFunction(Name, FTy);
+}
+
+CallInst *feme::cpu::createMaskedSetMeshOutputs(IRBuilderBase &B,
+                                                Value *VertexCount,
+                                                Value *PrimitiveCount,
+                                                Value *Mask) {
+  Module *M = B.GetInsertBlock()->getModule();
+  FunctionCallee Callee = getOrInsertMaskedSetMeshOutputs(
+      *M, VertexCount->getType(), Mask->getType());
+  return B.CreateCall(Callee, {VertexCount, PrimitiveCount, Mask});
+}
+
+bool feme::cpu::isMaskedSetMeshOutputsCall(const CallInst &CI) {
+  const Function *Callee = CI.getCalledFunction();
+  return Callee && Callee->getName().starts_with(MaskedSetMeshOutputsPrefix);
+}

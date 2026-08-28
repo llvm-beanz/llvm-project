@@ -65,6 +65,11 @@ bool isStageOpLegalForStage(StageOpKind Kind, ShaderStage Stage) {
     // `StreamEmit`/`StreamCut` above were unreachable until the geometry
     // stage was validated.
     return Stage == ShaderStage::Amplification;
+  case StageOpKind::SetMeshOutputs:
+    // (Roadmap H6c-a-a-i) Likewise not yet reachable: `ValidateStagePass`
+    // does not validate the mesh stage yet, mirroring `TaskPayloadStore`
+    // above.
+    return Stage == ShaderStage::Mesh;
   case StageOpKind::NumStageOpKinds:
     break;
   }
@@ -227,9 +232,12 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
   case StageOpKind::StreamCut:
   case StageOpKind::SubpassLoad:
   case StageOpKind::TaskPayloadStore:
+  case StageOpKind::SetMeshOutputs:
     // No element/row/component operands to validate: a task payload
     // write (roadmap H6i) addresses raw memory by byte offset, not a
-    // `SignatureElement`, so it has nothing to look up here either.
+    // `SignatureElement`, so it has nothing to look up here either; a
+    // mesh entry's `SetMeshOutputsEXT` (roadmap H6c-a-a-i) is likewise a
+    // workgroup-uniform count pair, not a signature element access.
     break;
   case StageOpKind::NumStageOpKinds:
     llvm_unreachable("not a real StageOpKind");
