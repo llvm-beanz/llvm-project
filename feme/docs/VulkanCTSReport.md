@@ -11634,3 +11634,178 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
     --deqp-log-filename=draw_h6g_b_a_i_a_i_a.qpa
 python3 resume_run_h6g_b_a_i_a_i_a.py  # full dEQP-VK.mesh_shader.* group
 ```
+
+## Roadmap H6g-b-a-i-a-i-b: measured impact (`fcmp`/`icmp`, `llvm.vector.reduce.*`, and vectorizable-intrinsic producer/consumer gaps in `SIMDize.cpp`)
+
+**Starting point.** H6g-b-a-i-a-i-a's own real-ICD re-run of the exact
+218-case `vkRefUtil.cpp:37` bucket found 80 cases hitting
+`feme-cpu-simdize`'s "used outside a supported ... pattern" rejection
+as the new dominant cause, once that row's masked-store fix let those
+shaders progress further. This row's own ask, per its roadmap text, was
+to reduce a real failing shader (named as
+`dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only`)
+down to the exact IR shape and decide whether the fix was a narrow
+`fcmp`/`icmp` consumer-and-producer addition or the broader per-lane
+`<N x i1>` `select`-condition decomposition the design doc's own
+existing deviation note anticipated.
+
+**Fix 1 (`fcmp`/`icmp` + `select`-condition, `dc7fe7b15f2f`).** Reducing
+the named case down to its IR confirmed the row's own cited shape
+exactly: `%8 = insertelement <4 x float> %6, float %7, i64 3` used by
+`%16 = fcmp ole <4 x float> %8, %15`. Added `fcmp`/`icmp` (`CmpInst`) as
+a supported vector producer (its `<N x i1>` result decomposes into `N`
+per-component `<W x i1>` comparisons like ordinary elementwise
+arithmetic) and consumer, and generalized `select`'s condition to accept
+either a shared scalar `i1` or a per-lane `<N x i1>` vector (decomposed
+into `N` widened components in `widenVectorSelect`, one used per
+per-component `select`) -- closing the design doc's own "a `select`
+with a per-lane `<N x i1>` condition remains diagnosed" deviation note
+in the same commit. New lit test `simdize-vector-fcmp-select.ll`,
+updated `simdize-vector-select.ll`/`simdize-vector-unsupported.ll`, unit
+test `SIMDizeTest.DecomposesVectorComparisonIntoPerLaneSelectCondition`
+(`bf6a561b0531`).
+
+**This fix alone was necessary but not sufficient.** Re-running the
+same real named case against the real `deqp-vk`/`feme` Vulkan ICD
+(`FEME_VULKAN_LOG_CREATION_ERRORS=1`) still failed with the same class
+of `feme-cpu-simdize` diagnostic. Temporarily instrumenting
+`checkVectorDecompositionSupported`'s own rejection points with a
+one-off diagnostic dump (the same technique H6g-b-a-i-a-i-a used) found
+the *real* rejected shape was not a `select` at all:
+
+```
+%16 = fcmp ole <4 x float> %8, %15
+%17 = call i1 @llvm.vector.reduce.and.v4i1(<4 x i1> %16)
+```
+
+-- glslang's own lowering of GLSL's `all(lessThanEqual(a, b))` builtin,
+an `llvm.vector.reduce.*` intrinsic call folding a divergent vector's
+components together, a shape `checkVectorDecompositionSupported` did
+not accept as a consumer at all.
+
+**Fix 2 (`llvm.vector.reduce.*` consumer, `eaf8216ce1f4`).** Added
+`isSupportedVectorReduceIntrinsic` (accepting the integer/comparison
+reduces `and`/`or`/`xor`/`add`/`mul`/`smax`/`smin`/`umax`/`umin`; the
+floating-point reduces `fadd`/`fmul`/`fmax`/`fmin` are excluded as out
+of scope/unneeded -- none of this row's real cases exercise them, and
+`fadd`/`fmul`'s extra scalar `start` operand would complicate the fold)
+and `widenVectorReduce`, which folds a (possibly divergent,
+possibly-decomposed) vector operand's `N` components together two at a
+time with the matching op, landing the result -- itself not
+vector-typed, since a reduce always returns its operand's scalar
+element type -- in the ordinary `Widened` map rather than
+`WidenedVectorComponents`. New lit test `simdize-vector-reduce.ll`, unit
+test `SIMDizeTest.DecomposesVectorComparisonIntoReduceAnd`.
+
+**Still not sufficient.** Re-running the same real named case again
+still failed, with a *third* new blocker found via the same
+diagnostic-dump technique:
+
+```
+%31 = call <4 x float> @feme.cpu.resource.load.raw.v4f32(...)
+%33 = call <4 x float> @llvm.minnum.v4f32(<4 x float> %31, <4 x float> %32)
+```
+
+-- a GLSL `min()`/`max()`/`clamp()` builtin lowering to
+`llvm.minnum`/`llvm.maxnum`/`llvm.smin`/`llvm.smax` intrinsic calls over
+an already-decomposed divergent vector operand: `widenVectorElementwise`
+only special-cased `BinaryOperator`/`UnaryOperator`/`CastInst`/`CmpInst`
+producers, not an arbitrary elementwise-vectorizable `CallInst`.
+
+**Fix 3 (homogeneous vectorizable-intrinsic producer/consumer,
+`eaf8216ce1f4`).** Generalized `checkVectorDecompositionSupported`,
+`widenVectorElementwise` (now also dispatching on `CallInst`, using
+`I.args()` in place of `I.operands()` since a call's own operand list
+also includes its callee), and `widenInstruction`'s dispatch to accept
+any vector-typed, homogeneous "trivially vectorizable" intrinsic call
+(`isElementwiseVectorizableIntrinsic`, already used elsewhere for the
+uniform-broadcast case) as both a producer and a consumer over a
+decomposed operand, decomposing it exactly like ordinary elementwise
+arithmetic: one scalar-element intrinsic call per component, each
+keeping the widened `<W x elemT>` overload. New lit test
+`simdize-vector-intrinsic.ll`, unit test
+`SIMDizeTest.DecomposesHomogeneousVectorizableIntrinsicCall`
+(`08c1e2b9d4e5`/`3cb7e072fda2`).
+
+**Tests.**
+
+```
+ninja check-feme (assertions-enabled, ccache build):
+Total Discovered Tests: 2020
+  Unsupported:   59 (2.92%)
+  Passed     : 1961 (97.08%)
+```
+
+The discovered-test total rises from H6g-b-a-i-a-i-a's 2014 to 2020 by
+exactly the 6 new tests these three fixes add across all of them (3 lit
++ 3 unit); 0 regressions.
+
+**A real ICD re-run confirms this row's own SIMDize-level fix is
+complete.** With all three fixes landed, re-running the same single
+named case (`dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only`)
+against the real `deqp-vk`/`feme` Vulkan ICD now gets past
+`feme-cpu-simdize` entirely -- it fails only at
+`vkCreateGraphicsPipelines` time on an unrelated JIT-link error:
+
+```
+JIT session error: Symbols not found: [ feme.cpu.resource.load.raw.v2f32, feme.cpu.resource.load.raw.v3i32, feme.cpu.resource.load.raw.v3f32 ]
+vkCreateGraphicsPipelines: Failed to materialize symbols: { (main, { feme.cpu.resource.load.raw.i32, feme_cpu_entry_main, feme.cpu.resource.load.raw.v4f32, feme.cpu.resource.load.raw.f32 }) }
+```
+
+Given the group's size, this row's real-CTS validation used the
+tractable `dEQP-VK.mesh_shader.ext.in_out.*` subgroup (560 cases, the
+row's own cited 80/218-case bucket, extracted from `dEQP-VK-cases.txt`
+via `--deqp-caselist-file`) rather than a full 218-case
+`vkRefUtil.cpp:37`-bucket or full `dEQP-VK.mesh_shader.*` (28044-case)
+re-run:
+
+```
+Passed:        0/560 (0.0%)
+Failed:        80/560 (14.3%)
+Not supported: 480/560 (85.7%)
+```
+
+Unchanged from H6g-b-a-i-a-i-a's own 80-case count -- but spot-checking
+several distinct failing cases across the bucket (not just the one
+named case) confirms every one now hits the same new
+`feme.cpu.resource.load.raw.v2f32`/`v3f32`/`v2i32`/`v3i32`
+missing-JIT-symbol error instead of `feme-cpu-simdize`'s diagnostic,
+confirming the bucket's dominant blocker has moved entirely, not just
+for the one reduced case. Root-causing that new blocker
+(`feme/runtime/CPU/FeMeRuntimeCPU.c` only defines the scalar and
+full-`<4 x T>`-width `feme.cpu.resource.load.raw.*` overloads, not the
+2-/3-component ones a `vec2`/`vec3`/`ivec2`/`ivec3` mesh-shader
+input/output needs) is a different subsystem entirely (JIT runtime
+symbol registration, not `SIMDizePass` decomposition) and is out of
+scope for this row -- tracked as new roadmap row H6g-b-a-i-a-i-c.
+
+`FeMeCPUDesign.md` updated (`13051214ea77`): Phase 4's decomposition
+deviation bullet now documents all nine producer shapes (was six before
+this row) and the reduce/vectorizable-intrinsic consumer shapes, and
+retires the now-resolved "a `select` with a per-lane `<N x i1>`
+condition remains diagnosed" deviation note this row's own Fix 1 closed.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a `SIMDizePass`-completeness fix within its existing
+"vectors become components" decomposition scope, not a new feature or
+extension surface.
+
+**Milestone H6 does not close.** This row's own three fixes land and
+are confirmed complete at the `SIMDizePass` level, but the same
+real-ICD re-run surfaces H6g-b-a-i-a-i-c as the bucket's new dominant
+blocker, alongside the already-tracked H6g-b-c.
+
+**Reproducing this row.** Same ICD build as every prior mesh-shading
+row:
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  ./deqp-vk --deqp-case=dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only \
+    --deqp-log-filename=single_h6g_b_a_i_a_i_b.qpa
+grep "^TEST: dEQP-VK.mesh_shader.ext.in_out\." dEQP-VK-cases.txt | sed 's/^TEST: //' > cases_h6g_b_a_i_a_i_b.txt
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=cases_h6g_b_a_i_a_i_b.txt \
+    --deqp-log-filename=in_out_h6g_b_a_i_a_i_b.qpa \
+    --deqp-log-images=disable --deqp-log-shader-sources=disable
+```
