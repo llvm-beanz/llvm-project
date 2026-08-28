@@ -40093,3 +40093,167 @@ Did not force speculative code. Instead:
 This session lands two commits: (1) the `Roadmap.md`/`VulkanCTSReport.md`
 documentation updates above, and (2) this `agent_thoughts.md` entry, per
 the standing instruction to commit it separately as the final commit.
+
+# H6d: checked amplification dispatch queues and meshlet assembly
+
+## Scope check before writing code
+
+Read the roadmap row, its dependency (H6c, done) and the rows that
+depend on it (H6c-a-a, H6c-a-b, H6e) before touching anything, since
+several recent H6 rows (H6c-a, H6c-a's investigation) turned out to have
+less content than their own text suggested. H6d's own text asks for two
+independent things, and its listed file scope is `feme/lib/Graphics`
+only (no `Target/CPU`, no `Transforms`):
+
+1. A task entry's `EmitMeshTasksEXT` becoming "a bounded, validated
+   dispatch of mesh workgroups (mirroring the compute dispatch queue's
+   own bounds checks)".
+2. A mesh workgroup's emitted per-vertex/per-primitive outputs becoming
+   "one meshlet the executor can consume, with topology validation".
+
+Confirmed both are genuinely buildable today, independent of any of
+H6c-a-a/H6c-a-b/H6h/H6i landing, because H6c already built the two
+objects each piece needs: `MeshOutputBuilder` (for meshlet assembly) and
+`FemeTaskArgs::MeshGroupCount`/`FemeMeshArgs`'s shape (for context on
+what a real dispatch will eventually look like, though this row does
+not consume those ABI structs directly -- see below). H6d's own
+dependents (H6c-a-a, H6c-a-b) explicitly describe it as producing
+"somewhere real to write into" for a *future* wiring row, not as itself
+wiring anything into compiled IR or the CPU-target ABI -- so, deliberately,
+neither new class in this row touches `FemeMeshArgs`/`FemeTaskArgs`,
+`CanonicalizeStage.cpp`, or any SPIR-V import path. That wiring is
+H6c-a-a/H6c-a-b's own job, gated on H6i (and, for task payload, H6h)
+separately.
+
+## What "mirroring the compute dispatch queue's own bounds checks" means here
+
+Found the actual precedent: `feme/lib/Vulkan/CommandBuffer.cpp`'s
+file-local `validateGroupCount` (called from `vkCmdDispatch`), which
+checks `vkCmdDispatch`'s requested group count against
+`VkPhysicalDeviceLimits::maxComputeWorkGroupCount`, per-dimension, and
+returns an `llvm::Error` rather than silently clamping. That function
+lives in the Vulkan layer (it reads a live `PhysicalDeviceInfo`), so it
+is not itself something this row's `feme/lib/Graphics`-only scope can
+reuse directly -- but it *is* the shape to mirror: validate a requested
+count against a bound, returning a diagnosable `Error`, before any
+dispatch happens.
+
+New `feme::graphics::AmplificationDispatchQueue` (`AmplificationDispatch.h`/
+`.cpp`) does exactly that for a task entry's `EmitMeshTasksEXT(x, y, z)`
+request, but at the Vulkan-independent `feme::graphics` layer (mirroring
+how `MeshOutputBuilder`/`TaskPayloadBuilder` are themselves Vulkan-
+independent, constructed from caller-supplied bounds rather than reading
+a live `PhysicalDeviceInfo`):
+
+- `AmplificationDispatchLimits` bundles the two bounds `VK_EXT_mesh_
+  shader`'s spec actually gives this call: a per-dimension bound
+  (`MaxGroupCount`, mirroring `maxComputeWorkGroupCount`'s own per-
+  dimension check) and a total-product bound (`MaxTotalGroupCount`,
+  `maxMeshWorkGroupTotalCount` -- compute's own dispatch has no
+  equivalent of this one, since `EmitMeshTasksEXT`'s total workgroup
+  count is bounded directly rather than only per-dimension).
+- `AmplificationDispatchQueue::create` validates both, computing the
+  three-dimension product in 64 bits explicitly (a dedicated unit test,
+  `ComputesTheProductWithoutA32BitOverflow`, exercises a per-dimension
+  request that individually satisfies a permissive per-dimension limit
+  but whose product overflows 32 bits, confirming a truncated-to-32-bit
+  product could not have wrongly wrapped back under the total limit).
+- A validated queue enumerates each dispatched mesh workgroup's group ID
+  (`getGroupID`, X-fastest/Z-slowest) rather than eagerly invoking
+  anything -- mirroring `PreparedDispatch`'s own "validate/prepare once,
+  then let the caller drive invocation" split, since `Executor::
+  executeDraws` (H6e) will need to interleave this enumeration with
+  mesh-specific per-workgroup state (its own `MeshOutputBuilder`
+  instance, and later a task's payload) rather than a bare callback the
+  way `feme::cpu::runDispatch`'s own triple loop directly invokes an
+  entry function.
+
+## What "topology validation ... diagnosed, not read out of bounds" means here
+
+`MeshOutputBuilder::setPrimitiveIndices` (H6c) already rejects an
+out-of-range vertex index *at write time*. Investigated whether that
+alone already satisfies H6d's own "topology validation" ask, or whether
+something more is needed -- concluded it does not, for a concrete
+reason: once a real compiled mesh workgroup's output is wired directly
+into a `MeshOutputBuilder`'s underlying storage (roadmap H6c-a-a, still
+pending, blocked on H6i), that wiring will not necessarily route through
+`setPrimitiveIndices`'s own checked setter at all -- a compiled store
+into raw ABI-shaped memory has no reason to call back into this object's
+API. So a *second*, assembly-time validation gate is exactly what
+"diagnosed, not read out of bounds" is asking for: a boundary check that
+does not trust how the data it is reading arrived, mirroring why
+`assembleMeshlet` (not `MeshOutputBuilder` itself) is the right place
+for it.
+
+New `feme::graphics::Meshlet`/`assembleMeshlet` (`Meshlet.h`/`.cpp`):
+`assembleMeshlet(const MeshOutputBuilder &)` trims a workgroup's
+completed builder down to its actual (`SetMeshOutputsEXT`-declared)
+vertex/primitive counts -- not the entry point's declared maxima the
+builder itself is sized to -- and re-walks every primitive's vertex
+index list, checking each entry against the *actual* vertex count.
+`MeshletTest.cpp`'s `DiagnosesAnOutOfRangeVertexIndexRatherThanReadingOOB`
+case forges exactly the scenario this guards against: write a primitive
+index list while the declared vertex count is still large enough for it
+to pass `setPrimitiveIndices`'s own check, then shrink the declared
+vertex count via a second `setOutputCounts` call (which does not touch
+already-written storage), leaving a builder whose stored data is valid
+by H6c's own historical check but invalid now -- `assembleMeshlet`
+catches this and returns an `llvm::Error` naming the offending primitive
+and index, rather than the executor later reading past the meshlet's
+own trimmed vertex array.
+
+## Files and tests
+
+New: `feme/include/feme/Graphics/AmplificationDispatch.h`,
+`feme/lib/Graphics/AmplificationDispatch.cpp`,
+`feme/unittests/Graphics/AmplificationDispatchTest.cpp` (6 cases);
+`feme/include/feme/Graphics/Meshlet.h`, `feme/lib/Graphics/Meshlet.cpp`,
+`feme/unittests/Graphics/MeshletTest.cpp` (3 cases). Both new `.cpp`
+files added to `feme/lib/Graphics/CMakeLists.txt`; both new test files
+added to `feme/unittests/Graphics/CMakeLists.txt`.
+
+## Validation
+
+- `ninja FeMeGraphicsTests` (ccache-launched, assertions-enabled build)
+  builds clean; the 9 new tests all pass in isolation
+  (`--gtest_filter="*Meshlet*:*AmplificationDispatch*"`). One early
+  mistake caught by this run: an early draft of
+  `ComputesTheProductWithoutA32BitOverflow` checked the returned
+  `Expected<AmplificationDispatchQueue>`'s boolean falsiness via
+  `ASSERT_FALSE((bool)Queue)` but never called `takeError()`/
+  `consumeError()` on it, which aborts at destruction time
+  (`llvm::Expected` requires its held `Error` to be explicitly consumed
+  even after being checked falsy) -- fixed by adding `llvm::
+  consumeError(Queue.takeError())`.
+- `ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, re-enabled
+  `CMAKE_C_COMPILER_LAUNCHER`/`CMAKE_CXX_COMPILER_LAUNCHER=ccache` on the
+  existing build directory first, since it had been configured with a
+  bare `/usr/bin/clang++` path rather than a ccache launcher) passes in
+  full: **1906/1965** (59 pre-existing, unrelated `Unsupported`, 0
+  `Failed`), up from H6c's own **1897/1956** baseline by exactly this
+  row's 9 new tests.
+- Ran the Vulkan CTS as instructed: `dEQP-VK.mesh_shader.*` (28044
+  cases) stays **0/0/28044**, correctly so -- this row adds no SPIR-V
+  import, canonicalization, or Vulkan-facing change at all. The
+  `dEQP-VK.draw.*` 1957-case `draw_sample.txt` regression sample stays
+  byte-identical to H6c's own recorded totals (14/153/1790): 0
+  regressions. Full writeup in `VulkanCTSReport.md`'s new "Roadmap H6d:
+  measured impact" section.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+  needed. `VK_EXT_mesh_shader` stays unadvertised, and
+  `AmplificationDispatchLimits`'s bounds are plain constructor
+  parameters today, not read from any advertised
+  `VkPhysicalDeviceMeshShaderPropertiesEXT` limit -- that wiring belongs
+  to H6f, once a real Vulkan mesh pipeline exists to advertise limits
+  for.
+- Updated `Roadmap.md`: struck through H6d with a summary of what
+  landed (mirroring every prior struck-through row's own format).
+
+## Commits
+
+This session lands four commits, each independently buildable/testable:
+(1) `AmplificationDispatchQueue` plus its unit tests, (2) `Meshlet`/
+`assembleMeshlet` plus its unit tests, (3) the `Roadmap.md`/
+`VulkanCTSReport.md` documentation updates, and (4) this
+`agent_thoughts.md` entry, per the standing instruction to commit it
+separately as the final commit.
