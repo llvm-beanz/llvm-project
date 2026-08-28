@@ -49,6 +49,18 @@ void GraphicsPipeline::setGeometryStage(
   this->Geometry = State;
 }
 
+void GraphicsPipeline::setMeshStage(
+    std::shared_ptr<cpu::CompiledStage> TaskStage,
+    std::shared_ptr<cpu::CompiledStage> MeshStage, MeshState State) {
+  assert(MeshStage && "a mesh pipeline needs its own mesh stage");
+  // \p TaskStage is legitimately null: a mesh pipeline with no task stage
+  // dispatches its mesh workgroups directly (`vkCmdDrawMeshTasksEXT`'s own
+  // shape), rather than through a task entry's `EmitMeshTasksEXT`.
+  this->TaskStage = std::move(TaskStage);
+  this->MeshStage = std::move(MeshStage);
+  this->Mesh = State;
+}
+
 bool feme::graphics::topologyHasAdjacency(PrimitiveTopology Topology) {
   switch (Topology) {
   case PrimitiveTopology::LineListWithAdjacency:

@@ -24,6 +24,7 @@
 #define FEME_GRAPHICS_PIPELINE_H
 
 #include "feme/Graphics/Geometry.h"
+#include "feme/Graphics/Mesh.h"
 #include "feme/Graphics/PatchPipeline.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/RuntimeABI.h"
@@ -503,6 +504,38 @@ public:
   /// Only valid to call when `hasGeometryStages()` is true.
   const GeometryState &getGeometryState() const { return Geometry; }
 
+  /// Attaches the compiled mesh stage (and, optionally, the task
+  /// (amplification) stage that drives it) a mesh pipeline runs in place
+  /// of the vertex-fetch/assembly/tessellation/geometry chain (roadmap
+  /// H6e). `executeDraws` runs `TaskStage`'s own workgroups (if bound) and
+  /// reads back each one's requested mesh-workgroup count through a
+  /// checked `feme::graphics::AmplificationDispatchQueue` (roadmap H6d),
+  /// or -- with no task stage -- treats each `PreparedDraw::MeshDraws`
+  /// entry's own group count as `MeshStage`'s direct workgroup dispatch
+  /// (mirroring `vkCmdDrawMeshTasksEXT`'s shape); every dispatched
+  /// workgroup's completed output is assembled into a `feme::graphics::
+  /// Meshlet` and merged into the same clipping/rasterization path the
+  /// vertex/tessellation/geometry chain already uses. A mesh pipeline has
+  /// no vertex-input/input-assembly state at all (roadmap H6f), so
+  /// `setTessellationStages`/`setGeometryStage` must not also be called on
+  /// a pipeline this is called on, and vice versa.
+  void setMeshStage(std::shared_ptr<cpu::CompiledStage> TaskStage,
+                    std::shared_ptr<cpu::CompiledStage> MeshStage,
+                    MeshState State);
+
+  /// Whether this pipeline runs a mesh stage (roadmap H6e). True exactly
+  /// when `setMeshStage` has been called.
+  bool hasMeshStages() const { return MeshStage != nullptr; }
+  /// Only valid to call when `hasMeshStages()` is true.
+  const cpu::CompiledStage &getMeshStage() const { return *MeshStage; }
+  /// Whether a task (amplification) stage was bound alongside the mesh
+  /// stage. Only valid to call when `hasMeshStages()` is true.
+  bool hasTaskStage() const { return TaskStage != nullptr; }
+  /// Only valid to call when `hasTaskStage()` is true.
+  const cpu::CompiledStage &getTaskStage() const { return *TaskStage; }
+  /// Only valid to call when `hasMeshStages()` is true.
+  const MeshState &getMeshState() const { return Mesh; }
+
 private:
   std::shared_ptr<cpu::CompiledStage> VertexStage;
   std::shared_ptr<cpu::CompiledStage> FragmentStage;
@@ -512,6 +545,9 @@ private:
   TessellationState Tessellation;
   std::shared_ptr<cpu::CompiledStage> GeometryStage;
   GeometryState Geometry;
+  std::shared_ptr<cpu::CompiledStage> TaskStage;
+  std::shared_ptr<cpu::CompiledStage> MeshStage;
+  MeshState Mesh;
   PrimitiveTopology Topology;
   RasterState Raster;
   DepthState Depth;
