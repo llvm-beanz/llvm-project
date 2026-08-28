@@ -13,6 +13,7 @@ add_feme_library(FeMeTransformsCPU
   ImageCalls.cpp
   Linearize.cpp
   MaskIntrinsics.cpp
+  MeshOutputWrapper.cpp
   PatchConstantWrapper.cpp
   Prepare.cpp
   StageMaskCalls.cpp
