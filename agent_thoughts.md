@@ -41631,3 +41631,121 @@ quietly reporting only what I expected to see.
 - `PrimitiveIndices` (a primitive's own vertex index list) -- still has
   no canonicalized `feme.stage.*` op and stays unwired; noted in
   `MeshOutputWrapper.h`'s own comment, not addressed here.
+
+# H6c-a-a-iii: fix `resolveOffsetWithinElement`'s arrayed-builtin-block assertion
+
+## Task
+
+Close out roadmap milestone H6c-a-a-iii: `CanonicalizeStage.cpp`'s
+`resolveOffsetWithinElement` asserts via `cast<StructType>` instead of
+gracefully rejecting an unmodeled shape when a multi-`ElementID` builtin
+interface block's own value type is not a plain (non-arrayed)
+`StructType`. This was found by H6c-a-a-ii's own closing re-run: 9 of
+`dEQP-VK.mesh_shader.*`'s cases abort the whole `deqp-vk` process with
+this assertion instead of failing cleanly.
+
+## Investigation
+
+Read `resolveOffsetWithinElement` and its caller `resolveStageIOAccess`
+closely. The function is reached two ways:
+
+1. Via `getDynamicVertexIndexedAccess`'s dynamic-vertex-indexed path,
+   which always peels one array dimension off the global's value type
+   before calling in (`cast<ArrayType>(GV->getValueType())->getElementType()`),
+   so `ElemTy` there is always the *per-row* type -- for a builtin
+   interface block, always a plain struct.
+2. Via the ordinary constant-offset fallback in `resolveStageIOAccess`,
+   which only peels that same dimension for `Input`-storage globals
+   (`isPerVertexArrayInputGlobal`, deliberately `Input`-only per H6b's
+   own comment -- a constant `Output`-array index already has a
+   legitimate, different meaning: an ordinary matrix output's own
+   per-row store). For an `Output`-storage arrayed builtin block (a
+   mesh entry's `PerPrimitiveEXT` block, e.g. `gl_MeshPrimitivesEXT[]`),
+   a **constant**-indexed access (the shape a real, unrolled
+   GLSL-compiled per-primitive write takes) never gets that peel, so it
+   reaches `resolveOffsetWithinElement` with `ElemTy` still the whole
+   array-of-struct. `IDs.size() != 1` (a multi-member block) then hits
+   `cast<StructType>(ElemTy)` directly on an `ArrayType` -- the crash.
+
+This matches the milestone's own framing exactly: "a multi-`ElementID`
+builtin interface block's own value type is not a plain (non-arrayed)
+`StructType`."
+
+## Fix
+
+Changed `resolveOffsetWithinElement`'s return type from `StageIOAccess`
+to `std::optional<StageIOAccess>`, and its `IDs.size() != 1` branch to
+use `dyn_cast<StructType>` instead of `cast<StructType>`, returning
+`std::nullopt` when the cast fails -- exactly the same "leave this
+access unrewritten, `ValidateStagePass` diagnoses it later" treatment
+every other unmodeled shape in this file already gets (mirrors
+`UnresolvableLoadInputIsLeftAlone`'s own established precedent for a
+different unmodeled shape). No call-site change was needed beyond the
+signature: `resolveStageIOAccess`, the function's only caller, already
+returns `std::optional<StageIOAccess>` itself, and both its own
+`return resolveOffsetWithinElement(...)` call sites already forward the
+result through unchanged.
+
+This is a minimal, surgical fix scoped to exactly what the milestone's
+own text asked for -- it does not attempt to *model* the arrayed shape
+(that would be new scope, actually letting these cases progress further
+towards a real pass), only to stop it from crashing the whole process.
+
+## Testing
+
+Added `CanonicalizeStageTest.cpp`'s
+`ConstantIndexIntoArrayedBuiltinInterfaceBlockIsLeftUnrewritten`: builds
+a multi-`ElementID` builtin interface block (`!feme.spirv.MemberDecorations`,
+2 members) declared as an array of that struct (address space 8,
+mirroring `gl_MeshPrimitivesEXT[]`), stores through a constant array
+index. Confirms the store is left as a raw, unrewritten `StoreInst` (no
+`feme.stage.output.store` call) after the fix. Reverting just the
+`dyn_cast`/`cast` change and re-running this test reproduces the
+pre-fix assertion failure directly (aborts the whole test binary),
+confirming both the bug and the fix.
+
+`ninja check-feme` (assertions-enabled, ccache build): 2009/2009
+discovered, 1950 passing (59 pre-existing `Unsupported`, 0 `Failed`), up
+from H6c-a-a-ii's own 2008/1949 baseline by exactly the 1 new test.
+
+## Vulkan CTS validation
+
+Ran a real, full `dEQP-VK.mesh_shader.*` re-run (28044 cases) using the
+same resume-loop methodology H6c-a-a-i/H6c-a-a-ii's own reports
+established, against the existing `feme_icd.json` ICD build. This time
+the resume loop completed in a single iteration with an empty
+blacklist -- 0 crashes, down from 9. Results: Passed 1/28044 (unchanged),
+Failed 337/28044 (up from 328, exactly the 9 previously-crashing cases
+now resolving as a clean `Fail (retcode: VK_ERROR_INITIALIZATION_FAILED
+at vkPipelineConstructionUtil.cpp:176)`), NotSupported 27706/28044
+(unchanged). 0 Pass/Fail regressions, matching the milestone's own "same
+failing-case set, just a worse failure mode" framing -- now resolved
+back to the better mode.
+
+Also re-ran the persisted 1957-case `draw_sample.txt` regression sample
+(from `/tmp/h6c-a-a-ii-cts/draw_sample.txt`, copied forward) from
+`VK-GL-CTS/run` (the working directory with the `vulkan` data symlink
+CTS needs for relative-path shader/resource loads -- running from an
+arbitrary `/tmp` directory hit spurious `ResourceError`s on missing
+`./vulkan/...` files, a test-harness quirk unrelated to this fix, not a
+real regression; re-ran from the correct working directory instead of
+chasing it further). Results byte-identical to every prior row's own
+recorded totals: 14 passed / 153 failed / 1790 not supported, 0
+regressions.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+no change needed. This row changes no advertised feature bit or
+extension, only a robustness fix to existing CPU-side canonicalization
+(rejecting an unmodeled shape gracefully instead of asserting).
+
+## Docs updated
+
+- `feme/docs/Roadmap.md`: struck through H6c-a-a-iii with the full
+  "done" writeup (root cause, fix, tests, measured CTS impact).
+- `feme/docs/VulkanCTSReport.md`: appended a new "Roadmap H6c-a-a-iii:
+  measured impact" section with the full root-cause/fix/test/CTS
+  reproduction detail.
+- Left `H6g-b` untouched: this task's own scope is only H6c-a-a-iii.
+  `H6g-b`'s own re-run (confirming the 235+33-case content-compilation
+  bucket clears) is a separate milestone or has now become unblocked,
+  neither of which the current request asked me to touch.
