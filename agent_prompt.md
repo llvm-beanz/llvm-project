@@ -33,12 +33,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H6c?
+Can you work on milestone H6c-a?
 
-> **Reuse the compute workgroup/groupshared/barrier/wave lowering for task and
-> mesh entries**, adding a bounded mesh-output builder (mirroring
-> `feme::graphics::GeometryStreamBuilder`, but structure-of-arrays
-> per-vertex/per-primitive rather than stream-ordered) and a bounded task
-> payload builder, plus
-> `FemeMeshArgs`/`FemeTaskArgs`/`CompiledStage::invokeMesh`/`invokeTask`
-> (mirroring `FemeGeometryArgs`/`CompiledStage::invokeGeometry`, H5d)
+> **Wire `MeshOutputBuilder`/`TaskPayloadBuilder` into real `feme.stage.*`
+> mesh-output-store/task-payload-store operations** reaching the reused
+> `EntryWrapperPass` path, once those ops exist (H6d) and, for task payload
+> specifically, once it can be imported from SPIR-V `TaskPayloadWorkgroupEXT` at
+> all (H6h) and canonicalized (H6i)
