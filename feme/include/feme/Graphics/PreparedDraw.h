@@ -158,6 +158,25 @@ struct DrawCommand {
   int32_t VertexOffset = 0;
 };
 
+/// One mesh-pipeline draw command (roadmap H6e), used in place of
+/// `DrawCommand` when the bound pipeline runs a mesh stage
+/// (`GraphicsPipeline::hasMeshStages()`): a mesh pipeline has no vertex
+/// buffers, index buffer, or topology to assemble primitives from, only a
+/// workgroup count to dispatch.
+///
+/// When the pipeline has no task (amplification) stage
+/// (`!GraphicsPipeline::hasTaskStage()`), `GroupCount` is the mesh stage's
+/// own direct workgroup dispatch, mirroring `vkCmdDrawMeshTasksEXT(x, y,
+/// z)`'s own argument shape (roadmap H6f wires the real Vulkan entry point
+/// onto this same field once it exists). When a task stage is bound
+/// instead, `GroupCount` is the *task* stage's own dispatch (mirroring
+/// `vkCmdDispatch`'s shape) -- each dispatched task workgroup's own
+/// `EmitMeshTasksEXT` call is what actually decides how many mesh
+/// workgroups it drives (`feme::graphics::AmplificationDispatchQueue`).
+struct MeshDrawCommand {
+  std::array<uint32_t, 3> GroupCount{1, 1, 1};
+};
+
 /// A snapshot of one draw's dynamic state: color attachments, viewport and
 /// scissor arrays, bound vertex buffers, the resource heap the vertex/fragment
 /// stages read from, and the draw commands to execute against them. Owned
@@ -184,6 +203,13 @@ struct PreparedDraw {
   IndexBufferBinding IndexBuffer;
   cpu::DispatchResources Resources;
   llvm::ArrayRef<DrawCommand> Draws;
+  /// (roadmap H6e) The mesh-pipeline draw commands to execute, used
+  /// instead of `Draws` when the bound pipeline runs a mesh stage
+  /// (`GraphicsPipeline::hasMeshStages()`) -- `executeDraws` requires
+  /// exactly one of `Draws`/`MeshDraws` to be non-empty, matching which of
+  /// the two mutually exclusive pre-rasterization chains the pipeline
+  /// runs.
+  llvm::ArrayRef<MeshDrawCommand> MeshDraws;
   /// When the pipeline's sample count is greater than 1, `Attachments`
   /// stores each color attachment's multisample data (samples interleaved
   /// per pixel: see Executor.cpp's `readDepth` comment for the exact
