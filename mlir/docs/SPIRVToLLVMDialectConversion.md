@@ -454,6 +454,14 @@ modelled with `xor` operation with a mask with all bits set.
 %0 = spirv.LogicalNot %op : i1  =>  %0    = llvm.xor %op, %mask : i1
 ```
 
+`spirv.All` and `spirv.Any` reduce a vector of `i1` values to a scalar `i1`,
+and are modelled with the LLVM vector-reduction intrinsics:
+
+SPIR-V Dialect op | LLVM Dialect op
+:---------------: | :-----------------------:
+`spirv.All`         | `llvm.intr.vector.reduce.and`
+`spirv.Any`         | `llvm.intr.vector.reduce.or`
+
 ### Memory ops
 
 This section describes the conversion patterns for SPIR-V dialect operations

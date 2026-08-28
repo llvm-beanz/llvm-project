@@ -2416,6 +2416,8 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       IComparePattern<spirv::LogicalEqualOp, LLVM::ICmpPredicate::eq>,
       IComparePattern<spirv::LogicalNotEqualOp, LLVM::ICmpPredicate::ne>,
       NotPattern<spirv::LogicalNotOp>,
+      DirectConversionPattern<spirv::AllOp, LLVM::vector_reduce_and>,
+      DirectConversionPattern<spirv::AnyOp, LLVM::vector_reduce_or>,
 
       // Memory ops
       AccessChainPattern, AddressOfPattern, LoadStorePattern<spirv::LoadOp>,

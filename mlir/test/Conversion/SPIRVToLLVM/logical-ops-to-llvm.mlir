@@ -93,6 +93,28 @@ spirv.func @logical_or_vector(%arg0: vector<4xi1>, %arg1: vector<4xi1>) "None" {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.All
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @all_vector
+spirv.func @all_vector(%arg0: vector<4xi1>) "None" {
+  // CHECK: "llvm.intr.vector.reduce.and"(%{{.*}}) : (vector<4xi1>) -> i1
+  %0 = spirv.All %arg0 : vector<4xi1>
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
+// spirv.Any
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @any_vector
+spirv.func @any_vector(%arg0: vector<4xi1>) "None" {
+  // CHECK: "llvm.intr.vector.reduce.or"(%{{.*}}) : (vector<4xi1>) -> i1
+  %0 = spirv.Any %arg0 : vector<4xi1>
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.Ordered
 //===----------------------------------------------------------------------===//
 
