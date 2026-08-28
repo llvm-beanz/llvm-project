@@ -27,8 +27,13 @@
 // input/output access reuses the existing `InputLoad`/`OutputStore` ops
 // (a hull/domain stage's control-point/patch-constant elements are
 // ordinary signature elements, distinguished by `SignatureDirection`/
-// `SignatureFrequency`, not a separate op family). Mesh-output and ray
-// operations remain later milestones.
+// `SignatureFrequency`, not a separate op family). A mesh entry's own
+// per-vertex/per-primitive output writes likewise reuse `OutputStore`
+// (roadmap H6b, threading its dynamic vertex/primitive index through the
+// existing `Vertex` operand); roadmap H6i adds `TaskPayloadStore` for a
+// task entry's own bounded payload write, which has no signature element
+// of its own to reuse `OutputStore` for. Ray operations remain a later
+// milestone.
 //
 //===----------------------------------------------------------------------===//
 
@@ -129,6 +134,17 @@ enum class StageOpKind : uint8_t {
   /// `SubpassLoadPattern` synthesizes that constant when a real
   /// `OpImageRead` carries no `Sample` image operand at all.
   SubpassLoad,
+  /// `feme.stage.task.payload.store(offset, value)`: a task entry's bounded
+  /// payload write (roadmap H6i). Unlike `OutputStore`, \c offset is a
+  /// plain byte offset into the payload's raw storage -- not an
+  /// `ElementID`/`Row`/`Component` triple -- since a task payload
+  /// (`TaskPayloadWorkgroupEXT`, importable as an ordinary address-space-14
+  /// global per roadmap H6h) is task-defined memory shared verbatim with
+  /// the mesh workgroups it dispatches, not a `SignatureElement` of its
+  /// own. \c value is the scalar/vector stored at that offset (mirroring
+  /// how a stage-IO store already reaches this pass pre-decomposed to a
+  /// scalar/vector leaf, see `storeStageIOValue`).
+  TaskPayloadStore,
   // Keep last: the number of stage op kinds, for range checks.
   NumStageOpKinds,
 };
@@ -231,6 +247,12 @@ llvm::CallInst *createStageSubpassLoad(llvm::IRBuilderBase &B,
                                        uint32_t AttachmentIndex,
                                        uint32_t Component,
                                        llvm::Value *Sample = nullptr);
+
+/// `feme.stage.task.payload.store(offset, value)`, where \p Offset is the
+/// constant byte offset within the task payload this store writes (see
+/// `StageOpKind::TaskPayloadStore`'s comment).
+llvm::CallInst *createStageTaskPayloadStore(llvm::IRBuilderBase &B,
+                                            uint64_t Offset, llvm::Value *Val);
 ///@}
 
 /// Reads back \p CI's operand \p Idx as a constant `i32`/`i8`/`i1`, or

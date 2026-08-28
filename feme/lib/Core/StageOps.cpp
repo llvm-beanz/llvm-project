@@ -48,6 +48,7 @@ constexpr StageOpInfo StageOpTable[] = {
     {StageOpKind::StreamEmit, "feme.stage.stream.emit", false},
     {StageOpKind::StreamCut, "feme.stage.stream.cut", false},
     {StageOpKind::SubpassLoad, "feme.stage.subpass.load", true},
+    {StageOpKind::TaskPayloadStore, "feme.stage.task.payload.store", true},
 };
 // clang-format on
 
@@ -126,10 +127,15 @@ FunctionCallee feme::getOrInsertStageOp(Module &M, StageOpKind Kind,
   if (Info.Overloaded) {
     Name.push_back('.');
     // The type that varies across an overload of this op is its result, for
-    // every overloaded kind except `OutputStore`, whose only "value" is its
-    // (void-returning) `value` operand -- the fourth argument, per
-    // `StageOpKind::OutputStore`'s comment.
-    Type *OverloadTy = Kind == StageOpKind::OutputStore ? ArgTys[3] : ResultTy;
+    // every overloaded kind except `OutputStore`/`TaskPayloadStore`, whose
+    // only "value" is its (void-returning) `value` operand -- the fourth
+    // argument for `OutputStore` (per its own comment), the second for
+    // `TaskPayloadStore` (its `offset` operand is the first).
+    Type *OverloadTy = ResultTy;
+    if (Kind == StageOpKind::OutputStore)
+      OverloadTy = ArgTys[3];
+    else if (Kind == StageOpKind::TaskPayloadStore)
+      OverloadTy = ArgTys[1];
     appendTypeSuffix(Name, OverloadTy);
   }
   FunctionType *FTy = FunctionType::get(ResultTy, ArgTys, /*isVarArg=*/false);
@@ -238,6 +244,13 @@ CallInst *feme::createStageSubpassLoad(IRBuilderBase &B,
   Value *SampleVal = Sample ? Sample : ConstantInt::get(B.getInt32Ty(), 0);
   return createCall(B, StageOpKind::SubpassLoad, B.getFloatTy(),
                     {IndexVal, ComponentVal, SampleVal});
+}
+
+CallInst *feme::createStageTaskPayloadStore(IRBuilderBase &B, uint64_t Offset,
+                                            Value *Val) {
+  Value *OffsetVal = ConstantInt::get(B.getInt32Ty(), Offset);
+  return createCall(B, StageOpKind::TaskPayloadStore, B.getVoidTy(),
+                    {OffsetVal, Val});
 }
 
 std::optional<uint64_t> feme::getStageOpConstantOperand(const CallInst &CI,

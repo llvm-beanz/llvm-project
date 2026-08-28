@@ -172,6 +172,23 @@ TEST_F(StageOpsTest, SubpassLoadCarriesExplicitSample) {
   ASSERT_EQ(getStageOpConstantOperand(*CI, 2), 3u);
 }
 
+/// (Roadmap H6i) `TaskPayloadStore` is overloaded on its `value` operand --
+/// the second argument, unlike `OutputStore`'s fourth -- and its first
+/// (`offset`) operand round-trips as an ordinary constant `i32`.
+TEST_F(StageOpsTest, TaskPayloadStoreIsVoidAndOverloadedOnValue) {
+  Value *Val = ConstantInt::get(B.getInt32Ty(), 42);
+  CallInst *CI = createStageTaskPayloadStore(B, /*Offset=*/8, Val);
+  EXPECT_TRUE(CI->getType()->isVoidTy());
+  EXPECT_EQ(CI->getCalledFunction()->getName(),
+            "feme.stage.task.payload.store.i32");
+  ASSERT_EQ(getStageOpConstantOperand(*CI, 0), 8u);
+  EXPECT_EQ(CI->getArgOperand(1), Val);
+
+  StageOpKind Kind;
+  ASSERT_TRUE(isStageOpCall(*CI, &Kind));
+  EXPECT_EQ(Kind, StageOpKind::TaskPayloadStore);
+}
+
 TEST_F(StageOpsTest, NonStageOpCallIsRejected) {
   FunctionCallee Callee =
       M->getOrInsertFunction("not.a.stage.op", B.getVoidTy());
