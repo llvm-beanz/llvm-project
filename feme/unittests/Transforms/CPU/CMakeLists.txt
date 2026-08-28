@@ -20,6 +20,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   HullWrapperTest.cpp
   LinearizeTest.cpp
   MaskIntrinsicsTest.cpp
+  MeshOutputWrapperTest.cpp
   PatchConstantWrapperTest.cpp
   PrepareTest.cpp
   ReferenceEntryWrapperTest.cpp
