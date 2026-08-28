@@ -39366,3 +39366,153 @@ no feature bit or extension.
 2. Docs: `Roadmap.md`'s H5e-d row struck through, `VulkanCTSReport.md`'s
    new "Roadmap H5e-d: measured impact" section.
 3. This entry.
+
+# Milestone H5e-e: non-multiview layered-rendering `gl_Layer` routing
+
+Asked to work on H5e-e: "6 `dEQP-VK.geometry.layered.2d_array.*.
+multiple_layers_per_invocation` variants render an incorrect image
+(`Fail (Rendered images are incorrect)`) ... a genuine
+rendering-correctness bug in the geometry-to-layered-render-target path
+(most likely `gl_Layer` routing, per-invocation output-vertex addressing,
+or stream-merge ordering under `Invocations > 1`, none yet isolated)."
+
+## Re-triaging the bucket's real scope
+
+Before touching any code, ran `deqp-vk` directly against a live `feme`
+ICD (`VK_ICD_FILENAMES=.../feme_icd.json`, `--deqp-case="dEQP-VK.geometry.
+layered.*"`, 100 cases) to see the current baseline for myself rather
+than trusting the roadmap row's own "6 cases" framing. Found **0/100
+passing**, 78 `Fail` / 22 `NotSupported` -- vastly broader than "6
+`2d_array` cases". Decoded the base64 PNG images `TestResults.qpa`
+embeds per failing case (regex out the `<Image Name="...">` blocks,
+`base64.b64decode`, `PIL.Image.resize(..., NEAREST)` to upscale tiny
+images for the `view` tool) to see the actual failure shapes rather than
+guessing from text status alone.
+
+Cross-referencing the CTS's own source (`vktGeometryLayeredRenderingTests.
+cpp`)'s test-name -> `TestType` enum mapping table, and H5e-c's own report
+(which had already found the "Rendered images are incorrect" bucket grew
+6 -> 24 cases after fixing an unrelated `vkQueueSubmit` gap), the real
+scope this row owns is 24 cases: `render_to_one`, `render_to_default_
+layer`, `multiple_layers_per_invocation`, across `1d_array`/`2d_array`/
+`cube`/`cube_array` (not `3d`, a separate pre-existing `vkCreateImage`
+gap) x 2 sizes each.
+
+## Root cause 1: `applyLoadOps`'s clear mask
+
+Started with `render_to_default_layer` (`TEST_TYPE_DEFAULT_LAYER`) since
+it's the simplest case -- no `gl_Layer` write anywhere, CTS just expects
+every non-zero layer to render as an untouched "empty" image. Found
+layers 1..N rendering as *random garbage* rather than the expected
+empty/cleared image, immediately pointing at the clear path rather than
+anything geometry-stage-specific.
+
+Traced this to `CommandBuffer.cpp`'s `applyLoadOps`: `uint32_t ViewMask =
+Binding.ViewMask ? Binding.ViewMask : 1u;`. For any non-multiview
+(`Binding.ViewMask == 0`) attachment, this collapsed the clear mask to a
+single bit regardless of `Binding.Layers` (the framebuffer's real
+array-layer count, already correctly populated elsewhere but never
+consulted here) -- so `LOAD_OP_CLEAR` only ever cleared layer 0, leaving
+every other layer uninitialized. Fixed with a new `fullLayerMask(Layers)`
+helper (all-ones over `Layers` bits, saturating at `~0u` past 32) used in
+place of the `1u` fallback.
+
+Rebuilt just `libfeme_vulkan.so` (`ninja feme_vulkan`, much faster than a
+full rebuild -- the established fast-iteration pattern from every prior
+H5e-* session) and re-ran the full `layered.*` group: 0/100 -> 8/100
+passing, all 8 `render_to_default_layer` cases (4 view types x 2 sizes).
+
+## Root cause 2: `runDraw`'s unconditional per-view attachment slicing
+
+`render_to_one`/`multiple_layers_per_invocation` (the remaining 16
+target cases) still failed. Picked `dEQP-VK.geometry.layered.2d_array.
+12_36_6.render_to_one` (6 layers, target layer 3) as a concrete
+repro: the image showed layers 0,1,2,4,5 correctly empty (confirming fix
+1 works) but layer 3 -- the actual target -- entirely black, i.e. the
+quad never got drawn there at all, not garbage this time, just missing.
+
+Added temporary `FEME_DEBUG_LAYER`-gated `llvm::errs()` instrumentation
+inside `Executor.cpp`'s `resolvePrimitiveState` lambda, right after it
+computes `RequestedLayer` from the geometry stage's own `gl_Layer`
+output, printing `RequestedLayer`/`DrawLayerCount`. Rebuilt and re-ran:
+`RequestedLayer=3` (correctly read!) but `DrawLayerCount=1` -- so
+`resolveRenderTargetArrayLayer(3, 1)` rejected the primitive as out of
+range, discarding it silently.
+
+Traced `DrawLayerCount` back through `getDrawLayerCount(Draw)` to
+`Attachment.ArrayLayers`, and found the actual root cause in
+`CommandBuffer.cpp`'s `runDraw`: its per-view loop unconditionally calls
+`sliceAttachmentLayer(A, ViewIndex)` on every attachment for *every*
+draw, even the common non-multiview case (`ViewIndex` always 0) -- this
+slices every attachment down to exactly 1 layer (layer 0) before
+`Executor.cpp`'s own already-correct per-primitive `gl_Layer` routing
+ever gets a chance to see more than that one layer. This is a
+fundamentally different (and more fundamental) bug than the roadmap
+row's own suspicion of "gl_Layer routing/per-invocation addressing/
+stream-merge ordering" -- it's really "every attachment gets pre-sliced
+to 1 layer before the shader's own gl_Layer output ever has a chance to
+route to anything else", and it applies identically to a vertex stage's
+own `gl_Layer` output too, not just a geometry stage's (confirmed later
+by the regression-sample re-run below).
+
+Fixed by only performing the per-view `sliceAttachmentLayer` calls when
+`Gfx.Binding.ViewMask != 0` (true multiview, where each view bit really
+does map onto its own same-numbered layer via `gl_ViewIndex` and no
+shader-side `gl_Layer` write is needed); a non-multiview draw
+(`ViewMask == 0`) now passes every attachment through with its full,
+unsliced layer range, so `Executor.cpp`'s own per-primitive routing
+(already correct, already tested) can reach any layer. Removed the
+`FEME_DEBUG_LAYER` debug instrumentation before committing -- it was
+diagnostic-only.
+
+Rebuilt and re-ran the full `layered.*` group: 8/100 -> **24/100**,
+exactly this row's own full target bucket, 0 regressions (54 `Fail`/22
+`NotSupported` remaining are all the pre-existing `3d` image-creation gap
+and other, already-separately-tracked test types this row never owned).
+
+## Verification
+
+- `dEQP-VK.geometry.*` (200 cases): 10/200 (H5e-d's baseline) -> 34/200,
+  exactly +24, 0 regressions (`NotSupported` byte-identical at 33/200).
+- `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample:
+  12/1957 -> 14/1957, +2 (`shader_layer.vertex_shader_5`'s `renderpass`/
+  `partial_secondary_cmd_buff` variants -- confirming fix 2 isn't
+  geometry-stage-specific, a *vertex* stage's own `gl_Layer` write
+  benefits identically), 0 regressions.
+- New `DrawTest.GeometryStageLayerOutputRoutesToANonMultiviewLayer`: a
+  real `EmitVertex`/`EndPrimitive`-driven geometry shader (not just a
+  pipeline-creation-only shape like `GraphicsPipelineTest.cpp`'s
+  `GeometrySource`) writing a constant `gl_Layer = 1`, over a plain
+  two-layer non-multiview render pass -- checks layer 0 reads back
+  `LOAD_OP_CLEAR`'s own black (fix 1) and layer 1 reads back the
+  fragment stage's red rather than being silently discarded (fix 2).
+  Verified by hand that reverting just the `CommandBuffer.cpp` changes
+  (`git stash` on that one file) reproduces the exact predicted failure
+  (garbage bytes in layer 1), then restored the fix.
+- `ninja check-feme` (assertions-enabled, ccache build): 1872/1931 (59
+  pre-existing `Unsupported`, 0 `Failed`), up from H5e-d's own 1871/1930
+  by exactly the 1 new unit test.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed, confirmed by reading both -- this is a pure rendering-
+  correctness bug fix touching no feature bit or extension (layered
+  rendering and `gl_Layer`/`shaderOutputLayer` were both already
+  advertised and already partly working).
+
+Struck through H5e-e on the roadmap and updated `FeMeVulkanDesign.md`'s
+roadmap-H2 section, which had described the now-fixed unconditional
+per-view slicing as if it still applied, and described `gl_Layer` as an
+output with no consumer.
+
+## Commits
+
+1. Both `CommandBuffer.cpp` fixes (`fullLayerMask`/`applyLoadOps`, and
+   `runDraw`'s conditional per-view slicing) plus `DrawTest.
+   GeometryStageLayerOutputRoutesToANonMultiviewLayer`, which exercises
+   both together (they're tightly coupled -- the test needs both fixes
+   to pass, so splitting them into separately-tested commits would leave
+   an intermediate, deliberately-red state rather than a genuinely
+   bisectable one).
+2. Docs: `Roadmap.md`'s H5e-e row struck through, `VulkanCTSReport.md`'s
+   new "Roadmap H5e-e: measured impact" section, `FeMeVulkanDesign.md`'s
+   updated roadmap-H2 section.
+3. This entry.
