@@ -314,6 +314,41 @@ bool isElementwiseVectorizableIntrinsic(Intrinsic::ID ID) {
   }
 }
 
+/// Roadmap H6g-b-a-i-a-i-b: whether \p ID is one of the `llvm.vector.reduce.*`
+/// intrinsics `FunctionWidener::widenVectorReduce` can widen -- a real,
+/// concrete GLSL/SPIR-V shape a component-wise vector comparison feeds,
+/// e.g. glslang's `all(lessThanEqual(a, b))` lowering to
+/// `llvm.vector.reduce.and.v4i1(fcmp ole <4 x float> %a, %b)`, confirmed by
+/// a one-off diagnostic dump of the exact rejected producer/consumer pair
+/// against a real failing `dEQP-VK.mesh_shader.ext.in_out.32_bits_only`
+/// case. Each of these folds its vector operand's `N` components together
+/// two at a time with the same scalar binary op/intrinsic, so a divergent,
+/// per-lane-decomposed `<N x T>` operand widens into a single lane-wise
+/// `<W x T>` result exactly the way any other divergent scalar-typed value
+/// does -- no different from ordinary elementwise arithmetic, just applied
+/// across components instead of across two whole operands. The
+/// floating-point reductions (`fadd`/`fmul`/`fmax`/`fmin`, the latter two
+/// also available as NaN-propagating `fmaximum`/`fminimum`) are excluded:
+/// none of `fadd`/`fmul`'s extra scalar `start` operand is exercised by
+/// any shape reaching this pass yet, and generalizing to it is left to a
+/// future row if a real case needs it.
+bool isSupportedVectorReduceIntrinsic(Intrinsic::ID ID) {
+  switch (ID) {
+  case Intrinsic::vector_reduce_and:
+  case Intrinsic::vector_reduce_or:
+  case Intrinsic::vector_reduce_xor:
+  case Intrinsic::vector_reduce_add:
+  case Intrinsic::vector_reduce_mul:
+  case Intrinsic::vector_reduce_smax:
+  case Intrinsic::vector_reduce_smin:
+  case Intrinsic::vector_reduce_umax:
+  case Intrinsic::vector_reduce_umin:
+    return true;
+  default:
+    return false;
+  }
+}
+
 /// Whether \p Ty is a pointer into groupshared (`addrspace(3)`) memory --
 /// the address space `feme::cpu::GroupSharedAddressSpace` names (see
 /// GroupShared.h). A divergent access through one of these needs its own
@@ -479,6 +514,7 @@ private:
   void widenShuffleVector(ShuffleVectorInst &SV, IRBuilder<> &Builder);
   void widenVectorSelect(SelectInst &SI, IRBuilder<> &Builder);
   void widenVectorElementwise(Instruction &I, IRBuilder<> &Builder);
+  void widenVectorReduce(CallInst &CI, IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenScalarizedFallback(Instruction &I, IRBuilder<> &Builder);
   bool widenInstruction(Instruction &I, IRBuilder<> &Builder);
@@ -562,13 +598,20 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   // value, another elementwise arithmetic/cast operand, an `fcmp`/`icmp`
   // operand (roadmap H6g-b-a-i-a-i-b: its own `<N x i1>` result is, in
   // turn, itself just another divergent vector value, most commonly
-  // consumed by a `select`'s now-supported per-lane vector condition), or
-  // (roadmap H6g-b-a-i-a-i-a) a matched `feme.cpu.masked.store.*` call's
-  // stored-value operand -- the same per-lane reassembly a matched
-  // resource-store call's stored-value operand already gets (see
-  // `widenMaskedStore`), needed for a write with no canonicalized
-  // `feme.stage.*`/`feme.cpu.resource.*` op of its own to become instead,
-  // e.g. a mesh entry point's own
+  // consumed by a `select`'s now-supported per-lane vector condition, or
+  // by a `llvm.vector.reduce.and`/`or` call folding it into a single
+  // per-lane boolean -- see below), a `llvm.vector.reduce.*` call's vector
+  // operand (roadmap H6g-b-a-i-a-i-b: see
+  // `isSupportedVectorReduceIntrinsic`/`widenVectorReduce` -- the shape a
+  // component-wise vector comparison feeding glslang's `all`/`any`
+  // GLSL builtins actually takes, confirmed by reducing a real failing
+  // `dEQP-VK.mesh_shader.ext.in_out.32_bits_only` case down to its exact
+  // IR shape), or (roadmap H6g-b-a-i-a-i-a) a matched
+  // `feme.cpu.masked.store.*` call's stored-value operand -- the same
+  // per-lane reassembly a matched resource-store call's stored-value
+  // operand already gets (see `widenMaskedStore`), needed for a write with
+  // no canonicalized `feme.stage.*`/`feme.cpu.resource.*` op of its own to
+  // become instead, e.g. a mesh entry point's own
   // `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)` (see
   // MeshOutputWrapper.h's file comment). Verify every divergent vector
   // value matches one of those producer shapes, and every use of one
@@ -650,8 +693,28 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       // A `feme.cpu.image.*` sample/load returns `<4 x float>` and is
       // decomposed into per-component wide vectors exactly like a typed
       // buffer load (see `widenImageCall`).
-      IsSupportedProducer =
-          (Matched && !Matched->StoredValue) || matchImageCall(*CI);
+      if ((Matched && !Matched->StoredValue) || matchImageCall(*CI)) {
+        IsSupportedProducer = true;
+      } else if (Function *Callee = CI->getCalledFunction()) {
+        // Roadmap H6g-b-a-i-a-i-b: a vector-typed, homogeneous "trivially
+        // vectorizable" intrinsic call (`llvm.minnum`/`llvm.maxnum`/
+        // `llvm.smin`/`llvm.smax`/...) over an already-decomposed
+        // divergent vector operand -- the shape a GLSL `min`/`max`/`clamp`
+        // builtin over a vec-typed resource-load result takes (confirmed
+        // by reducing a real failing `dEQP-VK.mesh_shader.ext.in_out`
+        // case down to its exact IR shape once the row's own initial
+        // `fcmp`/`icmp` fix let it progress this far) -- decomposes
+        // exactly like ordinary elementwise arithmetic: one
+        // scalar-element intrinsic call per component (see
+        // `widenVectorElementwise`).
+        Intrinsic::ID ID = Callee->getIntrinsicID();
+        IsSupportedProducer =
+            ID != Intrinsic::not_intrinsic &&
+            isElementwiseVectorizableIntrinsic(ID) &&
+            llvm::all_of(CI->args(), [&](const Value *Arg) {
+              return Arg->getType() == I.getType();
+            });
+      }
     }
 
     if (!IsSupportedProducer) {
@@ -660,8 +723,9 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
           "' has a divergent value '" + I.getName() +
           "' of vector type; only a constant-index insertelement chain, a "
           "phi, a select, a shufflevector, elementwise arithmetic/cast, a "
-          "vector comparison, or a resource/image load is supported "
-          "(roadmap milestone 7 deviation)");
+          "vector comparison, a homogeneous vectorizable intrinsic call, "
+          "or a resource/image load is supported (roadmap milestone 7 "
+          "deviation)");
       return false;
     }
 
@@ -685,6 +749,32 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         std::optional<MatchedMaskedMemOp> MaskedStore = matchMaskedStore(*UserCI);
         if (MaskedStore && MaskedStore->ValueOperand == &I)
           continue;
+        // Roadmap H6g-b-a-i-a-i-b: a `llvm.vector.reduce.*` call folding
+        // `I`'s own components together (see `isSupportedVectorReduceIntrinsic`/
+        // `widenVectorReduce`) -- the shape glslang's `all`/`any`-style
+        // GLSL builtins take over a component-wise vector comparison, e.g.
+        // `llvm.vector.reduce.and.v4i1(fcmp ole <4 x float> %a, %b)`.
+        Function *Callee = UserCI->getCalledFunction();
+        if (Callee &&
+            isSupportedVectorReduceIntrinsic(Callee->getIntrinsicID()) &&
+            UserCI->getArgOperand(0) == &I)
+          continue;
+        // Roadmap H6g-b-a-i-a-i-b: an argument of a vector-typed,
+        // homogeneous "trivially vectorizable" intrinsic call (see the
+        // producer-side check above and `widenVectorElementwise`) -- `I`
+        // is itself visited (and validated as a producer) by this same
+        // top-level loop when its result is also vector-typed, so accept
+        // it here unconditionally rather than re-checking argument
+        // positions.
+        if (Callee) {
+          Intrinsic::ID ID = Callee->getIntrinsicID();
+          if (ID != Intrinsic::not_intrinsic &&
+              isElementwiseVectorizableIntrinsic(ID) &&
+              llvm::all_of(UserCI->args(), [&](const Value *Arg) {
+                return Arg->getType() == UserCI->getType();
+              }))
+            continue;
+        }
       }
       if (isa<ExtractElementInst>(U))
         continue;
@@ -720,9 +810,10 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
           "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent vector value '" + I.getName() +
           "' used outside a supported insertelement-chain/resource-store/"
-          "extractelement/select/shufflevector/phi/elementwise/comparison "
-          "pattern; component decomposition is not yet supported for this "
-          "use (roadmap milestone 7 deviation)");
+          "extractelement/select/shufflevector/phi/elementwise/comparison/"
+          "reduce/vectorizable-intrinsic pattern; component decomposition "
+          "is not yet supported for this use (roadmap milestone 7 "
+          "deviation)");
       return false;
     }
   }
@@ -1812,9 +1903,14 @@ void FunctionWidener::widenVectorElementwise(Instruction &I,
   // like a `phi`/`select`/`shufflevector`. Every vector-typed operand of
   // one of these instructions has the same element count as the result
   // (an LLVM IR requirement), so all of a multi-operand op's operand
-  // component lists line up component-for-component.
+  // component lists line up component-for-component. A `CallInst`'s own
+  // "operands" include its callee (the last one), which is never widened,
+  // so `I.args()` is used instead for that case (roadmap
+  // H6g-b-a-i-a-i-b's homogeneous vectorizable-intrinsic shape).
+  auto *ICall = dyn_cast<CallInst>(&I);
   SmallVector<SmallVector<Value *, 4>, 2> OperandComponents;
-  for (Value *Op : I.operands())
+  for (Value *Op : ICall ? iterator_range(ICall->arg_begin(), ICall->arg_end())
+                          : iterator_range(I.op_begin(), I.op_end()))
     OperandComponents.push_back(
         Op->getType()->isVectorTy() ? getVectorComponents(Op, Builder)
                                      : SmallVector<Value *, 4>());
@@ -1828,7 +1924,9 @@ void FunctionWidener::widenVectorElementwise(Instruction &I,
   for (unsigned C = 0; C != NumComponents; ++C) {
     auto ComponentOperand = [&](unsigned OpIdx) -> Value * {
       return OperandComponents[OpIdx].empty()
-                 ? getWidened(I.getOperand(OpIdx), Builder)
+                 ? getWidened((ICall ? ICall->getArgOperand(OpIdx)
+                                     : I.getOperand(OpIdx)),
+                              Builder)
                  : OperandComponents[OpIdx][C];
     };
     Value *NewV = nullptr;
@@ -1848,6 +1946,22 @@ void FunctionWidener::widenVectorElementwise(Instruction &I,
       NewV = Builder.CreateCmp(Cmp->getPredicate(), ComponentOperand(0),
                                ComponentOperand(1),
                                I.getName() + ".wide" + Twine(C));
+    } else if (ICall) {
+      // Roadmap H6g-b-a-i-a-i-b: a homogeneous "trivially vectorizable"
+      // intrinsic call (`llvm.minnum`/`llvm.maxnum`/`llvm.smin`/
+      // `llvm.smax`/...) over an already-decomposed divergent vector
+      // operand -- the shape a GLSL `min`/`max`/`clamp` builtin over a
+      // vec-typed resource-load result takes -- widens to the identical
+      // intrinsic's `<W x elemT>` overload, called once per component,
+      // mirroring `widenElementwise`'s equivalent uniform-broadcast case.
+      Intrinsic::ID ID = ICall->getCalledFunction()->getIntrinsicID();
+      Function *WideCallee =
+          Intrinsic::getOrInsertDeclaration(NewF->getParent(), ID, {WideElemTy});
+      SmallVector<Value *, 4> WideArgs;
+      for (unsigned OpIdx = 0, E = ICall->arg_size(); OpIdx != E; ++OpIdx)
+        WideArgs.push_back(ComponentOperand(OpIdx));
+      NewV = Builder.CreateCall(WideCallee, WideArgs,
+                                I.getName() + ".wide" + Twine(C));
     } else {
       auto *UO = cast<UnaryOperator>(&I);
       NewV = Builder.CreateUnOp(UO->getOpcode(), ComponentOperand(0),
@@ -1858,6 +1972,65 @@ void FunctionWidener::widenVectorElementwise(Instruction &I,
 
   WidenedVectorComponents[&I] = std::move(Components);
   ToErase.push_back(&I);
+}
+
+void FunctionWidener::widenVectorReduce(CallInst &CI, IRBuilder<> &Builder) {
+  // Roadmap H6g-b-a-i-a-i-b: fold a (possibly divergent, possibly
+  // per-lane-decomposed) vector operand's `N` components together two at a
+  // time with the same scalar op `getVectorComponents` retrieves them for
+  // -- exactly the shape glslang's `all`/`any`-style GLSL builtins take
+  // over a component-wise vector comparison
+  // (`llvm.vector.reduce.and.v4i1(fcmp ole <4 x float> %a, %b)`), confirmed
+  // against a real failing `dEQP-VK.mesh_shader.ext.in_out.32_bits_only`
+  // case. `getVectorComponents` already handles either a genuinely
+  // divergent, decomposed operand or a uniform one transparently, so this
+  // widens correctly either way. Unlike every other `widen*` helper here,
+  // the *result* is not itself vector-typed (an `llvm.vector.reduce.*`
+  // call always returns its vector operand's scalar element type) -- one
+  // `<W x T>` lane-wise scalar result, recorded in the ordinary `Widened`
+  // map exactly like any other divergent scalar-typed value's widened
+  // form, not `WidenedVectorComponents`.
+  SmallVector<Value *, 4> Components =
+      getVectorComponents(CI.getArgOperand(0), Builder);
+  Intrinsic::ID ID = CI.getCalledFunction()->getIntrinsicID();
+  Value *Acc = Components[0];
+  for (Value *Rhs : ArrayRef(Components).drop_front()) {
+    switch (ID) {
+    case Intrinsic::vector_reduce_and:
+      Acc = Builder.CreateAnd(Acc, Rhs);
+      break;
+    case Intrinsic::vector_reduce_or:
+      Acc = Builder.CreateOr(Acc, Rhs);
+      break;
+    case Intrinsic::vector_reduce_xor:
+      Acc = Builder.CreateXor(Acc, Rhs);
+      break;
+    case Intrinsic::vector_reduce_add:
+      Acc = Builder.CreateAdd(Acc, Rhs);
+      break;
+    case Intrinsic::vector_reduce_mul:
+      Acc = Builder.CreateMul(Acc, Rhs);
+      break;
+    case Intrinsic::vector_reduce_smax:
+      Acc = Builder.CreateBinaryIntrinsic(Intrinsic::smax, Acc, Rhs);
+      break;
+    case Intrinsic::vector_reduce_smin:
+      Acc = Builder.CreateBinaryIntrinsic(Intrinsic::smin, Acc, Rhs);
+      break;
+    case Intrinsic::vector_reduce_umax:
+      Acc = Builder.CreateBinaryIntrinsic(Intrinsic::umax, Acc, Rhs);
+      break;
+    case Intrinsic::vector_reduce_umin:
+      Acc = Builder.CreateBinaryIntrinsic(Intrinsic::umin, Acc, Rhs);
+      break;
+    default:
+      llvm_unreachable(
+          "isSupportedVectorReduceIntrinsic accepted an unhandled ID");
+    }
+  }
+  Acc->setName(CI.getName() + ".wide");
+  Widened[&CI] = Acc;
+  ToErase.push_back(&CI);
 }
 
 void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
@@ -1949,6 +2122,23 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     }
     if (isMaskAnyCall(*CI)) {
       widenMaskAny(*CI, Builder);
+      return true;
+    }
+    if (Function *Callee = CI->getCalledFunction();
+        Callee && isSupportedVectorReduceIntrinsic(Callee->getIntrinsicID())) {
+      widenVectorReduce(*CI, Builder);
+      return true;
+    }
+    if (Function *Callee = CI->getCalledFunction(); Callee &&
+        CI->getType()->isVectorTy() &&
+        isElementwiseVectorizableIntrinsic(Callee->getIntrinsicID()) &&
+        llvm::all_of(CI->args(), [&](const Value *Arg) {
+          return Arg->getType() == CI->getType();
+        })) {
+      // Roadmap H6g-b-a-i-a-i-b: `llvm.minnum`/`llvm.maxnum`/`llvm.smin`/
+      // `llvm.smax`/... over an already-decomposed divergent vector
+      // operand (see `widenVectorElementwise`).
+      widenVectorElementwise(*CI, Builder);
       return true;
     }
     if (std::optional<MatchedMaskedMemOp> Matched = matchMaskedLoad(*CI)) {
