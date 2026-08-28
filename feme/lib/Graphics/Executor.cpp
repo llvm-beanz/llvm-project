@@ -2416,14 +2416,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // clipping/rasterization path a vertex/tessellation/geometry primitive
   // already uses.
   if (Pipeline.hasMeshStages()) {
-    // (roadmap H6f leaves this) Nothing yet advertises `VK_EXT_mesh_
-    // shader`, so there is no real `VkPhysicalDeviceMeshShaderPropertiesEXT`
-    // to source these bounds from; a permissive placeholder is used
-    // instead, wide enough that no dispatch shape this milestone can
-    // exercise ever exceeds it.
-    AmplificationDispatchLimits MeshLimits;
-    MeshLimits.MaxGroupCount = {65535, 65535, 65535};
-    MeshLimits.MaxTotalGroupCount = 4194304;
+    // (roadmap H6f) `Pipeline.getMeshDispatchLimits()` is the pipeline's
+    // own real bound, sourced from `VkPhysicalDeviceMeshShaderProperties
+    // EXT::maxMeshWorkGroupCount`/`maxMeshWorkGroupTotalCount`
+    // (`feme::vulkan::GraphicsPipeline::buildExecutorPipeline`) -- the
+    // hardcoded placeholder this line used before H6f advertised those
+    // properties for real is gone.
+    const AmplificationDispatchLimits &MeshLimits =
+        Pipeline.getMeshDispatchLimits();
 
     const cpu::CompiledStage &MSStage = Pipeline.getMeshStage();
     const MeshState &Mesh = Pipeline.getMeshState();
@@ -2517,50 +2517,61 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
       if (Pipeline.hasTaskStage()) {
         const cpu::CompiledStage &TS = Pipeline.getTaskStage();
-        for (uint32_t Z = 0; Z != MDC.GroupCount[2]; ++Z)
-          for (uint32_t Y = 0; Y != MDC.GroupCount[1]; ++Y)
-            for (uint32_t X = 0; X != MDC.GroupCount[0]; ++X) {
-              std::array<uint32_t, 3> GroupID{X, Y, Z};
-              std::vector<uint8_t> GroupShared(
-                  TS.getArtifactInfo().GroupSharedSize);
-              uint32_t RequestedMeshGroupCount[3] = {0, 0, 0};
+        // (roadmap H6f) The task stage's own dispatch (`MDC.GroupCount`,
+        // mirroring `vkCmdDrawMeshTasksEXT`'s shape when a task stage is
+        // bound) is validated against `Pipeline.getTaskDispatchLimits()`
+        // exactly like the mesh stage's own dispatch below --
+        // `VkPhysicalDeviceMeshShaderPropertiesEXT::maxTaskWorkGroupCount`/
+        // `maxTaskWorkGroupTotalCount` -- rather than enumerated
+        // unconditionally; `AmplificationDispatchQueue::getGroupID` also
+        // gives the same X-fastest/Z-slowest order the replaced manual
+        // triple loop used.
+        Expected<AmplificationDispatchQueue> TaskQueue =
+            AmplificationDispatchQueue::create(
+                MDC.GroupCount, Pipeline.getTaskDispatchLimits());
+        if (!TaskQueue)
+          return TaskQueue.takeError();
+        for (uint64_t TaskI = 0; TaskI != TaskQueue->size(); ++TaskI) {
+          std::array<uint32_t, 3> GroupID = TaskQueue->getGroupID(TaskI);
+          std::vector<uint8_t> GroupShared(
+              TS.getArtifactInfo().GroupSharedSize);
+          uint32_t RequestedMeshGroupCount[3] = {0, 0, 0};
 
-              cpu::TaskResources TRes;
-              TRes.ResourceHeap = Draw.Resources.ResourceHeap;
-              TRes.BoundResources = Draw.Resources.BoundResources;
-              TRes.BoundImages = Draw.Resources.BoundImages;
-              TRes.BoundSamplers = Draw.Resources.BoundSamplers;
-              TRes.ImageHeap = Draw.Resources.ImageHeap;
-              TRes.SamplerHeap = Draw.Resources.SamplerHeap;
-              TRes.RootConstants = Draw.Resources.RootConstants;
-              TRes.GroupID = GroupID;
-              TRes.GroupCount = MDC.GroupCount;
-              TRes.GroupShared = GroupShared;
-              // `MeshGroupCount` addresses one contiguous 3-uint32 block;
-              // `TaskResources`/`FemeTaskArgs` only need its address.
-              TRes.MeshGroupCount = RequestedMeshGroupCount;
-              cpu::PreparedTaskBatch PTB =
-                  cpu::PreparedTaskBatch::create(TS.getResourceInfo(), TRes);
-              if (Error E = TS.invokeTask(PTB))
-                return E;
+          cpu::TaskResources TRes;
+          TRes.ResourceHeap = Draw.Resources.ResourceHeap;
+          TRes.BoundResources = Draw.Resources.BoundResources;
+          TRes.BoundImages = Draw.Resources.BoundImages;
+          TRes.BoundSamplers = Draw.Resources.BoundSamplers;
+          TRes.ImageHeap = Draw.Resources.ImageHeap;
+          TRes.SamplerHeap = Draw.Resources.SamplerHeap;
+          TRes.RootConstants = Draw.Resources.RootConstants;
+          TRes.GroupID = GroupID;
+          TRes.GroupCount = MDC.GroupCount;
+          TRes.GroupShared = GroupShared;
+          // `MeshGroupCount` addresses one contiguous 3-uint32 block;
+          // `TaskResources`/`FemeTaskArgs` only need its address.
+          TRes.MeshGroupCount = RequestedMeshGroupCount;
+          cpu::PreparedTaskBatch PTB =
+              cpu::PreparedTaskBatch::create(TS.getResourceInfo(), TRes);
+          if (Error E = TS.invokeTask(PTB))
+            return E;
 
-              std::array<uint32_t, 3> MeshGroupCount{
-                  RequestedMeshGroupCount[0], RequestedMeshGroupCount[1],
-                  RequestedMeshGroupCount[2]};
-              Expected<AmplificationDispatchQueue> Queue =
-                  AmplificationDispatchQueue::create(MeshGroupCount,
-                                                     MeshLimits);
-              if (!Queue)
-                return Queue.takeError();
-              for (uint64_t I = 0; I != Queue->size(); ++I) {
-                Expected<Meshlet> MeshletOut = runMeshWorkgroup(
-                    Queue->getGroupID(I), Queue->getGroupCount(),
-                    /*Payload=*/{});
-                if (!MeshletOut)
-                  return MeshletOut.takeError();
-                Meshlets.push_back(std::move(*MeshletOut));
-              }
-            }
+          std::array<uint32_t, 3> MeshGroupCount{RequestedMeshGroupCount[0],
+                                                 RequestedMeshGroupCount[1],
+                                                 RequestedMeshGroupCount[2]};
+          Expected<AmplificationDispatchQueue> Queue =
+              AmplificationDispatchQueue::create(MeshGroupCount, MeshLimits);
+          if (!Queue)
+            return Queue.takeError();
+          for (uint64_t I = 0; I != Queue->size(); ++I) {
+            Expected<Meshlet> MeshletOut =
+                runMeshWorkgroup(Queue->getGroupID(I), Queue->getGroupCount(),
+                                 /*Payload=*/{});
+            if (!MeshletOut)
+              return MeshletOut.takeError();
+            Meshlets.push_back(std::move(*MeshletOut));
+          }
+        }
       } else {
         Expected<AmplificationDispatchQueue> Queue =
             AmplificationDispatchQueue::create(MDC.GroupCount, MeshLimits);

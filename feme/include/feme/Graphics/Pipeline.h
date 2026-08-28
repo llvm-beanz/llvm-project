@@ -23,6 +23,7 @@
 #ifndef FEME_GRAPHICS_PIPELINE_H
 #define FEME_GRAPHICS_PIPELINE_H
 
+#include "feme/Graphics/AmplificationDispatch.h"
 #include "feme/Graphics/Geometry.h"
 #include "feme/Graphics/Mesh.h"
 #include "feme/Graphics/PatchPipeline.h"
@@ -519,9 +520,22 @@ public:
   /// no vertex-input/input-assembly state at all (roadmap H6f), so
   /// `setTessellationStages`/`setGeometryStage` must not also be called on
   /// a pipeline this is called on, and vice versa.
+  ///
+  /// \p MeshLimits bounds the mesh stage's own dispatch -- either
+  /// `PreparedDraw::MeshDraws`' own direct group count (no task stage) or
+  /// a bound task workgroup's own `EmitMeshTasksEXT` request (a task
+  /// stage) -- and \p TaskLimits bounds `TaskStage`'s own dispatch
+  /// (`MeshDraws`' group count, when a task stage is bound); both mirror
+  /// `VkPhysicalDeviceMeshShaderPropertiesEXT::maxMeshWorkGroupCount`/
+  /// `maxMeshWorkGroupTotalCount` and their `maxTaskWorkGroup*`
+  /// counterparts (roadmap H6f advertises the real values these are
+  /// constructed from; `Executor::executeDraws` used a hardcoded
+  /// placeholder before this parameter existed). \p TaskLimits is unused,
+  /// and may be left default-constructed, when \p TaskStage is null.
   void setMeshStage(std::shared_ptr<cpu::CompiledStage> TaskStage,
                     std::shared_ptr<cpu::CompiledStage> MeshStage,
-                    MeshState State);
+                    MeshState State, AmplificationDispatchLimits MeshLimits,
+                    AmplificationDispatchLimits TaskLimits = {});
 
   /// Whether this pipeline runs a mesh stage (roadmap H6e). True exactly
   /// when `setMeshStage` has been called.
@@ -535,6 +549,16 @@ public:
   const cpu::CompiledStage &getTaskStage() const { return *TaskStage; }
   /// Only valid to call when `hasMeshStages()` is true.
   const MeshState &getMeshState() const { return Mesh; }
+  /// Only valid to call when `hasMeshStages()` is true. See `setMeshStage`'s
+  /// own comment.
+  const AmplificationDispatchLimits &getMeshDispatchLimits() const {
+    return MeshLimits;
+  }
+  /// Only valid to call when `hasTaskStage()` is true. See `setMeshStage`'s
+  /// own comment.
+  const AmplificationDispatchLimits &getTaskDispatchLimits() const {
+    return TaskLimits;
+  }
 
 private:
   std::shared_ptr<cpu::CompiledStage> VertexStage;
@@ -548,6 +572,8 @@ private:
   std::shared_ptr<cpu::CompiledStage> TaskStage;
   std::shared_ptr<cpu::CompiledStage> MeshStage;
   MeshState Mesh;
+  AmplificationDispatchLimits MeshLimits;
+  AmplificationDispatchLimits TaskLimits;
   PrimitiveTopology Topology;
   RasterState Raster;
   DepthState Depth;

@@ -120,7 +120,12 @@ TEST(GraphicsPipelineTest, SetMeshStageRecordsTheMeshAndTaskStagesAndState) {
   Mesh.OutputTopology = MeshOutputTopology::Triangles;
   Mesh.MaxOutputVertices = 3;
   Mesh.MaxOutputPrimitives = 1;
-  Pipeline.setMeshStage(*TS, *MS, Mesh);
+  // (roadmap H6f) See `ExecutorTest.cpp`'s `makeMeshPipeline` comment: the
+  // dispatch limits are a required, explicit argument now.
+  AmplificationDispatchLimits Limits;
+  Limits.MaxGroupCount = {65535, 65535, 65535};
+  Limits.MaxTotalGroupCount = 4194304;
+  Pipeline.setMeshStage(*TS, *MS, Mesh, Limits, Limits);
 
   EXPECT_TRUE(Pipeline.hasMeshStages());
   EXPECT_TRUE(Pipeline.hasTaskStage());
@@ -149,7 +154,9 @@ TEST(GraphicsPipelineTest, SetMeshStageAllowsAnOmittedTaskStage) {
       PrimitiveTopology::TriangleList,
       RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
       BlendMode::Replace, /*SampleCount=*/1, Attachments);
-  Pipeline.setMeshStage(/*TaskStage=*/nullptr, *MS, MeshState{});
+  Pipeline.setMeshStage(
+      /*TaskStage=*/nullptr, *MS, MeshState{},
+      AmplificationDispatchLimits{{65535, 65535, 65535}, 4194304});
 
   EXPECT_TRUE(Pipeline.hasMeshStages());
   EXPECT_FALSE(Pipeline.hasTaskStage());

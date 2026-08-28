@@ -3170,8 +3170,10 @@ constexpr char SolidRedFragmentShaderIR[] = R"(
 /// like `CompiledStageTest`'s own mesh/task cases -- real per-vertex
 /// output-writing IR is blocked pending roadmap H6h/H6i (see this file's
 /// own comment above).
-Expected<GraphicsPipeline> buildMeshPipeline(Context &Ctx, bool WithTaskStage,
-                                             uint32_t AttachmentSize = 4) {
+Expected<GraphicsPipeline> buildMeshPipeline(
+    Context &Ctx, bool WithTaskStage, uint32_t AttachmentSize = 4,
+    AmplificationDispatchLimits MeshLimits = {{65535, 65535, 65535}, 4194304},
+    AmplificationDispatchLimits TaskLimits = {{65535, 65535, 65535}, 4194304}) {
   EntrySignature MeshSig;
   MeshSig.Elements = {makeElement(0, SignatureDirection::Output, 4,
                                   /*Location=*/std::nullopt,
@@ -3210,7 +3212,16 @@ Expected<GraphicsPipeline> buildMeshPipeline(Context &Ctx, bool WithTaskStage,
   Mesh.OutputTopology = MeshOutputTopology::Triangles;
   Mesh.MaxOutputVertices = 3;
   Mesh.MaxOutputPrimitives = 1;
-  Pipeline.setMeshStage(std::move(TS), std::move(*MS), Mesh);
+  // (roadmap H6f) `setMeshStage` now requires its own dispatch limits
+  // explicitly, mirroring the real `VkPhysicalDeviceMeshShaderProperties
+  // EXT`-sourced values `feme::vulkan::GraphicsPipeline::
+  // buildExecutorPipeline` supplies; \p MeshLimits/\p TaskLimits default to
+  // the same permissive bound `Executor.cpp` itself hardcoded before that
+  // plumbing existed, but a caller may tighten either to exercise
+  // rejection (see `RejectsAMeshDispatchExceedingItsPipelineDispatchLimits`
+  // below).
+  Pipeline.setMeshStage(std::move(TS), std::move(*MS), Mesh, MeshLimits,
+                        TaskLimits);
   return Pipeline;
 }
 
@@ -3309,6 +3320,68 @@ TEST(
   // above.
   for (uint8_t B : Storage)
     EXPECT_EQ(B, 0);
+}
+
+// (roadmap H6f) A direct mesh dispatch (no task stage) exceeding the
+// pipeline's own `getMeshDispatchLimits()` is rejected rather than run --
+// the real counterpart of `Pipeline.h`'s hardcoded placeholder this
+// milestone replaced, mirroring `maxComputeWorkGroupCount`'s own draw-time
+// enforcement for compute (`CommandBuffer.cpp`'s `validateGroupCount`).
+TEST(ExecutorTest, RejectsADirectMeshDispatchExceedingItsPipelineLimits) {
+  Context Ctx;
+  AmplificationDispatchLimits TightMeshLimits{{1, 1, 1}, 1};
+  Expected<GraphicsPipeline> Pipeline = buildMeshPipeline(
+      Ctx, /*WithTaskStage=*/false, /*AttachmentSize=*/4, TightMeshLimits);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  uint32_t Size = 4;
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {4, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
+}
+
+// The task-dispatch counterpart of the test above: a task stage's own
+// dispatch (`MeshDrawCommand::GroupCount`, when a task stage is bound) is
+// checked against `getTaskDispatchLimits()`, independently of the mesh
+// dispatch limit the task's own `EmitMeshTasksEXT` request is separately
+// checked against.
+TEST(ExecutorTest, RejectsATaskDispatchExceedingItsPipelineLimits) {
+  Context Ctx;
+  AmplificationDispatchLimits Permissive{{65535, 65535, 65535}, 4194304};
+  AmplificationDispatchLimits TightTaskLimits{{1, 1, 1}, 1};
+  Expected<GraphicsPipeline> Pipeline =
+      buildMeshPipeline(Ctx, /*WithTaskStage=*/true, /*AttachmentSize=*/4,
+                        Permissive, TightTaskLimits);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  uint32_t Size = 4;
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {4, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
 }
 
 } // namespace
