@@ -952,4 +952,161 @@ TEST(CompiledStageTest, InvokeGeometryRunsStageAwarePath) {
   EXPECT_FALSE(Artifact.Signature.empty());
 }
 
+// Roadmap H6c: a mesh entry point dispatches as a bounded workgroup exactly
+// like compute, so `feme::cpu::EntryWrapperPass` -- the same group loop,
+// groupshared allocation and barrier-region splitting compute already
+// uses -- builds its `feme_cpu_entry_<name>` unmodified (see Pipeline.cpp's
+// wrapper-selection comment). This writes `GroupID.x` into groupshared,
+// barriers, reads it back, doubles it, and stores the result into a bound
+// buffer -- covers `FemeMeshArgs`' shared `Resources`/`GroupID`/
+// `GroupShared` prefix reaching a real compiled mesh entry point exactly
+// the way it already reaches a compute one.
+constexpr char MeshGroupSharedBarrierShaderIR[] = R"(
+  @shared = internal addrspace(3) global [4 x i32] undef
+  define void @ms_main() #0 {
+    %h = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+    %gid = call i32 @llvm.dx.group.id(i32 0)
+    %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 0
+    store i32 %gid, ptr addrspace(3) %ptr
+    call void @llvm.dx.group.memory.barrier.with.group.sync()
+    %val = load i32, ptr addrspace(3) %ptr
+    %doubled = mul i32 %val, 2
+    %offset = mul i32 %gid, 4
+    call void @llvm.dx.resource.store.rawbuffer.i32(
+        target("dx.RawBuffer", i8, 1, 0) %h, i32 %offset, i32 poison, i32 %doubled)
+    ret void
+  }
+  declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefromheap(i32, i1)
+  declare void @llvm.dx.resource.store.rawbuffer.i32(
+      target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
+  declare i32 @llvm.dx.group.id(i32)
+  declare void @llvm.dx.group.memory.barrier.with.group.sync()
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+// Same shape as `MeshGroupSharedBarrierShaderIR`, tagged as the task
+// (amplification) stage instead -- `MeshState`'s own file comment notes the
+// task stage dispatches the same bounded-workgroup way mesh does.
+constexpr char TaskGroupSharedBarrierShaderIR[] = R"(
+  @shared = internal addrspace(3) global [4 x i32] undef
+  define void @ts_main() #0 {
+    %h = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+    %gid = call i32 @llvm.dx.group.id(i32 0)
+    %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 0
+    store i32 %gid, ptr addrspace(3) %ptr
+    call void @llvm.dx.group.memory.barrier.with.group.sync()
+    %val = load i32, ptr addrspace(3) %ptr
+    %doubled = mul i32 %val, 2
+    %offset = mul i32 %gid, 4
+    call void @llvm.dx.resource.store.rawbuffer.i32(
+        target("dx.RawBuffer", i8, 1, 0) %h, i32 %offset, i32 poison, i32 %doubled)
+    ret void
+  }
+  declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefromheap(i32, i1)
+  declare void @llvm.dx.resource.store.rawbuffer.i32(
+      target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
+  declare i32 @llvm.dx.group.id(i32)
+  declare void @llvm.dx.group.memory.barrier.with.group.sync()
+  attributes #0 = { "hlsl.shader"="amplification" "hlsl.numthreads"="1,1,1" }
+)";
+
+Expected<std::unique_ptr<CompiledStage>>
+compileStage(Context &Ctx, StringRef IR, ShaderStage Stage,
+            unsigned WaveSize = 4) {
+  SMDiagnostic Err;
+  auto LLVMMod = parseAssemblyString(IR, Err, Ctx.getLLVMContext());
+  if (!LLVMMod)
+    return createStringError(inconvertibleErrorCode(), "parse error: %s",
+                             Err.getMessage().str().c_str());
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
+  StageCompileOptions Opts;
+  Opts.Stage = Stage;
+  Opts.WaveSize = WaveSize;
+  return CompiledStage::create(Ctx, std::move(Mod), Opts);
+}
+
+TEST(CompiledStageTest, InvokeMeshReusesComputeGroupSharedAndBarrierLowering) {
+  Context Ctx;
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      compileStage(Ctx, MeshGroupSharedBarrierShaderIR, ShaderStage::Mesh);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Mesh);
+
+  std::vector<int32_t> Buffer(4, -1);
+  FemeDescriptor Desc{};
+  Desc.Data = Buffer.data();
+  Desc.SizeInBytes = Buffer.size() * sizeof(int32_t);
+  Desc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Desc.Flags = FEME_DESCRIPTOR_UAV;
+
+  MeshResources Resources;
+  Resources.ResourceHeap = ArrayRef<FemeDescriptor>(&Desc, 1);
+  Resources.GroupID = {2, 0, 0};
+  Resources.GroupCount = {4, 1, 1};
+  std::vector<uint8_t> GroupShared(16, 0);
+  Resources.GroupShared = GroupShared;
+  PreparedMeshBatch Prepared =
+      PreparedMeshBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeMesh(Prepared), Succeeded());
+  // Group 2 writes 2 (its own GroupID) doubled, i.e. 4, at its own slot.
+  EXPECT_EQ(Buffer, (std::vector<int32_t>{-1, -1, 4, -1}));
+}
+
+TEST(CompiledStageTest, InvokeMeshRejectsANonMeshStage) {
+  Context Ctx;
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      compile(Ctx); // ordinary compute stage.
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+
+  MeshResources Resources;
+  PreparedMeshBatch Prepared =
+      PreparedMeshBatch::create((*Stage)->getResourceInfo(), Resources);
+  EXPECT_THAT_ERROR((*Stage)->invokeMesh(Prepared), Failed());
+}
+
+TEST(CompiledStageTest, InvokeTaskReusesComputeGroupSharedAndBarrierLowering) {
+  Context Ctx;
+  Expected<std::unique_ptr<CompiledStage>> Stage = compileStage(
+      Ctx, TaskGroupSharedBarrierShaderIR, ShaderStage::Amplification);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Amplification);
+
+  std::vector<int32_t> Buffer(4, -1);
+  FemeDescriptor Desc{};
+  Desc.Data = Buffer.data();
+  Desc.SizeInBytes = Buffer.size() * sizeof(int32_t);
+  Desc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Desc.Flags = FEME_DESCRIPTOR_UAV;
+
+  TaskResources Resources;
+  Resources.ResourceHeap = ArrayRef<FemeDescriptor>(&Desc, 1);
+  Resources.GroupID = {3, 0, 0};
+  Resources.GroupCount = {4, 1, 1};
+  std::vector<uint8_t> GroupShared(16, 0);
+  Resources.GroupShared = GroupShared;
+  PreparedTaskBatch Prepared =
+      PreparedTaskBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeTask(Prepared), Succeeded());
+  // Group 3 writes 3 (its own GroupID) doubled, i.e. 6, at its own slot.
+  EXPECT_EQ(Buffer, (std::vector<int32_t>{-1, -1, -1, 6}));
+}
+
+TEST(CompiledStageTest, InvokeTaskRejectsANonTaskStage) {
+  Context Ctx;
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      compile(Ctx); // ordinary compute stage.
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+
+  TaskResources Resources;
+  PreparedTaskBatch Prepared =
+      PreparedTaskBatch::create((*Stage)->getResourceInfo(), Resources);
+  EXPECT_THAT_ERROR((*Stage)->invokeTask(Prepared), Failed());
+}
+
 } // namespace

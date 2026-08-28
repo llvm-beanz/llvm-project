@@ -367,8 +367,28 @@ Expected<PipelineResult> runPipeline(Module &M,
       if (Error E = runAndCheck("wrapping", GeometryWrapperPass()))
         return std::move(E);
       break;
+    // Roadmap H6c: a mesh or task (amplification) entry point dispatches
+    // as a bounded workgroup exactly like compute (`VK_EXT_mesh_shader`'s
+    // own `LocalSize`/`gl_WorkGroupID` model, not geometry's per-primitive
+    // batch), so `EntryWrapperPass` -- the compute wrapper's group loop,
+    // groupshared allocation and barrier-region splitting -- builds
+    // `feme_cpu_entry_<name>` for either exactly the way it already does
+    // for compute, unmodified: `FemeMeshArgs`/`FemeTaskArgs` (RuntimeABI.h)
+    // share `FemeDispatchArgs`'s own field layout for every field this pass
+    // reads (`Resources`, `GroupID`, `GroupShared`), so no stage-specific
+    // wrapper is needed for that part of the job at all. What is *not* yet
+    // wired here (left to roadmap H6h/H6i/H6d, see agent_thoughts.md's H6c
+    // entry): lowering a per-vertex/per-primitive mesh output store, a
+    // task payload store, `SetMeshOutputsEXT`, or `EmitMeshTasksEXT` --
+    // none of those has a `feme.stage.*` op reaching this pipeline yet, so
+    // only a mesh/task entry point using ordinary resources/root constants
+    // and groupshared/barrier cooperation compiles and runs correctly
+    // end-to-end today.
     case feme::ShaderStage::Amplification:
     case feme::ShaderStage::Mesh:
+      if (Error E = runAndCheck("wrapping", EntryWrapperPass()))
+        return std::move(E);
+      break;
     case feme::ShaderStage::Library:
     case feme::ShaderStage::RayGeneration:
     case feme::ShaderStage::AnyHit:

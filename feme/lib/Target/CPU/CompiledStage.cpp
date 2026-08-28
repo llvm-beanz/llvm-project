@@ -392,6 +392,24 @@ Error CompiledStage::invokeGeometry(
   return Error::success();
 }
 
+Error CompiledStage::invokeMesh(const PreparedMeshBatch &Prepared) const {
+  if (Stage != ShaderStage::Mesh)
+    return createStringError(inconvertibleErrorCode(),
+                             "invokeMesh is only legal for mesh stages");
+  FemeMeshArgs Args = Prepared.args();
+  reinterpret_cast<MeshEntryPointFn>(EntryFn)(&Args);
+  return Error::success();
+}
+
+Error CompiledStage::invokeTask(const PreparedTaskBatch &Prepared) const {
+  if (Stage != ShaderStage::Amplification)
+    return createStringError(inconvertibleErrorCode(),
+                             "invokeTask is only legal for task stages");
+  FemeTaskArgs Args = Prepared.args();
+  reinterpret_cast<TaskEntryPointFn>(EntryFn)(&Args);
+  return Error::success();
+}
+
 StageArtifactInfo CompiledStage::getArtifactInfo() const {
   StageArtifactInfo Artifact = StageArtifactInfo::fromResourceInfo(Info);
   Artifact.Stage = Stage;
