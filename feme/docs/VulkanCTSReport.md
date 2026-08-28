@@ -10956,3 +10956,193 @@ VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   deqp-vk --deqp-caselist-file=draw_sample.txt \
     --deqp-log-filename=draw_h6g_b_a.qpa
 ```
+
+## Roadmap H6g-b-a-i: measured impact (fix Vulkan array-stride correctness in `VulkanLayoutUtils`/`ConvertSPIRVToLLVMPass`)
+
+**Starting point.** H6g-b-a's own re-run found the new dominant single
+cause of its 218-case `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37`
+bucket (80 of 218 cases) was `ConvertSPIRVToLLVMPass` failing to
+legalize `spirv.AccessChain` outright ("failed to legalize operation
+'spirv.AccessChain' that was explicitly marked illegal"). This row's
+own ask was to isolate which `spirv.AccessChain` shape the existing
+conversion patterns don't cover, and fix it.
+
+**Root cause.** Reproduced directly by re-running the exact 218-case
+bucket through feme's own Vulkan ICD
+(`VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json`,
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`) rather than theorizing: the base
+pointer type on every one of the 80 failing `spirv.AccessChain` ops
+was a `StorageBuffer`/`Block`-decorated struct holding ordinary
+vertex-attribute data (`vec2`/`vec3`/`vec4` float/int arrays of 4
+elements each) -- a generic CTS `RWStructuredBuffer`-style SSBO, not
+mesh-shader-specific content at all. It only surfaces in this test
+group because H6g-b-a's own fix is the first thing to let this
+particular SPIR-V shape reach legalization at all here (it is very
+likely exercised by other, non-mesh `dEQP-VK` groups already, but
+confirming/fixing that is out of this row's own scope).
+
+`convertArrayType` (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`)
+validates a `!spirv.array<N x T, stride=S>`'s declared stride `S`
+against `T`'s own compact `SPIRVType::getSizeInBytes()` and rejects
+the array outright if they don't match exactly. For `vector<3xf32>`,
+that compact size is 12 bytes -- but the Vulkan spec's std430/std140
+layout rules require an array's stride to be a multiple of its
+element's *base alignment*, and a 3-component vector's base alignment
+is rounded up to that of a 4-component one (16 bytes), specifically
+*because* 3-component vectors are otherwise irregular to pack. Every
+conformant SPIR-V producer (glslang included) therefore emits
+`ArrayStride=16` for `array<N x vec3<f32>>`, not 12 -- so this compact-
+size check was spuriously rejecting every single one of these
+(extremely common) arrays as having an "unnatural" stride. Confirmed
+independently that MLIR's own `DataLayout::getTypeSize` already
+computes a real LLVM `!llvm.array<N x vector<3xf32>>`'s per-element
+size as 16 bytes too (`getDefaultTypeSizeInBits` in
+`DataLayoutInterfaces.cpp` rounds a vector's innermost dimension up to
+the next power of 2), meaning a plain, unpadded LLVM array genuinely
+does reproduce stride 16 in practice -- rejecting it was simply wrong,
+not a conservative-but-safe check.
+
+A second, independently-triggerable copy of the same flaw was found in
+`VulkanLayoutUtils::decorateType(spirv::ArrayType, Size&, Size&)`
+(`mlir/lib/Dialect/SPIRV/Utils/LayoutUtils.cpp`), which computes the
+*canonical* stride and total size for an array when decorating an
+undecorated composite type. It also used the element's raw compact
+size (both for the stride it assigns and, less obviously, for the
+array's own total size used to place any struct member that follows
+it) instead of the alignment-rounded value. This function backs (a)
+`SPIRVCompositeTypeLayoutPass` (`decorate-spirv-composite-type-layout`,
+which emits real `ArrayStride` decorations into SPIR-V -- meaning it
+likely emitted too-small strides/offsets for such arrays historically)
+and (b) `convertStructTypeWithOffset`'s own struct-identity check in
+`SPIRVToLLVM.cpp` (not used by feme, which has its own struct
+converter for an unrelated, already-solved reason, but a real
+consumer of the same utility nonetheless).
+
+**The fix.** Added a new public helper,
+`VulkanLayoutUtils::getNaturalArrayStride(Type elementType)`, that
+returns the element's size rounded up to its own alignment (reusing
+the existing private `decorateType(Type, Size&, Size&)` overload to
+compute both). Wired it into two places:
+
+1. `convertArrayType`'s stride-validity check, replacing the direct
+   `SPIRVType::getSizeInBytes()` comparison.
+2. `VulkanLayoutUtils::decorateType(spirv::ArrayType, ...)`'s own
+   stride computation (`llvm::alignTo(elementSize, elementAlignment)`)
+   and total-size computation (`stride * numElements`, not
+   `elementSize * numElements`), so the canonical layout this utility
+   produces is now internally consistent with the corrected stride.
+
+Small, surgical diff across
+`mlir/include/mlir/Dialect/SPIRV/Utils/LayoutUtils.h`,
+`mlir/lib/Dialect/SPIRV/Utils/LayoutUtils.cpp`, and
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`.
+
+**New tests.**
+
+- `mlir/test/Conversion/SPIRVToLLVM/spirv-types-to-llvm.mlir`:
+  `array_with_natural_vector3_stride`, a
+  `!spirv.array<4 x vector<3xf32>, stride=16>` now converting to
+  `!llvm.array<4 x vector<3xf32>>` (previously rejected).
+- `mlir/test/Conversion/SPIRVToLLVM/spirv-types-to-llvm-invalid.mlir`:
+  `array_with_unnatural_vector3_stride`, the same element type but
+  `stride=12` (the wrong, unrounded value) confirmed still correctly
+  rejected -- guards against the fix becoming overly permissive.
+- `mlir/test/Dialect/SPIRV/Transforms/layout-decoration.mlir`: a
+  struct with an undecorated `!spirv.array<4xvector<3xf32>>` member
+  now decorated with `stride=16` (not 12) and its following `f32`
+  member correctly placed at offset 64 (not 48), covering the
+  `VulkanLayoutUtils::decorateType` fix specifically.
+- `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-storage-buffer.mlir`:
+  `read_vec3_array_element`, a `StorageBuffer` block with a fixed-size
+  `vec3` array member (the exact shape that reproduced the real CTS
+  failure) converting through feme's own resource-handle conversion
+  path to the expected `llvm.spv.resource.getpointer`/GEP/load
+  sequence, mirroring the file's existing `rtarray`-based cases.
+
+```
+ninja check-mlir-target-spirv: 23/23 passing (unaffected; this row
+  doesn't touch Target/SPIRV)
+ninja check-mlir-dialect-spirv: 52/52 passing (0 regressions; +1 new
+  split-input-file case added to the existing
+  `layout-decoration.mlir` -- lit counts files, not `RUN`-split cases
+  within them, so the discovered-test total is unchanged)
+ninja check-mlir-conversion-spirvtollvm (SPIRVToLLVM lit suite): 23/23
+  passing (0 regressions; +2 new split-input-file cases added to
+  existing files, same file-granularity reasoning as above)
+MLIRSPIRVToLLVMTests (gtest unit suite): 3/3 passing, unaffected
+ninja check-feme (assertions-enabled, ccache build):
+Total Discovered Tests: 2009
+  Unsupported:   59 (2.94%)
+  Passed     : 1950 (97.06%)
+```
+
+`check-feme` stays byte-identical to H6g-b-a's own baseline
+(1950/2009, 0 `Failed`) -- this row extends an existing test file with
+a new `RUN`-split case rather than adding a new discovered test.
+
+**A diagnostic-logged re-run of the exact 218-case `vkRefUtil.cpp:37`
+bucket** H6g-b-a's own text named, through feme's actual Vulkan ICD,
+confirms the fix directly:
+
+```
+| Count | Cause (before -> after this row's fix) |
+|---|---|
+| 80 -> 0  | `spirv.AccessChain` legalization failures (this row's own named cause -- fully cleared) |
+| 1  -> 81 | `spirv.All` legalization failures (new dominant cause, tracked as H6g-b-a-i-a) |
+| 11 -> 11 | `spirv.MemoryBarrier` legalization failures (unaffected, already out of scope) |
+| 4  -> 4  | `spirv.AtomicExchange` legalization failures (unaffected, already out of scope) |
+| 1  -> 1  | `spirv.EXT.EmitMeshTasks` legalization failure (unaffected, already out of scope) |
+| 1  -> 1  | `spirv.Any` legalization failure (unaffected, already out of scope) |
+```
+
+All 80 formerly-`spirv.AccessChain`-blocked cases now progress further
+and land squarely in the new `spirv.All` bucket (81 = 80 + the
+pre-existing 1) -- a clean, single-cause hand-off consistent with this
+milestone's established pattern (fixing the dominant blocker in a
+bucket routes the same cases into whatever the next dominant blocker
+is, rather than spreading them across many new failure modes). Overall
+bucket totals are unchanged (218/218 still fail, as expected: none of
+these cases can succeed until every remaining legalization gap in
+their shared SPIR-V content is closed), but the specific cause each
+one hits has moved strictly forward, confirming real progress.
+
+**`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample**
+stays byte-identical to every prior row's own recorded totals:
+
+```
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+**0 regressions** (expected: `vector<3xf32>`/similar array-of-vector
+layouts affected by this fix are common but this fix only makes
+previously over-rejected, spec-conformant SPIR-V accepted -- it never
+changes behavior for any SPIR-V this sample already exercised
+successfully).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed
+no change needed: this is a pure MLIR SPIR-V layout/type-conversion
+correctness fix, touching no `feme`-advertised feature bit or
+extension.
+
+**Milestone H6 does not close.** This row's own fix directly clears
+the dominant cause it named, but the same re-run that confirms that
+also surfaces a new dominant cause in its place -- `spirv.All`
+legalization failures, tracked as new roadmap row H6g-b-a-i-a --
+alongside the already-tracked H6g-b-b and H6g-b-c.
+
+**Reproducing this row.** Same ICD build and methodology as every
+prior mesh-shading row, run from `VK-GL-CTS/run` (relative
+shader-source resource paths require it):
+
+```shell
+cd /path/to/VK-GL-CTS/run
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  deqp-vk --deqp-caselist-file=<218-case-bucket>.txt \
+    --deqp-log-filename=diag_check.qpa
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-filename=draw_h6g_b_a_i.qpa
+```
