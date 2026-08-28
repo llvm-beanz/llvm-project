@@ -33,16 +33,17 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6g-b and close out milestone H6?
+Can you complete H6g-b-a?
 
-> **Re-run `dEQP-VK.mesh_shader.*` and confirm the 235
-> `vkCreateGraphicsPipelines`/33 `vkPipelineConstructionUtil.cpp` ->
-> `VK_ERROR_INITIALIZATION_FAILED` content-compilation failures clear**, once
-> real mesh/task shader content can actually compile end-to-end -- still
-> blocked: H6c-a-a-i and H6c-a-a-ii have both now landed (`SetMeshOutputsEXT`
-> canonicalization and `flattenMeshRow`'s `PerPrimitive` routing, respectively),
-> but H6c-a-a-ii's own closing re-run confirms `H6c-a-a-iii`
-> (`resolveOffsetWithinElement`'s arrayed-builtin-block crash, still hitting a
-> subset of this row's own cases instead of a clean
-> `VK_ERROR_INITIALIZATION_FAILED`) remains the sole open blocker. This row now
-> depends only on that remaining row
+> **`ConvertSPIRVToLLVMPass`/the MLIR SPIR-V dialect deserializer rejects
+> `PerPrimitiveEXT` with `error: unhandled Decoration : 'PerPrimitiveEXT'`,
+> failing SPIR-V module deserialization outright** before `feme` ever sees the
+> module -- the single dominant cause found within H6g-b's own 235-case
+> `vkCreateGraphicsPipelines` bucket (202 of 232 cases still failing there hit
+> exactly this, per a diagnostic-logged re-run of that bucket alone), and a
+> prerequisite for any mesh entry with a real `PerPrimitiveEXT`-decorated
+> per-primitive output block (the same shape `H6c-a-a-iii`'s own fix already had
+> to reason about downstream, but never gets the chance to reach, since
+> deserialization fails first). Root cause not yet isolated (upstream MLIR
+> SPIR-V dialect decoration table, or a `feme`-local import shim over it -- not
+> yet determined which)
