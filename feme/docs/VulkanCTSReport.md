@@ -9838,3 +9838,100 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
  --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6i.qpa
 ```
+
+## Roadmap H6g: measured impact (`dEQP-VK.mesh_shader.*` post-H6h/H6i triage)
+
+This row closes out H6g's own triage scope. H6g's original text assumed
+that once H6h (`TaskPayloadWorkgroupEXT` address-space/import) and H6i
+(`CanonicalizeStagePass` mesh/amplification acceptance) both landed, a
+re-run would let the 235 `vkCreateGraphicsPipelines`/33
+`vkPipelineConstructionUtil.cpp` -> `VK_ERROR_INITIALIZATION_FAILED`
+content-compilation failures clear. Both prerequisites did land (H6h,
+H6i), so this row re-ran the full `dEQP-VK.mesh_shader.*` group and the
+`dEQP-VK.draw.*` 1957-case regression sample to check.
+
+```
+dEQP-VK.mesh_shader.* (28044 cases):
+Before this row (H6h/H6i's own recorded baseline):
+  Passed:        1/28044 (0.0%)
+  Failed:        337/28044 (1.2%)
+  Not supported: 27706/28044 (98.8%)
+
+After this row:
+  Passed:        1/28044 (0.0%)
+  Failed:        337/28044 (1.2%)
+  Not supported: 27706/28044 (98.8%)
+```
+
+Byte-identical, and the 337 failures split by API call and error code
+into the exact same four buckets H6f's original run found: 235
+`vkCreateGraphicsPipelines` -> `VK_ERROR_INITIALIZATION_FAILED`, 68
+`vkCreateRenderPass` -> `VK_ERROR_FORMAT_NOT_SUPPORTED`, 33
+`vkPipelineConstructionUtil.cpp` -> `VK_ERROR_INITIALIZATION_FAILED`, 1
+`vkGetPhysicalDeviceImageFormatProperties` ->
+`VK_ERROR_FORMAT_NOT_SUPPORTED` (235+68+33+1 = 337).
+
+**This means H6g's own original text under-scoped the real blocker for
+the content-compilation buckets.** H6h/H6i landing was necessary but not
+sufficient: real mesh/task content still cannot compile end-to-end
+because nothing wires `MeshOutputBuilder`/`TaskPayloadBuilder` into a
+canonicalized entry's actual output/payload writes yet -- that wiring is
+H6c-a-a (mesh output) and H6c-a-b (task payload), the two rows H6c-a's
+own investigation split out *before* H6g was written, and H6g's
+dependency list should have named them directly instead of only their
+own already-satisfied prerequisites (H6d, H6h, H6i, all now done). H6i's
+own text already flagged this precisely ("`feme.stage.task.payload.store`
+has no caller reachable from `EntryWrapperPass` ... until H6c-a-b wires
+one in"); this row's job is to confirm that measurement holds and correct
+H6g's own roadmap text and dependency list accordingly, not to re-litigate
+it.
+
+**The format-related bucket (68+1) is independently decidable today,
+regardless of H6c-a-a/H6c-a-b.** Every one of these 69 cases fails
+because a render-pass attachment format or an image-format query names a
+format/usage combination outside the mandatory table roadmap H8 ("Format
+table completeness for the graphics profile") already exists to close --
+nothing about *which* formats these particular mesh-shader cases exercise
+is mesh-shading-specific. Decision: no new roadmap row. This bucket folds
+into H8's own existing, still-open scope; H8's own entry now cross-
+references this finding.
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt`
+sample, same file every prior row's own report used:
+
+```
+Before (H6i's own baseline):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical failing-case set (diffed by name, not just count). **0
+regressions, 0 new passes.**
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: this row is pure CTS triage plus a roadmap/report update, with no
+source change at all -- no feature bit, limit, or extension is touched.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1934/1993** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), unchanged from H6i's own baseline -- this row adds no new unit
+tests, since there is no new source behavior to cover.
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                               # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+ /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+ --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6g.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+ /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+ --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6g.qpa
+```
