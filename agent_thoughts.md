@@ -40257,3 +40257,212 @@ This session lands four commits, each independently buildable/testable:
 `VulkanCTSReport.md` documentation updates, and (4) this
 `agent_thoughts.md` entry, per the standing instruction to commit it
 separately as the final commit.
+
+# H6e: chaining the mesh path into `Executor::executeDraws`
+
+## Scope check before writing code
+
+Read the roadmap row and its H5d precedent ("Chain the geometry stage
+into `Executor::executeDraws`") in full before touching anything, since
+this row's own text explicitly says it mirrors H5d's approach. H5d's own
+`agent_thoughts.md` entry and its `Executor.cpp` diff show the shape:
+geometry output gets flattened into the same vertex-shaped storage the
+raw vertex-shader path already produces, then falls through into one
+shared clip/cull/rasterize/fragment-shade tail. H6e's own row asks for
+exactly the mesh-shading analogue of that, plus "a task entry point's
+dispatch driving which mesh workgroups run when one is bound" -- the
+amplification half H5d never had to deal with, since geometry shaders
+have no upstream task-equivalent stage.
+
+Confirmed H6d (done) already supplies everything this row's own
+dependency line requires: `AmplificationDispatchQueue`/
+`AmplificationDispatchLimits` (bounded, validated mesh-workgroup
+enumeration) and `Meshlet`/`assembleMeshlet` (a mesh workgroup's trimmed,
+re-validated output). Confirmed H6h ("TaskPayloadWorkgroupEXT" import)
+and H6i (`CanonicalizeStagePass`'s stage filter for Mesh/Amplification)
+are still both unimplemented, meaning no compiled mesh/task entry point
+can write `FemeMeshArgs::ActualVertexCount`/`VertexOutputs` or
+`FemeTaskArgs::MeshGroupCount` from real IR today -- so, deliberately,
+this row's own scope is "chain the wiring", not "prove it moves real
+triangles", the same "correctly wired, no real content yet" position H6c
+and H6d were both explicitly scoped down to as well.
+
+## Why `RasterizePrimitives` needed to be extracted first
+
+`executeDraws`'s existing per-`DrawCommand` loop was one long function
+body: vertex fetch/shade, then (if bound) geometry invocation and stream
+flattening, then an unconditional clip/viewport/cull/tile-bin/fragment-
+shade tail operating on whatever `RasterOutRef`/index buffers the
+preceding stage produced. Chaining mesh output into that tail without
+duplicating it required either (a) making the mesh path loop back
+through the vertex/geometry code paths pretending to be a degenerate
+vertex draw, which would smuggle in wrong assumptions (mesh has no
+vertex-input/input-assembly state at all, and its `RasterClass` is
+`Mesh.OutputTopology`-derived rather than `VkPrimitiveTopology`-derived),
+or (b) extracting the shared tail into its own callable and having both
+paths feed it. Chose (b), mirroring the fact that H5d itself effectively
+did the same thing inline (falling through from geometry into the same
+tail vertex draws already used) without ever factoring it out as its own
+named unit -- factoring it out now pays for itself doubly, since the
+mesh path's own inputs (`RasterOutRef`, absolute triangle/line index
+lists, `RasterClass`) are structurally identical in shape to what
+geometry already built, just sourced from meshlets instead of a
+geometry stream.
+
+Extracted `RasterizePrimitives` as a lambda (not a free function),
+since it closes over enough per-draw-call state (bound framebuffer,
+pipeline, viewport/scissor, per-attachment formats) that turning it into
+a free function would require a large parameter-object refactor out of
+scope for this row. Verified via `./FeMeGraphicsTests` that all 200
+pre-existing tests still passed unchanged after the extraction, before
+writing a single line of new mesh-path logic -- catching one incidental
+bug along the way: geometry-stage point output was using a stale
+pre-geometry vertex count instead of `RasterOutRef.InvocationCount`,
+which the extraction's parameter list forced into the open. Fixed it in
+the same commit since it was directly encountered while doing the
+extraction, per the "fix bugs tightly coupled to the code you're
+changing" rule.
+
+## `GraphicsPipeline::setMeshStage`/`hasMeshStages`
+
+Mirrored `setGeometryStage` exactly in shape. The one design choice: a
+mesh stage is required (asserted non-null, matching how a vertex stage
+is required for the ordinary graphics path) but a task stage is
+optional, since `vkCmdDrawMeshTasksEXT` is valid with no task shader
+bound at all (direct mesh dispatch) per the `VK_EXT_mesh_shader` spec.
+Used the existing null-`FragmentStage` precedent (H2j, depth/stencil-only
+pipelines) as the model for "a stage pointer that is sometimes
+legitimately null", rather than inventing a new convention.
+
+## Converting `VSSig`/`VS` from unconditional to conditional
+
+`executeDraws` unconditionally called `Pipeline.getVertexStage()` near
+the top to build `VSSig` before this row. Since a mesh pipeline has no
+vertex stage at all, this had to become conditional. Chose an
+`std::optional<EntrySignature> VSSigValue` populated only when
+`!Pipeline.hasMeshStages()`, then renamed every downstream use-site
+(`*VSSig` dereferences, `VS.`-prefixed calls) to match, rather than
+leaving the old unconditional path and adding a parallel mesh path next
+to it -- keeping one signature-resolution code path with a single
+branch point is easier to audit than two independent ones that must
+agree on RasterClass/RasterSig derivation. `RasterSig` itself became a
+three-way choice: `MeshSig` if bound, else `GSSig` if bound, else the
+pre-geometry (vertex/tessellation-evaluation) signature -- directly
+mirroring the existing two-way `GSSig`-or-not choice H5d already
+established, just extended by one more link in the chain.
+
+## The dispatch-and-rasterize branch itself
+
+Placed as a large early-return block (`if (Pipeline.hasMeshStages()) { ...
+return Error::success(); }`) before the vertex-draw-command loop, rather
+than interleaving mesh and vertex logic inside one shared loop --
+`Draw.Draws` and `Draw.MeshDraws` are asserted mutually exclusive on
+entry, so a `PreparedDraw` is either an ordinary draw or a mesh draw
+batch, never both, and keeping them as two textually separate branches
+that both terminate in the same `RasterizePrimitives` call was clearer
+than threading a per-iteration mesh/vertex discriminant through one
+combined loop.
+
+Per `MeshDrawCommand`: if no task stage is bound, `MDC.GroupCount` is
+fed directly into a fresh `AmplificationDispatchQueue` (mirroring
+`vkCmdDrawMeshTasksEXT`'s own direct-dispatch shape) and every enumerated
+group ID runs the mesh workgroup once. If a task stage *is* bound,
+`MDC.GroupCount` instead dispatches the *task* stage (mirroring
+`vkCmdDrawMeshTasksEXT` used with a task shader, where the app-supplied
+counts describe task workgroups, not mesh ones); each task workgroup is
+invoked via `CompiledStage::invokeTask` (X-fastest iteration order,
+mirroring `feme::cpu::runDispatch`'s own existing triple loop, which is
+the only existing enumeration-order precedent in the codebase), its
+resulting `FemeTaskArgs::MeshGroupCount` is read back, and *that* count
+seeds a fresh per-task-workgroup `AmplificationDispatchQueue` whose
+enumerated mesh workgroups are what actually runs `invokeMesh` -- this is
+the literal "task entry point's dispatch driving which mesh workgroups
+run" the roadmap row asks for. Since no compiled task entry can yet write
+a non-zero `MeshGroupCount` (H6h/H6i blocker again), every task-driven
+dispatch this row can exercise today enumerates zero mesh workgroups,
+which the new `TaskStageDispatchDrivesWhichMeshWorkgroupsRunAndNoneRunUntilItRequestsAny`
+test asserts directly (all task workgroups ran exactly once; the mesh
+stage's own UAV side effect never happened at all).
+
+Each invoked mesh workgroup's raw output is flattened into a
+`MeshOutputBuilder` (via a new `flattenMeshRow` helper reading `MeshSig`'s
+declared Output elements in order) and trimmed to a `Meshlet` via H6d's
+own `assembleMeshlet`. All meshlets from a `MeshDrawCommand`, across every
+dispatched workgroup, are merged in dispatch order into one combined
+`StageStorage` (via `unflattenMeshRow`, `flattenMeshRow`'s inverse) plus
+absolute triangle/line index lists offset by each meshlet's own vertex
+count, then handed to `RasterizePrimitives` alongside a `RasterClass`
+derived from `Mesh.OutputTopology` (Points/Lines/Triangles).
+
+Documented two deliberate simplifications directly in `Executor.cpp`,
+since both are legitimate scope boundaries rather than bugs:
+
+1. `flattenMeshRow`/`unflattenMeshRow`'s row layout is *self-consistent*
+   (round-trips correctly through this row's own code) but is not
+   claimed to match any real SPIR-V/Vulkan ABI convention for mesh
+   output storage -- that convention does not exist yet in this codebase
+   (it is exactly H6c-a-a's own future job, gated on H6i), so there is
+   nothing "real" to match against today. Once H6c-a-a lands a real
+   canonicalized mesh-output-store operation, this flattening scheme
+   will likely need to be replaced or reconciled with whatever layout
+   that operation actually produces.
+2. `AmplificationDispatchLimits` uses a hardcoded, permissive placeholder
+   (`MaxGroupCount={65535,65535,65535}`, `MaxTotalGroupCount=4194304}`)
+   rather than any value read from `PhysicalDeviceInfo`, since no real
+   Vulkan mesh pipeline exists yet to have limits advertised for (H6f's
+   own explicit job, per its roadmap text "advertise only what the
+   implementation actually enforces").
+
+## A namespace mistake caught by the build, not by review
+
+`Executor.cpp` is entirely inside `namespace feme::graphics`, but the new
+code was initially written qualifying types like `AmplificationDispatchLimits`,
+`MeshOutputBuilder`, and `Meshlet` with an explicit `graphics::` prefix
+(copy-paste habit from writing test files, which sit in `feme::graphics`
+via `using namespace` rather than a literal nested `namespace` block).
+The build caught this immediately as "no member named `graphics` in
+namespace `feme::graphics`". Fixed via a scripted blanket
+string-replace of the literal substring `"graphics::"` -> `""` across
+the file, then manually verified the replace did not accidentally touch
+any unrelated, correctly-qualified `cpu::` prefix (it did not -- confirmed
+by diffing the file before/after the replace and checking every removed
+`graphics::` occurrence's surrounding context).
+
+## Testing strategy, given the H6h/H6i blocker
+
+Followed the exact same "prove wiring, not content" strategy H5d's own
+`ExecutesDrawsAsNoOpWhenGeometryStageNeverEmits` test and H6c's own
+`CompiledStageTest.cpp` mesh/task cases both already established: rather
+than trying to prove real meshlets rasterize correctly (impossible until
+H6h/H6i land), wrote mesh/task IR that writes a doubled `GroupID.x` into
+a bound UAV buffer via groupshared+barrier cooperation (mirroring
+`CompiledStageTest.cpp`'s own `MeshGroupSharedBarrierShaderIR`/
+`TaskGroupSharedBarrierShaderIR` precedent directly), then asserted two
+things per test: every expected workgroup ran exactly once with the
+right `GroupID` (via the UAV buffer's contents), and the color
+attachment stayed entirely untouched (since every assembled meshlet is
+legitimately empty). This is a "dispatch and side-effect" proof, not a
+"rasterization" proof -- which is the correct, honest scope for what H6e
+can prove today, mirroring how H6c's and H6d's own tests were similarly
+scoped to what their own remaining blockers actually allowed.
+
+## Verification and outcome
+
+`ninja check-feme` (assertions-enabled, ccache build): 1910/1969 passing
+(59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from H6d's
+1906/1965 baseline by exactly the 4 new tests this row adds
+(`PipelineTest.cpp`'s 2, `ExecutorTest.cpp`'s 2). Ran the Vulkan CTS at
+`/home/dev/dev/VK-GL-CTS/` via the feme ICD: `dEQP-VK.mesh_shader.*`
+stayed 0/0/28044 (expected -- confirmed rather than assumed, since this
+row touches no Vulkan-facing file at all), and the `dEQP-VK.draw.*`
+1957-case regression sample stayed byte-identical to H6d's own recorded
+totals (14/153/1790). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` needed no update, confirmed by grep:
+`VK_EXT_mesh_shader` is still listed as "Planned (in scope, not
+implemented)". Updated `Roadmap.md` (struck through H6e with a `done:`
+writeup) and `VulkanCTSReport.md` (new "Roadmap H6e: measured impact"
+section) accordingly. Committed in five small, separately-reviewable
+commits: the `RasterizePrimitives` extraction, `setMeshStage`/
+`hasMeshStages`, `MeshDrawCommand`/`PreparedDraw::MeshDraws`, the full
+mesh-chaining logic in `Executor.cpp`, `PipelineTest.cpp`'s new tests,
+`ExecutorTest.cpp`'s new tests, and this documentation update.
