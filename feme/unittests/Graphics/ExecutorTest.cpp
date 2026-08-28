@@ -3384,4 +3384,112 @@ TEST(ExecutorTest, RejectsATaskDispatchExceedingItsPipelineLimits) {
   ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
 }
 
+// Roadmap H6c-a-a-ii: a mesh entry's canonicalized `feme.stage.set_mesh_
+// outputs`/`feme.stage.output.store` calls declare and write one vertex
+// (`PerVertex`-frequency `SV_Position`, element 0) and one primitive
+// (`PerPrimitive`-frequency element 1, an otherwise-unconsumed scalar)
+// from the same workgroup. Before this row, `Executor::runMeshWorkgroup`
+// never populated `MeshResources::PrimitiveOutputLayout`/`PrimitiveOutputs`
+// at all (left null/empty), so `MeshOutputWrapperPass`'s already-correct
+// per-primitive store lowering (H6c-a-a) would read/write through a null
+// layout pointer the moment a real compiled entry exercised it, and its
+// own `flattenMeshRow`/`unflattenMeshRow` walked *every* Output element
+// unconditionally, silently misaligning any signature -- like this one --
+// that mixes `PerVertex` and `PerPrimitive` elements. This test exercises
+// exactly that mixed shape end to end and asserts the vertex data still
+// renders correctly (proving the frequency split does not corrupt or
+// misalign the per-vertex path) and that the primitive store's own read/
+// write no longer crashes -- `PointList`-shaped output (roadmap H6e's own
+// "a point-class draw rasterizes every one of its own vertices directly"
+// path) needs no `PrimitiveIndices` write, which remains separately
+// unwired (see `MeshOutputWrapper.h`'s own comment), so this is the
+// cleanest mixed-frequency shape reachable today.
+constexpr char MeshMixedFrequencyOutputShaderIR[] = R"(
+  define void @ms_main() #0 {
+    call void @feme.stage.set_mesh_outputs(i32 1, i32 1)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -0.25, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 0.25, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 7.0, i32 0)
+    ret void
+  }
+  declare void @feme.stage.set_mesh_outputs(i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+TEST(
+    ExecutorTest,
+    RoutesAPerPrimitiveOutputElementIntoPrimitiveOutputsAlongsideAPerVertexOne) {
+  Context Ctx;
+  EntrySignature MeshSig;
+  SignatureElement PosElt =
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position);
+  SignatureElement PrimElt =
+      makeElement(1, SignatureDirection::Output, 1, /*Location=*/0);
+  PrimElt.Frequency = SignatureFrequency::PerPrimitive;
+  MeshSig.Elements = {PosElt, PrimElt};
+  Expected<std::shared_ptr<CompiledStage>> MS =
+      compileStage(Ctx, MeshMixedFrequencyOutputShaderIR, "ms_main", MeshSig,
+                   ShaderStage::Mesh);
+  ASSERT_THAT_EXPECTED(MS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, SolidRedFragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  uint32_t Size = 4;
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, Size, Size}};
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  MeshState Mesh;
+  Mesh.OutputTopology = MeshOutputTopology::Points;
+  Mesh.MaxOutputVertices = 1;
+  Mesh.MaxOutputPrimitives = 1;
+  AmplificationDispatchLimits Permissive{{65535, 65535, 65535}, 4194304};
+  Pipeline.setMeshStage(/*TaskStage=*/nullptr, std::move(*MS), Mesh, Permissive,
+                        Permissive);
+
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {1, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // NDC (-0.25, 0.25) maps to pixel (1, 1) of the 4x4 target (same mapping
+  // `RendersAPointList` already establishes) -- proving the per-vertex
+  // `SV_Position` this workgroup wrote still reaches rasterization
+  // correctly even though it shares this signature with a `PerPrimitive`
+  // element, which the fix's own frequency-filtered `flattenMeshRow`/
+  // `unflattenMeshRow` must keep from misaligning.
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Storage.data() + (Y * Size + X) * 4;
+  };
+  const uint8_t *Red = texel(1, 1);
+  EXPECT_EQ(Red[0], 255);
+  EXPECT_EQ(Red[1], 0);
+  EXPECT_EQ(Red[3], 255);
+  const uint8_t *Untouched = texel(0, 0);
+  EXPECT_EQ(Untouched[3], 0);
+}
+
 } // namespace
