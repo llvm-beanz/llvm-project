@@ -42553,3 +42553,182 @@ shape). Milestone H6 does not close: the same rerun's new dominant
 `feme-cpu-simdize` cause -- a divergent vector used as an `fcmp`/`icmp`
 operand -- becomes new sibling row `H6g-b-a-i-a-i-b`, and H6g-b-c remains
 open and untouched by this row.
+
+# H6g-b-a-i-a-i-b (`fcmp`/`icmp`, `llvm.vector.reduce.*`, and vectorizable-intrinsic gaps in `SIMDize.cpp`)
+
+Started from H6g-b-a-i-a-i-a's own new dominant blocker: 80 of the
+218-case `vkRefUtil.cpp:37` bucket now hit `feme-cpu-simdize`'s "used
+outside a supported pattern" rejection for a divergent vector value used
+as an `fcmp`/`icmp` operand, with the row's own text already citing the
+exact reduced case
+(`dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only`,
+`%8 = insertelement <4 x float> %6, float %7, i64 3` used by
+`%16 = fcmp ole <4 x float> %8, %15`) and asking whether the fix was a
+narrow consumer-and-producer addition or the broader "per-lane `<N x i1>`
+`select` condition" decomposition the design doc's own file-comment
+deviation note already flagged.
+
+Read `checkVectorDecompositionSupported`, `widenVectorSelect`,
+`widenVectorElementwise` in `SIMDize.cpp`. Decided to do both at once
+since they're tightly coupled: added `fcmp`/`icmp` as a producer
+(decomposes into per-component `<W x i1>` comparisons, symmetric with
+ordinary elementwise arithmetic) and consumer, and generalized `select`'s
+condition to accept a per-lane `<N x i1>` vector in addition to a scalar
+`i1` -- closing the design doc's own documented deviation in the same
+change rather than leaving it half-fixed. Added lit test
+`simdize-vector-fcmp-select.ll`, updated `simdize-vector-select.ll`'s
+comment and `simdize-vector-unsupported.ll` (its old example, a
+per-lane-condition `select`, was now legal, so I replaced it with a
+genuinely-still-unsupported shape: a divergent vector passed to an
+unmatched call). Added unit test
+`SIMDizeTest.DecomposesVectorComparisonIntoPerLaneSelectCondition`. Built
+and ran `ninja check-feme` until clean (1957/2016, up from 1955/2014 by
+the 2 new tests, 0 failed). Committed source+lit tests together
+(`dc7fe7b15f2f`), unit test separately (`bf6a561b0531`), matching the
+project's established split.
+
+Per the standing instruction to run the real VK-GL-CTS after each change
+(not a simulated/roleplay count), found the real `deqp-vk` binary and the
+real `feme` Vulkan ICD already built in this checkout, and re-ran the
+row's own exact named case with `FEME_VULKAN_LOG_CREATION_ERRORS=1`. It
+still failed with the same class of `feme-cpu-simdize` diagnostic --
+meaning the fix so far was necessary but not sufficient. Rather than
+guess, I used the project's own documented "one-off
+diagnostic-dump-and-single-case-rerun technique" (referenced by this
+row's own roadmap prose): added temporary `errs()` dumps right before
+`checkVectorDecompositionSupported`'s rejection points, rebuilt only
+`ninja feme_vulkan` (fast -- it only needs to relink the ICD shared
+library, not the whole tree), and re-ran the single case. That's how I
+found the *actual* rejected shape wasn't a `select` at all:
+`%17 = call i1 @llvm.vector.reduce.and.v4i1(<4 x i1> %16)` --
+glslang's own lowering of GLSL's `all(lessThanEqual(...))` builtin. A
+third distinct shape from what the roadmap row's own prose anticipated.
+
+Added `isSupportedVectorReduceIntrinsic` (the integer/comparison
+reduces only -- `and`/`or`/`xor`/`add`/`mul`/`smax`/`smin`/`umax`/`umin`;
+I deliberately left out the floating-point reduces since none of this
+row's real cases exercise them and `fadd`/`fmul` have an extra scalar
+`start` operand that would complicate the fold for no observed benefit)
+and `widenVectorReduce`, which folds a vector operand's `N` components
+together two at a time with the matching op. This is the one place in
+the whole pass where a "vector producer chain"'s widened form collapses
+back down to a scalar-shaped `Widened` entry instead of
+`WidenedVectorComponents`, since an `llvm.vector.reduce.*` call's result
+type is never itself a vector. Rebuilt, fixed one lit test's expected
+error-message text (needed `/reduce` appended), reconfirmed
+`ninja check-feme` clean.
+
+Re-ran the same real single case again with the reduce fix in place --
+*still failed*, with yet a *third* new blocker, found the same way:
+`%33 = call <4 x float> @llvm.minnum.v4f32(<4 x float> %31, <4 x float> %32)`,
+where `%31` was itself a divergent, already-decomposed
+`feme.cpu.resource.load.raw.v4f32` call result. A GLSL
+`min()`/`max()`/`clamp()` builtin. `widenVectorElementwise` only handled
+`BinaryOperator`/`UnaryOperator`/`CastInst`/`CmpInst` as vector-typed
+producers, not an arbitrary "trivially vectorizable" intrinsic `CallInst`
+whose operands were themselves decomposed vectors.
+
+At this point I had three distinct new shapes discovered entirely
+through real CTS validation, none of which the roadmap row's own written
+investigation had anticipated (it only foresaw the `select`-condition
+angle). I decided this was still squarely this row's own scope -- all
+three are instances of the same underlying "feme-cpu-simdize rejects a
+divergent vector value used as/via an `fcmp`/`icmp`-adjacent-or-similar
+comparison/intrinsic operand" root cause the row names, discovered
+because fixing the first exposed the next, exactly the same
+"real-CTS-driven fix chain" pattern H6g-b-a-i-a-i-a used for its own
+masked-store investigation. So I fixed all three under this row rather
+than artificially stopping at the literal `fcmp`/`icmp` wording and
+filing two more siblings for shapes needed just to reach a real
+passing/progressing case.
+
+Generalized `checkVectorDecompositionSupported`,
+`widenVectorElementwise` (now also handling `CallInst` -- had to switch
+from iterating `I.operands()` to `I.args()` for that case, since a
+call's own operand list includes its callee as a trailing operand, which
+must never be treated as a vector operand to decompose), and
+`widenInstruction`'s `CallInst` dispatch to accept any vector-typed,
+homogeneous "trivially vectorizable" intrinsic call
+(`isElementwiseVectorizableIntrinsic`, already used elsewhere for the
+uniform-broadcast case) as both a producer and consumer, decomposing it
+exactly like ordinary elementwise arithmetic. Added lit tests
+`simdize-vector-reduce.ll` and `simdize-vector-intrinsic.ll`, unit tests
+`SIMDizeTest.DecomposesVectorComparisonIntoReduceAnd` and
+`DecomposesHomogeneousVectorizableIntrinsicCall`. Committed the combined
+reduce+intrinsic source/lit-test change as one commit (`eaf8216ce1f4`,
+reduce and vectorizable-intrinsic support are two closely related shapes
+discovered via the same real-CTS chain in one investigation session, so
+I judged bundling them one step less granular than H6g-b-a-i-a-i-a's own
+single-shape-per-commit precedent to still be a small, reviewable,
+single-purpose change) and the two matching unit tests as a second
+commit (`3cb7e072fda2`; initially forgot the reduce unit test in the
+first attempt at that commit and amended it in before moving on, rather
+than leaving a mismatch between the commit message and its diff).
+
+Removed the temporary `errs()` debug instrumentation before any of the
+above commits. Rebuilt clean: `ninja check-feme` 1961/2020, 59
+unsupported, 0 failed (up from H6g-b-a-i-a-i-a's own 1955/2014 by exactly
+the 6 new tests across all three fixes).
+
+Re-ran the real single named case one final time with all three fixes in
+place: it now gets past `feme-cpu-simdize` entirely -- no more SIMDize
+diagnostic at all -- and instead fails at `vkCreateGraphicsPipelines`
+time with a JIT-link error (`Symbols not found: [
+feme.cpu.resource.load.raw.v2f32, feme.cpu.resource.load.raw.v3i32,
+feme.cpu.resource.load.raw.v3f32 ]`). Traced that to
+`feme/runtime/CPU/FeMeRuntimeCPU.c`: it only defines the scalar and
+full-`<4 x T>`-width `feme.cpu.resource.load.raw.*` overloads, not the
+2-/3-component ones a `vec2`/`vec3`/`ivec2`/`ivec3` mesh-shader
+input/output actually needs. This is a genuinely different subsystem
+(JIT runtime symbol registration, not `SIMDizePass` decomposition at
+all) and clearly out of scope for a `SIMDize.cpp`-focused row.
+
+Given the full 218-case bucket / full 28044-case `dEQP-VK.mesh_shader.*`
+group re-run this row's chain would ideally also confirm (matching
+H6g-b-a-i-a-i-a's own methodology), I judged a full resume-loop rerun of
+28044 cases not to be a good use of session time purely to re-confirm a
+bucket size the row's own text already established (80/218); instead I
+re-ran the specific, tractable 560-case `dEQP-VK.mesh_shader.ext.in_out.*`
+subgroup this row's own named case belongs to (extracted from
+`dEQP-VK-cases.txt`) both before and after the fixes. It stayed
+0/560 passed / 80/560 failed / 480/560 not-supported both times -- the
+same total -- but spot-checking several distinct failing cases across
+the bucket (not just the one named case) confirmed every single one now
+hits the new JIT-symbol error instead of `feme-cpu-simdize`'s, proving
+the bucket's dominant blocker moved entirely rather than just for the
+one reduced case. That is real, verifiable progress even though the raw
+failure *count* didn't move -- worth calling out explicitly in both the
+CTS report and the roadmap text rather than letting an unchanged number
+read as "no progress."
+
+Filed the new blocker as sibling row `H6g-b-a-i-a-i-c` (same nesting
+depth as this row, not deeper, per the standing instruction), root-caused
+to `feme/runtime/CPU/FeMeRuntimeCPU.c`'s missing v2/v3-width raw-load
+overloads, explicitly noting the store-side and typed-buffer paths
+haven't been checked for the same gap yet.
+
+Updated `FeMeCPUDesign.md`'s Phase 4 decomposition-deviation bullet to
+describe all nine producer shapes (up from six) and retire the
+now-resolved per-lane-condition-`select` deviation note, as its own
+docs-only commit. Struck through this row in `Roadmap.md` with a done
+narrative covering all three fixes and the real CTS validation chain,
+and added the new `H6g-b-a-i-a-i-c` sibling row, as its own commit.
+Recorded the full "Roadmap H6g-b-a-i-a-i-b: measured impact" narrative in
+`VulkanCTSReport.md`, including the two intermediate real-CTS discoveries
+that made each earlier fix necessary-but-insufficient, as its own commit.
+Confirmed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+need no changes (a `SIMDizePass`-completeness fix, not a new advertised
+feature/extension) and said so explicitly in both docs rather than
+silently skipping them.
+
+Net for this row: closed as three chained fixes (fcmp/icmp+select,
+reduce, vectorizable-intrinsic), each discovered only because the real
+CTS run kept surfacing the *next* shape once the prior one was fixed --
+a good illustration of why the standing "run the real CTS after each
+change" instruction matters: a purely-simulated or IR-reduction-only
+investigation would have stopped after the first fix and declared
+victory, missing two more real, distinct root causes entirely. Milestone
+H6 does not close: this row's own fix chain is complete and verified,
+but the same bucket's dominant blocker has moved to the new
+`H6g-b-a-i-a-i-c` row (a runtime JIT-symbol gap, unrelated to
+`SIMDizePass`), and `H6g-b-c` remains open and untouched.
