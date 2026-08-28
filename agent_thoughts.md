@@ -42163,3 +42163,123 @@ this fix itself. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
 confirmed no change needed -- this is a pure MLIR SPIR-V
 layout/type-conversion correctness fix, touching no `feme`-advertised
 feature bit or extension surface at all.
+
+# H6g-b-a-i-a: `ConvertSPIRVToLLVMPass` fails to legalize `spirv.All`
+
+Picked up where H6g-b-a-i's own re-run left off: the fixed
+`spirv.AccessChain` legalization let 80 previously-blocked cases in
+the 218-case `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket
+progress further, and the group's own re-run found the new dominant
+cause among them (81 of 218, up from a pre-existing, already
+out-of-scope 1) was `ConvertSPIRVToLLVMPass` failing to legalize
+`spirv.All` outright.
+
+Investigated the two alternatives the roadmap row itself named: (1) a
+missing pattern for `spirv.All`/`spirv.Any` outright, or (2) an
+existing pattern that doesn't cover this operand shape. Went straight
+to `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`'s
+`populateSPIRVToLLVMConversionPatterns` and searched its full pattern
+list (~250 lines) for any `spirv::AllOp`/`spirv::AnyOp` reference --
+found none at all, anywhere in the file. The `Logical ops` section
+registers `spirv.LogicalAnd`, `spirv.LogicalOr`, `spirv.LogicalEqual`,
+`spirv.LogicalNotEqual`, and `spirv.LogicalNot`, but simply never
+grew an entry for `spirv.All`/`spirv.Any` -- confirming alternative
+(1), not a shape-specific gap in an existing pattern (there was no
+existing pattern to have a gap in).
+
+The fix itself turned out to be almost trivial once the tablegen
+definitions were checked: `SPIRV_AllOp`/`SPIRV_AnyOp`
+(`SPIRVLogicalOps.td`) both reduce a `vector<Nxi1>` operand down to a
+scalar `i1` result -- exactly the shape LLVM's own
+`llvm.intr.vector.reduce.and`/`.or` intrinsics already model. Checked
+how `ConvertVectorToLLVM` already uses these same intrinsics
+(`LLVM::vector_reduce_and`/`LLVM::vector_reduce_or`, via its own
+`createIntegerReductionArithmeticOpLowering` helper for
+`vector.reduction`'s `AND`/`OR` combining kinds) to confirm the class
+names and calling convention, then registered two one-line
+`DirectConversionPattern<spirv::AllOp, LLVM::vector_reduce_and>` /
+`DirectConversionPattern<spirv::AnyOp, LLVM::vector_reduce_or>`
+entries in the same `Logical ops` section -- no new pattern class
+needed, since `DirectConversionPattern` already handles "replace this
+SPIR-V op with this LLVM op over the same (type-converted) operands"
+generically, and both new ops fit that shape exactly. Manually
+verified with `mlir-opt -convert-spirv-to-llvm` on a small
+`spirv.All`/`spirv.Any` test module before writing the lit test, to
+confirm the intrinsic call shape (`"llvm.intr.vector.reduce.and"(%arg)
+: (vector<4xi1>) -> i1`) matched expectations.
+
+Added `all_vector`/`any_vector` cases to the existing
+`logical-ops-to-llvm.mlir` (matching the file's existing
+scalar/vector-pair convention for the other logical ops, though
+`spirv.All`/`spirv.Any` only ever take a vector operand per their own
+verifier, so there's no scalar variant to add). Updated
+`SPIRVToLLVMDialectConversion.md`'s `Logical ops` section with the new
+op-to-intrinsic mapping table entry, consistent with how every other
+op in that section is documented.
+
+Ran `ninja check-mlir-conversion-spirvtollvm check-mlir-target-spirv
+check-mlir-dialect-spirv` (assertions-enabled, ccache build): 23/23,
+58/58, 52/52, all passing, 0 regressions (the target/dialect suites
+are untouched by this change and confirmed unaffected). The
+`MLIRSPIRVToLLVMTests` gtest suite: 3/3, unaffected. `ninja
+check-feme`: unchanged at 1950/2009 (59 pre-existing `Unsupported`,
+0 `Failed`) -- a pure upstream-MLIR fix, no `feme`-local code touched
+at all.
+
+Re-ran the full `dEQP-VK.mesh_shader.*` group (28044 cases,
+resume-loop methodology via `VK-GL-CTS/run/resume_run.py`, adapted
+with a new `mesh_h6g_b_a_i_a` log prefix) to confirm the fix against
+real content rather than relying on the lit test alone: 15 resume
+iterations (same 14 known-crashing cases blacklisted as every prior
+mesh-shading row), completing cleanly with 323 Fail / 27706
+NotSupported / 1 Pass. Re-extracted the exact 218-case
+`vkRefUtil.cpp:37` bucket from this fresh run (confirmed still exactly
+218 cases, matching H6g-b-a-i's own count) and re-ran it alone with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` diagnostic logging enabled: **0**
+`spirv.All`/`spirv.Any` legalization failures remain (down from 81),
+confirming the fix directly. The bucket's `vkCreateGraphicsPipelines`
+failure causes now partition into 9 distinct buckets across the full
+218 cases (82/68/17/17/12/7/7/5/3), with the new single dominant cause
+a `feme`-local `feme::cpu::UnsupportedOps` rejection of a
+register-bound resource handle (82 of 218, up from a pre-existing,
+already out-of-scope 1) -- the 81 formerly-`spirv.All`-blocked cases
+land squarely here, the same clean single-cause hand-off this
+investigation chain has shown at every step so far. Added new roadmap
+row `H6g-b-a-i-a-i` for it, out of this row's own scope, following the
+same "one row per newly-discovered dominant cause" discipline as every
+prior row.
+
+Re-ran the 1957-case `draw_sample.txt` regression sample: byte-
+identical to every prior row (14/153/1790), 0 regressions, as expected
+since this fix only makes previously over-rejected `spirv.All`/
+`spirv.Any` occurrences legalize -- it never changes behavior for any
+SPIR-V this sample already exercised successfully, and none of that
+sample's own cases exercise a mesh entry point at all.
+
+Updated the roadmap: `H6g-b-a-i-a` struck through with its resolution
+(confirming the row's own first, simpler named alternative -- a
+missing pattern outright, not a shape gap in an existing one), the
+`H6` milestone summary and its own dependency list updated to
+reference `H6g-b-a-i-a-i` instead of the now-closed `H6g-b-a-i-a`, and
+new row `H6g-b-a-i-a-i` added for the freshly surfaced
+`UnsupportedOps` register-bound-resource-handle rejection.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed
+no change needed: this is a pure upstream MLIR SPIRVToLLVM
+conversion-pattern-coverage fix, touching no `feme`-advertised feature
+bit or extension surface at all. No `Design.md` deviation needed
+either -- unlike H6g-b-a-i's array-stride fix, this row didn't
+contradict or refine any existing documented deviation, it simply
+closed a missing-pattern gap.
+
+One environment hiccup during this session: partway through writing
+up the roadmap/CTS-report updates, the sandbox's write access to files
+under both `llvm-project` and `VK-GL-CTS` intermittently returned
+"Permission denied" for several tool calls in a row (`edit`, `bash`
+writes, even simple `python3 -c` invocations), while plain `bash`
+reads kept working. This looked like a transient sandbox/session
+issue rather than anything caused by this change; access recovered on
+its own, and all previously-gathered CTS run artifacts under
+`VK-GL-CTS/run` (the `mesh_h6g_b_a_i_a_*` resume-loop logs, the
+extracted 218-case bucket file, the diagnostic re-run log, and the
+`draw_sample.txt` regression run) were still present and unaffected
+once it did, so no CTS re-run work was lost or had to be redone.
