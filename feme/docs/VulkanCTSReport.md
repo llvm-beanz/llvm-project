@@ -10108,3 +10108,168 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
  --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6c_a_a.qpa
 ```
+
+## Roadmap H6c-a-b: measured impact (wire `TaskPayloadBuilder` into a task entry's canonicalized payload-store operation)
+
+This row closes out H6c-a-b: a task (amplification) entry's own
+canonicalized (H6i-shaped) `feme.stage.task.payload.store` -- a masked,
+per-lane store with a compile-time-constant `offset` operand, by the time
+`LinearizePass` is done with it -- now actually reaches `FemeTaskArgs::
+Payload`, and `feme::graphics::Executor::executeDraws`'s own
+`feme::graphics::TaskPayloadBuilder` instance backs that same memory end
+to end into `FemeMeshArgs::Payload` for every mesh workgroup the task
+workgroup's own (still H6c-a-a-i/-ii-blocked) `EmitMeshTasksEXT` request
+dispatches.
+
+**New `feme::cpu::TaskPayloadWrapperPass`** (`TaskPayloadWrapper.h`/`.cpp`)
+is `MeshOutputWrapperPass`'s deliberately simpler task-stage counterpart,
+run immediately before `EntryWrapperPass` in `Pipeline.cpp`'s
+`ShaderStage::Amplification` case. It appends two new named wave-body
+parameters -- `task_payload`, `task_max_payload_bytes` -- unconditionally
+to every task entry's wave body (the same "always append params,
+conditionally lower" convention every stage wrapper follows), then lowers
+every masked payload store it finds into a store at `task_payload +
+offset`. Unlike a mesh output store's dynamic per-lane `Vertex` operand, a
+task payload store's `offset` is always the *same* compile-time constant
+for every lane at one call site (`StageOpKind::TaskPayloadStore`'s own
+documented contract, confirmed by `CanonicalizeStage.cpp`'s constant-
+offset walk), so every lane targets one shared address -- the same "every
+lane may write, the mask decides whose value survives" load-select-store
+pattern `MeshOutputWrapper.cpp`'s `lowerMeshOutputStore` already uses, just
+against one fixed address per call site instead of one address per output
+slot, and with no `FemeStageLayout`/element-ID lookup needed at all. A
+defensive `Offset + ByteSize <= MaxPayloadBytes` bounds check is ANDed into
+each lane's own mask (mirroring `MeshOutputWrapper.cpp`'s own
+`umin`-based clamp precedent for the same "a canonicalized store's own
+operand is not yet validated against this dispatch's real runtime bound"
+gap), since no execution-mode or captured attribute exists yet for a task
+shader's own declared payload byte size to check against instead.
+
+**Masking plumbing extended through `Linearize`/`SIMDize`.**
+`StageMaskCalls.h`/`.cpp` gained `createMaskedTaskPayloadStore`/
+`isMaskedTaskPayloadStoreCall` (mirroring `MaskedOutputStore`'s own
+3-operand `(offset, value, mask)` shape); `Linearize.cpp`'s
+`applyStageMasks`/`hasStageMaskOps` gained a `TaskPayloadStore` case
+alongside `OutputStore`/`StreamEmit`/`StreamCut`; `SIMDize.cpp`'s
+`FunctionWidener` gained `widenMaskedTaskPayloadStore` (keeps the constant
+offset scalar, widens the value across the wave, ANDs the mask with
+`Env.SideEffectMask`) and its dispatch check.
+
+**`feme::cpu::EntryWrapperPass` extended, not replaced**, mirroring
+H6c-a-a's own `IsMesh` precedent exactly: `WrapperEnv` gained two new
+(default-null) fields (`TaskPayload`/`TaskMaxPayloadBytes`);
+`buildWrapperEnv` gained an `IsTask` parameter that, when true, loads them
+out of new `getTaskArgsType`'s `FemeTaskArgs`-shaped struct
+(`StageArgsLayout.h`'s new `TaskArgsField` enum, sharing `Resources`/
+`GroupID`/`GroupCount`/`GroupShared`'s field indices with
+`getDispatchArgsType`/`getMeshArgsType`, the same shared-prefix trick H6c
+established); `buildWaveLoop`'s by-name parameter dispatch gained
+`task_payload`/`task_max_payload_bytes` arms; all three wrapper-building
+call sites (`buildWrapper`, `buildWrapperForLoop`, `buildWrapperForBranch`)
+now compute both `IsMesh` and `IsTask` and thread both through
+consistently (never both true at once, since a function has exactly one
+`ShaderStage`).
+
+**Host-side wiring.** `feme::graphics::TaskPayloadBuilder` gained a
+`getMutableBytes()` accessor (`TaskPayload.h`/`.cpp`) -- the only way this
+class's own storage ever picks up a real compiled write, since a compiled
+task entry has no way to call back into `write()`.
+`feme::graphics::GraphicsPipeline::setMeshStage` gained a new
+`MaxTaskPayloadBytes` parameter (mirroring how `MeshLimits`/`TaskLimits`
+already flow the same way), populated from a new
+`feme::vulkan::MaxTaskPayloadBytes` constant (`GraphicsPipeline.h`, the
+specification's own 16384-byte floor, replacing `EntryPoints.cpp`'s
+previously-hardcoded literal so the two can never disagree, the same
+"shared ceiling" discipline `MaxMeshOutputVertices` already follows).
+`Executor::executeDraws`'s task-dispatch loop now constructs one
+`TaskPayloadBuilder` per task workgroup, backs `TaskResources::Payload`
+with `getMutableBytes()` before `invokeTask`, and passes `getBytes()` into
+`runMeshWorkgroup`'s own `Payload` parameter for every mesh workgroup that
+task workgroup's `EmitMeshTasksEXT` request dispatches -- replacing the two
+hardcoded `/*Payload=*/{}` call sites H6c-a-a's own row left in place.
+
+**New unit tests.** `TaskPayloadWrapperTest.cpp` (4 cases) isolates the new
+pass: lowering a single payload store, confirming params are still
+appended even with no payload store present, lowering two stores at
+distinct offsets in one entry, and chaining into `EntryWrapperPass` to
+confirm the combined pipeline builds a real `feme_cpu_entry_as_main`
+wrapper. `CompiledStageTest.cpp` gained one new end-to-end case,
+`InvokeTaskWritesPayloadStore`: a canonicalized-shaped task entry compiled
+through the real `CompiledStage::create` pipeline and invoked via
+`CompiledStage::invokeTask` writes a real value into `FemeTaskArgs::
+Payload` at exactly its own declared byte offset, leaving every other byte
+untouched -- mirroring `InvokeMeshWritesPerVertexOutputStore`'s own "prove
+a real value reaches host memory through the full compiled path" shape.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1944/2003** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6c-a-a's own **1939/1998** baseline by exactly this
+row's 5 new tests.
+
+**Measured CTS impact: correctly zero, for the same reason H6c-a-a's own
+closing re-run found.** `FemeMeshArgs::Payload` now receives real bytes
+end to end, but `H6c-a-a-i` (`SetMeshOutputsEXT` canonicalization) and
+`H6c-a-a-ii` (`flattenMeshRow`'s `PerPrimitive` routing) remain open --
+both already-tracked, pre-existing gaps this row's own text does not
+depend on or touch -- so a real mesh-shader draw still assembles an empty
+meshlet regardless of this row's own payload wiring, and no `dEQP-VK.
+mesh_shader.*` case exercises reading a task payload back from a real
+mesh invocation yet in any case (that would additionally need a mesh-side
+`TaskPayloadWorkgroupEXT` *load* canonicalized into a `feme.stage.*` op,
+explicitly out of this row's own scope per its roadmap text: "somewhere
+real to be read from", not "read from"):
+
+```
+dEQP-VK.mesh_shader.* (28044 cases):
+Before this row (H6c-a-a/H6i's own recorded baseline):
+  Passed:        1/28044 (0.0%)
+  Failed:        337/28044 (1.2%)
+  Not supported: 27706/28044 (98.8%)
+
+After this row:
+  Passed:        1/28044 (0.0%)
+  Failed:        337/28044 (1.2%)
+  Not supported: 27706/28044 (98.8%)
+```
+
+Byte-identical failing-case set. **0 regressions, 0 new passes** --
+expected, matching H6c/H6c-a-a/H6d/H6i's own precedent of a CPU-lowering-
+and-host-wiring-only row not yet reachable from a real Vulkan draw until
+`H6c-a-a-i`/`H6c-a-a-ii` also land.
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt`
+sample, same file every prior row's own report used:
+
+```
+Before (H6c-a-a's own baseline):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical failing-case set. **0 regressions, 0 new passes.**
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: `maxTaskPayloadSize`'s advertised *value* is unchanged
+(still the specification's own 16384-byte floor, now read from a shared
+constant instead of a duplicated literal) and no feature bit or extension
+changed -- the same shape H6c/H6c-a-a/H6d/H6i's own entries recorded
+needing no inventory update for.
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                               # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+ /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+ --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6c_a_b.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+ /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+ --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6c_a_b.qpa
+```
