@@ -254,9 +254,19 @@ static std::optional<Type> convertArrayType(spirv::ArrayType type,
                                             TypeConverter &converter) {
   unsigned stride = type.getArrayStride();
   Type elementType = type.getElementType();
-  auto sizeInBytes = cast<spirv::SPIRVType>(elementType).getSizeInBytes();
-  if (stride != 0 && (!sizeInBytes || *sizeInBytes != stride))
-    return std::nullopt;
+  // `VulkanLayoutUtils::getNaturalArrayStride` -- rather than the element's
+  // own compact `SPIRVType::getSizeInBytes()` -- is what determines whether
+  // `stride` is one this conversion can reproduce with a plain LLVM array:
+  // an element's own size and its Vulkan base alignment can differ (e.g. a
+  // 3-component vector's alignment is rounded up to that of a 4-component
+  // one), and it is the alignment-rounded stride that every std430/std140-
+  // conformant SPIR-V producer (glslang included) actually emits.
+  if (stride != 0) {
+    std::optional<VulkanLayoutUtils::Size> naturalStride =
+        VulkanLayoutUtils::getNaturalArrayStride(elementType);
+    if (!naturalStride || *naturalStride != stride)
+      return std::nullopt;
+  }
 
   auto llvmElementType = converter.convertType(elementType);
   if (!llvmElementType)

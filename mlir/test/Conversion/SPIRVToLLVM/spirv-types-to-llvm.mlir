@@ -10,6 +10,15 @@ spirv.func @array(!spirv.array<16 x f32>, !spirv.array< 32 x vector<4xf32> >) "N
 // CHECK-LABEL: @array_with_natural_stride(!llvm.array<16 x f32>)
 spirv.func @array_with_natural_stride(!spirv.array<16 x f32, stride=4>) "None"
 
+// A 3-component vector's own compact size (12 bytes for `vector<3xf32>`) is
+// smaller than its Vulkan base alignment (16 bytes, the same as a
+// 4-component vector's), so the `ArrayStride` every std430/std140-
+// conformant SPIR-V producer (glslang included) emits for an array of one
+// is 16, not 12 -- still a "natural" stride this converts to a plain LLVM
+// array for, since it is the element's own real per-array-slot size.
+// CHECK-LABEL: @array_with_natural_vector3_stride(!llvm.array<4 x vector<3xf32>>)
+spirv.func @array_with_natural_vector3_stride(!spirv.array<4 x vector<3xf32>, stride=16>) "None"
+
 //===----------------------------------------------------------------------===//
 // Image type
 //===----------------------------------------------------------------------===//

@@ -73,6 +73,18 @@ spirv.module Logical GLSL450 {
 // -----
 
 spirv.module Logical GLSL450 {
+  // A 3-component vector's own compact size (12 bytes) is smaller than its
+  // Vulkan base alignment (16 bytes, the same as a 4-component vector's), so
+  // the `ArrayStride` this pass assigns an array of one must be 16, not 12,
+  // matching the real stride every std430/std140-conformant SPIR-V producer
+  // (glslang included) actually emits.
+  // CHECK: spirv.GlobalVariable @var0 : !spirv.ptr<!spirv.struct<(!spirv.array<4 x vector<3xf32>, stride=16> [0], f32 [64])>, StorageBuffer>
+  spirv.GlobalVariable @var0 : !spirv.ptr<!spirv.struct<(!spirv.array<4xvector<3xf32>>, f32)>, StorageBuffer>
+}
+
+// -----
+
+spirv.module Logical GLSL450 {
   // CHECK: spirv.GlobalVariable @emptyStructAsMember : !spirv.ptr<!spirv.struct<(!spirv.struct<()> [0])>, StorageBuffer>
   spirv.GlobalVariable @emptyStructAsMember : !spirv.ptr<!spirv.struct<(!spirv.struct<()>)>, StorageBuffer>
 

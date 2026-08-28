@@ -15,6 +15,7 @@
 #define MLIR_DIALECT_SPIRV_UTILS_LAYOUTUTILS_H_
 
 #include <cstdint>
+#include <optional>
 
 namespace mlir {
 class Type;
@@ -59,6 +60,16 @@ public:
   /// StorageBuffer, PhysicalStorageBuffer, Uniform, and PushConstant Storage
   /// Classes without layout information.
   static bool isLegalType(Type type);
+
+  /// Returns the `ArrayStride` an array of `elementType` must be decorated
+  /// with under Vulkan layout rules, or `std::nullopt` if `elementType`'s
+  /// size and alignment cannot be computed. This is `elementType`'s own size
+  /// rounded up to its base alignment -- e.g. 16 bytes for a 3- or
+  /// 4-component 4-byte-scalar vector, even though such a vector's own
+  /// compact size is only 12 or 16 bytes respectively -- matching the real
+  /// stride every std430/std140-conformant SPIR-V producer (glslang
+  /// included) emits for such an array.
+  static std::optional<Size> getNaturalArrayStride(Type elementType);
 
 private:
   /// Returns a new type with layout decoration. Assigns the type size in bytes

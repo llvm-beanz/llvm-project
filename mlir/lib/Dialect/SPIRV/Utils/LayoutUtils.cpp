@@ -13,6 +13,7 @@
 
 #include "mlir/Dialect/SPIRV/Utils/LayoutUtils.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVTypes.h"
+#include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
 
@@ -134,9 +135,26 @@ Type VulkanLayoutUtils::decorateType(spirv::ArrayType arrayType,
   // According to the Vulkan spec:
   // "An array has a base alignment equal to the base alignment of its element
   // type."
-  size = elementSize * numElements;
   alignment = elementAlignment;
-  return spirv::ArrayType::get(memberType, numElements, elementSize);
+  // The stride between elements must be a multiple of the array's own
+  // alignment (e.g. 16 bytes, not 12, for an array of 3-component vectors of
+  // 4-byte scalars), even though the element's own compact size can be
+  // smaller than that.
+  Size stride = llvm::alignTo(elementSize, elementAlignment);
+  // The array's own total size -- used to place any struct member that
+  // follows it -- must therefore also be computed from that per-element
+  // stride, not from the (possibly smaller) compact element size.
+  size = stride * numElements;
+  return spirv::ArrayType::get(memberType, numElements, stride);
+}
+
+std::optional<VulkanLayoutUtils::Size>
+VulkanLayoutUtils::getNaturalArrayStride(Type elementType) {
+  Size elementSize = 0;
+  Size elementAlignment = 1;
+  if (!decorateType(elementType, elementSize, elementAlignment))
+    return std::nullopt;
+  return llvm::alignTo(elementSize, elementAlignment);
 }
 
 Type VulkanLayoutUtils::decorateType(spirv::MatrixType matrixType,
