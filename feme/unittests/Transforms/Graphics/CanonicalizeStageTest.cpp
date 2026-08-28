@@ -875,6 +875,127 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenLoads, 4u);
 }
 
+/// (Roadmap H6b) The store-side, `Output`-storage-class (address space 8)
+/// mirror of `ThreadsDynamicVertexIndexIntoInputLoad`: a mesh entry's own
+/// per-vertex/per-primitive output array
+/// (`gl_MeshVerticesEXT[i]`/`gl_MeshPrimitivesEXT[i]`-shaped, or any other
+/// per-vertex/per-primitive-arrayed plain `Output` varying) is *written*
+/// through a genuinely dynamic index -- the invocation's own per-vertex/
+/// per-primitive output slot -- rather than geometry's loop-carried read
+/// index, but hits the exact same `getStageIOBaseAndOffset` limitation:
+/// before generalizing `getDynamicVertexIndexedAccess` to `Output` globals
+/// too (previously `Input`-only, address space 7, via
+/// `isDynamicIndexedArrayGlobal`), this shape resolved to `std::nullopt`
+/// and was left an unrewritten raw store on a still-`external` global.
+/// Unlike `Input`'s H5f, this deliberately does *not* extend to a
+/// *constant* `Output`-array index (see `isPerVertexArrayInputGlobal`'s
+/// own comment: a constant index into an `Output` array already has a
+/// real, different meaning in production use, an ordinary matrix
+/// output's own per-row store -- `RewritesSPIRVArrayOutputStorePerElementByteOffset`
+/// above), so `RowCountIsVertexArray` stays `false` here even though this
+/// global is structurally identical to `ThreadsDynamicVertexIndexIntoInputLoad`'s
+/// own `Input` one; only the *access itself* routes through `Vertex`, not
+/// (yet) the signature's own description of the element. See "Roadmap H6:
+/// what H6b found, and why it stops here" in VulkanCTSReport.md.
+TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_verts = external addrspace(8) global [3 x <4 x float>], !spirv.Decorations !0
+    define void @main(i32 %i, <4 x float> %v) #0 {
+      %p = getelementptr inbounds [3 x <4 x float>], ptr addrspace(8) @out_verts, i32 0, i32 %i
+      store <4 x float> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 3u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+  EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 0u);
+    EXPECT_EQ(CI->getArgOperand(4), IArg);
+    EXPECT_FALSE(isa<Constant>(CI->getArgOperand(4)));
+  }
+  EXPECT_EQ(SeenStores, 4u);
+
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
+/// (Roadmap H6b) The builtin-interface-block-array shape a mesh entry's
+/// own `gl_MeshPrimitivesEXT[]` genuinely takes (mirroring
+/// `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad`'s `gl_in[]`
+/// but on the `Output`/store side): `gl_MeshPrimitivesEXT[i].
+/// gl_PrimitiveID = %v` decomposes into member 0's own `ElementID`,
+/// `Row`/`Component` both left at their default constant 0, and `%i`
+/// itself threaded through as `Vertex` -- here standing in for the
+/// per-primitive output slot, not a per-vertex one, since this helper's
+/// own structural recognition (deliberately, matching
+/// `isPerVertexArrayInputGlobal`'s own precedent) does not distinguish the
+/// two.
+TEST(CanonicalizeStageTest,
+     ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_mesh_prims = external addrspace(8) global [4 x { i32, i32 }], !feme.spirv.MemberDecorations !10
+    define void @main(i32 %i, i32 %v) #0 {
+      %p = getelementptr inbounds [4 x { i32, i32 }], ptr addrspace(8) @gl_mesh_prims, i32 0, i32 %i, i32 0
+      store i32 %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !10 = !{!11, !12}
+    !11 = !{i32 0, !13}
+    !12 = !{i32 1, !14}
+    !13 = !{!15}
+    !15 = !{i32 11, i32 7}
+    !14 = !{!16}
+    !16 = !{i32 5271}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  EXPECT_EQ(Sig->Elements[0].SystemValue, SignatureSystemValue::PrimitiveID);
+  EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[0].ElementID);
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 0u);
+    EXPECT_EQ(CI->getArgOperand(4), IArg);
+    EXPECT_FALSE(isa<Constant>(CI->getArgOperand(4)));
+  }
+  EXPECT_EQ(SeenStores, 1u);
+}
+
 /// (Roadmap C8) glslang wraps a `varying`-block *member* -- even a matrix
 /// one -- in an outer single-member struct at the SPIR-V level
 /// (`dEQP-VK.glsl.linkage.varying.struct.*`'s own shape: a `mat4x2` member

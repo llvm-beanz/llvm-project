@@ -859,6 +859,22 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
 /// constant-offset path, so a *constant* `gl_in[k]` index is folded into
 /// the same `Vertex` operand a non-constant one is (roadmap H5f), not
 /// into `Row`. Sets \p AddrSpace to \p GV's address space when true.
+///
+/// (Roadmap H6b) Deliberately kept `Input`-only (unlike
+/// `isDynamicIndexedArrayGlobal` below, which also accepts `Output`):
+/// unlike `Input`, a real `Output`-storage-class array already has a
+/// legitimate constant-per-row access pattern in production use today (an
+/// ordinary matrix output store's own per-row `getelementptr` --
+/// `RewritesSPIRVArrayOutputStorePerElementByteOffset`'s own test
+/// coverage), so folding a *constant* `Output`-array index into `Vertex`
+/// here the same way `Input`'s is would misroute a real matrix's own
+/// constant row index. Nothing analogous exists for `Input` (no
+/// pre-existing SPIR-V import ever produces a per-row `getelementptr` into
+/// a real `Input` matrix; `RewritesSPIRVMatrixInputLoadOneRowAtATime`
+/// loads the whole matrix in one instruction and lets
+/// `loadStageIOValue`'s own recursion split it apart instead), so H5f's
+/// constant-fold extension stays safe there. See "Roadmap H6: what H6b
+/// found, and why it stops here" in VulkanCTSReport.md.
 bool isPerVertexArrayInputGlobal(const GlobalVariable *GV,
                                  unsigned &AddrSpace) {
   if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 7)
@@ -866,30 +882,65 @@ bool isPerVertexArrayInputGlobal(const GlobalVariable *GV,
   return isa<ArrayType>(GV->getValueType());
 }
 
-/// (Roadmap H5b) A geometry entry point's own per-vertex inputs
+/// (Roadmap H6b) Whether \p GV is a stage-IO global's per-vertex- or
+/// per-primitive-arrayed `Input` (address space 7, geometry's `gl_in[]`)
+/// *or* `Output` (address space 8, a mesh entry's own
+/// `gl_MeshVerticesEXT[]`/`gl_MeshPrimitivesEXT[]`, or a plain
+/// user-defined `PerVertexEXT`/`PerPrimitiveEXT` varying) array -- the
+/// same structural shape `isPerVertexArrayInputGlobal` recognizes, just
+/// not restricted to `Input`. Used *only* by
+/// `getDynamicVertexIndexedAccess`'s own genuinely-non-constant-index
+/// recognition: unlike a constant array index (see
+/// `isPerVertexArrayInputGlobal`'s own comment on why that stays
+/// `Input`-only), a real shader's matrix/array access is essentially
+/// always constant-indexed (GLSL/SPIR-V unrolls or otherwise folds a
+/// compile-time-fixed dimension), so a *non-constant* index into an
+/// `Output`-storage array is not expected to collide with any real,
+/// already-supported matrix-output shape -- it is exactly the shape a
+/// mesh entry's own per-vertex/per-primitive output write takes (indexed
+/// by the invocation's own output slot, not a compile-time constant).
+/// Sets \p AddrSpace to \p GV's address space when true.
+bool isDynamicIndexedArrayGlobal(const GlobalVariable *GV,
+                                 unsigned &AddrSpace) {
+  if (!isSPIRVStageIOGlobal(GV, AddrSpace) ||
+      (AddrSpace != 7 && AddrSpace != 8))
+    return false;
+  return isa<ArrayType>(GV->getValueType());
+}
+
+/// (Roadmap H5b/H6b) A geometry entry point's own per-vertex inputs
 /// (`gl_in[]`-shaped: either the `gl_PerVertex` builtin block itself, or a
 /// plain user-defined varying -- GLSL/SPIR-V always arrays *every* input
 /// of a geometry entry point at `VerticesPerPrimitive`-many elements for
 /// that stage) are read through a genuinely dynamic index, the shader's
 /// own loop-carried vertex-in-primitive counter -- unlike a matrix's `Row`
 /// dimension (`getStageIORowShape`'s own `RowCount`), which is always a
-/// compile-time-fixed `ArrayType` extent. `getStageIOBaseAndOffset`'s own
-/// `stripAndAccumulateConstantOffsets` walk cannot fold a non-constant GEP
-/// index at all, so it stops at (and returns) the GEP itself rather than
-/// the underlying global -- exactly why a `gl_in[i]`-shaped access
-/// resolved to `std::nullopt` (left unrewritten) before this.
+/// compile-time-fixed `ArrayType` extent. (Roadmap H6b) A mesh entry
+/// point's own per-vertex/per-primitive outputs
+/// (`gl_MeshVerticesEXT[]`/`gl_MeshPrimitivesEXT[]`-shaped, or a plain
+/// user-defined `PerVertexEXT`/`PerPrimitiveEXT` varying) are *written*
+/// through the exact same shape, indexed by the invocation's own
+/// per-vertex/per-primitive output slot rather than a loop-carried
+/// counter -- the mirror image of geometry's read side, on `Output`
+/// storage (address space 8) rather than `Input` (7). Either way,
+/// `getStageIOBaseAndOffset`'s own `stripAndAccumulateConstantOffsets`
+/// walk cannot fold a non-constant GEP index at all, so it stops at (and
+/// returns) the GEP itself rather than the underlying global -- exactly
+/// why a `gl_in[i]`- or `gl_MeshVerticesEXT[i]`-shaped access resolved to
+/// `std::nullopt` (left unrewritten) before this.
 ///
 /// This recognizes that one specific shape instead: a `GetElementPtrInst`
-/// whose pointer operand is directly a stage-IO `Input`-storage-class
-/// (address space 7) global variable's own outer array dimension -- its
-/// first index constant zero (ordinary pointer-to-aggregate arithmetic),
-/// its second a non-constant `Value*` (the vertex index) -- with every
-/// further index, if any, constant (a builtin interface block's own
-/// member, or a matrix row within that one vertex's own value), resolved
-/// into a byte offset the same way `resolveRowComponent` already does for
-/// the ordinary constant-offset path, just starting one array dimension
-/// in. (Roadmap H5f) A constant vertex index is *not* left unresolved
-/// here: `resolveStageIOAccess`'s own ordinary constant-offset path
+/// whose pointer operand is directly a stage-IO (`Input`- or
+/// `Output`-storage-class, address space 7 or 8) global variable's own
+/// outer array dimension -- its first index constant zero (ordinary
+/// pointer-to-aggregate arithmetic), its second a non-constant `Value*`
+/// (the vertex/primitive index) -- with every further index, if any,
+/// constant (a builtin interface block's own member, or a matrix row
+/// within that one vertex's own value), resolved into a byte offset the
+/// same way `resolveRowComponent` already does for the ordinary
+/// constant-offset path, just starting one array dimension in. (Roadmap
+/// H5f) A constant vertex index is *not* left unresolved here:
+/// `resolveStageIOAccess`'s own ordinary constant-offset path
 /// (`getStageIOBaseAndOffset`) folds it in too, using
 /// `isPerVertexArrayInputGlobal` (below) to recognize the same global
 /// shape and route that constant index through `Vertex` there as well,
@@ -902,7 +953,7 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
     return std::nullopt;
   auto *GV = dyn_cast<GlobalVariable>(GEP->getPointerOperand());
   unsigned AddrSpace = 0;
-  if (!isPerVertexArrayInputGlobal(GV, AddrSpace))
+  if (!isDynamicIndexedArrayGlobal(GV, AddrSpace))
     return std::nullopt;
   auto *ArrTy = cast<ArrayType>(GV->getValueType());
   if (GEP->getNumIndices() < 2)
@@ -1516,7 +1567,10 @@ StageIOAccess resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
 /// global's own outer array dimension into `Vertex` too, via
 /// `isPerVertexArrayInputGlobal`, so a *constant* `gl_in[k]` index is
 /// routed the same way a non-constant one already is, rather than folding
-/// into `Row`. \p OutputGlobals (roadmap H2e) is checked to set the
+/// into `Row` -- deliberately `Input`-only (see that helper's own
+/// comment on why a *constant* `Output`-array index is not folded the
+/// same way, roadmap H6b). \p OutputGlobals (roadmap H2e) is checked to
+/// set the
 /// result's `IsOutput`, so a caller can tell a genuinely-input load from
 /// an `Output`-direction read-back.
 std::optional<StageIOAccess> resolveStageIOAccess(
@@ -1633,7 +1687,12 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     // per-vertex-arrayed `Input` global (`isPerVertexArrayInputGlobal`),
     // never for a builtin interface block's own per-member element, whose
     // `ValueTy` has already had that same dimension peeled off by the
-    // caller before it ever reaches here.
+    // caller before it ever reaches here. (Roadmap H6b) Deliberately not
+    // extended to a mesh entry's own per-vertex/per-primitive `Output`
+    // arrays yet -- see `isPerVertexArrayInputGlobal`'s own comment on why
+    // that stays `Input`-only for now; reconciling this flag's own
+    // meaning for `Output` is left to a later roadmap row alongside the
+    // constant-index case.
     auto addElement = [&](GlobalVariable *GV, unsigned AddrSpace,
                           const ParsedSPIRVDecorations &D, Type *ValueTy,
                           bool RowCountIsVertexArray = false) {
@@ -1671,12 +1730,16 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // carries no whole-variable decoration of its own -- SPIR-V
         // decorates each of its struct members individually -- so it
         // decomposes into one `SignatureElement` per member instead of
-        // the single one every other stage-IO global gets. (Roadmap H5b)
-        // A geometry entry's own per-vertex block (`gl_in[]`-shaped) is
-        // this same shape one array dimension further out -- the block
-        // type itself, not the array wrapping `VerticesPerPrimitive`-many
-        // of it, is what carries one `ElementID` per member; the array
-        // dimension is the dynamically-indexed `Vertex` operand instead
+        // the single one every other stage-IO global gets. (Roadmap
+        // H5b/H6b) A geometry entry's own per-vertex block
+        // (`gl_in[]`-shaped) or a mesh entry's own per-vertex/
+        // per-primitive block (`gl_MeshVerticesEXT[]`/
+        // `gl_MeshPrimitivesEXT[]`-shaped) is this same shape one array
+        // dimension further out -- the block type itself, not the array
+        // wrapping `VerticesPerPrimitive`/`OutputVertices`/
+        // `OutputPrimitivesEXT`-many of it, is what carries one
+        // `ElementID` per member; the array dimension is the
+        // dynamically-indexed `Vertex` operand instead
         // (`getDynamicVertexIndexedAccess`'s own peeling on the access
         // side), never folded into any member's own `RowCount`.
         if (const MDNode *MemberMD =
@@ -1701,6 +1764,9 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // consumer can tell the two apart regardless of whether the
         // shader's own index into it happens to be constant (folded into
         // `Row` by `resolveOffsetWithinElement`) or dynamic (`Vertex`).
+        // (Roadmap H6b) Not yet extended to a mesh entry's own plain
+        // per-vertex/per-primitive `Output` array -- see
+        // `isPerVertexArrayInputGlobal`'s own comment.
         unsigned UnusedAddrSpace = 0;
         ParsedSPIRVDecorations D =
             parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
@@ -1809,8 +1875,15 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       // (an `Input` one is never written to in SPIR-V); also tracking it
       // through `ShadowValues` (roadmap H2e) lets a later read-back of the
       // same element resolve to it.
+      // (Roadmap H6b) A dynamically-indexed mesh-entry per-vertex/
+      // per-primitive `Output`-array store (`getDynamicVertexIndexedAccess`'s
+      // own store-side counterpart to H5b's `Input`-side one) threads its
+      // own per-vertex/per-primitive index through as the `Vertex` operand
+      // the same way the load path above already does, in place of the
+      // ordinary constant `Zero` every other stage-IO store still uses.
+      Value *Vertex = Access->Vertex ? Access->Vertex : Zero;
       storeStageIOBlockValue(B, Val, Val->getType(), Access->ElementIDs, Row,
-                             Component, Zero, &ShadowValues);
+                             Component, Vertex, &ShadowValues);
       SI->eraseFromParent();
       Changed = true;
     }

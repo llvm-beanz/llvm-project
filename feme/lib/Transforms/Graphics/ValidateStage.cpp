@@ -139,31 +139,34 @@ void validateRow(CallInst &CI, unsigned RowOperand, const SignatureElement &Elt,
   }
 }
 
-/// (Roadmap H5b) Checks that \p CI's \p VertexOperand, if non-constant, is
-/// legal for \p Stage. Every stage's own `feme.stage.input.load`/
+/// (Roadmap H5b/H6b) Checks that \p CI's \p VertexOperand, if non-constant,
+/// is legal for \p Stage. Every stage's own `feme.stage.input.load`/
 /// `.output.store` recursion (`loadStageIOValue`/`storeStageIOValue` in
 /// CanonicalizeStage.cpp) seeds this operand with an ordinary constant
-/// `i32 0` by default; the sole exception is a geometry entry's own
-/// dynamically-indexed `gl_in[i]`-shaped per-vertex input
-/// (`getDynamicVertexIndexedAccess`), threaded through as a genuine
-/// non-constant `Value*` -- legal only there because `FemeGeometryArgs`'s
-/// own primitive-major `Inputs` layout (see GeometryWrapper.cpp's file
-/// comment: "the vertex-in-primitive operand ... may be any value in
-/// `[0, VerticesPerPrimitive)`") is the only stage ABI actually built to
+/// `i32 0` by default; the exceptions are a geometry entry's own
+/// dynamically-indexed `gl_in[i]`-shaped per-vertex input, and a mesh
+/// entry's own dynamically-indexed `gl_MeshVerticesEXT[i]`/
+/// `gl_MeshPrimitivesEXT[i]`-shaped per-vertex/per-primitive output
+/// (both via `getDynamicVertexIndexedAccess`), threaded through as a
+/// genuine non-constant `Value*` -- legal only there because
+/// `FemeGeometryArgs`'s own primitive-major `Inputs` layout (see
+/// GeometryWrapper.cpp's file comment: "the vertex-in-primitive operand
+/// ... may be any value in `[0, VerticesPerPrimitive)`") and its mesh
+/// equivalent (roadmap H6c) are the only stage ABIs actually built to
 /// address one at runtime. A non-constant `Vertex` operand anywhere else
 /// can only mean a malformed/miscompiled access no valid input should ever
 /// produce.
 void validateVertex(CallInst &CI, unsigned VertexOperand, ShaderStage Stage,
                     StringRef OpName) {
   if (getStageOpConstantOperand(CI, VertexOperand) ||
-      Stage == ShaderStage::Geometry)
+      Stage == ShaderStage::Geometry || Stage == ShaderStage::Mesh)
     return;
   Function &F = *CI.getFunction();
   F.getContext().emitError(
       &CI, "feme-graphics-validate-stage: '" + OpName + "' in function '" +
                F.getName() +
                "' has a non-constant vertex operand, illegal outside the "
-               "geometry stage");
+               "geometry/mesh stages");
 }
 
 void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,

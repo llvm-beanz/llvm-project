@@ -215,6 +215,9 @@ struct SignatureElement {
   /// `RowCount` already reflects only that member's own shape -- the
   /// outer per-vertex array dimension is peeled off before those are
   /// built and never folds into any member's `RowCount` to begin with.
+  /// (Roadmap H6b) Still `Input`-only: a mesh entry's own per-vertex/
+  /// per-primitive `Output` array is not yet reflected here (see
+  /// `isPerVertexArrayInputGlobal`'s own comment, CanonicalizeStage.cpp).
   bool RowCountIsVertexArray = false;
 
   SignatureInterpolationMode Interpolation =
