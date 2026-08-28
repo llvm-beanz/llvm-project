@@ -39771,3 +39771,217 @@ warned against for geometry.
   `VulkanExtensionInventory.md` need no change (nothing new advertised,
   matching H6a's own precedent of not adding an entry for a
   non-advertising row).
+
+# Milestone H6c
+
+## Request
+
+"Reuse the compute workgroup/groupshared/barrier/wave lowering for task and
+mesh entries, adding a bounded mesh-output builder (mirroring
+`feme::graphics::GeometryStreamBuilder`, but structure-of-arrays
+per-vertex/per-primitive rather than stream-ordered) and a bounded task
+payload builder, plus `FemeMeshArgs`/`FemeTaskArgs`/
+`CompiledStage::invokeMesh`/`invokeTask` (mirroring
+`FemeGeometryArgs`/`CompiledStage::invokeGeometry`, H5d)."
+
+## Investigating the dependency chain before writing anything
+
+Roadmap.md lists H6c's own "Depends on" column as H6i. H6i's row in turn
+depends on H6b and H6h. H6b is done; H6h (give `TaskPayloadWorkgroupEXT` an
+address-space mapping in LLVM's SPIR-V backend, so a task payload variable
+can even be imported as an LLVM global) is not. So on paper, H6c looks
+blocked transitively on unlanded work. Rather than either blindly
+implementing the task's literal words in a vacuum or declaring the whole
+milestone blocked and doing nothing, I re-read H6b's own write-up (which
+explicitly separated "canonicalize a mesh entry's per-vertex/per-primitive
+*output* writes" — landed — from "canonicalize a task entry's payload
+write" — explicitly deferred to H6h/H6i) and asked: what does H6c's own
+literal text actually require that depends on H6i? Re-reading it closely,
+none of it does. "Reuse the compute lowering for task and mesh entries"
+means routing `EntryWrapperPass` (or an equivalent) over mesh/task-tagged
+IR — nothing about that requires `CanonicalizeStagePass` to accept those
+stages, since a hand-built or already-canonicalized module can be routed
+through the CPU-target pipeline without SPIR-V import or canonicalization
+happening at all (the same test strategy `GeometryWrapperTest.cpp` and
+`CompiledStageTest.cpp` already use for geometry). Likewise "a bounded
+mesh-output builder" and "a bounded task payload builder" are standalone
+data-structure asks with no dependency on any upstream pass at all — they
+just need somewhere to write bounded per-workgroup output. And
+`FemeMeshArgs`/`FemeTaskArgs`/`invokeMesh`/`invokeTask` are ABI-struct and
+API-surface asks, again with no upstream dependency, as long as the ABI
+structs are designed to plug into the *existing* wrapper rather than
+requiring the wrapper itself to change.
+
+This reframing — "H6c's roadmap dependency line is about the eventual
+*end-to-end* feature being usable, not about every sub-deliverable in the
+row's own bullet list" — matches the project's own established precedent:
+H6b itself landed a large, real, tested piece of work (mesh `Output`-array
+dynamic indexing) while explicitly carving the task-payload half out to
+H6h/H6i. I decided to do the same thing here: land everything in H6c's own
+bullet list that is genuinely deliverable and testable today, and add a new
+lettered roadmap row (H6c-a) for the piece that is honestly blocked
+(wiring the new builders to real mesh-output-store/task-payload-store
+operations, which don't exist as `feme.stage.*` ops yet at all — that's
+H6d's job per its own roadmap text — and, for task payload specifically,
+whose SPIR-V import is blocked on H6h/H6i).
+
+## The central design decision: `EntryWrapperPass` reuse without modifying it
+
+I read `EntryWrapper.cpp`/`.h` in full (~1663 lines) before touching
+anything, since "reuse the compute lowering" could have meant anything
+from "call the same pass" to "refactor it to be stage-generic." I found
+it references `FemeDispatchArgs`/`DispatchArgsLayout.h` in exactly three
+places, and in all three cases it only reads `DispatchArgsField::Resources`
+/`GroupID`/`GroupShared` off the args struct via `CreateStructGEP` using
+`getDispatchArgsType(Ctx)`. With LLVM's opaque pointers, `CreateStructGEP`
+computes byte offsets purely from the `StructType` passed to it — it does
+not care what the "real" runtime pointee type is, only that the offsets it
+computes match what the caller actually lays out in memory at those
+offsets. This is the key insight: if `FemeMeshArgs`/`FemeTaskArgs` declare
+the *exact same leading fields in the exact same order* as
+`FemeDispatchArgs` — `FemeShaderResources Resources; uint32_t GroupID[3];
+uint32_t GroupCount[3]; void *GroupShared;` — then a `CreateStructGEP`
+against `getDispatchArgsType(Ctx)`'s layout will compute the *correct*
+offset into a `FemeMeshArgs`/`FemeTaskArgs` instance too, even though the
+wrapper was never told about those types at all. This means
+`EntryWrapperPass` can be invoked completely unmodified on a module tagged
+`ShaderStage::Mesh`/`Amplification`, and it will correctly build a
+`feme_cpu_entry_<name>` wrapper with full group-loop, groupshared
+allocation, and barrier-region-splitting support — exactly the same code
+path compute already exercises, with zero changes to
+`EntryWrapper.cpp`/`.h`. This is about as literal an implementation of
+"reuse the compute lowering" as is possible, and it is much lower-risk than
+attempting to generalize a 1663-line pass to explicitly branch on stage.
+
+I chose `FemeDispatchArgs`'s field layout to mirror (not `FemeGeometryArgs`'s,
+which has a different shape — a *pointer* `Resources` field, no `GroupID`/
+`GroupShared` at all, since geometry doesn't dispatch as a workgroup) because
+mesh and task entries genuinely *do* dispatch as bounded workgroups exactly
+like compute — `numthreads`/`GroupID`/`GroupCount`/groupshared/barriers are
+first-class task/mesh-shader concepts in HLSL/SPIR-V, not something
+being awkwardly repurposed.
+
+## What I built, in landing order
+
+1. **`feme::graphics::MeshOutputBuilder`** (`MeshOutput.h`/`.cpp`) — a
+   bounded structure-of-arrays per-vertex/per-primitive output store.
+   Deliberately *not* a mirror of `GeometryStreamBuilder`'s own shape:
+   geometry's `emit`/`cut` model is inherently stream-ordered (a geometry
+   shader invocation emits vertices one at a time, in order, onto a
+   numbered stream), whereas a mesh shader's `SetMeshOutputsEXT` declares
+   fixed vertex/primitive counts up front and then writes each output
+   *randomly*, addressed by index — there is no emit-order at all. So
+   `MeshOutputBuilder` is bounds-checked random-access storage: reserve
+   the declared vertex/primitiveindex counts, then `setVertex`/
+   `setPrimitiveIndices` write directly into pre-sized backing arrays, no
+   append/cut state machine needed. 7 unit tests cover construction
+   bounds, in-range/out-of-range vertex and primitive writes, and reading
+   back written data.
+2. **`feme::graphics::TaskPayloadBuilder`** (`TaskPayload.h`/`.cpp`) — a
+   bounded byte-buffer store for a task entry's payload (the data
+   `EmitMeshTasksEXT` hands to the mesh workgroups it dispatches).
+   Simpler than the mesh-output builder: a fixed-capacity byte buffer with
+   bounds-checked typed read/write helpers. 5 unit tests.
+3. **`FemeMeshArgs`/`FemeTaskArgs`** (`RuntimeABI.h`) — ABI structs
+   mirroring `FemeDispatchArgs`'s leading fields exactly, per the design
+   decision above, with extensive doc comments explaining exactly what is
+   and is not wired (mesh output / task payload pointers are *not* yet
+   part of these structs' fields at all, since nothing downstream
+   consumes them yet; adding them now would be dead, untestable surface
+   area).
+4. **`MeshResources`/`PreparedMeshBatch`, `TaskResources`/
+   `PreparedTaskBatch`** (`ResourceHeap.h`/`.cpp`) — mirroring
+   `GeometryResources`/`PreparedGeometryBatch`'s pattern (a `Resources`
+   struct describing one invocation's inputs, and a `PreparedBatch` type
+   whose `create()` materializes the resource/image/sampler heaps and
+   whose `args()` builds the ABI struct). Unlike `PreparedGeometryBatch`
+   (which batches *all* primitives for one draw at once, since geometry
+   shaders instantiate per-primitive), these are scoped to *one
+   workgroup* at a time, mirroring `PreparedDispatch::argsFor`/
+   `invokeGroup`'s own per-group shape — because mesh/task dispatch is
+   per-workgroup exactly like compute, not per-primitive-batch like
+   geometry. I initially forgot both classes need an owned
+   `FemeShaderResources ShaderResources{}` private member (since
+   `FemeMeshArgs::Resources`/`FemeTaskArgs::Resources` are embedded by
+   value, unlike `FemeGeometryArgs::Resources`, which is a pointer) — hit
+   a compile error building `args()`, added the member, fixed.
+5. **`CompiledStage::invokeMesh`/`invokeTask`** (`CompiledStage.h`/`.cpp`)
+   — mirror `invokeGeometry`'s shape exactly: stage-checked (returns an
+   `Error` if the compiled stage isn't `Mesh`/`Amplification`
+   respectively), then call `Prepared.args()` and invoke the compiled
+   function pointer.
+6. **`Pipeline.cpp` wiring** — added
+   `case feme::ShaderStage::Amplification: case feme::ShaderStage::Mesh:`
+   to the stage-wrapper-selection switch, both falling through to the
+   same, completely unmodified `EntryWrapperPass()` call compute uses,
+   with a comment explaining why this is safe and correct today.
+
+## Testing
+
+Added `CompiledStageTest.cpp` cases
+(`InvokeMeshReusesComputeGroupSharedAndBarrierLowering`,
+`InvokeMeshRejectsANonMeshStage`,
+`InvokeTaskReusesComputeGroupSharedAndBarrierLowering`,
+`InvokeTaskRejectsANonTaskStage`) that hand-build LLVM IR tagged
+`"hlsl.shader"="mesh"`/`"amplification"` with `hlsl.numthreads`, writing
+`GroupID` into an `addrspace(3)` groupshared global, barriering
+(`llvm.dx.group.memory.barrier.with.group.sync`), reading it back, doubling
+it, and storing the result to a bound raw buffer at an offset keyed by
+`GroupID` — this is deliberately the same shape as
+`EntryWrapperTest.cpp`'s own `AllocatesSmallGroupSharedOnStack`/
+`SplitsAtGroupSyncBarrier` fixtures, since the whole point is proving the
+*same* wrapper machinery those tests already validate for compute also
+works, unmodified, for mesh/task. Compiled the module through
+`CompiledStage::create` with `StageCompileOptions.Stage` set to
+`ShaderStage::Mesh`/`Amplification`, invoked via
+`invokeMesh(PreparedMeshBatch)`/`invokeTask(PreparedTaskBatch)` with a
+specific `GroupID`, and asserted the buffer slot at that group's own index
+received `GroupID * 2` — proving the full round trip (resource heap ->
+`GroupID` plumbing -> groupshared write -> barrier -> groupshared read ->
+resource store) works end to end through the reused wrapper for both
+stages. Also added negative tests confirming `invokeMesh`/`invokeTask`
+reject a stage mismatch, mirroring `invokeGeometry`'s own precedent.
+
+All 16 new tests pass (`MeshOutputTest.cpp` 7, `TaskPayloadTest.cpp` 5,
+`CompiledStageTest.cpp` 4). Full `ninja check-feme`
+(`LLVM_ENABLE_ASSERTIONS=ON`, ccache-configured build) passes in full:
+1897/1956 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from
+H6b's own 1881/1940 baseline by exactly those 16 new tests.
+
+## Vulkan CTS
+
+Ran `dEQP-VK.mesh_shader.*` (28044 cases) against the current build:
+still 0/0/28044, exactly as expected — this row changes nothing reachable
+from SPIR-V import, canonicalization, or the Vulkan API surface at all, it
+only adds CPU-target wrapper/ABI infrastructure exercised by direct unit
+tests. Ran the same 1957-case `draw_sample.txt` regression sample every
+prior H-milestone report has used: byte-identical to H6b's own recorded
+totals (14 passed/153 failed/1790 not-supported) — 0 regressions. Recorded
+both results as a new "Roadmap H6c: measured impact" section in
+`VulkanCTSReport.md`. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no changes: `VK_EXT_mesh_shader` stays
+"planned, not implemented," since nothing new is advertised to Vulkan by
+this row.
+
+## Roadmap bookkeeping
+
+Struck through H6c's row with a detailed "done, scoped down" note
+explaining the H6i-dependency reframing above and exactly what was and
+wasn't delivered. Added a new roadmap row, H6c-a, depending on H6d/H6h/H6i,
+tracking the deferred work: wiring `MeshOutputBuilder`/`TaskPayloadBuilder`
+to real `feme.stage.*` mesh-output-store/task-payload-store/
+`SetMeshOutputsEXT`/`EmitMeshTasksEXT` operations once those operations
+exist and task payload's SPIR-V import is unblocked. Updated
+`FeMeGraphicsDesign.md`'s G6 status paragraph to also summarize H6b (which
+had never gotten its own paragraph update) and this row.
+
+## Commits
+
+Landed as four separate commits: (1) `MeshOutputBuilder`/
+`TaskPayloadBuilder` + their tests, (2) `FemeMeshArgs`/`FemeTaskArgs`, (3)
+`MeshResources`/`TaskResources`/`PreparedMeshBatch`/`PreparedTaskBatch`, (4)
+`CompiledStage::invokeMesh`/`invokeTask` + `Pipeline.cpp` wiring + the new
+`CompiledStageTest.cpp` cases, plus a fifth commit for the documentation
+updates (Roadmap.md/FeMeGraphicsDesign.md/VulkanCTSReport.md). This
+`agent_thoughts.md` entry is committed separately, as its own final commit,
+per the standing instruction.
