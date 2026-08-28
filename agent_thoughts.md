@@ -41233,3 +41233,168 @@ extension, (4) `Pipeline.cpp`'s case split, (5) `MeshOutputWrapperTest.cpp`
 plus its `CMakeLists.txt` registration, (6) the `CompiledStageTest.cpp`
 end-to-end case, (7) the `Roadmap.md` update, (8) the `VulkanCTSReport.md`
 section, and (9) this `agent_thoughts.md` entry.
+
+# Closing out milestone H6c-a-b: wiring `TaskPayloadBuilder` into a task entry's canonicalized payload-store operation
+
+Picked up where H6c-a-a left off: with H6d (checked amplification dispatch
+queues), H6h (`TaskPayloadWorkgroupEXT` address-space convention), and H6i
+(`CanonicalizeStagePass` accepting `ShaderStage::Amplification` and
+canonicalizing a payload write into `feme.stage.task.payload.store`) all
+already landed, H6c-a-b's own remaining job was narrower than it might
+first read: wire the *already-canonicalized* op into a real compiled
+lowering path and back it with real host memory, not invent any new
+canonicalization or dispatch machinery.
+
+## Scoping decision: mesh-side payload reading is out of this row's job
+
+The roadmap text says the payload should have "somewhere real to be read
+from by the mesh workgroups it dispatches" -- not that a mesh workgroup
+must actually read it. I confirmed there is no canonicalized form of a
+mesh-side `TaskPayloadWorkgroupEXT` *load* anywhere in the codebase (no
+`feme.stage.*` op for it), and inventing one was not implied by this row's
+own text. So the scope I committed to was exactly two things:
+
+ 1. A task entry's own payload *store* lowers into a real memory write
+    (`FemeTaskArgs::Payload`).
+ 2. That same memory is threaded, unmodified, into `FemeMeshArgs::Payload`
+    for every mesh workgroup the task workgroup's `EmitMeshTasksEXT`
+    dispatches (already reads from `MeshResources::Payload`, since that
+    plumbing was pre-built by H6c).
+
+This kept the change surgical: no mesh-side compiler changes needed at
+all, and `ValidateStage.cpp`'s `TaskPayloadStore: return Stage ==
+ShaderStage::Amplification` case (explicitly commented "not yet
+reachable... `ValidateStagePass` does not validate the amplification stage
+yet") stays untouched, since extending stage validation to a new stage is
+a separate concern this row's text does not mention.
+
+## Design: `TaskPayloadWrapperPass` is deliberately simpler than `MeshOutputWrapperPass`
+
+The one subtlety worth writing down: a task payload store's `offset`
+operand is *not* like a mesh output store's `Vertex` operand. `Vertex` is
+a genuinely divergent per-lane value (which vertex slot *this* lane's
+invocation owns); `offset` is always the same compile-time constant for
+every lane at one call site -- confirmed by re-reading
+`CanonicalizeStage.cpp`'s `getStageIOBaseAndOffset`'s constant-offset walk
+and `StageOpKind::TaskPayloadStore`'s own doc comment, both of which I'd
+already read carefully during H6i. That means every lane at one call site
+writes to the *same* address, not a per-lane-distinct one -- so I didn't
+need any `FemeStageLayout`/element-ID lookup the way mesh output needed
+(`VertexOutputLayout`/`PrimitiveOutputLayout`). The lowering is still the
+same "every lane may write, the mask decides whose value survives"
+load-select-store pattern `MeshOutputWrapper.cpp`'s `lowerMeshOutputStore`
+already established (safe even with every lane sharing one address: an
+inactive lane's select just re-writes the value that was already there),
+just against one fixed address per call site instead of a computed one
+per output slot. This let `TaskPayloadWrapper.cpp` come in noticeably
+shorter than its mesh counterpart.
+
+## Bounds checking without a shader-declared size
+
+Mesh output had `MeshState::MaxOutputVertices/Primitives`, captured from
+SPIR-V execution modes back at H6a, to clamp against. A task payload has
+no equivalent: nothing captures the shader's own declared payload struct
+size as a queryable attribute anywhere in this pipeline, and adding that
+capture felt out of scope for a "wire the builder in" row. Instead I
+reused the same pattern `MaxMeshOutputVertices`/`MaxMeshWorkGroupCount`
+already established in `GraphicsPipeline.h`: a single shared
+`MaxTaskPayloadBytes` constant (16384, the specification's own floor),
+consumed by both the CPU-lowering side's runtime bounds check
+(`FemeTaskArgs::MaxPayloadBytes`, ultimately sized from
+`TaskPayloadBuilder::getMaxPayloadBytes()`) and the Vulkan-facing
+`maxTaskPayloadSize` property, so they can never independently drift. A
+tighter, per-shader-declared bound is real future work, but a
+larger-than-needed shared ceiling is always safe, and correctness for
+this row doesn't need it any tighter.
+
+## Threading the host-side pipe: `Pipeline` needed a new field, not just `Executor`
+
+I initially assumed `Executor.cpp` alone would need editing (construct a
+`TaskPayloadBuilder`, back `TaskResources::Payload`, thread the bytes into
+`runMeshWorkgroup`). But sizing that builder needed
+`feme::vulkan::MaxTaskPayloadBytes`, and `Executor.cpp`/`lib/Graphics`
+sits *below* `lib/Vulkan` in this codebase's own layering (`FeMeGraphics`
+has no dependency on `FeMeVulkanCore`, confirmed by reading both
+`CMakeLists.txt`s -- it's the other direction), so directly including a
+`lib/Vulkan` header from `lib/Graphics` would have inverted that
+dependency and likely not even linked. The existing, already-established
+pattern for exactly this problem is `AmplificationDispatchLimits` flowing
+through `GraphicsPipeline::setMeshStage`'s own parameters, populated by
+`lib/Vulkan/GraphicsPipeline.cpp` and read back by `Executor.cpp` through
+`Pipeline.getMeshDispatchLimits()`/`getTaskDispatchLimits()`. I followed
+that same shape exactly: added a `MaxTaskPayloadBytes` parameter to
+`setMeshStage`, stored it, exposed `getMaxTaskPayloadBytes()`, and had
+`GraphicsPipeline.cpp`'s existing `setMeshStage` call site (already
+passing `MaxMeshWorkGroupCount`/`MaxTaskWorkGroupCount`-derived limits)
+pass the new constant alongside them. `Executor.cpp` then only ever reads
+`Pipeline.getMaxTaskPayloadBytes()`, never touches `feme::vulkan::`
+directly -- keeping the layering intact.
+
+## `TaskPayloadBuilder::getMutableBytes()`
+
+`TaskPayloadBuilder` (already fully implemented before this row, from
+H6c) only exposed `write()`/`read()`/`getBytes()` -- all of which assume
+the *host* is the one doing the writing/reading, calling into this class's
+own API. But a compiled task entry doesn't call back into C++ objects: it
+writes directly into whatever raw pointer `FemeTaskArgs::Payload` holds,
+the same way every other stage output buffer in this codebase is written
+(raw pointer, no accessor round-trip). So `TaskPayloadBuilder` needed one
+new accessor, `getMutableBytes()`, handing out a `MutableArrayRef<uint8_t>`
+into its own private storage -- the only way this class's storage ever
+picks up a real compiled write. This is a small, narrowly-justified
+addition to an already-tested class, not a design change to it.
+
+## Testing
+
+`TaskPayloadWrapperTest.cpp` (4 cases, mirroring `MeshOutputWrapperTest.cpp`'s
+own shape): single-store lowering, params-always-appended-even-with-no-store,
+two stores at distinct offsets in one entry (proving no single-store
+assumption), and chaining into `EntryWrapperPass` to confirm the combined
+pipeline builds a real wrapper. `CompiledStageTest.cpp` gained
+`InvokeTaskWritesPayloadStore`, mirroring `InvokeMeshWritesPerVertexOutputStore`'s
+own "prove a real value reaches host memory through the full compiled
+path" shape: an `i32` store at byte offset 4 lands exactly there in a
+`TaskResources::Payload` buffer, leaving byte offset 0 untouched.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: 1944/2003 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up
+from H6c-a-a's own 1939/1998 baseline by exactly these 5 new tests.
+
+Ran a real `deqp-vk` (built under `/home/dev/dev/VK-GL-CTS/`) against both
+`dEQP-VK.mesh_shader.*` (28044 cases) and the `dEQP-VK.draw.*` 1957-case
+`draw_sample.txt` regression sample: both came back byte-identical to
+H6c-a-a's own recorded totals (mesh_shader: 1 passed / 337 failed / 27706
+not supported; draw sample: 14 passed / 153 failed / 1790 not supported).
+Expected and confirmed: `H6c-a-a-i`/`H6c-a-a-ii` remain open (so a real
+mesh-shader draw still assembles an empty meshlet regardless of this
+row's own payload wiring), and no case in this CTS group exercises reading
+a task payload back from a real mesh invocation yet in any case, since
+that would additionally need a mesh-side `TaskPayloadWorkgroupEXT` *load*
+canonicalized -- explicitly out of this row's own scope.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed no
+change needed -- `maxTaskPayloadSize`'s advertised *value* is unchanged
+(same 16384-byte floor, now read from a shared constant instead of a
+duplicated literal), and no feature bit or extension changed.
+
+Updated `Roadmap.md` (struck through H6c-a-b with a "done:" writeup,
+corrected H6g-b's and H6's own summary text to reflect H6c-a-b landing --
+H6g-b now depends on only H6c-a-a-i/H6c-a-a-ii) and `VulkanCTSReport.md`
+(new "Roadmap H6c-a-b: measured impact" section). Also updated
+`RuntimeABI.h`'s `FemeTaskArgs`/`Payload` comments, which had explicitly
+said "nothing yet writes to `Payload`" -- that statement is no longer
+true, so I corrected it rather than leaving a stale comment behind.
+
+Committed separately: (1) `StageMaskCalls.h`/`.cpp`'s masked-call
+plumbing, (2) `Linearize.cpp`/`SIMDize.cpp`'s `TaskPayloadStore` handling,
+(3) `StageArgsLayout.h`'s `TaskArgsField`/`getTaskArgsType` plus new
+`TaskPayloadWrapper.h`/`.cpp` and its `CMakeLists.txt` registration, (4)
+`EntryWrapper.cpp`'s `IsTask`-aware extension, (5) `Pipeline.cpp`'s
+`ShaderStage::Amplification` case update, (6)
+`GraphicsPipeline.h`/`.cpp`/`Pipeline.h`/`.cpp`/`EntryPoints.cpp`'s
+`MaxTaskPayloadBytes` plumbing, (7) `TaskPayload.h`/`.cpp`'s
+`getMutableBytes()` plus `Executor.cpp`'s real wiring, (8)
+`TaskPayloadWrapperTest.cpp` plus its `CMakeLists.txt` registration and
+the `CompiledStageTest.cpp` end-to-end case, (9) the `RuntimeABI.h`
+comment fix, (10) the `Roadmap.md` update, (11) the `VulkanCTSReport.md`
+section, and (12) this `agent_thoughts.md` entry.
