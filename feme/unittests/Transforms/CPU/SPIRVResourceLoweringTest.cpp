@@ -64,6 +64,17 @@ bool hasResourceTypedCall(Function &F, StringRef Prefix) {
   return false;
 }
 
+/// Returns the byte-offset operand of the first canonical
+/// `feme.cpu.resource.load.raw.*` call in \p F, or nullptr if none exists.
+Value *findRawLoadOffset(Function &F) {
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getName().starts_with("feme.cpu.resource.load.raw"))
+          return CI->getArgOperand(3);
+  return nullptr;
+}
+
 TEST(SPIRVResourceLoweringTest, LeavesModuleWithNoBoundHandlesUnchanged) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -110,7 +121,8 @@ TEST(SPIRVResourceLoweringTest, LowersScalarBindingToResourceLoad) {
 // pipeline-creation failures for shaders reading gl_ViewportIndex out of a
 // bound uniform block. Verify function-attached metadata survives the
 // resource-env-parameter rewrite.
-TEST(SPIRVResourceLoweringTest, PreservesFunctionMetadataAcrossEnvParamRewrite) {
+TEST(SPIRVResourceLoweringTest,
+     PreservesFunctionMetadataAcrossEnvParamRewrite) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main(i32 %idx) !feme.signature !0 {
@@ -135,8 +147,8 @@ TEST(SPIRVResourceLoweringTest, PreservesFunctionMetadataAcrossEnvParamRewrite) 
   EXPECT_TRUE(hasResourceLoadCall(*F));
   MDNode *Signature = F->getMetadata("feme.signature");
   ASSERT_TRUE(Signature) << "!feme.signature metadata was lost when the "
-                             "function was rewritten to add resource-env "
-                             "parameters";
+                            "function was rewritten to add resource-env "
+                            "parameters";
   ASSERT_EQ(Signature->getNumOperands(), 1u);
   EXPECT_EQ(cast<MDString>(Signature->getOperand(0))->getString(),
             "fragment-signature-placeholder");
@@ -309,6 +321,109 @@ TEST(SPIRVResourceLoweringTest, LeavesStorageBufferArrayStoreUnchanged) {
   ASSERT_TRUE(F);
   EXPECT_FALSE(hasResourceLoadCall(*F));
   EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.store.raw"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+// Roadmap H6g-b-a-i-a-i: glslang can spell a storage buffer block directly
+// as a fixed-layout struct whose members are fixed-size arrays/vectors,
+// rather than `dxc`'s one-member runtime-array wrapper. Once
+// `spirv.AccessChain` lowering has selected one field with
+// `llvm.spv.resource.getpointer`, any further array/vector descent is an
+// ordinary GEP off that field pointer; this pass must fold the whole chain
+// back into one raw byte offset instead of leaving the handle behind for
+// `UnsupportedOps`.
+TEST(SPIRVResourceLoweringTest,
+     LowersDirectStorageBlockFieldAndNestedArrayAccessToResourceLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(i32 %idx) {
+      %h = call target("spirv.VulkanBuffer", {[4 x <4 x float>], [2 x float]}, 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %field = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {[4 x <4 x float>], [2 x float]}, 12, 1) %h, i32 1)
+      %elt = getelementptr [2 x float], ptr %field, i32 0, i32 %idx
+      %v = load float, ptr %elt
+      ret float %v
+    }
+    declare target("spirv.VulkanBuffer", {[4 x <4 x float>], [2 x float]}, 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {[4 x <4 x float>], [2 x float]}, 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceLoadCall(*F));
+
+  Value *Offset = findRawLoadOffset(*F);
+  ASSERT_TRUE(Offset);
+  // Field 1 starts after the 64-byte `[4 x <4 x float>]` member, and the
+  // nested `[2 x float]` GEP adds `idx * 4` on top of that.
+  auto *Base = dyn_cast<Instruction>(Offset);
+  ASSERT_TRUE(Base);
+  EXPECT_EQ(Base->getOpcode(), Instruction::Add);
+  auto *BaseOffset = dyn_cast<ConstantInt>(Base->getOperand(0));
+  ASSERT_TRUE(BaseOffset);
+  EXPECT_EQ(BaseOffset->getZExtValue(), 64u);
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersStructuredStorageBufferFieldAccessToFieldOffset) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(i32 %idx) {
+      %h = call target("spirv.VulkanBuffer", [0 x {<4 x float>, <4 x float>}], 12, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %elt = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x {<4 x float>, <4 x float>}], 12, 0) %h, i32 %idx)
+      %field = getelementptr {<4 x float>, <4 x float>}, ptr %elt, i32 0, i32 1
+      %v = load <4 x float>, ptr %field
+      ret <4 x float> %v
+    }
+    declare target("spirv.VulkanBuffer", [0 x {<4 x float>, <4 x float>}], 12, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x {<4 x float>, <4 x float>}], 12, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceLoadCall(*F));
+
+  Value *Offset = findRawLoadOffset(*F);
+  ASSERT_TRUE(Offset);
+  auto *Add = dyn_cast<Instruction>(Offset);
+  ASSERT_TRUE(Add);
+  EXPECT_EQ(Add->getOpcode(), Instruction::Add);
+  auto *FieldOffset = dyn_cast<ConstantInt>(Add->getOperand(1));
+  ASSERT_TRUE(FieldOffset);
+  EXPECT_EQ(FieldOffset->getZExtValue(), 16u);
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LeavesDirectStorageBlockDynamicFieldSelectorUnchanged) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(i32 %field) {
+      %h = call target("spirv.VulkanBuffer", {[4 x <4 x float>], [2 x float]}, 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {[4 x <4 x float>], [2 x float]}, 12, 1) %h, i32 %field)
+      %v = load float, ptr %ptr
+      ret float %v
+    }
+    declare target("spirv.VulkanBuffer", {[4 x <4 x float>], [2 x float]}, 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {[4 x <4 x float>], [2 x float]}, 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(hasResourceLoadCall(*F));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
@@ -1000,4 +1115,3 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2d.v4f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
-

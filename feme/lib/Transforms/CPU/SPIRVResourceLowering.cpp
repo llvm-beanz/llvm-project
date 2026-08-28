@@ -43,22 +43,24 @@ namespace {
 
 /// Which kind of resource a bound handle wraps.
 ///
-/// The first five are buffers -- a storage buffer -- a homogeneous,
+/// The first six are buffers -- a storage buffer -- a homogeneous,
 /// dynamically-indexed runtime array (`RWStructuredBuffer<T>`/
-/// `StructuredBuffer<T>`) -- a uniform buffer -- a fixed set of
-/// differently-typed named fields at fixed byte offsets
-/// (`cbuffer`/`ConstantBuffer<T>`) -- a uniform buffer array -- a uniform
-/// block whose sole field is itself a fixed-size, homogeneous array
-/// (roadmap F12a's own `layout(std140) uniform Input { uint data[16]; }`
-/// shape) -- or (V4) a texel buffer -- a `Buffer<T>`/`RWBuffer<T>`-shaped,
-/// format-converting view over a `Dim::Buffer` SPIR-V image. Each needs its
-/// own offset arithmetic (see `lowerAccesses`): a storage buffer access
-/// multiplies a (possibly dynamic) array index by a fixed element stride, a
-/// uniform buffer access resolves a (always compile-time-constant) field
-/// index directly to a fixed struct-layout byte offset, a uniform buffer
-/// *array* access multiplies a (possibly dynamic) array index by a fixed
-/// stride exactly like a storage buffer's own -- except that stride is
-/// carried explicitly on the handle type itself (see
+/// `StructuredBuffer<T>`) -- a storage buffer block spelled directly as a
+/// fixed-layout struct (`glslang`'s own form for a fixed-size-only `buffer`
+/// block) -- a uniform buffer -- a fixed set of differently-typed named
+/// fields at fixed byte offsets (`cbuffer`/`ConstantBuffer<T>`) -- a
+/// uniform buffer array -- a uniform block whose sole field is itself a
+/// fixed-size, homogeneous array (roadmap F12a's own
+/// `layout(std140) uniform Input { uint data[16]; }` shape) -- or (V4) a
+/// texel buffer -- a `Buffer<T>`/`RWBuffer<T>`-shaped, format-converting
+/// view over a `Dim::Buffer` SPIR-V image. Each needs its own offset
+/// arithmetic (see `lowerAccesses`): a storage buffer access multiplies a
+/// (possibly dynamic) array index by a fixed element stride, a direct-field
+/// storage or uniform buffer access resolves a (always compile-time-
+/// constant) field index directly to a fixed struct-layout byte offset, a
+/// uniform buffer *array* access multiplies a (possibly dynamic) array
+/// index by a fixed stride exactly like a storage buffer's own -- except
+/// that stride is carried explicitly on the handle type itself (see
 /// `classifyVulkanBufferHandle`'s comment), since a std140 array's stride
 /// (always a multiple of 16 bytes) need not equal its element's own natural
 /// size the way a std430 storage buffer array's always does -- and a texel
@@ -73,6 +75,7 @@ namespace {
 /// (see ImageCalls.h).
 enum class HandleKind {
   Storage,
+  StorageStruct,
   Uniform,
   UniformArray,
   TexelStorage,
@@ -96,6 +99,7 @@ bool isBufferHandleKind(HandleKind Kind) {
 BoundResourceClass getResourceClass(HandleKind Kind) {
   switch (Kind) {
   case HandleKind::Storage:
+  case HandleKind::StorageStruct:
   case HandleKind::Uniform:
   case HandleKind::UniformArray:
   case HandleKind::TexelStorage:
@@ -130,11 +134,12 @@ struct RangeKey {
 struct RangeEntry {
   HandleKind Kind = HandleKind::Storage;
   /// The storage-buffer element stride (`Kind == Storage`); unused, always
-  /// 0, for a uniform buffer, whose offsets come from `ElementStruct`'s own
-  /// layout instead.
+  /// 0, for a direct-field storage/uniform buffer, whose offsets come from
+  /// `ElementStruct`'s own layout instead.
   uint64_t Stride = 0;
-  /// The uniform-buffer field struct (`Kind == Uniform`); null for a
-  /// storage buffer.
+  /// The direct-field storage/uniform-buffer field struct
+  /// (`Kind == StorageStruct`/`Uniform`); null for a runtime-array storage
+  /// or uniform-array buffer.
   StructType *ElementStruct = nullptr;
   /// The texel-buffer shader-side element type (`isTexelHandleKind(Kind)`);
   /// null otherwise. This is the scalar per-*channel* type
@@ -187,12 +192,19 @@ struct HandleClassification {
   Type *TexelElementType = nullptr;
 };
 
+/// SPIR-V's `Uniform` and `StorageBuffer` storage-class numeric values, as
+/// forwarded unchanged into `spirv.VulkanBuffer`'s own first integer
+/// parameter by `convert{Buffer,Uniform}BlockType`
+/// (SPIRVToLLVMPatterns.cpp).
+constexpr unsigned SPIRVStorageClassUniform = 2;
+constexpr unsigned SPIRVStorageClassStorageBuffer = 12;
+
 /// Returns \p Handle's buffer classification if its type is a
-/// `spirv.VulkanBuffer` handle over a flat (non-aggregate-accessed) element
-/// -- see `feme::spirv::convertBufferBlockType`/`convertUniformBlockType`
-/// in SPIRVToLLVMPatterns.cpp for the handle shapes this recognizes: one
-/// type parameter (a storage buffer's `!llvm.array<0 x ElemTy>` runtime
-/// array, a uniform buffer's own field struct directly, or a uniform
+/// `spirv.VulkanBuffer` handle -- see
+/// `feme::spirv::convertBufferBlockType`/`convertUniformBlockType` in
+/// SPIRVToLLVMPatterns.cpp for the handle shapes this recognizes: one type
+/// parameter (a storage buffer's `!llvm.array<0 x ElemTy>` runtime array, a
+/// direct-field storage or uniform buffer's own struct, or a uniform
 /// buffer array's own `!llvm.array<0 x ElemTy>` marker array -- the same
 /// shape a storage buffer's own uses) and either two integer parameters
 /// (storage class, writability) or, for a uniform buffer array only, three
@@ -214,14 +226,21 @@ struct HandleClassification {
 /// which is why the parameter count -- not `ElemTy` -- is what
 /// distinguishes them here.
 ///
+/// A struct parameter is normally a direct-field uniform buffer, but a
+/// `StorageBuffer`-class handle with one is a glslang-style storage buffer
+/// block emitted directly as a fixed-layout struct rather than `dxc`'s
+/// one-member runtime-array wrapper.
+///
 /// Returns `std::nullopt` for any other handle kind (an image/sampler
-/// resource, not yet covered -- see the header comment).
+/// resource, or a `spirv.VulkanBuffer` shape this pass still does not
+/// model -- see the header comment).
 std::optional<HandleClassification>
 classifyVulkanBufferHandle(const CallInst &Handle, const DataLayout &DL) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
   if (!HandleTy || HandleTy->getName() != "spirv.VulkanBuffer")
     return std::nullopt;
-  if (HandleTy->getNumTypeParameters() != 1)
+  if (HandleTy->getNumTypeParameters() != 1 ||
+      HandleTy->getNumIntParameters() < 2)
     return std::nullopt;
   Type *Param = HandleTy->getTypeParameter(0);
   if (auto *ArrayTy = dyn_cast<ArrayType>(Param)) {
@@ -232,8 +251,12 @@ classifyVulkanBufferHandle(const CallInst &Handle, const DataLayout &DL) {
                                 DL.getTypeStoreSize(ArrayTy->getElementType()),
                                 nullptr};
   }
-  if (auto *StructTy = dyn_cast<StructType>(Param))
-    return HandleClassification{HandleKind::Uniform, 0, StructTy};
+  if (auto *StructTy = dyn_cast<StructType>(Param)) {
+    if (HandleTy->getIntParameter(0) == SPIRVStorageClassStorageBuffer)
+      return HandleClassification{HandleKind::StorageStruct, 0, StructTy};
+    if (HandleTy->getIntParameter(0) == SPIRVStorageClassUniform)
+      return HandleClassification{HandleKind::Uniform, 0, StructTy};
+  }
   return std::nullopt;
 }
 
@@ -492,61 +515,97 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
   return true;
 }
 
-/// Checks that every use of \p Handle is the flat access shape this pass
-/// models for \p Kind: a `llvm.spv.resource.getpointer` call whose own
-/// result is used only by an ordinary `load` (every kind), or a `store` it
-/// is the pointer operand (not the stored value) of (`HandleKind::Storage`/
-/// `TexelStorage` only -- a uniform/uniform-array/texel-uniform buffer is
-/// always read-only, matching Vulkan's own restriction on
-/// `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`/`_UNIFORM_TEXEL_BUFFER`) -- see the
-/// header comment's "access shape" bullet. For `HandleKind::Uniform`, the
+/// Returns whether \p GEP's byte offset relative to its pointer operand can
+/// be recovered as a non-negative constant plus zero or more
+/// `index * constant` terms, the only form `lowerRawPointerUses` below
+/// materializes.
+bool hasResolvableGEPByteOffset(const GetElementPtrInst &GEP,
+                                const DataLayout &DL) {
+  unsigned BitWidth = DL.getIndexSizeInBits(GEP.getPointerAddressSpace());
+  SmallMapVector<Value *, APInt, 4> VariableOffsets;
+  APInt ConstantOffset(BitWidth, 0);
+  if (!GEP.collectOffset(DL, BitWidth, VariableOffsets, ConstantOffset))
+    return false;
+  if (ConstantOffset.isNegative())
+    return false;
+  return llvm::all_of(VariableOffsets, [](const auto &Entry) {
+    return !Entry.second.isNegative();
+  });
+}
+
+/// Checks that every use of \p Ptr is one of the load/store or, when
+/// \p AllowGEPs, `getelementptr` shapes this pass can lower.
+bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
+                                 bool AllowGEPs, const DataLayout &DL) {
+  for (const User *U : Ptr.users()) {
+    if (const auto *LI = dyn_cast<LoadInst>(U)) {
+      if (IsTexel ? !isSupportedTexelElementType(LI->getType())
+                  : !isSupportedRawElementType(LI->getType()))
+        return false;
+      continue;
+    }
+    if (Writable)
+      if (const auto *SI = dyn_cast<StoreInst>(U)) {
+        if (SI->getPointerOperand() != &Ptr)
+          return false;
+        if (IsTexel
+                ? !isSupportedTexelElementType(SI->getValueOperand()->getType())
+                : !isSupportedRawElementType(SI->getValueOperand()->getType()))
+          return false;
+        continue;
+      }
+    if (AllowGEPs)
+      if (const auto *GEP = dyn_cast<GetElementPtrInst>(U)) {
+        if (GEP->getPointerOperand() != &Ptr ||
+            !hasResolvableGEPByteOffset(*GEP, DL) ||
+            !hasOnlySupportedPointerUses(*GEP, Writable, IsTexel, AllowGEPs,
+                                         DL))
+          return false;
+        continue;
+      }
+    return false;
+  }
+  return true;
+}
+
+/// Checks that every use of \p Handle is the access shape this pass models
+/// for \p Kind: a `llvm.spv.resource.getpointer` call whose own result is
+/// used by an ordinary `load` (every kind), a `store` it is the pointer
+/// operand of (`HandleKind::Storage`/`StorageStruct`/`TexelStorage` only --
+/// a uniform/uniform-array/texel-uniform buffer is always read-only,
+/// matching Vulkan's own restriction on
+/// `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`/`_UNIFORM_TEXEL_BUFFER`), or, for a
+/// storage-buffer kind only, an ordinary `getelementptr` chain ending in
+/// such a load/store. For `HandleKind::Uniform` and `StorageStruct`, the
 /// `getpointer` index (the field selected within the block's struct) must
-/// also be a compile-time constant, unlike a storage buffer's -- or a
-/// uniform buffer *array*'s (`HandleKind::UniformArray`) -- possibly
-/// dynamic array index: a real cbuffer field access is always statically
-/// typed. For a texel-buffer kind, every load's result type (or
-/// store's stored-value type) must be one of the shapes
-/// `isSupportedTexelElementType` accepts -- see `classifyTexelBufferHandle`'s
-/// comment for why that check belongs here rather than on the handle type;
-/// for a storage/uniform kind, it must instead be one
-/// `isSupportedRawElementType` accepts, since that is what
+/// also be a compile-time constant: a real cbuffer or direct-field storage
+/// block access is statically typed there. For a texel-buffer kind, every
+/// load's result type (or store's stored-value type) must be one of the
+/// shapes `isSupportedTexelElementType` accepts -- see
+/// `classifyTexelBufferHandle`'s comment for why that check belongs here
+/// rather than on the handle type; for a storage/uniform kind, it must
+/// instead be one `isSupportedRawElementType` accepts, since that is what
 /// `createRawLoad`/`createRawStore` (and, transitively,
 /// `feme::cpu::mangleResourceCallName`) can mangle a runtime call name for.
-/// Any further `getelementptr` into the element's own fields (a
-/// structured-buffer field access, or a nested uniform-buffer field) is
-/// left unmodeled, matching
-/// `feme::cpu::ResourceLoweringPass::hasOnlySupportedUses`'s own narrowing.
+/// A nested uniform-buffer field access, or any GEP whose byte offset is not
+/// recoverable from its indices, is still left unmodeled.
 bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
-  bool Writable =
-      Kind == HandleKind::Storage || Kind == HandleKind::TexelStorage;
+  bool Writable = Kind == HandleKind::Storage ||
+                  Kind == HandleKind::StorageStruct ||
+                  Kind == HandleKind::TexelStorage;
   bool IsTexel = isTexelHandleKind(Kind);
+  bool AllowGEPs =
+      Kind == HandleKind::Storage || Kind == HandleKind::StorageStruct;
+  const DataLayout &DL = Handle.getModule()->getDataLayout();
   for (const User *U : Handle.users()) {
     const auto *GetPtr = dyn_cast<CallInst>(U);
     if (!GetPtr || getIntrinsicID(GetPtr) != Intrinsic::spv_resource_getpointer)
       return false;
-    if (Kind == HandleKind::Uniform &&
+    if ((Kind == HandleKind::Uniform || Kind == HandleKind::StorageStruct) &&
         !isa<ConstantInt>(GetPtr->getArgOperand(1)))
       return false;
-    for (const User *PU : GetPtr->users()) {
-      if (const auto *LI = dyn_cast<LoadInst>(PU)) {
-        if (IsTexel ? !isSupportedTexelElementType(LI->getType())
-                    : !isSupportedRawElementType(LI->getType()))
-          return false;
-        continue;
-      }
-      if (Writable) {
-        if (const auto *SI = dyn_cast<StoreInst>(PU)) {
-          if (SI->getPointerOperand() != GetPtr)
-            return false;
-          if (IsTexel
-                  ? !isSupportedTexelElementType(SI->getValueOperand()->getType())
-                  : !isSupportedRawElementType(SI->getValueOperand()->getType()))
-            return false;
-          continue;
-        }
-      }
+    if (!hasOnlySupportedPointerUses(*GetPtr, Writable, IsTexel, AllowGEPs, DL))
       return false;
-    }
   }
   return true;
 }
@@ -799,8 +858,77 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
   return NewF;
 }
 
+/// Materializes \p GEP's byte offset relative to its pointer operand as an
+/// i64 value. `hasOnlySupportedPointerUses` already guaranteed this is
+/// representable as a non-negative constant plus zero or more
+/// `index * constant` terms.
+Value *computePointerOffset(IRBuilderBase &Builder,
+                            const GetElementPtrInst &GEP,
+                            const DataLayout &DL) {
+  unsigned BitWidth = DL.getIndexSizeInBits(GEP.getPointerAddressSpace());
+  SmallMapVector<Value *, APInt, 4> VariableOffsets;
+  APInt ConstantOffset(BitWidth, 0);
+  bool Collected =
+      GEP.collectOffset(DL, BitWidth, VariableOffsets, ConstantOffset);
+  (void)Collected;
+  assert(Collected &&
+         "hasOnlySupportedPointerUses only accepts resolvable GEPs");
+  assert(!ConstantOffset.isNegative() &&
+         "hasOnlySupportedPointerUses only accepts non-negative GEP offsets");
+
+  Value *Offset =
+      ConstantInt::get(Builder.getInt64Ty(), ConstantOffset.getZExtValue());
+  for (const auto &[Index, Multiplier] : VariableOffsets) {
+    assert(!Multiplier.isNegative() &&
+           "hasOnlySupportedPointerUses only accepts non-negative GEP offsets");
+    Value *Term = Index;
+    if (Term->getType() != Builder.getInt64Ty())
+      Term = Builder.CreateZExtOrTrunc(Term, Builder.getInt64Ty());
+    if (Multiplier != 1)
+      Term =
+          Builder.CreateMul(Term, ConstantInt::get(Builder.getInt64Ty(),
+                                                   Multiplier.getZExtValue()));
+    Offset = Builder.CreateAdd(Offset, Term);
+  }
+  return Offset;
+}
+
+/// Rewrites every raw-buffer load/store reachable from \p Ptr (either
+/// directly or, for a structured storage block, through a GEP chain) using
+/// the already-resolved descriptor index and byte offset.
+void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
+                         Value *DescriptorIndex, Value *Offset,
+                         const DataLayout &DL) {
+  Value *Mask = ConstantInt::getTrue(Ptr->getContext());
+  for (User *U : llvm::make_early_inc_range(Ptr->users())) {
+    if (auto *LI = dyn_cast<LoadInst>(U)) {
+      IRBuilder<> Builder(LI);
+      CallInst *Loaded = createRawLoad(Builder, Env, DescriptorIndex, Offset,
+                                       Mask, LI->getType(), LI->getName());
+      LI->replaceAllUsesWith(Loaded);
+      LI->eraseFromParent();
+      continue;
+    }
+    if (auto *SI = dyn_cast<StoreInst>(U)) {
+      IRBuilder<> Builder(SI);
+      createRawStore(Builder, Env, DescriptorIndex, Offset,
+                     SI->getValueOperand(), Mask);
+      SI->eraseFromParent();
+      continue;
+    }
+
+    auto *GEP = cast<GetElementPtrInst>(U);
+    IRBuilder<> Builder(GEP);
+    Value *NestedOffset =
+        Builder.CreateAdd(Offset, computePointerOffset(Builder, *GEP, DL));
+    lowerRawPointerUses(GEP, Env, DescriptorIndex, NestedOffset, DL);
+    GEP->eraseFromParent();
+  }
+}
+
 /// Rewrites every access through \p BH.Handle -- a `getpointer` call
-/// followed by a load or store, see `hasOnlySupportedUses` -- into the
+/// followed by a load or store, or, for a structured storage block, a GEP
+/// chain ending in one (see `hasOnlySupportedUses`) -- into the
 /// corresponding canonical `feme.cpu.resource.*` call, using \p Env and the
 /// range-checked heap index `HeapBase + clamp(Index, BH.RangeSize)` (see
 /// `computeClampedIndex` and the header comment's roadmap R26 note).
@@ -814,18 +942,20 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
 /// `getpointer` array index (re-read per call, since -- unlike the
 /// descriptor index above -- a distinct array element may be read per
 /// access) by \p BH.Stride and goes through
-/// `feme::cpu::createRawLoad`/`createRawStore`; a (non-array) uniform-buffer
-/// access resolves its `getpointer` field index (a compile-time constant,
-/// guaranteed by `hasOnlySupportedUses`) directly to \p BH.ElementStruct's
-/// own declared byte offset for that field, also through the raw family --
-/// no runtime arithmetic needed at all, since a cbuffer's fields have no
-/// dynamic index the way a storage/uniform buffer array's elements do. A
-/// texel buffer access (`isTexelHandleKind(BH.Kind)`) needs no byte-offset
-/// arithmetic either: its `getpointer` "index" is already the image
-/// coordinate `OpImageRead`/`OpImageFetch`/`OpImageWrite` themselves address
-/// by, so it goes through `feme::cpu::createTypedLoad`/`createTypedStore`
-/// directly, letting the CPU runtime's format conversion (keyed off the
-/// bound `FemeDescriptor::Format`) do the rest.
+/// `feme::cpu::createRawLoad`/`createRawStore`; a direct-field storage or
+/// uniform-buffer access resolves its `getpointer` field index (a compile-
+/// time constant, guaranteed by `hasOnlySupportedUses`) directly to
+/// \p BH.ElementStruct's own declared byte offset for that field, and any
+/// following GEPs contributing further byte offset are folded in by
+/// `lowerRawPointerUses` -- no other runtime arithmetic needed at the
+/// top-level field selection itself, since such fields have no dynamic index
+/// the way a storage/uniform buffer array's elements do. A texel buffer
+/// access (`isTexelHandleKind(BH.Kind)`) needs no byte-offset arithmetic
+/// either: its `getpointer` "index" is already the image coordinate
+/// `OpImageRead`/`OpImageFetch`/`OpImageWrite` themselves address by, so it
+/// goes through `feme::cpu::createTypedLoad`/`createTypedStore` directly,
+/// letting the CPU runtime's format conversion (keyed off the bound
+/// `FemeDescriptor::Format`) do the rest.
 void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
                    uint32_t HeapBase) {
   LLVMContext &Ctx = BH.Handle->getContext();
@@ -858,29 +988,26 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
       Offset = ConstantInt::get(I64Ty, ByteOffset);
     }
 
-    for (User *PU : llvm::make_early_inc_range(GetPtr->users())) {
-      if (auto *LI = dyn_cast<LoadInst>(PU)) {
-        IRBuilder<> Builder(LI);
-        CallInst *Loaded =
-            IsTexel
-                ? createTypedLoad(Builder, Env, DescriptorIndex, ElementIndex,
-                                  Mask, LI->getType(), LI->getName())
-                : createRawLoad(Builder, Env, DescriptorIndex, Offset, Mask,
-                                LI->getType(), LI->getName());
-        LI->replaceAllUsesWith(Loaded);
-        LI->eraseFromParent();
-        continue;
-      }
-      // Only reachable for HandleKind::Storage/TexelStorage.
-      auto *SI = cast<StoreInst>(PU);
-      IRBuilder<> Builder(SI);
-      if (IsTexel)
+    if (IsTexel) {
+      for (User *PU : llvm::make_early_inc_range(GetPtr->users())) {
+        if (auto *LI = dyn_cast<LoadInst>(PU)) {
+          IRBuilder<> Builder(LI);
+          CallInst *Loaded =
+              createTypedLoad(Builder, Env, DescriptorIndex, ElementIndex, Mask,
+                              LI->getType(), LI->getName());
+          LI->replaceAllUsesWith(Loaded);
+          LI->eraseFromParent();
+          continue;
+        }
+        // Only reachable for HandleKind::TexelStorage.
+        auto *SI = cast<StoreInst>(PU);
+        IRBuilder<> Builder(SI);
         createTypedStore(Builder, Env, DescriptorIndex, ElementIndex,
                          SI->getValueOperand(), Mask);
-      else
-        createRawStore(Builder, Env, DescriptorIndex, Offset,
-                       SI->getValueOperand(), Mask);
-      SI->eraseFromParent();
+        SI->eraseFromParent();
+      }
+    } else {
+      lowerRawPointerUses(GetPtr, Env, DescriptorIndex, Offset, DL);
     }
     GetPtr->eraseFromParent();
   }

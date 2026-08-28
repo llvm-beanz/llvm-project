@@ -5,11 +5,8 @@
 ; -- see the "Scope" note in
 ; feme/include/feme/Transforms/CPU/SPIRVResourceLowering.h: a non-buffer-dim
 ; image/sampler handle (a `Texture2D`/`Sampler`, not a storage buffer or (V4)
-; a `Dim::Buffer` texel buffer), a storage-buffer element accessed through a
-; further `getelementptr` into its own fields (a `StructuredBuffer` with
-; more than one field, read through one of them individually), and (roadmap
-; R26) an unbounded descriptor array -- SPIR-V's own spelling of an
-; unbounded range, mirroring
+; a `Dim::Buffer` texel buffer) and (roadmap R26) an unbounded descriptor
+; array -- SPIR-V's own spelling of an unbounded range, mirroring
 ; `feme::cpu::BoundResourceNormalizationPass`'s own rejection of an
 ; unbounded DXIL `handlefrombinding` range.
 
@@ -27,20 +24,6 @@ define void @image_resource(i32 %idx) {
   ret void
 }
 
-; CHECK-LABEL: define void @field_access(
-; CHECK-NOT: resource_heap
-; CHECK: call target("spirv.VulkanBuffer", {{.*}}) @llvm.spv.resource.handlefrombinding
-define void @field_access(i32 %idx) {
-  %h = call target("spirv.VulkanBuffer", [0 x {<4 x i32>, <4 x float>}], 12, 0)
-      @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
-  %ptr = call ptr
-      @llvm.spv.resource.getpointer(
-          target("spirv.VulkanBuffer", [0 x {<4 x i32>, <4 x float>}], 12, 0) %h, i32 %idx)
-  %field = getelementptr inbounds {<4 x i32>, <4 x float>}, ptr %ptr, i32 0, i32 1
-  %v = load <4 x float>, ptr %field
-  ret void
-}
-
 ; CHECK-LABEL: define void @unbounded_array(
 ; CHECK-NOT: resource_heap
 ; CHECK: call target("spirv.VulkanBuffer", {{.*}}) @llvm.spv.resource.handlefrombinding
@@ -53,4 +36,18 @@ define void @unbounded_array(i32 %idx, i32 %which) {
   ret void
 }
 
-; CHECK-NOT: !feme.cpu.bound_resources
+; CHECK-LABEL: define void @field_access(
+; CHECK: %[[IDX64:[0-9]+]] = zext i32 %idx to i64
+; CHECK: %[[BASE:[0-9]+]] = mul i64 %[[IDX64]], 32
+; CHECK: %[[OFFSET:[0-9]+]] = add i64 %[[BASE]], 16
+; CHECK: call <4 x float> @feme.cpu.resource.load.raw.v4f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %[[OFFSET]], i1 true)
+define void @field_access(i32 %idx) {
+  %h = call target("spirv.VulkanBuffer", [0 x {<4 x i32>, <4 x float>}], 12, 0)
+      @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+  %ptr = call ptr
+      @llvm.spv.resource.getpointer(
+          target("spirv.VulkanBuffer", [0 x {<4 x i32>, <4 x float>}], 12, 0) %h, i32 %idx)
+  %field = getelementptr inbounds {<4 x i32>, <4 x float>}, ptr %ptr, i32 0, i32 1
+  %v = load <4 x float>, ptr %field
+  ret void
+}
