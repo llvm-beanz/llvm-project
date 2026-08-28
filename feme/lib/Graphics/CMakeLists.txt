@@ -7,6 +7,7 @@ add_feme_library(FeMeGraphics
   GeometryStreamCollection.cpp
   ImageFixture.cpp
   LayeredRendering.cpp
+  Mesh.cpp
   Patch.cpp
   PatchPipeline.cpp
   Pipeline.cpp
