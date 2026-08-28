@@ -33,16 +33,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5e-d?
+Can you work on milestone H5e-e?
 
-> **6 `dEQP-VK.geometry.emit.*_emit_0_end_1` cases fail with
-> `feme-cpu-wrap-geometry: geometry stage wrapper requires attached
-> feme.signature metadata`**, newly exposed by H5e-a. A geometry entry point
-> compiled from one of these specific `emit`-count shapes (a shader that ends
-> its primitive without emitting on that particular stream/count combination)
-> reaches `GeometryWrapperPass` without the `feme.signature` metadata it
-> requires to construct the wrapper -- a reflection/metadata-attachment gap
-> somewhere upstream of `GeometryWrapperPass` itself (likely
-> `CanonicalizeStagePass` or SPIR-V import), not `GeometryWrapperPass`'s own
-> lowering (which is otherwise proven correct by G5's existing test suite and
-> this row's own `EmitVertex`/`EndPrimitive` fix). Root cause not yet isolated
+> **6 `dEQP-VK.geometry.layered.2d_array.*.multiple_layers_per_invocation`
+> variants render an incorrect image** (`Fail (Rendered images are incorrect)`),
+> newly exposed by H5e-a. Unlike H5e-b/H5e-c's outright creation/submission
+> failures, these pipelines now run to completion without error and produce a
+> wrong result -- a genuine rendering-correctness bug in the
+> geometry-to-layered-render-target path (most likely `gl_Layer` routing,
+> per-invocation output-vertex addressing, or stream-merge ordering under
+> `Invocations > 1`, none yet isolated). Root cause not yet isolated
