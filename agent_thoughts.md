@@ -41020,3 +41020,216 @@ Committed separately: (1) the `Roadmap.md` update (H6g close-out, H6g-a/
 H6g-b split, H6 parent-row and H8 cross-reference updates), (2) the
 `VulkanCTSReport.md` "Roadmap H6g: measured impact" section, and (3) this
 `agent_thoughts.md` entry.
+
+# Closing out milestone H6c-a-a: wiring `MeshOutputBuilder` into a mesh entry's canonicalized output store
+
+Task: complete and close out H6c-a-a -- wire `MeshOutputBuilder` into a
+mesh entry's canonicalized `feme.stage.output.store` `Vertex`-operand
+writes (H6b) reaching `EntryWrapperPass`/`CompiledStage::invokeMesh`'s
+reused path, now that H6d (meshlet assembly) and H6i (canonicalization
+stage filter accepting `ShaderStage::Mesh`) have both landed. Does not
+need H6h (task payload import), since mesh output never touches
+`TaskPayloadWorkgroupEXT` -- confirmed directly by re-reading H6c-a-a's
+own roadmap text and the H6c-a split rationale before writing any code.
+
+## Investigation
+
+Read `feme/.instructions.md` again for the coding-standard baseline (C++17,
+LLVM style, clang-format, no RTTI/exceptions, early exits). Re-read the
+Roadmap.md rows for H6, H6c, H6c-a, H6c-a-a, H6c-a-b, H6d, H6g, H6g-b, H6i
+in full to reconstruct the dependency chain and confirm both named
+prerequisites (H6d, H6i) are struck through as done.
+
+Traced the whole existing pipeline before writing anything:
+
+- `CanonicalizeStage.cpp`: confirmed H6b's `isPerVertexArrayInputGlobal`/
+  `isDynamicIndexedArrayGlobal`/`getDynamicVertexIndexedAccess` already
+  canonicalize a mesh entry's `Output`-array store with a dynamic `Vertex`
+  operand into an ordinary `feme.stage.output.store` call, and (via H6i)
+  the pass's own stage filter now actually reaches a `"mesh"`-tagged
+  entry point, not just the function called directly.
+- `StageMaskCalls.cpp`: `LinearizePass` unconditionally converts every
+  `feme.stage.output.store` into a masked form
+  (`feme.cpu.masked.stage.output.store.<ty>(Element, Row, Component,
+  Value, Vertex, Mask)`, 6 args, `Element` a baked-in `ConstantInt`) before
+  any stage wrapper runs -- confirmed a stage-specific wrapper must check
+  `isMaskedOutputStoreCall`, never `isStageOpCall(..., OutputStore)`
+  directly, matching `VertexWrapper.cpp`/`GeometryWrapper.cpp`'s own
+  precedent.
+- `Signature.h`: `SignatureElement::Frequency`
+  (`SignatureFrequency::PerVertex`/`PerPrimitive`) is the only field that
+  distinguishes which of a mesh entry's two output arrays
+  (`VertexOutputs`/`PrimitiveOutputs`) a given store should target; no
+  real SPIR-V import path sets `PerPrimitive` for mesh yet, so this had to
+  be exercised with hand-built `SignatureElement`s in tests, mirroring how
+  `GeometryWrapperTest.cpp` already hand-builds elements for cases no real
+  importer produces yet either.
+- `RuntimeABI.h`/`ResourceHeap.h`: `FemeMeshArgs`/`MeshResources`/
+  `PreparedMeshBatch` are already complete (landed at H6c) -- confirmed
+  `FemeMeshArgs` shares its first four fields
+  (`Resources`/`GroupID`/`GroupCount`/`GroupShared`) byte-for-byte with
+  `FemeDispatchArgs`, which is exactly why `EntryWrapperPass` could already
+  read that shared prefix through `getDispatchArgsType`'s shorter struct
+  even for a real, longer `FemeMeshArgs*` pointer -- a documented,
+  deliberate ABI trick this row's own extension needed to preserve rather
+  than disturb.
+- `Executor.cpp`'s `runMeshWorkgroup` (landed at H6e): already builds a
+  real `StageStorage`-backed `FemeStageLayout`, populates
+  `MeshResources::VertexOutputLayout`/`VertexOutputs`/
+  `ActualVertexCount`/`ActualPrimitiveCount`, and calls
+  `MeshOutputBuilder`/`assembleMeshlet` -- fully ready and waiting only for
+  compiled IR to actually write real data into those buffers. Also found,
+  while re-reading it closely this time, that `flattenMeshRow` does *not*
+  filter by `SignatureElement::Frequency` -- it treats every `Output`
+  element as per-vertex, and `PrimitiveOutputs`/`PrimitiveOutputLayout` are
+  never populated at all. Filed as a new gap below rather than silently
+  left unaddressed.
+- `EntryWrapper.cpp`: `buildWaveLoop`'s per-argument dispatch is an
+  exhaustive if/else-if chain ending in `llvm_unreachable` -- any new
+  wave-body parameter name it doesn't recognize crashes it. Confirmed
+  there are three separate call sites that build a top-level wrapper
+  function and call `buildWrapperEnv`/select `ArgsTy`
+  (`buildWrapper`, the common case; `buildWrapperForLoop`/
+  `buildWrapperForBranch`, the barrier-split cases) -- all three needed
+  the same treatment for correctness, not just the one existing tests
+  happen to exercise.
+- `GeometryWrapper.cpp`/`VertexWrapper.cpp`: primary structural templates
+  for the new pass -- `computeStageStorageAddress`'s address-computation
+  shape, `appendXStageParams`'s "always append, conditionally lower"
+  convention, and masked-store lowering's per-lane mask-extract/select
+  pattern all reused near-verbatim.
+- `SPIRVResourceLowering.cpp`'s `computeClampedIndex`: precedent for
+  defensively clamping an index before it becomes a raw memory address,
+  used here as the model for clamping the dynamic mesh output slot index
+  since -- unlike a resource-heap lookup -- there is no bounds-checked
+  fallback for a raw `VertexOutputs`/`PrimitiveOutputs` write.
+
+## Design decisions
+
+- **New, narrow pass (`MeshOutputWrapperPass`), not an `EntryWrapperPass`
+  extension that also lowers stage ops.** Named to avoid implying it
+  replaces `EntryWrapperPass`'s ABI-building role -- it only appends
+  params and lowers output stores, then `EntryWrapperPass` still builds
+  the actual group-loop wrapper around the result, analogous in spirit to
+  `PatchConstantWrapperPass` running alongside (not instead of)
+  `HullWrapperPass`.
+- **`Pipeline.cpp`'s combined `Amplification`/`Mesh` case split in two.**
+  Only `Mesh` gets `MeshOutputWrapperPass()` before `EntryWrapperPass()`;
+  `Amplification` keeps just `EntryWrapperPass()`, since task payload
+  wiring is H6c-a-b's own separate job.
+- **Clamp against the declared *maximum*, not the declared *actual*
+  count.** `SetMeshOutputsEXT` has no canonicalized op yet (explicitly out
+  of this row's scope, per H6c-a-a's own text), so there is no "actual"
+  count to clamp against yet -- clamping to `MaxOutputVertices`/
+  `MaxOutputPrimitives` (the workgroup's declared upper bound, always
+  known) is what prevents a real OOB write regardless, with a tighter
+  bound left to whichever future row wires `SetMeshOutputsEXT` itself
+  (now tracked as H6c-a-a-i below).
+- **`MeshArgsField`/`getMeshArgsType` mirror `FemeMeshArgs` exactly,
+  reusing `DispatchArgsField`'s own values for the shared prefix.** Kept
+  the existing ABI trick intact rather than duplicating a parallel
+  "shared prefix" abstraction.
+
+## Implementation
+
+1. `StageArgsLayout.h`: added `MeshArgsField` enum (18 fields) and
+   `getMeshArgsType(Ctx)`, field-for-field matching `FemeMeshArgs`.
+2. New `MeshOutputWrapper.h`/`.cpp`: `MeshOutputWrapperPass` appends the
+   six new named params (`mesh_vertex_output_layout`, `mesh_vertex_outputs`,
+   `mesh_primitive_output_layout`, `mesh_primitive_outputs`,
+   `mesh_max_output_vertices`, `mesh_max_output_primitives`) to every
+   `ShaderStage::Mesh` entry with a `WaveBodyEnv`, then lowers every masked
+   output store found, branching per-element on `SignatureFrequency`, with
+   the `umin`-based defensive clamp described above. Diagnoses (does not
+   crash on) any other stray stage op, matching `VertexWrapper.cpp`'s own
+   precedent.
+3. `EntryWrapper.cpp`/`.h`: `WrapperEnv` gained six new mesh-only fields;
+   `buildWrapperEnv` gained an `IsMesh` parameter that loads them out of
+   `getMeshArgsType`'s struct when set; `buildWaveLoop`'s dispatch switch
+   gained six new arms; all three wrapper-building call sites now compute
+   `IsMesh` from `feme::getShaderStage(WaveBodyIn)` and select
+   `getMeshArgsType`/`getDispatchArgsType` and thread `IsMesh` through
+   accordingly.
+4. `Pipeline.cpp`: split the `Amplification`/`Mesh` case; `Mesh` now runs
+   `MeshOutputWrapperPass()` then `EntryWrapperPass()`; updated the case's
+   own comment to describe the new state and the two newly-discovered
+   remaining gaps.
+5. Tests: new `MeshOutputWrapperTest.cpp` (4 cases: per-vertex lowering,
+   per-primitive lowering into the other array, params-always-appended
+   with no output store present, and chaining into `EntryWrapperPass` to
+   confirm the combined pipeline still builds a real wrapper). One new
+   `CompiledStageTest.cpp` case, `InvokeMeshWritesPerVertexOutputStore`:
+   compiles a canonicalized-shaped mesh entry (using its own `GroupID` as
+   a stand-in dynamic `Vertex` operand, since no real bounded per-vertex
+   loop variable exists without `SetMeshOutputsEXT`) through the real
+   `CompiledStage::create` pipeline and confirms `invokeMesh` writes a
+   real, non-zero-initialized value into `FemeMeshArgs::VertexOutputs` at
+   exactly that group's own slot -- the first test in this codebase
+   proving real data (not just zero-initialized memory) reaches
+   `VertexOutputs` through the full compiled path.
+
+## Newly discovered gaps, filed as new roadmap rows rather than silently left implicit
+
+While closing this row out, re-reading `Executor.cpp`'s `runMeshWorkgroup`
+and `MeshOutputBuilder.h` closely confirmed two further gaps this row's
+own wiring does not (and, per H6c-a-a's own text, was never meant to)
+close:
+
+- **H6c-a-a-i**: `SetMeshOutputsEXT` still has no canonicalized
+  `feme.stage.*` op, so `FemeMeshArgs::ActualVertexCount`/
+  `ActualPrimitiveCount` stay 0 after a real compiled `invokeMesh` call --
+  `MeshOutputBuilder::assembleMeshlet` always trims to an empty meshlet
+  regardless of how much real data this row's own `MeshOutputWrapperPass`
+  correctly writes into `VertexOutputs`/`PrimitiveOutputs`.
+- **H6c-a-a-ii**: `Executor::runMeshWorkgroup`'s own `flattenMeshRow` does
+  not filter by `SignatureElement::Frequency` -- every `Output` element is
+  currently treated as per-vertex, and `PrimitiveOutputs`/
+  `PrimitiveOutputLayout` are never populated in `MeshResources` at all,
+  so even once H6c-a-a-i lands, a `PerPrimitive`-frequency element this
+  row's own pass correctly routes to `PrimitiveOutputs` would not actually
+  be read back out by the executor.
+
+Both are new lettered rows (`H6c-a-a-i`, `H6c-a-a-ii`), each depending on
+H6c-a-a (this row) and each other's own scope kept independent, since
+they touch different files (`Transforms/Graphics`+`Transforms/CPU` for
+the former, purely `Graphics` for the latter). `H6g-b`'s own text and
+dependency list were corrected to reference both new rows plus H6c-a-b,
+rather than leaving its now-outdated "H6c-a-a alone will clear this"
+assumption uncorrected.
+
+## Validation
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache launcher
+configured): **1939/1998** passing (59 pre-existing, unrelated
+`Unsupported`, 0 `Failed`), up from H6i's own 1934/1993 baseline by
+exactly the 5 new tests this row adds. Ran the full `FeMeTransformsCPU`/
+`FeMeTargetCPU` unit-test binaries directly first (189 + 86 tests, all
+passing) before the full `check-feme` target, to isolate any regression
+quickly if one had appeared.
+
+Vulkan CTS re-run from `/home/dev/dev/VK-GL-CTS/`:
+
+- `dEQP-VK.mesh_shader.*` (28044 cases): byte-identical to H6i/H6g's own
+  recorded totals (1 passed / 337 failed / 27706 not supported). Expected
+  and confirmed, per the two newly-discovered gaps above -- a real mesh
+  workgroup still assembles an empty meshlet regardless of this row's own
+  wiring.
+- `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample:
+  byte-identical to H6i/H6g's own recorded totals (14 passed / 153 failed
+  / 1790 not supported).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed no
+change needed (`VK_EXT_mesh_shader` already fully advertised since H6f;
+this row touches no feature bit, limit, or extension).
+
+Updated `Roadmap.md` (struck through H6c-a-a with a "done:" writeup,
+added H6c-a-a-i/H6c-a-a-ii, corrected H6g-b's text/dependencies) and
+`VulkanCTSReport.md` (new "Roadmap H6c-a-a: measured impact" section).
+
+Committed separately: (1) `StageArgsLayout.h` (`MeshArgsField`/
+`getMeshArgsType`), (2) new `MeshOutputWrapper.h`/`.cpp` plus its
+`CMakeLists.txt` registration, (3) `EntryWrapper.cpp`/`.h`'s mesh-aware
+extension, (4) `Pipeline.cpp`'s case split, (5) `MeshOutputWrapperTest.cpp`
+plus its `CMakeLists.txt` registration, (6) the `CompiledStageTest.cpp`
+end-to-end case, (7) the `Roadmap.md` update, (8) the `VulkanCTSReport.md`
+section, and (9) this `agent_thoughts.md` entry.
