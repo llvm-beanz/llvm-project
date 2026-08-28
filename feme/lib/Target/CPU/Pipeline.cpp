@@ -17,6 +17,7 @@
 #include "feme/Transforms/CPU/GeometryWrapper.h"
 #include "feme/Transforms/CPU/HullWrapper.h"
 #include "feme/Transforms/CPU/Linearize.h"
+#include "feme/Transforms/CPU/MeshOutputWrapper.h"
 #include "feme/Transforms/CPU/PatchConstantWrapper.h"
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
@@ -376,16 +377,35 @@ Expected<PipelineResult> runPipeline(Module &M,
     // for compute, unmodified: `FemeMeshArgs`/`FemeTaskArgs` (RuntimeABI.h)
     // share `FemeDispatchArgs`'s own field layout for every field this pass
     // reads (`Resources`, `GroupID`, `GroupShared`), so no stage-specific
-    // wrapper is needed for that part of the job at all. What is *not* yet
-    // wired here (left to roadmap H6h/H6i/H6d, see agent_thoughts.md's H6c
-    // entry): lowering a per-vertex/per-primitive mesh output store, a
-    // task payload store, `SetMeshOutputsEXT`, or `EmitMeshTasksEXT` --
-    // none of those has a `feme.stage.*` op reaching this pipeline yet, so
-    // only a mesh/task entry point using ordinary resources/root constants
-    // and groupshared/barrier cooperation compiles and runs correctly
-    // end-to-end today.
+    // wrapper is needed for that part of the job at all.
+    //
+    // Roadmap H6c-a-a: a mesh entry's own per-vertex/per-primitive
+    // `feme.stage.output.store` (canonicalized with a dynamic `Vertex`
+    // operand, roadmap H6b) is not one of those shared fields, so
+    // `MeshOutputWrapperPass` runs first, appending `FemeMeshArgs`'s
+    // output-array fields to the wave body by name and lowering every
+    // masked output store into an address into `VertexOutputs`/
+    // `PrimitiveOutputs` -- see MeshOutputWrapper.h. `EntryWrapperPass`
+    // then builds the group-loop wrapper around the result exactly as
+    // before, just against `getMeshArgsType`'s longer struct instead of
+    // `getDispatchArgsType`'s (see `feme::cpu::buildWrapperEnv`'s own
+    // `IsMesh` handling, EntryWrapper.cpp).
+    //
+    // What is *not* yet wired here (left to a future roadmap row, see
+    // agent_thoughts.md's H6c-a-a entry): a task payload store,
+    // `SetMeshOutputsEXT`, or `EmitMeshTasksEXT` -- none of those has a
+    // `feme.stage.*` op reaching this pipeline yet, so
+    // `FemeMeshArgs::ActualVertexCount`/`ActualPrimitiveCount` remain 0
+    // (an assembled meshlet's declared counts) even once this pass's own
+    // output-store wiring lands, and an amplification entry's own task
+    // payload write is still unwired.
     case feme::ShaderStage::Amplification:
+      if (Error E = runAndCheck("wrapping", EntryWrapperPass()))
+        return std::move(E);
+      break;
     case feme::ShaderStage::Mesh:
+      if (Error E = runAndCheck("wrapping", MeshOutputWrapperPass()))
+        return std::move(E);
       if (Error E = runAndCheck("wrapping", EntryWrapperPass()))
         return std::move(E);
       break;
