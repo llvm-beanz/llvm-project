@@ -10273,3 +10273,145 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
  --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6c_a_b.qpa
 ```
+
+## Roadmap H6c-a-a-i: measured impact (canonicalize `SetMeshOutputsEXT`, wire into `MeshOutputWrapperPass`/`EntryWrapperPass`)
+
+This row closes out H6c-a-a-i: a mesh entry's `SetMeshOutputsEXT` call --
+converted directly into a new `feme.stage.set_mesh_outputs` call at the
+MLIR SPIR-V-to-LLVM conversion level (`SetMeshOutputsEXTConversionPattern`,
+`SPIRVToLLVMPatterns.cpp`), masked/widened through `Linearize`/`SIMDize`
+exactly like every other stage op, and lowered by `MeshOutputWrapperPass`
+-- now actually writes `FemeMeshArgs::ActualVertexCount`/
+`ActualPrimitiveCount` through two new always-appended trailing wave-body
+params (`mesh_actual_vertex_count`, `mesh_actual_primitive_count`), the
+same "append params, lower masked calls" shape H6c-a-a's own per-vertex/
+per-primitive output-store wiring and H6c-a-b's own task-payload wiring
+both already established. See Roadmap.md's own H6c-a-a-i entry for the
+full implementation summary (the `EXTSetMeshOutputsOp`/`spirv.EXT.
+SetMeshOutputs` real-mnemonic gotcha, the "workgroup-uniform but still
+masked" design choice, and the exact test list).
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **2007 discovered, 1948 passing** (59 pre-existing, unrelated
+`Unsupported`, 0 `Failed`), up from H6c-a-b's own **2003 discovered, 1944
+passing** baseline by exactly this row's 4 new tests (`StageOpsTest`'s
+`SetMeshOutputsIsVoidAndNotOverloaded`, `MeshOutputWrapperTest`'s
+`LowersSetMeshOutputsCall`, the new `spirv-to-llvm-set-mesh-outputs.mlir`
+conversion test, and `CompiledStageTest`'s `InvokeMeshWritesSetMeshOutputs`
+end-to-end case).
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt`
+sample, same file every prior row's own report used:
+
+```
+Before (H6c-a-b's own baseline):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical failing-case set. **0 regressions, 0 new passes.**
+
+**`dEQP-VK.mesh_shader.*` (28044 cases): 0 new passes, as expected --
+plus a newly-discovered crash affecting 28 cases, tracked as new row
+H6c-a-a-iii.**
+
+```
+Before this row (H6c-a-b's own recorded baseline):
+  Passed:        1/28044 (0.0%)
+  Failed:        337/28044 (1.2%)
+  Not supported: 27706/28044 (98.8%)
+
+After this row:
+  Passed:        1/28044 (0.0%)
+  Failed:        309/28044 (1.1%)
+  Not supported: 27706/28044 (98.8%)
+  Unresolved (deqp-vk process aborts, no clean result -- see below): 28/28044 (0.1%)
+```
+
+Passed and Not-supported both stay byte-identical to the prior baseline
+-- **expected and correct**, since `H6c-a-a-ii` (`flattenMeshRow`'s
+`PerPrimitive` routing) remains open, so no real mesh-shader draw can yet
+assemble a correctly-routed, non-empty meshlet from this row's wiring
+alone. The `Failed` bucket's own count drop (337 -> 309) is *not* 28 new
+passes: it is exactly the same 28 cases moving from `Failed` into the new
+`Unresolved` bucket below, a strictly worse failure mode for those 28
+cases, not an improvement.
+
+**Newly-discovered crash (28 cases), tracked as new roadmap row
+H6c-a-a-iii.** Before this row landed, a mesh entry referencing
+`SetMeshOutputsEXT` failed pipeline creation immediately and cleanly, at
+SPIR-V-to-LLVM conversion (`error: failed to legalize operation
+'spirv.EXT.SetMeshOutputs' that was explicitly marked illegal`), reported
+as an ordinary `Fail (retcode: VK_ERROR_INITIALIZATION_FAILED at
+vkPipelineConstructionUtil.cpp:176)`. Now that this row makes that
+conversion succeed, compilation reaches further into
+`CanonicalizeStagePass`, and 28 of these same cases (each a real mesh
+shader whose builtin interface uses a `PerPrimitiveEXT`-decorated or
+otherwise arrayed builtin block -- e.g. `dEQP-VK.mesh_shader.ext.builtin.
+cull_primitives`, `.draw_index_in_{mesh,task}`, `.layer*`, `.
+local_invocation_{id,index}_in_{mesh,task}`, `.num_work_groups_*`, `.
+position`, `.primitive_id_*`, `.viewport_index*`, `.work_group_id_in_
+{mesh,task}`, and 6 `ext.smoke.monolithic.*` cases) instead abort the
+entire `deqp-vk` process with:
+
+```
+deqp-vk: llvm/include/llvm/Support/Casting.h:572: decltype(auto)
+llvm::cast(From *) [To = llvm::StructType, From = llvm::Type]:
+Assertion `isa<To>(Val) && "cast<Ty>() argument of incompatible type!"'
+failed.
+```
+
+This assertion lives in `CanonicalizeStage.cpp`'s
+`resolveOffsetWithinElement` (pre-existing code this row's own new
+`feme.stage.set_mesh_outputs` wiring never touches): its multi-
+`ElementID` path (`IDs.size() != 1`, a builtin interface block with more
+than one member) unconditionally `cast<StructType>`s the block's own
+value type, a shape that has always held for every builtin interface
+block reachable before this row (e.g. a non-arrayed `gl_PerVertex`
+block), but does not hold for a mesh entry's own arrayed builtin blocks
+(`PerPrimitiveEXT`-decorated or otherwise, one array element per
+primitive/vertex rather than one plain struct) -- a shape that was
+*never reachable* before this row, since every one of these 28 cases'
+own pipelines used to fail at the earlier, unconverted-`SetMeshOutputsEXT`
+rejection first. **0 `Pass`/`Fail` regressions** (byte-identical failing-
+case set, just a worse failure mode), but a real robustness regression:
+a `deqp-vk` run (or a fuzzer) without this report's own resume-loop
+workaround (below) would silently lose every case after the first crash,
+the same class of problem H4b's own tessellation triage already
+documented for an unrelated crash. Filed as new roadmap row H6c-a-a-iii,
+scoped to `CanonicalizeStage.cpp`'s general per-primitive/per-vertex
+arrayed-builtin-block resolution -- deliberately *not* fixed in this row,
+to keep this row's own scope to exactly `SetMeshOutputsEXT`'s own
+canonicalization and wiring, its own stated deliverable.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this row changes no advertised feature bit or extension,
+only CPU-side lowering.
+
+**Reproducing this row.** Same ICD build as the rest of this report. The
+full `dEQP-VK.mesh_shader.*` group can no longer be run in one `deqp-vk`
+invocation without losing cases past the first H6c-a-a-iii crash above,
+so use the same resume-loop shape H4b's tessellation triage established,
+generalized to blacklist every case whose own `Test case '...'..` line
+printed with no following result line (not just the single last one --
+one crash can leave several such cases pending in one batch):
+
+```shell
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.mesh_shader.*" --deqp-runmode=txt-caselist
+grep -oP "^TEST: \K.*" dEQP-VK-cases.txt > remaining.txt
+# resume loop: repeatedly run against `remaining.txt`, parse each
+# iteration's log for every "Test case '...'.." with no following
+# Pass/Fail/NotSupported/... line, add those to a blacklist, remove
+# both resolved and blacklisted cases from `remaining.txt`, and stop
+# once a `DONE!` line appears with no unresolved case that iteration.
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-filename=draw_h6c_a_a_i.qpa
+```
