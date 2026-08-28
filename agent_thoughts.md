@@ -42283,3 +42283,85 @@ its own, and all previously-gathered CTS run artifacts under
 extracted 218-case bucket file, the diagnostic re-run log, and the
 `draw_sample.txt` regression run) were still present and unaffected
 once it did, so no CTS re-run work was lost or had to be redone.
+
+# H6g-b-a-i-a-i (`UnsupportedOps` register-bound resource handle rejection)
+
+Started by following the same path as the prior H6g-b-a-* rows: read the
+local FeMe instructions, roadmap context, and the last few mesh-shading
+commits/docs so the investigation/writeup style matched what the tree
+already expected. Confirmed early that `UnsupportedOps.cpp` itself is
+only the reporter; the real likely gap had to be whichever earlier pass
+left a `llvm.spv.resource.handlefrombinding` alive this late, most
+likely `SPIRVResourceLoweringPass` because its per-function lowering is
+all-or-nothing.
+
+The first useful clue came from the prior row's preserved diagnostic log:
+82 `UnsupportedOps` hits, but really just four unique handle names, with
+46+34 of them on two huge `spirv.VulkanBuffer ... s_12_1t` handles.
+Those names strongly suggested SPIR-V `StorageBuffer` bindings, not
+root constants, and the associated `.qpa` shader source confirmed it:
+large glslang-emitted `layout(std430) readonly buffer { ... }` blocks
+(`pvd`/`ppd`) whose members were fixed-size arrays of vectors/scalars.
+That pointed away from `RootConstantLowering` and toward a resource-use
+shape `SPIRVResourceLoweringPass` simply did not accept yet.
+
+To confirm the exact imported shape, I extracted one representative
+failing fragment shader's SPIR-V assembly from the `.qpa`, assembled it
+with `spirv-as`, imported it with `feme-translate --import-spirv`, and
+translated it to LLVM IR (the key detail was needing
+`feme-translate --no-implicit-module --spirv-to-llvmir` after trimming
+it down to a single `spirv.module`). That showed the real pattern very
+clearly: `handlefrombinding` -> `llvm.spv.resource.getpointer` selecting
+one constant struct member -> ordinary LLVM `getelementptr` into the
+selected field's fixed-size array -> final load. The CPU pass already
+handled the first step, but only if the `getpointer` user was a *flat*
+direct load/store. Any further GEP made `hasOnlySupportedUses` fail,
+which in turn left *every* handle in the function untouched and later
+rejected by `UnsupportedOps`.
+
+Implemented the fix in `SPIRVResourceLowering.cpp` by adding a separate
+`StorageStruct` classification for struct-typed `spirv.VulkanBuffer`
+handles in SPIR-V storage class 12 (`StorageBuffer`), then teaching the
+pointer-use validator/lowerer to recurse through ordinary GEP chains and
+fold their byte offsets into the existing raw resource offset. Kept one
+negative boundary intact on purpose: a dynamic *top-level* field selector
+for a direct storage block still stays unsupported, because that is not a
+statically typed field selection anymore and I did not want this row to
+quietly broaden the pass beyond the shape the real CTS content actually
+needed.
+
+One self-inflicted detour: after the first local unit tests passed, I did
+an ICD rerun and initially thought the real 82-case bucket had not moved
+at all. That turned out to be because I had rebuilt only the unit-test
+binary/static library path, not `libfeme_vulkan.so`, so the Vulkan ICD
+rerun was still executing the old lowering code. Rebuilding the actual
+`feme_vulkan` target immediately changed the real CTS diagnostics from
+82 leftover storage-buffer handles down to a lone pre-existing
+sampled-image/sampler remainder. Worth recording because this tree has a
+lot of separately-linked binaries and it is easy to validate the wrong
+artifact if I only rebuild the tests.
+
+Validation/results after rebuilding the actual ICD:
+- targeted unit coverage: 3 new `SPIRVResourceLoweringTest` cases, all
+  passing;
+- had to update the existing lit regression
+  `spirv-resource-lowering-unsupported.ll` because its former
+  `field_access` negative case is now intentionally supported;
+- full `ninja check-feme`: 1953/2012 passing, 59 unsupported, 0 failed;
+- real 218-case `vkRefUtil.cpp:37` bucket rerun: the row's named cause
+  drops 82 -> 1.
+
+To understand what became dominant next, I re-ran the 218-case bucket
+with a single combined stdout/stderr log and classified each case by the
+first emitted FeMe/MLIR diagnostic when present. That made the hand-off
+obvious: 148 cases now first hit `feme-cpu-simdize`'s divergent-vector
+rejection, which became the next roadmap row
+`H6g-b-a-i-a-i-a`. There are still 11 cases in the bucket that fail
+without a FeMe/MLIR diagnostic before `deqp-vk`'s own Linux-only
+`Device fault tests execution not supported in Linux-like OSs` abort path
+fires; I kept that caveat explicit in the docs instead of forcing those
+into a guessed bucket.
+
+Also re-ran the standard `draw_sample.txt` regression sample and compared
+its per-case status map to the previous row's `draw_h6g_b_a_i_a.qpa` --
+not just the totals. The map is identical, confirming 0 regressions.
