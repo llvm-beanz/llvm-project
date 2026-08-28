@@ -23,8 +23,11 @@ change as well.
 
 If the request is to complete a roadmap stage, if you complete it please strike
 it through on the roadmap document, if you do not, please add entries to the
-roadmap document (lettered with lowercase letters such as R34a or R34b) to break
-down the remaining work for that milestone.
+roadmap document to break down the remaining work for that milestone.
+
+During the H6 milestone breakdowns things have gone a little crazy with nesting
+letters in strange ways. Please avoid nesting milestones more than one lowercase
+letter deep going forward.
 
 Break your changes into small code changes with each change committed
 spearately. Record your thought process into a file named "agent_thoughts.md" at
@@ -33,22 +36,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6g-b-a-i-a-i?
+Can you complete H6g-b-a-i-a-i-a?
 
-> **`feme::cpu::UnsupportedOps` rejects a register-bound resource handle that
-> survives to the FeMe CPU target's normalization pass ("unsupported raised
-> operation: ... is a register-bound resource handle the FeMe CPU target cannot
-> normalize into a heap access or the root-constant block ...")**, now the
-> single dominant cause found within H6g-b-a-i-a's own 218-case
-> `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket (82 of 218 cases hit
-> exactly this, per a diagnostic-logged re-run of that bucket alone, up from a
-> pre-existing, already out-of-scope 1 -- the 81 cases H6g-b-a-i-a's own fix
-> newly unblocked progress into this same failure), and newly reachable only now
-> that H6g-b-a-i-a's own fix lets the `spirv.All`/`spirv.Any`-bearing SPIR-V
-> this bucket's cases share actually legalize far enough to reach `feme-cpu`'s
-> own resource-handle normalization pass. Root cause not yet isolated (which
-> resource-declaration shape in this content the pass's existing "finite,
-> unambiguous traditional binding, bindless access, or root-constant"
-> recognition doesn't cover, and whether the fix belongs in
-> `UnsupportedOps`/`RootConstantLowering` itself or an earlier canonicalization
-> step feeding it)
+> **`feme-cpu-simdize` rejects a newly-unblocked divergent vector value in the
+> same 218-case `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket ("function
+> 'main' has a divergent vector value ... used outside a supported
+> insertelement-chain/resource-store/extractelement/select/shufflevector/phi/elementwise
+> pattern; component decomposition is not yet supported for this use")**, now
+> the new dominant first-emitted FeMe/MLIR diagnostic in that bucket once
+> H6g-b-a-i-a-i's own direct-storage-buffer-handle fix lets those shaders
+> progress further (148 of 218 cases in a combined stdout/stderr diagnostic
+> rerun land here first; H6g-b-a-i-a-i reduced its own named `UnsupportedOps`
+> bucket from 82 cases to a lone, out-of-scope sampled-image/sampler remainder).
+> Root cause not yet isolated: needs a real failing shader/IR reduction to
+> identify which divergent-vector use shape in the newly-unblocked mesh/fragment
+> content is still outside `SIMDizePass`'s supported decomposition patterns, and
+> whether the right fix belongs in `SIMDize.cpp` itself or in an earlier
+> canonicalization/legalization pass feeding it
