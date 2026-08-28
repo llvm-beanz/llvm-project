@@ -40466,3 +40466,178 @@ commits: the `RasterizePrimitives` extraction, `setMeshStage`/
 `hasMeshStages`, `MeshDrawCommand`/`PreparedDraw::MeshDraws`, the full
 mesh-chaining logic in `Executor.cpp`, `PipelineTest.cpp`'s new tests,
 `ExecutorTest.cpp`'s new tests, and this documentation update.
+
+# 2026-08-28: Closing out milestone H6f
+
+## Starting point
+
+Picked this session up mid-H6f: two prior commits already existed
+(`[feme] H6f: thread real mesh/task dispatch limits through
+GraphicsPipeline`, `[feme] H6f: accept mesh pipelines in
+vkCreateGraphicsPipelines`), but the previous agent's work stopped there
+-- the `vkCmdDrawMeshTasks*` entry points did not exist yet,
+`PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` did not advertise
+`VK_EXT_mesh_shader` at all, and, per the user's own explicit callout,
+the previous agent left no roadmap update and no `agent_thoughts.md`
+entry. My job was to finish H6f's three remaining pieces, verify with
+CTS, and this time actually do the bookkeeping.
+
+## Implementing the draw-command routing
+
+Added `vkCmdDrawMeshTasksEXT`/`vkCmdDrawMeshTasksIndirectEXT`/
+`vkCmdDrawMeshTasksIndirectCountEXT`, threading them through
+`CommandBuffer.h`'s `RecordedCommand::Kind` the same way every other
+`vkCmdDraw*` variant already works, refactoring `runDraw` into shared
+`resolveDrawAttachments`/`runPreparedDraw` helpers plus a new
+`runMeshDraw`, and adding `readIndirectMeshDraws`/`readIndirectDrawCount`
+mirroring the existing indirect-draw readers' own bounds-checking
+discipline. Needed to add declarations to `EntryPoints.h` (the generated
+`ProcAddr.cpp` `.inc` references these names directly), register them in
+`ImplementedEntrypoints.txt`, and add `VK_EXT_mesh_shader` to
+`vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` -- which broke a test
+fixture (`vk-gen-entrypoints-split-features.test`'s synthetic
+`vk-split-features.xml`, which must declare every extension named in
+`SUPPORTED_EXTENSIONS` or the generator itself errors), fixed by adding a
+synthetic `VK_EXT_mesh_shader` stub to that fixture too.
+
+## A real Executor.cpp bug found by testing, not just a test workaround
+
+Writing `DrawTest.cpp`'s new mesh-draw tests immediately hit
+`VK_ERROR_INITIALIZATION_FAILED` on every one. Using
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` (an opt-in diagnostic env var,
+`Diagnostics.h`) surfaced the real error: "the last pre-rasterization
+stage does not write an SV_Position output." `Executor.cpp`'s
+pre-rasterization validation had a documented relaxation for a geometry
+stage with a fully empty reflected signature (H5e-b's own precedent,
+covering `dEQP-VK.geometry.emit.*_emit_0_end_0`'s "declares nothing,
+writes nothing" shape) but no mesh-stage equivalent. Since every mesh
+entry this implementation can currently compile is *necessarily*
+content-empty (real per-vertex/per-primitive writes are blocked on
+H6h/H6i), this was not a test-only problem: without this fix, no mesh
+pipeline draw could ever succeed, defeating H6f's entire "route through
+the same prepared-draw code" purpose. Fixed by mirroring the existing
+`GSSig->Elements.empty()` check for `MeshSig`.
+
+## Advertising VK_EXT_mesh_shader, and a second real bug found by CTS
+
+Added the extension to `PhysicalDeviceInfo.cpp`'s supported-extensions
+list and `taskShader`/`meshShader` = `VK_TRUE` plus a first pass at
+`VkPhysicalDeviceMeshShaderPropertiesEXT` to `EntryPoints.cpp`. This
+first properties revision mirrored `maxComputeWorkGroupSize`/
+`Invocations` for the work-group fields (reasoning: mesh/task reuse
+compute's own dispatch machinery unmodified, H6c) and used what I
+initially thought were conservative placeholder values for the
+mesh-output-specific fields.
+
+Running `dEQP-VK.mesh_shader.*` against that revision (28044 cases) got
+0 pass, 338 fail, 27706 not-supported. Grepping the failure messages by
+category found: 155 real pipeline-creation content failures (expected,
+blocked on H6h/H6i), 80 **"maxMeshOutputComponents too low to run this
+test"**, 68 unrelated render-pass format failures, 33 unrelated
+pipeline-construction-library failures, 1 unrelated format-query
+failure, and 1 **"Some properties failed the limits test"**. Both
+starred failures are the same underlying bug: I had set several
+`VkPhysicalDeviceMeshShaderPropertiesEXT` fields below
+`VK_EXT_mesh_shader`'s own specification-mandated conformance minimums.
+Found the exact required floors by reading the CTS's own source
+(`vktMeshShaderPropertyTestsEXT.cpp`'s `CHECK_LIMITS_MIN`/`MAX` macros,
+~line 2381-2414): `maxMeshWorkGroupSize`/`maxTaskWorkGroupSize` must be
+>=128 in every dimension (mine mirrored compute's own dimension-2 value
+of 64), `maxMeshOutputComponents` must be >=128 (mine was 64, mirroring
+`maxGeometryOutputComponents`'s core-1.0 floor -- the wrong precedent to
+mirror, since mesh shading's own spec floor is different and higher),
+`maxMeshOutputMemorySize` must be >=32768 and
+`maxMeshPayloadAndOutputMemorySize` must be >=48128 (mine computed 8192
+for both from an arbitrary formula), and `maxMeshOutputLayers` must be
+>=8 (mine was 1).
+
+The interesting design question was whether raising these was honest or
+just inflating a number nothing backs. This project's whole discipline
+(H4b/H5e) is "advertise only what's actually enforced" -- so before
+touching a single number I went and checked what each one's *real*
+ceiling actually is:
+
+- `maxMeshWorkGroupSize`/`maxTaskWorkGroupSize`/`*Invocations`: I found,
+  via grep, that **nothing at all** validated a mesh or task entry's
+  declared group size against anything at pipeline-creation time --
+  unlike `Pipeline.cpp`'s `compileComputePipeline`, which does check a
+  compute entry's group size against `maxComputeWorkGroupSize`/
+  `Invocations`. So my original 64/128 numbers weren't a real ceiling
+  being honestly mirrored at all; they were an unenforced guess that
+  happened to be *below* the honest, currently-unenforced true capacity.
+  Rather than just raise the number (still unenforced, still not truly
+  "honest" in the sense this project cares about), I added real
+  enforcement: `validateMeshOrTaskGroupSize` in `GraphicsPipeline.cpp`,
+  reusing `GroupSize.h`'s `resolveComputeGroupSize` SPIR-V scanner
+  (previously `GLCompute`-only) extended to also accept the `MeshEXT`/
+  `TaskEXT` execution models -- since a mesh/task entry's group size is
+  encoded identically to a compute entry's, this needed no new parsing
+  logic, just a loosened execution-model check. New
+  `feme::vulkan::MaxMeshWorkGroupSize`/`MaxTaskWorkGroupSize`/
+  `*Invocations` constants (128/128/128, 128) in `GraphicsPipeline.h`
+  are now both the enforced ceiling and the advertised property,
+  mirroring `MaxMeshOutputVertices`'s own established pattern exactly.
+- `maxMeshOutputComponents`/`maxMeshOutputMemorySize`/
+  `maxMeshPayloadAndOutputMemorySize`/`maxMeshOutputLayers`: checked
+  `feme::graphics::MeshOutputBuilder` (`Graphics/MeshOutput.h`) and found
+  its per-vertex/per-primitive rows are a plain, dynamically-sized
+  `std::vector<float>` -- no fixed component-count or byte-size ceiling
+  at all. Checked `maxFramebufferLayers` (256, already general per H2's
+  layered-rendering support) to confirm 8 layers is nowhere near a real
+  cap either. So these four numbers were never bound by anything lower
+  than the specification's own floor; raising them to that floor is the
+  *honest* choice (matching what's genuinely true today), not an
+  inflated one, and matches the exact reasoning `maxMeshOutputVertices`
+  itself already used for its own "advertise a genuinely unbounded
+  quantity at its own true value" precedent.
+
+Added 4 new unit tests to cover this: two in `GroupSizeTest.cpp`
+confirming `MeshEXT`/`TaskEXT` execution models now resolve a group size,
+and two in `GraphicsPipelineTest.cpp` confirming an over-limit mesh/task
+work-group size is now rejected at pipeline creation (mirroring the
+existing `RejectsMeshOutputCountsExceedingLimits` test's own shape).
+
+## Verification and outcome
+
+`ninja check-feme` (assertions-enabled, ccache build): 1930/1989 passing
+(59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from H6e's own
+1910/1969 baseline by exactly the 20 new/updated tests this row adds
+across `DrawTest.cpp` (7), `GraphicsPipelineTest.cpp` (2 new + 1
+existing test's extension-count assertion updated 31->32), and
+`GroupSizeTest.cpp` (2). Re-ran `dEQP-VK.mesh_shader.*` after the
+property fix: 1/28044 pass (up from 0), 337/28044 fail (down from 338 --
+the property-limit bug's own signature resolved; the 80 previously-
+blocked cases now correctly report `NotSupported` on an unrelated,
+genuine `shaderFloat16` gap instead), 27706 not-supported (unchanged).
+Diffed the `dEQP-VK.draw.*` 1957-case regression sample's failing-case
+*names* (not just counts) against H6e's own recorded run and confirmed
+they are byte-identical (153 failures, same set) -- 0 regressions, as
+expected for a row that adds new capability without touching any
+existing, already-exercised code path.
+
+Updated `VulkanExtensionInventory.md` (`VK_EXT_mesh_shader` moved from
+Planned to Advertised, 31->32/49->48), left `Vulkan14FeatureInventory.md`
+untouched (it tracks only core 1.0-1.4 surface, not `EXT` extensions --
+confirmed by grep before deciding not to touch it), updated
+`FeMeVulkanDesign.md`'s mesh-shading-exposure section to describe H6f's
+completion, added a new "Roadmap H6f: measured impact" section to
+`VulkanCTSReport.md` documenting both the before/after CTS numbers and
+the property-limit bug's own root cause, and struck through H6f in
+`Roadmap.md` with a `done:` writeup. Also filled in H6g's previously-
+placeholder scope description with the actual four failure buckets this
+row's own measured run found (235 real-content-compilation failures
+already tracked by H6h/H6i, 68+1 unrelated format failures out of mesh
+shading's scope entirely, 33 pipeline-construction-library variants of
+the same content-compilation blocker) -- H6g's own remaining job is now
+concretely "re-run once H6h/H6i land, confirm the content-compilation
+buckets clear, and decide whether the format-related ones need their own
+row."
+
+Committed in small, separately-reviewable commits: (1) the
+`vkCmdDrawMeshTasks*` draw-command routing plus its generator/test-
+fixture updates, (2) the `Executor.cpp` mesh-signature-empty fix, (3)
+`VK_EXT_mesh_shader`/`taskShader`/`meshShader`/properties advertisement
+plus the new `GroupSize.h`/`GraphicsPipeline.h` group-size-enforcement
+machinery it depends on, (4) the extension-bookkeeping and design-doc
+updates, (5) the new/updated unit tests, (6) the `VulkanCTSReport.md`
+and `Roadmap.md` updates, and (7) this `agent_thoughts.md` entry.
