@@ -42732,3 +42732,164 @@ H6 does not close: this row's own fix chain is complete and verified,
 but the same bucket's dominant blocker has moved to the new
 `H6g-b-a-i-a-i-c` row (a runtime JIT-symbol gap, unrelated to
 `SIMDizePass`), and `H6g-b-c` remains open and untouched.
+
+# H6g-b-a-i-a-i-c: missing raw-buffer-load runtime symbols (`v2f32`/`v3f32`/`v2i32`/`v3i32`/`v4i32`)
+
+Started from H6g-b-a-i-a-i-b's own closing discovery: once its three
+`SIMDizePass` fixes landed, the same 80-case `dEQP-VK.mesh_shader.ext.
+in_out.*` bucket moved its dominant real-ICD failure from
+`feme-cpu-simdize` to a `vkCreateGraphicsPipelines`-time JIT-link error
+naming five missing symbols: `feme.cpu.resource.load.raw.v2f32`/
+`v3f32`/`v3i32`/`v2i32`/`v4i32`.
+
+First step was making sure the compiler side wasn't at fault. Read
+`feme::cpu::mangleResourceCallName` (`ResourceCalls.cpp`) and confirmed
+it mangles any `FixedVectorType` operand generically by element type
+and width -- there's no width-specific special-casing to fix, and
+`ResourceLoweringPass`'s call sites just pass through whatever vector
+type the IR value already has. So this was purely a missing-definition
+problem in `feme/runtime/CPU/FeMeRuntimeCPU.c`, which only had scalar
+(`.i32`/`.f32`) and `v4f32` raw load/store defined. Checking more
+carefully than the row's own text asked for, `v4i32` raw load/store
+were *also* missing on both sides -- not just the reported load-side
+v2/v3 gap.
+
+Added the 10 missing functions (load+store for v2f32/v3f32/v2i32/
+v3i32/v4i32), mirroring the existing v4f32 bindless-descriptor-lookup-
+then-masked-load/store shape as closely as possible: same helper
+structure, same `asm`-label convention, new
+`FemeRTv2f32`/`v3f32`/`v2i32`/`v3i32` (+ `...Unaligned`) typedefs
+alongside the existing v4 ones.
+
+While writing the v3-wide *store* bodies, something felt off: the
+existing v4f32 store just does `*(Unaligned *)Ptr = Value;`, so I
+wrote the v3 ones the same way first. Checked the compiled IR with
+`opt -S` out of habit (I'd just added a new, less-tested width) and
+found it was emitting a `store <4 x float>` -- a 16-byte store into
+what should be a 12-byte, bounds-checked region. `sizeof(FemeRTv3f32)`
+is 16 (Clang pads a 3-wide vector's storage size up to the next power
+of two), so both the naive dereference *and* `__builtin_memcpy(Ptr,
+&Value, sizeof(Value))` inherit that padded size. The fix that
+actually worked was forcing an explicit literal byte count --
+`__builtin_memcpy(Ptr, &Value, 12)` -- which correctly emits an exact
+12-byte store; verified before/after with `opt -S`. The load side
+never had this problem: a return value isn't ABI-coerced/padded by
+Clang the way a by-value parameter is, so the existing dereference-
+based load pattern already produced exact 12-byte reads for v3, and I
+left it unchanged.
+
+That padding discovery led to a second question I couldn't let go of:
+if `sizeof` lies about the logical size, does the *parameter's LLVM
+type itself* also get changed by Clang's ABI lowering, and if so, does
+that affect the real production JIT-link path (not just this file's
+own internal consistency)? Digging in confirmed yes: Clang coerces a
+by-value `<3 x float>`/`<3 x i32>` C parameter into a `<4 x i32>`
+register-pair type in the *compiled function's own signature* -- so
+the runtime bitcode's actual `femeCpuResourceStoreRawV3F32` definition
+has a different `FunctionType` than the canonical, uncoerced `<3 x T>`
+type `feme::cpu::ResourceCalls::createRawStore` declares and calls
+with in the real caller module, before that module is ever linked
+against the runtime bitcode.
+
+This felt like a real risk, not a theoretical one, so I didn't want to
+just assume LLVM's linker would catch or safely ignore it. Checked with
+`llvm-link` + `opt -passes=verify` on hand-built modules with
+deliberately mismatched declaration/definition types for the same
+symbol: the verifier does not reject this. Opaque-pointer-based linking
+resolves declarations to definitions by name and RAUWs the callee,
+without re-validating each call site's own `FunctionType` against the
+now-linked definition's real one -- so a mismatched-ABI call would
+silently produce whatever the calling convention happens to do with
+mismatched register/stack layouts, which could be silent corruption on
+a different architecture even if it happens to work here.
+
+To get real confidence rather than reasoning from the ABI spec alone,
+I wrote a temporary probe test (`RawVectorABIProbeTest.cpp`, deleted
+once it had answered the question) that reproduced the *exact*
+production shape: declare the canonical `<3 x T>`-typed function in a
+caller module, build a call to it, then use `Linker::linkInModule`
+(matching `Pipeline.cpp`/`CompiledStage.cpp`'s own real use of
+`Linker::Flags::LinkOnlyNeeded`) to merge in the runtime bitcode
+*after* the call already exists, then execute via MCJIT. It round-
+tripped correctly on this aarch64 host. So the real production pipeline
+is safe today, specifically because the declaration always precedes
+the link (confirmed by reading, not assuming, `CompiledStage.cpp`'s
+actual ordering) and because this host's calling convention happens to
+lay out the coerced and uncoerced forms compatibly enough for a
+3-element vector. I did not chase further into whether this holds on
+every architecture FeMe might someday target -- that's a real, if
+narrow, portability risk worth someone's attention later, but it's not
+this row's own scope, and manufacturing a synthetic cross-arch failure
+here would have been scope creep with no CTS-observable payoff.
+
+Testing followed the same two-track pattern prior rows established: a
+lit-test check for the new symbol names in the compiled runtime
+bitcode, and gtest round-trips exercising each new function's actual
+behavior. The gtest tests initially looked like a hang on V3F32/V3I32
+-- running under `timeout` revealed it was actually a fast `assert()`
+abort inside `CallInst::init`, not a hang; the existing
+`addStoreWrapper` helper called the runtime's *actual parsed* Function
+object directly, so it saw the real (ABI-coerced) parameter type
+already, not the logical one, and building a call with a mismatched
+value type asserts immediately in an assertions-enabled build. Fixed
+by generalizing the helper to detect that mismatch and adapt (shuffle-
+vector-widen + bitcast) before calling, matching what a real coerced C
+call site's calling convention actually does -- transparent for the
+pre-existing v2/v4 tests, necessary for the new v3 ones.
+
+`ninja check-feme` (assertions-enabled, ccache build) rose from
+1961/2020 to 1966/2025 -- exactly the 5 new tests (lit unchanged at 1,
+gtest +5, matching the 5 round-trip tests added, since the lit test
+only added `CHECK-DAG` lines to an existing test rather than a new
+file) -- with 0 regressions.
+
+Ran the real `deqp-vk`/`feme` Vulkan ICD against this row's own named
+case and the full 560-case `dEQP-VK.mesh_shader.ext.in_out.*` bucket
+(same caselist-derivation technique as H6g-b-a-i-a-i-b, reusing the
+same `dEQP-VK-cases.txt` snapshot). The exact reported JIT symbol gap
+is gone from every one of the 80 previously-blocked cases -- confirmed
+by grepping the full run's combined log for the resolved error string
+across all 80, not just the one named case. The bucket's totals
+(0 passed / 80 failed / 480 not-supported) are unchanged, as expected:
+this row was never going to make new cases pass, only move the point
+of failure. The 80 cases split cleanly in two: 40 now hit
+`spirv_var_NN` symbol-not-found errors, which turned out to be the
+*already-tracked* `H6g-b-c` row's own described failure mode exactly
+(a mesh entry's unresolved arrayed-builtin-block access surviving to
+the JIT because `ValidateStagePass` doesn't validate the mesh stage) --
+I checked this deliberately rather than assuming, since creating a
+duplicate roadmap row for an already-tracked cause would be a real
+mistake, not just untidy. The other 40 hit a new, previously-unseen
+`feme-cpu-wrap-mesh-output: unexpected stage op left for the mesh
+output wrapper` diagnostic from `MeshOutputWrapperPass::
+lowerMeshStageOps`'s catch-all rejection -- genuinely new, so filed as
+a new roadmap row.
+
+Per the standing instruction (avoid nesting milestone IDs more than
+one lowercase letter deep going forward, since the H6g chain has
+already gotten quite deep), I did not extend the `H6g-b-a-i-a-i-c`
+chain any further for this new blocker. Instead I filed it as
+`H6g-b-d` -- a new sibling one level under `H6g-b`, alongside the
+already-established `H6g-b-a`/`H6g-b-b`/`H6g-b-c`, cross-referencing
+`H6g-b-a-i-a-i-c` as how it was discovered without inheriting its deep
+nesting.
+
+Checked `FeMeCPUDesign.md`'s "Runtime Support Library" section for
+whether it needed a deviation note: it already describes the runtime
+generically ("descriptor lookup ... for every supported format"),
+without enumerating specific vector widths, so this fix is already
+accurately described with no wording change required -- confirmed by
+reading the section rather than assuming a fix to *any* runtime file
+always needs a design-doc edit. Also confirmed
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+changes and said so explicitly in the CTS report, since `VK_EXT_mesh_
+shader`'s "Advertised" status is unaffected by a runtime-symbol-gap fix
+within its existing scope.
+
+Net for this row: closed as a single runtime-completeness fix (plus one
+real, related store-widening bug found and fixed along the way, and one
+deliberately-scoped-out ABI-coercion investigation that concluded "safe
+today, confirmed empirically, not theoretically"). The reported symbol
+gap is fully resolved and verified against the real CTS. Milestone H6
+does not close: the same bucket's 80 cases now split between the
+already-tracked `H6g-b-c` and the newly filed `H6g-b-d`.
