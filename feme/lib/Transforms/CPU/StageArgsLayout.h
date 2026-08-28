@@ -358,6 +358,37 @@ inline llvm::StructType *getMeshArgsType(llvm::LLVMContext &Ctx) {
             PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 2)});
 }
 
+/// Field indices into the `FemeTaskArgs`-shaped LLVM struct
+/// `getTaskArgsType` builds, matching
+/// feme/include/feme/Target/CPU/RuntimeABI.h field-for-field. `Resources`
+/// through `GroupShared` (roadmap H6c) deliberately share
+/// `DispatchArgsField`'s own values for the same four fields, mirroring
+/// `MeshArgsField`'s own comment.
+enum TaskArgsField : unsigned {
+  TaskArgsFieldResources = 0,
+  TaskArgsFieldGroupID = 1,
+  TaskArgsFieldGroupCount = 2,
+  TaskArgsFieldGroupShared = 3,
+  TaskArgsFieldMaxPayloadBytes = 4,
+  TaskArgsFieldReserved32 = 5,
+  TaskArgsFieldPayload = 6,
+  TaskArgsFieldMeshGroupCount = 7,
+  TaskArgsFieldReserved = 8,
+};
+
+/// Builds the LLVM struct type mirroring `FemeTaskArgs`: field types/order
+/// match that struct exactly (roadmap H6c-a-b), the same "ordinary LLVM
+/// struct layout reproduces the C layout" convention `getMeshArgsType`
+/// above already relies on.
+inline llvm::StructType *getTaskArgsType(llvm::LLVMContext &Ctx) {
+  llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
+  llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
+  llvm::Type *I32x3 = llvm::ArrayType::get(I32Ty, 3);
+  return llvm::StructType::get(
+      Ctx, {getShaderResourcesType(Ctx), I32x3, I32x3, PtrTy, I32Ty, I32Ty,
+            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 2)});
+}
+
 inline llvm::Value *loadStructField(llvm::IRBuilder<> &Builder,
                                     llvm::StructType *Ty, llvm::Value *Ptr,
                                     unsigned Field, llvm::Type *FieldTy) {

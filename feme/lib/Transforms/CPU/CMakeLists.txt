@@ -28,6 +28,7 @@ add_feme_library(FeMeTransformsCPU
   SPIRVPushConstantLowering.cpp
   SPIRVResourceLowering.cpp
   SPIRVSubpassLowering.cpp
+  TaskPayloadWrapper.cpp
   UnsupportedOps.cpp
   VerifyStructured.cpp
   WaveCalls.cpp
