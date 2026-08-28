@@ -9740,3 +9740,101 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
  --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6h.qpa
 ```
+
+## Roadmap H6i: measured impact (`CanonicalizeStagePass` accepts `ShaderStage::Mesh`/`Amplification`, task payload store canonicalization)
+
+This row closes out H6i: `CanonicalizeStagePass::run`'s stage filter now
+also accepts `ShaderStage::Mesh`/`ShaderStage::Amplification`, routing both
+through the same `canonicalizeSPIRVStage` path Domain/Geometry already
+use (no barrier-splitting needed, mirroring H5c's own reasoning for
+Geometry). A mesh entry's own per-vertex/per-primitive `Output`-array
+writes (H6b) were already implemented in `canonicalizeSPIRVStage` itself,
+just unreachable through the full pass until this filter change -- a new
+`MeshStageCanonicalizesOutputArrayStore` unit test re-runs
+`ThreadsDynamicVertexIndexIntoOutputStore`'s own shape through a genuine
+`"mesh"`-tagged entry point (rather than that test's own `"vertex"`
+stand-in, needed at the time since the filter did not accept `Mesh` yet)
+to confirm the whole pass, not just the function called directly, now
+reaches it.
+
+A task entry's bounded payload write is new: a new `TaskPayloadStore`
+`feme.stage.*` op (`feme.stage.task.payload.store(offset, value)`,
+StageOps.h/.cpp) canonicalizes an ordinary store through
+`TaskPayloadGlobalVariablePattern`'s own address-space-14 global import
+shape (roadmap H6h) by its resolved byte offset -- reusing
+`getStageIOBaseAndOffset`'s existing constant-offset walk (already generic
+over any address space, not gated on `isSPIRVStageIOGlobal`) rather than
+adding a parallel one. Unlike a stage-IO store, this carries no
+`SignatureElement`: the payload is raw, task-defined memory shared
+verbatim with the mesh workgroups a task entry's `EmitMeshTasksEXT`
+dispatches, not a piece of the vertex/fragment-style signature
+`EntrySignature` describes, so `!feme.signature` stays absent for an
+otherwise-payload-only task entry. `isStageOpLegalForStage`/`validateCall`
+in `ValidateStage.cpp`, the uniformity switch in `WaveUniformity.cpp`, and
+the widening switch in `SIMDize.cpp` all gained an explicit
+`TaskPayloadStore` case to keep their exhaustive `switch`es over
+`StageOpKind` covering the new enumerator (mirroring how `StreamEmit`/
+`StreamCut` were recorded as "not yet reachable" cases before geometry
+validation landed) -- none of the three is actually reachable for this op
+yet (`ValidateStagePass::run` does not validate Amplification, and neither
+`WaveUniformity`/`SIMDize` widening path is exercised until H6c-a-b wires
+a real caller through `EntryWrapperPass`).
+
+Two new `CanonicalizeStageTest.cpp` cases cover this row directly:
+`MeshStageCanonicalizesOutputArrayStore` (above) and
+`AmplificationStageCanonicalizesTaskPayloadStore` (a two-field payload
+struct store, one constant-`i32`-valued field at offset 0 and one
+`float`-argument-valued field at offset 4, confirming both the resolved
+offsets and that no `!feme.signature` gets attached). A new
+`StageOpsTest.cpp` case, `TaskPayloadStoreIsVoidAndOverloadedOnValue`,
+covers the new builder/table entry directly, mirroring
+`OutputStoreIsVoidAndOverloadedOnValue`.
+
+**Expected, and confirmed, zero behavioral change against H6f/H6h's own
+recorded totals.** `feme.stage.task.payload.store` has no caller reachable
+from `EntryWrapperPass`/`CompiledStage::invokeTask` yet -- wiring a real
+`TaskPayloadBuilder` into it is H6c-a-b, itself still blocked on H6d's own
+checked dispatch queue giving the payload somewhere real to be read back
+from -- so a real `dEQP-VK.mesh_shader.*` re-run is, and is expected to be,
+byte-identical to H6h's own baseline:
+
+```
+Before this row (H6h's own baseline):
+ Passed:        1/28044 (0.0%)
+ Failed:        337/28044 (1.2%)
+ Not supported: 27706/28044 (98.8%)
+
+After this row:
+ Passed:        1/28044 (0.0%)
+ Failed:        337/28044 (1.2%)
+ Not supported: 27706/28044 (98.8%)
+```
+
+0 regressions, 0 new passes -- exactly as H6h's own text already
+anticipated ("landing H6h alone does not yet let any of the 235+33
+content-compilation failures H6g tracks clear, since H6i's own
+canonicalization-filter change has not landed yet"): this row lands that
+filter change, but H6c-a-a/H6c-a-b's own wiring into `EntryWrapperPass`
+still has to land before any of those failures can actually clear.
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change: this row touches no feature bit, limit, or extension -- it is a
+pure IR-canonicalization addition, the same shape H6b/H6h's own entries
+recorded needing no inventory update for.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1934/1993** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6h's own **1931/1990** baseline by this row's three new
+unit tests (`TaskPayloadStoreIsVoidAndOverloadedOnValue`,
+`MeshStageCanonicalizesOutputArrayStore`,
+`AmplificationStageCanonicalizesTaskPayloadStore`).
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                               # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+ /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+ --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6i.qpa
+```

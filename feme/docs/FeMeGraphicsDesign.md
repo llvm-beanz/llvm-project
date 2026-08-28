@@ -2875,19 +2875,28 @@ share `FemeDispatchArgs`'s leading field layout; new bounded
 `GeometryStreamBuilder`, but structure-of-arrays rather than
 stream-ordered) and `CompiledStage::invokeMesh`/`invokeTask` (mirroring
 `invokeGeometry`) round out the ABI plumbing, but are not yet wired to any
-real `feme.stage.*` mesh-output-store/task-payload-store operation, since
-those operations do not exist yet (roadmap H6d) and task payload import
-remains blocked on H6i's own `CanonicalizeStagePass` mesh-stage support
-(tracked as roadmap H6c-a) -- H6h has since closed the other half of that
+real `feme.stage.*` mesh-output-store/task-payload-store operation (tracked
+as roadmap H6c-a, split into H6c-a-a/H6c-a-b). H6h closed one half of that
 blocker, giving `TaskPayloadWorkgroupEXT` an address-space convention
 (address space 14) and a `TaskPayloadGlobalVariablePattern` global-variable
 import pattern, mirroring `WorkgroupGlobalVariablePattern`/
-`PushConstantGlobalVariablePattern`. No amplification
-dispatch queue or meshlet assembly exists yet (roadmap H6d); the executor
-has no mesh-chaining path (roadmap H6e); and
-`vkCreateGraphicsPipelines`/`PhysicalDeviceInfo.cpp` accept and advertise
-nothing mesh-shader-related (roadmap H6f). See Roadmap.md's H6a-H6i rows
-for the full remaining breakdown.
+`PushConstantGlobalVariablePattern`. H6i closes the other half:
+`CanonicalizeStagePass::run`'s stage filter now accepts
+`ShaderStage::Mesh`/`Amplification` too, routing both through
+`canonicalizeSPIRVStage` (mirroring how H5c flipped geometry's own filter),
+and a new `TaskPayloadStore` `feme.stage.*` op
+(`feme.stage.task.payload.store(offset, value)`, StageOps.h/.cpp)
+canonicalizes a task entry's bounded payload write by its resolved byte
+offset -- carrying no `SignatureElement` of its own, since the payload is
+raw task-defined memory rather than a piece of the vertex/fragment-style
+signature. `MeshOutputBuilder`/`TaskPayloadBuilder` still have no real
+caller: wiring them into a real dispatched meshlet/payload (H6c-a-a/
+H6c-a-b) needs H6d's own checked dispatch queue to give them somewhere
+real to read from/write into. No amplification dispatch queue or meshlet
+assembly exists yet (roadmap H6d); the executor has no mesh-chaining path
+(roadmap H6e); and `vkCreateGraphicsPipelines`/`PhysicalDeviceInfo.cpp`
+accept and advertise nothing mesh-shader-related (roadmap H6f). See
+Roadmap.md's H6a-H6i rows for the full remaining breakdown.
 
 ### G7: Ray-query and traversal foundations
 
