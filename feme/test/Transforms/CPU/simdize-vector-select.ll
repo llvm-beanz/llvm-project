@@ -5,8 +5,10 @@
 ; into one `select` per component sharing that single widened condition
 ; (see `checkVectorDecompositionSupported`'s file comment and
 ; `FunctionWidener::widenVectorSelect` in SIMDize.cpp). A `select` with a
-; per-lane `<N x i1>` condition remains diagnosed (see
-; simdize-vector-unsupported.ll).
+; per-lane `<N x i1>` condition -- decomposed into one `select` per
+; component instead, each with its own widened condition component -- is
+; now also supported (roadmap H6g-b-a-i-a-i-b, see
+; simdize-vector-fcmp-select.ll).
 
 ; CHECK-LABEL: define void @main(
 ; CHECK-NOT: <4 x <4 x float>>

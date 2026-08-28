@@ -526,11 +526,19 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   //    (see `createWidenedVectorPHIStub`/`fillWidenedVectorPHIIncoming`) --
   //    the shape `feme::cpu::LinearizePass`'s merge blocks give a value
   //    reconciled across a uniform diamond's arms,
-  //  - a `select` of vector type with a scalar `i1` condition, decomposed
-  //    into `N` per-component `select`s sharing that one widened condition
-  //    (see `widenVectorSelect`) -- a `select` with a per-lane `<N x i1>`
-  //    condition remains diagnosed, since none of the shapes that reach
-  //    this pass need it, and
+  //  - a `select` of vector type, decomposed into `N` per-component
+  //    `select`s (see `widenVectorSelect`) -- a scalar `i1` condition is
+  //    shared unchanged by every component, while a per-lane `<N x i1>`
+  //    condition (roadmap H6g-b-a-i-a-i-b) is itself decomposed into `N`
+  //    widened components first, one per `select`, exactly like any other
+  //    divergent vector operand,
+  //  - a vector comparison (`fcmp`/`icmp`), producing a `<N x i1>` result
+  //    (roadmap H6g-b-a-i-a-i-b), decomposed into `N` per-component
+  //    `fcmp`/`icmp`s exactly like ordinary elementwise arithmetic (see
+  //    `widenVectorElementwise`) -- the common component-wise
+  //    `lessThanEqual`/`greaterThan`-style GLSL comparison feeding a
+  //    per-lane `select` (`mix`/`select` intrinsics with a `bvec`
+  //    condition), and
   //  - a `shufflevector` (its mask is always a compile-time constant in
   //    LLVM IR), decomposed at compile time into a selection among its two
   //    operands' own components with no runtime work at all (see
@@ -549,14 +557,18 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   // resource-store call's stored-value operand, an `extractelement` (a
   // constant index reads a component directly; a non-constant one chains
   // selects across every component instead, see `widenExtractElement`), a
-  // vector-typed `select`'s true/false operand, a `shufflevector`'s vector
-  // operand, a vector-typed `phi`'s incoming value, another elementwise
-  // arithmetic/cast operand, or (roadmap H6g-b-a-i-a-i-a) a matched
-  // `feme.cpu.masked.store.*` call's stored-value operand -- the same
-  // per-lane reassembly a matched resource-store call's stored-value
-  // operand already gets (see `widenMaskedStore`), needed for a write with
-  // no canonicalized `feme.stage.*`/`feme.cpu.resource.*` op of its own to
-  // become instead, e.g. a mesh entry point's own
+  // vector-typed `select`'s condition, true, or false operand, a
+  // `shufflevector`'s vector operand, a vector-typed `phi`'s incoming
+  // value, another elementwise arithmetic/cast operand, an `fcmp`/`icmp`
+  // operand (roadmap H6g-b-a-i-a-i-b: its own `<N x i1>` result is, in
+  // turn, itself just another divergent vector value, most commonly
+  // consumed by a `select`'s now-supported per-lane vector condition), or
+  // (roadmap H6g-b-a-i-a-i-a) a matched `feme.cpu.masked.store.*` call's
+  // stored-value operand -- the same per-lane reassembly a matched
+  // resource-store call's stored-value operand already gets (see
+  // `widenMaskedStore`), needed for a write with no canonicalized
+  // `feme.stage.*`/`feme.cpu.resource.*` op of its own to become instead,
+  // e.g. a mesh entry point's own
   // `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)` (see
   // MeshOutputWrapper.h's file comment). Verify every divergent vector
   // value matches one of those producer shapes, and every use of one
@@ -593,9 +605,23 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       IsSupportedProducer = isa<ConstantInt>(IE->getOperand(2));
     } else if (isa<PHINode>(&I)) {
       IsSupportedProducer = true;
-    } else if (auto *SI = dyn_cast<SelectInst>(&I)) {
-      IsSupportedProducer = SI->getCondition()->getType()->isIntegerTy(1);
+    } else if (isa<SelectInst>(&I)) {
+      // A scalar `i1` condition is shared unchanged by every per-component
+      // `select`; a per-lane `<N x i1>` condition (roadmap
+      // H6g-b-a-i-a-i-b) is itself just another divergent vector operand,
+      // decomposed the same way any other one is (see `widenVectorSelect`),
+      // so both shapes are supported unconditionally here.
+      IsSupportedProducer = true;
     } else if (isa<ShuffleVectorInst>(&I)) {
+      IsSupportedProducer = true;
+    } else if (isa<CmpInst>(&I)) {
+      // A vector `fcmp`/`icmp` (roadmap H6g-b-a-i-a-i-b) decomposes exactly
+      // like ordinary elementwise arithmetic: one scalar-element comparison
+      // per component, its `<N x i1>` result split into `N` `<W x i1>`
+      // components instead of one illegal `<W x <N x i1>>` (see
+      // `widenVectorElementwise`). Both of a `CmpInst`'s operands always
+      // share the result's element count (an LLVM IR requirement), so
+      // components always line up, exactly like a `BinaryOperator`.
       IsSupportedProducer = true;
     } else if (isa<BinaryOperator>(&I) || isa<UnaryOperator>(&I)) {
       // Ordinary elementwise arithmetic over a vector -- the common
@@ -633,9 +659,9 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
           "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent value '" + I.getName() +
           "' of vector type; only a constant-index insertelement chain, a "
-          "phi, a scalar-condition select, a shufflevector, elementwise "
-          "arithmetic/cast, or a resource/image load is supported (roadmap "
-          "milestone 7 deviation)");
+          "phi, a select, a shufflevector, elementwise arithmetic/cast, a "
+          "vector comparison, or a resource/image load is supported "
+          "(roadmap milestone 7 deviation)");
       return false;
     }
 
@@ -662,10 +688,21 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       }
       if (isa<ExtractElementInst>(U))
         continue;
+      // A `select`'s true/false operand is a supported consumer
+      // unconditionally (widened by `widenVectorSelect`'s per-component
+      // reassembly regardless of the condition's own shape); its
+      // condition, when `I` itself, is accepted only when it is a vector
+      // (roadmap H6g-b-a-i-a-i-b's own per-lane `<N x i1>` condition,
+      // decomposed alongside the true/false operands rather than shared
+      // unchanged the way a scalar condition is) -- a scalar `i1`
+      // condition never reaches this loop at all, since only a
+      // vector-typed divergent value is visited here in the first place.
       if (auto *UserSel = dyn_cast<SelectInst>(U))
-        if ((UserSel->getTrueValue() == &I || UserSel->getFalseValue() == &I) &&
-            UserSel->getCondition()->getType()->isIntegerTy(1))
+        if (UserSel->getTrueValue() == &I || UserSel->getFalseValue() == &I ||
+            (UserSel->getCondition() == &I && I.getType()->isVectorTy()))
           continue;
+      if (isa<CmpInst>(U))
+        continue;
       if (auto *UserShuffle = dyn_cast<ShuffleVectorInst>(U))
         if (UserShuffle->getOperand(0) == &I || UserShuffle->getOperand(1) == &I)
           continue;
@@ -683,9 +720,9 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
           "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent vector value '" + I.getName() +
           "' used outside a supported insertelement-chain/resource-store/"
-          "extractelement/select/shufflevector/phi/elementwise pattern; "
-          "component decomposition is not yet supported for this use "
-          "(roadmap milestone 7 deviation)");
+          "extractelement/select/shufflevector/phi/elementwise/comparison "
+          "pattern; component decomposition is not yet supported for this "
+          "use (roadmap milestone 7 deviation)");
       return false;
     }
   }
@@ -1733,12 +1770,23 @@ void FunctionWidener::widenShuffleVector(ShuffleVectorInst &SV,
 }
 
 void FunctionWidener::widenVectorSelect(SelectInst &SI, IRBuilder<> &Builder) {
-  // A vector-typed `select` with a scalar `i1` condition (the shape
-  // `checkVectorDecompositionSupported` accepts) decomposes into one
-  // `select` per component, all sharing that single widened condition --
-  // "Vectors become components, not nested vectors" applies to a `select`
-  // exactly like a `phi`/`shufflevector`/`insertelement` chain.
-  Value *WideCond = getWidened(SI.getCondition(), Builder);
+  // A vector-typed `select`'s condition is either scalar `i1`, shared
+  // unchanged by every per-component `select` below (a single broadcast
+  // covers every lane and every vector component alike), or -- roadmap
+  // H6g-b-a-i-a-i-b -- itself a per-lane `<N x i1>` vector (e.g. the
+  // `<N x i1>` result of a component-wise `fcmp`/`icmp`), decomposed into
+  // `N` widened `<W x i1>` components exactly like any other divergent
+  // vector operand, one used per `select`. Either way, "Vectors become
+  // components, not nested vectors" applies to a `select` exactly like a
+  // `phi`/`shufflevector`/`insertelement` chain.
+  Value *Cond = SI.getCondition();
+  Value *WideCond = nullptr;
+  SmallVector<Value *, 4> CondComponents;
+  if (Cond->getType()->isVectorTy())
+    CondComponents = getVectorComponents(Cond, Builder);
+  else
+    WideCond = getWidened(Cond, Builder);
+
   SmallVector<Value *, 4> TrueComponents =
       getVectorComponents(SI.getTrueValue(), Builder);
   SmallVector<Value *, 4> FalseComponents =
@@ -1747,8 +1795,8 @@ void FunctionWidener::widenVectorSelect(SelectInst &SI, IRBuilder<> &Builder) {
   SmallVector<Value *, 4> Components;
   for (unsigned I = 0, E = TrueComponents.size(); I != E; ++I)
     Components.push_back(Builder.CreateSelect(
-        WideCond, TrueComponents[I], FalseComponents[I],
-        SI.getName() + ".wide" + Twine(I)));
+        CondComponents.empty() ? WideCond : CondComponents[I],
+        TrueComponents[I], FalseComponents[I], SI.getName() + ".wide" + Twine(I)));
 
   WidenedVectorComponents[&SI] = std::move(Components);
   ToErase.push_back(&SI);
@@ -1791,6 +1839,15 @@ void FunctionWidener::widenVectorElementwise(Instruction &I,
     } else if (auto *Cast = dyn_cast<CastInst>(&I)) {
       NewV = Builder.CreateCast(Cast->getOpcode(), ComponentOperand(0),
                                 WideElemTy, I.getName() + ".wide" + Twine(C));
+    } else if (auto *Cmp = dyn_cast<CmpInst>(&I)) {
+      // A vector `fcmp`/`icmp` (roadmap H6g-b-a-i-a-i-b): its `<N x i1>`
+      // result decomposes into `N` per-component `<W x i1>` comparisons
+      // exactly like a `BinaryOperator`'s two operands do -- `WideElemTy`
+      // above is already `<W x i1>` here, since it is derived from `I`'s
+      // own (boolean-vector) result type.
+      NewV = Builder.CreateCmp(Cmp->getPredicate(), ComponentOperand(0),
+                               ComponentOperand(1),
+                               I.getName() + ".wide" + Twine(C));
     } else {
       auto *UO = cast<UnaryOperator>(&I);
       NewV = Builder.CreateUnOp(UO->getOpcode(), ComponentOperand(0),
@@ -2059,7 +2116,7 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
 
   if (I.getType()->isVectorTy() &&
       (isa<BinaryOperator>(&I) || isa<UnaryOperator>(&I) ||
-       isa<CastInst>(&I))) {
+       isa<CastInst>(&I) || isa<CmpInst>(&I))) {
     widenVectorElementwise(I, Builder);
     return true;
   }
