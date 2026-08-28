@@ -2816,8 +2816,8 @@ buildNoEmitGeometryPipeline(Context &Ctx, uint32_t AttachmentSize) {
       makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
                   SignatureSystemValue::Position),
       makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
-  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
-      Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
   if (!VS)
     return VS.takeError();
 
@@ -3080,6 +3080,235 @@ TEST(ExecutorTest, RejectsAdjacencyTopologyWithoutAGeometryStage) {
   };
   PreparedDraw Draw = Scene.prepare();
   EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
+}
+
+// (Roadmap H6e) Chains the mesh path into `executeDraws`: this reuses
+// `CompiledStageTest.cpp`'s own "write GroupID.x, doubled, into a bound UAV
+// buffer, via groupshared-and-barrier cooperation" shape (roadmap H6c) to
+// prove which mesh (and, in the next test, task) workgroups actually run
+// and in what group-count shape, since no compiled mesh/task entry point
+// can yet write `ActualVertexCount`/`VertexOutputs`/`MeshGroupCount` from
+// real IR (roadmap H6h/H6i, see this milestone's own commit message and
+// agent_thoughts.md) -- meaning every meshlet these tests' own mesh stage
+// assembles is legitimately empty, and the bound color attachment must
+// stay entirely untouched, exactly mirroring `ExecutesDrawsAsNoOpWhen
+// GeometryStageNeverEmits`'s own precedent for a geometry stage.
+constexpr char MeshGroupIDDoublingShaderIR[] = R"(
+  @shared = internal addrspace(3) global [4 x i32] undef
+  define void @ms_main() #0 {
+    %h = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+    %gid = call i32 @llvm.dx.group.id(i32 0)
+    %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 0
+    store i32 %gid, ptr addrspace(3) %ptr
+    call void @llvm.dx.group.memory.barrier.with.group.sync()
+    %val = load i32, ptr addrspace(3) %ptr
+    %doubled = mul i32 %val, 2
+    %offset = mul i32 %gid, 4
+    call void @llvm.dx.resource.store.rawbuffer.i32(
+        target("dx.RawBuffer", i8, 1, 0) %h, i32 %offset, i32 poison, i32 %doubled)
+    ret void
+  }
+  declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefromheap(i32, i1)
+  declare void @llvm.dx.resource.store.rawbuffer.i32(
+      target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
+  declare i32 @llvm.dx.group.id(i32)
+  declare void @llvm.dx.group.memory.barrier.with.group.sync()
+  attributes #0 = { "hlsl.shader"="mesh" "hlsl.numthreads"="1,1,1" }
+)";
+
+// Same shape as `MeshGroupIDDoublingShaderIR`, tagged as the task
+// (amplification) stage instead; the requested mesh-workgroup count it
+// would write via `EmitMeshTasksEXT` is left unwritten, per H6c/H6d's own
+// documented scope (roadmap H6h/H6i), so it always requests zero mesh
+// workgroups.
+constexpr char TaskGroupIDDoublingShaderIR[] = R"(
+  @shared = internal addrspace(3) global [4 x i32] undef
+  define void @ts_main() #0 {
+    %h = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefromheap(i32 0, i1 false)
+    %gid = call i32 @llvm.dx.group.id(i32 0)
+    %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 0
+    store i32 %gid, ptr addrspace(3) %ptr
+    call void @llvm.dx.group.memory.barrier.with.group.sync()
+    %val = load i32, ptr addrspace(3) %ptr
+    %doubled = mul i32 %val, 2
+    %offset = mul i32 %gid, 4
+    call void @llvm.dx.resource.store.rawbuffer.i32(
+        target("dx.RawBuffer", i8, 1, 0) %h, i32 %offset, i32 poison, i32 %doubled)
+    ret void
+  }
+  declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefromheap(i32, i1)
+  declare void @llvm.dx.resource.store.rawbuffer.i32(
+      target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
+  declare i32 @llvm.dx.group.id(i32)
+  declare void @llvm.dx.group.memory.barrier.with.group.sync()
+  attributes #0 = { "hlsl.shader"="amplification" "hlsl.numthreads"="1,1,1" }
+)";
+
+// A fragment stage with no inputs at all -- every rasterized fragment (were
+// any ever produced) would be solid red -- so the mesh-path tests below
+// need no vertex-output varying linkage at all, only `SV_Position`.
+constexpr char SolidRedFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+/// Builds a mesh (and, if \p WithTaskStage, task) `GraphicsPipeline`: the
+/// mesh stage only declares an `SV_Position` output (roadmap H6e's own
+/// `RasterizePrimitives` requires one, per the vertex/geometry path's own
+/// long-standing rule) and cooperates via groupshared/barriers exactly
+/// like `CompiledStageTest`'s own mesh/task cases -- real per-vertex
+/// output-writing IR is blocked pending roadmap H6h/H6i (see this file's
+/// own comment above).
+Expected<GraphicsPipeline> buildMeshPipeline(Context &Ctx, bool WithTaskStage,
+                                             uint32_t AttachmentSize = 4) {
+  EntrySignature MeshSig;
+  MeshSig.Elements = {makeElement(0, SignatureDirection::Output, 4,
+                                  /*Location=*/std::nullopt,
+                                  SignatureSystemValue::Position)};
+  Expected<std::shared_ptr<CompiledStage>> MS = compileStage(
+      Ctx, MeshGroupIDDoublingShaderIR, "ms_main", MeshSig, ShaderStage::Mesh);
+  if (!MS)
+    return MS.takeError();
+
+  std::shared_ptr<CompiledStage> TS;
+  if (WithTaskStage) {
+    EntrySignature TaskSig;
+    Expected<std::shared_ptr<CompiledStage>> TSExp =
+        compileStage(Ctx, TaskGroupIDDoublingShaderIR, "ts_main", TaskSig,
+                     ShaderStage::Amplification);
+    if (!TSExp)
+      return TSExp.takeError();
+    TS = std::move(*TSExp);
+  }
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, SolidRedFragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      /*VertexStage=*/nullptr, std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  MeshState Mesh;
+  Mesh.OutputTopology = MeshOutputTopology::Triangles;
+  Mesh.MaxOutputVertices = 3;
+  Mesh.MaxOutputPrimitives = 1;
+  Pipeline.setMeshStage(std::move(TS), std::move(*MS), Mesh);
+  return Pipeline;
+}
+
+TEST(ExecutorTest,
+     RunsEveryMeshWorkgroupDirectlyWhenNoTaskStageIsBoundAndRastersNothing) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildMeshPipeline(Ctx, /*WithTaskStage=*/false);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::vector<int32_t> MeshBuffer(4, -1);
+  cpu::FemeDescriptor Desc{};
+  Desc.Data = MeshBuffer.data();
+  Desc.SizeInBytes = MeshBuffer.size() * sizeof(int32_t);
+  Desc.Kind = static_cast<uint32_t>(cpu::ResourceKind::Raw);
+  Desc.Flags = FEME_DESCRIPTOR_UAV;
+
+  uint32_t Size = 4;
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.Resources.ResourceHeap = ArrayRef<cpu::FemeDescriptor>(&Desc, 1);
+  MeshDrawCommand MDC;
+  MDC.GroupCount = {4, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Every one of the 4 directly-dispatched mesh workgroups ran exactly
+  // once, each writing its own GroupID.x doubled at its own slot.
+  EXPECT_EQ(MeshBuffer, (std::vector<int32_t>{0, 2, 4, 6}));
+
+  // No compiled mesh entry point can yet declare a non-zero vertex/
+  // primitive count (roadmap H6h/H6i), so every assembled meshlet is
+  // empty -- the color attachment must stay entirely untouched, exactly
+  // as `ExecutesDrawsAsNoOpWhenGeometryStageNeverEmits` already
+  // establishes for the geometry-stage counterpart of this same
+  // "correctly wired but currently produces nothing" state.
+  for (uint8_t B : Storage)
+    EXPECT_EQ(B, 0);
+}
+
+TEST(
+    ExecutorTest,
+    TaskStageDispatchDrivesWhichMeshWorkgroupsRunAndNoneRunUntilItRequestsAny) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildMeshPipeline(Ctx, /*WithTaskStage=*/true);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::vector<int32_t> TaskBuffer(4, -1);
+  cpu::FemeDescriptor TaskDesc{};
+  TaskDesc.Data = TaskBuffer.data();
+  TaskDesc.SizeInBytes = TaskBuffer.size() * sizeof(int32_t);
+  TaskDesc.Kind = static_cast<uint32_t>(cpu::ResourceKind::Raw);
+  TaskDesc.Flags = FEME_DESCRIPTOR_UAV;
+
+  uint32_t Size = 4;
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.Resources.ResourceHeap = ArrayRef<cpu::FemeDescriptor>(&TaskDesc, 1);
+  MeshDrawCommand MDC;
+  // With a task stage bound, `MeshDrawCommand::GroupCount` is the *task*
+  // stage's own dispatch (mirroring `vkCmdDispatch`'s shape).
+  MDC.GroupCount = {4, 1, 1};
+  std::array<MeshDrawCommand, 1> MeshDraws = {MDC};
+  Draw.MeshDraws = MeshDraws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Every one of the 4 task workgroups ran exactly once (this milestone's
+  // own "a task entry point's dispatch driving which mesh workgroups run
+  // when one is bound" charter's task-dispatch half).
+  EXPECT_EQ(TaskBuffer, (std::vector<int32_t>{0, 2, 4, 6}));
+
+  // No compiled task entry point can yet write `MeshGroupCount` from real
+  // IR (roadmap H6h/H6i), so every task workgroup above requested zero
+  // mesh workgroups: the mesh stage itself never runs at all, and the
+  // color attachment stays untouched, exactly like the no-task-stage test
+  // above.
+  for (uint8_t B : Storage)
+    EXPECT_EQ(B, 0);
 }
 
 } // namespace
