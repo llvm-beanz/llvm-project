@@ -8,6 +8,7 @@
 
 #include "Sync.h"
 #include "CommandBuffer.h"
+#include "Diagnostics.h"
 #include "Icd.h"
 #include "Objects.h"
 
@@ -62,7 +63,7 @@ void applySignals(ArrayRef<SemaphoreOp> Signals) {
 VkResult executeCommandBuffers(ArrayRef<CommandBuffer *> CmdBufs) {
   for (CommandBuffer *CmdBuf : CmdBufs) {
     if (Error E = executeCommandBuffer(*CmdBuf)) {
-      consumeError(std::move(E));
+      logCreationFailure(std::move(E), "vkQueueSubmit");
       return VK_ERROR_INITIALIZATION_FAILED;
     }
   }
