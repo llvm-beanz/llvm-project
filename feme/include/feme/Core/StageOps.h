@@ -145,6 +145,15 @@ enum class StageOpKind : uint8_t {
   /// how a stage-IO store already reaches this pass pre-decomposed to a
   /// scalar/vector leaf, see `storeStageIOValue`).
   TaskPayloadStore,
+  /// `feme.stage.set_mesh_outputs(vertex_count, primitive_count)`: a mesh
+  /// entry's `SetMeshOutputsEXT` call (roadmap H6c-a-a-i), declaring the
+  /// workgroup's real (`<= OutputVertices`/`OutputPrimitivesEXT`) output
+  /// counts. Per the SPIR-V/GLSL spec it must be called exactly once by
+  /// every invocation of the workgroup with identical arguments before any
+  /// other output-affecting instruction, so unlike `OutputStore` it has no
+  /// per-invocation `Vertex`/`Row`/`Component` addressing of its own --
+  /// both operands are workgroup-uniform, not per-lane data.
+  SetMeshOutputs,
   // Keep last: the number of stage op kinds, for range checks.
   NumStageOpKinds,
 };
@@ -231,8 +240,7 @@ createStageInterpolateAtOffset(llvm::IRBuilderBase &B, llvm::Type *ResultTy,
 /// `feme.stage.stream.emit(stream)`, where \p Stream is the output stream
 /// index (an ordinary `i32` constant, typically 0 unless the geometry stage
 /// declares multiple output streams).
-llvm::CallInst *createStageStreamEmit(llvm::IRBuilderBase &B,
-                                      uint32_t Stream);
+llvm::CallInst *createStageStreamEmit(llvm::IRBuilderBase &B, uint32_t Stream);
 
 /// `feme.stage.stream.cut(stream)`.
 llvm::CallInst *createStageStreamCut(llvm::IRBuilderBase &B, uint32_t Stream);
@@ -253,6 +261,12 @@ llvm::CallInst *createStageSubpassLoad(llvm::IRBuilderBase &B,
 /// `StageOpKind::TaskPayloadStore`'s comment).
 llvm::CallInst *createStageTaskPayloadStore(llvm::IRBuilderBase &B,
                                             uint64_t Offset, llvm::Value *Val);
+
+/// `feme.stage.set_mesh_outputs(vertex_count, primitive_count)` (see
+/// `StageOpKind::SetMeshOutputs`'s comment).
+llvm::CallInst *createStageSetMeshOutputs(llvm::IRBuilderBase &B,
+                                          llvm::Value *VertexCount,
+                                          llvm::Value *PrimitiveCount);
 ///@}
 
 /// Reads back \p CI's operand \p Idx as a constant `i32`/`i8`/`i1`, or

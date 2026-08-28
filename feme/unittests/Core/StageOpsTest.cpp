@@ -146,7 +146,7 @@ TEST_F(StageOpsTest, StreamEmitAndCutCarryStreamIndex) {
 
 TEST_F(StageOpsTest, SubpassLoadCarriesAttachmentIndexAndComponent) {
   CallInst *CI = createStageSubpassLoad(B, /*AttachmentIndex=*/2,
-                                       /*Component=*/1);
+                                        /*Component=*/1);
   EXPECT_EQ(CI->getCalledFunction()->getName(), "feme.stage.subpass.load.f32");
   // Marked overloaded purely to give SIMDizePass's widened `<W x f32>` form
   // its own distinct symbol from this scalar declaration -- see
@@ -168,7 +168,7 @@ TEST_F(StageOpsTest, SubpassLoadCarriesAttachmentIndexAndComponent) {
 TEST_F(StageOpsTest, SubpassLoadCarriesExplicitSample) {
   Value *Sample = ConstantInt::get(Type::getInt32Ty(Ctx), 3);
   CallInst *CI = createStageSubpassLoad(B, /*AttachmentIndex=*/0,
-                                       /*Component=*/2, Sample);
+                                        /*Component=*/2, Sample);
   ASSERT_EQ(getStageOpConstantOperand(*CI, 2), 3u);
 }
 
@@ -187,6 +187,23 @@ TEST_F(StageOpsTest, TaskPayloadStoreIsVoidAndOverloadedOnValue) {
   StageOpKind Kind;
   ASSERT_TRUE(isStageOpCall(*CI, &Kind));
   EXPECT_EQ(Kind, StageOpKind::TaskPayloadStore);
+}
+
+/// (Roadmap H6c-a-a-i) `SetMeshOutputs` is not overloaded (both operands
+/// are always `i32`, unlike `TaskPayloadStore`'s `value`), so its callee
+/// name carries no type-mangling suffix.
+TEST_F(StageOpsTest, SetMeshOutputsIsVoidAndNotOverloaded) {
+  Value *VertexCount = ConstantInt::get(B.getInt32Ty(), 3);
+  Value *PrimitiveCount = ConstantInt::get(B.getInt32Ty(), 1);
+  CallInst *CI = createStageSetMeshOutputs(B, VertexCount, PrimitiveCount);
+  EXPECT_TRUE(CI->getType()->isVoidTy());
+  EXPECT_EQ(CI->getCalledFunction()->getName(), "feme.stage.set_mesh_outputs");
+  EXPECT_EQ(CI->getArgOperand(0), VertexCount);
+  EXPECT_EQ(CI->getArgOperand(1), PrimitiveCount);
+
+  StageOpKind Kind;
+  ASSERT_TRUE(isStageOpCall(*CI, &Kind));
+  EXPECT_EQ(Kind, StageOpKind::SetMeshOutputs);
 }
 
 TEST_F(StageOpsTest, NonStageOpCallIsRejected) {
