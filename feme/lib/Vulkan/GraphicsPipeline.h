@@ -32,7 +32,9 @@
 #include "PhysicalDeviceInfo.h"
 #include "Pipeline.h"
 
+#include "feme/Graphics/AmplificationDispatch.h"
 #include "feme/Graphics/Geometry.h"
+#include "feme/Graphics/Mesh.h"
 #include "feme/Graphics/Pipeline.h"
 #include "feme/Graphics/PreparedDraw.h"
 #include "feme/Target/CPU/RuntimeABI.h"
@@ -88,6 +90,33 @@ struct VertexInputAttribute {
 /// validation and `EntryPoints.cpp`'s advertised property so the two can
 /// never disagree.
 constexpr uint32_t MaxVertexAttribDivisor = 0xFFFFFFFFu;
+
+/// (roadmap H6f) `VkPhysicalDeviceMeshShaderPropertiesEXT::
+/// maxMeshOutputVertices`/`maxMeshOutputPrimitives`: shared between
+/// `compileAndValidateStages`'s own creation-time enforcement of a compiled
+/// mesh entry's declared `MeshState::MaxOutputVertices`/`MaxOutputPrimitives`
+/// and `EntryPoints.cpp`'s advertised property, so the two can never
+/// disagree -- exactly as `MaxVertexAttribDivisor` above does for its own
+/// property/validation pair. Matches `maxGeometryOutputVertices`'s own
+/// honest ceiling (H5e): mesh output assembly (`MeshOutputBuilder`) has no
+/// larger fixed-size buffer than geometry's own.
+constexpr uint32_t MaxMeshOutputVertices = 256;
+constexpr uint32_t MaxMeshOutputPrimitives = 256;
+
+/// (roadmap H6f) `maxMeshWorkGroupCount`/`maxMeshWorkGroupTotalCount` and
+/// their task-stage counterparts (`maxTaskWorkGroupCount`/
+/// `maxTaskWorkGroupTotalCount`): shared between `buildExecutorPipeline`'s
+/// own `feme::graphics::AmplificationDispatchLimits` (enforced at draw time
+/// by `AmplificationDispatchQueue`, see `Executor.cpp`) and
+/// `EntryPoints.cpp`'s advertised properties, mirroring
+/// `maxComputeWorkGroupCount`/`maxComputeWorkGroupTotalCount` exactly: the
+/// mesh and task stages reuse compute's own group-dispatch machinery
+/// unmodified (roadmap H6c), so compute's own real, enforced limits are a
+/// legitimately honest mirror here rather than an inflated guess.
+constexpr std::array<uint32_t, 3> MaxMeshWorkGroupCount = {65535, 65535, 65535};
+constexpr uint32_t MaxMeshWorkGroupTotalCount = 4194304;
+constexpr std::array<uint32_t, 3> MaxTaskWorkGroupCount = {65535, 65535, 65535};
+constexpr uint32_t MaxTaskWorkGroupTotalCount = 4194304;
 
 /// The `VkDynamicState` subset this driver implements, as a bitmask. A
 /// pipeline naming any other dynamic state fails creation (see the file
@@ -226,6 +255,18 @@ struct GraphicsPipelineArtifact {
   /// (roadmap H5e) Set only for a pipeline declaring
   /// `VK_SHADER_STAGE_GEOMETRY_BIT`.
   std::shared_ptr<feme::cpu::CompiledStage> GeometryStage;
+  /// (roadmap H6f) Set only for a mesh pipeline (declaring
+  /// `VK_SHADER_STAGE_MESH_BIT_EXT`); mutually exclusive with every stage
+  /// above (`VertexStage`, the tessellation/geometry stages) -- a graphics
+  /// pipeline is either a "primitive" pipeline (vertex, optionally
+  /// tessellation/geometry) or a mesh pipeline, never a mix of the two.
+  std::shared_ptr<feme::cpu::CompiledStage> MeshStage;
+  /// (roadmap H6f) Set only when `MeshStage` is and the pipeline also
+  /// declares `VK_SHADER_STAGE_TASK_BIT_EXT`; the task stage is optional
+  /// even for a mesh pipeline (a mesh shader may be dispatched directly,
+  /// with no task stage driving it -- see `graphics::GraphicsPipeline::
+  /// hasTaskStage`).
+  std::shared_ptr<feme::cpu::CompiledStage> TaskStage;
 };
 
 /// One graphics pipeline's compiled stages plus its whole translated,
@@ -277,6 +318,13 @@ struct GraphicsPipelineState {
   /// `feme.geometry.*` reflection (unlike `Tessellation`, nothing here
   /// comes from a `VkGraphicsPipelineCreateInfo` field).
   feme::graphics::GeometryState Geometry;
+  /// (roadmap H6f) Set only when `Artifact->MeshStage` is (i.e. the
+  /// pipeline is a mesh pipeline): the mesh shape `buildExecutorPipeline`
+  /// hands to `graphics::GraphicsPipeline::setMeshStage`, assembled
+  /// entirely from the compiled mesh stage's own `feme.mesh.*` reflection
+  /// (like `Geometry` above, nothing here comes from a
+  /// `VkGraphicsPipelineCreateInfo` field).
+  feme::graphics::MeshState Mesh;
 };
 
 /// A `VkPipeline` graphics pipeline: the compiled stages plus the
@@ -366,6 +414,12 @@ public:
   bool hasGeometryStages() const {
     return State.Artifact->GeometryStage != nullptr;
   }
+  /// (roadmap H6f) Whether this is a mesh pipeline (declares
+  /// `VK_SHADER_STAGE_MESH_BIT_EXT`, and so has no vertex/tessellation/
+  /// geometry stages -- see `GraphicsPipelineArtifact`'s own comment).
+  bool hasMeshStages() const { return State.Artifact->MeshStage != nullptr; }
+  /// Only valid to call when `hasMeshStages()` is true.
+  bool hasTaskStage() const { return State.Artifact->TaskStage != nullptr; }
 
 private:
   GraphicsPipelineState State;

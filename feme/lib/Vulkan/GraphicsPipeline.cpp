@@ -21,6 +21,7 @@
 #include "feme/Core/Module.h"
 #include "feme/Core/Signature.h"
 #include "feme/Graphics/Geometry.h"
+#include "feme/Graphics/Mesh.h"
 #include "feme/Graphics/Patch.h"
 #include "feme/Graphics/Tessellation.h"
 #include "feme/Target/CPU/CompiledStage.h"
@@ -387,11 +388,20 @@ bool isSupportedVertexAttributeFormat(feme::cpu::ResourceFormat Format) {
 /// geometry module. At most one of \p OutState/\p OutGeometryState is ever
 /// non-null for a given call -- a module is never both a tessellation and a
 /// geometry stage.
+///
+/// \p OutMeshState is filled in the same way from a mesh module's own
+/// `feme.mesh.*` attributes (`feme::graphics::getMeshState`, roadmap H6f).
+/// Unlike \p OutState/\p OutGeometryState, a mesh module's entry point is
+/// *not* rewritten by `feme::graphics::CanonicalizeStagePass` at all yet
+/// (roadmap H6i is what will teach it to): the attributes this reads are
+/// stamped directly by SPIR-V import (`ConvertSPIRVToLLVMPass`), so reading
+/// them here needs no cooperation from that pass either way.
 Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
     feme::Context &Ctx, const VkPipelineShaderStageCreateInfo &StageInfo,
     feme::ShaderStage Stage, llvm::StringRef EntryPointOverride = {},
     std::optional<feme::graphics::TessellationState> *OutState = nullptr,
-    std::optional<feme::graphics::GeometryState> *OutGeometryState = nullptr) {
+    std::optional<feme::graphics::GeometryState> *OutGeometryState = nullptr,
+    std::optional<feme::graphics::MeshState> *OutMeshState = nullptr) {
   if (!StageInfo.module)
     return createStringError(inconvertibleErrorCode(),
                              "graphics pipeline stage has no VkShaderModule");
@@ -408,9 +418,9 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
 
   auto *Module = fromHandle<ShaderModule>(StageInfo.module);
   std::string DefaultEntryPoint = StageInfo.pName ? StageInfo.pName : "main";
-  llvm::StringRef EntryPoint =
-      EntryPointOverride.empty() ? llvm::StringRef(DefaultEntryPoint)
-                                 : EntryPointOverride;
+  llvm::StringRef EntryPoint = EntryPointOverride.empty()
+                                   ? llvm::StringRef(DefaultEntryPoint)
+                                   : EntryPointOverride;
 
   Expected<feme::Module> AsLLVMIR = importShaderModule(Ctx, Module->words());
   if (!AsLLVMIR)
@@ -419,14 +429,17 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
   ModuleAnalysisManager MAM;
   feme::graphics::CanonicalizeStagePass().run(AsLLVMIR->getLLVMModule(), MAM);
 
-  if (OutState || OutGeometryState) {
+  if (OutState || OutGeometryState || OutMeshState) {
     llvm::Function *Entry = AsLLVMIR->getLLVMModule().getFunction(EntryPoint);
     if (OutState)
-      *OutState = Entry ? feme::graphics::getTessellationState(*Entry)
-                        : std::nullopt;
+      *OutState =
+          Entry ? feme::graphics::getTessellationState(*Entry) : std::nullopt;
     if (OutGeometryState)
       *OutGeometryState =
           Entry ? feme::graphics::getGeometryState(*Entry) : std::nullopt;
+    if (OutMeshState)
+      *OutMeshState =
+          Entry ? feme::graphics::getMeshState(*Entry) : std::nullopt;
   }
 
   feme::cpu::StageCompileOptions Opts;
@@ -552,8 +565,9 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
   bool GeometryNeverWrites = GeometryStage && PositionSig.Elements.empty();
   if (!GeometryNeverWrites && (!Position || Position->ComponentCount != 4))
     return createStringError(
-        inconvertibleErrorCode(), "%s stage does not write a 4-component "
-                                  "SV_Position output",
+        inconvertibleErrorCode(),
+        "%s stage does not write a 4-component "
+        "SV_Position output",
         GeometryStage ? "geometry"
                       : (DomainStage ? "tessellation evaluation" : "vertex"));
 
@@ -727,8 +741,8 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
   // multisampled dynamic-rendering pipeline as "disagreeing" with a
   // sample count dynamic rendering never actually specified.
   if (CreateInfo.pMultisampleState)
-    Targets.SampleCount =
-        static_cast<uint32_t>(CreateInfo.pMultisampleState->rasterizationSamples);
+    Targets.SampleCount = static_cast<uint32_t>(
+        CreateInfo.pMultisampleState->rasterizationSamples);
   return Targets;
 }
 
@@ -925,8 +939,9 @@ Error translateDepthStencilState(
   bool NeedsStencil = StencilTestDynamic;
   if (!Info) {
     // A dynamically-enabled test still needs somewhere to test/write into.
-    if (NeedsDepth && (!Targets.DepthStencil ||
-                       !isSupportedDepthAttachmentFormat(*Targets.DepthStencil)))
+    if (NeedsDepth &&
+        (!Targets.DepthStencil ||
+         !isSupportedDepthAttachmentFormat(*Targets.DepthStencil)))
       return createStringError(inconvertibleErrorCode(),
                                "depth testing/writes need a depth attachment "
                                "in the pipeline's render target");
@@ -983,8 +998,7 @@ Error translateDepthStencilState(
         static_cast<uint8_t>(Info->front.compareMask);
     Out.Stencil.Front.WriteMask = static_cast<uint8_t>(Info->front.writeMask);
     Out.Stencil.Front.Reference = static_cast<uint8_t>(Info->front.reference);
-    Out.Stencil.Back.CompareMask =
-        static_cast<uint8_t>(Info->back.compareMask);
+    Out.Stencil.Back.CompareMask = static_cast<uint8_t>(Info->back.compareMask);
     Out.Stencil.Back.WriteMask = static_cast<uint8_t>(Info->back.writeMask);
     Out.Stencil.Back.Reference = static_cast<uint8_t>(Info->back.reference);
     return Error::success();
@@ -1283,12 +1297,16 @@ Error translateFixedFunctionState(
     const VkPipelineShaderStageCreateInfo *&FragmentInfo,
     const VkPipelineShaderStageCreateInfo *&TessControlInfo,
     const VkPipelineShaderStageCreateInfo *&TessEvalInfo,
-    const VkPipelineShaderStageCreateInfo *&GeometryInfo) {
+    const VkPipelineShaderStageCreateInfo *&GeometryInfo,
+    const VkPipelineShaderStageCreateInfo *&MeshInfo,
+    const VkPipelineShaderStageCreateInfo *&TaskInfo) {
   VertexInfo = nullptr;
   FragmentInfo = nullptr;
   TessControlInfo = nullptr;
   TessEvalInfo = nullptr;
   GeometryInfo = nullptr;
+  MeshInfo = nullptr;
+  TaskInfo = nullptr;
   for (uint32_t I = 0; I != CreateInfo.stageCount; ++I) {
     const VkPipelineShaderStageCreateInfo &Stage = CreateInfo.pStages[I];
     switch (Stage.stage) {
@@ -1312,18 +1330,52 @@ Error translateFixedFunctionState(
       // into `Result.Tessellation`.
       GeometryInfo = &Stage;
       break;
+    case VK_SHADER_STAGE_MESH_BIT_EXT:
+      // (roadmap H6f) `compileAndValidateStages` compiles this module
+      // once, tagged `feme::ShaderStage::Mesh`, and merges its reflected
+      // `feme::graphics::MeshState` into `Result.Mesh`, mirroring how the
+      // geometry stage's own reflection is merged into `Result.Geometry`
+      // above.
+      MeshInfo = &Stage;
+      break;
+    case VK_SHADER_STAGE_TASK_BIT_EXT:
+      // (roadmap H6f) Compiled tagged `feme::ShaderStage::Amplification`;
+      // only legal alongside a mesh stage (checked below).
+      TaskInfo = &Stage;
+      break;
     default:
-      // Mesh and task stages are a later milestone (V8); a pipeline
-      // naming one fails here rather than rendering without it.
       return createStringError(inconvertibleErrorCode(),
-                               "only the vertex, fragment, tessellation and "
-                               "geometry stages are implemented (V6/H4b/"
-                               "H5e)");
+                               "only the vertex, fragment, tessellation, "
+                               "geometry, mesh and task stages are "
+                               "implemented (V6/H4b/H5e/H6f)");
     }
   }
-  if (!VertexInfo)
-    return createStringError(inconvertibleErrorCode(),
-                             "a graphics pipeline needs a vertex stage");
+  // (roadmap H6f) A mesh pipeline has no vertex stage at all -- mesh and
+  // vertex input are mutually exclusive ways to originate a pipeline's
+  // vertices (`VUID-VkGraphicsPipelineCreateInfo-stage-02096`/neighbors).
+  if (MeshInfo && VertexInfo)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "a graphics pipeline may not declare both a mesh stage and a "
+        "vertex stage");
+  if (!VertexInfo && !MeshInfo)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "a graphics pipeline needs a vertex stage or a mesh stage");
+  // (roadmap H6f) A mesh pipeline has no input-assembly stage for
+  // tessellation/geometry to attach to either -- both are entirely
+  // vertex-pipeline concepts.
+  if (MeshInfo && (TessControlInfo || TessEvalInfo || GeometryInfo))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "a mesh pipeline may not declare tessellation or geometry stages");
+  // (roadmap H6f) The task stage only ever drives a mesh stage's dispatch
+  // (`EmitMeshTasksEXT`); it is meaningless without one.
+  if (TaskInfo && !MeshInfo)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "a graphics pipeline may not declare a task stage without a mesh "
+        "stage");
   // (roadmap H4b) The two tessellation stages are only ever legal together:
   // a hull shader with no domain shader (or vice versa) has no tessellator
   // state to run with (`VUID-VkGraphicsPipelineCreateInfo-pStages-00736`/
@@ -1340,12 +1392,17 @@ Error translateFixedFunctionState(
   // independently, since the extension's own spec text scopes it "to all
   // accesses emanating from the shader code of this shader stage". A
   // fragment-less pipeline (below) has no fragment-stage `pNext` to
-  // resolve, so `Result.FragmentRobustness` is left at its default.
-  Expected<PipelineRobustness> VertexRobustness =
-      resolvePipelineRobustness(CreateInfo.pNext, VertexInfo->pNext);
-  if (!VertexRobustness)
-    return VertexRobustness.takeError();
-  Result.VertexRobustness = *VertexRobustness;
+  // resolve, so `Result.FragmentRobustness` is left at its default. A mesh
+  // pipeline (roadmap H6f) has no vertex stage either, so
+  // `Result.VertexRobustness` is likewise left at its default in that
+  // case.
+  if (VertexInfo) {
+    Expected<PipelineRobustness> VertexRobustness =
+        resolvePipelineRobustness(CreateInfo.pNext, VertexInfo->pNext);
+    if (!VertexRobustness)
+      return VertexRobustness.takeError();
+    Result.VertexRobustness = *VertexRobustness;
+  }
   if (FragmentInfo) {
     Expected<PipelineRobustness> FragmentRobustness =
         resolvePipelineRobustness(CreateInfo.pNext, FragmentInfo->pNext);
@@ -1374,75 +1431,99 @@ Error translateFixedFunctionState(
 
   const VkPipelineInputAssemblyStateCreateInfo *InputAssembly =
       CreateInfo.pInputAssemblyState;
-  if (!InputAssembly)
-    return createStringError(inconvertibleErrorCode(),
-                             "a graphics pipeline needs input assembly state");
-  std::optional<PrimitiveTopology> Topology =
-      mapTopology(InputAssembly->topology);
-  if (!Topology)
-    return createStringError(inconvertibleErrorCode(),
-                             "primitive topology %u is not implemented",
-                             unsigned(InputAssembly->topology));
-  // (roadmap H5e-b) `Executor.cpp`'s `executeDraws` only honors
-  // `primitiveRestartEnable` for the strip/fan topologies
-  // `topologySupportsPrimitiveRestart` lists (every list topology has no
-  // notion of restarting an assembly in progress in the first place --
-  // `VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00428`/
-  // neighbors, since this ICD does not implement
-  // `VK_EXT_primitive_topology_list_restart`); mirrored here so an
-  // unsupported combination fails at creation, not silently at draw time.
-  if (InputAssembly->primitiveRestartEnable &&
-      !feme::graphics::topologySupportsPrimitiveRestart(*Topology))
-    return createStringError(
-        inconvertibleErrorCode(),
-        "primitiveRestartEnable requires a strip or fan primitive topology");
-  // (roadmap H4b) A tessellation-enabled pipeline must use
-  // `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` -- it is the only topology the
-  // tessellator can patch-assemble from -- and, symmetrically, that
-  // topology is meaningless without a tessellator to feed it to
-  // (`VUID-VkGraphicsPipelineCreateInfo-topology-08889`/neighbors).
-  bool HasTessellationStages = TessControlInfo != nullptr;
-  if (HasTessellationStages != (*Topology == PrimitiveTopology::PatchList))
-    return createStringError(
-        inconvertibleErrorCode(),
-        "VK_PRIMITIVE_TOPOLOGY_PATCH_LIST requires a tessellation-control/"
-        "evaluation stage pair, and vice versa");
-  // (roadmap H5e) Symmetric check for the four adjacency topologies: their
-  // whole purpose is handing a geometry stage each primitive's neighboring
-  // vertices (`Executor.cpp`'s own runtime check, mirrored here so an
-  // unsupported combination fails at creation, not at draw time --
-  // `VUID-VkGraphicsPipelineCreateInfo-topology-00738`/neighbors). Unlike
-  // `PatchList`, this is one-directional: a geometry stage may run over a
-  // non-adjacency topology too (it just never sees any adjacency data).
-  if (feme::graphics::topologyHasAdjacency(*Topology) && !GeometryInfo)
-    return createStringError(
-        inconvertibleErrorCode(),
-        "an adjacency primitive topology requires a pipeline with a "
-        "geometry stage");
+  // (roadmap H6f) A mesh pipeline originates its own vertices/primitives
+  // entirely from the mesh stage's own emitted output -- it has neither a
+  // vertex-input stage nor a fixed input-assembly topology to configure
+  // (`VUID-VkGraphicsPipelineCreateInfo-pStages-02096`/neighbors): both
+  // `pVertexInputState`/`pInputAssemblyState` must be null, and none of
+  // the topology/tessellation/adjacency checks below apply. `Result.
+  // Topology`/`Result.PrimitiveRestartEnable` are left at their defaults,
+  // unused (`Executor.cpp`'s mesh path drives entirely off `MeshState::
+  // OutputTopology` instead -- see `Pipeline.h`'s `hasMeshStages`).
+  if (MeshInfo) {
+    if (CreateInfo.pVertexInputState)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "a mesh pipeline may not declare pVertexInputState");
+    if (InputAssembly)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "a mesh pipeline may not declare pInputAssemblyState");
+    Result.SampleCount = Targets->SampleCount;
+  } else {
+    if (!InputAssembly)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "a graphics pipeline needs input assembly state");
+    std::optional<PrimitiveTopology> Topology =
+        mapTopology(InputAssembly->topology);
+    if (!Topology)
+      return createStringError(inconvertibleErrorCode(),
+                               "primitive topology %u is not implemented",
+                               unsigned(InputAssembly->topology));
+    // (roadmap H5e-b) `Executor.cpp`'s `executeDraws` only honors
+    // `primitiveRestartEnable` for the strip/fan topologies
+    // `topologySupportsPrimitiveRestart` lists (every list topology has no
+    // notion of restarting an assembly in progress in the first place --
+    // `VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00428`/
+    // neighbors, since this ICD does not implement
+    // `VK_EXT_primitive_topology_list_restart`); mirrored here so an
+    // unsupported combination fails at creation, not silently at draw time.
+    if (InputAssembly->primitiveRestartEnable &&
+        !feme::graphics::topologySupportsPrimitiveRestart(*Topology))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "primitiveRestartEnable requires a strip or fan primitive "
+          "topology");
+    // (roadmap H4b) A tessellation-enabled pipeline must use
+    // `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` -- it is the only topology the
+    // tessellator can patch-assemble from -- and, symmetrically, that
+    // topology is meaningless without a tessellator to feed it to
+    // (`VUID-VkGraphicsPipelineCreateInfo-topology-08889`/neighbors).
+    bool HasTessellationStages = TessControlInfo != nullptr;
+    if (HasTessellationStages != (*Topology == PrimitiveTopology::PatchList))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "VK_PRIMITIVE_TOPOLOGY_PATCH_LIST requires a tessellation-control/"
+          "evaluation stage pair, and vice versa");
+    // (roadmap H5e) Symmetric check for the four adjacency topologies:
+    // their whole purpose is handing a geometry stage each primitive's
+    // neighboring vertices (`Executor.cpp`'s own runtime check, mirrored
+    // here so an unsupported combination fails at creation, not at draw
+    // time -- `VUID-VkGraphicsPipelineCreateInfo-topology-00738`/
+    // neighbors). Unlike `PatchList`, this is one-directional: a geometry
+    // stage may run over a non-adjacency topology too (it just never sees
+    // any adjacency data).
+    if (feme::graphics::topologyHasAdjacency(*Topology) && !GeometryInfo)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "an adjacency primitive topology requires a pipeline with a "
+          "geometry stage");
 
-  if (HasTessellationStages) {
-    const VkPipelineTessellationStateCreateInfo *Tessellation =
-        CreateInfo.pTessellationState;
-    if (!Tessellation)
-      return createStringError(
-          inconvertibleErrorCode(),
-          "a tessellation-enabled graphics pipeline needs "
-          "VkPipelineTessellationStateCreateInfo");
-    if (Tessellation->patchControlPoints == 0 ||
-        Tessellation->patchControlPoints >
-            DeviceInfo.Properties.limits.maxTessellationPatchSize)
-      return createStringError(
-          inconvertibleErrorCode(),
-          "patchControlPoints %u exceeds maxTessellationPatchSize %u",
-          Tessellation->patchControlPoints,
-          DeviceInfo.Properties.limits.maxTessellationPatchSize);
-    Result.Tessellation.InputControlPointCount =
-        Tessellation->patchControlPoints;
+    if (HasTessellationStages) {
+      const VkPipelineTessellationStateCreateInfo *Tessellation =
+          CreateInfo.pTessellationState;
+      if (!Tessellation)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "a tessellation-enabled graphics pipeline needs "
+            "VkPipelineTessellationStateCreateInfo");
+      if (Tessellation->patchControlPoints == 0 ||
+          Tessellation->patchControlPoints >
+              DeviceInfo.Properties.limits.maxTessellationPatchSize)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "patchControlPoints %u exceeds maxTessellationPatchSize %u",
+            Tessellation->patchControlPoints,
+            DeviceInfo.Properties.limits.maxTessellationPatchSize);
+      Result.Tessellation.InputControlPointCount =
+          Tessellation->patchControlPoints;
+    }
+
+    Result.Topology = *Topology;
+    Result.PrimitiveRestartEnable = InputAssembly->primitiveRestartEnable;
+    Result.SampleCount = Targets->SampleCount;
   }
-
-  Result.Topology = *Topology;
-  Result.PrimitiveRestartEnable = InputAssembly->primitiveRestartEnable;
-  Result.SampleCount = Targets->SampleCount;
 
   const VkPhysicalDeviceLimits &Limits = DeviceInfo.Properties.limits;
   // Dynamic state is translated first: `translateDepthStencilState` below
@@ -1452,9 +1533,14 @@ Error translateFixedFunctionState(
   // comment).
   if (Error E = translateDynamicState(CreateInfo.pDynamicState, Result))
     return E;
-  if (Error E =
-          translateVertexInput(CreateInfo.pVertexInputState, Limits, Result))
-    return E;
+  // (roadmap H6f) A mesh pipeline has no vertex-input state to translate
+  // (checked above); `translateVertexInput` is skipped entirely rather
+  // than called with a null `pVertexInputState`, which would instead
+  // translate to "zero bindings/attributes" for a vertex pipeline.
+  if (!MeshInfo)
+    if (Error E =
+            translateVertexInput(CreateInfo.pVertexInputState, Limits, Result))
+      return E;
   if (Error E = translateRasterState(CreateInfo.pRasterizationState, Result))
     return E;
   if (Error E =
@@ -1513,10 +1599,10 @@ bool hasLowerLeftTessellationDomainOrigin(
     if (Next->sType !=
         VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO)
       continue;
-    const auto *DomainOrigin =
-        reinterpret_cast<const VkPipelineTessellationDomainOriginStateCreateInfo *>(
-            Next);
-    return DomainOrigin->domainOrigin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+    const auto *DomainOrigin = reinterpret_cast<
+        const VkPipelineTessellationDomainOriginStateCreateInfo *>(Next);
+    return DomainOrigin->domainOrigin ==
+           VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
   }
   return false;
 }
@@ -1540,8 +1626,8 @@ bool hasLowerLeftTessellationDomainOrigin(
 /// whichever domain origin the pipeline actually requested rather than
 /// always relative to the upper-left one the tessellator itself assumes.
 /// `Point`/`Line` have no winding to flip.
-feme::graphics::TessOutputPrimitive
-flipTessellationWindingForDomainOrigin(feme::graphics::TessOutputPrimitive Primitive) {
+feme::graphics::TessOutputPrimitive flipTessellationWindingForDomainOrigin(
+    feme::graphics::TessOutputPrimitive Primitive) {
   switch (Primitive) {
   case feme::graphics::TessOutputPrimitive::TriangleCw:
     return feme::graphics::TessOutputPrimitive::TriangleCcw;
@@ -1587,24 +1673,51 @@ flipTessellationWindingForDomainOrigin(feme::graphics::TessOutputPrimitive Primi
 /// left `nullptr` too and \p Geometry is left untouched. Otherwise the
 /// module is compiled once (`ShaderStage::Geometry`), with \p Geometry
 /// filled in from its own `feme.geometry.*` reflection.
+///
+/// \p MeshInfo is `nullptr` for a "primitive" pipeline (vertex, optionally
+/// tessellation/geometry) and non-null for a mesh pipeline (roadmap H6f) --
+/// `translateFixedFunctionState` already established the two are mutually
+/// exclusive with \p VertexInfo, so exactly one of them is non-null on
+/// entry. When \p MeshInfo is set, the module is compiled once
+/// (`ShaderStage::Mesh`), \p Mesh is filled in from its own `feme.mesh.*`
+/// reflection and validated against \p MeshOutputLimits (`maxMeshOutput
+/// Vertices`/`maxMeshOutputPrimitives`, mirroring how \p Geometry's own
+/// `Invocations`/`MaxOutputVertices` are validated against \p Limits
+/// above), and the returned artifact's `VertexStage`/`HullStage`/
+/// `PatchConstantStage`/`DomainStage`/`GeometryStage` are all left
+/// `nullptr`. \p TaskInfo is `nullptr` for a mesh pipeline with no task
+/// stage (also legal, see `graphics::GraphicsPipeline::hasTaskStage`) and
+/// otherwise compiled once too (`ShaderStage::Amplification`), with no
+/// reflected state of its own to validate (`Mesh.h`'s own comment: a task
+/// entry declares no shape beyond its workgroup size).
 Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
-    const VkPipelineShaderStageCreateInfo &VertexInfo,
+    const VkPipelineShaderStageCreateInfo *VertexInfo,
     const VkPipelineShaderStageCreateInfo *FragmentInfo,
     const VkPipelineShaderStageCreateInfo *TessControlInfo,
     const VkPipelineShaderStageCreateInfo *TessEvalInfo,
     const VkPipelineShaderStageCreateInfo *GeometryInfo,
+    const VkPipelineShaderStageCreateInfo *MeshInfo,
+    const VkPipelineShaderStageCreateInfo *TaskInfo,
     const PipelineLayout &Layout, const VkPhysicalDeviceLimits &Limits,
     uint32_t ColorAttachmentCount,
     llvm::ArrayRef<VertexInputAttribute> VertexAttributes,
     feme::graphics::TessellationState &Tessellation,
-    feme::graphics::GeometryState &Geometry) {
+    feme::graphics::GeometryState &Geometry, feme::graphics::MeshState &Mesh) {
   auto Ctx = std::make_unique<feme::Context>();
   Ctx->setDiagnosticHandler([](const feme::Diagnostic &) {});
 
-  Expected<std::shared_ptr<feme::cpu::CompiledStage>> VertexStage =
-      compileGraphicsStage(*Ctx, VertexInfo, feme::ShaderStage::Vertex);
-  if (!VertexStage)
-    return VertexStage.takeError();
+  // (roadmap H6f) A mesh pipeline has no vertex stage at all (see this
+  // function's own comment above); the whole "primitive" pipeline half
+  // below (vertex/tessellation/geometry) is skipped for one, and a
+  // separate mesh/task-only path runs instead further down.
+  std::shared_ptr<feme::cpu::CompiledStage> VertexStageCompiled;
+  if (VertexInfo) {
+    Expected<std::shared_ptr<feme::cpu::CompiledStage>> Compiled =
+        compileGraphicsStage(*Ctx, *VertexInfo, feme::ShaderStage::Vertex);
+    if (!Compiled)
+      return Compiled.takeError();
+    VertexStageCompiled = std::move(*Compiled);
+  }
   std::shared_ptr<feme::cpu::CompiledStage> FragmentStage;
   if (FragmentInfo) {
     Expected<std::shared_ptr<feme::cpu::CompiledStage>> Compiled =
@@ -1639,8 +1752,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
 
     std::optional<feme::graphics::TessellationState> DomainState;
     Expected<std::shared_ptr<feme::cpu::CompiledStage>> DomainCompiled =
-        compileGraphicsStage(*Ctx, *TessEvalInfo, feme::ShaderStage::Domain,
-                             {}, &DomainState);
+        compileGraphicsStage(*Ctx, *TessEvalInfo, feme::ShaderStage::Domain, {},
+                             &DomainState);
     if (!DomainCompiled)
       return DomainCompiled.takeError();
     DomainStage = std::move(*DomainCompiled);
@@ -1722,16 +1835,72 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     Geometry = *GeomState;
   }
 
-  const feme::cpu::ResourceInfo &VSInfo = (*VertexStage)->getResourceInfo();
-  if (!pushConstantsCoverRootConstantSize(Layout, VSInfo.RootConstantSize,
-                                          Limits.maxPushConstantsSize,
-                                          VK_SHADER_STAGE_VERTEX_BIT))
-    return createStringError(
-        inconvertibleErrorCode(),
-        "a stage's root-constant span is not fully covered by a "
-        "VkPushConstantRange visible to it in its VkPipelineLayout");
-  if (Error E = validateBoundRanges(VSInfo, Layout))
-    return std::move(E);
+  // (roadmap H6f) `MeshInfo`/`TaskInfo` are set exactly for a mesh pipeline
+  // (`translateFixedFunctionState` already established `VertexInfo`/
+  // `MeshInfo` are mutually exclusive); `TaskInfo` is separately optional
+  // even then (see this function's own comment above).
+  std::shared_ptr<feme::cpu::CompiledStage> MeshStageCompiled;
+  std::shared_ptr<feme::cpu::CompiledStage> TaskStageCompiled;
+  if (MeshInfo) {
+    std::optional<feme::graphics::MeshState> MeshShapeState;
+    Expected<std::shared_ptr<feme::cpu::CompiledStage>> Compiled =
+        compileGraphicsStage(*Ctx, *MeshInfo, feme::ShaderStage::Mesh, {},
+                             nullptr, nullptr, &MeshShapeState);
+    if (!Compiled)
+      return Compiled.takeError();
+    MeshStageCompiled = std::move(*Compiled);
+
+    // (roadmap H6f) Mirrors the geometry stage's own "declares no
+    // execution mode" check above: a mesh entry point that failed to
+    // declare its output topology/counts has nothing sensible to run the
+    // executor's meshlet assembly against.
+    if (!MeshShapeState)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "the mesh stage declares no output topology/count execution "
+          "mode (OutputPoints/OutputLinesEXT/OutputTrianglesEXT, "
+          "OutputVertices, OutputPrimitivesEXT)");
+    // (roadmap H6f) The two mesh-stage limits with a single declared
+    // scalar to check them against, mirroring the geometry stage's own
+    // `Invocations`/`MaxOutputVertices` check above.
+    if (MeshShapeState->MaxOutputVertices > MaxMeshOutputVertices)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "the mesh stage's OutputVertices execution mode (%u) exceeds "
+          "maxMeshOutputVertices (%u)",
+          MeshShapeState->MaxOutputVertices, MaxMeshOutputVertices);
+    if (MeshShapeState->MaxOutputPrimitives > MaxMeshOutputPrimitives)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "the mesh stage's OutputPrimitivesEXT execution mode (%u) "
+          "exceeds maxMeshOutputPrimitives (%u)",
+          MeshShapeState->MaxOutputPrimitives, MaxMeshOutputPrimitives);
+    Mesh = *MeshShapeState;
+
+    if (TaskInfo) {
+      Expected<std::shared_ptr<feme::cpu::CompiledStage>> TaskCompiled =
+          compileGraphicsStage(*Ctx, *TaskInfo,
+                               feme::ShaderStage::Amplification);
+      if (!TaskCompiled)
+        return TaskCompiled.takeError();
+      TaskStageCompiled = std::move(*TaskCompiled);
+    }
+  }
+
+  std::shared_ptr<feme::cpu::CompiledStage> VertexStage =
+      std::move(VertexStageCompiled);
+  if (VertexStage) {
+    const feme::cpu::ResourceInfo &VSInfo = VertexStage->getResourceInfo();
+    if (!pushConstantsCoverRootConstantSize(Layout, VSInfo.RootConstantSize,
+                                            Limits.maxPushConstantsSize,
+                                            VK_SHADER_STAGE_VERTEX_BIT))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "a stage's root-constant span is not fully covered by a "
+          "VkPushConstantRange visible to it in its VkPipelineLayout");
+    if (Error E = validateBoundRanges(VSInfo, Layout))
+      return std::move(E);
+  }
   if (FragmentStage) {
     const feme::cpu::ResourceInfo &FSInfo = FragmentStage->getResourceInfo();
     if (!pushConstantsCoverRootConstantSize(Layout, FSInfo.RootConstantSize,
@@ -1779,20 +1948,58 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     if (Error E = validateBoundRanges(GSInfo, Layout))
       return std::move(E);
   }
+  if (MeshStageCompiled) {
+    const feme::cpu::ResourceInfo &MSInfo =
+        MeshStageCompiled->getResourceInfo();
+    if (!pushConstantsCoverRootConstantSize(Layout, MSInfo.RootConstantSize,
+                                            Limits.maxPushConstantsSize,
+                                            VK_SHADER_STAGE_MESH_BIT_EXT))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "a stage's root-constant span is not fully covered by a "
+          "VkPushConstantRange visible to it in its VkPipelineLayout");
+    if (Error E = validateBoundRanges(MSInfo, Layout))
+      return std::move(E);
+  }
+  if (TaskStageCompiled) {
+    const feme::cpu::ResourceInfo &TSInfo =
+        TaskStageCompiled->getResourceInfo();
+    if (!pushConstantsCoverRootConstantSize(Layout, TSInfo.RootConstantSize,
+                                            Limits.maxPushConstantsSize,
+                                            VK_SHADER_STAGE_TASK_BIT_EXT))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "a stage's root-constant span is not fully covered by a "
+          "VkPushConstantRange visible to it in its VkPipelineLayout");
+    if (Error E = validateBoundRanges(TSInfo, Layout))
+      return std::move(E);
+  }
 
-  if (Error E = validateStageInterfaces(
-          **VertexStage, FragmentStage.get(), DomainStage.get(),
-          GeometryStageCompiled.get(), ColorAttachmentCount, VertexAttributes))
-    return std::move(E);
+  // (roadmap H6f) A mesh pipeline's entry points have no reflected
+  // `feme::EntrySignature` to validate a cross-stage interface against yet
+  // (`compileGraphicsStage`'s own comment on `feme::graphics::
+  // CanonicalizeStagePass` not touching mesh/task entries -- that is
+  // roadmap H6i's job); `validateStageInterfaces` is entirely a "primitive"
+  // pipeline concept, skipped here rather than called against a vertex
+  // stage that does not exist for one.
+  if (VertexStage) {
+    if (Error E = validateStageInterfaces(
+            *VertexStage, FragmentStage.get(), DomainStage.get(),
+            GeometryStageCompiled.get(), ColorAttachmentCount,
+            VertexAttributes))
+      return std::move(E);
+  }
 
   auto Artifact = std::make_shared<GraphicsPipelineArtifact>();
   Artifact->Ctx = std::move(Ctx);
-  Artifact->VertexStage = std::move(*VertexStage);
+  Artifact->VertexStage = std::move(VertexStage);
   Artifact->FragmentStage = std::move(FragmentStage);
   Artifact->HullStage = std::move(HullStage);
   Artifact->PatchConstantStage = std::move(PatchConstantStage);
   Artifact->DomainStage = std::move(DomainStage);
   Artifact->GeometryStage = std::move(GeometryStageCompiled);
+  Artifact->MeshStage = std::move(MeshStageCompiled);
+  Artifact->TaskStage = std::move(TaskStageCompiled);
   return Artifact;
 }
 
@@ -1811,15 +2018,20 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   const VkPipelineShaderStageCreateInfo *TessControlInfo = nullptr;
   const VkPipelineShaderStageCreateInfo *TessEvalInfo = nullptr;
   const VkPipelineShaderStageCreateInfo *GeometryInfo = nullptr;
-  if (Error E =
-          translateFixedFunctionState(CreateInfo, DeviceInfo, Result,
-                                      VertexInfo, FragmentInfo,
-                                      TessControlInfo, TessEvalInfo,
-                                      GeometryInfo))
+  const VkPipelineShaderStageCreateInfo *MeshInfo = nullptr;
+  const VkPipelineShaderStageCreateInfo *TaskInfo = nullptr;
+  if (Error E = translateFixedFunctionState(
+          CreateInfo, DeviceInfo, Result, VertexInfo, FragmentInfo,
+          TessControlInfo, TessEvalInfo, GeometryInfo, MeshInfo, TaskInfo))
     return std::move(E);
 
   const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
-  auto *VertexModule = fromHandle<ShaderModule>(VertexInfo->module);
+  // (roadmap H6f) `VertexInfo` is `nullptr` for a mesh pipeline; the module
+  // (and the words/entry point fed into the cache key below) follows it to
+  // a null/empty state the same way `FragmentModule` already does for a
+  // fragment-less pipeline.
+  auto *VertexModule =
+      VertexInfo ? fromHandle<ShaderModule>(VertexInfo->module) : nullptr;
   // (roadmap H2j) `FragmentInfo` is `nullptr` for a pipeline that legally
   // omitted its fragment stage; `FragmentModule` (and the words/entry point
   // fed into the cache key below) follow it to a null/empty state rather
@@ -1840,17 +2052,32 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   // cache key below) follows it to a null/empty state the same way.
   auto *GeometryModule =
       GeometryInfo ? fromHandle<ShaderModule>(GeometryInfo->module) : nullptr;
+  // (roadmap H6f) `MeshInfo` is `nullptr` for a "primitive" pipeline;
+  // `TaskInfo` is separately `nullptr` for a mesh pipeline with no task
+  // stage. Both modules (and their words/entry points fed into the cache
+  // key below) follow them to a null/empty state the same way.
+  auto *MeshModule =
+      MeshInfo ? fromHandle<ShaderModule>(MeshInfo->module) : nullptr;
+  auto *TaskModule =
+      TaskInfo ? fromHandle<ShaderModule>(TaskInfo->module) : nullptr;
 
   // A cache key needs the whole normalized pipeline description (see
   // "Pipeline Cache" in feme/docs/FeMeVulkanDesign.md): computed here, it
   // can be checked *before* paying for stage compilation, unlike a key
   // computed from the compiled result.
   std::optional<PipelineCacheKey> Key;
-  if (Cache && VertexModule && (!FragmentInfo || FragmentModule) &&
+  if (Cache && (VertexInfo ? VertexModule : MeshModule) &&
+      (!FragmentInfo || FragmentModule) &&
       (!TessControlInfo || (TessControlModule && TessEvalModule)) &&
-      (!GeometryInfo || GeometryModule)) {
+      (!GeometryInfo || GeometryModule) && (!MeshInfo || MeshModule) &&
+      (!TaskInfo || TaskModule)) {
     std::vector<uint8_t> FixedFunctionState =
         serializeFixedFunctionState(Result);
+    llvm::ArrayRef<uint32_t> VertexWords =
+        VertexModule ? VertexModule->words() : llvm::ArrayRef<uint32_t>();
+    llvm::StringRef VertexEntry =
+        VertexInfo ? (VertexInfo->pName ? VertexInfo->pName : "main")
+                   : llvm::StringRef();
     llvm::ArrayRef<uint32_t> FragmentWords =
         FragmentModule ? FragmentModule->words() : llvm::ArrayRef<uint32_t>();
     llvm::StringRef FragmentEntry =
@@ -1867,18 +2094,28 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
         TessEvalModule ? TessEvalModule->words() : llvm::ArrayRef<uint32_t>();
     llvm::StringRef TessEvalEntry =
         TessEvalInfo ? (TessEvalInfo->pName ? TessEvalInfo->pName : "main")
-                    : llvm::StringRef();
+                     : llvm::StringRef();
     llvm::ArrayRef<uint32_t> GeometryWords =
         GeometryModule ? GeometryModule->words() : llvm::ArrayRef<uint32_t>();
     llvm::StringRef GeometryEntry =
         GeometryInfo ? (GeometryInfo->pName ? GeometryInfo->pName : "main")
-                    : llvm::StringRef();
+                     : llvm::StringRef();
+    llvm::ArrayRef<uint32_t> MeshWords =
+        MeshModule ? MeshModule->words() : llvm::ArrayRef<uint32_t>();
+    llvm::StringRef MeshEntry =
+        MeshInfo ? (MeshInfo->pName ? MeshInfo->pName : "main")
+                 : llvm::StringRef();
+    llvm::ArrayRef<uint32_t> TaskWords =
+        TaskModule ? TaskModule->words() : llvm::ArrayRef<uint32_t>();
+    llvm::StringRef TaskEntry =
+        TaskInfo ? (TaskInfo->pName ? TaskInfo->pName : "main")
+                 : llvm::StringRef();
     Key = computeGraphicsPipelineCacheKey(
-        DeviceInfo.Properties.pipelineCacheUUID, VertexModule->words(),
-        VertexInfo->pName ? VertexInfo->pName : "main", FragmentWords,
-        FragmentEntry, Layout.setLayouts(), Layout.pushConstantRanges(),
-        FixedFunctionState, TessControlWords, TessControlEntry, TessEvalWords,
-        TessEvalEntry, GeometryWords, GeometryEntry);
+        DeviceInfo.Properties.pipelineCacheUUID, VertexWords, VertexEntry,
+        FragmentWords, FragmentEntry, Layout.setLayouts(),
+        Layout.pushConstantRanges(), FixedFunctionState, TessControlWords,
+        TessControlEntry, TessEvalWords, TessEvalEntry, GeometryWords,
+        GeometryEntry, MeshWords, MeshEntry, TaskWords, TaskEntry);
   }
 
   std::shared_ptr<GraphicsPipelineArtifact> Artifact =
@@ -1893,10 +2130,12 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
       return std::nullopt;
     Expected<std::shared_ptr<GraphicsPipelineArtifact>> Compiled =
         compileAndValidateStages(
-            *VertexInfo, FragmentInfo, TessControlInfo, TessEvalInfo,
-            GeometryInfo, Layout, DeviceInfo.Properties.limits,
+            VertexInfo, FragmentInfo, TessControlInfo, TessEvalInfo,
+            GeometryInfo, MeshInfo, TaskInfo, Layout,
+            DeviceInfo.Properties.limits,
             static_cast<uint32_t>(Result.Attachments.size()),
-            Result.VertexAttributes, Result.Tessellation, Result.Geometry);
+            Result.VertexAttributes, Result.Tessellation, Result.Geometry,
+            Result.Mesh);
     if (!Compiled)
       return Compiled.takeError();
     Artifact = std::move(*Compiled);
@@ -2000,6 +2239,23 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
   // too.
   if (State.Artifact->GeometryStage)
     Result.setGeometryStage(State.Artifact->GeometryStage, State.Geometry);
+  // (roadmap H6f) `Artifact->MeshStage` is set exactly when this pipeline
+  // is a mesh pipeline (see `compileAndValidateStages`'s own comment), and
+  // `State.Mesh` was filled in and validated there too. `Artifact->
+  // TaskStage` is separately optional even for a mesh pipeline (a mesh
+  // shader may be dispatched with no task stage driving it).
+  // `MaxMeshWorkGroupCount`/`MaxMeshWorkGroupTotalCount` and their task
+  // counterparts are this ICD's own honest, enforced dispatch ceilings
+  // (`GraphicsPipeline.h`'s own comment), advertised verbatim by
+  // `VkPhysicalDeviceMeshShaderPropertiesEXT` (`EntryPoints.cpp`) so the
+  // two can never disagree.
+  if (State.Artifact->MeshStage)
+    Result.setMeshStage(State.Artifact->TaskStage, State.Artifact->MeshStage,
+                        State.Mesh,
+                        feme::graphics::AmplificationDispatchLimits{
+                            MaxMeshWorkGroupCount, MaxMeshWorkGroupTotalCount},
+                        feme::graphics::AmplificationDispatchLimits{
+                            MaxTaskWorkGroupCount, MaxTaskWorkGroupTotalCount});
   return Result;
 }
 

@@ -281,6 +281,40 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (roadmap H6f) A minimal mesh entry point: declares its output topology/
+/// count execution modes (`OutputTrianglesEXT`/`OutputVertices`/
+/// `OutputPrimitivesEXT`) and workgroup size (`LocalSize`, mirroring a
+/// compute entry's own), but emits nothing (no `spirv.EmitMeshTasksEXT`/
+/// per-vertex writes -- roadmap H6h/H6i is what would make it emit real
+/// geometry). Enough to exercise `vkCreateGraphicsPipelines` accepting a
+/// mesh pipeline at all, mirroring `EmptyGeometrySource`'s own "declares
+/// its shape, writes nothing" role for the geometry stage.
+constexpr llvm::StringLiteral MeshSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "MeshEXT" @main
+  spirv.ExecutionMode @main "OutputTrianglesEXT"
+  spirv.ExecutionMode @main "OutputVertices", 3
+  spirv.ExecutionMode @main "OutputPrimitivesEXT", 1
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
+/// (roadmap H6f) A minimal task entry point: no `EmitMeshTasksEXT` call
+/// (so it never actually drives the mesh stage -- mirrors `MeshSource`'s
+/// own "declared but empty" role), just a workgroup size.
+constexpr llvm::StringLiteral TaskSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "TaskEXT" @main
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
 class GraphicsPipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -336,8 +370,9 @@ protected:
     DepthPassInfo.pAttachments = DepthAttachments;
     DepthPassInfo.subpassCount = 1;
     DepthPassInfo.pSubpasses = &DepthSubpass;
-    ASSERT_EQ(vkCreateRenderPass(Device, &DepthPassInfo, nullptr, &PassWithDepth),
-              VK_SUCCESS);
+    ASSERT_EQ(
+        vkCreateRenderPass(Device, &DepthPassInfo, nullptr, &PassWithDepth),
+        VK_SUCCESS);
   }
 
   void TearDown() override {
@@ -425,9 +460,9 @@ protected:
   /// `patchControlPoints` set to 3, over `TessStages` rather than `Stages`
   /// (so a caller wanting both a tessellating and a non-tessellating
   /// pipeline alive at once, e.g. to compare cache keys, can).
-  VkGraphicsPipelineCreateInfo makeTessellationCreateInfo(
-      VkShaderModule Vertex, VkShaderModule TessControl,
-      VkShaderModule TessEval, VkShaderModule Fragment) {
+  VkGraphicsPipelineCreateInfo
+  makeTessellationCreateInfo(VkShaderModule Vertex, VkShaderModule TessControl,
+                             VkShaderModule TessEval, VkShaderModule Fragment) {
     VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
     TessStages[0] = Stages[0];
     TessStages[1] = {};
@@ -461,8 +496,8 @@ protected:
   /// adjacency topology -- only the converse (an adjacency topology
   /// requires a bound geometry stage) is enforced.
   VkGraphicsPipelineCreateInfo makeGeometryCreateInfo(VkShaderModule Vertex,
-                                                       VkShaderModule Geometry,
-                                                       VkShaderModule Fragment) {
+                                                      VkShaderModule Geometry,
+                                                      VkShaderModule Fragment) {
     VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
     GeomStages[0] = Stages[0];
     GeomStages[1] = {};
@@ -477,6 +512,80 @@ protected:
     return Info;
   }
 
+  /// (roadmap H6f) `makeCreateInfo`'s mesh-enabled sibling: a mesh pipeline
+  /// has no vertex stage and no vertex-input/input-assembly state at all
+  /// (`translateFixedFunctionState`'s own check), so this does not build
+  /// on `makeCreateInfo` the way `makeTessellationCreateInfo`/
+  /// `makeGeometryCreateInfo` do -- it assembles a
+  /// `VkGraphicsPipelineCreateInfo` from scratch instead, over
+  /// `MeshStages`. \p Task is `VK_NULL_HANDLE` for a mesh pipeline with no
+  /// task stage (legal -- see `GraphicsPipeline.h`'s `hasTaskStage`), in
+  /// which case only the mesh and fragment stages are named.
+  VkGraphicsPipelineCreateInfo
+  makeMeshCreateInfo(VkShaderModule Mesh, VkShaderModule Fragment,
+                     VkShaderModule Task = VK_NULL_HANDLE) {
+    uint32_t StageCount = 0;
+    if (Task != VK_NULL_HANDLE) {
+      MeshStages[StageCount] = {};
+      MeshStages[StageCount].sType =
+          VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      MeshStages[StageCount].stage = VK_SHADER_STAGE_TASK_BIT_EXT;
+      MeshStages[StageCount].module = Task;
+      MeshStages[StageCount].pName = "main";
+      ++StageCount;
+    }
+    MeshStages[StageCount] = {};
+    MeshStages[StageCount].sType =
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    MeshStages[StageCount].stage = VK_SHADER_STAGE_MESH_BIT_EXT;
+    MeshStages[StageCount].module = Mesh;
+    MeshStages[StageCount].pName = "main";
+    ++StageCount;
+    MeshStages[StageCount] = {};
+    MeshStages[StageCount].sType =
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    MeshStages[StageCount].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    MeshStages[StageCount].module = Fragment;
+    MeshStages[StageCount].pName = "main";
+    ++StageCount;
+
+    Viewport = {0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+    Scissor = {{0, 0}, {4, 4}};
+    ViewportState = {};
+    ViewportState.viewportCount = 1;
+    ViewportState.pViewports = &Viewport;
+    ViewportState.scissorCount = 1;
+    ViewportState.pScissors = &Scissor;
+    Raster = {};
+    Raster.cullMode = VK_CULL_MODE_NONE;
+    Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    Raster.polygonMode = VK_POLYGON_MODE_FILL;
+    Raster.lineWidth = 1.0f;
+    Multisample = {};
+    Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    BlendAttachment = {};
+    BlendAttachment.colorWriteMask = 0xF;
+    Blend = {};
+    Blend.attachmentCount = 1;
+    Blend.pAttachments = &BlendAttachment;
+
+    VkGraphicsPipelineCreateInfo Info{};
+    Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    Info.stageCount = StageCount;
+    Info.pStages = MeshStages;
+    // (roadmap H6f) A mesh pipeline declares neither -- both must be
+    // null (`translateFixedFunctionState`'s own check).
+    Info.pVertexInputState = nullptr;
+    Info.pInputAssemblyState = nullptr;
+    Info.pViewportState = &ViewportState;
+    Info.pRasterizationState = &Raster;
+    Info.pMultisampleState = &Multisample;
+    Info.pColorBlendState = &Blend;
+    Info.layout = Layout;
+    Info.renderPass = Pass;
+    return Info;
+  }
+
   VkInstance Instance = VK_NULL_HANDLE;
   VkPhysicalDevice Physical = VK_NULL_HANDLE;
   VkDevice Device = VK_NULL_HANDLE;
@@ -487,6 +596,7 @@ protected:
   VkPipelineShaderStageCreateInfo Stages[2]{};
   VkPipelineShaderStageCreateInfo TessStages[4]{};
   VkPipelineShaderStageCreateInfo GeomStages[3]{};
+  VkPipelineShaderStageCreateInfo MeshStages[3]{};
   VkPipelineTessellationStateCreateInfo Tessellation{};
   VkPipelineVertexInputStateCreateInfo VertexInput{};
   VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
@@ -573,8 +683,7 @@ TEST_F(GraphicsPipelineTest, ReportsPipelineCreationFeedback) {
   VkPipelineCreationFeedback Feedback{};
   VkPipelineCreationFeedback StageFeedbacks[2]{};
   VkPipelineCreationFeedbackCreateInfo FeedbackInfo{};
-  FeedbackInfo.sType =
-      VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+  FeedbackInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
   FeedbackInfo.pPipelineCreationFeedback = &Feedback;
   FeedbackInfo.pipelineStageCreationFeedbackCount = 2;
   FeedbackInfo.pPipelineStageCreationFeedbacks = StageFeedbacks;
@@ -583,9 +692,8 @@ TEST_F(GraphicsPipelineTest, ReportsPipelineCreationFeedback) {
   VkPipeline Pipe = VK_NULL_HANDLE;
   ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
 
-  EXPECT_EQ(Feedback.flags,
-            static_cast<VkPipelineCreationFeedbackFlags>(
-                VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT));
+  EXPECT_EQ(Feedback.flags, static_cast<VkPipelineCreationFeedbackFlags>(
+                                VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT));
   for (const VkPipelineCreationFeedback &StageFeedback : StageFeedbacks)
     EXPECT_EQ(StageFeedback.flags,
               static_cast<VkPipelineCreationFeedbackFlags>(
@@ -864,7 +972,8 @@ TEST_F(GraphicsPipelineTest, TranslatesLineRasterizationState) {
   auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
   feme::graphics::RasterState Resolved =
       Graphics->buildExecutorPipeline(DynamicGraphicsState{}).getRasterState();
-  EXPECT_EQ(Resolved.LineMode, feme::graphics::LineRasterizationMode::Bresenham);
+  EXPECT_EQ(Resolved.LineMode,
+            feme::graphics::LineRasterizationMode::Bresenham);
   EXPECT_EQ(Resolved.LineWidth, 3.0f);
   EXPECT_TRUE(Resolved.StippledLineEnable);
   EXPECT_EQ(Resolved.StippleFactor, 3u);
@@ -1220,7 +1329,8 @@ TEST_F(GraphicsPipelineTest, ViewportWithCountIsTheSameDynamicStateAsViewport) {
 /// conformant caller reaches, per `DynamicGraphicsState::Topology`'s own
 /// comment) falls back to the pipeline's own static topology rather than
 /// resolving to something unspecified.
-TEST_F(GraphicsPipelineTest, DynamicPrimitiveTopologySwitchesWithinTriangleClass) {
+TEST_F(GraphicsPipelineTest,
+       DynamicPrimitiveTopologySwitchesWithinTriangleClass) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
 
@@ -1733,7 +1843,8 @@ TEST_F(GraphicsPipelineTest, AcceptsTessellationStages) {
   const feme::graphics::GraphicsPipeline Executor =
       Pipe->buildExecutorPipeline(DynamicGraphicsState{});
   ASSERT_TRUE(Executor.hasTessellationStages());
-  EXPECT_EQ(Executor.getTopology(), feme::graphics::PrimitiveTopology::PatchList);
+  EXPECT_EQ(Executor.getTopology(),
+            feme::graphics::PrimitiveTopology::PatchList);
   EXPECT_EQ(Executor.getTessellationState().InputControlPointCount, 3u);
   EXPECT_EQ(Executor.getTessellationState().OutputControlPointCount, 3u);
   EXPECT_EQ(Executor.getTessellationState().Domain,
@@ -1924,8 +2035,8 @@ TEST_F(GraphicsPipelineTest, RejectsUnpairedTessellationStage) {
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
   EXPECT_EQ(Pipe, VK_NULL_HANDLE);
 
-  VkPipelineShaderStageCreateInfo OnlyEval[3] = {
-      TessStages[0], TessStages[2], TessStages[3]};
+  VkPipelineShaderStageCreateInfo OnlyEval[3] = {TessStages[0], TessStages[2],
+                                                 TessStages[3]};
   Info.pStages = OnlyEval;
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
   EXPECT_EQ(Pipe, VK_NULL_HANDLE);
@@ -2134,9 +2245,9 @@ TEST_F(GraphicsPipelineTest, AcceptsPrimitiveRestartOnStripAndFanTopologies) {
   TestTopology(VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, /*NeedsGeometry=*/false);
   TestTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, /*NeedsGeometry=*/false);
   TestTopology(VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY,
-              /*NeedsGeometry=*/true);
+               /*NeedsGeometry=*/true);
   TestTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY,
-              /*NeedsGeometry=*/true);
+               /*NeedsGeometry=*/true);
 
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Geometry, nullptr);
@@ -2171,6 +2282,231 @@ TEST_F(GraphicsPipelineTest, AcceptsGeometryStageThatNeverEmits) {
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Geometry, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H6f) `vkCreateGraphicsPipelines` accepts a mesh pipeline with
+/// no task stage at all -- the mesh stage is dispatched directly, per
+/// `PreparedDraw::MeshDraws`' own group count (`vkCmdDrawMeshTasksEXT`'s
+/// shape, roadmap H6e).
+TEST_F(GraphicsPipelineTest, AcceptsMeshPipelineWithNoTaskStage) {
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeMeshCreateInfo(Mesh, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+  ASSERT_NE(Handle, VK_NULL_HANDLE);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  EXPECT_TRUE(Pipe->hasMeshStages());
+  EXPECT_FALSE(Pipe->hasTaskStage());
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  ASSERT_TRUE(Executor.hasMeshStages());
+  EXPECT_FALSE(Executor.hasTaskStage());
+  EXPECT_EQ(Executor.getMeshState().OutputTopology,
+            feme::graphics::MeshOutputTopology::Triangles);
+  EXPECT_EQ(Executor.getMeshState().MaxOutputVertices, 3u);
+  EXPECT_EQ(Executor.getMeshState().MaxOutputPrimitives, 1u);
+  // (roadmap H6f) The dispatch limits `buildExecutorPipeline` supplies are
+  // this ICD's own honest, enforced ceilings -- the real counterpart of
+  // `Executor.cpp`'s previous hardcoded placeholder -- shared with
+  // `VkPhysicalDeviceMeshShaderPropertiesEXT`'s advertised
+  // `maxMeshWorkGroupCount`/`maxMeshWorkGroupTotalCount`.
+  EXPECT_EQ(Executor.getMeshDispatchLimits().MaxGroupCount,
+            MaxMeshWorkGroupCount);
+  EXPECT_EQ(Executor.getMeshDispatchLimits().MaxTotalGroupCount,
+            MaxMeshWorkGroupTotalCount);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// (roadmap H6f) A mesh pipeline may also declare a task stage; it is
+/// only ever legal alongside a mesh stage (`RejectsTaskStageWithoutMesh
+/// Stage` below covers the converse).
+TEST_F(GraphicsPipelineTest, AcceptsMeshPipelineWithTaskStage) {
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Task = createModule(TaskSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeMeshCreateInfo(Mesh, Fragment, Task);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+  ASSERT_NE(Handle, VK_NULL_HANDLE);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  EXPECT_TRUE(Pipe->hasMeshStages());
+  EXPECT_TRUE(Pipe->hasTaskStage());
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  ASSERT_TRUE(Executor.hasTaskStage());
+  EXPECT_EQ(Executor.getTaskDispatchLimits().MaxGroupCount,
+            MaxTaskWorkGroupCount);
+  EXPECT_EQ(Executor.getTaskDispatchLimits().MaxTotalGroupCount,
+            MaxTaskWorkGroupTotalCount);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Task, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// (roadmap H6f) A mesh pipeline may not also declare a vertex stage --
+/// the two are mutually exclusive ways to originate a pipeline's
+/// vertices.
+TEST_F(GraphicsPipelineTest, RejectsMeshAndVertexStageCombination) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeMeshCreateInfo(Mesh, Fragment);
+  VkPipelineShaderStageCreateInfo Combined[3]{};
+  Combined[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Combined[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Combined[0].module = Vertex;
+  Combined[0].pName = "main";
+  Combined[1] = MeshStages[0]; // the mesh stage `makeMeshCreateInfo` built.
+  Combined[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Combined[2].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Combined[2].module = Fragment;
+  Combined[2].pName = "main";
+  Info.stageCount = 3;
+  Info.pStages = Combined;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H6f) A task stage only ever drives a mesh stage's dispatch;
+/// it is meaningless (and rejected) without one.
+TEST_F(GraphicsPipelineTest, RejectsTaskStageWithoutMeshStage) {
+  VkShaderModule Task = createModule(TaskSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkPipelineShaderStageCreateInfo TaskOnlyStages[2]{};
+  TaskOnlyStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  TaskOnlyStages[0].stage = VK_SHADER_STAGE_TASK_BIT_EXT;
+  TaskOnlyStages[0].module = Task;
+  TaskOnlyStages[0].pName = "main";
+  TaskOnlyStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  TaskOnlyStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  TaskOnlyStages[1].module = Fragment;
+  TaskOnlyStages[1].pName = "main";
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = TaskOnlyStages;
+  Info.pVertexInputState = nullptr;
+  Info.pInputAssemblyState = nullptr;
+  Viewport = {0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Scissor = {{0, 0}, {4, 4}};
+  ViewportState = {};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  Raster = {};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  Raster.lineWidth = 1.0f;
+  Multisample = {};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  BlendAttachment = {};
+  BlendAttachment.colorWriteMask = 0xF;
+  Blend = {};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Task, nullptr);
+}
+
+/// (roadmap H6f) A mesh pipeline may not declare `pVertexInputState` --
+/// it has no vertex-input stage to configure at all.
+TEST_F(GraphicsPipelineTest, RejectsMeshPipelineWithVertexInputState) {
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeMeshCreateInfo(Mesh, Fragment);
+  VertexInput = {};
+  VertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  Info.pVertexInputState = &VertexInput;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// (roadmap H6f) A mesh pipeline may not declare `pInputAssemblyState`
+/// either -- it has no fixed input-assembly topology at all.
+TEST_F(GraphicsPipelineTest, RejectsMeshPipelineWithInputAssemblyState) {
+  VkShaderModule Mesh = createModule(MeshSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeMeshCreateInfo(Mesh, Fragment);
+  InputAssembly = {};
+  InputAssembly.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  Info.pInputAssemblyState = &InputAssembly;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
+}
+
+/// (roadmap H6f) `maxMeshOutputVertices`/`maxMeshOutputPrimitives` are
+/// enforced at pipeline creation, not left as an unchecked, merely-
+/// advertised ceiling (mirroring `maxGeometryOutputVertices`'s own
+/// enforcement, H5e).
+TEST_F(GraphicsPipelineTest, RejectsMeshOutputCountsExceedingLimits) {
+  // `MaxMeshOutputVertices` (256) declared as an `OutputVertices` of 257
+  // -- one past the honest ceiling this ICD advertises and enforces.
+  constexpr llvm::StringLiteral OverLimitMeshSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "MeshEXT" @main
+  spirv.ExecutionMode @main "OutputTrianglesEXT"
+  spirv.ExecutionMode @main "OutputVertices", 257
+  spirv.ExecutionMode @main "OutputPrimitivesEXT", 1
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+  VkShaderModule Mesh = createModule(OverLimitMeshSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeMeshCreateInfo(Mesh, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Mesh, nullptr);
 }
 
 } // namespace

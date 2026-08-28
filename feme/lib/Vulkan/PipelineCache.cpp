@@ -104,7 +104,9 @@ PipelineCacheKey feme::vulkan::computeGraphicsPipelineCacheKey(
     ArrayRef<uint8_t> FixedFunctionState,
     ArrayRef<uint32_t> TessControlShaderWords, StringRef TessControlEntry,
     ArrayRef<uint32_t> TessEvalShaderWords, StringRef TessEvalEntry,
-    ArrayRef<uint32_t> GeometryShaderWords, StringRef GeometryEntry) {
+    ArrayRef<uint32_t> GeometryShaderWords, StringRef GeometryEntry,
+    ArrayRef<uint32_t> MeshShaderWords, StringRef MeshEntry,
+    ArrayRef<uint32_t> TaskShaderWords, StringRef TaskEntry) {
   SHA256 Hash;
   Hash.update(ArrayRef(DeviceUUID, VK_UUID_SIZE));
   Hash.update(
@@ -117,9 +119,9 @@ PipelineCacheKey feme::vulkan::computeGraphicsPipelineCacheKey(
   Hash.update(FragmentEntry);
   // (roadmap H4b) Empty for a pipeline with no tessellation stages, exactly
   // like `FragmentShaderWords`/`FragmentEntry` are for a fragment-less one.
-  Hash.update(ArrayRef(
-      reinterpret_cast<const uint8_t *>(TessControlShaderWords.data()),
-      TessControlShaderWords.size() * sizeof(uint32_t)));
+  Hash.update(
+      ArrayRef(reinterpret_cast<const uint8_t *>(TessControlShaderWords.data()),
+               TessControlShaderWords.size() * sizeof(uint32_t)));
   Hash.update(TessControlEntry);
   Hash.update(
       ArrayRef(reinterpret_cast<const uint8_t *>(TessEvalShaderWords.data()),
@@ -130,6 +132,16 @@ PipelineCacheKey feme::vulkan::computeGraphicsPipelineCacheKey(
       ArrayRef(reinterpret_cast<const uint8_t *>(GeometryShaderWords.data()),
                GeometryShaderWords.size() * sizeof(uint32_t)));
   Hash.update(GeometryEntry);
+  // (roadmap H6f) Empty for a "primitive" pipeline (no mesh stage) or a
+  // mesh pipeline with no task stage, the same way.
+  Hash.update(
+      ArrayRef(reinterpret_cast<const uint8_t *>(MeshShaderWords.data()),
+               MeshShaderWords.size() * sizeof(uint32_t)));
+  Hash.update(MeshEntry);
+  Hash.update(
+      ArrayRef(reinterpret_cast<const uint8_t *>(TaskShaderWords.data()),
+               TaskShaderWords.size() * sizeof(uint32_t)));
+  Hash.update(TaskEntry);
   hashSetLayoutsAndPushConstants(Hash, SetLayouts, PushConstantRanges);
   Hash.update(FixedFunctionState);
   return Hash.final();
@@ -234,8 +246,7 @@ namespace {
 /// than merely uncontended.
 class ConditionalLock {
 public:
-  ConditionalLock(std::mutex &M, bool Skip)
-      : Lock(M, std::defer_lock) {
+  ConditionalLock(std::mutex &M, bool Skip) : Lock(M, std::defer_lock) {
     if (!Skip)
       Lock.lock();
   }

@@ -124,7 +124,11 @@ PipelineCacheKey computeGraphicsPipelineCacheKey(
     llvm::ArrayRef<uint32_t> TessEvalShaderWords = {},
     llvm::StringRef TessEvalEntry = {},
     llvm::ArrayRef<uint32_t> GeometryShaderWords = {},
-    llvm::StringRef GeometryEntry = {});
+    llvm::StringRef GeometryEntry = {},
+    llvm::ArrayRef<uint32_t> MeshShaderWords = {},
+    llvm::StringRef MeshEntry = {},
+    llvm::ArrayRef<uint32_t> TaskShaderWords = {},
+    llvm::StringRef TaskEntry = {});
 
 /// Whether persistent (serialized) pipeline-cache data is ever trusted as
 /// `vkCreatePipelineCache` input, per `FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA`
