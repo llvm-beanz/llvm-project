@@ -33,7 +33,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H6f?
+Can you complete and close out milestone H6f?
 
 > **`vkCreateGraphicsPipelines` accepts a mesh pipeline** (task stage optional,
 > mesh stage required, no vertex-input/input-assembly state),
@@ -43,4 +43,7 @@ Can you work on milestone H6f?
 > `taskShader`/`meshShader`, and every `VkPhysicalDeviceMeshShaderPropertiesEXT`
 > limit at this implementation's own honest, bounded ceilings (mirroring
 > H4b/H5e's own "advertise only what the implementation actually enforces"
-> discipline
+> discipline)
+
+The last agent did not update the roadmap or leave thoughts about its progress
+in the agent_thoughts file.
