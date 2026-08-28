@@ -33,13 +33,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5e-e?
+Can you work on milestone H6?
 
-> **6 `dEQP-VK.geometry.layered.2d_array.*.multiple_layers_per_invocation`
-> variants render an incorrect image** (`Fail (Rendered images are incorrect)`),
-> newly exposed by H5e-a. Unlike H5e-b/H5e-c's outright creation/submission
-> failures, these pipelines now run to completion without error and produce a
-> wrong result -- a genuine rendering-correctness bug in the
-> geometry-to-layered-render-target path (most likely `gl_Layer` routing,
-> per-invocation output-vertex addressing, or stream-merge ordering under
-> `Invocations > 1`, none yet isolated). Root cause not yet isolated
+> **Mesh and task (amplification) shading**, `VK_EXT_mesh_shader`: G6's stage
+> model plus the Vulkan-side pipeline/draw entry points (`vkCmdDrawMeshTasks*`),
+> bounded payload/output limits reported truthfully, and the mesh path through
+> the same prepared-draw code. Whole `dEQP-VK.mesh_shader` group
