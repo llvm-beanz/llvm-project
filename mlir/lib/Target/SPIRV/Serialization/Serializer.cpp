@@ -316,6 +316,9 @@ static std::string getDecorationName(StringRef attrName) {
     return "CacheControlLoadINTEL";
   if (attrName == "cache_control_store_intel")
     return "CacheControlStoreINTEL";
+  // convertToCamelFromSnakeCase will not capitalize "EXT".
+  if (attrName == "per_primitive_ext")
+    return "PerPrimitiveEXT";
 
   return llvm::convertToCamelFromSnakeCase(attrName, /*capitalizeFirst=*/true);
 }
@@ -423,6 +426,7 @@ LogicalResult Serializer::processDecorationAttr(Location loc, uint32_t resultID,
   case spirv::Decoration::Invariant:
   case spirv::Decoration::Patch:
   case spirv::Decoration::Coherent:
+  case spirv::Decoration::PerPrimitiveEXT:
     // For unit attributes and decoration attributes, the args list
     // has no values so we do nothing.
     if (isa<UnitAttr, DecorationAttr>(attr))

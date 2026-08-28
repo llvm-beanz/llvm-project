@@ -36,3 +36,14 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [MeshShadingEXT], [SPV_EX
   // CHECK: spirv.EntryPoint "TaskEXT" {{@.*}}, {{@.*}}
   spirv.EntryPoint "TaskEXT" @emit_mesh_tasks_payload, @payload
 }
+
+// -----
+
+spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [MeshShadingEXT], [SPV_EXT_mesh_shader]> {
+  // A per-primitive output block variable is decorated `PerPrimitiveEXT`; the
+  // deserializer used to reject this outright with "unhandled Decoration :
+  // 'PerPrimitiveEXT'", failing module deserialization before it ever reached
+  // any per-primitive-block-shaped mesh output.
+  // CHECK: per_primitive_ext
+  spirv.GlobalVariable @primitive_out {per_primitive_ext} : !spirv.ptr<i32, Output>
+}
