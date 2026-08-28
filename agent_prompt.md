@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5
+resume: 1e6c9692-6155-400e-8766-6a9ef7e44e72
 ---
 # Initial Guidelines
 
@@ -32,6 +33,9 @@ the root of the repository, appending to the file under a new top-level heading
 if it already exists, and commit it in its own commit when you're done.
 
 # Request
+
+The agent got stuck and didn't complete its last run. I've stashed the changes
+you can restore them with `git stash pop`.
 
 Can you complete H6g-b-a-i-a?
 
