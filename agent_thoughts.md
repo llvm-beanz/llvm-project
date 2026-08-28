@@ -40946,3 +40946,77 @@ change and task-payload-store canonicalization with its unit tests, (4)
 the `Roadmap.md`/`FeMeGraphicsDesign.md`/`VulkanCTSReport.md` updates,
 (5) the `FeMeVulkanDesign.md` tracking-reference fix, and (6) this
 `agent_thoughts.md` entry.
+
+# 2026-08-28: Closing out milestone H6g
+
+Task: "complete and close out milestone H6g" -- the CTS-triage row H6f's
+own measured run spawned, covering the 337 `dEQP-VK.mesh_shader.*`
+failures left after H6f (235+33 content-compilation, 68+1
+render-pass/image-format).
+
+Read H6g's own roadmap text closely first: it assumed that once H6h
+(`TaskPayloadWorkgroupEXT` address-space/import) and H6i
+(`CanonicalizeStagePass` mesh/amplification acceptance) both landed, a
+re-run would clear the 235+33 content-compilation bucket. Both had
+already landed (both rows carry `~~...~~` strikethrough). But reading
+H6c-a's own investigation (which predates H6g) showed it had already
+split the *actual* wiring work into H6c-a-a (mesh output) and H6c-a-b
+(task payload) -- neither landed -- and H6i's own "measured impact"
+section in VulkanCTSReport.md explicitly flagged that
+`feme.stage.task.payload.store` has no caller reachable from
+`EntryWrapperPass` until H6c-a-b wires one in. So before touching
+anything I suspected H6g's premise ("once H6h/H6i land ... re-run and
+confirm") was simply wrong -- H6h/H6i were necessary but not sufficient.
+
+Verified by actually doing the re-run rather than trusting the inference:
+built `check-feme` (assertions-enabled, ccache) -- 1934/1993, matching
+H6i's own recorded baseline exactly, 0 new failures. Then ran
+`dEQP-VK.mesh_shader.*` (28044 cases) against the live `feme-vulkan` ICD:
+1/337/27706, byte-identical to H6h/H6i's own recorded totals. Broke the
+337 failures down programmatically by API call + `VK_ERROR_*` code:
+235 `vkCreateGraphicsPipelines`/`VK_ERROR_INITIALIZATION_FAILED`, 68
+`vkCreateRenderPass`/`VK_ERROR_FORMAT_NOT_SUPPORTED`, 33
+`vkPipelineConstructionUtil.cpp`/`VK_ERROR_INITIALIZATION_FAILED`, 1
+`vkGetPhysicalDeviceImageFormatProperties`/`VK_ERROR_FORMAT_NOT_SUPPORTED`
+-- the exact same 235/68/33/1 split H6f's own run found, confirming my
+suspicion: content compilation genuinely has not cleared, because
+H6c-a-a/H6c-a-b (not H6h/H6i directly) are the real gate, and both are
+still open. Also re-ran the `dEQP-VK.draw.*` 1957-case regression sample:
+14/153/1790, byte-identical to H6i's own baseline -- 0 regressions.
+
+For the format-related 68+1 bucket, the task's own text asked me to
+decide whether it needs a new roadmap row or stays a documented,
+permanent gap. Inspected the failing case names directly (all
+`vk.createRenderPass`/`vk.getPhysicalDeviceImageFormatProperties`
+failures) and cross-checked against roadmap H8 ("Format table
+completeness for the graphics profile"), which already exists precisely
+to close format-table gaps like this one. Nothing about these particular
+failures is mesh-shading-specific -- they are H8's own already-tracked,
+still-open gap reached by a new CTS group. Decision: no new row; folded
+into H8, and added a cross-reference in H8's own roadmap text so the
+connection is discoverable from either row.
+
+Since H6g's own actual remaining job (confirming the content-compilation
+buckets clear) is *not* achievable yet -- correctly blocked, not
+speculatively so, now that I've verified H6d/H6h/H6i (H6c-a-a/H6c-a-b's
+own prerequisites) are all done and the two wiring rows are unblocked and
+ready to pick up next -- I did not strike through the milestone as if the
+CTS buckets themselves were resolved. Instead: H6g itself is marked done
+as a *triage* row (its own actual, narrower job: decide the fate of each
+bucket, and correct the roadmap's own dependency/scope text), and the
+work is split into H6g-a (format bucket, closed, folded into H8) and
+H6g-b (content-compilation re-run, still open, now correctly tracked
+against H6c-a-a/H6c-a-b directly). This mirrors the H6c-a -> H6c-a-a/
+H6c-a-b split precedent exactly: a row can close out its own genuine
+scope (an investigation, or here a triage) while spawning further rows
+for work that scope legitimately discovered was not yet landable.
+
+No source changes at all in this row -- pure CTS re-run plus
+`Roadmap.md`/`VulkanCTSReport.md` updates. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` confirmed to need no change (no feature,
+limit, or extension touched).
+
+Committed separately: (1) the `Roadmap.md` update (H6g close-out, H6g-a/
+H6g-b split, H6 parent-row and H8 cross-reference updates), (2) the
+`VulkanCTSReport.md` "Roadmap H6g: measured impact" section, and (3) this
+`agent_thoughts.md` entry.
