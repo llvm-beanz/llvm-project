@@ -41398,3 +41398,121 @@ plumbing, (2) `Linearize.cpp`/`SIMDize.cpp`'s `TaskPayloadStore` handling,
 the `CompiledStageTest.cpp` end-to-end case, (9) the `RuntimeABI.h`
 comment fix, (10) the `Roadmap.md` update, (11) the `VulkanCTSReport.md`
 section, and (12) this `agent_thoughts.md` entry.
+
+# Agent thoughts: H6c-a-a-i (canonicalize `SetMeshOutputsEXT`, wire into `MeshOutputWrapperPass`/`EntryWrapperPass`)
+
+## Approach
+
+H6c-a-a's own closing re-run found that its mesh output-store wiring,
+though correct in isolation, never gets exercised end to end because
+`feme::graphics::MeshOutputBuilder::assembleMeshlet` always trims to an
+empty meshlet: `FemeMeshArgs::ActualVertexCount`/`ActualPrimitiveCount`
+stay 0 forever, since nothing canonicalizes `SetMeshOutputsEXT` into a
+`feme.stage.*` op the way an output store already is. This row closes
+that specific gap.
+
+I mirrored H6c-a-b's own already-landed `TaskPayloadStore` wiring almost
+exactly, since the two ops are architecturally very similar: a stage op
+with no signature element, needing mask/widen plumbing through
+`Linearize`/`SIMDize`, then a CPU-side wrapper lowering step that stores
+into a plain pointer (no `FemeStageLayout` addressing needed, unlike
+per-vertex/per-primitive output stores' structure-of-arrays storage).
+`ActualVertexCount`/`ActualPrimitiveCount` are literally two adjacent
+`uint32_t*` fields in `FemeMeshArgs`, so this needed no new ABI space at
+all -- H6c-a-a had already reserved `MeshArgsFieldActualVertexCount`/
+`ActualPrimitiveCount` (13/14) and the corresponding struct slots in
+`getMeshArgsType`, apparently anticipating this exact follow-up row.
+
+The one design choice worth calling out: `SetMeshOutputsEXT` is
+workgroup-uniform by spec (every invocation must call it with identical
+arguments, "before the first invocation" semantics), so it would have
+been reasonable to treat it as always-uniform and skip the masked-call
+machinery entirely, reading it once per workgroup rather than once per
+lane. I chose not to -- I still route it through the full
+`Linearize`/`SIMDize` masked/widened pipeline every other stage op uses,
+for defensive consistency: nothing upstream *validates* that a
+`SetMeshOutputsEXT` call is actually workgroup-uniform (a malformed or
+adversarial shader could call it non-uniformly), and the per-lane
+lowering I wrote handles this correctly regardless -- every active lane
+computes and stores the same value (by spec), so a plain "last active
+lane wins" store is trivially idempotent and correct even if some lane's
+mask ends up off due to control flow the shader itself never should have
+taken. This costs nothing extra at runtime beyond what `TaskPayloadStore`
+already pays for the same reason, and keeps this op from being a special
+case anyone maintaining `Linearize`/`SIMDize` needs to remember exists.
+
+## A real gotcha: `EXTSetMeshOutputsOp` is not `SetMeshOutputsEXTOp`
+
+The `.td` file's own doc comment shows the assembly example
+`spirv.SetMeshOutputsEXT %vcount, %pcount : i32, i32`, and I initially
+wrote both the C++ conversion pattern and a `.mlir` test using that
+spelling. Both were wrong in different ways:
+
+- The **C++ class name** is `mlir::spirv::EXTSetMeshOutputsOp`, not
+  `SetMeshOutputsEXTOp` -- `SPIRV_ExtVendorOp`'s vendor-prefix naming
+  convention puts `EXT` first in the *class* name, discovered only via a
+  build failure (`sed`-fixed).
+- The **assembly mnemonic** is actually `spirv.EXT.SetMeshOutputs`, not
+  `spirv.SetMeshOutputsEXT` -- `SPIRV_VendorOp`'s own definition
+  (`SPIRVBase.td`) builds the op name as `vendorName # "." # mnemonic`,
+  i.e. `"EXT.SetMeshOutputs"`, which I only discovered by trying to parse
+  my own `.mlir` test file and getting `custom op 'spirv.SetMeshOutputsEXT'
+  is unknown`, then confirming the real name via the generated
+  `SPIRVOps.cpp.inc`'s own `getOperationName()` string literal. The
+  `.td` file's own doc-comment example is simply stale/wrong (or refers
+  to a different, non-existent historical spelling) -- I did not attempt
+  to fix that upstream MLIR doc comment, since it is out of this
+  repository's own scope, but noted the discrepancy in the roadmap entry
+  so nobody else loses time on it.
+
+## A real, if out-of-scope, crash discovered by running the Vulkan CTS
+
+Running the full `dEQP-VK.mesh_shader.*` group after this row's change
+found a second real gap, distinct from H6c-a-a-ii: 28 cases that
+previously failed *cleanly* at SPIR-V-to-LLVM conversion (an unconverted
+`SetMeshOutputsEXT` was rejected immediately) now compile far enough to
+reach `CanonicalizeStage.cpp`'s `resolveOffsetWithinElement`, which
+`cast<StructType>`s a builtin interface block's value type unconditionally
+whenever it has more than one `ElementID` -- a shape that has always held
+before this row (an ordinary non-arrayed `gl_PerVertex` block), but not
+for a mesh entry's own *arrayed* builtin blocks (`PerPrimitiveEXT`-
+decorated or otherwise). The result is a hard assertion failure that
+aborts the whole `deqp-vk` process, rather than the `VK_ERROR_
+INITIALIZATION_FAILED` these same 28 cases used to report.
+
+I verified this is not something my own new code causes directly --
+`lowerSetMeshOutputs`/`MeshOutputWrapperPass` never call
+`resolveOffsetWithinElement` at all, and I confirmed by `git stash`-ing my
+whole change and rebuilding that the *same* 28 cases fail cleanly on the
+old code path instead. This is a pre-existing latent bug in generic
+builtin-interface-block resolution, just newly reachable because this
+row's own change is the first thing to make `SetMeshOutputsEXT`
+conversion succeed for these particular shaders. I chose not to fix
+`resolveOffsetWithinElement` itself in this row -- it is a nontrivial,
+distinct piece of work (teaching that function to peel an arrayed
+builtin block's own outer dimension the way per-vertex-arrayed *inputs*
+are already peeled elsewhere in the same file), and fixing it here would
+have meant scope creep well past this row's own stated deliverable. I
+filed it as new roadmap row H6c-a-a-iii instead, with the CTS numbers
+that motivate it recorded honestly in VulkanCTSReport.md (0 `Pass`/`Fail`
+regressions, but a real robustness regression worth fixing).
+
+Measuring this also required a more careful CTS harness resume-loop than
+prior rows needed: the naive "blacklist only the single last `Test case`
+line seen" loop (adequate for H4b's own tessellation triage, where each
+crash was isolated) undercounted here, since one assertion crash can
+leave *several* already-started-but-unresolved cases pending in the same
+batch. I rewrote the loop to blacklist every case whose own `Test case
+'...'..` line printed with no following result line, which converged
+correctly and accounted for all 28044 cases with no gaps.
+
+## Deliberately deferred to later roadmap rows
+
+- `H6c-a-a-ii` (`flattenMeshRow`'s `PerPrimitive` routing) -- untouched,
+  explicitly out of this row's own scope from the start.
+- `H6c-a-a-iii` (the newly-discovered `resolveOffsetWithinElement` crash
+  above) -- filed, not fixed, to keep this row's own scope to exactly
+  `SetMeshOutputsEXT`'s own canonicalization and wiring.
+- `EmitMeshTasksEXT` remains uncanonicalized (`Pipeline.cpp`'s own
+  comment still notes this) -- a task-stage op, not this row's own mesh-
+  stage scope.
