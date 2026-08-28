@@ -10808,3 +10808,151 @@ VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   deqp-vk --deqp-caselist-file=draw_sample.txt \
     --deqp-log-filename=draw_h6g_b.qpa
 ```
+
+## Roadmap H6g-b-a: measured impact (fix `PerPrimitiveEXT` decoration deserialization/serialization gap)
+
+**Starting point.** H6g-b's own re-run found the dominant single cause
+of its 232-case `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket
+(202 of 232 cases) was `ConvertSPIRVToLLVMPass`/the MLIR SPIR-V
+dialect deserializer rejecting `PerPrimitiveEXT` outright with `error:
+unhandled Decoration : 'PerPrimitiveEXT'`, failing SPIR-V module
+deserialization before `feme` ever saw the module. This row's own ask
+was to isolate the root cause (upstream MLIR SPIR-V dialect decoration
+table, or a `feme`-local import shim over it) and fix it.
+
+**Root cause.** Purely upstream MLIR, not any `feme`-local shim.
+`SPIRVBase.td`'s `Decoration` enum already lists
+`SPIRV_D_PerPrimitiveEXT` (value 5271, gated on the
+`SPV_EXT_mesh_shader` extension and `MeshShadingEXT` capability, same
+as every other `PerPrimitiveEXT`-adjacent enum entry). But
+`Deserializer.cpp`'s `processDecoration` is a hand-written switch over
+`spirv::Decoration` (its own comment: "TODO: This function should also
+be auto-generated. For now, since only a few decorations are
+processed/handled in a meaningful manner, going with a manual
+implementation") -- and that switch's unit-attribute case group
+(`Aliased`, `Flat`, `NoPerspective`, `Patch`, `Coherent`, etc., all
+zero-operand decorations that just attach a `UnitAttr`) never listed
+`PerPrimitiveEXT`, so it fell through to the `default:` case's
+`"unhandled Decoration"` error. Per the SPIR-V spec, `PerPrimitiveEXT`
+is itself a zero-operand decoration -- it belongs in exactly that
+group. `Serializer.cpp`'s matching case list had the identical gap for
+the reverse direction (MLIR -> SPIR-V), and its `getDecorationName`
+helper (which guesses a decoration's SPIR-V name back from its
+`snake_case` MLIR attribute name via
+`llvm::convertToCamelFromSnakeCase`) needed the same kind of explicit
+override the `cache_control_load_intel`/`cache_control_store_intel`
+cases already use, since that conversion cannot recover an all-caps
+`EXT` suffix any more than it could recover `INTEL`'s.
+
+**The fix.** Added `spirv::Decoration::PerPrimitiveEXT` to
+`Deserializer.cpp`'s existing unit-attribute case group (identical
+`words.size() != 2` shape check, attaches `opBuilder.getUnitAttr()`)
+and to `Serializer.cpp`'s mirror-image case group, plus a
+`per_primitive_ext` -> `"PerPrimitiveEXT"` override in
+`getDecorationName`. Three-line diff to each of
+`mlir/lib/Target/SPIRV/{Deserialization/Deserializer,Serialization/Serializer}.cpp`.
+
+**New test.** `mlir/test/Target/SPIRV/mesh-ops.mlir` gained a new
+split (a `PerPrimitiveEXT`-decorated `spirv.GlobalVariable` inside a
+`MeshShadingEXT`-requiring module), exercised by the file's existing
+`--test-spirv-roundtrip` `RUN` line (MLIR -> SPIR-V binary -> MLIR,
+`FileCheck`'d) and, where `spirv-tools` is available, its
+`--serialize-spirv`/`spirv-val` `RUN` lines (real binary
+serialization, validated by `spirv-val` itself).
+
+```
+ninja check-mlir-target-spirv: 58/58 passing (was 57/58; +1 new test)
+ninja check-mlir-dialect-spirv: 52/52 passing (unaffected)
+ninja check-feme (assertions-enabled, ccache build):
+Total Discovered Tests: 2009
+  Unsupported:   59 (2.94%)
+  Passed     : 1950 (97.06%)
+```
+
+`check-feme` stays byte-identical to H6g-b's own baseline (1950/2009,
+0 `Failed`), since this is a pure upstream-MLIR fix touching no
+`feme`-local source.
+
+**A real `dEQP-VK.mesh_shader.*` re-run (28044 cases)** after the fix,
+same resume-loop methodology:
+
+```
+Result counts: {'Fail': 323, 'NotSupported': 27706, 'Pass': 1}
+Blacklisted (crashed): 14 (was 3)
+```
+
+A diagnostic-logged re-run of exactly the 232-case
+`vkRefUtil.cpp:37` bucket H6g-b's own text named (via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`) confirms this row's own fix
+directly: **0** occurrences of `"unhandled Decoration"` remain (down
+from 202) -- this row's own named dominant cause is fully cleared.
+Tracing where those 202 formerly-blocked cases landed:
+
+- **3** now progress past pipeline creation entirely, failing later at
+  a brand-new `vkCmdUtil.cpp:338` location (out of this row's scope, a
+  genuine forward-progress signal this fix produced).
+- **11** now reach `feme::cpu::SIMDizePass` far enough to hit
+  H6g-b-b's own already-tracked `FunctionWidener::widenMaskedStore`
+  assertion (confirmed via `gdb` backtrace on one of them,
+  `dEQP-VK.mesh_shader.ext.misc.barrier_in_task`: an identical stack
+  to H6g-b-b's own originally-reported 3 cases). H6g-b-b's own crash
+  count grows from 3 to 14 as a direct, expected consequence; see its
+  updated roadmap text.
+- The remaining **188**, plus the **30** cases H6g-b's own text
+  already called out of its own scope, now fail for other, further
+  downstream reasons. A diagnostic-logged re-run of the resulting
+  **218**-case `vkRefUtil.cpp:37` bucket breaks down as:
+
+  | Count | Cause |
+  |---|---|
+  | 80 | `failed to legalize operation 'spirv.AccessChain' that was explicitly marked illegal` (new dominant cause, tracked as **H6g-b-a-i**) |
+  | 68 | `feme-cpu-simdize: ... has a divergent vector value ... used outside a supported insertelement-chain/...` |
+  | 15 | `feme-cpu-wrap-mesh-output`/`feme-cpu-wrap-fragment` metadata-missing errors |
+  | 14 | `feme-cpu-linearize` unsupported-control-flow-shape errors |
+  | 11 | `failed to legalize operation 'spirv.MemoryBarrier'` |
+  | 5 | `Symbols not found: [ spirv_var_N ]` (already tracked by H6g-b-c) |
+  | 9 | `spirv.AtomicExchange`/`spirv.EXT.EmitMeshTasks`/`spirv.Any`/`spirv.All` legalization failures (singletons/small groups) |
+
+  All 33 `vkPipelineConstructionUtil.cpp:176` cases H6g-b's own text
+  named remain, unaffected either way (still tracked by H6g-b-c).
+
+**`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample**
+stays byte-identical to every prior row's own recorded totals:
+
+```
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+**0 regressions** (expected: this fix only changes SPIR-V decoration
+deserialization/serialization for a mesh-shading-only decoration, which
+no `dEQP-VK.draw.*` case exercises).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed
+no change needed: this is a pure MLIR SPIR-V dialect fix, touching no
+`feme`-advertised feature bit or extension.
+
+**Milestone H6 does not close.** This row's own fix directly clears
+the dominant cause it named, but the same re-run that confirms that
+also surfaces a new dominant cause in its place --
+`spirv.AccessChain` legalization failures, tracked as new roadmap row
+H6g-b-a-i -- alongside the already-tracked H6g-b-b (now grown from 3
+to 14 crashing cases) and H6g-b-c.
+
+**Reproducing this row.** Same ICD build and resume-loop methodology
+as every prior mesh-shading row, run from `VK-GL-CTS/run` (relative
+shader-source resource paths require it):
+
+```shell
+cd /path/to/VK-GL-CTS/run
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  python3 resume_run.py
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  deqp-vk --deqp-caselist-file=vkrefutil_fail_cases.txt \
+    --deqp-log-filename=diag_check.qpa
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-filename=draw_h6g_b_a.qpa
+```
