@@ -145,6 +145,18 @@ typedef float FemeRTv4f32 __attribute__((vector_size(16)));
 // to its component size, not to the whole vector's width.
 typedef float FemeRTv4f32Unaligned __attribute__((vector_size(16), aligned(4)));
 
+// The narrower `vec2`/`vec3` counterparts of `FemeRTv4f32` above (roadmap
+// H6g-b-a-i-a-i-c): a GLSL `vec2`/`vec3` mesh-shader input/output element
+// compiles down to LLVM IR's `<2 x float>`/`<3 x float>`, un-padded (unlike
+// e.g. a `<4 x float>`, a `<3 x float>`'s IR/memory layout is exactly three
+// packed `float`s, not four), so both need their own raw-load/store
+// overload rather than reusing `FemeRTv4f32`'s.
+typedef float FemeRTv2f32 __attribute__((vector_size(8)));
+typedef float FemeRTv2f32Unaligned __attribute__((vector_size(8), aligned(4)));
+typedef float FemeRTv3f32 __attribute__((vector_size(12)));
+typedef float FemeRTv3f32Unaligned
+    __attribute__((vector_size(12), aligned(4)));
+
 // Mirrors `feme::cpu::FemeDescriptor` (RuntimeABI.h): { Data, SizeInBytes,
 // Stride, Format, Kind, Flags, Counter }.
 typedef struct {
@@ -379,6 +391,16 @@ typedef int32_t FemeRTv4i32 __attribute__((vector_size(16)));
 // bytes, matching `FemeRTv4f32Unaligned` above.
 typedef int32_t FemeRTv4i32Unaligned
     __attribute__((vector_size(16), aligned(4)));
+
+// The narrower `ivec2`/`ivec3` counterparts of `FemeRTv4i32` above, matching
+// `FemeRTv2f32`/`FemeRTv3f32`'s un-padded `<2 x i32>`/`<3 x i32>` shape
+// (roadmap H6g-b-a-i-a-i-c).
+typedef int32_t FemeRTv2i32 __attribute__((vector_size(8)));
+typedef int32_t FemeRTv2i32Unaligned
+    __attribute__((vector_size(8), aligned(4)));
+typedef int32_t FemeRTv3i32 __attribute__((vector_size(12)));
+typedef int32_t FemeRTv3i32Unaligned
+    __attribute__((vector_size(12), aligned(4)));
 
 // Unpacks a `R8G8B8A8_UINT` value (four unsigned bytes, little-endian: R,
 // G, B, A) into a `<4 x i32>` by zero-extending each byte.
@@ -655,6 +677,235 @@ __attribute__((always_inline)) void femeCpuResourceStoreRawV4F32(
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
   *(FemeRTv4f32Unaligned *)Ptr = (FemeRTv4f32Unaligned)Value;
+}
+
+// `feme.cpu.resource.load.raw.v2f32`/`.v3f32`/`.v2i32`/`.v3i32`/`.v4i32`
+// (roadmap H6g-b-a-i-a-i-c): the narrower-than-`vec4` and integer-vector
+// raw-buffer-load/store overloads a `vec2`/`vec3`/`ivec2`/`ivec3`/`ivec4`
+// mesh-shader input/output (e.g. a whole-`vec2` load out of a `uniform Foo
+// { vec2 v[N]; }` block) actually needs -- `feme::cpu::mangleResourceCallName`
+// already mangles any fixed-vector element type generically (see
+// ResourceCalls.cpp), so `feme::cpu::ResourceLoweringPass` was always able
+// to *emit* a call to these names; only these runtime definitions
+// themselves, mirroring `V4F32` above's bindless-descriptor-lookup-then-
+// masked-load/store shape one byte width at a time, were missing.
+FemeRTv2f32
+femeCpuResourceLoadRawV2F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                            uint32_t DescriptorIndex, uint64_t ByteOffset,
+                            _Bool Mask) asm("feme.cpu.resource.load.raw.v2f32");
+
+__attribute__((always_inline)) FemeRTv2f32 femeCpuResourceLoadRawV2F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 8);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 8);
+  if (!((OkRaw || OkStructured) && Mask))
+    return (FemeRTv2f32){0.0f, 0.0f};
+  const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  return *(const FemeRTv2f32Unaligned *)Ptr;
+}
+
+void femeCpuResourceStoreRawV2F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv2f32 Value,
+    _Bool Mask) asm("feme.cpu.resource.store.raw.v2f32");
+
+__attribute__((always_inline)) void femeCpuResourceStoreRawV2F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv2f32 Value, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 8);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 8);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!((OkRaw || OkStructured) && Mask && IsUAV))
+    return;
+  unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  *(FemeRTv2f32Unaligned *)Ptr = (FemeRTv2f32Unaligned)Value;
+}
+
+FemeRTv3f32
+femeCpuResourceLoadRawV3F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                            uint32_t DescriptorIndex, uint64_t ByteOffset,
+                            _Bool Mask) asm("feme.cpu.resource.load.raw.v3f32");
+
+__attribute__((always_inline)) FemeRTv3f32 femeCpuResourceLoadRawV3F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 12);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 12);
+  if (!((OkRaw || OkStructured) && Mask))
+    return (FemeRTv3f32){0.0f, 0.0f, 0.0f};
+  const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  return *(const FemeRTv3f32Unaligned *)Ptr;
+}
+
+void femeCpuResourceStoreRawV3F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv3f32 Value,
+    _Bool Mask) asm("feme.cpu.resource.store.raw.v3f32");
+
+__attribute__((always_inline)) void femeCpuResourceStoreRawV3F32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv3f32 Value, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 12);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 12);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!((OkRaw || OkStructured) && Mask && IsUAV))
+    return;
+  unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  // A plain `*(FemeRTv3f32Unaligned *)Ptr = ...` store here gets widened by
+  // the optimizer into a 16-byte `<4 x float>` store (observed at -O2):
+  // Clang's ABI lowering already receives `Value` coerced into a `<4 x
+  // i32>` register pair, and folds the coerced-to-`<3 x float>` conversion
+  // back into a single over-wide store instead of one that writes exactly
+  // the 12 bytes `femeRTCheckAccess` above actually bounds-checked -- an
+  // out-of-bounds write past a buffer's last element. `__builtin_memcpy`
+  // with the explicit literal `12` (not `sizeof(Value)`, which is 16:
+  // Clang pads a `<3 x float>`'s storage size up to the next power of two)
+  // keeps the copy to exactly those 12 bytes.
+  __builtin_memcpy(Ptr, &Value, 12);
+}
+
+FemeRTv2i32
+femeCpuResourceLoadRawV2I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                            uint32_t DescriptorIndex, uint64_t ByteOffset,
+                            _Bool Mask) asm("feme.cpu.resource.load.raw.v2i32");
+
+__attribute__((always_inline)) FemeRTv2i32 femeCpuResourceLoadRawV2I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 8);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 8);
+  if (!((OkRaw || OkStructured) && Mask))
+    return (FemeRTv2i32){0, 0};
+  const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  return *(const FemeRTv2i32Unaligned *)Ptr;
+}
+
+void femeCpuResourceStoreRawV2I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv2i32 Value,
+    _Bool Mask) asm("feme.cpu.resource.store.raw.v2i32");
+
+__attribute__((always_inline)) void femeCpuResourceStoreRawV2I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv2i32 Value, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 8);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 8);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!((OkRaw || OkStructured) && Mask && IsUAV))
+    return;
+  unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  *(FemeRTv2i32Unaligned *)Ptr = (FemeRTv2i32Unaligned)Value;
+}
+
+FemeRTv3i32
+femeCpuResourceLoadRawV3I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                            uint32_t DescriptorIndex, uint64_t ByteOffset,
+                            _Bool Mask) asm("feme.cpu.resource.load.raw.v3i32");
+
+__attribute__((always_inline)) FemeRTv3i32 femeCpuResourceLoadRawV3I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 12);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 12);
+  if (!((OkRaw || OkStructured) && Mask))
+    return (FemeRTv3i32){0, 0, 0};
+  const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  return *(const FemeRTv3i32Unaligned *)Ptr;
+}
+
+void femeCpuResourceStoreRawV3I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv3i32 Value,
+    _Bool Mask) asm("feme.cpu.resource.store.raw.v3i32");
+
+__attribute__((always_inline)) void femeCpuResourceStoreRawV3I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv3i32 Value, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 12);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 12);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!((OkRaw || OkStructured) && Mask && IsUAV))
+    return;
+  unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  // See `femeCpuResourceStoreRawV3F32`'s comment: `__builtin_memcpy` with
+  // the explicit literal `12` (not `sizeof(Value)`, which is 16) avoids the
+  // same out-of-bounds store-widening risk for the integer `<3 x i32>`
+  // overload.
+  __builtin_memcpy(Ptr, &Value, 12);
+}
+
+FemeRTv4i32
+femeCpuResourceLoadRawV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                            uint32_t DescriptorIndex, uint64_t ByteOffset,
+                            _Bool Mask) asm("feme.cpu.resource.load.raw.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuResourceLoadRawV4I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 16);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 16);
+  if (!((OkRaw || OkStructured) && Mask))
+    return (FemeRTv4i32){0, 0, 0, 0};
+  const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  return *(const FemeRTv4i32Unaligned *)Ptr;
+}
+
+void femeCpuResourceStoreRawV4I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv4i32 Value,
+    _Bool Mask) asm("feme.cpu.resource.store.raw.v4i32");
+
+__attribute__((always_inline)) void femeCpuResourceStoreRawV4I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, FemeRTv4i32 Value, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 16);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 16);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!((OkRaw || OkStructured) && Mask && IsUAV))
+    return;
+  unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  *(FemeRTv4i32Unaligned *)Ptr = (FemeRTv4i32Unaligned)Value;
 }
 
 //--- Images and samplers (roadmap R30) ----------------------------------------
