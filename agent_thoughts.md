@@ -42365,3 +42365,191 @@ into a guessed bucket.
 Also re-ran the standard `draw_sample.txt` regression sample and compared
 its per-case status map to the previous row's `draw_h6g_b_a_i_a.qpa` --
 not just the totals. The map is identical, confirming 0 regressions.
+
+# H6g-b-a-i-a-i-a (`feme.cpu.masked.store.*` divergent-vector-value consumer gap)
+
+H6g-b-a-i-a-i's own re-run of the 218-case `vkRefUtil.cpp:37` bucket left
+148 cases hitting `feme-cpu-simdize`'s "divergent vector value ... used
+outside a supported ... pattern" rejection as the new dominant cause,
+once its own direct-storage-buffer-handle fix let those shaders progress
+far enough to reach `SIMDizePass`'s own decomposition precondition check.
+This row's job was to find the exact use shape still missing from
+`checkVectorDecompositionSupported`'s accepted-consumer list, and decide
+whether the fix belonged in `SIMDize.cpp` itself or an earlier pass.
+
+I started the same way the last few rows did: read
+`checkVectorDecompositionSupported`'s own accepted-shape enumeration and
+its various `widen*` helpers first, to have a mental model of what
+*should* already work before going looking for what doesn't. It checks a
+producer's shape (insertelement chain, phi, scalar-condition select,
+shufflevector, elementwise op) and a consumer's shape (insertelement
+operand0, resource-store's stored value, extractelement, select
+true/false, shufflevector operand, phi incoming, elementwise operand)
+completely up front, and bails with a clean diagnostic before any
+mutation if anything doesn't match -- a deliberate "never let a later
+step build an illegal type and assert" design that's paid off in every
+row so far, including this one, as it turns out.
+
+Rather than trust a lit-only reduction to reveal the real shape (bucket
+rows keep being reminders that hand-guessed IR shapes tend to miss what
+real content produces), I added a couple of temporary `errs()` prints
+directly in `checkVectorDecompositionSupported`'s own rejection path,
+rebuilt `feme_vulkan`, and ran one specific failing case directly against
+the real ICD: `dEQP-VK.mesh_shader.ext.api.draw.draw_count_0...no_task_shader`.
+That immediately showed the real value: `%35 = insertelement <3 x i32>
+...` feeding `call void @feme.cpu.masked.store.v3i32(...)`. Tracing the
+real GLSL source in `vktMeshShaderApiTestsEXT.cpp` confirmed the shape:
+`gl_PrimitiveTriangleIndicesEXT[col] = uvec3(indices.x, indices.y,
+indices.z)`. `MeshOutputWrapper.h`'s own file comment already flagged
+why: `PrimitiveIndices` has no canonicalized `feme.stage.*` op of its own
+yet, unlike ordinary per-vertex/per-primitive outputs, so it survives
+unchanged as a plain LLVM `store` all the way to `LinearizePass`, which
+masks it into `feme.cpu.masked.store.v3i32` under divergent control flow
+exactly like it would any other ordinary store -- completely unrelated to
+resource stores or groupshared stores, and I'd wager unrelated to any
+other row's own investigation so far, which is why it hadn't been taught
+to the checker yet.
+
+That explained the clean rejection. What made me look twice was that
+`FunctionWidener::widenMaskedStore` itself was *also* broken for this
+shape, independent of the checker: it called the scalar-only `getWidened`
+helper unconditionally on the stored value, and for a vector-typed,
+already-decomposed value (tracked only in `WidenedVectorComponents`, not
+in `Widened`), that falls through to `getWidened`'s generic
+uniform-broadcast fallback, which would try to build an illegal `<W x <3
+x i32>>` vector-of-vectors. `llvm.masked.scatter` has no way to represent
+a per-lane vector value at all -- its value operand type must be `<N x
+ScalarOrPointerT>`. So even if I'd only fixed the checker to accept the
+shape, widening would still have hit an assertion instead of doing
+anything useful; both halves needed fixing together, and both live in
+`SIMDize.cpp`, not an earlier canonicalization pass.
+
+The fix: `checkVectorDecompositionSupported` now accepts a matched
+`feme.cpu.masked.store.*` call's stored-value operand as a consumer, the
+same way it already accepted a matched resource-store call's.
+`widenMaskedStore` now special-cases a vector-typed stored value: pull
+its components via the existing `getVectorComponents` helper (the "dual
+of `getWidened`" for decomposed vectors -- already used elsewhere, no
+need to reinvent it), reassemble each lane's own `<3 x i32>` via
+extractelement/insertelement, and do a masked write with a load-select-
+store idiom -- the same idiom `MeshOutputWrapper.cpp`'s own
+`lowerMeshOutputStore` already uses for conditional writes without
+branches -- instead of `llvm.masked.scatter`. The scalar/pointer path is
+untouched.
+
+Reverted the debug prints, rebuilt, reran the same single case: the
+`feme-cpu-simdize` error is gone, and the case now progresses to an
+already-tracked `feme-cpu-wrap-mesh-output` error instead. Good sign.
+`ninja check-feme` at that point: 1953/2012, unaffected by the fix
+itself (no new tests yet).
+
+Added the lit regression
+`feme/test/Transforms/CPU/simdize-masked-memop-vector-divergent.ll` next.
+Hit a genuinely annoying FileCheck gotcha while writing it: `CHECK-COUNT-N`
+scans forward and consumes matches in order, but does not require them to
+be contiguous -- if I put a `CHECK-COUNT-4` for one interleaved pattern
+after another `CHECK-COUNT` that had already consumed everything up to a
+later point in the stream, occurrences of the first pattern that occur
+*before* that cursor position are silently missed, not reported as a
+failure to find them "there," just merged into whatever the greedy scan
+already consumed. I ended up dropping the fully-grouped-by-lane
+`CHECK-COUNT` sequences in favor of one specific, non-counted `CHECK:`
+for a single lane's mask value (a literal substring match, not a regex,
+so a bare `%lane.mask` without a numeric suffix reliably picks the first
+occurrence) followed by a single `CHECK-COUNT-4` for the pattern known to
+occur exactly once per remaining lane. Worth remembering next time I
+write a CHECK sequence over interleaved per-lane output.
+
+Added the unit test
+`SIMDizeTest.DecomposesInsertElementChainIntoMaskedVectorStore` next
+(same file, right after `RewritesGroupSharedMaskedStoreAtUniformAddress`,
+which is the closest existing sibling test), asserting no nested vector
+type appears anywhere in the widened function and exactly 4 real `<3 x
+i32>` stores come out for a 4-lane wave. Both new tests pass in
+isolation, and `ninja check-feme` after adding them: 1955/2014, +2 tests,
+0 regressions.
+
+Re-ran the real 218-case `vkRefUtil.cpp:37` bucket the same way prior
+rows have -- combined stdout/stderr diagnostic log, classify each case by
+the first emitted FeMe/MLIR diagnostic. Had to fix my own classifier
+script twice along the way: first it only matched lines starting with
+`error:`/`warning:`, which silently missed plain
+`vkCreateGraphicsPipelines: <message>`-prefixed diagnostics (no `error:`
+prefix at all) and miscounted a bogus "no diagnostic" bucket as a result;
+fixed by taking the first non-empty, non-`  Fail (`-prefixed line after
+each case's header instead of filtering by prefix. With that fixed:
+`feme-cpu-simdize` drops 148 -> 80, and `feme-cpu-wrap-mesh-output` rises
+15 -> 83 (exactly the 68 newly-unblocked cases), with every other bucket
+in the table bit-for-bit unchanged from the prior row's own table. Clean,
+isolated fix, no side effects on unrelated buckets.
+
+Out of an abundance of caution given how deep this milestone chain has
+gotten, I re-added the debug prints once more (temporarily) and looked at
+one of the remaining 80 `feme-cpu-simdize` cases directly
+(`dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only`)
+to see what the *next* dominant shape actually is, rather than leave it
+as a total guess in the roadmap. It's `%8 = insertelement <4 x float>
+...` feeding `%16 = fcmp ole <4 x float> %8, %15` -- a vector floating-
+point comparison consumer, genuinely different from anything this row
+fixed (comparisons aren't in the accepted-consumer list at all today,
+and the file's own existing "a `select` with a per-lane `<N x i1>`
+condition remains diagnosed" deviation note hints this might need
+broader per-lane-condition support, not just a narrow consumer-shape
+addition). Reverted the debug prints again, rebuilt clean, reconfirmed
+`ninja check-feme` still 1955/2014. Filed this as a new sibling row,
+`H6g-b-a-i-a-i-b` -- deliberately a sibling under the same parent, not a
+level deeper, per the standing instruction to stop nesting milestones
+more than one lowercase letter deep.
+
+Ran the standard `draw_sample.txt` regression sample: byte-identical
+totals to every prior row (14/153/1790), 0 regressions.
+
+Then ran a full `dEQP-VK.mesh_shader.*` group re-run (28044 leaf cases)
+via the resume-loop script, expecting to maybe need to blacklist a
+handful of crashes the way the H6g-b-a-i-a-i row's own full run needed 14
+for. It completed in a single clean iteration instead -- 0 crashes, 0
+blacklisting needed. That was a pleasant surprise, and worth chasing down
+rather than just noting: the *previous* full run's 14 blacklisted cases
+were exactly the ones tracked by H6g-b-b's own roadmap row (a
+`FunctionWidener::widenMaskedStore -> getWidened -> ConstantVector::getSplat`
+assertion). Diffing this row's freshly re-extracted 232-case
+`vkRefUtil.cpp:37` bucket against the prior 218-case snapshot confirmed
+it directly: the +14 new cases are *exactly* H6g-b-b's own 14 named
+cases (`barrier_in_task`, `group_memory_barrier_in_task_*`,
+`memory_barrier_shared_in_task_*`, `emit_in_control_flow*`,
+`payload_not_accessed`), not some unrelated set. Spot-checking one of
+them directly (`payload_not_accessed`) confirmed it now cleanly hits
+`feme-cpu-wrap-mesh-output` with no crash at all.
+
+That makes sense once I looked at H6g-b-b's own description again:
+its crash is in the exact same function (`widenMaskedStore`), the exact
+same helper (`getWidened`), and the exact same underlying LLVM assertion
+(`isValidElementType` rejecting a non-scalar/non-pointer element type) my
+fix's vector-typed branch now intercepts before it ever reaches the old,
+generic `getWidened` call at all. H6g-b-b's own author had characterized
+the failing value's type as "aggregate," but a fixed-size vector *is*
+itself a non-scalar, non-pointer type from `isValidElementType`'s point
+of view when it appears as another vector's *element* type -- so I think
+this was the same divergent-`<3 x i32>`-into-masked-store shape all
+along, just observed through the crash path instead of the (later-added)
+clean-diagnostic path. I did not find, or go looking very hard for, any
+genuinely aggregate (struct/array) `StoredValue` reaching this code --
+none of the CTS content exercises one today as far as this investigation
+found, so I closed H6g-b-b on the strength of the empirical 14/14 fix
+plus the identical-code-path argument, while being explicit in both the
+roadmap and the CTS report that no true aggregate case was separately
+reproduced. If one turns up in some future row, `widenMaskedStore`'s
+vector branch obviously doesn't handle it either.
+
+Net for this row: `feme-cpu-simdize`'s masked-store divergent-vector
+consumer gap is fixed and tested (lit + unit), the real CTS bucket drops
+148 -> 80 with a clean hand-off to `feme-cpu-wrap-mesh-output`, H6g-b-b
+closes as an unplanned side effect with matching evidence, the 1957-case
+draw regression sample is unaffected, and `FeMeCPUDesign.md` got a small
+clarifying addition to its Phase 4 consumer-shape list rather than a
+deviation notice (this is squarely within the documented "vectors become
+per-lane components" model, just teaching it one more real consumer
+shape). Milestone H6 does not close: the same rerun's new dominant
+`feme-cpu-simdize` cause -- a divergent vector used as an `fcmp`/`icmp`
+operand -- becomes new sibling row `H6g-b-a-i-a-i-b`, and H6g-b-c remains
+open and untouched by this row.
