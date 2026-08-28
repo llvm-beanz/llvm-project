@@ -206,7 +206,8 @@ struct RenderTargetBinding {
 /// backing view covers. `Image`'s packed subresource layout is exactly the
 /// layout `feme::graphics::AttachmentView` assumes, so this is a pointer
 /// and an extent, never a copy. Fails for a view this driver cannot render
-/// into (an unbound image or a non-2D view).
+/// into (an unbound image, or a view whose dimension is none of 1D,
+/// 1D-array, 2D, 2D-array, cube, or cube-array -- roadmap H5e-c).
 llvm::Expected<feme::graphics::AttachmentView>
 resolveAttachmentView(ImageView *View);
 

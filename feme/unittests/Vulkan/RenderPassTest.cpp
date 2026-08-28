@@ -475,6 +475,153 @@ TEST_F(RenderPassTest, FramebufferAcceptsLayeredAttachmentWithEnoughLayers) {
   vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
+/// Roadmap H5e-c: a `VK_IMAGE_VIEW_TYPE_1D_ARRAY` view is a legal Vulkan
+/// render target (`dEQP-VK.geometry.layered.1d_array.*`'s own framebuffer
+/// shape), but `resolveAttachmentView` used to reject any view dimension
+/// other than 2D/2D-array outright, surfacing as an unattributed
+/// `vkQueueSubmit` `VK_ERROR_INITIALIZATION_FAILED` once a geometry stage
+/// actually wrote a `gl_Layer` output into one. Confirms `resolveAttachmentView`
+/// now accepts a 1D-array view and addresses it exactly like a 2D-array one
+/// (one array-layer stride apart, one row tall).
+TEST_F(RenderPassTest, ResolveAttachmentViewAcceptsOneDArrayView) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_1D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 1, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 3;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.layerCount = 3;
+  VkImageView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  llvm::Expected<feme::graphics::AttachmentView> Resolved =
+      resolveAttachmentView(fromHandle<ImageView>(View));
+  ASSERT_TRUE(static_cast<bool>(Resolved)) << llvm::toString(Resolved.takeError());
+  EXPECT_EQ(Resolved->Width, 4u);
+  EXPECT_EQ(Resolved->Height, 1u);
+  EXPECT_EQ(Resolved->ArrayLayers, 3u);
+
+  vkDestroyImageView(Device, View, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+/// Roadmap H5e-c: a `VK_IMAGE_VIEW_TYPE_CUBE_ARRAY` view is also a legal
+/// Vulkan render target (`dEQP-VK.geometry.layered.cube_array.*`'s own
+/// framebuffer shape) -- the six faces of each cube are simply the backing
+/// image's own array layers to `Image`, which never itself models a cube
+/// dimension; only the view's own `dimension()` distinguishes it.
+/// `resolveAttachmentView` used to reject this outright too, alongside the
+/// 1D/1D-array case above.
+TEST_F(RenderPassTest, ResolveAttachmentViewAcceptsCubeArrayView) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 12; // Two cubes, six faces each.
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.layerCount = 12;
+  VkImageView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  llvm::Expected<feme::graphics::AttachmentView> Resolved =
+      resolveAttachmentView(fromHandle<ImageView>(View));
+  ASSERT_TRUE(static_cast<bool>(Resolved)) << llvm::toString(Resolved.takeError());
+  EXPECT_EQ(Resolved->Width, 4u);
+  EXPECT_EQ(Resolved->Height, 4u);
+  EXPECT_EQ(Resolved->ArrayLayers, 12u);
+
+  vkDestroyImageView(Device, View, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+/// Roadmap H2/H5e-c: a view dimension no render target supports at all
+/// (3D) is still rejected -- confirms the 1D/1D-array/cube/cube-array
+/// acceptance above stayed additive rather than loosening the check
+/// generally.
+TEST_F(RenderPassTest, ResolveAttachmentViewRejects3DView) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_3D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 2};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.layerCount = 1;
+  VkImageView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  llvm::Expected<feme::graphics::AttachmentView> Resolved =
+      resolveAttachmentView(fromHandle<ImageView>(View));
+  EXPECT_FALSE(static_cast<bool>(Resolved));
+  llvm::consumeError(Resolved.takeError());
+
+  vkDestroyImageView(Device, View, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 /// Roadmap H2: a framebuffer declaring more layers than a bound view's own
 /// `layerCount` (from its base array layer) is rejected -- the view cannot
 /// supply every layer the framebuffer promises.

@@ -81,12 +81,33 @@ resolveAttachmentView(ImageView *View) {
   // (Roadmap H2) A layered render target's view is `VK_IMAGE_VIEW_TYPE_
   // 2D_ARRAY` (`ImageDimension::Texture2DArray`), not `_2D`; both are
   // otherwise addressed identically here (2D, one array-layer stride
-  // apart), so both are accepted.
-  if (View->dimension() != feme::cpu::ImageDimension::Texture2D &&
-      View->dimension() != feme::cpu::ImageDimension::Texture2DArray)
-    return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                   "only a 2D or 2D-array image view may be "
-                                   "a render target");
+  // apart), so both are accepted. (Roadmap H5e-c) Vulkan also permits a
+  // `VK_IMAGE_VIEW_TYPE_1D`/`_1D_ARRAY` view as a render target (e.g.
+  // `dEQP-VK.geometry.layered.1d_array.*`'s own framebuffer, one row tall
+  // by construction since a 1D image's `extent.height` must be 1) and a
+  // `VK_IMAGE_VIEW_TYPE_CUBE`/`_CUBE_ARRAY` view (`dEQP-VK.geometry.
+  // layered.cube{,_array}.*`'s own framebuffer -- the six faces of a cube,
+  // or six-face groups of a cube array, are simply the backing image's own
+  // array layers to `Image`, which never itself carries a `Cube` dimension
+  // (`mapImageDimension` only ever produces `Texture2D(Array)`/`Texture1D
+  // (Array)`/`Texture3D`; "cube" is purely an addressing convention this
+  // view's own `ImageDimension::TextureCube(Array)` records, not a
+  // different physical layout) -- addressed identically to the 1D/2D cases
+  // below, so all six dimensions are accepted.
+  switch (View->dimension()) {
+  case feme::cpu::ImageDimension::Texture1D:
+  case feme::cpu::ImageDimension::Texture1DArray:
+  case feme::cpu::ImageDimension::Texture2D:
+  case feme::cpu::ImageDimension::Texture2DArray:
+  case feme::cpu::ImageDimension::TextureCube:
+  case feme::cpu::ImageDimension::TextureCubeArray:
+    break;
+  default:
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "only a 1D, 1D-array, 2D, 2D-array, cube, or cube-array image view "
+        "may be a render target");
+  }
   if (Range.baseMipLevel >= Img.mipLevels())
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "a render target view's base mip level is "
