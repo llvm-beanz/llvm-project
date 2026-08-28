@@ -9662,3 +9662,81 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6f.qpa
 ```
+
+## Roadmap H6h: measured impact (`TaskPayloadWorkgroupEXT` address space and global-variable import)
+
+This row closes out H6h: a new `TaskPayloadGlobalVariablePattern`
+(`SPIRVToLLVMPatterns.cpp`), mirroring
+`WorkgroupGlobalVariablePattern`/`PushConstantGlobalVariablePattern`,
+converts a `TaskPayloadWorkgroupEXT`-storage-class `spirv.GlobalVariable`
+(SPIR-V enum 5402 -- a task entry's bounded payload variable) to an
+ordinary `llvm.mlir.global` in address space 14, a FeMe-only convention:
+unlike `Workgroup`(3)/`Input`(7)/`Output`(8)/`StorageBuffer`(11)/
+`Uniform`(12)/`PushConstant`(13), LLVM's own SPIR-V backend
+(`storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h`) has
+no mapping at all for this storage class, so 14 -- the next value after
+the highest one that switch does define, and otherwise unused anywhere in
+this conversion layer -- is picked here rather than reused from it. A
+matching `spirv::PointerType` conversion routes any access-chain result
+reaching into the variable's contents to the same address space, so a
+plain `spirv.AccessChain`/`spirv.Load`/`spirv.Store` through it converts
+with MLIR's own generic patterns, exactly as a `Workgroup` variable's own
+access already does -- no further FeMe-specific pattern is needed for
+those. This is purely conversion-layer plumbing: a payload variable can
+now be imported as an LLVM global at all, but nothing yet reads or writes
+one through it (`CanonicalizeStagePass::run` still does not accept
+`ShaderStage::Mesh`/`Amplification`, tracked separately as H6i), so no
+`feme.stage.*` payload op exists for a canonicalization pass to produce
+yet.
+
+**Expected, and confirmed, zero behavioral change.** Since this row adds
+an import path with no caller reachable from any entry point
+`CanonicalizeStagePass`/the mesh/task pipeline actually processes today,
+a real `dEQP-VK.mesh_shader.*` re-run should be -- and is -- byte-identical
+to H6f's own recorded baseline:
+
+```
+Before this row (H6f's own baseline):
+ Passed:        1/28044 (0.0%)
+ Failed:        337/28044 (1.2%)
+ Not supported: 27706/28044 (98.8%)
+
+After this row:
+ Passed:        1/28044 (0.0%)
+ Failed:        337/28044 (1.2%)
+ Not supported: 27706/28044 (98.8%)
+```
+
+0 regressions, 0 new passes -- exactly as expected, and as H6g's own text
+already anticipated ("blocked on H6h's `TaskPayloadWorkgroupEXT` lowering
+*and* H6i's `CanonicalizeStagePass` mesh-stage support"): landing H6h
+alone does not yet let any of the 235+33 content-compilation failures
+H6g tracks clear, since H6i's own canonicalization-filter change has not
+landed yet.
+
+`Vulkan14FeatureInventory.md` and `VulkanExtensionInventory.md` need no
+change: this row touches no feature bit, limit, or extension -- it is a
+pure SPIR-V-to-LLVM conversion-layer addition, the same shape H5e-d's own
+entry recorded needing no inventory update for an analogous
+reflection/metadata-only fix.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1931/1990** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6f's own **1930/1989** baseline by this row's new
+`spirv-to-llvm-task-payload.mlir` lit test (2 `RUN`/`CHECK` blocks:
+storing through a payload array element, and loading a scalar payload
+variable directly, mirroring `spirv-to-llvm-workgroup.mlir`'s own
+coverage shape for the precedent this row mirrors).
+
+**Reproducing.**
+
+```
+feme-opt --feme-convert-spirv-to-llvm --split-input-file \
+ feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-task-payload.mlir
+
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                               # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+ /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+ --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6h.qpa
+```
