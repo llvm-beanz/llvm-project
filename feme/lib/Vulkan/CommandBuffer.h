@@ -134,6 +134,11 @@ struct RecordedCommand {
     ClearAttachments,
     BlitImage,
     ResolveImage,
+    // (roadmap H6f) `VK_EXT_mesh_shader`'s three draw commands, mirroring
+    // `Draw`/`DrawIndirect`'s own direct/indirect/indirect-count shape.
+    DrawMeshTasks,
+    DrawMeshTasksIndirect,
+    DrawMeshTasksIndirectCount,
   };
 
   Kind Op;
@@ -147,6 +152,13 @@ struct RecordedCommand {
   /// three `uint32_t`s are read from at execution time.
   Buffer *IndirectBuffer = nullptr;
   uint64_t IndirectOffset = 0;
+  /// (roadmap H6f) `DrawMeshTasksIndirectCount`: the buffer/offset
+  /// `vkCmdDrawMeshTasksIndirectCountEXT`'s own actual draw count (a single
+  /// `uint32_t`, capped at `Count[0]`'s `maxDrawCount`) is read from at
+  /// execution time -- distinct from `IndirectBuffer` above, which still
+  /// holds the `VkDrawMeshTasksIndirectCommandEXT` array itself.
+  Buffer *CountBuffer = nullptr;
+  uint64_t CountBufferOffset = 0;
   /// `BindDescriptorSets`: the first bound set index, the sets themselves,
   /// and the flat dynamic-offset array consumed across them in ascending
   /// (set, binding) order (see `DescriptorSetLayout::dynamicOffsetCount`).
@@ -870,6 +882,47 @@ public:
     Cmd.FirstVertexOrIndex = FirstIndex;
     Cmd.VertexOffset = VertexOffset;
     Cmd.FirstInstance = FirstInstance;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap H6f) `vkCmdDrawMeshTasksEXT`: dispatches \p GroupCountX *
+  /// \p GroupCountY * \p GroupCountZ mesh (or, with a bound task stage,
+  /// task) workgroups directly, mirroring `vkCmdDispatch`'s own direct
+  /// group-count shape.
+  void drawMeshTasks(uint32_t GroupCountX, uint32_t GroupCountY,
+                     uint32_t GroupCountZ) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::DrawMeshTasks;
+    Cmd.Count = {GroupCountX, GroupCountY, GroupCountZ};
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap H6f) `vkCmdDrawMeshTasksIndirectEXT`: reads \p DrawCount
+  /// `VkDrawMeshTasksIndirectCommandEXT` structures from \p IndirectBuffer
+  /// at \p Offset with \p Stride, mirroring `drawIndirect`'s own shape.
+  void drawMeshTasksIndirect(Buffer *IndirectBuf, uint64_t Offset,
+                            uint32_t DrawCount, uint32_t Stride) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::DrawMeshTasksIndirect;
+    Cmd.IndirectBuffer = IndirectBuf;
+    Cmd.IndirectOffset = Offset;
+    Cmd.Count[0] = DrawCount;
+    Cmd.DstSize = Stride;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap H6f) `vkCmdDrawMeshTasksIndirectCountEXT`: like
+  /// `drawMeshTasksIndirect` above, but the actual draw count is itself
+  /// read from \p CountBuf at \p CountOffset (a single `uint32_t`,
+  /// clamped to \p MaxDrawCount) rather than supplied directly.
+  void drawMeshTasksIndirectCount(Buffer *IndirectBuf, uint64_t Offset,
+                                 Buffer *CountBuf, uint64_t CountOffset,
+                                 uint32_t MaxDrawCount, uint32_t Stride) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::DrawMeshTasksIndirectCount;
+    Cmd.IndirectBuffer = IndirectBuf;
+    Cmd.IndirectOffset = Offset;
+    Cmd.CountBuffer = CountBuf;
+    Cmd.CountBufferOffset = CountOffset;
+    Cmd.Count[0] = MaxDrawCount;
+    Cmd.DstSize = Stride;
     Commands.push_back(Cmd);
   }
 

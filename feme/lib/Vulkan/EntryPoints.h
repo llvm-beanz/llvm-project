@@ -734,6 +734,18 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(VkCommandBuffer commandBuffer,
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexedIndirect(
     VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
     uint32_t drawCount, uint32_t stride);
+// (roadmap H6f) `VK_EXT_mesh_shader`'s three draw commands.
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawMeshTasksEXT(VkCommandBuffer commandBuffer,
+                                                 uint32_t groupCountX,
+                                                 uint32_t groupCountY,
+                                                 uint32_t groupCountZ);
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawMeshTasksIndirectEXT(
+    VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
+    uint32_t drawCount, uint32_t stride);
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawMeshTasksIndirectCountEXT(
+    VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
+    VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount, uint32_t stride);
 
 // V3: secondary command buffers (see "Command Buffers").
 VKAPI_ATTR void VKAPI_CALL

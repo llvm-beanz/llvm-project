@@ -107,6 +107,16 @@ SUPPORTED_EXTENSIONS = (
     # the core name alone is not reachable through the loader for every
     # caller.
     "VK_KHR_map_memory2",
+    # (roadmap H6f) `vkCmdDrawMeshTasksEXT`/`vkCmdDrawMeshTasksIndirectEXT`/
+    # `vkCmdDrawMeshTasksIndirectCountEXT` (CommandBuffer.cpp) route through
+    # the same prepared-draw code `vkCmdDraw*` already uses
+    # (`runPreparedDraw`), closing the milestone alongside mesh pipeline
+    # creation (GraphicsPipeline.cpp) and this driver's own
+    # `VkPhysicalDeviceMeshShaderPropertiesEXT` limits (PhysicalDeviceInfo.
+    # cpp). `dEQP-VK.mesh_shader.*` enables this extension by name, the
+    # same reason every other post-`maintenance5` entry in this tuple is
+    # listed.
+    "VK_EXT_mesh_shader",
 )
 
 # First-parameter handle types that make a command dispatched at the
