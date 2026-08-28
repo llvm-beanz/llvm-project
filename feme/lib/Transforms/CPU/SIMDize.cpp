@@ -1857,6 +1857,7 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       case feme::StageOpKind::Demote:
       case feme::StageOpKind::StreamEmit:
       case feme::StageOpKind::StreamCut:
+      case feme::StageOpKind::TaskPayloadStore:
       case feme::StageOpKind::NumStageOpKinds:
         break;
       }

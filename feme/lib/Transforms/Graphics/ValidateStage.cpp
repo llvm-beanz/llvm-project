@@ -59,6 +59,12 @@ bool isStageOpLegalForStage(StageOpKind Kind, ShaderStage Stage) {
     // today (see its `run` below). Recorded now so this switch stays
     // exhaustive once the geometry stage is validated here too.
     return Stage == ShaderStage::Geometry;
+  case StageOpKind::TaskPayloadStore:
+    // (Roadmap H6i) Likewise not yet reachable: `ValidateStagePass` does
+    // not validate the amplification (task) stage yet, mirroring how
+    // `StreamEmit`/`StreamCut` above were unreachable until the geometry
+    // stage was validated.
+    return Stage == ShaderStage::Amplification;
   case StageOpKind::NumStageOpKinds:
     break;
   }
@@ -220,7 +226,10 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
   case StageOpKind::StreamEmit:
   case StageOpKind::StreamCut:
   case StageOpKind::SubpassLoad:
-    // No element/row/component operands to validate.
+  case StageOpKind::TaskPayloadStore:
+    // No element/row/component operands to validate: a task payload
+    // write (roadmap H6i) addresses raw memory by byte offset, not a
+    // `SignatureElement`, so it has nothing to look up here either.
     break;
   case StageOpKind::NumStageOpKinds:
     llvm_unreachable("not a real StageOpKind");
