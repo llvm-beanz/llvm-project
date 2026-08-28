@@ -11449,3 +11449,188 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   deqp-vk --deqp-caselist-file=draw_sample.txt \
     --deqp-log-filename=draw_h6g_b_a_i_a_i.qpa
 ```
+
+## Roadmap H6g-b-a-i-a-i-a: measured impact (`feme.cpu.masked.store.*` divergent-vector-value consumer gap in `SIMDize.cpp`)
+
+**Starting point.** H6g-b-a-i-a-i's own diagnostic re-run of the exact
+218-case `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket found a
+new dominant single cause: 148 cases hit `feme-cpu-simdize`'s "function
+'main' has a divergent vector value ... used outside a supported
+insertelement-chain/resource-store/extractelement/select/shufflevector/
+phi/elementwise pattern" rejection, up from that row's own baseline,
+once its direct-storage-buffer-handle fix let those shaders progress
+far enough to reach `SIMDizePass`'s own decomposition precondition
+check. This row's own ask was to reduce a real failing shader down to
+the exact divergent-vector use shape still outside
+`checkVectorDecompositionSupported`'s accepted patterns, and to decide
+whether the fix belonged in `SIMDize.cpp` itself or an earlier
+canonicalization/legalization pass.
+
+**Root cause.** Temporarily instrumenting `checkVectorDecompositionSupported`'s
+own rejection point to dump the offending instruction and its users,
+then re-running a single representative failing case
+(`dEQP-VK.mesh_shader.ext.api.draw.draw_count_0...no_task_shader`)
+directly against the real ICD, isolated the exact IR shape: a mesh
+entry point's own `gl_PrimitiveTriangleIndicesEXT[col] = uvec3(indices.x,
+indices.y, indices.z)` write. Unlike an ordinary per-vertex/per-primitive
+output element, `PrimitiveIndices` has no canonicalized `feme.stage.*`
+op of its own yet (documented in `MeshOutputWrapper.h`'s own file
+comment), so it never becomes a `feme.cpu.resource.*`/masked-output-store
+call the way other mesh outputs do -- it survives all the way to
+`feme::cpu::LinearizePass` as an ordinary LLVM `store` of a divergent
+`<3 x i32>` value, which `LinearizePass` masks into a
+`feme.cpu.masked.store.v3i32` call under divergent control flow exactly
+like any other non-resource, non-groupshared store.
+
+That call type was never taught to `checkVectorDecompositionSupported`
+as an accepted consumer of a decomposed divergent vector value (only a
+matched `feme.cpu.resource.*` store's stored-value operand was). Worse,
+`FunctionWidener::widenMaskedStore` itself was unconditionally calling
+the scalar-only `getWidened` helper on its stored-value operand; for a
+vector-typed, already-decomposed value (tracked only in
+`WidenedVectorComponents`, not `Widened`), that fell through to
+`getWidened`'s generic uniform-broadcast fallback and attempted to
+build an illegal `<W x <3 x i32>>` vector-of-vectors (`llvm.masked.scatter`
+has no vector-of-vector-element form to represent a per-lane vector
+value at all). `checkVectorDecompositionSupported`'s own strict,
+enumerate-every-accepted-shape design meant this reached a clean
+diagnostic rather than the illegal-type assertion the underlying
+`widenMaskedStore` bug would otherwise have caused -- confirming, once
+again, that the precondition checker is doing its job as designed. The
+fix therefore belongs in `SIMDize.cpp` itself, not an earlier pass:
+both the consumer-acceptance gap and the `widenMaskedStore` widening bug
+live there.
+
+**Fix.** `checkVectorDecompositionSupported` now accepts a matched
+`feme.cpu.masked.store.*` call's stored-value operand as a supported
+consumer of a decomposed divergent vector, the same way it already
+accepted a matched resource-store call's. `FunctionWidener::widenMaskedStore`
+now recognizes a vector-typed stored value, reassembles each lane's own
+`<3 x i32>` from the decomposed per-component wide values via
+`getVectorComponents` plus per-lane extractelement/insertelement
+(mirroring `widenResourceCall`'s equivalent per-lane reassembly), and
+writes each lane individually with a load-select-store idiom (mirroring
+`MeshOutputWrapper.cpp`'s own `lowerMeshOutputStore`) instead of
+`llvm.masked.scatter`. The scalar/pointer-typed value path is unchanged.
+
+**Tests.** New lit regression
+`feme/test/Transforms/CPU/simdize-masked-memop-vector-divergent.ll`
+(a divergent-control-flow IR reduction storing an insertelement-chain-built
+`<3 x i32>` to a non-groupshared pointer, verified through
+`feme-cpu-linearize,feme-cpu-simdize`) and new unit test
+`SIMDizeTest.DecomposesInsertElementChainIntoMaskedVectorStore`
+(asserting no nested vector types appear and exactly 4 real `<3 x i32>`
+stores are produced for a 4-lane wave).
+
+```
+ninja check-feme (assertions-enabled, ccache build):
+Total Discovered Tests: 2014
+  Unsupported:   59 (2.93%)
+  Passed     : 1955 (97.07%)
+```
+
+The discovered-test total rises from H6g-b-a-i-a-i's 2012 to 2014 by
+exactly the 2 new tests this row adds (1 lit + 1 unit); 0 regressions.
+
+**A real ICD re-run of the exact 218-case `vkRefUtil.cpp:37` bucket**
+(`bucket_refutil37_h6g_b_a_i_a.txt`, unchanged from the prior row) with
+a single combined stdout/stderr diagnostic log confirms the fix
+directly:
+
+```
+| Count | First emitted FeMe/MLIR diagnostic after this row's fix |
+|---|---|
+| 83 | `feme-cpu-wrap-mesh-output` metadata-missing rejection (up from 15; +68) |
+| 80 | `feme-cpu-simdize` divergent-vector-value rejection (down from 148; new dominant cause is a vector `fcmp`/`icmp` comparison consumer, tracked as H6g-b-a-i-a-i-b) |
+| 13 | `feme-cpu-linearize` unsupported-control-flow-shape rejection (unchanged) |
+| 11 | `spirv.MemoryBarrier` legalization failure (unchanged) |
+| 11 | no FeMe/MLIR diagnostic emitted before failure / `deqp-vk`'s own Linux-only device-fault-test abort path (unchanged) |
+| 7  | specialization constants unsupported (unchanged) |
+| 7  | rasterizer/depth-stencil state mismatch (unchanged) |
+| 5  | `Symbols not found` (already tracked as H6g-b-c, unchanged) |
+| 4  | `spirv.AtomicExchange` legalization failure (unchanged) |
+| 3  | color-blend-state mismatch (unchanged) |
+| 2  | `feme-cpu-wrap-fragment` metadata-missing rejection (unchanged) |
+| 1  | `spirv.EXT.EmitMeshTasks` legalization failure (unchanged) |
+| 1  | remaining sampled-image/sampler `UnsupportedOps` rejection (unchanged) |
+```
+
+That table totals the full 218 cases. Every bucket other than this
+row's own named cause and its direct hand-off target
+(`feme-cpu-wrap-mesh-output`) is bit-for-bit unchanged from
+H6g-b-a-i-a-i's own table, confirming a clean, isolated fix:
+
+```
+feme-cpu-simdize divergent-vector-value rejections: 148 -> 80
+feme-cpu-wrap-mesh-output rejections:                15 -> 83
+```
+
+**An unplanned but verified side effect: H6g-b-b also closes.** A full
+`dEQP-VK.mesh_shader.*` re-run (28044 leaf cases, same resume-loop
+methodology as every prior full-group row) completed in a single clean
+iteration with **0** cases needing blacklisting, compared to the 14
+cases (and 15 resume-loop iterations) H6g-b-b's own row required. Its
+crash (`FunctionWidener::widenMaskedStore` -> `getWidened` ->
+`ConstantVector::getSplat`'s `isValidElementType` assertion) is the
+exact same code path this row's fix touches: that assertion rejects a
+vector *element* type exactly the way it would reject a genuine
+struct/array element type, so H6g-b-b's "aggregate (non-scalar,
+non-pointer) element type" description was an imprecise characterization
+of the same vector-of-vector-element shape this row root-caused, not a
+distinct genuine-aggregate bug -- no aggregate-typed `StoredValue` was
+ever isolated in H6g-b-b's own investigation or in this row's. Each of
+H6g-b-b's own 14 previously-crashing cases (`barrier_in_task`,
+`group_memory_barrier_in_task_{array,float,struct,uint64,vector}`,
+`memory_barrier_shared_in_task_{array,float,struct,uint64,vector}`,
+`emit_in_control_flow`, `emit_in_control_flow_bad_emit_last`,
+`payload_not_accessed`) was confirmed individually landing in this same
+`vkRefUtil.cpp:37` bucket with an ordinary, non-crashing diagnostic
+instead (spot-checked `payload_not_accessed`: now cleanly hits
+`feme-cpu-wrap-mesh-output`, no crash, no `gdb` needed) -- the full-run
+bucket accordingly grows from 218 to **232** cases (218 + these 14),
+confirmed by diffing the two bucket case-name lists directly rather than
+assumed from the count alone. See H6g-b-b's own updated roadmap row.
+
+**`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample**
+stays byte-identical to every prior row's baseline:
+
+```
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+**0 regressions.**
+
+`FeMeCPUDesign.md` needs no update beyond a small clarifying note added
+to its "Phase 4: Widening" section documenting the newly-supported
+masked-store consumer shape (a completeness fix within the design's
+already-documented "divergent vectors become per-lane components"
+decomposition model, not a new widening model). `Vulkan14FeatureInventory.md`
+and `VulkanExtensionInventory.md` need no update: no advertised Vulkan
+feature bit or extension changed -- this is a pure CPU-target `SIMDize`
+widening completeness fix.
+
+**Milestone H6 does not close.** This row's own fix clears its named
+`feme-cpu-simdize` masked-store blocker and incidentally closes H6g-b-b,
+but the same rerun surfaces a new dominant blocker in its place -- a
+divergent vector value used as an `fcmp`/`icmp` comparison operand,
+tracked as new roadmap row H6g-b-a-i-a-i-b -- alongside the
+already-tracked H6g-b-c.
+
+**Reproducing this row.** Same ICD build and methodology as every prior
+mesh-shading row, run from `VK-GL-CTS/run` (relative shader-source
+resource paths require it):
+
+```shell
+cd /path/to/VK-GL-CTS/run
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  deqp-vk --deqp-caselist-file=bucket_refutil37_h6g_b_a_i_a.txt \
+    --deqp-log-filename=diag_h6g_b_a_i_a_i_a.qpa \
+    > diag_h6g_b_a_i_a_i_a_combined.log 2>&1
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-filename=draw_h6g_b_a_i_a_i_a.qpa
+python3 resume_run_h6g_b_a_i_a_i_a.py  # full dEQP-VK.mesh_shader.* group
+```

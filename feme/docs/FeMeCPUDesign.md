@@ -602,7 +602,16 @@ called out inline where it's discussed, and summarized here:
   real CTS run (see VulkanCTSReport.md's "Roadmap C3: measured impact").
   Any producer's components may be consumed by another link of an
   insertelement chain, a matched resource-store call's stored-value
-  operand, an `extractelement` (C3: a constant index reads a component
+  operand, a matched `feme.cpu.masked.store.*` call's stored-value
+  operand (H6g-b-a-i-a-i-a: `LinearizePass`'s masked form of an ordinary
+  `store` under divergent control flow -- reached, for example, by a mesh
+  entry point's `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)`, which
+  has no canonicalized `feme.stage.*` op of its own to become a resource
+  store instead; `FunctionWidener::widenMaskedStore` reassembles each
+  lane's vector from its decomposed components and writes it with a
+  load-select-store idiom rather than `llvm.masked.scatter`, which cannot
+  represent a per-lane vector value), an `extractelement` (C3: a constant
+  index reads a component
   directly; a non-constant one now chains `select`s across every component
   instead of being diagnosed -- "a shuffle or a dynamic index becomes
   selects across the components"), a vector-typed `select`'s true/false
