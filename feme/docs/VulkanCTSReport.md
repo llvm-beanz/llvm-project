@@ -9445,3 +9445,91 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6d.qpa
 ```
+
+## Roadmap H6e: measured impact (chained the mesh path into `Executor::executeDraws`)
+
+**Still 0/0/28044 on `dEQP-VK.mesh_shader.*`, and that is the correct,
+expected result** -- this row chains `Executor::executeDraws` itself
+(`GraphicsPipeline::setMeshStage`/`hasMeshStages` in `Pipeline.h`/`.cpp`,
+`MeshDrawCommand`/`PreparedDraw::MeshDraws` in `PreparedDraw.h`, and a new
+mesh/task dispatch-and-rasterize branch in `Executor.cpp` that reuses
+H6d's own `AmplificationDispatchQueue`/`Meshlet`/`assembleMeshlet` and
+feeds the assembled meshlets into the very same `RasterizePrimitives`
+tail vertex/geometry primitives already share, mirroring H5d's own
+geometry-chaining precedent) -- but nothing new is reachable from a real
+Vulkan mesh/task pipeline yet: no SPIR-V import path change, no
+`vkCreateGraphicsPipelines`/`PhysicalDeviceInfo.cpp` change, and no
+`VK_EXT_mesh_shader` advertisement. The new branch is exercised only by
+its own new `PipelineTest.cpp`/`ExecutorTest.cpp` unit tests, which
+directly hand-build `GraphicsPipeline`s with compiled mesh/task IR and
+call `executeDraws`, the same established strategy every prior mesh-path
+row (H6a-H6d) already uses.
+
+```
+Test run totals:
+  Passed:        0/28044 (0.0%)
+  Failed:        0/28044 (0.0%)
+  Not supported: 28044/28044 (100.0%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+change: `VK_EXT_mesh_shader` stays absent, and this row advertises
+nothing new. This row's own `AmplificationDispatchLimits` value is still
+a permissive hardcoded placeholder (`MaxGroupCount={65535,65535,65535}`,
+`MaxTotalGroupCount=4194304`), documented in `Executor.cpp` as pending
+H6f's own "advertise only what the implementation actually enforces"
+job. Likewise, every meshlet this row's chain assembles is legitimately
+empty at runtime: no compiled mesh/task entry point can yet write
+`FemeMeshArgs::ActualVertexCount`/`VertexOutputs`/`FemeTaskArgs::MeshGroupCount`
+from real IR (blocked on H6h's `TaskPayloadWorkgroupEXT` lowering and
+H6i's `CanonicalizeStagePass` stage-filter lift for `Mesh`), so this row's
+new `ExecutorTest.cpp` cases instead prove dispatch/`GroupID` correctness
+end-to-end (a bound UAV buffer written via groupshared+barrier,
+mirroring `CompiledStageTest.cpp`'s own precedent) while asserting the
+color attachment stays untouched -- the same "correctly wired but
+produces nothing yet" shape as this row's own
+`ExecutesDrawsAsNoOpWhenGeometryStageNeverEmits` (H5d) precedent.
+
+**Regression sample.** This row touches no Vulkan-facing file at all
+(`Executor.cpp`/`Pipeline.h`/`Pipeline.cpp`/`PreparedDraw.h` are all
+`feme::graphics`-internal, upstream of any real `vkCreateGraphicsPipelines`/
+`vkCmdDraw*` entry point); no existing class, function, or behavior
+observable from Vulkan changed. `dEQP-VK.draw.*`'s 1957-case
+`draw_sample.txt` sample, same file every prior row's own report used:
+
+```
+Before (H6d's own baseline):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical to H6d's own recorded totals. **0 regressions, 0 new
+passes.**
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1910/1969** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6d's own **1906/1965** baseline by exactly the 4 new
+tests this row adds: `PipelineTest.cpp`
+(`SetMeshStageRecordsTheMeshAndTaskStagesAndState`,
+`SetMeshStageAllowsAnOmittedTaskStage`) and `ExecutorTest.cpp`
+(`RunsEveryMeshWorkgroupDirectlyWhenNoTaskStageIsBoundAndRastersNothing`,
+`TaskStageDispatchDrivesWhichMeshWorkgroupsRunAndNoneRunUntilItRequestsAny`).
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                                # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6e.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6e.qpa
+```
