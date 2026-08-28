@@ -1470,4 +1470,33 @@ TEST(CanonicalizeStageTest, GeometryStageMapsSystemValues) {
   EXPECT_EQ(PrimitiveID.SystemValue, SignatureSystemValue::PrimitiveID);
 }
 
+/// (Roadmap H5e-d) A geometry entry compiled from an `emit`-count shape
+/// that ends its primitive without ever emitting on that stream/count
+/// combination (e.g. a CTS `dEQP-VK.geometry.emit.*_emit_0_end_1` case)
+/// calls only `EndPrimitive` -- already lowered to `feme.stage.stream.cut`
+/// by `SPIRVToLLVMPatterns` by the time this pass runs -- and neither
+/// reads nor writes a single stage-IO global. Confirm this still gets an
+/// (empty) `!feme.signature` attached: `feme::cpu::GeometryWrapperPass`
+/// (`GeometryWrapper.cpp`) hard-requires one on any geometry entry using a
+/// stage op at all, a stream cut included, and previously never got one
+/// here since the signature-building branch was scoped to entries with at
+/// least one stage-IO global.
+TEST(CanonicalizeStageTest, GeometryStreamCutOnlyEntryStillGetsASignature) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      call void @feme.stage.stream.cut(i32 0)
+      ret void
+    }
+    declare void @feme.stage.stream.cut(i32)
+    attributes #0 = { "feme.shader.stage"="geometry" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  EXPECT_TRUE(Sig->Elements.empty());
+}
+
 } // namespace

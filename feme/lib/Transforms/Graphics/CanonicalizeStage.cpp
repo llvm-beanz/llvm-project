@@ -1713,6 +1713,32 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     addElements(OutputGlobals);
     dxil::setEntrySignature(F, Sig);
     Changed = true;
+  } else if (Stage == ShaderStage::Geometry) {
+    // (Roadmap H5e-d) A geometry entry compiled from an `emit`-count shape
+    // that ends its primitive without ever emitting on that particular
+    // stream/count combination (e.g. a CTS `dEQP-VK.geometry.emit.*_emit_
+    // 0_end_1` case) calls only `EndPrimitive` -- lowered to a masked
+    // stream-cut op by `SPIRVToLLVMPatterns` -- and neither reads nor
+    // writes a single stage-IO global, so the discovery loop above finds
+    // both `InputGlobals`/`OutputGlobals` empty and the branch above never
+    // runs, leaving this entry with no `!feme.signature` metadata at all.
+    // `feme::cpu::GeometryWrapperPass` (`GeometryWrapper.cpp`) cannot
+    // tolerate that absence the way `loadInput`/`storeOutput` resolution
+    // elsewhere does: any geometry entry that uses so much as one stage op
+    // -- a stream cut included -- hard-requires an attached signature to
+    // look element IDs up in, so it errors out instead of quietly treating
+    // a missing one as empty. Attach an explicit empty signature here,
+    // scoped to `Geometry` only: unlike `Vertex`/`Fragment` (dispatched to
+    // both `canonicalizeDXILStage` and this function by
+    // `CanonicalizeStagePass::run`, so an empty-globals function reaching
+    // here could still be a DXIL-origin entry deliberately left
+    // signature-less, exactly the ambiguity roadmap H4g's own rejected fix
+    // ran into), a geometry entry is only ever routed through this
+    // (SPIR-V-only) function, so there is no DXIL-origin ambiguity to
+    // preserve.
+    Sig = dxil::getEntrySignature(F).value_or(EntrySignature{});
+    dxil::setEntrySignature(F, Sig);
+    Changed = true;
   }
 
   // (Roadmap H2e) An `Output`-direction global's own read-back load (see
