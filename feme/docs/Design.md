@@ -656,8 +656,12 @@ A *uniform* buffer's own sized (not runtime) array member needed a second,
 related fix (roadmap F12a). MLIR's own `spirv::ArrayType` conversion
 (`convertArrayType` in SPIRVToLLVM.cpp) is stricter than its runtime-array
 counterpart above: it refuses to convert an array at all unless its
-declared `ArrayStride` equals its element's own natural (LLVM ABI) size.
-That is always true for a std430 storage buffer array (the only kind the
+declared `ArrayStride` equals its element's *natural* Vulkan stride
+(originally, and until roadmap H6g-b-a-i fixed it, this was the element's
+raw/compact LLVM ABI size -- wrong for a 3- or 4-component vector, whose
+element's *base alignment* the stride must actually be a multiple of
+instead, per the Vulkan spec; see that row's own design/report entries).
+That was always true for a std430 storage buffer array (the only kind the
 fix above needed to cover), but not for a std140 *uniform* buffer array,
 whose every element is widened to a 16-byte-aligned stride regardless of
 its own size -- e.g. `layout(std140) uniform Input { uint data[16]; }`'s
@@ -692,6 +696,31 @@ buffer access and a thread index before any retargeting pass runs. FeMe still
 does not emit `llvm.spv.*` for anything that has a target-independent LLVM
 equivalent -- arithmetic, control flow, memory -- only for the shader
 concepts that do not.
+
+#### Deviation: a std430 array of 3-/4-component vectors needs its element's base alignment, not its compact size, for stride validation
+
+Roadmap H6g-b-a-i found a real, upstream MLIR bug in the very
+`convertArrayType` stride check the prior deviation above already
+described as "always true for a std430 storage buffer array": that
+description was itself wrong for an array of 3-component vectors (and,
+more generally, of anything whose Vulkan *base alignment* differs from its
+own compact size). `vector<3xf32>`'s compact size is 12 bytes, but its
+Vulkan base alignment -- and so the `ArrayStride` every conformant SPIR-V
+producer (glslang included) emits for an array of one -- is 16 bytes, the
+same as a 4-component vector's. `convertArrayType` validated the declared
+stride against the element's raw `SPIRVType::getSizeInBytes()` instead,
+spuriously rejecting every std430 storage buffer array of `vec3`s (a
+generic, common CTS vertex-attribute shape, not mesh-shading-specific) with
+`spirv.AccessChain` legalization failures.
+
+Fixed by adding `VulkanLayoutUtils::getNaturalArrayStride(Type)` (the
+element's size rounded up to its own alignment) and using it in place of
+the element's raw compact size, both in `convertArrayType`'s own check and
+in `VulkanLayoutUtils::decorateType(spirv::ArrayType, ...)`'s stride/total-
+size computation (an independent copy of the identical flaw, backing
+`SPIRVCompositeTypeLayoutPass` and `convertStructTypeWithOffset`'s own
+struct-identity check). See "Roadmap H6g-b-a-i: measured impact" in
+VulkanCTSReport.md for the full root-cause investigation and CTS impact.
 
 #### Deviation: control flow structurization is not always possible on import
 
