@@ -39114,3 +39114,145 @@ validation-logic corrections.
    new "Roadmap H5e-b: measured impact" section,
    `FeMeVulkanDesign.md`'s corrected restart-topology paragraph.
 4. This entry.
+
+# Milestone H5e-c: layered geometry-draw `vkQueueSubmit` failure bucket
+
+## Reading the row
+
+H5e-c's own text: 18 `dEQP-VK.geometry.layered.{1d_array,2d_array}.*`
+cases (`multiple_layers_per_invocation`, `render_to_one`,
+`render_to_default_layer`, `render_to_all`) fail at `vkQueueSubmit` with
+`VK_ERROR_INITIALIZATION_FAILED`, newly exposed by H5e-a. Root cause not
+yet isolated.
+
+## Investigation
+
+Built check-feme first to confirm the starting baseline matched
+H5e-b's own report exactly: 1867/1926. Then ran the targeted CTS case
+list directly (`deqp-vk --deqp-case="dEQP-VK.geometry.layered.1d_array.*"`)
+against the existing build/CTS checkout under `/home/dev/dev/VK-GL-CTS`
+(both already built) to see the failures live. Confirmed the shape:
+`multiple_layers_per_invocation`/`render_to_default_layer`/`render_to_one`
+fail with a bare `vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED`,
+`render_to_all` fails earlier at `vkCreateGraphicsPipelines` (a different,
+already-tracked bucket -- the 60-case `getelementptr`/output-array-storage
+one H5e-a left uncategorized), and `2d_array`'s three matching cases were
+*already* failing with `Fail (Rendered images are incorrect)`, not
+`vkQueueSubmit` -- so the row's own "1d_array,2d_array" framing was
+already stale by the time I looked, much like H5e-b's own experience with
+work that had landed after the row's text was written.
+
+Tried `FEME_VULKAN_LOG_CREATION_ERRORS=1` first, expecting it to name the
+real failure the way it did for H5e-b's `vkCreateGraphicsPipelines`
+cases. It printed nothing at all. Traced this to `Sync.cpp`'s
+`executeCommandBuffers` (shared by `vkQueueSubmit`/`vkQueueSubmit2`)
+calling a bare `consumeError` on the failed command buffer's
+`llvm::Error`, unlike `GraphicsPipeline.cpp`'s own creation-failure path
+which already routes through `feme::vulkan::logCreationFailure`. Fixed
+that first (small, mechanical, its own commit) and rebuilt just
+`libfeme_vulkan.so` (the `feme_vulkan` ninja target) to re-run the exact
+same CTS case quickly without paying for a full `ninja check-feme`
+rebuild every iteration -- this turned out to be the right call, since it
+let the *real* diagnostic answer the "what's actually wrong" question
+directly instead of by inference:
+
+```
+vkQueueSubmit: only a 2D or 2D-array image view may be a render target
+```
+
+That string traced straight to `RenderPass.cpp`'s `resolveAttachmentView`,
+which only ever accepted `Texture2D`/`Texture2DArray` view dimensions.
+Vulkan permits `VK_IMAGE_VIEW_TYPE_1D`/`_1D_ARRAY` (and, I confirmed by
+reading `vktGeometryLayeredRenderingTests.cpp` in the CTS checkout
+directly, `_CUBE`/`_CUBE_ARRAY` too) as a color-attachment view type;
+none of those had ever been accepted. Checked `Image.cpp`'s
+`mapImageDimension` to confirm a 1D or cube-compatible image never gets
+its own distinct "1D"/"cube" `Image`-level dimension at all -- only the
+*view's* `ImageDimension` (`TextureCube`/`TextureCubeArray`) records the
+addressing convention; the underlying `Image`'s own packed layout
+(`mipLayouts`, `SlicePitch`) is identical either way, and
+`resolveAttachmentView`'s existing layer-major addressing already handles
+it with zero further change. This made the fix a pure "extend the
+acceptance switch" one-liner-ish change, not a new addressing scheme.
+
+Before committing to "1d_array is the whole story", ran the full
+`dEQP-VK.geometry.*` group (not just the two named subgroups) to check
+whether any other subgroup hit the same rejection under a name the row's
+own text never mentioned. Found `cube.*`/`cube_array.*` did too -- exactly
+6 cases each, for 18 total either way, just a materially different 18
+than the row's own enumerated list (my own 6 `1d_array` + 6 `cube` + 6
+`cube_array`, versus the row's claimed 6 `1d_array` + 12 `2d_array`).
+Extended the fix to accept all four additional dimensions in one change
+rather than doing 1d_array now and cube/cube_array as a follow-up row,
+since they share the exact same root cause and the same one-line
+acceptance-switch shape -- splitting them would have been artificial
+granularity, not "small, independently testable" granularity.
+
+## Verification
+
+Re-ran the full `dEQP-VK.geometry.*` group after the fix: 0
+`vkQueueSubmit` failures remain anywhere in the group (down from 18);
+group totals unchanged (4 Pass / 163 Fail / 33 NotSupported, since every
+one of the 18 just moved to a different `Fail` reason, not out of
+`Failed`). All 18 individually confirmed to now land in
+`Fail (Rendered images are incorrect)` -- the same bucket H5e-e already
+tracks (previously scoped to 6 `2d_array` cases, now 24). This is exactly
+the "reclassified into an already-tracked bucket" outcome H5e-b's own
+report established as a legitimate way to close a row: the row's own ask
+(stop the silent `vkQueueSubmit` failure) is satisfied even though a
+different, already-owned bug remains for those same cases.
+
+`dEQP-VK.draw.*`'s 1957-case regression sample: byte-identical to every
+prior row's own baseline (12/155/1790), 0 regressions -- expected, since
+no non-geometry draw in that sample uses a 1D/cube(-array) render target.
+
+`ninja check-feme` (assertions-enabled, ccache build): 1870/1929, up from
+H5e-b's own 1867/1926 by exactly the 3 new unit tests this row adds, 0
+failures either before or after.
+
+## Test coverage added
+
+`RenderPassTest.cpp` gains three tests calling `resolveAttachmentView`
+directly (it's already exported via `RenderPass.h`, so no new test-only
+API surface was needed): `ResolveAttachmentViewAcceptsOneDArrayView`,
+`ResolveAttachmentViewAcceptsCubeArrayView` (using
+`VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT` on a real 2D image, exactly the
+shape a real cube-array render target uses), and
+`ResolveAttachmentViewRejects3DView` -- a regression guard confirming the
+acceptance stayed additive (3D is still rejected, since Vulkan itself
+never permits a 3D-typed view as a render target).
+
+## Docs
+
+`Roadmap.md`'s H5e-c row is struck through with the corrected root cause
+and scope, explicit about the "1d_array,2d_array" framing being wrong
+(the `2d_array` cases it named never actually hit `vkQueueSubmit`; the
+`cube`/`cube_array` cases it never named did). `FeMeVulkanDesign.md`
+gains a new status note in "Render passes and dynamic rendering" (the
+same section H2's own `resolveAttachmentView`/layered-rendering work
+lives in) and `FeMeGraphicsDesign.md` gains a paragraph in the
+geometry-stage section noting the gap was never geometry-specific despite
+being found via a geometry-stage `gl_Layer` write. `VulkanCTSReport.md`
+gets a new "Roadmap H5e-c: measured impact" section with the full
+before/after breakdown, following H5e/H5e-a/H5e-b's own established
+structure. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+needed no changes: this row touches neither an advertised feature bit nor
+an extension, only an existing core-1.0 render-target acceptance check
+that was simply too narrow.
+
+## Commits
+
+1. `Sync.cpp`'s `executeCommandBuffers` routed through
+   `logCreationFailure` instead of a bare `consumeError`, so
+   `FEME_VULKAN_LOG_CREATION_ERRORS` can actually surface a
+   `vkQueueSubmit`-time execution failure the same way it already does
+   for a `vkCreateGraphicsPipelines`-time one.
+2. `RenderPass.cpp`'s `resolveAttachmentView` accepting
+   `Texture1D`/`Texture1DArray`/`TextureCube`/`TextureCubeArray` view
+   dimensions alongside the already-accepted `Texture2D`/
+   `Texture2DArray`, plus the doc-comment update in `RenderPass.h` and
+   the three new `RenderPassTest.cpp` unit tests.
+3. Docs: `Roadmap.md`'s H5e-c row struck through, `VulkanCTSReport.md`'s
+   new "Roadmap H5e-c: measured impact" section, `FeMeVulkanDesign.md`'s
+   new status note, `FeMeGraphicsDesign.md`'s new paragraph.
+4. This entry.
