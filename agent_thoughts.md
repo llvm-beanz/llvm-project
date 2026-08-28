@@ -41749,3 +41749,114 @@ extension, only a robustness fix to existing CPU-side canonicalization
   `H6g-b`'s own re-run (confirming the 235+33-case content-compilation
   bucket clears) is a separate milestone or has now become unblocked,
   neither of which the current request asked me to touch.
+
+# Closing out H6g-b, and why milestone H6 does not close
+
+Task: "complete H6g-b and close out milestone H6". H6g-b's own text
+asked to re-run `dEQP-VK.mesh_shader.*` and confirm the 235
+`vkCreateGraphicsPipelines`/33 `vkPipelineConstructionUtil.cpp` ->
+`VK_ERROR_INITIALIZATION_FAILED` bucket clears, now that
+`H6c-a-a-i`/`H6c-a-a-ii`/`H6c-a-a-iii` have all landed.
+
+Built `check-feme` (assertions-enabled, ccache) first to confirm the
+starting baseline matched H6c-a-a-iii's own recorded 2009/2009,
+1950-passing state -- it did, no drift.
+
+Then ran the full `dEQP-VK.mesh_shader.*` group (28044 cases, the same
+resume-loop methodology every prior mesh-shading row established, from
+`VK-GL-CTS/run` so relative shader-resource paths resolve) before
+touching any code, to get a clean starting picture: `Fail` 337,
+`NotSupported` 27706, `Pass` 1, 0 crashes -- byte-identical to
+H6c-a-a-iii's own closing numbers, as expected.
+
+Re-ran just the named 235-case `vkRefUtil.cpp:37` bucket with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` and found the real diagnostic:
+`vkCreateGraphicsPipelines: a mesh pipeline may not declare
+pVertexInputState`. Traced this to `GraphicsPipeline.cpp`'s own
+mesh-stage carve-out, which rejected any non-null
+`pVertexInputState`/`pInputAssemblyState` on a mesh pipeline outright.
+Checked the actual Vulkan spec text
+(`VK-GL-CTS/external/vulkan-docs/src/chapters/pipelines.adoc`): both
+members are only required to be **ignored** when the pipeline includes
+a mesh shader stage, not null. Confirmed `dEQP-VK.mesh_shader.*` itself
+always hits this, because every one of its pipelines is built through
+the shared, non-mesh-aware `vkObjUtil.cpp` `makeGraphicsPipeline`
+helper, which unconditionally sets a non-null default
+`pVertexInputState`/`pInputAssemblyState` with no mesh-aware carve-out
+of its own (confirmed by reading that helper directly) -- so this was
+a real, previously-unreported `feme` bug, not a CTS-side oddity.
+
+Fixed by simply not reading either pointer for a mesh pipeline, exactly
+mirroring the spec's own "ignored" wording, rather than checking and
+rejecting a non-null value. Found the existing unit tests
+(`RejectsMeshPipelineWithVertexInputState`/
+`RejectsMeshPipelineWithInputAssemblyState`) directly encoded the wrong,
+overly-strict behavior; replaced both with `Accepts*` counterparts
+expecting `VK_SUCCESS` and a real, destroyed pipeline handle, and
+updated `makeMeshCreateInfo`'s own stale comment.
+
+Rebuilt and re-ran `check-feme`: 2009/2009 discovered, 1950 passing,
+unchanged from H6c-a-a-iii's own baseline (2 tests replaced, not
+added, so no net count change) -- 0 unexpected failures.
+
+Re-ran the full `dEQP-VK.mesh_shader.*` group again after the fix:
+`Fail` 334, `NotSupported` 27706, `Pass` 1, but now **3 crashes**
+(a new bucket the fix itself exposed, not present before). This meant
+the 235/33-case bucket did *not* fully clear -- rather than declaring
+victory on the strength of the one real bug found and fixed, dug
+further to characterize what's left, since the task explicitly asked
+to "confirm the failures clear", not just "fix a contributing bug":
+
+- Re-ran the 232 still-failing `vkRefUtil.cpp:37` cases as a batch with
+  diagnostics enabled: 202 of 232 (87%) now fail with `error: unhandled
+  Decoration : 'PerPrimitiveEXT'` -- an MLIR SPIR-V dialect
+  deserialization gap, rejecting the module before `feme` even sees it.
+  This is the single dominant remaining cause. The other 30 spread
+  across roughly ten distinct, smaller gaps (unrelated stage-wrapping
+  diagnostics, unimplemented rasterizer state combinations,
+  unconverted `spirv.AtomicExchange`/`spirv.All` ops, etc.) -- clearly
+  out of this row's own scope to chase individually.
+- Used `gdb` (catching `SIGABRT` specifically, since the crash was
+  buried under an assertion inside a worker thread that a plain
+  `SIGSEGV`-catching run kept losing) to get a real backtrace for the
+  3 new crashes (`emit_in_control_flow`,
+  `emit_in_control_flow_bad_emit_last`, `payload_not_accessed`): all
+  three hit the identical `FunctionWidener::widenMaskedStore ->
+  getWidened -> ConstantVector::getSplat -> FixedVectorType::get`
+  assertion, on a masked store whose stored value has an aggregate
+  element type `getWidened`'s scalar/pointer-only assumption never
+  accounted for.
+- Checked the remaining 33 `vkPipelineConstructionUtil.cpp:176` cases
+  (the exact set H6c-a-a-ii/H6c-a-a-iii's own reports already named):
+  a representative case (`cull_primitives`) now fails with `JIT
+  session error: Symbols not found: [ spirv_var_16 ]` -- confirming
+  H6c-a-a-iii's own fix correctly left an unresolvable
+  arrayed-builtin-block access unrewritten (rather than asserting), but
+  nothing downstream ever diagnoses that left-alone access before it
+  reaches the JIT as a genuinely undefined symbol, because
+  `ValidateStagePass::run` still does not validate `ShaderStage::Mesh`
+  at all -- exactly the "not yet reachable" gap H6c-a-a-iii's own report
+  already flagged as a future risk, now concretely reached.
+
+Also re-ran `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression
+sample (from `VK-GL-CTS/run`, after first hitting the same spurious
+`ResourceError`-from-wrong-working-directory quirk noted in the
+H6c-a-a-iii entry above and re-running from the right place instead of
+chasing it): byte-identical to every prior row's own recorded totals
+(14/153/1790), 0 regressions.
+
+Given this, updated the roadmap honestly: `H6g-b` is struck through
+(its own literal ask -- re-run and investigate -- is done, and it found
+and fixed a real bug along the way) but the milestone `H6` row itself
+is **not** struck through, since the group's own re-run replaced one
+known blocker with three newly-isolated ones. Added `H6g-b-a` (SPIR-V
+`PerPrimitiveEXT` import gap), `H6g-b-b` (`FunctionWidener` aggregate
+splat assertion), and `H6g-b-c` (unresolved arrayed-builtin access
+reaching the JIT undiagnosed) as new roadmap rows, all still open,
+mirroring the letter-suffix convention the task description itself
+asked for when a milestone can't actually be closed.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+no change needed (`VK_EXT_mesh_shader` was already `Advertised` since
+H6f; this fix is pure pipeline-validation robustness, no feature bit
+or extension surface changed).
