@@ -33,17 +33,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete and close out milestone H6f?
+Can you complete and close out milestone H6h?
 
-> **`vkCreateGraphicsPipelines` accepts a mesh pipeline** (task stage optional,
-> mesh stage required, no vertex-input/input-assembly state),
-> **`vkCmdDrawMeshTasksEXT`/`vkCmdDrawMeshTasksIndirectEXT`/`vkCmdDrawMeshTasksIndirectCountEXT`
-> route through the same prepared-draw code `vkCmdDraw*` already uses**, and
-> `PhysicalDeviceInfo.cpp` advertises `VK_EXT_mesh_shader`,
-> `taskShader`/`meshShader`, and every `VkPhysicalDeviceMeshShaderPropertiesEXT`
-> limit at this implementation's own honest, bounded ceilings (mirroring
-> H4b/H5e's own "advertise only what the implementation actually enforces"
-> discipline)
-
-The last agent did not update the roadmap or leave thoughts about its progress
-in the agent_thoughts file.
+> **Give `TaskPayloadWorkgroupEXT` an address-space convention and a
+> global-variable import pattern**: LLVM's own SPIR-V backend
+> (`storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h`) has no
+> mapping at all for `TaskPayloadWorkgroupEXT` (SPIR-V enum 5402) -- unlike
+> `Input`(7)/`Output`(8)/`Workgroup`(3)/`PushConstant`(13), which FeMe's own
+> `StageIOGlobalVariablePattern`/`WorkgroupGlobalVariablePattern`/`PushConstantGlobalVariablePattern`
+> (`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`) already reuse from
+> that fixed mapping -- so a task entry's payload variable cannot be imported as
+> an LLVM global at all today (found during H6b's own investigation). Needs a
+> new address space (any value FeMe's own conversion layer does not otherwise
+> use) and a `TaskPayloadGlobalVariablePattern` mirroring the two precedents
+> above, before `CanonicalizeStage.cpp` has anything to canonicalize a payload
+> write into
