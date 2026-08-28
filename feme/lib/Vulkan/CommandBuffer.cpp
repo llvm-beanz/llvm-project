@@ -980,13 +980,32 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
   return Error::success();
 }
 
+/// The mask `applyClear` should clear when this render-pass instance is
+/// *not* multiview (`RenderTargetBinding::ViewMask == 0`): every layer
+/// `Binding.Layers` covers, not just the single implicit "view 0" a
+/// multiview-shaped mask of `1u` would otherwise imply. A plain layered
+/// render target (no multiview) still lets a geometry stage route each
+/// primitive to any layer via `gl_Layer` (roadmap H5e-e), and Vulkan
+/// defines `VK_ATTACHMENT_LOAD_OP_CLEAR` as clearing the whole attachment
+/// view up front regardless of which layers a draw goes on to touch --
+/// leaving every layer past the first uninitialized (as `1u` alone did)
+/// is what let `dEQP-VK.geometry.layered.*`'s "expecting empty image"
+/// layers observe leftover garbage instead. Saturates at 32 layers, the
+/// same width `RenderTargetBinding::ViewMask` itself is limited to.
+uint32_t fullLayerMask(uint32_t Layers) {
+  if (Layers >= 32)
+    return ~0u;
+  return (1u << Layers) - 1;
+}
+
 /// Applies every attachment's load op for the current subpass -- once when
 /// a render pass instance begins, and (roadmap H2i) again at every
 /// `vkCmdNextSubpass`, so a later subpass's own new views of an
 /// already-referenced attachment still get their own share of the clear.
 Error applyLoadOps(const RenderTargetBinding &Binding,
                    llvm::DenseMap<uintptr_t, uint32_t> &AlreadyLoaded) {
-  uint32_t ViewMask = Binding.ViewMask ? Binding.ViewMask : 1u;
+  uint32_t ViewMask =
+      Binding.ViewMask ? Binding.ViewMask : fullLayerMask(Binding.Layers);
   for (const RenderTargetView &View : Binding.Colors)
     if (Error E = applyClear(View, View.SampleCount, Binding.RenderArea,
                              AttachmentKind::Color, ViewMask, AlreadyLoaded))
@@ -1453,37 +1472,63 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   // their own view's count, not every slot sharing the sum across all
   // views -- see `QueryPool.h`'s file comment and
   // `ActiveOcclusionQuery`'s own comment above.
-  uint32_t ViewMask = Gfx.Binding.ViewMask ? Gfx.Binding.ViewMask : 1u;
+  // (Roadmap H5e-e) Only a genuine multiview instance (`ViewMask != 0`)
+  // pre-slices each attachment down to one view's own single array layer
+  // before the draw runs: multiview's `gl_ViewIndex` maps each such view
+  // directly onto that same-numbered layer with no shader-side `gl_Layer`
+  // write needed (see the comment above). A plain layered render target
+  // (no multiview at all, `ViewMask == 0`) instead leaves every attachment
+  // at its full, unsliced layer range, exactly as `Executor.cpp`'s own
+  // per-primitive `gl_Layer`/`SV_RenderTargetArrayIndex` routing
+  // (`resolvePrimitiveState`/`sliceAttachmentLayer`) already expects to
+  // find it: pre-slicing to "view 0" here regardless left a geometry
+  // stage's `gl_Layer` output with only ever a single, already-sliced
+  // layer to address (`getDrawLayerCount` saw `ArrayLayers == 1` no
+  // matter how many layers the attachment view actually covered),
+  // silently discarding every primitive routed to any layer but the
+  // first -- the root cause behind `dEQP-VK.geometry.layered.*`'s
+  // `render_to_one`/`multiple_layers_per_invocation` "rendered images are
+  // incorrect" bucket.
+  bool IsMultiview = Gfx.Binding.ViewMask != 0;
+  uint32_t ViewMask = IsMultiview ? Gfx.Binding.ViewMask : 1u;
   uint32_t EnumeratedViewIndex = 0;
   for (uint32_t ViewIndex = 0; ViewMask != 0; ++ViewIndex, ViewMask >>= 1) {
     if ((ViewMask & 1u) == 0)
       continue;
 
     std::vector<feme::graphics::AttachmentView> ViewAttachments;
-    ViewAttachments.reserve(Attachments.size());
-    for (const feme::graphics::AttachmentView &A : Attachments)
-      ViewAttachments.push_back(sliceAttachmentLayer(A, ViewIndex));
     std::vector<feme::graphics::AttachmentView> ViewSubpassInputs;
-    ViewSubpassInputs.reserve(SubpassInputs.size());
-    for (const feme::graphics::AttachmentView &A : SubpassInputs)
-      ViewSubpassInputs.push_back(sliceAttachmentLayer(A, ViewIndex));
-
-    // (Roadmap H2) Resolve attachments and the depth/stencil attachment are
-    // multiview-array images too, exactly like the color attachments sliced
-    // into `ViewAttachments` above; slicing only `Attachments` and leaving
-    // `ResolveAttachments`/`DepthStencil` pointed at every view's own shared,
-    // unsliced (layer 0) image regresses every case that reads depth/stencil
-    // or a resolve target back per view (e.g. multiview occlusion queries,
-    // which read `DepthStencil` for the early depth/stencil test).
     std::vector<feme::graphics::AttachmentView> ViewResolveAttachments;
-    ViewResolveAttachments.reserve(ResolveAttachments.size());
-    for (const feme::graphics::AttachmentView &A : ResolveAttachments)
-      ViewResolveAttachments.push_back(sliceAttachmentLayer(A, ViewIndex));
     feme::graphics::DepthStencilAttachment ViewDepthStencil;
-    ViewDepthStencil.Depth =
-        sliceAttachmentLayer(DepthStencil.Depth, ViewIndex);
-    ViewDepthStencil.Stencil =
-        sliceAttachmentLayer(DepthStencil.Stencil, ViewIndex);
+    if (IsMultiview) {
+      ViewAttachments.reserve(Attachments.size());
+      for (const feme::graphics::AttachmentView &A : Attachments)
+        ViewAttachments.push_back(sliceAttachmentLayer(A, ViewIndex));
+      ViewSubpassInputs.reserve(SubpassInputs.size());
+      for (const feme::graphics::AttachmentView &A : SubpassInputs)
+        ViewSubpassInputs.push_back(sliceAttachmentLayer(A, ViewIndex));
+
+      // (Roadmap H2) Resolve attachments and the depth/stencil attachment
+      // are multiview-array images too, exactly like the color attachments
+      // sliced into `ViewAttachments` above; slicing only `Attachments`
+      // and leaving `ResolveAttachments`/`DepthStencil` pointed at every
+      // view's own shared, unsliced (layer 0) image regresses every case
+      // that reads depth/stencil or a resolve target back per view (e.g.
+      // multiview occlusion queries, which read `DepthStencil` for the
+      // early depth/stencil test).
+      ViewResolveAttachments.reserve(ResolveAttachments.size());
+      for (const feme::graphics::AttachmentView &A : ResolveAttachments)
+        ViewResolveAttachments.push_back(sliceAttachmentLayer(A, ViewIndex));
+      ViewDepthStencil.Depth =
+          sliceAttachmentLayer(DepthStencil.Depth, ViewIndex);
+      ViewDepthStencil.Stencil =
+          sliceAttachmentLayer(DepthStencil.Stencil, ViewIndex);
+    } else {
+      ViewAttachments = Attachments;
+      ViewSubpassInputs = SubpassInputs;
+      ViewResolveAttachments = ResolveAttachments;
+      ViewDepthStencil = DepthStencil;
+    }
 
     std::vector<feme::cpu::FemeImageDescriptor> SubpassInputHeap;
     std::vector<feme::cpu::FemeImageSubresourceLayout> SubpassInputLayouts;

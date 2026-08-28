@@ -4809,6 +4809,268 @@ TEST_F(DrawTest, MultiviewRendersDifferentColorPerViewIntoItsOwnLayer) {
   vkFreeMemory(Device, LayeredMemory, nullptr);
 }
 
+/// (Roadmap H5e-e) A vertex stage with an entirely empty interface --
+/// mirrors `EmptyGeometrySource`/tessellation's own `void main(void) {}`
+/// shape above -- legal here because the paired geometry stage
+/// (`LayerOneLayeredGeometrySource`, below) neither reads any of
+/// `gl_in[]`'s per-vertex outputs nor needs a per-vertex `Position` input:
+/// it emits its own three hardcoded, oversized-triangle vertices outright.
+constexpr llvm::StringLiteral EmptyVertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main
+}
+)mlir";
+
+/// (Roadmap H5e-e) A real, `EmitVertex`/`EndPrimitive`-driven geometry
+/// stage -- unlike `GeometrySource`/`EmptyGeometrySource`
+/// (`GraphicsPipelineTest.cpp`), which only exercise pipeline-creation
+/// acceptance and never actually run -- that writes a constant
+/// `gl_Layer = 1` once, then emits one oversized CCW triangle covering
+/// the whole viewport into that layer via three `spirv.EmitVertex`s and a
+/// closing `spirv.EndPrimitive`. Pairs with a plain (non-multiview,
+/// `viewMask == 0`) two-layer render pass: this is the regression shape
+/// for `dEQP-VK.geometry.layered.*.render_to_one`/
+/// `multiple_layers_per_invocation`, where a geometry stage's own
+/// `gl_Layer` output -- not multiview's `gl_ViewIndex` -- is what must
+/// route the primitive to a non-zero attachment array layer.
+constexpr llvm::StringLiteral LayerOneLayeredGeometrySource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Geometry], []> {
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @out_layer built_in("Layer") : !spirv.ptr<i32, Output>
+  spirv.func @main() -> () "None" {
+    %layer = spirv.Constant 1 : i32
+    %layerp = spirv.mlir.addressof @out_layer : !spirv.ptr<i32, Output>
+    spirv.Store "Output" %layerp, %layer : i32
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+
+    %p0 = spirv.CompositeConstruct %neg1, %neg1, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    spirv.Store "Output" %posp, %p0 : vector<4xf32>
+    spirv.EmitVertex
+
+    %p1 = spirv.CompositeConstruct %three, %neg1, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    spirv.Store "Output" %posp, %p1 : vector<4xf32>
+    spirv.EmitVertex
+
+    %p2 = spirv.CompositeConstruct %neg1, %three, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    spirv.Store "Output" %posp, %p2 : vector<4xf32>
+    spirv.EmitVertex
+    spirv.EndPrimitive
+    spirv.Return
+  }
+  spirv.EntryPoint "Geometry" @main, @out_pos, @out_layer
+  spirv.ExecutionMode @main "Triangles"
+  spirv.ExecutionMode @main "OutputTriangleStrip"
+  spirv.ExecutionMode @main "OutputVertices", 3
+}
+)mlir";
+
+/// (Roadmap H5e-e) A geometry stage's own `gl_Layer` output routes a draw
+/// into a non-zero attachment array layer of a plain (non-multiview)
+/// layered render target -- exactly the shape
+/// `dEQP-VK.geometry.layered.*.render_to_one` exercises and that rendered
+/// nothing at all into any layer before this fix: `CommandBuffer.cpp`'s
+/// `runDraw` used to unconditionally slice every attachment down to a
+/// single array layer (layer 0) once per "view" even when there was no
+/// real multiview (`viewMask == 0`, one always-`ViewIndex == 0` loop
+/// iteration) -- destroying every layer but 0 before `Executor.cpp`'s own
+/// per-primitive `gl_Layer` routing (`resolveRenderTargetArrayLayer`) ever
+/// got a chance to see them, so a primitive routed to any layer but 0 was
+/// silently discarded as out of range. This test's target layer (1) is
+/// also left an untouched `LOAD_OP_CLEAR` layer in every other case in
+/// this file, so it doubles as a regression test for the *other* half of
+/// this fix: clearing a plain layered attachment must clear every one of
+/// its layers up front (`fullLayerMask`), not just layer 0 -- layer 0
+/// here must read back as cleared black, not left as whatever
+/// uninitialized bytes its backing memory happened to start with.
+TEST_F(DrawTest, GeometryStageLayerOutputRoutesToANonMultiviewLayer) {
+  constexpr uint32_t LayerCount = 2;
+
+  VkImage LayeredImage = VK_NULL_HANDLE;
+  VkDeviceMemory LayeredMemory = VK_NULL_HANDLE;
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {Extent, Extent, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = LayerCount;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &LayeredImage),
+            VK_SUCCESS);
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, LayeredImage, &Reqs);
+  VkMemoryAllocateInfo MemAllocInfo{};
+  MemAllocInfo.allocationSize = Reqs.size;
+  ASSERT_EQ(vkAllocateMemory(Device, &MemAllocInfo, nullptr, &LayeredMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, LayeredImage, LayeredMemory, 0),
+            VK_SUCCESS);
+
+  VkImageView LayeredView = VK_NULL_HANDLE;
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = LayeredImage;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.layerCount = LayerCount;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &LayeredView),
+            VK_SUCCESS);
+
+  // A plain (no `VkRenderPassMultiviewCreateInfo`) single-subpass render
+  // pass: `viewMask == 0` throughout.
+  VkAttachmentDescription Attachment{};
+  Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 1;
+  PassInfo.pAttachments = &Attachment;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LayeredPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LayeredPass),
+            VK_SUCCESS);
+
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LayeredPass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.pAttachments = &LayeredView;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = LayerCount;
+  VkFramebuffer LayeredFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LayeredFb),
+            VK_SUCCESS);
+
+  VkShaderModule VertexModule = createModule(EmptyVertexSource);
+  VkShaderModule GeometryModule = createModule(LayerOneLayeredGeometrySource);
+  VkShaderModule FragmentModule = createModule(RedFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[3]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = VertexModule;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+  Stages[1].module = GeometryModule;
+  Stages[1].pName = "main";
+  Stages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[2].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[2].module = FragmentModule;
+  Stages[2].pName = "main";
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo PipeInfo{};
+  PipeInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  PipeInfo.stageCount = 3;
+  PipeInfo.pStages = Stages;
+  PipeInfo.pVertexInputState = &VertexInput;
+  PipeInfo.pInputAssemblyState = &InputAssembly;
+  PipeInfo.pViewportState = &ViewportState;
+  PipeInfo.pRasterizationState = &Raster;
+  PipeInfo.pMultisampleState = &Multisample;
+  PipeInfo.pColorBlendState = &Blend;
+  PipeInfo.layout = Layout;
+  PipeInfo.renderPass = LayeredPass;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &PipeInfo,
+                                      nullptr, &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValue{};
+  ClearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LayeredPass;
+  PassBegin.framebuffer = LayeredFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 1;
+  PassBegin.pClearValues = &ClearValue;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Layer 0 was never the geometry stage's `gl_Layer` target: it must
+  // read back as `LOAD_OP_CLEAR`'s own solid black, not garbage. Layer 1
+  // is the geometry stage's actual `gl_Layer == 1` target: it must read
+  // back as the fragment stage's solid red.
+  const auto *Data =
+      static_cast<const uint8_t *>(fromHandle<Image>(LayeredImage)->data());
+  size_t LayerSizeBytes = (size_t)Extent * Extent * 4;
+  const uint8_t *Layer0 = Data;
+  const uint8_t *Layer1 = Data + LayerSizeBytes;
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      size_t Off = ((size_t)Y * Extent + X) * 4;
+      EXPECT_EQ(Layer0[Off + 0], 0x00)
+          << "layer 0 (untouched) at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Layer0[Off + 1], 0x00)
+          << "layer 0 (untouched) at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Layer0[Off + 2], 0x00)
+          << "layer 0 (untouched) at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Layer0[Off + 3], 0xFF)
+          << "layer 0 (untouched) at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Layer1[Off + 0], 0xFF)
+          << "layer 1 (gl_Layer target) at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Layer1[Off + 1], 0x00)
+          << "layer 1 (gl_Layer target) at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Layer1[Off + 2], 0x00)
+          << "layer 1 (gl_Layer target) at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Layer1[Off + 3], 0xFF)
+          << "layer 1 (gl_Layer target) at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, FragmentModule, nullptr);
+  vkDestroyShaderModule(Device, GeometryModule, nullptr);
+  vkDestroyShaderModule(Device, VertexModule, nullptr);
+  vkDestroyFramebuffer(Device, LayeredFb, nullptr);
+  vkDestroyRenderPass(Device, LayeredPass, nullptr);
+  vkDestroyImageView(Device, LayeredView, nullptr);
+  vkDestroyImage(Device, LayeredImage, nullptr);
+  vkFreeMemory(Device, LayeredMemory, nullptr);
+}
+
 /// (Roadmap H2h) A classic `VkRenderPass`'s later subpass reading an
 /// *earlier* subpass's own color output back through a `subpassInput`,
 /// under multiview -- exactly the shape `dEQP-VK.multiview.
