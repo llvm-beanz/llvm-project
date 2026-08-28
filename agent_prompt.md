@@ -33,24 +33,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete and close out milestone H6g?
+Can you complete and close out milestone H6c-a-a?
 
-> **Triage and close the `dEQP-VK.mesh_shader.*` buckets H6f's own measured run
-> found** (mirroring H5e-a through H5e-e's own post-landing triage rows): 235
-> `vkCreateGraphicsPipelines` -> `VK_ERROR_INITIALIZATION_FAILED` (real
-> mesh/task shader *content* compilation, blocked on H6h's
-> `TaskPayloadWorkgroupEXT` lowering and H6i's `CanonicalizeStagePass`
-> mesh-stage support -- not this row's own scope, tracked by those two rows
-> directly), 68 `vkCreateRenderPass`/1
-> `vkGetPhysicalDeviceImageFormatProperties` -> `VK_ERROR_FORMAT_NOT_SUPPORTED`
-> (an unrelated render-pass/image format gap, out of mesh shading's own scope
-> entirely), and 33 `vkPipelineConstructionUtil.cpp` ->
-> `VK_ERROR_INITIALIZATION_FAILED` (graphics-pipeline-library variants of the
-> same content-compilation cases as the first bucket, same blocker). Since every
-> one of these four buckets is already tracked by an existing row (H6h/H6i) or
-> is out of mesh shading's own scope (render-pass/image format support, a
-> pre-existing, unrelated gap), this row's own remaining job is narrow: once
-> H6h/H6i land and real mesh/task content can compile, re-run
-> `dEQP-VK.mesh_shader.*` and confirm the 235+33 content-compilation failures
-> clear, then decide whether the format-related 68+1 need their own new roadmap
-> row or stay a documented, permanent gap
+> **Wire `MeshOutputBuilder` into a mesh entry's canonicalized
+> `feme.stage.output.store` `Vertex`-operand writes (H6b)** reaching
+> `EntryWrapperPass`/`CompiledStage::invokeMesh`'s reused path, once
+> `CanonicalizeStagePass::run`'s stage filter accepts `ShaderStage::Mesh` (H6i)
+> and a mesh workgroup's assembled meshlet (H6d) gives the wiring somewhere real
+> to write into -- does not need H6h, since mesh output never touches
+> `TaskPayloadWorkgroupEXT`
