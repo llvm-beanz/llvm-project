@@ -53,7 +53,7 @@ void GraphicsPipeline::setMeshStage(
     std::shared_ptr<cpu::CompiledStage> TaskStage,
     std::shared_ptr<cpu::CompiledStage> MeshStage, MeshState State,
     AmplificationDispatchLimits MeshLimits,
-    AmplificationDispatchLimits TaskLimits) {
+    AmplificationDispatchLimits TaskLimits, uint32_t MaxTaskPayloadBytes) {
   assert(MeshStage && "a mesh pipeline needs its own mesh stage");
   // \p TaskStage is legitimately null: a mesh pipeline with no task stage
   // dispatches its mesh workgroups directly (`vkCmdDrawMeshTasksEXT`'s own
@@ -63,6 +63,7 @@ void GraphicsPipeline::setMeshStage(
   this->Mesh = State;
   this->MeshLimits = MeshLimits;
   this->TaskLimits = TaskLimits;
+  this->MaxTaskPayloadBytes = MaxTaskPayloadBytes;
 }
 
 bool feme::graphics::topologyHasAdjacency(PrimitiveTopology Topology) {

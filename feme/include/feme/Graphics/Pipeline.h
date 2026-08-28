@@ -530,12 +530,20 @@ public:
   /// `maxMeshWorkGroupTotalCount` and their `maxTaskWorkGroup*`
   /// counterparts (roadmap H6f advertises the real values these are
   /// constructed from; `Executor::executeDraws` used a hardcoded
-  /// placeholder before this parameter existed). \p TaskLimits is unused,
-  /// and may be left default-constructed, when \p TaskStage is null.
+  /// placeholder before this parameter existed). \p TaskLimits and
+  /// \p MaxTaskPayloadBytes are unused, and may be left default-
+  /// constructed/zero, when \p TaskStage is null.
+  ///
+  /// \p MaxTaskPayloadBytes (roadmap H6c-a-b) bounds `TaskStage`'s own
+  /// payload storage (`feme::graphics::TaskPayloadBuilder`,
+  /// `Executor::executeDraws`), mirroring
+  /// `VkPhysicalDeviceMeshShaderPropertiesEXT::maxTaskPayloadSize` the
+  /// same way \p MeshLimits/\p TaskLimits mirror their own properties.
   void setMeshStage(std::shared_ptr<cpu::CompiledStage> TaskStage,
                     std::shared_ptr<cpu::CompiledStage> MeshStage,
                     MeshState State, AmplificationDispatchLimits MeshLimits,
-                    AmplificationDispatchLimits TaskLimits = {});
+                    AmplificationDispatchLimits TaskLimits = {},
+                    uint32_t MaxTaskPayloadBytes = 0);
 
   /// Whether this pipeline runs a mesh stage (roadmap H6e). True exactly
   /// when `setMeshStage` has been called.
@@ -559,6 +567,9 @@ public:
   const AmplificationDispatchLimits &getTaskDispatchLimits() const {
     return TaskLimits;
   }
+  /// Only valid to call when `hasTaskStage()` is true. See `setMeshStage`'s
+  /// own comment.
+  uint32_t getMaxTaskPayloadBytes() const { return MaxTaskPayloadBytes; }
 
 private:
   std::shared_ptr<cpu::CompiledStage> VertexStage;
@@ -574,6 +585,7 @@ private:
   MeshState Mesh;
   AmplificationDispatchLimits MeshLimits;
   AmplificationDispatchLimits TaskLimits;
+  uint32_t MaxTaskPayloadBytes = 0;
   PrimitiveTopology Topology;
   RasterState Raster;
   DepthState Depth;

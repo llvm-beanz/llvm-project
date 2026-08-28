@@ -118,6 +118,20 @@ constexpr uint32_t MaxMeshWorkGroupTotalCount = 4194304;
 constexpr std::array<uint32_t, 3> MaxTaskWorkGroupCount = {65535, 65535, 65535};
 constexpr uint32_t MaxTaskWorkGroupTotalCount = 4194304;
 
+/// (roadmap H6c-a-b) `VkPhysicalDeviceMeshShaderPropertiesEXT::
+/// maxTaskPayloadSize`: shared between `EntryPoints.cpp`'s advertised
+/// property and `feme::cpu::TaskPayloadWrapperPass`'s own runtime bound
+/// (`FemeTaskArgs::MaxPayloadBytes`, threaded from
+/// `feme::graphics::TaskPayloadBuilder` in `Executor.cpp`), so the two can
+/// never disagree -- the same "shared ceiling, not an independently
+/// guessed pair" discipline `MaxMeshOutputVertices` above follows. Chosen
+/// as a round, generous bound rather than a per-shader-declared size: no
+/// execution-mode or captured attribute exists yet for a task shader's own
+/// declared `TaskPayloadWorkgroupEXT` byte size (left to a future roadmap
+/// row), so a shared fixed ceiling -- always large enough, never tight --
+/// is this milestone's own deliberately narrow scope.
+constexpr uint32_t MaxTaskPayloadBytes = 16384;
+
 /// (roadmap H6f) `maxMeshWorkGroupSize`/`maxMeshWorkGroupInvocations` and
 /// their task-stage counterparts: unlike `MaxMeshWorkGroupCount` above (the
 /// dispatched *group count*, genuinely shared with compute's own dispatch

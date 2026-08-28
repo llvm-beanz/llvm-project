@@ -2298,7 +2298,8 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
                         feme::graphics::AmplificationDispatchLimits{
                             MaxMeshWorkGroupCount, MaxMeshWorkGroupTotalCount},
                         feme::graphics::AmplificationDispatchLimits{
-                            MaxTaskWorkGroupCount, MaxTaskWorkGroupTotalCount});
+                            MaxTaskWorkGroupCount, MaxTaskWorkGroupTotalCount},
+                        MaxTaskPayloadBytes);
   return Result;
 }
 

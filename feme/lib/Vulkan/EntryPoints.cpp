@@ -989,15 +989,16 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     // below `VK_EXT_mesh_shader`'s own specification-mandated floor (128
     // for every dimension); see `MaxMeshWorkGroupSize`'s own comment for
     // why advertising the higher, spec-mandated floor here is honest
-    // rather than inflated. `maxTaskPayloadSize` is the specification's
-    // own floor (16384 bytes): `TaskPayloadBuilder`
-    // (`Graphics/TaskPayload.cpp`) accepts an arbitrary payload size at
-    // construction with no fixed ceiling of its own to mirror honestly,
-    // since `TaskPayloadWorkgroupEXT` storage-class lowering does not
-    // exist yet (blocked on roadmap H6h), so nothing ever writes to or
-    // checks a larger size -- the same "advertise no more than what's
-    // genuinely bounded" discipline `maxGeometryOutputVertices` above
-    // already follows. `maxMeshOutputVertices`/`Primitives` mirror
+    // rather than inflated. `maxTaskPayloadSize` mirrors
+    // `feme::vulkan::MaxTaskPayloadBytes` (`GraphicsPipeline.h`), shared
+    // with `feme::cpu::TaskPayloadWrapperPass`'s own runtime bound
+    // (roadmap H6c-a-b) so the two can never disagree -- the specification's
+    // own floor (16384 bytes), chosen because no execution-mode or
+    // captured attribute exists yet for a task shader's own declared
+    // `TaskPayloadWorkgroupEXT` byte size to mirror more tightly (a future
+    // roadmap row), the same "advertise no more than what's genuinely
+    // bounded" discipline `maxGeometryOutputVertices` above already
+    // follows. `maxMeshOutputVertices`/`Primitives` mirror
     // `feme::vulkan::MaxMeshOutputVertices`/`MaxMeshOutputPrimitives`
     // (`GraphicsPipeline.h`), this implementation's own enforced ceiling,
     // matching `maxGeometryOutputVertices`'s own precedent (H5e) of no
@@ -1041,7 +1042,7 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
           feme::vulkan::MaxTaskWorkGroupSize[1];
       MeshShader->maxTaskWorkGroupSize[2] =
           feme::vulkan::MaxTaskWorkGroupSize[2];
-      MeshShader->maxTaskPayloadSize = 16384;
+      MeshShader->maxTaskPayloadSize = feme::vulkan::MaxTaskPayloadBytes;
       MeshShader->maxTaskSharedMemorySize =
           Info.Properties.limits.maxComputeSharedMemorySize;
       MeshShader->maxTaskPayloadAndSharedMemorySize =
