@@ -9935,3 +9935,176 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
  --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6g.qpa
 ```
+
+## Roadmap H6c-a-a: measured impact (wire `MeshOutputBuilder` into a mesh entry's canonicalized output store)
+
+This row closes out H6c-a-a: a mesh entry's own canonicalized (H6b-shaped)
+`feme.stage.output.store` -- a masked, per-lane store with a dynamic
+`Vertex` operand, by the time `LinearizePass` and `CanonicalizeStagePass`
+(H6i) are done with it -- now actually reaches `FemeMeshArgs::
+VertexOutputs`/`PrimitiveOutputs`, the same buffers `feme::graphics::
+Executor::runMeshWorkgroup`'s already-built `MeshOutputBuilder` consumer
+(Executor.cpp, landed alongside H6e) reads from.
+
+**New `feme::cpu::MeshOutputWrapperPass`** (`MeshOutputWrapper.h`/`.cpp`)
+is a narrow, single-purpose companion pass that runs immediately before
+`EntryWrapperPass` in `Pipeline.cpp`'s `ShaderStage::Mesh` case (split out
+of the combined `Amplification`/`Mesh` case H6c originally wrote, since
+amplification's own task-payload wiring is H6c-a-b's separate job, not
+this row's). It appends six new named wave-body parameters --
+`mesh_vertex_output_layout`, `mesh_vertex_outputs`,
+`mesh_primitive_output_layout`, `mesh_primitive_outputs`,
+`mesh_max_output_vertices`, `mesh_max_output_primitives` -- unconditionally
+to every mesh entry's wave body, mirroring every other stage wrapper's own
+"always append params, conditionally lower" convention (see
+VertexWrapper.cpp), then lowers every masked output store it finds by
+branching on the referenced `SignatureElement::Frequency`:
+`SignatureFrequency::PerVertex` addresses `VertexOutputs`/
+`VertexOutputLayout`, `PerPrimitive` addresses `PrimitiveOutputs`/
+`PrimitiveOutputLayout` instead -- the only reason this needs its own pass
+rather than reusing `VertexWrapperPass`'s single-array addressing
+directly.
+
+**Defensive clamping, since `SetMeshOutputsEXT` is still unwired.** A mesh
+output store's dynamic `Vertex` operand is the compiled entry's own
+runtime value; nothing yet validates it against the workgroup's *actual*
+declared output count (`SetMeshOutputsEXT` has no canonicalized
+`feme.stage.*` form yet -- explicitly out of this row's scope, matching
+H6c-a's own text). Unlike a resource-heap index (which has a bounds-checked
+lookup as a safety net, see `SPIRVResourceLowering.cpp`'s
+`computeClampedIndex`), an out-of-range mesh output write would be a raw
+OOB memory write with no such net, so `lowerMeshOutputStore` clamps the
+slot index into `[0, Max)` via `llvm::Intrinsic::umin` against
+`mesh_max_output_vertices`/`mesh_max_output_primitives` (guarding
+`Max == 0` with a `select` first, to avoid `0 - 1` wrapping back to
+`UINT32_MAX` and defeating the clamp). This bounds a real out-of-range
+write to the declared *maximum*, not the declared *actual* count -- a
+tighter bound is left to whichever future row wires `SetMeshOutputsEXT`
+itself.
+
+**`feme::cpu::EntryWrapperPass` extended, not replaced.** `WrapperEnv`
+gained six new (default-null) fields mirroring the params above;
+`buildWrapperEnv` gained an `IsMesh` parameter that, when true, loads them
+out of `getMeshArgsType`'s longer struct instead of `getDispatchArgsType`'s
+shorter one (both share the same field indices for the four fields they
+have in common -- `Resources`/`GroupID`/`GroupCount`/`GroupShared` --
+which is what let `EntryWrapperPass` already read that shared prefix
+through either struct type interchangeably, confirmed at H6c time);
+`buildWaveLoop`'s exhaustive by-name parameter dispatch gained six new
+`else if` arms threading the loaded values through by name, the same way
+`resource_heap`/`wave_groupshared`/etc. already are. All three call sites
+that build a top-level wrapper function (`buildWrapper`, the common case;
+`buildWrapperForLoop`/`buildWrapperForBranch`, the barrier-split cases)
+now compute `IsMesh` from `feme::getShaderStage(WaveBodyIn)` and thread it
+through consistently, so a mesh entry containing a group-sync barrier
+alongside an output store is handled correctly too, not just the common
+no-barrier case.
+
+**New unit tests.** `MeshOutputWrapperTest.cpp` (4 cases) isolates the new
+pass: lowering a per-vertex-frequency store, lowering a per-primitive-
+frequency store into the *other* output array, confirming params are
+still appended even with no output store present (matching the "always
+append" convention), and chaining into `EntryWrapperPass` to confirm the
+combined pipeline builds a real `feme_cpu_entry_ms_main` wrapper.
+`CompiledStageTest.cpp` gained one new end-to-end case,
+`InvokeMeshWritesPerVertexOutputStore`: a canonicalized-shaped mesh entry
+(its own `GroupID`, standing in for a real bounded per-vertex loop
+variable, as the dynamic `Vertex` operand) compiled through the real
+`CompiledStage::create` pipeline and invoked via `CompiledStage::
+invokeMesh` writes its own group id, as a float, into `FemeMeshArgs::
+VertexOutputs` at exactly that group's own slot -- the first test in this
+codebase to prove a *real* value (not just zero-initialized memory)
+reaches `VertexOutputs` through the full compiled path.
+
+**What this row still leaves unwired, honestly re-scoping H6g-b's own
+optimistic assumption.** `SetMeshOutputsEXT` has no canonicalized
+`feme.stage.*` op, so `FemeMeshArgs::ActualVertexCount`/
+`ActualPrimitiveCount` stay 0 after a real compiled `invokeMesh` call --
+`feme::graphics::MeshOutputBuilder::setOutputCounts`/`assembleMeshlet`
+already tolerate this (an out-of-range or absent `setOutputCounts` call
+legitimately assembles an empty meshlet, per `MeshOutputBuilder.h`'s own
+comment), so a real mesh-shader draw still assembles nothing to
+rasterize even with this row's own wiring landed. Separately,
+`Executor::runMeshWorkgroup`'s own `flattenMeshRow` (Executor.cpp, H6e)
+does not yet filter by `SignatureElement::Frequency` -- it treats every
+`Output` element as per-vertex, so a `PerPrimitive`-frequency element this
+row's own `MeshOutputWrapperPass` correctly routes to
+`PrimitiveOutputs` would not actually be read back out by the executor
+today. Both gaps are new roadmap rows below (R34's own lettering
+convention), not silently left implicit:
+
+ - **H6c-a-a-i**: canonicalize `SetMeshOutputsEXT` into a new
+   `feme.stage.*` op and wire it into `MeshOutputWrapperPass`/
+   `EntryWrapperPass` so `ActualVertexCount`/`ActualPrimitiveCount` (and,
+   ultimately, `assembleMeshlet`'s trimmed meshlet) reflect a real
+   declared count instead of always 0.
+ - **H6c-a-a-ii**: teach `Executor::runMeshWorkgroup`'s `flattenMeshRow`
+   to route a `PerPrimitive`-frequency `Output` element into
+   `MeshResources::PrimitiveOutputs`/`PrimitiveOutputLayout` (currently
+   never populated at all) instead of unconditionally treating every
+   element as per-vertex.
+
+Because of both gaps, **this row's own CTS impact is correctly zero**,
+matching H6c/H6d/H6i's own precedent of a CPU-lowering-only row not yet
+being reachable from a real Vulkan draw:
+
+```
+dEQP-VK.mesh_shader.* (28044 cases):
+Before this row (H6i/H6g's own recorded baseline):
+  Passed:        1/28044 (0.0%)
+  Failed:        337/28044 (1.2%)
+  Not supported: 27706/28044 (98.8%)
+
+After this row:
+  Passed:        1/28044 (0.0%)
+  Failed:        337/28044 (1.2%)
+  Not supported: 27706/28044 (98.8%)
+```
+
+Byte-identical failing-case set. **0 regressions, 0 new passes** --
+expected, since neither `SetMeshOutputsEXT` (H6c-a-a-i) nor
+`PrimitiveOutputs` readback (H6c-a-a-ii) exist yet, so a real mesh-shader
+draw still assembles an empty meshlet regardless of this row's own output-
+store wiring.
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt`
+sample, same file every prior row's own report used:
+
+```
+Before (H6i/H6g's own baseline):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical failing-case set. **0 regressions, 0 new passes.**
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this row touches no feature bit, limit, or extension --
+pure CPU-target IR-lowering, the same shape H6c/H6d/H6i's own entries
+recorded needing no inventory update for.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1939/1998** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6i's own **1934/1993** baseline by this row's five new
+unit tests (`MeshOutputWrapperTest.cpp`'s 4,
+`CompiledStageTest.cpp`'s 1 new `InvokeMeshWritesPerVertexOutputStore`
+case).
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                               # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+ /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+ --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6c_a_a.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+ /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+ --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6c_a_a.qpa
+```
