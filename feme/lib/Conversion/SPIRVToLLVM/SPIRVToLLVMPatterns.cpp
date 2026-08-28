@@ -1732,6 +1732,48 @@ public:
   }
 };
 
+/// Converts a `TaskPayloadWorkgroupEXT`-storage-class `spirv.GlobalVariable`
+/// -- a task entry's bounded payload variable (SPIR-V enum 5402), written by
+/// `OpEmitMeshTasksEXT`'s own payload operand and read back by the mesh
+/// stage it launches -- to an ordinary `llvm.mlir.global` in address space
+/// 14. Unlike every other storage class `StageIOGlobalVariablePattern`/
+/// `PushConstantGlobalVariablePattern`/`WorkgroupGlobalVariablePattern`
+/// above reuse from LLVM's own SPIR-V backend
+/// (`storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h`),
+/// that switch has no case for `TaskPayloadWorkgroupEXT` at all (it hits the
+/// `report_fatal_error` default), so 14 is a FeMe-only convention -- the
+/// next address space after the highest one (13, `PushConstant`) that
+/// switch does define, and not otherwise used anywhere in this file
+/// (roadmap H6h). A payload variable is read-write across the two stages
+/// that share it (never constant, unlike `Input`) and, like `Workgroup`,
+/// has no zero-initializer convention of its own to preserve.
+class TaskPayloadGlobalVariablePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GlobalVariableOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GlobalVariableOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());
+    if (SrcType.getStorageClass() !=
+        mlir::spirv::StorageClass::TaskPayloadWorkgroupEXT)
+      return Rewriter.notifyMatchFailure(Op, "not a task payload variable");
+
+    mlir::Type DstType =
+        getTypeConverter()->convertType(SrcType.getPointeeType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::GlobalOp>(
+        Op, DstType, /*isConstant=*/false, mlir::LLVM::Linkage::External,
+        Op.getSymName(), mlir::Attribute(), /*alignment=*/0,
+        /*addrSpace=*/14);
+    return mlir::success();
+  }
+};
+
 /// Emits the `llvm.spv.resource.getpointer` call addressing \p Coordinate
 /// within the resource \p Handle. LLVM's SPIRV backend selects
 /// `OpImageRead`/`OpImageWrite` from the ordinary load or store through the
@@ -3197,6 +3239,24 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
                                             /*addressSpace=*/3);
   });
 
+  // A `TaskPayloadWorkgroupEXT` pointer --
+  // `TaskPayloadGlobalVariablePattern`'s own global, or an access chain
+  // result reaching into it -- is ordinary memory too, in address space 14:
+  // a FeMe-only convention, since LLVM's own SPIRV backend
+  // (`storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h`)
+  // has no mapping at all for this storage class (SPIR-V enum 5402,
+  // roadmap H6h).
+  TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
+                                  -> std::optional<mlir::Type> {
+    if (Type.getStorageClass() !=
+        mlir::spirv::StorageClass::TaskPayloadWorkgroupEXT)
+      return std::nullopt;
+    if (!TypeConverter.convertType(Type.getPointeeType()))
+      return std::nullopt;
+    return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
+                                            /*addressSpace=*/14);
+  });
+
   // MLIR's own runtime array conversion refuses one with an `ArrayStride`
   // decoration (see `convertRuntimeArrayType` in MLIR's `SPIRVToLLVM.cpp`),
   // which every runtime array nested in a real (Vulkan-valid) storage
@@ -3327,8 +3387,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       SDotAccSatConversionPattern, UDotAccSatConversionPattern,
       SUDotAccSatConversionPattern, SpecConstantErasurePattern,
       StageIOGlobalVariablePattern, SwitchConversionPattern,
-      TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern>(
-      Patterns.getContext(), TypeConverter, FeMeBenefit);
+      TaskPayloadGlobalVariablePattern, TerminateInvocationConversionPattern,
+      WorkgroupGlobalVariablePattern>(Patterns.getContext(), TypeConverter,
+                                      FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
                ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
