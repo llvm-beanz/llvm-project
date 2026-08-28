@@ -29,6 +29,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   ResourceLoweringTest.cpp
   SIMDizeTest.cpp
   SPIRVResourceLoweringTest.cpp
+  TaskPayloadWrapperTest.cpp
   UnsupportedOpsTest.cpp
   VerifyStructuredTest.cpp
   VertexWrapperTest.cpp

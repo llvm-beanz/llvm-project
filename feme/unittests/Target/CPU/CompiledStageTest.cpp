@@ -28,6 +28,7 @@
 #include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -1175,6 +1176,51 @@ TEST(CompiledStageTest, InvokeTaskReusesComputeGroupSharedAndBarrierLowering) {
   ASSERT_THAT_ERROR((*Stage)->invokeTask(Prepared), Succeeded());
   // Group 3 writes 3 (its own GroupID) doubled, i.e. 6, at its own slot.
   EXPECT_EQ(Buffer, (std::vector<int32_t>{-1, -1, -1, 6}));
+}
+
+// Roadmap H6c-a-b: a task entry's own canonicalized (H6i-shaped)
+// `feme.stage.task.payload.store` with a compile-time-constant `offset`
+// operand reaches `TaskPayloadWrapperPass`'s new lowering, through
+// `EntryWrapperPass`'s reused compute-style group-loop wrapper, and lands
+// in `FemeTaskArgs::Payload` -- the same buffer
+// `feme::graphics::Executor::executeDraws`'s `TaskPayloadBuilder` (wired in
+// `Executor.cpp`) hands to every mesh workgroup this task workgroup's own
+// `EmitMeshTasksEXT` request would dispatch, through `FemeMeshArgs::
+// Payload`.
+constexpr char TaskPayloadStoreShaderIR[] = R"(
+  define void @as_main() #0 {
+    call void @feme.stage.task.payload.store.i32(i32 4, i32 1234)
+    ret void
+  }
+  declare void @feme.stage.task.payload.store.i32(i32, i32)
+  attributes #0 = { "hlsl.shader"="amplification" "hlsl.numthreads"="1,1,1" }
+)";
+
+TEST(CompiledStageTest, InvokeTaskWritesPayloadStore) {
+  Context Ctx;
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      compileStage(Ctx, TaskPayloadStoreShaderIR, ShaderStage::Amplification);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Amplification);
+
+  std::vector<uint8_t> Payload(8, 0);
+
+  TaskResources Resources;
+  Resources.GroupID = {0, 0, 0};
+  Resources.GroupCount = {1, 1, 1};
+  Resources.Payload = Payload;
+  PreparedTaskBatch Prepared =
+      PreparedTaskBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeTask(Prepared), Succeeded());
+  // The store at byte offset 4 writes 1234 as a little-endian i32; byte
+  // offset 0 stays untouched (this workgroup's payload struct's own other
+  // member, never written).
+  int32_t Written;
+  std::memcpy(&Written, Payload.data() + 4, sizeof(Written));
+  EXPECT_EQ(Written, 1234);
+  EXPECT_EQ(std::vector<uint8_t>(Payload.begin(), Payload.begin() + 4),
+           (std::vector<uint8_t>{0, 0, 0, 0}));
 }
 
 TEST(CompiledStageTest, InvokeTaskRejectsANonTaskStage) {
