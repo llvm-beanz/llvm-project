@@ -33,18 +33,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6g-b-a-i?
+Can you complete H6g-b-a-i-a?
 
-> **`ConvertSPIRVToLLVMPass` fails to legalize `spirv.AccessChain` outright
-> ("failed to legalize operation 'spirv.AccessChain' that was explicitly marked
-> illegal")**, now the single dominant cause found within H6g-b-a's own
-> newly-shrunk 218-case `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket
-> (80 of 218 cases still failing there hit exactly this, per a diagnostic-logged
-> re-run of that bucket alone), and newly reachable only now that H6g-b-a's own
-> fix lets `PerPrimitiveEXT`-decorated per-primitive-block SPIR-V actually
-> deserialize far enough to reach legalization at all. Root cause not yet
-> isolated (which `spirv.AccessChain` shape the existing conversion patterns
-> don't cover -- a per-primitive-block member access through a
-> `PerPrimitiveEXT`-decorated pointer specifically, given this row's own
-> prerequisite, or something broader -- and whether the fix belongs in a
-> new/extended conversion pattern or a legalization-target adjustment)
+> **`ConvertSPIRVToLLVMPass` fails to legalize `spirv.All` outright ("failed to
+> legalize operation 'spirv.All' that was explicitly marked illegal", e.g. `%124
+> = "spirv.All"(%123) : (vector<4xi1>) -> i1`)**, now the single dominant cause
+> found within H6g-b-a-i's own 218-case
+> `vkCreateGraphicsPipelines`/`vkRefUtil.cpp:37` bucket (81 of 218 cases hit
+> exactly this, per a diagnostic-logged re-run of that bucket alone, up from a
+> pre-existing, already out-of-scope 1 -- the 80 cases H6g-b-a-i's own fix newly
+> unblocked progress into this same failure), and newly reachable only now that
+> H6g-b-a-i's own fix lets the `spirv.AccessChain`-bearing SPIR-V this bucket's
+> cases share actually legalize far enough to reach the `spirv.All`/`spirv.Any`
+> (vector-to-scalar boolean reduction) ops that same content also contains. Root
+> cause not yet isolated (whether MLIR's SPIRVToLLVM conversion is simply
+> missing a pattern for `spirv.All`/`spirv.Any` outright, or one exists but
+> doesn't cover this operand shape)
