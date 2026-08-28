@@ -208,6 +208,20 @@ struct WrapperEnv {
   /// region writes and reads only its own slot (index `wave_index`), so
   /// this needs no synchronization beyond the barrier's own fence.
   Value *BarrierSpill;
+
+  /// The `FemeMeshArgs`-only fields `feme::cpu::MeshOutputWrapperPass`
+  /// (roadmap H6c-a-a) appends to a mesh entry's wave body before this
+  /// pass runs, or null for every non-mesh stage (see `buildWrapperEnv`'s
+  /// own `IsMesh` parameter). See MeshOutputWrapper.h for what each one
+  /// means; this pass only threads them through to the wave body by name,
+  /// the same way it already does for `resource_heap`/`wave_groupshared`/
+  /// etc. -- see `buildWaveLoop`'s dispatch below.
+  Value *MeshVertexOutputLayout = nullptr;
+  Value *MeshVertexOutputs = nullptr;
+  Value *MeshPrimitiveOutputLayout = nullptr;
+  Value *MeshPrimitiveOutputs = nullptr;
+  Value *MeshMaxOutputVertices = nullptr;
+  Value *MeshMaxOutputPrimitives = nullptr;
 };
 
 /// Builds the `FemeDispatchArgs`-derived values every region's wave loop
@@ -215,10 +229,13 @@ struct WrapperEnv {
 /// buffer -- on the wrapper's own stack if it fits, else the host-supplied
 /// `Args->GroupShared` (see the file comment above). If \p SpillTy is
 /// non-null, also allocates the barrier-context spill buffer sized for
-/// \p WavesPerGroup waves.
+/// \p WavesPerGroup waves. If \p IsMesh, \p ArgsTy is actually
+/// `getMeshArgsType`'s longer struct (see `WrapperEnv::MeshVertexOutputLayout`
+/// et al.'s own comment), and this also loads its mesh-only fields.
 WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
                            const GroupSharedLayout &GSLayout,
-                           StructType *SpillTy, uint32_t WavesPerGroup) {
+                           StructType *SpillTy, uint32_t WavesPerGroup,
+                           bool IsMesh = false) {
   Type *PtrTy = PointerType::get(Entry.getContext(), 0);
   Type *I32Ty = Entry.getInt32Ty();
   Type *I32x3 = ArrayType::get(I32Ty, 3);
@@ -277,6 +294,21 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
     AllocaInst *Buf = Entry.CreateAlloca(ArrayType::get(SpillTy, WavesPerGroup),
                                          nullptr, "barrier.spill");
     Env.BarrierSpill = Buf;
+  }
+
+  if (IsMesh) {
+    Env.MeshVertexOutputLayout = loadArgsField(
+        Entry, ArgsTy, Args, MeshArgsFieldVertexOutputLayout, PtrTy);
+    Env.MeshVertexOutputs = loadArgsField(Entry, ArgsTy, Args,
+                                          MeshArgsFieldVertexOutputs, PtrTy);
+    Env.MeshPrimitiveOutputLayout = loadArgsField(
+        Entry, ArgsTy, Args, MeshArgsFieldPrimitiveOutputLayout, PtrTy);
+    Env.MeshPrimitiveOutputs = loadArgsField(
+        Entry, ArgsTy, Args, MeshArgsFieldPrimitiveOutputs, PtrTy);
+    Env.MeshMaxOutputVertices = loadArgsField(
+        Entry, ArgsTy, Args, MeshArgsFieldMaxOutputVertices, I32Ty);
+    Env.MeshMaxOutputPrimitives = loadArgsField(
+        Entry, ArgsTy, Args, MeshArgsFieldMaxOutputPrimitives, I32Ty);
   }
   return Env;
 }
@@ -352,6 +384,18 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       CallArgs.push_back(Env.GroupShared);
     else if (Arg.getName() == "barrier_spill")
       CallArgs.push_back(Env.BarrierSpill);
+    else if (Arg.getName() == "mesh_vertex_output_layout")
+      CallArgs.push_back(Env.MeshVertexOutputLayout);
+    else if (Arg.getName() == "mesh_vertex_outputs")
+      CallArgs.push_back(Env.MeshVertexOutputs);
+    else if (Arg.getName() == "mesh_primitive_output_layout")
+      CallArgs.push_back(Env.MeshPrimitiveOutputLayout);
+    else if (Arg.getName() == "mesh_primitive_outputs")
+      CallArgs.push_back(Env.MeshPrimitiveOutputs);
+    else if (Arg.getName() == "mesh_max_output_vertices")
+      CallArgs.push_back(Env.MeshMaxOutputVertices);
+    else if (Arg.getName() == "mesh_max_output_primitives")
+      CallArgs.push_back(Env.MeshMaxOutputPrimitives);
     else if (Arg.getName().starts_with("loopvar")) {
       unsigned N;
       bool Failed =
@@ -1085,6 +1129,7 @@ splitLoopBodyAtBarriers(Function &WaveBody, ArrayRef<BasicBlock *> BodyOrder,
 Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
                               unsigned WaveSize, uint32_t GroupSizeTotal,
                               uint32_t WavesPerGroup) {
+  bool IsMesh = feme::getShaderStage(WaveBodyIn) == feme::ShaderStage::Mesh;
   Function *WaveBody = &WaveBodyIn;
   Module &M = *WaveBody->getParent();
   LLVMContext &Ctx = M.getContext();
@@ -1146,7 +1191,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   // `WaveBody` now contains only the (dead) header/latch; clone their
   // instructions directly into the wrapper below, then discard it.
   GroupSharedLayout GSLayout = computeGroupSharedLayout(M);
-  StructType *ArgsTy = getDispatchArgsType(Ctx);
+  StructType *ArgsTy = IsMesh ? getMeshArgsType(Ctx) : getDispatchArgsType(Ctx);
   Type *PtrTy = PointerType::get(Ctx, 0);
   std::string WrapperName = getEntrySymbolName(WaveBody->getName());
   FunctionType *WrapperTy =
@@ -1158,8 +1203,8 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
 
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
   IRBuilder<> Entry(EntryBB);
-  WrapperEnv WEnv =
-      buildWrapperEnv(Entry, ArgsTy, Args, GSLayout, SpillTy, WavesPerGroup);
+  WrapperEnv WEnv = buildWrapperEnv(Entry, ArgsTy, Args, GSLayout, SpillTy,
+                                   WavesPerGroup, IsMesh);
 
   // The prefix region's own wave loop runs before the wrapper's scalar
   // loop phi(s) exist; it never actually reads its `loopvarN` parameter
@@ -1384,6 +1429,7 @@ splitArmAtBarriers(Function *&WaveBody, ArrayRef<BasicBlock *> ArmOrder,
 Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
                                 unsigned WaveSize, uint32_t GroupSizeTotal,
                                 uint32_t WavesPerGroup) {
+  bool IsMesh = feme::getShaderStage(WaveBodyIn) == feme::ShaderStage::Mesh;
   Function *WaveBody = &WaveBodyIn;
   Module &M = *WaveBody->getParent();
   LLVMContext &Ctx = M.getContext();
@@ -1411,7 +1457,7 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
   // `WaveBody` now contains only the (dead) header; clone its instructions
   // directly into the wrapper below, then discard it.
   GroupSharedLayout GSLayout = computeGroupSharedLayout(M);
-  StructType *ArgsTy = getDispatchArgsType(Ctx);
+  StructType *ArgsTy = IsMesh ? getMeshArgsType(Ctx) : getDispatchArgsType(Ctx);
   Type *PtrTy = PointerType::get(Ctx, 0);
   std::string WrapperName = getEntrySymbolName(WaveBody->getName());
   FunctionType *WrapperTy =
@@ -1424,7 +1470,7 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
   IRBuilder<> Entry(EntryBB);
   WrapperEnv WEnv = buildWrapperEnv(Entry, ArgsTy, Args, GSLayout,
-                                    /*SpillTy=*/nullptr, WavesPerGroup);
+                                    /*SpillTy=*/nullptr, WavesPerGroup, IsMesh);
 
   BasicBlock *Pred = EntryBB;
   if (PrefixFn)
@@ -1551,6 +1597,7 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
 /// pass to wrap in that case -- or if barrier splitting failed (a
 /// diagnostic has already been emitted).
 Function *buildWrapper(Function &WaveBodyIn) {
+  bool IsMesh = feme::getShaderStage(WaveBodyIn) == feme::ShaderStage::Mesh;
   std::optional<WaveBodyEnv> Env = getWaveBodyEnv(WaveBodyIn);
   if (!Env)
     return nullptr;
@@ -1596,7 +1643,7 @@ Function *buildWrapper(Function &WaveBodyIn) {
 
   GroupSharedLayout GSLayout = computeGroupSharedLayout(M);
 
-  StructType *ArgsTy = getDispatchArgsType(Ctx);
+  StructType *ArgsTy = IsMesh ? getMeshArgsType(Ctx) : getDispatchArgsType(Ctx);
   Type *PtrTy = PointerType::get(Ctx, 0);
 
   std::string WrapperName = getEntrySymbolName(WaveBody->getName());
@@ -1609,8 +1656,8 @@ Function *buildWrapper(Function &WaveBodyIn) {
 
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
   IRBuilder<> Entry(EntryBB);
-  WrapperEnv WEnv =
-      buildWrapperEnv(Entry, ArgsTy, Args, GSLayout, SpillTy, WavesPerGroup);
+  WrapperEnv WEnv = buildWrapperEnv(Entry, ArgsTy, Args, GSLayout, SpillTy,
+                                   WavesPerGroup, IsMesh);
 
   BasicBlock *Pred = EntryBB;
   for (unsigned R = 0, E = Regions.size(); R != E; ++R) {
