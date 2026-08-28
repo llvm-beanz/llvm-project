@@ -5,6 +5,7 @@ set(LLVM_LINK_COMPONENTS
   )
 
 add_feme_unittest(FeMeGraphicsTests
+  AmplificationDispatchTest.cpp
   DomainInvocationsTest.cpp
   ExecutorTest.cpp
   GeometryInputsTest.cpp

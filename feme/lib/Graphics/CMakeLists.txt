@@ -1,4 +1,5 @@
 add_feme_library(FeMeGraphics
+  AmplificationDispatch.cpp
   DomainInvocations.cpp
   Executor.cpp
   Geometry.cpp
