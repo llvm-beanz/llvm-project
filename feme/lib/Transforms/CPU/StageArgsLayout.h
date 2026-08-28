@@ -314,6 +314,50 @@ inline llvm::StructType *getGeometryArgsType(llvm::LLVMContext &Ctx) {
                                 PtrTy, llvm::ArrayType::get(PtrTy, 2)});
 }
 
+/// Field indices into the `FemeMeshArgs`-shaped LLVM struct `getMeshArgsType`
+/// builds, matching feme/include/feme/Target/CPU/RuntimeABI.h field-for-
+/// field. `Resources` through `GroupShared` (roadmap H6c) deliberately
+/// share `DispatchArgsField`'s own values for the same four fields --
+/// `feme::cpu::EntryWrapperPass` reads that shared prefix through either
+/// enum interchangeably (see `FemeMeshArgs`'s own comment).
+enum MeshArgsField : unsigned {
+  MeshArgsFieldResources = 0,
+  MeshArgsFieldGroupID = 1,
+  MeshArgsFieldGroupCount = 2,
+  MeshArgsFieldGroupShared = 3,
+  MeshArgsFieldMaxOutputVertices = 4,
+  MeshArgsFieldMaxOutputPrimitives = 5,
+  MeshArgsFieldOutputTopology = 6,
+  MeshArgsFieldReserved32 = 7,
+  MeshArgsFieldVertexOutputLayout = 8,
+  MeshArgsFieldVertexOutputs = 9,
+  MeshArgsFieldPrimitiveOutputLayout = 10,
+  MeshArgsFieldPrimitiveOutputs = 11,
+  MeshArgsFieldPrimitiveIndices = 12,
+  MeshArgsFieldActualVertexCount = 13,
+  MeshArgsFieldActualPrimitiveCount = 14,
+  MeshArgsFieldPayloadLayout = 15,
+  MeshArgsFieldPayload = 16,
+  MeshArgsFieldReserved = 17,
+};
+
+/// Builds the LLVM struct type mirroring `FemeMeshArgs`: field types/order
+/// match that struct exactly (roadmap H6c-a-a), relying on ordinary LLVM
+/// struct layout to reproduce its C layout -- including its shared
+/// `Resources`/`GroupID`/`GroupCount`/`GroupShared` prefix, which lets
+/// `feme::cpu::EntryWrapperPass` GEP into either this type or
+/// `getDispatchArgsType`'s shorter one for those four fields
+/// interchangeably.
+inline llvm::StructType *getMeshArgsType(llvm::LLVMContext &Ctx) {
+  llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
+  llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
+  llvm::Type *I32x3 = llvm::ArrayType::get(I32Ty, 3);
+  return llvm::StructType::get(
+      Ctx, {getShaderResourcesType(Ctx), I32x3, I32x3, PtrTy, I32Ty, I32Ty,
+            I32Ty, I32Ty, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
+            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 2)});
+}
+
 inline llvm::Value *loadStructField(llvm::IRBuilder<> &Builder,
                                     llvm::StructType *Ty, llvm::Value *Ptr,
                                     unsigned Field, llvm::Type *FieldTy) {
