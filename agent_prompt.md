@@ -33,16 +33,16 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H5e-c?
+Can you work on milestone H5e-d?
 
-> **18 `dEQP-VK.geometry.layered.{1d_array,2d_array}.*` cases
-> (`multiple_layers_per_invocation`, `render_to_one`, `render_to_default_layer`,
-> `render_to_all`) fail at `vkQueueSubmit` with
-> `VK_ERROR_INITIALIZATION_FAILED`**, newly exposed by H5e-a (previously masked
-> by the `EmitVertex`/`EndPrimitive` legalization failure). Distinct from
-> H5e-b's pipeline-creation-time failure and from the pre-existing `layered.3d`
-> image-creation gap (`vk.createImage`, unrelated) and
-> `layered.*.fragment_layer` fragment-input gap (`feme-cpu-wrap-fragment`,
-> unrelated) -- this bucket is specific to a layered geometry-stage draw's own
-> execution, using `gl_Layer` output from the geometry stage rather than just
-> varying output-array storage. Root cause not yet isolated
+> **6 `dEQP-VK.geometry.emit.*_emit_0_end_1` cases fail with
+> `feme-cpu-wrap-geometry: geometry stage wrapper requires attached
+> feme.signature metadata`**, newly exposed by H5e-a. A geometry entry point
+> compiled from one of these specific `emit`-count shapes (a shader that ends
+> its primitive without emitting on that particular stream/count combination)
+> reaches `GeometryWrapperPass` without the `feme.signature` metadata it
+> requires to construct the wrapper -- a reflection/metadata-attachment gap
+> somewhere upstream of `GeometryWrapperPass` itself (likely
+> `CanonicalizeStagePass` or SPIR-V import), not `GeometryWrapperPass`'s own
+> lowering (which is otherwise proven correct by G5's existing test suite and
+> this row's own `EmitVertex`/`EndPrimitive` fix). Root cause not yet isolated
