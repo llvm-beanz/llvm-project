@@ -22,3 +22,13 @@
 ; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.raw.i32{{"?}}(
 ; CHECK-DAG: float @{{"?}}{{(\\01)?}}feme.cpu.resource.load.raw.f32{{"?}}(
 ; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.raw.f32{{"?}}(
+; CHECK-DAG: <2 x float> @{{"?}}{{(\\01)?}}feme.cpu.resource.load.raw.v2f32{{"?}}(
+; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.raw.v2f32{{"?}}(
+; CHECK-DAG: <3 x float> @{{"?}}{{(\\01)?}}feme.cpu.resource.load.raw.v3f32{{"?}}(
+; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.raw.v3f32{{"?}}(
+; CHECK-DAG: <2 x i32> @{{"?}}{{(\\01)?}}feme.cpu.resource.load.raw.v2i32{{"?}}(
+; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.raw.v2i32{{"?}}(
+; CHECK-DAG: <3 x i32> @{{"?}}{{(\\01)?}}feme.cpu.resource.load.raw.v3i32{{"?}}(
+; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.raw.v3i32{{"?}}(
+; CHECK-DAG: <4 x i32> @{{"?}}{{(\\01)?}}feme.cpu.resource.load.raw.v4i32{{"?}}(
+; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.raw.v4i32{{"?}}(
