@@ -73,6 +73,7 @@
 #include "feme/Graphics/PreparedDraw.h"
 #include "feme/Graphics/StageLink.h"
 #include "feme/Graphics/StageStorage.h"
+#include "feme/Graphics/TaskPayload.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/RuntimeABI.h"
@@ -2550,6 +2551,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           std::vector<uint8_t> GroupShared(
               TS.getArtifactInfo().GroupSharedSize);
           uint32_t RequestedMeshGroupCount[3] = {0, 0, 0};
+          // (roadmap H6c-a-b) `Payload` backs `FemeTaskArgs::Payload` below
+          // with somewhere real for a canonicalized `feme.stage.task.
+          // payload.store` (`feme::cpu::TaskPayloadWrapperPass`) to write
+          // into, and is read back verbatim by every mesh workgroup this
+          // task workgroup's own `EmitMeshTasksEXT` request dispatches,
+          // through `runMeshWorkgroup`'s own \p Payload parameter below --
+          // `TaskPayloadBuilder::getMutableBytes()`/`getBytes()` are the
+          // same underlying storage, so no copy happens in between.
+          feme::graphics::TaskPayloadBuilder Payload(
+              Pipeline.getMaxTaskPayloadBytes());
 
           cpu::TaskResources TRes;
           TRes.ResourceHeap = Draw.Resources.ResourceHeap;
@@ -2562,6 +2573,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           TRes.GroupID = GroupID;
           TRes.GroupCount = MDC.GroupCount;
           TRes.GroupShared = GroupShared;
+          TRes.Payload = Payload.getMutableBytes();
           // `MeshGroupCount` addresses one contiguous 3-uint32 block;
           // `TaskResources`/`FemeTaskArgs` only need its address.
           TRes.MeshGroupCount = RequestedMeshGroupCount;
@@ -2578,9 +2590,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           if (!Queue)
             return Queue.takeError();
           for (uint64_t I = 0; I != Queue->size(); ++I) {
-            Expected<Meshlet> MeshletOut =
-                runMeshWorkgroup(Queue->getGroupID(I), Queue->getGroupCount(),
-                                 /*Payload=*/{});
+            Expected<Meshlet> MeshletOut = runMeshWorkgroup(
+                Queue->getGroupID(I), Queue->getGroupCount(),
+                Payload.getBytes());
             if (!MeshletOut)
               return MeshletOut.takeError();
             Meshlets.push_back(std::move(*MeshletOut));

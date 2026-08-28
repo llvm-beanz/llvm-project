@@ -27,11 +27,15 @@
 // checked the same way every other bounded builder in this file's siblings
 // already checks its own before every write.
 //
-// Wiring a real compiled task entry point's payload writes into a live
-// `TaskPayloadBuilder` object is left open pending roadmap H6h (giving
-// `TaskPayloadWorkgroupEXT` an address-space convention at all) and H6i
-// (canonicalizing a payload write into a `feme.stage.*` op in the first
-// place) -- see agent_thoughts.md's H6c entry for why this row stops here.
+// Roadmap H6c-a-b wires a real compiled task entry point's payload writes
+// into a live `TaskPayloadBuilder` object: `Executor.cpp` hands
+// `getMutableBytes()`'s pointer to `FemeTaskArgs::Payload` before invoking
+// a compiled task stage, so `feme::cpu::TaskPayloadWrapperPass`'s lowered
+// payload store (roadmap H6h/H6i having given `TaskPayloadWorkgroupEXT` an
+// address-space convention and a canonicalized `feme.stage.*` op) writes
+// straight into this class's own backing storage, and every mesh
+// workgroup a task workgroup dispatches (`EmitMeshTasksEXT`, roadmap H6d)
+// reads that same builder's `getBytes()` back via `FemeMeshArgs::Payload`.
 //
 //===----------------------------------------------------------------------===//
 
@@ -76,6 +80,16 @@ public:
 
   /// The whole payload buffer, `getMaxPayloadBytes()` wide.
   llvm::ArrayRef<uint8_t> getBytes() const { return Payload; }
+
+  /// The whole payload buffer, mutable: roadmap H6c-a-b's own use for this
+  /// accessor is handing a compiled task entry's `FemeTaskArgs::Payload`
+  /// pointer (`Executor.cpp`) somewhere real to store into directly --
+  /// `feme::cpu::TaskPayloadWrapperPass`'s lowered payload store writes
+  /// straight into this backing memory via that raw pointer, bypassing
+  /// `write` above entirely (a compiled task entry has no way to call back
+  /// into this class), so this is the only way this class's own storage
+  /// ever picks up a real compiled write.
+  llvm::MutableArrayRef<uint8_t> getMutableBytes() { return Payload; }
 
 private:
   std::vector<uint8_t> Payload;
