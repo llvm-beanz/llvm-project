@@ -9533,3 +9533,132 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6e.qpa
 ```
+
+## Roadmap H6f: measured impact (mesh pipeline creation, `vkCmdDrawMeshTasks*` routing, and `VK_EXT_mesh_shader` advertisement)
+
+This row closes out H6f: `vkCreateGraphicsPipelines` now accepts a mesh
+pipeline (task stage optional, mesh stage required, no
+vertex-input/input-assembly state -- `GraphicsPipeline.cpp`'s
+`translateFixedFunctionState`/`compileAndValidateStages`),
+`vkCmdDrawMeshTasksEXT`/`vkCmdDrawMeshTasksIndirectEXT`/
+`vkCmdDrawMeshTasksIndirectCountEXT` are implemented and route through the
+same `runPreparedDraw` helper `vkCmdDraw*` already shares
+(`CommandBuffer.cpp`, refactored out of the pre-existing `runDraw`), and
+`PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` advertise `VK_EXT_mesh_shader`,
+`taskShader`/`meshShader` = `VK_TRUE`, and every
+`VkPhysicalDeviceMeshShaderPropertiesEXT` field at this implementation's
+own honest, bounded ceiling.
+
+**A real bug found via CTS, not just unit tests: `maxMeshWorkGroupSize`/
+`maxTaskWorkGroupSize`/`maxMeshOutputComponents`/`maxMeshOutputMemorySize`/
+`maxMeshPayloadAndOutputMemorySize`/`maxMeshOutputLayers` were initially
+set below `VK_EXT_mesh_shader`'s own specification-mandated minimums.**
+The first properties revision mirrored `maxComputeWorkGroupSize`/
+`Invocations` verbatim (dimension 2 = 64, below the mesh/task spec floor
+of 128) and used placeholder values for the output-related fields (64,
+8192, 8192, 1) below their own spec floors (128, 32768, 48128, 8). Running
+`dEQP-VK.mesh_shader.*` against that revision surfaced 80 "maxMeshOutput
+Components too low to run this test" failures and 1 "Some properties
+failed the limits test" failure (`vktMeshShaderPropertyTestsEXT.cpp`'s
+`CHECK_LIMITS_MIN` checks). Investigating whether raising these values
+would be dishonest (i.e., whether some fixed-size internal buffer
+actually caps them lower) found the opposite: no code path validated a
+mesh/task entry's declared group size against anything at all (a real
+enforcement gap, not merely a low-but-honest ceiling), and
+`feme::graphics::MeshOutputBuilder`'s per-row storage
+(`Graphics/MeshOutput.h`) is a dynamically-sized `std::vector<float>` with
+no fixed component/memory ceiling either. The fix was therefore twofold:
+add genuine pipeline-creation-time enforcement of the work-group-size
+pair (`validateMeshOrTaskGroupSize` in `GraphicsPipeline.cpp`, reusing
+`GroupSize.h`'s `resolveComputeGroupSize` extended to accept the
+`MeshEXT`/`TaskEXT` execution models alongside `GLCompute`, checked
+against new `feme::vulkan::MaxMeshWorkGroupSize`/`MaxTaskWorkGroupSize`/
+`*Invocations` constants in `GraphicsPipeline.h`), and raise every
+now-genuinely-unbounded property to the specification's own mandatory
+floor rather than an arbitrary smaller guess.
+
+```
+Before this fix:
+  Passed:        0/28044 (0.0%)
+  Failed:        338/28044 (1.2%)
+  Not supported: 27706/28044 (98.8%)
+
+After this fix:
+  Passed:        1/28044 (0.0%)
+  Failed:        337/28044 (1.2%)
+  Not supported: 27706/28044 (98.8%)
+```
+
+The 80 previously-`maxMeshOutputComponents`-blocked cases now correctly
+report `NotSupported` (`shaderFloat16 feature not supported`, an
+unrelated, genuine feature gap) instead of failing on the property check,
+and the one properties-limits meta-test now passes. The remaining 337
+failures are unrelated to this row's own scope, unchanged in kind from
+H6f's earlier (pre-fix) run: 235 `vkCreateGraphicsPipelines` ->
+`VK_ERROR_INITIALIZATION_FAILED` (real mesh/task shader *content*
+compilation -- expected, blocked on H6h's `TaskPayloadWorkgroupEXT`
+lowering and H6i's `CanonicalizeStagePass` mesh-stage support; up from
+155 by exactly the 80 cases the property fix newly lets reach real
+pipeline creation), 68 `vkCreateRenderPass` ->
+`VK_ERROR_FORMAT_NOT_SUPPORTED` (an unrelated render-pass format gap, out
+of this row's scope), 33 `vkPipelineConstructionUtil.cpp` ->
+`VK_ERROR_INITIALIZATION_FAILED` (graphics-pipeline-library variants of
+the same content-compilation cases, same blocker), and 1
+`vkGetPhysicalDeviceImageFormatProperties` ->
+`VK_ERROR_FORMAT_NOT_SUPPORTED` (the same unrelated format gap). See
+roadmap H6g for the follow-up row triaging/closing out these remaining
+categories.
+
+`VulkanExtensionInventory.md` moves `VK_EXT_mesh_shader` from "Planned" to
+"Advertised" (31 -> 32 advertised, 49 -> 48 planned). `Vulkan14FeatureInventory.md`
+needs no change: it tracks core 1.0-1.4 feature/limit/extension surface
+only, not `VK_EXT_mesh_shader` (a non-core `EXT` extension).
+
+**Regression sample.** `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt`
+sample, same file every prior row's own report used:
+
+```
+Before (H6e's own baseline):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+
+After (this row):
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+Byte-identical failing-case set to H6e's own recorded totals (diffed by
+name, not just count). **0 regressions, 0 new passes.**
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, ccache build) passes in
+full: **1930/1989** (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6e's own **1910/1969** baseline by this row's new
+`DrawTest.cpp` mesh-draw-command coverage
+(`DrawMeshTasksRunsWithoutErrorAndProducesNoOutputYet`,
+`DrawMeshTasksWithTaskStageRunsWithoutError`,
+`DrawMeshTasksIndirectReadsBuffer`,
+`RejectsOutOfBoundsIndirectMeshTasksDraw`,
+`DrawMeshTasksIndirectCountClampsToCountBuffer`,
+`DrawMeshTasksRejectsANonMeshPipeline`,
+`DrawMeshTasksWithoutBoundPipelineFails`), this row's new
+`GraphicsPipelineTest.cpp` work-group-size enforcement coverage
+(`RejectsMeshWorkGroupSizeExceedingLimits`,
+`RejectsTaskWorkGroupSizeExceedingLimits`), and this row's new
+`GroupSizeTest.cpp` `MeshEXT`/`TaskEXT` acceptance coverage
+(`ResolvesFromLocalSizeForMeshEntryPoint`,
+`ResolvesFromLocalSizeForTaskEntryPoint`).
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                                # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.mesh_shader.*" --deqp-log-filename=mesh_h6f.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=draw_sample.txt --deqp-log-filename=draw_h6f.qpa
+```
