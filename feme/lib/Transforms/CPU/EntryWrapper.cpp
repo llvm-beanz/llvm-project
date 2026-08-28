@@ -222,6 +222,14 @@ struct WrapperEnv {
   Value *MeshPrimitiveOutputs = nullptr;
   Value *MeshMaxOutputVertices = nullptr;
   Value *MeshMaxOutputPrimitives = nullptr;
+
+  /// The `FemeTaskArgs`-only fields `feme::cpu::TaskPayloadWrapperPass`
+  /// (roadmap H6c-a-b) appends to a task entry's wave body before this
+  /// pass runs, or null for every non-task stage (see `buildWrapperEnv`'s
+  /// own `IsTask` parameter), mirroring `MeshVertexOutputLayout` et al.
+  /// above exactly.
+  Value *TaskPayload = nullptr;
+  Value *TaskMaxPayloadBytes = nullptr;
 };
 
 /// Builds the `FemeDispatchArgs`-derived values every region's wave loop
@@ -231,11 +239,15 @@ struct WrapperEnv {
 /// non-null, also allocates the barrier-context spill buffer sized for
 /// \p WavesPerGroup waves. If \p IsMesh, \p ArgsTy is actually
 /// `getMeshArgsType`'s longer struct (see `WrapperEnv::MeshVertexOutputLayout`
-/// et al.'s own comment), and this also loads its mesh-only fields.
+/// et al.'s own comment), and this also loads its mesh-only fields; if
+/// \p IsTask, \p ArgsTy is `getTaskArgsType`'s longer struct instead, and
+/// this loads its own task-only fields (`WrapperEnv::TaskPayload`/
+/// `TaskMaxPayloadBytes`) the same way. \p IsMesh and \p IsTask are never
+/// both true (a function is tagged with exactly one `ShaderStage`).
 WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
                            const GroupSharedLayout &GSLayout,
                            StructType *SpillTy, uint32_t WavesPerGroup,
-                           bool IsMesh = false) {
+                           bool IsMesh = false, bool IsTask = false) {
   Type *PtrTy = PointerType::get(Entry.getContext(), 0);
   Type *I32Ty = Entry.getInt32Ty();
   Type *I32x3 = ArrayType::get(I32Ty, 3);
@@ -309,6 +321,12 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
         Entry, ArgsTy, Args, MeshArgsFieldMaxOutputVertices, I32Ty);
     Env.MeshMaxOutputPrimitives = loadArgsField(
         Entry, ArgsTy, Args, MeshArgsFieldMaxOutputPrimitives, I32Ty);
+  }
+  if (IsTask) {
+    Env.TaskPayload =
+        loadArgsField(Entry, ArgsTy, Args, TaskArgsFieldPayload, PtrTy);
+    Env.TaskMaxPayloadBytes = loadArgsField(
+        Entry, ArgsTy, Args, TaskArgsFieldMaxPayloadBytes, I32Ty);
   }
   return Env;
 }
@@ -396,6 +414,10 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       CallArgs.push_back(Env.MeshMaxOutputVertices);
     else if (Arg.getName() == "mesh_max_output_primitives")
       CallArgs.push_back(Env.MeshMaxOutputPrimitives);
+    else if (Arg.getName() == "task_payload")
+      CallArgs.push_back(Env.TaskPayload);
+    else if (Arg.getName() == "task_max_payload_bytes")
+      CallArgs.push_back(Env.TaskMaxPayloadBytes);
     else if (Arg.getName().starts_with("loopvar")) {
       unsigned N;
       bool Failed =
@@ -1130,6 +1152,8 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
                               unsigned WaveSize, uint32_t GroupSizeTotal,
                               uint32_t WavesPerGroup) {
   bool IsMesh = feme::getShaderStage(WaveBodyIn) == feme::ShaderStage::Mesh;
+  bool IsTask =
+      feme::getShaderStage(WaveBodyIn) == feme::ShaderStage::Amplification;
   Function *WaveBody = &WaveBodyIn;
   Module &M = *WaveBody->getParent();
   LLVMContext &Ctx = M.getContext();
@@ -1191,7 +1215,9 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   // `WaveBody` now contains only the (dead) header/latch; clone their
   // instructions directly into the wrapper below, then discard it.
   GroupSharedLayout GSLayout = computeGroupSharedLayout(M);
-  StructType *ArgsTy = IsMesh ? getMeshArgsType(Ctx) : getDispatchArgsType(Ctx);
+  StructType *ArgsTy = IsMesh   ? getMeshArgsType(Ctx)
+                       : IsTask ? getTaskArgsType(Ctx)
+                                : getDispatchArgsType(Ctx);
   Type *PtrTy = PointerType::get(Ctx, 0);
   std::string WrapperName = getEntrySymbolName(WaveBody->getName());
   FunctionType *WrapperTy =
@@ -1204,7 +1230,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
   IRBuilder<> Entry(EntryBB);
   WrapperEnv WEnv = buildWrapperEnv(Entry, ArgsTy, Args, GSLayout, SpillTy,
-                                   WavesPerGroup, IsMesh);
+                                   WavesPerGroup, IsMesh, IsTask);
 
   // The prefix region's own wave loop runs before the wrapper's scalar
   // loop phi(s) exist; it never actually reads its `loopvarN` parameter
@@ -1430,6 +1456,8 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
                                 unsigned WaveSize, uint32_t GroupSizeTotal,
                                 uint32_t WavesPerGroup) {
   bool IsMesh = feme::getShaderStage(WaveBodyIn) == feme::ShaderStage::Mesh;
+  bool IsTask =
+      feme::getShaderStage(WaveBodyIn) == feme::ShaderStage::Amplification;
   Function *WaveBody = &WaveBodyIn;
   Module &M = *WaveBody->getParent();
   LLVMContext &Ctx = M.getContext();
@@ -1457,7 +1485,9 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
   // `WaveBody` now contains only the (dead) header; clone its instructions
   // directly into the wrapper below, then discard it.
   GroupSharedLayout GSLayout = computeGroupSharedLayout(M);
-  StructType *ArgsTy = IsMesh ? getMeshArgsType(Ctx) : getDispatchArgsType(Ctx);
+  StructType *ArgsTy = IsMesh   ? getMeshArgsType(Ctx)
+                       : IsTask ? getTaskArgsType(Ctx)
+                                : getDispatchArgsType(Ctx);
   Type *PtrTy = PointerType::get(Ctx, 0);
   std::string WrapperName = getEntrySymbolName(WaveBody->getName());
   FunctionType *WrapperTy =
@@ -1470,7 +1500,8 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
   IRBuilder<> Entry(EntryBB);
   WrapperEnv WEnv = buildWrapperEnv(Entry, ArgsTy, Args, GSLayout,
-                                    /*SpillTy=*/nullptr, WavesPerGroup, IsMesh);
+                                    /*SpillTy=*/nullptr, WavesPerGroup, IsMesh,
+                                    IsTask);
 
   BasicBlock *Pred = EntryBB;
   if (PrefixFn)
@@ -1598,6 +1629,8 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
 /// diagnostic has already been emitted).
 Function *buildWrapper(Function &WaveBodyIn) {
   bool IsMesh = feme::getShaderStage(WaveBodyIn) == feme::ShaderStage::Mesh;
+  bool IsTask =
+      feme::getShaderStage(WaveBodyIn) == feme::ShaderStage::Amplification;
   std::optional<WaveBodyEnv> Env = getWaveBodyEnv(WaveBodyIn);
   if (!Env)
     return nullptr;
@@ -1643,7 +1676,9 @@ Function *buildWrapper(Function &WaveBodyIn) {
 
   GroupSharedLayout GSLayout = computeGroupSharedLayout(M);
 
-  StructType *ArgsTy = IsMesh ? getMeshArgsType(Ctx) : getDispatchArgsType(Ctx);
+  StructType *ArgsTy = IsMesh   ? getMeshArgsType(Ctx)
+                       : IsTask ? getTaskArgsType(Ctx)
+                                : getDispatchArgsType(Ctx);
   Type *PtrTy = PointerType::get(Ctx, 0);
 
   std::string WrapperName = getEntrySymbolName(WaveBody->getName());
@@ -1657,7 +1692,7 @@ Function *buildWrapper(Function &WaveBodyIn) {
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
   IRBuilder<> Entry(EntryBB);
   WrapperEnv WEnv = buildWrapperEnv(Entry, ArgsTy, Args, GSLayout, SpillTy,
-                                   WavesPerGroup, IsMesh);
+                                   WavesPerGroup, IsMesh, IsTask);
 
   BasicBlock *Pred = EntryBB;
   for (unsigned R = 0, E = Regions.size(); R != E; ++R) {
