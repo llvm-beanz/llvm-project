@@ -612,6 +612,20 @@ bool isSPIRVStageIOGlobal(const GlobalVariable *GV, unsigned &AddrSpace) {
          GV->getMetadata("feme.spirv.MemberDecorations") != nullptr;
 }
 
+/// (Roadmap H6i) Whether \p GV is a task entry's own bounded payload
+/// variable: address space 14, the FeMe-only convention
+/// `TaskPayloadGlobalVariablePattern`
+/// (feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp) converts a
+/// `TaskPayloadWorkgroupEXT`-storage-class `spirv.GlobalVariable` to
+/// (roadmap H6h) -- unlike `isSPIRVStageIOGlobal`'s `Input`/`Output`
+/// globals, this carries no `!spirv.Decorations`/
+/// `!feme.spirv.MemberDecorations` metadata of its own (it is raw,
+/// task-defined memory, not a signature element), so address space alone
+/// identifies it.
+bool isTaskPayloadGlobal(const GlobalVariable *GV) {
+  return GV && GV->getAddressSpace() == 14;
+}
+
 /// (Roadmap H2e) Tracks, per (`ElementID`, `Row`, `Component`) leaf scalar
 /// of an `Output`-direction stage-IO element, the shadow `AllocaInst` its
 /// stores and read-back loads are redirected through. Unlike DXIL's
@@ -1636,10 +1650,12 @@ std::optional<StageIOAccess> resolveStageIOAccess(
 /// `output.store` -- building and attaching this entry's
 /// `feme::EntrySignature` along the way, the piece roadmap R19 explicitly
 /// deferred to this milestone (see "Signature reflection" in
-/// feme/docs/FeMeGraphicsDesign.md) -- and its already-legalized
+/// feme/docs/FeMeGraphicsDesign.md) -- its already-legalized
 /// `llvm.spv.discard`/derivative/quad-read intrinsic calls into their
 /// `feme.stage.*` peers, mirroring `canonicalizeDXILStage`'s handling of the
-/// same operations' DXIL-derived forms.
+/// same operations' DXIL-derived forms, and (roadmap H6i) a task entry's
+/// bounded payload writes (address space 14, see `isTaskPayloadGlobal`)
+/// into `feme.stage.task.payload.store`.
 bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
                             SPIRVCanonicalPhase Phase) {
   bool Changed = false;
@@ -1855,8 +1871,28 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       std::optional<StageIOAccess> Access =
           resolveStageIOAccess(SI->getPointerOperand(), Val->getType(), DL,
                                ElementIDs, OutputGlobalSet);
-      if (!Access)
+      if (!Access) {
+        // (Roadmap H6i) A task entry's bounded payload write -- an
+        // ordinary store through a (possibly GEP'd) address-space-14
+        // global, `TaskPayloadGlobalVariablePattern`'s own import shape
+        // (roadmap H6h) -- resolves no `StageIOAccess` at all (it is raw
+        // task-defined memory, not a signature element), so it falls
+        // through to here instead. `getStageIOBaseAndOffset` (already
+        // generic over any address space) still recovers its constant
+        // byte offset, letting it canonicalize into
+        // `feme.stage.task.payload.store` by that offset directly, rather
+        // than being left an unrewritten raw store the way a genuinely
+        // unresolvable stage-IO access is.
+        if (auto BaseAndOffset =
+                getStageIOBaseAndOffset(SI->getPointerOperand(), DL)) {
+          if (isTaskPayloadGlobal(BaseAndOffset->first)) {
+            createStageTaskPayloadStore(B, BaseAndOffset->second, Val);
+            SI->eraseFromParent();
+            Changed = true;
+          }
+        }
         continue;
+      }
       Value *Row = Access->Row ? Access->Row : Zero;
       Value *Component = Access->Component ? Access->Component : Zero;
       // (Roadmap H2g) A single-element `gl_Position`/`gl_PerVertex.
@@ -2000,7 +2036,8 @@ PreservedAnalyses CanonicalizeStagePass::run(Module &M,
     if (!Stage ||
         (*Stage != ShaderStage::Vertex && *Stage != ShaderStage::Fragment &&
          *Stage != ShaderStage::Hull && *Stage != ShaderStage::Domain &&
-         *Stage != ShaderStage::Geometry))
+         *Stage != ShaderStage::Geometry && *Stage != ShaderStage::Mesh &&
+         *Stage != ShaderStage::Amplification))
       continue;
 
     // An absent signature (e.g. a hand-written test exercising only the

@@ -1620,4 +1620,98 @@ TEST(CanonicalizeStageTest, GeometryStreamCutOnlyEntryStillGetsASignature) {
   EXPECT_TRUE(Sig->Elements.empty());
 }
 
+/// (Roadmap H6i) `CanonicalizeStagePass::run`'s stage filter now accepts
+/// `ShaderStage::Mesh`, routing it through `canonicalizeSPIRVStage` the
+/// same way `ThreadsDynamicVertexIndexIntoOutputStore` above already
+/// exercised with a `"vertex"`-tagged stand-in (the filter did not accept
+/// `Mesh` yet when that test was written, roadmap H6b). Re-run with a
+/// genuine `"mesh"` stage attribute to confirm the whole pass -- not just
+/// `canonicalizeSPIRVStage` called directly -- now actually reaches a mesh
+/// entry's own dynamically-indexed per-vertex `Output`-array store.
+TEST(CanonicalizeStageTest, MeshStageCanonicalizesOutputArrayStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_verts = external addrspace(8) global [3 x <4 x float>], !spirv.Decorations !0
+    define void @main(i32 %i, <4 x float> %v) #0 {
+      %p = getelementptr inbounds [3 x <4 x float>], ptr addrspace(8) @out_verts, i32 0, i32 %i
+      store <4 x float> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    EXPECT_EQ(CI->getArgOperand(4), IArg);
+    EXPECT_FALSE(isa<Constant>(CI->getArgOperand(4)));
+  }
+  EXPECT_EQ(SeenStores, 4u);
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
+/// (Roadmap H6i) A task entry's bounded payload write -- an ordinary store
+/// through `TaskPayloadGlobalVariablePattern`'s own address-space-14 global
+/// import shape (roadmap H6h) -- canonicalizes into
+/// `feme.stage.task.payload.store` by its resolved constant byte offset,
+/// now that `CanonicalizeStagePass::run`'s stage filter accepts
+/// `ShaderStage::Amplification` and routes it through
+/// `canonicalizeSPIRVStage`. Unlike a stage-IO store, this carries no
+/// `SignatureElement` at all: the payload is raw, task-defined memory, not
+/// a signature (`!feme.signature` stays entirely absent -- neither
+/// `InputGlobals` nor `OutputGlobals` see this address space at all).
+TEST(CanonicalizeStageTest, AmplificationStageCanonicalizesTaskPayloadStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @payload = external addrspace(14) global { i32, [4 x float] }
+    define void @main(float %v) #0 {
+      store i32 1, ptr addrspace(14) @payload
+      store float %v, ptr addrspace(14) getelementptr inbounds nuw (i8, ptr addrspace(14) @payload, i64 4)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="amplification" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *VArg = F->getArg(0);
+
+  EXPECT_FALSE(dxil::getEntrySignature(*F).has_value());
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) ||
+        Kind != StageOpKind::TaskPayloadStore)
+      continue;
+    if (SeenStores == 0) {
+      EXPECT_EQ(getStageOpConstantOperand(*CI, /*Offset=*/0), 0u);
+      EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(1))->getZExtValue(), 1u);
+    } else {
+      EXPECT_EQ(getStageOpConstantOperand(*CI, /*Offset=*/0), 4u);
+      EXPECT_EQ(CI->getArgOperand(1), VArg);
+    }
+    ++SeenStores;
+  }
+  EXPECT_EQ(SeenStores, 2u);
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
 } // namespace
