@@ -33,10 +33,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on milestone H6c-a?
+Can you work on milestone H6d?
 
-> **Wire `MeshOutputBuilder`/`TaskPayloadBuilder` into real `feme.stage.*`
-> mesh-output-store/task-payload-store operations** reaching the reused
-> `EntryWrapperPass` path, once those ops exist (H6d) and, for task payload
-> specifically, once it can be imported from SPIR-V `TaskPayloadWorkgroupEXT` at
-> all (H6h) and canonicalized (H6i)
+> **Implement checked amplification dispatch queues and meshlet assembly**: a
+> task entry's `EmitMeshTasksEXT` becomes a bounded, validated dispatch of mesh
+> workgroups (mirroring the compute dispatch queue's own bounds checks), and a
+> mesh workgroup's emitted per-vertex/per-primitive outputs become one meshlet
+> the executor can consume, with topology validation (an out-of-range vertex
+> index in a primitive's index list is diagnosed, not read out of bounds)
