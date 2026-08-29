@@ -37,19 +37,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H7?
+Can you complete H7b?
 
-> **The optional core 1.0 graphics feature bits.** `PhysicalDeviceInfo.cpp`
-> reports exactly three `VkPhysicalDeviceFeatures` bits `VK_TRUE`
-> (`robustBufferAccess`, `dualSrcBlend`, `textureCompressionASTC_LDR`, lines
-> 349-373); the other ~52 are all `VK_FALSE`. Each is *optional* for a 1.4
-> submission, so none blocks a conformance claim — but each is a block of
-> mandatory-list cases reported `NotSupported`, and several are cheap on a
-> software device (`imageCubeArray`, `independentBlend`, `fillModeNonSolid`,
-> `depthClamp`, `depthBiasClamp`, `depthBounds`, `wideLines`/`largePoints` once
-> F5's line rasterization lands, `sampleRateShading`, `alphaToOne`, `logicOp`,
-> `occlusionQueryPrecise`, `multiDrawIndirect`, `drawIndirectFirstInstance`,
-> `vertexPipelineStoresAndAtomics`, `fragmentStoresAndAtomics`,
-> `shaderClipDistance`, `shaderCullDistance`, `samplerAnisotropy`,
-> `shaderStorageImage*`). Split into sub-rows per cluster when assigned; do
-> **not** land as one commit
+> **`imageCubeArray`**: `Image.cpp` already accepts
+> `VK_IMAGE_VIEW_TYPE_CUBE_ARRAY` at view-creation time, but
+> `CommandBuffer.cpp`'s descriptor materialization only builds a 2D,
+> base-layer-0 image descriptor for shader access -- a cube-array view's
+> remaining layers/faces never reach a shader-visible descriptor. Needs the
+> descriptor path widened to a real array-of-cube-faces layout before this can
+> honestly flip
