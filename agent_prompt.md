@@ -36,31 +36,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6g-b-a-i-a-i-c?
+Can you complete H6c-a?
 
-> **`vkCreateGraphicsPipelines` fails at JIT-link time with "Symbols not found:
-> [ feme.cpu.resource.load.raw.v2f32, feme.cpu.resource.load.raw.v3f32,
-> feme.cpu.resource.load.raw.v3i32, feme.cpu.resource.load.raw.v2i32,
-> feme.cpu.resource.load.raw.v4i32 ]"**, now the new dominant blocker in the
-> same 80-case `dEQP-VK.mesh_shader.ext.in_out.*` bucket H6g-b-a-i-a-i-b's own
-> `fcmp`/`icmp`/reduce/vectorizable-intrinsic fixes let those cases progress
-> past `feme-cpu-simdize` entirely (confirmed by re-running the full 560-case
-> bucket and spot-checking several individual cases with
-> `FEME_VULKAN_LOG_CREATION_ERRORS=1` against the real `deqp-vk`/`feme` Vulkan
-> ICD once H6g-b-a-i-a-i-b's own fix landed). Root cause isolated:
-> `feme/runtime/CPU/FeMeRuntimeCPU.c` only defines the scalar
-> (`feme.cpu.resource.load.raw.i32`/`.f32`) and full-`<4 x T>`-width
-> (`feme.cpu.resource.load.raw.v4f32`/`.v4i32`) raw-buffer-load overloads today
-> (see its own `asm("feme.cpu.resource.load.raw.v4f32")`-labeled function and
-> neighbors) -- the 2- and 3-component overloads a `vec2`/`vec3`/`ivec2`/`ivec3`
-> mesh-shader input/output actually needs are simply missing, so the JIT's
-> `orc::LLJIT` can't materialize a call to them at pipeline-creation time. The
-> store-side (`feme.cpu.resource.store.raw.*`) and typed-buffer
-> (`feme.cpu.resource.{load,store}.typed.v4{f32,i32}`) paths were not checked
-> for the same v2/v3 gap and may need the same fix. Not yet fixed: needs new
-> `feme.cpu.resource.load.raw.v2f32`/`.v3f32`/`.v2i32`/`.v3i32` (and likely the
-> store-side/typed-buffer counterparts, pending the same gap check) runtime
-> functions mirroring the existing `v4f32`/`v4i32` ones'
-> bindless-descriptor-lookup-then-masked-load shape, plus confirming
-> `feme::cpu::ResourceCalls`/`ResourceLowering.cpp` already emit calls to these
-> names for narrower vector widths (or need their own fix to do so)
+> **Wire `MeshOutputBuilder`/`TaskPayloadBuilder` into real `feme.stage.*`
+> mesh-output-store/task-payload-store operations** reaching the reused
+> `EntryWrapperPass` path, once those ops exist (H6d) and, for task payload
+> specifically, once it can be imported from SPIR-V `TaskPayloadWorkgroupEXT` at
+> all (H6h) and canonicalized (H6i) (investigated, not landed: direct inspection
+> of `feme/include/feme/Core/StageOps.h`'s `StageOpKind` enum,
+> `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, and
+> `CanonicalizeStagePass::run`'s stage filter
+> (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`) confirms all three
+> named prerequisites -- H6d, H6h, H6i -- are still completely unimplemented: no
+> mesh-output-store/task-payload-store `feme.stage.*` op exists,
+> `TaskPayloadWorkgroupEXT` still has no address-space convention or import
+> pattern, and the canonicalization stage filter still does not accept
+> `ShaderStage::Mesh`/`Amplification`. Unlike H6b's own investigation, which
+> found a real, independently-landable fix inside its own stated scope, this row
+> has zero such content: there is nothing yet producing a canonicalized
+> mesh-output-store/task-payload-store operation for
+> `MeshOutputBuilder`/`TaskPayloadBuilder` to be wired to. Split below into two
+> independently-trackable rows, since mesh output and task payload do not
+> actually share the same blocker set -- mesh output's own canonicalization
+> already exists (H6b's `feme.stage.output.store` `Vertex` operand), so wiring
+> it only needs H6d (meshlet assembly to consume it) and H6i (lifting the stage
+> filter so a mesh entry is canonicalized at all, not H6h, which is
+> task-payload-import-specific); task payload additionally needs H6h before H6i
+> can canonicalize a payload write into anything. See "Roadmap H6c-a: why this
+> row could not land" in VulkanCTSReport.md)
