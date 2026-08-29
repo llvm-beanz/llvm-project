@@ -44971,3 +44971,104 @@ and corrected both the row and the total, with a short bullet noting the
 drift and its correction -- small, but worth fixing since leaving it
 would have made this row's own edit visibly inconsistent with the table
 it sits above.
+
+# Session: continuing H7f — root-causing and fixing H7o, discovering H7p
+
+## What I was actually asked to do
+This session's prompt was a continuation request: "continue working on H7f
+or other milestones that block completing H7f." H7f's own last update had
+already closed `alphaToOne` and broken `sampleRateShading` out as a new
+follow-on, H7o, described (at the time) as a `SIMDize.cpp` gap in
+divergent buffer-store-address handling. My job was to make real progress
+on H7o (and, transitively, unblock H7f's own `sampleRateShading` bit if
+possible) rather than to re-litigate H7f's own already-closed decisions.
+
+## The original H7o diagnosis was wrong, and I didn't accept that until I re-reduced it
+H7f's own text (and H7o's own initial roadmap row) confidently attributed
+the compile failure to a divergent `GetElementPtrInst`/buffer-store
+address -- a specific, plausible-sounding claim, complete with a made-up
+formula (`pos = ((coord.y * width) + coord.x) * samples + int(gl_SampleID)`)
+that read like it came from real shader source. It didn't occur to me to
+distrust it until I actually captured the real failing module (via a
+temporary `FEME_DEBUG_DUMP_PRE_SIMDIZE` env-var dump in `Pipeline.cpp`,
+rebuilt, re-run against the real failing CTS case) and looked at it
+directly. The real failing value wasn't a buffer-store address at all --
+it was the **vertex shader's** `positions[gl_VertexIndex]` constant
+lookup table, a completely different function, a completely different
+shape, and (importantly) not even the shader H7f's own text pointed at.
+Lesson reinforced (this project has hit this exact trap before, per the
+H6g-b/H6j/H6k/H6l chain's own notes): a previous session's own confident
+root-cause narrative is not evidence. The only evidence that counts is
+the actual captured IR for the actual failing case. I should default to
+capturing it early, rather than trusting an inherited diagnosis and only
+falling back to real reduction once the "obvious" fix doesn't compile
+cleanly against a hand-written repro (which is what happened here --
+I only went and captured the real module after failing to construct a
+matching repro from the written description).
+
+## Two real fixes, cleanly separable, and I kept them that way
+Once I had the real module, the fix was straightforward: `SIMDize.cpp`'s
+producer-classification switch had zero handling for an ordinary
+(non-groupshared) `LoadInst` producing a divergent vector value. Adding
+it, and teaching `widenScalarizedFallback` to decompose a vector-typed
+per-lane-clone result into `N` widened components instead of trying to
+build an illegal nested vector type, fixed the vertex shader. That alone
+would have been a clean, single-commit fix -- except it uncovered a
+*second*, independent bug the moment pipeline creation got past the first
+one: `feme-cpu-wrap-fragment: fragment stage wrapper requires attached
+feme.signature metadata`. This was a genuinely different bug in a
+genuinely different pass (`RootConstantLowering.cpp`/
+`SPIRVPushConstantLowering.cpp`, not `SIMDize.cpp`), and I made a point of
+keeping it as its own reasoning thread and its own commit rather than
+folding it into "the SIMDize fix" just because both blocked the same CTS
+case. Small, separately-reviewable, separately-revertable commits stay
+more valuable than one commit that happens to fix the observed symptom.
+
+## `feme-opt` can't reduce every real shader shape standalone
+While root-causing the second bug, I wanted to reduce the actual failing
+fragment shader (`copy_sample_frag`, `subpassLoad` + a push constant)
+outside the full Vulkan pipeline, the way I'd done for the vertex shader.
+It turns out `feme-opt`'s tool driver only registers pass-pipeline
+callbacks for a subset of the CPU pipeline's passes -- `SPIRVSubpassLoweringPass`
+isn't one of them. So any shader using `subpassLoad` can't be reduced via
+`feme-opt` alone; the real `deqp-vk` + temporary-debug-dump approach was
+the only way to capture that module. I didn't fix this gap in `feme-opt`
+itself (out of scope for this session, and not something either roadmap
+row asked for), but it's worth a future note if standalone-shader
+reduction becomes a recurring need for subpass-using shapes.
+
+## Deciding whether to keep the `sampleRateShading` flip -- and choosing not to
+After both fixes, I re-flipped `sampleRateShading` to `VK_TRUE` and
+re-ran the real CTS cases, expecting the 4 previously-known targeted cases
+to clear. Three did. The fourth (`min_1_0.samples_2`, the strictest
+`minSampleShading` setting) genuinely *failed* -- not `NotSupported`, an
+actual wrong-pixels failure. It would have been easy to rationalize this
+away (it's "only" the strictest setting; the other three pass; the
+invocation-count semantics are still spec-conformant since we always run
+at full sample rate). I decided against that: this project's own stated
+policy is that a feature bit should only be advertised once every
+mandatory case exercising it can really pass, and a genuine `Fail` (not
+`NotSupported`) on a real mandatory case is unambiguously a conformance
+violation if shipped. So I reverted the feature-bit flip and its test
+back to `sampleRateShading = VK_FALSE`, kept both real compiler fixes
+(they're independently valuable and regression-free), and broke the new
+`gl_FragCoord`-per-sample gap out as its own follow-on, H7p, rather than
+either quietly shipping a known-broken feature bit or spending
+significant additional time on a third, distinct bug in this same
+session. `Executor.cpp`'s own H7f-era comment ("a shader whose output
+does not depend on gl_SampleID simply recomputes the same color on every
+pass ... harmless") turned out to be an incorrect assumption once tested
+against a `gl_FragCoord`-only shader specifically -- a good example of a
+design comment that sounded right until a real CTS case actually
+exercised the exact case it hadn't considered.
+
+## H7o closes; H7p is new; nesting stays at one letter
+Per this session's own standing nesting-discipline instruction, H7p sits
+directly under H7 (no deeper nesting), matching H7f, H7n, and H7o. H7o
+itself is now struck through in `Roadmap.md`, with its own row's
+strikethrough wrapping only the original (now-superseded) diagnosis text,
+matching the convention every other closed H7 sub-row already uses (the
+milestone ID itself stays unstruck, an "(done: ...)" trailing parenthetical
+carries the real outcome) -- I initially struck through the ID too before
+noticing every other closed row in this file keeps the ID plain, and
+fixed it before committing.
