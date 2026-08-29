@@ -43302,3 +43302,150 @@ occurrences of the named diagnostic. Milestone H6 does not close: the
 same bucket's newly-unblocked cases split into a new blocker, H6k
 (heap corruption in `executeDraws`), alongside the pre-existing
 H6g-b-c and H6g-b-a-i-a-i-b dependencies.
+
+# Session: Completing H6g-b-c (`ValidateStagePass` does not validate the mesh stage)
+
+## Task
+
+The roadmap's own H6g-b-c row named a specific, concrete gap: a mesh
+entry's unresolved arrayed-builtin-block access (left unrewritten by
+H6c-a-a-iii's own `resolveOffsetWithinElement` fix, which deliberately
+returns `std::nullopt` "leave for `ValidateStagePass` to diagnose") is
+never actually diagnosed, because `ValidateStagePass::run` still only
+validates `Vertex`/`Fragment` -- every prior row that touched mesh
+validation, from `H6a` on, left `ShaderStage::Mesh` unreachable there.
+The raw global-variable access survives to `feme::cpu`'s JIT and fails
+with a genuinely undefined symbol instead of a clean, diagnosable
+compile-time rejection.
+
+## Investigation
+
+Read `ValidateStage.cpp` first: `isStageOpLegalForStage`'s per-`Kind`
+switch already had a `StageOpKind::SetMeshOutputs` case scoped to
+`Stage == ShaderStage::Mesh`, explicitly commented "not yet reachable"
+because `run` never dispatches `Mesh` at all -- confirming the row's
+own framing directly rather than assuming it. But naively adding `Mesh`
+to `run`'s stage filter would have been an incomplete fix on its own:
+`isStageOpLegalForStage`'s `InputLoad`/`OutputStore` case only accepted
+`Vertex`/`Fragment`, yet `StageOps.h`'s own doc comment states a mesh
+entry's per-vertex/per-primitive output write reuses `OutputStore`
+(roadmap H6b) -- so enabling `Mesh` validation without also widening
+that case would have made every legitimate mesh output store newly,
+wrongly rejected as "not legal in function ... (stage 'mesh')", a
+regression this task's own request never asked for and real CTS
+content would have hit immediately.
+
+The second half -- actually diagnosing the arrayed-builtin-block gap
+itself -- needed more than a stage-filter change, since
+`resolveOffsetWithinElement`'s `std::nullopt` return leaves the load/
+store on the *raw* global variable entirely un-rewritten; it never
+becomes a `feme.stage.*` call at all, so `ValidateStagePass`'s existing
+call-based validation loop has nothing to see. Found
+`CanonicalizeStage.cpp`'s own `isSPIRVStageIOGlobal` (address space
+7/8, `!spirv.Decorations`/`!feme.spirv.MemberDecorations`) as the
+precise recognizer already used to identify this shape, but it lived
+in that file's anonymous namespace, private to `CanonicalizeStagePass`.
+Rather than duplicating that recognition logic in `ValidateStage.cpp`
+(risking the two definitions drifting apart over time), factored it
+out into a new shared header, `feme/include/feme/Transforms/Graphics/
+StageIOGlobal.h`, with no behavior change to `CanonicalizeStagePass`
+itself -- confirmed by rebuilding `FeMeTransformsGraphics` clean before
+touching `ValidateStage.cpp` at all.
+
+## The fix
+
+1. Refactor commit: move `isSPIRVStageIOGlobal` to the new shared
+   header, update `CanonicalizeStage.cpp` to include and use it.
+2. `ValidateStage.cpp`: wire `ShaderStage::Mesh` into `run`'s stage
+   filter; extend `isStageOpLegalForStage`'s `InputLoad`/`OutputStore`
+   case to accept `Mesh` too; add `validateStageIOGlobalAccess`, which
+   walks a load/store's pointer operand back through any
+   `getelementptr` chain (`llvm::GEPOperator`, covering both the
+   instruction and constant-expression forms -- deliberately simpler
+   than `CanonicalizeStagePass`'s own offset-resolving
+   `getStageIOGlobal`, since this only needs to know *whether* a raw
+   stage-IO global survived, not its byte offset) to find the
+   underlying `GlobalVariable`, and diagnoses if `isSPIRVStageIOGlobal`
+   still recognizes it.
+3. Four new `ValidateStageTest.cpp` cases: `MeshOutputStoreIsLegal`/
+   `DiscardInMeshStageIsIllegal` (both directions of the newly-wired
+   stage's own legality rules), `UnresolvedStageIOGlobalAccessInMeshIsDiagnosed`
+   (reusing `CanonicalizeStageTest`'s own arrayed-`PerPrimitiveEXT`-
+   block IR fixture directly against `ValidateStagePass`, confirming
+   the exact targeted shape is caught), and
+   `OrdinaryAllocaAccessInMeshIsNotDiagnosed` (a negative control).
+
+## Verification
+
+`ninja check-feme` (assertions-enabled, ccache build): 1972/2031
+passing (59 pre-existing `Unsupported`, 0 `Failed`), up from the prior
+1968/2027 baseline by exactly the 4 new tests.
+
+Ran the *real* `deqp-vk` against the actual VK-GL-CTS checkout under
+`/home/dev/dev/VK-GL-CTS/`, using the `feme` Vulkan ICD
+(`feme_icd.json`), rather than trusting the unit tests alone:
+
+- `dEQP-VK.mesh_shader.ext.builtin.cull_primitives` (the row's own
+  named case): the previously-undiagnosed `JIT session error: Symbols
+  not found: [ spirv_var_16 ]` is gone, replaced by a clean
+  `feme-graphics-validate-stage: ... has an unresolved stage-IO
+  global-variable access to 'spirv_var_16' ...` diagnostic, emitted
+  well before pipeline creation fails (still `Fail`,
+  `VK_ERROR_INITIALIZATION_FAILED` -- diagnosed, not fixed, exactly
+  this row's own scope).
+- The full real `dEQP-VK.mesh_shader.ext.builtin.*` group (37 cases):
+  12 cases now hit the new clean diagnostic (the 9-case-turned-33-case
+  set's mesh portion, grown by 3 further cases sharing the identical
+  shape -- `num_work_groups_mesh`, `num_work_groups_task_and_mesh`,
+  `primitive_id_spirv`); the other 10 failing cases hit an unrelated,
+  pre-existing `feme-cpu-simdize` diagnostic, confirmed unaffected (0
+  `feme-graphics-validate-stage` messages for any of them). Group
+  totals unchanged (0 Pass / 22 Fail / 15 NotSupported) -- expected,
+  since diagnosing a failure earlier and more cleanly does not itself
+  turn it into a pass.
+- `dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample:
+  byte-identical to every prior row's own recorded totals
+  (14/153/1790). **0 regressions.**
+
+## A new discovery, out of scope
+
+The same 37-case group re-run found something this task never asked
+for: `cull_primitives` alone (no other case in the group) additionally
+reports three `feme.stage.output.store` row-out-of-range errors
+(element 4 rows 1-2, element 5 rows 1-3), only visible now that
+`ValidateStagePass` validates the mesh stage at all for the first
+time. Confirmed this is not the same shape as H6g-b-c's own arrayed-
+block gap (that gap never produces a canonicalized `feme.stage.*` call
+at all, so it could never trigger `validateRow`'s row-range check).
+Rather than silently absorbing this into H6g-b-c's own closure text or
+guessing at a fix without a real IR reduction, filed it as a new,
+narrower roadmap row, `H6l`, one level under `H6` (not nested deeper
+under `H6g-b`), per the standing instruction against nesting milestone
+IDs more than one lowercase letter deep. Recorded one plausible-but-
+unconfirmed candidate theory (a constant per-vertex/per-primitive
+`Output`-array index folding into `Row` instead of `Vertex`, the same
+class of bug H6b's own comment already flagged as a known risk it
+deliberately did not fix for `Output`) without asserting it as the
+actual root cause.
+
+## Documentation updates
+
+Struck through `H6g-b-c` on the roadmap with its resolution text,
+updated `H6`'s own mega-row narrative and dependency list (removed
+`H6g-b-c`, added `H6l`), and added the new `H6l` row. Appended "Roadmap
+H6g-b-c: measured impact" to `VulkanCTSReport.md` with the full
+reproduction. Confirmed (not assumed) `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no changes: a pure diagnostic-
+completeness fix within `ValidateStagePass`'s existing, already-
+documented scope, touching no feature bit or extension.
+
+## Net result
+
+H6g-b-c is closed: `ValidateStagePass` now validates the mesh stage
+and diagnoses the exact arrayed-builtin-block gap the row named,
+verified end to end against the real ICD with the targeted JIT-symbol
+failure mode gone from all 12 affected cases in a real group re-run,
+and zero regressions in both `check-feme` and the `dEQP-VK.draw.*`
+sample. Milestone H6 does not close: the same re-run surfaces a new,
+narrower, not-yet-root-caused blocker (`H6l`), alongside the
+pre-existing `H6g-b-a-i-a-i-b` and `H6k`.
