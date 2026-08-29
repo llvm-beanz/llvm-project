@@ -341,6 +341,10 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
     return DynamicStateLineWidth;
   case VK_DYNAMIC_STATE_LINE_STIPPLE_KHR:
     return DynamicStateLineStipple;
+  case VK_DYNAMIC_STATE_DEPTH_BIAS:
+    return DynamicStateDepthBias;
+  case VK_DYNAMIC_STATE_DEPTH_BOUNDS:
+    return DynamicStateDepthBounds;
   default:
     return std::nullopt;
   }
@@ -898,11 +902,28 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
   if (!Info)
     return createStringError(inconvertibleErrorCode(),
                              "a graphics pipeline needs rasterization state");
-  if (Info->rasterizerDiscardEnable || Info->depthClampEnable ||
-      Info->depthBiasEnable)
+  if (Info->rasterizerDiscardEnable)
     return createStringError(inconvertibleErrorCode(),
-                             "rasterizer discard, depth clamp, and depth "
-                             "bias are not implemented");
+                             "rasterizer discard is not implemented");
+  // (roadmap H7d) `depthClamp`: a pipeline may declare `depthClampEnable`
+  // regardless of whether this ICD's own `depthClamp` feature bit is
+  // `VK_TRUE` (see PhysicalDeviceInfo.cpp) -- consistent with this
+  // project's long-standing precedent of never gating an optional
+  // feature's *translation* on whether the app actually enabled the
+  // corresponding `VkPhysicalDeviceFeatures` bit. See `clipTriangle`'s and
+  // `projectVertex`'s own comments in Executor.cpp for the implementation.
+  Out.Raster.DepthClampEnable = Info->depthClampEnable != VK_FALSE;
+  // (roadmap H7d) `depthBiasClamp`: `depthBiasEnable` itself needs no
+  // feature bit (core-1.0 functionality); only a nonzero `depthBiasClamp`
+  // is gated by the `depthBiasClamp` feature, and this ICD accepts that
+  // unconditionally too, for the same reason as `DepthClampEnable` above.
+  Out.Raster.DepthBiasEnable = Info->depthBiasEnable != VK_FALSE;
+  if (Info->depthBiasEnable &&
+      (Out.DynamicStates & DynamicStateDepthBias) == 0) {
+    Out.Raster.DepthBiasConstantFactor = Info->depthBiasConstantFactor;
+    Out.Raster.DepthBiasClamp = Info->depthBiasClamp;
+    Out.Raster.DepthBiasSlopeFactor = Info->depthBiasSlopeFactor;
+  }
   // (roadmap H7c) `fillModeNonSolid`: `VK_POLYGON_MODE_LINE`/`_POINT`
   // rasterize a triangle-class primitive's own edges/vertices instead of
   // its filled interior -- see `PolygonMode`'s own comment
@@ -982,10 +1003,10 @@ Error translateDepthStencilState(
   // is unspecified/irrelevant), not merely treat it as an initial value --
   // so neither its boolean fields nor `depthCompareOp`/the stencil op
   // fields may gate whether this function accepts or rejects the
-  // pipeline. `DepthBoundsTestEnable` gets the same treatment for the same
-  // reason, even though the test itself is never implemented: see
-  // `DynamicStateBits`'s own comment on why that combination is still
-  // safe to accept.
+  // pipeline. (roadmap H7d) `DepthBoundsTestEnable` gets the same
+  // treatment for the same reason: `VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_
+  // ENABLE`'s own resolved value always comes from `DynamicGraphicsState::
+  // DepthBoundsTestEnable` instead.
   bool TestDynamic = (Out.DynamicStates & DynamicStateDepthTestEnable) != 0;
   bool WriteDynamic = (Out.DynamicStates & DynamicStateDepthWriteEnable) != 0;
   bool CompareDynamic = (Out.DynamicStates & DynamicStateDepthCompareOp) != 0;
@@ -995,7 +1016,7 @@ Error translateDepthStencilState(
       (Out.DynamicStates & DynamicStateStencilTestEnable) != 0;
   bool StencilOpDynamic = (Out.DynamicStates & DynamicStateStencilOp) != 0;
 
-  bool NeedsDepth = TestDynamic || WriteDynamic;
+  bool NeedsDepth = TestDynamic || WriteDynamic || BoundsDynamic;
   bool NeedsStencil = StencilTestDynamic;
   if (!Info) {
     // A dynamically-enabled test still needs somewhere to test/write into.
@@ -1013,11 +1034,9 @@ Error translateDepthStencilState(
                                "in the pipeline's render target");
     return Error::success();
   }
-  if (!BoundsDynamic && Info->depthBoundsTestEnable)
-    return createStringError(inconvertibleErrorCode(),
-                             "the depth bounds test is not implemented");
 
-  NeedsDepth = NeedsDepth || Info->depthTestEnable || Info->depthWriteEnable;
+  NeedsDepth = NeedsDepth || Info->depthTestEnable || Info->depthWriteEnable ||
+              Info->depthBoundsTestEnable;
   if (NeedsDepth) {
     if (!Targets.DepthStencil ||
         !isSupportedDepthAttachmentFormat(*Targets.DepthStencil))
@@ -1037,7 +1056,29 @@ Error translateDepthStencilState(
                                  "unrecognized depth compare operation");
       Out.Depth.Compare = *Compare;
     }
+    // (roadmap H7d) `depthBounds`: like `depthClampEnable`/`depthBias
+    // Enable` (`translateRasterState`), accepted regardless of whether
+    // this ICD's own `depthBounds` feature bit is `VK_TRUE`
+    // (PhysicalDeviceInfo.cpp). `BoundsDynamic` (the enable bit,
+    // `VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE`) and `BoundsRangeDynamic`
+    // (the `min`/`maxDepthBounds` values, `VK_DYNAMIC_STATE_DEPTH_BOUNDS`)
+    // are independently-dynamic states, exactly like `StencilOpDynamic`
+    // and the stencil reference/compare/write masks below.
+    bool BoundsRangeDynamic = (Out.DynamicStates & DynamicStateDepthBounds) != 0;
+    if (BoundsDynamic) {
+      // Ignored per the comment above; resolved from
+      // `DynamicGraphicsState::DepthBoundsTestEnable` instead (see
+      // `buildExecutorPipeline`'s `ResolvedDepth`).
+      Out.Depth.BoundsTestEnable = false;
+    } else {
+      Out.Depth.BoundsTestEnable = Info->depthBoundsTestEnable != VK_FALSE;
+    }
+    if (!BoundsRangeDynamic) {
+      Out.Depth.MinDepthBounds = Info->minDepthBounds;
+      Out.Depth.MaxDepthBounds = Info->maxDepthBounds;
+    }
   }
+
 
   NeedsStencil = NeedsStencil || Info->stencilTestEnable;
   if (!NeedsStencil)
@@ -2276,6 +2317,14 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
     ResolvedRaster.StippleFactor = Dynamic.StippleFactor;
     ResolvedRaster.StipplePattern = Dynamic.StipplePattern;
   }
+  // (roadmap H7d) `VK_DYNAMIC_STATE_DEPTH_BIAS`: like `LineWidth` above,
+  // this is `RasterState::DepthBiasEnable`'s own static path made dynamic,
+  // not a new feature.
+  if (isDynamic(DynamicStateDepthBias)) {
+    ResolvedRaster.DepthBiasConstantFactor = Dynamic.DepthBiasConstantFactor;
+    ResolvedRaster.DepthBiasClamp = Dynamic.DepthBiasClamp;
+    ResolvedRaster.DepthBiasSlopeFactor = Dynamic.DepthBiasSlopeFactor;
+  }
 
   feme::graphics::DepthState ResolvedDepth = State.Depth;
   if (isDynamic(DynamicStateDepthTestEnable))
@@ -2284,8 +2333,16 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
     ResolvedDepth.WriteEnable = Dynamic.DepthWriteEnable;
   if (isDynamic(DynamicStateDepthCompareOp))
     ResolvedDepth.Compare = Dynamic.DepthCompare;
-  // `Dynamic.DepthBoundsTestEnable` is intentionally never read here: see
-  // `DynamicStateBits`'s comment on why it can only ever be `VK_FALSE`.
+  // (roadmap H7d) `Dynamic.DepthBoundsTestEnable` is now consulted for
+  // real: `translateDepthStencilState` leaves `State.Depth.BoundsTestEnable`
+  // at its default (`false`) whenever this state is dynamic, exactly like
+  // `DepthCompareOp`'s own `CompareDynamic` handling above.
+  if (isDynamic(DynamicStateDepthBoundsTestEnable))
+    ResolvedDepth.BoundsTestEnable = Dynamic.DepthBoundsTestEnable;
+  if (isDynamic(DynamicStateDepthBounds)) {
+    ResolvedDepth.MinDepthBounds = Dynamic.MinDepthBounds;
+    ResolvedDepth.MaxDepthBounds = Dynamic.MaxDepthBounds;
+  }
 
   feme::graphics::PrimitiveTopology ResolvedTopology =
       (isDynamic(DynamicStatePrimitiveTopology) && Dynamic.Topology)

@@ -178,13 +178,9 @@ enum DynamicStateBits : uint32_t {
   // already use, not a new rasterizer feature -- unlike mapTopology's
   // still-open point/line topologies or the dual-source blend factors (see
   // FeMeGraphicsDesign.md's status note). `DynamicStateDepthBoundsTest
-  // Enable` is the one exception worth calling out: the depth bounds test
-  // itself is not implemented, but the `depthBounds` feature this ICD
-  // advertises is also `VK_FALSE` (PhysicalDeviceInfo.cpp), so a
-  // conformant application can never legally set this dynamic state to
-  // `VK_TRUE` in the first place -- it is accepted and stored but never
-  // consulted, exactly as `depthBoundsTestEnable` in the static path
-  // already isn't (see `translateDepthStencilState`'s rejection of it).
+  // Enable` (roadmap H7d) now has a real consumer too: `ResolvedDepth.
+  // BoundsTestEnable` reads `Dynamic.DepthBoundsTestEnable` whenever this
+  // bit is set, exactly like every other state here.
   DynamicStateCullMode = 1u << 6,
   DynamicStateFrontFace = 1u << 7,
   DynamicStateDepthTestEnable = 1u << 8,
@@ -220,6 +216,18 @@ enum DynamicStateBits : uint32_t {
   // `DynamicGraphicsState` exactly like every other per-draw state above.
   DynamicStateLineWidth = 1u << 16,
   DynamicStateLineStipple = 1u << 17,
+  // (roadmap H7d) `VK_DYNAMIC_STATE_DEPTH_BIAS` (core 1.0):
+  // `vkCmdSetDepthBias`'s 3-float payload previously had nowhere to go
+  // (the entry point was a no-op stub, `depthBiasEnable` itself rejected
+  // at pipeline creation); now flows through `DynamicGraphicsState`
+  // exactly like `DynamicStateLineWidth` above.
+  DynamicStateDepthBias = 1u << 18,
+  // (roadmap H7d) `VK_DYNAMIC_STATE_DEPTH_BOUNDS` (core 1.0):
+  // `vkCmdSetDepthBounds`'s 2-float `min`/`maxDepthBounds` payload,
+  // distinct from `DynamicStateDepthBoundsTestEnable` above (which only
+  // ever toggles the test on/off) -- a pipeline may declare either, both,
+  // or neither independently.
+  DynamicStateDepthBounds = 1u << 19,
 };
 
 /// The command-buffer-resolved value of every piece of dynamic state a
@@ -244,8 +252,9 @@ struct DynamicGraphicsState {
   bool DepthTestEnable = false;
   bool DepthWriteEnable = false;
   feme::graphics::CompareOp DepthCompare = feme::graphics::CompareOp::Less;
-  // `VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE`'s own value: stored for
-  // completeness but never consulted (see `DynamicStateBits`'s comment).
+  // (roadmap H7d) `VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE`'s own value,
+  // consulted by `ResolvedDepth.BoundsTestEnable` (see
+  // `DynamicStateBits`'s comment).
   bool DepthBoundsTestEnable = false;
   bool StencilTestEnable = false;
   /// `vkCmdSetStencilOpEXT`'s per-face payload ([front, back], like the
@@ -274,6 +283,13 @@ struct DynamicGraphicsState {
   /// (roadmap F5) `vkCmdSetLineStippleKHR`'s payload.
   uint32_t StippleFactor = 1;
   uint16_t StipplePattern = 0xFFFF;
+  /// (roadmap H7d) `vkCmdSetDepthBias`'s 3-float payload.
+  float DepthBiasConstantFactor = 0.0f;
+  float DepthBiasClamp = 0.0f;
+  float DepthBiasSlopeFactor = 0.0f;
+  /// (roadmap H7d) `vkCmdSetDepthBounds`'s 2-float payload.
+  float MinDepthBounds = 0.0f;
+  float MaxDepthBounds = 1.0f;
 };
 
 /// The shareable, compiled part of a graphics `VkPipeline`: the
