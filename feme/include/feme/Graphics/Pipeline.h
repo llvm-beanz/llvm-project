@@ -438,6 +438,17 @@ struct RasterState {
   float DepthBiasConstantFactor = 0.0f;
   float DepthBiasClamp = 0.0f;
   float DepthBiasSlopeFactor = 0.0f;
+  /// (roadmap H7e) The upper bound a point-topology primitive's own
+  /// derived size (`SignatureSystemValue::PointSize`'s written value, or
+  /// 1.0 if unwritten) is clamped to before quad expansion, mirroring
+  /// `VkPhysicalDeviceLimits::pointSizeRange[1]`
+  /// (`PhysicalDeviceInfo.cpp`, which the Vulkan layer -- the only layer
+  /// allowed to depend on both -- keeps equal to this same value; see
+  /// that file's own comment). Unlike `LineWidth` above, this is a fixed
+  /// device limit, not per-pipeline state a `VkPipelineRasterizationState
+  /// CreateInfo` field sets, so `GraphicsPipeline.cpp` never writes it;
+  /// every pipeline keeps this struct's own default.
+  float MaxPointSize = 64.0f;
 };
 
 /// One attachment's format/extent identity, part of the pipeline's cache key

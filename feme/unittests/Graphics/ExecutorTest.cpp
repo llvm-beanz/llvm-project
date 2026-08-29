@@ -717,9 +717,12 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedTriangleFan) {
   EXPECT_EQ(Green[1], 255);
 }
 
-// roadmap C4: a `PointList` draws a fixed 1-pixel-square point at each
-// vertex (`largePoints` is not an advertised device feature, so a
-// conformant point size is always 1.0 -- see the executor's own comment).
+// roadmap C4: a `PointList` draws a point `RasterState::MaxPointSize`
+// pixels across by default when the vertex shader never writes
+// `gl_PointSize` (Vulkan's own documented fallback for an unwritten
+// `PointSize` output is 1.0 -- see `RasterVertex::PointSize`'s own
+// comment in Executor.cpp). `largePoints`/`RendersAPointAtItsWrittenPoint
+// Size` below cover a real, non-default derived size.
 TEST(ExecutorTest, RendersAPointList) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
@@ -754,10 +757,221 @@ TEST(ExecutorTest, RendersAPointList) {
   EXPECT_EQ(Untouched[3], 0);
 }
 
-// roadmap C4: a `LineList` draws a fixed 1-pixel-wide line between each
-// pair of vertices (`wideLines` is not an advertised device feature, so a
-// conformant line width is always 1.0, matching `lineWidthRange`'s fixed
-// `[1.0, 1.0]` in `PhysicalDeviceInfo.cpp`).
+// A vertex shader like `VertexShaderIR` above, but with a third input
+// attribute (element 0, location 2: one float) it writes straight through
+// to a new `SignatureSystemValue::PointSize` output (element 4) alongside
+// `Position`/color -- exercises `RasterVertex::PointSize`/`emitPointQuad`'s
+// clamp (roadmap H7e, `largePoints`) end to end through a real `PointList`
+// draw.
+constexpr char PointSizeVertexShaderIR[] = R"(
+  define void @vs_pointsize() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %cr = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %cg = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %cb = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+    %ca = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 0)
+    %ps = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %cr, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 1, float %cg, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 2, float %cb, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 3, float %ca, i32 0)
+    call void @feme.stage.output.store.f32(i32 5, i32 0, i32 0, float %ps, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+/// Builds a `PointList` pipeline whose vertex shader writes a real
+/// `gl_PointSize` (`PointSizeVertexShaderIR` above), with the given
+/// `RasterState` (so a test can set `MaxPointSize` to any test-local
+/// clamp bound without needing a real device-sized render target).
+Expected<GraphicsPipeline> buildPointSizePipeline(Context &Ctx,
+                                                   RasterState Raster) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/2),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 4, /*Location=*/0),
+      makeElement(5, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::PointSize)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, PointSizeVertexShaderIR, "vs_pointsize", VSSig, ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  return GraphicsPipeline(std::move(*VS), std::move(*FS),
+                          PrimitiveTopology::PointList, Raster, DepthState{},
+                          BlendMode::Replace, /*SampleCount=*/1,
+                          std::move(Attachments), StencilState{},
+                          std::vector<BlendState>{BlendState{}});
+}
+
+/// One point, its position/color/`PointSize` interleaved per vertex (11
+/// floats/vertex: xyz, rgba, size), centered at the 4x4 target's exact
+/// pixel-grid center (screen (2, 2), NDC (0, 0) -- chosen, like
+/// `RendersAPointList`'s own pixel centers, so the expansion's own corners
+/// land on exact half-pixel boundaries).
+PreparedDraw preparePointSizeDraw(std::array<uint8_t, 64> &AttachmentStorage,
+                                  std::vector<float> &VertexData,
+                                  std::array<VertexBufferBinding, 1> &Bindings,
+                                  std::array<AttachmentView, 1> &Attachments,
+                                  AttachmentView &Color) {
+  static const std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12},
+      {2, cpu::ResourceFormat::R32_FLOAT, 28}};
+  Color = AttachmentView{AttachmentStorage, cpu::ResourceFormat::R8G8B8A8_UNORM,
+                        4, 4};
+  Attachments = {Color};
+  Bindings = {VertexBufferBinding{
+      0, 32,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 1;
+  Cmd.InstanceCount = 1;
+  static std::array<DrawCommand, 1> Draws;
+  Draws = {Cmd};
+  Draw.Draws = Draws;
+  return Draw;
+}
+
+// roadmap H7e (`largePoints`): a `PointList` vertex writing a real
+// `gl_PointSize` expands to a quad that many pixels across, not the
+// unwritten default's 1 pixel -- a size of 2.0 centered exactly on the
+// pixel grid covers exactly the 2x2 block of pixels straddling that
+// intersection.
+TEST(ExecutorTest, RendersAPointAtItsWrittenPointSize) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPointSizePipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::vector<float> VertexData = {
+      0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 2.0f,
+  };
+  std::array<uint8_t, 64> AttachmentStorage{};
+  std::array<VertexBufferBinding, 1> Bindings;
+  std::array<AttachmentView, 1> Attachments;
+  AttachmentView Color;
+  PreparedDraw Draw = preparePointSizeDraw(AttachmentStorage, VertexData,
+                                           Bindings, Attachments, Color);
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t Y : {1u, 2u})
+    for (uint32_t X : {1u, 2u})
+      EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
+  // Every pixel outside the 2x2 block is untouched.
+  EXPECT_EQ(texel(0, 0)[3], 0);
+  EXPECT_EQ(texel(3, 3)[3], 0);
+  EXPECT_EQ(texel(0, 3)[3], 0);
+  EXPECT_EQ(texel(3, 0)[3], 0);
+}
+
+// roadmap H7e (`largePoints`): the derived point size is clamped to
+// `[1.0, RasterState::MaxPointSize]` before quad expansion, exactly like a
+// real `dEQP-VK.rasterization.primitive_size.points.*` case's own expected
+// clamped result -- writing a size far beyond a (test-local) 2-pixel
+// maximum still renders only the 2x2 block `RendersAPointAtItsWrittenPoint
+// Size` above does, not the unclamped, much larger size.
+TEST(ExecutorTest, ClampsPointSizeToTheDevicesMaximum) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.MaxPointSize = 2.0f;
+  Expected<GraphicsPipeline> Pipeline = buildPointSizePipeline(Ctx, Raster);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::vector<float> VertexData = {
+      0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 999.0f,
+  };
+  std::array<uint8_t, 64> AttachmentStorage{};
+  std::array<VertexBufferBinding, 1> Bindings;
+  std::array<AttachmentView, 1> Attachments;
+  AttachmentView Color;
+  PreparedDraw Draw = preparePointSizeDraw(AttachmentStorage, VertexData,
+                                           Bindings, Attachments, Color);
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t Y : {1u, 2u})
+    for (uint32_t X : {1u, 2u})
+      EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
+  // A point clamped to 2 pixels does not spill onto the target's edges.
+  EXPECT_EQ(texel(0, 0)[3], 0);
+  EXPECT_EQ(texel(3, 3)[3], 0);
+}
+
+// roadmap H7e (`largePoints`): the derived point size is also clamped up
+// to `pointSizeRange[0]` (1.0) when a vertex shader writes a size below
+// it -- a size of 0.0 still renders exactly 1 pixel, not zero.
+TEST(ExecutorTest, ClampsPointSizeUpToTheMinimum) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPointSizePipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::vector<float> VertexData = {
+      0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f,
+  };
+  std::array<uint8_t, 64> AttachmentStorage{};
+  std::array<VertexBufferBinding, 1> Bindings;
+  std::array<AttachmentView, 1> Attachments;
+  AttachmentView Color;
+  PreparedDraw Draw = preparePointSizeDraw(AttachmentStorage, VertexData,
+                                           Bindings, Attachments, Color);
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  // Exactly one pixel of the 2x2 intersection -- the top-left rule's own
+  // tie-break, same as any other exactly grid-aligned quad corner.
+  EXPECT_EQ(texel(1, 1)[3], 255);
+  EXPECT_EQ(texel(2, 2)[3], 0);
+  EXPECT_EQ(texel(1, 2)[3], 0);
+  EXPECT_EQ(texel(2, 1)[3], 0);
+}
+
+// roadmap C4: a `LineList` draws a 1-pixel-wide line between each pair of
+// vertices when the pipeline's own `RasterState::LineWidth` (this test's
+// default) is 1.0; `RendersAWideRectangularLine` below covers a wider one
+// (roadmap F5/H7e, `wideLines`).
 TEST(ExecutorTest, RendersAHorizontalLineList) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(

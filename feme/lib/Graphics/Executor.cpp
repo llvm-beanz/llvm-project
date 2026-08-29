@@ -288,11 +288,18 @@ struct LinkedVarying {
 struct RasterVertex {
   std::array<float, 4> Clip;
   SmallVector<uint32_t, 8> Varyings;
+  /// (roadmap H7e) The last pre-rasterization stage's own
+  /// `SignatureSystemValue::PointSize` output, read by a point-topology
+  /// primitive's own quad expansion; meaningless for a triangle/line
+  /// primitive's vertices. Defaults to Vulkan's own documented fallback
+  /// for an unwritten `gl_PointSize` (1.0).
+  float PointSize = 1.0f;
 };
 
 RasterVertex lerpVertex(const RasterVertex &A, const RasterVertex &B, float T,
                         ArrayRef<LinkedVarying> Varyings) {
   RasterVertex Out;
+  Out.PointSize = A.PointSize;
   for (unsigned I = 0; I != 4; ++I)
     Out.Clip[I] = A.Clip[I] + (B.Clip[I] - A.Clip[I]) * T;
   Out.Varyings.resize(A.Varyings.size());
@@ -1278,6 +1285,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   const SignatureElement *VSViewportOut =
       findElement(RasterSig, SignatureDirection::Output,
                   SignatureSystemValue::ViewportArrayIndex);
+  // (roadmap H7e) Optional: not every vertex shader writes `gl_PointSize`,
+  // and only a point-topology draw's own quad expansion ever reads it.
+  const SignatureElement *VSPointSize = findElement(
+      RasterSig, SignatureDirection::Output, SignatureSystemValue::PointSize);
   if (!VSPosition)
     return createStringError(inconvertibleErrorCode(),
                              "the last pre-rasterization stage does not "
@@ -1571,6 +1582,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       RasterVertex V;
       for (unsigned C = 0; C != 4; ++C)
         V.Clip[C] = RasterOut->readFloat(VSPosition->ElementID, C, Flat);
+      if (VSPointSize)
+        V.PointSize = RasterOut->readFloat(VSPointSize->ElementID, 0, Flat);
       V.Varyings.resize(0);
       for (const LinkedVarying &LV : Varyings)
         for (uint32_t Row = 0; Row != LV.RowCount; ++Row)
@@ -1765,11 +1778,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
     // Expands one point (a real `PointList` invocation, or -- roadmap
     // H7c -- one vertex of a `PolygonMode::Point` triangle) into its
-    // fixed 0.5-pixel-half-extent quad.
+    // quad, `PointSize` pixels across (roadmap H7e; `largePoints`).
+    // Vulkan clamps the derived size to `[pointSizeRange[0],
+    // pointSizeRange[1]]` before rasterizing -- a real `deqp-vk` clamp
+    // check (`dEQP-VK.rasterization.primitive_size.points.*`) exercises
+    // exactly this path -- so this clamps to `[1.0,
+    // Raster.MaxPointSize]` (`PhysicalDeviceInfo.cpp`'s own
+    // `pointSizeRange[0]` is likewise fixed at `1.0`).
     auto emitPointQuad = [&](std::array<float, 2> P, float InvW, float Depth,
                              const RasterVertex &Vtx,
                              const PrimitiveState &Primitive) {
-      constexpr float Half = 0.5f;
+      float Half =
+          std::clamp(Vtx.PointSize, 1.0f, Pipeline.getRasterState().MaxPointSize) *
+          0.5f;
       QuadCorner TL{{P[0] - Half, P[1] - Half}, InvW, Depth, &Vtx};
       QuadCorner TR{{P[0] + Half, P[1] - Half}, InvW, Depth, &Vtx};
       QuadCorner BR{{P[0] + Half, P[1] + Half}, InvW, Depth, &Vtx};
