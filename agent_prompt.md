@@ -36,20 +36,23 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6j?
+Can you complete H6g-b-c?
 
->**A real `dEQP-VK.mesh_shader.ext.in_out.*` case now fails at `vkQueueSubmit`
->with "vertex output and fragment input at location 0 disagree on component/row
->count or type"**, newly exposed by H6g-b-d's own `MeshOutputWrapperPass`
->catch-all fix: once the 40 cases that fix unblocks progress past compilation,
->they reach submission-time interface validation between the mesh entry's own
->per-vertex output and the fragment stage's input, and disagree despite both
->sides being generated from matching `layout(location=...)` declarations in
->`vktMeshShaderInOutTestsEXT.cpp`'s own generated GLSL. Root cause not yet
->isolated: unclear whether the mismatch is a genuine signature-matching bug
->specific to a mesh-to-fragment interface (as opposed to the already-working
->vertex-to-fragment and geometry-to-fragment cases), a
->`MeshOutputWrapperPass`/`EntryWrapperPass` byproduct that changes the reflected
->output signature's own component/row count from what the fragment stage's input
->signature expects, or a pre-existing interface-matching gap this is simply the
->first mesh-stage case to exercise at all
+> **A mesh entry's unresolved arrayed-builtin-block access -- left unrewritten
+> by `H6c-a-a-iii`'s own `resolveOffsetWithinElement` fix (`std::nullopt`,
+> "leave for `ValidateStagePass` to diagnose") -- is never actually diagnosed,
+> because `ValidateStagePass::run` still does not validate `ShaderStage::Mesh`
+> at all (every prior row that touched mesh validation, from `H6a` on, left this
+> unreachable/not-yet-wired)**, so the raw, un-canonicalized global-variable
+> access survives all the way to `feme::cpu`'s JIT, which then fails with a
+> genuinely undefined symbol (confirmed directly:
+> `dEQP-VK.mesh_shader.ext.builtin.cull_primitives`, one of this row's own 33
+> `vkPipelineConstructionUtil.cpp:176` cases, fails with `JIT session error:
+> Symbols not found: [ spirv_var_16 ]`) instead of a clean, diagnosable
+> compile-time rejection -- the exact same 9-case-turned-33-case set
+> `H6c-a-a-ii`/`H6c-a-a-iii`'s own reports already named (`cull_primitives`,
+> `draw_index_in_{mesh,task}`, `local_invocation_{id,index}_in_task`,
+> `position`, `primitive_id_glsl`, `work_group_id_in_{mesh,task}`). This is the
+> concrete, now-reachable instance of the gap `H6c-a-a-iii`'s own report already
+> flagged as a future risk ("not yet reachable... mirroring `TaskPayloadStore`'s
+> own 'not yet reachable' precedent")
