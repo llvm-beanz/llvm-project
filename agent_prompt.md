@@ -37,14 +37,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H7d?
+Can you complete H7e?
 
-> **`depthClamp`/`depthBiasClamp`/`depthBounds`**: `GraphicsPipeline.cpp`
-> explicitly rejects `depthClampEnable`, depth bias entirely
-> (`depthBiasEnable`), and
-> `VkPipelineDepthStencilStateCreateInfo::depthBoundsTestEnable` ("the depth
-> bounds test is not implemented") at pipeline-creation time; none of the three
-> has any per-fragment implementation in `Executor.cpp`'s depth/stencil test
-> path. Three related but independently gated depth-pipeline features, grouped
-> since fixing depth-bias admission is a likely prerequisite for
-> `depthBiasClamp` specifically
+> **`wideLines`/`largePoints`**: F5 already threads a real, variable `LineWidth`
+> through the line rasterizer's own quad-expansion path (`Executor.cpp`), so
+> `wideLines` is likely close -- `lineWidthRange`/`lineWidthGranularity` above
+> stay at the degenerate `[1.0, 1.0]`/`1.0` floor and need raising to match
+> whatever this rasterizer can honestly support. `largePoints` needs real new
+> work: point-primitive expansion is still hardcoded to a fixed 1-pixel size,
+> unlike the line path F5 already generalized
