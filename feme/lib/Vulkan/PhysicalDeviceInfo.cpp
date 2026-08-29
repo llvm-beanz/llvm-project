@@ -371,6 +371,31 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Info.Features.dualSrcBlend = VK_TRUE;
   Info.Features.wideLines = VK_TRUE;
   Info.Features.largePoints = VK_TRUE;
+  // (Roadmap H7f) `alphaToOne`: `Executor.cpp`'s
+  // `GraphicsPipeline::getAlphaToOneEnable()` forces every color
+  // attachment's output alpha to `1.0`, confirmed conformant against a real
+  // `dEQP-VK.pipeline.monolithic.multisample.alpha_to_one.*` re-run (4/4
+  // feme-supported-sample-count cases pass), so this one honestly flips to
+  // `VK_TRUE`. `alphaToCoverageEnable` remains rejected at pipeline-creation
+  // time (roadmap H7n) and has no feature bit of its own to flip.
+  //
+  // `sampleRateShading` deliberately stays `VK_FALSE` despite
+  // `GraphicsPipeline::getSampleShadingEnable()`'s own per-sample
+  // shade/dispatch/merge loop being implemented and unit-tested: a real
+  // `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading*`/
+  // `multisample_shader_builtin.sample_id.*` re-run (once this feature bit
+  // was flipped to `VK_TRUE` to let `checkSupport` allow them to attempt
+  // real pipeline creation for the first time) fails every case at
+  // `vkQueueSubmit`-adjacent shader compilation with `feme-cpu-simdize:
+  // ... has a divergent value '' of vector type ...`; the same shader
+  // shape's `gl_SampleID`-derived storage-buffer index also fails with
+  // sample shading disabled, confirming the gap is `SIMDize.cpp`'s own
+  // pre-existing lack of support for a divergent (per-invocation-computed)
+  // buffer store address, not anything specific to per-sample shading
+  // itself. Advertising the feature bit before a real `dEQP-VK` case that
+  // exercises it can pass would be a conformance violation, so it stays
+  // off pending roadmap H7o.
+  Info.Features.alphaToOne = VK_TRUE;
   // Roadmap E20 ("Block-compressed image groundwork + ASTC LDR decode")
   // first tracked this Vulkan 1.0 core feature bit explicitly (previously
   // left implicitly false by the zero-initialization above, unlike

@@ -111,16 +111,18 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
 
 TEST(PhysicalDeviceInfo,
      OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised) {
-  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c/H7d/H7e) `robustBufferAccess`/
+  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c/H7d/H7e/H7f) `robustBufferAccess`/
   // `dualSrcBlend`/`textureCompressionASTC_LDR`/`multiViewport`/
   // `tessellationShader`/`geometryShader`/`independentBlend`/`logicOp`/
   // `occlusionQueryPrecise`/`multiDrawIndirect`/
   // `drawIndirectFirstInstance`/`imageCubeArray`/`fillModeNonSolid`/
-  // `depthClamp`/`depthBiasClamp`/`depthBounds`/`wideLines`/`largePoints`
-  // are the only core features this milestone can honestly claim (see
-  // PhysicalDeviceInfo.cpp's comment); every other `VkBool32` stays
-  // false, since nothing else has been implemented that could back one
-  // yet.
+  // `depthClamp`/`depthBiasClamp`/`depthBounds`/`wideLines`/`largePoints`/
+  // `alphaToOne` are the only core features this milestone can honestly
+  // claim (see PhysicalDeviceInfo.cpp's comment); every other `VkBool32`
+  // stays false, since nothing else has been implemented that could back
+  // one yet -- including `sampleRateShading`, whose own executor plumbing
+  // (roadmap H7f) is implemented but stays unadvertised pending roadmap
+  // H7o's own `SIMDize.cpp` divergent-buffer-store gap.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
@@ -140,6 +142,8 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.depthBounds, VK_TRUE);
   EXPECT_EQ(Info.Features.wideLines, VK_TRUE);
   EXPECT_EQ(Info.Features.largePoints, VK_TRUE);
+  EXPECT_EQ(Info.Features.alphaToOne, VK_TRUE);
+  EXPECT_EQ(Info.Features.sampleRateShading, VK_FALSE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -160,6 +164,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.depthBounds = VK_FALSE;
   Cleared.wideLines = VK_FALSE;
   Cleared.largePoints = VK_FALSE;
+  Cleared.alphaToOne = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }
