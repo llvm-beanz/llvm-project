@@ -111,13 +111,14 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
 
 TEST(PhysicalDeviceInfo,
      OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised) {
-  // (V4/C4/E22/H3/H4b/H5e/H7a) `robustBufferAccess`/`dualSrcBlend`/
+  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a) `robustBufferAccess`/`dualSrcBlend`/
   // `textureCompressionASTC_LDR`/`multiViewport`/`tessellationShader`/
   // `geometryShader`/`independentBlend`/`logicOp`/`occlusionQueryPrecise`/
-  // `multiDrawIndirect`/`drawIndirectFirstInstance` are the only core
-  // features this milestone can honestly claim (see PhysicalDeviceInfo.
-  // cpp's comment); every other `VkBool32` stays false, since nothing
-  // else has been implemented that could back one yet.
+  // `multiDrawIndirect`/`drawIndirectFirstInstance`/`imageCubeArray` are
+  // the only core features this milestone can honestly claim (see
+  // PhysicalDeviceInfo.cpp's comment); every other `VkBool32` stays
+  // false, since nothing else has been implemented that could back one
+  // yet.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
@@ -130,6 +131,7 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.occlusionQueryPrecise, VK_TRUE);
   EXPECT_EQ(Info.Features.multiDrawIndirect, VK_TRUE);
   EXPECT_EQ(Info.Features.drawIndirectFirstInstance, VK_TRUE);
+  EXPECT_EQ(Info.Features.imageCubeArray, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -143,6 +145,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.occlusionQueryPrecise = VK_FALSE;
   Cleared.multiDrawIndirect = VK_FALSE;
   Cleared.drawIndirectFirstInstance = VK_FALSE;
+  Cleared.imageCubeArray = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }

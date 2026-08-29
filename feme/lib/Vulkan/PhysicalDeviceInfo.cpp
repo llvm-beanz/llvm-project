@@ -473,6 +473,25 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // `validateDrawCounts`/`runDraw` never special-case an indirect draw's
   // instance offset differently from a direct one's.
   Info.Features.drawIndirectFirstInstance = VK_TRUE;
+  // Roadmap H7b/H7b-a: `imageCubeArray` needed two coordinated fixes
+  // before it could honestly flip. H7b widened `CommandBuffer.cpp`'s
+  // `materializeImageDescriptor` to build a real per-layer/per-face
+  // descriptor for a `Texture2DArray`/`TextureCube`/`TextureCubeArray`
+  // view (previously only ever a 2D, base-layer-0 descriptor). H7b-a then
+  // closed the deeper, pipeline-creation-time blocker that fix's own
+  // survey found: `SPIRVResourceLowering.cpp`'s
+  // `classifySampledImage2DHandle` and `ResourceLowering.cpp`'s
+  // `classifyImageHandle` both rejected every `Cube`/`CubeArray`/
+  // `2DArray`-dimensioned shader binding outright, before a descriptor
+  // was ever reached; a `gl_CullPrimitiveEXT`-style i1-scalar case is a
+  // separate, unrelated gap (roadmap H6m) this row does not touch. With
+  // both fixes and a real cube-face-selection ("major axis") coordinate
+  // transform in `feme/runtime/CPU/FeMeRuntimeCPU.c`'s
+  // `femeRTSelectCubeFace` now in place, a real `CommandBufferTest.cpp`
+  // dispatch samples a bound `TextureCubeArray` end to end and reads back
+  // the correct face/array-element's own texel, so this can honestly
+  // flip to `VK_TRUE`.
+  Info.Features.imageCubeArray = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
