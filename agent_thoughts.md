@@ -44866,3 +44866,108 @@ mesh-shading milestone-6 deviation already self-documented in its own
 error message text. This is a good example of the value in always
 searching prior CTS-report writeups for an error message's exact
 wording before assuming a freshly-surfaced failure is novel.
+
+# Session: Roadmap H7f (`sampleRateShading`/`alphaToOne`)
+
+## The roadmap text's own "already-implemented" claim about alpha-to-coverage was wrong
+H7f's original bullet described `alphaToOneEnable` as "distinct from the
+already-implemented alpha-to-coverage handling" -- implying
+`alphaToCoverageEnable` just worked and only `alphaToOne` itself needed
+new work. An exhaustive grep across `Executor.cpp`/`GraphicsPipeline.cpp`
+turned up nothing: no alpha-to-coverage handling exists anywhere in the
+blend/coverage path at all. Rather than silently correct the record or
+(worse) quietly implement alpha-to-coverage as an undocumented bonus
+inside this row, I left it rejected (matching the original H7's own
+top-level scope list, which separately named it) and broke it out as its
+own tracked row, H7n -- a real per-sample coverage-mask update is
+different-shaped work from either of H7f's own two bits (it touches
+coverage, not color output), so it earns its own row rather than folding
+silently into this one's "done" summary.
+
+## Design decisions for `sampleRateShading`: full sample rate, pixel-center
+## interpolation, fixed 4-lane quad
+Three simplifications, each checked against the real Vulkan spec text
+before committing to it:
+- **Always shade at the full sample rate, ignore `minSampleShading`'s
+  exact value.** The spec requires *at least*
+  `ceil(minSampleShading * rasterizationSamples)` invocations per
+  fragment; running every sample trivially satisfies that for any
+  `minSampleShading` in `[0,1]`. `RasterState`/`GraphicsPipeline` never
+  even need a field to store the value -- there was a moment of doubt
+  about whether this counted as "faking" conformance, resolved by
+  re-reading the spec's own "at least" wording twice before proceeding.
+- **Interpolate varyings at pixel-center on every pass, not at each
+  sample's exact position.** This matches an existing precedent already
+  in the codebase (the coverage-test loop's own comment about
+  pixel-center barycentrics) rather than introducing a new precision
+  compromise -- a shader whose output doesn't read `gl_SampleID` produces
+  the same color on every pass, which is correct (just not maximally
+  efficient), since only that pass's one sample slot gets written.
+- **Keep the 4-lane quad fixed; loop passes instead of widening lanes.**
+  `FemeFragmentInvocation`/`FemeFragmentResult` are ABI-fixed at 4 lanes
+  (one 2x2 quad). Per-sample shading is achieved by running the existing
+  shade/dispatch/merge sequence once per sample, narrowing a *local copy*
+  of the invocation array's `SampleIndex`/`Coverage` fields each pass --
+  not by inventing a wider ABI. This mirrors how a real GPU shades a
+  fixed-size quad multiple times rather than growing the quad.
+
+## A real CTS run surfaced a genuine, pre-existing SIMDize gap -- and it
+## was tempting to either over-scope or under-scope the finding
+The first real `deqp-vk` run (after flipping both feature bits) showed
+`alphaToOne` fully conformant (4/4) but every `sampleRateShading`-relevant
+case failing at shader-compilation time:
+`feme-cpu-simdize: ... has a divergent value '' of vector type ...`. My
+first instinct was to assume this was caused by my own executor changes
+(the per-sample pass loop) somehow producing bad IR -- but the executor
+runs *after* SIMDize, and the failure is at compile time, before any
+fragment invocation. Cross-checking which cases failed was the key
+diagnostic step: `min_sample_shading_disabled.*` cases (sample shading
+*not* even enabled) failed identically to `_enabled.*` ones, which rules
+out anything specific to per-sample shading and points squarely at the
+shared fixed shader both variants use (which reads `gl_SampleID` to
+compute a storage-buffer index for a write). Reading `SIMDize.cpp`'s own
+divergent-value producer classification confirmed the gap precisely: it
+has categories for casts, elementwise arithmetic, comparisons, phi/
+select/shufflevector, and (importantly) resource *loads*, but a resource
+*store*'s own computed address is explicitly excluded from producer
+classification, and there is no case for a `GetElementPtrInst` with a
+divergent index at all. A minimal hand-written-IR test confirmed reading
+`SV_SampleIndex` and doing ordinary arithmetic on it (no store) compiles
+fine -- so the gap is specifically "divergent buffer *store* address," not
+"reading a per-lane system value."
+
+Given the size of what a real fix needs (most likely a new
+`llvm.masked.scatter`-based lowering for a divergent resource store,
+mirroring the groupshared-memory scatter-store path `SIMDize.cpp`
+already has for that different address space), I chose not to attempt it
+within H7f's own scope -- it's a substantial, independent compiler-pass
+change, not "tightly coupled" to the executor/translation work H7f's own
+text described. Instead: reverted `sampleRateShading`'s feature bit back
+to `VK_FALSE` (keeping only the fully-conformant `alphaToOne` at
+`VK_TRUE`) and broke the gap out as its own follow-on row, H7o, with
+enough detail (the exact shader shape, the exact `SIMDize.cpp` code
+location, the confirmation that it's generic rather than
+sample-shading-specific) that whoever picks it up next doesn't need to
+re-derive any of this.
+
+This is the same "IR reduction to scope a fix, then decide whether it's
+in-scope or its own row" pattern the H6g-b/H6j/H6k/H6l chain established
+-- and a good reminder that a feature bit should only flip once a real
+conformance case exercising it can actually pass, not just once the
+plumbing compiles and unit tests pass in isolation. The unit tests here
+were all correct and necessary (they isolate the executor's own logic
+from the unrelated compiler gap), but they alone would have been
+misleading grounds for declaring `sampleRateShading` done.
+
+## A stale summary table, found and fixed in passing
+While updating `Vulkan14FeatureInventory.md`'s bulleted narrative for this
+row, the "Findings" table right above it turned out to still read "15 of
+55"/"56 of 150" for the 1.0 row/total -- numbers from before roadmap
+H7a's own flips, even though the bulleted prose below the table had been
+kept current at every step since (H7a through H7e). The table and prose
+had quietly diverged. Recomputed the true count directly from the table's
+own per-bit rows (19 of 55 `yes`, after this row's own `alphaToOne` flip)
+and corrected both the row and the total, with a short bullet noting the
+drift and its correction -- small, but worth fixing since leaving it
+would have made this row's own edit visibly inconsistent with the table
+it sits above.
