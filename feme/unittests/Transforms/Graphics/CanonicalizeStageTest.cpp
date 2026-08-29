@@ -996,27 +996,34 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenStores, 1u);
 }
 
-/// (Roadmap H6c-a-a-iii) A multi-`ElementID` builtin interface block
-/// whose own value type is an arrayed `StructType` (a mesh entry's own
+/// (Roadmap H6k) A multi-`ElementID` builtin interface block whose own
+/// value type is an arrayed `StructType` (a mesh entry's own
 /// `PerPrimitiveEXT`/`PerVertexEXT`-decorated block, e.g.
 /// `gl_MeshPrimitivesEXT[]`), accessed through a *constant* array index
 /// rather than `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore`'s
-/// dynamic one: unlike a dynamic index, a constant one does not go
-/// through `getDynamicVertexIndexedAccess` at all (that helper explicitly
-/// rejects a constant index, deferring to the ordinary constant-offset
-/// path), and unlike `Input`'s own per-vertex array
-/// (`isPerVertexArrayInputGlobal`, roadmap H5f), a constant `Output`-array
-/// index is deliberately *not* folded into `Vertex` either (roadmap H6b, to
-/// avoid misrouting a real matrix output's own constant row index) -- so this
-/// shape reaches `resolveOffsetWithinElement` with the whole array-of-struct
-/// (`GV->getValueType()`) as `ElemTy` and more than one `ElementID`,
-/// previously asserting via `cast<StructType>` (a shape that could not be
-/// reached before H6c-a-a-i made `SetMeshOutputsEXT` conversion succeed,
-/// since every case exercising it failed earlier at SPIR-V-to-LLVM
-/// conversion). Confirms the fixed function now gracefully leaves this
-/// store unrewritten instead of crashing the whole process.
+/// dynamic one -- the exact shape a real, glslang-compiled
+/// `dEQP-VK.mesh_shader.ext.in_out.*` mesh entry's own
+/// `gl_MeshVerticesEXT[k].gl_Position = ...`-style compile-time-unrolled
+/// per-vertex output store takes. Before this row, a constant `Output`
+/// array index was deliberately *not* folded into `Vertex` (roadmap H6b,
+/// to avoid misrouting a real matrix output's own constant row index) --
+/// safe for every stage this implementation gives a genuine per-row
+/// matrix output *except* mesh (`isPerVertexArrayMeshOutputGlobal`'s own
+/// comment) -- so this shape used to reach `resolveOffsetWithinElement`
+/// with the whole array-of-struct (`GV->getValueType()`) as `ElemTy` and
+/// more than one `ElementID`, which cannot itself be cast to a
+/// `StructType` and so resolved to `std::nullopt` (left unrewritten). A
+/// mesh entry's own constant-indexed access now takes the identical fold
+/// `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore`'s dynamic
+/// one already did, peeling the constant array index into `Vertex` before
+/// `resolveOffsetWithinElement` picks the right member's own `ElementID`
+/// out of the (now correctly per-element, not per-array) struct type --
+/// exactly what stopped the real CTS case's own `StageStorage` corruption
+/// (this row's own crash, `feme-graphics-validate-stage`'s "row is out of
+/// range" diagnostic converted what used to be silent heap corruption
+/// into a compile-time-visible one before this fix).
 TEST(CanonicalizeStageTest,
-     ConstantIndexIntoArrayedBuiltinInterfaceBlockIsLeftUnrewritten) {
+     FoldsConstantIndexIntoArrayedBuiltinInterfaceBlockMemberStore) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     @gl_mesh_prims = external addrspace(8) global [4 x { i32, i32 }], !feme.spirv.MemberDecorations !10
@@ -1035,17 +1042,31 @@ TEST(CanonicalizeStageTest,
     !16 = !{i32 5271}
   )");
   ASSERT_TRUE(M);
-  run(*M);
+  EXPECT_TRUE(run(*M));
   Function *F = M->getFunction("main");
 
-  bool SawRawStore = false;
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  EXPECT_EQ(Sig->Elements[0].SystemValue, SignatureSystemValue::PrimitiveID);
+  EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
+
+  unsigned SeenStores = 0;
   for (Instruction &I : instructions(F)) {
-    if (isa<StoreInst>(&I))
-      SawRawStore = true;
-    if (auto *CI = dyn_cast<CallInst>(&I))
-      EXPECT_FALSE(isStageOpCall(*CI));
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[0].ElementID);
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 0u);
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Vertex=*/4), 1u);
   }
-  EXPECT_TRUE(SawRawStore);
+  EXPECT_EQ(SeenStores, 1u);
+
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
 }
 
 /// (Roadmap C8) glslang wraps a `varying`-block *member* -- even a matrix
@@ -1761,7 +1782,136 @@ TEST(CanonicalizeStageTest, MeshStagePeelsPerVertexArrayFromOutputRowCount) {
   EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
 }
 
-/// (Roadmap H6i) A task entry's bounded payload write -- an ordinary store
+/// (Roadmap H6k) A real `dEQP-VK.mesh_shader.ext.in_out.*` mesh entry's own
+/// per-vertex output store is not always dynamically indexed the way
+/// `MeshStageCanonicalizesOutputArrayStore` above models it -- glslang
+/// commonly unrolls a small, compile-time-bounded per-vertex output loop
+/// into one *constant*-indexed store per vertex instead (`out_verts[1] =
+/// ...`, not `out_verts[i] = ...`). Before this row's own fix,
+/// `resolveStageIOAccess`'s ordinary constant-offset path folded that
+/// constant index into an ordinary `Row` operand rather than `Vertex` --
+/// exactly the roadmap H6b-era treatment deliberately kept for every
+/// *other* stage's own genuine per-row matrix output store, but wrong here
+/// because a mesh entry's plain `Output` global's `RowCount` has been
+/// peeled to the fragment-visible per-vertex shape (roadmap H6j, `1` for a
+/// `vec4`) rather than the array's own extent: a constant vertex index
+/// greater than 0 folded into `Row` this way silently exceeds that
+/// `RowCount`, corrupting `feme::graphics::StageStorage`'s own storage
+/// past its allocated bounds at runtime (roadmap H6k's own named
+/// heap-corruption crash) rather than being rejected or handled correctly.
+/// Confirms the fix directly: a constant `out_verts[1]` store's own
+/// `feme.stage.output.store` call now threads a constant `1` through the
+/// `Vertex` operand (index 4), not `Row` (index 1, which must stay the
+/// ordinary default `0`).
+TEST(CanonicalizeStageTest, FoldsConstantVertexIndexIntoOutputStoreForMesh) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_verts = external addrspace(8) global [3 x <4 x float>], !spirv.Decorations !0
+    define void @main(<4 x float> %v) #0 {
+      %p = getelementptr inbounds [3 x <4 x float>], ptr addrspace(8) @out_verts, i32 0, i32 1
+      store <4 x float> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    auto *Row = dyn_cast<ConstantInt>(CI->getArgOperand(1));
+    ASSERT_TRUE(Row);
+    EXPECT_EQ(Row->getZExtValue(), 0u);
+    auto *Vertex = dyn_cast<ConstantInt>(CI->getArgOperand(4));
+    ASSERT_TRUE(Vertex);
+    EXPECT_EQ(Vertex->getZExtValue(), 1u);
+  }
+  EXPECT_EQ(SeenStores, 4u);
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
+/// (Roadmap H6k) The single-member-block counterpart to
+/// `FoldsConstantVertexIndexIntoOutputStoreForMesh` above: a real
+/// `dEQP-VK.mesh_shader.ext.in_out.*` mesh entry's `gl_MeshVerticesEXT`
+/// (`out gl_MeshPerVertexEXT { vec4 gl_Position; } gl_MeshVerticesEXT[];`)
+/// is a single-member builtin interface block (one `!feme.spirv.
+/// MemberDecorations`-decorated member, `gl_Position`), not a plain
+/// per-vertex array -- `addElements`'s own block-decompose path
+/// (`isSPIRVStageIOGlobal`'s `MemberDecorations` branch) still assigns it
+/// exactly one `ElementID`, same as a plain global would, but reaches
+/// `resolveStageIOAccess` down the "block" side rather than the "plain
+/// array" one `FoldsConstantVertexIndexIntoOutputStoreForMesh` exercises.
+/// This is the *exact* shape a real, glslang-compiled
+/// `dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_1.mesh_only`
+/// case's own `gl_MeshVerticesEXT[k].gl_Position = ...` constant-indexed,
+/// compile-time-unrolled store takes (confirmed against a real `deqp-vk`
+/// run's own SPIR-V disassembly) -- the specific real-world shape this
+/// row's own fix (extending `isPerVertexArrayMeshOutputGlobal` to cover a
+/// builtin block, not just a plain array) was needed to unblock; the
+/// earlier, narrower fix (plain-array-only) left this exact shape still
+/// routing through the ordinary matrix-`Row` fold and still corrupting
+/// `StageStorage` at runtime for every real mesh case using
+/// `gl_MeshVerticesEXT`/`gl_MeshPrimitivesEXT`.
+TEST(CanonicalizeStageTest,
+     FoldsConstantVertexIndexIntoSingleMemberInterfaceBlockOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_mesh_verts = external addrspace(8) global [4 x { <4 x float> }], !feme.spirv.MemberDecorations !10
+    define void @main(<4 x float> %v) #0 {
+      %p = getelementptr inbounds [4 x { <4 x float> }], ptr addrspace(8) @gl_mesh_verts, i32 0, i32 1, i32 0
+      store <4 x float> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !10 = !{!11}
+    !11 = !{i32 0, !12}
+    !12 = !{!13}
+    !13 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].SystemValue, SignatureSystemValue::Position);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    auto *Row = dyn_cast<ConstantInt>(CI->getArgOperand(1));
+    ASSERT_TRUE(Row);
+    EXPECT_EQ(Row->getZExtValue(), 0u);
+    auto *Vertex = dyn_cast<ConstantInt>(CI->getArgOperand(4));
+    ASSERT_TRUE(Vertex);
+    EXPECT_EQ(Vertex->getZExtValue(), 1u);
+  }
+  EXPECT_EQ(SeenStores, 4u);
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
 /// through `TaskPayloadGlobalVariablePattern`'s own address-space-14 global
 /// import shape (roadmap H6h) -- canonicalizes into
 /// `feme.stage.task.payload.store` by its resolved constant byte offset,

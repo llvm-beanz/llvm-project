@@ -870,10 +870,51 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
 /// loads the whole matrix in one instruction and lets
 /// `loadStageIOValue`'s own recursion split it apart instead), so H5f's
 /// constant-fold extension stays safe there. See "Roadmap H6: what H6b
-/// found, and why it stops here" in VulkanCTSReport.md.
+/// found, and why it stops here" in VulkanCTSReport.md. (Roadmap H6k) That
+/// reasoning holds for every stage this implementation gives a genuine
+/// per-row matrix output to *except* mesh: see
+/// `isPerVertexArrayMeshOutputGlobal` below for the narrower, `Mesh`-only
+/// exception this row adds instead of loosening this check itself.
 bool isPerVertexArrayInputGlobal(const GlobalVariable *GV,
                                  unsigned &AddrSpace) {
   if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 7)
+    return false;
+  return isa<ArrayType>(GV->getValueType());
+}
+
+/// (Roadmap H6k) Whether \p GV is a mesh entry's own per-vertex/
+/// per-primitive `Output` array (address space 8) -- the `Output`-side
+/// counterpart to `isPerVertexArrayInputGlobal` above, deliberately scoped
+/// to \p Stage `== ShaderStage::Mesh` rather than every stage: unlike a
+/// mesh entry, a non-mesh stage's own `Output`-storage array can be a real
+/// matrix's own per-row storage (`isPerVertexArrayInputGlobal`'s own
+/// comment on why the constant-index fold below stays unsafe there), so
+/// this must not misroute a `Vertex`/`Geometry`/`Domain`/`Hull` stage's own
+/// constant-indexed matrix output store into `Vertex`. A mesh entry has no
+/// such ordinary matrix output to begin with -- every plain `Output` write
+/// it makes is through this same per-vertex/per-primitive array (see
+/// H6j's own `addElements` comment) -- so the fold is safe precisely
+/// because \p Stage narrows it to that one case. Unlike an earlier version
+/// of this helper, a builtin interface block (its own
+/// `feme.spirv.MemberDecorations`, e.g. an arrayed `gl_MeshVerticesEXT`/
+/// `gl_MeshPrimitivesEXT`) is *not* excluded: `resolveOffsetWithinElement`
+/// already knows how to pick the right member's own `ElementID` out of a
+/// struct-shaped element type (`addElements`'s own per-member block path
+/// assigns one `ElementID` per member), the exact same way
+/// `getDynamicVertexIndexedAccess`'s own dynamic-index counterpart already
+/// relies on it doing for a *non*-constant vertex index
+/// (`ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore` covers
+/// that side) -- excluding the block shape here only for a *constant*
+/// index left it the one shape this fold still routed through the wrong
+/// (matrix-`Row`) path instead, corrupting `StageStorage` for a real
+/// `gl_MeshVerticesEXT[k].gl_Position = ...`-shaped, compile-time-unrolled
+/// store (this row's own crash). Sets \p AddrSpace to \p GV's address
+/// space when true.
+bool isPerVertexArrayMeshOutputGlobal(const GlobalVariable *GV,
+                                     unsigned &AddrSpace,
+                                     ShaderStage Stage) {
+  if (Stage != ShaderStage::Mesh || !isSPIRVStageIOGlobal(GV, AddrSpace) ||
+      AddrSpace != 8)
     return false;
   return isa<ArrayType>(GV->getValueType());
 }
@@ -1576,16 +1617,21 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
 /// global's own outer array dimension into `Vertex` too, via
 /// `isPerVertexArrayInputGlobal`, so a *constant* `gl_in[k]` index is
 /// routed the same way a non-constant one already is, rather than folding
-/// into `Row` -- deliberately `Input`-only (see that helper's own
-/// comment on why a *constant* `Output`-array index is not folded the
-/// same way, roadmap H6b). \p OutputGlobals (roadmap H2e) is checked to
-/// set the
-/// result's `IsOutput`, so a caller can tell a genuinely-input load from
-/// an `Output`-direction read-back.
+/// into `Row` -- deliberately `Input`-only for every stage but `Mesh`
+/// (see that helper's own comment on why a *constant* `Output`-array
+/// index is not folded the same way there, roadmap H6b). (Roadmap H6k) A
+/// mesh entry's own constant-indexed per-vertex/per-primitive `Output`
+/// array access -- e.g. a small, compile-time-unrolled per-vertex output
+/// loop, which is exactly the shape real `dEQP-VK.mesh_shader.ext.in_out.*`
+/// cases compile mesh entries into -- gets the identical treatment via
+/// `isPerVertexArrayMeshOutputGlobal`, using \p Stage to keep the fold
+/// scoped to mesh alone. \p OutputGlobals (roadmap H2e) is checked to set
+/// the result's `IsOutput`, so a caller can tell a genuinely-input load
+/// from an `Output`-direction read-back.
 std::optional<StageIOAccess> resolveStageIOAccess(
     Value *Ptr, Type *ValueTy, const DataLayout &DL,
     const DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> &ElementIDs,
-    const DenseSet<GlobalVariable *> &OutputGlobals) {
+    const DenseSet<GlobalVariable *> &OutputGlobals, ShaderStage Stage) {
   if (std::optional<std::tuple<GlobalVariable *, Value *, uint64_t>> Dyn =
           getDynamicVertexIndexedAccess(Ptr, DL)) {
     auto [GV, VertexIndex, ByteOffset] = *Dyn;
@@ -1615,11 +1661,27 @@ std::optional<StageIOAccess> resolveStageIOAccess(
   // for consistency: fold the constant vertex index into `Vertex`, not an
   // ordinary `Row` the way `resolveOffsetWithinElement` below would
   // otherwise read it as (exactly what this global's shape did before
-  // this row). Left alone for a whole-global aggregate access (\p ValueTy
-  // names the entire array, e.g. copying every vertex's value at once),
-  // which has no single vertex to peel out.
+  // this row). (Roadmap H6k) A mesh entry's own constant-indexed
+  // per-vertex/per-primitive `Output` array access takes the identical
+  // fold, via `isPerVertexArrayMeshOutputGlobal` -- both a plain
+  // user-defined varying array *and* a builtin interface block
+  // (`gl_MeshVerticesEXT`/`gl_MeshPrimitivesEXT`, e.g. a real
+  // `gl_MeshVerticesEXT[k].gl_Position = ...`, glslang's own
+  // compile-time-unrolled shape for a small, fixed `max_vertices`):
+  // `resolveOffsetWithinElement` below already knows how to pick the
+  // right member's own `ElementID` out of a struct-shaped element type,
+  // exactly the same way it does for `getDynamicVertexIndexedAccess`'s own
+  // non-constant-index counterpart just above, so there is nothing
+  // block-specific left to do here. Without this fold, a
+  // compile-time-unrolled per-vertex output store's constant index folds
+  // into `Row` instead, past that (now correctly peeled, roadmap H6j)
+  // element's own `RowCount == 1`, corrupting host memory beyond its
+  // storage's own bounds. Left alone for a whole-global aggregate access
+  // (\p ValueTy names the entire array, e.g. copying every vertex's value
+  // at once), which has no single vertex to peel out.
   unsigned AddrSpace = 0;
-  if (isPerVertexArrayInputGlobal(GV, AddrSpace) &&
+  if ((isPerVertexArrayInputGlobal(GV, AddrSpace) ||
+       isPerVertexArrayMeshOutputGlobal(GV, AddrSpace, Stage)) &&
       ValueTy != GV->getValueType()) {
     auto *ArrTy = cast<ArrayType>(GV->getValueType());
     Type *ElemTy = ArrTy->getElementType();
@@ -1864,7 +1926,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     if (auto *LI = dyn_cast<LoadInst>(&I)) {
       std::optional<StageIOAccess> Access =
           resolveStageIOAccess(LI->getPointerOperand(), LI->getType(), DL,
-                               ElementIDs, OutputGlobalSet);
+                               ElementIDs, OutputGlobalSet, Stage);
       if (!Access)
         continue;
       // A scalar interface variable is one `feme.stage.input.load`; a
@@ -1897,7 +1959,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       Value *Val = SI->getValueOperand();
       std::optional<StageIOAccess> Access =
           resolveStageIOAccess(SI->getPointerOperand(), Val->getType(), DL,
-                               ElementIDs, OutputGlobalSet);
+                               ElementIDs, OutputGlobalSet, Stage);
       if (!Access) {
         // (Roadmap H6i) A task entry's bounded payload write -- an
         // ordinary store through a (possibly GEP'd) address-space-14
