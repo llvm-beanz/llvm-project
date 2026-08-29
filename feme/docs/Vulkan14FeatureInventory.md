@@ -69,7 +69,7 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---|---|---|
-| 1.0 | 12 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
+| 1.0 | 13 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
 | 1.1 | 1 of 12 | n/a (see scope note) | 7 of 23 |
 | 1.2 | 9 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
@@ -117,14 +117,16 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt`, understating
   the 1.4 extension row as 14 of 16 rather than its true 15 of 16; restored
   here alongside roadmap H2's own `multiview` update.
-- **10 of the 43 unimplemented 1.0 feature bits are graphics
-  capabilities** (`fillModeNonSolid`, `wideLines`, `largePoints`,
+- **9 of the 42 unimplemented 1.0 feature bits are graphics
+  capabilities** (`wideLines`, `largePoints`,
   `sampleRateShading`,
   `depthClamp`, `depthBiasClamp`, `depthBounds`,
   `shaderClipDistance`, `shaderCullDistance`,
-  `alphaToOne`) -- down from 11 (itself down from 14, itself down from 15
+  `alphaToOne`) -- down from 10 (itself down from 11, itself down from
+  14, itself down from 15
   once roadmap H5e closed `geometryShader`, itself down from 16 once
-  roadmap H4a/H4b closed `tessellationShader`) now that roadmap H7b/H7b-a
+  roadmap H4a/H4b closed `tessellationShader`) now that roadmap H7c
+  closed `fillModeNonSolid`, roadmap H7b/H7b-a
   closed `imageCubeArray`, and roadmap H7a closed
   `independentBlend`, `occlusionQueryPrecise`, and `multiDrawIndirect`
   alongside two feature bits this file never grouped as
@@ -284,7 +286,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `drawIndirectFirstInstance` | yes | roadmap H7a: `CommandBuffer.cpp`'s `readIndirectDraws` already copies a nonzero `firstInstance` through unconditionally |
 | feature | VK_VERSION_1_0 | `depthClamp` | no |  |
 | feature | VK_VERSION_1_0 | `depthBiasClamp` | no |  |
-| feature | VK_VERSION_1_0 | `fillModeNonSolid` | no |  |
+| feature | VK_VERSION_1_0 | `fillModeNonSolid` | yes | roadmap H7c: `GraphicsPipeline.cpp`'s `translateRasterState` now maps `VK_POLYGON_MODE_LINE`/`_POINT` onto a new `RasterState::Polygon` field instead of rejecting anything but `FILL`, and `Executor.cpp`'s solid-triangle assembly loop decomposes a `Line`-mode triangle into its own 3 edges (reusing F5's own line-width/mode/stipple machinery unmodified) or a `Point`-mode triangle into its own 3 vertices (reusing the existing point quad expansion) |
 | feature | VK_VERSION_1_0 | `depthBounds` | no |  |
 | feature | VK_VERSION_1_0 | `wideLines` | no |  |
 | feature | VK_VERSION_1_0 | `largePoints` | no |  |

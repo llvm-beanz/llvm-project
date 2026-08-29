@@ -2386,6 +2386,33 @@ anything other than `1.0` yet). See `unittests/Graphics/ExecutorTest.cpp`'s
 `unittests/Vulkan/DrawTest.cpp`'s `DynamicLineWidthWidensTheLine` (real
 SPIR-V pipeline, end to end) for coverage.
 
+Status (roadmap H7c, `fillModeNonSolid` -- reusing the line rasterizer
+above rather than inventing a second one): `RasterState` gained a
+`PolygonMode` field (`Fill`/`Line`/`Point`, matching `VkPolygonMode`),
+translated by `GraphicsPipeline.cpp`'s `translateRasterState` from
+`VkPipelineRasterizationStateCreateInfo::polygonMode` (previously
+rejected outright unless `VK_POLYGON_MODE_FILL`). `executeDraws`'
+solid-triangle assembly loop (`feme/lib/Graphics/Executor.cpp`) now
+branches on it, after the existing cull-mode rejection (`VkCullModeFlags`
+only ever applies to "a polygon" per the spec, so the *original*
+triangle is culled by its own real winding before any decomposition) and
+before the CW/CCW winding-fix swap: a `Line`-mode triangle decomposes
+into its own 3 edges, each fed through the same `LineWidth`/`LineMode`/
+stipple-aware quad expansion above (per `VK_KHR_line_rasterization`'s own
+spec text, which extends those fields to "any line segment ... drawn ...
+when polygonMode is VK_POLYGON_MODE_LINE"), each edge starting stipple
+continuity at arc length 0 (a triangle's own 3 edges have no
+Vulkan-defined "connected strip" concept, unlike a real line strip's
+segments -- a deliberate scope choice, not a spec requirement, since the
+spec does not define stipple continuity across a filled triangle's own
+edges); a `Point`-mode triangle emits its own 3 vertices through the
+existing fixed-size point quad expansion instead. `PhysicalDeviceInfo.cpp`
+now advertises `fillModeNonSolid = VK_TRUE`. See
+`unittests/Graphics/ExecutorTest.cpp`'s
+`PolygonModeLineRastersOnlyTheTrianglesThreeEdges`/
+`PolygonModePointRastersOnlyTheTrianglesThreeVertices` and
+`unittests/Vulkan/GraphicsPipelineTest.cpp`'s
+`TranslatesNonFillPolygonModes` for coverage.
 
 The conventional tessellation path inserts patch control, fixed tessellation,
 domain evaluation, and optional geometry execution between vertex shading and
