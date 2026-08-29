@@ -121,8 +121,14 @@ TEST(PhysicalDeviceInfo,
   // claim (see PhysicalDeviceInfo.cpp's comment); every other `VkBool32`
   // stays false, since nothing else has been implemented that could back
   // one yet -- including `sampleRateShading`, whose own executor plumbing
-  // (roadmap H7f) is implemented but stays unadvertised pending roadmap
-  // H7o's own `SIMDize.cpp` divergent-buffer-store gap.
+  // (roadmap H7f) is implemented, and whose two roadmap H7o
+  // pipeline-creation-time blockers (a `SIMDize.cpp` divergent-load gap
+  // and a `RootConstantLowering.cpp`/`SPIRVPushConstantLowering.cpp`
+  // metadata-copy bug) are both now fixed too, but still stays
+  // unadvertised: a real CTS re-run this milestone surfaced a third,
+  // distinct, still-unfixed functional gap (`Executor.cpp`'s per-sample
+  // pass loop not varying `gl_FragCoord` per sample position), tracked as
+  // a new roadmap follow-on, H7p.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);

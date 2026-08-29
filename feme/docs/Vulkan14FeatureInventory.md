@@ -137,17 +137,21 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   alongside two feature bits this file never grouped as
   "graphics-specific" in the first place (`logicOp`,
   `drawIndirectFirstInstance`, closed by the same H7a row).
-  `sampleRateShading` itself stays open despite roadmap H7f's own
-  executor plumbing (a real per-sample shade/dispatch/merge loop) being
-  implemented and unit-tested: flipping its feature bit to advertise it
-  would let a real `dEQP-VK.pipeline.monolithic.multisample.
-  min_sample_shading*`/`multisample_shader_builtin.sample_id.*` case
-  attempt real pipeline creation for the first time, and every one
-  fails at shader-compilation time on a pre-existing, generic
-  `SIMDize.cpp` gap (no support for a divergent, per-invocation-computed
-  buffer store address) newly reachable this way -- tracked separately
-  as roadmap H7o, since advertising the bit before a real conformance
-  case exercising it can pass would itself be a conformance violation.
+  `sampleRateShading` itself stays open despite roadmap H7o now fixing
+  two real, distinct pipeline-creation-time gaps that had blocked it
+  (a `SIMDize.cpp` divergent-vector-load producer gap, and a
+  `RootConstantLowering.cpp`/`SPIRVPushConstantLowering.cpp`
+  metadata-copy bug), letting 11/60 real `dEQP-VK.pipeline.monolithic.
+  multisample.min_sample_shading_*` cases execute for the first time
+  (up from 0): a real re-run surfaced a third, distinct, still-open
+  functional gap instead -- `Executor.cpp`'s own per-sample shading
+  loop (H7f) does not vary `gl_FragCoord` per sample position, so a
+  `gl_FragCoord`-derived shader color recomputes the same value on
+  every per-sample pass, genuinely failing (not merely `NotSupported`)
+  the strictest `min_sample_shading_enabled.min_1_0.samples_2.quad`
+  case -- tracked as a new roadmap follow-on, H7p, since advertising
+  the bit before a real conformance case exercising it can pass would
+  itself be a conformance violation.
   Each of these remaining bits is *optional* for a conformance
   submission -- unlike every 1.1-1.4 row above, a device may report
   them false and still be conformant -- so none blocks the claim; each
@@ -302,7 +306,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `independentBlend` | yes | roadmap H7a: `GraphicsPipeline.cpp`'s `translateColorBlendState` already applies a per-color-attachment `BlendState` independently |
 | feature | VK_VERSION_1_0 | `geometryShader` | yes | roadmap H5a-H5e: SPIR-V geometry entry-point execution-mode reflection, `CanonicalizeStagePass`/`Executor.cpp` geometry chaining, and `vkCreateGraphicsPipelines` acceptance/compilation |
 | feature | VK_VERSION_1_0 | `tessellationShader` | yes | roadmap H4a/H4b: SPIR-V tessellation-control/-evaluation reflection, splitting and `vkCreateGraphicsPipelines` acceptance/compilation |
-| feature | VK_VERSION_1_0 | `sampleRateShading` | no | roadmap H7f: `Executor.cpp`'s `processTile` implements a real per-sample shade/dispatch/merge loop, but the feature bit stays unadvertised -- a real `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading*`/`multisample_shader_builtin.sample_id.*` re-run fails every case at shader-compilation time on a pre-existing, generic `SIMDize.cpp` gap (no support for a divergent, per-invocation-computed buffer store address), tracked separately as roadmap H7o |
+| feature | VK_VERSION_1_0 | `sampleRateShading` | no | roadmap H7f: `Executor.cpp`'s `processTile` implements a real per-sample shade/dispatch/merge loop, but the feature bit stays unadvertised -- roadmap H7o fixed two real, distinct pipeline-creation-time gaps blocking it (a `SIMDize.cpp` divergent-vector-load producer gap, and a `RootConstantLowering.cpp`/`SPIRVPushConstantLowering.cpp` metadata-copy bug), letting 11/60 real `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading_*` cases execute for the first time, but surfaced a third, distinct, still-open functional gap instead (`Executor.cpp`'s per-sample loop not varying `gl_FragCoord` per sample position, failing `min_sample_shading_enabled.min_1_0.samples_2.quad` for real), tracked separately as roadmap H7p |
 | feature | VK_VERSION_1_0 | `dualSrcBlend` | yes |  |
 | feature | VK_VERSION_1_0 | `logicOp` | yes | roadmap H7a: `Executor.cpp`'s `applyLogicOp`/`mergeColor` already implement every `VkLogicOp` value |
 | feature | VK_VERSION_1_0 | `multiDrawIndirect` | yes | roadmap H7a: `CommandBuffer.cpp`'s `readIndirectDraws`/`readIndirectMeshDraws` already loop over an arbitrary indirect `DrawCount`; `maxDrawIndirectCount` raised to `UINT32_MAX` to match |

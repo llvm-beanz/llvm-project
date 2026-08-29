@@ -379,23 +379,49 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // `VK_TRUE`. `alphaToCoverageEnable` remains rejected at pipeline-creation
   // time (roadmap H7n) and has no feature bit of its own to flip.
   //
-  // `sampleRateShading` deliberately stays `VK_FALSE` despite
-  // `GraphicsPipeline::getSampleShadingEnable()`'s own per-sample
-  // shade/dispatch/merge loop being implemented and unit-tested: a real
-  // `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading*`/
-  // `multisample_shader_builtin.sample_id.*` re-run (once this feature bit
-  // was flipped to `VK_TRUE` to let `checkSupport` allow them to attempt
-  // real pipeline creation for the first time) fails every case at
-  // `vkQueueSubmit`-adjacent shader compilation with `feme-cpu-simdize:
-  // ... has a divergent value '' of vector type ...`; the same shader
-  // shape's `gl_SampleID`-derived storage-buffer index also fails with
-  // sample shading disabled, confirming the gap is `SIMDize.cpp`'s own
-  // pre-existing lack of support for a divergent (per-invocation-computed)
-  // buffer store address, not anything specific to per-sample shading
-  // itself. Advertising the feature bit before a real `dEQP-VK` case that
-  // exercises it can pass would be a conformance violation, so it stays
-  // off pending roadmap H7o.
+  // `sampleRateShading` deliberately stays `VK_FALSE`, despite roadmap
+  // H7o real progress: `SIMDize.cpp`'s `checkVectorDecompositionSupported`
+  // had no producer case at all for a plain (non-groupshared,
+  // non-resource-call) divergent-address `load` of vector type -- not a
+  // divergent buffer-store address (already fully supported, see
+  // `widenResourceCall`), as an earlier pass at this root cause
+  // incorrectly assumed -- and now does (`LoadInst` decomposes into
+  // widened per-component values exactly like a resource-call load
+  // already did, via `widenScalarizedFallback`'s new vector-result
+  // decomposition); a second, independently-blocking bug (two
+  // Function-replacement helpers, `RootConstantLowering.cpp`'s
+  // `addRootConstantParams` and `SPIRVPushConstantLowering.cpp`'s own
+  // inline equivalent, silently dropping `!feme.signature` metadata when
+  // rebuilding a push-constant-only function) is also fixed. Together
+  // these let 11/60 real `dEQP-VK.pipeline.monolithic.multisample.
+  // min_sample_shading_*` cases execute for the first time (up from 0,
+  // every one previously failing at pipeline-creation time) -- but a real
+  // re-run surfaced a third, distinct, still-unfixed gap:
+  // `min_sample_shading_enabled.min_1_0.samples_2` (min_1_0 =
+  // `minSampleShading` 1.0, requiring every covered sample to actually
+  // get its own distinct shaded value) genuinely *fails* ("Got less
+  // unique colors than requested through minSampleShading"), not merely
+  // `NotSupported` -- `Executor.cpp`'s own per-sample shade/dispatch/merge
+  // loop (roadmap H7f) deliberately keeps every interpolated varying
+  // (including `gl_FragCoord`) at the pixel center on every pass (see its
+  // own "harmless, just not maximally efficient" comment), so a
+  // `gl_FragCoord`-derived color -- like this real CTS case's own
+  // `color_frag` shader -- recomputes the identical value on every one of
+  // a pixel's per-sample passes instead of a genuinely distinct one; this
+  // is invisible to a shader whose color instead derives from
+  // `gl_SampleID`/`SV_SampleIndex` (already correctly varied per pass),
+  // but a real conformance blocker for one that does not. Advertising the
+  // feature bit before every mandatory, feme-supported-sample-count case
+  // that exercises it passes for real would be a conformance violation,
+  // so it stays off pending a new roadmap follow-on, H7p (widening
+  // `Executor.cpp`'s per-sample pass loop to evaluate `gl_FragCoord` --
+  // and any other otherwise-pixel-center interpolant -- at the actual
+  // sample position `SamplePositions` already tracks, not just the pixel
+  // center, on every pass). See "Roadmap H7o: measured impact" in
+  // VulkanCTSReport.md for the real reduction, both fixes, and the full
+  // CTS re-run this comment summarizes.
   Info.Features.alphaToOne = VK_TRUE;
+
   // Roadmap E20 ("Block-compressed image groundwork + ASTC LDR decode")
   // first tracked this Vulkan 1.0 core feature bit explicitly (previously
   // left implicitly false by the zero-initialization above, unlike

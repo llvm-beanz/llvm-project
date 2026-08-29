@@ -2056,22 +2056,31 @@ new executor work, confirmed conformant against a real
 feme-supported-sample-count cases passing) -- flipped to `VK_TRUE`.
 `sampleRateShading`'s own executor plumbing (`processTile`'s outer
 per-sample pass loop, narrowing each pass's `FemeFragmentInvocation` copy
-to one sample) is likewise implemented and unit-tested, but its feature
-bit deliberately stays `VK_FALSE`: flipping it to let a real
-`min_sample_shading*`/`sample_id.*` case attempt real pipeline creation
-for the first time shows every one failing at shader-compilation time on
-`SIMDize.cpp`'s own pre-existing, generic lack of support for a divergent
-(per-invocation-computed) buffer store address -- not anything specific
-to per-sample shading, and confirmed unrelated to this row's own executor
-change (the same shader shape fails identically with sample shading
-disabled). Advertising the bit before a real conformance case exercising
-it can pass would itself be a conformance violation, so it stays closed
-pending roadmap H7o. See "Roadmap H7f: measured impact" in
+to one sample) is likewise implemented and unit-tested, and roadmap H7o
+went on to fix two real, distinct pipeline-creation-time gaps that had
+blocked every `min_sample_shading*`/`sample_id.*` case from even
+attempting real pipeline creation (a `SIMDize.cpp` divergent-vector-load
+producer gap -- the real root cause, not the divergent buffer-store
+address an earlier diagnosis incorrectly assumed, which was already
+supported -- and a `RootConstantLowering.cpp`/
+`SPIRVPushConstantLowering.cpp` metadata-copy bug dropping
+`!feme.signature` for any push-constant-only function). With both fixed,
+11/60 real `min_sample_shading_*` cases execute for the first time (up
+from 0), but a third, distinct, still-open functional gap surfaced in
+that re-run instead: `processTile`'s per-sample pass loop deliberately
+keeps every interpolated varying, including `gl_FragCoord`, at the pixel
+center on every pass, so a `gl_FragCoord`-derived shader color recomputes
+the identical value on every per-sample pass, genuinely failing (not
+merely `NotSupported`) the strictest `min_sample_shading_enabled.
+min_1_0.samples_2.quad` case. Advertising the bit before a real
+conformance case exercising it can pass would itself be a conformance
+violation, so it stays closed pending a new roadmap follow-on, H7p. See
+"Roadmap H7f: measured impact" and "Roadmap H7o: measured impact" in
 VulkanCTSReport.md for the full before/after CTS breakdown. The rest of
 H7's own survey (`vertexPipelineStoresAndAtomics`/
 `fragmentStoresAndAtomics`, `shaderClipDistance`/`shaderCullDistance`,
 `samplerAnisotropy`, and the four `shaderStorageImage*` bits, alongside
-`sampleRateShading`'s own now-separately-tracked H7o blocker and
+`sampleRateShading`'s own now-separately-tracked H7p blocker and
 `alphaToCoverageEnable`'s own H7n) each need real, independent work first
 and remain open.
 
