@@ -2268,15 +2268,16 @@ screen-space quad and feeding it through the exact same clip (a
 whole-primitive near-plane `W`-reject rather than a full
 Sutherland-Hodgman clip; see the deviation note below)/rasterize/
 fragment-invocation/output-merge path every other primitive already
-uses, rather than writing a second rasterizer. `pointSizeRange`/
-`lineWidthRange` (`PhysicalDeviceInfo.cpp`) are a fixed 1-pixel extent:
-`largePoints`/`wideLines` are not advertised device features (`Features`
-in `PhysicalDeviceInfo.cpp` leaves both `VK_FALSE`), so a conformant
-caller can never legally request anything else, and the executor's point/
-line quad expansion accordingly hardcodes a 0.5-pixel half-extent/
-half-width rather than reading a `SV_PointSize` shader output or
-`vkCmdSetLineWidth` value. The one deviation from a "real" point/line
-rasterizer: a point or line gets no Sutherland-Hodgman near/far/side-
+uses, rather than writing a second rasterizer. `lineWidthRange`/
+`pointSizeRange` (`PhysicalDeviceInfo.cpp`) now extend up to `64.0`
+(roadmap H7e): `wideLines`/`largePoints` are advertised device features,
+and the executor's line quad expansion reads a real, pipeline-set
+`LineWidth` (roadmap F5) while the point quad expansion reads a real,
+per-vertex `gl_PointSize` when one is written (`RasterVertex::PointSize`,
+clamped to `[1.0, RasterState::MaxPointSize]` in `emitPointQuad`) rather
+than hardcoding a fixed 0.5-pixel half-extent. The one deviation from a
+"real" point/line rasterizer: a point or line gets no Sutherland-Hodgman
+near/far/side-
 plane clip, only a whole-primitive reject when a vertex's clip-space `W`
 is at or below `clipTriangle`'s own `ClipEpsilon` guard (a point/line
 that would need side-plane clipping is instead scissor/viewport-bound-
@@ -2391,12 +2392,15 @@ rasterizer's line positions are full `float` screen-space coordinates
 with no separate fixed-point snapping grid of their own to report a
 tighter bound for.
 
-One deliberate scope boundary, not a deviation: `wideLines`/`largePoints`
-stay `VK_FALSE` and `lineWidthRange`/`pointSizeRange` stay their existing
-fixed values -- claiming those is roadmap H7's row, not this one's, even
-though the line rasterizer above now genuinely honors whatever
-`LineWidth` it is given (a conformant caller just cannot legally request
-anything other than `1.0` yet). See `unittests/Graphics/ExecutorTest.cpp`'s
+One deliberate scope boundary at the time, since closed: `wideLines`/
+`largePoints`/`lineWidthRange`/`pointSizeRange` stayed at their
+degenerate fixed values here -- claiming those was roadmap H7's row, not
+this one's, even though the line rasterizer above already genuinely
+honored whatever `LineWidth` it was given (a conformant caller just could
+not legally request anything other than `1.0` yet). Roadmap H7e has
+since claimed both (see "Builtins and system values"'s own "Status
+(roadmap H7e)" note, and the primitive-topology paragraph above, both in
+this file). See `unittests/Graphics/ExecutorTest.cpp`'s
 `RendersAWideRectangularLine`/`RendersABresenhamDiagonalLine`/
 `RendersAStippledLine`/`RectangularSmoothLineAntialiasesItsEdge` (direct
 `RasterState` coverage) and `unittests/Vulkan/GraphicsPipelineTest.cpp`'s

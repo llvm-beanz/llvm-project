@@ -69,12 +69,12 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---|---|---|
-| 1.0 | 13 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
+| 1.0 | 15 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
 | 1.1 | 1 of 12 | n/a (see scope note) | 7 of 23 |
 | 1.2 | 9 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
 | 1.4 | 20 of 21 | 25 | 15 of 16 |
-| **total** | **54 of 150** | **70** | **48 of 86** |
+| **total** | **56 of 150** | **70** | **48 of 86** |
 
 - **The 1.3 floor is nearly closed; the 1.1/1.2 floor was never audited
   until now, and the 1.4 floor is nearly closed too.** Roadmap E1-E28 drove
@@ -117,15 +117,16 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt`, understating
   the 1.4 extension row as 14 of 16 rather than its true 15 of 16; restored
   here alongside roadmap H2's own `multiview` update.
-- **6 of the 39 unimplemented 1.0 feature bits are graphics
-  capabilities** (`wideLines`, `largePoints`,
-  `sampleRateShading`,
+- **4 of the 39 unimplemented 1.0 feature bits are graphics
+  capabilities** (`sampleRateShading`,
   `shaderClipDistance`, `shaderCullDistance`,
-  `alphaToOne`) -- down from 9 (itself down from 10, itself down from
+  `alphaToOne`) -- down from 6 (itself down from 9, itself down from
+  10, itself down from
   11, itself down from
   14, itself down from 15
   once roadmap H5e closed `geometryShader`, itself down from 16 once
-  roadmap H4a/H4b closed `tessellationShader`) now that roadmap H7d
+  roadmap H4a/H4b closed `tessellationShader`) now that roadmap H7e
+  closed `wideLines` and `largePoints`, roadmap H7d
   closed `depthClamp`, `depthBiasClamp`, and `depthBounds`, roadmap
   H7c closed `fillModeNonSolid`, roadmap H7b/H7b-a
   closed `imageCubeArray`, and roadmap H7a closed
@@ -289,8 +290,8 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `depthBiasClamp` | yes | roadmap H7d: `GraphicsPipeline.cpp`'s `translateRasterState` maps `depthBiasEnable`/`depthBiasConstantFactor`/`depthBiasClamp`/`depthBiasSlopeFactor` onto `RasterState`, and `Executor.cpp` computes `depthBiasConstantFactor * r + depthBiasSlopeFactor * maxSlope` (clamped via `depthBiasClamp`) once per triangle |
 | feature | VK_VERSION_1_0 | `fillModeNonSolid` | yes | roadmap H7c: `GraphicsPipeline.cpp`'s `translateRasterState` now maps `VK_POLYGON_MODE_LINE`/`_POINT` onto a new `RasterState::Polygon` field instead of rejecting anything but `FILL`, and `Executor.cpp`'s solid-triangle assembly loop decomposes a `Line`-mode triangle into its own 3 edges (reusing F5's own line-width/mode/stipple machinery unmodified) or a `Point`-mode triangle into its own 3 vertices (reusing the existing point quad expansion) |
 | feature | VK_VERSION_1_0 | `depthBounds` | yes | roadmap H7d: `GraphicsPipeline.cpp`'s `translateDepthStencilState` now maps `depthBoundsTestEnable`/`minDepthBounds`/`maxDepthBounds` onto `DepthState`, and `Executor.cpp`'s `testDepthStencil` runs the depth bounds test first, before the stencil test, comparing the value already stored in the depth attachment against `[MinDepthBounds, MaxDepthBounds]` |
-| feature | VK_VERSION_1_0 | `wideLines` | no |  |
-| feature | VK_VERSION_1_0 | `largePoints` | no |  |
+| feature | VK_VERSION_1_0 | `wideLines` | yes | roadmap H7e: `PhysicalDeviceInfo.cpp` raises `lineWidthRange[1]` from the degenerate `1.0` floor to `64.0` -- `Executor.cpp`'s line rasterizer already threaded a real, variable `LineWidth` through its quad-expansion path since roadmap F5, needing no executor change |
+| feature | VK_VERSION_1_0 | `largePoints` | yes | roadmap H7e: `Executor.cpp`'s `emitPointQuad` now derives its half-extent from a new `RasterVertex::PointSize` field (populated from a written `gl_PointSize`, mapped from SPIR-V `BuiltIn` 1 by `CanonicalizeStage.cpp`'s `getSystemValueForBuiltIn`), clamped to `[1.0, RasterState::MaxPointSize]` (a new field, `64.0` by default, matching `PhysicalDeviceInfo.cpp`'s `pointSizeRange[1]`) -- previously hardcoded to a hardware-independent 1 pixel |
 | feature | VK_VERSION_1_0 | `alphaToOne` | no |  |
 | feature | VK_VERSION_1_0 | `multiViewport` | yes |  |
 | feature | VK_VERSION_1_0 | `samplerAnisotropy` | no |  |

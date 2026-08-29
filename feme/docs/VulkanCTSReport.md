@@ -13463,3 +13463,119 @@ and `depthClamp`/`depthBiasClamp`/`depthBounds` all honestly read
 adjacency-pipeline gap surfaced by this row's own CTS run are unrelated,
 pre-existing, out-of-scope limitations, broken out as new roadmap
 follow-on rows rather than blocking this milestone's own completion.
+
+## Roadmap H7e: measured impact (`wideLines`/`largePoints`)
+
+**What changed**: `PhysicalDeviceInfo.cpp` raises `lineWidthRange[1]`/
+`pointSizeRange[1]` from the degenerate `1.0` floor to `64.0` and flips
+`wideLines`/`largePoints` to `VK_TRUE`. `Executor.cpp`'s line rasterizer
+already threaded a real, variable `LineWidth` through its quad-expansion
+path since roadmap F5, so `wideLines` needed no executor change at all.
+`largePoints` needed real new work: a new `SignatureSystemValue::PointSize`
+(mapped from SPIR-V `BuiltIn` 1 by `CanonicalizeStage.cpp`), a new
+`RasterVertex::PointSize` field populated from an optional `VSPointSize`
+signature-element lookup, and `emitPointQuad`'s half-extent now derives
+from `Vtx.PointSize` clamped to `[1.0, RasterState::MaxPointSize]` (a new
+`RasterState` field, `64.0` by default, cross-referenced by comment with
+`PhysicalDeviceInfo.cpp`'s `pointSizeRange[1]` rather than a shared
+constant -- the Vulkan layer depends on the Graphics layer, not the
+reverse, so `Executor.cpp` cannot include `PhysicalDeviceInfo.h`) --
+previously hardcoded to a hardware-independent 1 pixel regardless of any
+written `gl_PointSize`.
+
+**Case-list construction**: every group a source survey of the VK-GL-CTS
+checkout under test found touching `wideLines`/`largePoints` directly
+(`grep -rl "wideLines\|largePoints" external/vulkancts/modules/vulkan/`):
+`dEQP-VK.rasterization.primitive_size.points.*` (8 cases, the dedicated
+`largePoints` correctness test, `vktRasterizationTests.cpp`),
+`dEQP-VK.rasterization.polygon_as_large_points.*` (roadmap H7c's own
+`PolygonMode::Point` group, several variants of which additionally
+require `largePoints`/`VK_KHR_maintenance5`'s `polygonModePointSize`),
+`dEQP-VK.rasterization.line_width.*`, `dEQP-VK.draw.renderpass.
+point_size_clamp.*` (the dedicated derived-point-size-clamp test,
+`vktDrawPointClampTests.cpp`), `dEQP-VK.dynamic_state.*.line_width*` (78
+cases, `vktDynamicStateLineWidthTests.cpp`), and every
+`dEQP-VK.clipping.*point*`/`dEQP-VK.multiview.*point*`/`dEQP-VK.pipeline.
+*line_width*` case -- 126 total unique cases after removing duplicates,
+run in one `deqp-vk` invocation directly against `libfeme_vulkan.so`
+(`VK_ICD_FILENAMES` pointed at `feme_icd.json`):
+
+```
+Test run totals:
+  Passed:        31/126 (24.6%)
+  Failed:        12/126 (9.5%)
+  Not supported: 83/126 (65.9%)
+```
+
+**31 newly-passing cases**, all gated on `wideLines`/`largePoints` and
+`NotSupported` before this row (confirmed: this device advertised neither
+feature until this change). Of the 12 `Failed`:
+
+- **2 are the pre-existing, already-tracked H7k grid-alignment gap**
+  (`dEQP-VK.clipping.clip_volume.{depth_clamp,outside}.point_list`) --
+  identical failure shape ("Rendered image(s) are incorrect") to the one
+  H7d's own CTS run already found and broke out as roadmap H7k, not
+  introduced by this row. These two cases do not depend on
+  `largePoints`/`wideLines` at all (a `PointList`'s default, unwritten
+  point size is 1.0 either way); they are only in this row's own
+  126-case sample because the broad `*point*`/`*point_size*` glob this
+  row's own case-list construction used incidentally swept them in.
+- **9 are a previously-known-but-untracked generic pipeline-construction
+  gap**, newly reachable because these 9 cases were gated behind
+  `wideLines`/`largePoints` and never ran before:
+  `dEQP-VK.draw.renderpass.point_size_clamp.point_size_clamp_max` and 8
+  of `dEQP-VK.dynamic_state.monolithic.line_width.{dyna_static,
+  static_dyna}.*` fail `vkCreateGraphicsPipelines` with
+  `VK_ERROR_INITIALIZATION_FAILED`, `feme-cpu-wrap-vertex`/
+  `feme-cpu-wrap-fragment` reporting "... stage wrapper requires attached
+  feme.signature metadata" -- the exact same shape roadmap H3a already
+  root-caused and fixed for the *fragment* side (a `Function::Create`+
+  `copyAttributesFrom` rebuild in `SPIRVResourceLowering.cpp`/
+  `ResourceLowering.cpp` silently drops function-attached metadata), but
+  this row's own reproduction (a separate real `dEQP-VK.dynamic_state.
+  monolithic.cb_state.*` sample also shows a mixed pass/fail rate
+  unrelated to line width or point size) confirms the equivalent
+  *vertex*-side gap H3a's own writeup had already flagged as "not yet
+  independently tracked" is still open -- broken out below as a new
+  follow-on row, H7m, rather than fixed as part of this one (out of
+  scope: unrelated to point-size/line-width logic itself, and a real fix
+  needs its own root-cause investigation mirroring H3a's).
+- **1 is the pre-existing, already-tracked mesh-shading milestone-6
+  deviation** (`dEQP-VK.dynamic_state.monolithic.rs_state.
+  line_width_mesh`, `error: feme-cpu-linearize: ... has an internal
+  branch in 'Flow'; unsupported (roadmap milestone 6 deviation)`) -- the
+  error message itself names its own existing tracking, confirmed
+  unrelated to line width by a same-group `rs_state.*` sample (7/10
+  failing for other, equally pre-existing, unrelated reasons).
+
+**0 regressions; all 12 failures pre-existing.** The 83 `NotSupported`
+cases are all legitimately gated on something else entirely: this
+device's `maxFramebufferWidth`/`maxFramebufferHeight`/
+`maxViewportDimensions` (`4096`) reject the 3 largest
+`primitive_size.points.point_size_{8192,9216,10240}`-equivalent render
+sizes outright (an honest, pre-existing device-limit gate, not a new
+gap), several `primitive_size.points.point_size_{128,256,512,2048}`
+cases reject an sRGB/float attachment format combination this device
+does not support, and every `polygon_as_large_points`
+`polygonModePointSize`-gated variant correctly reports `NotSupported`
+since this device does not implement `VK_KHR_maintenance5` at all (an
+orthogonal, unrelated extension gap).
+
+**Inventories**: `Vulkan14FeatureInventory.md` updated -- `wideLines` and
+`largePoints` both flip to `yes`, the 1.0 feature-advertised count rises
+from 13 of 55 to 15 of 55 (total 54 of 150 to 56 of 150), and the
+"graphics-specific unimplemented" bullet drops from 6 to 4.
+`VulkanExtensionInventory.md` confirmed to need no change: no extension
+is touched by this row, only two core 1.0 feature bits.
+
+**Milestone H7e closes.** `GraphicsPipeline.cpp`/`PhysicalDeviceInfo.cpp`
+advertise both features honestly, `Executor.cpp` implements both end to
+end (line width needing no change, point size proven by 3 new
+`ExecutorTest.cpp` cases and this row's own real `deqp-vk` run), and
+`check-feme` passes in full (2016/2075, 59 pre-existing unrelated
+`Unsupported`, 0 `Failed`), up from H7d's own 2011/2070 by exactly the 5
+new tests this row adds (3 `ExecutorTest.cpp` `PointSize` cases, 1
+`CanonicalizeStageTest.cpp` `PointSize` builtin-mapping case, 1
+`PhysicalDeviceInfoTest.cpp` line-width/point-size-range case). The
+generic vertex-side signature-metadata gap this row's own CTS run
+confirmed still open is broken out separately as roadmap H7m.
