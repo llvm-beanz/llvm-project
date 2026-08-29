@@ -13852,3 +13852,123 @@ metadata-copy fix's own coverage extends two pre-existing lit tests,
 `Transforms/CPU/root-constant-lowering.ll` and
 `Transforms/CPU/spirv-push-constant-lowering.ll`, each gaining a new
 `CHECK`'d case, adding no further test count).
+
+## Roadmap H7p: measured impact (closing `sampleRateShading` for real)
+
+**Two independently-blocking gaps, both fixed this row.**
+
+**Gap 1 (`gl_FragCoord` not varying per sample position)**: `Executor.cpp`'s
+`processTile` per-sample shading loop (H7f) deliberately left every
+interpolated varying, including `gl_FragCoord`/`SV_Position`, at the pixel
+center on every one of a pixel's per-sample passes. Harmless for a shader
+whose color genuinely depends on `gl_SampleID`, but wrong for one that
+depends on `gl_FragCoord` alone (like the real
+`dEQP-VK.pipeline.monolithic.multisample.min_sample_shading_enabled.
+min_1_0.samples_2.quad` case's own `color_frag` shader,
+`fragColor = vec4(fract(gl_FragCoord.xy), 0.0, 1.0)`): every pass recomputed
+the identical color, failing the CTS's own per-pixel "at least
+`ceil(minSampleShading * sampleCount)` unique colors" check for the
+strictest `minSampleShading = 1.0` case. Fixed by re-deriving each pass's
+`Position.xy` from `SamplePositions[PassSample]`'s own real per-sample
+offset instead of leaving it pixel-center.
+
+Proven correct in isolation with a scratch, temporary unit test (not
+committed) directly exercising the raw MSAA write path across a full
+32x32, 2-sample image with an `R32G32B32A32_FLOAT` attachment (avoiding
+UNORM8 saturation, which produced a false failure signal on a first,
+incorrect attempt using an unclamped raw-`gl_FragCoord` shader) and a
+manual `fract()` check in the C++ code: **0 mismatches**.
+
+**Gap 2 (subpass-input sample-count mismatch)**: despite gap 1's fix, the
+real CTS case still failed identically. Decoding the QPA log's embedded
+per-sample readback PNGs showed a suspicious column-based checkerboard
+pattern -- the two "single-sampled" per-sample images were byte-identical
+and showed data addressed at the wrong stride, not simply "stale"/
+"unwritten" data. Root cause: the real CTS test structure renders subpass
+0 with a genuinely multisampled pipeline (writing `color_frag`'s output
+into a real multisample color attachment), then N further subpasses, each
+with a *different*, single-sample pipeline, each reading back exactly one
+sample of subpass 0's own attachment via `subpassLoad(imageMS,
+pushConstants.sampleId)`. `CommandBuffer.cpp`'s `buildSubpassInputHeap`
+computed every heap entry's `RowPitch`/`SampleStride` -- including subpass
+**input** attachments -- from the *currently bound draw's own pipeline*
+sample count, not the input attachment's own real sample count. For this
+case, subpass 1+'s single-sample pipeline was used to address subpass 0's
+4x-multisampled attachment, making `RowPitch` too small by the real sample
+factor and `SampleStride` an outright `0` (`SampleCount > 1 ? ElemSize :
+0` evaluated false), aliasing every sample read to the same texel --
+exactly the observed checkerboard artifact.
+
+Fixed by adding a new `SubpassInputSampleCounts` vector to
+`ResolvedDrawAttachments` (populated per input-attachment index from each
+view's own image in `resolveDrawAttachments`), threading it through
+`buildSubpassInputHeap`'s new `SubpassInputSampleCounts` parameter, and
+using it (rather than the blanket pipeline sample count) specifically for
+the `SubpassInputs` heap-entry path; the `Attachments`/`DepthStencil`
+fallback path still correctly uses the bound pipeline's own sample count,
+since a subpass's own color/depth/stencil attachments must match its own
+pipeline's sample count by spec.
+
+New permanent regression test, `DrawTest.cpp`'s
+`SubpassLoadReadsAnEarlierSubpassMultisampledColorOutputWithADifferentPipelineSampleCount`
+(seeded-memory technique, modeled on the neighboring
+`SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote`/
+`MultiviewInputAttachmentReadsBackAnEarlierSubpassColorOutput` tests):
+builds a classic 2-subpass render pass where subpass 0's attachment is
+genuinely 4x-multisampled (seeded directly, no real draw, via
+`LOAD_OP_LOAD`) and subpass 1 uses a different, single-sample pipeline to
+`subpassLoad` one explicit sample back into a single-sample attachment.
+**Confirmed to fail without the fix** (reverted `CommandBuffer.cpp`
+locally, rebuilt, reran: fails with wrong values at the exact same
+checkerboard-style pattern as the real CTS failure) and to **pass with
+the fix**.
+
+**Real CTS re-run, both fixes in place:**
+
+```
+dEQP-VK.pipeline.monolithic.multisample.min_sample_shading_enabled.min_1_0.samples_2.quad
+  Pass (Got proper count of unique colors)
+```
+
+Broader sweep across every feme-supported-sample-count
+`min_sample_shading_enabled`/`min_sample_shading_disabled` case (7 cases:
+`min_0_25`/`min_0_5`/`min_1_0` at `samples_2`, `min_1_0` at
+`samples_4.quad`, `samples_1` baseline, and the disabled-vs-enabled pair
+at `samples_2`/`samples_4`):
+
+```
+Test run totals:
+  Passed:        7/7 (100.0%)
+  Failed:        0/7 (0.0%)
+```
+
+No regression in the neighboring `alpha_to_one.*` cases (3/3 still pass).
+The already-tracked, unrelated `sample_id.*` pipeline-creation-time
+failures (H7o's own `SIMDize.cpp` divergent-store-address gap, distinct
+from anything H7p touches) remain exactly as before -- confirmed via a
+72-case sweep across `min_sample_shading_*`/`sample_id.*`: 30 pass, 6 fail
+(all `sample_id.*`, all `VK_ERROR_INITIALIZATION_FAILED` at
+`vkPipelineConstructionUtil.cpp:176`, unrelated to this row), 36
+`NotSupported` (higher sample counts, e.g. `samples_8`/`samples_64`, not
+supported by this software rasterizer).
+
+**Decision**: with every mandatory, feme-supported-sample-count
+`min_sample_shading*` case now passing for real, `sampleRateShading`
+honestly flips to `VK_TRUE` in `PhysicalDeviceInfo.cpp`.
+
+**Inventories**: `Vulkan14FeatureInventory.md` updated -- `sampleRateShading`
+now `yes`; the 1.0 feature-advertised count rises from 19 of 55 to 20 of
+55 (total 60 of 150 to 61 of 150); the "graphics capabilities among
+unimplemented 1.0 bits" count drops from 3 to 2
+(`shaderClipDistance`/`shaderCullDistance` only). `VulkanExtensionInventory.md`
+confirmed to need no change (a core feature-bit row, not an extension).
+`FeMeVulkanDesign.md`'s H7 status paragraph updated.
+
+**Milestone H7p closes** (struck through in `Roadmap.md`). `check-feme`
+passes in full (2024/2083, 59 pre-existing unrelated `Unsupported`, 0
+`Failed`), up from H7o's own 2022/2081 by exactly 1 new test
+(`DrawTest.cpp`'s new subpass-sample-count regression test;
+`PhysicalDeviceInfoTest.cpp`'s `sampleRateShading == VK_TRUE` update edits
+an existing case rather than adding one; a scratch diagnostic test used
+during investigation was written, used, and then removed, never
+committed).

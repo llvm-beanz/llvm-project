@@ -2047,8 +2047,8 @@ test first, before the stencil test, against the value already stored in
 the depth attachment) all needed real new translation and executor work,
 unlike H7a's already-correct-but-unadvertised cluster. See "Roadmap H7d:
 measured impact" in VulkanCTSReport.md for the full before/after CTS
-breakdown. **Status (roadmap H7f): `alphaToOne` done, `sampleRateShading`
-blocked on a new, separately tracked compiler gap.** `alphaToOne`
+breakdown. **Status (roadmap H7f/H7p): `alphaToOne` and `sampleRateShading`
+both done.** `alphaToOne`
 (`Executor.cpp`'s `processTile` forces every color attachment's output
 alpha to `1.0` when `GraphicsPipeline::getAlphaToOneEnable()`) is real,
 new executor work, confirmed conformant against a real
@@ -2065,22 +2065,32 @@ address an earlier diagnosis incorrectly assumed, which was already
 supported -- and a `RootConstantLowering.cpp`/
 `SPIRVPushConstantLowering.cpp` metadata-copy bug dropping
 `!feme.signature` for any push-constant-only function). With both fixed,
-11/60 real `min_sample_shading_*` cases execute for the first time (up
-from 0), but a third, distinct, still-open functional gap surfaced in
-that re-run instead: `processTile`'s per-sample pass loop deliberately
-keeps every interpolated varying, including `gl_FragCoord`, at the pixel
-center on every pass, so a `gl_FragCoord`-derived shader color recomputes
+11/60 real `min_sample_shading_*` cases executed for the first time (up
+from 0), but a third, distinct functional gap surfaced in
+that re-run: `processTile`'s per-sample pass loop deliberately
+kept every interpolated varying, including `gl_FragCoord`, at the pixel
+center on every pass, so a `gl_FragCoord`-derived shader color recomputed
 the identical value on every per-sample pass, genuinely failing (not
 merely `NotSupported`) the strictest `min_sample_shading_enabled.
-min_1_0.samples_2.quad` case. Advertising the bit before a real
-conformance case exercising it can pass would itself be a conformance
-violation, so it stays closed pending a new roadmap follow-on, H7p. See
-"Roadmap H7f: measured impact" and "Roadmap H7o: measured impact" in
+min_1_0.samples_2.quad` case. Roadmap H7p fixed this (re-deriving each
+pass's `gl_FragCoord` from its own real per-sample position), but the
+real case *still* failed identically even with that fix: a fourth,
+independently-blocking bug, `CommandBuffer.cpp`'s `buildSubpassInputHeap`
+using the currently-bound draw's own pipeline sample count for subpass
+**input** attachments too, silently mis-addressing every `subpassLoad`
+read whenever a later subpass's own pipeline sample count differs from
+the earlier subpass's attachment it reads back (exactly this CTS test's
+own render-pass structure). Fixed by threading a new, real
+per-input-attachment `SubpassInputSampleCounts` vector through
+`resolveDrawAttachments`/`buildSubpassInputHeap`. With all four gaps
+closed, every feme-supported-sample-count `min_sample_shading*` case now
+passes for real, so `sampleRateShading` flips to `VK_TRUE`. See
+"Roadmap H7f: measured impact", "Roadmap H7o: measured impact", and
+"Roadmap H7p: measured impact" in
 VulkanCTSReport.md for the full before/after CTS breakdown. The rest of
 H7's own survey (`vertexPipelineStoresAndAtomics`/
 `fragmentStoresAndAtomics`, `shaderClipDistance`/`shaderCullDistance`,
 `samplerAnisotropy`, and the four `shaderStorageImage*` bits, alongside
-`sampleRateShading`'s own now-separately-tracked H7p blocker and
 `alphaToCoverageEnable`'s own H7n) each need real, independent work first
 and remain open.
 
