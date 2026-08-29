@@ -1912,6 +1912,143 @@ TEST(CanonicalizeStageTest,
     EXPECT_FALSE(isa<StoreInst>(&I));
 }
 
+/// (Roadmap H6l) The exact shape a real
+/// `dEQP-VK.mesh_shader.ext.builtin.cull_primitives` mesh entry's own
+/// `gl_MeshVerticesEXT[k].gl_Position = ...` constant-indexed,
+/// compile-time-unrolled per-vertex store takes once its own
+/// `gl_MeshPerVertexEXT` block carries all four of `gl_PerVertex`'s
+/// members (`gl_Position`/`gl_PointSize`/`gl_ClipDistance`/
+/// `gl_CullDistance`), not just
+/// `FoldsConstantVertexIndexIntoSingleMemberInterfaceBlockOutputStore`'s
+/// `gl_Position`-only shape. `{<4 x float>, float, [1 x float], [1 x
+/// float]}`'s own `StructLayout` places `gl_Position` at byte 0,
+/// `gl_PointSize` at 16, `gl_ClipDistance` at 20 and `gl_CullDistance` at
+/// 24 (the same offsets `RecognizesInterfaceBlockPerMemberByteOffsetAccess`
+/// above already covers for one, unarrayed instance) -- so *this* struct's
+/// own last member ends at byte 28, not the 32 `DataLayout::
+/// getTypeAllocSize` reports once the struct's own leading `<4 x float>`
+/// member forces 16-byte alignment padding at its tail. Before this row,
+/// `resolveStageIOAccess`'s constant-vertex-index fold used that
+/// ABI-padded 32 as `VertexSize`, so vertex *1*'s own `gl_Position` (real,
+/// SPIR-V-embedded byte offset 28) resolved with `VertexIdx == 0` and
+/// `Residual == 28` -- landing past `gl_Position`'s own member (offset 0)
+/// and inside `gl_CullDistance`'s (offset 24, one 4-byte element), an
+/// out-of-range `Row`/`Component` for that 1-element member, exactly this
+/// row's own `feme-graphics-validate-stage` diagnostic. Fixed by
+/// `getPackedMeshElementSize`, which reports the tightly packed 28 --
+/// matching the real embedded offsets -- instead.
+TEST(CanonicalizeStageTest,
+     FoldsConstantVertexIndexIntoMultiMemberInterfaceBlockOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_mesh_verts = external addrspace(8) global [2 x { <4 x float>, float, [1 x float], [1 x float] }], !feme.spirv.MemberDecorations !10
+    define void @main(<4 x float> %v) #0 {
+      %p = getelementptr inbounds [2 x { <4 x float>, float, [1 x float], [1 x float] }], ptr addrspace(8) @gl_mesh_verts, i32 0, i32 1, i32 0
+      store <4 x float> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !10 = !{!11, !12, !13, !14}
+    !11 = !{i32 0, !15}
+    !12 = !{i32 1, !16}
+    !13 = !{i32 2, !17}
+    !14 = !{i32 3, !18}
+    !15 = !{!19}
+    !19 = !{i32 11, i32 0}
+    !16 = !{!20}
+    !20 = !{i32 11, i32 1}
+    !17 = !{!21}
+    !21 = !{i32 11, i32 3}
+    !18 = !{!22}
+    !22 = !{i32 11, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 4u);
+  EXPECT_EQ(Sig->Elements[0].SystemValue, SignatureSystemValue::Position);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[0].ElementID);
+    auto *Vertex = dyn_cast<ConstantInt>(CI->getArgOperand(4));
+    ASSERT_TRUE(Vertex);
+    EXPECT_EQ(Vertex->getZExtValue(), 1u);
+  }
+  EXPECT_EQ(SeenStores, 4u);
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
+/// (Roadmap H6l) The plain-array counterpart of
+/// `FoldsConstantVertexIndexIntoMultiMemberInterfaceBlockOutputStore`
+/// above: a real `dEQP-VK.mesh_shader.ext.builtin.cull_primitives` mesh
+/// entry's own `gl_PrimitiveTriangleIndicesEXT[k] = ...` constant-indexed
+/// store addresses a `[N x <3 x i32>]` (`uvec3[]`), whose own element
+/// (`uvec3`) allocates to 16 bytes (`DataLayout::getTypeAllocSize` pads a
+/// 3-wide vector up to a 4-wide SIMD register) but is addressed 12 bytes
+/// apart in the real, SPIR-V-embedded offsets (`uvec3`'s own tightly
+/// packed 3-`i32` size) -- the same ABI-vs-packed gap
+/// `FoldsConstantVertexIndexIntoMultiMemberInterfaceBlockOutputStore`
+/// covers for a struct-shaped element, but for a vector-shaped one
+/// instead. Before this row, primitive 2's own real byte offset (24)
+/// divided by the ABI-padded 16 misrouted to `VertexIdx == 1` (not 2) --
+/// silently misdirecting which primitive's own triangle indices a real
+/// mesh entry's store actually lands on, since `Vertex` (unlike `Row`/
+/// `Component`) is never range-checked by `ValidateStage.cpp`.
+TEST(CanonicalizeStageTest,
+     FoldsConstantVertexIndexIntoPlainVectorArrayOutputStoreWithPadding) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_prim_tri_indices = external addrspace(8) global [4 x <3 x i32>], !spirv.Decorations !0
+    define void @main(<3 x i32> %v) #0 {
+      %p = getelementptr inbounds [4 x <3 x i32>], ptr addrspace(8) @gl_prim_tri_indices, i32 0, i32 2
+      store <3 x i32> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 3u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    auto *Vertex = dyn_cast<ConstantInt>(CI->getArgOperand(4));
+    ASSERT_TRUE(Vertex);
+    EXPECT_EQ(Vertex->getZExtValue(), 2u);
+  }
+  // `uvec3`'s 3 components each get their own `Row`-0 store (see
+  // `loadStageIOValue`/`storeStageIOValue`'s own component recursion),
+  // all sharing the one, correctly-folded `Vertex` operand this test
+  // exists to check.
+  EXPECT_EQ(SeenStores, 3u);
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
 /// through `TaskPayloadGlobalVariablePattern`'s own address-space-14 global
 /// import shape (roadmap H6h) -- canonicalizes into
 /// `feme.stage.task.payload.store` by its resolved constant byte offset,
