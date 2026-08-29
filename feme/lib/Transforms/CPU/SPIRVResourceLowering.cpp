@@ -84,6 +84,28 @@ enum class HandleKind {
   Sampler
 };
 
+/// Which of the four sampled-image shapes `HandleKind::SampledImage2D`
+/// covers (roadmap H7b-a widened it beyond plain, non-arrayed 2D -- the
+/// enumerator name is kept for now to minimize the blast radius across this
+/// file's many `HandleKind` switches; only `ImageShape` distinguishes the
+/// four shapes below it). A cube(array) is purely a view-level addressing
+/// convention over an ordinary 2D-array-shaped image, never a distinct
+/// physical layout of its own (see FeMeVulkanDesign.md's H7b update), so
+/// `Cube`/`CubeArray` reuse the identical `HandleKind::SampledImage2D`
+/// classification and only differ in `ImageShape`.
+enum class ImageShape {
+  /// A plain, non-arrayed `Texture2D`: `(U, V)` sample/fetch coordinates.
+  Plain2D,
+  /// A `Texture2DArray`: `(U, V, ArrayLayer)` sample, `(X, Y, Layer)` fetch.
+  Array2D,
+  /// A `TextureCube`: a 3-component direction-vector sample coordinate; no
+  /// fetch (`OpImageFetch` is illegal against `Dim::Cube` in SPIR-V).
+  Cube,
+  /// A `TextureCubeArray`: a 3-component direction vector plus a float
+  /// array-layer sample coordinate; no fetch, for the same reason as Cube.
+  CubeArray,
+};
+
 /// Whether \p Kind is one of the two texel-buffer kinds (see `HandleKind`).
 bool isTexelHandleKind(HandleKind Kind) {
   return Kind == HandleKind::TexelStorage || Kind == HandleKind::TexelUniform;
@@ -150,6 +172,14 @@ struct RangeEntry {
   /// access instead (see that function's comment).
   Type *TexelElementType = nullptr;
   uint32_t RangeSize = 0;
+  /// The sampled-image shape (`Kind == SampledImage2D` only, see
+  /// `ImageShape`); `Plain2D` (its zero-value) for every other kind. Two
+  /// bindings at the same identity with different shapes (e.g. one
+  /// function using a `TextureCube`, another a plain `Texture2D`, at the
+  /// same descriptor set/binding -- not legal Vulkan usage, but not
+  /// diagnosed as an error before this pass either) are a conflict, like
+  /// every other classification mismatch this struct already detects.
+  ImageShape Shape = ImageShape::Plain2D;
   bool Conflicting = false;
   /// Assigned once every range has been collected (see `assignHeapBases`).
   uint32_t HeapBase = 0;
@@ -173,6 +203,9 @@ struct BoundHandle {
   StructType *ElementStruct;
   Type *TexelElementType;
   uint32_t RangeSize;
+  /// Meaningful only for `Kind == SampledImage2D`; `Plain2D` (its
+  /// zero-value) for every other kind.
+  ImageShape Shape = ImageShape::Plain2D;
 };
 
 /// Returns the intrinsic ID of the call \p V is, or `not_intrinsic`.
@@ -190,6 +223,9 @@ struct HandleClassification {
   uint64_t Stride = 0;
   StructType *ElementStruct = nullptr;
   Type *TexelElementType = nullptr;
+  /// Meaningful only for `Kind == SampledImage2D`; `Plain2D` (its
+  /// zero-value) for every other kind.
+  ImageShape Shape = ImageShape::Plain2D;
 };
 
 /// SPIR-V's `Uniform` and `StorageBuffer` storage-class numeric values, as
@@ -349,14 +385,18 @@ classifyTexelBufferHandle(const CallInst &Handle) {
 
 /// SPIR-V's `Dim` operand value for `OpTypeImage 2D`.
 constexpr unsigned SPIRVDim2D = 1;
+/// SPIR-V's `Dim` operand value for `OpTypeImage Cube` (roadmap H7b-a).
+constexpr unsigned SPIRVDimCube = 3;
 
 /// Returns \p Handle's classification if its type is a single-sampled,
-/// non-arrayed, floating-point or 32-bit-integer 2D `spirv.Image`/
-/// `spirv.SignedImage` handle used *with* a sampler -- the one image shape
+/// floating-point or 32-bit-integer 2D or Cube `spirv.Image`/
+/// `spirv.SignedImage` handle used *with* a sampler -- the shapes
 /// `runtime/CPU`'s sampling/fetch helpers implement (see ImageCalls.h's own
-/// scope note). Every other dimension, an arrayed or multisampled image,
-/// and a storage image (`Sampled == 2`, which would need a
-/// `feme.cpu.image.store.*` helper that does not exist yet) return
+/// scope note; roadmap H7b-a widened this beyond plain, non-arrayed 2D to
+/// also cover `Texture2DArray`/`TextureCube`/`TextureCubeArray`, recorded in
+/// the returned classification's own `Shape`). Every other dimension, a
+/// multisampled image, and a storage image (`Sampled == 2`, which would
+/// need a `feme.cpu.image.store.*` helper that does not exist yet) return
 /// `std::nullopt`. An integer-channel handle is classified the same as a
 /// float one here -- `hasOnlySupportedImageUses` (roadmap E26) is what
 /// narrows its *uses* to fetch only, since SPIR-V never legalizes a
@@ -370,11 +410,14 @@ classifySampledImage2DHandle(const CallInst &Handle) {
   if (HandleTy->getNumTypeParameters() != 1 ||
       HandleTy->getNumIntParameters() != 6)
     return std::nullopt;
-  if (HandleTy->getIntParameter(0) != SPIRVDim2D)
+  unsigned Dim = HandleTy->getIntParameter(0);
+  if (Dim != SPIRVDim2D && Dim != SPIRVDimCube)
     return std::nullopt;
-  // [Dim, Depth, Arrayed, MS, Sampled, Format]: an arrayed or multisampled
-  // image needs a layer/sample coordinate the 2D helpers do not take.
-  if (HandleTy->getIntParameter(2) != 0 || HandleTy->getIntParameter(3) != 0)
+  // [Dim, Depth, Arrayed, MS, Sampled, Format]: a multisampled image needs
+  // a per-sample coordinate the runtime's sampling/fetch helpers do not
+  // take (no `feme.cpu.image.*` entry point for MSAA sampling exists).
+  bool Arrayed = HandleTy->getIntParameter(2) != 0;
+  if (HandleTy->getIntParameter(3) != 0)
     return std::nullopt;
   if (HandleTy->getIntParameter(4) != SPIRVSampledWithSampler)
     return std::nullopt;
@@ -382,8 +425,13 @@ classifySampledImage2DHandle(const CallInst &Handle) {
   Type *ChannelType = HandleTy->getTypeParameter(0);
   if (!ChannelType->isFloatTy() && !ChannelType->isIntegerTy(32))
     return std::nullopt; // No other channel shape is decodable today.
+  ImageShape Shape;
+  if (Dim == SPIRVDim2D)
+    Shape = Arrayed ? ImageShape::Array2D : ImageShape::Plain2D;
+  else
+    Shape = Arrayed ? ImageShape::CubeArray : ImageShape::Cube;
   return HandleClassification{HandleKind::SampledImage2D, 0, nullptr,
-                              ChannelType};
+                              ChannelType, Shape};
 }
 
 /// Returns \p Handle's classification if its type is a `spirv.Sampler`
@@ -435,12 +483,15 @@ bool isV4I32(const Type *Ty) {
          VecTy->getElementType()->isIntegerTy(32);
 }
 
-/// Whether \p Coord is a two-component coordinate of the right element type
-/// for \p Float (normalized `<2 x float>` for a sample, integer
-/// `<2 x i32>` for a fetch).
-bool isCoord2D(const Value *Coord, bool Float) {
+/// Whether \p Coord is an \p N-component coordinate of the right element
+/// type for \p Float (normalized `<N x float>` for a sample, integer
+/// `<N x i32>` for a fetch) -- `Plain2D`'s 2-component `(u, v)`/`(x, y)`,
+/// `Array2D`'s 3-component `(u, v, layer)`/`(x, y, layer)` (roadmap H7b-a),
+/// and `Cube`/`CubeArray`'s 3-/4-component direction-vector coordinate
+/// (roadmap H7b-a).
+bool isCoordN(const Value *Coord, unsigned N, bool Float) {
   const auto *VecTy = dyn_cast<FixedVectorType>(Coord->getType());
-  if (!VecTy || VecTy->getNumElements() != 2)
+  if (!VecTy || VecTy->getNumElements() != N)
     return false;
   return Float ? VecTy->getElementType()->isFloatTy()
                : VecTy->getElementType()->isIntegerTy(32);
@@ -455,10 +506,12 @@ bool isZeroOffset(const Value *Offset) {
   return C && C->isNullValue();
 }
 
-/// Checks that every use of a 2D sampled-image handle is one this pass can
+/// Checks that every use of a sampled-image handle is one this pass can
 /// rewrite: the image operand of an `llvm.spv.resource.sample`/
 /// `samplelevel` whose coordinate, offset and result shapes the CPU
-/// runtime's 2D helpers implement, or an `llvm.spv.resource.getpointer`
+/// runtime's helpers for \p Shape implement, or (`Plain2D`/`Array2D` only
+/// -- `OpImageFetch` is illegal against `Dim::Cube` in SPIR-V, so `Cube`/
+/// `CubeArray` never reach this branch) an `llvm.spv.resource.getpointer`
 /// texel fetch (`OpImageFetch`, see `feme::spirv::ImageLoadPattern`) whose
 /// pointer is only loaded from. \p IsInteger (roadmap E26) is
 /// `classifySampledImage2DHandle`'s own channel-type test, repeated by the
@@ -467,7 +520,19 @@ bool isZeroOffset(const Value *Offset) {
 /// sample against an integer-sampled image, so there is no shape to
 /// accept), and expects each fetch's loaded type to be `<4 x i32>` instead
 /// of `<4 x float>`.
-bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger) {
+///
+/// Roadmap H7b-a coordinate widths, per SPIR-V's own convention (see
+/// `classifySampledImage2DHandle`'s comment): `Plain2D` samples/fetches a
+/// 2-component coordinate; `Array2D` samples/fetches a 3-component one
+/// (the array layer as its own float/integer third component); `Cube`
+/// samples a 3-component direction vector; `CubeArray` samples a
+/// 4-component one (direction plus a float array-layer 4th component).
+bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
+                               ImageShape Shape) {
+  unsigned SampleCoordWidth =
+      Shape == ImageShape::CubeArray ? 4
+      : (Shape == ImageShape::Array2D || Shape == ImageShape::Cube) ? 3
+                                                                     : 2;
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
     if (!CI)
@@ -480,16 +545,19 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
       unsigned OffsetIdx = ExplicitLod ? 4 : 3;
-      if (!isCoord2D(CI->getArgOperand(2), /*Float=*/true) ||
+      if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
           !isZeroOffset(CI->getArgOperand(OffsetIdx)) ||
           !isV4F32(CI->getType()))
         return false;
       continue;
     }
 
+    if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray)
+      return false; // No fetch shape exists for Cube/CubeArray.
     if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
       return false;
-    if (!isCoord2D(CI->getArgOperand(1), /*Float=*/false))
+    unsigned FetchCoordWidth = Shape == ImageShape::Array2D ? 3 : 2;
+    if (!isCoordN(CI->getArgOperand(1), FetchCoordWidth, /*Float=*/false))
       return false;
     for (const User *PU : CI->users()) {
       const auto *LI = dyn_cast<LoadInst>(PU);
@@ -678,7 +746,8 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
     switch (Classification->Kind) {
     case HandleKind::SampledImage2D:
       if (!hasOnlySupportedImageUses(
-              *CI, Classification->TexelElementType->isIntegerTy(32)))
+              *CI, Classification->TexelElementType->isIntegerTy(32),
+              Classification->Shape))
         return std::nullopt;
       break;
     case HandleKind::Sampler:
@@ -712,7 +781,8 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
     Handles.push_back(BoundHandle{CI, Key, Classification->Kind,
                                   Classification->Stride,
                                   Classification->ElementStruct,
-                                  Classification->TexelElementType, RangeSize});
+                                  Classification->TexelElementType, RangeSize,
+                                  Classification->Shape});
   }
   return Handles;
 }
@@ -1016,20 +1086,36 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
 
 /// Rewrites every sample and texel fetch performed through the image and
 /// sampler handles in \p HeapIndices -- a map from each accepted
-/// `handlefrombinding` call to the range-checked heap index it resolves to
-/// -- into the corresponding canonical `feme.cpu.image.*` call (see
-/// ImageCalls.h), then erases the handles themselves.
+/// One image or sampler handle's already-resolved heap index, plus (for an
+/// image handle) its `ImageShape` -- carried through from
+/// `classifySampledImage2DHandle` so `lowerImageAccesses` below can dispatch
+/// each sample/fetch to the right `feme.cpu.image.*` shape without a second
+/// lookup. Meaningless (left `Plain2D`, its zero-value) for a sampler
+/// handle's own entry, which is only ever read for its `Index`.
+struct ImageHeapEntry {
+  Value *Index;
+  ImageShape Shape = ImageShape::Plain2D;
+};
+
+/// Rewrites every sample and texel fetch performed through the image and
+/// sampler handles in \p HeapIndices -- a map from each accepted
+/// `handlefrombinding` call to the range-checked heap index (and, for an
+/// image handle, `ImageShape`) it resolves to -- into the corresponding
+/// canonical `feme.cpu.image.*` call (see ImageCalls.h), then erases the
+/// handles themselves.
 ///
 /// `hasOnlySupportedImageUses`/`hasOnlySupportedSamplerUses` already
 /// guaranteed at collection time that every use is one of these shapes, so
 /// there is no partially-rewritten state to worry about: either the whole
 /// function was accepted, or none of it was.
-void lowerImageAccesses(const MapVector<CallInst *, Value *> &HeapIndices,
+void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices,
                         const ImageCallEnv &Env) {
   LLVMContext &Ctx = Env.ImageHeap->getContext();
   Value *Mask = ConstantInt::getTrue(Ctx);
 
-  for (const auto &[Handle, ImageIndex] : HeapIndices) {
+  for (const auto &[Handle, Entry] : HeapIndices) {
+    Value *ImageIndex = Entry.Index;
+    ImageShape Shape = Entry.Shape;
     for (User *U : llvm::make_early_inc_range(Handle->users())) {
       auto *CI = cast<CallInst>(U);
       bool ExplicitLod = false;
@@ -1041,25 +1127,60 @@ void lowerImageAccesses(const MapVector<CallInst *, Value *> &HeapIndices,
           continue;
         IRBuilder<> Builder(CI);
         Value *Coord = CI->getArgOperand(2);
-        Value *U0 = Builder.CreateExtractElement(Coord, uint64_t{0});
-        Value *V0 = Builder.CreateExtractElement(Coord, uint64_t{1});
         Value *Lod = ExplicitLod ? CI->getArgOperand(3)
                                  : ConstantFP::get(Builder.getFloatTy(), 0.0);
+        Value *ExplicitLodFlag = Builder.getInt1(ExplicitLod);
         Value *SamplerIndex =
-            HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1)));
-        CallInst *NewCall =
-            createSample2D(Builder, Env, ImageIndex, SamplerIndex, U0, V0, Lod,
-                           Builder.getInt1(ExplicitLod), Mask, CI->getName());
+            HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
+        Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
+        Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
+        CallInst *NewCall;
+        switch (Shape) {
+        case ImageShape::Plain2D:
+          NewCall = createSample2D(Builder, Env, ImageIndex, SamplerIndex, C0,
+                                   C1, Lod, ExplicitLodFlag, Mask,
+                                   CI->getName());
+          break;
+        case ImageShape::Array2D: {
+          Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{2});
+          NewCall = createSample2DArray(Builder, Env, ImageIndex, SamplerIndex,
+                                       C0, C1, ArrayLayer, Lod,
+                                       ExplicitLodFlag, Mask, CI->getName());
+          break;
+        }
+        case ImageShape::Cube: {
+          Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
+          NewCall = createSampleCube(Builder, Env, ImageIndex, SamplerIndex,
+                                     C0, C1, C2, Lod, ExplicitLodFlag, Mask,
+                                     CI->getName());
+          break;
+        }
+        case ImageShape::CubeArray: {
+          Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
+          Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{3});
+          NewCall = createSampleCubeArray(Builder, Env, ImageIndex,
+                                          SamplerIndex, C0, C1, C2, ArrayLayer,
+                                          Lod, ExplicitLodFlag, Mask,
+                                          CI->getName());
+          break;
+        }
+        }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;
       }
 
       // `OpImageFetch`: a `getpointer` whose result is only loaded from.
+      // `hasOnlySupportedImageUses` already rejected this branch for
+      // `Cube`/`CubeArray` (no fetch shape exists for either), so only
+      // `Plain2D`/`Array2D` reach here.
       IRBuilder<> Builder(CI);
       Value *Coord = CI->getArgOperand(1);
       Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
       Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
+      Value *Layer = Shape == ImageShape::Array2D
+                        ? Builder.CreateExtractElement(Coord, uint64_t{2})
+                        : nullptr;
       for (User *PU : llvm::make_early_inc_range(CI->users())) {
         auto *LI = cast<LoadInst>(PU);
         IRBuilder<> LoadBuilder(LI);
@@ -1072,15 +1193,29 @@ void lowerImageAccesses(const MapVector<CallInst *, Value *> &HeapIndices,
         // F8c). The loaded type -- `<4 x i32>` or `<4 x float>`,
         // `hasOnlySupportedImageUses`'s own per-handle check already
         // guaranteed one or the other -- selects the integer (roadmap E26)
-        // or float `feme.cpu.image.load.2d.*` entry point.
+        // or float `feme.cpu.image.load.2d*` entry point.
         bool IsInteger = isV4I32(LI->getType());
-        CallInst *Loaded =
-            IsInteger
-                ? createLoad2DI32(LoadBuilder, Env, ImageIndex, X, Y,
-                                  LoadBuilder.getInt32(0), Mask, LI->getName())
-                : createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
-                               LoadBuilder.getInt32(0), LoadBuilder.getInt32(0),
-                               Mask, LI->getName());
+        CallInst *Loaded;
+        if (Shape == ImageShape::Array2D) {
+          Loaded =
+              IsInteger
+                  ? createLoad2DArrayI32(LoadBuilder, Env, ImageIndex, X, Y,
+                                        Layer, LoadBuilder.getInt32(0), Mask,
+                                        LI->getName())
+                  : createLoad2DArray(LoadBuilder, Env, ImageIndex, X, Y,
+                                      Layer, LoadBuilder.getInt32(0),
+                                      LoadBuilder.getInt32(0), Mask,
+                                      LI->getName());
+        } else {
+          Loaded =
+              IsInteger
+                  ? createLoad2DI32(LoadBuilder, Env, ImageIndex, X, Y,
+                                    LoadBuilder.getInt32(0), Mask,
+                                    LI->getName())
+                  : createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
+                                 LoadBuilder.getInt32(0),
+                                 LoadBuilder.getInt32(0), Mask, LI->getName());
+        }
         LI->replaceAllUsesWith(Loaded);
         LI->eraseFromParent();
       }
@@ -1090,8 +1225,8 @@ void lowerImageAccesses(const MapVector<CallInst *, Value *> &HeapIndices,
 
   // Erased last: a sampler handle still had the sample calls as users while
   // the image side of the loop above was rewriting them.
-  for (const auto &[Handle, ImageIndex] : HeapIndices) {
-    (void)ImageIndex;
+  for (const auto &[Handle, Entry] : HeapIndices) {
+    (void)Entry;
     Handle->eraseFromParent();
   }
 }
@@ -1190,11 +1325,12 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
       if (It == Ranges.end())
         Ranges.emplace(BH.Key, RangeEntry{BH.Kind, BH.Stride, BH.ElementStruct,
                                           BH.TexelElementType, BH.RangeSize,
-                                          /*Conflicting=*/false});
+                                          BH.Shape, /*Conflicting=*/false});
       else if (It->second.Kind != BH.Kind || It->second.Stride != BH.Stride ||
                It->second.ElementStruct != BH.ElementStruct ||
                It->second.TexelElementType != BH.TexelElementType ||
-               It->second.RangeSize != BH.RangeSize)
+               It->second.RangeSize != BH.RangeSize ||
+               It->second.Shape != BH.Shape)
         It->second.Conflicting = true;
     }
     PerFunctionHandles[&F] = std::move(*Handles);
@@ -1217,7 +1353,7 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     // Image and sampler handles are rewritten together, after this loop:
     // a sample needs *both* of its descriptor indices, which are computed
     // at two different handles.
-    MapVector<CallInst *, Value *> ImageHeapIndices;
+    MapVector<CallInst *, ImageHeapEntry> ImageHeapIndices;
     bool UsesSamplerHeap = false;
     for (const BoundHandle &BH : Handles) {
       const RangeEntry &Entry = Ranges.at(BH.Key);
@@ -1233,8 +1369,9 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
       }
       UsesSamplerHeap |= BH.Kind == HandleKind::Sampler;
       IRBuilder<> Builder(BH.Handle);
-      ImageHeapIndices[BH.Handle] = computeClampedIndex(
+      Value *Index = computeClampedIndex(
           Builder, BH.Handle->getArgOperand(3), Entry.HeapBase, BH.RangeSize);
+      ImageHeapIndices[BH.Handle] = ImageHeapEntry{Index, BH.Shape};
     }
     if (!RewroteAny)
       continue;
