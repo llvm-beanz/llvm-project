@@ -325,10 +325,15 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxCullDistances = 8;
   Limits.maxCombinedClipAndCullDistances = 8;
   Limits.discreteQueuePriorities = 2;
+  // (roadmap H7e) `pointSizeRange[1]`/`lineWidthRange[1]` must match
+  // `feme::graphics::RasterState::MaxPointSize`'s own default (Pipeline.h)
+  // and the executor's own line-width handling (unclamped, so any
+  // advertised maximum is honest) respectively -- see each file's own
+  // comment for why the limit and the executor behavior live apart.
   Limits.pointSizeRange[0] = 1.0f;
   Limits.pointSizeRange[1] = 64.0f;
   Limits.lineWidthRange[0] = 1.0f;
-  Limits.lineWidthRange[1] = 1.0f;
+  Limits.lineWidthRange[1] = 64.0f;
   Limits.pointSizeGranularity = 1.0f;
   Limits.lineWidthGranularity = 1.0f;
   Limits.strictLines = VK_FALSE;
@@ -354,17 +359,18 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // the executor's dual-source blend path (`feme::graphics::executeDraws`'
   // `FSColor1`) is implemented and `maxFragmentDualSrcAttachments` above
   // is already the honest `1` this feature requires, so advertising it is
-  // likewise honest -- `largePoints`/`wideLines` are left `VK_FALSE`: a
-  // point's quad expansion still hardcodes a fixed 1-pixel size (roadmap
-  // F5 only generalized the *line* path), and although
-  // `feme::graphics::RasterState::LineWidth`/`vkCmdSetLineWidth` are now
-  // genuinely threaded through the line rasterizer (Executor.cpp), this
-  // struct's own `lineWidthRange` stays the honest, degenerate `[1.0,
-  // 1.0]` below until a later row claims `wideLines` itself (see
-  // Vulkan14FeatureInventory.md's H7 row).
+  // likewise honest. (Roadmap H7e) `wideLines`/`largePoints`: `Executor.cpp`
+  // now honestly implements both -- `RasterState::LineWidth` was already
+  // threaded through the line rasterizer unclamped since F5, and the
+  // point-topology quad expansion now reads a real, clamped
+  // (`RasterState::MaxPointSize`) point size instead of a hardcoded
+  // 1-pixel half-extent -- so both can flip to `VK_TRUE`, with
+  // `lineWidthRange`/`pointSizeRange` above raised to match.
   Info.Features = VkPhysicalDeviceFeatures{};
   Info.Features.robustBufferAccess = VK_TRUE;
   Info.Features.dualSrcBlend = VK_TRUE;
+  Info.Features.wideLines = VK_TRUE;
+  Info.Features.largePoints = VK_TRUE;
   // Roadmap E20 ("Block-compressed image groundwork + ASTC LDR decode")
   // first tracked this Vulkan 1.0 core feature bit explicitly (previously
   // left implicitly false by the zero-initialization above, unlike

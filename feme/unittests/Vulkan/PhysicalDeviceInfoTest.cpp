@@ -111,13 +111,13 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
 
 TEST(PhysicalDeviceInfo,
      OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised) {
-  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c/H7d) `robustBufferAccess`/
+  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c/H7d/H7e) `robustBufferAccess`/
   // `dualSrcBlend`/`textureCompressionASTC_LDR`/`multiViewport`/
   // `tessellationShader`/`geometryShader`/`independentBlend`/`logicOp`/
   // `occlusionQueryPrecise`/`multiDrawIndirect`/
   // `drawIndirectFirstInstance`/`imageCubeArray`/`fillModeNonSolid`/
-  // `depthClamp`/`depthBiasClamp`/`depthBounds` are the only core
-  // features this milestone can honestly claim (see
+  // `depthClamp`/`depthBiasClamp`/`depthBounds`/`wideLines`/`largePoints`
+  // are the only core features this milestone can honestly claim (see
   // PhysicalDeviceInfo.cpp's comment); every other `VkBool32` stays
   // false, since nothing else has been implemented that could back one
   // yet.
@@ -138,6 +138,8 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.depthClamp, VK_TRUE);
   EXPECT_EQ(Info.Features.depthBiasClamp, VK_TRUE);
   EXPECT_EQ(Info.Features.depthBounds, VK_TRUE);
+  EXPECT_EQ(Info.Features.wideLines, VK_TRUE);
+  EXPECT_EQ(Info.Features.largePoints, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -156,8 +158,27 @@ TEST(PhysicalDeviceInfo,
   Cleared.depthClamp = VK_FALSE;
   Cleared.depthBiasClamp = VK_FALSE;
   Cleared.depthBounds = VK_FALSE;
+  Cleared.wideLines = VK_FALSE;
+  Cleared.largePoints = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
+}
+
+// Roadmap H7e: `lineWidthRange`/`pointSizeRange` must be raised beyond the
+// degenerate `[1.0, 1.0]` floor alongside `wideLines`/`largePoints` -- a
+// device advertising either feature but not a supported width/size beyond
+// 1.0 pixel would make the feature bit meaningless (every real
+// `dEQP-VK.rasterization.primitive_size.points.*`/wide-line case requests
+// a size well beyond 1.0).
+TEST(PhysicalDeviceInfo, LineWidthAndPointSizeRangesSupportWideLinesAndLargePoints) {
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  const VkPhysicalDeviceLimits &Limits = Info.Properties.limits;
+  EXPECT_EQ(Limits.lineWidthRange[0], 1.0f);
+  EXPECT_GT(Limits.lineWidthRange[1], 1.0f);
+  EXPECT_EQ(Limits.pointSizeRange[0], 1.0f);
+  EXPECT_GT(Limits.pointSizeRange[1], 1.0f);
+  EXPECT_GT(Limits.lineWidthGranularity, 0.0f);
+  EXPECT_GT(Limits.pointSizeGranularity, 0.0f);
 }
 
 // Roadmap H7a: `maxDrawIndirectCount` must be raised alongside
