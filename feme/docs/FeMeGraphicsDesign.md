@@ -2173,6 +2173,14 @@ readRaw`/`writeRaw`'s `Row` parameter, `LinkedVarying::RowCount`) -- but a
 matrix *vertex attribute* (bound from a vertex buffer, which needs one
 `VkVertexInputAttributeDescription` per column at consecutive locations)
 remains a mechanical, on-demand addition, same as 16-/64-bit varyings.
+(Roadmap H6m deviation note) A SPIR-V `bool` (`OpTypeBool`/LLVM `i1`)
+stage-IO scalar -- e.g. a mesh entry's own `gl_CullPrimitiveEXT` -- never
+reaches `StageStorage` at its true 1-bit width: `CanonicalizeStage.cpp`
+canonicalizes it to an ordinary 32-bit element (`SignatureComponentType::
+Bool`, `BitWidth == 32`) at the SPIR-V-to-`feme.stage.*` boundary instead,
+mirroring a real GPU driver's own in-memory representation of a
+shader-visible `bool`, so this restriction stays genuinely "32-bit
+scalars only" rather than gaining a 1-bit exception.
 Vertex-output/fragment-input varyings link by `Location`, the same
 Vulkan-style convention "Normalized pipeline" notes in place of a
 `StageInterfaceMap`. `unittests/Graphics/ExecutorTest.cpp`
@@ -2935,7 +2943,20 @@ vector padding). A new `getPackedMeshElementSize` helper now computes
 the tightly packed size directly instead, used only for this one fold's
 own `VertexSize` -- `resolveRowComponent`'s separate row/component
 peeling needs no equivalent fix, since a single stage-IO member's own
-row shape is never one of the two shapes this padding gap affects. See
+row shape is never one of the two shapes this padding gap affects.
+Roadmap H6m has since found and closed a narrower, generic gap H6l's own
+fix newly exposed: `StageStorage::buildStageStorage`'s "32-bit scalars
+only" scope limit (below), previously unreachable in the stage-IO path,
+rejects `gl_CullPrimitiveEXT`'s SPIR-V `OpTypeBool`/LLVM `i1` element
+outright. Rather than widening `StageStorage`'s own per-element layout to
+a genuine 1-bit scalar -- a real redesign of its byte-oriented
+`InvocationStride`/`ComponentStride`/`RowStride` addressing this
+milestone does not need -- `CanonicalizeStage.cpp`'s own
+`getComponentType`/`loadStageIOValue`/`storeStageIOValue` canonicalize a
+`bool` stage-IO scalar to an ordinary 32-bit element at the SPIR-V-to-
+`feme.stage.*` boundary instead (mirroring a real GPU driver's own
+in-memory representation of a shader-visible `bool`), so `StageStorage`
+itself needed no change at all. See
 Roadmap.md's H6a-H6m rows for the full remaining breakdown.
 
 ### G7: Ray-query and traversal foundations

@@ -12643,6 +12643,173 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-caselist-file=draw_sample.txt --deqp-shadercache=disable
 ```
 
+## Roadmap H6m: measured impact (canonicalize a `bool` stage-IO scalar to 32 bits)
+
+H6l's own real-ICD re-run left this row a single, specific,
+already-narrowed blocker to fix: `cull_primitives` now clears
+`feme-graphics-validate-stage` entirely, but `vkQueueSubmit` itself fails
+with `"stage element 5 has a 1-bit scalar; only 32-bit elements are
+implemented yet"` -- `StageStorage.cpp`'s own long-standing, generic
+"32-bit scalars only" scope limit, reached for the first time in the
+stage-IO path.
+
+**Root cause, found via a real IR reduction** (the same technique this
+whole H6g-b/H6j/H6k/H6l chain has used throughout): a minimal mesh entry
+storing an `i1` value into a `PerPrimitiveEXT`-decorated interface
+block's own `BuiltIn 4485` (`CullPrimitiveEXT`) member --
+`gl_MeshPrimitivesEXT[i].gl_CullPrimitiveEXT = %v` -- reproduces the
+exact failure directly:
+
+```
+vkQueueSubmit: stage element 0 has a 1-bit scalar; only 32-bit elements are implemented yet
+```
+
+`getComponentType` (`CanonicalizeStage.cpp`) maps an LLVM `IntegerType`
+straight to `{SInt, IntTy->getBitWidth()}`, so SPIR-V's `OpTypeBool`
+(represented, like every other SPIR-V-to-LLVM-IR path in this project,
+as a plain `i1`) reflects as a 1-bit `SignatureElement` --
+`StageStorage::buildStageStorage`'s per-element layout
+(`InvocationStride`/`ComponentStride`/`RowStride`) is hard-coded to a
+4-byte scalar throughout and has no addressable representation for
+anything narrower, so it errors rather than laying out storage the
+compiled wrapper would misread.
+
+**Choosing a fix.** The roadmap row's own text posed two options: widen
+`StageStorage`'s own layout to a genuine 1-bit (or 1-byte, packed)
+scalar, or canonicalize a `bool` stage-IO element to an ordinary 32-bit
+integer at the `CanonicalizeStage.cpp`/SPIR-V-to-LLVM boundary before it
+ever reaches `StageStorage`. The real IR reduction settled it: a 1-bit
+scalar has no clean fit in `StageStorage`'s existing byte-oriented
+addressing model (every other scalar width this project supports --
+8/16/32/64, `Signature.cpp`'s own `checkBitWidth` -- is already
+byte-addressable; 1 bit is not, the same "not byte-addressable" class of
+gap roadmap E29's own `Workgroup`-storage addressable-`i1` fix rejected
+outright rather than solved), and canonicalizing at the boundary instead
+mirrors how a real GPU driver actually represents a shader-visible
+`bool` in memory (a full 32-bit word, not a packed bit) -- so it needed
+no redesign of `StageStorage`'s own addressing at all, only two small,
+local changes in `CanonicalizeStage.cpp`.
+
+**The fix.** `getComponentType` now special-cases `i1` ahead of the
+generic `IntegerType` case, returning `{SignatureComponentType::Bool,
+32}` instead of `{SInt, 1}` -- reusing the `Bool`/`StageLayoutScalarKind::
+Bool` pairing `StageStorage.cpp`'s own `scalarKindFor` already had a case
+for, just never a producer of. `loadStageIOValue`/`storeStageIOValue`'s
+own terminal (leaf-scalar) cases widen/narrow the actual value to match:
+a store zero-extends its `i1` operand to `i32` before calling
+`createStageOutputStore`, and a load calls `createStageInputLoad` with an
+`i32` result type and truncates it back down to `i1`. The shadow-alloca
+read-back path (`ShadowValueMap`, roadmap H2e) is untouched -- it never
+reaches `StageStorage` at all, so it keeps the value's own natural `i1`
+type. `StageStorage.cpp`/`.h` needed no change whatsoever.
+
+A new unit test,
+`CanonicalizesBoolPerPrimitiveOutputStoreToA32BitElement`
+(`CanonicalizeStageTest.cpp`), covers the whole boundary directly: the
+reduced `gl_CullPrimitiveEXT`-shaped IR from the root-cause reduction
+above, asserting the reflected element is `{Bool, 32}`, the emitted
+`feme.stage.output.store`'s value operand is an `i32` `zext` of the
+original `i1`, and a direct call to `buildStageStorage` on the resulting
+signature succeeds where it previously errored with this row's own exact
+message. Confirmed to fail without this fix (reproducing "stage element 0
+has a 1-bit scalar..." via `buildStageStorage`'s own `Error` directly)
+and pass with it.
+
+```
+$ ninja -C <feme-build> check-feme
+...
+Total Discovered Tests: 2036
+  Unsupported:   59 (2.90%)
+  Passed     : 1977 (97.10%)
+```
+
+Up from H6l's own 1976/2035 by exactly the 1 new test this row adds (0
+pre-existing tests newly failed).
+
+**A real ICD re-run confirms the fix.** Re-running `cull_primitives`
+alone:
+
+```
+Test run totals:
+  Passed:        0/1 (0.0%)
+  Failed:        1/1 (100.0%)
+```
+
+Still `Fail`, but no longer at `vkQueueSubmit`: the shader now compiles,
+links, and submits successfully, and the case fails instead on a clean
+pixel-comparison mismatch --
+
+```
+Pixel (0, 0) failed: expected (0, 0, 1, 1) and found (0, 0, 0, 1)
+...
+Check log for details at vktMeshShaderBuiltinTestsEXT.cpp:641
+```
+
+-- every covered pixel renders black instead of the expected blue,
+i.e. `gl_CullPrimitiveEXT` now compiles and stores its value correctly,
+but the CPU rasterizer does not yet honor it to actually skip a culled
+primitive. This is a distinct, later rendering-correctness gap -- not
+filed as a new sibling row, since it blocks no other case and sits
+squarely inside this milestone's own already-tracked "bounded
+payload/output limits reported truthfully" scope, rather than being a
+new kind of compile-time blocker the way every prior H6g-b/H6j/H6k/H6l/
+H6m row in this chain was.
+
+Re-running the full `dEQP-VK.mesh_shader.ext.builtin.*` group (37 cases)
+confirms this row is not a regression bucket-wide:
+
+```
+Test run totals:
+  Passed:         0/37 (0.0%)
+  Failed:        22/37 (59.5%)
+  Not supported: 15/37 (40.5%)
+```
+
+Byte-identical to H6l's own recorded 22/37 `Failed` split, confirmed via a
+`git stash` before/after comparison of the full 37-case group (same
+split either way; only `cull_primitives`'s own failure *reason* changed,
+from `vkQueueSubmit: ... 1-bit scalar ...` to the pixel-comparison
+mismatch above). A re-run of the 1957-case `draw_sample.txt` regression
+sample (`dEQP-VK.draw.*`, `VK-GL-CTS/run/draw_sample.txt`) confirms no
+regression there either, byte-identical to every prior recorded run:
+
+```
+Test run totals:
+  Passed:        14/1957 (0.7%)
+  Failed:       153/1957 (7.8%)
+Not supported: 1790/1957 (91.5%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure lowering-correctness fix within
+`VK_EXT_mesh_shader`'s already-advertised scope, touching no feature bit
+or extension.
+
+**Roadmap H6m closes.** This row's own fix lands and is confirmed
+complete for the exact diagnostic it targeted -- zero `"N-bit scalar;
+only 32-bit elements are implemented yet"` occurrences anywhere in the
+37-case builtin group, no regression in the wider mesh-shading or draw
+regression samples -- and does not reopen or narrow into a further
+sibling row the way H6g-b/H6j/H6k/H6l each did: `cull_primitives`'s own
+remaining gap (rendering, not compiling) is out of this row's own scope.
+**Milestone H6 does not close**: `cull_primitives` and the wider 37-case
+builtin group still do not pass.
+
+**Reproducing this row.** Same ICD build and CTS checkout as every prior
+mesh-shading row:
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n dEQP-VK.mesh_shader.ext.builtin.cull_primitives \
+    --deqp-shadercache=disable
+# Full builtin group and draw regression sample:
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.mesh_shader.ext.builtin.*" --deqp-shadercache=disable
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=draw_sample.txt --deqp-shadercache=disable
+```
+
 ## Roadmap H6c-a: closed by its own split
 
 Re-checking H6c-a's own literal ask now that its three named
