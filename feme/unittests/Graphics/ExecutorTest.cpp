@@ -990,6 +990,92 @@ TEST(ExecutorTest, RectangularSmoothLineAntialiasesItsEdge) {
   EXPECT_EQ(texel(0, 3)[3], 0);
 }
 
+// roadmap H7c: `PolygonMode::Line` decomposes a triangle into its three
+// edges as independent (Bresenham, for a pixel-exact prediction here)
+// line segments instead of a filled interior. Vertices sit exactly on
+// pixel centers (0, 0), (3, 0), (0, 3) so each of the 3 edges' own
+// Bresenham walk is easy to hand-derive: the top edge lights row 0's 4
+// pixels, the left edge lights column 0's 4 pixels, and the diagonal
+// edge lights the (3,0)-(2,1)-(1,2)-(0,3) anti-diagonal -- 9 pixels
+// total, leaving the remaining 7 (including the far corner (3, 3) and
+// the triangle's own centroid-ish (2, 2)) untouched, unlike `Fill` mode.
+TEST(ExecutorTest, PolygonModeLineRastersOnlyTheTrianglesThreeEdges) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.Polygon = PolygonMode::Line;
+  Raster.LineMode = LineRasterizationMode::Bresenham;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(Ctx, Raster);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -0.75f, 0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 0)
+      0.75f,  0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (3, 0)
+      -0.75f, -0.75f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 3)
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (auto [X, Y] : {std::pair{0u, 0u},
+                      {1u, 0u},
+                      {2u, 0u},
+                      {3u, 0u},
+                      std::pair{0u, 1u},
+                      {0u, 2u},
+                      {0u, 3u},
+                      std::pair{2u, 1u},
+                      {1u, 2u}})
+    EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
+  for (auto [X, Y] : {std::pair{1u, 1u},
+                      {3u, 1u},
+                      {1u, 3u},
+                      {2u, 2u},
+                      std::pair{2u, 3u},
+                      {3u, 2u},
+                      {3u, 3u}})
+    EXPECT_EQ(texel(X, Y)[3], 0) << "x=" << X << " y=" << Y;
+}
+
+// roadmap H7c: `PolygonMode::Point` rasterizes only the triangle's own 3
+// vertices as independent 1-pixel points, reusing the exact same
+// vertices as the test above (each landing exactly on a pixel center)
+// so each vertex lights exactly the one pixel it sits on and nothing
+// else -- notably, none of the "edge" pixels the `Line` test above
+// lights (e.g. (1, 0), (0, 1), (2, 1)) get lit here.
+TEST(ExecutorTest, PolygonModePointRastersOnlyTheTrianglesThreeVertices) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.Polygon = PolygonMode::Point;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(Ctx, Raster);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -0.75f, 0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 0)
+      0.75f,  0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (3, 0)
+      -0.75f, -0.75f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // pixel (0, 3)
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (auto [X, Y] : {std::pair{0u, 0u}, {3u, 0u}, {0u, 3u}})
+    EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
+  for (uint32_t Y = 0; Y != 4; ++Y)
+    for (uint32_t X = 0; X != 4; ++X) {
+      if ((X == 0 && Y == 0) || (X == 3 && Y == 0) || (X == 0 && Y == 3))
+        continue;
+      EXPECT_EQ(texel(X, Y)[3], 0) << "x=" << X << " y=" << Y;
+    }
+}
+
 TEST(ExecutorTest, InterpolatesColorAcrossTheTriangle) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
