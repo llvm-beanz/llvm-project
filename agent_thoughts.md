@@ -43449,3 +43449,208 @@ and zero regressions in both `check-feme` and the `dEQP-VK.draw.*`
 sample. Milestone H6 does not close: the same re-run surfaces a new,
 narrower, not-yet-root-caused blocker (`H6l`), alongside the
 pre-existing `H6g-b-a-i-a-i-b` and `H6k`.
+
+# Session: Completing H6k (`executeDraws` heap corruption on real mesh in_out cases)
+
+## Starting point
+
+H6j's own real-ICD re-run left a named, unresolved crash: 32 of the 40
+cases its own interface-matching fix unblocked reached real mesh-stage
+execution for the first time and crashed the whole `deqp-vk` process --
+`SIGSEGV`/`SIGABRT` inside `feme::graphics::executeDraws`, a heap-corrupting
+`free()` of an `llvm::Expected<feme::graphics::StageStorage>`, several
+frames removed from wherever the real overrun happened. No FeMe/MLIR
+diagnostic at all, unlike H6c-a-a-iii's own clean assertion-failure crash.
+The row's own text speculated the bug lived in `StageStorage`'s own
+allocation/`writeRaw`/`readRaw`, `Executor.cpp`'s mesh-specific
+`RasterSig`/varying-linking setup, or `MeshOutputWrapperPass`'s per-vertex
+output layout.
+
+## First surprise: the crash reproduces as a clean diagnostic instead
+
+Reused the prior session's `/tmp/h6j/cases_h6j.txt`/`blacklist.txt`
+artifacts and re-ran the 32 blacklisted cases individually against a
+freshly rebuilt `feme_vulkan`. Zero crashes. Instead, a clean
+`ValidateStagePass` diagnostic: `'feme.stage.output.store' ... row 1 is
+out of range for element 0`. This isn't the bug fixing itself -- it's
+H6g-b-c's already-landed `ShaderStage::Mesh` validation wiring catching,
+at compile time, the exact same out-of-bounds access the crash used to
+hit only at runtime past that check. The crash and the diagnostic are the
+same underlying bug; the validation pass just turns silent corruption
+into a clean rejection.
+
+## Root-causing: constant-index fold path, not `StageStorage`
+
+Traced `CanonicalizeStage.cpp`'s `resolveStageIOAccess`. Its constant-
+offset fold (`isPerVertexArrayInputGlobal`) only ever routed a constant
+per-vertex array index into `Vertex` for `Input`, never `Output` --
+deliberate, because other stages have legitimate constant-indexed matrix
+`Output` stores that must stay routed through `Row` (roadmap H6b). This is
+wrong specifically for `Mesh`: glslang unrolls a real mesh entry's small,
+compile-time-bounded per-vertex output loop into one constant-indexed
+store per vertex (confirmed directly against the real SPIR-V disassembly
+embedded in `deqp-vk`'s own `.qpa` log for the failing case), and every
+plain `Mesh`-stage `Output` array write is per-vertex/per-primitive, never
+a real matrix (per H6j's own `RowCount`-peeling fix).
+
+### First fix attempt, and why it wasn't enough
+
+Added a new, `Mesh`-only `isPerVertexArrayMeshOutputGlobal` helper,
+threaded a `Stage` parameter through `resolveStageIOAccess`, and added a
+unit test (`FoldsConstantVertexIndexIntoOutputStoreForMesh`). To avoid
+regressing an existing test
+(`ConstantIndexIntoArrayedBuiltinInterfaceBlockIsLeftUnrewritten`, a
+multi-member-struct case), I scoped the new helper to plain, non-block
+arrays only -- explicitly excluding any global carrying
+`feme.spirv.MemberDecorations` metadata (i.e. builtin interface blocks
+like `gl_MeshVerticesEXT`/`gl_MeshPrimitivesEXT`).
+
+`ninja check-feme` passed (1973/2032), and a standalone re-run of the 32
+blacklisted cases looked completely clean: 0 crashes, 0 row-errors. I
+nearly stopped here.
+
+### The discrepancy that caught the bug
+
+A full 560-case bucket re-run showed "row is out of range" errors
+reappearing on cases (e.g. `permutation_1.mesh_only`) that had just
+tested clean standalone. Reproduced deterministically 3 times, with the
+shader cache disabled and deleted, ruling out caching as the cause. This
+was surprising enough that I stopped and dug in rather than writing it off
+as flakiness.
+
+Added temporary `FEME_H6K_DEBUG`-gated `errs()` prints into
+`resolveStageIOAccess`'s constant-fold branch and the store-rewrite call
+site, rebuilt `feme_vulkan`, and re-ran the single failing case with
+`FEME_H6K_DEBUG=1`. The debug output showed the *still-buggy* element was
+not the scalar array I'd assumed from GLSL declaration order -- it was
+`gl_MeshVerticesEXT`'s own `gl_Position`, a **single-member** builtin
+interface block (`[N x { vec4 }]`), confirmed against the SPIR-V
+disassembly (`%32 = OpTypeStruct %7`, `%33 = OpTypeArray %32 %9`).
+`ElementID` assignment order does not match GLSL declaration/location
+order (builtin blocks get discovered in the discovery loop's own
+iteration order), which is why I misread which element was failing on
+first pass.
+
+The real bug: my first fix's block exclusion was **too broad**. It was
+meant to protect the *multi*-member-block regression case, but it also
+excluded *single*-member blocks -- exactly the shape a real
+`gl_MeshVerticesEXT[k].gl_Position = ...` constant-indexed store takes.
+Excluded globals fell through to the old default path, folding the
+constant vertex index into `Row` instead of `Vertex`, exceeding the
+(correctly peeled, H6j) `RowCount == 1` and corrupting `StageStorage` --
+the actual H6k crash.
+
+## Why excluding blocks was unnecessary in the first place
+
+`resolveOffsetWithinElement` -- the same function the already-correct
+*dynamic*-index path (`getDynamicVertexIndexedAccess`) already relies on
+for this identical shape -- already generically resolves a struct-shaped
+`ElemTy` via `dyn_cast<StructType>` + `DL.getStructLayout` +
+`SL->getElementContainingOffset`, correctly picking the right member's
+own `ElementID` out of a multi-`ElementID` list. The pre-existing,
+already-passing test `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore`
+proves this for a 2-member block with a dynamic index. There was never
+anything block-specific missing downstream -- only the fold's own
+upstream exclusion was wrong. Corrected fix: remove the
+`feme.spirv.MemberDecorations` exclusion entirely, so both plain arrays
+and interface blocks (single- or multi-member) share the same,
+already-correct downstream handling.
+
+## Fix and test changes
+
+- `isPerVertexArrayMeshOutputGlobal`: removed the block exclusion,
+  updated doc comments to explain why blocks are now included (mirrors
+  `getDynamicVertexIndexedAccess`'s existing handling).
+- Removed all `FEME_H6K_DEBUG` prints (verified via grep afterward).
+- Renamed/rewrote `ConstantIndexIntoArrayedBuiltinInterfaceBlockIsLeftUnrewritten`
+  to `FoldsConstantIndexIntoArrayedBuiltinInterfaceBlockMemberStore` --
+  now asserts the store IS correctly rewritten (`Row=0`, `Vertex=1`,
+  matching `Sig->Elements[0].ElementID`), instead of asserting it's left
+  unrewritten. This test's old assertion was itself testing the wrong
+  thing once the underlying handling in `resolveOffsetWithinElement` was
+  understood to already be correct for blocks.
+- Added `FoldsConstantVertexIndexIntoSingleMemberInterfaceBlockOutputStore`,
+  matching the exact real-world CTS shape (single-member
+  `gl_MeshVerticesEXT`-style block wrapping a `vec4`).
+- Confirmed `ValidateStageTest.UnresolvedStageIOGlobalAccessInMeshIsDiagnosed`
+  is unaffected -- it runs `ValidateStagePass` directly on raw,
+  un-canonicalized IR, a genuinely different scenario from this
+  canonicalization fix.
+
+## Verification
+
+- `FeMeTransformsGraphicsTests` targeted filter: 23/23 pass (was 22, +1
+  new test).
+- `ninja check-feme`: 1974/2033 passing, 0 Failed, 59 pre-existing
+  Unsupported (up from H6j's own 1968/2027 by exactly the new/renamed
+  test assertions this row adds).
+- Real ICD re-run: single case clean (reaches image-comparison `Fail`, no
+  crash/row-error); 32-case blacklist -- 0 crashes/row-errors, 27 clean
+  image-comparison fails + 5 already-tracked `spirv_var_NN` JIT-symbol
+  fails; full 560-case bucket -- 0 Passed / 80 Failed / 480 Not
+  Supported, **zero** crashes or row/component-range diagnostics
+  anywhere, the 80 failures splitting evenly between the same two
+  already-tracked/out-of-scope categories.
+
+## A side effect worth checking: H6l
+
+H6l's own row describes a different real mesh case
+(`dEQP-VK.mesh_shader.ext.builtin.cull_primitives`) hitting `row N is out
+of range` errors, and speculated this exact fold might be the same
+underlying bug class. Since my fix generalizes the fold to *all* Mesh
+`Output` arrays (block or not), I checked whether it also happened to fix
+H6l. Re-ran `dEQP-VK.mesh_shader.ext.builtin.cull_primitives` after the
+fix: still fails, but with a *different* error shape --
+`component N is out of range for element {1,2,3}` in addition to
+`row N is out of range for element {3,4,5}`, not the originally-reported
+`row N ... element {4,5}`.
+
+To make sure this wasn't a regression I was introducing, I used `git
+stash` to rebuild `feme_vulkan` *without* my fix and re-ran the full
+37-case `dEQP-VK.mesh_shader.ext.builtin.*` group both ways: 22/37
+`Failed` either way, byte-identical pass/fail split. So H6k's fix is not
+a regression for this group -- it just changes which diagnostic
+`cull_primitives` itself hits, revealing a further, different bug in the
+same signature/offset-resolution area that this row's own scope doesn't
+cover. Restored my fix (`git stash pop`) and rebuilt before continuing.
+
+Per the task's own instructions ("if you do not complete a roadmap stage,
+add entries breaking down remaining work" -- and more generally, keeping
+the roadmap accurate with each change), I updated H6l's row text to
+describe the new diagnostic shape and tally, without attempting to fix it
+myself -- that's a separate, deeper investigation outside H6k's own
+assigned scope.
+
+## Documentation updates
+
+- `Roadmap.md`: struck through H6k with a "done" summary (root cause,
+  corrected fix, test changes, before/after `check-feme` and CTS tallies,
+  cross-reference to the new VulkanCTSReport.md section). Updated H6l's
+  row text (not struck through -- still open) to describe the new
+  post-H6k diagnostic shape and note it's confirmed not a regression.
+- `VulkanCTSReport.md`: added a new "Roadmap H6k: measured impact"
+  section mirroring H6j's own style -- crash-to-diagnostic
+  reclassification, root cause (including the false start), corrected
+  fix, before/after tallies, and the H6l side-effect note.
+- `FeMeGraphicsDesign.md`: extended the G6 status paragraph with a short
+  note on why the constant-vertex-index fold needed to cover builtin
+  interface blocks, not just plain per-vertex arrays, and updated the
+  "see Roadmap.md's H6a-H6j rows" cross-reference to H6a-H6l.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+  no change needed -- neither file cites individual H6-chain rows beyond
+  H6f's own `VK_EXT_mesh_shader` advertisement, and this is a pure
+  bugfix within that already-advertised scope, touching no feature bit
+  or extension.
+
+## Lesson for next time
+
+The single biggest time cost this session was trusting a standalone,
+32-case-blacklist "0 crashes" result as sufficient verification before
+checking a much larger, more representative bucket. A narrow fix that
+happens to route around every case in a small reproduction set can still
+leave a class of bug the reproduction set didn't happen to exercise --
+here, single-member interface blocks specifically. Running the full
+560-case bucket (not just the specific blacklist) was what caught it, and
+should be the default verification step for this kind of fold/routing fix
+in the mesh-shading code, not an afterthought once something "looks
+clean" on a smaller sample.
