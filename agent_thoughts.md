@@ -43654,3 +43654,192 @@ here, single-member interface blocks specifically. Running the full
 should be the default verification step for this kind of fold/routing fix
 in the mesh-shading code, not an afterthought once something "looks
 clean" on a smaller sample.
+
+# Session: Completing H6l (`cull_primitives`'s post-H6k row/component-out-of-range diagnostics)
+
+## Starting point
+
+H6k's own real-ICD re-run left H6l with a narrower, changed diagnostic:
+`dEQP-VK.mesh_shader.ext.builtin.cull_primitives` still reported
+`feme-graphics-validate-stage` `row`/`component is out of range` errors,
+but no longer the originally-reported `row N is out of range for element
+{4,5}` shape -- a mix of `row`/`component` errors spread across elements
+1-5 instead, with component 4 and rows 3/4/5 dominating the tally. H6l's
+own text speculated the fix might belong in
+`resolveOffsetWithinElement`'s per-primitive-block handling or in this
+shader's own signature reflection, and flagged needing a real IR
+reduction (the same technique H6k's own investigation used) to isolate
+which builtin output was still resolving wrong.
+
+## False start: reasoning about `DataLayout::getTypeAllocSize` by hand
+
+Before touching real code, I tried to verify my suspicion (an ABI-padding
+mismatch, similar in shape to the already-closed C1/H6g-b-a-i array-stride
+bug class) by hand-reconstructing the exact failing SPIR-V module
+(`spirv-as`/`spirv-dis`, verified byte-identical to the original via
+`diff`) and running it standalone through `feme-opt --llvm ...
+-passes="feme-graphics-canonicalize-stage,feme-graphics-validate-stage"`.
+This did **not** reproduce any errors, even after simulating the real
+pipeline's bitcode round-trip. I initially treated this as a real
+discrepancy between the standalone and real code paths and spent time
+tracing `GraphicsPipeline.cpp`/`Pipeline.cpp`/`CompiledStage.cpp` looking
+for double-canonicalization or context-cloning bugs -- none existed. In
+hindsight this was very likely just investigator error: manually reasoning
+about `DataLayout::getTypeAllocSize`'s return value for a
+`{<4 x float>, float, [1 x float], [1 x float]}` struct without actually
+querying it is exactly the kind of mistake that class of bug thrives on. I
+did not go back and re-verify the standalone repro after adding debug
+prints; the lesson either way is the same -- **query `DataLayout`
+directly with a debug print instead of reasoning about its ABI rules by
+hand**, especially once a vector member forces struct alignment.
+
+## Root-causing via real-ICD debug prints (the project's own established technique)
+
+Reverted to the same methodology H6k's own investigation used: temporary
+`llvm::errs()` prints in `CanonicalizeStage.cpp`'s `resolveStageIOAccess`
+constant-vertex-index fold, rebuilding only `feme_vulkan` (not the whole
+`check-feme` suite) for fast iteration, and reproducing against the real
+`deqp-vk` binary with `VK_DRIVER_FILES` pointed at the built ICD. The
+first pass of prints (GV name, ByteOffset, VertexSize, VertexIdx,
+Residual) showed `VertexSize=32` for `gl_MeshVerticesEXT`
+(`spirv_var_16`) and `VertexSize=16` for `gl_PrimitiveTriangleIndicesEXT`
+(`spirv_var_43`), but I wanted direct confirmation these were ABI-padded
+rather than "real" before writing a fix, so I added a second round of
+prints dumping `DataLayout::getStructLayout(ST)->getSizeInBytes()` and
+each member's own `getElementOffset`, plus a vector's own scalar
+`getTypeAllocSize` and element count. This confirmed directly: the
+four-member `gl_PerVertex`-shaped struct's own members sit at offsets
+0/16/20/24 (`gl_Position`/`gl_PointSize`/`gl_ClipDistance`/
+`gl_CullDistance`), ending at byte 28, but the struct's own ABI
+allocation size is 32 (rounded up to its own 16-byte alignment, driven by
+the leading `<4 x float>` member) -- and the real, SPIR-V-embedded
+constant offsets between vertices in the actual failing IR are 28 bytes
+apart (0, 28, 56, 84, 112, 140), not 32. Likewise `uvec3`'s own scalar
+alloc (4) times 3 elements is 12, but `DataLayout::getTypeAllocSize(<3 x
+i32>)` returns 16 (LLVM's own 4-wide SIMD vector padding), while the
+real embedded offsets for `gl_PrimitiveTriangleIndicesEXT` are 12 bytes
+apart (0, 12, 24, 36).
+
+This fully explains H6l's own observed diagnostic shape: dividing a real
+byte offset by the wrong (too-large) `VertexSize` under-counts
+`VertexIdx` and leaves a too-large `Residual`, which for the struct-block
+case lands `resolveOffsetWithinElement`'s `StructLayout::
+getElementContainingOffset` on the *wrong* member (e.g. landing on
+`gl_PointSize`/`gl_ClipDistance`/`gl_CullDistance` instead of
+`gl_Position`), producing legitimately-out-of-range `Row`/`Component`
+values for that far-narrower member -- exactly the observed mix of
+errors across elements 1-5 (never 0, `gl_Position` itself, since that
+member is never the one wrongly landed *on*, only landed *past*), and
+never element 5 alone in isolation either since the plain-array case
+(`gl_PrimitiveTriangleIndicesEXT`) never reaches a `Row`/`Component`
+check at all (its whole-vector store shape skips straight to a `Vertex`
+operand, silently wrong instead of diagnosably wrong). It also explains
+why H6l stayed narrow to `cull_primitives` alone: this is the only case
+among the 37-case `builtin` group that writes to a *full* four-member
+`gl_PerVertex`-shaped block (most other cases in that group only ever
+write `gl_Position` -- H6k's own single-member fixture -- which has no
+alignment padding at all, 16 allocated == 16 packed).
+
+## The fix
+
+Added `getPackedMeshElementSize(Type *, const DataLayout &)` in
+`CanonicalizeStage.cpp`, computing the tightly-packed size of a mesh
+entry's own per-vertex/per-primitive array element directly instead of
+trusting `DataLayout::getTypeAllocSize`: a struct's last member's own
+offset (from `StructLayout`, which already reflects real interior
+alignment gaps correctly -- only the *trailing* ABI padding is wrong)
+plus that member's own packed size; a vector's element count times its
+own packed scalar size; an array's element count times its own packed
+element size; recursing through all three. `resolveStageIOAccess`'s
+`VertexSize` computation now calls this instead of
+`DL.getTypeAllocSize(ElemTy)` directly. Deliberately left
+`resolveRowComponent`'s own, separate row/component peeling untouched --
+it operates on a single stage-IO member's own row shape (a scalar,
+vector, or plain fixed-size array), never one of the two shapes
+(per-vertex/per-primitive struct-or-vector *array element*) this padding
+gap is specific to, so there is no equivalent bug there to fix.
+
+Removed both temporary debug-print blocks before finalizing.
+
+## Testing
+
+Added two new `CanonicalizeStageTest` cases directly reproducing the two
+shapes found: `FoldsConstantVertexIndexIntoMultiMemberInterfaceBlockOutputStore`
+(the real four-member `gl_PerVertex`-shaped block, asserting a
+byte-28-offset store to vertex 1 resolves `Vertex == 1`, not the
+wrongly-computed `0`) and
+`FoldsConstantVertexIndexIntoPlainVectorArrayOutputStoreWithPadding` (a
+`[4 x <3 x i32>]` array, asserting a byte-24-offset store to primitive 2
+resolves `Vertex == 2`, not `1`). Both fail without the fix and pass with
+it; confirmed the pre-existing single-member-block/plain-array/
+multi-`ElementID`-block tests are unaffected (their own fixtures happen
+to need no ABI padding, so the new helper is a no-op for them).
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+1976/2035 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from
+H6k's own 1974/2033 by exactly these 2 new tests.
+
+## Real CTS verification
+
+- `cull_primitives` alone: zero remaining `feme-graphics-validate-stage`
+  occurrences (confirmed by grep on the re-run log), down from the
+  originally-reported and H6k-changed diagnostics both. Still `Fail`,
+  but now for a wholly distinct reason surfaced only because this fix
+  lets the case clear compile-time validation for the first time:
+  `vkQueueSubmit` fails with `"stage element 5 has a 1-bit scalar; only
+  32-bit elements are implemented yet"` (visible only with
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1`, an opt-in env var in
+  `Diagnostics.cpp` I had not previously needed) -- `StageStorage.cpp`'s
+  own generic, pre-existing "32-bit scalars only" scope limit, reached
+  by `gl_CullPrimitiveEXT`'s own SPIR-V `bool` element. This is the same
+  narrowing pattern every row in the H6g-b/H6j/H6k/H6l chain has
+  followed, so filed as a new sibling row, H6m (not nested any deeper,
+  per the standing one-lowercase-letter-deep instruction), rather than
+  trying to fix it as part of H6l's own, already-different-scoped fix.
+- Full `dEQP-VK.mesh_shader.ext.builtin.*` group (37 cases): 22/37
+  `Failed`, byte-identical to H6k's own recorded split -- confirmed not a
+  regression -- and grep confirms zero `feme-graphics-validate-stage`
+  occurrences anywhere in the bucket now (down from 16 contributed by
+  `cull_primitives` alone before this fix).
+- 1957-case `draw_sample.txt` regression sample (`dEQP-VK.draw.*`): 14
+  Passed / 153 Failed / 1790 Not Supported, byte-identical to every prior
+  recorded run in `VulkanCTSReport.md` -- confirmed no regression outside
+  mesh shading either.
+
+## Documentation
+
+- `Roadmap.md`: struck through H6l with a `(done: ...)` parenthetical
+  matching the established H6h-H6k style (root cause, the fix, new
+  tests, before/after `check-feme` and CTS tallies, the newly-surfaced
+  H6m cross-reference). Added a new H6m row one level under H6 (not
+  nested any deeper under H6l) describing the newly surfaced `StageStorage`
+  32-bit-scalars-only blocker.
+- `VulkanCTSReport.md`: added a new "Roadmap H6l: measured impact"
+  section mirroring H6k's own style -- the debug-print evidence, root
+  cause for both the struct-block and plain-array shapes, the fix,
+  before/after tallies for `check-feme`/`cull_primitives`/the 37-case
+  builtin group/the draw regression sample, and the H6m hand-off note.
+- `FeMeGraphicsDesign.md`: extended the G6 status paragraph with a short
+  note on the `VertexSize`/packed-size distinction this fix needed, and
+  updated the "see Roadmap.md's H6a-H6l rows" cross-reference to
+  H6a-H6m.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+  no change needed -- neither file cites individual H6-chain rows, and
+  this is a pure lowering-correctness fix within `VK_EXT_mesh_shader`'s
+  already-advertised scope, touching no feature bit or extension.
+
+## Lesson for next time
+
+Don't trust hand-computed `DataLayout` reasoning (ABI sizes, alignment,
+padding) without a debug print confirming it against the real compiler;
+a standalone repro that "doesn't reproduce" is much more likely to be an
+error in that reasoning than a genuine environment difference, and
+should be re-verified with the *same* instrumentation used on the real
+path before being treated as a dead end. Also: once a fold like this one
+has one root cause (H6k's own "which globals get this treatment"
+question), check whether the *quantities* the fold computes (not just
+which code path it takes) are also correct for every shape it now
+applies to -- H6k fixed a routing bug, but left this row's own
+size-computation bug, in the same function, entirely alone, because it
+was verified against a fixture (`gl_Position`-only) too simple to expose
+it.
