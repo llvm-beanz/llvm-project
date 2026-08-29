@@ -12,6 +12,7 @@
 #include "feme/Core/Signature.h"
 #include "feme/Core/StageOps.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
+#include "feme/Transforms/Graphics/StageIOGlobal.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -591,25 +592,6 @@ StageIORowShape getStageIORowShape(Type *ValueTy) {
   if (auto *VecTy = dyn_cast<FixedVectorType>(PerRowTy))
     return {VecTy->getElementType(), VecTy->getNumElements(), RowCount};
   return {PerRowTy, /*ComponentCount=*/1, RowCount};
-}
-
-/// Whether \p GV is a stage-IO variable -- the shape
-/// `StageIOGlobalVariablePattern`/`feme::spirv::attachStageIODecorations`
-/// (feme/lib/Conversion/SPIRVToLLVM/) produce: address space 7 (`Input`) or
-/// 8 (`Output`), carrying either whole-variable `!spirv.Decorations`
-/// metadata or (roadmap H2d) a builtin interface block's own per-member
-/// `feme.spirv.MemberDecorations` metadata -- the shape a block variable
-/// (e.g. `gl_PerVertex`) gets instead, having no whole-variable decoration
-/// of its own (roadmap H2c). Sets \p AddrSpace to \p GV's address space
-/// when true.
-bool isSPIRVStageIOGlobal(const GlobalVariable *GV, unsigned &AddrSpace) {
-  if (!GV)
-    return false;
-  AddrSpace = GV->getAddressSpace();
-  if (AddrSpace != 7 && AddrSpace != 8)
-    return false;
-  return GV->getMetadata("spirv.Decorations") != nullptr ||
-         GV->getMetadata("feme.spirv.MemberDecorations") != nullptr;
 }
 
 /// (Roadmap H6i) Whether \p GV is a task entry's own bounded payload
