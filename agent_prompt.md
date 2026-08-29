@@ -36,31 +36,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6g-b-d?
+Can you complete H6j?
 
-> **`feme::cpu::MeshOutputWrapperPass::lowerMeshStageOps` diagnoses
-> "feme-cpu-wrap-mesh-output: unexpected stage op left for the mesh output
-> wrapper"** on 40 of the 80 cases in the same
-> `dEQP-VK.mesh_shader.ext.in_out.*` bucket H6g-b-a-i-a-i-c's own real-ICD
-> re-run found -- discovered while confirming that row's fix: after adding the
-> missing `feme.cpu.resource.load.raw.v2f32`/`v3f32`/`v2i32`/`v3i32`/`v4i32`
-> runtime overloads and re-running the full 560-case bucket, the 80
-> previously-JIT-symbol-blocked cases split evenly, 40 now hitting the
-> already-tracked H6g-b-c `spirv_var_NN` gap and 40 hitting this new blocker
-> instead. Root cause not yet isolated: `lowerMeshStageOps`
-> (`MeshOutputWrapper.cpp`) only accepts
-> `isMaskedOutputStoreCall`/`isMaskedSetMeshOutputsCall` as the two lowerable
-> shapes once a mesh entry point uses any `feme.stage.*`/masked-output op at all
-> (`isStageOpCall(*CI) \|\| isMaskedOutputStoreCall(*CI) \|\|
-> isMaskedSetMeshOutputsCall(*CI)` gates entry into the function at all); its
-> closing catch-all `F.getContext().emitError(CI, ...)` fires on every surviving
-> call that is neither of those two -- an unmasked (not yet lowered by
-> `Linearize.cpp`'s `applyStageMasks`) `feme.stage.output.store`, or some other
-> `StageOpKind` a mesh entry should never legally contain (`InputLoad`, an
-> interpolation op, etc., per the function's own comment "a mesh entry point has
-> no ordinary stage-IO input to read"), reaching this pass unexpectedly. Needs a
-> real failing shader/IR reduction (the same one-off
-> diagnostic-dump-and-single-case-rerun technique H6g-b-a-i-a-i-a/-b used) to
-> find which `feme.stage.*` op survives unlowered and why, before deciding
-> whether the fix belongs in `MeshOutputWrapperPass` itself (accept a new shape)
-> or upstream in whichever pass was supposed to have already lowered/masked it
+>**A real `dEQP-VK.mesh_shader.ext.in_out.*` case now fails at `vkQueueSubmit`
+>with "vertex output and fragment input at location 0 disagree on component/row
+>count or type"**, newly exposed by H6g-b-d's own `MeshOutputWrapperPass`
+>catch-all fix: once the 40 cases that fix unblocks progress past compilation,
+>they reach submission-time interface validation between the mesh entry's own
+>per-vertex output and the fragment stage's input, and disagree despite both
+>sides being generated from matching `layout(location=...)` declarations in
+>`vktMeshShaderInOutTestsEXT.cpp`'s own generated GLSL. Root cause not yet
+>isolated: unclear whether the mismatch is a genuine signature-matching bug
+>specific to a mesh-to-fragment interface (as opposed to the already-working
+>vertex-to-fragment and geometry-to-fragment cases), a
+>`MeshOutputWrapperPass`/`EntryWrapperPass` byproduct that changes the reflected
+>output signature's own component/row count from what the fragment stage's input
+>signature expects, or a pre-existing interface-matching gap this is simply the
+>first mesh-stage case to exercise at all
