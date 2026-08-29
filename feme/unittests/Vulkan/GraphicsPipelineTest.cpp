@@ -986,6 +986,49 @@ TEST_F(GraphicsPipelineTest, TranslatesLineRasterizationState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap H7c) `fillModeNonSolid`: `VK_POLYGON_MODE_LINE`/`_POINT` are
+/// now accepted and translated to `RasterState::Polygon`, instead of
+/// unconditionally rejecting any non-`FILL` mode.
+TEST_F(GraphicsPipelineTest, TranslatesNonFillPolygonModes) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.polygonMode = VK_POLYGON_MODE_LINE;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  EXPECT_EQ(Graphics->buildExecutorPipeline(DynamicGraphicsState{})
+                .getRasterState()
+                .Polygon,
+            feme::graphics::PolygonMode::Line);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+
+  Info = makeCreateInfo(Vertex, Fragment);
+  Raster.polygonMode = VK_POLYGON_MODE_POINT;
+  Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+  Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  EXPECT_EQ(Graphics->buildExecutorPipeline(DynamicGraphicsState{})
+                .getRasterState()
+                .Polygon,
+            feme::graphics::PolygonMode::Point);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+
+  // An unrecognized `VkPolygonMode` (`VK_NV_fill_rectangle`'s own value,
+  // never advertised) is still rejected.
+  Info = makeCreateInfo(Vertex, Fragment);
+  Raster.polygonMode = VK_POLYGON_MODE_FILL_RECTANGLE_NV;
+  Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap F6) `VkPipelineVertexInputDivisorStateCreateInfo` overrides a
 /// per-instance binding's default divisor (1) with an explicit value,
 /// recorded on the pipeline's own `VertexInputBinding` for the executor's

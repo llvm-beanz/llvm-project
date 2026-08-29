@@ -181,6 +181,21 @@ enum class CullMode : uint8_t {
   FrontAndBack,
 };
 
+/// How a triangle's own three vertices are rasterized, matching Vulkan's
+/// `VkPolygonMode`/Direct3D's `D3D12_FILL_MODE` one-for-one (roadmap H7c;
+/// `VK_POLYGON_MODE_FILL_RECTANGLE_NV` is not modeled, since
+/// `VK_NV_fill_rectangle` is never advertised). `Line`/`Point` only ever
+/// apply to a triangle-class primitive (`RasterPrimitiveClass::Triangle`
+/// in Executor.cpp): a real point- or line-topology primitive already
+/// rasterizes as itself regardless of this field, per the spec ("the
+/// polygonMode ... controls ... the rasterization of polygons", i.e.
+/// triangles only).
+enum class PolygonMode : uint8_t {
+  Fill,
+  Line,
+  Point,
+};
+
 /// Which vertex winding order is front-facing.
 enum class FrontFace : uint8_t {
   CounterClockwise,
@@ -356,9 +371,16 @@ enum class LineRasterizationMode : uint8_t {
 struct RasterState {
   CullMode Cull = CullMode::None;
   FrontFace Front = FrontFace::CounterClockwise;
+  /// (roadmap H7c) Whether a triangle-class primitive rasterizes as a
+  /// filled polygon, its three edges as independent line segments, or its
+  /// three vertices as independent points -- see `PolygonMode`'s own
+  /// comment. Meaningless for a real point- or line-topology primitive,
+  /// which already rasterizes as itself.
+  PolygonMode Polygon = PolygonMode::Fill;
   /// (roadmap F5) Which of the three `VK_KHR_line_rasterization` styles a
-  /// line-topology primitive is drawn with; meaningless for point/triangle
-  /// primitives.
+  /// line-topology primitive -- or a `PolygonMode::Line` triangle's own
+  /// edges (roadmap H7c) -- is drawn with; meaningless for a point
+  /// primitive/`PolygonMode::Point`.
   LineRasterizationMode LineMode = LineRasterizationMode::Rectangular;
   /// (roadmap F5) A line primitive's screen-space width in pixels
   /// (`VkPipelineRasterizationStateCreateInfo::lineWidth`, or

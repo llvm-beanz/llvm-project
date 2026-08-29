@@ -49,6 +49,7 @@ using feme::graphics::CullMode;
 using feme::graphics::FrontFace;
 using feme::graphics::LineRasterizationMode;
 using feme::graphics::LogicOp;
+using feme::graphics::PolygonMode;
 using feme::graphics::PrimitiveTopology;
 using feme::graphics::StencilFaceState;
 using feme::graphics::StencilOp;
@@ -104,6 +105,23 @@ std::optional<CullMode> mapCullMode(VkCullModeFlags Cull) {
     return CullMode::Back;
   case VK_CULL_MODE_FRONT_AND_BACK:
     return CullMode::FrontAndBack;
+  default:
+    return std::nullopt;
+  }
+}
+
+// (roadmap H7c) `VkPolygonMode` -> `feme::graphics::PolygonMode`.
+// `VK_POLYGON_MODE_FILL_RECTANGLE_NV` is deliberately unrecognized, since
+// `VK_NV_fill_rectangle` is never advertised (`getSupportedDeviceExtensions`,
+// PhysicalDeviceInfo.cpp).
+std::optional<PolygonMode> mapPolygonMode(VkPolygonMode Mode) {
+  switch (Mode) {
+  case VK_POLYGON_MODE_FILL:
+    return PolygonMode::Fill;
+  case VK_POLYGON_MODE_LINE:
+    return PolygonMode::Line;
+  case VK_POLYGON_MODE_POINT:
+    return PolygonMode::Point;
   default:
     return std::nullopt;
   }
@@ -364,11 +382,10 @@ bool isSupportedVertexAttributeFormat(feme::cpu::ResourceFormat Format) {
 /// missing until now. \p StageName names the stage in the returned error
 /// ("mesh"/"task"), and \p LimitName names the offending property
 /// ("maxMeshWorkGroupSize/Invocations"/"maxTaskWorkGroupSize/Invocations").
-Error validateMeshOrTaskGroupSize(const VkPipelineShaderStageCreateInfo &StageInfo,
-                                  llvm::ArrayRef<uint32_t> MaxSize,
-                                  uint32_t MaxInvocations,
-                                  llvm::StringRef StageName,
-                                  llvm::StringRef LimitName) {
+Error validateMeshOrTaskGroupSize(
+    const VkPipelineShaderStageCreateInfo &StageInfo,
+    llvm::ArrayRef<uint32_t> MaxSize, uint32_t MaxInvocations,
+    llvm::StringRef StageName, llvm::StringRef LimitName) {
   auto *Module = fromHandle<ShaderModule>(StageInfo.module);
   std::string EntryPoint = StageInfo.pName ? StageInfo.pName : "main";
   Expected<std::array<uint32_t, 3>> GroupSize =
@@ -882,10 +899,22 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
     return createStringError(inconvertibleErrorCode(),
                              "a graphics pipeline needs rasterization state");
   if (Info->rasterizerDiscardEnable || Info->depthClampEnable ||
-      Info->depthBiasEnable || Info->polygonMode != VK_POLYGON_MODE_FILL)
+      Info->depthBiasEnable)
     return createStringError(inconvertibleErrorCode(),
-                             "rasterizer discard, depth clamp, depth bias, "
-                             "and non-fill polygon modes are not implemented");
+                             "rasterizer discard, depth clamp, and depth "
+                             "bias are not implemented");
+  // (roadmap H7c) `fillModeNonSolid`: `VK_POLYGON_MODE_LINE`/`_POINT`
+  // rasterize a triangle-class primitive's own edges/vertices instead of
+  // its filled interior -- see `PolygonMode`'s own comment
+  // (feme/include/feme/Graphics/Pipeline.h) and the executor's
+  // `RasterizePrimitives`. `VK_POLYGON_MODE_FILL_RECTANGLE_NV` is the only
+  // real `VkPolygonMode` value this rejects (`mapPolygonMode` above).
+  std::optional<PolygonMode> Polygon = mapPolygonMode(Info->polygonMode);
+  if (!Polygon)
+    return createStringError(inconvertibleErrorCode(),
+                             "unrecognized VkPolygonMode value %u",
+                             unsigned(Info->polygonMode));
+  Out.Raster.Polygon = *Polygon;
   std::optional<CullMode> Cull = mapCullMode(Info->cullMode);
   if (!Cull)
     return createStringError(inconvertibleErrorCode(),
@@ -2296,13 +2325,13 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
   // `VkPhysicalDeviceMeshShaderPropertiesEXT` (`EntryPoints.cpp`) so the
   // two can never disagree.
   if (State.Artifact->MeshStage)
-    Result.setMeshStage(State.Artifact->TaskStage, State.Artifact->MeshStage,
-                        State.Mesh,
-                        feme::graphics::AmplificationDispatchLimits{
-                            MaxMeshWorkGroupCount, MaxMeshWorkGroupTotalCount},
-                        feme::graphics::AmplificationDispatchLimits{
-                            MaxTaskWorkGroupCount, MaxTaskWorkGroupTotalCount},
-                        MaxTaskPayloadBytes);
+    Result.setMeshStage(
+        State.Artifact->TaskStage, State.Artifact->MeshStage, State.Mesh,
+        feme::graphics::AmplificationDispatchLimits{MaxMeshWorkGroupCount,
+                                                    MaxMeshWorkGroupTotalCount},
+        feme::graphics::AmplificationDispatchLimits{MaxTaskWorkGroupCount,
+                                                    MaxTaskWorkGroupTotalCount},
+        MaxTaskPayloadBytes);
   return Result;
 }
 
