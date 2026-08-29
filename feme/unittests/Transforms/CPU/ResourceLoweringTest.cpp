@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/ResourceLowering.h"
 
+#include "feme/Transforms/CPU/ImageCalls.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
@@ -249,6 +250,246 @@ TEST(ResourceLoweringTest, CanonicalizesStructuredBufferByteOffset) {
     }
   }
   EXPECT_TRUE(FoundCanonicalCall);
+}
+
+/// Finds \p F's call to the canonical `feme.cpu.image.*` entry point named
+/// \p Name, or null if none exists -- mirrors
+/// `SPIRVResourceLoweringTest.cpp`'s own helper of the same name.
+CallInst *findImageCall(Function &F, StringRef Name) {
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getName() == Name)
+          return CI;
+  return nullptr;
+}
+
+// The following image-lowering tests (roadmap H7b-a) are the first
+// dedicated coverage for `ResourceLowering.cpp`'s `classifyImageHandle`/
+// `lowerImageAccesses` -- the DXIL mirror of `SPIRVResourceLoweringTest.cpp`
+// -- since the pre-existing `Texture2D`-only support had none of its own;
+// each test below establishes both the pre-existing plain-2D shape's
+// coverage and H7b-a's new Array2D/Cube/CubeArray widening in one pass.
+
+TEST(ResourceLoweringTest, LowersTexture2DSampleToImageSample) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x float> %uv) {
+      %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 2)
+          @llvm.dx.resource.handlefromheap.timg2d(i32 0, i1 false)
+      %samp = call target("dx.Sampler", 0)
+          @llvm.dx.resource.handlefromheap.tsamp2d(i32 1, i1 false)
+      %r = call <4 x float> @llvm.dx.resource.sample.timg2d(
+          target("dx.Texture", <4 x float>, 0, 0, 0, 2) %tex,
+          target("dx.Sampler", 0) %samp, <2 x float> %uv,
+          <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 2)
+        @llvm.dx.resource.handlefromheap.timg2d(i32, i1)
+    declare target("dx.Sampler", 0)
+        @llvm.dx.resource.handlefromheap.tsamp2d(i32, i1)
+    declare <4 x float> @llvm.dx.resource.sample.timg2d(
+        target("dx.Texture", <4 x float>, 0, 0, 0, 2),
+        target("dx.Sampler", 0), <2 x float>, <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4f32");
+  ASSERT_TRUE(Sample);
+  std::optional<MatchedImageCall> Matched = matchImageCall(*Sample);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Sample2D);
+}
+
+TEST(ResourceLoweringTest, LowersTexture2DLoadToImageLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x i32> %xy) {
+      %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 2)
+          @llvm.dx.resource.handlefromheap.timg2dl(i32 0, i1 false)
+      %r = call <4 x float> @llvm.dx.resource.load.level.timg2dl(
+          target("dx.Texture", <4 x float>, 0, 0, 0, 2) %tex,
+          <2 x i32> %xy, i32 0, <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 2)
+        @llvm.dx.resource.handlefromheap.timg2dl(i32, i1)
+    declare <4 x float> @llvm.dx.resource.load.level.timg2dl(
+        target("dx.Texture", <4 x float>, 0, 0, 0, 2), <2 x i32>, i32,
+        <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.2d.v4f32");
+  ASSERT_TRUE(Load);
+}
+
+TEST(ResourceLoweringTest, LowersTexture2DArraySampleToImageSampleArray) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x float> %uvw) {
+      %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 7)
+          @llvm.dx.resource.handlefromheap.timg2darr(i32 0, i1 false)
+      %samp = call target("dx.Sampler", 0)
+          @llvm.dx.resource.handlefromheap.tsamp2darr(i32 1, i1 false)
+      %r = call <4 x float> @llvm.dx.resource.sample.timg2darr(
+          target("dx.Texture", <4 x float>, 0, 0, 0, 7) %tex,
+          target("dx.Sampler", 0) %samp, <3 x float> %uvw,
+          <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 7)
+        @llvm.dx.resource.handlefromheap.timg2darr(i32, i1)
+    declare target("dx.Sampler", 0)
+        @llvm.dx.resource.handlefromheap.tsamp2darr(i32, i1)
+    declare <4 x float> @llvm.dx.resource.sample.timg2darr(
+        target("dx.Texture", <4 x float>, 0, 0, 0, 7),
+        target("dx.Sampler", 0), <3 x float>, <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample =
+      findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32");
+  ASSERT_TRUE(Sample);
+}
+
+TEST(ResourceLoweringTest, LowersTexture2DArrayLoadToImageLoadArray) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x i32> %xyz) {
+      %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 7)
+          @llvm.dx.resource.handlefromheap.timg2darrl(i32 0, i1 false)
+      %r = call <4 x float> @llvm.dx.resource.load.level.timg2darrl(
+          target("dx.Texture", <4 x float>, 0, 0, 0, 7) %tex,
+          <3 x i32> %xyz, i32 0, <3 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 7)
+        @llvm.dx.resource.handlefromheap.timg2darrl(i32, i1)
+    declare <4 x float> @llvm.dx.resource.load.level.timg2darrl(
+        target("dx.Texture", <4 x float>, 0, 0, 0, 7), <3 x i32>, i32,
+        <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.2darray.v4f32");
+  ASSERT_TRUE(Load);
+}
+
+TEST(ResourceLoweringTest, LowersTextureCubeSampleToImageSampleCube) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x float> %dir) {
+      %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 5)
+          @llvm.dx.resource.handlefromheap.timgcube(i32 0, i1 false)
+      %samp = call target("dx.Sampler", 0)
+          @llvm.dx.resource.handlefromheap.tsampcube(i32 1, i1 false)
+      %r = call <4 x float> @llvm.dx.resource.sample.timgcube(
+          target("dx.Texture", <4 x float>, 0, 0, 0, 5) %tex,
+          target("dx.Sampler", 0) %samp, <3 x float> %dir,
+          <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 5)
+        @llvm.dx.resource.handlefromheap.timgcube(i32, i1)
+    declare target("dx.Sampler", 0)
+        @llvm.dx.resource.handlefromheap.tsampcube(i32, i1)
+    declare <4 x float> @llvm.dx.resource.sample.timgcube(
+        target("dx.Texture", <4 x float>, 0, 0, 0, 5),
+        target("dx.Sampler", 0), <3 x float>, <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cube.v4f32");
+  ASSERT_TRUE(Sample);
+}
+
+TEST(ResourceLoweringTest, LowersTextureCubeArraySampleToImageSampleCubeArray) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<4 x float> %dirandlayer) {
+      %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 9)
+          @llvm.dx.resource.handlefromheap.timgcubearr(i32 0, i1 false)
+      %samp = call target("dx.Sampler", 0)
+          @llvm.dx.resource.handlefromheap.tsampcubearr(i32 1, i1 false)
+      %r = call <4 x float> @llvm.dx.resource.sample.timgcubearr(
+          target("dx.Texture", <4 x float>, 0, 0, 0, 9) %tex,
+          target("dx.Sampler", 0) %samp, <4 x float> %dirandlayer,
+          <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 9)
+        @llvm.dx.resource.handlefromheap.timgcubearr(i32, i1)
+    declare target("dx.Sampler", 0)
+        @llvm.dx.resource.handlefromheap.tsampcubearr(i32, i1)
+    declare <4 x float> @llvm.dx.resource.sample.timgcubearr(
+        target("dx.Texture", <4 x float>, 0, 0, 0, 9),
+        target("dx.Sampler", 0), <4 x float>, <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample =
+      findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32");
+  ASSERT_TRUE(Sample);
+}
+
+// `TextureCube` has no `Load` method in HLSL/DXIL at all (mirroring
+// `OpImageFetch`'s identical restriction against SPIR-V's `Dim::Cube` --
+// see `SPIRVResourceLoweringTest.cpp`'s `LeavesACubeImageFetchAlone`), so a
+// `load.level` call against a `TextureCube` handle -- however unusual --
+// must be left entirely unrewritten rather than lowered.
+TEST(ResourceLoweringTest, LeavesATextureCubeLoadUnchanged) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x i32> %xyz) {
+      %tex = call target("dx.Texture", <4 x float>, 0, 0, 0, 5)
+          @llvm.dx.resource.handlefromheap.timgcubel(i32 0, i1 false)
+      %r = call <4 x float> @llvm.dx.resource.load.level.timgcubel(
+          target("dx.Texture", <4 x float>, 0, 0, 0, 5) %tex,
+          <3 x i32> %xyz, i32 0, <3 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 5)
+        @llvm.dx.resource.handlefromheap.timgcubel(i32, i1)
+    declare <4 x float> @llvm.dx.resource.load.level.timgcubel(
+        target("dx.Texture", <4 x float>, 0, 0, 0, 5), <3 x i32>, i32,
+        <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.load.2darray.v4f32"));
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.load.2d.v4f32"));
+  // The un-lowered call itself is still present, referencing the original
+  // (never-heap-widened) `main` signature.
+  bool FoundOriginalLoad = false;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getName().starts_with("llvm.dx.resource.load.level"))
+          FoundOriginalLoad = true;
+  EXPECT_TRUE(FoundOriginalLoad);
 }
 
 } // namespace

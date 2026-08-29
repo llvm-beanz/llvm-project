@@ -303,14 +303,36 @@ void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
   Info.Handle->eraseFromParent();
 }
 
-/// A `dx.Texture` handle originating from a `handlefromheap` call, only for
-/// the one dimension `runtime/CPU` actually implements sampling/loading for
+/// Which of the four sampled-image shapes `classifyImageHandle` recognizes
+/// (roadmap H7b-a widened it beyond plain, non-arrayed `Texture2D` --
+/// mirrors `feme::spirv`'s own `ImageShape` on the SPIR-V side of this same
+/// milestone). A cube(array) is purely a view-level addressing convention
+/// over an ordinary 2D-array-shaped image, never a distinct physical layout
+/// of its own (see FeMeVulkanDesign.md's H7b update).
+enum class ImageShape {
+  /// A plain, non-arrayed `Texture2D`: `(U, V)` sample/load coordinates.
+  Plain2D,
+  /// A `Texture2DArray`: `(U, V, ArrayLayer)` sample, `(X, Y, Layer)` load.
+  Array2D,
+  /// A `TextureCube`: a 3-component direction-vector sample coordinate; no
+  /// `Load` (`TextureCube`/`TextureCubeArray` have no `Load` method in
+  /// HLSL/DXIL, mirroring SPIR-V's identical `OpImageFetch` restriction).
+  Cube,
+  /// A `TextureCubeArray`: a 3-component direction vector plus a float
+  /// array-layer sample coordinate; no `Load`, for the same reason as Cube.
+  CubeArray,
+};
+
+/// A `dx.Texture` handle originating from a `handlefromheap` call, for one
+/// of the four dimensions `runtime/CPU` implements sampling/loading for
 /// (see the file header comment's scope note).
 struct ImageHandle {
   CallInst *HandleFromHeap;
+  ImageShape Shape;
 };
 
-/// Recognizes \p V as a 2D `dx.Texture` handle from the descriptor heap, or
+/// Recognizes \p V as a `Texture2D`/`Texture2DArray`/`TextureCube`/
+/// `TextureCubeArray` `dx.Texture` handle from the descriptor heap, or
 /// returns `std::nullopt` for any other shape (a different dimension, a
 /// register-bound handle, or not a handle at all) -- left unraised rather
 /// than erroring, exactly like every other not-yet-covered shape in this
@@ -320,9 +342,20 @@ std::optional<ImageHandle> classifyImageHandle(Value *V) {
   if (!CI || getIntrinsicID(CI) != Intrinsic::dx_resource_handlefromheap)
     return std::nullopt;
   auto *Ty = dyn_cast<dxil::TextureExtType>(CI->getType());
-  if (!Ty || Ty->getDimension() != dxil::ResourceKind::Texture2D)
+  if (!Ty)
     return std::nullopt;
-  return ImageHandle{CI};
+  switch (Ty->getDimension()) {
+  case dxil::ResourceKind::Texture2D:
+    return ImageHandle{CI, ImageShape::Plain2D};
+  case dxil::ResourceKind::Texture2DArray:
+    return ImageHandle{CI, ImageShape::Array2D};
+  case dxil::ResourceKind::TextureCube:
+    return ImageHandle{CI, ImageShape::Cube};
+  case dxil::ResourceKind::TextureCubeArray:
+    return ImageHandle{CI, ImageShape::CubeArray};
+  default:
+    return std::nullopt;
+  }
 }
 
 /// Recognizes \p V as a `dx.Sampler` handle from the descriptor heap.
@@ -375,10 +408,15 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
     Value *Mask = Builder.getTrue();
 
     if (IsLoadLevel) {
-      // (handle, coord, level, offset) -> <4 x float>.
+      // (handle, coord, level, offset) -> <4 x float>. `TextureCube`/
+      // `TextureCubeArray` have no `Load` method in HLSL/DXIL at all (the
+      // same restriction `OpImageFetch` has against SPIR-V's `Dim::Cube`),
+      // so only Plain2D/Array2D are ever accepted here.
       std::optional<ImageHandle> Img =
           classifyImageHandle(CI->getArgOperand(0));
-      if (!Img || !isZeroOffset(CI->getArgOperand(3)))
+      if (!Img || !isZeroOffset(CI->getArgOperand(3)) ||
+          (Img->Shape != ImageShape::Plain2D &&
+           Img->Shape != ImageShape::Array2D))
         continue;
       Value *Coord = CI->getArgOperand(1);
       Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
@@ -389,10 +427,17 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       // through `llvm.dx.resource.load_level`'s own sample argument
       // elsewhere, not this level-only path), so this always reads sample
       // 0 -- like `feme.stage.subpass.load`'s own default (roadmap F8c).
-      CallInst *NewCall = createLoad2D(Builder, Env, ImageIndex, X, Y,
-                                       CI->getArgOperand(2),
-                                       Builder.getInt32(0), Mask,
-                                       CI->getName());
+      CallInst *NewCall;
+      if (Img->Shape == ImageShape::Array2D) {
+        Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
+        NewCall = createLoad2DArray(Builder, Env, ImageIndex, X, Y, Layer,
+                                    CI->getArgOperand(2),
+                                    Builder.getInt32(0), Mask, CI->getName());
+      } else {
+        NewCall = createLoad2D(Builder, Env, ImageIndex, X, Y,
+                               CI->getArgOperand(2), Builder.getInt32(0),
+                               Mask, CI->getName());
+      }
       CI->replaceAllUsesWith(NewCall);
       CI->eraseFromParent();
       Changed = true;
@@ -408,17 +453,49 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       continue;
 
     Value *Coord = CI->getArgOperand(2);
-    Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
-    Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
     Value *Lod = IsSampleLevel ? CI->getArgOperand(3)
                                : ConstantFP::get(Builder.getFloatTy(), 0.0);
     Value *UseExplicitLod = Builder.getInt1(IsSampleLevel);
     Value *ImageIndex = Img->HandleFromHeap->getArgOperand(0);
     Value *SamplerIndex = (*Sampler)->getArgOperand(0);
 
-    CallInst *NewCall =
-        createSample2D(Builder, Env, ImageIndex, SamplerIndex, U, V, Lod,
-                       UseExplicitLod, Mask, CI->getName());
+    CallInst *NewCall;
+    switch (Img->Shape) {
+    case ImageShape::Plain2D: {
+      Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
+      Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
+      NewCall = createSample2D(Builder, Env, ImageIndex, SamplerIndex, U, V,
+                               Lod, UseExplicitLod, Mask, CI->getName());
+      break;
+    }
+    case ImageShape::Array2D: {
+      Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
+      Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
+      Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
+      NewCall = createSample2DArray(Builder, Env, ImageIndex, SamplerIndex, U,
+                                    V, Layer, Lod, UseExplicitLod, Mask,
+                                    CI->getName());
+      break;
+    }
+    case ImageShape::Cube: {
+      Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
+      Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
+      Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
+      NewCall = createSampleCube(Builder, Env, ImageIndex, SamplerIndex, X, Y,
+                                 Z, Lod, UseExplicitLod, Mask, CI->getName());
+      break;
+    }
+    case ImageShape::CubeArray: {
+      Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
+      Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
+      Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
+      Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{3});
+      NewCall = createSampleCubeArray(Builder, Env, ImageIndex, SamplerIndex,
+                                      X, Y, Z, Layer, Lod, UseExplicitLod,
+                                      Mask, CI->getName());
+      break;
+    }
+    }
     CI->replaceAllUsesWith(NewCall);
     CI->eraseFromParent();
     Changed = true;
@@ -451,7 +528,11 @@ bool hasImageAccesses(const Function &F) {
     // handle it left deliberately unrewritten (see the header comment's
     // "per-access" note).
     if (IsLoadLevel) {
-      if (classifyImageHandle(CI->getArgOperand(0)) &&
+      std::optional<ImageHandle> Img =
+          classifyImageHandle(CI->getArgOperand(0));
+      if (Img &&
+          (Img->Shape == ImageShape::Plain2D ||
+           Img->Shape == ImageShape::Array2D) &&
           isZeroOffset(CI->getArgOperand(3)))
         return true;
       continue;
