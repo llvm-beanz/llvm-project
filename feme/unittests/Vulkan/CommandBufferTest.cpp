@@ -2851,3 +2851,96 @@ TEST_F(ASTCSampledImageDispatchTest,
   EXPECT_FLOAT_EQ(Result[2], 127.0f / 255.0f);
   EXPECT_FLOAT_EQ(Result[3], 1.0f);
 }
+
+namespace {
+
+/// (Roadmap H7b) The same scenario `SampledImageDispatchTest` exercises,
+/// but over a two-layer image whose bound view selects layer 1 via a
+/// nonzero `baseArrayLayer` -- `materializeImageDescriptor` used to
+/// reject any such view outright (see this file's header comment on
+/// `MaterializedBoundResources::ArrayLayerAdjustedMipLayoutStorage`),
+/// reading as all-zero rather than layer 1's own texels. The bound
+/// `VkImageView` stays `VK_IMAGE_VIEW_TYPE_2D` -- `ImageView::dimension()`
+/// reports `Texture2D` for it regardless of the image's own layer count
+/// or the view's base layer -- so this reuses `kSampledImageShader`
+/// as-is: a real `Dim2D`, non-arrayed SPIR-V handle is exactly what
+/// `SPIRVResourceLowering.cpp`'s handle classification already supports,
+/// letting this exercise the widened descriptor addressing end-to-end
+/// through a real dispatch (unlike an actual `TextureCubeArray`-typed
+/// shader binding, which SPIR-V/DXIL resource lowering does not yet
+/// classify -- tracked separately as roadmap H7b-a).
+class SecondArrayLayerSampledImageDispatchTest
+    : public SampledImageDispatchTest {
+protected:
+  void createImage() override {
+    VkImageCreateInfo ImageInfo{};
+    ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+    ImageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ImageInfo.extent = {Extent, Extent, 1};
+    ImageInfo.mipLevels = 1;
+    ImageInfo.arrayLayers = 2;
+    ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = ImageSize * 2;
+    AllocInfo.memoryTypeIndex = 0;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &ImageMemory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindImageMemory(Device, Img, ImageMemory, 0), VK_SUCCESS);
+    ASSERT_EQ(vkMapMemory(Device, ImageMemory, 0, VK_WHOLE_SIZE, 0, &Texels),
+              VK_SUCCESS);
+
+    // Layer 0 carries the same "own linear index" values the base fixture
+    // uses; layer 1 carries a distinguishable +100 offset of them, so a
+    // materialized descriptor that (wrongly) kept pointing at layer 0, or
+    // read all-zero, is caught the same obviously-wrong way the base
+    // fixture's own comment describes.
+    auto *F = static_cast<float *>(Texels);
+    for (uint32_t Layer = 0; Layer != 2; ++Layer)
+      for (uint32_t I = 0; I != Extent * Extent; ++I)
+        for (uint32_t C = 0; C != 4; ++C)
+          F[Layer * Extent * Extent * 4 + I * 4 + C] =
+              static_cast<float>(Layer * 100 + I * 4 + C);
+
+    VkImageViewCreateInfo ViewInfo{};
+    ViewInfo.image = Img;
+    ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ViewInfo.subresourceRange.baseArrayLayer = 1;
+    ViewInfo.subresourceRange.levelCount = 1;
+    ViewInfo.subresourceRange.layerCount = 1;
+    ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+  }
+};
+
+} // namespace
+
+TEST_F(SecondArrayLayerSampledImageDispatchTest,
+       SamplesTheBoundLayerRatherThanLayerZeroOrAllZero) {
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  writeDescriptorSet();
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  // UV (0.75, 0.75) with NEAREST filtering lands on texel (1, 1), i.e.
+  // linear index 3, of whichever layer is actually bound.
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_FLOAT_EQ(Result[0], 112.0f);
+  EXPECT_FLOAT_EQ(Result[1], 113.0f);
+  EXPECT_FLOAT_EQ(Result[2], 114.0f);
+  EXPECT_FLOAT_EQ(Result[3], 115.0f);
+}

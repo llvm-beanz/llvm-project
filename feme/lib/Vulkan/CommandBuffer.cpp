@@ -198,6 +198,18 @@ struct MaterializedBoundResources {
   std::vector<std::vector<uint8_t>> DecodedImageStorage;
   std::vector<std::vector<feme::cpu::FemeImageSubresourceLayout>>
       DecodedImageLayoutStorage;
+
+  /// (Roadmap H7b) Per-mip `FemeImageSubresourceLayout` tables
+  /// `materializeImageDescriptor` builds for a view whose
+  /// `baseArrayLayer` is nonzero: `Image::mipLayouts()`'s own shared
+  /// table always describes array layer 0, so a nonzero base layer needs
+  /// its own copy with each entry's `Offset` shifted by `BaseArrayLayer *
+  /// SlicePitch` (the same per-layer addressing `Image::texelPointer`
+  /// already uses) rather than a pointer directly into the shared table.
+  /// Kept alive the same way `DecodedImageLayoutStorage` is -- see that
+  /// field's own comment.
+  std::vector<std::vector<feme::cpu::FemeImageSubresourceLayout>>
+      ArrayLayerAdjustedMipLayoutStorage;
 };
 
 /// Whether \p Format is one of the 14 `_SRGB` ASTC LDR footprints rather
@@ -344,11 +356,36 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   if (!View || !View->image() || !View->image()->isBound())
     return;
   Image *Img = View->image();
-  if (View->dimension() != feme::cpu::ImageDimension::Texture2D)
+  // (Roadmap H7b) `Texture2DArray`/`TextureCube`/`TextureCubeArray` all
+  // address an ordinary 2D-array-shaped physical `Image` the identical
+  // way `Texture2D` does -- the "array of faces" a cube(array) view
+  // names is purely a view-level convention over consecutive array
+  // layers (see `RenderPass.cpp`'s `resolveAttachmentView`, which
+  // already relies on exactly this for render-target attachments) -- so
+  // the same per-layer addressing below covers all four uniformly.
+  // `Texture1D`/`Texture1DArray`/`Texture3D`/multisampled dimensions stay
+  // out of scope here: nothing in this roadmap row asks for them, and a
+  // 3D image's depth slices use a different pitch convention
+  // (`Image::texelPointer`'s own `ArrayPitch`/`DepthPitch` split) this
+  // fix does not attempt to generalize to.
+  switch (View->dimension()) {
+  case feme::cpu::ImageDimension::Texture2D:
+  case feme::cpu::ImageDimension::Texture2DArray:
+  case feme::cpu::ImageDimension::TextureCube:
+  case feme::cpu::ImageDimension::TextureCubeArray:
+    break;
+  default:
     return;
+  }
 
   const VkImageSubresourceRange &Range = View->range();
-  if (Range.baseArrayLayer != 0)
+  if (Range.baseArrayLayer >= Img->arrayLayers())
+    return;
+  uint32_t LayerCount =
+      Img->resolvedLayerCount(Range.baseArrayLayer, Range.layerCount);
+  LayerCount =
+      std::min(LayerCount, Img->arrayLayers() - Range.baseArrayLayer);
+  if (LayerCount == 0)
     return;
   if (Range.baseMipLevel >= Img->mipLevels())
     return;
@@ -359,18 +396,25 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   if (LevelCount == 0)
     return;
 
-  Dst.Dimension = static_cast<uint32_t>(feme::cpu::ImageDimension::Texture2D);
+  Dst.Dimension = static_cast<uint32_t>(View->dimension());
   Dst.Width = std::max(1u, Img->width() >> Range.baseMipLevel);
   Dst.Height = std::max(1u, Img->height() >> Range.baseMipLevel);
   Dst.Depth = 1;
   Dst.MipLevels = LevelCount;
-  Dst.ArrayLayers = 1;
+  Dst.ArrayLayers = LayerCount;
   Dst.PlaneCount = 1;
   Dst.SampleCount = Img->sampleCount();
   Dst.Flags = isReadOnlyDescriptorType(Type) ? feme::cpu::FEME_IMAGE_SAMPLED
                                              : feme::cpu::FEME_IMAGE_STORAGE;
 
   if (feme::cpu::isASTCLdrFormat(Img->format())) {
+    // (Roadmap E23 scope, unchanged by H7b) ASTC decode only ever
+    // produces layer 0's texels -- a nonzero base layer or a
+    // multi-layer range on an ASTC image reads as all-zero the same
+    // way an unsupported dimension already did, rather than silently
+    // decoding the wrong layer's blocks.
+    if (Range.baseArrayLayer != 0 || LayerCount != 1)
+      return;
     DecodedASTCImage Decoded =
         decodeASTCImageForSampling(Img, Range.baseMipLevel, LevelCount);
     Result.DecodedImageStorage.push_back(std::move(Decoded.Texels));
@@ -389,7 +433,22 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   Dst.Data = Img->data();
   Dst.SizeInBytes = Img->sizeInBytes();
   Dst.Format = static_cast<uint32_t>(View->format());
-  Dst.MipLayouts = Img->mipLayouts().data() + Range.baseMipLevel;
+  if (Range.baseArrayLayer == 0) {
+    Dst.MipLayouts = Img->mipLayouts().data() + Range.baseMipLevel;
+  } else {
+    // A nonzero base layer shifts row 0/slice 0/sample 0 of every mip
+    // level by `BaseArrayLayer * SlicePitch` -- the same per-layer
+    // offset `Image::texelPointer` computes -- so the shared
+    // `Img->mipLayouts()` table (which always describes layer 0) can't
+    // be pointed into directly; build an adjusted copy instead.
+    std::vector<feme::cpu::FemeImageSubresourceLayout> Adjusted(
+        Img->mipLayouts().begin() + Range.baseMipLevel,
+        Img->mipLayouts().begin() + Range.baseMipLevel + LevelCount);
+    for (feme::cpu::FemeImageSubresourceLayout &L : Adjusted)
+      L.Offset += uint64_t(Range.baseArrayLayer) * L.SlicePitch;
+    Result.ArrayLayerAdjustedMipLayoutStorage.push_back(std::move(Adjusted));
+    Dst.MipLayouts = Result.ArrayLayerAdjustedMipLayoutStorage.back().data();
+  }
   Dst.MipLayoutCount = LevelCount;
 }
 
