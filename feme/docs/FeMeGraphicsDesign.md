@@ -2909,8 +2909,18 @@ loop), neither of which consult the flag. `CanonicalizeStage.cpp` now
 peels that dimension off a mesh entry's own plain `Output` global before
 building its `SignatureElement`, the same way a builtin interface block's
 per-member element already has it peeled, rather than folding it in and
-flagging it. See Roadmap.md's H6a-H6j rows for the full remaining
-breakdown.
+flagging it. Roadmap H6k has since found and closed a related gap one
+level down, in `CanonicalizeStage.cpp`'s constant-vertex-index fold
+itself rather than its `RowCount` reflection: a real mesh entry's
+per-vertex output stores are compile-time-unrolled by glslang into
+constant-indexed stores, and the fold that routes a constant per-vertex
+index into `Vertex` (rather than a real per-stage matrix's `Row`) needs
+to cover a per-vertex *builtin interface block* (e.g. `gl_MeshVerticesEXT`
+wrapping `gl_Position`), not just a plain array -- `resolveOffsetWithinElement`
+already resolves a struct-shaped element's own per-member `ElementID`
+generically, whether one member or several, so the fold needed no new
+block-specific handling once the index itself folds identically either
+way. See Roadmap.md's H6a-H6l rows for the full remaining breakdown.
 
 ### G7: Ray-query and traversal foundations
 
