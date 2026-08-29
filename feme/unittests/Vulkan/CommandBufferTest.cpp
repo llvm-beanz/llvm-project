@@ -160,6 +160,51 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (Roadmap H7b-a) The `TextureCubeArray` counterpart of
+/// `kSampledImageShader`: samples a bound `Dim::Cube`, `Arrayed` sampled
+/// image at a fixed direction vector (+Z axis) and cube-array element 1,
+/// writing the four resulting components to a `StorageBuffer`. This is
+/// the first shader in this ICD with a real `Cube`/`CubeArray`-dimensioned
+/// SPIR-V handle -- `SPIRVResourceLowering.cpp`'s `classifySampledImage2DHandle`
+/// rejected every such handle before this roadmap row.
+const char *kCubeArraySampledImageShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ImageCubeArray], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.GlobalVariable @out bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>
+  spirv.func @main() -> () "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %image = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>
+    %1 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %sampler = spirv.Load "UniformConstant" %1 : !spirv.sampler
+    %si = spirv.SampledImage %image, %sampler : !spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>>
+    %dirandlayer = spirv.Constant dense<[0.000000e+00, 0.000000e+00, 1.000000e+00, 1.000000e+00]> : vector<4xf32>
+    %lod = spirv.Constant 0.000000e+00 : f32
+    %texel = spirv.ImageSampleExplicitLod %si, %dirandlayer ["Lod"], %lod : !spirv.sampled_image<!spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>>, vector<4xf32>, f32 -> vector<4xf32>
+    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %c2 = spirv.Constant 2 : i32
+    %c3 = spirv.Constant 3 : i32
+    %r = spirv.CompositeExtract %texel[0 : i32] : vector<4xf32>
+    %g = spirv.CompositeExtract %texel[1 : i32] : vector<4xf32>
+    %b = spirv.CompositeExtract %texel[2 : i32] : vector<4xf32>
+    %a = spirv.CompositeExtract %texel[3 : i32] : vector<4xf32>
+    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac0, %r : f32
+    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac1, %g : f32
+    %ac2 = spirv.AccessChain %2[%c0, %c2] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac2, %b : f32
+    %ac3 = spirv.AccessChain %2[%c0, %c3] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac3, %a : f32
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @img, @samp, @out
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
 /// V3: reads a single `StorageBuffer` element, adds a `PushConstant`
 /// block's sole `i32` member, and writes the result back -- exercises the
 /// "combined" push-constant + bound-resource lowering path end to end
@@ -2410,6 +2455,11 @@ namespace {
 class SampledImageDispatchTest : public ::testing::Test {
 protected:
   static constexpr uint32_t Extent = 2;
+  // (Roadmap H7b-a) Overridable so a subclass exercising a
+  // Cube/CubeArray-dimensioned handle can swap in its own shader while
+  // reusing every other fixture method (mirrors `getShaderSource`'s own
+  // precedent elsewhere in this file, e.g. `IntTexelBufferAddShaderTest`).
+  virtual const char *getShaderSource() { return kSampledImageShader; }
   static constexpr VkDeviceSize TexelSize = 16; // R32G32B32A32_SFLOAT
   static constexpr VkDeviceSize ImageSize = Extent * Extent * TexelSize;
 
@@ -2449,7 +2499,7 @@ protected:
     ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
               VK_SUCCESS);
 
-    std::vector<uint32_t> Words = assembleSPIRV(kSampledImageShader);
+    std::vector<uint32_t> Words = assembleSPIRV(getShaderSource());
     ASSERT_FALSE(Words.empty());
     VkShaderModuleCreateInfo ShaderInfo{};
     ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
@@ -2943,4 +2993,102 @@ TEST_F(SecondArrayLayerSampledImageDispatchTest,
   EXPECT_FLOAT_EQ(Result[1], 113.0f);
   EXPECT_FLOAT_EQ(Result[2], 114.0f);
   EXPECT_FLOAT_EQ(Result[3], 115.0f);
+}
+
+namespace {
+
+/// (Roadmap H7b-a) The scenario H7b-a's own gap description called out by
+/// name: a real `TextureCubeArray`-typed shader binding, which
+/// `SPIRVResourceLowering.cpp`'s handle classification rejected outright
+/// before this roadmap row (unlike `SecondArrayLayerSampledImageDispatchTest`'s
+/// `Dim2D`, non-arrayed handle over a multi-layer image, which only needed
+/// H7b's descriptor-materialization widening). Two cube elements (12
+/// physical array layers) are created; `kCubeArraySampledImageShader`
+/// samples along the `+Z` direction (face index 4, per
+/// `femeRTSelectCubeFace`'s own face-order comment) at cube-array element
+/// 1, landing on physical layer `1 * 6 + 4 == 10`.
+class CubeArraySampledImageDispatchTest : public SampledImageDispatchTest {
+protected:
+  static constexpr uint32_t CubeElements = 2;
+  static constexpr uint32_t FacesPerCube = 6;
+  static constexpr uint32_t PhysicalLayers = CubeElements * FacesPerCube;
+
+  const char *getShaderSource() override {
+    return kCubeArraySampledImageShader;
+  }
+
+  void createImage() override {
+    VkImageCreateInfo ImageInfo{};
+    ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+    ImageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    ImageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ImageInfo.extent = {Extent, Extent, 1};
+    ImageInfo.mipLevels = 1;
+    ImageInfo.arrayLayers = PhysicalLayers;
+    ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = ImageSize * PhysicalLayers;
+    AllocInfo.memoryTypeIndex = 0;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &ImageMemory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindImageMemory(Device, Img, ImageMemory, 0), VK_SUCCESS);
+    ASSERT_EQ(vkMapMemory(Device, ImageMemory, 0, VK_WHOLE_SIZE, 0, &Texels),
+              VK_SUCCESS);
+
+    // Every physical layer carries a distinguishable `Layer * 100 +
+    // own-linear-index` value, exactly like
+    // `SecondArrayLayerSampledImageDispatchTest`'s own fixture -- a wrong
+    // face/cube-element selection lands on a different, obviously-wrong
+    // layer's own values rather than a plausible neighbor.
+    auto *F = static_cast<float *>(Texels);
+    for (uint32_t Layer = 0; Layer != PhysicalLayers; ++Layer)
+      for (uint32_t I = 0; I != Extent * Extent; ++I)
+        for (uint32_t C = 0; C != 4; ++C)
+          F[Layer * Extent * Extent * 4 + I * 4 + C] =
+              static_cast<float>(Layer * 100 + I * 4 + C);
+
+    VkImageViewCreateInfo ViewInfo{};
+    ViewInfo.image = Img;
+    ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+    ViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ViewInfo.subresourceRange.levelCount = 1;
+    ViewInfo.subresourceRange.layerCount = PhysicalLayers;
+    ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+  }
+};
+
+} // namespace
+
+TEST_F(CubeArraySampledImageDispatchTest,
+       SamplesTheSelectedFaceAndCubeArrayElement) {
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  writeDescriptorSet();
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  // Direction (0, 0, 1) resolves to face 4 (+Z) at UV (0.5, 0.5), which
+  // NEAREST-samples texel (1, 1) (linear index 3) of whichever physical
+  // layer the (face, cube-array-element) pair actually selects. Cube
+  // element 1's own +Z face is physical layer `1 * 6 + 4 == 10`, so the
+  // expected values are `10 * 100 + {12, 13, 14, 15}`.
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_FLOAT_EQ(Result[0], 1012.0f);
+  EXPECT_FLOAT_EQ(Result[1], 1013.0f);
+  EXPECT_FLOAT_EQ(Result[2], 1014.0f);
+  EXPECT_FLOAT_EQ(Result[3], 1015.0f);
 }
