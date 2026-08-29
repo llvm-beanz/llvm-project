@@ -45072,3 +45072,101 @@ milestone ID itself stays unstruck, an "(done: ...)" trailing parenthetical
 carries the real outcome) -- I initially struck through the ID too before
 noticing every other closed row in this file keeps the ID plain, and
 fixed it before committing.
+
+# Session: closing roadmap H7p (sampleRateShading, second blocking gap)
+
+Picked up mid-investigation from a prior (compacted) session: H7f's
+`sampleRateShading` executor/translation work was real and unit-tested, H7o
+had already fixed two pipeline-creation-time compiler bugs blocking every
+`min_sample_shading*`/`sample_id.*` case from even attempting real pipeline
+creation, and a first H7p fix (making `gl_FragCoord` vary per real sample
+position in `Executor.cpp`'s per-sample pass loop) had been written and
+unit-tested but not yet confirmed against the real, previously-failing CTS
+case (`min_sample_shading_enabled.min_1_0.samples_2.quad`).
+
+**First surprise this session**: the `gl_FragCoord` fix, though correct and
+sufficient in every unit test, did *not* make the real CTS case pass. Rather
+than debug the full multi-subpass CTS scenario blind, I first isolated
+whether the fix itself was actually correct by writing a scratch diagnostic
+unit test directly exercising the raw MSAA write path across a whole 32x32,
+2-sample image -- bypassing `subpassLoad`/copy-passes entirely. My first
+attempt at this diagnostic used a UNORM8 attachment with a raw (non-`fract`'d)
+`gl_FragCoord`-derived shader, which quietly saturated all X>1 values to 255
+and produced a false "992/1024 mismatches" signal -- a genuine "test
+construction bug that looks like a product bug" trap. Switching to a
+`R32G32B32A32_FLOAT` attachment and computing `fract()` manually in the C++
+checker gave a clean 0 mismatches, proving the raw write path (including the
+`gl_FragCoord` fix) was fully correct. This redirected the investigation
+entirely away from `Executor.cpp` and toward the `subpassLoad`/copy-pass
+readback path in `CommandBuffer.cpp`.
+
+**The real second bug**: decoding the QPA log's embedded per-sample readback
+PNGs (base64 + PIL) showed the two "single-sampled" per-sample images were
+byte-identical and showed a suspicious column-based checkerboard, not simply
+stale/uninitialized data -- a strong signal of a stride/addressing bug rather
+than a "value never written" bug. Reading the real CTS test structure
+(`MinSampleShadingInstance::iterate`/`initSampleShadingPrograms` in the real
+VK-GL-CTS source) confirmed subpass 0 draws with a genuinely multisampled
+pipeline, then N further subpasses each with a *different*, single-sample
+pipeline, each `subpassLoad`-ing one specific sample back out of subpass 0's
+own multisampled attachment. Re-reading `CommandBuffer.cpp`'s
+`resolveDrawAttachments`/`buildSubpassInputHeap`/`runPreparedDraw` found the
+real bug: `buildSubpassInputHeap` computed every heap entry's
+`RowPitch`/`SampleStride` from the *currently bound draw's own pipeline*
+sample count, including subpass **input** attachments -- wrong whenever the
+attachment being read back has a different real sample count than the
+reading pipeline, exactly this test's own shape. `SampleStride` even
+collapsed to a flat `0` in this case (`SampleCount > 1 ? ElemSize : 0`
+evaluating false for the single-sample reading pipeline), aliasing every
+sample read to the same texel.
+
+Fixed by adding a real, per-input-attachment `SubpassInputSampleCounts`
+vector (populated from each input view's own image, not the bound pipeline)
+threaded through `resolveDrawAttachments`/`buildSubpassInputHeap`, used
+specifically for the `SubpassInputs` heap-entry path; the
+`Attachments`/`DepthStencil` fallback path correctly keeps using the bound
+pipeline's own sample count, since a subpass's own color/depth/stencil
+attachments must match its own pipeline's sample count by spec (this is not
+a case that needed the same fix).
+
+Wrote a new permanent regression test, `DrawTest.cpp`'s
+`SubpassLoadReadsAnEarlierSubpassMultisampledColorOutputWithADifferentPipelineSampleCount`,
+modeled closely on two neighboring tests in the same file (the seeded-memory
+technique from `SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote`,
+the classic 2-subpass render-pass/framebuffer setup from
+`MultiviewInputAttachmentReadsBackAnEarlierSubpassColorOutput`). To be sure
+this test actually exercises the bug rather than passing vacuously, I
+temporarily `git stash`ed just the `CommandBuffer.cpp` fix, rebuilt, and
+confirmed the test fails with the exact same kind of wrong-value pattern as
+the real CTS failure, then restored the fix and confirmed it passes. This
+"prove the regression test would have caught the bug" step felt important
+given how subtle and previously-invisible this bug was -- it's exactly the
+kind of bug a weaker test (e.g. one that only checks a single pixel, or uses
+matching sample counts in both subpasses) would never catch.
+
+**Verification methodology this session, in order**: (1) build+run the new
+unit test standalone -- pass; (2) revert-rebuild-rerun to confirm it fails
+without the fix -- confirmed; (3) full `ninja check-feme` -- 2024/2083, 0
+failures, up by exactly 1 test from the new `DrawTest.cpp` case; (4) targeted
+real CTS re-run of the originally-failing case in isolation -- now passes;
+(5) broader real CTS sweep of all 7 feme-supported-sample-count
+`min_sample_shading_enabled`/`min_sample_shading_disabled` cases -- 7/7 pass;
+(6) broader real CTS sweep of the full `min_sample_shading_*`/`sample_id.*`/
+`alpha_to_one.*` groups (72 cases) to confirm no regressions anywhere nearby
+-- 30 pass, 6 fail (all `sample_id.*`, confirmed pre-existing and unrelated:
+`VK_ERROR_INITIALIZATION_FAILED` at pipeline creation, the already-tracked
+H7o `SIMDize.cpp` divergent-store-address gap for a *different*
+`gl_SampleID`-derived buffer-index shape, not anything this session's fixes
+touch), 36 not-supported (higher sample counts this software rasterizer
+doesn't support at all, e.g. `samples_8`/`samples_64`). With every mandatory
+case now passing for real and no regressions found, flipped `sampleRateShading`
+to `VK_TRUE` and struck through H7p in `Roadmap.md`.
+
+**Lesson reinforced**: a fix that is "correct in isolation, unit-tested, and
+compiles clean" can still be entirely insufficient to make a real end-to-end
+CTS case pass if there's an independent, unrelated bug elsewhere in the same
+code path. The diagnostic discipline of isolating *which* fix is/isn't
+working (via a targeted scratch test bypassing the parts already believed
+correct) before diving into the next layer down was the key technique that
+made finding the second bug tractable rather than a blind guessing exercise
+across a large, unfamiliar, multi-subpass CTS test.
