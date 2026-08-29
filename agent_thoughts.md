@@ -45170,3 +45170,22 @@ working (via a targeted scratch test bypassing the parts already believed
 correct) before diving into the next layer down was the key technique that
 made finding the second bug tractable rather than a blind guessing exercise
 across a large, unfamiliar, multi-subpass CTS test.
+
+# Session: closing out roadmap H7f now that both blockers are resolved
+
+This request asked me to continue H7f or its blocking milestones. Both of
+H7f's own blockers -- H7o (two pipeline-creation-time compiler bugs) and H7p
+(the `gl_FragCoord`-per-sample-position fix and the subpass-input
+sample-count-mismatch fix) -- were already fixed in the immediately preceding
+session, and `sampleRateShading` already flips to `VK_TRUE` alongside
+`alphaToOne`. There was no remaining code work left in H7f's own scope: I
+re-verified `ninja check-feme` still passes in full (2024/2083, 0 failures)
+at HEAD, confirmed the roadmap/CTS-report/feature-inventory docs from the
+prior session already accurately describe the full four-gap resolution, and
+struck through H7f's own roadmap row (previously left unstruck with only an
+inline "Update" note, since H7o/H7p hadn't landed yet at the time that note
+was written). `alphaToCoverageEnable`/H7n remains explicitly out of H7f's own
+scope and stays open, as does the rest of H7's own survey (H7g-H7m).
+
+No new code changes were needed this session -- this was purely a
+documentation-closure pass confirming and formalizing work already done.
