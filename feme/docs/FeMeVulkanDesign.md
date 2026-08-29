@@ -2047,12 +2047,33 @@ test first, before the stencil test, against the value already stored in
 the depth attachment) all needed real new translation and executor work,
 unlike H7a's already-correct-but-unadvertised cluster. See "Roadmap H7d:
 measured impact" in VulkanCTSReport.md for the full before/after CTS
-breakdown. The rest of H7's own survey (`wideLines`/`largePoints`,
-`sampleRateShading`, `alphaToOne`, `vertexPipelineStoresAndAtomics`/
+breakdown. **Status (roadmap H7f): `alphaToOne` done, `sampleRateShading`
+blocked on a new, separately tracked compiler gap.** `alphaToOne`
+(`Executor.cpp`'s `processTile` forces every color attachment's output
+alpha to `1.0` when `GraphicsPipeline::getAlphaToOneEnable()`) is real,
+new executor work, confirmed conformant against a real
+`dEQP-VK.pipeline.monolithic.multisample.alpha_to_one.*` re-run (4/4
+feme-supported-sample-count cases passing) -- flipped to `VK_TRUE`.
+`sampleRateShading`'s own executor plumbing (`processTile`'s outer
+per-sample pass loop, narrowing each pass's `FemeFragmentInvocation` copy
+to one sample) is likewise implemented and unit-tested, but its feature
+bit deliberately stays `VK_FALSE`: flipping it to let a real
+`min_sample_shading*`/`sample_id.*` case attempt real pipeline creation
+for the first time shows every one failing at shader-compilation time on
+`SIMDize.cpp`'s own pre-existing, generic lack of support for a divergent
+(per-invocation-computed) buffer store address -- not anything specific
+to per-sample shading, and confirmed unrelated to this row's own executor
+change (the same shader shape fails identically with sample shading
+disabled). Advertising the bit before a real conformance case exercising
+it can pass would itself be a conformance violation, so it stays closed
+pending roadmap H7o. See "Roadmap H7f: measured impact" in
+VulkanCTSReport.md for the full before/after CTS breakdown. The rest of
+H7's own survey (`vertexPipelineStoresAndAtomics`/
 `fragmentStoresAndAtomics`, `shaderClipDistance`/`shaderCullDistance`,
-`samplerAnisotropy`, and the four `shaderStorageImage*` bits) each need
-real, independent work first and remain open, broken down as Roadmap.md's
-H7e-H7j rows.
+`samplerAnisotropy`, and the four `shaderStorageImage*` bits, alongside
+`sampleRateShading`'s own now-separately-tracked H7o blocker and
+`alphaToCoverageEnable`'s own H7n) each need real, independent work first
+and remain open.
 
 ## Implementation Milestones
 

@@ -69,12 +69,12 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---|---|---|
-| 1.0 | 15 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
+| 1.0 | 19 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
 | 1.1 | 1 of 12 | n/a (see scope note) | 7 of 23 |
 | 1.2 | 9 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
 | 1.4 | 20 of 21 | 25 | 15 of 16 |
-| **total** | **56 of 150** | **70** | **48 of 86** |
+| **total** | **60 of 150** | **70** | **48 of 86** |
 
 - **The 1.3 floor is nearly closed; the 1.1/1.2 floor was never audited
   until now, and the 1.4 floor is nearly closed too.** Roadmap E1-E28 drove
@@ -117,15 +117,18 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt`, understating
   the 1.4 extension row as 14 of 16 rather than its true 15 of 16; restored
   here alongside roadmap H2's own `multiview` update.
-- **4 of the 39 unimplemented 1.0 feature bits are graphics
+- **3 of the 39 unimplemented 1.0 feature bits are graphics
   capabilities** (`sampleRateShading`,
-  `shaderClipDistance`, `shaderCullDistance`,
-  `alphaToOne`) -- down from 6 (itself down from 9, itself down from
+  `shaderClipDistance`, `shaderCullDistance`) -- down from 4 (itself
+  down from 6, itself down from 9, itself down from
   10, itself down from
   11, itself down from
   14, itself down from 15
   once roadmap H5e closed `geometryShader`, itself down from 16 once
-  roadmap H4a/H4b closed `tessellationShader`) now that roadmap H7e
+  roadmap H4a/H4b closed `tessellationShader`) now that roadmap H7f
+  closed `alphaToOne` (confirmed against a real
+  `dEQP-VK.pipeline.monolithic.multisample.alpha_to_one.*` re-run, 4/4
+  feme-supported-sample-count cases passing), roadmap H7e
   closed `wideLines` and `largePoints`, roadmap H7d
   closed `depthClamp`, `depthBiasClamp`, and `depthBounds`, roadmap
   H7c closed `fillModeNonSolid`, roadmap H7b/H7b-a
@@ -133,12 +136,30 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `independentBlend`, `occlusionQueryPrecise`, and `multiDrawIndirect`
   alongside two feature bits this file never grouped as
   "graphics-specific" in the first place (`logicOp`,
-  `drawIndirectFirstInstance`, closed by the same H7a row). Each is
-  *optional* for a conformance submission -- unlike every 1.1-1.4 row
-  above, a device may report them false and still be conformant -- so
-  none blocks the claim; each is nonetheless a block of mandatory-list
-  cases reported `NotSupported`, which is why roadmap &sect;1.9.7's H7
-  tracks them as a cluster rather than as conformance blockers.
+  `drawIndirectFirstInstance`, closed by the same H7a row).
+  `sampleRateShading` itself stays open despite roadmap H7f's own
+  executor plumbing (a real per-sample shade/dispatch/merge loop) being
+  implemented and unit-tested: flipping its feature bit to advertise it
+  would let a real `dEQP-VK.pipeline.monolithic.multisample.
+  min_sample_shading*`/`multisample_shader_builtin.sample_id.*` case
+  attempt real pipeline creation for the first time, and every one
+  fails at shader-compilation time on a pre-existing, generic
+  `SIMDize.cpp` gap (no support for a divergent, per-invocation-computed
+  buffer store address) newly reachable this way -- tracked separately
+  as roadmap H7o, since advertising the bit before a real conformance
+  case exercising it can pass would itself be a conformance violation.
+  Each of these remaining bits is *optional* for a conformance
+  submission -- unlike every 1.1-1.4 row above, a device may report
+  them false and still be conformant -- so none blocks the claim; each
+  is nonetheless a block of mandatory-list cases reported
+  `NotSupported`, which is why roadmap &sect;1.9.7's H7 tracks them as
+  a cluster rather than as conformance blockers.
+- **This edition found the "Findings" table's own 1.0 row/total had
+  drifted stale**, still reading "15 of 55"/"56 of 150" from before
+  roadmap H7a-H7e's own feature-bit flips were ever folded in (the
+  bulleted narrative above them was kept current each time, but the
+  table itself was not); corrected to "19 of 55"/"60 of 150" here
+  alongside roadmap H7f's own `alphaToOne` flip.
 - **Ten core-promoted extensions are *partially* implemented**, a
   state neither this file nor
   [VulkanExtensionInventory.md](VulkanExtensionInventory.md) can express
@@ -281,7 +302,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `independentBlend` | yes | roadmap H7a: `GraphicsPipeline.cpp`'s `translateColorBlendState` already applies a per-color-attachment `BlendState` independently |
 | feature | VK_VERSION_1_0 | `geometryShader` | yes | roadmap H5a-H5e: SPIR-V geometry entry-point execution-mode reflection, `CanonicalizeStagePass`/`Executor.cpp` geometry chaining, and `vkCreateGraphicsPipelines` acceptance/compilation |
 | feature | VK_VERSION_1_0 | `tessellationShader` | yes | roadmap H4a/H4b: SPIR-V tessellation-control/-evaluation reflection, splitting and `vkCreateGraphicsPipelines` acceptance/compilation |
-| feature | VK_VERSION_1_0 | `sampleRateShading` | no |  |
+| feature | VK_VERSION_1_0 | `sampleRateShading` | no | roadmap H7f: `Executor.cpp`'s `processTile` implements a real per-sample shade/dispatch/merge loop, but the feature bit stays unadvertised -- a real `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading*`/`multisample_shader_builtin.sample_id.*` re-run fails every case at shader-compilation time on a pre-existing, generic `SIMDize.cpp` gap (no support for a divergent, per-invocation-computed buffer store address), tracked separately as roadmap H7o |
 | feature | VK_VERSION_1_0 | `dualSrcBlend` | yes |  |
 | feature | VK_VERSION_1_0 | `logicOp` | yes | roadmap H7a: `Executor.cpp`'s `applyLogicOp`/`mergeColor` already implement every `VkLogicOp` value |
 | feature | VK_VERSION_1_0 | `multiDrawIndirect` | yes | roadmap H7a: `CommandBuffer.cpp`'s `readIndirectDraws`/`readIndirectMeshDraws` already loop over an arbitrary indirect `DrawCount`; `maxDrawIndirectCount` raised to `UINT32_MAX` to match |
@@ -292,7 +313,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `depthBounds` | yes | roadmap H7d: `GraphicsPipeline.cpp`'s `translateDepthStencilState` now maps `depthBoundsTestEnable`/`minDepthBounds`/`maxDepthBounds` onto `DepthState`, and `Executor.cpp`'s `testDepthStencil` runs the depth bounds test first, before the stencil test, comparing the value already stored in the depth attachment against `[MinDepthBounds, MaxDepthBounds]` |
 | feature | VK_VERSION_1_0 | `wideLines` | yes | roadmap H7e: `PhysicalDeviceInfo.cpp` raises `lineWidthRange[1]` from the degenerate `1.0` floor to `64.0` -- `Executor.cpp`'s line rasterizer already threaded a real, variable `LineWidth` through its quad-expansion path since roadmap F5, needing no executor change |
 | feature | VK_VERSION_1_0 | `largePoints` | yes | roadmap H7e: `Executor.cpp`'s `emitPointQuad` now derives its half-extent from a new `RasterVertex::PointSize` field (populated from a written `gl_PointSize`, mapped from SPIR-V `BuiltIn` 1 by `CanonicalizeStage.cpp`'s `getSystemValueForBuiltIn`), clamped to `[1.0, RasterState::MaxPointSize]` (a new field, `64.0` by default, matching `PhysicalDeviceInfo.cpp`'s `pointSizeRange[1]`) -- previously hardcoded to a hardware-independent 1 pixel |
-| feature | VK_VERSION_1_0 | `alphaToOne` | no |  |
+| feature | VK_VERSION_1_0 | `alphaToOne` | yes | roadmap H7f: `Executor.cpp`'s `processTile` now forces every color attachment's output alpha to `1.0` when `GraphicsPipeline::getAlphaToOneEnable()`, confirmed against a real `dEQP-VK.pipeline.monolithic.multisample.alpha_to_one.*` re-run (4/4 feme-supported-sample-count cases passing) |
 | feature | VK_VERSION_1_0 | `multiViewport` | yes |  |
 | feature | VK_VERSION_1_0 | `samplerAnisotropy` | no |  |
 | feature | VK_VERSION_1_0 | `textureCompressionETC2` | no |  |

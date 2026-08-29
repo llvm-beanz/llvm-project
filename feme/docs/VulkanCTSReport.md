@@ -13579,3 +13579,127 @@ new tests this row adds (3 `ExecutorTest.cpp` `PointSize` cases, 1
 `PhysicalDeviceInfoTest.cpp` line-width/point-size-range case). The
 generic vertex-side signature-metadata gap this row's own CTS run
 confirmed still open is broken out separately as roadmap H7m.
+
+## Roadmap H7f: measured impact (`sampleRateShading`/`alphaToOne`)
+
+**What changed**: `GraphicsPipeline.cpp`'s `translateGraphicsPipeline` now
+translates `sampleShadingEnable`/`alphaToOneEnable` into
+`Result.SampleShadingEnable`/`Result.AlphaToOneEnable` instead of
+rejecting both outright (`alphaToCoverageEnable` remains rejected, broken
+out below as roadmap H7n). `Executor.cpp`'s `processTile` wraps its
+FSInput-build/dispatch/merge sequence in an outer per-sample pass loop
+(`PassCount = Pipeline.getSampleShadingEnable() ? SampleCount : 1`), each
+pass narrowing a local `PassInvocations` copy's `SampleIndex`/`Coverage`
+to that one sample before dispatch -- always shading at full sample rate
+when `sampleShadingEnable` is set (a spec-conformant simplification:
+running every sample trivially satisfies "at least
+`ceil(minSampleShading * rasterizationSamples)`" for any
+`minSampleShading` in `[0,1]`, so its exact value is never stored). Alpha
+forcing (`RGBA[3] = 1.0` when `getAlphaToOneEnable()`) applies to every
+attachment right after the existing alpha-to-coverage multiply.
+
+**Case-list construction**: 224 cases from the real VK-GL-CTS mustpass
+list (`external/vulkancts/mustpass/main/vk-default/pipeline/monolithic/
+{multisample.txt,multisample-shader-builtin.txt,
+extended-dynamic-state.txt}`), restricted to feme-supported sample counts
+(1/2/4/8): `multisample_shader_builtin.sample_id.*` (6), `multisample.
+alpha_to_one.samples_{1,2,4,8}[_sparse]` (68), `multisample.
+min_sample_shading_{enabled,disabled}.min_*.samples_{2,4,8}.quad` (150),
+and `extended_dynamic_state.after_pipelines.*alpha_to_one*` (4), run in
+one `deqp-vk` invocation directly against `libfeme_vulkan.so`.
+
+**First run** (both feature bits flipped to `VK_TRUE`):
+
+```
+Test run totals:
+  Passed:          4/224 (1.8%)
+  Failed:         96/224 (42.9%)
+  Not supported: 124/224 (55.4%)
+```
+
+The 4 `Passed` are all 4 real `alpha_to_one.samples_{1,2,4,8}` cases
+(confirms `alphaToOneEnable`'s own executor implementation end to end).
+All 96 `Failed` are `min_sample_shading_{enabled,disabled}.*`/
+`sample_id.*` cases, every one failing identically at shader-compilation
+time: `error: feme-cpu-simdize: function 'main' has a divergent value ''
+of vector type; only a constant-index insertelement chain, a phi, a
+select, a shufflevector, elementwise arithmetic/cast, a vector
+comparison, a homogeneous vectorizable intrinsic call, or a
+resource/image load is supported (roadmap milestone 7 deviation)`,
+`VK_ERROR_INITIALIZATION_FAILED` at pipeline creation, before any
+fragment-stage execution -- meaning before any of this row's own executor
+per-sample-shading code would even run.
+
+**Root cause investigated**: the real CTS shader source
+(`vktPipelineMultisampleShaderBuiltInTests.cpp:5512`,
+`vktPipelineMultisampleTests.cpp:6899`) computes a per-invocation buffer
+index from `gl_SampleID` (`pos = ((coord.y * width) + coord.x) * samples
++ int(gl_SampleID)`) and stores through it into a storage buffer.
+Crucially, **`min_sample_shading_disabled.*` cases fail identically to
+`min_sample_shading_enabled.*`** (both use the same fixed shader,
+regardless of whether the pipeline itself enables sample shading) --
+confirming the gap is generic to a divergent (per-invocation-computed)
+buffer store address, not anything specific to per-sample shading or to
+this row's own executor changes. `SIMDize.cpp`'s divergent-vector-value
+producer classification has no case for a `GetElementPtrInst` with a
+divergent index, and its resource-call handling explicitly excludes a
+`StoredValue` call's own address operand from producer classification
+(`if ((Matched && !Matched->StoredValue) || matchImageCall(*CI))`) --
+unlike groupshared memory, which already has real scatter-store support
+for a divergent address. A minimal, hand-written-IR `ExecutorTest.cpp`
+case reading `SV_SampleIndex` and doing ordinary cast/arithmetic on it
+(no buffer store) compiles and passes cleanly through `SIMDize.cpp`,
+confirming the gap is specifically about a divergent *store address*, not
+about reading a per-lane system value at all. Broken out as its own
+follow-on row, H7o, rather than fixed here: scoping a fix needs a real IR
+reduction of this exact case, the same technique the H6g-b/H6j/H6k/H6l
+chain used throughout, and is a substantial, separate compiler-pass
+change (most likely a new `llvm.masked.scatter`-based lowering) out of
+this row's own scope.
+
+**Decision**: `alphaToOne` flips to `VK_TRUE` (fully conformant).
+`sampleRateShading` stays `VK_FALSE` -- advertising it before a real
+conformance case exercising it can pass would itself be a conformance
+violation -- pending H7o.
+
+**Second run** (`alphaToOne` on, `sampleRateShading` reverted to off):
+
+```
+Test run totals:
+  Passed:          4/224 (1.8%)
+  Failed:          0/224 (0.0%)
+  Not supported: 220/224 (98.2%)
+```
+
+**0 regressions; 0 failures.** The 220 `NotSupported` cases are all
+`min_sample_shading*`/`sample_id.*` (now correctly gated on
+`sampleRateShading` again, `NotSupported (Requested core feature is not
+supported: sampleRateShading at vktTestCase.cpp:1497)`) and the 64
+`extended_dynamic_state.after_pipelines.*alpha_to_one*` cases (gated on
+`VK_EXT_extended_dynamic_state3`, an orthogonal, unrelated extension this
+device does not implement).
+
+**Inventories**: `Vulkan14FeatureInventory.md` updated -- `alphaToOne`
+flips to `yes`; `sampleRateShading` stays `no`, with a note pointing at
+H7o. The 1.0 feature-advertised count rises from 18 of 55 to 19 of 55
+(total 59 of 150 to 60 of 150 -- this edition also found the "Findings"
+table's own 1.0 row/total had drifted stale since H7a, corrected
+alongside this row's own change), and the "graphics-specific
+unimplemented" bullet drops from 4 to 3. `VulkanExtensionInventory.md`
+confirmed to need no change: no extension is touched, only one core 1.0
+feature bit. `FeMeVulkanDesign.md`'s H7 status paragraph updated.
+
+**Milestone H7f partially closes.** `alphaToOne` is done: translated,
+executor-implemented, unit-tested (`ExecutorTest.cpp`'s
+`AlphaToOneEnableForcesOutputAlphaToOne`, `GraphicsPipelineTest.cpp`'s
+`TranslatesSampleShadingAndAlphaToOneState`), and confirmed conformant by
+real CTS. `sampleRateShading`'s own translation/executor plumbing is
+equally done and unit-tested (`ExecutorTest.cpp`'s
+`SampleShadingEnableInvokesFragmentOncePerSample`), but its feature bit
+stays closed pending a new, separately-tracked compiler gap, H7o.
+`alphaToCoverageEnable` (found, during this row's own investigation, to
+have been inaccurately described as "already-implemented" by H7f's
+original roadmap text) remains unimplemented and untracked with its own
+feature bit, broken out as H7n. `check-feme` passes in full (2020/2079,
+59 pre-existing unrelated `Unsupported`, 0 `Failed`), up from H7e's own
+2016/2075 by exactly the 4 new tests this row adds.
