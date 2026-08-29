@@ -36,31 +36,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6c-a?
+Can you complete H6g-b-d?
 
-> **Wire `MeshOutputBuilder`/`TaskPayloadBuilder` into real `feme.stage.*`
-> mesh-output-store/task-payload-store operations** reaching the reused
-> `EntryWrapperPass` path, once those ops exist (H6d) and, for task payload
-> specifically, once it can be imported from SPIR-V `TaskPayloadWorkgroupEXT` at
-> all (H6h) and canonicalized (H6i) (investigated, not landed: direct inspection
-> of `feme/include/feme/Core/StageOps.h`'s `StageOpKind` enum,
-> `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, and
-> `CanonicalizeStagePass::run`'s stage filter
-> (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`) confirms all three
-> named prerequisites -- H6d, H6h, H6i -- are still completely unimplemented: no
-> mesh-output-store/task-payload-store `feme.stage.*` op exists,
-> `TaskPayloadWorkgroupEXT` still has no address-space convention or import
-> pattern, and the canonicalization stage filter still does not accept
-> `ShaderStage::Mesh`/`Amplification`. Unlike H6b's own investigation, which
-> found a real, independently-landable fix inside its own stated scope, this row
-> has zero such content: there is nothing yet producing a canonicalized
-> mesh-output-store/task-payload-store operation for
-> `MeshOutputBuilder`/`TaskPayloadBuilder` to be wired to. Split below into two
-> independently-trackable rows, since mesh output and task payload do not
-> actually share the same blocker set -- mesh output's own canonicalization
-> already exists (H6b's `feme.stage.output.store` `Vertex` operand), so wiring
-> it only needs H6d (meshlet assembly to consume it) and H6i (lifting the stage
-> filter so a mesh entry is canonicalized at all, not H6h, which is
-> task-payload-import-specific); task payload additionally needs H6h before H6i
-> can canonicalize a payload write into anything. See "Roadmap H6c-a: why this
-> row could not land" in VulkanCTSReport.md)
+> **`feme::cpu::MeshOutputWrapperPass::lowerMeshStageOps` diagnoses
+> "feme-cpu-wrap-mesh-output: unexpected stage op left for the mesh output
+> wrapper"** on 40 of the 80 cases in the same
+> `dEQP-VK.mesh_shader.ext.in_out.*` bucket H6g-b-a-i-a-i-c's own real-ICD
+> re-run found -- discovered while confirming that row's fix: after adding the
+> missing `feme.cpu.resource.load.raw.v2f32`/`v3f32`/`v2i32`/`v3i32`/`v4i32`
+> runtime overloads and re-running the full 560-case bucket, the 80
+> previously-JIT-symbol-blocked cases split evenly, 40 now hitting the
+> already-tracked H6g-b-c `spirv_var_NN` gap and 40 hitting this new blocker
+> instead. Root cause not yet isolated: `lowerMeshStageOps`
+> (`MeshOutputWrapper.cpp`) only accepts
+> `isMaskedOutputStoreCall`/`isMaskedSetMeshOutputsCall` as the two lowerable
+> shapes once a mesh entry point uses any `feme.stage.*`/masked-output op at all
+> (`isStageOpCall(*CI) \|\| isMaskedOutputStoreCall(*CI) \|\|
+> isMaskedSetMeshOutputsCall(*CI)` gates entry into the function at all); its
+> closing catch-all `F.getContext().emitError(CI, ...)` fires on every surviving
+> call that is neither of those two -- an unmasked (not yet lowered by
+> `Linearize.cpp`'s `applyStageMasks`) `feme.stage.output.store`, or some other
+> `StageOpKind` a mesh entry should never legally contain (`InputLoad`, an
+> interpolation op, etc., per the function's own comment "a mesh entry point has
+> no ordinary stage-IO input to read"), reaching this pass unexpectedly. Needs a
+> real failing shader/IR reduction (the same one-off
+> diagnostic-dump-and-single-case-rerun technique H6g-b-a-i-a-i-a/-b used) to
+> find which `feme.stage.*` op survives unlowered and why, before deciding
+> whether the fix belongs in `MeshOutputWrapperPass` itself (accept a new shape)
+> or upstream in whichever pass was supposed to have already lowered/masked it
