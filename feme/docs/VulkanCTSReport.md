@@ -12360,3 +12360,170 @@ both stay tracked separately. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` confirmed no change needed: this is a pure
 Roadmap bookkeeping closure, touching no feature bit, limit, or
 extension.
+
+## Roadmap H6g-b-c: measured impact (wire `ShaderStage::Mesh` into `ValidateStagePass`, diagnose an unresolved stage-IO global-variable access)
+
+**The fix.** `feme::graphics::ValidateStagePass::run` validated only
+`Vertex`/`Fragment` entry points until this row; every prior row that
+touched mesh validation (`H6a` on) left `ShaderStage::Mesh` unreachable.
+Two changes were needed to wire it in correctly:
+
+1. `isStageOpLegalForStage`'s `InputLoad`/`OutputStore` case previously
+   only accepted `Vertex`/`Fragment` -- but a mesh entry's own
+   per-vertex/per-primitive output write reuses `OutputStore` (roadmap
+   H6b), so simply adding `Mesh` to `ValidateStagePass::run`'s stage
+   filter without also widening this case would have made every
+   legitimate mesh output store newly, wrongly rejected as "not legal in
+   function ... (stage 'mesh')". Fixed by extending the case to accept
+   `Mesh` too.
+2. A new check, `validateStageIOGlobalAccess`, walks every load/store's
+   pointer operand back through any `getelementptr` chain
+   (`llvm::GEPOperator`, covering both the instruction and
+   constant-expression forms) to find its underlying `GlobalVariable`.
+   One `isSPIRVStageIOGlobal` still recognizes (address space 7/8,
+   carrying `!spirv.Decorations`/`!feme.spirv.MemberDecorations`) means
+   `CanonicalizeStagePass` left that particular access un-rewritten --
+   exactly the shape `resolveOffsetWithinElement` (roadmap H6c-a-a-iii)
+   returns `std::nullopt` for today, e.g. a mesh entry's arrayed
+   `PerPrimitiveEXT`/`PerVertexEXT` builtin interface-block access -- so
+   it is now diagnosed directly instead of silently surviving to
+   `feme::cpu`'s JIT as an undefined symbol.
+
+`isSPIRVStageIOGlobal` itself was factored out of `CanonicalizeStage.cpp`'s
+anonymous namespace into a new shared header,
+`feme/include/feme/Transforms/Graphics/StageIOGlobal.h`, with no behavior
+change to `CanonicalizeStagePass`, so both passes recognize the identical
+global-variable shape.
+
+**Unit tests.** Four new cases in `ValidateStageTest.cpp`:
+`MeshOutputStoreIsLegal`/`DiscardInMeshStageIsIllegal` (confirming the
+newly-wired stage's own legality rules in both directions),
+`UnresolvedStageIOGlobalAccessInMeshIsDiagnosed` (reusing
+`CanonicalizeStageTest.
+ConstantIndexIntoArrayedBuiltinInterfaceBlockIsLeftUnrewritten`'s own
+arrayed-`PerPrimitiveEXT`-block IR directly against `ValidateStagePass`,
+confirming the exact shape this row targets is caught with the expected
+message and global name), and `OrdinaryAllocaAccessInMeshIsNotDiagnosed`
+(a negative control, confirming an unrelated local `alloca` access is not
+flagged).
+
+```
+$ ninja -C <feme-build> check-feme
+...
+Total Discovered Tests: 2031
+  Unsupported:   59 (2.90%)
+  Passed     : 1972 (97.10%)
+```
+
+Up from H6k's own 1968/2027 baseline by exactly the 4 new tests this row
+adds (0 pre-existing tests newly failed).
+
+**A real ICD re-run confirms the fix directly.** Re-running this row's
+own named case:
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case=dEQP-VK.mesh_shader.ext.builtin.cull_primitives \
+    --deqp-log-filename=single_h6g_b_c.qpa
+```
+
+```
+error: feme-graphics-validate-stage: function 'main' has an unresolved
+stage-IO global-variable access to 'spirv_var_16', a shape
+CanonicalizeStagePass does not yet canonicalize into a 'feme.stage.*'
+call
+...
+  Fail (retcode: VK_ERROR_INITIALIZATION_FAILED at vkPipelineConstructionUtil.cpp:176)
+```
+
+The undiagnosed `JIT session error: Symbols not found: [ spirv_var_16 ]`
+this row's own text cited is gone -- the exact same global name
+(`spirv_var_16`) is now named directly in a clean, compile-time
+diagnostic emitted well before pipeline creation fails. The case still
+fails (`VK_ERROR_INITIALIZATION_FAILED` at the same call site), exactly
+this row's own scope: diagnosing the gap, not fixing the underlying
+unmodeled arrayed-block shape (still `H6c-a-a-iii`'s own open item).
+
+**A full re-run of the real `dEQP-VK.mesh_shader.ext.builtin.*` group
+(37 cases) confirms this at scale**:
+
+```shell
+grep '^TEST: dEQP-VK.mesh_shader.ext.builtin\.' dEQP-VK-cases.txt \
+  | sed 's/^TEST: //' > cases_h6g_b_c.txt
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=cases_h6g_b_c.txt \
+    --deqp-log-filename=builtin_h6g_b_c.qpa \
+    --deqp-log-images=disable --deqp-log-shader-sources=disable
+```
+
+```
+  Passed:        0/37 (0.0%)
+  Failed:       22/37 (59.5%)
+  Not supported: 15/37 (40.5%)
+```
+
+Unchanged totals from before this row (expected -- diagnosing a failure
+earlier and more cleanly does not itself turn it into a pass). Of the
+22 `Failed` cases, 12 now hit this row's own new clean diagnostic instead
+of a raw JIT symbol error -- the mesh-portion of the 9-case-turned-33-case
+set `H6c-a-a-ii`/`H6c-a-a-iii`'s own reports named, grown by three further
+cases this group's own re-run finds sharing the identical shape
+(`num_work_groups_mesh`, `num_work_groups_task_and_mesh`,
+`primitive_id_spirv`):
+
+```
+cull_primitives, draw_index_in_mesh, draw_index_in_task,
+local_invocation_id_in_task, local_invocation_index_in_task,
+num_work_groups_mesh, num_work_groups_task_and_mesh, position,
+primitive_id_glsl, primitive_id_spirv, work_group_id_in_mesh,
+work_group_id_in_task
+```
+
+The other 10 failing cases in the group (`global_invocation_id_in_{mesh,
+task}`, `layer`, `layer_no_write`, `layer_shared`,
+`local_invocation_{id,index}_in_mesh`, `viewport_index`,
+`viewport_index_no_write`, `viewport_index_shared`) hit an unrelated,
+pre-existing `feme-cpu-simdize` divergent-vector-value diagnostic further
+down the pipeline -- confirmed unaffected by this row (0
+`feme-graphics-validate-stage` diagnostics reported for any of them).
+
+**A new, distinct, narrower bug surfaces in the same re-run, entirely out
+of this row's own scope.** `cull_primitives` alone (no other case in the
+group) additionally reports three `feme.stage.output.store` row-out-of-
+range errors:
+
+```
+error: feme-graphics-validate-stage: 'feme.stage.output.store' in function 'main' row 1 is out of range for element 4
+error: feme-graphics-validate-stage: 'feme.stage.output.store' in function 'main' row 2 is out of range for element 4
+error: feme-graphics-validate-stage: 'feme.stage.output.store' in function 'main' row 1 is out of range for element 5
+error: feme-graphics-validate-stage: 'feme.stage.output.store' in function 'main' row 2 is out of range for element 5
+error: feme-graphics-validate-stage: 'feme.stage.output.store' in function 'main' row 3 is out of range for element 5
+```
+
+These only became visible now that `ValidateStagePass` validates the
+mesh stage at all for the first time -- not investigated further here
+(root cause not yet isolated; see the roadmap's own H6l entry for a
+first candidate theory), filed as new row H6l.
+
+**`dEQP-VK.draw.*`'s 1957-case `draw_sample.txt` regression sample**
+stays byte-identical to every prior row's own recorded totals:
+
+```
+  Passed:        14/1957 (0.7%)
+  Failed:        153/1957 (7.8%)
+  Not supported: 1790/1957 (91.5%)
+```
+
+**0 regressions.**
+
+`FeMeGraphicsDesign.md`/`Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` confirmed no change needed: this is a pure
+diagnostic-completeness fix within `ValidateStagePass`'s existing scope
+(catching a shape `CanonicalizeStagePass` already documented it would
+leave for this pass to diagnose), touching no feature bit, limit, or
+extension.
+
+**Milestone H6 does not close.** This row's own fix lands and is confirmed
+complete for the exact diagnostic it targeted, but the same real-ICD
+re-run finds a new, narrower blocker in the same group: H6l.
