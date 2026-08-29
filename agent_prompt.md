@@ -37,12 +37,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H7b?
+Can you complete H7b-a?
 
-> **`imageCubeArray`**: `Image.cpp` already accepts
-> `VK_IMAGE_VIEW_TYPE_CUBE_ARRAY` at view-creation time, but
-> `CommandBuffer.cpp`'s descriptor materialization only builds a 2D,
-> base-layer-0 image descriptor for shader access -- a cube-array view's
-> remaining layers/faces never reach a shader-visible descriptor. Needs the
-> descriptor path widened to a real array-of-cube-faces layout before this can
-> honestly flip
+> **Shader-visible cube(array)/2D-array image sampling**:
+> `SPIRVResourceLowering.cpp`'s `classifySampledImage2DHandle` and
+> `ResourceLowering.cpp`'s `classifyImageHandle` both hard-restrict
+> sampled-image handle classification to `Dim=2D`/`Texture2D`, non-arrayed only,
+> rejecting every `Cube`/`CubeArray`/`2DArray`-typed shader binding at
+> pipeline-creation time (gracefully, per this project's own "unsupported ops
+> fail pipeline creation" policy, but before any descriptor lookup is reached).
+> Needs, together: (1) widened handle classification accepting
+> `Cube`/`CubeArray`/`2DArray` dimensions; (2) a cube-face-selection coordinate
+> transform (the classic "major axis" algorithm converting `OpImageSample`'s
+> 3-component direction vector, or 4-component with array layer for `CubeArray`,
+> into a face index plus 2D UV) not implemented anywhere in the codebase yet;
+> (3) a widened CPU runtime texel-fetch primitive (`femeRTFetchTexel2D`,
+> `feme/runtime/CPU/FeMeRuntimeCPU.c`) accepting an array-layer/face parameter,
+> which it lacks entirely today. H7b's own descriptor-materialization widening
+> (byte-correct addressing for these dimensions/layers) is already in place and
+> does not need revisiting
