@@ -37,7 +37,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H7f?
+Can you continue working on H7f or other milestones that block completing H7f?
 
 > **`sampleRateShading`/`alphaToOne`**: the executor always invokes the fragment
 > shader once per covered fragment/pixel, never once per covered sample, so
@@ -46,4 +46,40 @@ Can you complete H7f?
 > handling at all in the blend path (distinct from the already-implemented
 > alpha-to-coverage handling). Grouped since both are
 > `VkPipelineMultisampleStateCreateInfo` fields reached by the same
-> pipeline-state translation code
+> pipeline-state translation code. **Update: `alphaToOne` done,
+> `sampleRateShading` blocked on a new gap.** `alphaToOneEnable` translation
+> (`GraphicsPipeline.cpp`) and executor handling (`Executor.cpp`'s `processTile`
+> forcing every color attachment's alpha to `1.0`) are both real and confirmed
+> conformant against a real
+> `dEQP-VK.pipeline.monolithic.multisample.alpha_to_one.*` re-run (4/4
+> feme-supported-sample-count cases passing) -- `alphaToOne` flips to `VK_TRUE`.
+> `sampleRateShading`'s own translation and executor plumbing (a per-sample
+> shade/dispatch/merge loop, narrowing each pass's invocation copy to one
+> sample) are likewise implemented and unit-tested, but real
+> `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading*`/`multisample_shader_builtin.sample_id.*`
+> re-run (once the feature bit was flipped to let `checkSupport` allow these
+> cases to attempt real pipeline creation for the first time) fails every case
+> at shader-compilation time with `feme-cpu-simdize: ... has a divergent value
+> '' of vector type ...`; the identical shader shape's `gl_SampleID`-derived
+> storage-buffer index also fails with sample shading *disabled*, confirming the
+> gap is `SIMDize.cpp`'s own pre-existing, generic lack of support for a
+> divergent (per-invocation-computed) buffer store address, not anything
+> sample-shading-specific -- so `sampleRateShading`'s feature bit stays
+> `VK_FALSE` (advertising it before a real conformance case exercising it can
+> pass would be a conformance violation), tracked as a new follow-on, H7o.
+> `alphaToCoverageEnable` remains rejected and untracked-with-a-feature-bit,
+> tracked as H7n. `ninja check-feme` (assertions-enabled, ccache build) passes
+> in full, 2020/2079 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up
+> from H7e's own 2016/2075 baseline by exactly the 4 new tests this row adds
+> (`ExecutorTest`'s
+> `SampleShadingEnableInvokesFragmentOncePerSample`/`AlphaToOneEnableForcesOutputAlphaToOne`,
+> `GraphicsPipelineTest`'s
+> `TranslatesSampleShadingAndAlphaToOneState`/`RejectsAlphaToCoverageEnable`);
+> the later feature-bit revision (`alphaToOne` on, `sampleRateShading` left off)
+> only edits assertions inside the pre-existing `PhysicalDeviceInfoTest` case,
+> adding no further test. `Vulkan14FeatureInventory.md` updated (`alphaToOne`
+> now advertised, `sampleRateShading` explicitly noted as blocked on H7o);
+> `VulkanExtensionInventory.md` confirmed no change needed (a core feature-bit
+> row, not an extension). `FeMeVulkanDesign.md`'s H7 status paragraph updated.
+> See "Roadmap H7f: measured impact" in VulkanCTSReport.md for the full
+> reproduction
