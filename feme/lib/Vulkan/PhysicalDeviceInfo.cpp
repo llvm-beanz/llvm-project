@@ -379,11 +379,11 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // `VK_TRUE`. `alphaToCoverageEnable` remains rejected at pipeline-creation
   // time (roadmap H7n) and has no feature bit of its own to flip.
   //
-  // `sampleRateShading` deliberately stays `VK_FALSE`, despite roadmap
-  // H7o real progress: `SIMDize.cpp`'s `checkVectorDecompositionSupported`
-  // had no producer case at all for a plain (non-groupshared,
-  // non-resource-call) divergent-address `load` of vector type -- not a
-  // divergent buffer-store address (already fully supported, see
+  // `sampleRateShading` now flips to `VK_TRUE`, closing roadmap H7o/H7p:
+  // `SIMDize.cpp`'s `checkVectorDecompositionSupported` had no producer
+  // case at all for a plain (non-groupshared, non-resource-call)
+  // divergent-address `load` of vector type -- not a divergent
+  // buffer-store address (already fully supported, see
   // `widenResourceCall`), as an earlier pass at this root cause
   // incorrectly assumed -- and now does (`LoadInst` decomposes into
   // widened per-component values exactly like a resource-call load
@@ -392,35 +392,47 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // Function-replacement helpers, `RootConstantLowering.cpp`'s
   // `addRootConstantParams` and `SPIRVPushConstantLowering.cpp`'s own
   // inline equivalent, silently dropping `!feme.signature` metadata when
-  // rebuilding a push-constant-only function) is also fixed. Together
-  // these let 11/60 real `dEQP-VK.pipeline.monolithic.multisample.
-  // min_sample_shading_*` cases execute for the first time (up from 0,
-  // every one previously failing at pipeline-creation time) -- but a real
-  // re-run surfaced a third, distinct, still-unfixed gap:
-  // `min_sample_shading_enabled.min_1_0.samples_2` (min_1_0 =
-  // `minSampleShading` 1.0, requiring every covered sample to actually
-  // get its own distinct shaded value) genuinely *fails* ("Got less
-  // unique colors than requested through minSampleShading"), not merely
-  // `NotSupported` -- `Executor.cpp`'s own per-sample shade/dispatch/merge
-  // loop (roadmap H7f) deliberately keeps every interpolated varying
-  // (including `gl_FragCoord`) at the pixel center on every pass (see its
-  // own "harmless, just not maximally efficient" comment), so a
-  // `gl_FragCoord`-derived color -- like this real CTS case's own
-  // `color_frag` shader -- recomputes the identical value on every one of
-  // a pixel's per-sample passes instead of a genuinely distinct one; this
-  // is invisible to a shader whose color instead derives from
-  // `gl_SampleID`/`SV_SampleIndex` (already correctly varied per pass),
-  // but a real conformance blocker for one that does not. Advertising the
-  // feature bit before every mandatory, feme-supported-sample-count case
-  // that exercises it passes for real would be a conformance violation,
-  // so it stays off pending a new roadmap follow-on, H7p (widening
-  // `Executor.cpp`'s per-sample pass loop to evaluate `gl_FragCoord` --
-  // and any other otherwise-pixel-center interpolant -- at the actual
-  // sample position `SamplePositions` already tracks, not just the pixel
-  // center, on every pass). See "Roadmap H7o: measured impact" in
-  // VulkanCTSReport.md for the real reduction, both fixes, and the full
-  // CTS re-run this comment summarizes.
+  // rebuilding a push-constant-only function) was also fixed (roadmap
+  // H7o). A third, distinct gap then surfaced: `min_sample_shading_
+  // enabled.min_1_0.samples_2` (`min_1_0` = `minSampleShading` 1.0,
+  // requiring every covered sample to actually get its own distinct
+  // shaded value) genuinely *failed* ("Got less unique colors than
+  // requested through minSampleShading"), not merely `NotSupported` --
+  // `Executor.cpp`'s own per-sample shade/dispatch/merge loop (roadmap
+  // H7f) kept every interpolated varying (including `gl_FragCoord`) at
+  // the pixel center on every pass, so a `gl_FragCoord`-derived color --
+  // like this real CTS case's own `color_frag` shader -- recomputed the
+  // identical value on every one of a pixel's per-sample passes instead
+  // of a genuinely distinct one. Roadmap H7p closes this: `processTile`'s
+  // per-sample pass loop now re-derives each pass's `Position.xy`
+  // (`gl_FragCoord`/`SV_Position`) from `SamplePositions[PassSample]`'s
+  // own real per-sample offset instead of leaving it pixel-center, so a
+  // shader depending on `gl_FragCoord` (with or without also depending on
+  // `gl_SampleID`/`SV_SampleIndex`) now genuinely varies per sample. Even
+  // with that fix, the real `min_sample_shading_enabled.min_1_0.samples_2`
+  // case still failed identically -- a fourth, independently-blocking bug:
+  // `CommandBuffer.cpp`'s `buildSubpassInputHeap` used the *currently
+  // bound draw's own pipeline* sample count uniformly for every heap
+  // entry's `RowPitch`/`SampleStride`, including subpass **input**
+  // attachments read back via `subpassLoad`. The real CTS case's own
+  // structure -- subpass 0 draws with a genuinely multisampled pipeline,
+  // then subpass 1+ each use a *different*, single-sample pipeline to
+  // `subpassLoad` one specific sample back out of subpass 0's own
+  // multisampled attachment -- means the input attachment's real sample
+  // count (subpass 0's) differs from the reading pipeline's own (subpass
+  // 1+'s), so using the latter silently mis-addressed every subpass-input
+  // read (`SampleStride` even went to a flat `0`, aliasing every sample to
+  // the same texel). Fixed by threading a new, real per-input-attachment
+  // `SubpassInputSampleCounts` vector (populated from each input view's
+  // own image) through `resolveDrawAttachments`/`buildSubpassInputHeap`
+  // instead of assuming the bound pipeline's sample count applies to
+  // every attachment. With all four gaps closed, every mandatory,
+  // feme-supported-sample-count `min_sample_shading*`/`sample_id.*` case
+  // that was previously blocked now either passes for real or fails on an
+  // already-tracked, unrelated gap -- see "Roadmap H7p: measured impact"
+  // in VulkanCTSReport.md for the full reproduction.
   Info.Features.alphaToOne = VK_TRUE;
+  Info.Features.sampleRateShading = VK_TRUE;
 
   // Roadmap E20 ("Block-compressed image groundwork + ASTC LDR decode")
   // first tracked this Vulkan 1.0 core feature bit explicitly (previously
