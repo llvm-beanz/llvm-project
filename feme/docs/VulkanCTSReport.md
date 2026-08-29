@@ -12127,6 +12127,165 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
     --deqp-log-images=disable --deqp-log-shader-sources=disable
 ```
 
+## Roadmap H6j: measured impact (`CanonicalizeStage.cpp` mesh-output `RowCount` reflection)
+
+H6g-b-d's own real-ICD re-run left this row a single, specific, named
+diagnostic to root-cause: 40 of the 80 `dEQP-VK.mesh_shader.ext.in_out.*`
+bucket's failures reached `vkQueueSubmit` and failed there with:
+
+```
+vkQueueSubmit: vertex output and fragment input at location 0 disagree on component/row count or type
+  Fail (vk.queueSubmit(queue, 1u, &submitInfo, *fence): VK_ERROR_INITIALIZATION_FAILED at vkCmdUtil.cpp:338)
+```
+
+**Root cause, found by direct code inspection (no reduction technique
+needed this time -- both sides of the check are read directly out of
+`CanonicalizeStage.cpp`/`Executor.cpp`/`GraphicsPipeline.cpp`).** Neither
+of the two byproducts this row's own text speculated about
+(`MeshOutputWrapperPass`/`EntryWrapperPass`) touches a `SignatureElement`'s
+`RowCount` at all -- both operate purely on already-canonicalized
+`feme.stage.*` calls, well after signature reflection has already run. The
+actual bug is in `CanonicalizeStage.cpp`'s own `addElements` lambda: a mesh
+entry's own plain (non-block) per-vertex/per-primitive `Output` global
+(e.g. `layout(location=0) out vec4 v_color[];`, the shape
+`vktMeshShaderInOutTestsEXT.cpp` actually generates) was reflected the same
+way roadmap H5f's `Input`-side treatment reflects a geometry entry's
+`gl_in[]`-shaped varying: the whole declared type -- outer per-vertex array
+dimension included -- becomes `RowCount` via `getStageIORowShape`, with
+`SignatureElement::RowCountIsVertexArray` flagging that the dimension is a
+per-vertex array's own extent rather than a real matrix's row count. That
+flag-and-fold treatment is safe for `Input` because nothing downstream
+ever links an `Input` element's `RowCount` against another stage's one --
+but a mesh entry's `Output` element *is* linked, by `Location`, against
+the fragment stage's own unarrayed input, by both `GraphicsPipeline.cpp`'s
+`validateStageInterfaces` and `feme::graphics::executeDraws`'s own
+varying-linking loop, and neither consults `RowCountIsVertexArray` when
+comparing the two `RowCount`s. Left folded in, a 3-vertex mesh entry's own
+`vec4` per-vertex output was wrongly reflected with `RowCount == 3` (the
+mesh's own `OutputVertices`) instead of `1` (the fragment-visible
+per-vertex shape), disagreeing with the fragment input's own
+`RowCount == 1` at the same location -- exactly this row's own named
+diagnostic, despite both sides sharing the same `layout(location=...)`.
+
+**The fix.** `CanonicalizeStage.cpp`'s `addElements` lambda now peels a
+mesh entry's own plain `Output` global's outer per-vertex/per-primitive
+array dimension off before building its `SignatureElement` -- the same
+peeling a builtin interface block's own per-member element already gets --
+leaving `RowCountIsVertexArray` at its default `false` to match, rather
+than folding the dimension in and flagging it the way `Input`'s H5f
+treatment does. New `CanonicalizeStageTest.
+MeshStagePeelsPerVertexArrayFromOutputRowCount` reproduces the bug
+directly at the unit level: confirmed to fail (`RowCount` wrongly `3`, not
+`1`) without this fix and pass with it. The pre-existing
+`MeshStageCanonicalizesOutputArrayStore` test (which only asserts the
+store rewrite itself, not the resulting `RowCount`) and
+`ThreadsDynamicVertexIndexIntoOutputStore` (deliberately tagged a
+non-`Mesh` stage, confirming this fix does not touch a real per-stage
+matrix output's own `RowCount`) both remain unaffected.
+
+```
+$ ninja -C <feme-build> check-feme
+...
+Total Discovered Tests: 2027
+  Unsupported:   59 (2.91%)
+  Passed     : 1968 (97.09%)
+```
+
+Up from H6g-b-d's own 1967/2026 by exactly the 1 new test this row adds
+(0 pre-existing tests newly failed).
+
+**A real ICD re-run confirms the fix, and finds a new bug in its place.**
+Re-running this row's own named case: the interface mismatch is gone, and
+it now progresses all the way to a genuine image comparison:
+
+```
+ <Text>Image comparison failed: max difference = (0, 0, 1, 1), threshold = (0.005, 0.005, 0.005, 0.005)</Text>
+  Fail (Result does not match reference; check log for details at vktMeshShaderInOutTestsEXT.cpp:1590)
+```
+
+Re-running the full 560-case `dEQP-VK.mesh_shader.ext.in_out.*` bucket hit
+the same class of problem H6c-a-a-iii's own crash first ran into: several
+of the 40 newly-unblocked cases now reach real mesh-stage execution for
+the first time and crash the whole `deqp-vk` process outright, losing
+every case after the first crash in one run. Using the same per-case
+resume-loop methodology H6c-a-a-iii's own reproduction established
+(blacklisting each case whose `Test case '...'..` line printed with no
+following result line, removing both resolved and blacklisted cases from
+the remaining list, and repeating), the full bucket resolves after 33
+iterations:
+
+```
+Passed:         0/560 (0.0%)
+Failed:        48/560 (8.6%)
+Not supported: 480/560 (85.7%)
+Crashed (blacklisted, no clean result): 32/560 (5.7%)
+```
+
+Grepping every iteration's combined log confirms **zero** remaining
+occurrences of "disagree on component/row count or type", down from 40 --
+this row's own targeted diagnostic is fully resolved bucket-wide, not just
+for the one named case. The bucket's 80 pre-existing failures split three
+ways now, instead of H6g-b-d's own two:
+
+```
+     40 JIT session error: Symbols not found: [ spirv_var_NN ]  (already-tracked H6g-b-c, unchanged)
+      8 Result does not match reference (vktMeshShaderInOutTestsEXT.cpp:1590) -- genuine image-comparison failure, out of this row's own scope
+     32 SIGSEGV/SIGABRT inside feme::graphics::executeDraws itself -- new, not yet root-caused
+```
+
+The 40 `spirv_var_NN` cases are confirmed unchanged (still H6g-b-c's own
+already-tracked bucket, not a duplicate). The 8 clean image-comparison
+failures are a real, further, out-of-scope bug this row was never going to
+fix (correct interface linkage does not imply correct pixel output) and
+are left unfiled, since nothing about them is FeMe/MLIR-diagnosable yet --
+a `deqp-vk` reference-image mismatch, not a `feme`-side error. The
+remaining 32 are a genuinely new, distinct crash, confirmed by a real
+`gdb` backtrace to be heap corruption (a bad `free()` several frames inside
+`llvm::Expected<feme::graphics::StageStorage>`'s destructor) reached only
+through `executeDraws`/`runPreparedDraw`/`runMeshDraw`/`vkQueueSubmit` --
+never reachable before this row's own fix let these cases past submission-
+time validation in the first place. Filed as a new roadmap row one level
+under H6 (not nested any deeper under H6g-b, per the standing instruction
+against nesting milestone IDs more than one lowercase letter deep going
+forward), H6k.
+
+`FeMeGraphicsDesign.md`'s G6 status paragraph updated with a short note
+explaining why this direction could not reuse H5f's `Input`-side
+flag-and-fold `RowCountIsVertexArray` treatment verbatim.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure signature-reflection fix within
+`VK_EXT_mesh_shader`'s already-advertised scope, touching no feature bit
+or extension.
+
+**Milestone H6 does not close.** This row's own fix lands and is confirmed
+complete for the exact diagnostic it targeted, but the same real-ICD
+re-run finds a new blocker in the same bucket: H6k.
+
+**Reproducing this row.** Same ICD build as every prior mesh-shading row:
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case=dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only \
+    --deqp-log-filename=single_h6j.qpa
+grep "^TEST: dEQP-VK.mesh_shader.ext.in_out\." dEQP-VK-cases.txt | sed 's/^TEST: //' > cases_h6j.txt
+# The full bucket needs the resume-loop below -- several of the 40
+# newly-unblocked cases crash the whole process outright (H6k):
+cp cases_h6j.txt remaining.txt
+: > results.txt; : > blacklist.txt
+while [ -s remaining.txt ]; do
+  VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+    ./deqp-vk --deqp-caselist-file=remaining.txt \
+      --deqp-log-filename=iter.qpa \
+      --deqp-log-images=disable --deqp-log-shader-sources=disable \
+      > iter.stdout 2>&1
+  # Parse iter.stdout: every "Test case '...'.." line with no following
+  # Pass/Fail/NotSupported/... line before the process died is a crash;
+  # append it to blacklist.txt, append every other case to results.txt,
+  # then remove both from remaining.txt and repeat.
+done
+```
+
 ## Roadmap H6c-a: closed by its own split
 
 Re-checking H6c-a's own literal ask now that its three named

@@ -2895,8 +2895,22 @@ H6c-a-b) needs H6d's own checked dispatch queue to give them somewhere
 real to read from/write into. No amplification dispatch queue or meshlet
 assembly exists yet (roadmap H6d); the executor has no mesh-chaining path
 (roadmap H6e); and `vkCreateGraphicsPipelines`/`PhysicalDeviceInfo.cpp`
-accept and advertise nothing mesh-shader-related (roadmap H6f). See
-Roadmap.md's H6a-H6i rows for the full remaining breakdown.
+accept and advertise nothing mesh-shader-related (roadmap H6f). Roadmap
+H6j has since found and closed a gap H6b's own signature reflection left
+unlike H5f's equivalent `Input`-side treatment: a mesh entry's own plain
+(non-block) per-vertex/per-primitive `Output` global was reflected with its
+outer per-vertex/per-primitive array dimension folded into `RowCount`
+(mirroring H5f's `Input`-side `RowCountIsVertexArray`-flagged treatment
+verbatim), which is wrong for this direction specifically -- unlike
+`Input`, this element's `RowCount` is linked, by `Location`, against the
+fragment stage's own unarrayed input (`GraphicsPipeline.cpp`'s
+`validateStageInterfaces`/`feme::graphics::executeDraws`'s varying-linking
+loop), neither of which consult the flag. `CanonicalizeStage.cpp` now
+peels that dimension off a mesh entry's own plain `Output` global before
+building its `SignatureElement`, the same way a builtin interface block's
+per-member element already has it peeled, rather than folding it in and
+flagging it. See Roadmap.md's H6a-H6j rows for the full remaining
+breakdown.
 
 ### G7: Ray-query and traversal foundations
 
