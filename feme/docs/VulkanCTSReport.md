@@ -13703,3 +13703,152 @@ original roadmap text) remains unimplemented and untracked with its own
 feature bit, broken out as H7n. `check-feme` passes in full (2020/2079,
 59 pre-existing unrelated `Unsupported`, 0 `Failed`), up from H7e's own
 2016/2075 by exactly the 4 new tests this row adds.
+
+## Roadmap H7o: measured impact (two `sampleRateShading` pipeline-creation-time gaps)
+
+**What changed**: two real, distinct fixes, both to CPU-target compiler
+passes, neither touching any feature bit directly.
+
+1. `SIMDize.cpp`'s `checkVectorDecompositionSupported` gained a new
+   producer case: a plain (non-groupshared) `LoadInst` of vector type at a
+   divergent address is now a supported producer, decomposed into `N`
+   widened per-component values (`widenScalarizedFallback`) exactly like a
+   resource-call load already was. A groupshared load of vector type stays
+   excluded (its own gather-based path, `widenGroupSharedLoad`, does not
+   yet support a vector-typed result).
+2. `RootConstantLowering.cpp`'s `addRootConstantParams` and
+   `SPIRVPushConstantLowering.cpp`'s inline `SPIRVPushConstantLoweringPass
+   ::run` `Function::Create` block both now copy the original function's
+   metadata (`getAllMetadata`/`setMetadata`) onto the rebuilt function that
+   appends trailing `root_constants`/`root_constant_size` ABI parameters --
+   matching the pattern the other ~4 such Function-replacement helpers
+   (`ResourceLowering.cpp`, `SPIRVResourceLowering.cpp`,
+   `SPIRVSubpassLowering.cpp`) already used. `GlobalObject::
+   copyAttributesFrom()` does not copy function-attached metadata; these
+   two helpers had silently dropped it entirely.
+
+**Root cause investigated**: a real IR reduction, capturing the actual
+module right before `SIMDizePass` for a real
+`min_sample_shading_enabled.min_0_0.samples_2.quad` re-run (temporary
+`FEME_DEBUG_DUMP_PRE_SIMDIZE` instrumentation in `Pipeline.cpp`, reverted
+after use), showed H7f's own original diagnosis was wrong: the failing
+value was not a `GetElementPtrInst`-addressed divergent buffer *store*
+(already fully supported, see `widenResourceCall`) but the **vertex**
+shader (`quad_vert`) of the same test group, whose classic
+`positions[gl_VertexIndex]` local constant lookup table -- a
+per-invocation-divergent index into an ordinary, non-groupshared
+`<4 x float>` array -- had no producer case at all in
+`checkVectorDecompositionSupported`'s switch. `widenScalarizedFallback`
+(the generic instruction-widening fallback) would have built an illegal
+nested `<W x <N x T>>` vector type had a vector-typed load been let
+through unconditionally, explaining why the check existed in the first
+place; the fix instead decomposes the per-lane load's own vector result
+into `N` separate widened components. Confirmed against the real captured
+module (`feme-opt --llvm -passes=feme-cpu-simdize`): compiled cleanly,
+zero errors, after the fix.
+
+Re-flipping `sampleRateShading` to `VK_TRUE` and re-running the 4 targeted
+`min_sample_shading_*.samples_2.quad` cases with only this first fix
+applied surfaced a **second**, distinct failure, reachable only once the
+first was fixed: `feme-cpu-wrap-fragment: fragment stage wrapper requires
+attached feme.signature metadata`, for all 4 cases. Root-caused by
+manually reducing the group's second fragment shader
+(`copy_sample_frag`, `subpassLoad` + a push constant, no bound resource)
+through `glslangValidator` → `feme-translate --spirv-to-llvmir` →
+`feme-opt --feme-graphics-canonicalize-stage,feme-graphics-validate-stage`
+(confirming `!feme.signature` metadata is correctly attached at that
+point) and then, since `feme-opt`'s tool driver has no registered
+pass-pipeline callback for `SPIRVSubpassLoweringPass` (making a
+`subpassLoad`-using shader impossible to reduce standalone via
+`feme-opt` alone), a second temporary debug dump
+(`FEME_DEBUG_DUMP_PRE_WRAP`, before `WaveLoweringPass`, also reverted
+after use) against a real failing case -- confirming `!feme.signature`
+was genuinely missing by that point, and tracing backward through every
+Function-replacement helper in the pipeline to find the two (of ~6) that
+were missing the metadata-copy step every other one already had.
+
+**Targeted re-run** (both fixes applied, `sampleRateShading` re-flipped to
+`VK_TRUE`), the same 4 cases from H7f's own targeted sweep:
+
+```
+min_sample_shading_disabled.min_0_0.samples_2.quad   Pass
+min_sample_shading_disabled.min_1_0.samples_2.quad   Pass
+min_sample_shading_enabled.min_0_0.samples_2.quad    Pass
+min_sample_shading_enabled.min_1_0.samples_2.quad    Fail (Got less unique colors than requested through minSampleShading)
+```
+
+**A third, distinct, still-open bug**: `min_sample_shading_enabled.
+min_1_0.samples_2.quad` (`min_1_0` = `minSampleShading` 1.0, the
+strictest setting, requiring one genuinely distinct shaded value per
+covered sample) fails for real, not merely `NotSupported`. The full
+`min_sample_shading_*` group (60 cases) confirms this is reproducible in
+isolation (10 Pass, 0 Fail when run one case at a time; a grouped/glob run
+showed apparent nondeterminism for this exact case, `NotSupported`
+instead of `Fail`, not fully understood but not trusted -- the isolated
+result is the reliable one). Root cause: this case's own `color_frag`
+shader derives its output purely from `fract(gl_FragCoord.xy)`, with no
+`gl_SampleID`/`SV_SampleIndex` dependency at all. `Executor.cpp`'s
+`processTile` per-sample pass loop (H7f) deliberately keeps every
+interpolated varying, including `gl_FragCoord`, at the pixel center on
+every pass -- an explicit, documented design choice ("Interpolated
+varyings stay pixel-center on every pass... a shader whose output does
+not depend on `SV_SampleIndex`/`gl_SampleID` simply recomputes the same
+color on every pass") that turns out to be insufficient for full
+per-sample-value conformance: any invocation-count requirement is
+over-satisfied (this loop always runs at full sample rate, exceeding any
+`minSampleShading` minimum), but a `gl_FragCoord`-derived shader's
+per-sample *value* never actually varies, so the CTS's own "sufficient
+color diversity" check fails at `minSampleShading = 1.0` specifically.
+Not fixed here -- tracked as a new roadmap follow-on, H7p (widening
+`Executor.cpp`'s per-sample loop to evaluate `gl_FragCoord` at the actual
+per-sample position `SamplePositions` already tracks, not the pixel
+center, on every pass).
+
+**Full sweep** (124 cases, the same construction H7f's own 224-case sweep
+used -- `multisample_shader_builtin.sample_id.*`, `multisample.
+alpha_to_one.samples_{1,2,4,8}[_sparse]`, `multisample.
+min_sample_shading_{enabled,disabled}.min_*.samples_{2,4,8}.quad`,
+`extended_dynamic_state.after_pipelines.*alpha_to_one*`, restricted to
+feme-supported sample counts -- rerun with `sampleRateShading` correctly
+left `VK_FALSE` given the H7p gap above):
+
+```
+Test run totals:
+  Passed:          4/124 (3.2%)
+  Failed:          0/124 (0.0%)
+  Not supported: 120/124 (96.8%)
+```
+
+**0 regressions; 0 failures.** Identical shape to H7f's own second run:
+the 4 `Passed` are `alpha_to_one`'s own real cases (unaffected by this
+row), and all `NotSupported` cases are gated on `sampleRateShading`
+staying off (H7p) or the orthogonal, unrelated `VK_EXT_extended_dynamic_
+state3` extension.
+
+**Decision**: `sampleRateShading` stays `VK_FALSE` -- the H7p gap above is
+a real, mandatory-case conformance blocker, so flipping the bit now would
+be a conformance violation. Both real fixes land regardless: they are
+genuine, valuable, independently-useful compiler-correctness
+improvements (a common vertex-shader idiom and a common push-constant-
+only fragment-shader shape both now compile correctly where they
+previously did not), confirmed by `ninja check-feme` and by the CTS
+sweep above showing zero regressions.
+
+**Inventories**: `Vulkan14FeatureInventory.md` updated -- `sampleRateShading`
+stays `no`, comment updated to describe both fixes and point at the new
+H7p blocker instead of H7o (now itself fixed). `VulkanExtensionInventory.md`
+confirmed to need no change. `FeMeVulkanDesign.md`'s H7 status paragraph
+updated. `FeMeCPUDesign.md`'s `SIMDizePass` producer-shape count updated
+from nine to ten (the new `LoadInst` case).
+
+**Milestone H7o closes** (struck through in `Roadmap.md`), leaving a new,
+narrower follow-on, **H7p**, to unblock `sampleRateShading`'s own feature
+bit. `check-feme` passes in full (2022/2081, 59 pre-existing unrelated
+`Unsupported`, 0 `Failed`), up from H7f's own 2020/2079 by exactly the 2
+new tests this row adds (`SIMDizeTest`'s
+`DecomposesPrivateMemoryDivergentLoadIntoExtractElement` and a new lit
+test, `Transforms/CPU/simdize-private-vector-load-scalarize.ll`; the
+metadata-copy fix's own coverage extends two pre-existing lit tests,
+`Transforms/CPU/root-constant-lowering.ll` and
+`Transforms/CPU/spirv-push-constant-lowering.ll`, each gaining a new
+`CHECK`'d case, adding no further test count).
