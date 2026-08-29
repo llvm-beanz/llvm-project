@@ -345,7 +345,8 @@ clipAgainstPlane(std::vector<RasterVertex> In,
 }
 
 std::vector<RasterVertex> clipTriangle(std::array<RasterVertex, 3> Tri,
-                                       ArrayRef<LinkedVarying> Varyings) {
+                                       ArrayRef<LinkedVarying> Varyings,
+                                       bool DepthClampEnable) {
   std::vector<RasterVertex> Poly(Tri.begin(), Tri.end());
   static constexpr float (*Planes[])(const std::array<float, 4> &) = {
       [](const std::array<float, 4> &C) { return C[3] - ClipEpsilon; },
@@ -356,8 +357,18 @@ std::vector<RasterVertex> clipTriangle(std::array<RasterVertex, 3> Tri,
       [](const std::array<float, 4> &C) { return C[3] - C[2]; },
       [](const std::array<float, 4> &C) { return C[2]; },
   };
-  for (auto *Plane : Planes) {
-    Poly = clipAgainstPlane(std::move(Poly), Plane, Varyings);
+  // (roadmap H7d) `depthClampEnable`: per the Vulkan spec, a primitive is
+  // *not* clipped against the near/far planes when depth clamp is
+  // enabled -- its fragments' depths are clamped to the viewport's
+  // `[minDepth, maxDepth]` range instead (`projectVertex`'s own
+  // `DepthClampEnable` parameter). The near-eye guard (`Planes[0]`) and
+  // the four XY side planes (`Planes[1..4]`) always still run regardless:
+  // only the last two entries above are the actual near/far Z-clip
+  // planes.
+  size_t PlaneCount = DepthClampEnable ? std::size(Planes) - 2
+                                      : std::size(Planes);
+  for (size_t I = 0; I != PlaneCount; ++I) {
+    Poly = clipAgainstPlane(std::move(Poly), Planes[I], Varyings);
     if (Poly.size() < 3)
       return {};
   }
@@ -369,6 +380,14 @@ struct ScreenTriangle {
   std::array<std::array<float, 2>, 3> Pos;  // pixel-space x/y
   std::array<float, 3> InvW;                // 1/clip-space w, for SV_Position.w
   std::array<float, 3> Depth;               // viewport-mapped depth
+  /// (roadmap H7d) `depthClampEnable`'s single choke point: the owning
+  /// pipeline's viewport `[minDepth, maxDepth]` range (already sorted
+  /// low/high), applied to each fragment's *interpolated* depth -- see
+  /// `projectVertex`'s comment for why this can't happen any earlier,
+  /// per-vertex. Left at the default `[0, 1]` (harmless either way) when
+  /// depth clamp is disabled, since it's simply never consulted then.
+  float DepthClampLo = 0.0f;
+  float DepthClampHi = 1.0f;
   std::array<const uint32_t *, 3> Varyings; // pointer into owning storage
   bool FrontFacing;
   uint32_t PrimitiveID;
@@ -589,6 +608,33 @@ Error writeDepth(AttachmentView &Depth, uint32_t SampleCount, int32_t PX,
   }
 }
 
+/// (roadmap H7d) The depth-bias formula's format-dependent "r" constant
+/// (the "minimum resolvable difference" the Vulkan spec's own
+/// `depthBiasConstantFactor * r` term is scaled by): for a fixed-point
+/// (UNORM) depth format with \c N representable bits, `r = 2^-N`
+/// (confirmed via a real CTS test's own code comment,
+/// `depth_bias_triangle_list_fill.amber`, for `D16_UNORM`'s `r = 2^-16`).
+/// `D32_FLOAT` instead uses the floating-point format's own "r", the
+/// primitive's own maximum depth value's ULP: `ldexp(1, exponent(MaxZ) -
+/// 24)` (24 = 23 explicit mantissa bits + 1 implicit leading bit),
+/// special-cased to the smallest subnormal's exponent when \p MaxZ is 0.
+float depthBiasR(cpu::ResourceFormat Format, float MaxZ) {
+  switch (Format) {
+  case cpu::ResourceFormat::D16_UNORM:
+    return std::ldexp(1.0f, -16);
+  case cpu::ResourceFormat::D24_UNORM_S8_UINT:
+    return std::ldexp(1.0f, -24);
+  case cpu::ResourceFormat::D32_FLOAT:
+  default: {
+    int Exponent;
+    std::frexp(MaxZ, &Exponent);
+    if (MaxZ == 0.0f)
+      Exponent = -125; // The smallest representable exponent for a float.
+    return std::ldexp(1.0f, Exponent - 24);
+  }
+  }
+}
+
 /// Reads the stencil attachment's stored value, the same indexing
 /// `readDepth` uses. `S8_UINT` is one raw byte per texel; the stencil half
 /// of `D24_UNORM_S8_UINT` is the high byte of the same 4-byte word
@@ -661,9 +707,10 @@ uint8_t applyStencilOp(StencilOp Op, uint8_t Current, uint8_t Reference) {
 
 /// Runs the combined depth/stencil test at pixel (\p PX, \p PY), sample
 /// \p Sample of \p SampleCount, against candidate depth \p NewDepth, in
-/// the fixed-function order every API shares: the stencil test first
-/// (applying `FailOp` on failure), then -- only if stencil passed -- the
-/// depth test (applying `DepthFailOp`/`PassOp`). Returns whether the
+/// the fixed-function order every API shares: (roadmap H7d) the depth
+/// bounds test first (discarding outright on failure), then the stencil
+/// test (applying `FailOp` on failure), then -- only if stencil passed --
+/// the depth test (applying `DepthFailOp`/`PassOp`). Returns whether the
 /// fragment may proceed to color write. \p DepthAttachment/
 /// \p StencilAttachment are only dereferenced when the corresponding
 /// test/write is enabled (the caller already validated they are bound in
@@ -678,6 +725,22 @@ testDepthStencil(const DepthState &Depth, const StencilState &Stencil,
                  AttachmentView &StencilAttachment, uint32_t SampleCount,
                  bool FrontFacing, int32_t PX, int32_t PY, uint32_t Sample,
                  float NewDepth, std::optional<uint8_t> RefOverride = {}) {
+  // (roadmap H7d) The depth bounds test runs first, per the Vulkan spec's
+  // fixed-function ordering -- before even the stencil test -- and tests
+  // the value *already stored* in the depth attachment at this sample
+  // (`Za` in the spec's own terms), not the incoming fragment's own
+  // `NewDepth`, against `[MinDepthBounds, MaxDepthBounds]`. Failing it
+  // discards the fragment outright, with no stencil/depth write of any
+  // kind, exactly like every other reject below.
+  if (Depth.BoundsTestEnable) {
+    Expected<float> StoredDepth =
+        readDepth(DepthAttachment, SampleCount, PX, PY, Sample);
+    if (!StoredDepth)
+      return StoredDepth.takeError();
+    if (*StoredDepth < Depth.MinDepthBounds ||
+        *StoredDepth > Depth.MaxDepthBounds)
+      return false;
+  }
   StencilFaceState Face = FrontFacing ? Stencil.Front : Stencil.Back;
   if (RefOverride)
     Face.Reference = *RefOverride;
@@ -953,7 +1016,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                              Draw.ResolveAttachments.size(),
                              Draw.Attachments.size());
   const DepthState &PipelineDepth = Pipeline.getDepthState();
-  if ((PipelineDepth.TestEnable || PipelineDepth.WriteEnable) &&
+  if ((PipelineDepth.TestEnable || PipelineDepth.WriteEnable ||
+      PipelineDepth.BoundsTestEnable) &&
       Draw.DepthStencil.Depth.Data.empty())
     return createStringError(inconvertibleErrorCode(),
                              "depth testing/writes are enabled but the draw "
@@ -1416,7 +1480,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   bool FSMayDiscard = (FSFlags & (cpu::FEME_CPU_ARTIFACT_USES_DISCARD |
                                   cpu::FEME_CPU_ARTIFACT_USES_DEMOTE)) != 0;
   bool DepthTestOrWrite = PipelineDepth.TestEnable || PipelineDepth.WriteEnable;
-  bool NeedsDepthStencil = DepthTestOrWrite || PipelineStencil.TestEnable;
+  // (roadmap H7d) `BoundsTestEnable` also needs the depth-read path active
+  // even when neither the regular depth test nor a depth write is
+  // enabled -- a pipeline may legally enable only the bounds test.
+  bool NeedsDepthStencil = DepthTestOrWrite || PipelineDepth.BoundsTestEnable ||
+                          PipelineStencil.TestEnable;
   bool UseEarlyDepthStencil =
       NeedsDepthStencil && !FSDepthOut && !FSStencilRefOut && !FSMayDiscard;
   // (roadmap H4) Which primitive class actually reaches the rasterizer. A
@@ -1580,6 +1648,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       InvW = 1.0f / W;
       Depth =
           Viewport.MinDepth + NdcZ * (Viewport.MaxDepth - Viewport.MinDepth);
+      // (roadmap H7d) `depthClampEnable`: NOT clamped here. Per the
+      // Vulkan spec, depth clamping is a per-*fragment* operation applied
+      // to the (possibly out-of-[0,1]) depth *after* it has been
+      // interpolated across the primitive, not a per-vertex clamp
+      // applied before interpolation -- e.g. a triangle with one vertex
+      // at depth 0.5 and two at depth -0.5 must clamp to a *uniform* 0.0
+      // wherever the interpolated depth is negative, not interpolate
+      // between 0.5 and a clamped-to-0.0 endpoint (which would smear a
+      // gradient across the whole primitive instead). `Depth` here stays
+      // the raw, unclamped viewport-mapped value; the actual clamp
+      // happens once interpolated, at each `ScreenTriangle`'s single
+      // depth-clamp choke point below.
     };
 
     // Screen-space triangles plus their owning varying storage, binned into
@@ -1649,6 +1729,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       ST.Pos = Screen;
       ST.InvW = InvW;
       ST.Depth = Depth;
+      ST.DepthClampLo = std::min(Primitive.Viewport->MinDepth,
+                                 Primitive.Viewport->MaxDepth);
+      ST.DepthClampHi = std::max(Primitive.Viewport->MinDepth,
+                                 Primitive.Viewport->MaxDepth);
       ST.IsLine = IsLine;
       ST.EdgeDistance = Edge;
       ST.ArcLength = Arc;
@@ -1817,7 +1901,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         continue;
       std::array<RasterVertex, 3> V = {vertexAt(Tri[0]), vertexAt(Tri[1]),
                                        vertexAt(Tri[2])};
-      std::vector<RasterVertex> Clipped = clipTriangle(V, Varyings);
+      std::vector<RasterVertex> Clipped =
+          clipTriangle(V, Varyings, Pipeline.getRasterState().DepthClampEnable);
       for (size_t I = 1; I + 1 < Clipped.size(); ++I) {
         std::array<const RasterVertex *, 3> Poly = {&Clipped[0], &Clipped[I],
                                                     &Clipped[I + 1]};
@@ -1844,6 +1929,48 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             (Cull == CullMode::Front && FrontFacing) ||
             (Cull == CullMode::Back && !FrontFacing))
           continue;
+
+        // (roadmap H7d) `depthBiasEnable`: applies uniformly to a
+        // `PolygonMode::Fill`/`Line`/`Point` triangle alike (confirmed via
+        // real CTS test data, `vktDrawDepthBiasTests.cpp`'s
+        // `depth_bias_triangle_list_{fill,line,point}` cases) -- mutating
+        // `Depth` here, before the `PolygonMode` branch below runs, means
+        // every one of those three paths inherits the biased depth for
+        // free. The bias is a single constant added uniformly to all
+        // three vertices, which commutes with linear interpolation, so
+        // this is mathematically equivalent to biasing the whole
+        // interpolated surface -- matching how a real GPU computes it
+        // once per polygon rather than per-fragment.
+        if (Pipeline.getRasterState().DepthBiasEnable) {
+          const RasterState &Bias = Pipeline.getRasterState();
+          // `maxSlope` reuses the same directed-edge-function shape as
+          // `SArea`/`edgeFn` above, just with depth deltas standing in
+          // for one of the two position deltas -- `abs()` makes it
+          // sign-independent, so it needs no pre-/post-swap adjustment.
+          float Dx1 = Screen[1][0] - Screen[0][0];
+          float Dy1 = Screen[1][1] - Screen[0][1];
+          float Dx2 = Screen[2][0] - Screen[0][0];
+          float Dy2 = Screen[2][1] - Screen[0][1];
+          float Dz1 = Depth[1] - Depth[0];
+          float Dz2 = Depth[2] - Depth[0];
+          float MaxSlope = 0.0f;
+          if (SArea != 0.0f) {
+            float DzDx = (Dz1 * Dy2 - Dz2 * Dy1) / SArea;
+            float DzDy = (Dx1 * Dz2 - Dx2 * Dz1) / SArea;
+            MaxSlope = std::max(std::fabs(DzDx), std::fabs(DzDy));
+          }
+          float MaxZ = std::max({Depth[0], Depth[1], Depth[2]});
+          float R = depthBiasR(Draw.DepthStencil.Depth.Format, MaxZ);
+          float FragmentBias =
+              Bias.DepthBiasConstantFactor * R +
+              Bias.DepthBiasSlopeFactor * MaxSlope;
+          if (Bias.DepthBiasClamp > 0.0f)
+            FragmentBias = std::min(FragmentBias, Bias.DepthBiasClamp);
+          else if (Bias.DepthBiasClamp < 0.0f)
+            FragmentBias = std::max(FragmentBias, Bias.DepthBiasClamp);
+          for (float &D : Depth)
+            D += FragmentBias;
+        }
 
         // (roadmap H7c) `fillModeNonSolid`: a surviving (post-cull)
         // triangle whose pipeline requests `PolygonMode::Line`/`Point`
@@ -1886,6 +2013,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         ST.Pos = Screen;
         ST.InvW = InvW;
         ST.Depth = Depth;
+        ST.DepthClampLo = std::min(Primitive->Viewport->MinDepth,
+                                   Primitive->Viewport->MaxDepth);
+        ST.DepthClampHi = std::max(Primitive->Viewport->MinDepth,
+                                   Primitive->Viewport->MaxDepth);
         size_t Stride = Poly[0]->Varyings.size();
         for (unsigned K = 0; K != 3; ++K)
           ST.Varyings[K] = VaryingBits->data() + K * Stride;
@@ -2172,6 +2303,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                   B0 * Tri.InvW[0] + B1 * Tri.InvW[1] + B2 * Tri.InvW[2];
               float Depth =
                   B0 * Tri.Depth[0] + B1 * Tri.Depth[1] + B2 * Tri.Depth[2];
+              // (roadmap H7d) `depthClampEnable`'s single choke point:
+              // clamps the *interpolated* per-fragment depth, not any
+              // per-vertex value -- see `projectVertex`'s comment.
+              if (Pipeline.getRasterState().DepthClampEnable)
+                Depth = std::clamp(Depth, Tri.DepthClampLo, Tri.DepthClampHi);
               Inv.Position[Lane][0] = Quad.PixelX[Lane] + 0.5f;
               Inv.Position[Lane][1] = Quad.PixelY[Lane] + 0.5f;
               Inv.Position[Lane][2] = Depth;
