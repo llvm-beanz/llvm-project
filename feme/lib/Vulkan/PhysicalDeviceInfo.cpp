@@ -492,6 +492,21 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // the correct face/array-element's own texel, so this can honestly
   // flip to `VK_TRUE`.
   Info.Features.imageCubeArray = VK_TRUE;
+  // Roadmap H7c: `fillModeNonSolid`. `GraphicsPipeline.cpp`'s
+  // `translateRasterState` used to reject any `polygonMode` other than
+  // `VK_POLYGON_MODE_FILL` outright; it now maps `LINE`/`POINT` onto a
+  // new `feme::graphics::PolygonMode` carried on `RasterState::Polygon`.
+  // `Executor.cpp`'s solid-triangle assembly loop decomposes a
+  // `PolygonMode::Line` triangle into its own 3 edges (reusing F5's own
+  // line-width/mode/stipple machinery unmodified for each, per
+  // `VK_KHR_line_rasterization`'s own spec text extending those fields to
+  // "any line segment ... drawn ... when polygonMode is
+  // VK_POLYGON_MODE_LINE") or a `PolygonMode::Point` triangle into its
+  // own 3 vertices (reusing the existing point-topology quad expansion),
+  // instead of the ordinary filled-interior path -- proven end to end by
+  // `ExecutorTest.cpp`'s `PolygonModeLineRastersOnlyTheTrianglesThreeEdges`/
+  // `PolygonModePointRastersOnlyTheTrianglesThreeVertices`.
+  Info.Features.fillModeNonSolid = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;

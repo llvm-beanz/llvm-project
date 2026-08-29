@@ -111,10 +111,11 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
 
 TEST(PhysicalDeviceInfo,
      OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised) {
-  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a) `robustBufferAccess`/`dualSrcBlend`/
-  // `textureCompressionASTC_LDR`/`multiViewport`/`tessellationShader`/
-  // `geometryShader`/`independentBlend`/`logicOp`/`occlusionQueryPrecise`/
-  // `multiDrawIndirect`/`drawIndirectFirstInstance`/`imageCubeArray` are
+  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c) `robustBufferAccess`/
+  // `dualSrcBlend`/`textureCompressionASTC_LDR`/`multiViewport`/
+  // `tessellationShader`/`geometryShader`/`independentBlend`/`logicOp`/
+  // `occlusionQueryPrecise`/`multiDrawIndirect`/
+  // `drawIndirectFirstInstance`/`imageCubeArray`/`fillModeNonSolid` are
   // the only core features this milestone can honestly claim (see
   // PhysicalDeviceInfo.cpp's comment); every other `VkBool32` stays
   // false, since nothing else has been implemented that could back one
@@ -132,6 +133,7 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.multiDrawIndirect, VK_TRUE);
   EXPECT_EQ(Info.Features.drawIndirectFirstInstance, VK_TRUE);
   EXPECT_EQ(Info.Features.imageCubeArray, VK_TRUE);
+  EXPECT_EQ(Info.Features.fillModeNonSolid, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -146,6 +148,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.multiDrawIndirect = VK_FALSE;
   Cleared.drawIndirectFirstInstance = VK_FALSE;
   Cleared.imageCubeArray = VK_FALSE;
+  Cleared.fillModeNonSolid = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }
@@ -194,7 +197,8 @@ TEST(PhysicalDeviceInfo, GeometryLimitsMeetCore10Minimums) {
 // `VkPhysicalDeviceMultiviewFeatures` struct is covered by
 // `MultiviewFeaturesReportMultiviewTrueAmplificationFalse` below), and
 // must agree with it now that a geometry stage exists at all.
-TEST(PhysicalDeviceInfo, AggregateVulkan11FeaturesReportMultiviewGeometryShader) {
+TEST(PhysicalDeviceInfo,
+     AggregateVulkan11FeaturesReportMultiviewGeometryShader) {
   VkInstance Instance = VK_NULL_HANDLE;
   VkInstanceCreateInfo InstInfo{};
   ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
@@ -215,7 +219,6 @@ TEST(PhysicalDeviceInfo, AggregateVulkan11FeaturesReportMultiviewGeometryShader)
 
   vkDestroyInstance(Instance, nullptr);
 }
-
 
 TEST(PhysicalDeviceInfo, TextureCompressionASTCLDRIsAdvertised) {
   // Roadmap E22: `vkCreateImage` now accepts a block-compressed
@@ -669,9 +672,10 @@ TEST_F(PhysicalDeviceProperties2Test,
   // Roadmap E1: `VkPhysicalDeviceVulkan13Features.dynamicRendering` must
   // agree with the dedicated `VK_KHR_dynamic_rendering` struct case above
   // it -- pre-filled with a non-zero pattern first (the same
-  // unwritten-field guard `MultiviewFeaturesReportMultiviewTrueAmplificationFalse`
-  // below uses) so every other 1.3 bit's explicit `VK_FALSE` is verified
-  // rather than merely a pre-existing zero.
+  // unwritten-field guard
+  // `MultiviewFeaturesReportMultiviewTrueAmplificationFalse` below uses) so
+  // every other 1.3 bit's explicit `VK_FALSE` is verified rather than merely a
+  // pre-existing zero.
   VkPhysicalDeviceVulkan13Features Features13;
   std::memset(&Features13, 0xAA, sizeof(Features13));
   Features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -1433,8 +1437,9 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(IndexTypeUint8Features.indexTypeUint8, VK_TRUE);
 }
 
-TEST_F(PhysicalDeviceProperties2Test,
-       DynamicRenderingLocalReadIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    DynamicRenderingLocalReadIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
   // Roadmap F8a: `VK_KHR_dynamic_rendering_local_read`'s own dedicated
   // feature struct must agree with the aggregate
   // `VkPhysicalDeviceVulkan14Features` case above, exactly like
