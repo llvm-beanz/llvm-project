@@ -11970,3 +11970,78 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
     --deqp-log-filename=in_out_h6g_b_a_i_a_i_c.qpa \
     --deqp-log-images=disable --deqp-log-shader-sources=disable
 ```
+
+## Roadmap H6c-a: closed by its own split
+
+Re-checking H6c-a's own literal ask now that its three named
+prerequisites and its own two split rows have all landed, rather than
+assuming the earlier "why this row could not land" investigation is
+still the final word on it.
+
+**Prerequisite status, re-confirmed by direct inspection, not by
+assuming the roadmap's own struck-through text is accurate:**
+
+- H6d (`feme/lib/Graphics/AmplificationDispatch.cpp`,
+  `feme/lib/Graphics/Meshlet.cpp`): landed. `AmplificationDispatchQueue`
+  and `assembleMeshlet` both exist and are exercised by
+  `AmplificationDispatchTest.cpp`/`MeshletTest.cpp`.
+- H6h (`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`):
+  landed. `TaskPayloadGlobalVariablePattern` converts a
+  `TaskPayloadWorkgroupEXT` global into address space 14, confirmed
+  present by reading the pattern list directly.
+- H6i (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`): landed.
+  `CanonicalizeStagePass::run`'s stage filter accepts
+  `ShaderStage::Mesh`/`Amplification`, and a new `TaskPayloadStore`
+  `feme.stage.*` op (`feme/include/feme/Core/StageOps.h`) canonicalizes
+  a task entry's bounded payload write.
+
+**This row's own two split children, re-confirmed the same way:**
+
+- H6c-a-a wires `MeshOutputBuilder` into a mesh entry's canonicalized
+  `feme.stage.output.store` `Vertex`-operand writes via the new
+  `feme::cpu::MeshOutputWrapperPass`, run immediately before
+  `EntryWrapperPass` in `Pipeline.cpp`'s `ShaderStage::Mesh` case.
+- H6c-a-b wires `TaskPayloadBuilder` into a task entry's canonicalized
+  `feme.stage.task.payload.store` via the new
+  `feme::cpu::TaskPayloadWrapperPass`, run immediately before
+  `EntryWrapperPass` in `Pipeline.cpp`'s `ShaderStage::Amplification`
+  case.
+
+Both wrappers are confirmed reached from `EntryWrapperPass`'s reused
+compute-lowering path (the exact routing H6c-a's own text asks for) by
+`CompiledStageTest.cpp`'s `InvokeMeshWritesPerVertexOutputStore` and
+`InvokeTaskWritesPayloadStore` cases, each compiling a canonicalized-
+shaped mesh/task entry through the real `CompiledStage::create`
+pipeline and observing the resulting write land in `FemeMeshArgs::
+VertexOutputs`/`FemeTaskArgs::Payload` through `invokeMesh`/`invokeTask`
+end to end.
+
+**No further source change results from this row.** Everything H6c-a's
+own text names -- wiring `MeshOutputBuilder`/`TaskPayloadBuilder` into
+real `feme.stage.*` mesh-output-store/task-payload-store operations
+reaching the reused `EntryWrapperPass` path -- was already implemented
+under the row's own H6c-a-a/H6c-a-b children once their shared
+prerequisites landed; this row's remaining work is bookkeeping (closing
+it in the Roadmap) rather than a new patch, mirroring H6g-a's own
+"folds into an existing row, no source change from this row itself"
+precedent.
+
+`ninja check-feme` (assertions-enabled, ccache build) re-run to confirm
+no regression from this bookkeeping-only closure: 1966/2025 passing (59
+pre-existing, unrelated `Unsupported`, 0 `Failed`), byte-identical to
+the baseline already recorded by H6g-b-a-i-a-i-c's own closing entry --
+expected, since no source file changes with this row.
+
+**Milestone H6 still does not close.** H6c-a's own literal ask is now
+fully satisfied, but a real `dEQP-VK.mesh_shader.*` run still hits the
+two gaps H6c-a-a's and H6g-b-a-i-a-i-c's own closing re-runs already
+found and split out: H6g-b-c (a mesh entry's unresolved
+arrayed-builtin-block access reaches the JIT as an undefined symbol,
+since `ValidateStagePass` does not yet validate `ShaderStage::Mesh`) and
+H6g-b-d (`MeshOutputWrapperPass::lowerMeshStageOps`'s catch-all rejects
+a surviving `feme.stage.*`/masked-output-store call that is neither
+`OutputStore` nor `SetMeshOutputs`). Neither is this row's own concern;
+both stay tracked separately. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` confirmed no change needed: this is a pure
+Roadmap bookkeeping closure, touching no feature bit, limit, or
+extension.
