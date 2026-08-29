@@ -37,13 +37,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H7c?
+Can you complete H7d?
 
->  **`fillModeNonSolid`**: `GraphicsPipeline.cpp` explicitly rejects any
->  `VkPipelineRasterizationStateCreateInfo::polygonMode` other than
->  `VK_POLYGON_MODE_FILL` at pipeline-creation time; `Executor.cpp` has no
->  LINE/POINT wireframe-style rasterization path at all (distinct from the
->  already-supported `VK_PRIMITIVE_TOPOLOGY_{LINE,POINT}_LIST` topologies, which
->  rasterize a real line/point primitive, not a filled polygon's
->  edges/vertices). Needs a new non-solid rasterization mode in the triangle
->  path, likely reusing F5's own line-width/stipple machinery for the LINE case
+> **`depthClamp`/`depthBiasClamp`/`depthBounds`**: `GraphicsPipeline.cpp`
+> explicitly rejects `depthClampEnable`, depth bias entirely
+> (`depthBiasEnable`), and
+> `VkPipelineDepthStencilStateCreateInfo::depthBoundsTestEnable` ("the depth
+> bounds test is not implemented") at pipeline-creation time; none of the three
+> has any per-fragment implementation in `Executor.cpp`'s depth/stencil test
+> path. Three related but independently gated depth-pipeline features, grouped
+> since fixing depth-bias admission is a likely prerequisite for
+> `depthBiasClamp` specifically
