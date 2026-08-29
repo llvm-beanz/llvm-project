@@ -36,33 +36,27 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H6l?
+Can you complete H6m?
 
-> **`dEQP-VK.mesh_shader.ext.builtin.cull_primitives` reports
-> `feme-graphics-validate-stage: 'feme.stage.output.store' ...`
-> row/component-out-of-range errors**, alongside the already-diagnosed
-> `spirv_var_16` unresolved-global access H6g-b-c's own fix targeted -- newly
-> visible only because H6g-b-c wired `ShaderStage::Mesh` into
-> `ValidateStagePass::run` for the first time; no other case in a real re-run of
-> the full `dEQP-VK.mesh_shader.ext.builtin.*` group (37 cases) hits it, so this
-> is narrow, not the same shape as H6g-b-c's own arrayed-block gap. **Updated by
-> H6k**: H6k's own fix (folding a mesh entry's constant per-vertex index into
-> `Vertex` rather than `Row`, for both plain arrays and builtin interface
-> blocks) was the leading candidate this row's own text named, and a real re-run
-> of `cull_primitives` confirms it changed this row's own diagnostic shape,
-> without closing it: the originally-reported `row N is out of range for element
-> {4,5}` is gone, replaced by a mix of `row`/`component is out of range` errors
-> spread across elements 1-5 (tallied via a real re-run: components 1/2/3/5 each
-> a handful of times, component 4 sixty times, rows 3/4/5 forty-eight times
-> combined) -- a real re-run of the same 37-case group both immediately before
-> and after H6k's own fix (via `git stash`) confirms the group's own pass/fail
-> split is unchanged (22/37 `Failed` either way, not a regression), so this is
-> H6k's fix surfacing a different facet of the same underlying
-> signature/offset-resolution gap rather than a new bug. Root cause still not
-> isolated: needs a real IR reduction of this exact, now-changed case (the same
-> technique H6k's own investigation used) to find which of `cull_primitives`'s
-> own per-primitive builtin outputs
-> (`gl_PrimitivePointIndicesEXT`/`gl_PrimitiveLineIndicesEXT`/`gl_PrimitiveTriangleIndicesEXT`/`gl_CullPrimitiveEXT`-adjacent
-> shapes, per its own name) still resolves to the wrong `Row`/component, and
-> whether the fix belongs in `resolveOffsetWithinElement`'s own
-> per-primitive-block handling or in this shader's own signature reflection
+> **`vkQueueSubmit` fails a real
+> `dEQP-VK.mesh_shader.ext.builtin.cull_primitives` case with `"stage element N
+> has a 1-bit scalar; only 32-bit elements are implemented yet"`**
+> (`StageStorage.cpp`'s own long-standing "32-bit scalars only" scope limit,
+> `StageStorage.h`), newly reachable only because H6l's own fix lets this case
+> clear `feme-graphics-validate-stage` for the first time. `gl_CullPrimitiveEXT`
+> (`VK_EXT_mesh_shader`'s per-primitive cull builtin) is a SPIR-V/GLSL `bool`
+> (`i1`), the element this case's own error names; nothing mesh-shading-specific
+> about the gap itself -- any stage-IO element with a non-32-bit scalar type
+> hits the same generic check (`StageStorage.cpp`, `SignatureElement::BitWidth
+> != 32`) -- but this is the first real case in this project's own CTS coverage
+> to reach it in the stage-IO path specifically (roadmap E29f already closed the
+> related, but distinct, `Workgroup`-storage addressable-`i1` gap this generic
+> limit does not cover). Needs a real IR reduction of this exact case (the same
+> technique this whole H6g-b/H6j/H6k/H6l chain has used throughout) to scope a
+> fix: whether `StageStorage`'s own per-element layout
+> (`InvocationStride`/`ComponentStride`/`RowStride`, all hard-coded to a 4-byte
+> scalar today) can widen to a 1-bit (or 1-byte, packed) scalar cleanly, or
+> whether a `bool` stage-IO element should instead canonicalize to an ordinary
+> 32-bit integer at the `CanonicalizeStage.cpp`/SPIR-V-to-LLVM boundary before
+> ever reaching `StageStorage` at all (mirroring how a real GPU's own driver
+> typically represents a shader-visible `bool` as a 32-bit value in memory)
