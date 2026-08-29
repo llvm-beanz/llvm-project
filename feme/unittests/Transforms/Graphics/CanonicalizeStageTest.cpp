@@ -1717,6 +1717,50 @@ TEST(CanonicalizeStageTest, MeshStageCanonicalizesOutputArrayStore) {
     EXPECT_FALSE(isa<StoreInst>(&I));
 }
 
+/// (Roadmap H6j) A real `dEQP-VK.mesh_shader.ext.in_out.*` case's plain
+/// (non-block) per-vertex output varying (e.g. `layout(location=0) out
+/// vec4 v_color[];`) reflects `RowCount`/`ComponentCount` for the *fragment-
+/// visible* per-vertex shape (1, 4), not the outer per-vertex array extent
+/// (`OutputVertices`, here 3) `getStageIORowShape` would otherwise fold in
+/// -- unlike `MeshStageCanonicalizesOutputArrayStore` above, which only
+/// checks the store rewrite itself and does not assert on the resulting
+/// signature's shape. Before this row's own fix, this element's `RowCount`
+/// was wrongly 3 (the array extent), disagreeing with the fragment stage's
+/// own unarrayed `vec4` input at the same location -- `GraphicsPipeline.
+/// cpp`'s `validateStageInterfaces`/`feme::graphics::executeDraws`'s own
+/// varying-linking loop, both of which compare `RowCount` by `Location`
+/// across stages -- and failing at `vkQueueSubmit` with "vertex output and
+/// fragment input at location %u disagree on component/row count or
+/// type" despite both sides sharing the same `layout(location=...)`.
+/// `RowCountIsVertexArray` stays `false`: the array dimension is peeled
+/// off here (like a builtin interface block's own per-member element),
+/// not folded into `RowCount` and flagged.
+TEST(CanonicalizeStageTest, MeshStagePeelsPerVertexArrayFromOutputRowCount) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_verts = external addrspace(8) global [3 x <4 x float>], !spirv.Decorations !0
+    define void @main(i32 %i, <4 x float> %v) #0 {
+      %p = getelementptr inbounds [3 x <4 x float>], ptr addrspace(8) @out_verts, i32 0, i32 %i
+      store <4 x float> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].Location, 0u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+  EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
+}
+
 /// (Roadmap H6i) A task entry's bounded payload write -- an ordinary store
 /// through `TaskPayloadGlobalVariablePattern`'s own address-space-14 global
 /// import shape (roadmap H6h) -- canonicalizes into

@@ -1716,12 +1716,12 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     // per-vertex-arrayed `Input` global (`isPerVertexArrayInputGlobal`),
     // never for a builtin interface block's own per-member element, whose
     // `ValueTy` has already had that same dimension peeled off by the
-    // caller before it ever reaches here. (Roadmap H6b) Deliberately not
-    // extended to a mesh entry's own per-vertex/per-primitive `Output`
-    // arrays yet -- see `isPerVertexArrayInputGlobal`'s own comment on why
-    // that stays `Input`-only for now; reconciling this flag's own
-    // meaning for `Output` is left to a later roadmap row alongside the
-    // constant-index case.
+    // caller before it ever reaches here. (Roadmap H6j) A mesh entry's own
+    // plain per-vertex/per-primitive `Output` global gets the same
+    // peeled-`ValueTy`/default-`false` treatment as a builtin block's own
+    // member (see `addElements`'s own comment on why, unlike `Input`, that
+    // array dimension cannot just be folded into `RowCount` and flagged
+    // here instead).
     auto addElement = [&](GlobalVariable *GV, unsigned AddrSpace,
                           const ParsedSPIRVDecorations &D, Type *ValueTy,
                           bool RowCountIsVertexArray = false) {
@@ -1793,15 +1793,47 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // consumer can tell the two apart regardless of whether the
         // shader's own index into it happens to be constant (folded into
         // `Row` by `resolveOffsetWithinElement`) or dynamic (`Vertex`).
-        // (Roadmap H6b) Not yet extended to a mesh entry's own plain
-        // per-vertex/per-primitive `Output` array -- see
-        // `isPerVertexArrayInputGlobal`'s own comment.
+        // Nothing downstream ever links an `Input` element's `RowCount`
+        // against another stage's, so leaving the array dimension folded
+        // in (rather than peeled off, as a builtin block's own member is
+        // above) is harmless here.
+        //
+        // (Roadmap H6j) A mesh entry's own plain per-vertex/per-primitive
+        // `Output` global (e.g. a user-defined `PerVertexEXT`/
+        // `PerPrimitiveEXT` varying such as `layout(location=0) out vec4
+        // v_color[];`) cannot take the same "leave it folded in, flag it"
+        // treatment: unlike `Input`, this element's `RowCount` *is*
+        // linked, by `Location`, against the fragment stage's
+        // corresponding (unarrayed, one-per-fragment-invocation) input --
+        // `feme::graphics::executeDraws`/`GraphicsPipeline.cpp`'s own
+        // `validateStageInterfaces` -- and neither consults
+        // `RowCountIsVertexArray` when comparing the two. Left folded in,
+        // this element's `RowCount` would wrongly be `OutputVertices`/
+        // `OutputPrimitivesEXT` instead of the fragment-visible per-vertex
+        // shape (e.g. 1 for a `vec4`), disagreeing with the fragment
+        // input's own `RowCount` despite both sides sharing the same
+        // `layout(location=...)` -- exactly the `vkQueueSubmit`-time
+        // "disagree on component/row count or type" mismatch this row
+        // fixes. A mesh stage has no ordinary, unindexed output to write a
+        // real matrix into to begin with (every mesh `Output` write is
+        // through this same per-vertex/per-primitive array), so this
+        // dimension is never a genuine matrix row count to preserve --
+        // peel it off the same way a builtin block's own array dimension
+        // already is above, leaving `RowCountIsVertexArray` at its default
+        // `false` to match.
         unsigned UnusedAddrSpace = 0;
         ParsedSPIRVDecorations D =
             parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
-        addElement(GV, AddrSpace, D, GV->getValueType(),
-                   /*RowCountIsVertexArray=*/
-                   isPerVertexArrayInputGlobal(GV, UnusedAddrSpace));
+        Type *ValueTy = GV->getValueType();
+        bool RowCountIsVertexArray =
+            isPerVertexArrayInputGlobal(GV, UnusedAddrSpace);
+        if (Stage == ShaderStage::Mesh && AddrSpace == 8) {
+          if (auto *ArrTy = dyn_cast<ArrayType>(ValueTy))
+            ValueTy = ArrTy->getElementType();
+          RowCountIsVertexArray = false;
+        }
+        addElement(GV, AddrSpace, D, ValueTy,
+                   /*RowCountIsVertexArray=*/RowCountIsVertexArray);
       }
     };
     addElements(InputGlobals);

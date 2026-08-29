@@ -215,9 +215,14 @@ struct SignatureElement {
   /// `RowCount` already reflects only that member's own shape -- the
   /// outer per-vertex array dimension is peeled off before those are
   /// built and never folds into any member's `RowCount` to begin with.
-  /// (Roadmap H6b) Still `Input`-only: a mesh entry's own per-vertex/
-  /// per-primitive `Output` array is not yet reflected here (see
-  /// `isPerVertexArrayInputGlobal`'s own comment, CanonicalizeStage.cpp).
+  /// (Roadmap H6j) Also false for a mesh entry's own plain per-vertex/
+  /// per-primitive `Output` array (e.g. a user-defined `PerVertexEXT`/
+  /// `PerPrimitiveEXT` varying): unlike `Input`, that element's `RowCount`
+  /// is linked, by `Location`, against the fragment stage's corresponding
+  /// input, so its own per-vertex/per-primitive array dimension is peeled
+  /// off (like a builtin interface block's per-member element already is,
+  /// above) rather than folded into `RowCount` and flagged here -- see
+  /// `CanonicalizeStagePass::run`'s own `addElements` comment for why.
   bool RowCountIsVertexArray = false;
 
   SignatureInterpolationMode Interpolation =
