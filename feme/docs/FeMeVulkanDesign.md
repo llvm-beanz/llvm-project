@@ -2861,6 +2861,37 @@ still samples as all-zero -- `decodeASTCBlockHDR`'s float-producing
 interface does not fit this UNORM8 bridge, and stays outside this row's
 LDR-only scope, same as `runBlitImage`'s own HDR-source restriction (E22).
 
+**Update (roadmap H7b, open):** `materializeImageDescriptor` widens beyond
+`Texture2D`, `baseArrayLayer == 0` only: it now also accepts
+`Texture2DArray`/`TextureCube`/`TextureCubeArray` views and any
+`baseArrayLayer`, building a per-mip adjusted `FemeImageSubresourceLayout`
+table (each entry's `Offset` shifted by `BaseArrayLayer * SlicePitch`) when
+the base layer is nonzero, since `Image::mipLayouts()`'s own shared table
+always describes layer 0. This reuses the addressing insight
+`RenderPass.cpp`'s `resolveAttachmentView` already relies on for
+render-target attachments: cube(array) is purely a view-level convention
+over an ordinary 2D-array-shaped physical `Image`, never a distinct
+physical layout of its own. The ASTC LDR decode bridge above stays
+explicitly layer-0-only (`decodeASTCImageForSampling` has no per-layer
+loop), so a nonzero base layer or multi-layer range on an ASTC-format
+image now reads as all-zero the same explicit way an unsupported
+dimension already did, rather than silently decoding the wrong layer.
+
+**This widening alone does not make `imageCubeArray` honestly `VK_TRUE`.**
+A real code survey while implementing it found `SPIRVResourceLowering.cpp`'s
+`classifySampledImage2DHandle` and `ResourceLowering.cpp`'s
+`classifyImageHandle` both still hard-restrict shader-visible sampled-image
+*handle classification* -- an earlier pipeline stage than descriptor
+materialization -- to SPIR-V `Dim=2D`/DXIL `Texture2D`, non-arrayed only.
+No real `samplerCubeArray`-typed shader binding can reach a descriptor
+today regardless of this update, since pipeline creation rejects the
+handle first (gracefully, per this project's own "unsupported ops fail
+pipeline creation" policy). The CPU runtime's own texel-fetch primitive
+(`femeRTFetchTexel2D`, `feme/runtime/CPU/FeMeRuntimeCPU.c`) also has no
+array-layer/face parameter, and no cube-face-selection (direction-vector-
+to-face-plus-UV) coordinate math exists anywhere in the codebase yet.
+Tracked as roadmap H7b-a; `imageCubeArray` stays `VK_FALSE` until it lands.
+
 
 
 The first milestone that advertises `VK_QUEUE_GRAPHICS_BIT`, and therefore the
