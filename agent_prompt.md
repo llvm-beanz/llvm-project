@@ -37,22 +37,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H7b-a?
+Can you complete H7c?
 
-> **Shader-visible cube(array)/2D-array image sampling**:
-> `SPIRVResourceLowering.cpp`'s `classifySampledImage2DHandle` and
-> `ResourceLowering.cpp`'s `classifyImageHandle` both hard-restrict
-> sampled-image handle classification to `Dim=2D`/`Texture2D`, non-arrayed only,
-> rejecting every `Cube`/`CubeArray`/`2DArray`-typed shader binding at
-> pipeline-creation time (gracefully, per this project's own "unsupported ops
-> fail pipeline creation" policy, but before any descriptor lookup is reached).
-> Needs, together: (1) widened handle classification accepting
-> `Cube`/`CubeArray`/`2DArray` dimensions; (2) a cube-face-selection coordinate
-> transform (the classic "major axis" algorithm converting `OpImageSample`'s
-> 3-component direction vector, or 4-component with array layer for `CubeArray`,
-> into a face index plus 2D UV) not implemented anywhere in the codebase yet;
-> (3) a widened CPU runtime texel-fetch primitive (`femeRTFetchTexel2D`,
-> `feme/runtime/CPU/FeMeRuntimeCPU.c`) accepting an array-layer/face parameter,
-> which it lacks entirely today. H7b's own descriptor-materialization widening
-> (byte-correct addressing for these dimensions/layers) is already in place and
-> does not need revisiting
+>  **`fillModeNonSolid`**: `GraphicsPipeline.cpp` explicitly rejects any
+>  `VkPipelineRasterizationStateCreateInfo::polygonMode` other than
+>  `VK_POLYGON_MODE_FILL` at pipeline-creation time; `Executor.cpp` has no
+>  LINE/POINT wireframe-style rasterization path at all (distinct from the
+>  already-supported `VK_PRIMITIVE_TOPOLOGY_{LINE,POINT}_LIST` topologies, which
+>  rasterize a real line/point primitive, not a filled polygon's
+>  edges/vertices). Needs a new non-solid rasterization mode in the triangle
+>  path, likely reusing F5's own line-width/stipple machinery for the LINE case
