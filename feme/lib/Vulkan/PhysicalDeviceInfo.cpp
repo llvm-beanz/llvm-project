@@ -243,7 +243,13 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.subTexelPrecisionBits = 4;
   Limits.mipmapPrecisionBits = 4;
   Limits.maxDrawIndexedIndexValue = (1u << 24) - 1;
-  Limits.maxDrawIndirectCount = 1;
+  // Roadmap H7a: `multiDrawIndirect` is now advertised `VK_TRUE` (below) --
+  // `CommandBuffer.cpp`'s `readIndirectDraws`/`readIndirectMeshDraws`
+  // already loop over an arbitrary `DrawCount` read from the indirect
+  // buffer itself, with no fixed cap of their own beyond the buffer's own
+  // size (checked separately), so there is no smaller real ceiling to
+  // report here than the type itself allows.
+  Limits.maxDrawIndirectCount = std::numeric_limits<uint32_t>::max();
   Limits.maxSamplerLodBias = 2.0f;
   Limits.maxSamplerAnisotropy = 1.0f;
   // Roadmap H3 implements exactly Vulkan's mandatory multi-viewport floor:
@@ -423,6 +429,50 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // implementation cap, so there is no smaller real limit to report and no
   // larger one this milestone raises either.
   Info.Features.geometryShader = VK_TRUE;
+  // Roadmap H7a: five of the ~52 remaining Vulkan 1.0 core feature bits
+  // this milestone surveyed turned out to already be genuinely
+  // implemented, just never advertised -- flipped together as one small,
+  // low-risk cluster (see Roadmap.md's H7a row for the full survey and
+  // why the rest of H7's own candidates need real work first, tracked as
+  // H7b-H7j).
+  //
+  // `independentBlend`: `translateColorBlendState`
+  // (`GraphicsPipeline.cpp`) already stores one full `BlendState` per
+  // color attachment (`Out.ColorBlends`, sized to the render target's own
+  // attachment count), and the executor's blend path
+  // (`feme::graphics::mergeColor`, `Executor.cpp`) already consumes each
+  // attachment's own state independently -- nothing shares attachment 0's
+  // blend state across every attachment today, so advertising this is
+  // simply describing what already happens.
+  Info.Features.independentBlend = VK_TRUE;
+  // `logicOp`: `translateColorBlendState` already reads
+  // `logicOpEnable`/`logicOp`, and `Executor.cpp`'s own `applyLogicOp`/
+  // `mergeColor` already implement every one of Vulkan's 16 `VkLogicOp`
+  // values, bypassing ordinary blending exactly as the spec requires when
+  // enabled.
+  Info.Features.logicOp = VK_TRUE;
+  // `occlusionQueryPrecise`: `QueryPool`'s own occlusion-query support
+  // (roadmap H2f) was never boolean any-samples-passed -- `CommandBuffer.
+  // cpp`'s per-draw rasterization already calls
+  // `accumulateOcclusionSamples` with the real per-sample count of
+  // fragments whose depth/stencil tests passed, for every draw executed
+  // between `vkCmdBeginQuery`/`vkCmdEndQuery`, which is precisely what
+  // this feature promises over the non-precise form.
+  Info.Features.occlusionQueryPrecise = VK_TRUE;
+  // `multiDrawIndirect`: `CommandBuffer.cpp`'s `readIndirectDraws`/
+  // `readIndirectMeshDraws` already loop over an arbitrary `DrawCount`
+  // read from the indirect buffer (see `maxDrawIndirectCount` above,
+  // raised to match), so a `drawCount > 1` indirect call already works
+  // and was never rejected -- only the feature bit itself was never
+  // flipped to say so.
+  Info.Features.multiDrawIndirect = VK_TRUE;
+  // `drawIndirectFirstInstance`: the same `readIndirectDraws` already
+  // copies `VkDrawIndirectCommand::firstInstance`/
+  // `VkDrawIndexedIndirectCommand::firstInstance` straight into
+  // `DrawCommand::FirstInstance` with no requirement that it be zero, and
+  // `validateDrawCounts`/`runDraw` never special-case an indirect draw's
+  // instance offset differently from a direct one's.
+  Info.Features.drawIndirectFirstInstance = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;

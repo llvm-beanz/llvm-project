@@ -41,6 +41,27 @@ multiViewport
 # CompiledStages into graphics::GraphicsPipeline::setTessellationStages,
 # which Executor.cpp already consumes (H4b).
 tessellationShader
+# geometryShader: roadmap H5e -- vkCreateGraphicsPipelines accepts
+# VK_SHADER_STAGE_GEOMETRY_BIT, compiles it into a CompiledStage, and
+# Executor.cpp's geometry chaining (roadmap H5a-H5e) consumes it. Missing
+# from this file until roadmap H7a's own audit found the same drift
+# VulkanCTSReport.md's F13/F14 entries already found for two promoted
+# extensions -- restored here.
+geometryShader
+# independentBlend/logicOp/occlusionQueryPrecise/multiDrawIndirect/
+# drawIndirectFirstInstance: roadmap H7a -- each already fully backed by
+# existing, working code (GraphicsPipeline.cpp's per-attachment
+# BlendState/logicOpEnable/logicOp translation and Executor.cpp's
+# applyLogicOp/mergeColor; QueryPool.cpp's real per-sample occlusion
+# accumulation, roadmap H2f; CommandBuffer.cpp's readIndirectDraws/
+# readIndirectMeshDraws looping over an arbitrary indirect DrawCount with
+# a nonzero firstInstance already copied through unconditionally) but
+# never advertised until now.
+independentBlend
+logicOp
+occlusionQueryPrecise
+multiDrawIndirect
+drawIndirectFirstInstance
 #
 # --- Core Vulkan 1.1 (VkPhysicalDeviceVulkan11Features).
 #
