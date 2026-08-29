@@ -44530,3 +44530,211 @@ Split into four, each independently buildable/testable:
    depends on the real CTS run only possible after commits 1-3 landed).
 (This `agent_thoughts.md` update follows as its own, final commit, per
 standing instruction.)
+
+# Session: Completing H7d (`depthClamp`/`depthBiasClamp`/`depthBounds`)
+
+## Design
+
+`GraphicsPipeline.cpp` previously rejected `depthClampEnable` and
+`depthBiasEnable` together with `rasterizerDiscardEnable` in one
+combined check, and rejected `depthBoundsTestEnable` outright with an
+explicit "the depth bounds test is not implemented" error. None of the
+three had any per-fragment implementation in `Executor.cpp`. The three
+are related (all depth-pipeline state) but independently gated, and the
+user's own row text flagged depth-bias admission as a likely
+prerequisite for `depthBiasClamp` specifically -- which turned out to
+be exactly right: splitting `depthClampEnable`/`depthBiasEnable` out of
+the old combined rejection (leaving `rasterizerDiscardEnable` alone
+rejected) was the natural first step.
+
+Data model: `RasterState` gained `DepthClampEnable`/`DepthBiasEnable`/
+`DepthBiasConstantFactor`/`DepthBiasClamp`/`DepthBiasSlopeFactor`, and
+`DepthState` gained `BoundsTestEnable`/`MinDepthBounds`/
+`MaxDepthBounds`. Two new dynamic states
+(`VK_DYNAMIC_STATE_DEPTH_BIAS`/`_BOUNDS`) needed wiring through
+`CommandBuffer.cpp`'s `vkCmdSetDepthBias`/`vkCmdSetDepthBounds`
+(previously no-op stubs) and `GraphicsPipeline.cpp`'s
+`buildExecutorPipeline` `ResolvedRaster`/`ResolvedDepth` merge --
+alongside a pre-existing but previously-inert
+`VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE` that had never actually
+been consumed by anything until now.
+
+`Executor.cpp` implementation, initial pass:
+- Depth clamp: skip `clipTriangle`'s last 2 (near/far Z) of 7 clip
+  planes when enabled, and clamp the projected depth to
+  `[minDepth, maxDepth]`.
+- Depth bias: `depthBiasConstantFactor * r + depthBiasSlopeFactor *
+  maxSlope`, clamped via `depthBiasClamp`'s sign-dependent semantics,
+  computed once per triangle via a new `depthBiasR` helper (`2^-16`/
+  `2^-24` for `D16_UNORM`/`D24_UNORM_S8_UINT`, an ULP-based `ldexp`
+  formula for `D32_FLOAT`), applied to all 3 vertices' depths ahead of
+  H7c's own `PolygonMode` branch so Fill/Line/Point modes all inherit
+  it.
+- Depth bounds: runs at the very start of `testDepthStencil`, before
+  the stencil test, per the Vulkan spec's fixed-function order,
+  comparing the attachment's *stored* depth (not the incoming
+  fragment's) against `[MinDepthBounds, MaxDepthBounds]`.
+
+Unit tests (`GraphicsPipelineTest.cpp`, `DrawTest.cpp`,
+`PhysicalDeviceInfoTest.cpp`) all passed against this initial
+implementation: 467/467 + 209/209, full `check-feme` at 2009/2068. This
+is the point at which I would normally have called the row done -- but
+the standing instruction to run the real Vulkan CTS after each change
+caught two real bugs unit tests missed entirely.
+
+## Real CTS surfaces two distinct bugs
+
+A targeted 911-case list (every group touching `depthClampEnable`/
+`depthBiasEnable`/`depthBoundsTestEnable`) showed +8 newly-passing
+cases and zero regressions overall -- but all 10
+`dEQP-VK.clipping.clip_volume.depth_clamp.*` cases failed "Rendered
+image(s) are incorrect", a newly-surfaced, in-scope correctness gap
+(this whole group was `NotSupported` before `depthClamp` read
+`VK_TRUE`).
+
+Reading the CTS source (`vktClippingTests.cpp`'s
+`testPrimitivesDepthClamp`/`genVertices`) was essential here: each
+sub-case draws geometry whose per-vertex Z spans a range straddling
+either the near or far plane, and the fragment shader encodes
+`gl_FragCoord.z` directly into its output color, checked against an
+exact (zero-tolerance) expected value over a half-screen region. This
+test methodology is unusually good at catching exactly the kind of
+subtle numerical bug depth clamp is prone to.
+
+**Bug #1**: depth clamping was applied *per-vertex, before
+interpolation* (in `projectVertex`), not *per-fragment, after
+interpolation*. This is a genuinely easy mistake -- naively, "clamp the
+depth" reads like something you'd do wherever you compute a vertex's
+depth. But Vulkan's own semantics require clamping the *interpolated*
+value: a triangle with one in-range vertex and two out-of-range
+vertices must produce a *uniform* clamped result wherever the raw
+interpolated depth is out of range, not a gradient produced by
+interpolating between a clamped and unclamped endpoint. I worked out a
+concrete numeric example to confirm this before touching any code (see
+the design doc's own comment in `Executor.cpp` for the worked case),
+which was worth doing since it's very easy to "fix" this kind of bug by
+guessing and get subtly the wrong invariant instead.
+
+Fixed by moving the clamp to the single barycentric depth-interpolation
+choke point shared by all three primitive classes (triangle, line,
+point paths all funnel through `ScreenTriangle` construction). Added
+`DepthClampLo`/`DepthClampHi` fields to `ScreenTriangle`, populated
+from the owning viewport at both construction sites, rather than
+threading the viewport itself through to the interpolation site.
+
+Rebuilding and retesting after fix #1: unit tests still 467/467 +
+209/209 (no regressions -- unsurprising, since none of the existing
+unit tests exercised a mixed-vertex-depth triangle). Rerunning the
+10-case CTS group: `triangle_list`/`triangle_strip`/`triangle_fan` now
+passed (3/10, up from 0/10). Progress, but 7 still failing.
+
+**Bug #2**: with fix #1 landed, the *triangle* clamp math was
+independently confirmed correct via a temporary env-var-gated
+`fprintf` at the clamp site (matching the CTS's own expected values
+exactly) -- yet the rendered pixels still didn't match. A second debug
+print at the color-write site revealed the fragment shader's actual
+`gl_FragCoord.z` read was returning the *wrong* value entirely --
+matching component 0 (X) regardless of which component was requested.
+
+Tracing through `CanonicalizeStage.cpp` and `FragmentWrapper.cpp`
+found the root cause: a `Position`/`FragCoord` signature element always
+describes the *whole* `vec4` builtin (`FirstComponent = 0`,
+`ComponentCount = 4`) -- the "which component does *this* load want"
+information lives in the load intrinsic's own per-call `Component`
+operand, exactly like an ordinary varying load. The ordinary
+(non-system-value) varying-load path already consumed this operand
+correctly via `computeStageStorageAddress`'s `RelComponent = Component
+- Elt.FirstComponent`. The system-value branch, however, simply used
+`Elt.FirstComponent` directly (always 0) and completely ignored the
+call's own operand -- a latent bug that had simply never been exercised,
+since nothing before this task read any `gl_FragCoord` component but
+`.x`/`.y`, and those two happen to route through a separate, unaffected
+helper (`loadFragmentPositionComponent`) used elsewhere.
+
+This bug is *not* depth-clamp-specific at all -- it's a general
+fragment system-value vector-load bug, simply first surfaced by this
+row's own CTS coverage. Fixed by resolving the call's `Component`
+operand in `lowerFragmentInputLoad`'s system-value branch before
+dispatching to `loadFragmentSystemValue`, mirroring the ordinary path's
+existing constant-operand requirement.
+
+Rebuilding and retesting after fix #2: unit tests still 467/467 +
+209/209 (no regressions). Rerunning the CTS group: triangle topologies
+still passed; `_with_adjacency` variants (4 of 10) fail with a
+pre-existing, unrelated `VK_ERROR_INITIALIZATION_FAILED` at pipeline
+creation (a geometry-shader-adjacent gap, confirmed unrelated to depth
+clamp since the equivalent non-adjacency topologies in the same group
+pass cleanly); `line_list`/`line_strip`/`point_list` (3 of 10) still
+failed "Rendered image(s) are incorrect".
+
+## The point/line investigation: a third, out-of-scope gap
+
+Rather than a depth-clamp bug, the point/line failures turned out to be
+a *rasterization coverage* bug: adding a temporary debug print in
+`emitPointQuad` showed every one of this specific CTS case's own
+point/line vertices lands with its expanded quad centered *exactly* on
+an integer pixel-grid intersection (e.g. a point at screen `(8,8)`
+expands to a `[7.5,8.5]x[7.5,8.5]` quad). This project's own point/line
+coverage test excludes the covering pixel on *both* sides of that exact
+boundary, so every one of the 5 vertices in the CTS's own point-list
+test geometry renders zero pixels -- explaining why all 4 sub-case
+images for `point_list` were fully black, even the "clamp disabled"
+cases that should still render *something*.
+
+This is a real, pre-existing rasterization-convention gap (a real GPU's
+own fill rule guarantees an exact grid-aligned primitive lands
+consistently on one side, never both-excluded), but it's a different
+bug class entirely from depth clamp, not something H7d's own scope
+covers, and nothing in this project's own unit-test coverage exercises
+a point-topology draw at all yet (so it long predates this row). Rather
+than scope-creep into fixing the rasterizer's fill convention here, I
+broke it out as its own new roadmap row (H7k), alongside the
+adjacency-pipeline gap (H7l), and confirmed the depth-clamp/bias/bounds
+feature itself is otherwise complete and correctly implemented.
+
+## Regression tests added while root-causing
+
+Both bugs were caught by real CTS, not by any pre-existing unit test --
+worth calling out since it means the *existing* H7d unit tests (which
+all passed throughout) gave false confidence. Added two new targeted
+regression tests, both empirically verified (by temporarily
+reintroducing each bug and confirming the test fails, then restoring
+the fix and confirming it passes) rather than trusted on paper alone:
+
+- `FragmentWrapperTest.cpp`'s `ResolvesRequestedPositionComponentNotAlwaysX`
+  -- a compiler-phase-level test verifying a `Component` operand of 2
+  reaches the emitted position-component load as index 2, not the
+  pre-fix bug's hardcoded 0. Initially checked any `GetElementPtrInst`
+  in the lowered function, which gave a false pass against the *actual*
+  buggy code (an unrelated per-lane array GEP also happens to use a
+  constant index of 2 for lane 2, regardless of the bug) -- narrowed
+  the check to the `GEP` feeding directly into the `load float`
+  instruction, which discriminates correctly.
+- `DrawTest.cpp`'s `DepthClampAppliesAfterInterpolationNotBeforeIt` --
+  an end-to-end executor-level test using a single triangle whose 3
+  vertices span Z from -3.0 (below near) through 0.5 (in range) to 5.0
+  (beyond far), with a fragment shader writing `gl_FragCoord.z`
+  directly into the color output (deliberately exercising both fixes
+  together, mirroring the real CTS methodology). Took some iteration to
+  find pixels that actually discriminate the bug from the fix: a fully
+  reverted `Executor.cpp` gave a *different* wrong answer than the
+  isolated "clamp per-vertex instead of per-fragment" bug (because a
+  full revert also removes the unrelated near/far-clip-skip logic that
+  predates this specific bug), so I had to reintroduce *only* the
+  precise historical bug (moving the clamp back into `projectVertex`,
+  disabling the interpolation-site clamp) to get a faithful regression
+  test rather than a coincidentally-passing one.
+
+## Outcome
+
+19/911 (2.1%) Passed / 173/911 (19.0%) Failed / 719/911 (78.9%) Not
+supported on the targeted CTS list -- +3 newly passing (exactly the 3
+newly-fixed triangle topologies), 0 regressions (176 -> 173 Failed
+matches exactly). `check-feme` at 2011/2070 (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7c's own 2002/2061 by 9
+new tests (7 original + 2 added while root-causing the CTS failures).
+`depthClamp`/`depthBiasClamp`/`depthBounds` all honestly read
+`VK_TRUE`. Two genuinely out-of-scope, pre-existing gaps (point/line
+grid-alignment coverage, adjacency-topology pipeline construction) were
+found along the way and broken out as new roadmap rows (H7k, H7l)
+rather than either silently ignored or scope-crept into this row.
