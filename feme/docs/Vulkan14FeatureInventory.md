@@ -117,16 +117,17 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt`, understating
   the 1.4 extension row as 14 of 16 rather than its true 15 of 16; restored
   here alongside roadmap H2's own `multiview` update.
-- **9 of the 42 unimplemented 1.0 feature bits are graphics
+- **6 of the 39 unimplemented 1.0 feature bits are graphics
   capabilities** (`wideLines`, `largePoints`,
   `sampleRateShading`,
-  `depthClamp`, `depthBiasClamp`, `depthBounds`,
   `shaderClipDistance`, `shaderCullDistance`,
-  `alphaToOne`) -- down from 10 (itself down from 11, itself down from
+  `alphaToOne`) -- down from 9 (itself down from 10, itself down from
+  11, itself down from
   14, itself down from 15
   once roadmap H5e closed `geometryShader`, itself down from 16 once
-  roadmap H4a/H4b closed `tessellationShader`) now that roadmap H7c
-  closed `fillModeNonSolid`, roadmap H7b/H7b-a
+  roadmap H4a/H4b closed `tessellationShader`) now that roadmap H7d
+  closed `depthClamp`, `depthBiasClamp`, and `depthBounds`, roadmap
+  H7c closed `fillModeNonSolid`, roadmap H7b/H7b-a
   closed `imageCubeArray`, and roadmap H7a closed
   `independentBlend`, `occlusionQueryPrecise`, and `multiDrawIndirect`
   alongside two feature bits this file never grouped as
@@ -284,10 +285,10 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `logicOp` | yes | roadmap H7a: `Executor.cpp`'s `applyLogicOp`/`mergeColor` already implement every `VkLogicOp` value |
 | feature | VK_VERSION_1_0 | `multiDrawIndirect` | yes | roadmap H7a: `CommandBuffer.cpp`'s `readIndirectDraws`/`readIndirectMeshDraws` already loop over an arbitrary indirect `DrawCount`; `maxDrawIndirectCount` raised to `UINT32_MAX` to match |
 | feature | VK_VERSION_1_0 | `drawIndirectFirstInstance` | yes | roadmap H7a: `CommandBuffer.cpp`'s `readIndirectDraws` already copies a nonzero `firstInstance` through unconditionally |
-| feature | VK_VERSION_1_0 | `depthClamp` | no |  |
-| feature | VK_VERSION_1_0 | `depthBiasClamp` | no |  |
+| feature | VK_VERSION_1_0 | `depthClamp` | yes | roadmap H7d: `GraphicsPipeline.cpp`'s `translateRasterState` maps `depthClampEnable` onto `RasterState::DepthClampEnable`, and `Executor.cpp`'s `clipTriangle` skips its near/far Z-clip planes while the depth clamp itself is applied at the single barycentric-interpolation choke point (after per-fragment depth interpolation, not per-vertex in `projectVertex`) -- clamping before interpolation was found, via real `deqp-vk` reproduction, to smear a false gradient across a primitive with mixed in-range/out-of-range vertex depths instead of the uniform clamped result Vulkan requires |
+| feature | VK_VERSION_1_0 | `depthBiasClamp` | yes | roadmap H7d: `GraphicsPipeline.cpp`'s `translateRasterState` maps `depthBiasEnable`/`depthBiasConstantFactor`/`depthBiasClamp`/`depthBiasSlopeFactor` onto `RasterState`, and `Executor.cpp` computes `depthBiasConstantFactor * r + depthBiasSlopeFactor * maxSlope` (clamped via `depthBiasClamp`) once per triangle |
 | feature | VK_VERSION_1_0 | `fillModeNonSolid` | yes | roadmap H7c: `GraphicsPipeline.cpp`'s `translateRasterState` now maps `VK_POLYGON_MODE_LINE`/`_POINT` onto a new `RasterState::Polygon` field instead of rejecting anything but `FILL`, and `Executor.cpp`'s solid-triangle assembly loop decomposes a `Line`-mode triangle into its own 3 edges (reusing F5's own line-width/mode/stipple machinery unmodified) or a `Point`-mode triangle into its own 3 vertices (reusing the existing point quad expansion) |
-| feature | VK_VERSION_1_0 | `depthBounds` | no |  |
+| feature | VK_VERSION_1_0 | `depthBounds` | yes | roadmap H7d: `GraphicsPipeline.cpp`'s `translateDepthStencilState` now maps `depthBoundsTestEnable`/`minDepthBounds`/`maxDepthBounds` onto `DepthState`, and `Executor.cpp`'s `testDepthStencil` runs the depth bounds test first, before the stencil test, comparing the value already stored in the depth attachment against `[MinDepthBounds, MaxDepthBounds]` |
 | feature | VK_VERSION_1_0 | `wideLines` | no |  |
 | feature | VK_VERSION_1_0 | `largePoints` | no |  |
 | feature | VK_VERSION_1_0 | `alphaToOne` | no |  |

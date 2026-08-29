@@ -2310,10 +2310,15 @@ whichever class the pipeline's static topology falls into, not just the
 triangle class specifically. `VERTEX_INPUT_BINDING_STRIDE` (set through
 `vkCmdBindVertexBuffers2EXT`'s `pStrides`, the one state with no
 `vkCmdSet*` counterpart) reuses the vertex-fetch stride the static path
-already reads per binding. `DEPTH_BOUNDS_TEST_ENABLE` is accepted but
-inert: `depthBounds` is an unadvertised `VkPhysicalDeviceFeatures` bit, so
-a conformant caller can never legally set it `VK_TRUE`, and the depth
-bounds test itself remains as unimplemented as it always was. All 12 are
+already reads per binding. `DEPTH_BOUNDS_TEST_ENABLE` was, when this note
+was first written, accepted but inert: `depthBounds` was then an
+unadvertised `VkPhysicalDeviceFeatures` bit, so a conformant caller could
+never legally set it `VK_TRUE`, and the depth bounds test itself remained
+unimplemented. Roadmap H7d closed both gaps together: `depthBounds` (and
+`depthClamp`/`depthBiasClamp` alongside it) now advertises `VK_TRUE`, and
+`Executor.cpp`'s `testDepthStencil` implements a real depth bounds test,
+so `DEPTH_BOUNDS_TEST_ENABLE`'s own dynamic toggle is genuinely consumed
+now, not merely accepted. All 12 are
 implemented in `feme/lib/Vulkan/{GraphicsPipeline,CommandBuffer}.{h,cpp}`,
 and the extension is advertised (`PhysicalDeviceInfo.cpp`'s
 `getSupportedDeviceExtensions`, `EntryPoints.cpp`'s feature-struct

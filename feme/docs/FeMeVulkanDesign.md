@@ -2027,14 +2027,32 @@ flipping each bit legitimately unblocks a real block of previously
 a separate, already-tracked, pre-existing gap (chiefly C8's own
 matrix/aggregate `feme-cpu-simdize` legalization limitation and a broader
 `vkCreateGraphicsPipelines` content gap unrelated to any of these five
-bits), not a regression in any case that previously passed. The rest of
-H7's own survey (`imageCubeArray`, `fillModeNonSolid`, `depthClamp`/
-`depthBiasClamp`/`depthBounds`, `wideLines`/`largePoints`,
+bits), not a regression in any case that previously passed. **Status (roadmap H7d):
+done for the depth-pipeline cluster.** `depthClamp` (`Executor.cpp`'s
+`clipTriangle` skips its near/far Z-clip planes, and the *interpolated*
+per-fragment depth is clamped to the viewport range at the single
+barycentric-interpolation choke point shared by the triangle/line/point
+paths -- not per-vertex in `projectVertex`, which real `deqp-vk`
+reproduction found produces a false gradient instead of Vulkan's own
+required uniform clamped result for a primitive with mixed in-range/
+out-of-range vertex depths), `depthBiasClamp`
+(`GraphicsPipeline.cpp` translates `depthBiasEnable`/the three bias
+factors onto `RasterState`, and `Executor.cpp` computes
+`depthBiasConstantFactor * r + depthBiasSlopeFactor * maxSlope`, clamped
+via `depthBiasClamp`, once per triangle -- applied ahead of H7c's own
+`PolygonMode` branch so Fill/Line/Point modes all inherit it), and
+`depthBounds` (`GraphicsPipeline.cpp` drops the old `depthBoundsTestEnable`
+rejection, and `Executor.cpp`'s `testDepthStencil` runs the depth bounds
+test first, before the stencil test, against the value already stored in
+the depth attachment) all needed real new translation and executor work,
+unlike H7a's already-correct-but-unadvertised cluster. See "Roadmap H7d:
+measured impact" in VulkanCTSReport.md for the full before/after CTS
+breakdown. The rest of H7's own survey (`wideLines`/`largePoints`,
 `sampleRateShading`, `alphaToOne`, `vertexPipelineStoresAndAtomics`/
 `fragmentStoresAndAtomics`, `shaderClipDistance`/`shaderCullDistance`,
 `samplerAnisotropy`, and the four `shaderStorageImage*` bits) each need
 real, independent work first and remain open, broken down as Roadmap.md's
-H7b-H7j rows.
+H7e-H7j rows.
 
 ## Implementation Milestones
 

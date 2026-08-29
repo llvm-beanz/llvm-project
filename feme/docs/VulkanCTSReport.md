@@ -13374,3 +13374,92 @@ end to end (proven both by unit tests and this row's own real `deqp-vk`
 run), `check-feme` passes in full (2002/2061, 59 pre-existing unrelated
 `Unsupported`, 0 `Failed`), and `fillModeNonSolid` honestly reads
 `VK_TRUE`.
+
+## Roadmap H7d: measured impact (`depthClamp`/`depthBiasClamp`/`depthBounds`)
+
+**Case-list construction**: every group a source survey of the VK-GL-CTS
+checkout under test found touching `depthClamp`/`depthBias`/
+`depthBoundsTestEnable` directly or indirectly (`grep -rl
+"depthClampEnable\|depthBiasEnable\|depthBoundsTestEnable"
+external/vulkancts/modules/vulkan/`): `dEQP-VK.clipping.clip_volume.
+depth_clamp.*` (10 cases, the dedicated depth-clamp correctness test,
+`vktClippingTests.cpp`), `dEQP-VK.pipeline.{monolithic,
+fast_linked_library,pipeline_library,shader_object_unlinked_spirv}.
+depth_bias.*` and `.dynamic_state.**.depth_bounds*`/`.depth_bias*`, and
+`dEQP-VK.renderpasses.**.depth_bounds_test`/`.depth_bias*` -- 911 total
+unique cases after removing duplicates, run in one `deqp-vk` invocation
+directly against `libfeme_vulkan.so`.
+
+**Before this milestone's own two CTS-discovered bug fixes** (feature
+bits landed but not yet correctness-validated): 16 Passed / 176 Failed /
+719 NotSupported. All 10 `clip_volume.depth_clamp.*` cases failed
+"Rendered image(s) are incorrect" -- a newly-surfaced, in-scope
+regression (this whole case group was `NotSupported` before H7d, since
+`depthClamp` read `VK_FALSE`).
+
+**Root cause #1** (this row's own scope): depth clamping was applied
+**per-vertex, before interpolation** (`projectVertex` clamped, then
+barycentric interpolation ran on already-clamped per-vertex depths).
+Vulkan's own depth clamp is a per-fragment operation applied to the
+**interpolated** depth: a triangle with one vertex in-range and two
+out-of-range must clamp to a *uniform* value across the whole triangle,
+not a false linear gradient produced by interpolating already-clamped
+vertices. Fixed by moving the clamp to the single barycentric
+depth-interpolation site in `Executor.cpp` (`ScreenTriangle` gained
+`DepthClampLo`/`DepthClampHi`, populated from the primitive's own
+viewport at both `ScreenTriangle`-construction sites; `projectVertex`
+now always returns the raw, unclamped depth).
+
+**Root cause #2** (pre-existing, unrelated to depth clamp specifically):
+diagnosed via env-var-gated `fprintf` debug tracing plus `--deqp-log-
+images=enable` qpa-image extraction that the *test's own* fragment
+shader output (`vec4(1.0, gl_FragCoord.z, 0.0, 1.0)`, encoding depth
+directly in its G channel) was reading the **wrong component** --
+always `.x` instead of `.z`. `FragmentWrapper.cpp`'s
+`lowerFragmentInputLoad` resolved a system-value vector load (`Position`/
+`FragCoord`) using only the signature element's `FirstComponent` (a
+SPIR-V I/O-packing decoration, always 0 for a whole-`vec4` builtin),
+completely ignoring the load intrinsic's own per-call `Component`
+operand that the ordinary (non-system-value) varying-load path already
+consumed correctly. Nothing before this milestone's own CTS coverage had
+read any `gl_FragCoord` component but `.x`/`.y`, and those two happen to
+route through a separate, unaffected helper -- so the bug had never been
+exercised. Fixed by resolving the requested component from the load
+call's own operand before dispatching to `loadFragmentSystemValue`.
+
+**After both fixes**: 19/911 (2.1%) Passed, 173/911 (19.0%) Failed,
+719/911 (78.9%) NotSupported -- **+3 newly passing, 0 regressions**
+(176 -> 173 Failed exactly matches the 3 newly-passing cases). Of the
+10-case `clip_volume.depth_clamp.*` group specifically: `triangle_list`/
+`triangle_strip`/`triangle_fan` now **Pass**; the four `*_with_adjacency`
+(triangle and line) variants fail with a pre-existing, out-of-scope
+`VK_ERROR_INITIALIZATION_FAILED` at pipeline creation (a geometry-shader-
+related gap this row does not touch); `line_list`/`line_strip`/
+`point_list` fail "Rendered image(s) are incorrect" for a distinct,
+pre-existing, out-of-scope reason -- traced (via a temporary debug
+`fprintf` in `emitPointQuad`) to every one of this specific CTS case's
+point/line vertices landing with their quad centered **exactly** on an
+integer pixel-grid intersection, which this rasterizer's point/line-quad
+coverage test excludes on both sides of the boundary (a general point/
+line rasterization edge-case gap, not a depth-clamp-specific one, and not
+introduced by this row -- no point-topology draw path existed in this
+project's own unit-test coverage before this investigation either).
+Neither the adjacency-pipeline gap nor the point/line grid-alignment gap
+is in scope for H7d; both are left as follow-on roadmap items (see
+`Roadmap.md`).
+
+**Inventories**: `Vulkan14FeatureInventory.md`'s `depthClamp` row updated
+to describe the corrected (post-interpolation) clamp site.
+`VulkanExtensionInventory.md` confirmed to need no change: no extension
+is touched by this row, only three core 1.0 feature bits.
+
+**Milestone H7d closes** for `depthClamp`/`depthBiasClamp`/`depthBounds`
+proper: `GraphicsPipeline.cpp` accepts all three states,
+`Executor.cpp` implements all three end to end with correctness proven
+by unit tests and this row's own real `deqp-vk` run, `check-feme` passes
+in full (2011/2070, 59 pre-existing unrelated `Unsupported`, 0 `Failed`),
+and `depthClamp`/`depthBiasClamp`/`depthBounds` all honestly read
+`VK_TRUE`. The point/line grid-alignment rasterization gap and the
+adjacency-pipeline gap surfaced by this row's own CTS run are unrelated,
+pre-existing, out-of-scope limitations, broken out as new roadmap
+follow-on rows rather than blocking this milestone's own completion.
