@@ -13298,3 +13298,79 @@ standard convention with no seam blending).
 identified -- descriptor materialization (H7b itself) and shader-visible
 handle classification (this row) -- are now fixed and tested, `check-feme`
 passes in full, and `imageCubeArray` honestly reads `VK_TRUE`.
+
+## Roadmap H7c: measured impact (`fillModeNonSolid` -- `VK_POLYGON_MODE_LINE`/`_POINT`)
+
+**What changed**: `GraphicsPipeline.cpp`'s `translateRasterState` now maps
+`VkPipelineRasterizationStateCreateInfo::polygonMode` onto a new
+`feme::graphics::PolygonMode` (`Fill`/`Line`/`Point`) instead of rejecting
+anything but `VK_POLYGON_MODE_FILL` outright. `Executor.cpp`'s
+solid-triangle assembly loop decomposes a `Line`-mode triangle into its
+own 3 edges (reusing F5's existing `LineWidth`/`LineMode`/stipple-aware
+line rasterizer unmodified, per `VK_KHR_line_rasterization`'s own spec
+text extending those fields to "any line segment ... drawn ... when
+polygonMode is VK_POLYGON_MODE_LINE") or a `Point`-mode triangle into its
+own 3 vertices (reusing the existing point quad expansion), instead of
+the ordinary filled-interior path. `PhysicalDeviceInfo.cpp` now
+advertises `fillModeNonSolid = VK_TRUE`.
+
+**Real `deqp-vk` reproduction**: built a combined case list from every
+group a source survey of the VK-GL-CTS checkout under test
+(`grep -rl fillModeNonSolid external/vulkancts/modules/vulkan/`) found
+touching `polygonMode`/`fillModeNonSolid` directly: `dEQP-VK.draw.
+renderpass.non_line_with_params.*` (60 cases -- the dedicated
+non-solid-fill-mode draw test family, `vktDrawNonLineTests.cpp`),
+`dEQP-VK.rasterization.polygon_as_large_points.*`/`dEQP-VK.rasterization.
+primitive_size.*` (156 cases touching `polygon_mode` in their own name),
+and every other case across `dEQP-VK.pipeline.{monolithic,
+fast_linked_library,pipeline_library,shader_object_unlinked_spirv}` whose
+name references `polygonmode`/`polygon_mode`/`fillmode` -- 216 total
+unique cases after removing duplicates, run in one `deqp-vk` invocation
+directly against `libfeme_vulkan.so` (`VK_ICD_FILENAMES` pointed at
+`feme_icd.json`, no `lvp_icd.json` involved):
+
+```
+Test run totals:
+  Passed:        15/216 (6.9%)
+  Failed:        0/216 (0.0%)
+  Not supported: 201/216 (93.1%)
+```
+
+**0 failures.** All 15 `Passed` cases are exactly the ones this
+milestone's own scope covers and nothing else: `dEQP-VK.draw.renderpass.
+non_line_with_params.vtx_{points,triangles}_mode_{fill,point,line}_
+line_raster_{bresenham,rect,smooth}` (a plain vertex-fed point or
+triangle topology, no geometry/tessellation stage, rasterized through
+each of the 3 `polygonMode`/`lineRasterizationMode` combinations this row
+implements) -- `vtx_points_mode_line_*` in particular confirms the
+`PolygonMode::Line` path renders correctly even when fed a real
+point-topology primitive turned into degenerate zero-length "edges" by
+the test's own construction, not just the triangle case this row's own
+text focused on. Every one of the 201 `NotSupported` cases is gated
+behind an orthogonal, unimplemented feature this row does not touch and
+was never in scope for: `shaderTessellationAndGeometryPointSize` (every
+`_geom_*`/`_tess_*`-suffixed case in both groups -- a geometry/
+tessellation-stage point-size write, unrelated to polygon mode itself),
+`standardSampleLocations` (the `default_size.*_polygon_mode` multisample
+variants), and `largePoints` (the plain `primitive_size.points.
+point_size_*` cases, H7e's own row, not this one's). No `vtx_triangles_
+mode_line_*` (non-geometry-stage) case exists in the CTS's own test
+matrix at all -- confirmed by a direct grep of the full case list --
+so there is no missing coverage there, just an absent combination in
+the upstream suite itself.
+
+**Inventories**: `Vulkan14FeatureInventory.md` updated -- `fillModeNonSolid`
+flips to `yes`, the 1.0 feature-advertised count rises from 12 of 55 to
+13 of 55, and the "graphics-specific unimplemented" bullet drops from 10
+to 9. `VulkanExtensionInventory.md` confirmed to need no change: no
+extension is touched by this row, only a core 1.0 feature bit.
+`FeMeGraphicsDesign.md`'s F5 line-rasterization status paragraph gained a
+new note describing how `PolygonMode::Line`/`Point` reuses that
+machinery rather than inventing a second rasterizer.
+
+**Milestone H7c closes.** `translateRasterState` accepts
+`VK_POLYGON_MODE_LINE`/`_POINT`, `Executor.cpp` rasterizes both
+end to end (proven both by unit tests and this row's own real `deqp-vk`
+run), `check-feme` passes in full (2002/2061, 59 pre-existing unrelated
+`Unsupported`, 0 `Failed`), and `fillModeNonSolid` honestly reads
+`VK_TRUE`.
