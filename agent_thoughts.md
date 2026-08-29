@@ -44007,3 +44007,104 @@ that would otherwise need guessing or an appeal to written design docs
 alone -- it is often a more reliable signal than the design doc's own
 prose, since it is exactly the shape a future maintainer would have
 wired up first if the producer side existed yet.
+
+# Session: Completing H7 (the optional core 1.0 graphics feature bits)
+
+## Starting point
+
+H7's own row asked for a full survey of the ~52 optional
+`VkPhysicalDeviceFeatures` bits this ICD still reported `VK_FALSE`, naming
+about 20 candidates its own text guessed were "cheap on a software
+device" without confirming any of them against the real code, and
+explicitly required splitting the work into separately-assigned,
+separately-committed sub-rows rather than landing it as one commit --
+this row's own scope is inherently a survey-then-implement task, not a
+single fix.
+
+## Survey before touching any code
+
+Rather than guessing which of the ~20 named candidates were actually
+cheap, I delegated a real-code survey to an explore agent covering all
+20+ bits at once (batching independent, read-only investigation threads
+is exactly what that agent type is for), asking for a concrete verdict
+per bit plus the specific file/function evidence backing it, not just an
+opinion. This came back with a clean split: five bits
+(`independentBlend`, `logicOp`, `occlusionQueryPrecise`,
+`multiDrawIndirect`, `drawIndirectFirstInstance`) were reported as
+already fully implemented in the executor/pipeline layer, just never
+advertised; the rest need real, independent work of varying size. I did
+not take the survey's verdicts on faith -- for every one of the five
+"already implemented" candidates, I independently re-read the cited
+function (`translateColorBlendState`, `applyLogicOp`/`mergeColor`,
+`QueryPool.h`'s `accumulateOcclusionSamples`, `readIndirectDraws`) myself
+before committing to advertising anything, since an agent's own survey
+can misread a partial implementation as a complete one. All five held up
+under direct inspection.
+
+## The fix (H7a)
+
+Flipped all five bits `VK_TRUE` in `PhysicalDeviceInfo.cpp` in one small
+commit, with a Doxygen-style comment per bit citing the exact function
+that already backs it, and raised `maxDrawIndirectCount` from the
+spec-mandated `multiDrawIndirect == false` floor of `1` to `UINT32_MAX`
+to match (`readIndirectDraws`/`readIndirectMeshDraws` have no smaller
+real ceiling of their own -- they read whatever `DrawCount` is given,
+bounded only by the indirect buffer's own size, already checked
+separately). Extended the existing exhaustive
+`OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised`
+unit test to cover all five new bits (matching its own established
+"assert every claimed bit, then zero them all out and diff against an
+all-false struct" pattern rather than writing five new tests), and added
+one small new test for the raised limit.
+
+## Real CTS verification, and a lesson about what "cheap" actually means here
+
+Ran three targeted real `deqp-vk` groups (`logic_op` cases, occlusion
+query cases, and a multi-draw-indirect/`first_instance` sample) plus the
+existing `draw_sample.txt` regression sample, each compared before/after
+via `git stash`. Every group showed the same shape: `Passed` unchanged
+(0 in three of the four groups, 14 in the fourth), a real block of cases
+moving from `NotSupported` to a genuine attempt, and every one of those
+newly-attempted cases failing on a separate, already-tracked,
+pre-existing gap (C8's own `feme-cpu-simdize` matrix/aggregate
+legalization limitation for `logic_op`, a generic, not-yet-triaged
+`vkCreateGraphicsPipelines` content gap for the other two groups). This
+is the same "flip an honest bit, unblock real attempts, most still hit a
+different wall" pattern the whole H6 mesh-shading chain trained me to
+expect -- "cheap" in this row's own text meant "cheap to advertise
+correctly", not "cheap to get any of these 976+441+740 real cases to
+actually pass". I did not chase either newly-surfaced failure mode
+down: the `logic_op` one is already C8/H4e's own tracked scope, and the
+generic pipeline-creation one is a broad, separate gap that would need
+its own investigation before it could even be attributed to a specific
+row, not something to open a fresh H7-nested row for on a hunch.
+
+## Bookkeeping while in the file
+
+Found `AdvertisedPromotedFeatures.txt` (the hand-maintained tracking file
+`vk_gen_feature_inventory.py` reads to build
+`Vulkan14FeatureInventory.md`'s table) was missing `geometryShader`
+entirely, and the inventory doc's own top summary table still said "1.0:
+4 of 55" when the detailed table beneath it already listed 6 `yes` rows
+-- both pre-existing drifts from H3/H4b/H5e never being fully
+back-propagated into this specific tracking file, the same class of bug
+`VulkanCTSReport.md`'s own F13/F14 entries already found and fixed once
+for the promoted-extension side of this same file. Fixed both while
+already touching this file for H7a's own five additions (11 of 55 now
+correctly advertised), rather than leaving a doc that would be wrong the
+moment someone next regenerated it from the tracking file alone.
+
+## Roadmap breakdown for the rest
+
+Rather than guess at effort or land partial fixes for bits I hadn't
+actually scoped, I filed the remaining ~15 candidates as H7b-H7j, one
+row per natural cluster (a depth-pipeline cluster, a
+`VkPipelineMultisampleStateCreateInfo`-field cluster, a
+storage-image-format cluster still needing storage-image read/write
+lowering built from scratch first, etc.), each citing the specific
+missing piece the survey found (a rejected `polygonMode`, an explicit
+"not implemented" error, missing SPIR-V builtin plumbing, or no lowering
+path at all) rather than a vague "needs work" placeholder -- all flat,
+one level under H7, per the standing instruction against the H6-style
+runaway nesting. H7's own top-level row text was updated to describe the
+breakdown and stays open, exactly the H6-top-row pattern.
