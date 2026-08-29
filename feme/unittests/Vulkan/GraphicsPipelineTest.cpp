@@ -769,9 +769,13 @@ TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   Raster.rasterizerDiscardEnable = VK_TRUE;
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
 
-  // A dynamic state with no implemented path.
+  // A dynamic state with no implemented path (`rasterizerDiscardEnable`
+  // itself is unimplemented statically -- see the rasterizer-discard case
+  // above -- so its `VK_EXT_extended_dynamic_state2` dynamic counterpart
+  // has nowhere to go either; `VK_DYNAMIC_STATE_DEPTH_BIAS`/`_BOUNDS` are
+  // both implemented now, roadmap H7d).
   Info = makeCreateInfo(Vertex, Fragment);
-  VkDynamicState Unsupported = VK_DYNAMIC_STATE_DEPTH_BIAS;
+  VkDynamicState Unsupported = VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE;
   VkPipelineDynamicStateCreateInfo DynamicInfo{};
   DynamicInfo.dynamicStateCount = 1;
   DynamicInfo.pDynamicStates = &Unsupported;
@@ -1025,6 +1029,154 @@ TEST_F(GraphicsPipelineTest, TranslatesNonFillPolygonModes) {
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
   EXPECT_EQ(Pipe, VK_NULL_HANDLE);
 
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H7d) `depthClamp`/`depthBiasClamp`: a pipeline may enable
+/// `depthClampEnable`/`depthBiasEnable` and set static bias factors, which
+/// `translateRasterState` now accepts (instead of unconditionally
+/// rejecting `rasterizerDiscardEnable`, `depthClampEnable`, and
+/// `depthBiasEnable` together) and stores on `RasterState`.
+TEST_F(GraphicsPipelineTest, TranslatesDepthClampAndBiasState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.depthClampEnable = VK_TRUE;
+  Raster.depthBiasEnable = VK_TRUE;
+  Raster.depthBiasConstantFactor = 2.0f;
+  Raster.depthBiasClamp = 0.5f;
+  Raster.depthBiasSlopeFactor = 1.5f;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  feme::graphics::RasterState Resolved =
+      Graphics->buildExecutorPipeline(DynamicGraphicsState{}).getRasterState();
+  EXPECT_TRUE(Resolved.DepthClampEnable);
+  EXPECT_TRUE(Resolved.DepthBiasEnable);
+  EXPECT_EQ(Resolved.DepthBiasConstantFactor, 2.0f);
+  EXPECT_EQ(Resolved.DepthBiasClamp, 0.5f);
+  EXPECT_EQ(Resolved.DepthBiasSlopeFactor, 1.5f);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H7d) `VK_DYNAMIC_STATE_DEPTH_BIAS`: like `LineWidth`
+/// (`DynamicLineWidthAndStippleOverrideStaticState`), a pipeline may
+/// declare this dynamic and `buildExecutorPipeline` then reads the
+/// per-draw snapshot instead of its own (deliberately mismatched)
+/// creation-time bias factors.
+TEST_F(GraphicsPipelineTest, DynamicDepthBiasOverridesStaticState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.depthBiasEnable = VK_TRUE;
+  Raster.depthBiasConstantFactor = 1.0f;
+  Raster.depthBiasClamp = 1.0f;
+  Raster.depthBiasSlopeFactor = 1.0f;
+  VkDynamicState Dynamic = VK_DYNAMIC_STATE_DEPTH_BIAS;
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 1;
+  DynamicInfo.pDynamicStates = &Dynamic;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState DynState;
+  DynState.DepthBiasConstantFactor = 4.0f;
+  DynState.DepthBiasClamp = 3.0f;
+  DynState.DepthBiasSlopeFactor = 2.0f;
+  feme::graphics::RasterState Resolved =
+      Graphics->buildExecutorPipeline(DynState).getRasterState();
+  EXPECT_EQ(Resolved.DepthBiasConstantFactor, 4.0f);
+  EXPECT_EQ(Resolved.DepthBiasClamp, 3.0f);
+  EXPECT_EQ(Resolved.DepthBiasSlopeFactor, 2.0f);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H7d) `depthBounds`: a pipeline may enable
+/// `depthBoundsTestEnable` with static `min`/`maxDepthBounds`, which
+/// `translateDepthStencilState` now accepts (instead of unconditionally
+/// rejecting it) and stores on `DepthState` -- needs a depth attachment in
+/// its render target, exactly like the regular depth test.
+TEST_F(GraphicsPipelineTest, TranslatesDepthBoundsState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = PassWithDepth;
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthBoundsTestEnable = VK_TRUE;
+  DepthInfo.minDepthBounds = 0.25f;
+  DepthInfo.maxDepthBounds = 0.75f;
+  Info.pDepthStencilState = &DepthInfo;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  feme::graphics::DepthState Resolved =
+      Graphics->buildExecutorPipeline(DynamicGraphicsState{}).getDepthState();
+  EXPECT_TRUE(Resolved.BoundsTestEnable);
+  EXPECT_EQ(Resolved.MinDepthBounds, 0.25f);
+  EXPECT_EQ(Resolved.MaxDepthBounds, 0.75f);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H7d) `VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE`/`_BOUNDS`:
+/// like the dynamic depth-test-enable/compare-op states above, a pipeline
+/// may declare either or both dynamic and `buildExecutorPipeline` then
+/// resolves from the per-draw snapshot instead of the (deliberately
+/// mismatched) static state.
+TEST_F(GraphicsPipelineTest, DynamicDepthBoundsOverridesStaticState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = PassWithDepth;
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthBoundsTestEnable = VK_FALSE;
+  DepthInfo.minDepthBounds = 0.0f;
+  DepthInfo.maxDepthBounds = 1.0f;
+  Info.pDepthStencilState = &DepthInfo;
+  VkDynamicState DynStates[2] = {VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE,
+                                 VK_DYNAMIC_STATE_DEPTH_BOUNDS};
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 2;
+  DynamicInfo.pDynamicStates = DynStates;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState DynState;
+  DynState.DepthBoundsTestEnable = true;
+  DynState.MinDepthBounds = 0.1f;
+  DynState.MaxDepthBounds = 0.9f;
+  feme::graphics::DepthState Resolved =
+      Graphics->buildExecutorPipeline(DynState).getDepthState();
+  EXPECT_TRUE(Resolved.BoundsTestEnable);
+  EXPECT_EQ(Resolved.MinDepthBounds, 0.1f);
+  EXPECT_EQ(Resolved.MaxDepthBounds, 0.9f);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
