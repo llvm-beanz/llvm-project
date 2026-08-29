@@ -345,6 +345,19 @@ struct DepthState {
   bool TestEnable = false;
   bool WriteEnable = false;
   CompareOp Compare = CompareOp::Less;
+  /// (roadmap H7d) Whether the depth bounds test runs: it compares the
+  /// value already stored in the depth attachment at a fragment's pixel
+  /// (not the incoming fragment's own new depth) against
+  /// `[MinDepthBounds, MaxDepthBounds]`, discarding the fragment entirely
+  /// (no color/stencil/depth write) if outside that range -- and runs
+  /// before the stencil test, per the Vulkan spec's fixed-function order
+  /// (`VkPipelineDepthStencilStateCreateInfo::depthBoundsTestEnable`).
+  bool BoundsTestEnable = false;
+  /// (roadmap H7d) `minDepthBounds`/`maxDepthBounds`
+  /// (`VkPipelineDepthStencilStateCreateInfo`, or `vkCmdSetDepthBounds`'s
+  /// two values when dynamic).
+  float MinDepthBounds = 0.0f;
+  float MaxDepthBounds = 1.0f;
 };
 
 /// How a line primitive's width is turned into covered pixels, matching
@@ -401,6 +414,30 @@ struct RasterState {
   /// (`VkPipelineRasterizationLineStateCreateInfo::lineStipplePattern`):
   /// bit 0 is tested first, at the line's starting end.
   uint16_t StipplePattern = 0xFFFF;
+  /// (roadmap H7d) Whether a fragment's depth is clamped to the viewport's
+  /// `[minDepth, maxDepth]` range instead of the primitive being clipped
+  /// against the near/far planes (`VkPipelineRasterizationStateCreateInfo::
+  /// depthClampEnable`). See `clipTriangle`'s and `projectVertex`'s own
+  /// comments in Executor.cpp for how each half of this is implemented.
+  bool DepthClampEnable = false;
+  /// (roadmap H7d) Whether a constant, slope-scaled depth bias is added to
+  /// every fragment a triangle-class primitive generates
+  /// (`VkPipelineRasterizationStateCreateInfo::depthBiasEnable`). Applies
+  /// uniformly to `PolygonMode::Fill`/`Line`/`Point` triangles alike (see
+  /// `RasterState::Polygon`'s own comment) but never to a real point- or
+  /// line-topology primitive, matching the Vulkan spec's own wording (see
+  /// "Depth bias" in feme/docs/FeMeGraphicsDesign.md).
+  bool DepthBiasEnable = false;
+  /// (roadmap H7d) `depthBiasConstantFactor`/`depthBiasClamp`/
+  /// `depthBiasSlopeFactor` (`VkPipelineRasterizationStateCreateInfo`, or
+  /// `vkCmdSetDepthBias`'s three values when dynamic): together with the
+  /// bound depth attachment's own format-dependent "r" constant and each
+  /// triangle's own screen-space depth slope, these compute the bias
+  /// added to every fragment's depth (see "Depth bias" in
+  /// feme/docs/FeMeGraphicsDesign.md for the full formula).
+  float DepthBiasConstantFactor = 0.0f;
+  float DepthBiasClamp = 0.0f;
+  float DepthBiasSlopeFactor = 0.0f;
 };
 
 /// One attachment's format/extent identity, part of the pipeline's cache key
