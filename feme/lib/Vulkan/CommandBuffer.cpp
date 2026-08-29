@@ -1144,12 +1144,40 @@ uint32_t resolveVertexBindingStride(const GraphicsPipeline &Pipeline,
 /// `femeRTFetchTexel2D` (FragmentWrapper.cpp/FeMeRuntimeCPU.c), so
 /// `dynamicRenderingLocalReadMultisampledAttachments` now honestly
 /// advertises `VK_TRUE`.
+///
+/// Roadmap H7p: \p SubpassInputSampleCounts carries \p SubpassInputs'
+/// *own* per-attachment sample count, one entry per `InputAttachmentIndex`
+/// -- distinct from \p SampleCount (the *currently bound pipeline's* own
+/// `rasterizationSamples`, still correct for \p Attachments/\p
+/// DepthStencil below, since a subpass's own color/depth/stencil
+/// attachments always share their pipeline's sample count per the spec).
+/// A later subpass's input attachment is not necessarily one of that
+/// subpass's own color attachments (`RenderTargetBinding::Inputs`'s own
+/// comment: "may be a *different* attachment than any of this subpass's
+/// own `Colors`") and so may have been produced by an *earlier* subpass
+/// with an entirely different pipeline and sample count -- e.g. a real
+/// `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading_enabled.*`
+/// case's second (and later) subpasses, each a single-sample
+/// `copy_sample_frag` draw (`subpassLoad(imageMS, pushConstants.sampleId)`)
+/// reading back the first subpass's genuinely multisampled color output.
+/// Using \p SampleCount (that copy pipeline's own `1`) for \p
+/// SubpassInputs' `RowPitch`/`SampleStride` there silently mis-addressed
+/// every read (`RowPitch` short by the real image's sample-count factor,
+/// `SampleStride == 0` so every `sample` operand aliased to the same
+/// texel): every real per-sample fetch reads back garbage interleaved
+/// with the wrong texel's data instead of `pushConstants.sampleId`'s own
+/// sample, which is what actually produced the same-column, same-value
+/// "got less unique colors" failure (each of the two `getSingleSampledImage`
+/// resolves reading identical, incorrectly-strided data) -- not the
+/// `gl_FragCoord`-per-sample-position bug this roadmap entry originally
+/// scoped alone (still real and still needed, but insufficient by itself).
 Error buildSubpassInputHeap(
     const GraphicsState &Gfx,
     llvm::ArrayRef<feme::graphics::AttachmentView> Attachments,
     const feme::graphics::DepthStencilAttachment &DepthStencil,
     llvm::ArrayRef<feme::graphics::AttachmentView> SubpassInputs,
-    uint32_t SampleCount, std::vector<feme::cpu::FemeImageDescriptor> &Heap,
+    llvm::ArrayRef<uint32_t> SubpassInputSampleCounts, uint32_t SampleCount,
+    std::vector<feme::cpu::FemeImageDescriptor> &Heap,
     std::vector<feme::cpu::FemeImageSubresourceLayout> &Layouts) {
   auto ColorIndexFor = [&](size_t I) -> uint32_t {
     return I < Gfx.ColorAttachmentInputIndices.size()
@@ -1194,8 +1222,8 @@ Error buildSubpassInputHeap(
   Heap.assign(MaxIndex + 1, feme::cpu::FemeImageDescriptor{});
   Layouts.assign(MaxIndex + 1, feme::cpu::FemeImageSubresourceLayout{});
 
-  auto populate = [&](uint32_t Idx,
-                      const feme::graphics::AttachmentView &View) -> Error {
+  auto populate = [&](uint32_t Idx, const feme::graphics::AttachmentView &View,
+                      uint32_t ViewSampleCount) -> Error {
     if (Idx == VK_ATTACHMENT_UNUSED || View.Data.empty())
       return Error::success();
     Expected<uint32_t> ElemSize =
@@ -1213,37 +1241,46 @@ Error buildSubpassInputHeap(
     Dst.MipLevels = 1;
     Dst.ArrayLayers = 1;
     Dst.PlaneCount = 1;
-    Dst.SampleCount = SampleCount;
+    Dst.SampleCount = ViewSampleCount;
     Dst.Flags = feme::cpu::FEME_IMAGE_SAMPLED;
     feme::cpu::FemeImageSubresourceLayout &Layout = Layouts[Idx];
     Layout.Offset = 0;
     // Every sample of one texel is stored contiguously (matching
     // Image.cpp's `computeSubresourceLayouts`), so a row is `Width`
-    // texels of `SampleCount * *ElemSize` bytes each.
-    Layout.RowPitch = uint64_t(View.Width) * *ElemSize * SampleCount;
+    // texels of `ViewSampleCount * *ElemSize` bytes each.
+    Layout.RowPitch = uint64_t(View.Width) * *ElemSize * ViewSampleCount;
     Layout.SlicePitch = Layout.RowPitch * View.Height;
-    Layout.SampleStride = SampleCount > 1 ? *ElemSize : 0;
+    Layout.SampleStride = ViewSampleCount > 1 ? *ElemSize : 0;
     Dst.MipLayouts = &Layout;
     Dst.MipLayoutCount = 1;
     return Error::success();
   };
 
   if (!SubpassInputs.empty()) {
-    for (size_t I = 0; I != SubpassInputs.size(); ++I)
-      if (Error E = populate(static_cast<uint32_t>(I), SubpassInputs[I]))
+    for (size_t I = 0; I != SubpassInputs.size(); ++I) {
+      // (roadmap H7p) Each input attachment's own sample count, not the
+      // current (possibly single-sample) pipeline's -- see this
+      // function's own comment above.
+      uint32_t ViewSampleCount =
+          I < SubpassInputSampleCounts.size() ? SubpassInputSampleCounts[I]
+                                              : SampleCount;
+      if (Error E = populate(static_cast<uint32_t>(I), SubpassInputs[I],
+                            ViewSampleCount))
         return E;
+    }
     return Error::success();
   }
 
   for (size_t I = 0; I != Attachments.size(); ++I)
-    if (Error E = populate(ColorIndexFor(I), Attachments[I]))
+    if (Error E = populate(ColorIndexFor(I), Attachments[I], SampleCount))
       return E;
   if (Gfx.DepthInputAttachmentIndex)
-    if (Error E = populate(*Gfx.DepthInputAttachmentIndex, DepthStencil.Depth))
+    if (Error E = populate(*Gfx.DepthInputAttachmentIndex, DepthStencil.Depth,
+                          SampleCount))
       return E;
   if (Gfx.StencilInputAttachmentIndex)
-    if (Error E =
-            populate(*Gfx.StencilInputAttachmentIndex, DepthStencil.Stencil))
+    if (Error E = populate(*Gfx.StencilInputAttachmentIndex,
+                          DepthStencil.Stencil, SampleCount))
       return E;
   return Error::success();
 }
@@ -1298,6 +1335,10 @@ struct ResolvedDrawAttachments {
   std::vector<feme::graphics::AttachmentView> ResolveAttachments;
   feme::graphics::DepthStencilAttachment DepthStencil;
   std::vector<feme::graphics::AttachmentView> SubpassInputs;
+  /// (Roadmap H7p) `SubpassInputs[I]`'s own real sample count -- see
+  /// `buildSubpassInputHeap`'s own comment for why this cannot be assumed
+  /// to be the current draw's pipeline's sample count.
+  std::vector<uint32_t> SubpassInputSampleCounts;
 };
 
 /// Validates a draw's render-target binding against \p Pipeline's own
@@ -1396,9 +1437,11 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
   // attachment may be a different render-pass attachment entirely (e.g. an
   // earlier subpass's own color output).
   Resolved.SubpassInputs.reserve(Gfx.Binding.Inputs.size());
+  Resolved.SubpassInputSampleCounts.reserve(Gfx.Binding.Inputs.size());
   for (ImageView *View : Gfx.Binding.Inputs) {
     if (!View) {
       Resolved.SubpassInputs.push_back(feme::graphics::AttachmentView{});
+      Resolved.SubpassInputSampleCounts.push_back(0);
       continue;
     }
     Expected<feme::graphics::AttachmentView> Attachment =
@@ -1406,6 +1449,10 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
     if (!Attachment)
       return Attachment.takeError();
     Resolved.SubpassInputs.push_back(*Attachment);
+    // (Roadmap H7p) This input attachment's own real sample count -- see
+    // `buildSubpassInputHeap`'s own comment for why it must not be
+    // assumed to equal this draw's own pipeline's `SampleCount` below.
+    Resolved.SubpassInputSampleCounts.push_back(View->image()->sampleCount());
   }
   return Resolved;
 }
@@ -1434,6 +1481,8 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
       Resolved.DepthStencil;
   const std::vector<feme::graphics::AttachmentView> &SubpassInputs =
       Resolved.SubpassInputs;
+  const std::vector<uint32_t> &SubpassInputSampleCounts =
+      Resolved.SubpassInputSampleCounts;
 
   MaterializedBoundResources Materialized = buildBoundResources(BoundSets);
   feme::cpu::DispatchResources Resources;
@@ -1555,7 +1604,8 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
     std::vector<feme::cpu::FemeImageSubresourceLayout> SubpassInputLayouts;
     if (Error E = buildSubpassInputHeap(
             Gfx, ViewAttachments, ViewDepthStencil, ViewSubpassInputs,
-            Pipeline.sampleCount(), SubpassInputHeap, SubpassInputLayouts))
+            SubpassInputSampleCounts, Pipeline.sampleCount(), SubpassInputHeap,
+            SubpassInputLayouts))
       return E;
 
     uint64_t PassedSamples = 0;

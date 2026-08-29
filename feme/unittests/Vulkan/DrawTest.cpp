@@ -5605,7 +5605,269 @@ TEST_F(DrawTest,
   vkFreeMemory(Device, MSMemory, nullptr);
 }
 
-/// Roadmap H2: a fragment stage reading `gl_ViewIndex` (SPIR-V `BuiltIn
+/// Roadmap H7p: a classic (non-dynamic-rendering) `VkRenderPass` with two
+/// subpasses -- subpass 0's own color attachment is a genuinely
+/// multisampled (`VK_SAMPLE_COUNT_4_BIT`) attachment 0 (its per-sample
+/// data seeded directly, like `SubpassLoadReadsBackAnExplicitSampleOfThe
+/// ColorAttachmentItWrote`'s own comment explains, since a uniform draw
+/// can never produce distinct per-sample values to read back distinctly);
+/// subpass 1's own pipeline is a *different*, single-sample
+/// (`VK_SAMPLE_COUNT_1_BIT`) one, writing a single-sample attachment 1,
+/// that reads attachment 0 back via `subpassLoad`'s explicit-sample form
+/// (`SubpassLoadMultisampleFragmentSource`, sample 2) -- exactly the real
+/// `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading_enabled.*`
+/// shape (a later, single-sample `copy_sample_frag` subpass reading back
+/// an earlier, multisampled subpass's own color output) that exposed a
+/// real bug in `buildSubpassInputHeap` (CommandBuffer.cpp): it used the
+/// *current, single-sample* pipeline's own `SampleCount` (`1`) for the
+/// input attachment's `RowPitch`/`SampleStride` too, rather than that
+/// input attachment's own real sample count (`4`) -- `RowPitch` came out
+/// four times too small and `SampleStride` an outright `0` (every
+/// `subpassLoad` sample aliasing to the same, wrong texel), silently
+/// misaddressing every read instead of failing outright, which is what
+/// actually produced the `min_sample_shading_enabled`/`sample_id` CTS
+/// failures this roadmap entry originally, incompletely, attributed to
+/// `gl_FragCoord` alone. Before the fix, this test's own read-back below
+/// would not reliably show sample 2's own seeded red value (128); after
+/// it, it does.
+TEST_F(DrawTest,
+       SubpassLoadReadsAnEarlierSubpassMultisampledColorOutputWithADifferentPipelineSampleCount) {
+  constexpr uint32_t MSSampleCount = 4;
+
+  VkImage MSImage = VK_NULL_HANDLE, OutputImage = VK_NULL_HANDLE;
+  VkDeviceMemory MSMemory = VK_NULL_HANDLE, OutputMemory = VK_NULL_HANDLE;
+  VkImageView MSView = VK_NULL_HANDLE, OutputView = VK_NULL_HANDLE;
+  createImageAndView(VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT, MSImage, MSView, MSMemory,
+                     VK_SAMPLE_COUNT_4_BIT);
+  createImageAndView(VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT, OutputImage, OutputView,
+                     OutputMemory, VK_SAMPLE_COUNT_1_BIT);
+
+  // Every texel's 4 samples are seeded (0, 0, 0, 255), (64, 0, 0, 255),
+  // (128, 0, 0, 255), (192, 0, 0, 255) -- sample 2's red channel is
+  // therefore 128 everywhere, matching
+  // `SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote`'s
+  // own seed.
+  std::vector<uint8_t> Seed(Extent * Extent * MSSampleCount * 4);
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X)
+      for (uint32_t S = 0; S != MSSampleCount; ++S) {
+        size_t Off = ((size_t)(Y * Extent + X) * MSSampleCount + S) * 4;
+        Seed[Off + 0] = static_cast<uint8_t>(S * 64);
+        Seed[Off + 1] = 0;
+        Seed[Off + 2] = 0;
+        Seed[Off + 3] = 0xFF;
+      }
+  std::memcpy(fromHandle<Image>(MSImage)->data(), Seed.data(), Seed.size());
+
+  VkAttachmentDescription Attachments[2]{};
+  Attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_4_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+  VkAttachmentReference ColorRef0{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference ColorRef1{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference InputRef{0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+  VkSubpassDescription Subpasses[2]{};
+  Subpasses[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpasses[0].colorAttachmentCount = 1;
+  Subpasses[0].pColorAttachments = &ColorRef0;
+  Subpasses[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpasses[1].inputAttachmentCount = 1;
+  Subpasses[1].pInputAttachments = &InputRef;
+  Subpasses[1].colorAttachmentCount = 1;
+  Subpasses[1].pColorAttachments = &ColorRef1;
+
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 2;
+  PassInfo.pSubpasses = Subpasses;
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &Pass), VK_SUCCESS);
+
+  VkImageView FbAttachments[2] = {MSView, OutputView};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = Pass;
+  FbInfo.attachmentCount = 2;
+  FbInfo.pAttachments = FbAttachments;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer Fb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &Fb), VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule SubpassFragment =
+      createModule(SubpassLoadMultisampleFragmentSource);
+
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+  Binding.descriptorCount = 1;
+  Binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+  VkPipelineLayoutCreateInfo SubpassLayoutInfo{};
+  SubpassLayoutInfo.setLayoutCount = 1;
+  SubpassLayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout SubpassLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineLayout(Device, &SubpassLayoutInfo, nullptr,
+                                   &SubpassLayout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+            VK_SUCCESS);
+  VkDescriptorSetAllocateInfo DSAllocInfo{};
+  DSAllocInfo.descriptorPool = DescPool;
+  DSAllocInfo.descriptorSetCount = 1;
+  DSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+  VkDescriptorImageInfo ImageInfo{};
+  ImageInfo.imageView = MSView;
+  ImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+  Write.pImageInfo = &ImageInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  // Subpass 0's own pipeline is never actually drawn with (attachment 0's
+  // data is seeded directly above), but a subpass still needs no bound
+  // pipeline to simply be skipped over via `vkCmdNextSubpass` -- no
+  // pipeline is created for it at all.
+
+  // Subpass 1's own pipeline: a genuinely *different* sample count
+  // (`VK_SAMPLE_COUNT_1_BIT`) than attachment 0's own `VK_SAMPLE_COUNT_
+  // 4_BIT` -- the mismatch this test exists to exercise.
+  VkPipelineMultisampleStateCreateInfo SubpassMultisample{};
+  SubpassMultisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineShaderStageCreateInfo SubpassStages[2]{};
+  SubpassStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  SubpassStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  SubpassStages[0].module = Vertex;
+  SubpassStages[0].pName = "main";
+  SubpassStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  SubpassStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  SubpassStages[1].module = SubpassFragment;
+  SubpassStages[1].pName = "main";
+  VkGraphicsPipelineCreateInfo SubpassInfo{};
+  SubpassInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  SubpassInfo.stageCount = 2;
+  SubpassInfo.pStages = SubpassStages;
+  SubpassInfo.pVertexInputState = &VertexInput;
+  SubpassInfo.pInputAssemblyState = &InputAssembly;
+  SubpassInfo.pViewportState = &ViewportState;
+  SubpassInfo.pRasterizationState = &Raster;
+  SubpassInfo.pMultisampleState = &SubpassMultisample;
+  SubpassInfo.pColorBlendState = &Blend;
+  SubpassInfo.layout = SubpassLayout;
+  SubpassInfo.renderPass = Pass;
+  SubpassInfo.subpass = 1;
+  VkPipeline SubpassPipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &SubpassInfo,
+                                      nullptr, &SubpassPipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValues[2]{};
+  ClearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  ClearValues[1].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = Pass;
+  PassBegin.framebuffer = Fb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 2;
+  PassBegin.pClearValues = ClearValues;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  // Subpass 0: nothing to draw -- attachment 0's per-sample data is
+  // already seeded above and `VK_ATTACHMENT_LOAD_OP_LOAD` preserves it.
+  vkCmdNextSubpass(Cmd, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, SubpassPipe);
+  vkCmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, SubpassLayout,
+                          0, 1, &Set, 0, nullptr);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Attachment 1's own single sample must show sample 2's own seeded red
+  // value (128) in green, everywhere -- not the wrong-sample/misaligned
+  // garbage `buildSubpassInputHeap`'s pre-fix `RowPitch`/`SampleStride`
+  // (computed from subpass 1's own single-sample pipeline instead of
+  // attachment 0's real 4-sample count) actually produced.
+  const auto *Data =
+      static_cast<const uint8_t *>(fromHandle<Image>(OutputImage)->data());
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      size_t Off = ((size_t)Y * Extent + X) * 4;
+      EXPECT_EQ(Data[Off + 0], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Data[Off + 1], 128) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Data[Off + 2], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Data[Off + 3], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, SubpassPipe, nullptr);
+  vkDestroyShaderModule(Device, SubpassFragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyDescriptorPool(Device, DescPool, nullptr);
+  vkDestroyPipelineLayout(Device, SubpassLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+  vkDestroyFramebuffer(Device, Fb, nullptr);
+  vkDestroyRenderPass(Device, Pass, nullptr);
+  vkDestroyImageView(Device, OutputView, nullptr);
+  vkDestroyImage(Device, OutputImage, nullptr);
+  vkFreeMemory(Device, OutputMemory, nullptr);
+  vkDestroyImageView(Device, MSView, nullptr);
+  vkDestroyImage(Device, MSImage, nullptr);
+  vkFreeMemory(Device, MSMemory, nullptr);
+}
+
+
 /// ViewIndex`) writes a different color per multiview view, into a
 /// two-layer framebuffer bound by a two-view (`viewMask == 0b11`) render
 /// pass -- confirming `CommandBuffer.cpp`'s `runDraw` both runs the
