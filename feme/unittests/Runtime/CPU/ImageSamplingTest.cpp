@@ -117,6 +117,35 @@ using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
 /// same operand shape but a `<4 x i32>`-shaped `out`.
 using LoadI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                            int32_t, int32_t, uint32_t, bool, void *);
+/// The roadmap H7b-a `Texture2DArray` counterpart of `SampleFn`, adding a
+/// float `ArrayLayer` coordinate (rounded to nearest, clamped) before
+/// `Lod`.
+using SampleArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                               const FemeSamplerDescriptor *, uint32_t,
+                               uint32_t, uint32_t, float, float, float, float,
+                               bool, bool, void *);
+/// The roadmap H7b-a `Texture2DArray` counterpart of `LoadFn`, adding an
+/// integer `Layer` coordinate before `Mip`.
+using LoadArrayFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                             int32_t, int32_t, int32_t, uint32_t, uint32_t,
+                             bool, void *);
+/// The roadmap H7b-a `Texture2DArray` counterpart of `LoadI32Fn`.
+using LoadArrayI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                uint32_t, int32_t, int32_t, int32_t, uint32_t,
+                                bool, void *);
+/// The roadmap H7b-a `TextureCube` counterpart of `SampleFn`: a
+/// direction-vector coordinate (`DirX`, `DirY`, `DirZ`) instead of `(U, V)`.
+using SampleCubeFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                              const FemeSamplerDescriptor *, uint32_t,
+                              uint32_t, uint32_t, float, float, float, float,
+                              bool, bool, void *);
+/// The roadmap H7b-a `TextureCubeArray` counterpart of `SampleCubeFn`,
+/// adding a float `ArrayLayer` coordinate (selecting a six-layer cube
+/// element) before `Lod`.
+using SampleCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                   const FemeSamplerDescriptor *, uint32_t,
+                                   uint32_t, uint32_t, float, float, float,
+                                   float, float, bool, bool, void *);
 
 /// Builds a single-mip-level, single-layer 2D `FemeImageDescriptor` over
 /// \p Storage (assumed row-major, tightly packed at \p Format's element
@@ -144,6 +173,43 @@ FemeImageDescriptor makeImage2D(void *Storage, uint64_t SizeInBytes,
   Img.PlaneCount = 1;
   Img.SampleCount = 1;
   Img.Flags = FEME_IMAGE_SAMPLED | ExtraFlags;
+  Img.MipLayouts = &Layout;
+  Img.MipLayoutCount = 1;
+  return Img;
+}
+
+/// The roadmap H7b-a array counterpart of `makeImage2D` above: a
+/// single-mip-level, \p ArrayLayers-layer 2D `FemeImageDescriptor` over \p
+/// Storage (assumed row-major, tightly packed, layer-major -- each layer's
+/// own texels contiguous before the next layer's), sampled. Used both for
+/// plain `Texture2DArray` tests and (with `ArrayLayers` a multiple of 6)
+/// `TextureCube`/`TextureCubeArray` tests, since a cube(array) is purely a
+/// view-level addressing convention over an ordinary 2D-array-shaped image
+/// (see FeMeVulkanDesign.md's H7b update).
+FemeImageDescriptor makeImage2DArray(void *Storage, uint64_t SizeInBytes,
+                                     uint32_t Width, uint32_t Height,
+                                     uint32_t ArrayLayers,
+                                     ResourceFormat Format,
+                                     FemeImageSubresourceLayout &Layout) {
+  Layout = {0, 0, 0, 0};
+  uint64_t ElemSize =
+      SizeInBytes / (uint64_t)Width / (uint64_t)Height / (uint64_t)ArrayLayers;
+  Layout.RowPitch = Width * ElemSize;
+  Layout.SlicePitch = Layout.RowPitch * Height;
+
+  FemeImageDescriptor Img{};
+  Img.Data = Storage;
+  Img.SizeInBytes = SizeInBytes;
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(Format);
+  Img.Width = Width;
+  Img.Height = Height;
+  Img.Depth = 1;
+  Img.MipLevels = 1;
+  Img.ArrayLayers = ArrayLayers;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
   Img.MipLayouts = &Layout;
   Img.MipLayoutCount = 1;
   return Img;
@@ -827,4 +893,157 @@ TEST_F(ImageSamplingTest, LoadI32InactiveLaneReadsZero) {
   EXPECT_EQ(Out[3], 0);
 }
 
+// Roadmap H7b-a: `Texture2DArray` sampling/fetch and `TextureCube`/
+// `TextureCubeArray` sampling. Every image below is single-mip, one texel
+// per face/layer (so point sampling any (U, V) inside `[0, 1]` reads that
+// layer's one texel exactly), each layer's texel value equal to its own
+// layer index -- isolating exactly the new `Layer`/face-selection
+// addressing this milestone adds, independent of the (already-tested)
+// filtering/addressing math above.
+
+TEST_F(ImageSamplingTest, Sample2DArrayReadsRequestedLayer) {
+  float Storage[3][1][1][4] = {
+      {{{0, 0, 0, 0}}}, {{{1, 1, 1, 1}}}, {{{2, 2, 2, 2}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 1, 1, 3,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleArrayFn Fn = resolve<SampleArrayFn>(
+      addWrapper("sample_array", "feme.cpu.image.sample.2darray.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/2.0f, 0.0f,
+     true, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 2.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample2DArrayRoundsLayerToNearest) {
+  float Storage[2][1][1][4] = {{{{0, 0, 0, 0}}}, {{{1, 1, 1, 1}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 1, 1, 2,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleArrayFn Fn = resolve<SampleArrayFn>(
+      addWrapper("sample_array", "feme.cpu.image.sample.2darray.v4f32"));
+  float Out[4];
+  // 0.6 rounds to nearest layer 1, not truncates to layer 0.
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/0.6f, 0.0f,
+     true, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, Load2DArrayReadsRequestedLayer) {
+  float Storage[2][1][1][4] = {{{{0, 0, 0, 0}}}, {{{7, 7, 7, 7}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 1, 1, 2,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadArrayFn Fn = resolve<LoadArrayFn>(
+      addWrapper("load_array", "feme.cpu.image.load.2darray.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, /*X=*/0, /*Y=*/0, /*Layer=*/1, /*Mip=*/0, /*Sample=*/0,
+     true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 7.0f);
+}
+
+TEST_F(ImageSamplingTest, Load2DArrayOutOfRangeLayerReadsZero) {
+  float Storage[1][1][1][4] = {{{{9, 9, 9, 9}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 1, 1, 1,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadArrayFn Fn = resolve<LoadArrayFn>(
+      addWrapper("load_array", "feme.cpu.image.load.2darray.v4f32"));
+  float Out[4] = {1, 1, 1, 1};
+  Fn(ImageHeap, 1, 0, 0, 0, /*Layer=*/1, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, Load2DArrayI32ReadsRequestedLayer) {
+  int32_t Storage[2][1][1][4] = {{{{0, 0, 0, 0}}}, {{{42, 42, 42, 42}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 1, 1, 2,
+                       ResourceFormat::R32G32B32A32_UINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadArrayI32Fn Fn = resolve<LoadArrayI32Fn>(
+      addWrapper("load_array_i32", "feme.cpu.image.load.2darray.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, /*X=*/0, /*Y=*/0, /*Layer=*/1, /*Mip=*/0, true, Out);
+  EXPECT_EQ(Out[0], 42);
+}
+
+TEST_F(ImageSamplingTest, SampleCubeSelectsEachFaceByDirection) {
+  // Six single-texel faces, layer N valued N, in Vulkan's own cube
+  // array-layer order (+X, -X, +Y, -Y, +Z, -Z).
+  float Storage[6][1][1][4] = {{{{0, 0, 0, 0}}}, {{{1, 1, 1, 1}}},
+                               {{{2, 2, 2, 2}}}, {{{3, 3, 3, 3}}},
+                               {{{4, 4, 4, 4}}}, {{{5, 5, 5, 5}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 1, 1, 6,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::Repeat);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeFn Fn = resolve<SampleCubeFn>(
+      addWrapper("sample_cube", "feme.cpu.image.sample.cube.v4f32"));
+  struct { float X, Y, Z; float Expected; } Cases[] = {
+      {1.0f, 0.0f, 0.0f, 0.0f},  {-1.0f, 0.0f, 0.0f, 1.0f},
+      {0.0f, 1.0f, 0.0f, 2.0f},  {0.0f, -1.0f, 0.0f, 3.0f},
+      {0.0f, 0.0f, 1.0f, 4.0f},  {0.0f, 0.0f, -1.0f, 5.0f},
+  };
+  for (auto &C : Cases) {
+    float Out[4];
+    Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, C.X, C.Y, C.Z, 0.0f, true, true,
+       Out);
+    EXPECT_FLOAT_EQ(Out[0], C.Expected)
+        << "direction (" << C.X << ", " << C.Y << ", " << C.Z << ")";
+  }
+}
+
+TEST_F(ImageSamplingTest, SampleCubeArraySelectsRequestedCubeElement) {
+  // Two cube elements (12 layers total): element 0's six faces valued 0,
+  // element 1's six faces valued 100.
+  float Storage[12][1][1][4];
+  for (unsigned I = 0; I < 6; ++I)
+    for (unsigned C = 0; C < 4; ++C) {
+      Storage[I][0][0][C] = 0.0f;
+      Storage[I + 6][0][0][C] = 100.0f;
+    }
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 1, 1, 12,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::Repeat);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeArrayFn Fn = resolve<SampleCubeArrayFn>(
+      addWrapper("sample_cubearray", "feme.cpu.image.sample.cubearray.v4f32"));
+  float Out0[4], Out1[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, /*ArrayLayer=*/0.0f,
+     0.0f, true, true, Out0);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, /*ArrayLayer=*/1.0f,
+     0.0f, true, true, Out1);
+  EXPECT_FLOAT_EQ(Out0[0], 0.0f);
+  EXPECT_FLOAT_EQ(Out1[0], 100.0f);
+}
+
 } // namespace
+

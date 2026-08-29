@@ -132,6 +132,27 @@
 // `SubpassLoadPattern`'s new `Sample` image-operand case,
 // SPIRVToLLVMPatterns.cpp) now passes a real, possibly non-zero one.
 //
+// Update (roadmap H7b-a): `femeRTFetchTexel2D`/`femeRTFetchTexel2DI32` both
+// gained an explicit `Layer` parameter, added to `Layout->Offset` as
+// `Layer * Layout->SlicePitch` -- the same per-array-layer addressing
+// roadmap H7b's own `materializeImageDescriptor` widening already uses
+// host-side, reused here runtime-side. Every existing 2D (non-arrayed)
+// caller still passes a constant `0`. Six new exported entry points build
+// on this: `feme.cpu.image.sample.2darray.v4f32`/`.load.2darray.v4f32`/
+// `.v4i32` (a `Texture2DArray`'s own explicit integer, or rounded-nearest
+// float, array layer) and `.sample.cube.v4f32`/`.sample.cubearray.v4f32`
+// (a `TextureCube`/`TextureCubeArray`'s direction-vector coordinate,
+// converted to a face index plus 2D UV by the classic "major axis"
+// algorithm, `femeRTSelectCubeFace` below, then addressed as an ordinary
+// `Layer` -- `Face` for a plain cube, `CubeIndex * 6 + Face` for a cube
+// array -- since a cube(array) is purely a view-level addressing
+// convention over an ordinary 2D-array-shaped image, never a distinct
+// physical layout of its own (see FeMeVulkanDesign.md's H7b update). No
+// depth-comparison (`samplecmp`) counterpart is added for any of the five:
+// SPIR-V's SPIR-V-to-LLVM conversion (SPIRVResourceLowering.cpp) does not
+// lower a depth-comparison sample for *any* dimension yet, 2D included, so
+// there is no existing shape to generalize from.
+//
 //===----------------------------------------------------------------------===//
 
 #include <stdint.h>
@@ -1407,13 +1428,26 @@ femeRTApplyAddressMode(int32_t Coord, int32_t Size, uint32_t Mode,
   }
 }
 
-// Reads one texel at integer coordinates `(X, Y)`, sample `Sample`, of mip
-// level `Level` of `Img`, or `BorderColor` if `UseBorder` is set (a
-// `ClampToBorder` axis resolved out of range), or all-zero for any other
-// unreadable access (no image bound, `Level` beyond `MipLayoutCount`, an
+// Reads one texel at integer coordinates `(X, Y)`, array layer `Layer`,
+// sample `Sample`, of mip level `Level` of `Img`, or `BorderColor` if
+// `UseBorder` is set (a `ClampToBorder` axis resolved out of range), or
+// all-zero for any other unreadable access (no image bound, `Level` beyond
+// `MipLayoutCount`, `Layer` at or beyond `Img->ArrayLayers`, an
 // unrecognized format, or an access `femeRTImageFormatElementSize`/the mip
 // layout's own `SizeInBytes` bound rejects) -- the same "out-of-range reads
 // zero" rule buffers use (see "Bounds checking").
+//
+// Roadmap H7b-a: `Layer` selects one of `Img->ArrayLayers` array layers via
+// `Layer * Layout->SlicePitch`, the same per-layer addressing
+// `Image::texelPointer` (Image.cpp) and roadmap H7b's own descriptor-
+// materialization widening already use -- a `TextureCube`/`TextureCubeArray`
+// descriptor addresses its six-faces-per-array-element the identical way a
+// plain `Texture2DArray` addresses its layers (see FeMeVulkanDesign.md's
+// "cube(array) is a view-level addressing convention" note), so this one
+// widening covers every arrayed 2D-shaped dimension uniformly. Every caller
+// that reads a non-arrayed image (plain `Texture2D`) still passes a
+// constant `0`, exactly like the roadmap F8c `Sample` parameter's own
+// "every non-multisampled caller passes 0" convention.
 //
 // Roadmap F8b/F8c: a multisampled `Img` (`SampleCount > 1`) packs every
 // sample of one texel contiguously (`Layout->SampleStride == ElemSize`, see
@@ -1425,16 +1459,16 @@ femeRTApplyAddressMode(int32_t Coord, int32_t Size, uint32_t Mode,
 // attachment's own real sample count) selects which of those contiguous
 // samples this fetch reads, via `Sample * Layout->SampleStride`.
 __attribute__((always_inline)) static FemeRTv4f32
-femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level, int32_t X,
-                   int32_t Y, uint32_t Sample, _Bool UseBorder,
-                   const float BorderColor[4]) {
+femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level,
+                   uint32_t Layer, int32_t X, int32_t Y, uint32_t Sample,
+                   _Bool UseBorder, const float BorderColor[4]) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (UseBorder) {
     FemeRTv4f32 Border = {BorderColor[0], BorderColor[1], BorderColor[2],
                           BorderColor[3]};
     return Border;
   }
-  if (!Img->Data || Level >= Img->MipLayoutCount)
+  if (!Img->Data || Level >= Img->MipLayoutCount || Layer >= Img->ArrayLayers)
     return Zero;
   uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
   if (ElemSize == 0)
@@ -1444,7 +1478,8 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level, int32_t X,
                              ? (uint64_t)Img->SampleCount * Layout->SampleStride
                              : ElemSize;
   uint64_t SampleOffset = (uint64_t)Sample * Layout->SampleStride;
-  uint64_t Offset = Layout->Offset + (uint64_t)Y * Layout->RowPitch +
+  uint64_t Offset = Layout->Offset + (uint64_t)Layer * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch +
                     (uint64_t)X * TexelStride + SampleOffset;
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
@@ -1458,13 +1493,13 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level, int32_t X,
 // `OpImageFetch` (see ImageCalls.h's `Load2DI32` comment), which -- like
 // its float counterpart -- addresses no sampler and therefore no address
 // mode, so there is no `ClampToBorder` case to honor here either. Shares
-// `femeRTFetchTexel2D`'s roadmap F8b multisample-stride fix (see that
-// function's own comment).
+// `femeRTFetchTexel2D`'s roadmap F8b multisample-stride fix and roadmap
+// H7b-a array-layer widening (see that function's own comments).
 __attribute__((always_inline)) static FemeRTv4i32
 femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
-                      int32_t X, int32_t Y) {
+                      uint32_t Layer, int32_t X, int32_t Y) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
-  if (!Img->Data || Level >= Img->MipLayoutCount)
+  if (!Img->Data || Level >= Img->MipLayoutCount || Layer >= Img->ArrayLayers)
     return Zero;
   uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
   if (ElemSize == 0)
@@ -1473,7 +1508,8 @@ femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
   uint64_t TexelStride = Layout->SampleStride != 0
                              ? (uint64_t)Img->SampleCount * Layout->SampleStride
                              : ElemSize;
-  uint64_t Offset = Layout->Offset + (uint64_t)Y * Layout->RowPitch +
+  uint64_t Offset = Layout->Offset + (uint64_t)Layer * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch +
                     (uint64_t)X * TexelStride;
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
@@ -1547,11 +1583,12 @@ femeRTComputeBilinearSupport(const FemeRTImageDescriptor *Img, float U, float V,
   return S;
 }
 
-// Point-samples (nearest texel) `Img` at `(U, V)`.
+// Point-samples (nearest texel) `Img` at `(U, V)`, array layer `Layer`
+// (roadmap H7b-a; always `0` for a non-arrayed image).
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSamplePoint2D(const FemeRTImageDescriptor *Img,
                     const FemeRTSamplerDescriptor *Samp, float U, float V,
-                    uint32_t Level) {
+                    uint32_t Level, uint32_t Layer) {
   uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
   uint32_t LevelHeight = femeRTMipExtent(Img->Height, Level);
   int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
@@ -1561,29 +1598,30 @@ femeRTSamplePoint2D(const FemeRTImageDescriptor *Img,
       femeRTApplyAddressMode(X, (int32_t)LevelWidth, Samp->AddressU, &BorderX);
   int32_t AddrY =
       femeRTApplyAddressMode(Y, (int32_t)LevelHeight, Samp->AddressV, &BorderY);
-  return femeRTFetchTexel2D(Img, Level, AddrX, AddrY, /*Sample=*/0,
+  return femeRTFetchTexel2D(Img, Level, Layer, AddrX, AddrY, /*Sample=*/0,
                             BorderX || BorderY, Samp->BorderColor);
 }
 
-// Bilinearly filters `Img` at `(U, V)`, blending the four texels
+// Bilinearly filters `Img` at `(U, V)`, array layer `Layer` (roadmap
+// H7b-a; always `0` for a non-arrayed image), blending the four texels
 // `femeRTComputeBilinearSupport` selects.
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSampleLinear2D(const FemeRTImageDescriptor *Img,
                      const FemeRTSamplerDescriptor *Samp, float U, float V,
-                     uint32_t Level) {
+                     uint32_t Level, uint32_t Layer) {
   FemeRTBilinearSupport S =
       femeRTComputeBilinearSupport(Img, U, V, Samp, Level);
   FemeRTv4f32 T00 = femeRTFetchTexel2D(
-      Img, Level, S.X0, S.Y0, /*Sample=*/0, S.BorderX0 || S.BorderY0,
+      Img, Level, Layer, S.X0, S.Y0, /*Sample=*/0, S.BorderX0 || S.BorderY0,
       Samp->BorderColor);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(
-      Img, Level, S.X1, S.Y0, /*Sample=*/0, S.BorderX1 || S.BorderY0,
+      Img, Level, Layer, S.X1, S.Y0, /*Sample=*/0, S.BorderX1 || S.BorderY0,
       Samp->BorderColor);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(
-      Img, Level, S.X0, S.Y1, /*Sample=*/0, S.BorderX0 || S.BorderY1,
+      Img, Level, Layer, S.X0, S.Y1, /*Sample=*/0, S.BorderX0 || S.BorderY1,
       Samp->BorderColor);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(
-      Img, Level, S.X1, S.Y1, /*Sample=*/0, S.BorderX1 || S.BorderY1,
+      Img, Level, Layer, S.X1, S.Y1, /*Sample=*/0, S.BorderX1 || S.BorderY1,
       Samp->BorderColor);
   FemeRTv4f32 Top = T00 + (T10 - T00) * S.Wx;
   FemeRTv4f32 Bottom = T01 + (T11 - T01) * S.Wx;
@@ -1646,8 +1684,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
   uint32_t Level =
       femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
   return Samp.MagFilter == 1 // SamplerFilter::Linear.
-             ? femeRTSampleLinear2D(&Img, &Samp, U, V, Level)
-             : femeRTSamplePoint2D(&Img, &Samp, U, V, Level);
+             ? femeRTSampleLinear2D(&Img, &Samp, U, V, Level, /*Layer=*/0)
+             : femeRTSamplePoint2D(&Img, &Samp, U, V, Level, /*Layer=*/0);
 }
 
 // `feme.cpu.image.samplecmp.2d.f32`: depth-comparison samples a 2D sampled
@@ -1689,25 +1727,26 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
         femeRTApplyAddressMode(X, (int32_t)LevelWidth, Samp.AddressU, &BorderX);
     int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
                                            Samp.AddressV, &BorderY);
-    FemeRTv4f32 T = femeRTFetchTexel2D(&Img, Level, AddrX, AddrY, /*Sample=*/0,
-                                       BorderX || BorderY, Samp.BorderColor);
+    FemeRTv4f32 T = femeRTFetchTexel2D(&Img, Level, /*Layer=*/0, AddrX, AddrY,
+                                       /*Sample=*/0, BorderX || BorderY,
+                                       Samp.BorderColor);
     return femeRTApplyCompare(Samp.CompareFunc, Dref, T[0]);
   }
 
   FemeRTBilinearSupport S =
       femeRTComputeBilinearSupport(&Img, U, V, &Samp, Level);
   FemeRTv4f32 T00 = femeRTFetchTexel2D(
-      &Img, Level, S.X0, S.Y0, /*Sample=*/0, S.BorderX0 || S.BorderY0,
-      Samp.BorderColor);
+      &Img, Level, /*Layer=*/0, S.X0, S.Y0, /*Sample=*/0,
+      S.BorderX0 || S.BorderY0, Samp.BorderColor);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(
-      &Img, Level, S.X1, S.Y0, /*Sample=*/0, S.BorderX1 || S.BorderY0,
-      Samp.BorderColor);
+      &Img, Level, /*Layer=*/0, S.X1, S.Y0, /*Sample=*/0,
+      S.BorderX1 || S.BorderY0, Samp.BorderColor);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(
-      &Img, Level, S.X0, S.Y1, /*Sample=*/0, S.BorderX0 || S.BorderY1,
-      Samp.BorderColor);
+      &Img, Level, /*Layer=*/0, S.X0, S.Y1, /*Sample=*/0,
+      S.BorderX0 || S.BorderY1, Samp.BorderColor);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(
-      &Img, Level, S.X1, S.Y1, /*Sample=*/0, S.BorderX1 || S.BorderY1,
-      Samp.BorderColor);
+      &Img, Level, /*Layer=*/0, S.X1, S.Y1, /*Sample=*/0,
+      S.BorderX1 || S.BorderY1, Samp.BorderColor);
   float C00 = femeRTApplyCompare(Samp.CompareFunc, Dref, T00[0]);
   float C10 = femeRTApplyCompare(Samp.CompareFunc, Dref, T10[0]);
   float C01 = femeRTApplyCompare(Samp.CompareFunc, Dref, T01[0]);
@@ -1745,8 +1784,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DV4F32(
   if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  return femeRTFetchTexel2D(&Img, Mip, X, Y, Sample, /*UseBorder=*/0,
-                            NoBorder);
+  return femeRTFetchTexel2D(&Img, Mip, /*Layer=*/0, X, Y, Sample,
+                            /*UseBorder=*/0, NoBorder);
 }
 
 // `feme.cpu.image.load.2d.v4i32` (roadmap E26): the integer-format
@@ -1772,5 +1811,257 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DV4I32(
     return Zero;
   if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
     return Zero;
-  return femeRTFetchTexel2DI32(&Img, Mip, X, Y);
+  return femeRTFetchTexel2DI32(&Img, Mip, /*Layer=*/0, X, Y);
+}
+
+// Rounds `Value` to the nearest integer (per the Vulkan spec's "array
+// layer... rounded to the nearest integer" rule for a sampled array
+// layer) and clamps it to `[0, Count - 1]`, the same way an out-of-range
+// mip level or address-mode axis already clamps rather than reading zero.
+// `Count == 0` (a malformed or as-yet-uninitialized image descriptor)
+// returns 0 to avoid an unsigned underflow computing `Count - 1`.
+__attribute__((always_inline)) static uint32_t
+femeRTRoundClampLayer(uint32_t Count, float Value) {
+  if (Count == 0)
+    return 0;
+  float Rounded = __builtin_floorf(Value + 0.5f);
+  if (Rounded < 0.0f)
+    return 0;
+  uint32_t Layer = (uint32_t)Rounded;
+  return Layer >= Count ? Count - 1 : Layer;
+}
+
+// `feme.cpu.image.sample.2darray.v4f32` (roadmap H7b-a): the
+// `Texture2DArray` counterpart of `feme.cpu.image.sample.2d.v4f32` above
+// -- identical (U, V) filtering, plus `ArrayLayer` (SPIR-V's own arrayed-
+// sample coordinate convention: a float, rounded to nearest and clamped
+// to a valid layer by `femeRTRoundClampLayer` above).
+FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    float ArrayLayer, float Lod, _Bool UseExplicitLod,
+    _Bool Mask) asm("feme.cpu.image.sample.2darray.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    float ArrayLayer, float Lod, _Bool UseExplicitLod, _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  uint32_t Level =
+      femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
+  uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
+  return Samp.MagFilter == 1 // SamplerFilter::Linear.
+             ? femeRTSampleLinear2D(&Img, &Samp, U, V, Level, Layer)
+             : femeRTSamplePoint2D(&Img, &Samp, U, V, Level, Layer);
+}
+
+// `feme.cpu.image.load.2darray.v4f32` (roadmap H7b-a): the
+// `Texture2DArray` counterpart of `feme.cpu.image.load.2d.v4f32` above --
+// same bounds checking and no-sampler/no-filtering semantics, plus an
+// explicit integer `Layer` (SPIR-V's `OpImageFetch` array-layer coordinate
+// is always an integer, never a float, unlike the sampled path above).
+FemeRTv4f32 femeCpuImageLoad2DArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer, uint32_t Mip,
+    uint32_t Sample, _Bool Mask) asm("feme.cpu.image.load.2darray.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer, uint32_t Mip,
+    uint32_t Sample, _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  if (X < 0 || Y < 0 || Layer < 0 || (uint32_t)X >= Img.Width ||
+      (uint32_t)Y >= Img.Height || (uint32_t)Layer >= Img.ArrayLayers)
+    return Zero;
+  static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  return femeRTFetchTexel2D(&Img, Mip, (uint32_t)Layer, X, Y, Sample,
+                            /*UseBorder=*/0, NoBorder);
+}
+
+// `feme.cpu.image.load.2darray.v4i32` (roadmap H7b-a): the integer-format
+// counterpart of `feme.cpu.image.load.2darray.v4f32` above, mirroring how
+// `feme.cpu.image.load.2d.v4i32` relates to `feme.cpu.image.load.2d.v4f32`.
+FemeRTv4i32 femeCpuImageLoad2DArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer, uint32_t Mip,
+    _Bool Mask) asm("feme.cpu.image.load.2darray.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer, uint32_t Mip,
+    _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  if (X < 0 || Y < 0 || Layer < 0 || (uint32_t)X >= Img.Width ||
+      (uint32_t)Y >= Img.Height || (uint32_t)Layer >= Img.ArrayLayers)
+    return Zero;
+  return femeRTFetchTexel2DI32(&Img, Mip, (uint32_t)Layer, X, Y);
+}
+
+// The classic "major axis" cube-face-selection algorithm (Vulkan spec
+// 16.3.3 "Cube Map Face Selection and Transformations", matching OpenGL
+// and Direct3D's identical convention), converting a direction vector
+// into which of the six faces (Vulkan's own array-layer order for a cube
+// image view -- +X, -X, +Y, -Y, +Z, -Z, faces 0-5) it projects onto and
+// the normalized (U, V) coordinate within that face. `Major` (the
+// largest-magnitude component) is guaranteed nonzero for any
+// non-degenerate direction; a literal zero vector (never produced by a
+// real shader's own normalized direction, but not undefined behavior
+// either) resolves to face 0 with `Major` clamped away from zero below
+// to avoid a division by zero.
+typedef struct {
+  uint32_t Face;
+  float U, V;
+} FemeRTCubeFace;
+
+__attribute__((always_inline)) static FemeRTCubeFace
+femeRTSelectCubeFace(float X, float Y, float Z) {
+  float AbsX = __builtin_fabsf(X), AbsY = __builtin_fabsf(Y),
+        AbsZ = __builtin_fabsf(Z);
+  FemeRTCubeFace R;
+  float Major, U, V;
+  if (AbsX >= AbsY && AbsX >= AbsZ) {
+    Major = AbsX;
+    if (X > 0.0f) {
+      R.Face = 0; // +X.
+      U = -Z;
+      V = -Y;
+    } else {
+      R.Face = 1; // -X.
+      U = Z;
+      V = -Y;
+    }
+  } else if (AbsY >= AbsX && AbsY >= AbsZ) {
+    Major = AbsY;
+    if (Y > 0.0f) {
+      R.Face = 2; // +Y.
+      U = X;
+      V = Z;
+    } else {
+      R.Face = 3; // -Y.
+      U = X;
+      V = -Z;
+    }
+  } else {
+    Major = AbsZ;
+    if (Z > 0.0f) {
+      R.Face = 4; // +Z.
+      U = X;
+      V = -Y;
+    } else {
+      R.Face = 5; // -Z.
+      U = -X;
+      V = -Y;
+    }
+  }
+  if (Major == 0.0f)
+    Major = 1.0f; // Degenerate direction: avoid a division by zero.
+  R.U = 0.5f * (U / Major + 1.0f);
+  R.V = 0.5f * (V / Major + 1.0f);
+  return R;
+}
+
+// `feme.cpu.image.sample.cube.v4f32` (roadmap H7b-a): samples a
+// `TextureCube` sampled image at direction vector `(DirX, DirY, DirZ)`,
+// converted to a face index (addressed as `femeRTSamplePoint2D`/
+// `femeRTSampleLinear2D`'s own `Layer` parameter) and 2D UV by
+// `femeRTSelectCubeFace` above. A cube face's own edges are always
+// clamped, regardless of the bound sampler's own address mode: Vulkan,
+// Direct3D, and OpenGL alike never wrap or mirror across a cube face
+// boundary the way a plain 2D image's row/column wraps -- there is no
+// "next" face along a U/V axis.
+FemeRTv4f32 femeCpuImageSampleCubeV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float Lod, _Bool UseExplicitLod,
+    _Bool Mask) asm("feme.cpu.image.sample.cube.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float Lod, _Bool UseExplicitLod, _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u) || Img.ArrayLayers < 6) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  Samp.AddressU = 2; // ClampToEdge -- see comment above.
+  Samp.AddressV = 2;
+  uint32_t Level =
+      femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
+  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  return Samp.MagFilter == 1
+             ? femeRTSampleLinear2D(&Img, &Samp, CF.U, CF.V, Level, CF.Face)
+             : femeRTSamplePoint2D(&Img, &Samp, CF.U, CF.V, Level, CF.Face);
+}
+
+// `feme.cpu.image.sample.cubearray.v4f32` (roadmap H7b-a): the
+// `TextureCubeArray` counterpart of `feme.cpu.image.sample.cube.v4f32`
+// above, adding `ArrayLayer` (SPIR-V's own arrayed-cube coordinate
+// convention: a float selecting which six-layer cube element of the
+// array, rounded to nearest and clamped by `femeRTRoundClampLayer`).
+// `Img.ArrayLayers` is the whole array's own total layer count (roadmap
+// H7b's own descriptor materialization already reports this, e.g. 12 for
+// a two-element cube array); dividing by 6 recovers the number of
+// selectable cube elements.
+FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float ArrayLayer, float Lod, _Bool UseExplicitLod,
+    _Bool Mask) asm("feme.cpu.image.sample.cubearray.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
+    float DirZ, float ArrayLayer, float Lod, _Bool UseExplicitLod,
+    _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u) || Img.ArrayLayers < 6)
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageSampleCubeV4F32.
+  Samp.AddressV = 2;
+  uint32_t Level =
+      femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
+  FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  uint32_t NumCubes = Img.ArrayLayers / 6;
+  uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);
+  uint32_t Layer = CubeIndex * 6 + CF.Face;
+  return Samp.MagFilter == 1
+             ? femeRTSampleLinear2D(&Img, &Samp, CF.U, CF.V, Level, Layer)
+             : femeRTSamplePoint2D(&Img, &Samp, CF.U, CF.V, Level, Layer);
 }
