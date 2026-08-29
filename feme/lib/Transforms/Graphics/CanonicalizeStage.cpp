@@ -420,8 +420,8 @@ parseSPIRVMemberDecorations(const MDNode *MD) {
 
 /// The `feme::SignatureSystemValue` a SPIR-V `BuiltIn` decoration's value
 /// names, or `None` for a builtin FeMe's signature model has no
-/// representation for yet (`PointSize`, `PointCoord`, `SamplePosition`,
-/// `DeviceIndex`, ...), which is then treated as an
+/// representation for yet (`PointCoord`, `SamplePosition`, `DeviceIndex`,
+/// ...), which is then treated as an
 /// ordinary -- and, having no `Location` either, unlinkable -- varying and
 /// diagnosed by `feme::graphics::ValidateStagePass`/the executor rather
 /// than silently mapped onto an unrelated system value. Numbering is the
@@ -444,22 +444,28 @@ parseSPIRVMemberDecorations(const MDNode *MD) {
 /// index one (`DeviceIndex`, `VK_KHR_device_group`, still unimplemented).
 ///
 /// (Roadmap H2d) `ClipDistance`/`CullDistance` (`gl_ClipDistance`/
-/// `gl_CullDistance`, `PointSize` (`gl_PointSize`) likewise) map to `None`:
-/// none of the three has a real ABI-field consumer anywhere downstream
-/// (`shaderClipDistance`/`shaderCullDistance` are still `VK_FALSE`, see
-/// roadmap H7), the same "unmodeled system value" treatment an
-/// unrecognized DXIL semantic already gets (`SignatureImport.cpp`'s own
+/// `gl_CullDistance`) map to `None`: neither has a real ABI-field consumer
+/// anywhere downstream (`shaderClipDistance`/`shaderCullDistance` are still
+/// `VK_FALSE`, see roadmap H7), the same "unmodeled system value" treatment
+/// an unrecognized DXIL semantic already gets (`SignatureImport.cpp`'s own
 /// `getSystemValue` default case). Before this milestone these two SPIR-V
 /// `BuiltIn`s were unreachable in practice -- GLSL/SPIR-V never declares
 /// either as a standalone variable, only as `gl_PerVertex` interface-block
 /// members (H2a/H2c), which this function never saw until H2d's own
 /// per-member decomposition -- so this is a change in *what* gets produced,
 /// not in any previously-observable behavior.
+///
+/// (Roadmap H7e) `PointSize` (`gl_PointSize`) maps to
+/// `SignatureSystemValue::PointSize`: the last pre-rasterization stage's
+/// own vertex output the executor's point-topology quad expansion reads
+/// to derive a point primitive's screen-space size (`largePoints`).
 SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
   switch (BuiltIn) {
   case 0:  // Position
   case 15: // FragCoord
     return SignatureSystemValue::Position;
+  case 1: // PointSize
+    return SignatureSystemValue::PointSize;
   case 5:  // VertexId
   case 42: // VertexIndex
     return SignatureSystemValue::VertexID;

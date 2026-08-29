@@ -246,6 +246,39 @@ TEST(CanonicalizeStageTest, MapsSPIRVViewIndexBuiltInToSystemValue) {
   EXPECT_FALSE(ViewIndex.Location.has_value());
 }
 
+/// (Roadmap H7e) `BuiltIn PointSize` (SPIR-V code 1, `gl_PointSize`) maps
+/// to `SignatureSystemValue::PointSize` -- the last pre-rasterization
+/// stage's own vertex output the executor's point-topology quad expansion
+/// reads to derive a point primitive's screen-space size (`largePoints`).
+TEST(CanonicalizeStageTest, MapsSPIRVPointSizeBuiltInToSystemValue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PointSize = external addrspace(8) global float, !spirv.Decorations !0
+    @gl_Position = external addrspace(8) global <4 x float>, !spirv.Decorations !1
+    define void @main() #0 {
+      store float 4.0, ptr addrspace(8) @gl_PointSize
+      store <4 x float> zeroinitializer, ptr addrspace(8) @gl_Position
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 11, i32 1}
+    !3 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  const SignatureElement &PointSize = Sig->Elements[0];
+  EXPECT_EQ(PointSize.Direction, SignatureDirection::Output);
+  EXPECT_EQ(PointSize.SystemValue, SignatureSystemValue::PointSize);
+  EXPECT_FALSE(PointSize.Location.has_value());
+}
+
 /// (Roadmap H2a) glslang emits `gl_Position`/`gl_PointSize`/
 /// `gl_ClipDistance`/`gl_CullDistance` as members of an implicit
 /// `gl_PerVertex` interface *block* (a struct-typed `Output` variable)
@@ -352,12 +385,15 @@ TEST(CanonicalizeStageTest, RecognizesMemberDecoratedInterfaceBlockAsStageIO) {
   EXPECT_EQ(Position.SystemValue, SignatureSystemValue::Position);
   EXPECT_EQ(Position.ComponentCount, 4u);
 
-  // `PointSize`/`ClipDistance`/`CullDistance` have no ABI-field consumer
-  // anywhere downstream (roadmap H7's still-`VK_FALSE`
-  // `shaderClipDistance`/`shaderCullDistance`), so they map to `None`, the
-  // same "unmodeled system value" treatment an unrecognized DXIL semantic
+  // (Roadmap H7e) `PointSize` (member 1) now maps to
+  // `SignatureSystemValue::PointSize`. `ClipDistance`/`CullDistance`
+  // (members 2/3) still have no ABI-field consumer anywhere downstream
+  // (roadmap H7's still-`VK_FALSE` `shaderClipDistance`/
+  // `shaderCullDistance`), so they still map to `None`, the same
+  // "unmodeled system value" treatment an unrecognized DXIL semantic
   // already gets.
-  for (unsigned I = 2; I != 5; ++I)
+  EXPECT_EQ(Sig->Elements[2].SystemValue, SignatureSystemValue::PointSize);
+  for (unsigned I = 3; I != 5; ++I)
     EXPECT_EQ(Sig->Elements[I].SystemValue, SignatureSystemValue::None);
 
   unsigned StoreCount = 0;

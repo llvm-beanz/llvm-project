@@ -114,6 +114,18 @@ enum class SignatureSystemValue : uint8_t {
   /// (`feme::graphics::PreparedDraw::ViewIndex`), not from per-invocation
   /// data, so every invocation of one draw sees the same value.
   ViewIndex,
+  /// (roadmap H7e) `gl_PointSize`: the last pre-rasterization stage's own
+  /// vertex output giving the derived, screen-space diameter (in pixels)
+  /// of a point-topology primitive's own quad expansion. Always an
+  /// output; a point-topology draw is the only consumer, so the value is
+  /// meaningless for any other primitive topology. Added at the end,
+  /// not alphabetically/thematically alongside `Position`, to avoid
+  /// renumbering every later enumerator -- several `.ll` regression
+  /// tests (e.g. `feme/test/Tools/feme-render/*.test`) embed a
+  /// `SignatureSystemValue`'s raw numeric value in a hand-encoded,
+  /// pre-serialized signature-metadata byte blob, which a renumbering
+  /// would silently desync from this enum.
+  PointSize,
   // Keep last: the number of system values, for range checks.
   NumSystemValues,
 };

@@ -863,6 +863,20 @@ Unsupported system values are diagnosed during stage compilation. They are not
 silently replaced with zero because doing so can produce plausible but wrong
 images.
 
+#### Status (roadmap H7e)
+
+`gl_PointSize`/`SPIR-V`'s `PointSize` `BuiltIn` (value 1) now maps to
+`SignatureSystemValue::PointSize` (`CanonicalizeStage.cpp`'s
+`getSystemValueForBuiltIn`), a real vertex-stage output the executor's
+point-topology quad expansion reads to derive a point primitive's
+screen-space size (`largePoints`, `PhysicalDeviceInfo.cpp`). It needed no
+new wrapper-pass code: every vertex-stage output, builtin or not, already
+flows through one fully generic store path (`VertexWrapper.cpp`'s
+`lowerVertexOutputStore`), so adding a new output system value is purely a
+signature-mapping change. `ClipDistance`/`CullDistance` remain unmodeled
+(`None`), tracked separately under roadmap H7 (`shaderClipDistance`/
+`shaderCullDistance`).
+
 ### Tessellation and geometry stage model
 
 DXIL hull/domain stages and SPIR-V tessellation-control/evaluation stages map
