@@ -42954,3 +42954,224 @@ No deviation from `FeMeCPUDesign.md` results from this row either,
 since no design changed -- the design H6c-a-a/H6c-a-b already
 implemented against is unchanged by simply marking the summarizing row
 closed.
+
+# H6g-b-d: `MeshOutputWrapperPass::lowerMeshStageOps` catch-all rejects ordinary resource calls
+
+## Starting point
+
+H6g-b-a-i-a-i-c's own real-ICD re-run of the 560-case `dEQP-VK.
+mesh_shader.ext.in_out.*` bucket left 80 previously-JIT-symbol-blocked
+cases split evenly between the already-tracked H6g-b-c `spirv_var_NN`
+gap and a brand-new `feme-cpu-wrap-mesh-output: unexpected stage op
+left for the mesh output wrapper` diagnostic. This row's own filing
+text entertained two hypotheses without picking one: an unmasked
+(not-yet-lowered-by-`Linearize.cpp`) `feme.stage.output.store`, or some
+illegal `StageOpKind` a mesh entry should never contain (`InputLoad`,
+an interpolation op, etc.). My job was to actually find out which, or
+discover a third option, rather than guess.
+
+## Ruling out both filed hypotheses on paper first
+
+Before touching any tooling I read the CPU pipeline's own pass
+ordering in `Pipeline.cpp` (`ResourceLoweringPass` -> `LinearizePass`
+-> `SIMDizePass` -> `WaveLoweringPass` -> `MeshOutputWrapperPass`) and
+`Linearize.cpp`'s own closing check in `LinearizePass::run`:
+`hasStageMaskOps(F)` scans the whole function *after* both
+`DiamondFlattener` and `LoopLinearizer` have run, and diagnoses (with a
+distinctly different `feme-cpu-linearize`-prefixed message) any
+mask-affecting stage op — including `OutputStore`/`SetMeshOutputs` —
+that survives unmasked. That means an unmasked `feme.stage.output.
+store` should never reach `MeshOutputWrapperPass` silently; it would
+already have failed one stage earlier with a different message. I did
+spend a while chasing a real gap I found along the way — `LoopLinearizer::
+linearizeCycle`'s general (non-single-block, no-"Flow"-merge-block)
+case only calls `applyStageMasks` on the loop's `Header` and `Latch`
+blocks, never on any straight-line body blocks in between — but that
+gap, if ever hit, would *still* be caught by `LinearizePass`'s own
+closing `hasStageMaskOps` check (which scans the whole function,
+reachable or not), just with the wrong error message, not silently
+reach `MeshOutputWrapperPass`. So it doesn't explain this row's actual
+symptom, and I left it alone rather than chase an unrelated gap outside
+this row's own scope.
+
+Then I checked the actual GLSL these tests generate
+(`vktMeshShaderInOutTestsEXT.cpp`'s `IfaceVar::getAssignmentStatement`,
+called from C++-side `for` loops that *build shader source text*, not
+shader-side loops): every per-vertex/per-primitive assignment is fully
+unrolled at generation time. There is no shader-side loop at all in
+this bucket's shaders. That killed the loop-masking-gap theory as the
+cause here even before I'd fully worked out whether it was real (it
+is, just orthogonal — noted for whoever eventually looks at
+`LoopLinearizer`, not filed as a new row since I have no evidence it's
+ever actually hit in practice; manufacturing a synthetic repro with no
+CTS-observable payoff would have been scope creep).
+
+Also checked whether `TaskPayloadWorkgroupEXT` reads on the mesh side
+(`td.name[i]`, when a task shader precedes) route through some
+`feme.stage.*` op the mesh output wrapper doesn't know about — no:
+there is no `TaskPayloadLoad` `StageOpKind` at all; H6h's own address-
+space-14 global-variable import makes a payload read an ordinary LLVM
+`load`, not a stage op, so that's a dead end too.
+
+With both filed hypotheses on paper looking unlikely and no more
+theories worth chasing blind, I stopped guessing and went straight to
+real content.
+
+## Reproducing against the real ICD, and finding the actual value
+
+Built a caselist for the full `dEQP-VK.mesh_shader.ext.in_out.*` group
+(560 leaf cases, same `dEQP-VK-cases.txt` snapshot every prior row in
+this chain has reused) and ran it against the real `deqp-vk` binary
+already built under `/home/dev/dev/VK-GL-CTS/build`, with the
+`libfeme_vulkan.so` ICD from this repo's own existing build directory
+(`VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json`).
+Confirmed the exact reported diagnostic reproduces on one specific
+named case
+(`dEQP-VK.mesh_shader.ext.in_out.32_bits_only.permutation_0.mesh_only`)
+with `FEME_VULKAN_LOG_CREATION_ERRORS=1` set (the env var H5e-c's own
+row added to route `vkCreateGraphicsPipelines`'s own diagnostic through
+stderr instead of discarding it).
+
+Used the same one-off technique H6g-b-a-i-a-i-a/-b/-c already
+established: added a temporary `errs()` print of the offending
+`CallInst` directly inside `lowerMeshStageOps`'s own catch-all,
+rebuilt only `libfeme_vulkan.so` (fast — the CPU-side pass code, not
+the whole toolchain), and re-ran the single named case. The printed
+value:
+
+```
+%3409 = call <4 x float> @feme.cpu.resource.load.raw.v4f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 416, i1 true)
+```
+
+Neither of the two filed hypotheses. This is an entirely ordinary,
+already-correctly-lowered storage-buffer read — the exact same
+`feme.cpu.resource.load.raw.*` family H6g-b-a-i-a-i-c's own row had
+just finished adding missing overloads for — feeding the mesh output
+store's own value (`pvd.name[i]`/`ppd.name[i]` in the real generated
+GLSL). Not a stage op at all.
+
+## Root cause
+
+Re-read `lowerMeshStageOps` with that concrete value in hand and the
+bug was immediately obvious, and embarrassingly simple compared to
+either filed hypothesis: the function's own `UsesStageOps` gate at the
+top correctly only requires *some* call in `F` to actually need this
+pass's attention (an `OutputStore`/`SetMeshOutputs`/masked variant)
+before it proceeds at all — exactly matching its own doc comment. But
+the per-instruction loop that follows treats *every remaining
+`CallInst` in the whole function* as needing to be one of the two
+shapes it lowers, erroring out unconditionally on anything else. There
+was no `continue`-past-unrelated-calls case at all. Any mesh entry that
+both writes an output *and* reads a resource to compute that output's
+value — which is every single case in this bucket, since that's
+literally what "in_out" interface-variable testing does — hits this.
+
+I went back and checked: was this ever correct for a hypothetical mesh
+entry with *no* resource reads at all (only builtin-derived output
+values, like the existing `MeshOutputWrapperTest.
+LowersPerVertexOutputStore` unit test's `llvm.dx.thread.id`-derived
+value)? Yes, by accident — those tests only ever have exactly the two
+lowerable calls in the function, so the missing `continue` case never
+got exercised until a real shader that also reads a resource came
+along. That is exactly why this had gone unnoticed until a real-ICD run
+with real shader content, not a hand-built lit/unit-test reduction,
+found it — the existing unit test suite's own IR was too clean to
+exercise the actual bug, a recurring theme in this whole H6g-b chain.
+
+## Fix
+
+One surgical change to `MeshOutputWrapper.cpp`'s `lowerMeshStageOps`:
+the catch-all now only fires when the surviving call actually
+`isStageOpCall` — matching the function's own documented contract
+("diagnoses ... if F uses a feme.stage.* op this pass does not
+support") for the first time. Anything else (a resource load/store, an
+ordinary masked memory op, or any other call) falls through to
+`continue`, left completely alone, exactly as every earlier phase had
+already correctly done with it.
+
+## Testing
+
+Added `MeshOutputWrapperTest.LeavesUnrelatedResourceLoadCallAlone`,
+placed right after the existing `LowersPerVertexOutputStore` (the
+closest sibling): a mesh entry mixing a `feme.cpu.resource.load.raw.
+f32` call with an ordinary per-vertex output store, run through the
+real `LinearizePass`/`SIMDizePass`/`WaveLoweringPass`/
+`MeshOutputWrapperPass` chain (not a hand-mocked call to
+`MeshOutputWrapperPass` alone), using the same diagnostic-handler-
+callback pattern `LinearizeTest.cpp`/`SIMDizeTest.cpp` already use to
+assert `SawError` is false. First version of the test didn't actually
+check for the error at all (just checked the resource-load call
+survived and the module verified) and passed even against the
+unfixed code, since `emitError`'s default handler just prints to
+stderr rather than aborting or returning an observable signal on its
+own — a reminder that a diagnostic-emitting code path needs an
+explicit diagnostic-handler hook in the test, not just an assertion on
+downstream IR shape. Fixed by wiring up `setDiagnosticHandlerCallBack`
+before running the pipeline; confirmed by temporarily reverting the
+fix (`git stash`) and re-running the test in isolation — it now fails
+with `Value of: SawError / Actual: true / Expected: false` exactly as
+expected, then re-applied the fix and confirmed it passes.
+
+```
+ninja check-feme (assertions-enabled, ccache build):
+Total Discovered Tests: 2026
+  Unsupported:   59 (2.91%)
+  Passed     : 1967 (97.09%)
+```
+
+Rises from H6g-b-a-i-a-i-c's own 2025/1966 by exactly the 1 new test
+this row adds, 0 regressions.
+
+## Vulkan CTS validation
+
+Reverted the temporary debug print, rebuilt `libfeme_vulkan.so`, and
+re-ran both the single named case and the full 560-case bucket against
+the real ICD. The named case's `feme-cpu-wrap-mesh-output` diagnostic
+is gone entirely, progressing instead to a new `vkQueueSubmit`
+diagnostic ("vertex output and fragment input at location 0 disagree
+on component/row count or type"). The full bucket's totals are
+unchanged (0/560 pass, 80/560 fail, 480/560 not-supported, as expected
+— this row was never going to make new cases pass, only move the point
+of failure), and grepping the full combined log confirms zero
+remaining occurrences of the targeted diagnostic across all 80
+failures, not just the reduced case. The 80 failures split exactly the
+same two ways H6g-b-a-i-a-i-c's own re-run already found (40
+`spirv_var_NN`, still H6g-b-c's own already-tracked bucket, confirmed
+unchanged rather than assumed), with the other 40 now landing on the
+new `vkQueueSubmit` interface-mismatch bug instead of the fixed one.
+
+Filed that new bug as `H6j` — a new sibling one level under `H6`,
+*not* nested any deeper under `H6g-b` (which is already three lowercase
+letters deep: `H6g-b-d` itself), per the standing instruction to stop
+nesting milestone IDs more than one lowercase letter deep going
+forward. Cross-referenced `H6g-b-d` as how it was discovered, without
+inheriting that row's own deep nesting.
+
+## Documentation updates
+
+Checked `FeMeCPUDesign.md`'s description of `MeshOutputWrapperPass`:
+already accurately describes it as lowering masked mesh output stores
+in a mesh entry, with no wording that implied (or needed correcting
+to disclaim) rejecting unrelated calls — this is a pure bug fix
+restoring already-documented behavior, not a scope change, so no edit
+needed. Confirmed (rather than assumed) `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no changes: `VK_EXT_mesh_shader`'s
+"Advertised" status (from H6f) is unaffected by a CPU-lowering-pass bug
+fix within its own already-existing scope. Added "Roadmap H6g-b-d:
+measured impact" to `VulkanCTSReport.md` with the full reproduction
+(single-case and full-bucket commands and output), following the exact
+structure every prior row in this chain uses, and updated `Roadmap.md`:
+struck through `H6g-b-d` with its resolution text, added the new `H6j`
+row, and updated `H6`'s own summary line to reference the new split and
+`H6j`'s dependency.
+
+## Net result
+
+Closed as a single, surgical bug fix (a missing `continue`-past-
+unrelated-calls case) plus its regression test, found by ruling out
+the row's own filed hypotheses on paper and then going straight to a
+real-ICD single-case reduction rather than guessing further or
+hand-building a possibly-unrepresentative lit/IR reduction. Milestone
+H6 does not close: the same bucket's 40 newly-unblocked cases now split
+into a new blocker, H6j, alongside the pre-existing H6g-b-c and
+H6g-b-a-i-a-i-b dependencies.
