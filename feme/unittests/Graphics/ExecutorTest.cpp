@@ -2505,6 +2505,131 @@ TEST(ExecutorTest, SampleShadingEnableInvokesFragmentOncePerSample) {
   EXPECT_NE(MSStorage[0], MSStorage[3 * 4]);
 }
 
+// Roadmap H7p: a fragment shader that reads `SV_Position`/`gl_FragCoord`
+// (element 0, `SystemValue::Position`, components 0/1 -- `.x`/`.y`) and
+// writes them straight into its red/green channels, with no
+// `SV_SampleIndex`/`gl_SampleID` dependency at all -- the exact shape
+// that exposed a real `dEQP-VK.pipeline.monolithic.multisample.
+// min_sample_shading_enabled.min_1_0.samples_2.quad` failure
+// ("Got less unique colors than requested through minSampleShading"),
+// since `gl_FragCoord` previously stayed pixel-center on every one of
+// `processTile`'s per-sample passes (see H7o/H7p's own roadmap entries).
+constexpr char FragCoordFragmentShaderIR[] = R"(
+  define void @fs_fragcoord() #0 {
+    %fx = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %fy = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %fx, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %fy, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+TEST(ExecutorTest, SampleShadingEnableVariesFragCoordPerSamplePosition) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement FragCoordIn;
+  FragCoordIn.ElementID = 0;
+  FragCoordIn.Direction = SignatureDirection::Input;
+  FragCoordIn.ComponentType = SignatureComponentType::Float;
+  FragCoordIn.SystemValue = SignatureSystemValue::Position;
+  FragCoordIn.FirstComponent = 0;
+  FragCoordIn.ComponentCount = 4;
+  EntrySignature FSSig;
+  FSSig.Elements = {FragCoordIn, makeElement(1, SignatureDirection::Output, 4,
+                                             /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, FragCoordFragmentShaderIR, "fs_fragcoord", FSSig,
+                   ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/4,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}},
+      StencilState{}, std::vector<BlendState>{BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/true);
+
+  constexpr uint32_t Samples = 4;
+  std::vector<uint8_t> MSStorage(4u * 4u * Samples * 4u, 0);
+  AttachmentView MSColor{MSStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{MSColor};
+
+  // A triangle covering the whole [-1, 1] NDC square, so every sample of
+  // every pixel is covered.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  // Pixel (0, 0)'s own 4-sample "N-rooks" pattern (see `samplePositions`
+  // in Executor.cpp): each sample's fractional offset within the pixel is
+  // distinct in both X and Y, so each raw sample's stored red/green byte
+  // must match that sample's own real position -- not the pixel-center
+  // (0.5, 0.5) every sample would show under the pre-H7p bug.
+  constexpr std::array<std::array<float, 2>, Samples> ExpectedOffsets = {
+      {{0.375f, 0.125f},
+       {0.875f, 0.375f},
+       {0.125f, 0.625f},
+       {0.625f, 0.875f}}};
+  for (uint32_t S = 0; S != Samples; ++S) {
+    size_t Off = S * 4;
+    uint8_t ExpectedR = static_cast<uint8_t>(
+        std::lround(255.0 * static_cast<double>(ExpectedOffsets[S][0])));
+    uint8_t ExpectedG = static_cast<uint8_t>(
+        std::lround(255.0 * static_cast<double>(ExpectedOffsets[S][1])));
+    EXPECT_NEAR(MSStorage[Off], ExpectedR, 2) << "sample " << S << " red";
+    EXPECT_NEAR(MSStorage[Off + 1], ExpectedG, 2) << "sample " << S << " green";
+  }
+  // No two samples' red channels (nor green channels) coincide -- proving
+  // every pass genuinely re-evaluated `gl_FragCoord` at its own sample
+  // position rather than broadcasting one pixel-center-derived value.
+  for (uint32_t S = 0; S != Samples; ++S)
+    for (uint32_t T = S + 1; T != Samples; ++T) {
+      EXPECT_NE(MSStorage[S * 4], MSStorage[T * 4]) << S << " vs " << T;
+      EXPECT_NE(MSStorage[S * 4 + 1], MSStorage[T * 4 + 1]) << S << " vs " << T;
+    }
+}
+
 // Roadmap H7f: `alphaToOneEnable` forces every color attachment's output
 // alpha to `1.0` regardless of what the fragment shader itself wrote,
 // applied after `RectangularSmooth`'s own line-coverage alpha multiply

@@ -2396,41 +2396,60 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       }
 
       uint32_t QuadCount = static_cast<uint32_t>(Quads.size());
-      // (roadmap H7f) When `getSampleShadingEnable()` is set, this project
-      // always shades at the full sample rate rather than tracking
-      // `minSampleShading`'s own fractional value (see
+      // (roadmap H7f/H7p) When `getSampleShadingEnable()` is set, this
+      // project always shades at the full sample rate rather than
+      // tracking `minSampleShading`'s own fractional value (see
       // `GraphicsPipeline::getSampleShadingEnable`'s comment in
       // Pipeline.h for why that's always spec-conformant), so the whole
       // shade/dispatch/merge sequence below simply runs once per sample
-      // instead of once per pixel/lane. Interpolated varyings stay
-      // pixel-center on every pass -- this file's own long-standing
+      // instead of once per pixel/lane. `gl_FragCoord`/`SV_Position` is
+      // re-evaluated at each pass's own real sample position below
+      // (roadmap H7p) rather than staying pixel-center on every pass, so
+      // a shader whose output depends on it (but not on
+      // `SV_SampleIndex`/`gl_SampleID`) still shades a genuinely distinct
+      // value per sample, matching the real Vulkan spec requirement that
+      // `gl_FragCoord.xy` reflect the sample's own position once sample
+      // shading is active. Every other interpolated varying (ordinary
+      // user varyings, depth, `InvW`) is unaffected and stays evaluated
+      // once, at the pixel center, per this file's own long-standing
       // precision-scope choice (see the coverage-test loop's own
       // "Barycentric coordinates... evaluated once, at the pixel
-      // center" comment above) -- so a shader whose output does not
-      // depend on `SV_SampleIndex`/`gl_SampleID` simply recomputes the
-      // same color on every pass; only one sample's slot is ever
-      // written per pass, so this is harmless, just not maximally
-      // efficient.
+      // center" comment above); only one sample's slot is ever written
+      // per pass either way, so re-deriving every other interpolant per
+      // sample position would be extra precision with no observable
+      // effect on which sample's slot gets written.
       uint32_t PassCount = Pipeline.getSampleShadingEnable() ? SampleCount : 1;
       for (uint32_t PassSample = 0; PassSample != PassCount; ++PassSample) {
         // `PassInvocations` is `QuadInvocations` narrowed to this one
-        // pass: every lane's `SampleIndex` becomes `PassSample` and its
-        // `Coverage` becomes at most that one sample's bit, so the late
+        // pass: every lane's `SampleIndex` becomes `PassSample`, its
+        // `Coverage` becomes at most that one sample's bit, and (roadmap
+        // H7p) its `Position.xy` is shifted from the pixel center to
+        // `PassSample`'s own real sample offset, so the late
         // depth/stencil test and color-merge code below -- unchanged
         // from the single-pass (`SampleShadingEnable == false`) case --
-        // naturally test/write only that one sample per pass. When
-        // sample shading is disabled, `PassCount == 1` and this is an
-        // identity copy: `QuadInvocations` itself already carries every
-        // covered sample's bit and `SampleIndex[Lane] == 0`, exactly
-        // reproducing this function's pre-H7f behavior.
+        // naturally test/write only that one sample per pass, and any
+        // `gl_FragCoord`-dependent shader output actually varies across
+        // passes. When sample shading is disabled, `PassCount == 1` and
+        // this is an identity copy: `QuadInvocations` itself already
+        // carries every covered sample's bit, `SampleIndex[Lane] == 0`,
+        // and a pixel-center `Position.xy` (sample index 0's own
+        // position under a single-sample pipeline coincides with the
+        // pixel center, so this is still exactly this function's
+        // pre-H7f/H7p behavior in that case), exactly reproducing this
+        // function's pre-H7f behavior.
         std::vector<cpu::FemeFragmentInvocation> PassInvocations =
             QuadInvocations;
         if (Pipeline.getSampleShadingEnable()) {
           uint32_t SampleBit = 1u << PassSample;
-          for (cpu::FemeFragmentInvocation &PassInv : PassInvocations) {
+          std::array<float, 2> Offset = (*SamplePositions)[PassSample];
+          for (uint32_t Q = 0; Q != QuadCount; ++Q) {
+            cpu::FemeFragmentInvocation &PassInv = PassInvocations[Q];
+            const PendingQuad &Quad = Quads[Q];
             for (unsigned Lane = 0; Lane != 4; ++Lane) {
               PassInv.SampleIndex[Lane] = PassSample;
               PassInv.Coverage[Lane] &= SampleBit;
+              PassInv.Position[Lane][0] = Quad.PixelX[Lane] + Offset[0];
+              PassInv.Position[Lane][1] = Quad.PixelY[Lane] + Offset[1];
             }
           }
         }
