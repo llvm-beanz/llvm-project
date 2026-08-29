@@ -43175,3 +43175,130 @@ hand-building a possibly-unrepresentative lit/IR reduction. Milestone
 H6 does not close: the same bucket's 40 newly-unblocked cases now split
 into a new blocker, H6j, alongside the pre-existing H6g-b-c and
 H6g-b-a-i-a-i-b dependencies.
+
+# Session: Completing H6j (mesh-to-fragment `RowCount` mismatch at `vkQueueSubmit`)
+
+## Task
+
+H6g-b-d's own fix (the `MeshOutputWrapperPass::lowerMeshStageOps` catch-all
+that wrongly rejected any unrelated call) unblocked 40 of the
+`dEQP-VK.mesh_shader.ext.in_out.*` bucket's 80 failures past compilation,
+only to hit a new `vkQueueSubmit`-time failure: "vertex output and
+fragment input at location 0 disagree on component/row count or type".
+That row's own text filed this as H6j, with three named hypotheses and
+none root-caused yet. My task was to complete H6j.
+
+## Investigation
+
+Grepped for the exact diagnostic string and found it lives in
+`Executor.cpp`'s varying-linking loop (the actual `vkQueueSubmit`-time
+check the real ICD hits) and a near-identical (but incomplete, missing
+`RowCount`) check in `GraphicsPipeline.cpp`'s `validateStageInterfaces`.
+Both compare a `SignatureElement`'s `ComponentCount`/`RowCount`/
+`ComponentType` between a producer (vertex/geometry/mesh output) and a
+consumer (fragment input) matched by `Location`.
+
+Neither of H6j's own two `MeshOutputWrapperPass`/`EntryWrapperPass`
+hypotheses panned out on inspection: both operate purely on
+already-canonicalized `feme.stage.*` calls, well after signature
+reflection has run, and neither touches a `SignatureElement`'s fields at
+all. The actual bug is upstream, in `CanonicalizeStage.cpp`'s
+`addElements` lambda (the code roadmap H5b/H5f/H6b built out for
+`gl_in[]`/`gl_MeshVerticesEXT[]`-shaped per-vertex arrays): a mesh entry's
+own plain (non-block) per-vertex/per-primitive `Output` global -- the
+shape `vktMeshShaderInOutTestsEXT.cpp`'s own generated GLSL actually
+uses (a user-defined `PerVertexEXT` varying, not the builtin
+`gl_MeshVerticesEXT` block) -- was reflected with the exact same
+"fold the outer array into `RowCount`, flag it with
+`RowCountIsVertexArray`" treatment H5f gives a geometry entry's `Input`
+side. That treatment is provably safe for `Input`: nothing downstream
+ever links an `Input` element's `RowCount` against another stage's. But
+a mesh `Output` element's `RowCount` *is* linked, by `Location`, against
+the fragment stage's own unarrayed input, and neither linking site
+consults `RowCountIsVertexArray` -- so a 3-vertex mesh entry's `vec4`
+output was wrongly reflected with `RowCount == 3` instead of `1`,
+disagreeing with the fragment input's own `RowCount == 1` despite both
+sides sharing the same `layout(location=0)`.
+
+This is a case where the earlier per-direction symmetry (H5f's own
+comment explicitly flagged "still `Input`-only... reconciling this
+flag's own meaning for `Output` is left to a later roadmap row") turned
+out to need a genuinely different treatment for `Output`, not just a
+mechanical extension of the same flag to that direction -- the two
+directions have different downstream consumers with different
+requirements.
+
+## Fix
+
+`CanonicalizeStage.cpp`'s `addElements` lambda now peels a mesh entry's
+own plain `Output` global's outer per-vertex/per-primitive array
+dimension off before building its `SignatureElement` -- the same peeling
+a builtin interface block's own per-member element already gets --
+leaving `RowCountIsVertexArray` at its default `false`, rather than
+folding the dimension in and flagging it. Scoped narrowly to
+`Stage == ShaderStage::Mesh && AddrSpace == 8` so it cannot affect a real
+per-stage matrix output on any other stage (confirmed by the pre-existing
+`ThreadsDynamicVertexIndexIntoOutputStore` test, deliberately tagged a
+non-`Mesh` stage, staying unaffected).
+
+Added `CanonicalizeStageTest.MeshStagePeelsPerVertexArrayFromOutputRowCount`,
+confirmed to fail (`RowCount` wrongly `3`) without the fix and pass
+(`RowCount == 1`) with it. `ninja check-feme` (assertions-enabled, ccache
+build): 1968/2027 passing (59 pre-existing `Unsupported`, 0 `Failed`), up
+from H6g-b-d's own 1967/2026 by exactly this 1 new test.
+
+## Real-ICD verification, and a new bug found
+
+Re-ran the named single case and the full 560-case
+`dEQP-VK.mesh_shader.ext.in_out.*` bucket against the real `feme_vulkan`
+ICD (same technique as every prior row in this chain). The named case's
+"disagree on component/row count" diagnostic is gone; it now reaches a
+genuine image comparison (`Fail ... vktMeshShaderInOutTestsEXT.cpp:1590`).
+The full bucket needed a per-case resume loop (mirroring H6c-a-a-iii's
+own methodology) because several of the 40 newly-unblocked cases crash
+the whole `deqp-vk` process outright -- a new class of problem this
+row's own fix could not have reached before (interface validation used
+to stop these cases before they ever executed a real mesh draw).
+
+Bucket totals after the resume loop: 0 passed / 48 failed / 480 not
+supported / 32 crashed (blacklisted, no clean result). Grepping every
+iteration's log confirms zero remaining "disagree on component/row
+count" occurrences, down from 40. The 80 pre-existing failures now split
+three ways instead of H6g-b-d's own two: 40 unchanged `spirv_var_NN`
+(H6g-b-c), 8 genuine image-comparison failures (out of scope, not
+FeMe-diagnosable), and 32 crashes. A real `gdb` backtrace on one crashing
+case shows heap corruption -- a bad `free()` inside
+`llvm::Expected<feme::graphics::StageStorage>`'s destructor, reached
+through `executeDraws`/`runPreparedDraw`/`runMeshDraw`/`vkQueueSubmit` --
+filed as a new sibling row, H6k, since it is a distinct, deeper bug
+out of H6j's own scope (a heap-corruption crash inside actual mesh-draw
+execution, not an interface-signature mismatch).
+
+## Documentation updates
+
+Added a short note to `FeMeGraphicsDesign.md`'s G6 status paragraph
+explaining why the mesh `Output` direction could not reuse H5f's
+`Input`-side flag-and-fold `RowCountIsVertexArray` treatment verbatim.
+Confirmed (not assumed) `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no changes: `VK_EXT_mesh_shader`'s
+"Advertised" status (from H6f) is unaffected by a pure signature-
+reflection fix within its own already-existing scope. Added "Roadmap
+H6j: measured impact" to `VulkanCTSReport.md` with the full
+reproduction, following the same structure every prior row in this
+chain uses. Updated `Roadmap.md`: struck through `H6j` with its
+resolution text, added the new `H6k` row, and updated `H6`'s own
+summary line to reference `H6j`'s closure and `H6k`'s dependency (kept
+one level under `H6`, not nested deeper under `H6g-b`, per the standing
+instruction against nesting milestone IDs more than one lowercase
+letter deep).
+
+## Net result
+
+H6j is closed: root-caused to `CanonicalizeStage.cpp`'s signature
+reflection (not either of the two passes the row's own text
+speculated about), fixed with a narrow, direction-scoped peel, and
+verified end to end against the real ICD with zero remaining
+occurrences of the named diagnostic. Milestone H6 does not close: the
+same bucket's newly-unblocked cases split into a new blocker, H6k
+(heap corruption in `executeDraws`), alongside the pre-existing
+H6g-b-c and H6g-b-a-i-a-i-b dependencies.
