@@ -44108,3 +44108,161 @@ path at all) rather than a vague "needs work" placeholder -- all flat,
 one level under H7, per the standing instruction against the H6-style
 runaway nesting. H7's own top-level row text was updated to describe the
 breakdown and stays open, exactly the H6-top-row pattern.
+
+# Session: Completing H7b (`imageCubeArray`)
+
+## Starting point
+
+H7b's own roadmap text named a single blocker: `CommandBuffer.cpp`'s
+`materializeImageDescriptor` only builds a `Texture2D`, `baseArrayLayer ==
+0` shader-visible image descriptor, so a `VK_IMAGE_VIEW_TYPE_CUBE_ARRAY`
+view's remaining layers/faces never reach a shader. The roadmap framed
+this as the only thing standing between `imageCubeArray` and an honest
+`VK_TRUE`.
+
+## Investigation
+
+Before touching code, I traced the whole path a cube-array sample would
+need to travel, the same way prior H6/H7a sessions did:
+
+- `Image.cpp`'s `mapImageDimension` confirmed the key architectural fact
+  this row's own text didn't spell out: `feme::vulkan::Image` (the
+  physical object) never has a "Cube" dimension at all -- only
+  `Texture1D(Array)/Texture2D(Array)/Texture3D`. "Cube"/"CubeArray" exist
+  purely as `ImageView`-level addressing conventions over an ordinary
+  2D-array-shaped image; the six faces of a cube are just six consecutive
+  array layers. `RenderPass.cpp`'s `resolveAttachmentView` already proves
+  this out for render-target attachments, with an explicit comment saying
+  so, and its own `baseArrayLayer * SlicePitch` offset math is exactly
+  the addressing scheme a shader-visible descriptor needs too.
+- `CommandBuffer.cpp`'s `materializeImageDescriptor` confirmed the
+  roadmap's own claim precisely: `View->dimension() != Texture2D` and
+  `Range.baseArrayLayer != 0` both bail out to an all-zero-reading
+  descriptor.
+- Then I went one layer deeper than the roadmap text did, into what
+  actually *consumes* a materialized descriptor: `SPIRVResourceLowering.cpp`'s
+  `classifySampledImage2DHandle` and `ResourceLowering.cpp`'s
+  `classifyImageHandle`. Both hard-restrict shader-visible sampled-image
+  *handle classification* -- an earlier pipeline stage than descriptor
+  materialization -- to SPIR-V `Dim=2D`/DXIL `Texture2D`, non-arrayed
+  only. This is a second, independent, more fundamental blocker the
+  roadmap row's own text never named: even a perfectly widened descriptor
+  path can't be exercised by any real `samplerCubeArray`-typed shader
+  binding today, because pipeline creation rejects the handle *before* a
+  descriptor lookup is ever reached.
+- I also found the CPU runtime's own texel-fetch primitive
+  (`femeRTFetchTexel2D`, `feme/runtime/CPU/FeMeRuntimeCPU.c`) has no
+  array-layer/face parameter at all, and that no cube-face-selection
+  (direction-vector-to-face-plus-UV) coordinate math exists anywhere in
+  the codebase.
+
+This left me with a genuine scoping decision. Three options:
+
+1. Do only the descriptor-materialization widening the roadmap text
+   literally asks for, and flip the feature bit anyway. Rejected: this
+   would be dishonest -- no real shader could exercise cube(array)
+   sampling, since handle classification rejects it first.
+2. Try to close the whole chain in one session (handle classification +
+   cube-face math + runtime fetch primitive + descriptor widening).
+   Rejected as too large for one bounded, well-tested change, and risking
+   a rushed, under-tested implementation of the trickiest new piece (the
+   major-axis cube-face-selection algorithm) with no prior art in this
+   codebase to lean on.
+3. Do the real, bounded, testable descriptor-materialization fix now
+   (matching the roadmap row's own literal ask, and useful independent of
+   the rest), but explicitly *not* flip the feature bit, correcting the
+   roadmap text with the fuller root-cause understanding and filing the
+   remaining chain as a new sub-row. Chosen -- this is the same
+   "fixed X, but this surfaces/reveals larger blocker Y, tracked as a new
+   row" pattern the whole H6 chain (H6l -> H6m, etc.) already established,
+   and it produces genuine, shippable, tested progress rather than a
+   rushed or dishonest flip.
+
+## Implementation
+
+Widened `materializeImageDescriptor` to accept `Texture2DArray`/
+`TextureCube`/`TextureCubeArray` alongside `Texture2D` (all four address
+an ordinary 2D-array-shaped `Image` identically), and to support a
+nonzero `baseArrayLayer` by building a per-mip adjusted
+`FemeImageSubresourceLayout` table -- each entry's `Offset` shifted by
+`BaseArrayLayer * SlicePitch`, mirroring the exact addressing
+`Image::texelPointer` already uses per-layer. I resolved the open
+mip-level addressing question from before compaction by re-confirming
+`computeSubresourceLayouts`: each mip level's own `Offset`/`SlicePitch`
+already only describes layer 0 at that mip, so a single pointer shift (as
+`resolveAttachmentView` uses for one mip level at a time) can't be reused
+directly for a multi-mip descriptor -- instead I copy and adjust each
+requested mip level's own layout entry, reusing the same "own storage
+vector inside `MaterializedBoundResources`" pattern the ASTC decode path
+(`DecodedImageLayoutStorage`) already established, under a new
+`ArrayLayerAdjustedMipLayoutStorage` field.
+
+The ASTC LDR decode path (roadmap E23) explicitly stays layer-0-only:
+`decodeASTCImageForSampling` has no per-layer loop of its own, so I added
+an explicit guard rather than risk silently decoding the wrong layer's
+blocks now that non-2D/non-zero-layer views reach this function at all.
+
+## Testing
+
+The trickiest part of this session was finding a way to unit test the fix
+*end-to-end*, not just as an isolated data-transformation check --
+`materializeImageDescriptor` lives in an anonymous namespace, and this
+codebase's own established convention (confirmed by looking at how
+`resolveAttachmentView` is tested) favors real dispatch/pipeline-level
+tests over exposing internals. I couldn't build a real end-to-end test
+for the *cube-array* dimension itself, since no shader can declare a
+`samplerCubeArray` handle that clears pipeline creation today (the
+handle-classification blocker above). But I realized the
+`baseArrayLayer` half of the fix *is* independently, honestly testable
+end-to-end: `ImageView::dimension()` reports `Texture2D` for a
+`VK_IMAGE_VIEW_TYPE_2D` view regardless of the underlying image's own
+layer count or the view's base layer, and `SPIRVResourceLowering.cpp`
+already fully supports `Dim=2D` handles. So I added
+`SecondArrayLayerSampledImageDispatchTest`, reusing
+`SampledImageDispatchTest`'s existing shader/pipeline/dispatch machinery
+unchanged, over a real two-layer image with a `baseArrayLayer=1` view --
+confirming a real dispatch samples layer 1's own texels rather than layer
+0's or an all-zero read.
+
+`ninja check-feme` (assertions-enabled, ccache build): 2038 discovered
+tests, 1979 Passed (up from H7a's own 1978/2037 baseline by exactly the 1
+new test), 59 pre-existing unrelated Unsupported, 0 Failed.
+
+## Real Vulkan CTS
+
+Ran the 12 real `dEQP-VK.image.image_size.cube_array.*` mustpass cases
+(the only cube-array cases cheap enough to run directly and not already
+gated behind unrelated, still-missing storage-image write support) --
+all report `NotSupported (Requested core feature is not supported:
+imageCubeArray)`, unchanged, exactly as expected: this fix is invisible
+to any real CTS case until the feature bit itself flips, since CTS gates
+on the advertised bit rather than on whether the descriptor path happens
+to work underneath. The 1957-case `draw_sample.txt` regression sample
+stayed byte-identical to H7a's own recorded totals: 0 regressions.
+
+## Documentation
+
+- `Roadmap.md`: updated H7b's own text with the corrected, fuller
+  root-cause understanding (both blockers, not just the one originally
+  named), left un-struck-through (milestone doesn't close), and added a
+  new one-level-deep sub-row H7b-a tracking the remaining chain (handle
+  classification widening, cube-face-selection math, runtime fetch
+  primitive) -- staying within the one-lowercase-letter nesting cap.
+- `FeMeVulkanDesign.md`: added a matching "Update (roadmap H7b, open)"
+  paragraph in the image-sampling design section, describing the
+  widening, why it doesn't flip the feature bit, and pointing at H7b-a.
+- `VulkanCTSReport.md`: added a "Roadmap H7b: measured impact" section
+  with the check-feme delta, the real CTS run showing zero visible impact
+  (as expected, and explained why), and the regression-sample check.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed,
+  and stated in both docs, that no change is needed -- `imageCubeArray`
+  stays `VK_FALSE`.
+
+## Commits
+
+Split into three, each independently buildable/testable:
+1. The `materializeImageDescriptor` widening + new unit test.
+2. `Roadmap.md` + `FeMeVulkanDesign.md` updates.
+3. `VulkanCTSReport.md` update.
+(This `agent_thoughts.md` update follows as its own, final commit, per
+standing instruction.)
