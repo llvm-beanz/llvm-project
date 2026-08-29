@@ -42893,3 +42893,64 @@ today, confirmed empirically, not theoretically"). The reported symbol
 gap is fully resolved and verified against the real CTS. Milestone H6
 does not close: the same bucket's 80 cases now split between the
 already-tracked `H6g-b-c` and the newly filed `H6g-b-d`.
+
+# H6c-a: closing the row via its own already-landed split
+
+Task: "complete H6c-a". Before touching anything, I re-read the row's
+own current text in `feme/docs/Roadmap.md` and the matching
+"Roadmap H6c-a: why this row could not land" section in
+`VulkanCTSReport.md` -- the row's own text already documents a prior
+investigation (not this session's) that found zero independently-
+landable content and split the work into H6c-a-a (mesh output) and
+H6c-a-b (task payload), depending on H6d/H6h/H6i.
+
+Rather than assuming that split is still open, I checked the Roadmap
+directly for all five names it depends on:
+
+- H6d, H6h, H6i: all three show up struck through (`~~...~~`) in the
+  Roadmap already, with their own "measured impact" sections in
+  VulkanCTSReport.md.
+- H6c-a-a, H6c-a-b: also both struck through, each with `git log`
+  history showing real source commits (new `MeshOutputWrapperPass`/
+  `TaskPayloadWrapperPass`, `StageArgsLayout.h` extensions,
+  `EntryWrapperPass`'s `IsMesh`/`IsTask` extensions, and CompiledStage
+  end-to-end tests wiring each builder's output into `FemeMeshArgs`/
+  `FemeTaskArgs` through `invokeMesh`/`invokeTask`).
+
+So the actual state on disk is: everything H6c-a's own literal text
+asks for -- wiring `MeshOutputBuilder`/`TaskPayloadBuilder` into real
+`feme.stage.*` ops reaching the reused `EntryWrapperPass` path -- was
+already implemented, just under the row's own split children rather
+than under H6c-a's own row. The only thing left undone was Roadmap
+bookkeeping: H6c-a's own row was never struck through and closed once
+its children (and their shared prerequisites) actually landed.
+
+I did not write any new source code for this session, deliberately --
+there is nothing left in H6c-a's own stated scope to implement; adding
+speculative code here would just be re-doing H6c-a-a/H6c-a-b's already-
+tested work under a different pass name. Instead:
+
+1. Struck through H6c-a's own Roadmap row, with a new closing
+   explanation that names exactly which child implemented which half,
+   points at the concrete pass/class names, and is explicit that the
+   real end-to-end mesh-shading path is *still* not clean (H6g-b-c and
+   H6g-b-d remain open, discovered by H6c-a-a's and a later row's own
+   closing re-runs) -- H6c-a's own narrower ask is satisfied, but that
+   is not the same claim as "milestone H6 is done".
+2. Added a new "Roadmap H6c-a: closed by its own split" section to
+   `VulkanCTSReport.md`, re-verifying each prerequisite and child by
+   direct inspection (grep/read, not by trusting the struck-through
+   text at face value) and re-running `ninja check-feme`
+   (assertions-enabled, ccache build) to confirm 1966/2025 passing,
+   byte-identical to the last-recorded baseline -- expected, since this
+   row makes no source change, mirroring H6g-a's own "folds into an
+   existing row, no source change from this row itself" precedent
+   rather than inventing a new pattern for a bookkeeping-only closure.
+3. Confirmed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+   need no edits: no feature bit, limit, or extension advertisement
+   changes as a result of a pure Roadmap bookkeeping closure.
+
+No deviation from `FeMeCPUDesign.md` results from this row either,
+since no design changed -- the design H6c-a-a/H6c-a-b already
+implemented against is unchanged by simply marking the summarizing row
+closed.
