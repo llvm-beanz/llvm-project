@@ -13,6 +13,7 @@ add_feme_unittest(FeMeTransformsGraphicsTests
 target_link_libraries(FeMeTransformsGraphicsTests
   PRIVATE
   FeMeCore
+  FeMeGraphics
   FeMeTransformsDXIL
   FeMeTransformsGraphics
   )

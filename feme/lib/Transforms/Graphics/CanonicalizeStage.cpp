@@ -539,6 +539,18 @@ std::pair<SignatureComponentType, uint32_t> getComponentType(Type *Scalar) {
     return {SignatureComponentType::Float, 64};
   if (Scalar->isHalfTy())
     return {SignatureComponentType::Float, 16};
+  // (Roadmap H6m) SPIR-V's `OpTypeBool` (LLVM `i1`) -- e.g.
+  // `gl_CullPrimitiveEXT`, `VK_EXT_mesh_shader`'s per-primitive cull
+  // builtin -- canonicalizes to an ordinary 32-bit element here rather
+  // than surviving through to `StageStorage::buildStageStorage` at its
+  // true 1-bit width, which that host-owned structure-of-arrays layout
+  // has no addressable representation for (its per-element strides are
+  // all hard-coded to a 4-byte scalar). This mirrors how a real GPU
+  // driver typically represents a shader-visible `bool` as a 32-bit
+  // value in memory; `loadStageIOValue`/`storeStageIOValue` below widen/
+  // narrow the actual value at the same boundary.
+  if (Scalar->isIntegerTy(1))
+    return {SignatureComponentType::Bool, 32};
   if (auto *IntTy = dyn_cast<IntegerType>(Scalar))
     return {SignatureComponentType::SInt, IntTy->getBitWidth()};
   // FeMe's model has no representation for anything else (aggregates,
@@ -699,6 +711,18 @@ Value *loadStageIOValue(IRBuilderBase &B, Type *Ty, uint32_t ElementID,
   if (Shadow)
     return B.CreateLoad(Ty, Shadow->getOrCreate(ElementID, Row, Component, Ty),
                         Name);
+  // (Roadmap H6m) A `bool` (`i1`) leaf scalar was canonicalized to a
+  // 32-bit element by `getComponentType` above, so the `feme.stage.
+  // input.load` this element actually reads is `i32`-typed; narrow the
+  // loaded value back to `i1` here, at the same boundary, rather than
+  // leaving `Ty`'s two callers (the recursive cases above and
+  // `resolveOffsetWithinElement`'s own single-scalar caller) to each
+  // know about the widening.
+  if (Ty->isIntegerTy(1)) {
+    Value *Wide = createStageInputLoad(B, B.getInt32Ty(), ElementID, Row,
+                                       Component, Zero, Name);
+    return B.CreateTrunc(Wide, Ty);
+  }
   return createStageInputLoad(B, Ty, ElementID, Row, Component, Zero, Name);
 }
 
@@ -731,7 +755,17 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
                         Zero, Shadow);
     return;
   }
-  createStageOutputStore(B, ElementID, Row, Component, Val, Zero);
+  // (Roadmap H6m) The store-side mirror of `loadStageIOValue`'s own `i1`
+  // widening: `getComponentType` canonicalized this leaf's element to a
+  // 32-bit scalar, so the `feme.stage.output.store` this emits must widen
+  // \p Val to match, not store the bare `i1` `StageStorage` has no
+  // addressable representation for. The shadow alloca (read-back within
+  // this same invocation) keeps \p Val's own `i1` type, matching
+  // `loadStageIOValue`'s `Shadow` load above, which is narrowed back down
+  // from `i32` only on the non-shadow (real stage-IO) path.
+  Value *StoredVal =
+      Ty->isIntegerTy(1) ? B.CreateZExt(Val, B.getInt32Ty()) : Val;
+  createStageOutputStore(B, ElementID, Row, Component, StoredVal, Zero);
   if (Shadow)
     B.CreateStore(Val, Shadow->getOrCreate(ElementID, Row, Component, Ty));
 }

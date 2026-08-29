@@ -10,6 +10,7 @@
 
 #include "feme/Core/Signature.h"
 #include "feme/Core/StageOps.h"
+#include "feme/Graphics/StageStorage.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
@@ -21,6 +22,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
 #include <set>
@@ -2047,6 +2049,80 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenStores, 3u);
   for (Instruction &I : instructions(F))
     EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
+/// (Roadmap H6m) The exact shape a real
+/// `dEQP-VK.mesh_shader.ext.builtin.cull_primitives` mesh entry's own
+/// `gl_MeshPrimitivesEXT[i].gl_CullPrimitiveEXT = %v` store takes: SPIR-V's
+/// `OpTypeBool` (`gl_CullPrimitiveEXT`'s own declared GLSL `bool`,
+/// `VK_EXT_mesh_shader`'s per-primitive cull builtin, `BuiltIn` code 4485)
+/// is LLVM `i1`, which `StageStorage::buildStageStorage` has no
+/// addressable layout for -- its per-element strides are all hard-coded
+/// to a 4-byte scalar -- and previously reached it unchanged, failing
+/// `vkQueueSubmit` with "stage element N has a 1-bit scalar; only 32-bit
+/// elements are implemented yet" now that H6l's own fix lets this case
+/// clear `feme-graphics-validate-stage` for the first time. Fixed by
+/// canonicalizing the `i1` scalar to an ordinary 32-bit element at this
+/// SPIR-V-to-`feme.stage.*` boundary (`getComponentType`, `loadStageIOValue`/
+/// `storeStageIOValue`), mirroring how a real GPU driver represents a
+/// shader-visible `bool` in memory: the reflected `SignatureElement` is
+/// `{Bool, 32}`, the emitted `feme.stage.output.store`'s value operand is
+/// the `i1` zero-extended to `i32`, and `buildStageStorage` now succeeds
+/// building storage for it instead of erroring.
+TEST(CanonicalizeStageTest,
+     CanonicalizesBoolPerPrimitiveOutputStoreToA32BitElement) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_mesh_prims = external addrspace(8) global [4 x { i1 }], !feme.spirv.MemberDecorations !10
+    define void @main(i32 %i, i1 %v) #0 {
+      %p = getelementptr inbounds [4 x { i1 }], ptr addrspace(8) @gl_mesh_prims, i32 0, i32 %i, i32 0
+      store i1 %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !10 = !{!11}
+    !11 = !{i32 0, !12}
+    !12 = !{!13, !14}
+    !13 = !{i32 11, i32 4485}
+    !14 = !{i32 5271}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].ComponentType, SignatureComponentType::Bool);
+  EXPECT_EQ(Sig->Elements[0].BitWidth, 32u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    EXPECT_EQ(CI->getArgOperand(4), IArg);
+    Value *StoredVal = CI->getArgOperand(3);
+    EXPECT_TRUE(StoredVal->getType()->isIntegerTy(32));
+    auto *ZExt = dyn_cast<ZExtInst>(StoredVal);
+    ASSERT_TRUE(ZExt);
+    EXPECT_TRUE(ZExt->getOperand(0)->getType()->isIntegerTy(1));
+  }
+  EXPECT_EQ(SeenStores, 1u);
+
+  // `StageStorage::buildStageStorage` -- previously erroring "stage
+  // element 0 has a 1-bit scalar; only 32-bit elements are implemented
+  // yet" on this exact signature -- now succeeds, confirming the fix all
+  // the way through the boundary this row's own scope covers.
+  Expected<StageStorage> Storage =
+      buildStageStorage(*Sig, SignatureDirection::Output, /*InvocationCount=*/4);
+  ASSERT_THAT_EXPECTED(Storage, Succeeded());
+  EXPECT_EQ(Storage->Elements[0].BitWidth, 32u);
+  EXPECT_EQ(Storage->Elements[0].ScalarKind,
+            static_cast<uint32_t>(cpu::StageLayoutScalarKind::Bool));
 }
 
 /// through `TaskPayloadGlobalVariablePattern`'s own address-space-14 global
