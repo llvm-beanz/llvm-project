@@ -13188,3 +13188,113 @@ extension.
 **Milestone H6 does not close.** This row's own fix lands and is confirmed
 complete for the exact diagnostic it targeted, but the same real-ICD
 re-run finds a new, narrower blocker in the same group: H6l.
+
+## Roadmap H7b-a: measured impact (widen shader-visible sampled-image handle classification to Cube/CubeArray/2DArray)
+
+H7b's own writeup above closed `materializeImageDescriptor`'s descriptor-
+materialization gap but explicitly left `imageCubeArray` `VK_FALSE`,
+because a real code survey while implementing it found a second,
+previously-unnamed blocker even further up the pipeline:
+`SPIRVResourceLoweringPass::classifySampledImage2DHandle`
+(lib/Transforms/CPU/SPIRVResourceLowering.cpp) and DXIL's
+`classifyImageHandle` (lib/Transforms/CPU/ResourceLowering.cpp) both
+hard-rejected every sampled-image handle whose SPIR-V `Dim`/DXIL
+`ResourceKind` was not exactly `Dim2D`/`Texture2D`, non-arrayed -- at
+pipeline-creation time, before any descriptor lookup (H7b's own fix)
+could ever run. This row widens both to accept `Dim::Cube`/arrayed
+`Dim::2D`/arrayed `Dim::Cube` (SPIR-V) and
+`Texture2DArray`/`TextureCube`/`TextureCubeArray` (DXIL), adds a new CPU
+runtime `femeRTSelectCubeFace` major-axis cube-face-selection primitive
+(feme/runtime/CPU/FeMeRuntimeCPU.c), and flips `imageCubeArray` to
+`VK_TRUE` now that both halves of the gap (descriptor materialization and
+handle classification) are closed together.
+
+**check-feme**: `ninja check-feme` (assertions-enabled, ccache build)
+passes in full, 2058 discovered tests, 1999 `Passed` (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7b's own 2038/1979 baseline
+by the 22 new tests this row (plus H7b's own flip) adds: 5 new
+`SPIRVResourceLoweringTest` cases (Cube/CubeArray/2DArray handle
+classification), 7 new `ResourceLoweringTest` cases (the DXIL mirror --
+this file had *zero* pre-existing image-lowering coverage of any kind
+before this row), 1 new end-to-end `CommandBufferTest`
+(`CubeArraySampledImageDispatchTest.SamplesTheSelectedFaceAndCubeArrayElement`,
+a real compute dispatch sampling a `VK_IMAGE_VIEW_TYPE_CUBE_ARRAY` view's
++Z face at array element 1, its expected texel value hand-derived from
+`femeRTSelectCubeFace`'s own major-axis formula and confirmed correct on
+the first run), and the exhaustive `PhysicalDeviceInfoTest` feature-bit
+enumeration extended in place for `imageCubeArray` (not a new test).
+
+**Real `deqp-vk` runs**:
+
+```sh
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=cases_h7b_cube_array.txt \
+    --deqp-log-images=disable --deqp-log-shader-sources=disable
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-images=disable --deqp-log-shader-sources=disable
+```
+
+The same 12 `cases_h7b_cube_array.txt` cases H7b's own row measured
+(`dEQP-VK.image.image_size.cube_array.*`) all still report
+**`NotSupported`, but for a different, unrelated reason than before**:
+previously `Requested core feature is not supported: imageCubeArray`
+(the exact gate this row's own fix removes), now `Format not supported
+for the specified usage`. These 12 cases exclusively request
+`VK_IMAGE_USAGE_STORAGE_BIT` (`vktImageSizeTests.cpp`'s own
+`readonly`/`writeonly` naming), and `Format.cpp`'s `formatFeatureFlags`
+never sets `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` for *any* format today
+(a pre-existing, already-documented gap: "V5: Images and sampling"'s own
+status note in `FeMeVulkanDesign.md` names the missing
+`feme.cpp.image.store.*` runtime helper). This is expected and confirms
+the fix worked as scoped: the feature-bit gate these 12 cases used to hit
+is gone, and the *next* thing they hit is an orthogonal, already-tracked
+storage-image-write gap this row was never meant to close.
+
+No case in the current mustpass tree exercises an ordinary (non-shadow)
+sampled cube-array read without also depending on a *different* still-
+unimplemented feature that gates pipeline/descriptor creation before ever
+reaching this row's own fix -- surveyed directly rather than assumed:
+`texture.txt`'s own 1536 `cube_array` cases are all `dEQP-VK.texture.
+shadow.cube_array.*` (depth-compare `OpImageSampleDref*`, a different,
+still-unimplemented SPIR-V op family, unrelated to this row's scope);
+`binding-model.txt`'s 9108 `cube_array` cases all use an immutable-sampler
+or descriptor-array binding shape that already fails pipeline creation
+identically for a plain, non-array, non-cube `2d` case in the same test
+family (confirmed directly: `dEQP-VK.binding_model.shader_access.
+primary_cmd_buf.bind.combined_image_sampler_immutable.compute.
+single_descriptor.2d` fails `vkCreateComputePipelines` the same way as
+its own `.cube_array` sibling), so this is an orthogonal, pre-existing gap
+this row's own fix cannot and does not need to touch;
+`robustness.txt`'s `sampled_image.*.cube_array.comp` case reports
+`NotSupported (robustImageAccess not supported)`; and
+`pipeline/pipeline-library.txt`'s 443 `cube_array` cases all require
+`VK_EXT_attachment_feedback_loop_layout`, also unadvertised. The mustpass
+tree's own coverage of *sampled* cube-array reads is, today, entirely
+gated behind one or more of these three unrelated features for every
+single case -- confirmed by direct survey, not by inference -- so this
+row's own real end-to-end confirmation is
+`CommandBufferTest.cpp`'s `CubeArraySampledImageDispatchTest` above: a
+genuine compute dispatch through the real SPIR-V-to-LLVM lowering,
+`feme-cpu-resource-lowering`, and CPU runtime, not a mock.
+
+The 1957-case `draw_sample.txt` regression sample stays byte-identical to
+H7b's own recorded totals (14 Passed/179 Failed/1764 NotSupported):
+**0 regressions.**
+
+**Inventories**: `Vulkan14FeatureInventory.md` updated -- `imageCubeArray`
+flips to `yes`, the 1.0 feature-advertised count rises from 11 of 55 to 12
+of 55 (total 54 of 150), and the "graphics-specific unimplemented" bullet
+drops from 11 to 10. `VulkanExtensionInventory.md` confirmed to need no
+change: no extension is touched by this row, only a core 1.0 feature bit.
+`FeMeVulkanDesign.md`'s "V5: Images and sampling" status note updated with
+the cube(array)-over-2D-array addressing convention (a cube view is
+purely an addressing convention over the same array-of-2D-layers storage,
+never a distinct physical dimension) and the cube-face-selection
+algorithm choice (`femeRTSelectCubeFace`'s major-axis formula, the
+standard convention with no seam blending).
+
+**Milestone H7b-a closes.** Both halves of the gap H7b's own writeup
+identified -- descriptor materialization (H7b itself) and shader-visible
+handle classification (this row) -- are now fixed and tested, `check-feme`
+passes in full, and `imageCubeArray` honestly reads `VK_TRUE`.

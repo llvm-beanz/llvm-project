@@ -69,12 +69,12 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---|---|---|
-| 1.0 | 11 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
+| 1.0 | 12 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
 | 1.1 | 1 of 12 | n/a (see scope note) | 7 of 23 |
 | 1.2 | 9 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
 | 1.4 | 20 of 21 | 25 | 15 of 16 |
-| **total** | **53 of 150** | **70** | **48 of 86** |
+| **total** | **54 of 150** | **70** | **48 of 86** |
 
 - **The 1.3 floor is nearly closed; the 1.1/1.2 floor was never audited
   until now, and the 1.4 floor is nearly closed too.** Roadmap E1-E28 drove
@@ -117,14 +117,15 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt`, understating
   the 1.4 extension row as 14 of 16 rather than its true 15 of 16; restored
   here alongside roadmap H2's own `multiview` update.
-- **11 of the 44 unimplemented 1.0 feature bits are graphics
+- **10 of the 43 unimplemented 1.0 feature bits are graphics
   capabilities** (`fillModeNonSolid`, `wideLines`, `largePoints`,
   `sampleRateShading`,
   `depthClamp`, `depthBiasClamp`, `depthBounds`,
-  `imageCubeArray`, `shaderClipDistance`, `shaderCullDistance`,
-  `alphaToOne`) -- down from 14 (itself down from 15 once roadmap H5e
-  closed `geometryShader`, itself down from 16 once roadmap H4a/H4b
-  closed `tessellationShader`) now that roadmap H7a closed
+  `shaderClipDistance`, `shaderCullDistance`,
+  `alphaToOne`) -- down from 11 (itself down from 14, itself down from 15
+  once roadmap H5e closed `geometryShader`, itself down from 16 once
+  roadmap H4a/H4b closed `tessellationShader`) now that roadmap H7b/H7b-a
+  closed `imageCubeArray`, and roadmap H7a closed
   `independentBlend`, `occlusionQueryPrecise`, and `multiDrawIndirect`
   alongside two feature bits this file never grouped as
   "graphics-specific" in the first place (`logicOp`,
@@ -272,7 +273,7 @@ Every row cites the specific feature/limit/extension name it closes.
 |---|---|---|---|---|
 | feature | VK_VERSION_1_0 | `robustBufferAccess` | yes |  |
 | feature | VK_VERSION_1_0 | `fullDrawIndexUint32` | no |  |
-| feature | VK_VERSION_1_0 | `imageCubeArray` | no |  |
+| feature | VK_VERSION_1_0 | `imageCubeArray` | yes | roadmap H7b/H7b-a: `CommandBuffer.cpp`'s `materializeImageDescriptor` widened to a real `Texture2DArray`/`TextureCube`/`TextureCubeArray`-shaped descriptor, and `SPIRVResourceLowering.cpp`/`ResourceLowering.cpp`'s sampled-image handle classification widened to accept those shapes (with a new `femeRTSelectCubeFace` runtime cube-face-selection primitive), so a shader can now sample every layer/face of a real `VK_IMAGE_VIEW_TYPE_CUBE_ARRAY` view |
 | feature | VK_VERSION_1_0 | `independentBlend` | yes | roadmap H7a: `GraphicsPipeline.cpp`'s `translateColorBlendState` already applies a per-color-attachment `BlendState` independently |
 | feature | VK_VERSION_1_0 | `geometryShader` | yes | roadmap H5a-H5e: SPIR-V geometry entry-point execution-mode reflection, `CanonicalizeStagePass`/`Executor.cpp` geometry chaining, and `vkCreateGraphicsPipelines` acceptance/compilation |
 | feature | VK_VERSION_1_0 | `tessellationShader` | yes | roadmap H4a/H4b: SPIR-V tessellation-control/-evaluation reflection, splitting and `vkCreateGraphicsPipelines` acceptance/compilation |

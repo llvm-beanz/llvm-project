@@ -2657,15 +2657,20 @@ to this milestone's copy-only `image-loader-smoke.test`.
 
 Remaining narrowings, all inherited from R30's own scope (see
 FeMeGraphicsDesign.md's "Canonical image operations") rather than specific
-to this ICD: only a single-sampled, non-arrayed, float 2D sampled image can
-actually be *read* by a shader, a texel offset must be zero, and an image
-view over a nonzero base array layer is left unwritten (an all-zero
-descriptor, which reads as the robust zero result) because the image
-descriptor ABI has no base-layer field. Writing a storage image from a
-shader needs a `feme.cpu.image.store.*` runtime helper that does not exist
-yet, so a `STORAGE_IMAGE` binding is materialized but not yet writable.
-A shader-side `INPUT_ATTACHMENT` read is likewise not lowered yet: the
-object model can carry the binding, but subpass-input consumption remains
+to this ICD: only a single-sampled, float sampled image could originally be
+*read* by a shader, non-arrayed 2D only, and a nonzero base array layer was
+left unwritten because the image descriptor ABI had no base-layer field --
+roadmap H7b's own fix widened `materializeImageDescriptor` to a real
+nonzero-`baseArrayLayer` descriptor, and H7b-a's own fix (below) widened
+shader-visible handle classification itself to also accept
+`Texture2DArray`/`TextureCube`/`TextureCubeArray`, so only "single-sampled,
+float" remains a real narrowing today. A texel offset must still be zero.
+Writing a storage image from a shader needs a `feme.cpu.image.store.*`
+runtime helper that does not exist yet, so a `STORAGE_IMAGE` binding is
+materialized but not yet writable. A shader-side `INPUT_ATTACHMENT` read is
+likewise not lowered yet: the object model can carry the binding, but
+subpass-input consumption remains part of the render-pass follow-up rather
+than silently pretending an ordinary sampled-image lowering exists.
 part of the render-pass follow-up rather than silently pretending an
 ordinary sampled-image lowering exists.
 
@@ -2697,6 +2702,50 @@ a real block-compressed format needs this layout reworked to a
 block-aligned extent and a bytes-per-block stride first. Tracked as part
 of roadmap E20's scope rather than a narrowing of this milestone, since no
 compressed format was ever in V5's own goals above.
+
+**Roadmap H7b/H7b-a closed a separate, pre-existing narrowing: a shader
+could not sample `Texture2DArray`/`TextureCube`/`TextureCubeArray`.** This
+milestone's own `feme::vulkan::Image` never gained (and still does not
+have) a real "Cube" physical dimension -- `Image`'s packed mip-major
+subresource table above is array-of-2D-layers shaped regardless of the
+view's `VkImageViewType`, and a cube(array) view is purely an *addressing*
+convention over that same storage: 6 consecutive physical layers per cube,
+in the fixed `+X,-X,+Y,-Y,+Z,-Z` face order Vulkan itself mandates. H7b's
+own fix widened `materializeImageDescriptor`
+(lib/Vulkan/CommandBuffer.cpp) to compute the correct base physical layer
+for any of the 4 shapes rather than always hard-coding layer 0, which was
+sufficient to make a cube(array) view's remaining layers/faces reach a
+shader-visible descriptor at all; H7b-a's own fix then widened shader-side
+*consumption* of that descriptor, which had been rejected earlier in the
+pipeline, at pipeline-creation-time handle classification, before H7b's
+fix could even matter:
+`feme::cpu::SPIRVResourceLoweringPass::classifySampledImage2DHandle`
+(lib/Transforms/CPU/SPIRVResourceLowering.cpp) and DXIL's
+`classifyImageHandle` (lib/Transforms/CPU/ResourceLowering.cpp) now both
+accept `Dim::Cube`/arrayed `Dim::2D`/arrayed `Dim::Cube` (SPIR-V) and
+`Texture2DArray`/`TextureCube`/`TextureCubeArray` (DXIL) sampled-image
+handles, alongside the pre-existing non-arrayed `Dim::2D`/`Texture2D`
+case, each producing a distinct `ImageShape` the runtime lowering
+dispatches on. A new CPU runtime primitive,
+`femeRTSelectCubeFace` (feme/runtime/CPU/FeMeRuntimeCPU.c), implements the
+classic "major axis" algorithm: the largest-magnitude component of the
+3-component direction vector picks one of the 6 faces and its sign picks
+which of the pair, and the other two components (divided by that
+magnitude and rescaled into `[0, 1]`) become the face's 2D UV --
+`CubeArray`'s 4th (array-layer) component is rounded to the nearest
+integer and clamped, exactly like a real GPU's own driver, before being
+folded into the physical-layer computation above (`cubeIndex*6 + face`).
+This algorithm choice (nearest-face selection with no seam blending) is
+new to this project as of H7b-a and is not otherwise justified by an
+earlier design decision, since no earlier milestone sampled a cube face at
+all; it was chosen because it is the standard, widely-implemented
+convention (matching, e.g., a real GPU driver's own filtering-independent
+face/UV derivation step) and keeps the existing nearest/bilinear texel
+filtering in `femeRTSamplePoint2D` unmodified and reusable once the face
+and UV are known. `unittests/Vulkan/CommandBufferTest.cpp`'s
+`CubeArraySampledImageDispatchTest` exercises the full pipeline
+end-to-end, including this face-selection math, against a
+`VK_IMAGE_VIEW_TYPE_CUBE_ARRAY` view.
 
 **Roadmap E24 closed a separate, pre-existing gap this milestone's own
 scope never covered: `vkGetPhysicalDeviceFormatProperties`/
