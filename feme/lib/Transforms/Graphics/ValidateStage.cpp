@@ -12,13 +12,16 @@
 #include "feme/Core/Signature.h"
 #include "feme/Core/StageOps.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
+#include "feme/Transforms/Graphics/StageIOGlobal.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 
 using namespace llvm;
 using namespace feme;
@@ -36,7 +39,12 @@ bool isStageOpLegalForStage(StageOpKind Kind, ShaderStage Stage) {
   switch (Kind) {
   case StageOpKind::InputLoad:
   case StageOpKind::OutputStore:
-    return Stage == ShaderStage::Vertex || Stage == ShaderStage::Fragment;
+    // (Roadmap H6g-b-c) A mesh entry's own per-vertex/per-primitive output
+    // writes reuse `OutputStore` rather than a dedicated op (roadmap H6b's
+    // own comment on `StageOpKind::OutputStore`), now reachable here since
+    // `ValidateStagePass::run` below validates `ShaderStage::Mesh` too.
+    return Stage == ShaderStage::Vertex || Stage == ShaderStage::Fragment ||
+           Stage == ShaderStage::Mesh;
   case StageOpKind::Discard:
   case StageOpKind::Demote:
   case StageOpKind::IsHelper:
@@ -55,20 +63,20 @@ bool isStageOpLegalForStage(StageOpKind Kind, ShaderStage Stage) {
     return Stage == ShaderStage::Fragment;
   case StageOpKind::StreamEmit:
   case StageOpKind::StreamCut:
-    // Not yet reachable: `ValidateStagePass` only runs for Vertex/Fragment
-    // today (see its `run` below). Recorded now so this switch stays
-    // exhaustive once the geometry stage is validated here too.
+    // Not yet reachable: `ValidateStagePass` only runs for
+    // Vertex/Fragment/Mesh today (see its `run` below). Recorded now so
+    // this switch stays exhaustive once the geometry stage is validated
+    // here too.
     return Stage == ShaderStage::Geometry;
   case StageOpKind::TaskPayloadStore:
     // (Roadmap H6i) Likewise not yet reachable: `ValidateStagePass` does
     // not validate the amplification (task) stage yet, mirroring how
-    // `StreamEmit`/`StreamCut` above were unreachable until the geometry
-    // stage was validated.
+    // `StreamEmit`/`StreamCut` above are still unreachable until the
+    // geometry stage is validated.
     return Stage == ShaderStage::Amplification;
   case StageOpKind::SetMeshOutputs:
-    // (Roadmap H6c-a-a-i) Likewise not yet reachable: `ValidateStagePass`
-    // does not validate the mesh stage yet, mirroring `TaskPayloadStore`
-    // above.
+    // (Roadmap H6c-a-a-i) Reachable since roadmap H6g-b-c's own fix wired
+    // `ShaderStage::Mesh` into `ValidateStagePass::run` below.
     return Stage == ShaderStage::Mesh;
   case StageOpKind::NumStageOpKinds:
     break;
@@ -180,6 +188,45 @@ void validateVertex(CallInst &CI, unsigned VertexOperand, ShaderStage Stage,
                "geometry/mesh stages");
 }
 
+/// The `GlobalVariable` \p Ptr ultimately addresses by walking back through
+/// any chain of `getelementptr`s (instruction or constant-expression), or
+/// `nullptr` if it does not trace back to one directly. Unlike
+/// `CanonicalizeStagePass`'s own `getStageIOGlobal`, this does not need to
+/// resolve a byte offset -- only whether \p Ptr's underlying object is a
+/// stage-IO global at all -- so a plain GEP walk is enough.
+GlobalVariable *findUnderlyingGlobal(Value *Ptr) {
+  while (auto *GEP = dyn_cast<GEPOperator>(Ptr))
+    Ptr = GEP->getPointerOperand();
+  return dyn_cast<GlobalVariable>(Ptr);
+}
+
+/// (Roadmap H6g-b-c) Diagnoses \p I (a load or store) if \p Ptr -- its
+/// pointer operand -- still addresses a raw, un-canonicalized SPIR-V
+/// stage-IO global variable: the shape `CanonicalizeStagePass`'s own
+/// `resolveOffsetWithinElement` leaves behind (returning `std::nullopt`,
+/// "leave for `ValidateStagePass` to diagnose") when an access does not
+/// yet match a shape it knows how to rewrite into a `feme.stage.*` call --
+/// e.g. a mesh entry's arrayed `PerPrimitiveEXT`/`PerVertexEXT` builtin
+/// interface-block access (roadmap H6c-a-a-iii). Left unrewritten, such an
+/// access previously survived as an ordinary load/store of a
+/// `GlobalVariable` with no definition of its own all the way to
+/// `feme::cpu`'s JIT, which failed there with a raw, undiagnosable
+/// "Symbols not found" link error instead of a clean compile-time
+/// rejection.
+void validateStageIOGlobalAccess(Instruction &I, Value *Ptr) {
+  GlobalVariable *GV = findUnderlyingGlobal(Ptr);
+  unsigned AddrSpace;
+  if (!isSPIRVStageIOGlobal(GV, AddrSpace))
+    return;
+  Function &F = *I.getFunction();
+  F.getContext().emitError(
+      &I, "feme-graphics-validate-stage: function '" + F.getName() +
+              "' has an unresolved stage-IO global-variable access to '" +
+              GV->getName() +
+              "', a shape CanonicalizeStagePass does not yet canonicalize "
+              "into a 'feme.stage.*' call");
+}
+
 void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
                   const EntrySignature &Sig) {
   StringRef OpName = getStageOpName(Kind);
@@ -250,16 +297,27 @@ PreservedAnalyses ValidateStagePass::run(Module &M, ModuleAnalysisManager &AM) {
   for (Function &F : M) {
     std::optional<ShaderStage> Stage = getShaderStage(F);
     if (!Stage ||
-        (*Stage != ShaderStage::Vertex && *Stage != ShaderStage::Fragment))
+        (*Stage != ShaderStage::Vertex && *Stage != ShaderStage::Fragment &&
+         *Stage != ShaderStage::Mesh))
       continue;
 
     EntrySignature Sig = dxil::getEntrySignature(F).value_or(EntrySignature{});
     for (Instruction &I : instructions(F)) {
-      auto *CI = dyn_cast<CallInst>(&I);
-      StageOpKind Kind;
-      if (!CI || !isStageOpCall(*CI, &Kind))
+      if (auto *CI = dyn_cast<CallInst>(&I)) {
+        StageOpKind Kind;
+        if (isStageOpCall(*CI, &Kind))
+          validateCall(*CI, Kind, *Stage, Sig);
         continue;
-      validateCall(*CI, Kind, *Stage, Sig);
+      }
+      // (Roadmap H6g-b-c) Every stage validated here is routed through
+      // `CanonicalizeStagePass`'s own SPIR-V path, so any load/store still
+      // standing after it ran that addresses a recognized stage-IO global
+      // is one it failed to canonicalize, not ordinary unrelated program
+      // memory access.
+      if (auto *LI = dyn_cast<LoadInst>(&I))
+        validateStageIOGlobalAccess(I, LI->getPointerOperand());
+      else if (auto *SI = dyn_cast<StoreInst>(&I))
+        validateStageIOGlobalAccess(I, SI->getPointerOperand());
     }
   }
   // Diagnostics only; this pass never rewrites IR.

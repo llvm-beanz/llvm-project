@@ -7,14 +7,19 @@
 //===----------------------------------------------------------------------===//
 //
 // This file declares feme::graphics::ValidateStagePass, the validation half
-// of roadmap R20's `FeMeTransformsGraphics`: checking that a vertex/fragment
-// entry point's `feme.stage.*` calls (feme/include/feme/Core/StageOps.h) --
-// however they got there, whether from `CanonicalizeStagePass` or written by
-// hand -- have constant, in-range element/row/component operands against the
-// entry's `feme::EntrySignature`, and that every operation used is legal for
-// the entry's declared stage. See "Canonical stage operations" in
+// of roadmap R20's `FeMeTransformsGraphics`: checking that a
+// vertex/fragment/mesh entry point's `feme.stage.*` calls
+// (feme/include/feme/Core/StageOps.h) -- however they got there, whether
+// from `CanonicalizeStagePass` or written by hand -- have constant,
+// in-range element/row/component operands against the entry's
+// `feme::EntrySignature`, and that every operation used is legal for the
+// entry's declared stage. See "Canonical stage operations" in
 // feme/docs/FeMeGraphicsDesign.md: "Only operations required by implemented
-// stages are legal."
+// stages are legal." (Roadmap H6g-b-c) It also diagnoses a mesh entry's
+// raw, un-canonicalized SPIR-V stage-IO global-variable access --
+// `CanonicalizeStagePass` leaves one behind, rather than rewriting it into
+// a `feme.stage.*` call, whenever it does not yet model the accessed
+// shape -- instead of letting it reach `feme::cpu`'s JIT undiagnosed.
 //
 // This pass never rewrites IR; it only diagnoses (through
 // `LLVMContext::emitError`, the same mechanism
@@ -31,10 +36,11 @@
 namespace feme {
 namespace graphics {
 
-/// Validates every vertex/fragment entry point's `feme.stage.*` calls
-/// against its `feme::EntrySignature` and declared stage. Diagnoses (but
-/// does not fix) any violation; always preserves all analyses, since it
-/// never modifies IR.
+/// Validates every vertex/fragment/mesh entry point's `feme.stage.*` calls
+/// against its `feme::EntrySignature` and declared stage, and (roadmap
+/// H6g-b-c) any raw stage-IO global-variable access `CanonicalizeStagePass`
+/// left un-canonicalized. Diagnoses (but does not fix) any violation;
+/// always preserves all analyses, since it never modifies IR.
 class ValidateStagePass : public llvm::PassInfoMixin<ValidateStagePass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);

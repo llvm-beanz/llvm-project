@@ -235,4 +235,94 @@ TEST(ValidateStageTest, NonConstantVertexOperandIsDiagnosedOnOutputStore) {
   EXPECT_NE(Errors[0].find("non-constant vertex operand"), std::string::npos);
 }
 
+/// (Roadmap H6g-b-c) `ValidateStagePass::run` now validates the mesh
+/// stage too; an ordinary `feme.stage.output.store` call (a mesh entry's
+/// per-vertex/per-primitive output write, roadmap H6b) is legal there,
+/// mirroring `ValidCallsAreNotDiagnosed`'s vertex/fragment coverage.
+TEST(ValidateStageTest, MeshOutputStoreIsLegal) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 1.0, i32 0)
+      ret void
+    }
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="mesh" }
+  )");
+  ASSERT_TRUE(M);
+  attachTestSignature(*M->getFunction("main"));
+  EXPECT_TRUE(validate(*M).empty());
+}
+
+/// (Roadmap H6g-b-c) `feme.stage.discard` remains illegal in the mesh
+/// stage now that it is validated, mirroring
+/// `DiscardInVertexStageIsIllegal`.
+TEST(ValidateStageTest, DiscardInMeshStageIsIllegal) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      call void @feme.stage.discard(i1 true)
+      ret void
+    }
+    declare void @feme.stage.discard(i1)
+    attributes #0 = { "feme.shader.stage"="mesh" }
+  )");
+  ASSERT_TRUE(M);
+  std::vector<std::string> Errors = validate(*M);
+  ASSERT_EQ(Errors.size(), 1u);
+  EXPECT_NE(Errors[0].find("not legal"), std::string::npos);
+}
+
+/// (Roadmap H6g-b-c) The concrete gap this row closes: a mesh entry's
+/// arrayed `PerPrimitiveEXT`/`PerVertexEXT` builtin interface-block store
+/// `CanonicalizeStagePass::resolveOffsetWithinElement` leaves unrewritten
+/// (see `CanonicalizeStageTest.
+/// ConstantIndexIntoArrayedBuiltinInterfaceBlockIsLeftUnrewritten`, the
+/// exact IR shape reused here) is now diagnosed instead of silently
+/// reaching `feme::cpu`'s JIT as an undefined `GlobalVariable` symbol.
+TEST(ValidateStageTest, UnresolvedStageIOGlobalAccessInMeshIsDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_mesh_prims = external addrspace(8) global [4 x { i32, i32 }], !feme.spirv.MemberDecorations !10
+    define void @main(i32 %v) #0 {
+      %p = getelementptr inbounds [4 x { i32, i32 }], ptr addrspace(8) @gl_mesh_prims, i32 0, i32 1, i32 0
+      store i32 %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+    !10 = !{!11, !12}
+    !11 = !{i32 0, !13}
+    !12 = !{i32 1, !14}
+    !13 = !{!15}
+    !15 = !{i32 11, i32 7}
+    !14 = !{!16}
+    !16 = !{i32 5271}
+  )");
+  ASSERT_TRUE(M);
+  std::vector<std::string> Errors = validate(*M);
+  ASSERT_EQ(Errors.size(), 1u);
+  EXPECT_NE(Errors[0].find("unresolved stage-IO global-variable access"),
+            std::string::npos);
+  EXPECT_NE(Errors[0].find("gl_mesh_prims"), std::string::npos);
+}
+
+/// An ordinary load/store unrelated to any stage-IO global (e.g. a local
+/// `alloca`) is not diagnosed by
+/// `UnresolvedStageIOGlobalAccessInMeshIsDiagnosed`'s new check: only a
+/// `GlobalVariable` recognized by `isSPIRVStageIOGlobal` triggers it.
+TEST(ValidateStageTest, OrdinaryAllocaAccessInMeshIsNotDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %v) #0 {
+      %p = alloca i32
+      store i32 %v, ptr %p
+      %r = load i32, ptr %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(validate(*M).empty());
+}
+
 } // namespace

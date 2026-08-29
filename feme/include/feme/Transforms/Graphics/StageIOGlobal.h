@@ -40,7 +40,7 @@ inline bool isSPIRVStageIOGlobal(const llvm::GlobalVariable *GV,
   if (AddrSpace != 7 && AddrSpace != 8)
     return false;
   return GV->getMetadata("spirv.Decorations") != nullptr ||
-        GV->getMetadata("feme.spirv.MemberDecorations") != nullptr;
+         GV->getMetadata("feme.spirv.MemberDecorations") != nullptr;
 }
 
 } // namespace graphics
