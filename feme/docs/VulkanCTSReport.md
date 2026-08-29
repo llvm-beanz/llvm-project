@@ -12643,6 +12643,67 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-caselist-file=draw_sample.txt --deqp-shadercache=disable
 ```
 
+## Roadmap H7b: measured impact (widen `materializeImageDescriptor`'s dimension/array-layer support)
+
+H7b's own text named `CommandBuffer.cpp`'s `materializeImageDescriptor`
+hard-rejecting any view whose dimension wasn't `Texture2D`, and any
+nonzero `baseArrayLayer`, as the blocker keeping `imageCubeArray`
+`VK_FALSE`. That gap is real and now fixed: `materializeImageDescriptor`
+widens to `Texture2DArray`/`TextureCube`/`TextureCubeArray` views and any
+`baseArrayLayer`, building a per-mip adjusted subresource layout table
+(`Offset` shifted by `BaseArrayLayer * SlicePitch`) rather than pointing
+directly into `Image::mipLayouts()`'s shared, layer-0-relative table.
+
+**check-feme**: `ninja check-feme` (assertions-enabled, ccache build)
+passes in full, 2038 discovered tests, 1979 `Passed` (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7a's own 2037/1978 baseline
+by exactly the 1 new
+`SecondArrayLayerSampledImageDispatchTest.SamplesTheBoundLayerRatherThanLayerZeroOrAllZero`
+test this row adds -- a real end-to-end dispatch confirming a
+`VK_IMAGE_VIEW_TYPE_2D` view with `baseArrayLayer=1` over a two-layer
+image now samples layer 1's own texels rather than layer 0's or an
+all-zero read.
+
+**Real `deqp-vk` runs**:
+
+```sh
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=cases_h7b_cube_array.txt \
+    --deqp-log-images=disable --deqp-log-shader-sources=disable
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=draw_sample.txt \
+    --deqp-log-images=disable --deqp-log-shader-sources=disable
+```
+
+`cases_h7b_cube_array.txt` is the 12 `dEQP-VK.image.image_size.cube_array.*`
+cases from `external/vulkancts/mustpass/main/vk-default/image/image-size.txt`
+-- the only real cube-array cases in the mustpass tree cheap enough to run
+directly and not gated behind unrelated, still-missing storage-image
+support (`load-store.txt`'s own 386 `cube_array` cases all need a
+`feme.cpu.image.store.*` runtime helper this ICD does not have yet,
+unrelated to this row). All 12 report **`NotSupported (Requested core
+feature is not supported: imageCubeArray)`**, unchanged from before this
+row's own fix -- confirming, as the roadmap text above already concludes,
+that this widening alone is invisible to any real CTS case until
+`imageCubeArray` itself flips `VK_TRUE` (roadmap H7b-a), since real
+Vulkan CTS cases gate on the advertised feature bit rather than on
+whether the underlying descriptor path happens to work.
+
+The 1957-case `draw_sample.txt` regression sample stays byte-identical to
+H7a's own recorded totals (14 Passed/179 Failed/1764 NotSupported):
+**0 regressions.**
+
+**Inventories**: `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+confirmed to need no change -- `imageCubeArray` stays `VK_FALSE`, no
+extension or feature bit is touched by this row.
+
+**Milestone H7b does not close.** The descriptor-materialization gap
+its own text named is fixed and tested, but a real code survey while
+implementing it found a second, more fundamental, previously-unnamed
+blocker (`SPIRVResourceLowering.cpp`/`ResourceLowering.cpp`'s
+`Dim=2D`/`Texture2D`-only shader-visible handle classification) that
+this row's own fix cannot reach. Filed as roadmap H7b-a.
+
 ## Roadmap H7a: measured impact (five already-implemented core 1.0 feature bits)
 
 Roadmap H7 asked for a full survey of the ~20 named candidate optional
