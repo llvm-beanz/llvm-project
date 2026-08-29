@@ -44389,3 +44389,144 @@ Split into five, each independently buildable/testable:
    `VulkanCTSReport.md` documentation updates.
 (This `agent_thoughts.md` update follows as its own, final commit, per
 standing instruction.)
+
+# Session: Completing H7c (`fillModeNonSolid` -- `VK_POLYGON_MODE_LINE`/`_POINT`)
+
+## Design
+
+`GraphicsPipeline.cpp`'s `translateRasterState` used to reject any
+`polygonMode` other than `VK_POLYGON_MODE_FILL` outright, and
+`Executor.cpp` had no non-solid rasterization path for a triangle-class
+primitive at all -- the user's own row text suggested reusing F5's own
+line-width/stipple machinery for the LINE case, which turned out to be
+exactly the right shape once I surveyed `Executor.cpp`'s existing
+point/line topology handling.
+
+Key findings before writing any code:
+- **No feature-enable-gating precedent** exists anywhere in this
+  codebase (checked by grepping for `EnabledFeatures`/`requireFeature`
+  patterns) -- an app is never required to have actually enabled an
+  optional `VkPhysicalDeviceFeatures` bit before a pipeline can use the
+  corresponding functionality. Decided not to add gating for
+  `polygonMode` either, for consistency with `logicOp`/`independentBlend`
+  and every other optional-feature row before this one.
+- **Pipeline cache key excludes pure-runtime raster state already**:
+  `serializeFixedFunctionState` only ever serializes `Cull`/`Front`,
+  never `LineMode`/`LineWidth`/stipple -- so the new `Polygon` field
+  needs no cache-key change either, by the same precedent.
+- **`ResolvedRaster`'s full-struct copy** already carries any new
+  `RasterState` field through the dynamic-state merge with zero extra
+  code, since polygon mode has no dynamic-state counterpart in this
+  project's scope (`VK_EXT_extended_dynamic_state3`'s
+  `vkCmdSetPolygonModeEXT` is out of scope/unadvertised).
+- **`VK_KHR_line_rasterization`'s own spec text** explicitly extends
+  `lineRasterizationMode`/stipple fields to "any line segment ... drawn
+  ... when polygonMode is VK_POLYGON_MODE_LINE", not just a real
+  line-topology primitive -- this directly justified reusing F5's line
+  rasterizer unmodified rather than inventing a second one, and is cited
+  directly in the new code's own comments.
+- **Cull-mode ordering**: a real `VkCullModeFlags` only ever applies to
+  "a polygon" per the spec (never a point/line primitive), so the
+  triangle must be culled by its own real winding *before* being
+  decomposed into edges/points -- the new `PolygonMode` branch sits right
+  after the existing cull-mode rejection check, before the CW/CCW
+  winding-fix swap (which the synthetic sub-primitives never need).
+- **Stipple continuity across a triangle's own 3 edges**: chose to reset
+  arc length to 0 per edge, since a triangle's own edges have no
+  Vulkan-defined "connected strip" concept the way a real line strip's
+  segments do (a documented scope choice, not a spec mandate either way).
+
+## Implementation
+
+1. New `feme::graphics::PolygonMode` enum (`Fill`/`Line`/`Point`) and
+   `RasterState::Polygon` field (`Pipeline.h`).
+2. `GraphicsPipeline.cpp`: new `mapPolygonMode()` helper (mirrors
+   `mapCullMode()`), `translateRasterState` maps all 3 real
+   `VkPolygonMode` values instead of rejecting anything but `FILL`
+   (rejecting only the never-advertised `VK_POLYGON_MODE_FILL_RECTANGLE_NV`).
+3. `Executor.cpp`: refactored first (hoisted `QuadCorner`/
+   `pushQuadTriangle` earlier, extracted the topology-level Point/Line
+   `RasterClass` loop bodies into two new shared, reusable lambdas --
+   `emitPointQuad`/`emitLineSegment` -- pure behavior-preserving change,
+   confirmed via full test-suite reruns before adding anything new), then
+   added the actual new capability: the solid-triangle assembly loop now
+   branches on `Polygon`, calling `emitLineSegment`/`emitPointQuad` for
+   each of the triangle's 3 edges/vertices and `continue`-ing past the
+   normal filled-interior push.
+4. `PhysicalDeviceInfo.cpp`: `fillModeNonSolid = VK_TRUE`, once the
+   implementation above was confirmed working end to end (unit tests +
+   real CTS), mirroring H7b-a's own "advertise once it actually works"
+   gate.
+
+## Testing
+
+- `GraphicsPipelineTest.cpp`'s new `TranslatesNonFillPolygonModes`:
+  pipeline creation accepts `VK_POLYGON_MODE_LINE`/`_POINT` and records
+  the right `RasterState::Polygon` value; still rejects
+  `VK_POLYGON_MODE_FILL_RECTANGLE_NV`.
+- `ExecutorTest.cpp`'s new `PolygonModeLineRastersOnlyTheTrianglesThreeEdges`/
+  `PolygonModePointRastersOnlyTheTrianglesThreeVertices`: a triangle whose
+  3 vertices land exactly on pixel centers (0,0)/(3,0)/(0,3) in a 4x4
+  attachment, so each mode's expected lit-pixel set is hand-derivable
+  (Bresenham mode used for Line, for a pixel-exact prediction) and
+  checked precisely -- Line mode lights exactly the 9 pixels along the 3
+  edges (verified by hand: top edge lights row 0, left edge lights
+  column 0, diagonal edge lights the (3,0)-(2,1)-(1,2)-(0,3)
+  anti-diagonal) and leaves the remaining 7 untouched; Point mode lights
+  exactly the 3 vertex pixels. Both passed on the very first run, meaning
+  the hand-derivation and the implementation agreed.
+- `PhysicalDeviceInfoTest.cpp`'s exhaustive feature-bit test extended to
+  require `fillModeNonSolid`.
+- `ninja check-feme` (ccache + assertions): 2002/2061 passed, 59
+  pre-existing unrelated `Unsupported`, 0 `Failed`.
+
+## Real Vulkan CTS
+
+Built a combined case list (216 unique cases after dedup) from every
+group a source survey (`grep -rl fillModeNonSolid
+external/vulkancts/modules/vulkan/`) found touching `polygonMode`
+directly, and ran it in one `deqp-vk` invocation against
+`libfeme_vulkan.so` directly (`VK_ICD_FILENAMES` pointed at
+`feme_icd.json`). Result: 15 Passed / 0 Failed / 201 NotSupported. Every
+`Passed` case is exactly this row's own scope (plain vertex-fed
+point/triangle topology, no geometry/tessellation stage, all 3
+line-rasterization-mode combinations); every `NotSupported` case is
+gated behind an orthogonal unimplemented feature
+(`shaderTessellationAndGeometryPointSize`, `standardSampleLocations`,
+`largePoints` -- H7e's own row, not this one's). No `vtx_triangles_
+mode_line_*` (non-geometry) case exists in the CTS's own matrix at all,
+confirmed by direct grep -- not missing coverage, just an absent
+combination upstream. Full detail recorded in `VulkanCTSReport.md`'s new
+"Roadmap H7c: measured impact" section.
+
+## Docs
+
+- `Roadmap.md`: H7c struck through with a "done" writeup; H7's own
+  remaining sub-rows (H7d onward) untouched.
+- `Vulkan14FeatureInventory.md`: `fillModeNonSolid` row flips to `yes`;
+  1.0 summary count 12/55 -> 13/55; "graphics-specific unimplemented"
+  bullet 10 -> 9.
+- `VulkanExtensionInventory.md`: confirmed no change needed (grepped for
+  any `polygonMode`/`fillModeNonSolid`-adjacent extension row -- none
+  exists; this is a pure core-1.0 feature bit).
+- `FeMeGraphicsDesign.md`: new status paragraph appended directly after
+  F5's own line-rasterization status paragraph, describing how
+  `PolygonMode::Line`/`Point` reuses that machinery.
+- `VulkanCTSReport.md`: new "Roadmap H7c: measured impact" section.
+
+## Commits
+
+Split into four, each independently buildable/testable:
+1. `Pipeline.h` + `GraphicsPipeline.cpp` polygon-mode acceptance + its
+   new `GraphicsPipelineTest.cpp` coverage.
+2. `Executor.cpp` refactor (hoisted helpers, extracted
+   `emitPointQuad`/`emitLineSegment`) + the new Line/Point rasterization
+   capability + its new `ExecutorTest.cpp` coverage.
+3. `PhysicalDeviceInfo.cpp`'s `fillModeNonSolid` flip + extended
+   feature-bit test.
+4. `Roadmap.md`/`Vulkan14FeatureInventory.md`/`FeMeGraphicsDesign.md`
+   documentation updates.
+5. `VulkanCTSReport.md`'s measured-impact section (separate, since it
+   depends on the real CTS run only possible after commits 1-3 landed).
+(This `agent_thoughts.md` update follows as its own, final commit, per
+standing instruction.)
