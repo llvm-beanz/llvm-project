@@ -111,12 +111,13 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
 
 TEST(PhysicalDeviceInfo,
      OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised) {
-  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c) `robustBufferAccess`/
+  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c/H7d) `robustBufferAccess`/
   // `dualSrcBlend`/`textureCompressionASTC_LDR`/`multiViewport`/
   // `tessellationShader`/`geometryShader`/`independentBlend`/`logicOp`/
   // `occlusionQueryPrecise`/`multiDrawIndirect`/
-  // `drawIndirectFirstInstance`/`imageCubeArray`/`fillModeNonSolid` are
-  // the only core features this milestone can honestly claim (see
+  // `drawIndirectFirstInstance`/`imageCubeArray`/`fillModeNonSolid`/
+  // `depthClamp`/`depthBiasClamp`/`depthBounds` are the only core
+  // features this milestone can honestly claim (see
   // PhysicalDeviceInfo.cpp's comment); every other `VkBool32` stays
   // false, since nothing else has been implemented that could back one
   // yet.
@@ -134,6 +135,9 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.drawIndirectFirstInstance, VK_TRUE);
   EXPECT_EQ(Info.Features.imageCubeArray, VK_TRUE);
   EXPECT_EQ(Info.Features.fillModeNonSolid, VK_TRUE);
+  EXPECT_EQ(Info.Features.depthClamp, VK_TRUE);
+  EXPECT_EQ(Info.Features.depthBiasClamp, VK_TRUE);
+  EXPECT_EQ(Info.Features.depthBounds, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -149,6 +153,9 @@ TEST(PhysicalDeviceInfo,
   Cleared.drawIndirectFirstInstance = VK_FALSE;
   Cleared.imageCubeArray = VK_FALSE;
   Cleared.fillModeNonSolid = VK_FALSE;
+  Cleared.depthClamp = VK_FALSE;
+  Cleared.depthBiasClamp = VK_FALSE;
+  Cleared.depthBounds = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }

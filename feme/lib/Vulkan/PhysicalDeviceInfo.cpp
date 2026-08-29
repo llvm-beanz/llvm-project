@@ -507,6 +507,31 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // `ExecutorTest.cpp`'s `PolygonModeLineRastersOnlyTheTrianglesThreeEdges`/
   // `PolygonModePointRastersOnlyTheTrianglesThreeVertices`.
   Info.Features.fillModeNonSolid = VK_TRUE;
+  // Roadmap H7d: `depthClamp`/`depthBiasClamp`/`depthBounds`.
+  // `GraphicsPipeline.cpp`'s `translateRasterState`/`translateDepthStencil
+  // State` used to reject `depthClampEnable`, `depthBiasEnable` entirely,
+  // and `depthBoundsTestEnable` outright at pipeline-creation time; all
+  // three now translate onto real per-pipeline state
+  // (`RasterState::DepthClampEnable`/`DepthBiasEnable`/`DepthBiasClamp`,
+  // `DepthState::BoundsTestEnable`/`MinDepthBounds`/`MaxDepthBounds`).
+  // `Executor.cpp` implements each honestly: depth clamp skips
+  // `clipTriangle`'s near/far Z-clip planes and clamps `projectVertex`'s
+  // computed depth to the viewport range instead; depth bias computes
+  // `depthBiasConstantFactor * r + depthBiasSlopeFactor * maxSlope`
+  // (clamped via `depthBiasClamp`) once per triangle and applies it to
+  // all three vertices' depths, ahead of H7c's own polygon-mode branch so
+  // Fill/Line/Point modes all inherit it; the depth bounds test runs at
+  // the very start of `testDepthStencil`, before the stencil test, per
+  // the spec's fixed-function order, comparing the value already stored
+  // in the depth attachment (not the incoming fragment's own depth)
+  // against `[minDepthBounds, maxDepthBounds]`. Proven end to end by
+  // `DrawTest.cpp`'s `DepthClampKeepsFragmentsBeyondTheFarPlane`/
+  // `DepthBiasShiftsOverlappingDepth`/
+  // `DepthBoundsTestRejectsOutOfRangeFragments`, so all three can
+  // honestly flip to `VK_TRUE`.
+  Info.Features.depthClamp = VK_TRUE;
+  Info.Features.depthBiasClamp = VK_TRUE;
+  Info.Features.depthBounds = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
