@@ -37,12 +37,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete H7e?
+Can you complete H7f?
 
-> **`wideLines`/`largePoints`**: F5 already threads a real, variable `LineWidth`
-> through the line rasterizer's own quad-expansion path (`Executor.cpp`), so
-> `wideLines` is likely close -- `lineWidthRange`/`lineWidthGranularity` above
-> stay at the degenerate `[1.0, 1.0]`/`1.0` floor and need raising to match
-> whatever this rasterizer can honestly support. `largePoints` needs real new
-> work: point-primitive expansion is still hardcoded to a fixed 1-pixel size,
-> unlike the line path F5 already generalized
+> **`sampleRateShading`/`alphaToOne`**: the executor always invokes the fragment
+> shader once per covered fragment/pixel, never once per covered sample, so
+> `VkPipelineMultisampleStateCreateInfo::sampleShadingEnable`/`minSampleShading`
+> have no per-sample invocation loop to honor yet; `alphaToOneEnable` has no
+> handling at all in the blend path (distinct from the already-implemented
+> alpha-to-coverage handling). Grouped since both are
+> `VkPipelineMultisampleStateCreateInfo` fields reached by the same
+> pipeline-state translation code
