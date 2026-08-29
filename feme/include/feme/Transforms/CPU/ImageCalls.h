@@ -23,6 +23,16 @@
 //
 // Scope (roadmap R30): 2D only, matching `runtime/CPU`'s own scope note.
 //
+// Update (roadmap H7b-a): widened beyond plain 2D to also cover
+// `Texture2DArray`/`TextureCube`/`TextureCubeArray` shapes, reusing
+// `runtime/CPU`'s own newly-widened `feme.cpu.image.sample.2darray.v4f32`/
+// `.load.2darray.v4f32`/`.v4i32`/`.sample.cube.v4f32`/
+// `.sample.cubearray.v4f32` entry points (FeMeRuntimeCPU.c). No
+// `SampleCmp` counterpart is added for any of these new shapes: neither
+// `SPIRVResourceLowering.cpp` nor `ResourceLowering.cpp` lowers a
+// depth-comparison sample for *any* dimension yet, 2D included -- a
+// pre-existing, unrelated gap.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_IMAGECALLS_H
@@ -58,6 +68,29 @@ enum class ImageCallKind : uint8_t {
   /// legalizes `OpImageFetch` (never `OpImageSample*`) against an integer-
   /// sampled image, so there is nothing for a `SampleImage2DI32` to mean.
   Load2DI32,
+  /// `feme.cpu.image.sample.2darray.v4f32` (roadmap H7b-a): the
+  /// `Texture2DArray` counterpart of `Sample2D`, adding a float array-layer
+  /// coordinate (rounded to nearest, clamped, per SPIR-V's own arrayed-
+  /// sample convention).
+  Sample2DArray,
+  /// `feme.cpu.image.load.2darray.v4f32` (roadmap H7b-a): the
+  /// `Texture2DArray` counterpart of `Load2D`, adding an integer
+  /// array-layer coordinate.
+  Load2DArray,
+  /// `feme.cpu.image.load.2darray.v4i32` (roadmap H7b-a): the integer-format
+  /// counterpart of `Load2DArray`, mirroring `Load2DI32`'s relationship to
+  /// `Load2D`.
+  Load2DArrayI32,
+  /// `feme.cpu.image.sample.cube.v4f32` (roadmap H7b-a): the `TextureCube`
+  /// counterpart of `Sample2D` -- a 3-component direction-vector coordinate
+  /// (`U`/`V`/`W` here standing for the vector's X/Y/Z) resolved to a face
+  /// plus 2D UV by the runtime's own "major axis" algorithm.
+  SampleCube,
+  /// `feme.cpu.image.sample.cubearray.v4f32` (roadmap H7b-a): the
+  /// `TextureCubeArray` counterpart of `SampleCube`, adding a float
+  /// array-layer coordinate selecting which six-layer cube element of the
+  /// array to sample.
+  SampleCubeArray,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -82,20 +115,40 @@ struct MatchedImageCall {
   llvm::Value *SamplerIndex = nullptr;
   /// `Sample2D`/`SampleCmp2D`: normalized U/V coordinates.
   /// `Load2D`/`Load2DI32`: integer X/Y texel coordinates.
+  /// `Sample2DArray`/`Load2DArray`/`Load2DArrayI32`: same as their plain
+  /// counterparts' `U`/`V` (the array layer is carried separately, in
+  /// `ArrayLayer`/`Layer` below).
+  /// `SampleCube`/`SampleCubeArray`: the direction vector's X/Y component
+  /// (`W` below carries the Z component).
   llvm::Value *U = nullptr;
   llvm::Value *V = nullptr;
-  /// The LOD/mip operand: `Sample2D`/`SampleCmp2D`'s explicit-or-ignored LOD
-  /// float, or `Load2D`/`Load2DI32`'s integer mip level.
+  /// `SampleCube`/`SampleCubeArray` only: the direction vector's Z
+  /// component; null for every other kind.
+  llvm::Value *W = nullptr;
+  /// `Sample2DArray`/`SampleCubeArray` only: the float array-layer
+  /// coordinate (rounded to nearest, clamped, at the runtime); null for
+  /// every other kind, including the integer-coordinate `Load2DArray`/
+  /// `Load2DArrayI32`, which instead use `Layer` below.
+  llvm::Value *ArrayLayer = nullptr;
+  /// `Load2DArray`/`Load2DArrayI32` only: the integer array-layer texel
+  /// coordinate; null for every other kind.
+  llvm::Value *Layer = nullptr;
+  /// The LOD/mip operand: `Sample2D`/`SampleCmp2D`/`Sample2DArray`/
+  /// `SampleCube`/`SampleCubeArray`'s explicit-or-ignored LOD float, or
+  /// `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32`'s integer mip
+  /// level.
   llvm::Value *Lod = nullptr;
-  /// `Sample2D`/`SampleCmp2D` only: whether `Lod` is an explicit LOD (true)
-  /// or should be ignored in favor of implicit level 0 (false); null for
-  /// `Load2D`/`Load2DI32`, which always name their mip explicitly.
+  /// Whether `Lod` is an explicit LOD (true) or should be ignored in favor
+  /// of implicit level 0 (false), for every sampled (non-`Load*`) kind;
+  /// null for `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32`, which
+  /// always name their mip explicitly.
   llvm::Value *UseExplicitLod = nullptr;
   /// `SampleCmp2D` only: the depth-comparison reference value.
   llvm::Value *Dref = nullptr;
-  /// `Load2D` only (roadmap F8c): the multisample index a `subpassLoad`'s
-  /// explicit-sample form threads through; null for `Sample2D`/
-  /// `SampleCmp2D`/`Load2DI32`, which never carry one.
+  /// `Load2D`/`Load2DArray` only (roadmap F8c): the multisample index a
+  /// `subpassLoad`'s explicit-sample form threads through; null for every
+  /// sampled kind and for `Load2DI32`/`Load2DArrayI32`, which never carry
+  /// one.
   llvm::Value *Sample = nullptr;
   llvm::Value *Mask = nullptr;
 };
@@ -142,6 +195,51 @@ llvm::CallInst *createLoad2DI32(llvm::IRBuilderBase &Builder,
                                 llvm::Value *Y, llvm::Value *Mip,
                                 llvm::Value *Mask,
                                 const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.2darray.v4f32` call (roadmap H7b-a).
+llvm::CallInst *
+createSample2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                    llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                    llvm::Value *U, llvm::Value *V, llvm::Value *ArrayLayer,
+                    llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                    llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.load.2darray.v4f32` call (roadmap H7b-a). See
+/// `createLoad2D`'s `Sample` doc for its meaning here.
+llvm::CallInst *createLoad2DArray(llvm::IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env,
+                                  llvm::Value *ImageIndex, llvm::Value *X,
+                                  llvm::Value *Y, llvm::Value *Layer,
+                                  llvm::Value *Mip, llvm::Value *Sample,
+                                  llvm::Value *Mask,
+                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.load.2darray.v4i32` call (roadmap H7b-a).
+llvm::CallInst *createLoad2DArrayI32(llvm::IRBuilderBase &Builder,
+                                    const ImageCallEnv &Env,
+                                    llvm::Value *ImageIndex, llvm::Value *X,
+                                    llvm::Value *Y, llvm::Value *Layer,
+                                    llvm::Value *Mip, llvm::Value *Mask,
+                                    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.cube.v4f32` call (roadmap H7b-a). \p
+/// DirX/\p DirY/\p DirZ are the sample direction vector's components.
+llvm::CallInst *createSampleCube(llvm::IRBuilderBase &Builder,
+                                 const ImageCallEnv &Env,
+                                 llvm::Value *ImageIndex,
+                                 llvm::Value *SamplerIndex, llvm::Value *DirX,
+                                 llvm::Value *DirY, llvm::Value *DirZ,
+                                 llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                                 llvm::Value *Mask,
+                                 const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.cubearray.v4f32` call (roadmap H7b-a).
+llvm::CallInst *createSampleCubeArray(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *DirX,
+    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *ArrayLayer,
+    llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Mask,
+    const llvm::Twine &Name = "");
 
 /// Recognizes \p CI as one of the canonical `feme.cpu.image.*` calls,
 /// returning its decoded operands, or `std::nullopt` if \p CI's callee isn't

@@ -27,6 +27,16 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.load.2d.v4f32";
   case ImageCallKind::Load2DI32:
     return "feme.cpu.image.load.2d.v4i32";
+  case ImageCallKind::Sample2DArray:
+    return "feme.cpu.image.sample.2darray.v4f32";
+  case ImageCallKind::Load2DArray:
+    return "feme.cpu.image.load.2darray.v4f32";
+  case ImageCallKind::Load2DArrayI32:
+    return "feme.cpu.image.load.2darray.v4i32";
+  case ImageCallKind::SampleCube:
+    return "feme.cpu.image.sample.cube.v4f32";
+  case ImageCallKind::SampleCubeArray:
+    return "feme.cpu.image.sample.cubearray.v4f32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -69,6 +79,50 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // Same shape as Load2D, but returns <4 x i32> (roadmap E26).
     FTy = FunctionType::get(V4I32Ty,
                             {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Sample2DArray:
+    // Same as Sample2D, plus a float array_layer operand before lod.
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, u, v, array_layer, lod,
+    //  use_explicit_lod, mask) -> <4 x float>
+    FTy = FunctionType::get(V4F32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, F32Ty, F32Ty, I1Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Load2DArray:
+    // Same as Load2D, plus an integer layer operand before mip.
+    // (image_heap, image_heap_count, image_index, x, y, layer, mip,
+    //  sample, mask) -> <4 x float>
+    FTy = FunctionType::get(V4F32Ty,
+                            {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty,
+                             I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Load2DArrayI32:
+    // Same shape as Load2DArray, but returns <4 x i32>.
+    FTy = FunctionType::get(
+        V4I32Ty,
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::SampleCube:
+    // Same shape as Sample2D, but (u, v) becomes a 3-component direction
+    // vector (dir_x, dir_y, dir_z).
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, dir_x, dir_y, dir_z, lod,
+    //  use_explicit_lod, mask) -> <4 x float>
+    FTy = FunctionType::get(V4F32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, F32Ty, F32Ty, I1Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  case ImageCallKind::SampleCubeArray:
+    // Same as SampleCube, plus a float array_layer operand before lod.
+    FTy = FunctionType::get(V4F32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
   }
@@ -140,14 +194,89 @@ CallInst *feme::cpu::createLoad2DI32(IRBuilderBase &Builder,
       Name);
 }
 
+CallInst *feme::cpu::createSample2DArray(IRBuilderBase &Builder,
+                                         const ImageCallEnv &Env,
+                                         Value *ImageIndex,
+                                         Value *SamplerIndex, Value *U,
+                                         Value *V, Value *ArrayLayer,
+                                         Value *Lod, Value *UseExplicitLod,
+                                         Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Sample2DArray);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+                             Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
+                             V, ArrayLayer, Lod, UseExplicitLod, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createLoad2DArray(IRBuilderBase &Builder,
+                                       const ImageCallEnv &Env,
+                                       Value *ImageIndex, Value *X, Value *Y,
+                                       Value *Layer, Value *Mip, Value *Sample,
+                                       Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Load2DArray);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X,
+                             Y, Layer, Mip, Sample, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createLoad2DArrayI32(IRBuilderBase &Builder,
+                                         const ImageCallEnv &Env,
+                                         Value *ImageIndex, Value *X,
+                                         Value *Y, Value *Layer, Value *Mip,
+                                         Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Load2DArrayI32);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X,
+                             Y, Layer, Mip, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createSampleCube(IRBuilderBase &Builder,
+                                      const ImageCallEnv &Env,
+                                      Value *ImageIndex, Value *SamplerIndex,
+                                      Value *DirX, Value *DirY, Value *DirZ,
+                                      Value *Lod, Value *UseExplicitLod,
+                                      Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCube);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+                             Env.SamplerHeapCount, ImageIndex, SamplerIndex,
+                             DirX, DirY, DirZ, Lod, UseExplicitLod, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createSampleCubeArray(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *SamplerIndex, Value *DirX, Value *DirY, Value *DirZ,
+    Value *ArrayLayer, Value *Lod, Value *UseExplicitLod, Value *Mask,
+    const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCubeArray);
+  return Builder.CreateCall(
+      F,
+      {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+       Env.SamplerHeapCount, ImageIndex, SamplerIndex, DirX, DirY, DirZ,
+       ArrayLayer, Lod, UseExplicitLod, Mask},
+      Name);
+}
+
 std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
   const Function *Callee = CI.getCalledFunction();
   if (!Callee)
     return std::nullopt;
 
   static constexpr ImageCallKind AllKinds[] = {
-      ImageCallKind::Sample2D, ImageCallKind::SampleCmp2D,
-      ImageCallKind::Load2D, ImageCallKind::Load2DI32};
+      ImageCallKind::Sample2D,      ImageCallKind::SampleCmp2D,
+      ImageCallKind::Load2D,        ImageCallKind::Load2DI32,
+      ImageCallKind::Sample2DArray, ImageCallKind::Load2DArray,
+      ImageCallKind::Load2DArrayI32, ImageCallKind::SampleCube,
+      ImageCallKind::SampleCubeArray};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -219,6 +348,80 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.V = CI.getArgOperand(4);
     Result.Lod = CI.getArgOperand(5);
     Result.Mask = CI.getArgOperand(6);
+    break;
+  case ImageCallKind::Sample2DArray:
+    if (CI.arg_size() != 12)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.ArrayLayer = CI.getArgOperand(8);
+    Result.Lod = CI.getArgOperand(9);
+    Result.UseExplicitLod = CI.getArgOperand(10);
+    Result.Mask = CI.getArgOperand(11);
+    break;
+  case ImageCallKind::Load2DArray:
+    if (CI.arg_size() != 9)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Layer = CI.getArgOperand(5);
+    Result.Lod = CI.getArgOperand(6);
+    Result.Sample = CI.getArgOperand(7);
+    Result.Mask = CI.getArgOperand(8);
+    break;
+  case ImageCallKind::Load2DArrayI32:
+    if (CI.arg_size() != 8)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Layer = CI.getArgOperand(5);
+    Result.Lod = CI.getArgOperand(6);
+    Result.Mask = CI.getArgOperand(7);
+    break;
+  case ImageCallKind::SampleCube:
+    if (CI.arg_size() != 12)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.W = CI.getArgOperand(8);
+    Result.Lod = CI.getArgOperand(9);
+    Result.UseExplicitLod = CI.getArgOperand(10);
+    Result.Mask = CI.getArgOperand(11);
+    break;
+  case ImageCallKind::SampleCubeArray:
+    if (CI.arg_size() != 13)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.W = CI.getArgOperand(8);
+    Result.ArrayLayer = CI.getArgOperand(9);
+    Result.Lod = CI.getArgOperand(10);
+    Result.UseExplicitLod = CI.getArgOperand(11);
+    Result.Mask = CI.getArgOperand(12);
     break;
   }
   return Result;
