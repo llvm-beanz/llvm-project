@@ -43843,3 +43843,167 @@ applies to -- H6k fixed a routing bug, but left this row's own
 size-computation bug, in the same function, entirely alone, because it
 was verified against a fixture (`gl_Position`-only) too simple to expose
 it.
+
+# Session: Completing H6m (canonicalize a `bool` stage-IO scalar to 32 bits)
+
+## Starting point
+
+H6l's own real-ICD re-run left `cull_primitives` clearing
+`feme-graphics-validate-stage` entirely for the first time, but failing
+`vkQueueSubmit` itself with `"stage element N has a 1-bit scalar; only
+32-bit elements are implemented yet"` -- `StageStorage.cpp`'s own
+long-standing, generic "32-bit scalars only" scope limit
+(`StageStorage.h`'s own documented scope). The row's own text posed two
+candidate fixes without picking one: widen `StageStorage`'s own
+per-element layout to a genuine 1-bit (or packed 1-byte) scalar, or
+canonicalize a `bool` stage-IO element to an ordinary 32-bit integer at
+the `CanonicalizeStage.cpp`/SPIR-V-to-LLVM boundary before it ever
+reaches `StageStorage`, and asked for a real IR reduction to decide.
+
+## Reading the code before reducing anything
+
+Before writing any IR, I read `StageStorage.h`/`.cpp` end to end
+(`buildStageStorage`'s `Elt.BitWidth != 32` check, `readRaw`/`writeRaw`'s
+hard-coded `sizeof(uint32_t)` memcpy, every stride field's own doc
+comment) and `CanonicalizeStage.cpp`'s `getComponentType`/
+`loadStageIOValue`/`storeStageIOValue`. This surfaced two facts that
+settled the "which of the two options" question before I even needed a
+real IR reduction to prove it:
+
+1. `Signature.cpp`'s own `checkBitWidth` already documents the supported
+   widths as exactly 8/16/32/64 -- every one of them byte-addressable.
+   1 bit is categorically different, not just "one more width to add" to
+   `StageStorage`'s existing model; genuinely widening `StageStorage`
+   would mean inventing sub-byte packing its `readRaw`/`writeRaw`
+   contract has no room for today, a much bigger change than this row's
+   own narrow scope implies.
+2. `StageStorage.cpp`'s own `scalarKindFor` already has a
+   `SignatureComponentType::Bool -> StageLayoutScalarKind::Bool` case --
+   dead code today, since nothing ever constructs a `SignatureElement`
+   with `ComponentType == Bool`. That is a strong, pre-existing signal
+   that a 32-bit-wide "Bool" component type was always the intended
+   shape for this, just never wired up on the producer side.
+
+Both pointed at canonicalizing at the `CanonicalizeStage.cpp` boundary,
+matching the roadmap text's own closing parenthetical about how a real
+GPU driver represents a shader-visible `bool`. I also checked
+`E29`'s own `containsAddressableBool`/`WorkgroupGlobalVariablePattern`
+fix (the roadmap text's own named "related but distinct" precedent) to
+make sure I wasn't about to duplicate it -- that row *rejects* an
+addressable `Workgroup`-storage bool outright (a different address space,
+a different problem: an aggregate containing a raw `i1` member being
+`getelementptr`'d, which really is unrepresentable in memory at all,
+unlike a stage-IO scalar's own flat per-invocation storage), confirming
+this row's own gap needed a genuine fix, not the same rejection.
+
+## The real IR reduction
+
+Built a minimal mesh entry storing an `i1` into a `PerPrimitiveEXT`
+member decorated `BuiltIn 4485` (`CullPrimitiveEXT`) --
+`gl_MeshPrimitivesEXT[i].gl_CullPrimitiveEXT = %v` -- modeled directly on
+the existing `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore`
+fixture's own member-decorated-interface-block shape, just with an `i1`
+member type instead of `i32`. Ran it through `CanonicalizeStagePass`
+directly (as a new unit test, before writing any fix) and confirmed it
+reproduces `getComponentType` returning `{SInt, 1}` for the `i1` scalar,
+and that `buildStageStorage` on the resulting signature reproduces this
+row's own exact error message. This was enough to both confirm the root
+cause and give me a regression test for free.
+
+## The fix
+
+Two small, local changes in `CanonicalizeStage.cpp`:
+
+- `getComponentType` special-cases `Scalar->isIntegerTy(1)` ahead of the
+  generic `IntegerType` case, returning `{SignatureComponentType::Bool,
+  32}` instead of falling into `{SInt, IntTy->getBitWidth()}` (which
+  would give `{SInt, 1}`).
+- `loadStageIOValue`/`storeStageIOValue`'s own terminal (leaf-scalar)
+  cases widen/narrow the actual value to match: a store zero-extends its
+  `i1` operand to `i32` before calling `createStageOutputStore`; a load
+  calls `createStageInputLoad` with an `i32` result type and truncates
+  the result back down to `i1`. Left the `ShadowValueMap` read-back path
+  alone -- it stores/loads through an ordinary `AllocaInst`, never
+  reaches `StageStorage`, and keeps the value's own natural `i1` type
+  correctly either way.
+
+`StageStorage.cpp`/`.h` needed no change at all -- confirmed by grepping
+for every other place `BitWidth`/`ComponentType` get consulted
+(`ValidateStage.cpp` has none; `MeshOutputWrapper.cpp`'s own
+`lowerMeshOutputStore` stores whatever the call's own value operand type
+already is, which is now uniformly `i32` for this element, so nothing
+downstream of `CanonicalizeStage.cpp` needed to know about `i1` at all).
+
+## Testing
+
+Added one new `CanonicalizeStageTest` case,
+`CanonicalizesBoolPerPrimitiveOutputStoreToA32BitElement`, using the
+reduced IR above: asserts the reflected `SignatureElement` is `{Bool,
+32}`, the emitted `feme.stage.output.store`'s value operand is an `i32`
+`ZExtInst` of the original `i1`, and (linking `FeMeGraphics` into
+`FeMeTransformsGraphicsTests` for this) a direct `buildStageStorage` call
+on the resulting signature succeeds where it previously errored.
+Confirmed by temporarily reverting just the `CanonicalizeStage.cpp`
+change (`git checkout` on that one file, keeping the new test) that the
+test fails with exactly this row's own diagnostic shape (`BitWidth == 1`,
+`ComponentType == SInt`, no `ZExtInst`), then restored the fix and
+confirmed it passes.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+1977/2036 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`), up from
+H6l's own 1976/2035 by exactly this 1 new test.
+
+## Real CTS verification
+
+- `cull_primitives` alone: `vkQueueSubmit` no longer fails at all; the
+  case reaches actual rendering and fails instead on a clean
+  pixel-comparison mismatch (every covered pixel black instead of blue --
+  `gl_CullPrimitiveEXT` compiles and stores correctly, but the CPU
+  rasterizer does not yet honor it to skip a culled primitive). This is a
+  distinct, later rendering-correctness gap that I deliberately did not
+  file as a new sibling row: unlike every prior H6g-b/H6j/H6k/H6l/H6m
+  hand-off, it is not a new *compile-time* blocker surfacing behind a
+  narrower one, and it already sits inside this milestone's own
+  already-tracked "bounded payload/output limits reported truthfully"
+  scope from H6's own top-level roadmap description.
+- Full `dEQP-VK.mesh_shader.ext.builtin.*` group (37 cases): 22/37
+  `Failed`, byte-identical to H6l's own recorded split, confirmed via a
+  `git stash` before/after comparison (same split either way; only
+  `cull_primitives`'s own failure *reason* changed).
+- 1957-case `draw_sample.txt` regression sample: 14 Passed / 153 Failed /
+  1790 Not Supported, byte-identical to every prior recorded run --
+  confirmed no regression outside mesh shading.
+
+## Documentation
+
+- `Roadmap.md`: struck through H6m with a `(done: ...)` parenthetical
+  matching the established style. Did not add any new row underneath it
+  (the newly surfaced rendering gap is explicitly noted as out of scope
+  for a new row, per the note above), so H6's own remaining breakdown is
+  unchanged by this session -- the milestone still does not close.
+- `FeMeGraphicsDesign.md`: added a short paragraph to the mesh-shading
+  status note describing H6m's own fix and choice of the two options,
+  and a deviation note on the R32 status paragraph's "32-bit scalars
+  only" line clarifying a `bool` is canonicalized before it ever reaches
+  that restriction, rather than becoming a 1-bit exception to it.
+- `VulkanCTSReport.md`: added a new "Roadmap H6m: measured impact"
+  section mirroring H6l's own style -- the real IR reduction, the
+  two-option decision and why the boundary-canonicalization option won,
+  the fix, before/after tallies for `check-feme`/`cull_primitives`/the
+  37-case builtin group/the draw regression sample, and an explicit note
+  that this row closes without a further hand-off (unlike every prior row
+  in this chain).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+  no change needed -- pure lowering-correctness fix within
+  `VK_EXT_mesh_shader`'s already-advertised scope, touching no feature
+  bit or extension.
+
+## Lesson for next time
+
+Reading a struct/function's own existing dead code (`scalarKindFor`'s
+unused `Bool` case here) before writing a fix can directly answer a
+"which of these two designs did the codebase already intend" question
+that would otherwise need guessing or an appeal to written design docs
+alone -- it is often a more reliable signal than the design doc's own
+prose, since it is exactly the shape a future maintainer would have
+wired up first if the producer side existed yet.
