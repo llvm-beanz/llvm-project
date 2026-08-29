@@ -2322,6 +2322,15 @@ Error executeCommandsInto(
       Gfx.Dynamic.StippleFactor = Cmd.LineStippleFactorValue;
       Gfx.Dynamic.StipplePattern = Cmd.LineStipplePatternValue;
       break;
+    case RecordedCommand::Kind::SetDepthBias:
+      Gfx.Dynamic.DepthBiasConstantFactor = Cmd.DepthBiasConstantFactorValue;
+      Gfx.Dynamic.DepthBiasClamp = Cmd.DepthBiasClampValue;
+      Gfx.Dynamic.DepthBiasSlopeFactor = Cmd.DepthBiasSlopeFactorValue;
+      break;
+    case RecordedCommand::Kind::SetDepthBounds:
+      Gfx.Dynamic.MinDepthBounds = Cmd.MinDepthBoundsValue;
+      Gfx.Dynamic.MaxDepthBounds = Cmd.MaxDepthBoundsValue;
+      break;
     case RecordedCommand::Kind::SetRenderingAttachmentLocations: {
       // (roadmap F8) Restricted to a dynamic-rendering instance: a classic
       // `VkRenderPass`'s attachment/location correspondence is fixed by its
@@ -3570,13 +3579,11 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetPrimitiveTopologyEXT(
 // `dEQP-VK.dynamic_state.*` group). Each is legal to call regardless of
 // the currently bound pipeline's state, but only has an observable effect
 // when that pipeline both enables the corresponding fixed-function state
-// *and* declares it dynamic; every state these four commands govern
-// (depth bias/bounds, wide lines, a device mask beyond the one physical
-// device this ICD exposes) is already rejected at graphics-pipeline
-// creation (see V6's own deviation list in
-// feme/docs/FeMeVulkanDesign.md) or, for `vkCmdSetDeviceMask`, has no
-// second device to ever mask out -- so no bound pipeline this ICD
-// accepted could ever have made any of them anything but a no-op record.
+// *and* declares it dynamic. `vkCmdSetLineWidth` (roadmap F5) and
+// `vkCmdSetDepthBias`/`vkCmdSetDepthBounds` (roadmap H7d) have all since
+// grown real static paths and are wired below; only `vkCmdSetDeviceMask`
+// remains a genuine architectural no-op, since this ICD exposes exactly
+// one physical device for it to ever mask out.
 // (roadmap F5) `vkCmdSetLineWidth`: `VK_DYNAMIC_STATE_LINE_WIDTH` already
 // has a real static path (`RasterState::LineWidth`), so making it dynamic
 // is the same "read from the per-draw snapshot" pattern
@@ -3645,10 +3652,27 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetRenderingInputAttachmentIndices(
                                            StencilIndex);
 }
 
-VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer, float, float,
-                                             float) {}
+// (roadmap H7d) `vkCmdSetDepthBias`: `VK_DYNAMIC_STATE_DEPTH_BIAS` already
+// has a real static path (`RasterState::DepthBias*`), so making it dynamic
+// is the same "read from the per-draw snapshot" pattern `vkCmdSetLineWidth`
+// above already uses.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthBias(VkCommandBuffer commandBuffer, float depthBiasConstantFactor,
+                  float depthBiasClamp, float depthBiasSlopeFactor) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setDepthBias(depthBiasConstantFactor, depthBiasClamp,
+                    depthBiasSlopeFactor);
+}
 
-VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBounds(VkCommandBuffer, float, float) {}
+// (roadmap H7d) `vkCmdSetDepthBounds`: `VK_DYNAMIC_STATE_DEPTH_BOUNDS`
+// already has a real static path (`DepthState::Min`/`MaxDepthBounds`), the
+// same "read from the per-draw snapshot" pattern as above.
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBounds(VkCommandBuffer commandBuffer,
+                                               float minDepthBounds,
+                                               float maxDepthBounds) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setDepthBounds(minDepthBounds, maxDepthBounds);
+}
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetDeviceMask(VkCommandBuffer, uint32_t) {}
 

@@ -120,6 +120,10 @@ struct RecordedCommand {
     // `vkCmdSetLineStippleKHR` (`VK_KHR_line_rasterization`).
     SetLineWidth,
     SetLineStipple,
+    // (roadmap H7d) `vkCmdSetDepthBias`/`vkCmdSetDepthBounds` (both core
+    // 1.0).
+    SetDepthBias,
+    SetDepthBounds,
     // (roadmap F8) `vkCmdSetRenderingAttachmentLocations`/
     // `vkCmdSetRenderingInputAttachmentIndices` (`VK_KHR_dynamic_rendering_
     // local_read`).
@@ -309,6 +313,14 @@ struct RecordedCommand {
   float LineWidthValue = 1.0f;
   uint32_t LineStippleFactorValue = 1;
   uint16_t LineStipplePatternValue = 0xFFFF;
+  /// (roadmap H7d) `SetDepthBias`: `vkCmdSetDepthBias`'s 3-float payload.
+  float DepthBiasConstantFactorValue = 0.0f;
+  float DepthBiasClampValue = 0.0f;
+  float DepthBiasSlopeFactorValue = 0.0f;
+  /// (roadmap H7d) `SetDepthBounds`: `vkCmdSetDepthBounds`'s 2-float
+  /// `min`/`maxDepthBounds` payload.
+  float MinDepthBoundsValue = 0.0f;
+  float MaxDepthBoundsValue = 1.0f;
   /// (roadmap F8) `SetRenderingAttachmentLocations`:
   /// `vkCmdSetRenderingAttachmentLocations`'s `pColorAttachmentLocations`
   /// array (empty for a null pointer, the identity-mapping default).
@@ -775,6 +787,23 @@ public:
     Cmd.Op = RecordedCommand::Kind::SetLineStipple;
     Cmd.LineStippleFactorValue = Factor;
     Cmd.LineStipplePatternValue = Pattern;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap H7d) `vkCmdSetDepthBias`.
+  void setDepthBias(float ConstantFactor, float Clamp, float SlopeFactor) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetDepthBias;
+    Cmd.DepthBiasConstantFactorValue = ConstantFactor;
+    Cmd.DepthBiasClampValue = Clamp;
+    Cmd.DepthBiasSlopeFactorValue = SlopeFactor;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap H7d) `vkCmdSetDepthBounds`.
+  void setDepthBounds(float MinDepthBounds, float MaxDepthBounds) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetDepthBounds;
+    Cmd.MinDepthBoundsValue = MinDepthBounds;
+    Cmd.MaxDepthBoundsValue = MaxDepthBounds;
     Commands.push_back(Cmd);
   }
   /// (roadmap F8) `vkCmdSetRenderingAttachmentLocations`. \p Locations is
