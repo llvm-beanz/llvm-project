@@ -360,6 +360,15 @@ bool lowerMeshStageOps(Function &F) {
       CI->eraseFromParent();
       continue;
     }
+    // Only a genuinely unlowered `feme.stage.*` call is this pass's own
+    // problem to diagnose (see the function comment) -- everything else
+    // still calling through `F` at this point (resource loads/stores,
+    // ordinary masked memory ops, etc.) is unrelated to mesh output
+    // lowering and must be left alone rather than rejected outright; the
+    // `UsesStageOps` gate above only established that *some* call in `F`
+    // needs this pass's attention, not that *every* call does.
+    if (!isStageOpCall(*CI))
+      continue;
     F.getContext().emitError(
         CI, "feme-cpu-wrap-mesh-output: unexpected stage op left for the "
             "mesh output wrapper");

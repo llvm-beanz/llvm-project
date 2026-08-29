@@ -16,6 +16,7 @@
 #include "feme/Transforms/CPU/WaveLowering.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -99,6 +100,68 @@ TEST(MeshOutputWrapperTest, LowersPerVertexOutputStore) {
   for (const Instruction &I : instructions(*Body))
     if (const auto *CI = dyn_cast<CallInst>(&I))
       EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// (Roadmap H6g-b-d) A mesh entry that also happens to read a resource
+// (e.g. `pvd.name[i]`/`ppd.name[i]` in a real `dEQP-VK.mesh_shader.ext.
+// in_out.*` shader, a storage/uniform buffer read feeding the output
+// store's value) must not have that unrelated `feme.cpu.resource.load.
+// raw.*` call rejected by `lowerMeshStageOps`'s own catch-all: the
+// `UsesStageOps` gate only requires *some* call in the function to need
+// this pass's attention (the output store here), not that *every*
+// remaining call is one of the two shapes it lowers.
+TEST(MeshOutputWrapperTest, LeavesUnrelatedResourceLoadCallAlone) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ms_main() #0 {
+      %vid = call i32 @llvm.dx.thread.id(i32 0)
+      %loaded = call float @feme.cpu.resource.load.raw.f32(ptr null, i32 0, i32 0, i64 0, i1 true)
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float %loaded, i32 %vid)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare float @feme.cpu.resource.load.raw.f32(ptr, i32, i32, i64, i1)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="mesh" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  Sig.Elements = {
+      makeOutputElement(0, SignatureFrequency::PerVertex),
+  };
+  dxil::setEntrySignature(*M->getFunction("ms_main"), Sig);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  MeshOutputWrapperPass().run(*M, MAM);
+  EXPECT_FALSE(SawError);
+
+  Function *Body = M->getFunction("ms_main");
+  ASSERT_TRUE(Body);
+  bool SawResourceLoad = false;
+  for (const Instruction &I : instructions(*Body)) {
+    const auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+    if (const Function *Callee = CI->getCalledFunction())
+      SawResourceLoad |=
+          Callee->getName().starts_with("feme.cpu.resource.load.raw.");
+  }
+  EXPECT_TRUE(SawResourceLoad);
 
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
