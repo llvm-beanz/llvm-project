@@ -44266,3 +44266,126 @@ Split into three, each independently buildable/testable:
 3. `VulkanCTSReport.md` update.
 (This `agent_thoughts.md` update follows as its own, final commit, per
 standing instruction.)
+
+# Session: Completing H7b-a (shader-visible cube(array)/2D-array sampling)
+
+## Starting point
+
+H7b's own row (previous session) fixed `materializeImageDescriptor`'s
+descriptor-materialization gap but left `imageCubeArray` `VK_FALSE`,
+because implementing it surfaced a second, deeper blocker its own text
+never named: `SPIRVResourceLowering.cpp`'s `classifySampledImage2DHandle`
+and `ResourceLowering.cpp`'s `classifyImageHandle` both hard-restricted
+shader-visible sampled-image handle classification to `Dim=2D`/
+`Texture2D`, non-arrayed only -- rejecting every `Cube`/`CubeArray`/
+`2DArray` binding at pipeline-creation time, before H7b's own descriptor
+fix could ever matter. Filed as H7b-a in the prior session's docs commit.
+This session's task: actually close it.
+
+## Design decisions
+
+- **No new physical image dimension.** `feme::vulkan::Image` still has no
+  real "Cube" shape -- it stays a packed, array-of-2D-layers table
+  regardless of view type. A cube(array) view is purely an *addressing*
+  convention (6 consecutive layers per cube, fixed `+X,-X,+Y,-Y,+Z,-Z`
+  face order) over that same storage. This keeps H7b's own descriptor
+  materialization fix sufficient on the storage side; only the
+  *consumption* side (handle classification + face selection) needed new
+  code. Mirrors how a real GPU driver also never gives a cube texture a
+  distinct physical layout from a 2D array.
+- **Widened both SPIR-V and DXIL classification symmetrically.** Even
+  though only SPIR-V is exercised by the mesh/graphics pipeline today,
+  keeping the DXIL side in lock-step avoids a future silent asymmetry (as
+  H7a/H7b's own precedent already established for this pair of files).
+  `ResourceLoweringTest.cpp` had *zero* pre-existing image-lowering tests
+  at all before this session -- added 7 from scratch (a real gap in test
+  coverage, not something this row introduced).
+- **Cube-face selection: major-axis algorithm, no seam blending.** New
+  `femeRTSelectCubeFace` runtime primitive implements the standard
+  convention (largest-magnitude component picks the face and its sign
+  picks which of the pair; the other two components normalize into UV).
+  This is the widely-implemented convention and keeps the existing
+  `femeRTSamplePoint2D` nearest/bilinear filtering fully reusable once the
+  face and UV are known -- no changes needed to filtering itself.
+  `CubeArray`'s array-layer component rounds to nearest and clamps, same
+  as a real driver.
+- **`getShaderSource()` virtual added to `SampledImageDispatchTest`**,
+  mirroring an existing precedent elsewhere in `CommandBufferTest.cpp`
+  (`IntTexelBufferAddShaderTest`), so the new
+  `CubeArraySampledImageDispatchTest` fixture could reuse the entire
+  dispatch/verification harness and only override the shader source and
+  expected-texel derivation.
+- **Manually traced the expected texel by hand** before running the new
+  end-to-end test (`femeRTSelectCubeFace(0,0,1)` -> +Z face, UV (0.5,
+  0.5); `femeRTSamplePoint2D` nearest -> texel (1,1) on a 2x2 face;
+  `femeRTRoundClampLayer` -> cube index 1; physical layer `1*6+4=10`).
+  The test passed on the first run with this exact prediction, which is
+  strong independent confirmation the whole pipeline (classification,
+  face math, descriptor addressing, runtime fetch) is wired correctly
+  end-to-end, not just individually unit-tested.
+
+## Real CTS survey (not just check-feme)
+
+Ran the real `deqp-vk` from `/home/dev/dev/VK-GL-CTS/` after the fix
+landed. The 12 `dEQP-VK.image.image_size.cube_array.*` cases H7b's own
+row already measured still report `NotSupported`, but the *reason*
+changed from `imageCubeArray` unsupported (removed by this row) to
+`Format not supported for the specified usage` -- because all 12 request
+`VK_IMAGE_USAGE_STORAGE_BIT` only, and no format in this ICD advertises
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` yet (a separate, already-documented
+gap: no `feme.cpu.image.store.*` runtime helper exists). This is the
+expected, correct outcome, not a failure to fix the right thing.
+
+Surveyed the rest of the mustpass tree directly (not by assumption) for
+any *sampled* (non-storage) cube-array case this fix might newly unlock:
+every one found is gated behind a *different* still-missing feature --
+`texture.txt`'s 1536 cases are all depth-compare shadow sampling (a
+different SPIR-V op family); `binding-model.txt`'s 9108 cases use
+immutable-sampler/descriptor-array binding shapes that fail pipeline
+creation identically even for a plain non-cube `2d` case in the same
+family (confirmed directly by running one); `robustness.txt`'s cases need
+`robustImageAccess`; `pipeline-library.txt`'s cases need
+`VK_EXT_attachment_feedback_loop_layout`. None of these are in this row's
+scope. The real, working confirmation this row's fix does what it claims
+is therefore `CommandBufferTest.cpp`'s own new end-to-end dispatch test,
+not a mustpass case -- worth stating plainly rather than papering over
+with an unrelated CTS number.
+
+The 1957-case `draw_sample.txt` regression sample stayed byte-identical
+to H7b's own recorded totals (14/179/1764): 0 regressions.
+
+## Documentation
+
+- `Roadmap.md`: H7b and H7b-a rows both struck through with "done"
+  writeups (via a Python string-replace script, since these rows are
+  single lines exceeding 5000+ characters and the `edit` tool's exact-
+  match requirement makes that awkward). Also corrected H7b's own
+  check-feme numbers to the real measured totals (1999/2058, +22 tests)
+  in place of an earlier placeholder.
+- `FeMeVulkanDesign.md`: "V5: Images and sampling" gained a new status
+  note describing the addressing-convention decision and the cube-face
+  algorithm choice, and the stale "single-sampled, non-arrayed, float 2D
+  only" narrowing sentence was tightened to reflect both H7b's and
+  H7b-a's fixes (only "single-sampled, float" remains a real narrowing).
+- `Vulkan14FeatureInventory.md`: `imageCubeArray` flips to `yes`; the 1.0
+  summary row/total and the "graphics-specific unimplemented" bullet
+  count both updated to stay internally consistent.
+- `VulkanExtensionInventory.md`: confirmed no change needed (no extension
+  touched, only a core 1.0 feature bit) -- double-checked by grep, not
+  just assumed.
+- `VulkanCTSReport.md`: new "Roadmap H7b-a: measured impact" section with
+  the full real-CTS survey above.
+
+## Commits
+
+Split into five, each independently buildable/testable:
+1. `SPIRVResourceLowering.cpp` + its 5 new unit tests (SPIR-V side).
+2. `ResourceLowering.cpp` + its 7 new unit tests (DXIL side, first-ever
+   image-lowering coverage for that file).
+3. `CommandBufferTest.cpp`'s new end-to-end `CubeArraySampledImageDispatchTest`.
+4. `PhysicalDeviceInfo.cpp`'s `imageCubeArray` flip + extended feature-bit
+   test.
+5. `Roadmap.md`/`FeMeVulkanDesign.md`/`Vulkan14FeatureInventory.md`/
+   `VulkanCTSReport.md` documentation updates.
+(This `agent_thoughts.md` update follows as its own, final commit, per
+standing instruction.)
