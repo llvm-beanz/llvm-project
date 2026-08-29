@@ -2920,7 +2920,23 @@ wrapping `gl_Position`), not just a plain array -- `resolveOffsetWithinElement`
 already resolves a struct-shaped element's own per-member `ElementID`
 generically, whether one member or several, so the fold needed no new
 block-specific handling once the index itself folds identically either
-way. See Roadmap.md's H6a-H6l rows for the full remaining breakdown.
+way. Roadmap H6l has since found and closed a further, narrower gap in
+that same constant-vertex-index fold: `VertexSize` -- the stride the
+fold divides a constant byte offset by to recover `VertexIdx`/`Residual`
+-- was computed as `DataLayout::getTypeAllocSize(ElemTy)`, the
+ABI-alignment-padded allocation size of the per-vertex/per-primitive
+array's own element type, which need not agree with the *tightly
+packed* stride the SPIR-V-to-LLVM conversion actually bakes into the
+constant offsets it embeds (a full four-member `gl_PerVertex`-shaped
+block ends at byte 28 but allocates to 32, driven by its own leading
+`vec4` member's 16-byte alignment; a `uvec3` per-primitive element is
+addressed 12 bytes apart but allocates to 16, LLVM's own 4-wide SIMD
+vector padding). A new `getPackedMeshElementSize` helper now computes
+the tightly packed size directly instead, used only for this one fold's
+own `VertexSize` -- `resolveRowComponent`'s separate row/component
+peeling needs no equivalent fix, since a single stage-IO member's own
+row shape is never one of the two shapes this padding gap affects. See
+Roadmap.md's H6a-H6m rows for the full remaining breakdown.
 
 ### G7: Ray-query and traversal foundations
 

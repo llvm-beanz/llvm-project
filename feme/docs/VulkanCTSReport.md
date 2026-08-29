@@ -12459,6 +12459,190 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-caselist-file=cases_h6j.txt --deqp-shadercache=disable
 ```
 
+## Roadmap H6l: measured impact (`CanonicalizeStage.cpp` mesh-output packed-vertex-size fix)
+
+H6k's own real-ICD re-run left this row a single, specific,
+already-narrowed diagnostic to root-cause: `cull_primitives`'s own
+`row`/`component is out of range` errors, changed in shape (not closed)
+by H6k's own fix.
+
+**Root cause, found via the same real-ICD-plus-debug-print technique this
+whole H6g-b/H6j/H6k chain has used throughout** (temporary `llvm::errs()`
+prints in `resolveStageIOAccess`'s constant-vertex-index fold, confirmed
+against the real SPIR-V disassembly `deqp-vk
+--deqp-log-shader-sources=enable` reports for this exact case's own
+`mesh` stage). The fold computes `VertexSize =
+DataLayout::getTypeAllocSize(ElemTy)`, the ABI-alignment-padded
+allocation size of the per-vertex/per-primitive array's own element type,
+and divides each access's constant byte offset by it to recover
+`VertexIdx`/`Residual`. A debug-print trace of the real failing case's
+own two affected globals showed this size disagreeing with the real,
+SPIR-V-embedded stride in exactly the way roadmap C1/H6g-b-a-i's own
+prior "ABI padding vs. real layout" bug class does, but scoped this time
+to `CanonicalizeStage.cpp`'s own, separate `VertexSize` computation:
+
+```
+H6l-debug: GV=spirv_var_16 ByteOffset=28 VertexSize=32 VertexIdx=0 Residual=28
+H6l-debug:   struct alloc=32 memberOff[0]=0 memberOff[1]=16 memberOff[2]=20 memberOff[3]=24
+H6l-debug: GV=spirv_var_43 ByteOffset=12 VertexSize=16 VertexIdx=0 Residual=12
+H6l-debug:   vector scalarAlloc=4 numElts=3
+```
+
+`spirv_var_16` (`gl_MeshVerticesEXT`, a *full* four-member
+`gl_PerVertex`-shaped block -- `gl_Position`/`gl_PointSize`/
+`gl_ClipDistance`/`gl_CullDistance`, not H6k's own single-member
+`gl_Position`-only fixture) ends its last member (`gl_CullDistance`) at
+byte 24 plus its own 4-byte size, 28 total -- but *allocates* to 32,
+rounded up to the struct's own 16-byte alignment, itself driven by the
+leading `<4 x float>` member. Vertex 1's real, SPIR-V-embedded
+`gl_Position` write lands at byte 28 (confirmed against the real SPIR-V
+disassembly's own constant `getelementptr` offsets), so dividing by the
+ABI-padded 32 instead computed `VertexIdx == 0`, `Residual == 28` --
+landing past `gl_Position`'s own member (offset 0, `RowCount ==
+ComponentCount == ` its own 4-component vector) and inside
+`gl_CullDistance`'s (offset 24, a 1-element array), an out-of-range
+`Row`/`Component` for that far narrower member -- exactly this row's own
+observed diagnostic mix (never elements 0 or 5, the two globals this
+gap did not touch). `spirv_var_43`
+(`gl_PrimitiveTriangleIndicesEXT`, `[N x <3 x i32>]`, a plain array, not
+a block) is a narrower instance of the identical gap: `uvec3` allocates
+to 16 bytes (LLVM pads a 3-wide vector up to a 4-wide SIMD register) but
+is addressed 12 bytes apart in the real embedded offsets, `uvec3`'s own
+tightly packed 3-`i32` size -- silently, since this whole-vector store
+shape reaches no `Row`/`Component` range check `ValidateStage.cpp` could
+catch (only `Vertex`'s own non-constant-ness is checked, never its
+range), so this half of the gap misdirects which primitive's own
+triangle indices a store lands on without ever being diagnosed at all.
+
+**The fix.** A new `getPackedMeshElementSize` helper
+(`CanonicalizeStage.cpp`) computes the *tightly packed* size of a mesh
+entry's own per-vertex/per-primitive array element -- a struct's own
+last member's offset plus that member's own packed size (skipping
+`DataLayout::getStructLayout`'s own ABI tail padding), a vector's own
+element count times its own packed scalar size, an array's own element
+count times its own packed element size, recursing -- and
+`resolveStageIOAccess`'s constant-vertex-index fold now calls it instead
+of `DataLayout::getTypeAllocSize` directly for `VertexSize`. This is
+scoped to the fold's own `VertexSize` computation alone;
+`resolveRowComponent`'s own separate row/component peeling (a single
+member's own row shape, never one of the two shapes described above)
+still uses `getTypeAllocSize`, since a single stage-IO member's own row
+array or vector has no equivalent trailing-alignment gap to correct for.
+
+Two new unit tests cover the two shapes directly:
+`FoldsConstantVertexIndexIntoMultiMemberInterfaceBlockOutputStore`
+(the four-member `gl_PerVertex`-shaped block, asserting vertex 1's real
+byte-28 store resolves `Vertex == 1`, not `0`) and
+`FoldsConstantVertexIndexIntoPlainVectorArrayOutputStoreWithPadding`
+(the `uvec3` array, asserting primitive 2's real byte-24 store resolves
+`Vertex == 2`, not `1`) -- both fail without this fix (reproducing this
+row's own observed misrouting directly) and pass with it. The
+pre-existing `FoldsConstantVertexIndexIntoSingleMemberInterfaceBlockOutputStore`/
+`FoldsConstantVertexIndexIntoOutputStoreForMesh`/
+`FoldsConstantIndexIntoArrayedBuiltinInterfaceBlockMemberStore` tests
+(whose own fixtures happen not to need any ABI padding -- a lone `vec4`
+member, or an `{i32, i32}` member pair, both already packed) are
+unaffected, confirming the new helper is a no-op wherever packed and
+ABI-allocated sizes already agree.
+
+```
+$ ninja -C <feme-build> check-feme
+...
+Total Discovered Tests: 2035
+  Unsupported:   59 (2.90%)
+  Passed     : 1976 (97.10%)
+```
+
+Up from H6k's own 1974/2033 by exactly the 2 new tests this row adds (0
+pre-existing tests newly failed).
+
+**A real ICD re-run confirms the fix.** Re-running `cull_primitives`
+alone:
+
+```
+Test run totals:
+  Passed:         0/1 (0.0%)
+  Failed:         1/1 (100.0%)
+```
+
+Still `Fail`, but no longer for this row's own reason: grepping the
+re-run's own log confirms **zero** `feme-graphics-validate-stage`
+occurrences at all (down from the 16 `row`/`component is out of range`
+diagnostics this row's own text described). With
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` (this ICD's opt-in error-logging
+env var, `Diagnostics.cpp`), the real failure reached instead is:
+
+```
+vkQueueSubmit: stage element 5 has a 1-bit scalar; only 32-bit elements are implemented yet
+```
+
+-- `StageStorage.cpp`'s own long-standing, generic "32-bit scalars only"
+scope limit (`StageStorage.h`'s own documented scope, unrelated to mesh
+shading at all), reached for the first time by this case only because
+this row's own fix lets it clear compile-time validation and reach
+`vkQueueSubmit` at all; `gl_CullPrimitiveEXT` is a SPIR-V/GLSL `bool`
+(`i1`), element 5 in this case's own signature. This is the same
+narrowing pattern every H6g-b/H6j/H6k/H6l row in this chain has followed
+-- fixing one blocker surfaces the next, narrower one -- so it is filed
+as a new, sibling row one level under H6 (not nested any deeper under
+H6l, per the standing one-lowercase-letter-deep instruction): H6m.
+
+Re-running the full `dEQP-VK.mesh_shader.ext.builtin.*` group (37 cases)
+confirms this row is not a regression bucket-wide:
+
+```
+Test run totals:
+  Passed:         0/37 (0.0%)
+  Failed:        22/37 (59.5%)
+  Not supported: 15/37 (40.5%)
+```
+
+Byte-identical to H6k's own recorded 22/37 `Failed` split, and grepping
+the full re-run's own combined log confirms **zero**
+`feme-graphics-validate-stage` occurrences anywhere in the bucket (down
+from the 16 this row's own case alone used to contribute). A re-run of
+the 1957-case `draw_sample.txt` regression sample (`dEQP-VK.draw.*`,
+`VK-GL-CTS/run/draw_sample.txt`) confirms no regression there either,
+byte-identical to every prior recorded run:
+
+```
+Test run totals:
+  Passed:        14/1957 (0.7%)
+  Failed:       153/1957 (7.8%)
+Not supported: 1790/1957 (91.5%)
+```
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure lowering-correctness fix within
+`VK_EXT_mesh_shader`'s already-advertised scope, touching no feature bit
+or extension.
+
+**Milestone H6 does not close.** This row's own fix lands and is
+confirmed complete for the exact diagnostic it targeted -- zero
+`feme-graphics-validate-stage` row/component-out-of-range occurrences
+anywhere in the 37-case builtin group, no regression in the wider
+mesh-shading or draw regression samples -- but `cull_primitives` itself
+still does not pass, blocked now by the distinct, newly surfaced H6m.
+
+**Reproducing this row.** Same ICD build and CTS checkout as every prior
+mesh-shading row:
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n dEQP-VK.mesh_shader.ext.builtin.cull_primitives \
+    --deqp-shadercache=disable
+# Opt-in error logging to see the H6m blocker directly:
+FEME_VULKAN_LOG_CREATION_ERRORS=1 VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk -n dEQP-VK.mesh_shader.ext.builtin.cull_primitives \
+    --deqp-shadercache=disable
+# Full builtin group and draw regression sample:
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.mesh_shader.ext.builtin.*" --deqp-shadercache=disable
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=draw_sample.txt --deqp-shadercache=disable
+```
+
 ## Roadmap H6c-a: closed by its own split
 
 Re-checking H6c-a's own literal ask now that its three named
