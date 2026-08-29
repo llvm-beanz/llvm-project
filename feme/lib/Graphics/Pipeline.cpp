@@ -21,14 +21,17 @@ GraphicsPipeline::GraphicsPipeline(
     BlendMode Blend, uint32_t SampleCount,
     std::vector<AttachmentFormat> Attachments, StencilState Stencil,
     std::vector<BlendState> ColorBlends, bool LogicOpEnable, LogicOp Logic,
-    std::array<float, 4> BlendConstants, bool PrimitiveRestartEnable)
+    std::array<float, 4> BlendConstants, bool PrimitiveRestartEnable,
+    bool SampleShadingEnable, bool AlphaToOneEnable)
     : VertexStage(std::move(VertexStage)),
       FragmentStage(std::move(FragmentStage)), Topology(Topology),
       Raster(Raster), Depth(Depth), Blend(Blend), SampleCount(SampleCount),
       Attachments(std::move(Attachments)), Stencil(Stencil),
       ColorBlends(std::move(ColorBlends)), LogicOpEnable(LogicOpEnable),
       Logic(Logic), BlendConstants(BlendConstants),
-      PrimitiveRestartEnable(PrimitiveRestartEnable) {}
+      PrimitiveRestartEnable(PrimitiveRestartEnable),
+      SampleShadingEnable(SampleShadingEnable),
+      AlphaToOneEnable(AlphaToOneEnable) {}
 
 void GraphicsPipeline::setTessellationStages(
     std::shared_ptr<cpu::CompiledStage> HullStage,

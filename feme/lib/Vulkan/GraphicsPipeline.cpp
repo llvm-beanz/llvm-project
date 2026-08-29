@@ -1338,6 +1338,8 @@ serializeFixedFunctionState(const GraphicsPipelineState &State) {
   appendScalar(Out, State.Topology);
   appendScalar(Out, State.PrimitiveRestartEnable);
   appendScalar(Out, State.SampleCount);
+  appendScalar(Out, State.SampleShadingEnable);
+  appendScalar(Out, State.AlphaToOneEnable);
   appendScalar(Out, State.DynamicStates);
   appendScalar(Out, State.LogicOpEnable);
   appendScalar(Out, State.Logic);
@@ -1669,11 +1671,17 @@ Error translateFixedFunctionState(
       return createStringError(inconvertibleErrorCode(),
                                "the pipeline's rasterization sample count "
                                "disagrees with its render target's");
-    if (Multisample->sampleShadingEnable ||
-        Multisample->alphaToCoverageEnable || Multisample->alphaToOneEnable)
+    if (Multisample->alphaToCoverageEnable)
       return createStringError(inconvertibleErrorCode(),
-                               "sample shading, alpha-to-coverage and "
-                               "alpha-to-one are not implemented");
+                               "alpha-to-coverage is not implemented "
+                               "(roadmap H7n)");
+    // (roadmap H7f) `sampleShadingEnable`: this ICD always shades at the
+    // full sample rate when set, regardless of `minSampleShading`'s own
+    // fractional value -- see `GraphicsPipeline::getSampleShadingEnable`'s
+    // comment in Pipeline.h for why that's spec-conformant and why
+    // `minSampleShading` itself is never stored.
+    Result.SampleShadingEnable = Multisample->sampleShadingEnable != VK_FALSE;
+    Result.AlphaToOneEnable = Multisample->alphaToOneEnable != VK_FALSE;
     if (Multisample->pSampleMask && Samples <= 32 &&
         (*Multisample->pSampleMask & ((1u << Samples) - 1)) !=
             ((1u << Samples) - 1))
@@ -2356,7 +2364,8 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
       ResolvedStencil, State.ColorBlends, State.LogicOpEnable, State.Logic,
       isDynamic(DynamicStateBlendConstants) ? Dynamic.BlendConstants
                                             : State.BlendConstants,
-      State.PrimitiveRestartEnable);
+      State.PrimitiveRestartEnable, State.SampleShadingEnable,
+      State.AlphaToOneEnable);
   // (roadmap H4b) `Artifact->HullStage` is set exactly when this pipeline
   // declared tessellation stages (see `compileAndValidateStages`'s own
   // comment); `PatchConstantStage`/`DomainStage` are always set alongside

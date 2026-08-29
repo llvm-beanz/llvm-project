@@ -491,7 +491,9 @@ public:
                    bool LogicOpEnable = false, LogicOp Logic = LogicOp::Copy,
                    std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f,
                                                           0.0f},
-                   bool PrimitiveRestartEnable = false);
+                   bool PrimitiveRestartEnable = false,
+                   bool SampleShadingEnable = false,
+                   bool AlphaToOneEnable = false);
 
   const cpu::CompiledStage &getVertexStage() const { return *VertexStage; }
   /// Whether this pipeline has a fragment stage at all (roadmap H2j); false
@@ -521,6 +523,23 @@ public:
   /// the index type's all-1-bits value
   /// (`VkPipelineInputAssemblyStateCreateInfo::primitiveRestartEnable`).
   bool getPrimitiveRestartEnable() const { return PrimitiveRestartEnable; }
+  /// (roadmap H7f) Whether the fragment stage runs once per *covered
+  /// sample* instead of once per covered pixel/lane
+  /// (`VkPipelineMultisampleStateCreateInfo::sampleShadingEnable`).
+  /// `executeDraws` always shades at the full sample rate when this is
+  /// true, which trivially satisfies the spec's own "at least
+  /// `max(ceil(minSampleShading * rasterizationSamples), 1)` invocations
+  /// per fragment" minimum for any `minSampleShading` in `[0, 1]` --
+  /// `minSampleShading`'s exact fractional value is therefore never
+  /// stored or consulted (see "Sample-rate shading" in
+  /// feme/docs/FeMeGraphicsDesign.md).
+  bool getSampleShadingEnable() const { return SampleShadingEnable; }
+  /// (roadmap H7f) Whether every color attachment's output alpha is
+  /// forced to `1.0` after shading, before blending
+  /// (`VkPipelineMultisampleStateCreateInfo::alphaToOneEnable`). Distinct
+  /// from `alphaToCoverageEnable`, which remains rejected at
+  /// pipeline-creation time (roadmap H7n).
+  bool getAlphaToOneEnable() const { return AlphaToOneEnable; }
 
   /// Attaches the three compiled stages a tessellation-enabled pipeline
   /// runs between its vertex stage and rasterization -- a hull shader's
@@ -668,6 +687,8 @@ private:
   LogicOp Logic;
   std::array<float, 4> BlendConstants;
   bool PrimitiveRestartEnable;
+  bool SampleShadingEnable;
+  bool AlphaToOneEnable;
 };
 
 } // namespace feme::graphics

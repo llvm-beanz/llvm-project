@@ -350,6 +350,14 @@ struct GraphicsPipelineState {
   feme::graphics::LogicOp Logic = feme::graphics::LogicOp::Copy;
   std::array<float, 4> BlendConstants{0.0f, 0.0f, 0.0f, 0.0f};
   uint32_t SampleCount = 1;
+  /// (roadmap H7f) `VkPipelineMultisampleStateCreateInfo::
+  /// sampleShadingEnable`/`alphaToOneEnable`; see
+  /// `feme::graphics::GraphicsPipeline::getSampleShadingEnable`/
+  /// `getAlphaToOneEnable`'s own comments. `alphaToCoverageEnable` has no
+  /// field here -- it remains rejected at pipeline-creation time (roadmap
+  /// H7n).
+  bool SampleShadingEnable = false;
+  bool AlphaToOneEnable = false;
   std::vector<feme::graphics::AttachmentFormat> Attachments;
   std::vector<VertexInputBinding> VertexBindings;
   std::vector<VertexInputAttribute> VertexAttributes;
