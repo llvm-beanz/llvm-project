@@ -584,14 +584,21 @@ called out inline where it's discussed, and summarized here:
   become components, not nested vectors" describes splitting *any*
   divergent `<N x T>` (or aggregate) value into `N` separate `<W x T>`
   components, since LLVM has no `<W x <N x T>>`.
-  `feme::cpu::SIMDizePass` implements nine producer shapes: a
+  `feme::cpu::SIMDizePass` implements ten producer shapes: a
   constant-index `insertelement` chain assembling a vector from scalar
   components, the one shape a typed-buffer *store*'s raising actually
   produces (`feme::dxil::OpRaisingPass::raiseTypedBufferStore`); (R12) a
   vector-typed `feme.cpu.resource.*` *load* call (e.g. a typed-buffer
   element read back), decomposed into its `N` components directly as it
-  is scalarized rather than a single nested-vector `Widened` entry; and,
-  as of roadmap step C3 (feme/docs/Roadmap.md), a `phi` of vector type
+  is scalarized rather than a single nested-vector `Widened` entry; (H7o)
+  a plain, non-groupshared `LoadInst` of vector type at a divergent
+  address (e.g. a per-invocation-divergent index into an ordinary,
+  non-groupshared `<4 x float>` array, the classic
+  `positions[gl_VertexIndex]` GLSL/HLSL constant-lookup-table idiom),
+  decomposed the same way a resource-call load already was -- a
+  groupshared load of vector type is deliberately excluded, since
+  `widenGroupSharedLoad`'s own gather-based path does not yet support a
+  vector-typed result; and, as of roadmap step C3 (feme/docs/Roadmap.md), a `phi` of vector type
   (the shape a uniform diamond's merge block gives a value reconciled
   across two divergent arms), a `select` of vector type (a scalar `i1`
   condition is shared unchanged by every per-component `select`; a

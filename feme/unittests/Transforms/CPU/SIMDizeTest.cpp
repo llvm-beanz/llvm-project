@@ -456,6 +456,71 @@ TEST(SIMDizeTest, DecomposesResourceLoadIntoExtractElement) {
   EXPECT_TRUE(FoundWideAdd);
 }
 
+TEST(SIMDizeTest, DecomposesPrivateMemoryDivergentLoadIntoExtractElement) {
+  // Roadmap H7o: an ordinary, non-groupshared divergent-address `load` of
+  // vector type -- the "local constant lookup table indexed by a
+  // per-invocation builtin" shape, reduced from a real
+  // `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading_*` vertex
+  // shader's own `positions[gl_VertexIndex]` -- used to hit
+  // `checkVectorDecompositionSupported`'s "has a divergent value of vector
+  // type" diagnostic unconditionally: unlike a resource-call load (see
+  // `DecomposesResourceLoadIntoExtractElement` above) or a groupshared
+  // load (`WidensGroupSharedDivergentIndexToVectorGEPAndGather` below), no
+  // producer case at all covered a plain `LoadInst`. It is now decomposed
+  // the same way, into `N` widened per-component values via
+  // `widenScalarizedFallback`'s per-lane clone, rather than building one
+  // illegal `<4 x <4 x float>>` result.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %table = alloca [4 x <4 x float>], align 4
+      store [4 x <4 x float>] [
+          <4 x float> <float -1.0, float -1.0, float 0.0, float 1.0>,
+          <4 x float> <float -1.0, float  1.0, float 0.0, float 1.0>,
+          <4 x float> <float  1.0, float -1.0, float 0.0, float 1.0>,
+          <4 x float> <float  1.0, float  1.0, float 0.0, float 1.0>],
+          ptr %table, align 4
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %elt = getelementptr [4 x <4 x float>], ptr %table, i32 0, i32 %tid
+      %v = load <4 x float>, ptr %elt, align 4
+      %e0 = extractelement <4 x float> %v, i32 0
+      %e2 = extractelement <4 x float> %v, i32 2
+      %sum = fadd float %e0, %e2
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWideAdd = false;
+  bool FoundWideLoad = false;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *LI = dyn_cast<LoadInst>(&I))
+      if (LI->getType() == FixedVectorType::get(Type::getFloatTy(Ctx), 4))
+        FoundWideLoad = true;
+    if (auto *BO = dyn_cast<BinaryOperator>(&I))
+      if (BO->getOpcode() == Instruction::FAdd &&
+          BO->getType() == FixedVectorType::get(Type::getFloatTy(Ctx), 4))
+        FoundWideAdd = true;
+  }
+  // The per-lane load itself keeps the original `<4 x float>` element
+  // type (one real load through one lane's own extracted `ptr`, not a
+  // widened `<4 x <4 x float>>`, which the `EXPECT_FALSE` above already
+  // rules out for every instruction), while the reassembled components
+  // downstream (the `fadd` over two of them) widen exactly like a
+  // resource load's would.
+  EXPECT_TRUE(FoundWideLoad);
+  EXPECT_TRUE(FoundWideAdd);
+}
+
 TEST(SIMDizeTest, WidensNonConstantIndexExtractElementIntoSelectChain) {
   // Roadmap step C3: a non-constant-index `extractelement` out of a
   // decomposed vector is no longer diagnosed -- "a shuffle or a dynamic

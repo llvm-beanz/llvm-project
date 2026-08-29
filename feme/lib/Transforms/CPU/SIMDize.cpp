@@ -613,7 +613,16 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   // no canonicalized `feme.stage.*`/`feme.cpu.resource.*` op of its own to
   // become instead, e.g. a mesh entry point's own
   // `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)` (see
-  // MeshOutputWrapper.h's file comment). Verify every divergent vector
+  //    MeshOutputWrapper.h's file comment), and
+  //  - (roadmap H7o) an ordinary, non-groupshared `load` of vector type
+  //    through a divergent address -- the common "local constant lookup
+  //    table indexed by a per-invocation builtin" shape, e.g.
+  //    `positions[gl_VertexIndex]` -- decomposed into `N` widened
+  //    components by `widenScalarizedFallback`'s per-lane clone-and-
+  //    reassemble, exactly like any divergent-address load whose result is
+  //    already scalar,
+  //
+  // Verify every divergent vector
   // value matches one of those producer shapes, and every use of one
   // matches one of the consumer shapes, up front and bail with a
   // diagnostic, matching every other precondition this pass checks before
@@ -715,6 +724,25 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
               return Arg->getType() == I.getType();
             });
       }
+    } else if (auto *LI = dyn_cast<LoadInst>(&I)) {
+      // An ordinary, non-groupshared divergent-address `load` producing a
+      // vector-typed value -- e.g. `positions[gl_VertexIndex]` reading a
+      // local constant lookup table indexed by a per-invocation builtin
+      // like `gl_VertexIndex` (roadmap H7o, reduced from a real
+      // `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading_*`
+      // vertex shader) -- decomposes into `N` widened per-component values
+      // exactly like a vector-typed resource-call load already does (see
+      // `widenScalarizedFallback`'s per-component reassembly), rather than
+      // one illegal `<W x <N x T>>` result: its address, divergent because
+      // the index feeding its `getelementptr` is, is scalarized into `W`
+      // real per-lane loads, one through each lane's own extracted
+      // pointer. A groupshared address keeps its own dedicated
+      // gather-based widening (`widenGroupSharedLoad`), which does not
+      // (yet) support a vector-typed result, so is deliberately excluded
+      // here rather than silently mis-widened into an illegal nested
+      // vector gather.
+      IsSupportedProducer =
+          LI->isSimple() && !isGroupSharedPointerType(LI->getPointerOperandType());
     }
 
     if (!IsSupportedProducer) {
@@ -724,8 +752,8 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
           "' of vector type; only a constant-index insertelement chain, a "
           "phi, a select, a shufflevector, elementwise arithmetic/cast, a "
           "vector comparison, a homogeneous vectorizable intrinsic call, "
-          "or a resource/image load is supported (roadmap milestone 7 "
-          "deviation)");
+          "or a resource/image/ordinary load is supported (roadmap "
+          "milestone 7 deviation)");
       return false;
     }
 
@@ -1549,15 +1577,29 @@ void FunctionWidener::widenScalarizedFallback(Instruction &I,
   // enough to be widened in the first place) and an `AtomicCmpXchgInst`
   // (whose `{T, i1}` result is an aggregate `feme::cpu::SIMDizePass`
   // already rejects before this would run) are this fallback's only
-  // remaining atomic-instruction callers.
+  // remaining atomic-instruction callers. A vector-typed `I` (roadmap H7o:
+  // an ordinary, non-groupshared divergent-address `load` reading a local
+  // constant lookup table, e.g. `positions[gl_VertexIndex]`, is this
+  // shape's only producer today) decomposes its per-lane clone's own
+  // result into `N` widened components -- recorded in
+  // `WidenedVectorComponents`, exactly like every other vector-typed
+  // producer `checkVectorDecompositionSupported` accepts -- rather than
+  // building one illegal `<W x <N x T>>` `Result`.
   SmallVector<Value *, 4> WideOps;
   for (Value *Op : I.operands())
     WideOps.push_back(getWidened(Op, Builder));
 
   bool HasResult = !I.getType()->isVoidTy();
-  Value *Result =
-      HasResult ? PoisonValue::get(FixedVectorType::get(I.getType(), WaveSize))
-                : nullptr;
+  auto *ResultVecTy =
+      HasResult ? dyn_cast<FixedVectorType>(I.getType()) : nullptr;
+  Value *Result = (HasResult && !ResultVecTy)
+                      ? PoisonValue::get(FixedVectorType::get(I.getType(), WaveSize))
+                      : nullptr;
+  SmallVector<Value *, 4> Components;
+  if (ResultVecTy)
+    Components.assign(ResultVecTy->getNumElements(),
+                      PoisonValue::get(FixedVectorType::get(
+                          ResultVecTy->getElementType(), WaveSize)));
 
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Instruction *Clone = I.clone();
@@ -1570,12 +1612,23 @@ void FunctionWidener::widenScalarizedFallback(Instruction &I,
     // setNameImpl`'s "Cannot assign a name to void values!"), so only a
     // `HasResult` clone gets the ".lane" name.
     Builder.Insert(Clone, HasResult ? I.getName() + ".lane" : Twine());
-    if (Result)
+    if (ResultVecTy) {
+      for (unsigned Component = 0, NumComponents = ResultVecTy->getNumElements();
+           Component != NumComponents; ++Component) {
+        Value *LaneScalar = Builder.CreateExtractElement(
+            Clone, Builder.getInt32(Component), "lane.op.elt");
+        Components[Component] = Builder.CreateInsertElement(
+            Components[Component], LaneScalar, Builder.getInt32(Lane));
+      }
+    } else if (Result) {
       Result =
           Builder.CreateInsertElement(Result, Clone, Builder.getInt32(Lane));
+    }
   }
 
-  if (Result)
+  if (ResultVecTy)
+    WidenedVectorComponents[&I] = std::move(Components);
+  else if (Result)
     Widened[&I] = Result;
   ToErase.push_back(&I);
 }
