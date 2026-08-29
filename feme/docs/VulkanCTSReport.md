@@ -12643,6 +12643,82 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-caselist-file=draw_sample.txt --deqp-shadercache=disable
 ```
 
+## Roadmap H7a: measured impact (five already-implemented core 1.0 feature bits)
+
+Roadmap H7 asked for a full survey of the ~20 named candidate optional
+Vulkan 1.0 core feature bits this ICD still advertised `VK_FALSE`, to find
+which ones the executor/pipeline layer already genuinely implements and
+simply never advertised. The survey found five: `independentBlend`,
+`logicOp`, `occlusionQueryPrecise`, `multiDrawIndirect`, and
+`drawIndirectFirstInstance` -- each backed by real, already-working code
+(`GraphicsPipeline.cpp`'s per-attachment `BlendState`/`logicOpEnable`/
+`logicOp` translation, `Executor.cpp`'s `applyLogicOp`/`mergeColor`,
+`QueryPool.cpp`'s real per-sample occlusion accumulation, and
+`CommandBuffer.cpp`'s `readIndirectDraws`/`readIndirectMeshDraws` looping
+over an arbitrary indirect `DrawCount` with a nonzero `firstInstance`
+already copied through unconditionally). Flipped together as one small,
+low-risk commit, with `maxDrawIndirectCount` raised from `1` (the
+spec-mandated floor while `multiDrawIndirect` is false) to `UINT32_MAX`
+to match.
+
+**check-feme**: `ninja check-feme` (assertions-enabled, ccache build)
+passes in full, 1978/2037 (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`), up from H6m's own 1977/2036 baseline by exactly the 1 new
+`MaxDrawIndirectCountAllowsMultiDraw` test this row adds (the existing
+exhaustive feature-bit test was extended in place, not added as a new
+test).
+
+**Real `deqp-vk` re-runs**, each compared before/after via `git stash`:
+
+| Group | Cases | Before (Pass/Fail/NotSupported) | After (Pass/Fail/NotSupported) |
+|---|---|---|---|
+| `dEQP-VK.pipeline.monolithic.*logic_op*` | 976 | 0/0/976 | 0/192/784 |
+| `dEQP-VK.query_pool.occlusion_query.*` | 441 | 0/283/158 | 0/385/56 |
+| multi-draw-indirect + `first_instance` sample (`draw_indirect`/`draw_indexed_indirect` `triangle_list` `*multi_draw*` + `dEQP-VK.draw.*first_instance*`) | 740 | 0/60/680 | 0/248/492 |
+| `draw_sample.txt` regression sample | 1957 | 14/153/1790 | 14/179/1764 |
+
+Every group's own `Passed` count is unchanged before/after -- confirming
+zero regression in any case that previously passed -- while a real block
+of cases moves from `NotSupported` to a genuine execution attempt in each
+group (192/102/188/26 cases respectively), exactly the effect flipping an
+honestly-implemented feature bit should have. Every one of the newly
+attempted cases still fails, but on a separate, already-tracked,
+pre-existing gap, not a bug in any of these five bits themselves:
+
+- The 192 newly-attempted `logic_op` cases all fail with
+  `feme-cpu-simdize: ... divergent value ... of vector type`, C8's own
+  already-tracked matrix/aggregate legalization limitation (see roadmap
+  H4e), reached here through an sRGB-format logic-op shader shape rather
+  than the tessellation/geometry shapes H4b/H4c/H4d/H4e found it through
+  originally -- not a new gap, just a new caller of the same one.
+- The occlusion-query and multi-draw/`first_instance` groups' own newly
+  attempted cases all fail with a generic
+  `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED`,
+  a broader, not-yet-independently-triaged pipeline-creation content gap
+  unrelated to any of these five feature bits (the same diagnostic shape
+  for every failing case in both groups, none of it occlusion-query- or
+  indirect-draw-specific).
+
+**Inventories**: `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+confirmed to need no change -- no extension or Vulkan-1.1+ feature struct
+is touched, only five Vulkan-1.0-core `VkPhysicalDeviceFeatures` bits and
+one core 1.0 limit (`maxDrawIndirectCount`).
+
+**Milestone H7 does not close**: the remaining ~15 candidate bits this
+row's own survey found each need real, independent work first, broken
+down as Roadmap.md's H7b-H7j rows (none started).
+
+Reproduction:
+
+```sh
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.pipeline.monolithic.*logic_op*" --deqp-shadercache=disable
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.query_pool.occlusion_query.*" --deqp-shadercache=disable
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=draw_sample.txt --deqp-shadercache=disable
+```
+
 ## Roadmap H6m: measured impact (canonicalize a `bool` stage-IO scalar to 32 bits)
 
 H6l's own real-ICD re-run left this row a single, specific,

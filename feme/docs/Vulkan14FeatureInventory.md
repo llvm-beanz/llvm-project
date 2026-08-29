@@ -69,12 +69,12 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---|---|---|
-| 1.0 | 4 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
+| 1.0 | 11 of 55 | n/a (see scope note) | n/a (nothing is promoted into 1.0) |
 | 1.1 | 1 of 12 | n/a (see scope note) | 7 of 23 |
 | 1.2 | 9 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
 | 1.4 | 20 of 21 | 25 | 15 of 16 |
-| **total** | **46 of 150** | **70** | **48 of 86** |
+| **total** | **53 of 150** | **70** | **48 of 86** |
 
 - **The 1.3 floor is nearly closed; the 1.1/1.2 floor was never audited
   until now, and the 1.4 floor is nearly closed too.** Roadmap E1-E28 drove
@@ -117,14 +117,18 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `AdvertisedPromotedExtensions.txt`/`AdvertisedExtensions.txt`, understating
   the 1.4 extension row as 14 of 16 rather than its true 15 of 16; restored
   here alongside roadmap H2's own `multiview` update.
-- **14 of the 50 unimplemented 1.0 feature bits are graphics
+- **11 of the 44 unimplemented 1.0 feature bits are graphics
   capabilities** (`fillModeNonSolid`, `wideLines`, `largePoints`,
   `sampleRateShading`,
-  `independentBlend`, `depthClamp`, `depthBiasClamp`, `depthBounds`,
+  `depthClamp`, `depthBiasClamp`, `depthBounds`,
   `imageCubeArray`, `shaderClipDistance`, `shaderCullDistance`,
-  `occlusionQueryPrecise`, `multiDrawIndirect`, `alphaToOne`) -- down from
-  15 now that roadmap H5e closed `geometryShader` (itself down from 16
-  once roadmap H4a/H4b closed `tessellationShader`). Each is
+  `alphaToOne`) -- down from 14 (itself down from 15 once roadmap H5e
+  closed `geometryShader`, itself down from 16 once roadmap H4a/H4b
+  closed `tessellationShader`) now that roadmap H7a closed
+  `independentBlend`, `occlusionQueryPrecise`, and `multiDrawIndirect`
+  alongside two feature bits this file never grouped as
+  "graphics-specific" in the first place (`logicOp`,
+  `drawIndirectFirstInstance`, closed by the same H7a row). Each is
   *optional* for a conformance submission -- unlike every 1.1-1.4 row
   above, a device may report them false and still be conformant -- so
   none blocks the claim; each is nonetheless a block of mandatory-list
@@ -269,14 +273,14 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `robustBufferAccess` | yes |  |
 | feature | VK_VERSION_1_0 | `fullDrawIndexUint32` | no |  |
 | feature | VK_VERSION_1_0 | `imageCubeArray` | no |  |
-| feature | VK_VERSION_1_0 | `independentBlend` | no |  |
+| feature | VK_VERSION_1_0 | `independentBlend` | yes | roadmap H7a: `GraphicsPipeline.cpp`'s `translateColorBlendState` already applies a per-color-attachment `BlendState` independently |
 | feature | VK_VERSION_1_0 | `geometryShader` | yes | roadmap H5a-H5e: SPIR-V geometry entry-point execution-mode reflection, `CanonicalizeStagePass`/`Executor.cpp` geometry chaining, and `vkCreateGraphicsPipelines` acceptance/compilation |
 | feature | VK_VERSION_1_0 | `tessellationShader` | yes | roadmap H4a/H4b: SPIR-V tessellation-control/-evaluation reflection, splitting and `vkCreateGraphicsPipelines` acceptance/compilation |
 | feature | VK_VERSION_1_0 | `sampleRateShading` | no |  |
 | feature | VK_VERSION_1_0 | `dualSrcBlend` | yes |  |
-| feature | VK_VERSION_1_0 | `logicOp` | no |  |
-| feature | VK_VERSION_1_0 | `multiDrawIndirect` | no |  |
-| feature | VK_VERSION_1_0 | `drawIndirectFirstInstance` | no |  |
+| feature | VK_VERSION_1_0 | `logicOp` | yes | roadmap H7a: `Executor.cpp`'s `applyLogicOp`/`mergeColor` already implement every `VkLogicOp` value |
+| feature | VK_VERSION_1_0 | `multiDrawIndirect` | yes | roadmap H7a: `CommandBuffer.cpp`'s `readIndirectDraws`/`readIndirectMeshDraws` already loop over an arbitrary indirect `DrawCount`; `maxDrawIndirectCount` raised to `UINT32_MAX` to match |
+| feature | VK_VERSION_1_0 | `drawIndirectFirstInstance` | yes | roadmap H7a: `CommandBuffer.cpp`'s `readIndirectDraws` already copies a nonzero `firstInstance` through unconditionally |
 | feature | VK_VERSION_1_0 | `depthClamp` | no |  |
 | feature | VK_VERSION_1_0 | `depthBiasClamp` | no |  |
 | feature | VK_VERSION_1_0 | `fillModeNonSolid` | no |  |
@@ -289,7 +293,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `textureCompressionETC2` | no |  |
 | feature | VK_VERSION_1_0 | `textureCompressionASTC_LDR` | yes |  |
 | feature | VK_VERSION_1_0 | `textureCompressionBC` | no |  |
-| feature | VK_VERSION_1_0 | `occlusionQueryPrecise` | no |  |
+| feature | VK_VERSION_1_0 | `occlusionQueryPrecise` | yes | roadmap H7a: `QueryPool.cpp`'s occlusion queries (roadmap H2f) already accumulate the real per-sample passed count |
 | feature | VK_VERSION_1_0 | `pipelineStatisticsQuery` | no |  |
 | feature | VK_VERSION_1_0 | `vertexPipelineStoresAndAtomics` | no |  |
 | feature | VK_VERSION_1_0 | `fragmentStoresAndAtomics` | no |  |

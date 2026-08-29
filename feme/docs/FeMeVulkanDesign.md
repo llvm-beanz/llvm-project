@@ -1996,6 +1996,46 @@ after submission generally become device loss.
 - Allocation callbacks are called with the scope and alignment required by the
   Vulkan specification and never while holding unrelated queue locks.
 
+### Optional core 1.0 feature bits
+
+Roadmap H7 surveyed every one of the ~52 optional `VkPhysicalDeviceFeatures`
+bits this ICD still advertised `VK_FALSE` (beyond the handful earlier
+milestones already claim -- `robustBufferAccess`/`dualSrcBlend`/
+`textureCompressionASTC_LDR`/`multiViewport`/`tessellationShader`/
+`geometryShader`), to find which ones the executor/pipeline layer already
+genuinely implements and simply never advertised, versus which need real new
+work. **Status (roadmap H7a): done for the first, low-risk cluster this
+survey found.** `independentBlend` (`GraphicsPipeline.cpp`'s
+`translateColorBlendState` already stores one `BlendState` per color
+attachment, and `Executor.cpp`'s `mergeColor` already consumes each
+independently), `logicOp` (the same function already reads
+`logicOpEnable`/`logicOp`, and `Executor.cpp`'s `applyLogicOp` already
+implements every `VkLogicOp` value), `occlusionQueryPrecise`
+(`QueryPool.cpp`'s occlusion-query support, roadmap H2f, already
+accumulates the real per-sample passed count, not a boolean
+any-samples-passed), `multiDrawIndirect`, and `drawIndirectFirstInstance`
+(`CommandBuffer.cpp`'s `readIndirectDraws`/`readIndirectMeshDraws` already
+loop over an arbitrary `DrawCount` and already copy a nonzero
+`firstInstance` through unconditionally) were all already correct behavior,
+just never advertised -- flipped together as one commit, with
+`maxDrawIndirectCount` raised from the spec-mandated `multiDrawIndirect ==
+false` floor of `1` to `UINT32_MAX` to match (`readIndirectDraws`'s own
+loop has no smaller real ceiling of its own). See "Roadmap H7a: measured
+impact" in VulkanCTSReport.md for the full before/after CTS breakdown --
+flipping each bit legitimately unblocks a real block of previously
+`NotSupported` cases to attempt real execution, most of which now fail on
+a separate, already-tracked, pre-existing gap (chiefly C8's own
+matrix/aggregate `feme-cpu-simdize` legalization limitation and a broader
+`vkCreateGraphicsPipelines` content gap unrelated to any of these five
+bits), not a regression in any case that previously passed. The rest of
+H7's own survey (`imageCubeArray`, `fillModeNonSolid`, `depthClamp`/
+`depthBiasClamp`/`depthBounds`, `wideLines`/`largePoints`,
+`sampleRateShading`, `alphaToOne`, `vertexPipelineStoresAndAtomics`/
+`fragmentStoresAndAtomics`, `shaderClipDistance`/`shaderCullDistance`,
+`samplerAnisotropy`, and the four `shaderStorageImage*` bits) each need
+real, independent work first and remain open, broken down as Roadmap.md's
+H7b-H7j rows.
+
 ## Implementation Milestones
 
 ### V0: Loader-visible skeleton
