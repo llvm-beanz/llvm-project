@@ -1066,7 +1066,52 @@ TEST_F(GraphicsPipelineTest, TranslatesDepthClampAndBiasState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// (roadmap H7d) `VK_DYNAMIC_STATE_DEPTH_BIAS`: like `LineWidth`
+/// (roadmap H7f) `sampleShadingEnable`/`alphaToOneEnable` translate into
+/// `GraphicsPipeline::getSampleShadingEnable()`/`getAlphaToOneEnable()`;
+/// `alphaToCoverageEnable` remains rejected (roadmap H7n) even when the
+/// other two are enabled alongside it -- see
+/// `RejectsAlphaToCoverageEnable` below for that half of the check.
+TEST_F(GraphicsPipelineTest, TranslatesSampleShadingAndAlphaToOneState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Multisample.sampleShadingEnable = VK_TRUE;
+  Multisample.minSampleShading = 1.0f;
+  Multisample.alphaToOneEnable = VK_TRUE;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  feme::graphics::GraphicsPipeline Executor =
+      Graphics->buildExecutorPipeline(DynamicGraphicsState{});
+  EXPECT_TRUE(Executor.getSampleShadingEnable());
+  EXPECT_TRUE(Executor.getAlphaToOneEnable());
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H7f/H7n) `alphaToCoverageEnable` remains unimplemented and
+/// rejected at pipeline-creation time, unlike its two
+/// `VkPipelineMultisampleStateCreateInfo` neighbors above.
+TEST_F(GraphicsPipelineTest, RejectsAlphaToCoverageEnable) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Multisample.alphaToCoverageEnable = VK_TRUE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+
 /// (`DynamicLineWidthAndStippleOverrideStaticState`), a pipeline may
 /// declare this dynamic and `buildExecutorPipeline` then reads the
 /// per-draw snapshot instead of its own (deliberately mismatched)

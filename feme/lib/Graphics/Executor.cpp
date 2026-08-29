@@ -2396,184 +2396,234 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       }
 
       uint32_t QuadCount = static_cast<uint32_t>(Quads.size());
-      Expected<StageStorage> FSInput =
-          buildStageStorage(FSSig, SignatureDirection::Input, QuadCount * 4);
-      if (!FSInput)
-        return FSInput.takeError();
-      for (uint32_t Q = 0; Q != QuadCount; ++Q) {
-        const PendingQuad &Quad = Quads[Q];
-        const ScreenTriangle &Tri = ScreenTris[Quad.TriIdx];
-        for (unsigned Lane = 0; Lane != 4; ++Lane) {
-          float B0 = Quad.Bary0[Lane], B1 = Quad.Bary1[Lane],
-                B2 = Quad.Bary2[Lane];
-          uint32_t Invocation = Q * 4 + Lane;
-          size_t Idx = 0;
-          for (const LinkedVarying &LV : Varyings) {
-            for (uint32_t Row = 0; Row != LV.RowCount; ++Row) {
-              for (uint32_t C = 0; C != LV.ComponentCount; ++C, ++Idx) {
-                uint32_t Bits;
-                if (LV.ComponentType == SignatureComponentType::Float) {
-                  float V0, V1, V2;
-                  memcpy(&V0, &Tri.Varyings[0][Idx], 4);
-                  memcpy(&V1, &Tri.Varyings[1][Idx], 4);
-                  memcpy(&V2, &Tri.Varyings[2][Idx], 4);
-                  float Value;
-                  bool Perspective =
-                      LV.Interpolation !=
-                          SignatureInterpolationMode::NoPerspective &&
-                      LV.Interpolation !=
-                          SignatureInterpolationMode::NoPerspectiveCentroid &&
-                      LV.Interpolation !=
-                          SignatureInterpolationMode::NoPerspectiveSample;
-                  if (LV.Interpolation == SignatureInterpolationMode::Flat) {
-                    Value = V0;
-                  } else if (Perspective) {
-                    float InvW =
-                        B0 * Tri.InvW[0] + B1 * Tri.InvW[1] + B2 * Tri.InvW[2];
-                    float Numerator = B0 * Tri.InvW[0] * V0 +
-                                      B1 * Tri.InvW[1] * V1 +
-                                      B2 * Tri.InvW[2] * V2;
-                    Value = Numerator / InvW;
+      // (roadmap H7f) When `getSampleShadingEnable()` is set, this project
+      // always shades at the full sample rate rather than tracking
+      // `minSampleShading`'s own fractional value (see
+      // `GraphicsPipeline::getSampleShadingEnable`'s comment in
+      // Pipeline.h for why that's always spec-conformant), so the whole
+      // shade/dispatch/merge sequence below simply runs once per sample
+      // instead of once per pixel/lane. Interpolated varyings stay
+      // pixel-center on every pass -- this file's own long-standing
+      // precision-scope choice (see the coverage-test loop's own
+      // "Barycentric coordinates... evaluated once, at the pixel
+      // center" comment above) -- so a shader whose output does not
+      // depend on `SV_SampleIndex`/`gl_SampleID` simply recomputes the
+      // same color on every pass; only one sample's slot is ever
+      // written per pass, so this is harmless, just not maximally
+      // efficient.
+      uint32_t PassCount = Pipeline.getSampleShadingEnable() ? SampleCount : 1;
+      for (uint32_t PassSample = 0; PassSample != PassCount; ++PassSample) {
+        // `PassInvocations` is `QuadInvocations` narrowed to this one
+        // pass: every lane's `SampleIndex` becomes `PassSample` and its
+        // `Coverage` becomes at most that one sample's bit, so the late
+        // depth/stencil test and color-merge code below -- unchanged
+        // from the single-pass (`SampleShadingEnable == false`) case --
+        // naturally test/write only that one sample per pass. When
+        // sample shading is disabled, `PassCount == 1` and this is an
+        // identity copy: `QuadInvocations` itself already carries every
+        // covered sample's bit and `SampleIndex[Lane] == 0`, exactly
+        // reproducing this function's pre-H7f behavior.
+        std::vector<cpu::FemeFragmentInvocation> PassInvocations =
+            QuadInvocations;
+        if (Pipeline.getSampleShadingEnable()) {
+          uint32_t SampleBit = 1u << PassSample;
+          for (cpu::FemeFragmentInvocation &PassInv : PassInvocations) {
+            for (unsigned Lane = 0; Lane != 4; ++Lane) {
+              PassInv.SampleIndex[Lane] = PassSample;
+              PassInv.Coverage[Lane] &= SampleBit;
+            }
+          }
+        }
+
+        Expected<StageStorage> FSInput =
+            buildStageStorage(FSSig, SignatureDirection::Input, QuadCount * 4);
+        if (!FSInput)
+          return FSInput.takeError();
+        for (uint32_t Q = 0; Q != QuadCount; ++Q) {
+          const PendingQuad &Quad = Quads[Q];
+          const ScreenTriangle &Tri = ScreenTris[Quad.TriIdx];
+          for (unsigned Lane = 0; Lane != 4; ++Lane) {
+            float B0 = Quad.Bary0[Lane], B1 = Quad.Bary1[Lane],
+                  B2 = Quad.Bary2[Lane];
+            uint32_t Invocation = Q * 4 + Lane;
+            size_t Idx = 0;
+            for (const LinkedVarying &LV : Varyings) {
+              for (uint32_t Row = 0; Row != LV.RowCount; ++Row) {
+                for (uint32_t C = 0; C != LV.ComponentCount; ++C, ++Idx) {
+                  uint32_t Bits;
+                  if (LV.ComponentType == SignatureComponentType::Float) {
+                    float V0, V1, V2;
+                    memcpy(&V0, &Tri.Varyings[0][Idx], 4);
+                    memcpy(&V1, &Tri.Varyings[1][Idx], 4);
+                    memcpy(&V2, &Tri.Varyings[2][Idx], 4);
+                    float Value;
+                    bool Perspective =
+                        LV.Interpolation !=
+                            SignatureInterpolationMode::NoPerspective &&
+                        LV.Interpolation !=
+                            SignatureInterpolationMode::NoPerspectiveCentroid &&
+                        LV.Interpolation !=
+                            SignatureInterpolationMode::NoPerspectiveSample;
+                    if (LV.Interpolation == SignatureInterpolationMode::Flat) {
+                      Value = V0;
+                    } else if (Perspective) {
+                      float InvW = B0 * Tri.InvW[0] + B1 * Tri.InvW[1] +
+                                   B2 * Tri.InvW[2];
+                      float Numerator = B0 * Tri.InvW[0] * V0 +
+                                        B1 * Tri.InvW[1] * V1 +
+                                        B2 * Tri.InvW[2] * V2;
+                      Value = Numerator / InvW;
+                    } else {
+                      Value = B0 * V0 + B1 * V1 + B2 * V2;
+                    }
+                    memcpy(&Bits, &Value, 4);
                   } else {
-                    Value = B0 * V0 + B1 * V1 + B2 * V2;
+                    Bits = Tri.Varyings[0][Idx];
                   }
-                  memcpy(&Bits, &Value, 4);
-                } else {
-                  Bits = Tri.Varyings[0][Idx];
+                  FSInput->writeRaw(LV.FSElementID, C, Invocation, Bits, Row);
                 }
-                FSInput->writeRaw(LV.FSElementID, C, Invocation, Bits, Row);
               }
             }
           }
         }
-      }
 
-      Expected<StageStorage> FSOutput =
-          buildStageStorage(FSSig, SignatureDirection::Output, QuadCount * 4);
-      if (!FSOutput)
-        return FSOutput.takeError();
+        Expected<StageStorage> FSOutput =
+            buildStageStorage(FSSig, SignatureDirection::Output, QuadCount * 4);
+        if (!FSOutput)
+          return FSOutput.takeError();
 
-      cpu::FemeStageLayout FSInLayout = FSInput->layout();
-      cpu::FemeStageLayout FSOutLayout = FSOutput->layout();
-      std::vector<cpu::FemeFragmentResult> Results(QuadCount);
+        cpu::FemeStageLayout FSInLayout = FSInput->layout();
+        cpu::FemeStageLayout FSOutLayout = FSOutput->layout();
+        std::vector<cpu::FemeFragmentResult> Results(QuadCount);
 
-      cpu::FragmentResources FRes;
-      FRes.ResourceHeap = Draw.Resources.ResourceHeap;
-      FRes.BoundResources = Draw.Resources.BoundResources;
-      FRes.ImageHeap = Draw.Resources.ImageHeap;
-      FRes.SamplerHeap = Draw.Resources.SamplerHeap;
-      FRes.RootConstants = Draw.Resources.RootConstants;
-      FRes.SubpassInputHeap = Draw.SubpassInputHeap;
-      FRes.InputLayout = &FSInLayout;
-      FRes.Inputs = FSInput->Data.data();
-      FRes.OutputLayout = &FSOutLayout;
-      FRes.Outputs = FSOutput->Data.data();
-      FRes.Invocations = QuadInvocations;
-      FRes.Results = Results;
-      const cpu::CompiledStage &FS = Pipeline.getFragmentStage();
-      cpu::PreparedFragmentBatch PFB =
-          cpu::PreparedFragmentBatch::create(FS.getResourceInfo(), FRes);
-      if (Error E = FS.invokeFragments(PFB))
-        return E;
+        cpu::FragmentResources FRes;
+        FRes.ResourceHeap = Draw.Resources.ResourceHeap;
+        FRes.BoundResources = Draw.Resources.BoundResources;
+        FRes.ImageHeap = Draw.Resources.ImageHeap;
+        FRes.SamplerHeap = Draw.Resources.SamplerHeap;
+        FRes.RootConstants = Draw.Resources.RootConstants;
+        FRes.SubpassInputHeap = Draw.SubpassInputHeap;
+        FRes.InputLayout = &FSInLayout;
+        FRes.Inputs = FSInput->Data.data();
+        FRes.OutputLayout = &FSOutLayout;
+        FRes.Outputs = FSOutput->Data.data();
+        FRes.Invocations = PassInvocations;
+        FRes.Results = Results;
+        const cpu::CompiledStage &FS = Pipeline.getFragmentStage();
+        cpu::PreparedFragmentBatch PFB =
+            cpu::PreparedFragmentBatch::create(FS.getResourceInfo(), FRes);
+        if (Error E = FS.invokeFragments(PFB))
+          return E;
 
-      for (uint32_t Q = 0; Q != QuadCount; ++Q) {
-        const cpu::FemeFragmentResult &Result = Results[Q];
-        const PendingQuad &Quad = Quads[Q];
-        AttachmentView DepthAttachment =
-            sliceAttachmentLayer(Draw.DepthStencil.Depth, Quad.TargetLayer);
-        AttachmentView StencilAttachment =
-            sliceAttachmentLayer(Draw.DepthStencil.Stencil, Quad.TargetLayer);
-        for (unsigned Lane = 0; Lane != 4; ++Lane) {
-          if (!((Result.SideEffectMask >> Lane) & 1u))
-            continue;
-          int32_t PX = Quad.PixelX[Lane];
-          int32_t PY = Quad.PixelY[Lane];
+        for (uint32_t Q = 0; Q != QuadCount; ++Q) {
+          const cpu::FemeFragmentResult &Result = Results[Q];
+          const PendingQuad &Quad = Quads[Q];
+          AttachmentView DepthAttachment =
+              sliceAttachmentLayer(Draw.DepthStencil.Depth, Quad.TargetLayer);
+          AttachmentView StencilAttachment =
+              sliceAttachmentLayer(Draw.DepthStencil.Stencil, Quad.TargetLayer);
+          for (unsigned Lane = 0; Lane != 4; ++Lane) {
+            if (!((Result.SideEffectMask >> Lane) & 1u))
+              continue;
+            int32_t PX = Quad.PixelX[Lane];
+            int32_t PY = Quad.PixelY[Lane];
 
-          // A late depth/stencil test/write happens here, after the
-          // fragment stage ran, using its `SV_Depth`/`SV_StencilRef`
-          // outputs when it wrote them (an early test already handled
-          // the alternative above, per sample, and is not repeated here
-          // -- see "Depth/stencil test/write setup"). Every sample this
-          // lane covers is tested independently: they share the
-          // fragment's one shaded color/depth candidate, but each has
-          // its own stored depth/stencil value and therefore its own
-          // pass/fail result.
-          uint32_t PassMask = QuadInvocations[Q].Coverage[Lane];
-          if (!UseEarlyDepthStencil && NeedsDepthStencil) {
-            float FragDepth = QuadInvocations[Q].Position[Lane][2];
-            if (FSDepthOut)
-              FragDepth =
-                  FSOutput->readFloat(FSDepthOut->ElementID, 0, Q * 4 + Lane);
-            std::optional<uint8_t> RefOverride;
-            if (FSStencilRefOut)
-              RefOverride = static_cast<uint8_t>(FSOutput->readRaw(
-                  FSStencilRefOut->ElementID, 0, Q * 4 + Lane));
-            PassMask = 0;
-            for (uint32_t S = 0; S != SampleCount; ++S) {
-              if (!((QuadInvocations[Q].Coverage[Lane] >> S) & 1u))
-                continue;
-              Expected<bool> Pass = testDepthStencil(
-                  PipelineDepth, PipelineStencil, DepthAttachment,
-                  StencilAttachment, SampleCount,
-                  QuadInvocations[Q].IsFrontFace[Lane] != 0, PX, PY, S,
-                  FragDepth, RefOverride);
-              if (!Pass)
-                return Pass.takeError();
-              if (*Pass)
-                PassMask |= (1u << S);
+            // A late depth/stencil test/write happens here, after the
+            // fragment stage ran, using its `SV_Depth`/`SV_StencilRef`
+            // outputs when it wrote them (an early test already handled
+            // the alternative above, per sample, and is not repeated here
+            // -- see "Depth/stencil test/write setup"). Every sample this
+            // lane covers is tested independently: they share the
+            // fragment's one shaded color/depth candidate, but each has
+            // its own stored depth/stencil value and therefore its own
+            // pass/fail result.
+            uint32_t PassMask = PassInvocations[Q].Coverage[Lane];
+            if (!UseEarlyDepthStencil && NeedsDepthStencil) {
+              float FragDepth = PassInvocations[Q].Position[Lane][2];
+              if (FSDepthOut)
+                FragDepth =
+                    FSOutput->readFloat(FSDepthOut->ElementID, 0, Q * 4 + Lane);
+              std::optional<uint8_t> RefOverride;
+              if (FSStencilRefOut)
+                RefOverride = static_cast<uint8_t>(FSOutput->readRaw(
+                    FSStencilRefOut->ElementID, 0, Q * 4 + Lane));
+              PassMask = 0;
+              for (uint32_t S = 0; S != SampleCount; ++S) {
+                if (!((PassInvocations[Q].Coverage[Lane] >> S) & 1u))
+                  continue;
+                Expected<bool> Pass = testDepthStencil(
+                    PipelineDepth, PipelineStencil, DepthAttachment,
+                    StencilAttachment, SampleCount,
+                    PassInvocations[Q].IsFrontFace[Lane] != 0, PX, PY, S,
+                    FragDepth, RefOverride);
+                if (!Pass)
+                  return Pass.takeError();
+                if (*Pass)
+                  PassMask |= (1u << S);
+              }
             }
-          }
-          if (PassMask == 0)
-            continue;
-          if (Draw.PassedSampleCounter)
-            *Draw.PassedSampleCounter += llvm::popcount(PassMask);
+            if (PassMask == 0)
+              continue;
+            if (Draw.PassedSampleCounter)
+              *Draw.PassedSampleCounter += llvm::popcount(PassMask);
 
-          for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size();
-               ++AttIdx) {
-            AttachmentView Att = sliceAttachmentLayer(Draw.Attachments[AttIdx],
-                                                      Quad.TargetLayer);
-            if (Att.Data.empty())
-              // (Roadmap E5) An unused (`VK_NULL_HANDLE`) color slot: the
-              // write is discarded rather than performed.
-              continue;
-            if (!FSColors[AttIdx])
-              // (roadmap F8) `vkCmdSetRenderingAttachmentLocations` mapped
-              // no fragment output location onto this attachment: it is
-              // left exactly as it was, the same "nothing to write" case
-              // as an unused slot above.
-              continue;
-            std::array<double, 4> RGBA;
-            for (unsigned C = 0; C != 4; ++C)
-              RGBA[C] = FSOutput->readFloat(FSColors[AttIdx]->ElementID, C,
-                                            Q * 4 + Lane);
-            // (roadmap F5) `RectangularSmooth`'s antialiasing coverage
-            // (`Quad.LineCoverage`, `1.0` for every non-line/non-smooth
-            // triangle) multiplies into the written alpha so a partially-
-            // covered edge fragment blends proportionally rather than
-            // writing fully opaque or not at all.
-            RGBA[3] *= Quad.LineCoverage[Lane];
-            // Only attachment 0 ever has a second source color to read:
-            // Vulkan requires exactly one color attachment for a pipeline
-            // using a dual-source blend factor (see `FSColor1`'s own
-            // comment above).
-            std::array<double, 4> RGBA1{};
-            if (AttIdx == 0 && FSColor1)
-              for (unsigned C = 0; C != 4; ++C)
-                RGBA1[C] =
-                    FSOutput->readFloat(FSColor1->ElementID, C, Q * 4 + Lane);
-            const BlendState &AttBlend = Pipeline.getColorBlends()[AttIdx];
-            for (uint32_t S = 0; S != SampleCount; ++S) {
-              if (!((PassMask >> S) & 1u))
+            for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size();
+                 ++AttIdx) {
+              AttachmentView Att = sliceAttachmentLayer(
+                  Draw.Attachments[AttIdx], Quad.TargetLayer);
+              if (Att.Data.empty())
+                // (Roadmap E5) An unused (`VK_NULL_HANDLE`) color slot: the
+                // write is discarded rather than performed.
                 continue;
-              size_t Off = (((size_t)PY * Att.Width + PX) * SampleCount + S) *
-                           ColorElemSizes[AttIdx];
-              if (Error E = mergeColor(AttBlend, Pipeline.getLogicOpEnable(),
-                                       Pipeline.getLogicOp(),
-                                       Pipeline.getBlendConstants(), Att.Format,
-                                       RGBA, RGBA1,
-                                       MutableArrayRef(Att.Data.data() + Off,
-                                                       ColorElemSizes[AttIdx])))
-                return E;
+              if (!FSColors[AttIdx])
+                // (roadmap F8) `vkCmdSetRenderingAttachmentLocations` mapped
+                // no fragment output location onto this attachment: it is
+                // left exactly as it was, the same "nothing to write" case
+                // as an unused slot above.
+                continue;
+              std::array<double, 4> RGBA;
+              for (unsigned C = 0; C != 4; ++C)
+                RGBA[C] = FSOutput->readFloat(FSColors[AttIdx]->ElementID, C,
+                                              Q * 4 + Lane);
+              // (roadmap F5) `RectangularSmooth`'s antialiasing coverage
+              // (`Quad.LineCoverage`, `1.0` for every non-line/non-smooth
+              // triangle) multiplies into the written alpha so a partially-
+              // covered edge fragment blends proportionally rather than
+              // writing fully opaque or not at all.
+              RGBA[3] *= Quad.LineCoverage[Lane];
+              // (roadmap H7f) `alphaToOneEnable` forces every color
+              // attachment's own output alpha to the maximum representable
+              // value -- always `1.0` here, since `RGBA` is this pipeline's
+              // uniform float `[0, 1]` representation regardless of
+              // `Att.Format`'s own bit layout (packed to that format's
+              // representation later, in `mergeColor`). Applied after the
+              // line-coverage multiply above, matching the real spec's own
+              // "Multisample Coverage" ordering (`fragops.adoc`).
+              if (Pipeline.getAlphaToOneEnable())
+                RGBA[3] = 1.0;
+              // Only attachment 0 ever has a second source color to read:
+              // Vulkan requires exactly one color attachment for a pipeline
+              // using a dual-source blend factor (see `FSColor1`'s own
+              // comment above).
+              std::array<double, 4> RGBA1{};
+              if (AttIdx == 0 && FSColor1)
+                for (unsigned C = 0; C != 4; ++C)
+                  RGBA1[C] =
+                      FSOutput->readFloat(FSColor1->ElementID, C, Q * 4 + Lane);
+              const BlendState &AttBlend = Pipeline.getColorBlends()[AttIdx];
+              for (uint32_t S = 0; S != SampleCount; ++S) {
+                if (!((PassMask >> S) & 1u))
+                  continue;
+                size_t Off = (((size_t)PY * Att.Width + PX) * SampleCount + S) *
+                             ColorElemSizes[AttIdx];
+                if (Error E = mergeColor(
+                        AttBlend, Pipeline.getLogicOpEnable(),
+                        Pipeline.getLogicOp(), Pipeline.getBlendConstants(),
+                        Att.Format, RGBA, RGBA1,
+                        MutableArrayRef(Att.Data.data() + Off,
+                                        ColorElemSizes[AttIdx])))
+                  return E;
+              }
             }
           }
         }

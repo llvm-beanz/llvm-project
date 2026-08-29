@@ -2394,6 +2394,172 @@ TEST(ExecutorTest, MultisampleResolveAveragesPerPixelCoverage) {
   EXPECT_EQ(ResolveStorage[3 * 4], 0);        // pixel 3 black
 }
 
+// Roadmap H7f: `sampleShadingEnable`. A fragment shader that reads
+// `SV_SampleIndex` (element 0, no location -- a pure system value) and
+// writes `SampleIndex / 3.0` into its red channel: with sample shading
+// enabled and no resolve attachment bound, each of a fully-covered pixel's
+// 4 raw MSAA samples must show a distinct red value matching its own
+// sample index, proving the fragment stage really ran once per sample
+// rather than once per pixel with its single result broadcast to every
+// sample (the pre-H7f/`SampleShadingEnable == false` behavior, still
+// covered by `MultisampleResolveAveragesPerPixelCoverage` above, which
+// only ever observes one shaded value per pixel after resolve).
+constexpr char SampleIndexFragmentShaderIR[] = R"(
+  define void @fs_sampleindex() #0 {
+    %sidx = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+    %sf = uitofp i32 %sidx to float
+    %r = fdiv float %sf, 3.0
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %r, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+TEST(ExecutorTest, SampleShadingEnableInvokesFragmentOncePerSample) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement SampleIndexIn;
+  SampleIndexIn.ElementID = 0;
+  SampleIndexIn.Direction = SignatureDirection::Input;
+  SampleIndexIn.SystemValue = SignatureSystemValue::SampleIndex;
+  SampleIndexIn.ComponentType = SignatureComponentType::UInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {SampleIndexIn,
+                    makeElement(1, SignatureDirection::Output, 4,
+                                /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, SampleIndexFragmentShaderIR, "fs_sampleindex", FSSig,
+                   ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/4,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}},
+      StencilState{}, std::vector<BlendState>{BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/true);
+
+  constexpr uint32_t Samples = 4;
+  std::vector<uint8_t> MSStorage(4u * 4u * Samples * 4u, 0);
+  AttachmentView MSColor{MSStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{MSColor};
+
+  // A triangle covering the whole [-1, 1] NDC square, so every sample of
+  // every pixel is covered.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  // Pixel (0, 0)'s 4 raw samples: each one's red channel must match its
+  // own sample index (`S / 3.0`, quantized to a UNORM8 byte), not all be
+  // identical (the broadcast-from-one-shaded-value behavior this feature
+  // replaces).
+  for (uint32_t S = 0; S != Samples; ++S) {
+    size_t Off = S * 4;
+    uint8_t Expected = static_cast<uint8_t>(
+        std::lround(255.0 * static_cast<double>(S) / 3.0));
+    EXPECT_NEAR(MSStorage[Off], Expected, 2) << "sample " << S;
+  }
+  EXPECT_NE(MSStorage[0], MSStorage[1 * 4]);
+  EXPECT_NE(MSStorage[0], MSStorage[3 * 4]);
+}
+
+// Roadmap H7f: `alphaToOneEnable` forces every color attachment's output
+// alpha to `1.0` regardless of what the fragment shader itself wrote,
+// applied after `RectangularSmooth`'s own line-coverage alpha multiply
+// (F5) -- exercised here with a shader that writes a partially-transparent
+// alpha (0.25) to prove the pipeline state, not the shader, wins.
+TEST(ExecutorTest, AlphaToOneEnableForcesOutputAlphaToOne) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}},
+      StencilState{}, std::vector<BlendState>{BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/false,
+      /*AlphaToOneEnable=*/true);
+
+  TriangleScene Scene;
+  // Same fully-covering triangle as `FillsFullyCoveredTriangleWithSolidColor`,
+  // but every vertex's alpha is 0.25.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.25f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.25f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 0.25f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = Scene.AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 255) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I << " (alphaToOne)";
+  }
+}
+
 TEST(ExecutorTest, AcceptsEightSampleCount) {
   Context Ctx;
   EntrySignature VSSig;
