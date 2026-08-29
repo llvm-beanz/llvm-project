@@ -44738,3 +44738,131 @@ new tests (7 original + 2 added while root-causing the CTS failures).
 grid-alignment coverage, adjacency-topology pipeline construction) were
 found along the way and broken out as new roadmap rows (H7k, H7l)
 rather than either silently ignored or scope-crept into this row.
+
+# Session: Roadmap H7e (`wideLines`/`largePoints`)
+
+## Scoping the two features separately
+`wideLines` and `largePoints` are grouped in one roadmap row but turned
+out to need very different amounts of work. `wideLines` was essentially
+free: roadmap F5 had already generalized the line rasterizer's
+`LineWidth` handling, so the only change needed was raising
+`lineWidthRange[1]` past its degenerate `1.0` floor and flipping the
+feature bit. `largePoints` needed real new plumbing end to end: a new
+`SignatureSystemValue::PointSize`, a SPIR-V `BuiltIn`-to-system-value
+mapping, a `RasterVertex` field, a signature-element lookup, and the
+executor's point-quad half-extent computation. I split the work into
+three separate commits along natural seams (system-value plumbing;
+executor/pipeline logic; device limits/feature bits) rather than one
+big commit, per the standing "small separate changes" instruction.
+
+## A costly mistake: inserting an enum value in the middle
+My first attempt inserted the new `SignatureSystemValue::PointSize`
+enumerator alphabetically/thematically, right after `Position` and
+before `ClipDistance`. This looked natural but was wrong: several `.ll`
+regression tests under `feme/test/Tools/feme-render/` embed a
+hand-encoded, pre-serialized signature-metadata byte blob that literally
+hardcodes each element's `SystemValue` as a raw numeric byte (e.g. `\04`
+for what used to be `VertexID`). Inserting a new enumerator in the
+middle silently renumbers every enumerator after it, desyncing those
+literal bytes from the enum -- `VertexID`'s old raw value `4` now
+decodes as `ClipDistance` instead, which nothing handles, producing a
+generic "unsupported vertex system value" error. `ninja check-feme`
+caught this immediately (4 `feme-render` tool tests failed) even though
+every *unit* test I'd run up to that point passed cleanly, since none of
+them happen to exercise a raw pre-serialized metadata blob the way the
+lit-based tool tests do.
+
+The fix was to move `PointSize` to the very end of the enum, right
+before the `NumSystemValues` sentinel, and add a doc comment explaining
+why (to stop a future contributor from "helpfully" moving it back
+next to `Position` for readability). Since this bug was introduced and
+fixed within the same, not-yet-pushed local session, I used `git rebase
+-i` to fold the fix into the original commit that introduced the enum,
+rather than leaving a separate "oops, fix enum ordering" commit sitting
+in the history -- keeping each of the three H7e commits internally
+consistent and buildable on their own. This is the clearest argument yet
+in this project's own history for *always* running the full
+`check-feme` lit suite before considering a change validated, not just
+the specific unit-test binaries a change appears to touch: a change to
+a stable public enum can have consequences invisible to any test that
+doesn't happen to hardcode a raw numeric value against it.
+
+## Deciding not to fix H7k as part of this row
+The roadmap's own H7k entry (found during H7d) describes point/line
+quad expansion excluding exact pixel-grid-aligned centers. Since H7e
+adds the first real, sized point-quad path (previously always a fixed
+1x1), there was a real risk this row would newly trip that gap for
+every grid-aligned point size, not just the one CTS case H7k already
+found. Before writing any executor code, I wrote a standalone C++
+reproduction of the exact `edgeFn`/`isTopLeftEdge` top-left-fill-rule
+math `Executor.cpp` uses, and confirmed a grid-aligned point quad at
+every size tested (1 through 2048) covers exactly `round(pointSize)`
+pixels along a center scanline -- the top-left rule's own tie-break
+already resolves the point-quad case correctly; H7k's gap must be
+line-specific (or specific to the exact CTS scenario it was found in),
+not something `largePoints` reopens more broadly. This let me scope
+H7e's own work to just the point-size feature itself, deferring H7k's
+actual fix to its own row as originally planned, rather than
+speculatively bundling an unrelated fix into this one "just in case." I
+then verified there was no regression from H7k's gap in the real CTS
+run at the end (see below) as a check on this decision.
+
+## Threading a device limit into the executor without a shared header
+`emitPointQuad`'s clamp needs `pointSizeRange[1]`, a value
+`PhysicalDeviceInfo.cpp` (Vulkan layer) owns, but `Executor.cpp`
+(Graphics layer) cannot include anything from the Vulkan layer -- the
+dependency only goes one direction (Vulkan depends on Graphics, per
+`CMakeLists.txt`'s `LINK_LIBS`). Rather than invent a new
+shared-constant header (which would be the "obviously correct" software-
+engineering move in most codebases), I followed this project's own
+existing precedent for `LineWidth`'s default: a bare literal duplicated
+in both `RasterState`'s default member initializer and
+`PhysicalDeviceInfo.cpp`, tied together only by cross-referencing doc
+comments, no shared symbol. `RasterState::MaxPointSize` follows the same
+shape. This is a case where "follow the existing pattern, even if a
+generically 'better' pattern exists" is the right call for a codebase
+this size and age -- introducing a new sharing mechanism for one field
+when every other analogous field uses literal duplication would create
+inconsistency without a clear benefit.
+
+## Test-venue choice for the point-size clamp
+`ExecutorTest.cpp`'s existing `TriangleScene`/`buildPipeline` helpers
+are hardwired to a fixed 7-floats-per-vertex, color-passthrough vertex
+shader with no way to write a `PointSize` output. Rather than generalize
+those shared helpers (risking every existing test that depends on them),
+I wrote a dedicated `PointSizeVertexShaderIR`/`buildPointSizePipeline`
+pair alongside them, following the same "each test builds exactly the
+custom IR/signature it needs" pattern several other tests in this file
+already use for their own one-off shader needs (e.g. the multiple-
+render-target tests). This kept the new tests self-contained and let the
+upper-bound clamp test set `RasterState::MaxPointSize` to a small
+test-local value (`2.0`) directly, rather than needing a real
+64-pixel-wide render target to observe a meaningful clamp.
+
+## Real CTS validation confirmed no regressions, surfaced one new (but
+## already-known) gap
+A 126-case real `deqp-vk` sample covering every group touching
+`wideLines`/`largePoints` found 31 newly-passing cases and 0
+regressions -- but 12 failures, all pre-existing. Two matched H7k's own
+already-tracked signature (confirming the scoping decision above was
+sound: H7k's gap is not something `largePoints` newly triggers broadly,
+just the same two cases H7k already knows about). Nine hit a generic
+"vertex stage wrapper requires attached feme.signature metadata" error,
+newly reachable only because these specific cases were gated behind
+`wideLines`/`largePoints` and never got to run before. I nearly assumed
+this was a brand-new gap worth investigating and fixing inline, until a
+closer read of `VulkanCTSReport.md`'s own H3a write-up turned up a
+throwaway line from that milestone: this exact vertex-side shape was
+already found and explicitly flagged as "not yet independently tracked
+for the vertex side" months of project-history ago, sitting unaddressed
+since. Rather than re-discover and re-describe the same gap as if it
+were new, I cross-referenced H3a directly and broke it out as roadmap
+H7m, scoped as a real investigation (since H3a's own fix, a
+`copyMetadata` call, apparently already covers this exact shape and yet
+the bug persists -- meaning the fix's coverage has some gap of its own
+not yet understood) rather than assumed to be a trivial copy-paste of
+H3a's fix to "the vertex side" too. One more failure matched a
+mesh-shading milestone-6 deviation already self-documented in its own
+error message text. This is a good example of the value in always
+searching prior CTS-report writeups for an error message's exact
+wording before assuming a freshly-surfaced failure is novel.
