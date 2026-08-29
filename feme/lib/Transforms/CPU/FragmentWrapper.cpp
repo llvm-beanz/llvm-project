@@ -281,8 +281,38 @@ Value *lowerFragmentInputLoad(CallInst &CI, const SignatureElement &Elt,
     Value *InvocationIndex =
         getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
     if (Elt.SystemValue != SignatureSystemValue::None) {
-      LaneResult = loadFragmentSystemValue(Builder, Elt, FEnv.Invocations,
-                                           InvocationIndex, Lane);
+      // (roadmap H7d) A `Position`/`FragCoord` element's `Elt` always
+      // describes the *whole* `vec4` builtin (`Elt.FirstComponent == 0`,
+      // `Elt.ComponentCount == 4`) -- unlike an ordinary varying, whose
+      // per-call "which component does *this* load want" is threaded
+      // through `CI`'s own `Component` operand (see the `else` branch's
+      // `computeStageStorageAddress` call), not baked into `Elt` itself.
+      // `loadFragmentSystemValue`'s `Position` case indexes by
+      // `Elt.FirstComponent`, so that operand must be resolved here and
+      // substituted in, or every system-value vector component read
+      // (`gl_FragCoord.z`, `.w`, ...) would silently collapse to
+      // `Elt.FirstComponent`'s default of `0` (`.x`) instead -- exactly
+      // what a real GPU's own `gl_FragCoord.z` consumer (e.g.
+      // `dEQP-VK.clipping.clip_volume.depth_clamp.*`) surfaced first,
+      // since nothing before read any component but `.x`/`.y` (see
+      // `loadFragmentPositionComponent`'s own pre-existing, unaffected
+      // single-purpose helper below) of a fragment system value.
+      Value *RequestedComponent =
+          extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
+      auto *ComponentConst = dyn_cast<ConstantInt>(RequestedComponent);
+      if (!ComponentConst) {
+        CI.getContext().emitError(
+            &CI, "feme-cpu-wrap-fragment: fragment system-value component "
+                 "must be constant");
+        return nullptr;
+      }
+      SignatureElement ResolvedElt = Elt;
+      ResolvedElt.FirstComponent =
+          static_cast<uint32_t>(ComponentConst->getZExtValue()) -
+          Elt.FirstComponent;
+      LaneResult = loadFragmentSystemValue(Builder, ResolvedElt,
+                                           FEnv.Invocations, InvocationIndex,
+                                           Lane);
     } else {
       Value *Row = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
       Value *Component =

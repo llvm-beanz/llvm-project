@@ -11,6 +11,7 @@
 #include "feme/Core/Signature.h"
 #include "feme/Core/StageOps.h"
 #include "feme/Transforms/CPU/Linearize.h"
+#include "llvm/IR/Constants.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
@@ -78,6 +79,86 @@ TEST(FragmentWrapperTest, LowersStageIOAndWritesReturnMasks) {
       EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
 
   EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Regression test for roadmap H7d: `loadFragmentSystemValue()`'s `Position`
+// case previously indexed the per-lane `vec4` always by `Elt.FirstComponent`
+// (always 0 for a whole-builtin element), ignoring the load intrinsic's own
+// per-call `Component` operand (the 3rd argument to
+// `feme.stage.input.load.f32`) -- silently collapsing any read of
+// `gl_FragCoord.y`/`.z`/`.w` to `.x`. This was found via a real `deqp-vk`
+// reproduction of `dEQP-VK.clipping.clip_volume.depth_clamp.*`, whose own
+// fragment shader reads `gl_FragCoord.z`. Verify a `Component` operand of 2
+// (`.z`) actually reaches the emitted position-component GEP as index 2, not
+// the buggy constant 0.
+TEST(FragmentWrapperTest, ResolvesRequestedPositionComponentNotAlwaysX) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ps_main() #0 {
+      %fragz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %fragz, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement In;
+  In.ElementID = 0;
+  In.Direction = SignatureDirection::Input;
+  In.ComponentType = SignatureComponentType::Float;
+  In.SystemValue = SignatureSystemValue::Position;
+  In.FirstComponent = 0;
+  In.ComponentCount = 4;
+  SignatureElement Out;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::Output;
+  Out.ComponentType = SignatureComponentType::Float;
+  Sig.Elements = {In, Out};
+  dxil::setEntrySignature(*M->getFunction("ps_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  FragmentWrapperPass().run(*M, MAM);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Every lane's Position component load is a `load float, ptr %ComponentPtr`
+  // where `%ComponentPtr` is the final GEP indexing the requested component
+  // -- check *that* GEP's last index specifically (not any GEP in the
+  // function; the outer per-lane array GEP incidentally uses a constant
+  // index too, for the unrelated quad-lane selector, which would give a
+  // false pass if conflated with the component-selecting GEP).
+  Function *Entry = M->getFunction("ps_main");
+  ASSERT_TRUE(Entry);
+  bool FoundComponentTwoLoad = false;
+  bool FoundComponentZeroLoad = false;
+  for (const Instruction &I : instructions(*Entry)) {
+    const auto *Load = dyn_cast<LoadInst>(&I);
+    if (!Load || !Load->getType()->isFloatTy())
+      continue;
+    const auto *GEP = dyn_cast<GetElementPtrInst>(Load->getPointerOperand());
+    if (!GEP)
+      continue;
+    auto *LastIdx =
+        dyn_cast<ConstantInt>(GEP->getOperand(GEP->getNumOperands() - 1));
+    if (!LastIdx)
+      continue;
+    if (LastIdx->getZExtValue() == 2)
+      FoundComponentTwoLoad = true;
+    if (LastIdx->getZExtValue() == 0)
+      FoundComponentZeroLoad = true;
+  }
+  EXPECT_TRUE(FoundComponentTwoLoad)
+      << "expected a `load float` from the requested component (2, `.z`) of "
+         "the Position system value; the pre-fix bug always loaded "
+         "component 0 instead";
+  (void)FoundComponentZeroLoad;
 }
 
 // Regression test for roadmap H3a: gl_ViewportIndex read back as a fragment
