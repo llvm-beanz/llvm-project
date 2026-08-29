@@ -10,6 +10,7 @@
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
@@ -189,6 +190,23 @@ PreservedAnalyses SPIRVPushConstantLoweringPass::run(Module &M,
     Function *NewF = Function::Create(NewTy, F.getLinkage(),
                                       F.getAddressSpace(), "", F.getParent());
     NewF->copyAttributesFrom(&F);
+    // `GlobalObject::copyAttributesFrom()` does not copy function-attached
+    // metadata (e.g. `!feme.signature` attached by
+    // `feme::graphics::CanonicalizeStagePass`) -- copy it explicitly so
+    // stage reflection metadata survives this parameter-injection, exactly
+    // like `feme::cpu::ResourceLoweringPass::addResourceEnvParams` and
+    // `feme::cpu::addSubpassInputHeapParams` already do for their own
+    // trailing-parameter replacements (roadmap H7o: a real
+    // `dEQP-VK.pipeline.monolithic.multisample.min_sample_shading_*`
+    // fragment shader reading only a push constant -- no bound resource --
+    // is the first real case to reach this exact helper with a
+    // `feme.stage.*` op needing that metadata back later, surfacing the gap
+    // as `feme-cpu-wrap-fragment`'s "requires attached feme.signature
+    // metadata" diagnostic).
+    SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
+    F.getAllMetadata(MDs);
+    for (auto [Kind, Node] : MDs)
+      NewF->setMetadata(Kind, Node);
     NewF->setComdat(F.getComdat());
     NewF->splice(NewF->begin(), &F);
     for (auto [OldArg, NewArg] : llvm::zip(F.args(), NewF->args())) {

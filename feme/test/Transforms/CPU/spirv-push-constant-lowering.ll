@@ -49,3 +49,27 @@ define float @reads_second_member() {
   %v = load float, ptr addrspace(13) %p
   ret float %v
 }
+
+; Roadmap H7o: the metadata attached to the original function (here a
+; stand-in for `!feme.signature`, which a later pass like
+; `FragmentWrapperPass` requires to resolve stage-IO element IDs) must
+; survive the inline `Function::Create` replacement
+; `SPIRVPushConstantLoweringPass::run` performs to append the trailing
+; `root_constants`/`root_constant_size` parameters -- this previously
+; dropped every function-attached metadata node entirely, since
+; `GlobalObject::copyAttributesFrom()` does not copy it. This was the real
+; root cause of a genuine `dEQP-VK.pipeline.monolithic.multisample.
+; min_sample_shading*` pipeline-creation failure: a push-constant-only
+; fragment shader (like the CTS's own `copy_sample_frag`, reading only
+; `subpassLoad` and a push constant, no bound descriptor) silently lost
+; the `!feme.signature` metadata `feme-cpu-wrap-fragment` requires.
+; CHECK-LABEL: define i32 @keeps_metadata(
+; CHECK-SAME: ptr %root_constants, i32 %root_constant_size)
+; CHECK-SAME: !feme.fake_signature ![[FAKE_MD:[0-9]+]]
+define i32 @keeps_metadata() !feme.fake_signature !10 {
+  %p = getelementptr inbounds %PushConstants, ptr addrspace(13) @pc, i32 0, i32 0
+  %v = load i32, ptr addrspace(13) %p
+  ret i32 %v
+}
+!10 = !{!"keeps_metadata_marker"}
+; CHECK: ![[FAKE_MD]] = !{!"keeps_metadata_marker"}

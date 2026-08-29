@@ -120,6 +120,31 @@ declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer
     target("dx.CBuffer", [32 x i8]), i32)
 attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
 
+; Roadmap H7o: the metadata attached to the original function (here a
+; stand-in for `!feme.signature`, which a later pass like
+; `FragmentWrapperPass` requires to resolve stage-IO element IDs) must
+; survive the `Function::Create` replacement this pass performs to append
+; the trailing `root_constants`/`root_constant_size` parameters --
+; `addRootConstantParams` previously dropped every function-attached
+; metadata node entirely, since `GlobalObject::copyAttributesFrom()` does
+; not copy it.
+; CHECK-LABEL: define i32 @keeps_metadata(
+; CHECK-SAME: ptr %root_constants, i32 %root_constant_size)
+; CHECK-SAME: !feme.fake_signature ![[FAKE_MD:[0-9]+]]
+define i32 @keeps_metadata() !feme.fake_signature !10 {
+  %h = call target("dx.CBuffer", [16 x i8])
+      @llvm.dx.resource.handlefrombinding.tdx.CBuffer_md_a16i8t(i32 0, i32 3, i32 1, i32 0, ptr null)
+  %r = call {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer_md_a16i8t(
+      target("dx.CBuffer", [16 x i8]) %h, i32 0)
+  %v0 = extractvalue {i32, i32, i32, i32} %r, 0
+  ret i32 %v0
+}
+declare target("dx.CBuffer", [16 x i8])
+    @llvm.dx.resource.handlefrombinding.tdx.CBuffer_md_a16i8t(i32, i32, i32, i32, ptr)
+declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer_md_a16i8t(
+    target("dx.CBuffer", [16 x i8]), i32)
+!10 = !{!"keeps_metadata_marker"}
+
 ; Every lowered function's binding is recorded in the `!feme.cpu.resources`
 ; metadata "Resource usage discovery" describes: `other_binding` at
 ; `(space0, b1)`, `array_binding` at `(space0, b2)` with its full
@@ -129,3 +154,5 @@ attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
 ; CHECK: !1 = !{!"array_binding", i32 64, i1 false, i32 0, i32 2}
 ; CHECK: !2 = !{!"dynamic_row", i32 32, i1 false, i32 0, i32 0}
 ; CHECK: !3 = !{!"main", i32 32, i1 false, i32 0, i32 0}
+; CHECK: !4 = !{!"keeps_metadata", i32 16, i1 false, i32 0, i32 3}
+; CHECK: ![[FAKE_MD]] = !{!"keeps_metadata_marker"}
