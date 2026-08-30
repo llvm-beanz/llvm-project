@@ -317,6 +317,59 @@ TEST(SIMDizeTest, DiagnosesUnsupportedDivergentCall) {
       << "actual diagnostic: " << ErrorMessage;
 }
 
+// (Roadmap H7z) A divergent (per-lane) value of aggregate type -- e.g. an
+// ordinary array-typed `load` through a divergent address -- has no
+// per-lane component-decomposition support in this pass at all (unlike a
+// divergent vector, which this file's own many `Decomposes*` cases already
+// widen into `N` per-lane scalars). This is exactly the shape H7x's own
+// stage-IO fragment-input consumer used to produce for a
+// `gl_ClipDistance`/`gl_CullDistance` read, before roadmap H7y's own,
+// unrelated fix (StageIOAddressOfPattern keeping an array-typed `Input`
+// variable as a real pointer, so only a scalar element is ever loaded, not
+// the whole array) incidentally stopped that particular case from ever
+// reaching this pass as a divergent aggregate. The generic protection
+// itself -- diagnosing rather than miscompiling/asserting on a divergent
+// aggregate this pass cannot yet decompose -- remains load-bearing for any
+// other producer of one (this test's own synthetic array load, a struct
+// load, etc.), so it needs its own direct test independent of H7y's fix.
+TEST(SIMDizeTest, DiagnosesUnsupportedDivergentAggregate) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %p) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %off = zext i32 %tid to i64
+      %addr = getelementptr [2 x float], ptr %p, i64 %off
+      %loaded = load [2 x float], ptr %addr
+      %v0 = extractvalue [2 x float] %loaded, 0
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  std::string ErrorMessage;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Ctx) {
+        if (DI->getSeverity() != DS_Error)
+          return;
+        std::string &Out = *reinterpret_cast<std::string *>(Ctx);
+        raw_string_ostream OS(Out);
+        DiagnosticPrinterRawOStream Printer(OS);
+        DI->print(Printer);
+      },
+      &ErrorMessage);
+
+  runPass(*M);
+
+  EXPECT_NE(ErrorMessage.find("has a divergent value 'loaded' of aggregate "
+                              "type; component decomposition is not yet "
+                              "supported"),
+            std::string::npos)
+      << "actual diagnostic: " << ErrorMessage;
+}
+
 TEST(SIMDizeTest, WidensMaskedLoadStoreToGatherScatter) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
