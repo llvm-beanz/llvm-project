@@ -14194,3 +14194,91 @@ feature bits or extensions). `FeMeVulkanDesign.md`'s format-support section
 updated with the 7 new formats and the append-only `ResourceFormat`
 ordinal-safety rationale. `Roadmap.md`'s H7r struck through; H7s (the
 `VK_ATTACHMENT_UNUSED` subpass gap) added as a new, open, P2 follow-on.
+
+## Roadmap H7s: measured impact (`VK_ATTACHMENT_UNUSED` color attachment)
+
+**Gap.** `dEQP-VK.pipeline.monolithic.multisample.alpha_to_coverage_unused_attachment.*`
+(H7r's own follow-on, its own format gate now cleared) failed every
+feme-supported-sample-count case at `vkCreateGraphicsPipelines` time with
+`"an unused color attachment slot is not implemented"`. Two independent
+rejection points existed with the identical error message:
+`GraphicsPipeline.cpp`'s `getRenderTargets` (pipeline-creation time,
+building `PipelineRenderTargets.Colors`) and `CommandBuffer.cpp`'s
+`buildRenderTargetBinding` (`vkCmdBeginRenderPass` time, building
+`RenderTargetBinding.Colors`).
+
+**Design: reuse the existing E5 mechanism.** `VK_KHR_maintenance5`'s own
+dynamic-rendering `VkRenderingAttachmentInfo::imageView == VK_NULL_HANDLE`
+case (roadmap E5) already implements exactly this concept end-to-end: a
+color slot that is present (counts toward `colorAttachmentCount()`) but
+unused (no bound image, its write silently discarded). Tracing the full
+data flow confirmed every downstream consumer already handles
+`RenderTargetView::View == nullptr` generically and correctly --
+`resolveDrawAttachments` pushes an empty `AttachmentView` for it,
+`Executor.cpp`'s fragment-output linkage and color-merge loop both already
+treat an empty `AttachmentView` (`Att.Data.empty()`) as "nothing to read
+or write here." A classic `VkRenderPass`'s `VK_ATTACHMENT_UNUSED` color
+slot is mechanically identical, so the fix is simply to make the two
+rejection points push the same placeholder shapes
+(`ResourceFormat::Unknown` for `PipelineRenderTargets.Colors`,
+default-constructed `RenderTargetView{}` for `RenderTargetBinding.Colors`)
+instead of erroring, with zero changes needed in `Executor.cpp` or
+`resolveDrawAttachments` themselves.
+
+**A second, newly-reachable validation gap.** Once both rejection points
+were fixed and a real classic-render-pass test with an unused slot
+compiled a pipeline, a distinct, pre-existing bug in `validateStageInterfaces`
+surfaced: its per-color-attachment fragment-output-location loop
+unconditionally required a `SV_TargetN` output at *every* location from 0
+to `colorAttachmentCount`, including unused ones -- rejecting a
+perfectly legal pipeline where the fragment stage declares no output at
+all for an unused slot's location. Fixed by threading the render targets'
+own per-slot format list (`AttachmentFormat`, already built by
+`getRenderTargets`) through `compileAndValidateStages`/
+`validateStageInterfaces` (replacing a bare `ColorAttachmentCount`), and
+skipping the location-output requirement whenever that slot's format is
+`ResourceFormat::Unknown` (the same "unused" placeholder). The pre-existing
+H7n depth/stencil-only sample-count fallback in `getRenderTargets` (`if
+(Subpass.ColorAttachments.empty()) ...`) was also widened to `if
+(!AnyColorSampleCount) ...`, since a subpass whose color-attachment list
+is non-empty but every slot in it is unused is the same "no color
+attachment ever set it" gap H7n fixed, just reachable a different way.
+
+**Unit tests (new).** `DrawTest.cpp`'s `ClassicRenderPassSkipsUnusedColorAttachment`:
+a real classic `VkRenderPass` with a 2-slot subpass color-attachment list
+(location 0 `VK_ATTACHMENT_UNUSED`, location 1 a real attachment), a
+dual-output fragment shader writing both locations, confirming the
+unused location's write is silently discarded while the real location's
+write lands correctly -- mirrors the pre-existing dynamic-rendering
+sibling test, `DynamicRenderingSkipsNullColorAttachment`, which continues
+to pass unchanged (no regression in the E5 mechanism this row reuses).
+
+**Real CTS re-run.** `dEQP-VK.pipeline.monolithic.multisample.alpha_to_coverage_unused_attachment.*`:
+the `"an unused color attachment slot is not implemented"` rejection is
+gone entirely (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`) -- this
+row's own two fixes are both real and confirmed necessary (without the
+`validateStageInterfaces` fix, every case still failed pipeline creation,
+now with `"fragment stage has no 4-component floating-point output at
+location 1 (SV_Target1)"`, since location 1 is the real/used slot, not
+the unused one). However, the CTS case still does not pass end-to-end
+even with both fixes: it surfaces a *third*, independent, still-unfixed
+gap -- the real attachment's own fragment output (`fragColor1 =
+vtxColor.rgb`, a `vec3`) has only 3 components, not the 4 both
+`validateStageInterfaces` and `Executor.cpp` still hard-require for a
+*used* attachment's own output. This is unrelated to the unused-slot
+mechanism itself (confirmed: this row's own regression test, which uses
+full 4-component outputs throughout, passes cleanly with no vec3
+involved), so it is broken out as a new, separate follow-on, H7t, rather
+than folded into this row.
+
+**`ninja check-feme`.** Passes in full at **2036/2095** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7r's own 2035/2094 baseline
+by exactly the 1 new test this row adds (`DrawTest.cpp`'s
+`ClassicRenderPassSkipsUnusedColorAttachment`).
+
+**Documentation.** `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+confirmed no change needed (a core render-pass/subpass capability, not a
+feature bit or extension). `FeMeVulkanDesign.md`'s render-target-binding
+design section updated with an "Update (roadmap H7s, closed)" paragraph.
+`Roadmap.md`'s H7s struck through; H7t (the narrower-than-4-component
+fragment output gap) added as a new, open, P2 follow-on.

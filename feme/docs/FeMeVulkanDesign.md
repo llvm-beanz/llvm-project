@@ -2096,9 +2096,19 @@ re-run (12/12 feme-supported-sample-count cases passing); it has no
 `VkPhysicalDeviceFeatures` gate in the spec, so there is no feature bit to
 flip. H7n's own real CTS re-run also surfaced (and H7q fixed) an unrelated,
 pre-existing bug in a zero-color-attachment `VkRenderPass`'s render-target
-sample-count derivation, and surfaced (tracked as H7r, not yet fixed) a
-pre-existing, unrelated lack of `VK_FORMAT_R5G6B5_UNORM_PACK16` support. See
-"Roadmap H7n: measured impact" in VulkanCTSReport.md for the full
+sample-count derivation, and surfaced (and H7r fixed) a pre-existing,
+unrelated lack of `VK_FORMAT_R5G6B5_UNORM_PACK16` (and 6 other packed
+16-bit formats) support. H7r's own re-run then surfaced (and H7s fixed) a
+separate, previously-untracked gap: a classic `VkRenderPass` subpass's
+`VK_ATTACHMENT_UNUSED` color-attachment slot was rejected outright at both
+pipeline-creation and render-pass-binding time, unlike dynamic rendering's
+already-working `VK_NULL_HANDLE`-imageView equivalent (roadmap E5); both
+call sites now reuse that same "present but unused" mechanism. H7s's own
+re-run in turn surfaced a fourth, still-open gap (tracked as H7t): a
+fragment stage's color output narrower than 4 components (e.g. a `vec3`)
+at a *used* attachment location is still rejected outright. See
+"Roadmap H7n: measured impact", "Roadmap H7r: measured impact", and
+"Roadmap H7s: measured impact" in VulkanCTSReport.md for the full
 before/after CTS breakdown. The rest of
 H7's own survey (`vertexPipelineStoresAndAtomics`/
 `fragmentStoresAndAtomics`, `shaderClipDistance`/`shaderCullDistance`,
