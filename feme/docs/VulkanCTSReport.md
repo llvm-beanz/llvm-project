@@ -14892,3 +14892,144 @@ this section. `VulkanExtensionInventory.md` confirmed no change needed
 **not** struck through (real CTS cases still fail), but annotated with
 what it closed and a pointer to the new H7z follow-on row this
 re-run's own newly-discovered blocker required.
+
+## Roadmap H7y: measured impact (tessellation-evaluation/geometry-stage `gl_ClipDistance`/`gl_CullDistance` writes)
+
+**Implementation.** A single, foundational fix, found via a real
+`glslangValidator`/`feme-translate --spirv-to-llvmir` IR reduction of a
+minimal geometry shader reading `gl_in[i].gl_Position` in a loop:
+`StageIOAddressOfPattern` (`SPIRVToLLVMPatterns.cpp`) eagerly loaded
+*any* `Input`-storage-class stage-IO variable's whole value at its own
+`spirv.mlir.addressof` site, including an array-typed one (`gl_in[]`
+itself, or H7x's own standalone `gl_ClipDistance`/`gl_CullDistance`
+read) -- which cannot represent a genuinely dynamic (loop-carried)
+index at all, since `llvm.extractvalue`'s own index operands are
+compile-time-constant only. The fix required three coordinated changes,
+found iteratively via `feme-opt --debug-only=dialect-conversion` traces
+once the first change alone produced silently-mistyped IR (a "Note:
+Replacing op result of type ... with value(s) of type ..., but the
+legalized type(s) is/are ..." diagnostic) rather than an immediate
+error:
+
+- `StageIOAddressOfPattern` itself: an array-typed `Input` variable now
+  stays a real pointer, exactly like `Output` already does.
+- The parallel `addConversion(spirv::PointerType)` callback (a separate
+  source of truth MLIR's dialect-conversion framework and other patterns
+  query) gained the same array-pointee special case for `Input`.
+- A new, dedicated `StageIOArrayAccessChainPattern` (same class name as
+  H7x's own since-superseded `extractvalue`-based version, rewritten)
+  builds the resulting `getelementptr` directly with an explicit
+  real-pointer result type -- MLIR's own generic `AccessChainPattern`
+  cannot be reused, since it re-derives an inherently ambiguous result
+  type from the access chain's leaf SPIR-V pointer type alone (a
+  scalar/vector leaf's "declared" converted type cannot distinguish a
+  standalone scalar `Input` variable's own address from an access-chain
+  leaf into this array) -- plus a new `addTargetMaterialization`
+  callback on the `LLVMTypeConverter` resolving the one remaining
+  ambiguity at the following `spirv.Load`'s operand lookup, by emitting
+  an ordinary `llvm.load` through the real pointer whenever the
+  framework needs a value of the "expected" (eagerly-loaded-value) type
+  but only has that pointer on hand.
+
+Confirmed via 3 lit test cases in
+`Conversion/SPIRVToLLVM/spirv-to-llvm-stage-io.mlir` (a constant-index
+`gl_ClipDistance[0]` read -- rewritten from its prior
+`llvm.extractvalue`-based expectation -- a genuinely dynamic-index read,
+and a two-level `gl_in[i].gl_Position` read), replacing the now-invalid
+`spirv-to-llvm-stage-io-array-access-invalid.mlir` (deleted: its own
+premise, that a dynamic index into a value-modeled array always
+produces a diagnosed error, is no longer true).
+
+A real IR reduction (`glslangValidator -V` on a minimal geometry shader
+looping over `gl_in[i].gl_Position` →
+`feme-translate --import-spirv --no-implicit-module
+--spirv-to-llvmir`) reproduced the pre-fix
+`'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but
+got '!llvm.array<3 x ...>'` verifier error exactly, and confirmed it no
+longer fires post-fix -- the reduction now produces valid LLVM IR
+(`getelementptr` + `load`, no verifier errors, no stray
+`unrealized_conversion_cast`).
+
+**`ninja check-feme`.** Passes in full at **2049/2108** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`).
+
+**Real Vulkan CTS re-run.** With `shaderClipDistance`/`shaderCullDistance`
+provisionally flipped to `VK_TRUE` purely to let CTS attempt these cases
+(reverted before committing, matching H7h/H7w/H7x's own measurement
+discipline), a re-run of the 32
+`dEQP-VK.clipping.user_defined.clip_distance.vert_tess.*`/`vert_geom.*`
+cases (the primary target this row's own text names) gives:
+
+```
+vert_tess: Passed 0/16, Failed 16/16
+vert_geom: Passed 0/16, Failed 16/16
+```
+
+Every case now fails with a **different, new** error than before this
+row (the `getelementptr` verifier crash this row's own fix already
+resolved) -- and the errors split cleanly into three distinct shapes,
+none seen by any prior roadmap row's own CTS re-run:
+
+```
+# vert_geom (non-_fragmentshader_read), via FEME_VULKAN_LOG_CREATION_ERRORS=1:
+vkQueueSubmit: vertex/domain stage output -> geometry stage input:
+element 2 and its producer element 4 disagree on component/row count or
+type
+  Fail (vk.queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED)
+
+# vert_tess:
+error: feme-cpu-wrap-patch-constant: unsupported patch-constant input
+system value
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED)
+
+# *_fragmentshader_read (both vert_tess and vert_geom):
+error: feme-cpu-wrap-fragment: synthetic fragment layouts only support
+vertex operand 0
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED)
+```
+
+**What this confirms.** This row's own targeted gap -- the
+`getelementptr`-into-a-non-pointer crash named by this row's own text
+and by H7h's original CTS re-run -- is genuinely closed: that verifier
+error no longer occurs anywhere in either case list. But three further,
+separate, previously-undiscovered blockers sit one layer below,
+unrelated to the array/pointer representation this row fixed:
+
+1. A geometry stage's own per-vertex-arrayed `gl_ClipDistance`/
+   `gl_CullDistance` *input* does not stage-link correctly against the
+   vertex stage's single, non-arrayed *output* of the same builtin --
+   a signature-matching gap, not a lowering crash.
+2. A tessellation-evaluation stage cannot consume `gl_ClipDistance`/
+   `gl_CullDistance` as a patch-constant input at all.
+3. A fragment stage cannot read back a varying whose producer is a
+   tessellation-evaluation or geometry stage (only a vertex-stage
+   producer works, per H7x) -- `feme-cpu-wrap-fragment`'s own synthetic
+   fragment-input layout construction appears to hard-assume a single,
+   fixed producer stage.
+
+None of these three is specific to clip/cull-distance by itself (though
+clip/cull-distance is the first real CTS coverage to reach any of
+them), and none was in this row's own stated scope. They are broken out
+as new milestone **H13** (`H13a`/`H13b`/`H13c`) rather than nested under
+H7 (`H7`'s own single-letter suffix space, `H7a`-`H7z`, is now fully
+used, and this project's own "no more than one lowercase letter of
+nesting" convention rules out `H7aa`).
+
+**Feature-bit decision.** `shaderClipDistance`/`shaderCullDistance` stay
+`VK_FALSE` -- this row's own fix, while real, independently tested, and
+confirmed to close the gap this row's own text and H7h's CTS re-run
+named, does not by itself clear a real passing CTS case end to end
+(H7w's dynamic-index gap, H7x's `SIMDize`/H7z gap, and now H13's three
+new gaps all remain separately open).
+
+**Documentation.** `FeMeGraphicsDesign.md` gained a new "Status (roadmap
+H7y)" subsection, and its existing "Status (roadmap H7x)" subsection was
+updated to note that H7x's own original `extractvalue`-based fix was
+superseded by this row's more general pointer-based one (same class
+name, `StageIOArrayAccessChainPattern`, rewritten). `Vulkan14FeatureInventory.md`'s
+`shaderClipDistance`/`shaderCullDistance` rows updated with a pointer to
+this section. `VulkanExtensionInventory.md` confirmed no change needed
+(a core feature-bit row, not an extension). `Roadmap.md`'s H7y is now
+struck through (its own targeted gap is genuinely closed), with the
+three newly-discovered, out-of-scope blockers broken out as new
+milestone H13.
