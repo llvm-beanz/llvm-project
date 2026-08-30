@@ -37,23 +37,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H16 or any prerequisite work required to complete
+Can you continue working on H17 or any prerequisite work required to complete
 the H-series milestones?
 
-> **A `magFilter=LINEAR` magnification sample still produces slightly-wrong
-> (roughly +/-1 of 255 per channel) pixel values**, discovered via H15's own
-> real re-run of `dEQP-VK.texture.filtering.2d.*`: 156 remaining `Fail`s, all
-> real re-runs isolated to a `magFilter=LINEAR` case
-> (`combinations.nearest.linear.*`, `combinations.linear.linear.*`, plus the
-> `_mipmap_*` groups' own magnification cases) -- unlike H15's own gross
-> wrong-mip-level symptom, this is a small, consistent rounding-scale
-> discrepancy (e.g. `(50, 84, 171, 50)` rendered vs. `(49, 85, 170, 49)`
-> reference), suggesting a bilinear-weight or format-conversion rounding-mode
-> mismatch rather than a wrong texel or wrong level being read. Not yet
-> root-caused: needs a real, careful comparison of `femeRTSampleLinear2D`'s own
-> float-domain blend arithmetic (`FeMeRuntimeCPU.c`) and the UNORM8
-> encode/decode round-trip against the exact rounding convention
-> `tcu::TexLookupVerifier`'s own tolerance expects, to determine whether the gap
-> is in the bilinear weight computation itself, the final float-to-UNORM8
-> quantization, or a genuine (if small) tolerance mismatch in the verifier's own
-> assumptions
+> **Trilinear (`mipmapMode=VK_SAMPLER_MIPMAP_MODE_LINEAR`) filtering is not
+> implemented**, discovered via roadmap H16's own real re-run of
+> `dEQP-VK.texture.filtering.2d.*`: 70 of 74 remaining fails cluster cleanly
+> into every `minFilter` with a `_mipmap_linear` suffix
+> (`nearest_mipmap_linear`, `linear_mipmap_linear`), regardless of `magFilter`
+> (all 12/16 or more per group). `femeRTPlanImplicitLod`'s (`FeMeRuntimeCPU.c`)
+> own existing comment already flags this: `Samp->MipFilter` is accepted for the
+> API shape a real trilinear blend needs, but not yet consulted -- both
+> `Nearest` and `Linear` `mipmapMode` currently round to a single nearest level
+> (`femeRTSelectMipLevel`'s own `+0.5f`-then-round), never blending between the
+> two adjacent levels a real `mipmapMode=LINEAR` sampler is supposed to. Needs a
+> real investigation into computing the two adjacent integer levels bracketing
+> the clamped LOD float and blending
+> `femeRTSampleLinear2D`/`femeRTSamplePoint2D`'s own per-level result by the
+> LOD's fractional part, at every affected call site, when `Samp->MipFilter ==
+> Linear`
