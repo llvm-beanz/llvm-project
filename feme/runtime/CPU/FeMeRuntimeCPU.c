@@ -1521,17 +1521,32 @@ femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
 // `[0, MipLevels - 1]` -- used directly by an explicit-LOD sample, and (as
 // of roadmap H7i) by an implicit-LOD one too, given the `Lod`
 // `femeRTPlanImplicitLod` computes from real screen-space derivatives
-// rather than a hard-coded level 0. `MipFilter` is accepted for the API
-// shape a future trilinear blend needs, but not yet consulted: both
+// rather than a hard-coded level 0. `Samp->MipFilter` is accepted for the
+// API shape a future trilinear blend needs, but not yet consulted: both
 // `Nearest` and `Linear` currently round to the nearer single level.
+//
+// (Roadmap H15) Per the Vulkan spec's own image level-of-detail
+// operation, `Samp->LodBias`/`MinLod`/`MaxLod` (`VkSamplerCreateInfo`'s
+// `mipLodBias`/`minLod`/`maxLod`) apply uniformly to *both* an implicit-
+// and an explicit-LOD sample: `lod = clamp(lod + mipLodBias, minLod,
+// maxLod)`, before ever clamping further to the image's own valid level
+// range. A caller that wants "always read the base level regardless of
+// minification" -- the standard technique a non-mipmap `VkFilter`
+// (`VK_FILTER_NEAREST`/`VK_FILTER_LINEAR`, as opposed to a mipmapped one)
+// is realized with -- sets `maxLod` to a small clamp (e.g. `0.25`) for
+// exactly this purpose; skipping this clamp here silently let any such
+// sampler's computed implicit LOD select a coarser real mip level than
+// the caller asked for.
 __attribute__((always_inline)) static uint32_t
 femeRTSelectMipLevel(const FemeRTImageDescriptor *Img, float Lod,
-                     _Bool UseExplicitLod, uint32_t MipFilter) {
-  (void)MipFilter;
+                     _Bool UseExplicitLod,
+                     const FemeRTSamplerDescriptor *Samp) {
   if (Img->MipLevels == 0)
     return 0;
   float MaxLevel = (float)(Img->MipLevels - 1);
   float L = UseExplicitLod ? Lod : 0.0f;
+  L += Samp->LodBias;
+  L = __builtin_fmaxf(Samp->MinLod, __builtin_fminf(L, Samp->MaxLod));
   L = __builtin_fmaxf(0.0f, __builtin_fminf(L, MaxLevel));
   uint32_t Level = (uint32_t)(L + 0.5f);
   return Level > Img->MipLevels - 1 ? Img->MipLevels - 1 : Level;
@@ -1635,8 +1650,7 @@ femeRTPlanImplicitLod(const FemeRTImageDescriptor *Img,
     }
   }
 
-  Plan.Level =
-      femeRTSelectMipLevel(Img, Lod, /*UseExplicitLod=*/1, Samp->MipFilter);
+  Plan.Level = femeRTSelectMipLevel(Img, Lod, /*UseExplicitLod=*/1, Samp);
   return Plan;
 }
 
@@ -1786,7 +1800,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
 
   if (UseExplicitLod) {
     uint32_t Level =
-        femeRTSelectMipLevel(&Img, Lod, /*UseExplicitLod=*/1, Samp.MipFilter);
+        femeRTSelectMipLevel(&Img, Lod, /*UseExplicitLod=*/1, &Samp);
     return Samp.MagFilter == 1 // SamplerFilter::Linear.
                ? femeRTSampleLinear2D(&Img, &Samp, U, V, Level, /*Layer=*/0)
                : femeRTSamplePoint2D(&Img, &Samp, U, V, Level, /*Layer=*/0);
@@ -1845,8 +1859,7 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
     return 0.0f;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  uint32_t Level =
-      femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
+  uint32_t Level = femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, &Samp);
 
   if (Samp.MagFilter != 1) { // Point (nearest).
     uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
@@ -1988,8 +2001,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  uint32_t Level =
-      femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
+  uint32_t Level = femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, &Samp);
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
   return Samp.MagFilter == 1 // SamplerFilter::Linear.
              ? femeRTSampleLinear2D(&Img, &Samp, U, V, Level, Layer)
@@ -2145,8 +2157,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
   Samp.AddressU = 2; // ClampToEdge -- see comment above.
   Samp.AddressV = 2;
-  uint32_t Level =
-      femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
+  uint32_t Level = femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, &Samp);
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   return Samp.MagFilter == 1
              ? femeRTSampleLinear2D(&Img, &Samp, CF.U, CF.V, Level, CF.Face)
@@ -2186,8 +2197,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
   Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageSampleCubeV4F32.
   Samp.AddressV = 2;
-  uint32_t Level =
-      femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
+  uint32_t Level = femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, &Samp);
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   uint32_t NumCubes = Img.ArrayLayers / 6;
   uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);

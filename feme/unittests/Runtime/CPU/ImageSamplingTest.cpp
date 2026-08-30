@@ -232,7 +232,12 @@ FemeSamplerDescriptor makeSampler(SamplerFilter MagFilter,
   Samp.AddressV = static_cast<uint32_t>(AddressMode);
   Samp.AddressW = static_cast<uint32_t>(AddressMode);
   Samp.MinLod = 0.0f;
-  Samp.MaxLod = 0.0f;
+  // `VK_LOD_CLAMP_NONE`: matches how a real application requests an
+  // unclamped mip range (roadmap H15's own `MinLod`/`MaxLod` clamp fix
+  // would otherwise force every sample in this file down to level 0,
+  // since a zero-initialized `MaxLod` is a real, valid "clamp to the
+  // base level" request, not merely an unset default).
+  Samp.MaxLod = 1000.0f;
   return Samp;
 }
 
@@ -501,6 +506,165 @@ TEST_F(ImageSamplingTest, ImplicitLodSelectsCoarserMipFromDerivatives) {
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/1.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
      /*UseExplicitLod=*/false, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
+}
+
+TEST_F(ImageSamplingTest, MaxLodClampsImplicitSampleToBaseLevel) {
+  // Roadmap H15: `dEQP-VK.texture.filtering.2d.combinations.*` (and any
+  // other case using a real, non-mipmapped `VkFilter`) sets the
+  // sampler's own `maxLod` to a small clamp (`0.25`, mirroring
+  // `vkImageUtil.cpp`'s own `mapSampler` for a `tcu::Sampler::NEAREST`/
+  // `LINEAR`/`CUBIC` min filter) specifically to force every implicit-LOD
+  // sample to the base level regardless of how minified the footprint
+  // actually is -- this is the same (U, V) and derivatives as
+  // `ImplicitLodSelectsCoarserMipFromDerivatives` above (which reads the
+  // coarser level 1 with an unclamped `MaxLod`), but a `MaxLod` of `0.25`
+  // here must instead clamp back down to level 0.
+  float Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                           {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  float Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    float L0[2][2][4];
+    float L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MaxLod = 0.25f;
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/1.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, MinLodClampsExplicitSampleAboveBaseLevel) {
+  // Roadmap H15: the same `MinLod`/`MaxLod` clamp applies to an
+  // explicit-LOD sample too (the Vulkan spec's own "lod = clamp(lod +
+  // mipLodBias, minLod, maxLod)" step does not distinguish an implicit
+  // from an explicit source for `lod`) -- an explicit `Lod` of `0.0`
+  // (which would ordinarily read the base level) must clamp up to level
+  // 1 when `MinLod` excludes level 0 entirely.
+  float Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                           {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  float Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    float L0[2][2][4];
+    float L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MinLod = 1.0f;
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/true, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
+}
+
+TEST_F(ImageSamplingTest, LodBiasShiftsSelectedLevel) {
+  // Roadmap H15: `Samp->LodBias` (`VkSamplerCreateInfo::mipLodBias`) adds
+  // into the level-of-detail computation before the `MinLod`/`MaxLod`
+  // clamp -- an explicit `Lod` of `0.0` with a `LodBias` of `1.0` must
+  // read level 1, exactly as if the caller had passed `Lod=1.0` outright.
+  float Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                           {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  float Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    float L0[2][2][4];
+    float L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.LodBias = 1.0f;
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/true, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
