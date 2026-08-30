@@ -37,19 +37,16 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7w?
+Can you continue working on H7x?
 
-> **`gl_ClipDistance[i]`/`gl_CullDistance[i]` with a non-constant (dynamically
-> computed) index `i` is rejected outright**, discovered via H7h's own real
+> **A fragment shader cannot read back the interpolated
+> `gl_ClipDistance`/`gl_CullDistance` value**, discovered via H7h's own real
 > re-run of
-> `dEQP-VK.clipping.user_defined.clip_distance_dynamic_index.*`/`clip_cull_distance_dynamic_index.*`
-> (0/32): `feme-graphics-validate-stage` fails every case with `"function 'main'
-> has an unresolved stage-IO global-variable access to 'spirv_varN', a shape
-> CanonicalizeStagePass does not yet canonicalize into a 'feme.stage.*' call"`
-> -- `CanonicalizeStagePass` only recognizes a constant
-> `OpAccessChain`/`OpCompositeExtract` index into a `gl_PerVertex` array member
-> today, not a runtime value (e.g. a loop-varying `int`). Needs a real
-> investigation into what canonicalization a dynamically-indexed stage-IO array
-> member requires (likely lowering to a bounds-checked runtime read/write
-> against the element's own backing storage, rather than the current
-> constant-index-only `feme.stage.*` call shape)
+> `dEQP-VK.clipping.user_defined.clip_distance.vert.*_fragmentshader_read`/`clip_cull_distance.vert.*_fragmentshader_read`
+> (0/16): these builtins have no fragment-stage system-value-linked input path
+> today (H7h's own vertex-stage output consumer does not, by itself, make the
+> value available to a fragment stage the way an ordinary user varying already
+> is). Needs a real investigation into what plumbing a fragment-stage read of
+> these two builtins requires -- likely treating them as an ordinary
+> interpolated stage-IO input from the fragment side, distinct from the
+> executor's own vertex-stage clip/cull consumer this row added
