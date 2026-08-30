@@ -37,18 +37,23 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7s?
+Can you continue working on H7t?
 
-> **A `VkRenderPass` subpass's color attachment list with a
-> `VK_ATTACHMENT_UNUSED` slot is rejected outright at pipeline-creation time.**
-> Discovered via H7r's own re-run of `alpha_to_coverage_unused_attachment.*`
-> (color output written to fragment location 1, location 0 explicitly unused):
-> `GraphicsPipeline.cpp`'s `getRenderTargets` fails every case with `"an unused
-> color attachment slot is not implemented"` once H7r's own format fix lets
-> these cases clear the format gate for the first time -- a separate, larger,
-> previously-untracked gap in subpass/render-target construction, unrelated to
-> color-format support itself. Needs a real investigation into what
-> `getRenderTargets`/the fragment-stage-output-to-attachment-slot mapping
-> assumes about every slot being bound to a real attachment, and what has to
-> change (likely treating an unused slot as "no attachment, but a real output
-> location the shader may still write that is simply discarded") to support it
+> **A fragment stage's color output with fewer than 4 components (e.g. a `vec3`)
+> at a *used* color-attachment location is rejected outright**, discovered via
+> H7s's own re-run of `alpha_to_coverage_unused_attachment.*` (its own real
+> attachment's fragment output, `fragColor1 = vtxColor.rgb`, is a `vec3` at
+> location 1 -- legal per spec, with the missing components implicitly defined,
+> alpha defaulting to `1.0`). `GraphicsPipeline.cpp`'s `validateStageInterfaces`
+> (`Color->ComponentCount != 4`) and `Executor.cpp`'s fragment-output linkage
+> (`FSColor->ComponentCount != 4` at line 1377, and the equivalent checks for a
+> second color output and the alpha-to-coverage element) all hard-require
+> exactly 4 components for a real (used) attachment's own output; this is
+> unrelated to H7s's own unused-attachment-slot mechanism (confirmed: H7s's own
+> unit tests, all full 4-component outputs, pass cleanly with no regression).
+> Needs a real survey of what padding/defaulting a fragment output narrower than
+> 4 components requires end to end (accepting `ComponentCount` in `{1, 2, 3, 4}`
+> at `validateStageInterfaces`, then `Executor.cpp` synthesizing the missing
+> trailing components -- `0.0` for a missing G/B, `1.0` for a missing A,
+> mirroring how a narrower vertex *input* attribute is already zero/one-extended
+> elsewhere in this codebase)
