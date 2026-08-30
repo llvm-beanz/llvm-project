@@ -37,22 +37,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H17 or any prerequisite work required to complete
+Can you continue working on H18 or any prerequisite work required to complete
 the H-series milestones?
 
-> **Trilinear (`mipmapMode=VK_SAMPLER_MIPMAP_MODE_LINEAR`) filtering is not
-> implemented**, discovered via roadmap H16's own real re-run of
-> `dEQP-VK.texture.filtering.2d.*`: 70 of 74 remaining fails cluster cleanly
-> into every `minFilter` with a `_mipmap_linear` suffix
-> (`nearest_mipmap_linear`, `linear_mipmap_linear`), regardless of `magFilter`
-> (all 12/16 or more per group). `femeRTPlanImplicitLod`'s (`FeMeRuntimeCPU.c`)
-> own existing comment already flags this: `Samp->MipFilter` is accepted for the
-> API shape a real trilinear blend needs, but not yet consulted -- both
-> `Nearest` and `Linear` `mipmapMode` currently round to a single nearest level
-> (`femeRTSelectMipLevel`'s own `+0.5f`-then-round), never blending between the
-> two adjacent levels a real `mipmapMode=LINEAR` sampler is supposed to. Needs a
-> real investigation into computing the two adjacent integer levels bracketing
-> the clamped LOD float and blending
-> `femeRTSampleLinear2D`/`femeRTSamplePoint2D`'s own per-level result by the
-> LOD's fractional part, at every affected call site, when `Samp->MipFilter ==
-> Linear`
+> **`b10g11r11_ufloat` texture filtering fails independently of any mip/filter
+> combination**, discovered via roadmap H16's own real re-run of
+> `dEQP-VK.texture.filtering.2d.*`: the remaining fails not explained by H17's
+> own trilinear gap are all `formats.b10g11r11_ufloat.*` -- no format-neutral
+> pattern involved, so this is a distinct, format-specific gap, not
+> trilinear-related. H17's own closure re-run corrects the count from 4 to the
+> real 6 (all six
+> `formats.b10g11r11_ufloat.{linear,linear_mipmap_linear,linear_mipmap_nearest,nearest,nearest_mipmap_linear,nearest_mipmap_nearest}`
+> cases fail, not just the 4 non-`_mipmap_linear`-suffixed ones H16's own
+> narrower sample happened to catch). Not yet root-caused: needs a real
+> pixel-level reduction of one of these cases (e.g.
+> `formats.b10g11r11_ufloat.nearest`, the simplest -- no mip, no blend) to
+> determine whether the bug is in this packed-float format's own encode/decode
+> round-trip, or something else specific to this one format
