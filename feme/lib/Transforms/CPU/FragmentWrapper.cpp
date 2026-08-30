@@ -280,7 +280,17 @@ Value *lowerFragmentInputLoad(CallInst &CI, const SignatureElement &Elt,
     Value *LaneResult = Constant::getNullValue(ScalarTy);
     Value *InvocationIndex =
         getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
-    if (Elt.SystemValue != SignatureSystemValue::None) {
+    if (Elt.SystemValue != SignatureSystemValue::None &&
+        // (roadmap H7x) `gl_ClipDistance`/`gl_CullDistance` fragment
+        // inputs are linked into the ordinary `FSInput` varying storage
+        // by `Executor.cpp` (by `SystemValue` rather than `Location`,
+        // since these builtins carry no `Location` of their own), not
+        // into the per-invocation `FragmentInvocation` struct the other
+        // system values below read from -- so they take the same
+        // ordinary-varying path as any other linked input, keyed by
+        // `Elt.ElementID` the same way.
+        Elt.SystemValue != SignatureSystemValue::ClipDistance &&
+        Elt.SystemValue != SignatureSystemValue::CullDistance) {
       // (roadmap H7d) A `Position`/`FragCoord` element's `Elt` always
       // describes the *whole* `vec4` builtin (`Elt.FirstComponent == 0`,
       // `Elt.ComponentCount == 4`) -- unlike an ordinary varying, whose

@@ -79,15 +79,29 @@ Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
     E.SystemValue = static_cast<uint32_t>(Elt.SystemValue);
     if (Elt.SystemValue != SignatureSystemValue::None)
       E.Flags |= cpu::FEME_STAGE_ELEMENT_SYSTEM_VALUE;
-    // A system-value *input* is sourced from the invocation record by the
-    // compiled wrapper, not from this layout's `DataOffset` (see
-    // VertexWrapper.cpp/FragmentWrapper.cpp's `lowerVertexInputLoad`/
-    // `lowerFragmentInputLoad`), so it needs no storage. An output is
-    // always written through stage storage regardless of `SystemValue`
-    // (e.g. `SV_Position` -- see `lowerVertexOutputStore`), so only skip
-    // allocating storage for an input.
+    // A system-value *input* is normally sourced from the invocation
+    // record by the compiled wrapper, not from this layout's
+    // `DataOffset` (see VertexWrapper.cpp/FragmentWrapper.cpp's
+    // `lowerVertexInputLoad`/`lowerFragmentInputLoad`), so it needs no
+    // storage. An output is always written through stage storage
+    // regardless of `SystemValue` (e.g. `SV_Position` -- see
+    // `lowerVertexOutputStore`), so only skip allocating storage for an
+    // input.
+    //
+    // (roadmap H7x) `gl_ClipDistance`/`gl_CullDistance` fragment *inputs*
+    // are the one exception: `Executor.cpp` links them into the ordinary
+    // `Varyings` list by `SystemValue` (they carry no `Location` of their
+    // own) the same way any other varying is, writing/reading them
+    // through this same stage storage rather than a per-invocation
+    // record field -- so, unlike every other fragment system-value
+    // input, they still need real storage allocated here.
+    bool IsInterpolatedFragmentInput =
+        Direction == SignatureDirection::Input &&
+        (Elt.SystemValue == SignatureSystemValue::ClipDistance ||
+         Elt.SystemValue == SignatureSystemValue::CullDistance);
     if (Elt.SystemValue != SignatureSystemValue::None &&
-        Direction == SignatureDirection::Input)
+        Direction == SignatureDirection::Input &&
+        !IsInterpolatedFragmentInput)
       continue;
     if (Elt.BitWidth != 32)
       return createStringError(inconvertibleErrorCode(),

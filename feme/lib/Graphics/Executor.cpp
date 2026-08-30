@@ -1396,8 +1396,37 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // same `Location` (Vulkan-style linkage; see "Normalized pipeline").
   SmallVector<LinkedVarying, 8> Varyings;
   for (const SignatureElement &FSIn : FSSig.Elements) {
-    if (FSIn.Direction != SignatureDirection::Input ||
-        FSIn.SystemValue != SignatureSystemValue::None)
+    if (FSIn.Direction != SignatureDirection::Input)
+      continue;
+    // (roadmap H7x) `gl_ClipDistance`/`gl_CullDistance` read back by the
+    // fragment stage: these carry no `Location` (they are builtins), so
+    // they link by `SystemValue` against the same `VSClipDistance`/
+    // `VSCullDistance` output this function's own vertex-side clip/cull
+    // consumer (roadmap H7h) already resolved above, rather than by
+    // `Location` like an ordinary varying below. Once linked, the
+    // interpolation loops above/below need no further special-casing:
+    // both already read/write generically over `LinkedVarying::RowCount`.
+    if (FSIn.SystemValue == SignatureSystemValue::ClipDistance ||
+        FSIn.SystemValue == SignatureSystemValue::CullDistance) {
+      bool IsClip = FSIn.SystemValue == SignatureSystemValue::ClipDistance;
+      const SignatureElement *VSOut = IsClip ? VSClipDistance : VSCullDistance;
+      if (!VSOut)
+        return createStringError(inconvertibleErrorCode(),
+                                 "fragment stage reads gl_%sDistance but the "
+                                 "last pre-rasterization stage does not "
+                                 "write it",
+                                 IsClip ? "Clip" : "Cull");
+      if (FSIn.ComponentCount != 1 || FSIn.RowCount > VSOut->RowCount)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vertex output and fragment input "
+                                 "gl_%sDistance disagree on element count",
+                                 IsClip ? "Clip" : "Cull");
+      Varyings.push_back({VSOut->ElementID, FSIn.ElementID, FSIn.ComponentCount,
+                          FSIn.RowCount, FSIn.ComponentType,
+                          FSIn.Interpolation});
+      continue;
+    }
+    if (FSIn.SystemValue != SignatureSystemValue::None)
       continue;
     if (!FSIn.Location)
       return createStringError(inconvertibleErrorCode(),
