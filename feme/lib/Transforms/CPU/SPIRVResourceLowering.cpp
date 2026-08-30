@@ -82,13 +82,14 @@ enum class HandleKind {
   TexelUniform,
   SampledImage2D,
   Sampler,
-  /// A plain, non-arrayed, non-multisampled storage image (roadmap H19a):
-  /// `OpImageRead`/`OpImageWrite` through a `Sampled == 2` handle, lowered
-  /// to `feme.cpu.image.{load,store}.2d.*` rather than the sampled-image
-  /// `feme.cpu.image.sample.*` shapes. Unlike `SampledImage2D`, this kind
-  /// is scoped to `ImageShape::Plain2D` only for now (see
-  /// `classifyStorageImage2DHandle`'s comment) -- there is no `Shape` field
-  /// distinction to make since every instance is that one shape.
+  /// A storage image (roadmap H19a/H19b): `OpImageRead`/`OpImageWrite`
+  /// through a `Sampled == 2` handle, lowered to
+  /// `feme.cpu.image.{load,store}.2d(array).*` rather than the
+  /// sampled-image `feme.cpu.image.sample.*` shapes. Covers
+  /// `ImageShape::Plain2D` (roadmap H19a) and `ImageShape::Array2D`
+  /// (roadmap H19b) only; `Cube`/`CubeArray` remain unstarted follow-on
+  /// work (roadmap H19d) -- unlike `SampledImage2D`, this kind's `Shape`
+  /// is therefore never `Cube`/`CubeArray` in practice.
   StorageImage2D
 };
 
@@ -474,16 +475,18 @@ classifySampledImage2DHandle(const CallInst &Handle) {
                               ChannelType, Shape};
 }
 
-/// Returns \p Handle's classification if its type is a plain, non-arrayed,
-/// non-multisampled storage-image handle (`Sampled == 2`, roadmap H19a):
-/// the counterpart of `classifySampledImage2DHandle` above for
+/// Returns \p Handle's classification if its type is a plain or arrayed,
+/// non-multisampled storage-image handle (`Sampled == 2`, roadmap
+/// H19a/H19b): the counterpart of `classifySampledImage2DHandle` above for
 /// `OpImageRead`/`OpImageWrite` rather than a filtered sample. Scoped to
-/// `Dim::2D`, non-arrayed, non-multisampled only for now -- an arrayed or
-/// cube storage image, or a multisampled one, is left as unstarted
-/// follow-on work (see Roadmap.md's H19b/H19c breakdown), so every other
-/// shape returns `std::nullopt` here, exactly like
-/// `classifySampledImage2DHandle`'s own multisample/other-dimension
-/// rejections.
+/// `Dim::2D`, non-multisampled only for now -- a cube storage image, or a
+/// multisampled one, is left as unstarted follow-on work (see
+/// Roadmap.md's H19c/H19d breakdown), so every other shape returns
+/// `std::nullopt` here, exactly like `classifySampledImage2DHandle`'s own
+/// multisample/other-dimension rejections. Unlike the sampled-image
+/// classifier above, there is no `Cube`/`CubeArray` case to distinguish, so
+/// `Arrayed` maps directly to `Plain2D`/`Array2D` with no intermediate
+/// `Dim` switch needed.
 std::optional<HandleClassification>
 classifyStorageImage2DHandle(const CallInst &Handle) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
@@ -496,8 +499,7 @@ classifyStorageImage2DHandle(const CallInst &Handle) {
   // [Dim, Depth, Arrayed, MS, Sampled, Format].
   if (HandleTy->getIntParameter(0) != SPIRVDim2D)
     return std::nullopt;
-  if (HandleTy->getIntParameter(2) != 0) // Arrayed: not yet supported.
-    return std::nullopt;
+  bool Arrayed = HandleTy->getIntParameter(2) != 0; // Roadmap H19b.
   if (HandleTy->getIntParameter(3) != 0) // MS: not yet supported.
     return std::nullopt;
   if (HandleTy->getIntParameter(4) != SPIRVSampledWithoutSampler)
@@ -507,7 +509,9 @@ classifyStorageImage2DHandle(const CallInst &Handle) {
   if (!ChannelType->isFloatTy() && !ChannelType->isIntegerTy(32))
     return std::nullopt; // No other channel shape is decodable today.
   return HandleClassification{HandleKind::StorageImage2D, 0, nullptr,
-                              ChannelType, ImageShape::Plain2D};
+                              ChannelType,
+                              Arrayed ? ImageShape::Array2D
+                                      : ImageShape::Plain2D};
 }
 
 /// Returns \p Handle's classification if its type is a `spirv.Sampler`
@@ -645,19 +649,25 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
 }
 
 /// Checks that every use of a `HandleKind::StorageImage2D` handle (roadmap
-/// H19a) is a plain `getpointer` texel access (`OpImageRead`/`OpImageWrite`,
-/// same shape `hasOnlySupportedImageUses` accepts for a sampled image's own
-/// fetch), whose own users are `Load`s and/or `Store`s of the matching
-/// `<4 x float>`/`<4 x i32>` type -- both may appear on the *same*
-/// `getpointer` call, since the CTS's own `load_store` shader pattern reads
-/// and writes the same binding (a copy-shader idiom), unlike every other
-/// pointer-use check in this file, which does not need to consider that.
-bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger) {
+/// H19a/H19b) is a plain `getpointer` texel access (`OpImageRead`/
+/// `OpImageWrite`, same shape `hasOnlySupportedImageUses` accepts for a
+/// sampled image's own fetch), whose own users are `Load`s and/or `Store`s
+/// of the matching `<4 x float>`/`<4 x i32>` type -- both may appear on the
+/// *same* `getpointer` call, since the CTS's own `load_store` shader
+/// pattern reads and writes the same binding (a copy-shader idiom), unlike
+/// every other pointer-use check in this file, which does not need to
+/// consider that. \p Shape (roadmap H19b) is `Plain2D` or `Array2D` --
+/// `classifyStorageImage2DHandle` never returns `Cube`/`CubeArray` for a
+/// storage image today -- and selects the coordinate width exactly like
+/// `hasOnlySupportedImageUses`'s own `FetchCoordWidth`.
+bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
+                                      ImageShape Shape) {
+  unsigned CoordWidth = Shape == ImageShape::Array2D ? 3 : 2;
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
     if (!CI || getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
       return false;
-    if (!isCoordN(CI->getArgOperand(1), /*Width=*/2, /*Float=*/false))
+    if (!isCoordN(CI->getArgOperand(1), CoordWidth, /*Float=*/false))
       return false;
     for (const User *PU : CI->users()) {
       if (const auto *LI = dyn_cast<LoadInst>(PU)) {
@@ -957,7 +967,8 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
       break;
     case HandleKind::StorageImage2D:
       if (!hasOnlySupportedStorageImageUses(
-              *CI, Classification->TexelElementType->isIntegerTy(32)))
+              *CI, Classification->TexelElementType->isIntegerTy(32),
+              Classification->Shape))
         return std::nullopt;
       break;
     case HandleKind::Sampler:
@@ -1414,20 +1425,28 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
                         ? Builder.CreateExtractElement(Coord, uint64_t{2})
                         : nullptr;
       for (User *PU : llvm::make_early_inc_range(CI->users())) {
-        // `HandleKind::StorageImage2D` (roadmap H19a) accepts a `StoreInst`
-        // user here too -- `hasOnlySupportedStorageImageUses` already
-        // guaranteed its shape (matching value type, pointer operand ==
-        // this `getpointer` call), unlike `hasOnlySupportedImageUses`,
-        // which never accepts a store against a sampled image's own
-        // read-only fetch.
+        // `HandleKind::StorageImage2D` (roadmap H19a/H19b) accepts a
+        // `StoreInst` user here too -- `hasOnlySupportedStorageImageUses`
+        // already guaranteed its shape (matching value type, pointer
+        // operand == this `getpointer` call), unlike
+        // `hasOnlySupportedImageUses`, which never accepts a store against
+        // a sampled image's own read-only fetch.
         if (auto *SI = dyn_cast<StoreInst>(PU)) {
           IRBuilder<> StoreBuilder(SI);
           Value *Texel = SI->getValueOperand();
           bool IsInteger = isV4I32(Texel->getType());
-          if (IsInteger)
+          if (Shape == ImageShape::Array2D) {
+            if (IsInteger)
+              createStore2DArrayI32(StoreBuilder, Env, ImageIndex, X, Y,
+                                    Layer, Texel, Mask);
+            else
+              createStore2DArray(StoreBuilder, Env, ImageIndex, X, Y, Layer,
+                                 Texel, Mask);
+          } else if (IsInteger) {
             createStore2DI32(StoreBuilder, Env, ImageIndex, X, Y, Texel, Mask);
-          else
+          } else {
             createStore2D(StoreBuilder, Env, ImageIndex, X, Y, Texel, Mask);
+          }
           SI->eraseFromParent();
           continue;
         }

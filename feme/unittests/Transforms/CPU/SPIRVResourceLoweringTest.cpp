@@ -1490,7 +1490,9 @@ TEST(SPIRVResourceLoweringTest,
 // handle (`Sampled == 2`, no sampler), previously rejected outright by
 // `classifySampledImage2DHandle`, now classifies as `HandleKind::
 // StorageImage2D` and lowers `OpImageWrite`/`OpImageRead` to
-// `feme.cpu.image.store.2d.*`/`load.2d.*`.
+// `feme.cpu.image.store.2d.*`/`load.2d.*`. Roadmap H19b below widens this
+// to an arrayed storage image, lowering to `.store.2darray.*`/
+// `.load.2darray.*` instead.
 
 TEST(SPIRVResourceLoweringTest, LowersStorageImageWriteToImageStore) {
   LLVMContext Ctx;
@@ -1578,24 +1580,110 @@ TEST(SPIRVResourceLoweringTest, LowersStorageImageLoadStoreToBothCalls) {
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2d.v4f32"));
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesAnArrayedStorageImageHandleAlone) {
-  // Scoped to `Plain2D` only for now (see `classifyStorageImage2DHandle`'s
-  // comment): an arrayed storage image handle is left unrewritten rather
-  // than lowered into a helper that would silently drop the array layer.
+TEST(SPIRVResourceLoweringTest, LowersArrayedStorageImageWriteToImageStoreArray) {
+  // Roadmap H19b: an arrayed (`Arrayed == 1`) storage image handle
+  // (`Sampled == 2`) now classifies as `HandleKind::StorageImage2D` with
+  // `ImageShape::Array2D`, and its `OpImageWrite` (a `store` through
+  // `llvm.spv.resource.getpointer` on a 3-component `(x, y, layer)`
+  // coordinate) lowers to `feme.cpu.image.store.2darray.v4f32`.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define void @main(<2 x i32> %coord, <4 x float> %texel) {
+    define void @main(<3 x i32> %coord, <4 x float> %texel) {
       %img = call target("spirv.Image", float, 1, 0, 1, 0, 2, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %p = call ptr @llvm.spv.resource.getpointer.timg(
-          target("spirv.Image", float, 1, 0, 1, 0, 2, 0) %img, <2 x i32> %coord)
+          target("spirv.Image", float, 1, 0, 1, 0, 2, 0) %img, <3 x i32> %coord)
       store <4 x float> %texel, ptr %p
       ret void
     }
     declare target("spirv.Image", float, 1, 0, 1, 0, 2, 0)
         @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
     declare ptr @llvm.spv.resource.getpointer.timg(
-        target("spirv.Image", float, 1, 0, 1, 0, 2, 0), <2 x i32>)
+        target("spirv.Image", float, 1, 0, 1, 0, 2, 0), <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darray.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersIntegerArrayedStorageImageWriteToImageStoreArrayV4I32) {
+  // The integer-format counterpart: `OpTypeImage` with an integer sampled
+  // type lowers to `feme.cpu.image.store.2darray.v4i32` instead.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<3 x i32> %coord, <4 x i32> %texel) {
+      %img = call target("spirv.Image", i32, 1, 0, 1, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", i32, 1, 0, 1, 0, 2, 0) %img, <3 x i32> %coord)
+      store <4 x i32> %texel, ptr %p
+      ret void
+    }
+    declare target("spirv.Image", i32, 1, 0, 1, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", i32, 1, 0, 1, 0, 2, 0), <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darray.v4i32"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersArrayedStorageImageLoadStoreToBothCalls) {
+  // An arrayed storage image handle used for both a load (`OpImageRead`)
+  // and a store (`OpImageWrite`) lowers each independently to the arrayed
+  // helper pair.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<3 x i32> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 1, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 1, 0, 2, 0) %img, <3 x i32> %coord)
+      %v = load <4 x float>, ptr %p
+      store <4 x float> %v, ptr %p
+      ret void
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 1, 0, 2, 0), <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.load.2darray.v4f32"));
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darray.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesAMultisampledStorageImageHandleAlone) {
+  // A multisampled (`MS == 1`) storage image handle is still rejected --
+  // H19b only widens the `Arrayed` axis, not `MS` (that is roadmap H19d's
+  // scope).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<2 x i32> %coord, <4 x float> %texel) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 1, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 0, 1, 2, 0) %img, <2 x i32> %coord)
+      store <4 x float> %texel, ptr %p
+      ret void
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 1, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 0, 1, 2, 0), <2 x i32>)
   )");
   ASSERT_TRUE(M);
   runPass(*M);
@@ -1603,5 +1691,7 @@ TEST(SPIRVResourceLoweringTest, LeavesAnArrayedStorageImageHandleAlone) {
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.store.2d.v4f32"));
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.store.2darray.v4f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
+
