@@ -70,6 +70,46 @@ TEST(PrepareTest, PromotesAllocaAndLowersSwitch) {
   }
 }
 
+// Roadmap H19a: a `Function`-storage-class SPIR-V local variable (e.g. a
+// `gl_GlobalInvocationID.xy` scratch temporary) lowers to a vector-typed
+// `alloca` accessed one element at a time through a `getelementptr` --
+// `PromotePass` (plain `mem2reg`) alone refuses to promote any `alloca`
+// with a `getelementptr` use at all (`isAllocaPromotable`'s documented
+// precondition), which previously left a real, divergent vector `store`
+// into it for `feme::cpu::SIMDizePass` to reject outright (reduced from a
+// real failing `dEQP-VK.image.load_store.with_format.2d.r32_sfloat` case).
+// `SROAPass`, now run first, splits the `alloca` into per-element scalars
+// that `PromotePass` can then promote, eliminating it (and its
+// `getelementptr`s) entirely, leaving pure SSA `insertelement`/
+// `extractelement` for `feme::cpu::SIMDizePass` to widen normally.
+TEST(PrepareTest, PromotesVectorAllocaAccessedThroughGetElementPtr) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<2 x i32> %coord) #0 {
+      %a = alloca <2 x i32>
+      store <2 x i32> %coord, ptr %a
+      %x_ptr = getelementptr <2 x i32>, ptr %a, i32 0, i32 0
+      %x = load i32, ptr %x_ptr
+      %y_ptr = getelementptr <2 x i32>, ptr %a, i32 0, i32 1
+      %y = load i32, ptr %y_ptr
+      %sum = add i32 %x, %y
+      ret void
+    }
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  for (const Instruction &I : instructions(F)) {
+    EXPECT_FALSE(isa<AllocaInst>(I));
+    EXPECT_FALSE(isa<GetElementPtrInst>(I));
+    EXPECT_FALSE(isa<LoadInst>(I));
+    EXPECT_FALSE(isa<StoreInst>(I));
+  }
+}
+
 TEST(PrepareTest, KeepsOnlySelectedEntryPoint) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

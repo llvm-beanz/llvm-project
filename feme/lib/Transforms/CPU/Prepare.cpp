@@ -24,6 +24,7 @@
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Scalar/StructurizeCFG.h"
 #include "llvm/Transforms/Utils/BreakCriticalEdges.h"
 #include "llvm/Transforms/Utils/FixIrreducible.h"
@@ -36,12 +37,23 @@ using namespace feme::cpu;
 
 namespace {
 
-/// Runs the function-local half of Phase 1 on \p F: `mem2reg` first (so the
-/// structurizer sees as few `alloca`s live across blocks as possible), then
-/// `LowerSwitch` (the linearizer only understands two-way branches), then
-/// `FixIrreducible` + `UnifyLoopExits` + `StructurizeCFG` -- in that order,
-/// matching `StructurizeCFG`'s own documented precondition that irreducible
-/// control flow and multi-exit loops are already gone -- and finally
+/// Runs the function-local half of Phase 1 on \p F: `SROA` first (roadmap
+/// H19a: splits a `Function`-storage-class SPIR-V local variable lowered as
+/// a vector-typed `alloca` -- e.g. a `gl_GlobalInvocationID.xy` scratch
+/// temporary GEP-indexed one element at a time -- into per-element scalar
+/// allocas, since plain `mem2reg` alone refuses to promote any `alloca`
+/// with a `getelementptr` use at all, `isAllocaPromotable`'s documented
+/// precondition; reduced from a real failing
+/// `dEQP-VK.image.load_store.with_format.2d.r32_sfloat` case, whose
+/// compute shader's own coordinate computation takes exactly this shape),
+/// then `mem2reg` (so the structurizer sees as few `alloca`s live across
+/// blocks as possible -- `SROAPass` already promotes most of what it
+/// splits on its own, but a residual whole-value `alloca` `SROA` did not
+/// need to split still needs this pass), then `LowerSwitch` (the linearizer
+/// only understands two-way branches), then `FixIrreducible` +
+/// `UnifyLoopExits` + `StructurizeCFG` -- in that order, matching
+/// `StructurizeCFG`'s own documented precondition that irreducible control
+/// flow and multi-exit loops are already gone -- and finally
 /// `BreakCriticalEdges`: `StructurizeCFG`'s own "Flow" blocks (built to
 /// merge a divergent branch's two arms back together, see its
 /// documentation) can themselves leave a critical edge behind (a branch
@@ -51,6 +63,7 @@ namespace {
 /// critical edges" postcondition.
 void prepareFunction(Function &F, FunctionAnalysisManager &FAM) {
   FunctionPassManager FPM;
+  FPM.addPass(SROAPass(SROAOptions()));
   FPM.addPass(PromotePass());
   FPM.addPass(LowerSwitchPass());
   FPM.addPass(FixIrreduciblePass());
