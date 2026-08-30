@@ -46429,3 +46429,156 @@ gap unreachable.
 Commits this session: (1) new `SIMDizeTest.cpp` case, (2) documentation
 updates (Roadmap.md, FeMeGraphicsDesign.md, VulkanCTSReport.md,
 Vulkan14FeatureInventory.md), (3) this file.
+
+# Session: H7i (`samplerAnisotropy`) -- implementation done, conformance blocked
+
+## Task
+
+Continue roadmap H7i: `Image.cpp` already stored `anisotropyEnable`/
+`maxAnisotropy` on the sampler descriptor, but nothing consumed it --
+texture sampling was purely isotropic regardless. Needed the real
+anisotropic filter kernel wired into the sampling path.
+
+## Investigation
+
+Confirmed via `femeRTSelectMipLevel`'s implicit callers that mip level 0
+was hardcoded for every implicit sample in both `ResourceLowering.cpp`
+(DXIL) and `SPIRVResourceLowering.cpp` (SPIR-V) -- the real gap was one
+layer deeper than the row's own text suggested: there was no
+screen-space-derivative computation anywhere in the sampling path at
+all, a prerequisite for anisotropic filtering (which needs to know how
+fast texture coordinates change across a pixel footprint), not just a
+missing filter kernel. Confirmed via the actual CTS anisotropy test
+source (`vktTextureFilteringAnisotropyTests.cpp`) that it requires a
+genuinely measurable visual difference between isotropic and
+anisotropic renders and samples via implicit (not explicit-LOD)
+`texture()` -- an inert/no-op implementation would fail its own
+"must differ" assertion, so this could not be faked.
+
+## Implementation
+
+1. `FeMeRuntimeCPU.c`: `femeRTFastLog2` (freestanding-safe bit-trick
+   log2, no libm available), `FemeRTImplicitLodPlan`/
+   `femeRTPlanImplicitLod` (the standard "scale factor and level of
+   detail" formula from real derivatives), rewrote
+   `femeCpuImageSample2DV4F32` to do multi-tap averaging when
+   anisotropic.
+2. `ImageCalls.h`/`.cpp`: widened `Sample2D`'s call shape with four new
+   `DUdX`/`DUdY`/`DVdX`/`DVdY` float operands; new shared
+   `feme::cpu::getOrSynthesizeSample2DDerivatives` helper synthesizes
+   real `feme.stage.derivative.*` calls for a Fragment-stage implicit
+   sample (zero constants otherwise), called symmetrically from both
+   `ResourceLowering.cpp` and `SPIRVResourceLowering.cpp`.
+3. Fixed a logic bug found while designing tests: the anisotropic-enable
+   condition incorrectly required `Pmin > 0.0f`, excluding the most
+   common real anisotropic case (a surface viewed edge-on, one axis's
+   derivative exactly zero). Fixed to trigger whenever `Pmax > Pmin`.
+4. Found and fixed a critical, silent, pre-existing test-ABI bug:
+   `ImageSamplingTest.cpp`'s `SampleFn` typedef was stale (11-arg) vs.
+   the actual runtime shape even before this session's own 4-argument
+   widening -- a reminder that a raw function-pointer-cast test harness
+   needs updating in lockstep with the callee's real signature, or the
+   mismatch is UB that may not manifest as an obvious failure.
+5. Added 4 new unit tests (3 runtime, 1 SPIR-V-lowering) confirming the
+   real new behavior end to end, including one that mirrors the actual
+   CTS "must measurably differ" check directly.
+6. Fixed 3 `.ll` lit tests for the new 15-operand `Sample2D` shape --
+   one was a genuine failure, two were "accidentally still passing" via
+   a `CHECK-SAME` substring coincidentally matching a neighboring zero
+   constant rather than the intended operand (a real `CHECK-SAME`
+   pitfall: it is not anchored immediately after the previous match).
+7. Flipped `samplerAnisotropy` to `VK_TRUE`, `maxSamplerAnisotropy` to
+   `16.0f`.
+
+`ninja check-feme`: 2054/2113 passing, 0 failed, up 4 tests from the
+prior 2050/2109 baseline.
+
+## The mandatory real-CTS step changed the outcome
+
+Running `dEQP-VK.texture.filtering_anisotropy.*` found **0/128 passing**
+-- every graphics-pipeline case fails `vkCreateGraphicsPipelines` with
+`VK_ERROR_INITIALIZATION_FAILED`. `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+revealed the real cause: `UnsupportedOps.cpp`'s generic
+"register-bound resource handle the FeMe CPU target cannot normalize"
+diagnostic, firing on a `handlefrombinding` call whose result type is a
+literal struct combining `spirv.Image` and `spirv.Sampler` in one
+handle -- the shape glslang actually emits for an ordinary, idiomatic
+GLSL `uniform sampler2D` declaration (confirmed via the CTS log's own
+SPIR-V disassembly dump: a single `OpVariable` of `OpTypeSampledImage`
+type). `SPIRVResourceLowering.cpp`'s `classifySampledImage2DHandle`/
+`classifySamplerHandle` only recognize a *separately*-declared image
+handle and sampler handle later composed by `insertvalue`/read apart by
+`extractvalue` -- the shape this project's own existing unit tests (and
+presumably its classification logic) were built around -- not a single
+call already returning the combined pair.
+
+Critically, this reproduces identically on an *ordinary, unrelated*
+filtering case (`dEQP-VK.texture.filtering.2d.combinations.linear.
+linear.clamp_to_edge.clamp_to_edge`, non-compute), and a broader sweep
+of `dEQP-VK.texture.filtering.2d.*` (1698 cases) showed **0/1698
+passing** -- every graphics-pipeline texture-filtering case in this
+whole CTS group currently fails the same way. I confirmed this is
+structurally *not* caused by this session's own changes: classification
+fails before this row's own `getOrSynthesizeSample2DDerivatives` helper
+is ever reached (the whole function bails out of lowering before that
+call-construction step), so the new derivative code is provably
+irrelevant to this failure. It is a pre-existing gap, newly discovered
+(not newly introduced) purely because this was the first roadmap row
+whose own mandatory CTS-verification step happened to exercise a plain
+GLSL `uniform sampler2D` declaration through a real graphics pipeline.
+
+I verified the environment itself was not the problem (not a CTS
+checkout/toolchain drift) by re-running an unrelated, previously-known-
+passing case, `dEQP-VK.pipeline.monolithic.multisample.alpha_to_one.*`,
+which reproduced its documented 4/14 pass rate exactly.
+
+## Decision: revert the feature-bit flip, keep the implementation
+
+Given zero real CTS cases for `samplerAnisotropy` can currently pass, I
+reverted `samplerAnisotropy` to `VK_FALSE` and `maxSamplerAnisotropy` to
+its degenerate `1.0f` floor (a separate commit) -- flipping either would
+be an unverifiable conformance claim, the same standard this roadmap
+has consistently held itself to (H7h/H7o/H7w/H7x/H7y all left their own
+feature bits `VK_FALSE` when a real CTS re-run showed the gap wasn't
+actually fully closed). The underlying implicit-LOD/anisotropic-filter
+implementation itself is kept, since it is real, unit-tested at every
+phase, and a genuine prerequisite once the newly-found blocker is fixed.
+
+Roadmap.md's H7i row is left unstruck, rewritten to describe both the
+real implementation and the newly-discovered blocker "in progress"
+rather than falsely marked done. The blocker itself is broken out as a
+new milestone: `H7`'s own single-letter suffix space (`H7a`-`H7z`) is
+already fully used (per H7y's own prior note), so I followed the same
+precedent H7y itself set and added it to the existing `H13` follow-on
+series as `H13d`, rather than inventing a new nesting scheme -- keeping
+to the "no more than one lowercase letter deep" rule while reusing an
+already-established overflow series instead of creating a second one.
+
+Also discovered, while choosing this label, that "H7u" already denotes
+a real, previously-fixed push-descriptor issue referenced in prose
+inside `VulkanCTSReport.md`'s H7g section (with no corresponding
+`Roadmap.md` row of its own) -- so I did not reuse that label for this
+unrelated new gap.
+
+## Validation
+
+`ninja check-feme`: 2054/2113 passing, 0 failed (unchanged across the
+feature-bit revert and doc-only commits). `FeMeVulkanTests`: 481/481
+pass after the `PhysicalDeviceInfoTest.cpp` reversion.
+
+## Outcome
+
+Roadmap H7i is **not** struck through -- the implementation is real and
+tested, but conformance cannot be honestly claimed. A new, significant,
+broadly-impactful gap (`SPIRVResourceLoweringPass` cannot lower a
+combined-sampled-image-handle shape) is tracked as `H13d`, `P1`
+priority given how much real CTS graphics conformance it currently
+blocks (essentially all of `dEQP-VK.texture.filtering.2d.*`, not just
+anisotropy).
+
+Commits this session: (1) `FeMeRuntimeCPU.c` implementation, (2) shared
+`ImageCalls`/lowering changes, (3) test fixes/additions, (4) the
+`PhysicalDeviceInfo.cpp` feature-bit flip (H7i "closed"), (5) doc
+updates for that flip, (6) revert of the feature-bit flip once the CTS
+blocker was found, (7) doc updates recording the blocker and new H13d
+row, (8) this file.
