@@ -37,18 +37,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7r?
+Can you continue working on H7s?
 
-> **`VK_FORMAT_R5G6B5_UNORM_PACK16` (and likely other packed 16-bit formats) has
-> no support anywhere in the image/format layer**, discovered via H7n's own real
-> CTS re-run of
-> `dEQP-VK.pipeline.monolithic.multisample.alpha_to_coverage_unused_attachment.*`
-> (`AlphaToCoverageColorUnusedAttachmentInstance`'s own hard-coded color
-> format), which fails every feme-supported-sample-count case at `vkCreateImage`
-> time with `VK_ERROR_FORMAT_NOT_SUPPORTED`. Unrelated to alpha-to-coverage's
-> own coverage-mask logic (confirmed: the identical mask computation already
-> passes 12/12 real cases against ordinary formats in H7n's own main group),
-> purely a pre-existing, generic packed-format gap in the format-mapping/image
-> layer. Needs a real survey of which packed 16-bit formats (`R5G6B5`,
-> `R5G5B5A1`, `B5G6R5`, etc.) are worth adding, then real support through the
-> format-mapping, image storage, and sampling/blending paths
+> **A `VkRenderPass` subpass's color attachment list with a
+> `VK_ATTACHMENT_UNUSED` slot is rejected outright at pipeline-creation time.**
+> Discovered via H7r's own re-run of `alpha_to_coverage_unused_attachment.*`
+> (color output written to fragment location 1, location 0 explicitly unused):
+> `GraphicsPipeline.cpp`'s `getRenderTargets` fails every case with `"an unused
+> color attachment slot is not implemented"` once H7r's own format fix lets
+> these cases clear the format gate for the first time -- a separate, larger,
+> previously-untracked gap in subpass/render-target construction, unrelated to
+> color-format support itself. Needs a real investigation into what
+> `getRenderTargets`/the fragment-stage-output-to-attachment-slot mapping
+> assumes about every slot being bound to a real attachment, and what has to
+> change (likely treating an unused slot as "no attachment, but a real output
+> location the shader may still write that is simply discarded") to support it
