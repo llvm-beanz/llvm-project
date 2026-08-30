@@ -46958,3 +46958,109 @@ on one line after the signature widening) and applied them cleanly via
 2. `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`
    updates recording H15's closure and the new H16 row.
 3. This file.
+
+# Session: H16 (mag/min filter selection consulted only MagFilter)
+
+Continued from H15's own real re-run, which left 156 `dEQP-VK.texture.
+filtering.2d.*` fails and mischaracterized them (in the roadmap row H15
+itself wrote) as a small `magFilter=LINEAR` rounding-scale discrepancy.
+
+## Investigation
+
+Reproduced the exact case cited (`combinations.nearest.linear.repeat.
+repeat`), extracted `Rendered`/`Reference`/`ErrorMask` from the QPA log
+the same way prior sessions did, and found errors up to 75/255 -- far
+larger than a rounding-scale bug, immediately casting doubt on H15's own
+characterization of the gap.
+
+Re-ran the full `dEQP-VK.texture.filtering.2d.combinations.*` sweep (1350
+cases) and grouped the 120 fails. My first grouping attempt (by
+`parts[4:6]` of the dotted test name) only captured `minFilter` and
+produced a confusing pattern. Redoing it correctly (`parts[5:7]`, the true
+`(minFilter, magFilter)` pair) revealed the real signal immediately:
+*every* failing group has `minFilter != magFilter` (differing base type,
+nearest vs. linear); `linear.linear` and `nearest.nearest` have zero
+fails. That's a strong, clean signature -- not a rounding issue at all,
+but a wrong-filter-selected issue.
+
+Grepped `FeMeRuntimeCPU.c` and found the answer immediately: every single
+sampling entry point (`femeCpuImageSample2DV4F32` and its comparison/
+array/cube/cube-array siblings) branches on `Samp.MagFilter` alone,
+unconditionally, regardless of whether the LOD indicates minification or
+magnification. `Samp.MinFilter` is populated correctly by `Image.cpp` but
+was simply never read by the runtime. This is a real, spec-mandated rule
+(Vulkan's own image LOD operation: `lod <= 0` -> magFilter, `lod > 0` ->
+minFilter) that had just never been implemented -- H15's own `MaxLod`
+clamp fix happened to be *sufficient* for identical-filter-type samplers
+(doesn't matter which of two identical filters gets picked), which is
+exactly why this bug stayed hidden until a mismatched-type sampler
+exposed it.
+
+## Design
+
+Rather than bolt an `IsMagnifying` check onto each of the 5-6 call sites
+independently (risking them disagreeing about which LOD they're looking
+at), split `femeRTSelectMipLevel`'s old monolithic bias-clamp-then-round
+logic into two pieces:
+- `femeRTComputeClampedLod` -- just the biased+clamped float LOD, shared.
+- `femeRTSelectMipLevel` (now much smaller) -- just the final
+  round-to-nearest-then-clamp-to-image-levels step, taking the already
+  clamped float.
+- A new `femeRTUseLinearFilter(ClampedLod, Samp)` that both the explicit-
+  and implicit-LOD paths call with the *same* `ClampedLod` value used for
+  mip selection, so the two decisions can never disagree.
+
+`FemeRTImplicitLodPlan` gained a `ClampedLod` field so
+`femeRTPlanImplicitLod`'s own callers (which don't separately know the
+LOD it derived from screen-space derivatives) can make the same decision
+for both its single-tap and anisotropic multi-tap branches.
+
+One open design question I considered and decided not to solve specially:
+whether an anisotropic multi-tap sample (`TapCount > 1`) could ever
+technically be "magnifying" in the LOD-sign sense while still being
+anisotropic (a stretched-but-not-shrunk footprint). I didn't special-case
+this -- `femeRTUseLinearFilter(Plan.ClampedLod, ...)` is consulted
+uniformly regardless of tap count, which is the spec-correct behavior
+either way, so no special case was needed.
+
+## Fix + tests
+
+Applied the refactor at all five call sites that had the bug (2D,
+comparison, 2D-array, cube, cube-array -- the load/fetch paths don't
+filter, so they're unaffected). Added four new unit tests: two
+explicit-LOD (minifying picks MinFilter, magnifying picks MagFilter) and
+one implicit-LOD (minifying via real derivatives picks MinFilter), all
+using a sampler with `MagFilter=Nearest`/`MinFilter=Linear` so a wrong
+answer would be immediately visible (blend vs. no blend). Ran
+`git clang-format --diff` (not whole-file `-i`, per the H14-session
+lesson) and applied its suggested reflow before committing.
+
+`ninja check-feme` (ccache, assertions): 2064/2123, 0 `Failed`, 59
+pre-existing `Unsupported`, up 4 from the new tests.
+
+## Verification
+
+Real re-run of the exact original failing case: now passes. Full
+`combinations.*` sweep: 144/1350 pass (up from 72), 48 fail (down from
+120). Full `filtering.2d.*` sweep: 184/1698 pass (up from 102), 74 fail
+(down from 156). `filtering_anisotropy.*` unaffected (still 0/128,
+`NotSupported`, gated on the feature bit).
+
+Grouped the remaining 74 fails and found two *further* distinct, cleanly
+separable gaps:
+- 70 of them are every `_mipmap_linear` minFilter (trilinear/
+  `mipmapMode=LINEAR`) case, regardless of magFilter -- and
+  `femeRTPlanImplicitLod`'s own existing comment already flagged this as
+  unimplemented ("not yet consulted... both Nearest and Linear currently
+  round to the nearer single level"). This is real, generic,
+  well-scoped work -- filed as new roadmap H17.
+- The remaining 4 are all `b10g11r11_ufloat`, with no `mipmap_linear`
+  involved -- clearly unrelated to the trilinear gap, some other
+  format-specific bug. Filed as new roadmap H18, separately, since
+  conflating the two would make H17 harder to close cleanly.
+
+No `FeMeGraphicsDesign.md` deviation needed -- this whole row is a
+spec-compliance bug fix (implementing a rule the spec already mandates),
+not a design decision. Committed the runtime fix + tests, then the
+Roadmap/VulkanCTSReport/Vulkan14FeatureInventory updates, as two separate
+commits (this file as the third and last).
