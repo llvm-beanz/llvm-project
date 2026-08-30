@@ -37,19 +37,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7v?
+Can you continue working on H7h?
 
-> **`VK_KHR_maintenance6`'s `vkCmdBindDescriptorSets2` (`bind2`) fails for every
-> stage, including compute.** Discovered via H7g's own real CTS re-run of
-> `dEQP-VK.binding_model.shader_access.*.bind2.storage_buffer.*`: the
-> `vertex`/`fragment`-stage cases SIGSEGV (a null-pointer call inside
-> `writeDrawCmdBuffer`'s `bindDescriptorSets` helper), while the `compute`-stage
-> cases instead fail cleanly at `vkCreateComputePipelines` with
-> `VK_ERROR_INITIALIZATION_FAILED` -- both confirmed via a `git
-> stash`/rebuild/re-run to reproduce identically without any of H7g's own
-> changes, so this is pre-existing and entirely unrelated to storage-buffer
-> stage-write support itself (H7g's own non-`bind2` re-run, 1200/1200, is
-> unaffected). Needs a real investigation into why `vkCmdBindDescriptorSets2`'s
-> `VkBindDescriptorSetsInfo` path (`CommandBuffer.cpp`) diverges from the
-> already-working `vkCmdBindDescriptorSets` path enough to fail pipeline
-> creation/execution outright, for every stage
+> **`shaderClipDistance`/`shaderCullDistance`**: no
+> `ClipDistance`/`CullDistance` SPIR-V builtin support exists anywhere in the
+> stage-IO pipeline (`CanonicalizeStage.cpp`) or the executor's own clipping
+> path (`Executor.cpp`'s `clipTriangle`, which only clips against the fixed
+> homogeneous clip planes, with no per-vertex application-supplied plane
+> distances at all) despite `maxClipDistances`/`maxCullDistances` already being
+> set to the honest value `8`. Needs real stage-IO plumbing for both builtins
+> plus a clip-distance consumer in `clipTriangle` and a cull-distance consumer
+> wherever primitive culling happens
