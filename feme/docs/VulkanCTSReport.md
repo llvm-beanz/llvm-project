@@ -13972,3 +13972,115 @@ passes in full (2024/2083, 59 pre-existing unrelated `Unsupported`, 0
 an existing case rather than adding one; a scratch diagnostic test used
 during investigation was written, used, and then removed, never
 committed).
+
+## Roadmap H7n: measured impact (`alphaToCoverageEnable`, plus H7q/H7r follow-ons)
+
+**Feature.** `VkPipelineMultisampleStateCreateInfo::alphaToCoverageEnable`
+had no implementation at all: `GraphicsPipeline.cpp` rejected it at
+pipeline-creation time, and an exhaustive search of `Executor.cpp` found no
+coverage-mask handling anywhere in the blend/coverage path. Unlike
+`alphaToOneEnable` (roadmap H7f), `alphaToCoverageEnable` has no
+`VkPhysicalDeviceFeatures` gate in the Vulkan spec at all -- confirmed by
+reading the real CTS's own `MultisampleTest`/`AlphaToCoverageTest`
+`checkSupport` overrides, neither of which checks any feature bit beyond the
+base `MultisampleTest::checkSupport` -- so there is no feature-bit flip for
+this row, only real behavior.
+
+**Algorithm.** Reading the real CTS's `AlphaToCoverageInstance::verifyImage`
+(`vktPipelineMultisampleTests.cpp`) showed the verification is a
+resolved-average tolerance check, not an exact-value one, and that every
+geometry type's vertex color is `(1.0, 0.0, 0.0, alpha)` with `alpha` one of
+`1.0` (opaque), `0.25` (translucent), or `0.0` (invisible). A per-sample
+threshold `T_S = (S + 0.5) / SampleCount`, clearing a sample's coverage bit
+whenever the shaded fragment's location-0 alpha falls below it, produces
+exactly `round(alpha * SampleCount)` covered samples for any alpha in
+`[0, 1]` -- verified by hand against all three tolerance bounds (opaque:
+`[0.99, 1.01]`; translucent: `[0.0, 0.52]`; invisible: `[0.0, 0.01]`).
+
+**Implementation.** `GraphicsPipeline.cpp` now translates
+`alphaToCoverageEnable` directly (no rejection, no feature-bit check) into a
+new `GraphicsPipelineState::AlphaToCoverageEnable`/`GraphicsPipeline::
+getAlphaToCoverageEnable()` field, mirroring the existing `AlphaToOneEnable`
+plumbing, and includes it in the pipeline cache key. `Executor.cpp` adds a
+dedicated `FSAlphaToCoverage` signature-element lookup (`findElementByLocation
+(FSSig, Output, 0)`, looked up independently of `FSColors[0]` specifically to
+also cover the real CTS's own "unused color attachment" shape, where
+location 0's alpha is the only coverage-relevant output but location 0 itself
+is not bound to any real color attachment), forces `UseEarlyDepthStencil =
+false` whenever the feature is enabled (the mask depends on the fragment
+stage's own shaded output, unknown until after it runs -- the same reason
+`SV_Depth`/discard/demote already force the late path), and introduces a new
+per-lane `BaseCoverage` local: the raw per-sample coverage mask ANDed with the
+alpha-derived mask, read by both the depth/stencil test block's own
+sample-iteration loop and the post-test `PassMask` fallback, so alpha-to-
+coverage culling applies uniformly whether or not a depth/stencil test
+actually runs for a given pipeline.
+
+**Unit tests (new).** `GraphicsPipelineTest.cpp`'s `TranslatesAlphaToCoverageState`
+(alphaToCoverageEnable alone translates and defaults correctly) and an update
+to the existing `TranslatesSampleShadingAndAlphaToOneState` to also exercise
+it, replacing the now-obsolete `RejectsAlphaToCoverageEnable`.
+`ExecutorTest.cpp`'s `AlphaToCoverageEnableGeneratesPerSampleCoverageFromAlpha`
+(SampleCount=4, alpha=0.25 fully-covering triangle, raw non-resolved MSAA
+attachment, asserts exactly sample 0 is covered and samples 1-3 stay at their
+clear value -- directly validating the per-sample threshold math).
+
+**Real CTS re-run.** `dEQP-VK.pipeline.monolithic.multisample.
+alpha_to_coverage.*` (the main group): **12/12 feme-supported-sample-count
+cases pass, 0 failures** (36 `NotSupported` for sample counts 32/64 and
+"sparse" image backing -- pre-existing, unrelated gaps).
+
+Two related CTS groups exercise the same feature but surfaced two further,
+independent gaps unrelated to the coverage-mask logic itself, each broken out
+into its own roadmap row rather than folded into this one:
+
+- `alpha_to_coverage_no_color_attachment.*` (a `RENDER_TYPE_DEPTHSTENCIL_ONLY`
+  render, zero color attachments): all feme-supported-sample-count cases
+  initially failed pipeline creation with `"the pipeline's rasterization
+  sample count disagrees with its render target's"` (diagnosed via
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1`). Root cause: `GraphicsPipeline.cpp`'s
+  `getRenderTargets` only ever set `Targets.SampleCount` inside the loop over
+  `Subpass.ColorAttachments`, which never executes when that list is empty,
+  silently leaving the render target's derived sample count at its
+  single-sample default for any depth/stencil-only subpass. Fixed by roadmap
+  H7q (falling back to the depth/stencil attachment's own sample count when
+  there is no color attachment); re-run after that fix: **3/3
+  feme-supported-sample-count cases pass** (up from 0/3, 9 `NotSupported` for
+  other sample counts).
+- `alpha_to_coverage_unused_attachment.*` (color output written to location
+  1, location 0 unused, `AlphaToCoverageColorUnusedAttachmentInstance`'s own
+  hard-coded `VK_FORMAT_R5G6B5_UNORM_PACK16` color format): every
+  feme-supported-sample-count case fails at `vkCreateImage` time with
+  `VK_ERROR_FORMAT_NOT_SUPPORTED` -- confirmed via a repository-wide search
+  that no packed 16-bit format has any support anywhere in the image/format
+  layer, entirely unrelated to alpha-to-coverage's own logic. Tracked as a
+  new follow-on, H7r, not yet fixed. The `FSAlphaToCoverage` direct-location-0
+  lookup design (built specifically to support this CTS shape) remains
+  unverified against real CTS pending H7r, verified only by the
+  `ExecutorTest.cpp` unit test above.
+
+A broader `dEQP-VK.pipeline.monolithic.multisample.*` sweep (10576 cases) was
+also run to check for regressions from the H7q render-target sample-count
+fix: 189 pass, 63 fail, 10324 `NotSupported`. Every failure was confirmed
+pre-existing and unrelated to this row's own changes -- `mixed_count`,
+`sampled_image.*`, `3d.*` (pre-existing, unrelated image/sampling gaps),
+`a2c_with_a2one.*`/`sample_rate_a2c.*` (combination cases that fail before
+ever reaching coverage-mask computation, on pre-existing push-constant-range
+coverage gaps, a JIT symbol-materialization gap for `frag_depth` export, and
+an unsupported large-resource-array binding shape), and
+`alpha_to_coverage_unused_attachment.*` (H7r's own `R5G6B5` gap, above) --
+none newly introduced.
+
+**`ninja check-feme`.** Passes in full at **2026/2085** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7p's own 2024/2083 baseline by
+3 new tests: `GraphicsPipelineTest`'s `TranslatesAlphaToCoverageState` and
+`AcceptsMultisampledZeroColorRenderPass` (H7q's own regression test), and
+`ExecutorTest`'s `AlphaToCoverageEnableGeneratesPerSampleCoverageFromAlpha`.
+
+**Documentation.** `Vulkan14FeatureInventory.md` updated with a confirmatory
+note (not a feature-bit row, since none exists for this field).
+`VulkanExtensionInventory.md` confirmed no change needed (a core
+pipeline-state field, not an extension). `FeMeVulkanDesign.md`'s H7 status
+paragraph updated. `Roadmap.md`'s H7n struck through; H7q (the
+render-target-sample-count fix) struck through alongside it; H7r (the
+`R5G6B5` format gap) added as a new, open, P3 follow-on.

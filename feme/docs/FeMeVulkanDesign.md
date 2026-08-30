@@ -2087,12 +2087,23 @@ closed, every feme-supported-sample-count `min_sample_shading*` case now
 passes for real, so `sampleRateShading` flips to `VK_TRUE`. See
 "Roadmap H7f: measured impact", "Roadmap H7o: measured impact", and
 "Roadmap H7p: measured impact" in
-VulkanCTSReport.md for the full before/after CTS breakdown. The rest of
+VulkanCTSReport.md for the full before/after CTS breakdown. `alphaToCoverageEnable`
+(roadmap H7n) is also now real: `Executor.cpp`'s per-lane `BaseCoverage` mask
+clears a sample's coverage bit whenever the shaded fragment's location-0
+alpha falls below a per-sample threshold `(S + 0.5) / SampleCount`, confirmed
+against a real `dEQP-VK.pipeline.monolithic.multisample.alpha_to_coverage.*`
+re-run (12/12 feme-supported-sample-count cases passing); it has no
+`VkPhysicalDeviceFeatures` gate in the spec, so there is no feature bit to
+flip. H7n's own real CTS re-run also surfaced (and H7q fixed) an unrelated,
+pre-existing bug in a zero-color-attachment `VkRenderPass`'s render-target
+sample-count derivation, and surfaced (tracked as H7r, not yet fixed) a
+pre-existing, unrelated lack of `VK_FORMAT_R5G6B5_UNORM_PACK16` support. See
+"Roadmap H7n: measured impact" in VulkanCTSReport.md for the full
+before/after CTS breakdown. The rest of
 H7's own survey (`vertexPipelineStoresAndAtomics`/
 `fragmentStoresAndAtomics`, `shaderClipDistance`/`shaderCullDistance`,
-`samplerAnisotropy`, and the four `shaderStorageImage*` bits, alongside
-`alphaToCoverageEnable`'s own H7n) each need real, independent work first
-and remain open.
+`samplerAnisotropy`, and the four `shaderStorageImage*` bits) each need real,
+independent work first and remain open.
 
 ## Implementation Milestones
 
