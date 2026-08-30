@@ -181,6 +181,15 @@ using StoreFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                          int32_t, int32_t, FeMeTestV4F32, bool);
 using StoreI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                             int32_t, int32_t, FeMeTestV4I32, bool);
+/// The roadmap H19b `Texture2DArray` counterpart of `StoreFn`, adding an
+/// integer `Layer` coordinate before the texel value -- mirroring
+/// `LoadArrayFn`'s relationship to `LoadFn`.
+using StoreArrayFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                              int32_t, int32_t, int32_t, FeMeTestV4F32, bool);
+/// The roadmap H19b integer-format counterpart of `StoreArrayFn`.
+using StoreArrayI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                 uint32_t, int32_t, int32_t, int32_t,
+                                 FeMeTestV4I32, bool);
 
 /// Builds a single-mip-level, single-layer 2D `FemeImageDescriptor` over
 /// \p Storage (assumed row-major, tightly packed at \p Format's element
@@ -225,7 +234,8 @@ FemeImageDescriptor makeImage2DArray(void *Storage, uint64_t SizeInBytes,
                                      uint32_t Width, uint32_t Height,
                                      uint32_t ArrayLayers,
                                      ResourceFormat Format,
-                                     FemeImageSubresourceLayout &Layout) {
+                                     FemeImageSubresourceLayout &Layout,
+                                     uint32_t ExtraFlags = 0) {
   Layout = {0, 0, 0, 0};
   uint64_t ElemSize =
       SizeInBytes / (uint64_t)Width / (uint64_t)Height / (uint64_t)ArrayLayers;
@@ -244,7 +254,7 @@ FemeImageDescriptor makeImage2DArray(void *Storage, uint64_t SizeInBytes,
   Img.ArrayLayers = ArrayLayers;
   Img.PlaneCount = 1;
   Img.SampleCount = 1;
-  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.Flags = FEME_IMAGE_SAMPLED | ExtraFlags;
   Img.MipLayouts = &Layout;
   Img.MipLayoutCount = 1;
   return Img;
@@ -1800,5 +1810,63 @@ TEST_F(ImageSamplingTest, InactiveLaneStoreIsANoOp) {
   EXPECT_FLOAT_EQ(Storage[0][0][0], 1.0f);
 }
 
+// Roadmap H19b: `feme.cpu.image.store.2darray.v4f32`/`.v4i32`, the arrayed
+// counterpart of `feme.cpu.image.store.2d.*` above.
+
+TEST_F(ImageSamplingTest, StoreArrayWritesTexelIntoTheAddressedLayerOnly) {
+  float Storage[2][2][2][4] = {}; // [Layer][Y][X][Channel].
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2DArray(
+      Storage, sizeof(Storage), 2, 2, /*ArrayLayers=*/2,
+      ResourceFormat::R32G32B32A32_FLOAT, Layout, FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreArrayFn Store =
+      resolveRuntime<StoreArrayFn>("feme.cpu.image.store.2darray.v4f32");
+  FeMeTestV4F32 Texel = {5.0f, 6.0f, 7.0f, 8.0f};
+  Store(ImageHeap, 1, 0, /*X=*/1, /*Y=*/1, /*Layer=*/1, Texel, /*Mask=*/true);
+
+  EXPECT_FLOAT_EQ(Storage[1][1][1][0], 5.0f);
+  EXPECT_FLOAT_EQ(Storage[1][1][1][1], 6.0f);
+  EXPECT_FLOAT_EQ(Storage[1][1][1][2], 7.0f);
+  EXPECT_FLOAT_EQ(Storage[1][1][1][3], 8.0f);
+  // Layer 0's identical (X, Y) is untouched -- confirms the write actually
+  // addresses one layer, not every layer.
+  EXPECT_FLOAT_EQ(Storage[0][1][1][0], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, StoreArrayWritesTexelIntoR32G32B32A32Uint) {
+  uint32_t Storage[2][1][1][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2DArray(
+      Storage, sizeof(Storage), 1, 1, /*ArrayLayers=*/2,
+      ResourceFormat::R32G32B32A32_UINT, Layout, FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreArrayI32Fn Store = resolveRuntime<StoreArrayI32Fn>(
+      "feme.cpu.image.store.2darray.v4i32");
+  FeMeTestV4I32 Texel = {10, 20, 30, 40};
+  Store(ImageHeap, 1, 0, 0, 0, /*Layer=*/1, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[1][0][0][0], 10u);
+  EXPECT_EQ(Storage[1][0][0][3], 40u);
+  EXPECT_EQ(Storage[0][0][0][0], 0u);
+}
+
+TEST_F(ImageSamplingTest, StoreArrayOutOfBoundsLayerIsANoOp) {
+  float Storage[1][1][1][4] = {{{{1, 2, 3, 4}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2DArray(
+      Storage, sizeof(Storage), 1, 1, /*ArrayLayers=*/1,
+      ResourceFormat::R32G32B32A32_FLOAT, Layout, FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreArrayFn Store =
+      resolveRuntime<StoreArrayFn>("feme.cpu.image.store.2darray.v4f32");
+  FeMeTestV4F32 Texel = {9.0f, 9.0f, 9.0f, 9.0f};
+  Store(ImageHeap, 1, 0, 0, 0, /*Layer=*/5, Texel, /*Mask=*/true);
+  EXPECT_FLOAT_EQ(Storage[0][0][0][0], 1.0f);
+}
+
 } // namespace
+
 

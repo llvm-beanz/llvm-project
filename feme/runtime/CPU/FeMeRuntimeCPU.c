@@ -1689,6 +1689,60 @@ femeRTStoreTexel2DI32(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
   femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
 }
 
+// The arrayed counterpart of `femeRTStoreTexel2D` above, for
+// `feme.cpu.image.store.2darray.v4f32` (roadmap H19b): writes \p Texel to
+// the texel at integer coordinates `(X, Y)`, array layer \p Layer, mip
+// level 0, sample 0 of \p Img, addressing the layer via
+// `Layer * Layout->SlicePitch` -- the same per-layer addressing
+// `femeRTFetchTexel2D`'s own roadmap H7b-a widening already uses on the
+// read side. `Layer >= Img->ArrayLayers` is silently dropped, mirroring
+// `femeRTStoreTexel2D`'s own out-of-bounds-X/Y handling.
+__attribute__((always_inline)) static void
+femeRTStoreTexel2DArray(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
+                        uint32_t Layer, FemeRTv4f32 Texel) {
+  if (!Img->Data || Img->MipLayoutCount == 0 || Layer >= Img->ArrayLayers)
+    return;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img->Width || (uint32_t)Y >= Img->Height)
+    return;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t Offset = Layout->Offset + (uint64_t)Layer * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch + (uint64_t)X * TexelStride;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return;
+  unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
+  femeRTPackImageTexel(Img->Format, Ptr, Texel);
+}
+
+// The integer counterpart of `femeRTStoreTexel2DArray` above, for
+// `feme.cpu.image.store.2darray.v4i32` (roadmap H19b).
+__attribute__((always_inline)) static void
+femeRTStoreTexel2DArrayI32(const FemeRTImageDescriptor *Img, int32_t X,
+                          int32_t Y, uint32_t Layer, FemeRTv4i32 Texel) {
+  if (!Img->Data || Img->MipLayoutCount == 0 || Layer >= Img->ArrayLayers)
+    return;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img->Width || (uint32_t)Y >= Img->Height)
+    return;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t Offset = Layout->Offset + (uint64_t)Layer * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch + (uint64_t)X * TexelStride;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return;
+  unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
+  femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
+}
+
 
 // either an explicit-LOD sample's own `Lod` operand or (`UseExplicitLod`
 // false) an implicit-LOD sample's `Lod == 0.0` starting point (a caller
@@ -2274,6 +2328,45 @@ __attribute__((always_inline)) void femeCpuImageStore2DV4I32(
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
   femeRTStoreTexel2DI32(&Img, X, Y, Texel);
+}
+
+// `feme.cpu.image.store.2darray.v4f32` (roadmap H19b): the arrayed
+// counterpart of `feme.cpu.image.store.2d.v4f32` above, adding an integer
+// `Layer` operand -- SPIR-V's `OpImageWrite` array-layer coordinate is
+// always an integer, like `OpImageFetch`'s (see
+// `femeCpuImageLoad2DArrayV4F32`'s own identical comment).
+void femeCpuImageStore2DArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer,
+    FemeRTv4f32 Texel, _Bool Mask) asm("feme.cpu.image.store.2darray.v4f32");
+
+__attribute__((always_inline)) void femeCpuImageStore2DArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer,
+    FemeRTv4f32 Texel, _Bool Mask) {
+  if (!Mask || Layer < 0)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel2DArray(&Img, X, Y, (uint32_t)Layer, Texel);
+}
+
+// `feme.cpu.image.store.2darray.v4i32` (roadmap H19b): the integer-format
+// counterpart of `feme.cpu.image.store.2darray.v4f32` above.
+void femeCpuImageStore2DArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer,
+    FemeRTv4i32 Texel, _Bool Mask) asm("feme.cpu.image.store.2darray.v4i32");
+
+__attribute__((always_inline)) void femeCpuImageStore2DArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer,
+    FemeRTv4i32 Texel, _Bool Mask) {
+  if (!Mask || Layer < 0)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel2DArrayI32(&Img, X, Y, (uint32_t)Layer, Texel);
 }
 
 // Rounds `Value` to the nearest integer (per the Vulkan spec's "array
