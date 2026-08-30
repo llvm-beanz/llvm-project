@@ -15207,3 +15207,71 @@ pointer to H13d. `VulkanExtensionInventory.md` confirmed no change needed
 unstruck (not fully closed), with an "in progress" note describing both
 the real implementation and the newly-discovered blocker, and a new
 `H13d` row added for the blocker itself.
+
+## Roadmap H13d: measured impact
+
+**Fix.** `SPIRVResourceLoweringPass` now recognizes the combined
+`OpTypeSampledImage`-style `handlefrombinding` call shape glslang emits
+for an ordinary GLSL `uniform sampler2D` declaration (as opposed to
+the separately-declared-image-and-sampler shape composed via
+`insertvalue`, which `foldSampledImageStructs` already handled). A new
+`splitCombinedSampledImageHandles` splits a matching call into two
+synthetic single-resource `handlefrombinding` calls (sharing the
+original call's set/binding/etc. operands) before `foldSampledImageStructs`
+runs, whenever every use is a simple `extractvalue` of index 0 or 1;
+unrecognized shapes (e.g. the combined handle escaping whole to another
+function) are left untouched, matching this file's existing
+conservative-fallback convention.
+
+This split legitimately produces an Image-class handle and a
+Sampler-class handle sharing one `(Set, Binding)` -- exactly what a real
+`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` binding is. `RangeKey`
+(used purely for conflicting-re-declaration detection) was previously
+keyed only on `(Set, Binding)`, module-wide across every resource kind,
+so this collided as a false conflict and silently suppressed lowering
+for both synthetic handles. Widened `RangeKey`'s identity to `(Set,
+Binding, BoundResourceClass)`; confirmed via the full existing
+conflict-detection test set (`LeavesConflictingRangeSizeUnchanged`,
+`LeavesConflictingBufferKindAtSameIdentityUnchanged`,
+`LeavesConflictingUniformBufferArrayStrideAtSameIdentityUnchanged`,
+etc.) that every other same-class conflict is still correctly flagged.
+
+**Real CTS re-run.** `dEQP-VK.texture.filtering.2d.*` (1698 cases): no
+case fails at `vkCreateGraphicsPipelines`/`VK_ERROR_INITIALIZATION_FAILED`
+any longer -- this row's own specific scope (recognizing the combined
+handle so pipeline creation succeeds) is confirmed fixed. Overall still
+0/1698 passing (258 `Fail`, 1440 honest `NotSupported` for unadvertised
+formats), but every `Fail` is now a real, running pipeline producing
+wrong pixel values (`"Image verification failed"`, `"got N invalid
+pixels"` for every pixel in the surface), not a creation-time crash --
+a materially different, and new, class of failure than before this fix.
+Root-caused this is a distinct, previously-latent sampling-correctness
+gap (not a regression from this row's own change, since no combined-
+sampler pipeline had ever created successfully before to expose it) and
+tracked as new roadmap **H14** rather than folded into this row, since
+diagnosing it is a materially separate investigation (likely either a
+heap-index mixup in `splitCombinedSampledImageHandles`'s two synthetic
+handles, or an unrelated, pre-existing sampling-kernel bug this is
+simply the first real coverage to reach).
+
+`dEQP-VK.texture.filtering_anisotropy.*` (128 cases): unaffected by this
+fix, as expected -- still 128/128 `NotSupported` ("Skipping anisotropic
+tests since the device does not support anisotropic filtering"), since
+that group's own gate is the `samplerAnisotropy` feature bit itself
+(still `VK_FALSE`, per H7i), not pipeline creation. `samplerAnisotropy`
+is not revisited by this row.
+
+**`ninja check-feme`.** Passes in full at **2057/2116** (59
+pre-existing, unrelated `Unsupported`, 0 `Failed`), up from the prior
+2054/2113 baseline by the 3 new tests this row adds (2 gtest cases plus
+1 lit test).
+
+**Documentation.** `Roadmap.md`'s H13d struck through, with the real
+measured impact and a pointer to the new H14 follow-on. No
+`FeMeGraphicsDesign.md` deviation: the `RangeKey` widening is an
+internal implementation detail of conflict detection, not a documented
+design decision, and the combined-sampler split itself restores the
+already-documented two-independent-handle shape rather than introducing
+a new one. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+confirmed no change needed (this row fixes a pipeline-creation bug, not
+a feature bit or extension).
