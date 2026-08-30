@@ -932,6 +932,78 @@ surface passes today, `shaderClipDistance`/`shaderCullDistance`
 before H7w/H7x/H7y close would be a conformance violation, the same
 standard set by roadmap H7o/`sampleRateShading`.
 
+#### Status (roadmap H7w)
+
+A non-constant (loop-carried) index into `gl_ClipDistance`/
+`gl_CullDistance`'s own row dimension -- `gl_ClipDistance[i]` with a
+runtime `i`, as opposed to H7h's own compile-time-constant-index-only
+scope -- is now canonicalized: `CanonicalizeStage.cpp`'s new
+`getDynamicRowIndexedAccess` recognizes a `GetElementPtrInst` rooted
+directly at a stage-IO global with every index up to the final one
+constant (resolving struct-member selection and/or nested array
+peeling) and exactly one trailing non-constant index selecting a row
+within an `ArrayType` member, threading that index through as
+`StageIOAccess::Row` (already a `Value*`, not required constant --
+`resolveStageIOAccess`'s other paths just never produced a non-constant
+one before this row).
+
+This is a genuinely different dimension from roadmap H5b/H6b's own
+`getDynamicVertexIndexedAccess` (a non-constant index into a stage-IO
+global's *outer* per-vertex/per-primitive array dimension, e.g.
+geometry's `gl_in[i]` or mesh's `gl_MeshVerticesEXT[i]`): H7w's own
+shape is a non-constant index one level *inside* a `gl_PerVertex`
+interface block *member*'s own array (`ClipDistance`/`CullDistance`),
+not the block's own outer dimension (`gl_PerVertex` is a `StructType`,
+not itself an `ArrayType`), so the two recognizers cannot collide for
+any real shape glslang produces.
+
+**Deviation from the roadmap row's own text**: the row's text speculated
+this "likely" needs "lowering to a bounds-checked runtime read/write";
+no bounds check was added, matching this file's own established
+precedent for `getDynamicVertexIndexedAccess`'s equally unchecked
+`Vertex` index (out-of-range is undefined behavior for both, exactly as
+SPIR-V's own default `OpAccessChain` semantics permit -- `RelaxedGL`-style
+robustness clamping is a separate, currently-unimplemented concern, not
+one this row's own CTS reproduction needed).
+
+**`ShadowValueMap` (roadmap H2e's own `Output`-direction read-back
+scheme) needed a real extension**, not just `CanonicalizeStage.cpp`'s own
+pattern recognition: its per-(`ElementID`, `Row`, `Component`) shadow
+`AllocaInst` scheme assumed `Row` was always a compile-time constant (a
+distinct alloca per array element, promoted to SSA registers by
+`PromoteMemToReg`, which requires `llvm::isAllocaPromotable` -- no
+variable-index GEP into the alloca at all). A non-constant `Row` has no
+compile-time value to key such an alloca on, so it instead gets one
+`RowCount`-sized array alloca per (`ElementID`, `Component`), GEP'd by
+the runtime `Row` index for both its store and its read-back load; that
+array alloca is deliberately left out of the list `PromoteMemToReg`
+consumes (its own GEP is not promotable), so it stays ordinary stack
+memory rather than SSA registers -- correct, if a little less optimized,
+mirroring how a real GPU driver's own dynamically indexed local array
+likewise cannot live in registers.
+
+Confirmed via a new `CanonicalizeStageTest.cpp` case,
+`ThreadsDynamicRowIndexIntoClipDistanceOutputStore`, and via a real
+`glslangValidator`/`feme-translate` IR reduction of the exact
+`clip_distance_dynamic_index`/`clip_cull_distance_dynamic_index` CTS
+shape (a loop-carried `gl_ClipDistance[i]`/`gl_CullDistance[i]` write),
+which reproduced the pre-fix "unresolved stage-IO global-variable
+access" diagnostic and confirmed it no longer fires post-fix.
+
+A real CTS re-run (see "Roadmap H7w: measured impact" in
+`VulkanCTSReport.md`) confirms the canonicalization gap this row targets
+is closed -- the "unresolved stage-IO global-variable access" failure no
+longer occurs anywhere -- but every sampled case still fails to reach a
+final image, now for a wholly different, pre-existing, unrelated reason:
+`feme::cpu::LinearizePass` (roadmap R27) rejects the CTS shader's own
+loop shape outright ("has an internal branch ...; unsupported (roadmap
+milestone 6 deviation)"), a design-scoped limitation of that pass (not
+introduced or widened by this row) that blocks any stage entry with this
+particular loop shape, stage-IO or not. `shaderClipDistance`/
+`shaderCullDistance` stay `VK_FALSE` (H7w's own canonicalization fix
+alone does not flip a feature bit whose bulk of mandatory CTS surface
+still fails, the same standard as H7h/H7o).
+
 ### Tessellation and geometry stage model
 
 DXIL hull/domain stages and SPIR-V tessellation-control/evaluation stages map

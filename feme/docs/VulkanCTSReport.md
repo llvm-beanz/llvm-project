@@ -14687,3 +14687,100 @@ static-index consumer is real and tested; the feature bit itself stays
 blocked), with three new, properly-scoped follow-on rows added: H7w
 (dynamic indexing), H7x (fragment-shader read-back), H7y
 (tessellation/geometry-stage clip/cull-distance writes).
+
+## Roadmap H7w: measured impact (`gl_ClipDistance[i]`/`gl_CullDistance[i]` dynamic index)
+
+**Implementation.** `CanonicalizeStage.cpp` gained
+`getDynamicRowIndexedAccess`, recognizing a `GetElementPtrInst` rooted
+directly at a stage-IO global with a constant prefix of indices (member
+selection/nested-array peeling) and exactly one trailing non-constant
+index selecting a row within an `ArrayType` member -- e.g.
+`gl_PerVertex.gl_ClipDistance[i]` with a loop-carried `i` -- wired into
+both `getStageIOGlobal` (discovery) and `resolveStageIOAccess` (full
+resolution) as a third fallback, after the existing constant-offset and
+dynamic-vertex-index paths. `ShadowValueMap` (roadmap H2e's
+`Output`-direction read-back scheme) needed a real extension to support
+this: a non-constant `Row` cannot key a per-array-element scalar shadow
+`AllocaInst` the way every prior (constant-`Row`) shape did, so it now
+gets its own `RowCount`-sized array alloca per (`ElementID`,
+`Component`), GEP'd by the runtime `Row` value -- deliberately excluded
+from `PromoteMemToReg`'s own list (a variable-index GEP is not
+promotable), so it stays ordinary stack memory. Confirmed by a new
+`CanonicalizeStageTest.cpp` case,
+`ThreadsDynamicRowIndexIntoClipDistanceOutputStore`.
+
+A real IR reduction (`glslangValidator -V` on a minimal GLSL vertex
+shader mirroring the CTS shape → `feme-translate
+--import-spirv --spirv-to-llvmir` → `feme-opt --llvm
+-passes='feme-graphics-canonicalize-stage,feme-graphics-validate-stage'`)
+reproduced the pre-fix "unresolved stage-IO global-variable access to
+'spirv_varN'" diagnostic exactly as the roadmap row's own text describes,
+for both the `ClipDistance` and `CullDistance` members, and confirmed it
+no longer fires post-fix.
+
+**`ninja check-feme`.** Passes in full at **2048/2107** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7h's own 2047/2106 baseline
+by the 1 new test this row adds
+(`CanonicalizeStageTest.ThreadsDynamicRowIndexIntoClipDistanceOutputStore`).
+
+**Real Vulkan CTS re-run.** With `shaderClipDistance`/`shaderCullDistance`
+provisionally flipped to `VK_TRUE` purely to let CTS attempt these cases
+(reverted before committing, matching H7h's own measurement discipline), a
+re-run of the 16 `dEQP-VK.clipping.user_defined.{clip_distance,
+clip_cull_distance}_dynamic_index.vert.*` cases (non-`_fragmentshader_read`,
+the primary target this row's own text scopes to) gives:
+
+```
+Test run totals:
+  Passed:        0/16 (0.0%)
+  Failed:        16/16 (100.0%)
+  Not supported: 0/16 (0.0%)
+```
+
+Every case now fails with a **different** error than before this row:
+
+```
+error: feme-cpu-linearize: function 'main': loop at '' has an internal
+branch in ''; unsupported (roadmap milestone 6 deviation)
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED)
+```
+
+This is the exact same, already-documented, pre-existing
+`feme::cpu::LinearizePass` limitation this report already noted for
+`dEQP-VK.geometry.layered.*.readback` (roadmap R27 intentionally scopes
+`LinearizePass` to the divergent-diamond/divergent-loop-exit shapes it
+already supports) -- unrelated to stage-IO canonicalization, and not
+something this row's own scope (a `CanonicalizeStage.cpp` pattern-
+recognition gap) touches or should fix. A sampled cross-check against
+`clip_distance_dynamic_index.vert.1_fragmentshader_read`,
+`.vert_tess.1`, and `.vert_geom.1` reproduces the identical failure
+message, confirming it is generic to this CTS shader's own loop shape,
+not specific to the `.vert`-only, non-fragment-read subset.
+
+**What this confirms.** The "unresolved stage-IO global-variable access"
+diagnostic this row's own text names as its target **no longer occurs
+anywhere** in this case list -- real, measured forward progress, just not
+yet a passing image comparison, since a separate, unrelated,
+already-scoped-by-design gap sits immediately downstream. Unlike H7h's
+own three newly-discovered follow-on gaps (each a genuinely new,
+previously-untracked limitation), this one is already a known, named,
+intentionally-scoped limitation of a different pass entirely (roadmap
+R27's own `LinearizePass`), so no new roadmap row is added for it here;
+closing it is a `LinearizePass`-generalization project of its own,
+well outside a stage-IO canonicalization row's scope.
+
+**Feature-bit decision.** `shaderClipDistance`/`shaderCullDistance` stay
+`VK_FALSE` -- this row's fix alone does not clear a real passing CTS case
+end to end, the same standard set by H7h/H7o.
+
+**Documentation.** `FeMeGraphicsDesign.md` gained a new "Status (roadmap
+H7w)" subsection (including the one deliberate deviation from the
+roadmap row's own text: no bounds check was added, matching
+`getDynamicVertexIndexedAccess`'s own established precedent).
+`Vulkan14FeatureInventory.md`'s `shaderClipDistance`/`shaderCullDistance`
+rows updated with a pointer to this section. `VulkanExtensionInventory.md`
+confirmed no change needed (a core feature-bit row, not an extension).
+`Roadmap.md`'s H7w struck through as closed (the row's own scope, the
+canonicalization gap, is real, tested, and CTS-confirmed to no longer
+reproduce its own named failure) -- H7x/H7y remain open and untouched by
+this row.
