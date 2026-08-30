@@ -341,8 +341,8 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `textureCompressionBC` | no |  |
 | feature | VK_VERSION_1_0 | `occlusionQueryPrecise` | yes | roadmap H7a: `QueryPool.cpp`'s occlusion queries (roadmap H2f) already accumulate the real per-sample passed count |
 | feature | VK_VERSION_1_0 | `pipelineStatisticsQuery` | no |  |
-| feature | VK_VERSION_1_0 | `vertexPipelineStoresAndAtomics` | no |  |
-| feature | VK_VERSION_1_0 | `fragmentStoresAndAtomics` | no |  |
+| feature | VK_VERSION_1_0 | `vertexPipelineStoresAndAtomics` | yes | roadmap H7g: no stage-based gate on storage-buffer/-texel-buffer writes exists in the CPU lowering pipeline; a real `dEQP-VK...storage_buffer.vertex*` re-run (1200/1200, excluding the pre-existing, unrelated H7v `bind2` gap) confirms conformance. `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE` writes remain unsupported for every stage (unaffected, out of scope) |
+| feature | VK_VERSION_1_0 | `fragmentStoresAndAtomics` | yes | roadmap H7g, same reproduction as `vertexPipelineStoresAndAtomics` above (`dEQP-VK...storage_buffer.fragment*`/`.vertex_fragment*`, part of the same 1200/1200 re-run) |
 | feature | VK_VERSION_1_0 | `shaderTessellationAndGeometryPointSize` | no |  |
 | feature | VK_VERSION_1_0 | `shaderImageGatherExtended` | no |  |
 | feature | VK_VERSION_1_0 | `shaderStorageImageExtendedFormats` | no |  |

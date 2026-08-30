@@ -2117,11 +2117,30 @@ channel entirely. With H7t closed, the H7n-H7s chain's own original
 motivating case, `alpha_to_coverage_unused_attachment.*`, now passes in
 full. See "Roadmap H7n: measured impact", "Roadmap H7r: measured impact",
 "Roadmap H7s: measured impact", and "Roadmap H7t: measured impact" in
-VulkanCTSReport.md for the full before/after CTS breakdown. The rest of
-H7's own survey (`vertexPipelineStoresAndAtomics`/
-`fragmentStoresAndAtomics`, `shaderClipDistance`/`shaderCullDistance`,
-`samplerAnisotropy`, and the four `shaderStorageImage*` bits) each need real,
-independent work first and remain open.
+VulkanCTSReport.md for the full before/after CTS breakdown.
+`vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics` (roadmap H7g)
+are now real too: a survey of `feme::cpu::runPipeline` (`Pipeline.cpp`)
+confirmed no stage-based gate on storage-buffer/-texel-buffer writes ever
+existed -- every pass touching a resource store already operates
+identically regardless of stage -- so both feature bits simply flip to
+`VK_TRUE` with zero compiler/executor changes, confirmed by a real
+`dEQP-VK.binding_model.shader_access.*.storage_buffer.{vertex,fragment,
+vertex_fragment}*` re-run (1200/1200 passing). Real SPIR-V atomic
+operations and `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE` writes both remain
+separate, pre-existing, out-of-scope gaps unaffected by this row. H7g's
+own re-run surfaced two further, unrelated gaps: `VK_KHR_push_descriptor`
+(advertised, but never listed in `vk_gen_entrypoints.py`'s
+`SUPPORTED_EXTENSIONS`) had its own `_KHR`-suffixed entry points resolve
+to null, SIGSEGV'ing any `with_push` case -- fixed (roadmap H7u, folded
+into H7g's own commit) by registering both as thin forwarders to their
+already-implemented core names. A second, pre-existing `VK_KHR_
+maintenance6` `bind2` (`vkCmdBindDescriptorSets2`) failure, confirmed
+stage-independent via `git stash`, remains open as roadmap H7v. See
+"Roadmap H7g: measured impact" in VulkanCTSReport.md for the full
+before/after CTS breakdown. The rest of H7's own survey
+(`shaderClipDistance`/`shaderCullDistance`, `samplerAnisotropy`, and the
+four `shaderStorageImage*` bits) each need real, independent work first
+and remain open.
 
 ## Implementation Milestones
 

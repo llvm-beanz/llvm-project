@@ -14354,3 +14354,113 @@ by the 3 new tests above.
 confirmed no change needed (a core signature-linkage capability, not a
 feature bit or extension). `FeMeVulkanDesign.md`'s H7 status paragraph
 updated to reflect H7t's closure. `Roadmap.md`'s H7t struck through.
+
+## Roadmap H7g: measured impact (`vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics`, plus H7u's push-descriptor fix)
+
+**Gap.** `PhysicalDeviceInfo.cpp` reported both `vertexPipelineStoresAndAtomics`
+and `fragmentStoresAndAtomics` as `VK_FALSE`. No prior investigation had
+confirmed whether the CPU lowering pipeline (`feme::cpu::runPipeline`,
+`Pipeline.cpp`) gated storage-buffer/-image writes by stage at all.
+
+**Investigation.** An exhaustive read of every pass touching a resource
+store (`SPIRVResourceLoweringPass`, `ResourceLoweringPass`, `LinearizePass`,
+`SIMDizePass`, `WaveLoweringPass`) confirmed none of them branch on
+`StageCompileOptions::Stage`; the only stage-conditioned logic in the whole
+pipeline is (a) whether graphics stage-IO validation runs at all (skipped
+for `ShaderStage::Compute`, which has no `feme.stage.*` ops), and (b) which
+stage-specific entry-wrapper pass runs last. Neither restricts stores. Real
+SPIR-V atomic operations (`OpAtomicIAdd` etc.) are separately confirmed
+entirely unimplemented, for every stage including compute -- the existing
+compute "storage buffer" unit test uses a plain load+`IAdd`+store, not a
+true atomic RMW -- but cross-checking the real CTS's own
+`vktBindingShaderAccessTests.cpp` (`checkSupportShaderAccess`) confirmed
+these two feature bits gate ordinary storage-buffer/image *write* access
+from a stage, not specifically atomic RMW, so a plain-store test is
+sufficient evidence to flip the bits honestly.
+`VK_DESCRIPTOR_TYPE_STORAGE_IMAGE` write support is also confirmed entirely
+absent for every stage (`Format.cpp`'s own comment: no `feme.cpu.image.
+store.*` runtime helper exists for any format yet) -- a separate,
+pre-existing, stage-independent gap unaffected by and out of scope for this
+row, since the feature bits only promise writability for storage-resource
+kinds the device does support (storage buffers, and storage texel buffers
+via the existing `Buffer`-dim `spirv.ImageWrite` lowering).
+
+**Unit tests (new).** `DrawTest.cpp`'s `VertexStageWritesStorageBuffer` and
+`FragmentStageWritesStorageBuffer`: a real SPIR-V-dialect vertex/fragment
+shader each storing into a bound `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`
+(vertex: `buf[gl_VertexIndex] = (gl_VertexIndex + 1) * 11`, one distinct
+slot per invocation; fragment: `buf[0] = 42`, an identical constant every
+invocation), each deliberately avoiding any read-modify-write race since
+real atomics aren't implemented. Both passed immediately against the
+unmodified compiler/executor, confirming zero code changes were needed
+there -- mirroring the H7a "already-implemented feature bits" pattern.
+`createPipeline`'s test helper gained an optional `CustomLayout` parameter
+to support a custom descriptor-set-bound pipeline layout.
+
+**Feature-bit flip.** `PhysicalDeviceInfo.cpp`: both
+`vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics` set `VK_TRUE`.
+`PhysicalDeviceInfoTest.cpp`'s all-features assertion test updated
+accordingly.
+
+**Real CTS re-run.** `dEQP-VK.binding_model.shader_access.*.storage_buffer.
+{vertex,fragment,vertex_fragment}*` (excluding the `bind2` subset, tracked
+separately below as H7v): **1200/1200 pass, 0 fail, 0 `NotSupported`** (up
+from 0 pass/0 fail/1200 `NotSupported` before the flip, since every case
+was previously rejected up front by `checkSupportShaderAccess`).
+
+**A newly-reachable crash, found and fixed (roadmap H7u).** The same
+re-run's `with_push` subset (`DESCRIPTOR_UPDATE_METHOD_WITH_PUSH`, i.e.
+`VK_KHR_push_descriptor`) initially SIGSEGV'd on its very first case,
+previously unreached since every `with_push` case was rejected
+`NotSupported` before this row's own flip. `gdb -batch -ex run -ex bt`
+showed a null-function-pointer call inside CTS's own
+`vk::DescriptorSetUpdateBuilder::updateWithPush`. Root cause:
+`vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` never listed
+`VK_KHR_push_descriptor`, despite `PhysicalDeviceInfo.cpp` already
+advertising it (roadmap F12) -- so `vkCmdPushDescriptorSetKHR`/
+`vkCmdPushDescriptorSetWithTemplateKHR` (the extension's own, `_KHR`-
+suffixed original names, as opposed to their core-VK_VERSION_1_4-promoted
+unsuffixed aliases already implemented and registered) were never read out
+of `<extensions>` at all, so `vkGetDeviceProcAddr` returned null for them
+unconditionally. Fixed by adding `VK_KHR_push_descriptor` to
+`SUPPORTED_EXTENSIONS` (`vk_gen_entrypoints.py`), registering the two
+`_KHR` names in `ImplementedEntrypoints.txt`, and implementing them as thin
+forwarders to the already-implemented core names (`CommandBuffer.cpp`/
+`EntryPoints.h`). The pre-existing `vk-gen-entrypoints-split-features.test`
+lit test's synthetic `vk-split-features.xml` fixture was updated to declare
+this eighth `SUPPORTED_EXTENSIONS` entry too, so the generator test itself
+still exercises it. A new `CommandBufferTest.cpp` regression test,
+`PushDescriptorSetDispatchTest.KHRSuffixedEntryPointsProduceTheSameResult`,
+calls `vkCmdPushDescriptorSetKHR` directly and confirms identical behavior
+to the core name. Re-running the full `with_push*` subset (20 cases)
+post-fix: **20/20 pass**, and the fix is included in the 1200/1200 total
+above.
+
+**A second, unrelated gap found, not fixed (roadmap H7v, new).** The same
+broader re-run's `bind2` subset (`VK_KHR_maintenance6`'s
+`vkCmdBindDescriptorSets2`) also failed: vertex/fragment-stage cases
+SIGSEGV (a null-pointer call inside `writeDrawCmdBuffer`'s
+`bindDescriptorSets` helper, at a different call site than the push-
+descriptor crash above -- `x8`'s dereferenced value at the crash site was
+non-null, ruling out the same "unregistered `_KHR` name" root cause),
+while compute-stage cases instead fail cleanly with `VK_ERROR_
+INITIALIZATION_FAILED` at `vkCreateComputePipelines`. A `git stash`/
+rebuild/re-run of `dEQP-VK.binding_model.shader_access.primary_cmd_buf.
+bind2.storage_buffer.compute*` confirmed the exact same 30/30 failure
+without any of this row's own changes -- i.e. `bind2` is pre-existing and
+entirely stage-independent, unrelated to storage-buffer stage-write
+support itself. Tracked as a new follow-on, H7v, left open.
+
+**`ninja check-feme`.** Passes in full at **2042/2101** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7t's own 2039/2098 baseline
+by the 3 new tests this row and its H7u push-descriptor fix add
+(`DrawTest.cpp`'s `VertexStageWritesStorageBuffer`/
+`FragmentStageWritesStorageBuffer`, `CommandBufferTest.cpp`'s
+`KHRSuffixedEntryPointsProduceTheSameResult`).
+
+**Documentation.** `Vulkan14FeatureInventory.md` updated (both feature
+bits now advertised). `VulkanExtensionInventory.md` updated (`VK_KHR_
+push_descriptor`'s row notes the `_KHR` dispatch-table fix; `VK_KHR_
+maintenance6`'s row notes the new, open H7v `bind2` gap).
+`FeMeVulkanDesign.md`'s H7 status paragraph updated. `Roadmap.md`'s H7g
+struck through; H7v added as a new, single-lowercase-letter follow-on.

@@ -371,7 +371,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_maintenance3` | Implemented (core, not advertised by name) | vkGetDescriptorSetLayoutSupport plus VkPhysicalDeviceMaintenance3Properties (Descriptor.cpp, EntryPoints.cpp's fillProperties2Chain) |
 | `VK_KHR_maintenance4` | Implemented (core, not advertised by name) | roadmap E4: vkGetDeviceBufferMemoryRequirements/vkGetDeviceImageMemoryRequirements/vkGetDeviceImageSparseMemoryRequirements, maxBufferSize, all implemented as core VK_VERSION_1_3 names; extension string never needed by any known CTS case |
 | `VK_KHR_maintenance5` | Advertised |  |
-| `VK_KHR_maintenance6` | Advertised |  |
+| `VK_KHR_maintenance6` | Advertised | roadmap H7v (new, open): `vkCmdBindDescriptorSets2`'s own `bind2` path fails for every stage (SIGSEGV for vertex/fragment, `VK_ERROR_INITIALIZATION_FAILED` for compute), discovered via H7g's own re-run and confirmed pre-existing (reproduces identically via `git stash`) -- unrelated to advertising the extension itself |
 | `VK_KHR_maintenance7` | Not implemented |  |
 | `VK_KHR_maintenance8` | Not implemented |  |
 | `VK_KHR_maintenance9` | Not implemented |  |
@@ -389,7 +389,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_present_mode_fifo_latest_ready` | Not implemented |  |
 | `VK_KHR_present_wait` | Not implemented |  |
 | `VK_KHR_present_wait2` | Not implemented |  |
-| `VK_KHR_push_descriptor` | Advertised |  |
+| `VK_KHR_push_descriptor` | Advertised | roadmap H7u/H7g: `vkCmdPushDescriptorSetKHR`/`vkCmdPushDescriptorSetWithTemplateKHR` (the extension's own, `_KHR`-suffixed original names, as opposed to their core-1.4-promoted unsuffixed aliases already implemented) previously resolved to null via `vkGetDeviceProcAddr` -- `vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` never listed this extension despite it being advertised, so its own commands were never read out of `<extensions>` under their `_KHR` names. Fixed: both now registered as thin forwarders to the core names (`CommandBuffer.cpp`), confirmed via a real `dEQP-VK...with_push...storage_buffer.vertex*` re-run that previously SIGSEGV'd through exactly this null pointer and now passes (20/20) |
 | `VK_KHR_ray_query` | Planned (in scope, not implemented) | roadmap J5 |
 | `VK_KHR_ray_tracing_maintenance1` | Planned (in scope, not implemented) | roadmap J7 |
 | `VK_KHR_ray_tracing_pipeline` | Planned (in scope, not implemented) | roadmap J6 |
