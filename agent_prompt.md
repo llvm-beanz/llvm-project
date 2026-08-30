@@ -38,7 +38,8 @@ if it already exists, and commit it in its own commit when you're done.
 # Request
 
 Can you continue working on H7j or any prerequisite work required to complete
-the H-series milestones?
+the H-series milestones? You stopped part way through working on the last
+prompt. Your progress is stashed and can be restored with `git stash pop`.
 
 > **`shaderStorageImageExtendedFormats`/`shaderStorageImageMultisample`/`shaderStorageImageReadWithoutFormat`/`shaderStorageImageWriteWithoutFormat`**:
 > no `OpImageRead`/`OpImageWrite` lowering was found anywhere in the transform
