@@ -877,6 +877,61 @@ signature-mapping change. `ClipDistance`/`CullDistance` remain unmodeled
 (`None`), tracked separately under roadmap H7 (`shaderClipDistance`/
 `shaderCullDistance`).
 
+#### Status (roadmap H7h)
+
+`gl_ClipDistance`/`gl_CullDistance` (SPIR-V `BuiltIn` `ClipDistance`/3 and
+`CullDistance`/4) now map to `SignatureSystemValue::ClipDistance`/
+`CullDistance` (`CanonicalizeStage.cpp`'s `getSystemValueForBuiltIn`),
+mirroring roadmap H7e's `PointSize` precedent: a `gl_PerVertex` interface
+block's `float gl_ClipDistance[8]`/`gl_CullDistance[8]` members already
+decompose generically into a `RowCount`-shaped `SignatureElement`
+(`getStageIORowShape` folds the array dimension into `RowCount` with no
+new code), so only the builtin-to-system-value mapping itself was a real
+gap.
+
+The executor (`Executor.cpp`) is the real consumer, added as part of this
+same roadmap row:
+
+- `gl_ClipDistance` becomes one additional Sutherland-Hodgman half-space
+  clip per declared plane (up to 8, `clipTriangle`'s new
+  `ClipDistanceCount` parameter), run after the existing 7 fixed frustum
+  planes (their relative order is unconstrained by the spec, matching
+  this file's existing guard-band-plane note), evaluated directly
+  against the shader's own per-vertex value via `RasterVertex`'s new
+  `ClipDistances` array (linearly interpolated like any other varying).
+- `gl_CullDistance` discards a whole primitive outright, before it ever
+  reaches clipping, when one declared cull-plane index is negative for
+  every one of its (pre-clip) vertices (`isCulledByCullDistance`), per
+  the Vulkan spec's per-plane, all-vertices-negative rule.
+
+This is scoped to the **vertex stage only**, with **compile-time-constant
+array indices only**, and does **not** include fragment-stage read-back of
+the interpolated value. A real
+`dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}.*`
+re-run (see "Roadmap H7h: measured impact" in `VulkanCTSReport.md`) found
+that scope is real (16/16 passing) but confirmed three further, separate
+gaps this row does not close:
+
+- **dynamic indexing** (`*_dynamic_index`): a non-constant
+  `gl_ClipDistance[i]`/`gl_CullDistance[i]` array index is not
+  canonicalized by `CanonicalizeStagePass` at all -- tracked as roadmap
+  H7w.
+- **fragment-shader read-back** (`*_fragmentshader_read`): the fragment
+  stage has no system-value-linked input path for the interpolated
+  clip/cull-distance value -- tracked as roadmap H7x.
+- **tessellation/geometry-stage clip/cull-distance** (`vert_tess`/
+  `vert_geom`): writing `gl_ClipDistance`/`gl_CullDistance` from a
+  tessellation-evaluation or geometry stage hits an unrelated,
+  pre-existing LLVM lowering gap (a `getelementptr` into an
+  array-of-struct-typed SSA value, not a pointer) -- tracked as roadmap
+  H7y.
+
+Because only a small fraction of this feature's real mandatory CTS
+surface passes today, `shaderClipDistance`/`shaderCullDistance`
+(`PhysicalDeviceInfo.cpp`) stay at `VK_FALSE` -- advertising either bit
+before H7w/H7x/H7y close would be a conformance violation, the same
+standard set by roadmap H7o/`sampleRateShading`.
+
 ### Tessellation and geometry stage model
 
 DXIL hull/domain stages and SPIR-V tessellation-control/evaluation stages map

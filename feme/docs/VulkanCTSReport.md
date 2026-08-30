@@ -14583,3 +14583,107 @@ in this repository). `FeMeVulkanDesign.md`'s H7 status paragraph updated.
 `Roadmap.md`'s H7v struck through as closed (investigated to a conclusive
 root cause; the collateral resource-lowering bug fixed, the `bind2` crash
 itself confirmed to be a non-fixable environment limitation).
+
+## Roadmap H7h: measured impact (`shaderClipDistance`/`shaderCullDistance`)
+
+**Implementation.** `CanonicalizeStage.cpp`'s `getSystemValueForBuiltIn` now
+maps SPIR-V `BuiltIn ClipDistance` (3) and `CullDistance` (4) onto their own
+`SignatureSystemValue`s (previously `None`, the same "unmodeled" treatment
+an unrecognized DXIL semantic gets). The pre-existing generic `gl_PerVertex`
+per-member decomposition (`getStageIORowShape`) already folds a
+`[N x float]` array member into `RowCount = N`, so this was purely a
+builtin-to-system-value mapping gap, confirmed via a new
+`CanonicalizeStageTest.cpp` case, `MapsSPIRVClipCullDistanceBuiltInsToSystemValues`.
+
+`Executor.cpp` gained the real consumer:
+
+- `gl_ClipDistance` becomes one additional Sutherland-Hodgman half-space
+  clip per declared plane (up to 8), run after the existing 7 fixed
+  frustum planes, evaluated directly against each vertex's own shader
+  output value via a new `RasterVertex::ClipDistances` array (linearly
+  interpolated across a clipped edge like any other varying).
+- `gl_CullDistance` discards a whole primitive outright, before it ever
+  reaches clipping, when one declared cull-plane index is negative for
+  every one of the primitive's (pre-clip) vertices
+  (`isCulledByCullDistance`), per the Vulkan spec's per-plane,
+  all-vertices-negative rule.
+
+Two new `ExecutorTest.cpp` cases confirm this end to end:
+`ClipsATriangleAgainstAWrittenClipDistance` (a full-screen-covering
+triangle with `gl_ClipDistance[0]` set to each vertex's own NDC Y,
+verifying the negative-Y half is clipped away) and
+`CullsATriangleWhenCullDistanceIsNegativeForEveryVertex` (a uniformly
+negative `gl_CullDistance[0]` at all three vertices, verifying the whole
+primitive is discarded).
+
+This session's scope is deliberately narrow: the **vertex stage only**,
+with **compile-time-constant array indices only**, and **no fragment-stage
+read-back** of the interpolated value -- matching the roadmap row's own
+text ("a clip-distance consumer in `clipTriangle` and a cull-distance
+consumer wherever primitive culling happens"), nothing about dynamic
+indexing, fragment reads, or non-vertex stages.
+
+**`ninja check-feme`.** Passes in full at **2047/2106** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7v's own 2044/2103 baseline
+by the 3 new tests this row adds
+(`CanonicalizeStageTest.MapsSPIRVClipCullDistanceBuiltInsToSystemValues`,
+`ExecutorTest.ClipsATriangleAgainstAWrittenClipDistance`,
+`ExecutorTest.CullsATriangleWhenCullDistanceIsNegativeForEveryVertex`).
+
+**Real Vulkan CTS re-run.** With `shaderClipDistance`/`shaderCullDistance`
+provisionally flipped to `VK_TRUE` purely to let CTS attempt these cases
+(a device that reports the bit `VK_FALSE` makes every one of them report
+`NotSupported` rather than exercising the real implementation), a full
+re-run of `dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}
+[_dynamic_index].{vert,vert_tess,vert_geom}.*` gives:
+
+- `clip_distance.vert.*` (non-`_fragmentshader_read`): **8/8 pass**.
+- `clip_distance.vert.*_fragmentshader_read`: **0/8 pass** -- every case
+  fails at `vkCreateGraphicsPipelines` with an LLVM
+  `'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but
+  got '!llvm.array<N x f32>'` error. No fragment-side system-value-linked
+  input path exists for these two builtins yet.
+- `clip_cull_distance.vert.*` (non-`_fragmentshader_read`): **8/8 pass**.
+- `clip_cull_distance.vert.*_fragmentshader_read`: **0/8 pass**, identical
+  failure shape to `clip_distance`'s own `_fragmentshader_read` cases.
+- `clip_distance_dynamic_index.vert.*`: **0/16 pass** -- every case fails
+  with `feme-graphics-validate-stage: function 'main' has an unresolved
+  stage-IO global-variable access to 'spirv_varN', a shape
+  CanonicalizeStagePass does not yet canonicalize into a 'feme.stage.*'
+  call`. A non-constant array index into `gl_ClipDistance`/
+  `gl_CullDistance` is not recognized by `CanonicalizeStagePass` at all.
+- `clip_cull_distance_dynamic_index.vert.*`: **0/16 pass**, identical
+  failure shape.
+- `clip_distance.vert_tess.1`, `clip_distance.vert_geom.1` (sampled):
+  **0/2 pass** -- both fail at `vkCreateGraphicsPipelines` with the same
+  class of LLVM `getelementptr`-into-an-array(-of-struct)-typed-SSA-value
+  error as the `_fragmentshader_read` cases, but from the
+  tessellation-evaluation/geometry stage's own output-composition code
+  rather than a fragment-stage input.
+
+Totals: **16 pass / 66 sampled fail**, out of this feature's roughly 330
+real mandatory CTS cases once every stage/indexing-mode/fragment-read
+combination is counted. Only the vertex-stage, static-index,
+non-fragment-read subset is real conformance today.
+
+**Feature-bit decision.** Given that the bulk of this feature's own
+mandatory CTS surface still fails, `shaderClipDistance`/
+`shaderCullDistance` (`PhysicalDeviceInfo.cpp`) are left at their
+zero-initialized `VK_FALSE` -- advertising either bit now would be a
+conformance violation, the same standard set by roadmap
+H7o/`sampleRateShading` (which stayed `VK_FALSE` until a real passing
+case existed for every gate blocking it). Re-running the same case list
+against the unmodified (bit still `VK_FALSE`) build confirms every case
+correctly reports `NotSupported` (`"Shader ClipDistance not supported"`)
+rather than a false pass or a hard failure.
+
+**Documentation.** `Vulkan14FeatureInventory.md`'s `shaderClipDistance`/
+`shaderCullDistance` rows updated with the measured 16/~330 split and
+pointers to the three follow-on rows. `VulkanExtensionInventory.md`
+confirmed no change needed (a core feature-bit row, not an extension).
+`FeMeGraphicsDesign.md` gained a new "Status (roadmap H7h)" subsection.
+`Roadmap.md`'s H7h struck through as partially closed (the vertex-stage,
+static-index consumer is real and tested; the feature bit itself stays
+blocked), with three new, properly-scoped follow-on rows added: H7w
+(dynamic indexing), H7x (fragment-shader read-back), H7y
+(tessellation/geometry-stage clip/cull-distance writes).
