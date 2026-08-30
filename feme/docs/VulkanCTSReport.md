@@ -14784,3 +14784,111 @@ confirmed no change needed (a core feature-bit row, not an extension).
 canonicalization gap, is real, tested, and CTS-confirmed to no longer
 reproduce its own named failure) -- H7x/H7y remain open and untouched by
 this row.
+
+## Roadmap H7x: measured impact (fragment-stage read-back of `gl_ClipDistance`/`gl_CullDistance`)
+
+**Implementation.** Two real fixes, one at each layer a real IR
+reduction found blocking this row's own target shape:
+
+- `SPIRVToLLVMPatterns.cpp` gained `StageIOArrayAccessChainPattern`,
+  legalizing a single-constant-index `spirv.AccessChain` into a
+  value-modeled stage-IO array (the shape `StageIOAddressOfPattern`
+  produces for a fragment-stage `Input` array builtin, e.g. the
+  standalone, non-`gl_PerVertex`-wrapped `gl_ClipDistance`/
+  `gl_CullDistance` glslang emits for a fragment-stage read) directly to
+  `llvm.extractvalue`, mirroring the existing `BuiltInAccessChainPattern`
+  vector/`extractelement` precedent.
+- `Executor.cpp`'s fragment/vertex varying-linking loop now recognizes a
+  fragment input with `SystemValue` `ClipDistance`/`CullDistance` (no
+  `Location` of its own) and links it against the already-resolved
+  `VSClipDistance`/`VSCullDistance` vertex output by `SystemValue`
+  instead of skipping it, reusing the existing generic `LinkedVarying`
+  interpolation machinery unchanged. `StageStorage.cpp`/
+  `FragmentWrapper.cpp` needed a narrow carve-out so these two builtins'
+  fragment-side storage/lowering takes the ordinary-varying path rather
+  than the per-invocation-record path every other fragment system value
+  uses.
+
+Confirmed via 43/43 passing `Conversion/SPIRVToLLVM` lit tests (2 new:
+`spirv-to-llvm-stage-io.mlir`'s new constant-index case,
+`spirv-to-llvm-stage-io-array-access-invalid.mlir`'s new dynamic-index
+case) and a new `ExecutorTest.cpp` case,
+`FragmentShaderReadsBackInterpolatedClipAndCullDistance`.
+
+A real IR reduction (`glslangValidator -V` on a minimal GLSL
+vertex+fragment pair, the fragment shader reading back
+`gl_ClipDistance[0]` → `feme-translate --import-spirv
+--no-implicit-module --spirv-to-llvmir`) reproduced the pre-fix
+`'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but
+got '!llvm.array<1 x f32>'` verifier error exactly, and confirmed it no
+longer fires post-fix -- the reduction now produces valid LLVM IR
+(`load` + `extractvalue` + a `vcolor`-varying `fadd`, `insertelement`
+broadcast, and `store`).
+
+**`ninja check-feme`.** Passes in full at **2050/2109** (59
+pre-existing, unrelated `Unsupported`, 0 `Failed`), up from H7w's own
+2048/2107 baseline by the 2 new tests this row adds (1 new lit test
+case in an existing file, plus `ExecutorTest`'s new case; the invalid-
+access lit test file is new but counts as the file's own 1 test).
+
+**Real Vulkan CTS re-run.** With `shaderClipDistance`/`shaderCullDistance`
+provisionally flipped to `VK_TRUE` purely to let CTS attempt these cases
+(reverted before committing, matching H7h/H7w's own measurement
+discipline), a re-run of the 16
+`dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}.vert.
+*_fragmentshader_read` cases (the primary target this row's own text
+names) gives:
+
+```
+Test run totals:
+  Passed:        0/16 (0.0%)
+  Failed:        16/16 (100.0%)
+  Not supported: 0/16 (0.0%)
+```
+
+Every case now fails with a **different, new** error than before this
+row (the `getelementptr` verifier crash this row's own two fixes above
+already resolved):
+
+```
+error: feme-cpu-simdize: function 'main' has a divergent value '' of
+aggregate type; component decomposition is not yet supported (roadmap
+milestone 7 deviation)
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED)
+```
+
+**What this confirms.** Both of this row's own targeted gaps -- the
+SPIR-V-to-LLVM `AccessChain` legalization crash, and the missing
+fragment/vertex linking path -- are genuinely closed: the `getelementptr`
+verifier error this row's own text (and H7h's original CTS re-run) named
+no longer occurs anywhere. But a third, previously-hidden blocker sits
+immediately downstream, one layer below both fixes: `SIMDize.cpp`'s
+own producer/consumer classification of which divergent-value shapes it
+can widen into per-lane wave form does not yet cover an aggregate-typed
+divergent value at all (here, the whole `[N x f32]` array
+`StageIOAddressOfPattern` loads before this row's own `extractvalue`
+narrows it to a scalar -- a per-fragment-invocation-divergent load,
+since each lane's interpolated clip/cull-distance value differs). This
+is a **new, previously-undiscovered** gap (unlike H7w's own downstream
+`LinearizePass` hit, this diagnostic was never seen by any prior
+roadmap row's own CTS re-run), generic to any divergent aggregate value
+rather than specific to these two builtins, so it is broken out as its
+own new roadmap row, H7z, rather than folded into this one or nested
+under it (per this project's own "no more than one lowercase letter of
+nesting" convention).
+
+**Feature-bit decision.** `shaderClipDistance`/`shaderCullDistance` stay
+`VK_FALSE` -- this row's own fixes, while real, independently tested,
+and confirmed to close both of the gaps this row's own text and H7h's
+CTS re-run named, do not by themselves clear a real passing CTS case
+end to end (H7w's dynamic-index gap, H7y's tessellation/geometry gap,
+and now H7z's `SIMDize` aggregate gap all remain separately open).
+
+**Documentation.** `FeMeGraphicsDesign.md` gained a new "Status (roadmap
+H7x)" subsection. `Vulkan14FeatureInventory.md`'s
+`shaderClipDistance`/`shaderCullDistance` rows updated with a pointer to
+this section. `VulkanExtensionInventory.md` confirmed no change needed
+(a core feature-bit row, not an extension). `Roadmap.md`'s H7x is
+**not** struck through (real CTS cases still fail), but annotated with
+what it closed and a pointer to the new H7z follow-on row this
+re-run's own newly-discovered blocker required.

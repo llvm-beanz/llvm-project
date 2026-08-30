@@ -1004,6 +1004,88 @@ particular loop shape, stage-IO or not. `shaderClipDistance`/
 alone does not flip a feature bit whose bulk of mandatory CTS surface
 still fails, the same standard as H7h/H7o).
 
+#### Status (roadmap H7x)
+
+A fragment stage's own read of `gl_ClipDistance`/`gl_CullDistance` --
+H7h's own vertex-stage consumer never made the interpolated value
+reachable from the fragment side at all -- needed two real fixes, one at
+each of the two layers this row's own investigation found blocking it:
+
+1. **`SPIRVToLLVMPatterns.cpp` (one layer below `CanonicalizeStage.cpp`
+   entirely).** Unlike the vertex-stage `Output` side (always wrapped in
+   the `gl_PerVertex` interface block), glslang emits a fragment-stage
+   `gl_ClipDistance`/`gl_CullDistance` *read* as a standalone,
+   `BuiltIn`-decorated `Input`-storage-class array global --
+   `StageIOAddressOfPattern` (roadmap R19) already eagerly loads any
+   non-builtin `Input` variable's whole value at its own
+   `spirv.mlir.addressof` site (mirroring how a compute builtin `Input`
+   is value-modeled, since SPIR-V's own `Input` pointer type cannot tell
+   the two apart), which works for a variable loaded directly but
+   crashed MLIR's own generic, pointer-assuming `spirv.AccessChain`
+   pattern once one indexes into the resulting aggregate value
+   (`'llvm.getelementptr' op operand #0 must be LLVM pointer type ...
+   but got '!llvm.array<N x f32>'`) -- reproduced via a real
+   `glslangValidator`/`feme-translate --spirv-to-llvmir` IR reduction of
+   the exact shape. New `StageIOArrayAccessChainPattern`, mirroring the
+   existing `BuiltInAccessChainPattern`'s vector/`extractelement`
+   precedent for this array/`extractvalue` shape, legalizes a
+   single-constant-index `spirv.AccessChain` into a value-modeled array
+   directly to `llvm.extractvalue`. A non-constant index has no
+   `llvm.extractvalue` representation at all (unlike `getelementptr`),
+   so it is left unmatched -- deliberately scoped as this row's own
+   combination with roadmap H7w's already-tracked dynamic-index gap, not
+   a new regression -- falling through to MLIR's own generic pattern,
+   which now reports a clean, diagnosed `llvm.getelementptr` verifier
+   error instead of crashing.
+2. **`Executor.cpp`'s fragment/vertex varying-linking loop.** Extended to
+   recognize a fragment input whose `SystemValue` is `ClipDistance`/
+   `CullDistance` (these builtins carry no `Location`, so the loop
+   previously skipped them outright) and link it against the
+   already-resolved `VSClipDistance`/`VSCullDistance` vertex output by
+   `SystemValue` instead, with a clear error if the vertex stage doesn't
+   declare the matching output. Once linked as an ordinary
+   `LinkedVarying`, no further special-casing is needed: both the
+   per-vertex flatten and the per-fragment barycentric/perspective
+   interpolation loop already operate generically over
+   `LinkedVarying::RowCount`.
+
+Two supporting pieces, both previously assuming every fragment
+system-value input is sourced from the per-invocation
+`FragmentInvocation` record rather than ordinary stage storage, needed a
+narrow carve-out for these two builtins specifically:
+`StageStorage.cpp`'s `buildStageStorage` (which otherwise skips
+allocating storage for *any* system-value input) and
+`FragmentWrapper.cpp`'s `lowerFragmentInputLoad` (which otherwise routes
+every system-value input through `loadFragmentSystemValue`, which has no
+`ClipDistance`/`CullDistance` case). Both now treat `ClipDistance`/
+`CullDistance` fragment inputs as an ordinary linked varying instead.
+
+Confirmed via a new `ExecutorTest.cpp` case,
+`FragmentShaderReadsBackInterpolatedClipAndCullDistance`, and via the
+same real IR reduction above, which no longer reproduces the
+`getelementptr` verifier crash post-fix.
+
+**A real CTS re-run reveals a third, deeper, previously-hidden blocker**
+this row's own two fixes above do not reach: `feme-cpu-simdize`
+(`SIMDize.cpp`) rejects the resulting IR with `"function 'main' has a
+divergent value '' of aggregate type; component decomposition is not yet
+supported (roadmap milestone 7 deviation)"` -- a per-fragment-lane
+divergent `load [N x float]` (the whole `gl_ClipDistance`/
+`gl_CullDistance` array, loaded once at the `StageIOAddressOfPattern`
+site before this row's own `extractvalue` ever narrows it to a scalar)
+is an aggregate-typed divergent value, a shape `SIMDize.cpp`'s own
+producer/consumer classification (see its file comment) does not yet
+decompose into per-lane widened components at all -- unrelated to, and
+one layer below, both of this row's own fixes, which already resolved
+their own targeted `getelementptr`-crash/no-linking-path gaps cleanly.
+Broken out as a new, separate roadmap row (H7z) rather than folded into
+this one, since `SIMDize.cpp`'s own aggregate-decomposition gap is
+generic (any divergent aggregate-typed value hits it, not just
+`gl_ClipDistance`/`gl_CullDistance`) and substantial enough to warrant
+its own investigation. `shaderClipDistance`/`shaderCullDistance` stay
+`VK_FALSE` (this row's own fixes, while real and independently tested,
+do not by themselves clear a real passing CTS case end to end).
+
 ### Tessellation and geometry stage model
 
 DXIL hull/domain stages and SPIR-V tessellation-control/evaluation stages map
