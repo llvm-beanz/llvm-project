@@ -45950,3 +45950,138 @@ comment and the commit message, (4) documentation
 `Vulkan14FeatureInventory.md`'s two updated rows, `Roadmap.md`'s H7h
 strikethrough plus three new H7w/H7x/H7y rows -- `VulkanExtensionInventory.md`
 needed no change), (5) this file.
+
+# H7w: dynamic gl_ClipDistance[i]/gl_CullDistance[i] indexing
+
+## Scoping and investigation
+
+Started by re-reading H7h's own text of this row: a non-constant index
+into `gl_ClipDistance`/`gl_CullDistance`'s array dimension is rejected
+outright by `feme-graphics-validate-stage` because `CanonicalizeStagePass`
+never rewrites it into a `feme.stage.*` call in the first place. Traced
+this to `getStageIOBaseAndOffset`'s use of
+`Value::stripAndAccumulateConstantOffsets`, which requires every index in
+a GEP chain to be constant to fold anything at all -- a single
+non-constant index anywhere leaves the whole access unresolved.
+
+Studied the existing dynamic-index precedent
+(`getDynamicVertexIndexedAccess`/`isDynamicIndexedArrayGlobal`, from
+roadmap H5b/H6b/H6k) closely before writing anything, specifically to
+make sure I understood *why* it didn't already cover this shape rather
+than assuming it didn't. Confirmed it operates on a stage-IO global's own
+*outer* array dimension (the global's `getValueType()` must itself be an
+`ArrayType`) -- geometry's `gl_in[i]`, mesh's `gl_MeshVerticesEXT[i]`, a
+genuinely different dimension from H7w's own need: a non-constant index
+one level *inside* a `gl_PerVertex` interface block *member*'s own array.
+`gl_PerVertex` is a `StructType`, not an `ArrayType`, so there's no
+structural collision between the two shapes for any real glslang output.
+
+Did the standard real-IR-reduction technique this whole H6/H7 chain has
+used: wrote a minimal GLSL vertex shader with a loop-carried
+`gl_ClipDistance[i] = ...` write, compiled it with
+`glslangValidator -V`, imported it with `feme-translate
+--import-spirv --spirv-to-llvmir`, and confirmed via `feme-opt --llvm
+-passes='feme-graphics-canonicalize-stage,feme-graphics-validate-stage'`
+that this reproduces the exact real-world diagnostic. This became my
+regression check for the fix: re-run the same reduction after the code
+change and confirm the diagnostic no longer fires.
+
+## Implementation
+
+Wrote `getDynamicRowIndexedAccess`, deliberately structured to mirror
+`getDynamicVertexIndexedAccess`'s own shape (same kind of tuple return,
+same "walk the GEP, peel constant indices, catch exactly one
+non-constant one" logic) since this codebase's style consistently prefers
+a new function that mirrors an existing sibling closely over a more
+"clever" unified abstraction. Wired it into both `getStageIOGlobal`
+(discovery-only) and `resolveStageIOAccess` (full resolution) as a third
+fallback, after the two that already existed.
+
+First build attempt crashed with a `cast<ConstantInt>` assertion failure
+inside `ShadowValueMap::getOrCreate` -- not caught by my own unit test
+first because I hadn't yet run the *real* IR reduction through the full
+`canonicalizeSPIRVStage` path (my first unit test used a store-only
+shape that happened not to exercise the `Output`-direction read-back
+scheme's own shadow-alloca bookkeeping the same way a full pass run
+does... actually it did, once I added `Shadow` correctly -- the crash was
+real and had to be fixed properly, not worked around). Traced this to
+`ShadowValueMap`'s per-(ElementID, Row, Component) scalar-alloca scheme
+requiring `Row` to be a compile-time constant to serve as a map key --
+true for every prior shape this scheme ever saw, never true for H7w's
+own dynamic `Row`. Fixing this required understanding *why* the scheme
+existed at all (SPIR-V's `Output` storage class permits reading back an
+already-written value within the same invocation, unlike DXIL's
+write-only `storeOutput`) and what constraint the consumer downstream
+(`PromoteMemToReg`) placed on it (`isAllocaPromotable` rejects any
+variable-index GEP into an alloca outright) before deciding on a fix:
+give a non-constant `Row` its own array-typed alloca, GEP'd at the
+runtime index, and keep it out of `PromoteMemToReg`'s own list entirely
+rather than trying to force it into SSA form the same way. Correct, if a
+little less optimized -- exactly mirroring how a real GPU driver's own
+dynamically indexed local array likewise cannot live in registers.
+
+## Testing
+
+Added `ThreadsDynamicRowIndexIntoClipDistanceOutputStore` to
+`CanonicalizeStageTest.cpp`, mirroring
+`ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore`'s own
+structure closely, using the exact `gl_PerVertex`-with-`MemberDecorations`
+IR shape the real reduction confirmed. My first draft asserted "no
+`StoreInst` remains at all," copied uncritically from a sibling test
+without checking whether it actually applied here -- it doesn't, since
+the fix's own shadow-alloca write-through is a legitimate `StoreInst` to
+an ordinary local, not to the original stage-IO global. Caught this by
+actually running the new test rather than assuming it would pass, and
+fixed the assertion to check specifically that no store targets a
+`GlobalVariable` anymore, which is the property that actually matters.
+
+`ninja check-feme` (ccache + assertions): 2048/2107 passing (59
+pre-existing `Unsupported`, 0 `Failed`), one test up from H7h's own
+2047/2106 baseline.
+
+## Real Vulkan CTS run
+
+Ran the primary target -- the 16
+`dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}
+_dynamic_index.vert.*` cases (non-`_fragmentshader_read`) -- with
+`shaderClipDistance`/`shaderCullDistance` provisionally (and temporarily,
+reverted before any commit) flipped to `VK_TRUE` to let the cases
+actually exercise the real path rather than short-circuiting to
+`NotSupported`. Result: 0/16 pass, but the failure message changed
+completely from the "unresolved stage-IO global-variable access"
+diagnostic this row targets to a wholly different one --
+`feme-cpu-linearize`'s "loop ... has an internal branch ...; unsupported
+(roadmap milestone 6 deviation)". Recognized this exact message from
+this same file's own H6-era entry for
+`dEQP-VK.geometry.layered.*.readback`, already documented there as a
+pre-existing, intentionally design-scoped `LinearizePass` limitation
+(roadmap R27), unrelated to whatever feature happens to trip over it.
+Cross-checked a sample of `_fragmentshader_read`/`vert_tess`/`vert_geom`
+variants too, and all three hit the identical message -- confirming this
+is generic to the CTS shader's own loop shape, not specific to any one
+stage/read-back combination H7w itself touches.
+
+This is a real, measured "it moved the failure downstream" result: the
+gap this row's own text names is genuinely closed (confirmed by both the
+unit test and the real CTS run no longer producing that diagnostic), but
+a separate, already-known, already-scoped limitation of an entirely
+different pass sits immediately behind it. Decided *not* to invent a new
+roadmap row for that limitation, since (unlike H7h's own three
+newly-discovered follow-ons, each a genuinely new gap) this one is
+already tracked as an intentional design boundary of `LinearizePass`
+(roadmap R27's own text: "scoped ... to the divergent-diamond/
+divergent-loop-exit shapes already supported"), not a previously-unknown
+gap this row's own investigation surfaced. Struck H7w through as closed
+on that basis -- its own scope closed cleanly, even though the feature
+bit itself (needing the *whole* CTS surface to pass, per the H7h/H7o
+standard) stays `VK_FALSE`.
+
+## Commits
+
+Broken into: (1) the `CanonicalizeStage.cpp`/`ShadowValueMap` fix plus its
+new `CanonicalizeStageTest.cpp` test, (2) documentation
+(`FeMeGraphicsDesign.md`'s new H7w status subsection,
+`VulkanCTSReport.md`'s new "Roadmap H7w: measured impact" section,
+`Vulkan14FeatureInventory.md`'s two updated rows, `Roadmap.md`'s H7w
+strikethrough -- `VulkanExtensionInventory.md` needed no change, a core
+feature-bit row not an extension), (3) this file.
