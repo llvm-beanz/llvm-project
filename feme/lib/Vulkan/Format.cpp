@@ -516,10 +516,30 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
     break;
   }
 
-  // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is deliberately never set: no
-  // format has a `feme.cpu.image.store.*` runtime helper yet (see "V5:
-  // Images and sampling" in FeMeVulkanDesign.md), so a `STORAGE_IMAGE`
-  // binding is materialized but never actually writable by a shader.
+  // (Roadmap H19a) The mandatory storage-image format floor Vulkan's own
+  // spec requires: exactly `R32_{SFLOAT,UINT,SINT}` and
+  // `R32G32B32A32_{SFLOAT,UINT,SINT}`, the only formats
+  // `femeRTStoreTexel2D`/`femeRTStoreTexel2DI32`'s own
+  // `femeRTPackImageTexel`/`femeRTPackImageTexelI32` tables (FeMeRuntimeCPU.c)
+  // actually encode; every other format is honestly left unset until a
+  // matching pack/unpack case exists (`shaderStorageImageExtendedFormats`
+  // remains unclaimed, see Roadmap.md's H19b). Plain2D-only for now (no
+  // arrayed/cube/multisampled storage image lowering exists yet, see
+  // `SPIRVResourceLowering.cpp`'s `classifyStorageImage2DHandle`), but this
+  // format-feature bit is per-format, not per-view-shape, so it is still
+  // honest to set here.
+  switch (Format) {
+  case ResourceFormat::R32_FLOAT:
+  case ResourceFormat::R32G32B32A32_FLOAT:
+  case ResourceFormat::R32_UINT:
+  case ResourceFormat::R32G32B32A32_UINT:
+  case ResourceFormat::R32_SINT:
+  case ResourceFormat::R32G32B32A32_SINT:
+    Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    break;
+  default:
+    break;
+  }
 
   if (isSupportedColorAttachmentFormat(Format))
     Flags |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |

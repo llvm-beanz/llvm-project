@@ -353,15 +353,31 @@ TEST(FormatTest, FormatFeatureFlags4444FormatsAreTransferAndBlitOnly) {
   }
 }
 
-TEST(FormatTest, FormatFeatureFlagsNeverAdvertisesStorageImage) {
-  // Roadmap E24: no `feme.cpu.image.store.*` runtime helper exists for any
-  // format yet (see "V5: Images and sampling" in FeMeVulkanDesign.md), so
-  // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is never set, even for a format
-  // every other feature bit is set for.
-  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R32G32B32A32_FLOAT) &
-               VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloor) {
+  // Roadmap H19a: a real `feme.cpu.image.store.2d.*` runtime helper now
+  // exists (`femeRTStoreTexel2D`/`I32`, FeMeRuntimeCPU.c), but only for
+  // exactly the Vulkan spec's own mandatory storage-image format floor --
+  // `R32_{SFLOAT,UINT,SINT}`/`R32G32B32A32_{SFLOAT,UINT,SINT}` -- so
+  // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is set for those and left unset
+  // for every other format (`R8G8B8A8_UNORM` included), matching
+  // `shaderStorageImageExtendedFormats` staying unclaimed (see Roadmap.md's
+  // H19b).
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32_FLOAT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32B32A32_FLOAT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32_UINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32B32A32_UINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32_SINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32B32A32_SINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
-               VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R32G32_FLOAT) &
+              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
 }
 
 TEST(FormatTest, FormatFeatureFlagsAttachmentBitsMatchRenderPassSupport) {
