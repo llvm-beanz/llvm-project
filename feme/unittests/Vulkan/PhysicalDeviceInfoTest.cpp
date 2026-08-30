@@ -111,13 +111,14 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
 
 TEST(PhysicalDeviceInfo,
      OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised) {
-  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c/H7d/H7e/H7f/H7o/H7p)
+  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c/H7d/H7e/H7f/H7g/H7o/H7p)
   // `robustBufferAccess`/`dualSrcBlend`/`textureCompressionASTC_LDR`/
   // `multiViewport`/`tessellationShader`/`geometryShader`/
   // `independentBlend`/`logicOp`/`occlusionQueryPrecise`/
   // `multiDrawIndirect`/`drawIndirectFirstInstance`/`imageCubeArray`/
   // `fillModeNonSolid`/`depthClamp`/`depthBiasClamp`/`depthBounds`/
-  // `wideLines`/`largePoints`/`alphaToOne`/`sampleRateShading` are the
+  // `wideLines`/`largePoints`/`alphaToOne`/`sampleRateShading`/
+  // `vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics` are the
   // only core features this milestone can honestly claim (see
   // PhysicalDeviceInfo.cpp's comment); every other `VkBool32` stays
   // false, since nothing else has been implemented that could back one
@@ -127,6 +128,12 @@ TEST(PhysicalDeviceInfo,
   // `SPIRVPushConstantLowering.cpp` metadata-copy bug) and H7p's own
   // functional gap (`Executor.cpp`'s per-sample pass loop not varying
   // `gl_FragCoord` per sample position) were all fixed.
+  // `vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics` flip to
+  // `VK_TRUE` as of roadmap H7g: an investigation of the CPU lowering
+  // pipeline found no stage-conditioned gate on a storage-buffer store
+  // anywhere, confirmed by a real vertex/fragment-stage storage-buffer
+  // write draw (`DrawTest.cpp`'s `VertexStageWritesStorageBuffer`/
+  // `FragmentStageWritesStorageBuffer`).
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
@@ -148,6 +155,8 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.largePoints, VK_TRUE);
   EXPECT_EQ(Info.Features.alphaToOne, VK_TRUE);
   EXPECT_EQ(Info.Features.sampleRateShading, VK_TRUE);
+  EXPECT_EQ(Info.Features.vertexPipelineStoresAndAtomics, VK_TRUE);
+  EXPECT_EQ(Info.Features.fragmentStoresAndAtomics, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -170,6 +179,8 @@ TEST(PhysicalDeviceInfo,
   Cleared.largePoints = VK_FALSE;
   Cleared.alphaToOne = VK_FALSE;
   Cleared.sampleRateShading = VK_FALSE;
+  Cleared.vertexPipelineStoresAndAtomics = VK_FALSE;
+  Cleared.fragmentStoresAndAtomics = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }

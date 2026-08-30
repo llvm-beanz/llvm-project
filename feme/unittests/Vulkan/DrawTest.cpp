@@ -139,6 +139,74 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (roadmap H7g) `FullscreenVertexSource` plus a `StorageBuffer` write:
+/// each of the triangle's 3 vertices stores `(gl_VertexIndex + 1) * 11`
+/// into `buf[gl_VertexIndex]` (bound at set 0, binding 0) -- a distinct
+/// slot per vertex, so no two invocations race on the same element.
+/// Exercises `vertexPipelineStoresAndAtomics`'s own "a vertex stage can
+/// write a storage buffer" scenario end to end.
+constexpr llvm::StringLiteral VertexStorageBufferSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.func @main() -> () "None" {
+    %vidp = spirv.mlir.addressof @vid : !spirv.ptr<i32, Input>
+    %v = spirv.Load "Input" %vidp : i32
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %is0 = spirv.IEqual %v, %c0 : i32
+    %is1 = spirv.IEqual %v, %c1 : i32
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %xb = spirv.Select %is1, %three, %neg1 : i1, f32
+    %x = spirv.Select %is0, %neg1, %xb : i1, f32
+    %yb = spirv.Select %is1, %neg1, %three : i1, f32
+    %y = spirv.Select %is0, %neg1, %yb : i1, f32
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+    %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    %bufp = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %ac = spirv.AccessChain %bufp[%c0, %v] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %eleven = spirv.Constant 11 : i32
+    %vp1 = spirv.IAdd %v, %c1 : i32
+    %val = spirv.IMul %vp1, %eleven : i32
+    spirv.Store "StorageBuffer" %ac, %val : i32
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @vid, @pos, @buf
+}
+)mlir";
+
+/// (roadmap H7g) `RedFragmentSource` plus a `StorageBuffer` write: every
+/// covered fragment stores the same constant `42` into `buf[0]` (bound at
+/// set 0, binding 0), unconditionally -- since every invocation writes the
+/// identical value, the final result is well-defined regardless of
+/// invocation order, exercising `fragmentStoresAndAtomics`'s own "a
+/// fragment stage can write a storage buffer" scenario without needing a
+/// true atomic read-modify-write.
+constexpr llvm::StringLiteral FragmentStorageBufferSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.func @main() -> () "None" {
+    %c = spirv.Constant dense<[0.0, 0.0, 1.0, 1.0]> : vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xf32>
+    %bufp = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %c0 = spirv.Constant 0 : i32
+    %ac = spirv.AccessChain %bufp[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %fortytwo = spirv.Constant 42 : i32
+    spirv.Store "StorageBuffer" %ac, %fortytwo : i32
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color, @buf
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
 /// (roadmap H6f) A minimal mesh entry point: declares its output topology/
 /// count execution modes and workgroup size but emits nothing (no
 /// `spirv.EmitMeshTasksEXT`/per-vertex writes -- real mesh output content
@@ -778,9 +846,13 @@ protected:
 
   /// \p Rendering, when non-null, replaces the fixture's `VkRenderPass`
   /// with a chained `VkPipelineRenderingCreateInfo` (dynamic rendering).
+  /// \p CustomLayout, when non-null, replaces the fixture's own (empty)
+  /// `Layout` -- needed by a test whose shader binds a real descriptor
+  /// (e.g. roadmap H7g's storage-buffer tests).
   VkPipeline
   createPipeline(VkShaderModule Vertex, VkShaderModule Fragment,
-                 const VkPipelineRenderingCreateInfo *Rendering = nullptr) {
+                 const VkPipelineRenderingCreateInfo *Rendering = nullptr,
+                 VkPipelineLayout CustomLayout = VK_NULL_HANDLE) {
     VkPipelineShaderStageCreateInfo Stages[2]{};
     Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -823,7 +895,7 @@ protected:
     Info.pRasterizationState = &Raster;
     Info.pMultisampleState = &Multisample;
     Info.pColorBlendState = &Blend;
-    Info.layout = Layout;
+    Info.layout = CustomLayout != VK_NULL_HANDLE ? CustomLayout : Layout;
     if (Rendering)
       Info.pNext = Rendering;
     else
@@ -1051,6 +1123,186 @@ TEST_F(DrawTest, RendersFragmentOutputNarrowerThan4Components) {
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H7g) `vertexPipelineStoresAndAtomics`'s own "a vertex stage can
+/// write a storage buffer" scenario, exercised end to end: a real draw
+/// whose vertex stage (`VertexStorageBufferSource`) stores a distinct,
+/// vertex-index-derived value into each of a 3-element storage buffer's
+/// slots. The initial buffer contents are a sentinel (`0xEE` bytes) so a
+/// silently-discarded write (rather than a diagnosable compile failure)
+/// is still distinguishable from a correct one.
+TEST_F(DrawTest, VertexStageWritesStorageBuffer) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+  Binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout StorageLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &StorageLayout),
+            VK_SUCCESS);
+
+  VkDeviceMemory BufMemory = VK_NULL_HANDLE;
+  VkBuffer Buf = createBuffer(3 * sizeof(uint32_t), BufMemory,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  void *Mapped = nullptr;
+  ASSERT_EQ(vkMapMemory(Device, BufMemory, 0, VK_WHOLE_SIZE, 0, &Mapped),
+            VK_SUCCESS);
+  std::memset(Mapped, 0xEE, 3 * sizeof(uint32_t));
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+            VK_SUCCESS);
+  VkDescriptorSetAllocateInfo DSAllocInfo{};
+  DSAllocInfo.descriptorPool = DescPool;
+  DSAllocInfo.descriptorSetCount = 1;
+  DSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+  VkDescriptorBufferInfo BufInfo{Buf, 0, VK_WHOLE_SIZE};
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Write.pBufferInfo = &BufInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkShaderModule Vertex = createModule(VertexStorageBufferSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment, nullptr, StorageLayout);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, StorageLayout,
+                          0, 1, &Set, 0, nullptr);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  const auto *Values = static_cast<const uint32_t *>(Mapped);
+  EXPECT_EQ(Values[0], 11u);
+  EXPECT_EQ(Values[1], 22u);
+  EXPECT_EQ(Values[2], 33u);
+
+  vkUnmapMemory(Device, BufMemory);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyDescriptorPool(Device, DescPool, nullptr);
+  vkDestroyPipelineLayout(Device, StorageLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, BufMemory, nullptr);
+}
+
+/// (roadmap H7g) `fragmentStoresAndAtomics`'s own "a fragment stage can
+/// write a storage buffer" scenario: a real draw whose fragment stage
+/// (`FragmentStorageBufferSource`) stores a constant into a storage
+/// buffer's sole element for every covered fragment. The initial buffer
+/// contents are a sentinel (`0xEE` bytes) distinct from both `0` and the
+/// written constant, so a silently-discarded write is still
+/// distinguishable from a correct one.
+TEST_F(DrawTest, FragmentStageWritesStorageBuffer) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+  Binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout StorageLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &StorageLayout),
+            VK_SUCCESS);
+
+  VkDeviceMemory BufMemory = VK_NULL_HANDLE;
+  VkBuffer Buf =
+      createBuffer(sizeof(uint32_t), BufMemory, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  void *Mapped = nullptr;
+  ASSERT_EQ(vkMapMemory(Device, BufMemory, 0, VK_WHOLE_SIZE, 0, &Mapped),
+            VK_SUCCESS);
+  std::memset(Mapped, 0xEE, sizeof(uint32_t));
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+            VK_SUCCESS);
+  VkDescriptorSetAllocateInfo DSAllocInfo{};
+  DSAllocInfo.descriptorPool = DescPool;
+  DSAllocInfo.descriptorSetCount = 1;
+  DSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+  VkDescriptorBufferInfo BufInfo{Buf, 0, VK_WHOLE_SIZE};
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Write.pBufferInfo = &BufInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(FragmentStorageBufferSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment, nullptr, StorageLayout);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, StorageLayout,
+                          0, 1, &Set, 0, nullptr);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Every covered fragment writes the same constant, so both the write
+  // itself and the ordinary color output must be correct.
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texel(X, Y);
+      EXPECT_EQ(Texel[2], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+  EXPECT_EQ(*static_cast<const uint32_t *>(Mapped), 42u);
+
+  vkUnmapMemory(Device, BufMemory);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyDescriptorPool(Device, DescPool, nullptr);
+  vkDestroyPipelineLayout(Device, StorageLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, BufMemory, nullptr);
 }
 
 /// Roadmap C6: an imageless framebuffer (`VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT`)

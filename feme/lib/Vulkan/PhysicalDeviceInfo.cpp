@@ -603,6 +603,33 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Info.Features.depthBiasClamp = VK_TRUE;
   Info.Features.depthBounds = VK_TRUE;
 
+  // Roadmap H7g: `vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics`
+  // gate whether a `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`/`_DYNAMIC` (or
+  // `STORAGE_IMAGE`/`STORAGE_TEXEL_BUFFER`) binding may be written from the
+  // vertex/tessellation/geometry stages or the fragment stage,
+  // respectively (see `dEQP-VK.binding_model.shader_access`'s own
+  // `checkSupportShaderAccess`). Investigating the CPU lowering pipeline
+  // (`feme::cpu::runPipeline`, ResourceLoweringPass/SIMDizePass/
+  // WaveLoweringPass) found no stage-conditioned gate anywhere on an
+  // `OpStore`/`spirv.ImageWrite` against a bound resource -- every pass that
+  // touches a store operates on it identically regardless of
+  // `StageCompileOptions::Stage`, the same way `feme::cpu::
+  // SPIRVResourceLoweringPass` normalizes a bound `spirv.VulkanBuffer`
+  // handle into the same `feme.cpu.resource.*` calls for every stage.
+  // Confirmed end to end by `DrawTest.cpp`'s new
+  // `VertexStageWritesStorageBuffer`/`FragmentStageWritesStorageBuffer`
+  // (a real draw whose vertex/fragment stage stores through a bound
+  // `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`, read back correctly after
+  // `vkQueueSubmit`), so both flip to `VK_TRUE`. `STORAGE_IMAGE` writes
+  // remain unimplemented for every stage, including compute (see
+  // `Format.cpp`'s "`VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is deliberately
+  // never set" comment) -- a separate, pre-existing, stage-independent gap
+  // this row's own investigation did not need to close, since the feature
+  // bit only promises writability for whichever storage-resource kinds a
+  // device does support at all.
+  Info.Features.vertexPipelineStoresAndAtomics = VK_TRUE;
+  Info.Features.fragmentStoresAndAtomics = VK_TRUE;
+
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
   MemProps.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
