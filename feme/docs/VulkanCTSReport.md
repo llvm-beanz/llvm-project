@@ -14282,3 +14282,75 @@ feature bit or extension). `FeMeVulkanDesign.md`'s render-target-binding
 design section updated with an "Update (roadmap H7s, closed)" paragraph.
 `Roadmap.md`'s H7s struck through; H7t (the narrower-than-4-component
 fragment output gap) added as a new, open, P2 follow-on.
+## Roadmap H7t: measured impact (fragment color outputs narrower than 4 components)
+
+**Gap.** `dEQP-VK.pipeline.monolithic.multisample.alpha_to_coverage_unused_attachment.*`
+(H7s's own follow-on, its own unused-slot gate now cleared) still failed
+every feme-supported-sample-count case at `vkCreateGraphicsPipelines` time,
+now with `"fragment stage has no 4-component floating-point output at
+location 1 (SV_Target1)"`. The real attachment's own fragment output
+(`fragColor1 = vtxColor.rgb`) is a 3-component `vec3` -- legal per spec (the
+missing trailing components default to their identity value: `0.0` for a
+missing G/B, `1.0` for a missing A) -- but `GraphicsPipeline.cpp`'s
+`validateStageInterfaces` and three separate sites in `Executor.cpp`'s
+fragment-output linkage (`FSColors`, the dual-source-blend `FSColor1`, and
+`FSAlphaToCoverage`) all hard-required `ComponentCount == 4`.
+
+**Design.** Rather than requiring every fragment output to declare all 4
+components, all four sites now accept `ComponentCount` in `{1, 2, 3, 4}`.
+A new shared helper, `readFragmentColor` (`Executor.cpp`'s anonymous
+namespace, alongside `mergeColor`), reads a fragment output's up-to-4
+components, substituting the spec-defined identity default for any
+component at or beyond the element's own `ComponentCount` rather than
+reading out-of-bounds `StageStorage` (storage is only ever allocated for
+`[FirstComponent, FirstComponent + ComponentCount)`). The primary
+(`FSColors`) and dual-source-blend (`FSColor1`) read loops were both
+switched to call this helper; the alpha-to-coverage alpha read (which only
+ever needs component 3) was given a simple ternary default instead, since
+it has no use for a full 4-component fill. The design precedent is the
+pre-existing `ImageFixture.cpp` `unpackColor` function, which already
+implements exactly this "missing channel reads as its identity value"
+behavior for color formats lacking a channel entirely (e.g.
+`R5G6B5_UNORM`'s missing alpha already defaults to `1.0` there).
+
+**Unit tests (new, one per phase).** `GraphicsPipelineTest.cpp`'s
+`AcceptsFragmentOutputNarrowerThan4Components` (pipeline-creation-time: a
+real SPIR-V fragment shader with a `vec3` `SV_Target0` output, confirming
+`vkCreateGraphicsPipelines` now succeeds). `DrawTest.cpp`'s
+`RendersFragmentOutputNarrowerThan4Components` (full SPIR-V-to-pixel: a
+`vec3` green fragment output, attachment cleared to *transparent* black
+first so a broken "missing alpha defaults to 0" implementation would be
+distinguishable from a correct "defaults to 1" one, confirming the
+rendered texel is solid green with `0xFF` alpha). `ExecutorTest.cpp`'s
+`FillsTriangleWithColorOutputNarrowerThan4Components` (direct-LLVM-IR,
+Executor-linkage-focused: a hand-built `EntrySignature` with a
+`ComponentCount == 3` fragment-output element, exercising the same guard
+without going through SPIR-V import at all).
+
+**Real CTS re-run.** `dEQP-VK.pipeline.monolithic.multisample.alpha_to_coverage_unused_attachment.*`
+now passes in full: **6/6 feme-supported-sample-count cases pass** (0
+failed, 18 pre-existing `NotSupported` for other sample counts) -- the
+entire H7n->H7q->H7r->H7s->H7t chain's own original motivating case is
+closed.
+
+A broader `dEQP-VK.pipeline.monolithic.multisample.*` sweep (10576 cases)
+was re-run to check for regressions: **195 pass, 57 fail, 10324
+`NotSupported`**, up from H7q's own 189/63/10324 baseline by exactly the 6
+newly-passing cases above (57 = 63 - 6). Every remaining failure was
+confirmed pre-existing and unrelated to this row's own changes --
+`mixed_count`, `sampled_image.*`, `3d.*` (pre-existing, unrelated
+image/sampling gaps), `a2c_with_a2one.*`/`sample_rate_a2c` (pre-existing
+combination-case gaps noted in H7n's own sweep), and
+`compatible_render_pass.dynamic` (confirmed via a `git stash`/rebuild/
+re-run of just this case to fail identically -- `VK_ERROR_INITIALIZATION_FAILED`
+-- without this row's own changes, so pre-existing and unrelated) -- none
+newly introduced.
+
+**`ninja check-feme`.** Passes in full at **2039/2098** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7s's own 2036/2095 baseline
+by the 3 new tests above.
+
+**Documentation.** `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+confirmed no change needed (a core signature-linkage capability, not a
+feature bit or extension). `FeMeVulkanDesign.md`'s H7 status paragraph
+updated to reflect H7t's closure. `Roadmap.md`'s H7t struck through.

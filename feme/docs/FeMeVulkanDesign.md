@@ -2104,12 +2104,20 @@ separate, previously-untracked gap: a classic `VkRenderPass` subpass's
 pipeline-creation and render-pass-binding time, unlike dynamic rendering's
 already-working `VK_NULL_HANDLE`-imageView equivalent (roadmap E5); both
 call sites now reuse that same "present but unused" mechanism. H7s's own
-re-run in turn surfaced a fourth, still-open gap (tracked as H7t): a
-fragment stage's color output narrower than 4 components (e.g. a `vec3`)
-at a *used* attachment location is still rejected outright. See
-"Roadmap H7n: measured impact", "Roadmap H7r: measured impact", and
-"Roadmap H7s: measured impact" in VulkanCTSReport.md for the full
-before/after CTS breakdown. The rest of
+re-run in turn surfaced a fourth gap (H7t, now closed): a fragment stage's
+color output narrower than 4 components (e.g. a `vec3`) at a *used*
+attachment location was rejected outright by both `GraphicsPipeline.cpp`'s
+`validateStageInterfaces` and `Executor.cpp`'s fragment-output linkage;
+both now accept `ComponentCount` in `{1, 2, 3, 4}`, with `Executor.cpp`'s
+new `readFragmentColor` helper synthesizing any missing trailing
+components to their spec-defined identity default (`0.0` for a missing
+G/B, `1.0` for a missing A), mirroring the pre-existing
+`ImageFixture.cpp` `unpackColor` precedent for a color format lacking a
+channel entirely. With H7t closed, the H7n-H7s chain's own original
+motivating case, `alpha_to_coverage_unused_attachment.*`, now passes in
+full. See "Roadmap H7n: measured impact", "Roadmap H7r: measured impact",
+"Roadmap H7s: measured impact", and "Roadmap H7t: measured impact" in
+VulkanCTSReport.md for the full before/after CTS breakdown. The rest of
 H7's own survey (`vertexPipelineStoresAndAtomics`/
 `fragmentStoresAndAtomics`, `shaderClipDistance`/`shaderCullDistance`,
 `samplerAnisotropy`, and the four `shaderStorageImage*` bits) each need real,
