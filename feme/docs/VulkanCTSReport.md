@@ -15376,3 +15376,88 @@ resource-materialization bug fix, not a design decision change.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed
 no change needed (no feature bit or extension is affected by this
 row).
+
+## Roadmap H15: measured impact
+
+**Root cause.** `dEQP-VK.texture.filtering.2d.combinations.nearest.nearest.repeat.repeat`
+(closed by roadmap H14, but still failing) rendered a real, correctly-shaped
+gradient, but in coarse, blocky 3-pixel-wide bands rather than a smooth
+per-pixel gradient -- and each band's value was close to the *average* of
+the reference image's own finer-grained values across that band. That
+"blocky, averaged" signature is characteristic of a real GPU nearest-
+sampling a too-coarse mip level and magnifying it back up (a coarser mip
+level's own texel is typically a box-filtered average of several base-level
+texels), not a wrap-mode or texel-indexing bug. Root-caused to
+`femeRTSelectMipLevel` (`feme/runtime/CPU/FeMeRuntimeCPU.c`) never applying
+the sampler's own `LodBias`/`MinLod`/`MaxLod` (`VkSamplerCreateInfo`'s
+`mipLodBias`/`minLod`/`maxLod`) to the level-of-detail value before
+selecting a mip level -- the Vulkan spec's own image level-of-detail
+operation (`lod = clamp(lod + mipLodBias, minLod, maxLod)`) was simply
+missing from this function. This specific test's own sampler is exactly
+the shape `vkImageUtil.cpp`'s own `mapSampler` uses to realize a non-
+mipmapped `tcu::Sampler::NEAREST`/`LINEAR`/`CUBIC` min filter: it sets
+`maxLod = 0.25` specifically to force every real Vulkan implementation to
+always read the base level regardless of how minified the true footprint
+is (matching the test's own name -- a plain `NEAREST` min filter, as
+opposed to `NEAREST_MIPMAP_NEAREST`, should never read a level other than
+0). Our own implicit-LOD path (`femeRTPlanImplicitLod`) correctly computed
+a real, non-trivial LOD (~1.6-2.9, per this test's own hard-coded
+minification cases) from real screen-space derivatives, but nothing ever
+clamped that computed LOD back down using the sampler's `maxLod`, so it
+silently selected whatever coarser real mip level the derivatives implied
+instead of the base level the test's sampler setup actually requested.
+
+**Fix.** Widened `femeRTSelectMipLevel`'s own signature to take the full
+`FemeRTSamplerDescriptor` (rather than just its `MipFilter` field, which it
+already accepted but did not yet consult) and apply
+`L = clamp(L + Samp->LodBias, Samp->MinLod, Samp->MaxLod)` before the
+existing clamp to the image's own valid mip-level range -- applied
+uniformly at all six call sites (the plain 2D, cube, 2D-array, cube-array,
+and depth-comparison sample paths), since the Vulkan spec's own bias/clamp
+step does not distinguish an implicit-LOD sample's computed value from an
+explicit-LOD sample's operand value.
+
+**Test.** Four new unit tests in `feme/unittests/Runtime/CPU/ImageSamplingTest.cpp`:
+`MaxLodClampsImplicitSampleToBaseLevel` (the exact CTS shape -- an implicit
+sample whose derivatives imply a coarser level, clamped back to the base
+level by a small `MaxLod`), `MinLodClampsExplicitSampleAboveBaseLevel` (an
+explicit `Lod=0.0` clamped *up* to level 1 by a `MinLod` of `1.0`), and
+`LodBiasShiftsSelectedLevel` (an explicit `Lod=0.0` plus a `LodBias` of
+`1.0` reads level 1, exactly as an explicit `Lod=1.0` would). The existing
+`makeSampler` test helper's own default `MaxLod` (previously `0.0`, an
+unnoticed value that would newly clamp every other mip-level test in this
+file down to the base level once this fix landed) was widened to `1000.0`
+(`VK_LOD_CLAMP_NONE`) to preserve those pre-existing tests' own intent (an
+unclamped mip range).
+
+**`ninja check-feme`** (assertions + ccache): 2061/2120, 0 `Failed`, 59
+pre-existing `Unsupported`, up 3 tests from this row's own new coverage.
+
+**Real CTS re-run.** `dEQP-VK.texture.filtering.2d.combinations.nearest.nearest.repeat.repeat`
+(the case this row's own reduction started from) now passes outright,
+where it previously failed with "got 4041 invalid pixels" (of 4096). The
+broader `dEQP-VK.texture.filtering.2d.*` sweep (1698 cases): 102 now pass
+(up from 50 before this fix), 156 `Fail` (down from 208), 1440 honest
+`NotSupported` (unchanged). `dEQP-VK.texture.filtering_anisotropy.*`
+remains unaffected (still 0/128, all honest `NotSupported`, gated on the
+`samplerAnisotropy` feature bit itself -- confirmed by a direct re-run).
+
+**Remaining gap.** The 156 still-failing cases are a narrower, distinct
+issue from this row's own gross wrong-mip-level symptom: a real pixel-level
+comparison of one (`combinations.nearest.linear.repeat.repeat`) isolates
+them to `magFilter=LINEAR` magnification specifically, off by roughly +/-1
+of 255 per channel (e.g. rendered `(50, 84, 171, 50)` vs. reference
+`(49, 85, 170, 49)`) -- a small, consistent rounding-scale discrepancy, not
+a wrong texel or wrong level. Tracked as new roadmap H16 rather than
+blocking this row further.
+
+`samplerAnisotropy` (H7i) still stays `VK_FALSE`: unaffected by this fix,
+still blocked on the feature-bit gate and (now) H16's narrower remaining
+correctness gap rather than H15's own now-fixed gross gap.
+
+No `FeMeGraphicsDesign.md` deviation: this is a spec-compliance bug fix
+(the Vulkan image level-of-detail operation's own bias/clamp step), not a
+design decision change. `Vulkan14FeatureInventory.md` updated to reflect
+H15's closure and H16 as the new, narrower blocker;
+`VulkanExtensionInventory.md` confirmed no change needed (no extension is
+affected by this row).
