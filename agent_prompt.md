@@ -37,16 +37,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7x?
+Can you continue working on H7y?
 
-> **A fragment shader cannot read back the interpolated
-> `gl_ClipDistance`/`gl_CullDistance` value**, discovered via H7h's own real
-> re-run of
-> `dEQP-VK.clipping.user_defined.clip_distance.vert.*_fragmentshader_read`/`clip_cull_distance.vert.*_fragmentshader_read`
-> (0/16): these builtins have no fragment-stage system-value-linked input path
-> today (H7h's own vertex-stage output consumer does not, by itself, make the
-> value available to a fragment stage the way an ordinary user varying already
-> is). Needs a real investigation into what plumbing a fragment-stage read of
-> these two builtins requires -- likely treating them as an ordinary
-> interpolated stage-IO input from the fragment side, distinct from the
-> executor's own vertex-stage clip/cull consumer this row added
+> **Writing `gl_ClipDistance`/`gl_CullDistance` from a tessellation-evaluation
+> or geometry stage (rather than the vertex stage) fails at shader-compilation
+> time**, discovered via H7h's own real re-run of
+> `dEQP-VK.clipping.user_defined.clip_distance.vert_tess.*`/`vert_geom.*`: fails
+> with `"'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but
+> got '!llvm.array<N x ...>'"`, an LLVM lowering gap where a
+> `gl_ClipDistance`/`gl_CullDistance` array member reached as an SSA value (not
+> a pointer) inside a non-vertex pre-rasterization stage's own
+> output-composition code is indexed with a `getelementptr` that requires a
+> pointer operand -- unrelated to H7h's own vertex-stage consumer, which stores
+> the same array through a real pointer-backed path (`VertexWrapper.cpp`'s
+> `lowerVertexOutputStore`). Needs a real investigation into why the
+> tessellation-evaluation/geometry stage's own output-composition lowering
+> produces an array SSA value here instead of a pointer, and what has to change
+> to fix it generically (this may not be specific to clip/cull-distance -- worth
+> checking whether any other array-shaped tessellation/geometry stage output
+> hits the same gap)
