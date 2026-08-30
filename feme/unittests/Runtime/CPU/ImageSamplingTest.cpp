@@ -102,6 +102,17 @@ protected:
     return reinterpret_cast<FnTy>(
         Engine->getFunctionAddress(F->getName().str()));
   }
+
+  /// Resolves \p Name directly, with no `addWrapper` IR wrapper -- for
+  /// `feme.cpu.image.store.2d.*` (roadmap H19a), whose `Texel` parameter is
+  /// already a real, natural-width vector matching the C ABI exactly (see
+  /// `StoreFn`/`StoreI32Fn`'s comment), so there is no return value to
+  /// funnel through an `out` pointer and nothing a wrapper would add.
+  template <typename FnTy> FnTy resolveRuntime(StringRef Name) {
+    Function *F = getRuntimeFunction(*M, Name);
+    assert(F && "runtime function not found in libFeMeRuntimeCPU bitcode");
+    return resolve<FnTy>(F);
+  }
 };
 
 /// `feme.cpu.image.sample.2d.v4f32`'s own operand shape: image/sampler
@@ -153,6 +164,23 @@ using SampleCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                    const FemeSamplerDescriptor *, uint32_t,
                                    uint32_t, uint32_t, float, float, float,
                                    float, float, bool, bool, void *);
+
+/// A real, ABI-matching 4-lane vector type (unlike four separate scalar
+/// parameters, which the x86-64 SysV convention would place in four
+/// separate registers rather than one packed 128-bit one): mirrors
+/// `FeMeRuntimeCPU.c`'s own `FemeRTv4f32`/an `<4 x i32>` vector exactly,
+/// so `feme.cpu.image.store.2d.*`'s (roadmap H19a) `Texel` parameter can be
+/// resolved and called directly, with no IR-level wrapper needed (unlike
+/// `addWrapper`'s call-through-LLVM-IR strategy above, this test group's
+/// store functions are resolved and called as raw, JIT-compiled machine
+/// code, so the C++ call site's own argument types must already match the
+/// real ABI).
+typedef float FeMeTestV4F32 __attribute__((vector_size(16)));
+typedef int32_t FeMeTestV4I32 __attribute__((vector_size(16)));
+using StoreFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                         int32_t, int32_t, FeMeTestV4F32, bool);
+using StoreI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                            int32_t, int32_t, FeMeTestV4I32, bool);
 
 /// Builds a single-mip-level, single-layer 2D `FemeImageDescriptor` over
 /// \p Storage (assumed row-major, tightly packed at \p Format's element
@@ -1659,6 +1687,117 @@ TEST_F(ImageSamplingTest, SampleCubeArraySelectsRequestedCubeElement) {
      0.0f, true, true, Out1);
   EXPECT_FLOAT_EQ(Out0[0], 0.0f);
   EXPECT_FLOAT_EQ(Out1[0], 100.0f);
+}
+
+
+// Roadmap H19a: `feme.cpu.image.store.2d.v4f32`/`.v4i32`, the write-side
+// counterpart of `feme.cpu.image.load.2d.*` for a plain, non-arrayed,
+// non-multisampled storage image.
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR32G32B32A32Float) {
+  float Storage[2][2][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store =
+      resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {5.0f, 6.0f, 7.0f, 8.0f};
+  Store(ImageHeap, 1, 0, /*X=*/1, /*Y=*/1, Texel, /*Mask=*/true);
+
+  EXPECT_FLOAT_EQ(Storage[1][1][0], 5.0f);
+  EXPECT_FLOAT_EQ(Storage[1][1][1], 6.0f);
+  EXPECT_FLOAT_EQ(Storage[1][1][2], 7.0f);
+  EXPECT_FLOAT_EQ(Storage[1][1][3], 8.0f);
+  // Every other texel is untouched.
+  EXPECT_FLOAT_EQ(Storage[0][0][0], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesOnlyRedComponentIntoR32Float) {
+  // `R32_FLOAT` is a single-component format: only the texel's own first
+  // 4 bytes are written, matching `femeRTPackImageTexel`'s R32_FLOAT case.
+  float Storage[1][1] = {{-1.0f}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32_FLOAT, Layout,
+      FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store =
+      resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {42.0f, 99.0f, 99.0f, 99.0f};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_FLOAT_EQ(Storage[0][0], 42.0f);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR32G32B32A32Uint) {
+  uint32_t Storage[1][1][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R32G32B32A32_UINT, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  FeMeTestV4I32 Texel = {10, 20, 30, 40};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], 10u);
+  EXPECT_EQ(Storage[0][0][1], 20u);
+  EXPECT_EQ(Storage[0][0][2], 30u);
+  EXPECT_EQ(Storage[0][0][3], 40u);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesOnlyRedComponentIntoR32Sint) {
+  int32_t Storage[1][1] = {{-1}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32_SINT, Layout,
+      FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  FeMeTestV4I32 Texel = {-7, 0, 0, 0};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0], -7);
+}
+
+TEST_F(ImageSamplingTest, StoreOutOfBoundsCoordinateIsANoOp) {
+  float Storage[1][1][4] = {{{1, 2, 3, 4}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store =
+      resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {9.0f, 9.0f, 9.0f, 9.0f};
+  Store(ImageHeap, 1, 0, /*X=*/5, /*Y=*/5, Texel, /*Mask=*/true);
+  EXPECT_FLOAT_EQ(Storage[0][0][0], 1.0f);
+  EXPECT_FLOAT_EQ(Storage[0][0][1], 2.0f);
+}
+
+TEST_F(ImageSamplingTest, InactiveLaneStoreIsANoOp) {
+  float Storage[1][1][4] = {{{1, 2, 3, 4}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store =
+      resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {9.0f, 9.0f, 9.0f, 9.0f};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/false);
+  EXPECT_FLOAT_EQ(Storage[0][0][0], 1.0f);
 }
 
 } // namespace

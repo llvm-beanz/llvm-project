@@ -40,6 +40,10 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.sample.cube.v4f32";
   case ImageCallKind::SampleCubeArray:
     return "feme.cpu.image.sample.cubearray.v4f32";
+  case ImageCallKind::Store2D:
+    return "feme.cpu.image.store.2d.v4f32";
+  case ImageCallKind::Store2DI32:
+    return "feme.cpu.image.store.2d.v4i32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -133,15 +137,34 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
                              F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
+  case ImageCallKind::Store2D:
+    // (image_heap, image_heap_count, image_index, x, y, value, mask)
+    // -> void
+    FTy = FunctionType::get(
+        Type::getVoidTy(Ctx),
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, V4F32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Store2DI32:
+    // Same shape as Store2D, but the value operand is <4 x i32>.
+    FTy = FunctionType::get(
+        Type::getVoidTy(Ctx),
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, V4I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
   }
 
   StringRef Name = getImageCallName(Kind);
   Function *F = cast<Function>(M.getOrInsertFunction(Name, FTy).getCallee());
   if (!F->hasFnAttribute(Attribute::Memory)) {
-    // Every `feme.cpu.image.*` call only reads through its heap pointer
-    // arguments (see `feme::cpu::ResourceCalls::getOrInsertResourceCall`'s
-    // identical reasoning for buffers).
-    F->setMemoryEffects(MemoryEffects::argMemOnly(ModRefInfo::Ref));
+    // Every `feme.cpu.image.*` read-only call only reads through its heap
+    // pointer arguments (see `feme::cpu::ResourceCalls::getOrInsertResourceCall`'s
+    // identical reasoning for buffers); `Store2D`/`Store2DI32` (roadmap
+    // H19a) instead only *write* through theirs.
+    bool IsStore = Kind == ImageCallKind::Store2D ||
+                  Kind == ImageCallKind::Store2DI32;
+    F->setMemoryEffects(MemoryEffects::argMemOnly(
+        IsStore ? ModRefInfo::Mod : ModRefInfo::Ref));
     F->setWillReturn();
     F->setDoesNotThrow();
   }
@@ -202,6 +225,29 @@ CallInst *feme::cpu::createLoad2DI32(IRBuilderBase &Builder,
   Function *F = getOrInsertImageCall(*M, ImageCallKind::Load2DI32);
   return Builder.CreateCall(
       F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Y, Mip, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createStore2D(IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env, Value *ImageIndex,
+                                   Value *X, Value *Y, Value *Texel,
+                                   Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Store2D);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Y, Texel, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createStore2DI32(IRBuilderBase &Builder,
+                                      const ImageCallEnv &Env,
+                                      Value *ImageIndex, Value *X, Value *Y,
+                                      Value *Texel, Value *Mask,
+                                      const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Store2DI32);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Y, Texel, Mask},
       Name);
 }
 
@@ -287,7 +333,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::Load2D,        ImageCallKind::Load2DI32,
       ImageCallKind::Sample2DArray, ImageCallKind::Load2DArray,
       ImageCallKind::Load2DArrayI32, ImageCallKind::SampleCube,
-      ImageCallKind::SampleCubeArray};
+      ImageCallKind::SampleCubeArray, ImageCallKind::Store2D,
+      ImageCallKind::Store2DI32};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -437,6 +484,18 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Lod = CI.getArgOperand(10);
     Result.UseExplicitLod = CI.getArgOperand(11);
     Result.Mask = CI.getArgOperand(12);
+    break;
+  case ImageCallKind::Store2D:
+  case ImageCallKind::Store2DI32:
+    if (CI.arg_size() != 7)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Texel = CI.getArgOperand(5);
+    Result.Mask = CI.getArgOperand(6);
     break;
   }
   return Result;

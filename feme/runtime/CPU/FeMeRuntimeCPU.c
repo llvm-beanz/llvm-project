@@ -153,6 +153,38 @@
 // lower a depth-comparison sample for *any* dimension yet, 2D included, so
 // there is no existing shape to generalize from.
 //
+// Update (roadmap H19a): a plain 2D storage image (SPIR-V `OpTypeImage`
+// with `Sampled == 2`, "used without a sampler") is now writable, not just
+// readable -- `feme.cpu.image.load.2d.v4f32`/`.v4i32` already read one
+// (see their own comments: "sampled or storage"), but no
+// `feme.cpu.image.store.*` entry point existed for `OpImageWrite` to lower
+// to (see `SPIRVResourceLowering.cpp`'s own former `classifySampledImage2DHandle`
+// comment). Two new entry points, `feme.cpu.image.store.2d.v4f32`/`.v4i32`
+// (`femeCpuImageStore2DV4F32`/`V4I32` below), and their own
+// `femeRTStoreTexel2D`/`femeRTStoreTexel2DI32` helpers -- the write-side
+// mirror of `femeRTFetchTexel2D`/`femeRTFetchTexel2DI32`, always level 0,
+// layer 0, sample 0 (a storage image access never carries a mip, array
+// layer or multisample index in the scope this row covers) -- pack a
+// `<4 x float>`/`<4 x i32>` value back into a texel's own bytes via two new
+// `femeRTPackImageTexel`/`femeRTPackImageTexelI32` functions, the write-side
+// mirror of `femeRTUnpackImageTexel`/`femeRTUnpackImageTexelI32`. Scoped, for
+// now, to exactly the Vulkan spec's own mandatory storage-image format
+// floor (`VkPhysicalDeviceFeatures::shaderStorageImageExtendedFormats`
+// unset): `R32G32B32A32_{SFLOAT,UINT,SINT}` and `R32_{SFLOAT,UINT,SINT}`.
+// `R32_UINT`/`R32_SINT` (mandatory for storage images, but not for a
+// *sampled* image, so roadmap E26 above never added them) gain their own
+// `femeRTImageFormatElementSize`/`femeRTUnpackImageTexelI32` cases here too
+// -- a small, pre-existing, adjacent gap this row's own format floor
+// depends on closing to be honest (both previously silently decoded as
+// all-zero, `ElemSize == 0`, exactly like every other unmodeled format).
+// Every other format `femeRTUnpackImageTexel(I32)` already decodes stays
+// read-only through a storage-image handle: `femeRTPackImageTexel(I32)`
+// has no case for it, so a write silently drops (a real gap, not modeled
+// as an error here, tracked as roadmap H19b/H19c/H19d's own follow-on
+// scope alongside `shaderStorageImageExtendedFormats` itself) -- kept
+// unreachable in practice by `Format.cpp`'s own `VK_FORMAT_FEATURE_
+// STORAGE_IMAGE_BIT`, only now set for this same six-format floor.
+//
 //===----------------------------------------------------------------------===//
 
 #include <stdint.h>
@@ -1030,6 +1062,11 @@ __attribute__((always_inline)) static uint64_t
 femeRTImageFormatElementSize(uint32_t Format) {
   switch (Format) {
   case 1:  // R32_FLOAT
+  // (Roadmap H19a) `R32_UINT`/`R32_SINT`: mandatory for a storage image
+  // (unlike a *sampled* one, so roadmap E26 above never needed them), one
+  // 32-bit scalar each, matching `R32_FLOAT`'s own size.
+  case 5:  // R32_UINT
+  case 9:  // R32_SINT
     return 4;
   case 2:  // R32G32_FLOAT
     return 8;
@@ -1364,6 +1401,18 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
   case 8:  // R32G32B32A32_UINT
   case 12: // R32G32B32A32_SINT: identity format, no conversion.
     return (FemeRTv4i32) * (const FemeRTv4i32Unaligned *)Ptr;
+  // (Roadmap H19a) `R32_UINT`/`R32_SINT`: a single 32-bit scalar,
+  // reinterpreted directly like `R32G32B32A32_{UINT,SINT}` above; the
+  // unread G/B components pad `0`, alpha pads `1`, matching
+  // `femeRTUnpackImageTexel`'s own partial-component convention
+  // (`R32_FLOAT` et al.).
+  case 5:  // R32_UINT
+  case 9: { // R32_SINT
+    int32_t R;
+    __builtin_memcpy(&R, Ptr, sizeof(R));
+    FemeRTv4i32 V = {R, 0, 0, 1};
+    return V;
+  }
   case 15: { // R8G8B8A8_UINT
     uint32_t Raw;
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
@@ -1394,7 +1443,61 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
   }
 }
 
-// Applies `SamplerAddressMode` `Mode` to one coordinate axis: `Coord` (an
+// Packs \p Texel back into `Format`'s own bytes at \p Ptr -- the write-side
+// mirror of `femeRTUnpackImageTexel` above, for `feme.cpu.image.store.2d.
+// v4f32` (roadmap H19a). Scoped to exactly the two float-channel formats
+// the Vulkan spec's own mandatory storage-image format floor requires
+// (`VkPhysicalDeviceFeatures::shaderStorageImageExtendedFormats` unset):
+// `R32_FLOAT` and `R32G32B32A32_FLOAT`, both the identity case (no scalar
+// conversion, unlike e.g. `R8G8B8A8_UNORM`'s own quantizing pack this
+// function does not yet need to mirror). A write through any other format
+// -- reachable only if a future row widens `Format.cpp`'s own
+// `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` gate beyond this floor without
+// widening this switch to match -- is silently dropped, mirroring
+// `femeRTUnpackImageTexel`'s own "all-zero for an unmodeled format"
+// default rather than trapping.
+__attribute__((always_inline)) static void
+femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
+  switch (Format) {
+  case 1: { // R32_FLOAT: only the first component is stored.
+    float R = Texel[0];
+    __builtin_memcpy(Ptr, &R, sizeof(R));
+    return;
+  }
+  case 4: // R32G32B32A32_FLOAT: identity format, no conversion.
+    *(FemeRTv4f32Unaligned *)Ptr = (FemeRTv4f32Unaligned)Texel;
+    return;
+  default:
+    return;
+  }
+}
+
+// The integer counterpart of `femeRTPackImageTexel` above, covering the
+// mandatory storage-image format floor's two integer-channel formats,
+// `R32_UINT`/`R32_SINT` and `R32G32B32A32_UINT`/`_SINT` -- both identity
+// formats (a signed/unsigned 32-bit scalar's bit pattern is stored as-is
+// either way), mirroring `femeRTUnpackImageTexelI32`'s own read-side
+// treatment of the same four formats.
+__attribute__((always_inline)) static void
+femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
+                        FemeRTv4i32 Texel) {
+  switch (Format) {
+  case 5:  // R32_UINT
+  case 9: { // R32_SINT: only the first component is stored.
+    int32_t R = Texel[0];
+    __builtin_memcpy(Ptr, &R, sizeof(R));
+    return;
+  }
+  case 8:  // R32G32B32A32_UINT
+  case 12: // R32G32B32A32_SINT: identity format, no conversion.
+    *(FemeRTv4i32Unaligned *)Ptr = (FemeRTv4i32Unaligned)Texel;
+    return;
+  default:
+    return;
+  }
+}
+
+
 // integer texel index, possibly outside `[0, Size)`) against axis extent
 // `Size`. Sets `*UseBorder` if the result should be replaced by the
 // sampler's border color instead of a real texel (only possible for
@@ -1527,9 +1630,66 @@ femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
   return femeRTUnpackImageTexelI32(Img->Format, Ptr);
 }
 
-// (Roadmap H15) Computes the per-spec biased, range-clamped level-of-
-// detail value the Vulkan spec's own image level-of-detail operation
-// defines -- `lod' = clamp(lod + mipLodBias, minLod, maxLod)` -- from
+// Writes \p Texel to the texel at integer coordinates `(X, Y)`, mip level
+// 0, array layer 0, sample 0 of \p Img -- the write-side mirror of
+// `femeRTFetchTexel2D` above, for `feme.cpu.image.store.2d.v4f32` (roadmap
+// H19a). Scoped to a plain, non-arrayed, single-sample storage image (see
+// `classifyStorageImage2DHandle`'s own comment, `SPIRVResourceLowering.cpp`),
+// so unlike `femeRTFetchTexel2D` there is no `Level`/`Layer`/`Sample`
+// parameter to take -- every write this row's own shader-side lowering
+// produces addresses exactly one image, one mip, one layer, one sample. A
+// write past the image's own bounds, an unrecognized format
+// (`femeRTImageFormatElementSize` returning 0), or an empty (never bound)
+// descriptor is silently dropped rather than trapping, mirroring
+// `femeRTFetchTexel2D`'s own out-of-range read returning zero rather than
+// erroring.
+__attribute__((always_inline)) static void
+femeRTStoreTexel2D(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
+                   FemeRTv4f32 Texel) {
+  if (!Img->Data || Img->MipLayoutCount == 0 || Img->ArrayLayers == 0)
+    return;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img->Width || (uint32_t)Y >= Img->Height)
+    return;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t Offset =
+      Layout->Offset + (uint64_t)Y * Layout->RowPitch + (uint64_t)X * TexelStride;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return;
+  unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
+  femeRTPackImageTexel(Img->Format, Ptr, Texel);
+}
+
+// The integer counterpart of `femeRTStoreTexel2D` above, for
+// `feme.cpu.image.store.2d.v4i32` (roadmap H19a).
+__attribute__((always_inline)) static void
+femeRTStoreTexel2DI32(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
+                      FemeRTv4i32 Texel) {
+  if (!Img->Data || Img->MipLayoutCount == 0 || Img->ArrayLayers == 0)
+    return;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img->Width || (uint32_t)Y >= Img->Height)
+    return;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t Offset =
+      Layout->Offset + (uint64_t)Y * Layout->RowPitch + (uint64_t)X * TexelStride;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return;
+  unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
+  femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
+}
+
+
 // either an explicit-LOD sample's own `Lod` operand or (`UseExplicitLod`
 // false) an implicit-LOD sample's `Lod == 0.0` starting point (a caller
 // that already derived a real implicit LOD from screen-space derivatives,
@@ -2074,6 +2234,46 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DV4I32(
   if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
     return Zero;
   return femeRTFetchTexel2DI32(&Img, Mip, /*Layer=*/0, X, Y);
+}
+
+// `feme.cpu.image.store.2d.v4f32` (roadmap H19a): writes one texel of a 2D
+// storage image at integer coordinates `(X, Y)`, mip level 0, array layer
+// 0, sample 0 (see `femeRTStoreTexel2D`'s own scope comment) -- Vulkan's
+// `OpImageWrite`. An unbound (`!Img.Data`) or masked-off write is silently
+// dropped, mirroring `femeCpuImageLoad2DV4F32`'s own unbound-read-as-zero
+// treatment.
+void femeCpuImageStore2DV4F32(const FemeRTImageDescriptor *ImageHeap,
+                              uint32_t ImageHeapCount, uint32_t ImageIndex,
+                              int32_t X, int32_t Y, FemeRTv4f32 Texel,
+                              _Bool Mask) asm("feme.cpu.image.store.2d.v4f32");
+
+__attribute__((always_inline)) void femeCpuImageStore2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, FemeRTv4f32 Texel,
+    _Bool Mask) {
+  if (!Mask)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel2D(&Img, X, Y, Texel);
+}
+
+// `feme.cpu.image.store.2d.v4i32` (roadmap H19a): the integer-format
+// counterpart of `feme.cpu.image.store.2d.v4f32` above.
+void femeCpuImageStore2DV4I32(const FemeRTImageDescriptor *ImageHeap,
+                              uint32_t ImageHeapCount, uint32_t ImageIndex,
+                              int32_t X, int32_t Y, FemeRTv4i32 Texel,
+                              _Bool Mask) asm("feme.cpu.image.store.2d.v4i32");
+
+__attribute__((always_inline)) void femeCpuImageStore2DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, FemeRTv4i32 Texel,
+    _Bool Mask) {
+  if (!Mask)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel2DI32(&Img, X, Y, Texel);
 }
 
 // Rounds `Value` to the nearest integer (per the Vulkan spec's "array

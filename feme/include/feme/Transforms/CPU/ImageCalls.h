@@ -48,6 +48,14 @@
 // `SampleCube`/`SampleCubeArray` still resolve every implicit sample to
 // mip level 0, a pre-existing limitation this update does not change.
 //
+// Update (roadmap H19a): two new, write-only kinds, `Store2D`/`Store2DI32`,
+// give a storage image (a `spirv.Image`/`spirv.SignedImage` handle used
+// without a sampler, `Sampled == 2`) somewhere to lower `OpImageWrite` to
+// -- previously only `Load2D`/`Load2DI32` existed, covering `OpImageRead`/
+// `OpImageFetch` but never a write. Scoped, like every other kind here, to
+// a plain, non-arrayed 2D image (`ImageShape::Plain2D`); no
+// `Store2DArray`/cube counterpart exists yet.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_IMAGECALLS_H
@@ -106,6 +114,14 @@ enum class ImageCallKind : uint8_t {
   /// array-layer coordinate selecting which six-layer cube element of the
   /// array to sample.
   SampleCubeArray,
+  /// `feme.cpu.image.store.2d.v4f32` (roadmap H19a): a plain, non-arrayed
+  /// storage-image write (`OpImageWrite`), the write-side counterpart of
+  /// `Load2D`.
+  Store2D,
+  /// `feme.cpu.image.store.2d.v4i32` (roadmap H19a): the integer-format
+  /// counterpart of `Store2D`, mirroring `Load2DI32`'s relationship to
+  /// `Load2D`.
+  Store2DI32,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -172,6 +188,9 @@ struct MatchedImageCall {
   /// sampled kind and for `Load2DI32`/`Load2DArrayI32`, which never carry
   /// one.
   llvm::Value *Sample = nullptr;
+  /// `Store2D`/`Store2DI32` only: the `<4 x float>`/`<4 x i32>` texel value
+  /// being written; null for every read-only kind.
+  llvm::Value *Texel = nullptr;
   llvm::Value *Mask = nullptr;
 };
 
@@ -226,6 +245,23 @@ llvm::CallInst *createLoad2DI32(llvm::IRBuilderBase &Builder,
                                 llvm::Value *Y, llvm::Value *Mip,
                                 llvm::Value *Mask,
                                 const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.store.2d.v4f32` call (roadmap H19a): writes
+/// \p Texel to a plain, non-arrayed storage image at integer coordinates
+/// (\p X, \p Y), mip level 0.
+llvm::CallInst *createStore2D(llvm::IRBuilderBase &Builder,
+                              const ImageCallEnv &Env, llvm::Value *ImageIndex,
+                              llvm::Value *X, llvm::Value *Y,
+                              llvm::Value *Texel, llvm::Value *Mask,
+                              const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.store.2d.v4i32` call (roadmap H19a).
+llvm::CallInst *createStore2DI32(llvm::IRBuilderBase &Builder,
+                                 const ImageCallEnv &Env,
+                                 llvm::Value *ImageIndex, llvm::Value *X,
+                                 llvm::Value *Y, llvm::Value *Texel,
+                                 llvm::Value *Mask,
+                                 const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.2darray.v4f32` call (roadmap H7b-a).
 llvm::CallInst *
