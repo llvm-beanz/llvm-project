@@ -46331,3 +46331,101 @@ for the `extractvalue`-based approach.
 Commits this session: (1) `SPIRVToLLVMPatterns.cpp` fix + lit test
 updates, (2) documentation updates (Roadmap.md, FeMeGraphicsDesign.md,
 VulkanCTSReport.md, Vulkan14FeatureInventory.md), (3) this file.
+
+# H7z: the divergent-aggregate SIMDize diagnostic was already fixed by H7y
+
+## Task
+
+Continue working on roadmap H7z: `feme-cpu-simdize` rejects a divergent
+(per-fragment-varying) SSA value of aggregate type outright, discovered
+via H7x's own CTS re-run of the fragment-shader-read-back clip/cull-
+distance cases. The row's own text posed an open question: should
+`SIMDize.cpp` learn to decompose a divergent aggregate into per-lane
+scalars, or should an aggregate be prevented from ever reaching this
+pass as a single divergent value in the first place (e.g. by teaching
+`StageIOAddressOfPattern` or a later canonicalization step to decompose
+the array before this pass ever sees it)?
+
+## Investigation
+
+Before writing any code, I re-ran the exact 16 CTS cases this row's own
+text names, since the codebase has changed substantially since H7z was
+discovered (H7y landed since then, touching exactly
+`StageIOAddressOfPattern` -- one of the two mechanisms the row's own
+text speculated might be the fix). Flipped `shaderClipDistance`/
+`shaderCullDistance` to `VK_TRUE` temporarily to let CTS attempt them
+(same discipline as every prior row), rebuilt `libfeme_vulkan`, and
+re-ran:
+
+```
+clip_distance.vert.*_fragmentshader_read:      1/8 pass, 7/8 fail
+clip_cull_distance.vert.*_fragmentshader_read: 0/8 pass, 8/8 fail
+```
+
+The `"has a divergent value ... of aggregate type"` diagnostic this row
+was created to track is **gone** -- it doesn't appear in either case
+list. Every failure instead reproduces the already-tracked H13c
+diagnostic (`feme-cpu-wrap-fragment: synthetic fragment layouts only
+support vertex operand 0`), confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`.
+
+This makes sense in hindsight: H7y's fix (from last session) changed
+`StageIOAddressOfPattern` so an array-typed `Input` stage-IO variable
+stays a real pointer instead of being eagerly loaded as a whole
+aggregate value, specifically so `StageIOArrayAccessChainPattern` could
+build a real `getelementptr` for a dynamic array index. A side effect:
+a `gl_ClipDistance[i]` read now goes through `getelementptr` + a scalar
+`llvm.load` of one `f32` element, never loading the *whole* `[N x f32]`
+array as one aggregate SSA value at all. That's exactly the second
+option the row's own text posed ("prevented from ever reaching this
+point as a single divergent value") -- it just happened as an
+unplanned side effect of an unrelated fix, rather than a deliberate
+change made for this row.
+
+I reverted the temporary feature-bit flip before doing anything else
+(it's purely a measurement tool, not meant to land).
+
+## What I actually changed
+
+Nothing in `SIMDize.cpp` -- there's no longer a real, reachable case in
+this project's CTS coverage that needs it to learn aggregate
+decomposition, and its existing generic diagnostic (clean error instead
+of miscompile/assert) is still the right behavior for a hypothetical
+future divergent-aggregate producer. But that diagnostic path was
+previously *only* reachable via this now-closed clip/cull-distance
+shape, meaning it had zero direct unit-test coverage of its own in
+`SIMDizeTest.cpp` -- if some future change accidentally made this path
+unreachable-and-broken (e.g. an assert instead of a diagnostic), nothing
+would have caught it. Added `DiagnosesUnsupportedDivergentAggregate`: a
+small, synthetic `[2 x float]` load through a thread-ID-derived address,
+independent of any stage-IO machinery, exercising the diagnostic
+directly. Had to fix the expected substring in my first attempt at this
+test -- LLVM's diagnostic printer doesn't include the `%` sigil on a
+value name embedded in an error message, only the code that formats the
+message does (`I.getName()` returns `loaded`, not `%loaded`); a quick
+`--gtest_filter` run caught this immediately.
+
+## Validation
+
+`FeMeTransformsCPUTests`: 219/219 pass (up 1 from the new test). Full
+`ninja check-feme`: 2050/2109 (59 pre-existing `Unsupported`, 0
+`Failed`, up 1 from before).
+
+## Outcome
+
+Roadmap H7z struck through -- closed with no `SIMDize.cpp` code change,
+credited to H7y's own fix, plus a new direct unit test for the
+generic diagnostic path it leaves in place. `shaderClipDistance`/
+`shaderCullDistance` stay `VK_FALSE`: H13c (already tracked, from last
+session's H7y work) is the sole remaining blocker for these 16 cases,
+confirmed by matching diagnostic text exactly rather than assumed.
+
+This is a good example of why re-measuring against real CTS before
+writing code matters even for a row whose text sounds well-scoped and
+actionable: the obvious "implement aggregate decomposition in
+SIMDize.cpp" path would have been real, working, but entirely
+unnecessary effort, since an earlier, unrelated fix had already made the
+gap unreachable.
+
+Commits this session: (1) new `SIMDizeTest.cpp` case, (2) documentation
+updates (Roadmap.md, FeMeGraphicsDesign.md, VulkanCTSReport.md,
+Vulkan14FeatureInventory.md), (3) this file.
