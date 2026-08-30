@@ -154,6 +154,14 @@ vkCmdBindDescriptorSets2
 # CommandBuffer::bindDescriptorSets (CommandBuffer.cpp).
 vkCmdPushDescriptorSet
 vkCmdPushDescriptorSetWithTemplate
+# Roadmap H7u: VK_KHR_push_descriptor is advertised as its own extension in
+# addition to being promoted into core, so the two _KHR-suffixed original
+# names above must resolve too (thin forwarders to the core names,
+# CommandBuffer.cpp) -- found missing via a real dEQP-VK ...with_push...
+# storage_buffer.vertex* crash (null vkGetDeviceProcAddr return) once H7g's
+# own feature-bit flip let that case reach this path for the first time.
+vkCmdPushDescriptorSetKHR
+vkCmdPushDescriptorSetWithTemplateKHR
 # Roadmap F12 (closing roadmap E6's own deferred item): VK_KHR_maintenance6's
 # pNext-extensible wrappers, sharing vkCmdPushDescriptorSet/
 # vkCmdPushDescriptorSetWithTemplate's own recording above.

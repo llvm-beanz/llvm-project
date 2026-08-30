@@ -28,7 +28,7 @@
 // `VK_KHR_dynamic_rendering`, roadmap C4c's `VK_EXT_extended_dynamic_
 // state`, roadmap E29's `VK_KHR_maintenance5`, roadmap F5's
 // `VK_KHR_line_rasterization`, roadmap F14's `VK_KHR_map_memory2`, roadmap
-// H6f's `VK_EXT_mesh_shader`).
+// H6f's `VK_EXT_mesh_shader`, roadmap H7u's `VK_KHR_push_descriptor`).
 // CHECK-DAG: FEME_VK_COMMAND(vkCmdBeginRenderingKHR, DEVICE)
 // CHECK-DAG: FEME_VK_COMMAND(vkCmdEndRenderingKHR, DEVICE)
 // CHECK-DAG: FEME_VK_COMMAND(vkCmdSetCullModeEXT, DEVICE)
@@ -37,6 +37,7 @@
 // CHECK-DAG: FEME_VK_COMMAND(vkMapMemory2KHR, DEVICE)
 // CHECK-DAG: FEME_VK_COMMAND(vkUnmapMemory2KHR, DEVICE)
 // CHECK-DAG: FEME_VK_COMMAND(vkCmdDrawMeshTasksEXT, DEVICE)
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdPushDescriptorSetKHR, DEVICE)
 
 // vkExtCmd sits in a `<require depends="...">` block gated on an optional
 // extension `SUPPORTED_EXTENSIONS` does not list, so it must not appear at

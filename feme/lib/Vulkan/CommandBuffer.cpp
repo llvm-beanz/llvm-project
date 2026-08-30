@@ -2840,6 +2840,36 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate(
                                       *Template, pData);
 }
 
+// (roadmap H7u) Thin `_KHR`-suffixed forwarders for the two entry points
+// just above: `VK_KHR_push_descriptor` is advertised as its own extension
+// (`AdvertisedExtensions.txt`) in addition to being promoted into core, so
+// a real app/loader resolving either the core name or the original
+// extension name must get a working function either way -- unlike
+// `vkCmdBindDescriptorSets2`/`vkCmdPushDescriptorSet2` above, which are
+// only ever reached through `VK_KHR_maintenance6`'s own `_KHR` names (not
+// separately registered under an unsuffixed core alias here), this pair
+// had the opposite gap: only the unsuffixed name was registered, so
+// `vkGetDeviceProcAddr("vkCmdPushDescriptorSetKHR")` returned null and any
+// caller invoking the pointer it got back crashed. See
+// `ImplementedEntrypoints.txt`'s own comment for this pair for the real
+// CTS crash this was found from.
+VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetKHR(
+    VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
+    VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount,
+    const VkWriteDescriptorSet *pDescriptorWrites) {
+  feme::vulkan::vkCmdPushDescriptorSet(commandBuffer, pipelineBindPoint,
+                                       layout, set, descriptorWriteCount,
+                                       pDescriptorWrites);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplateKHR(
+    VkCommandBuffer commandBuffer,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    VkPipelineLayout layout, uint32_t set, const void *pData) {
+  feme::vulkan::vkCmdPushDescriptorSetWithTemplate(
+      commandBuffer, descriptorUpdateTemplate, layout, set, pData);
+}
+
 // (roadmap F12) `VK_KHR_maintenance6`'s `vkCmdPushDescriptorSet2`: the same
 // arguments as `vkCmdPushDescriptorSet` above, wrapped in a single
 // `pNext`-extensible `VkPushDescriptorSetInfo` in place of a

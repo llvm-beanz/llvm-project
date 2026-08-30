@@ -1449,6 +1449,55 @@ TEST_F(PushDescriptorSetDispatchTest, PushDescriptorSet2ProducesTheSameResult) {
   vkFreeMemory(Device, Out.Memory, nullptr);
 }
 
+/// (roadmap H7u) `vkCmdPushDescriptorSetKHR`/
+/// `vkCmdPushDescriptorSetWithTemplateKHR` must resolve to and behave
+/// identically to the core, non-`KHR`-suffixed pair above -- confirmed via a
+/// real `dEQP-VK...with_push...storage_buffer.vertex*` case that previously
+/// SIGSEGV'd through a null `vkGetDeviceProcAddr("vkCmdPushDescriptorSetKHR")`
+/// result once roadmap H7g's own feature-bit flip let it reach this path for
+/// the first time (`ImplementedEntrypoints.txt`/`vk_gen_entrypoints.py`'s own
+/// `SUPPORTED_EXTENSIONS` previously omitted `VK_KHR_push_descriptor`, so
+/// only the core alias was ever registered in the dispatch table).
+TEST_F(PushDescriptorSetDispatchTest, KHRSuffixedEntryPointsProduceTheSameResult) {
+  HostBuffer In = createStorageBuffer(4);
+  HostBuffer Out = createStorageBuffer(4);
+  uint32_t InitialValue = 7;
+  std::memcpy(In.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorBufferInfo InInfo{In.Buf, 0, 4};
+  VkDescriptorBufferInfo OutInfo{Out.Buf, 0, 4};
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[0].pBufferInfo = &InInfo;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[1].pBufferInfo = &OutInfo;
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdPushDescriptorSetKHR(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0,
+                            2, Writes);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result = 0;
+  std::memcpy(&Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result, InitialValue + 1);
+
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
 /// (roadmap F12) "When a command buffer begins recording, all push
 /// descriptors are undefined" (`vkCmdPushDescriptorSet`'s own spec text):
 /// re-beginning a command buffer must drop a previously-pushed binding

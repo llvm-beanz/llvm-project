@@ -10,9 +10,10 @@
      version itself. It also declares `VK_KHR_dynamic_rendering`,
      `VK_EXT_extended_dynamic_state`, `VK_KHR_maintenance5`,
      `VK_KHR_line_rasterization`, `VK_KHR_dynamic_rendering_local_read`,
-     `VK_KHR_map_memory2`, and `VK_EXT_mesh_shader`, the seven
-     extensions `SUPPORTED_EXTENSIONS` lists, whose commands must be read out
-     of `<extensions>` rather than out of any core feature. -->
+     `VK_KHR_map_memory2`, `VK_EXT_mesh_shader`, and
+     `VK_KHR_push_descriptor`, the eight extensions `SUPPORTED_EXTENSIONS`
+     lists, whose commands must be read out of `<extensions>` rather than
+     out of any core feature. -->
 <registry>
   <commands>
     <command>
@@ -70,6 +71,10 @@
     </command>
     <command>
       <proto><type>void</type><name>vkCmdDrawMeshTasksEXT</name></proto>
+      <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkCmdPushDescriptorSetKHR</name></proto>
       <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
     </command>
   </commands>
@@ -150,6 +155,12 @@
                supported="vulkan">
       <require>
         <command name="vkCmdDrawMeshTasksEXT"/>
+      </require>
+    </extension>
+    <extension name="VK_KHR_push_descriptor" number="81" type="device"
+               supported="vulkan">
+      <require>
+        <command name="vkCmdPushDescriptorSetKHR"/>
       </require>
     </extension>
   </extensions>

@@ -117,6 +117,18 @@ SUPPORTED_EXTENSIONS = (
     # same reason every other post-`maintenance5` entry in this tuple is
     # listed.
     "VK_EXT_mesh_shader",
+    # (roadmap H7u) `vkCmdPushDescriptorSetKHR`/
+    # `vkCmdPushDescriptorSetWithTemplateKHR` (CommandBuffer.cpp), thin
+    # forwarders to the core, non-`KHR`-suffixed `vkCmdPushDescriptorSet`/
+    # `vkCmdPushDescriptorSetWithTemplate` this driver also implements.
+    # Like `VK_KHR_map_memory2`/`VK_KHR_maintenance5` above, a real caller
+    # that resolves the extension's own name directly (rather than the
+    # core-1.4-only name) gets a null function pointer without this,
+    # confirmed by a real `dEQP-VK...with_push...storage_buffer.vertex*`
+    # case SIGSEGV'ing through exactly such a null pointer, newly reachable
+    # only once roadmap H7g's own feature-bit flip let this case clear an
+    # earlier gate for the first time.
+    "VK_KHR_push_descriptor",
 )
 
 # First-parameter handle types that make a command dispatched at the

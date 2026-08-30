@@ -367,6 +367,27 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate2(
     VkCommandBuffer commandBuffer,
     const VkPushDescriptorSetWithTemplateInfo
         *pPushDescriptorSetWithTemplateInfo);
+// Roadmap H7u: `VK_KHR_push_descriptor` is advertised (`AdvertisedExtensions
+// .txt`), so the two entry points above -- registered under their
+// core-promoted (unsuffixed) names only -- must also resolve under their
+// original `_KHR`-suffixed extension names, since the Vulkan spec requires
+// both spellings to alias the identical command for any app/loader that
+// queries the extension name directly (see `CommandBuffer.cpp`'s definitions
+// of these two thin forwarders for the full story: this was discovered as a
+// real, previously-unreachable `vkGetDeviceProcAddr` null-return/crash once
+// H7g's own storage-buffer-write feature bits let a real
+// `dEQP-VK...with_push...storage_buffer.vertex*` case reach this path for
+// the first time).
+VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetKHR(
+    VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
+    VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount,
+    const VkWriteDescriptorSet *pDescriptorWrites);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdPushDescriptorSetWithTemplateKHR(VkCommandBuffer commandBuffer,
+                                      VkDescriptorUpdateTemplate
+                                          descriptorUpdateTemplate,
+                                      VkPipelineLayout layout, uint32_t set,
+                                      const void *pData);
 VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
                                          uint32_t groupCountX,
                                          uint32_t groupCountY,
