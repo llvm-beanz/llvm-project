@@ -289,6 +289,100 @@ TEST_F(ImageSamplingTest, LinearSampleBlendsFourTexels) {
   EXPECT_FLOAT_EQ(Out[1], 2.0f);
 }
 
+TEST_F(ImageSamplingTest, ExplicitLodMinifyingUsesMinFilterNotMagFilter) {
+  // Roadmap H16: a *minifying* explicit-LOD sample (`Lod > 0`) must use
+  // the sampler's own `MinFilter`, not always `MagFilter`, per the
+  // Vulkan spec's own magnification/minification filter-selection rule.
+  // Same 2x2 image and sample point as `LinearSampleBlendsFourTexels`
+  // above (whose corner-of-all-four-texels coordinate cleanly
+  // distinguishes a nearest read, which reads exactly one texel, from a
+  // bilinear read, which averages all four) but with `MagFilter` set to
+  // `Nearest` and `MinFilter` set to `Linear`: a minifying sample here
+  // must still bilinear-blend (matching `MinFilter`), even though
+  // `MagFilter` says `Nearest`.
+  float Storage[2][2][4] = {{{0, 0, 0, 0}, {4, 0, 0, 0}},
+                            {{0, 4, 0, 0}, {4, 4, 0, 0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MinFilter = static_cast<uint32_t>(SamplerFilter::Linear);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  // `Lod=1.0` (explicit, minifying: `ClampedLod > 0`).
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/1.0f, /*UseExplicitLod=*/true, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 2.0f);
+  EXPECT_FLOAT_EQ(Out[1], 2.0f);
+}
+
+TEST_F(ImageSamplingTest, ExplicitLodMagnifyingUsesMagFilterNotMinFilter) {
+  // Roadmap H16: the magnifying (`Lod <= 0`) counterpart of
+  // `ExplicitLodMinifyingUsesMinFilterNotMagFilter` above -- same image,
+  // same sample point, `MagFilter` and `MinFilter` swapped
+  // (`MagFilter=Nearest`, `MinFilter=Linear`) -- but a negative, explicit
+  // `Lod` (a genuinely magnifying sample) must instead read exactly one
+  // texel (matching `MagFilter=Nearest`), not the four-texel bilinear
+  // blend `MinFilter=Linear` would otherwise produce.
+  float Storage[2][2][4] = {{{0, 0, 0, 0}, {4, 0, 0, 0}},
+                            {{0, 4, 0, 0}, {4, 4, 0, 0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MinFilter = static_cast<uint32_t>(SamplerFilter::Linear);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  // `Lod=-1.0` (explicit, magnifying: `ClampedLod <= 0`).
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/-1.0f, /*UseExplicitLod=*/true, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 4.0f);
+  EXPECT_FLOAT_EQ(Out[1], 4.0f);
+}
+
+TEST_F(ImageSamplingTest, ImplicitLodMinifyingUsesMinFilterNotMagFilter) {
+  // Roadmap H16: the implicit-LOD counterpart of
+  // `ExplicitLodMinifyingUsesMinFilterNotMagFilter` above -- a caller's
+  // own screen-space derivatives (not an explicit `Lod` operand) resolve
+  // to a minifying LOD (a per-pixel `dU/dx` of 1.0 across this image's
+  // 2-texel width is a scale factor of 2 texels/pixel, `log2(2) == 1 >
+  // 0`), and that must still consult `MinFilter`, not `MagFilter`, even
+  // though `femeRTPlanImplicitLod`'s own single-tap path (no anisotropy
+  // configured here) is what resolves it.
+  float Storage[2][2][4] = {{{0, 0, 0, 0}, {4, 0, 0, 0}},
+                            {{0, 4, 0, 0}, {4, 4, 0, 0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MinFilter = static_cast<uint32_t>(SamplerFilter::Linear);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/1.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 2.0f);
+  EXPECT_FLOAT_EQ(Out[1], 2.0f);
+}
+
 TEST_F(ImageSamplingTest, RepeatAddressingWrapsCoordinate) {
   // Sampling just past the right edge with Repeat addressing must wrap
   // around to the left column.
