@@ -37,20 +37,46 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H18 or any prerequisite work required to complete
+Can you continue working on H7i or any prerequisite work required to complete
 the H-series milestones?
 
-> **`b10g11r11_ufloat` texture filtering fails independently of any mip/filter
-> combination**, discovered via roadmap H16's own real re-run of
-> `dEQP-VK.texture.filtering.2d.*`: the remaining fails not explained by H17's
-> own trilinear gap are all `formats.b10g11r11_ufloat.*` -- no format-neutral
-> pattern involved, so this is a distinct, format-specific gap, not
-> trilinear-related. H17's own closure re-run corrects the count from 4 to the
-> real 6 (all six
-> `formats.b10g11r11_ufloat.{linear,linear_mipmap_linear,linear_mipmap_nearest,nearest,nearest_mipmap_linear,nearest_mipmap_nearest}`
-> cases fail, not just the 4 non-`_mipmap_linear`-suffixed ones H16's own
-> narrower sample happened to catch). Not yet root-caused: needs a real
-> pixel-level reduction of one of these cases (e.g.
-> `formats.b10g11r11_ufloat.nearest`, the simplest -- no mip, no blend) to
-> determine whether the bug is in this packed-float format's own encode/decode
-> round-trip, or something else specific to this one format
+> **`samplerAnisotropy`**: `Image.cpp` already stores
+> `anisotropyEnable`/`maxAnisotropy` on the sampler descriptor at creation time,
+> but no anisotropic filtering logic was found in the actual texture-sampling
+> implementation -- sampling still appears isotropic regardless of the stored
+> state. Needs the real anisotropic filter kernel wired into the sampling path
+> before this can honestly flip (and `maxSamplerAnisotropy`, currently the
+> degenerate `1.0f`, would need raising to match) (in progress: a real
+> screen-space-derivative-based implicit-LOD computation and a genuine bounded
+> multi-tap anisotropic filter are now implemented (`FeMeRuntimeCPU.c`'s
+> `femeRTPlanImplicitLod`, `ImageCalls.h`/`.cpp`'s widened `Sample2D` shape,
+> both `ResourceLowering.cpp` and `SPIRVResourceLowering.cpp`'s
+> `getOrSynthesizeSample2DDerivatives`), covering the plain `sampler2D`
+> (`Sample2D`) shape only. Four new unit tests confirm the real behavior end to
+> end: `ImageSamplingTest.cpp`'s
+> `ImplicitLodWithNoDerivativesReadsBaseLevel`/`ImplicitLodSelectsCoarserMipFromDerivatives`/`AnisotropicSampleDiffersFromIsotropicSample`,
+> and `SPIRVResourceLoweringTest.cpp`'s
+> `FragmentStageImplicitSampleSynthesizesRealDerivatives`. However, a real
+> re-run of `dEQP-VK.texture.filtering_anisotropy.*` found the filter kernel is
+> never actually reached: 0/128 pass (64 Fail, 64 `NotSupported` for unrelated
+> compute-format gaps), every graphics case failing at
+> `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`. Root-caused
+> via `FEME_VULKAN_LOG_CREATION_ERRORS=1` to `SPIRVResourceLoweringPass` not
+> recognizing a single combined `OpTypeSampledImage`-style `handlefrombinding`
+> call -- the shape glslang actually emits for an ordinary GLSL `uniform
+> sampler2D` declaration, as opposed to the separately-declared-then-composed
+> image+sampler pattern the pass's existing classification logic expects. A
+> broader sweep confirmed this is not specific to anisotropy or this row's own
+> changes: `dEQP-VK.texture.filtering.2d.*` (1698 cases) is 0/1698 passing
+> overall (258 Fail, all the same graphics-pipeline-creation error; 1440
+> `NotSupported`), and classification fails structurally upstream of anything
+> this row's own derivative-synthesis code touches, so that code is never
+> reached either way -- confirmed pre-existing and unrelated to H7i.
+> `samplerAnisotropy` therefore stays `VK_FALSE` (reverted from an earlier
+> premature `VK_TRUE`) and `maxSamplerAnisotropy` stays at its degenerate `1.0f`
+> floor -- flipping either would be an unverifiable conformance claim. `ninja
+> check-feme` (assertions-enabled, ccache build) passes in full, 2054/2113 (59
+> pre-existing, unrelated `Unsupported`, 0 `Failed`). Tracked to completion as
+> new roadmap follow-on H13d (the `SPIRVResourceLoweringPass`
+> combined-sampled-image-handle gap itself). See "Roadmap H7i: measured impact"
+> in VulkanCTSReport.md for the full reproduction)
