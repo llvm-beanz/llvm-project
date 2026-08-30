@@ -56,6 +56,13 @@
 // a plain, non-arrayed 2D image (`ImageShape::Plain2D`); no
 // `Store2DArray`/cube counterpart exists yet.
 //
+// Update (roadmap H19b): two more write-only kinds, `Store2DArray`/
+// `Store2DArrayI32`, extend the above to an arrayed (`ImageShape::Array2D`)
+// storage image, adding an integer array-layer operand before the texel
+// value -- mirroring exactly how `Load2DArray`/`Load2DArrayI32` extend
+// `Load2D`/`Load2DI32`'s own non-arrayed shape. Cube/cube-array storage
+// images remain unstarted follow-on work (roadmap H19c/H19d).
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_IMAGECALLS_H
@@ -122,6 +129,14 @@ enum class ImageCallKind : uint8_t {
   /// counterpart of `Store2D`, mirroring `Load2DI32`'s relationship to
   /// `Load2D`.
   Store2DI32,
+  /// `feme.cpu.image.store.2darray.v4f32` (roadmap H19b): the arrayed
+  /// counterpart of `Store2D`, adding an integer array-layer operand,
+  /// mirroring `Load2DArray`'s relationship to `Load2D`.
+  Store2DArray,
+  /// `feme.cpu.image.store.2darray.v4i32` (roadmap H19b): the integer-format
+  /// counterpart of `Store2DArray`, mirroring `Load2DArrayI32`'s
+  /// relationship to `Load2DArray`.
+  Store2DArrayI32,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -168,8 +183,9 @@ struct MatchedImageCall {
   /// every other kind, including the integer-coordinate `Load2DArray`/
   /// `Load2DArrayI32`, which instead use `Layer` below.
   llvm::Value *ArrayLayer = nullptr;
-  /// `Load2DArray`/`Load2DArrayI32` only: the integer array-layer texel
-  /// coordinate; null for every other kind.
+  /// `Load2DArray`/`Load2DArrayI32`/`Store2DArray`/`Store2DArrayI32`
+  /// (roadmap H19b) only: the integer array-layer texel coordinate; null
+  /// for every other kind.
   llvm::Value *Layer = nullptr;
   /// The LOD/mip operand: `Sample2D`/`SampleCmp2D`/`Sample2DArray`/
   /// `SampleCube`/`SampleCubeArray`'s explicit-or-ignored LOD float, or
@@ -188,8 +204,9 @@ struct MatchedImageCall {
   /// sampled kind and for `Load2DI32`/`Load2DArrayI32`, which never carry
   /// one.
   llvm::Value *Sample = nullptr;
-  /// `Store2D`/`Store2DI32` only: the `<4 x float>`/`<4 x i32>` texel value
-  /// being written; null for every read-only kind.
+  /// `Store2D`/`Store2DI32`/`Store2DArray`/`Store2DArrayI32` only: the
+  /// `<4 x float>`/`<4 x i32>` texel value being written; null for every
+  /// read-only kind.
   llvm::Value *Texel = nullptr;
   llvm::Value *Mask = nullptr;
 };
@@ -262,6 +279,25 @@ llvm::CallInst *createStore2DI32(llvm::IRBuilderBase &Builder,
                                  llvm::Value *Y, llvm::Value *Texel,
                                  llvm::Value *Mask,
                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.store.2darray.v4f32` call (roadmap H19b):
+/// writes \p Texel to an arrayed storage image at integer coordinates
+/// (\p X, \p Y), array layer \p Layer, mip level 0.
+llvm::CallInst *createStore2DArray(llvm::IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env,
+                                   llvm::Value *ImageIndex, llvm::Value *X,
+                                   llvm::Value *Y, llvm::Value *Layer,
+                                   llvm::Value *Texel, llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.store.2darray.v4i32` call (roadmap H19b).
+llvm::CallInst *createStore2DArrayI32(llvm::IRBuilderBase &Builder,
+                                      const ImageCallEnv &Env,
+                                      llvm::Value *ImageIndex,
+                                      llvm::Value *X, llvm::Value *Y,
+                                      llvm::Value *Layer, llvm::Value *Texel,
+                                      llvm::Value *Mask,
+                                      const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.2darray.v4f32` call (roadmap H7b-a).
 llvm::CallInst *

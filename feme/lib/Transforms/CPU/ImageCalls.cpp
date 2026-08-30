@@ -44,6 +44,10 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.store.2d.v4f32";
   case ImageCallKind::Store2DI32:
     return "feme.cpu.image.store.2d.v4i32";
+  case ImageCallKind::Store2DArray:
+    return "feme.cpu.image.store.2darray.v4f32";
+  case ImageCallKind::Store2DArrayI32:
+    return "feme.cpu.image.store.2darray.v4i32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -152,6 +156,23 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
         {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, V4I32Ty, I1Ty},
         /*isVarArg=*/false);
     break;
+  case ImageCallKind::Store2DArray:
+    // Same as Store2D, plus an integer layer operand before the texel
+    // value (roadmap H19b).
+    // (image_heap, image_heap_count, image_index, x, y, layer, value,
+    //  mask) -> void
+    FTy = FunctionType::get(
+        Type::getVoidTy(Ctx),
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, V4F32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Store2DArrayI32:
+    // Same shape as Store2DArray, but the value operand is <4 x i32>.
+    FTy = FunctionType::get(
+        Type::getVoidTy(Ctx),
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, V4I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
   }
 
   StringRef Name = getImageCallName(Kind);
@@ -162,7 +183,9 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // identical reasoning for buffers); `Store2D`/`Store2DI32` (roadmap
     // H19a) instead only *write* through theirs.
     bool IsStore = Kind == ImageCallKind::Store2D ||
-                  Kind == ImageCallKind::Store2DI32;
+                   Kind == ImageCallKind::Store2DI32 ||
+                   Kind == ImageCallKind::Store2DArray ||
+                   Kind == ImageCallKind::Store2DArrayI32;
     F->setMemoryEffects(MemoryEffects::argMemOnly(
         IsStore ? ModRefInfo::Mod : ModRefInfo::Ref));
     F->setWillReturn();
@@ -251,6 +274,33 @@ CallInst *feme::cpu::createStore2DI32(IRBuilderBase &Builder,
       Name);
 }
 
+CallInst *feme::cpu::createStore2DArray(IRBuilderBase &Builder,
+                                        const ImageCallEnv &Env,
+                                        Value *ImageIndex, Value *X, Value *Y,
+                                        Value *Layer, Value *Texel,
+                                        Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Store2DArray);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X,
+                             Y, Layer, Texel, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createStore2DArrayI32(IRBuilderBase &Builder,
+                                           const ImageCallEnv &Env,
+                                           Value *ImageIndex, Value *X,
+                                           Value *Y, Value *Layer,
+                                           Value *Texel, Value *Mask,
+                                           const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Store2DArrayI32);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X,
+                             Y, Layer, Texel, Mask},
+                            Name);
+}
+
 CallInst *feme::cpu::createSample2DArray(IRBuilderBase &Builder,
                                          const ImageCallEnv &Env,
                                          Value *ImageIndex,
@@ -334,7 +384,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::Sample2DArray, ImageCallKind::Load2DArray,
       ImageCallKind::Load2DArrayI32, ImageCallKind::SampleCube,
       ImageCallKind::SampleCubeArray, ImageCallKind::Store2D,
-      ImageCallKind::Store2DI32};
+      ImageCallKind::Store2DI32, ImageCallKind::Store2DArray,
+      ImageCallKind::Store2DArrayI32};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -496,6 +547,19 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.V = CI.getArgOperand(4);
     Result.Texel = CI.getArgOperand(5);
     Result.Mask = CI.getArgOperand(6);
+    break;
+  case ImageCallKind::Store2DArray:
+  case ImageCallKind::Store2DArrayI32:
+    if (CI.arg_size() != 8)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Layer = CI.getArgOperand(5);
+    Result.Texel = CI.getArgOperand(6);
+    Result.Mask = CI.getArgOperand(7);
     break;
   }
   return Result;
