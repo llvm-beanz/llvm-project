@@ -8,7 +8,10 @@
 
 #include "feme/Transforms/CPU/ImageCalls.h"
 
+#include "feme/Core/ShaderStage.h"
+#include "feme/Core/StageOps.h"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -54,11 +57,16 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
   switch (Kind) {
   case ImageCallKind::Sample2D:
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
-    //  image_index, sampler_index, u, v, lod, use_explicit_lod, mask)
-    // -> <4 x float>
+    //  image_index, sampler_index, u, v, dudx, dudy, dvdx, dvdy, lod,
+    //  use_explicit_lod, mask) -> <4 x float>. `dudx`/`dudy`/`dvdx`/`dvdy`
+    // (roadmap H7i) are the caller's own screen-space partial derivatives
+    // of `(u, v)`, consulted only for an implicit-LOD sample
+    // (`use_explicit_lod` false); a caller with none to give (a non-
+    // fragment stage, or an explicit-LOD sample) passes zero constants.
     FTy = FunctionType::get(V4F32Ty,
                             {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
-                             F32Ty, F32Ty, I1Ty, I1Ty},
+                             F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, I1Ty,
+                             I1Ty},
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::SampleCmp2D:
@@ -143,14 +151,17 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
 CallInst *feme::cpu::createSample2D(IRBuilderBase &Builder,
                                     const ImageCallEnv &Env, Value *ImageIndex,
                                     Value *SamplerIndex, Value *U, Value *V,
-                                    Value *Lod, Value *UseExplicitLod,
-                                    Value *Mask, const Twine &Name) {
+                                    Value *DUdX, Value *DUdY, Value *DVdX,
+                                    Value *DVdY, Value *Lod,
+                                    Value *UseExplicitLod, Value *Mask,
+                                    const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::Sample2D);
   return Builder.CreateCall(F,
                             {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
                              Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
-                             V, Lod, UseExplicitLod, Mask},
+                             V, DUdX, DUdY, DVdX, DVdY, Lod, UseExplicitLod,
+                             Mask},
                             Name);
 }
 
@@ -296,7 +307,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
 
   switch (Kind) {
   case ImageCallKind::Sample2D:
-    if (CI.arg_size() != 11)
+    if (CI.arg_size() != 15)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -306,9 +317,13 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.SamplerIndex = CI.getArgOperand(5);
     Result.U = CI.getArgOperand(6);
     Result.V = CI.getArgOperand(7);
-    Result.Lod = CI.getArgOperand(8);
-    Result.UseExplicitLod = CI.getArgOperand(9);
-    Result.Mask = CI.getArgOperand(10);
+    Result.DUdX = CI.getArgOperand(8);
+    Result.DUdY = CI.getArgOperand(9);
+    Result.DVdX = CI.getArgOperand(10);
+    Result.DVdY = CI.getArgOperand(11);
+    Result.Lod = CI.getArgOperand(12);
+    Result.UseExplicitLod = CI.getArgOperand(13);
+    Result.Mask = CI.getArgOperand(14);
     break;
   case ImageCallKind::SampleCmp2D:
     if (CI.arg_size() != 12)
@@ -425,4 +440,23 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     break;
   }
   return Result;
+}
+
+SampleDerivatives
+feme::cpu::getOrSynthesizeSample2DDerivatives(IRBuilderBase &B,
+                                              Function &Caller, Value *U,
+                                              Value *V) {
+  std::optional<feme::ShaderStage> Stage = feme::getShaderStage(Caller);
+  if (Stage != feme::ShaderStage::Fragment) {
+    Value *Zero = ConstantFP::get(B.getFloatTy(), 0.0);
+    return {Zero, Zero, Zero, Zero};
+  }
+  return {feme::createStageDerivative(B, feme::StageOpKind::DerivativeXCoarse,
+                                      U),
+          feme::createStageDerivative(B, feme::StageOpKind::DerivativeYCoarse,
+                                      U),
+          feme::createStageDerivative(B, feme::StageOpKind::DerivativeXCoarse,
+                                      V),
+          feme::createStageDerivative(B, feme::StageOpKind::DerivativeYCoarse,
+                                      V)};
 }

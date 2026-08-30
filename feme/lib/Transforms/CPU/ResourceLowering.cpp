@@ -464,8 +464,26 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
     case ImageShape::Plain2D: {
       Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
       Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
+      // Roadmap H7i: an implicit-LOD sample's real mip level (and, when
+      // enabled, an anisotropic footprint) needs this sample's own
+      // screen-space derivatives of (U, V), synthesized only in the
+      // fragment stage -- the only stage HLSL's implicit `Sample()` is
+      // ever legal from; an explicit-LOD `SampleLevel` ignores them, so
+      // zero constants (no extra IR) are passed instead.
+      SampleDerivatives D =
+          IsSample ? getOrSynthesizeSample2DDerivatives(
+                        Builder, *CI->getFunction(), U, V)
+                   : SampleDerivatives{ConstantFP::get(Builder.getFloatTy(),
+                                                       0.0),
+                                      ConstantFP::get(Builder.getFloatTy(),
+                                                       0.0),
+                                      ConstantFP::get(Builder.getFloatTy(),
+                                                       0.0),
+                                      ConstantFP::get(Builder.getFloatTy(),
+                                                       0.0)};
       NewCall = createSample2D(Builder, Env, ImageIndex, SamplerIndex, U, V,
-                               Lod, UseExplicitLod, Mask, CI->getName());
+                               D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod,
+                               UseExplicitLod, Mask, CI->getName());
       break;
     }
     case ImageShape::Array2D: {

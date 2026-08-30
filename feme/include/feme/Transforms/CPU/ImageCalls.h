@@ -33,6 +33,21 @@
 // depth-comparison sample for *any* dimension yet, 2D included -- a
 // pre-existing, unrelated gap.
 //
+// Update (roadmap H7i): `Sample2D`'s own implicit-LOD path (`Lod`'s
+// `UseExplicitLod` operand false) now consults four extra operands,
+// `DUdX`/`DUdY`/`DVdX`/`DVdY` -- the caller's own screen-space partial
+// derivatives of `U`/`V` -- instead of always resolving to mip level 0
+// (`runtime/CPU`'s own former scope note). A fragment-stage caller (the
+// only stage GLSL/HLSL's own implicit `texture()`/`Sample()` is ever
+// legal from) synthesizes them via `feme::createStageDerivative`
+// (`feme.stage.derivative.*`, `feme::cpu::WaveLoweringPass`'s existing
+// quad-lane machinery); any other caller passes zero constants, leaving
+// its own sample at mip level 0 exactly as before. Scoped to `Sample2D`
+// only -- the one shape a real anisotropic-filtering CTS case needs
+// (`dEQP-VK.texture.filtering.2d.*anisotropy*`); `Sample2DArray`/
+// `SampleCube`/`SampleCubeArray` still resolve every implicit sample to
+// mip level 0, a pre-existing limitation this update does not change.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_IMAGECALLS_H
@@ -122,6 +137,13 @@ struct MatchedImageCall {
   /// (`W` below carries the Z component).
   llvm::Value *U = nullptr;
   llvm::Value *V = nullptr;
+  /// `Sample2D` only (roadmap H7i): the caller's own screen-space partial
+  /// derivatives of `U`/`V`, consulted only for an implicit-LOD sample
+  /// (see `createSample2D`'s doc); null for every other kind.
+  llvm::Value *DUdX = nullptr;
+  llvm::Value *DUdY = nullptr;
+  llvm::Value *DVdX = nullptr;
+  llvm::Value *DVdY = nullptr;
   /// `SampleCube`/`SampleCubeArray` only: the direction vector's Z
   /// component; null for every other kind.
   llvm::Value *W = nullptr;
@@ -161,11 +183,20 @@ llvm::StringRef getImageCallName(ImageCallKind Kind);
 /// \p Kind in \p M.
 llvm::Function *getOrInsertImageCall(llvm::Module &M, ImageCallKind Kind);
 
-/// Builds a `feme.cpu.image.sample.2d.v4f32` call.
+/// Builds a `feme.cpu.image.sample.2d.v4f32` call. \p DUdX/\p DUdY/\p DVdX/
+/// \p DVdY (roadmap H7i) are the caller's own screen-space partial
+/// derivatives of \p U/\p V, used only when \p UseExplicitLod is false to
+/// compute a real implicit mip level (and, when the sampler enables
+/// anisotropic filtering, a multi-tap anisotropic footprint) instead of
+/// always reading mip level 0 -- pass zero constants for a caller with none
+/// to give (a non-fragment stage, or an explicit-LOD sample, where they are
+/// ignored either way).
 llvm::CallInst *createSample2D(llvm::IRBuilderBase &Builder,
                                const ImageCallEnv &Env, llvm::Value *ImageIndex,
                                llvm::Value *SamplerIndex, llvm::Value *U,
-                               llvm::Value *V, llvm::Value *Lod,
+                               llvm::Value *V, llvm::Value *DUdX,
+                               llvm::Value *DUdY, llvm::Value *DVdX,
+                               llvm::Value *DVdY, llvm::Value *Lod,
                                llvm::Value *UseExplicitLod, llvm::Value *Mask,
                                const llvm::Twine &Name = "");
 
@@ -245,6 +276,33 @@ llvm::CallInst *createSampleCubeArray(
 /// returning its decoded operands, or `std::nullopt` if \p CI's callee isn't
 /// one.
 std::optional<MatchedImageCall> matchImageCall(const llvm::CallInst &CI);
+
+/// The four screen-space partial-derivative operands `createSample2D`'s
+/// implicit-LOD path consults (roadmap H7i): `DUdX`, `DUdY`, `DVdX`, `DVdY`,
+/// in that order.
+struct SampleDerivatives {
+  llvm::Value *DUdX;
+  llvm::Value *DUdY;
+  llvm::Value *DVdX;
+  llvm::Value *DVdY;
+};
+
+/// Returns the four screen-space partial derivatives of \p U/\p V an
+/// implicit-LOD `Sample2D` call should pass to `createSample2D`, given that
+/// \p Caller (the function \p Builder is inserting into) declares
+/// \p RequiredStage (its own entry-point `ShaderStage`, `feme::ShaderStage`,
+/// via `feme::getShaderStage`): real derivatives, synthesized via
+/// `feme::createStageDerivative` (`feme.stage.derivative.x.coarse`/
+/// `.y.coarse`, later lowered by `feme::cpu::WaveLoweringPass`'s existing
+/// quad-lane machinery) when \p Caller's own stage is `Fragment` -- the
+/// only stage GLSL/HLSL's own implicit `texture()`/`Sample()` is ever legal
+/// from -- or four zero constants otherwise (an explicit-LOD sample, or
+/// (defensively) any other stage), leaving that sample's own implicit level
+/// resolved to mip 0 exactly as before this row.
+SampleDerivatives getOrSynthesizeSample2DDerivatives(llvm::IRBuilderBase &B,
+                                                     llvm::Function &Caller,
+                                                     llvm::Value *U,
+                                                     llvm::Value *V);
 
 } // namespace feme::cpu
 

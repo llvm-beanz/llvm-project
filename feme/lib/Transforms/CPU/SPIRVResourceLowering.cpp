@@ -1153,11 +1153,31 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
         CallInst *NewCall;
         switch (Shape) {
-        case ImageShape::Plain2D:
+        case ImageShape::Plain2D: {
+          // Roadmap H7i: an implicit-LOD sample's real mip level (and,
+          // when enabled, an anisotropic footprint) needs this sample's
+          // own screen-space derivatives of (C0, C1), synthesized only in
+          // the fragment stage -- the only stage GLSL's implicit
+          // `texture()` is ever legal from; an explicit-LOD
+          // `textureLod()` ignores them, so zero constants (no extra IR)
+          // are passed instead.
+          SampleDerivatives D =
+              !ExplicitLod
+                  ? getOrSynthesizeSample2DDerivatives(
+                        Builder, *CI->getFunction(), C0, C1)
+                  : SampleDerivatives{ConstantFP::get(Builder.getFloatTy(),
+                                                      0.0),
+                                     ConstantFP::get(Builder.getFloatTy(),
+                                                      0.0),
+                                     ConstantFP::get(Builder.getFloatTy(),
+                                                      0.0),
+                                     ConstantFP::get(Builder.getFloatTy(),
+                                                      0.0)};
           NewCall = createSample2D(Builder, Env, ImageIndex, SamplerIndex, C0,
-                                   C1, Lod, ExplicitLodFlag, Mask,
-                                   CI->getName());
+                                   C1, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod,
+                                   ExplicitLodFlag, Mask, CI->getName());
           break;
+        }
         case ImageShape::Array2D: {
           Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{2});
           NewCall = createSample2DArray(Builder, Env, ImageIndex, SamplerIndex,
