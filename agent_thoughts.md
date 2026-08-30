@@ -45474,3 +45474,97 @@ the 1 new test this row adds. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` needed no changes (grepped both for any
 mention of attachment-unused/H7r/H7s -- none -- confirming this is purely a
 core render-pass capability, not a feature bit or extension).
+
+# H7t: fragment color outputs narrower than 4 components
+
+Continuing the H7n->H7q->H7r->H7s chain: H7s's own re-run of
+`alpha_to_coverage_unused_attachment.*` got past the unused-attachment-slot
+rejection, but immediately hit a new one -- `"fragment stage has no
+4-component floating-point output at location 1 (SV_Target1)"`. The CTS
+case's own real color output (`fragColor1 = vtxColor.rgb`) is a `vec3`, and
+per spec that's entirely legal: a fragment shader isn't required to write
+every component of its own output, the missing ones just take their
+identity value (0.0 for a missing G/B, 1.0 for a missing A -- mirroring how
+a real GPU driver represents an "unwritten" output).
+
+I found the same `ComponentCount != 4` assumption baked into four separate
+places: `GraphicsPipeline.cpp`'s `validateStageInterfaces` (pipeline-
+creation-time validation) and three sites in `Executor.cpp` (the primary
+color read, the dual-source-blend companion read, and the
+alpha-to-coverage alpha read). Before writing any code I went looking for
+an existing "missing channel defaults to its identity value" precedent in
+this codebase to mirror rather than invent a new convention -- I'd
+originally expected it to be a vertex-input zero/one-extend, but there
+isn't one; the real precedent turned out to be `ImageFixture.cpp`'s
+`unpackColor`, which already does exactly this for color *formats* lacking
+a channel (e.g. `R5G6B5_UNORM`'s always-missing alpha already reads back
+as `1.0`). That became my design anchor and the comment I left at both new
+call sites.
+
+The trickier part was `StageStorage`'s own memory layout: it only ever
+allocates storage for `[FirstComponent, FirstComponent + ComponentCount)`
+per element, so a naive "just always read 4 components" loop would read
+out-of-bounds garbage for a narrower output rather than cleanly defaulting.
+I added a small shared helper, `readFragmentColor`, that guards each
+component read against the element's own `ComponentCount` and substitutes
+the identity default otherwise, and reused it for both the primary and
+dual-source-blend reads (the alpha-to-coverage site only ever needs
+component 3, so a plain ternary was simpler and clearer there than
+routing it through the same helper).
+
+One thing I noticed but deliberately left alone: the pre-existing read
+loops used the raw component index directly rather than
+`Elem.FirstComponent + C`, unlike several *other* consumers in the same
+file that do add `FirstComponent`. This looks like it could be a latent
+gap for a fragment output that isn't first in its own signature packing,
+but it's unrelated to H7t's own scope (no existing or new test exercises
+a non-zero `FirstComponent` fragment color output, and fixing it
+speculatively without a failing case to drive it would violate the
+"don't fix unrelated pre-existing issues" guidance) -- left as-is,
+preserving the existing behavior exactly.
+
+Tests, one per phase, to keep the "test each phase of translation"
+guideline honest even though this change didn't touch a distinct compiler
+pass: `GraphicsPipelineTest`'s `AcceptsFragmentOutputNarrowerThan4Components`
+(pipeline-creation time only, does a `vec3` output even let
+`vkCreateGraphicsPipelines` succeed), `DrawTest`'s
+`RendersFragmentOutputNarrowerThan4Components` (the full SPIR-V-to-pixel
+path -- I deliberately cleared the attachment to *transparent* black
+before drawing rather than opaque, so that a broken "missing alpha
+defaults to 0" implementation would produce a visibly wrong, distinct
+result rather than accidentally look correct against an already-opaque
+clear color), and `ExecutorTest`'s
+`FillsTriangleWithColorOutputNarrowerThan4Components` (the lower-level,
+direct-hand-built-IR test that bypasses SPIR-V import entirely, giving
+a "compiler phase" test focused purely on the Executor's own
+signature-linkage logic, distinct from the two full-stack SPIR-V tests).
+
+Real CTS re-run: `alpha_to_coverage_unused_attachment.*` now passes fully,
+6/6 (of the feme-supported sample counts; 18 other cases remain
+`NotSupported` for sample counts feme doesn't implement at all, unrelated
+to this row). This closes out the entire H7n->H7q->H7r->H7s->H7t chain that
+started from a single hard-coded CTS test's own color format. I also
+re-ran the broader `dEQP-VK.pipeline.monolithic.multisample.*` sweep
+(10576 cases) as a regression check: 195 pass/57 fail/10324 NotSupported,
+up from H7q's own 189/63 baseline by exactly the 6 newly-passing cases
+(63 - 6 = 57 checks out). One failure category I hadn't seen named in a
+prior session's sweep summary showed up --
+`compatible_render_pass.dynamic` -- so rather than assume it was
+pre-existing just because it wasn't in my remembered list, I `git
+stash`ed my changes, rebuilt the two touched object files, and re-ran
+that exact case against the pre-fix binary: it failed identically
+(`VK_ERROR_INITIALIZATION_FAILED`), confirming it's pre-existing and
+unrelated, not something my change surfaced or introduced.
+
+`ninja check-feme`: 2039/2098, 0 failed, up from H7s's own 2036/2095 by
+the 3 new tests this row adds. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` needed no changes -- grepped both for any
+existing mention related to component counts/H7t, found none, confirming
+this is a core signature-linkage capability rather than a feature bit or
+extension.
+
+Commits, small and separate as instructed: (1) the core fix across
+`GraphicsPipeline.cpp`/`Executor.cpp`, (2) the three new unit tests, (3)
+documentation (`Roadmap.md` strikethrough, `VulkanCTSReport.md`'s new
+"Roadmap H7t: measured impact" section, `FeMeVulkanDesign.md`'s H7 status
+paragraph), (4) this file.
