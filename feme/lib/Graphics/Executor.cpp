@@ -948,6 +948,27 @@ uint8_t applyLogicOp(LogicOp Op, uint8_t Src, uint8_t Dst) {
   llvm_unreachable("unhandled LogicOp");
 }
 
+/// Reads \p Elem's up-to-4-component fragment color output at row
+/// \p Invocation into \p RGBA, filling any component beyond \p Elem's own
+/// `ComponentCount` with its SPIR-V/GLSL-defined default value (roadmap
+/// H7t: a fragment output narrower than 4 components, e.g. a `vec3`, is
+/// legal per spec -- the missing components are simply never written by
+/// the shader, and read back as `0.0` for a missing green/blue channel or
+/// `1.0` for a missing alpha, mirroring `ImageFixture.cpp`'s own
+/// `unpackColor`'s "missing channel reads as its identity value"
+/// precedent for a color format lacking a channel entirely). \p Elem must
+/// already be known to be a `Float`-typed output (checked once, by
+/// whichever of `executeDraws`' own three per-element validations below
+/// looked it up), so no further type check is done here.
+void readFragmentColor(const StageStorage &FSOutput,
+                       const SignatureElement &Elem, uint32_t Invocation,
+                       std::array<double, 4> &RGBA) {
+  for (unsigned C = 0; C != 4; ++C)
+    RGBA[C] = C < Elem.ComponentCount
+                  ? FSOutput.readFloat(Elem.ElementID, C, Invocation)
+                  : (C == 3 ? 1.0 : 0.0);
+}
+
 /// Merges a fragment's new color \p Src into \p Texel (the attachment's
 /// existing texel, read and overwritten in place) per \p Pipeline's blend/
 /// logic-op/write-mask state (roadmap R33). A logic op, when enabled,
@@ -1374,12 +1395,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "fragment stage has no output at location %u "
                                "(mapped to color attachment %u)",
                                *Loc, I);
-    if (FSColor->ComponentCount != 4 ||
+    if (FSColor->ComponentCount == 0 || FSColor->ComponentCount > 4 ||
         FSColor->ComponentType != SignatureComponentType::Float)
       return createStringError(inconvertibleErrorCode(),
                                "the fragment output at location %u mapped "
                                "to color attachment %u must be a "
-                               "4-component floating-point output",
+                               "floating-point output of 1-4 components",
                                *Loc, I);
     FSColors.push_back(FSColor);
   }
@@ -1412,11 +1433,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "a dual-source blend factor is used but the "
                                "fragment stage has no Index=1 output at "
                                "location 0");
-    if (FSColor1->ComponentCount != 4 ||
+    if (FSColor1->ComponentCount == 0 || FSColor1->ComponentCount > 4 ||
         FSColor1->ComponentType != SignatureComponentType::Float)
       return createStringError(inconvertibleErrorCode(),
                                "the Index=1 output at location 0 must be a "
-                               "4-component floating-point output");
+                               "floating-point output of 1-4 components");
   }
 
   // (roadmap H7n) `alphaToCoverageEnable` generates its coverage mask from
@@ -1436,12 +1457,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       return createStringError(inconvertibleErrorCode(),
                                "alphaToCoverageEnable is set but the "
                                "fragment stage has no output at location 0");
-    if (FSAlphaToCoverage->ComponentCount != 4 ||
+    if (FSAlphaToCoverage->ComponentCount == 0 ||
+        FSAlphaToCoverage->ComponentCount > 4 ||
         FSAlphaToCoverage->ComponentType != SignatureComponentType::Float)
       return createStringError(inconvertibleErrorCode(),
                                "the output at location 0 must be a "
-                               "4-component floating-point output when "
-                               "alphaToCoverageEnable is set");
+                               "floating-point output of 1-4 components "
+                               "when alphaToCoverageEnable is set");
   }
 
   // (Roadmap E5/H3) The extent used to clamp each selected scissor rect
@@ -2604,8 +2626,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             // -written either -- consistent with `UseEarlyDepthStencil`
             // being forced off above whenever this is enabled.
             if (Pipeline.getAlphaToCoverageEnable()) {
-              double Alpha = FSOutput->readFloat(FSAlphaToCoverage->ElementID,
-                                                 3, Q * 4 + Lane);
+              // (roadmap H7t) A location-0 output narrower than 4
+              // components (e.g. a `vec3` writing only RGB) has no alpha
+              // of its own to read -- defaults to `1.0` (fully covered),
+              // the same identity value `readFragmentColor` synthesizes
+              // for a missing alpha component elsewhere.
+              double Alpha = FSAlphaToCoverage->ComponentCount == 4
+                                 ? FSOutput->readFloat(
+                                       FSAlphaToCoverage->ElementID, 3,
+                                       Q * 4 + Lane)
+                                 : 1.0;
               uint32_t AlphaCoverage = 0;
               for (uint32_t S = 0; S != SampleCount; ++S)
                 if (Alpha >= (static_cast<double>(S) + 0.5) / SampleCount)
@@ -2657,9 +2687,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                 // as an unused slot above.
                 continue;
               std::array<double, 4> RGBA;
-              for (unsigned C = 0; C != 4; ++C)
-                RGBA[C] = FSOutput->readFloat(FSColors[AttIdx]->ElementID, C,
-                                              Q * 4 + Lane);
+              readFragmentColor(*FSOutput, *FSColors[AttIdx], Q * 4 + Lane,
+                                RGBA);
               // (roadmap F5) `RectangularSmooth`'s antialiasing coverage
               // (`Quad.LineCoverage`, `1.0` for every non-line/non-smooth
               // triangle) multiplies into the written alpha so a partially-
@@ -2682,9 +2711,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               // comment above).
               std::array<double, 4> RGBA1{};
               if (AttIdx == 0 && FSColor1)
-                for (unsigned C = 0; C != 4; ++C)
-                  RGBA1[C] =
-                      FSOutput->readFloat(FSColor1->ElementID, C, Q * 4 + Lane);
+                readFragmentColor(*FSOutput, *FSColor1, Q * 4 + Lane, RGBA1);
               const BlendState &AttBlend = Pipeline.getColorBlends()[AttIdx];
               for (uint32_t S = 0; S != SampleCount; ++S) {
                 if (!((PassMask >> S) & 1u))

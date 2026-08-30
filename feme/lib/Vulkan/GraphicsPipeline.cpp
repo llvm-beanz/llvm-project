@@ -676,11 +676,19 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
         continue;
       const feme::SignatureElement *Color =
           findLocation(*FSSig, feme::SignatureDirection::Output, I);
-      if (!Color || Color->ComponentCount != 4 ||
+      // (roadmap H7t) A fragment output narrower than 4 components (e.g.
+      // a `vec3`) is legal per the SPIR-V/GLSL spec -- the missing
+      // trailing components are simply never written by the shader, and
+      // `Executor.cpp`'s own `readFragmentColor` fills them with their
+      // defined identity value (`0.0` for a missing green/blue channel,
+      // `1.0` for a missing alpha) at draw time, mirroring
+      // `ImageFixture.cpp`'s `unpackColor`'s own precedent for a color
+      // format lacking a channel entirely.
+      if (!Color || Color->ComponentCount == 0 || Color->ComponentCount > 4 ||
           Color->ComponentType != feme::SignatureComponentType::Float)
         return createStringError(inconvertibleErrorCode(),
-                                 "fragment stage has no 4-component "
-                                 "floating-point output at location %u "
+                                 "fragment stage has no floating-point "
+                                 "output of 1-4 components at location %u "
                                  "(SV_Target%u)",
                                  I, I);
     }
