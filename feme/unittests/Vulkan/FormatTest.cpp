@@ -48,6 +48,30 @@ TEST(FormatTest, Maps4444Formats) {
             ResourceFormat::A4B4G4R4_UNORM);
 }
 
+TEST(FormatTest, MapsRemainingPackedSixteenBitFormats) {
+  // Roadmap H7r: the remaining core Vulkan 1.0 packed 16-bit formats.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R4G4B4A4_UNORM_PACK16),
+            ResourceFormat::R4G4B4A4_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_B4G4R4A4_UNORM_PACK16),
+            ResourceFormat::B4G4R4A4_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R5G6B5_UNORM_PACK16),
+            ResourceFormat::R5G6B5_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_B5G6R5_UNORM_PACK16),
+            ResourceFormat::B5G6R5_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R5G5B5A1_UNORM_PACK16),
+            ResourceFormat::R5G5B5A1_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_B5G5R5A1_UNORM_PACK16),
+            ResourceFormat::B5G5R5A1_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A1R5G5B5_UNORM_PACK16),
+            ResourceFormat::A1R5G5B5_UNORM);
+  for (ResourceFormat Format :
+       {ResourceFormat::R4G4B4A4_UNORM, ResourceFormat::B4G4R4A4_UNORM,
+        ResourceFormat::R5G6B5_UNORM, ResourceFormat::B5G6R5_UNORM,
+        ResourceFormat::R5G5B5A1_UNORM, ResourceFormat::B5G5R5A1_UNORM,
+        ResourceFormat::A1R5G5B5_UNORM})
+    EXPECT_EQ(formatElementSize(Format), 2u);
+}
+
 TEST(FormatTest, RejectsUnsupportedFormat) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGB_UNORM_BLOCK), std::nullopt);
   EXPECT_EQ(mapVkFormat(VK_FORMAT_UNDEFINED), std::nullopt);

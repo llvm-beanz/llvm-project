@@ -173,9 +173,13 @@ TEST_F(RenderPassTest, CompilesDepthAttachment) {
 
 /// A format this driver has no representation for at all is rejected at
 /// creation rather than silently misinterpreted.
+/// `VK_FORMAT_A4R4G4B4_UNORM_PACK16` (roadmap E19) is recognized as a legal
+/// `VkFormat` but is not (yet) attachment-capable -- unlike
+/// `VK_FORMAT_R5G6B5_UNORM_PACK16` (roadmap H7r), which this test used to
+/// name here but which is now a real, working color attachment format.
 TEST_F(RenderPassTest, RejectsUnsupportedAttachmentFormat) {
   VkRenderPass Pass = VK_NULL_HANDLE;
-  EXPECT_EQ(createSimpleRenderPass(VK_FORMAT_R5G6B5_UNORM_PACK16, Pass),
+  EXPECT_EQ(createSimpleRenderPass(VK_FORMAT_A4R4G4B4_UNORM_PACK16, Pass),
             VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
 
@@ -188,6 +192,20 @@ TEST_F(RenderPassTest, RejectsDepthStencilFormatAsColorAttachment) {
   VkRenderPass Pass = VK_NULL_HANDLE;
   EXPECT_EQ(createSimpleRenderPass(VK_FORMAT_D24_UNORM_S8_UINT, Pass),
             VK_ERROR_INITIALIZATION_FAILED);
+}
+
+// Roadmap H7r: the 7 remaining core-1.0 packed 16-bit formats are now real,
+// working color attachment formats.
+TEST_F(RenderPassTest, CompilesRemainingPackedSixteenBitColorAttachments) {
+  for (VkFormat Format :
+       {VK_FORMAT_R4G4B4A4_UNORM_PACK16, VK_FORMAT_B4G4R4A4_UNORM_PACK16,
+        VK_FORMAT_R5G6B5_UNORM_PACK16, VK_FORMAT_B5G6R5_UNORM_PACK16,
+        VK_FORMAT_R5G5B5A1_UNORM_PACK16, VK_FORMAT_B5G5R5A1_UNORM_PACK16,
+        VK_FORMAT_A1R5G5B5_UNORM_PACK16}) {
+    VkRenderPass Pass = VK_NULL_HANDLE;
+    EXPECT_EQ(createSimpleRenderPass(Format, Pass), VK_SUCCESS) << Format;
+    vkDestroyRenderPass(Device, Pass, nullptr);
+  }
 }
 
 TEST_F(RenderPassTest, RejectsUnsupportedSampleCount) {

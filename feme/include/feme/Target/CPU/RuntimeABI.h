@@ -173,6 +173,32 @@ enum class ResourceFormat : uint32_t {
   ASTC_10x10_SFLOAT,
   ASTC_12x10_SFLOAT,
   ASTC_12x12_SFLOAT,
+
+  // (Roadmap H7r) A survey of the packed 16-bit formats worth adding
+  // beyond `A1B5G5R5_UNORM`/`A4R4G4B4_UNORM`/`A4B4G4R4_UNORM` above (E5/
+  // E19): the remaining core-1.0 4-bit- and 5/6-bit-per-component packed
+  // formats VK-GL-CTS's own `vktApiImageClearingTests.cpp` "formats worth
+  // testing" survey also covers (`clear_color_image`/
+  // `clear_color_attachment`) -- needed for real by `dEQP-VK.pipeline.
+  // monolithic.multisample.alpha_to_coverage_unused_attachment.*`'s own
+  // hard-coded `VK_FORMAT_R5G6B5_UNORM_PACK16` color format. Appended at
+  // the very end of this enum, rather than grouped with their siblings
+  // above, because `feme/runtime/CPU/FeMeRuntimeCPU.c`'s sampling table
+  // switches on this enum's raw ordinal value via hard-coded integer case
+  // labels (see that file's own comment) -- inserting anywhere before the
+  // existing tail would silently renumber, and so break, every one of
+  // those hard-coded cases. None of these seven are backed by a runtime
+  // sampling case (like `A4R4G4B4_UNORM`/`A4B4G4R4_UNORM` above, they are
+  // real, `packClearColor`/`unpackColor`-backed color-attachment formats,
+  // but not yet sampled formats); `R5G6B5_UNORM`/`B5G6R5_UNORM` have no
+  // alpha component at all, unpacking as an implicit, unwritable `1.0`.
+  R4G4B4A4_UNORM,
+  B4G4R4A4_UNORM,
+  R5G6B5_UNORM,
+  B5G6R5_UNORM,
+  R5G5B5A1_UNORM,
+  B5G5R5A1_UNORM,
+  A1R5G5B5_UNORM,
 };
 
 /// Whether \p Format is one of the ASTC block-compressed formats above.

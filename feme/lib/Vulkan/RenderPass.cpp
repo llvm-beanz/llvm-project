@@ -44,6 +44,17 @@ bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format) {
     // `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT` capable, backed
     // by their own `feme::graphics::packClearColor`/`unpackColor` cases.
     return true;
+  case feme::cpu::ResourceFormat::R4G4B4A4_UNORM:
+  case feme::cpu::ResourceFormat::B4G4R4A4_UNORM:
+  case feme::cpu::ResourceFormat::R5G6B5_UNORM:
+  case feme::cpu::ResourceFormat::B5G6R5_UNORM:
+  case feme::cpu::ResourceFormat::R5G5B5A1_UNORM:
+  case feme::cpu::ResourceFormat::B5G5R5A1_UNORM:
+  case feme::cpu::ResourceFormat::A1R5G5B5_UNORM:
+    // (Roadmap H7r) Also backed by a real `packClearColor`/`unpackColor`
+    // case each, unlike their `A4R4G4B4_UNORM`/`A4B4G4R4_UNORM` (E19)
+    // neighbors, which recognize the `VkFormat` but implement neither.
+    return true;
   default:
     // Every other format is either unknown to the executor's own
     // pack/unpack table (`feme::graphics::packClearColor`) or an integer
