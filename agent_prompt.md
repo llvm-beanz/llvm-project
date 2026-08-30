@@ -37,14 +37,16 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7j or any prerequisite work required to complete
-the H-series milestones? You stopped part way through working on the last
-prompt. Your progress is stashed and can be restored with `git stash pop`.
+Can you continue working on H19b or any prerequisite work required to complete
+the H-series milestones?
 
-> **`shaderStorageImageExtendedFormats`/`shaderStorageImageMultisample`/`shaderStorageImageReadWithoutFormat`/`shaderStorageImageWriteWithoutFormat`**:
-> no `OpImageRead`/`OpImageWrite` lowering was found anywhere in the transform
-> path for a storage image at all, so these four format/configuration bits have
-> no shader-side storage-image read/write implementation to be honest about yet
-> -- a larger prerequisite than a narrow format restriction to lift. Needs
-> storage-image read/write lowering built first (likely its own, larger
-> milestone), with these four bits as a follow-on once it exists
+> **Arrayed (`2D_ARRAY`) storage-image read/write** for the same mandatory
+> format floor H19a already covers --
+> `classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`
+> (`SPIRVResourceLowering.cpp`) currently require `Dim == 2D`, non-arrayed only;
+> a real re-run confirms every
+> `dEQP-VK.image.load_store.with_format.2d_array.*`/`1d_array.*` multi-layer
+> case fails at pipeline creation the same way H19a's own cases did before it
+> landed. Needs a real `Array2D` runtime entry point/call shape carrying a layer
+> index, mirroring how `Sample2DArray`/`Load2DArray` already extend the
+> non-arrayed read shapes
