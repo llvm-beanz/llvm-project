@@ -45699,3 +45699,111 @@ push-descriptor `_KHR` fix plus its own test and lit-test fixture update,
 VulkanCTSReport.md's new "Roadmap H7g: measured impact" section,
 Vulkan14FeatureInventory.md, VulkanExtensionInventory.md,
 FeMeVulkanDesign.md), (4) this file.
+
+# H7v: bind2 fails for every stage
+
+The request was to continue H7v, which as originally written conflated
+two symptoms under one row: a vertex/fragment SIGSEGV in `bind2`
+(`vkCmdBindDescriptorSets2`), and a "clean" compute failure
+(`VK_ERROR_INITIALIZATION_FAILED` at `vkCreateComputePipelines`). My first
+move was the same due-diligence check I've used throughout this chain:
+before assuming both symptoms share one cause, re-run the *non*-`bind2`
+compute cases too. They failed identically -- 0/160 across every update
+method regardless of `bind2` -- which immediately told me the "compute
+fails cleanly" half of H7v's text was itself inaccurate in the same way
+H7f's and H7g's original text turned out to be: a pre-existing gap
+misattributed to the thing that merely made it newly reachable.
+
+Root-causing the real compute bug needed an IR dump, since the actual
+caller silently swallows the compile error (`consumeError`). I
+instrumented `compileComputePipeline` (`Pipeline.cpp`) temporarily to
+print the full LLVM IR plus the real error text, which pointed at
+`checkSupportedRaisedOps`'s generic "unsupported raised operation"
+rejection -- not informative on its own, so I went one level deeper and
+added prints inside `SPIRVResourceLowering.cpp`'s `collectHandles` to see
+exactly which handle failed classification. This took two iterations: I
+first suspected the shader's two-field struct handle (`b_instance`,
+`{vec4,vec4}`), but the actual culprit was a *different* handle
+(`b_out`, an array wrapped in a one-member struct) being misclassified as
+read-only. Reading `classifyVulkanBufferHandle` showed why: for any
+struct-shaped handle, it decided readable-vs-writable purely from the
+storage-class int parameter (`Uniform`=2 → read-only, `StorageBuffer`=12
+→ writable), never looking at the handle's own second `Writable` int
+parameter. That parameter exists for exactly this reason on the MLIR
+conversion side (`SPIRVToLLVMPatterns.cpp`'s `convertBufferBlockType`),
+because glslang's default (pre-SPIR-V-1.3) spelling for a `buffer` block
+is still the `Uniform` storage class plus a `BufferBlock` decoration --
+the same storage-class value a genuine read-only `uniform` block also
+uses. The classifier had never accounted for this ambiguity, so any
+legacy-spelled writable SSBO got silently downgraded to read-only, and
+since `collectHandles` abandons an entire function's handles if any one
+fails classification, this one wrong handle broke the whole shader.
+
+The fix was narrow: check `Writable` for the `Uniform`-class struct case
+too, treating `Writable=1` as a real writable storage-buffer block. I
+added two focused unit tests mirroring the existing `StorageBuffer`-class
+coverage, one for the load path and one specifically proving the store
+path is now accepted (since that's the behavior that actually changes).
+Reverted every debug print in both files before committing -- this
+matters for a clean diff, and I double-checked with `git diff --stat`
+that only the two real files changed.
+
+With that fixed, 80/80 non-`bind2` compute cases now pass, up from 0/80.
+That's the whole of the "compute fails cleanly" half resolved, and it
+turned out to have nothing to do with `bind2` at all -- exactly the
+H7f/H7g pattern of a roadmap row's own text being inaccurate about what
+it's actually blocked on.
+
+That left the real `bind2` SIGSEGV, now also reachable from compute for
+the first time (since compute cases can finally get through pipeline
+creation instead of failing earlier at the unrelated bug). I used gdb the
+same way as before: `-batch -ex run -ex bt` for the crash site, then a
+second invocation with `frame N` plus `disassemble` to see the actual
+assembly (necessary because ASLR means you can't reuse an address across
+separate gdb runs). Both the vertex case and the newly-reachable compute
+case disassemble to the same shape: a `VkBindDescriptorSetsInfoKHR`
+struct is built correctly (confirmed by decoding its `sType` immediate,
+`0x3ba31aeb`), then a call through a null function-pointer member loaded
+from a fixed struct offset -- not our code, a null cached pointer inside
+CTS's own `DeviceInterface`/`DeviceFunctionPointers` struct.
+
+Rather than assume this was unfixable, I traced the actual resolution
+chain: CTS's `DeviceDriver` constructor gets `vkGetDeviceProcAddr` from
+the platform's `vkGetInstanceProcAddr`, then uses it to resolve every
+device command by name, including `vkCmdBindDescriptorSets2`. I checked
+whether feme's own ICD registers and exposes this command correctly --
+it does, confirmed both by reading the generated
+`VulkanEntrypoints.inc`/`ProcAddr.cpp` and by the fact that an existing
+unit test (`CommandBufferTest.cpp`'s
+`BindDescriptorSets2AndPushConstants2ReachTheDispatch`) calls it directly
+and passes. Since CTS goes through the *system* Vulkan loader
+(`VK_ICD_FILENAMES` plus `libvulkan.so.1`), not directly through feme's
+ICD, I checked the installed loader version: `libvulkan1` 1.3.275.0. That
+version predates `VK_KHR_maintenance6`/`vkCmdBindDescriptorSets2`'s
+addition to the Vulkan headers/loader (~1.3.284) and its later promotion
+to core in Vulkan 1.4 -- so the loader's own compiled-in device dispatch
+table simply has no slot for this command name, and returns null
+regardless of what the ICD itself supports. I attempted to sidestep the
+loader with deqp's `--deqp-vk-library-path` flag (load the ICD directly),
+but that hit an unrelated `VK_ERROR_EXTENSION_NOT_PRESENT` at instance
+creation -- plausibly because the loader normally shims in some
+instance-level behavior that direct ICD loading skips -- and I didn't
+chase that further, since the evidence I already had (loader version,
+correct ICD-side unit test, identical crash shape across two independent
+stages) was already conclusive without it.
+
+This is the first row in this whole H6/H7 chain that closes not with a
+code fix, but with a root-caused conclusion that the remaining symptom is
+an environment/toolchain limitation of this specific development machine,
+not a defect in the repository. I was careful in the roadmap/report
+writeup to state this plainly rather than paper over it, and to make sure
+the one real fix this row *did* produce (the resource-lowering
+classifier bug, entirely unrelated to bind2 itself) is documented and
+tested on its own merits.
+
+Commits, small and separate: (1) the `classifyVulkanBufferHandle` fix
+plus its two new `SPIRVResourceLoweringTest.cpp` cases, (2) documentation
+(Roadmap.md's H7v strikethrough, FeMeVulkanDesign.md's H7 status
+paragraph, VulkanCTSReport.md's new "Roadmap H7v: measured impact"
+section, VulkanExtensionInventory.md's `VK_KHR_maintenance6` row), (3)
+this file.
