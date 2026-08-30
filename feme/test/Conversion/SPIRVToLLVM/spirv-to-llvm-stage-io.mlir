@@ -140,20 +140,53 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Geometry], []> {
 
 // -----
 
-// (Roadmap H7x) A fragment stage's own read of `gl_ClipDistance`/
+// (Roadmap H7y) A real geometry/tessellation entry's own `gl_in[i].
+// gl_Position`-shaped read -- one `spirv.AccessChain` combining a
+// genuinely dynamic, loop-carried outer (per-vertex) index with a
+// constant inner (builtin interface block member) one. `gl_in`'s own
+// address-of stays a real pointer (see StageIOAddressOfPattern's own
+// comment), so this legalizes through StageIOArrayAccessChainPattern (see
+// its own comment for why not MLIR's own generic `AccessChainPattern`)
+// into an ordinary, two-index `getelementptr` plus `llvm.load`, exactly
+// like any other memory access -- no special-casing needed at the source
+// level, unlike the crash this exact shape used to hit before this row (a
+// `gl_in`-shaped `Input` array was previously eagerly loaded into a
+// value at the `spirv.mlir.addressof` site, and no pattern legalized a
+// multi-index `spirv.AccessChain` into that value at all).
+
+// CHECK-LABEL: llvm.func @read_gl_in_position
+// CHECK: %[[GEP:.*]] = llvm.getelementptr %{{.*}}[%{{.*}}, %{{.*}}, 0] : (!llvm.ptr<7>, i32, i32) -> !llvm.ptr<7>, !llvm.array<3 x struct<(vector<4xf32>, f32)>>
+// CHECK: llvm.load %[[GEP]] : !llvm.ptr<7> -> vector<4xf32>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Geometry], []> {
+  spirv.GlobalVariable @gl_in : !spirv.ptr<!spirv.array<3 x !spirv.struct<(vector<4xf32> [BuiltIn=0 : i32], f32 [BuiltIn=1 : i32])>>, Input>
+  spirv.func @read_gl_in_position(%idx : i32) -> vector<4xf32> "None" {
+    %0 = spirv.mlir.addressof @gl_in : !spirv.ptr<!spirv.array<3 x !spirv.struct<(vector<4xf32> [BuiltIn=0 : i32], f32 [BuiltIn=1 : i32])>>, Input>
+    %c0 = spirv.Constant 0 : i32
+    %ac = spirv.AccessChain %0[%idx, %c0] : !spirv.ptr<!spirv.array<3 x !spirv.struct<(vector<4xf32> [BuiltIn=0 : i32], f32 [BuiltIn=1 : i32])>>, Input>, i32, i32 -> !spirv.ptr<vector<4xf32>, Input>
+    %v = spirv.Load "Input" %ac : vector<4xf32>
+    spirv.ReturnValue %v : vector<4xf32>
+  }
+}
+
+// -----
+
+// (Roadmap H7x/H7y) A fragment stage's own read of `gl_ClipDistance`/
 // `gl_CullDistance` -- unlike the vertex-stage `Output` side, glslang
 // emits these as a standalone (not `gl_PerVertex`-block-wrapped) `Input`
 // array global, `BuiltIn`-decorated same as any other builtin, so it
-// converts through this ordinary stage-IO path (StageIOAddressOfPattern),
-// which -- like any non-builtin `Input` -- eagerly loads the whole array
-// at the `spirv.mlir.addressof` site, producing a value rather than a
-// pointer. A single *constant*-indexed `spirv.AccessChain` into that
-// value converts directly to `llvm.extractvalue` rather than falling
-// through to MLIR's own pointer-assuming `spirv.AccessChain` pattern.
+// converts through this ordinary stage-IO path (StageIOAddressOfPattern).
+// An array-typed `Input` stays a real pointer (roadmap H7y: a value-
+// modeled array cannot support a genuinely dynamic index at all, since
+// `llvm.extractvalue`'s own index operands are compile-time-constant
+// only -- see that pattern's own comment), so a constant-indexed
+// `spirv.AccessChain` into it legalizes through StageIOArrayAccessChainPattern
+// (see its own comment for why not MLIR's own generic, pointer-based
+// `AccessChainPattern`) into an ordinary `getelementptr` plus `llvm.load`,
+// the same as any other memory access.
 
 // CHECK-LABEL: llvm.func @read_clip_distance_0
-// CHECK: %[[ARR:.*]] = llvm.load %{{.*}} : !llvm.ptr<7> -> !llvm.array<1 x f32>
-// CHECK: llvm.extractvalue %[[ARR]][0] : !llvm.array<1 x f32>
+// CHECK: %[[GEP:.*]] = llvm.getelementptr %{{.*}}[%{{.*}}, %{{.*}}] : (!llvm.ptr<7>, i32, i32) -> !llvm.ptr<7>, !llvm.array<1 x f32>
+// CHECK: llvm.load %[[GEP]] : !llvm.ptr<7> -> f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ClipDistance], []> {
   spirv.GlobalVariable @gl_ClipDistance built_in("ClipDistance") : !spirv.ptr<!spirv.array<1 x f32>, Input>
   spirv.func @read_clip_distance_0() -> f32 "None" {
@@ -162,5 +195,28 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ClipDistance], [
     %1 = spirv.AccessChain %0[%c0] : !spirv.ptr<!spirv.array<1 x f32>, Input>, i32 -> !spirv.ptr<f32, Input>
     %2 = spirv.Load "Input" %1 : f32
     spirv.ReturnValue %2 : f32
+  }
+}
+
+// -----
+
+// (Roadmap H7y) Unlike a constant index, a *dynamic* (loop-carried) index
+// into an `Input` array -- `gl_in[i]`, a geometry/tessellation entry's
+// own per-vertex read, is the real shape this exercises -- has no
+// `llvm.extractvalue` representation at all. Since `gl_ClipDistance`
+// above stays a real pointer rather than an eagerly-loaded value, this
+// legalizes exactly the same way: an ordinary, dynamically-indexed
+// `getelementptr` plus `llvm.load`, with no special-casing needed.
+
+// CHECK-LABEL: llvm.func @read_clip_distance_dynamic
+// CHECK: %[[GEP:.*]] = llvm.getelementptr %{{.*}}[%{{.*}}, %{{.*}}] : (!llvm.ptr<7>, i32, i32) -> !llvm.ptr<7>, !llvm.array<2 x f32>
+// CHECK: llvm.load %[[GEP]] : !llvm.ptr<7> -> f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ClipDistance], []> {
+  spirv.GlobalVariable @gl_ClipDistance built_in("ClipDistance") : !spirv.ptr<!spirv.array<2 x f32>, Input>
+  spirv.func @read_clip_distance_dynamic(%idx : i32) -> f32 "None" {
+    %0 = spirv.mlir.addressof @gl_ClipDistance : !spirv.ptr<!spirv.array<2 x f32>, Input>
+    %ac = spirv.AccessChain %0[%idx] : !spirv.ptr<!spirv.array<2 x f32>, Input>, i32 -> !spirv.ptr<f32, Input>
+    %v = spirv.Load "Input" %ac : f32
+    spirv.ReturnValue %v : f32
   }
 }

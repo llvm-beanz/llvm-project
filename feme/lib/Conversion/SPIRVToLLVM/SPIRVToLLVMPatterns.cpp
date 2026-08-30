@@ -13,7 +13,6 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/Matchers.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
@@ -1062,27 +1061,40 @@ public:
 /// to, in the matching address space (8) -- see
 /// feme::spirv::populateSPIRVToLLVMTargetTypeConversions.
 ///
-/// For an `Input` variable, whose pointer converts to its pointee type
-/// instead (the same conversion a builtin `Input` variable's pointer uses,
-/// there being no way to tell the two apart by type alone), this instead
-/// loads the global eagerly right here, producing that pointee-typed value
-/// directly: LoadValuePattern then collapses the real `spirv.Load` reading
-/// it into the identity, exactly as it already does for a builtin's
-/// `llvm.spv.*` intrinsic result.
-/// Replaces `spirv.mlir.addressof` of a non-builtin stage-IO variable.
+/// For a scalar/vector-typed `Input` variable, whose pointer converts to
+/// its pointee type instead (the same conversion a builtin `Input`
+/// variable's pointer uses, there being no way to tell the two apart by
+/// type alone), this instead loads the global eagerly right here, producing
+/// that pointee-typed value directly: LoadValuePattern then collapses the
+/// real `spirv.Load` reading it into the identity, exactly as it already
+/// does for a builtin's `llvm.spv.*` intrinsic result.
 ///
-/// For an `Output` variable this produces `llvm.mlir.addressof` of the
-/// `llvm.mlir.global` StageIOGlobalVariablePattern converts its declaration
-/// to, in the matching address space (8) -- see
-/// feme::spirv::populateSPIRVToLLVMTargetTypeConversions.
-///
-/// For an `Input` variable, whose pointer converts to its pointee type
-/// instead (the same conversion a builtin `Input` variable's pointer uses,
-/// there being no way to tell the two apart by type alone), this instead
-/// loads the global eagerly right here, producing that pointee-typed value
-/// directly: LoadValuePattern then collapses the real `spirv.Load` reading
-/// it into the identity, exactly as it already does for a builtin's
-/// `llvm.spv.*` intrinsic result.
+/// (Roadmap H7y) An *array*-typed `Input` variable -- a geometry or
+/// tessellation entry's own per-vertex-arrayed `gl_in[]` (block or plain),
+/// or a fragment-stage's own standalone `gl_ClipDistance`/`gl_CullDistance`
+/// read (roadmap H7x) -- is deliberately left as a real pointer instead,
+/// exactly like the `Output` case above: a real shader may index such an
+/// array with a genuinely dynamic, loop-carried value (`gl_in[i]`), which
+/// has no representation as an `llvm.extractvalue` index (constant only)
+/// at all -- eagerly loading it into a value, as H7x's own since-removed
+/// `StageIOArrayAccessChainPattern` first tried to patch around for the
+/// constant-index case only, cannot support that shape by construction, no
+/// matter how many more patterns are added on top. Left as a pointer, an
+/// `spirv.AccessChain` into it -- with a constant or dynamic leading index,
+/// and any number of further constant ones selecting a builtin interface
+/// block's own member or a matrix row -- is legalized by this file's own
+/// `StageIOArrayAccessChainPattern` (below), not MLIR's own generic
+/// `AccessChainPattern`: that generic pattern computes its own result type
+/// by re-converting the access chain's *leaf* SPIR-V pointer type through
+/// this same type converter, which -- for a scalar/vector leaf -- still
+/// answers with the eagerly-loaded-value convention described just above
+/// (there being no way to tell a true standalone scalar `Input` variable's
+/// own pointer apart from an access-chain leaf pointer by type alone), so
+/// it would build an ill-typed `getelementptr` whose result is a value, not
+/// the real pointer this array's own base actually is;
+/// `feme::graphics::CanonicalizeStagePass`'s own
+/// `getDynamicVertexIndexedAccess`/`getDynamicRowIndexedAccess` are written
+/// to expect exactly this real-pointer shape (see their own comments).
 ///
 /// \p StageIOVariables must have been collected by
 /// feme::spirv::prepareStageIOVariables, before the conversion ran: by the
@@ -1128,12 +1140,106 @@ public:
         getTypeConverter()->convertType(PointerTy.getPointeeType());
     if (!ValueType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    // (Roadmap H7y) An array-typed `Input` variable stays a real pointer
+    // instead of an eagerly-loaded value -- see this class's own comment.
+    if (mlir::isa<mlir::LLVM::LLVMArrayType>(ValueType)) {
+      Rewriter.replaceOp(Op, Address);
+      return mlir::success();
+    }
+
     Rewriter.replaceOpWithNewOp<mlir::LLVM::LoadOp>(Op, ValueType, Address);
     return mlir::success();
   }
 
 private:
   const feme::spirv::StageIOInfoMap &StageIOVariables;
+};
+
+/// Returns true if \p Op's base operand is an `Input`-storage-class
+/// pointer to an array (see StageIOAddressOfPattern's own comment for why
+/// such a variable stays a real pointer, and StageIOArrayAccessChainPattern
+/// below for what this identifies it for).
+bool isInputArrayAccessChain(mlir::spirv::AccessChainOp Op) {
+  auto BaseType =
+      mlir::dyn_cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
+  return BaseType &&
+         BaseType.getStorageClass() == mlir::spirv::StorageClass::Input &&
+         mlir::isa<mlir::spirv::ArrayType>(BaseType.getPointeeType());
+}
+
+/// (Roadmap H7y) Converts a `spirv.AccessChain` whose base operand is a
+/// real pointer into an array-typed `Input` variable (see
+/// StageIOAddressOfPattern's own comment for why such a base stays a real
+/// pointer rather than an eagerly-loaded value) into an ordinary,
+/// pointer-result `getelementptr` -- with a constant or a genuinely dynamic
+/// leading (per-vertex) index, and any number of further indices selecting
+/// a builtin interface block's own member or a matrix row, uniformly.
+///
+/// This exists as its own pattern, rather than deferring to MLIR's own
+/// generic `AccessChainPattern`, only because that pattern computes its
+/// own *result* type by re-converting the access chain's leaf SPIR-V
+/// pointer type through the same type converter -- which, for a
+/// scalar/vector leaf, still answers with the "eagerly-loaded value"
+/// conversion a genuinely standalone scalar `Input` variable's own address
+/// needs (there being no way to tell the two apart by type alone once
+/// nested this deeply). Since this array's own base is a real pointer, not
+/// a value, that would build an ill-typed `getelementptr` whose declared
+/// result is a value type instead of the real pointer it must be. Building
+/// the `getelementptr` directly here, with an explicit real-pointer result
+/// type in the array's own address space, sidesteps that ambiguity for the
+/// `getelementptr` itself; the `spirv.Load` that always follows it still
+/// sees this same ambiguity (the leaf pointer type's declared/"legalized"
+/// conversion says a value, this pattern's own real result says a
+/// pointer), which is what the target materialization registered in
+/// feme::spirv::populateSPIRVToLLVMTargetTypeConversions resolves, by
+/// reading through the real pointer with an ordinary `llvm.load` whenever
+/// the dialect conversion framework needs a value of the "expected"
+/// (eagerly-loaded-value) type but only has this real pointer on hand.
+class StageIOArrayAccessChainPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (!isInputArrayAccessChain(Op))
+      return Rewriter.notifyMatchFailure(
+          Op, "not an access chain into an array-typed Input variable");
+    auto BaseType =
+        mlir::cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
+
+    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(
+            Adaptor.getBasePtr().getType()))
+      return Rewriter.notifyMatchFailure(Op,
+                                         "base did not convert to a pointer");
+
+    mlir::Type ElementType =
+        getTypeConverter()->convertType(BaseType.getPointeeType());
+    if (!ElementType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    llvm::SmallVector<mlir::Value, 4> Indices;
+    mlir::Type IndexType =
+        getTypeConverter()->convertType(Op.getIndices().front().getType());
+    if (!IndexType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    Indices.push_back(mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, IndexType, Rewriter.getIntegerAttr(IndexType, 0)));
+    llvm::append_range(Indices, Adaptor.getIndices());
+
+    mlir::Type ResultType = mlir::LLVM::LLVMPointerType::get(
+        Rewriter.getContext(),
+        mlir::cast<mlir::LLVM::LLVMPointerType>(
+            Adaptor.getBasePtr().getType())
+            .getAddressSpace());
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::GEPOp>(
+        Op, ResultType, ElementType, Adaptor.getBasePtr(), Indices);
+    return mlir::success();
+  }
 };
 
 /// Converts a load whose "pointer" operand already converted to the loaded
@@ -1201,75 +1307,6 @@ public:
 
     Rewriter.replaceOpWithNewOp<mlir::LLVM::ExtractElementOp>(
         Op, ResultType, Adaptor.getBasePtr(), Indices[0]);
-    return mlir::success();
-  }
-};
-
-/// Converts `spirv.AccessChain` selecting one constant element of a
-/// value-modeled *array*-typed `Input` stage-IO variable -- (roadmap H7x)
-/// `gl_ClipDistance[0]`/`gl_CullDistance[0]`, a fragment stage's own read
-/// of a per-vertex clip/cull-distance plane, the standalone (not
-/// interface-block-wrapped, unlike the vertex-stage `Output` side) `in
-/// float gl_ClipDistance[N]`/`gl_CullDistance[N]` builtin SPIR-V's own
-/// fragment-stage import always produces. `StageIOAddressOfPattern`
-/// converts a non-builtin `Input` variable's own address eagerly into the
-/// whole variable's own loaded value (mirroring a compute builtin's
-/// value-modeled convention, since `Input`'s pointee-type conversion
-/// cannot otherwise tell the two apart -- see that pattern's own comment),
-/// so any `spirv.AccessChain` indexing into it sees an aggregate *value*
-/// (here, an `!llvm.array`) as its own base operand rather than a real
-/// pointer -- something MLIR's own `AccessChainPattern` (which always
-/// builds a `getelementptr`, assuming its base operand converts to
-/// `!llvm.ptr`) cannot handle at all, the array-shaped counterpart of
-/// `BuiltInAccessChainPattern`'s own vector-shaped one just above.
-///
-/// Only a *constant* index is legalized this way, via `llvm.extractvalue`
-/// (whose own index operands are compile-time-constant only, unlike
-/// `llvm.extractelement`'s vector-lane one): a non-constant index into a
-/// value-modeled array has no such representation to select with at all.
-/// No real CTS case needs one yet -- that shape is roadmap H7w's own
-/// dynamic-index gap, combined with a fragment-side read, which stays a
-/// separate, open gap; a non-constant index here is left to this
-/// function's own `notifyMatchFailure`, falling through to MLIR's own
-/// generic `spirv.AccessChain` pattern, which then reports a clean,
-/// diagnosed `llvm.getelementptr` verifier error (still not a crash) for
-/// its own now-invalid, non-pointer base operand.
-class StageIOArrayAccessChainPattern
-    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
-public:
-  using mlir::SPIRVToLLVMConversion<
-      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
-                  mlir::ConversionPatternRewriter &Rewriter) const override {
-    auto ArrayTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(
-        Adaptor.getBasePtr().getType());
-    if (!ArrayTy)
-      return Rewriter.notifyMatchFailure(
-          Op, "base is not a value-modeled stage-IO array");
-
-    mlir::ValueRange Indices = Op.getIndices();
-    if (Indices.size() != 1)
-      return Rewriter.notifyMatchFailure(Op, "expected a single array index");
-
-    llvm::APInt IndexValue;
-    if (!mlir::matchPattern(Indices[0], mlir::m_ConstantInt(&IndexValue)))
-      return Rewriter.notifyMatchFailure(
-          Op, "a non-constant index into a value-modeled stage-IO array has "
-              "no llvm.extractvalue representation");
-
-    mlir::Type ResultType =
-        getTypeConverter()->convertType(Op.getComponentPtr().getType());
-    if (!ResultType)
-      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
-    if (ResultType != ArrayTy.getElementType())
-      return Rewriter.notifyMatchFailure(Op, "not selecting a scalar element");
-
-    Rewriter.replaceOpWithNewOp<mlir::LLVM::ExtractValueOp>(
-        Op, ResultType, Adaptor.getBasePtr(),
-        llvm::ArrayRef<int64_t>{
-            static_cast<int64_t>(IndexValue.getZExtValue())});
     return mlir::success();
   }
 };
@@ -3240,20 +3277,42 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
   // resource handle, like a builtin `Input` variable
   // (BuiltInAddressOfPattern), is a value LLVM's SPIRV backend materializes
   // on demand rather than memory, so the pointer SPIR-V reads either through
-  // has nothing to convert to but the value itself. A non-builtin `Input`
-  // variable (an ordinary stage-IO variable FeMe has no way to distinguish
-  // from a builtin one by type alone, since e.g. both can be a plain `i32`)
-  // shares this same conversion -- StageIOAddressOfPattern accordingly reads
-  // it eagerly at the `spirv.mlir.addressof` site too (rather than
-  // converting to a real pointer the way a non-builtin `Output` variable
-  // does just below, which no builtin ever is), so that this conversion's
-  // answer for every `Input` pointer type stays exactly one thing regardless
-  // of which kind of variable it is.
+  // has nothing to convert to but the value itself. A non-builtin, non-array
+  // `Input` variable (an ordinary stage-IO variable FeMe has no way to
+  // distinguish from a builtin one by type alone, since e.g. both can be a
+  // plain `i32`) shares this same conversion -- StageIOAddressOfPattern
+  // accordingly reads it eagerly at the `spirv.mlir.addressof` site too
+  // (rather than converting to a real pointer the way a non-builtin
+  // `Output` variable does just below, which no builtin ever is), so that
+  // this conversion's answer for every scalar/vector `Input` pointer type
+  // stays exactly one thing regardless of which kind of variable it is.
+  //
+  // (Roadmap H7y) An *array*-typed `Input` pointer (e.g. `gl_in[]`, a
+  // geometry/tessellation entry's own per-vertex input, or the standalone
+  // `gl_ClipDistance`/`gl_CullDistance` builtin array) is the one shape this
+  // "always a value" answer cannot support at all: LLVM's `extractvalue`
+  // can only select a compile-time-constant index out of a value, so a
+  // genuinely dynamic (loop-carried) index into such an array has no
+  // representation as a value-typed read whatsoever. StageIOAddressOfPattern
+  // accordingly keeps an array-typed `Input` variable a real pointer instead
+  // (see its own comment) -- this conversion has to answer consistently, or
+  // a later pattern that calls back into it (e.g. MLIR's own generic
+  // `AccessChainPattern`, which decides whether its base operand is a real
+  // pointer by re-converting the *original* SPIR-V pointer type rather than
+  // inspecting the already-converted operand's actual type) would compute
+  // the wrong shape and build an ill-typed `getelementptr`.
   TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
                                   -> std::optional<mlir::Type> {
     if (Type.getStorageClass() != mlir::spirv::StorageClass::Input &&
         !isResourcePointer(Type))
       return std::nullopt;
+    if (Type.getStorageClass() == mlir::spirv::StorageClass::Input &&
+        mlir::isa<mlir::spirv::ArrayType>(Type.getPointeeType())) {
+      if (!TypeConverter.convertType(Type.getPointeeType()))
+        return std::nullopt;
+      return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
+                                              /*addressSpace=*/7);
+    }
     return TypeConverter.convertType(Type.getPointeeType());
   });
 
@@ -3431,6 +3490,36 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
         return mlir::LLVM::LLVMStructType::getLiteral(
             Type.getContext(), {ImageHandle, SamplerHandle});
       });
+
+  // (Roadmap H7y) A scalar/vector `Input` pointer's own leaf, reached at
+  // the end of a `spirv.AccessChain` into an array-typed `Input` variable
+  // (StageIOArrayAccessChainPattern), is the one case where the ordinary
+  // "an `Input` pointer converts to its pointee's own value" answer (the
+  // very first conversion registered above) and the real value that
+  // pattern actually produces (a genuine pointer, since the array it
+  // indexes into is itself a real pointer, not a value) disagree -- there
+  // being no way to tell a genuinely standalone scalar `Input` variable's
+  // own address apart from such an access chain's leaf by type alone.
+  // Rather than accepting that mismatch (which would otherwise surface as
+  // a stray, unresolved `builtin.unrealized_conversion_cast` wherever the
+  // mismatched value is consumed), this materialization resolves it
+  // directly: whenever the framework needs a value of the "expected"
+  // (eagerly-loaded) type but the only value on hand is a real pointer in
+  // the `Input` address space (7), it reads through that pointer with an
+  // ordinary `llvm.load` -- exactly the value a genuine eager load would
+  // have produced at that same site to begin with.
+  TypeConverter.addTargetMaterialization(
+      [](mlir::OpBuilder &Builder, mlir::Type ResultType,
+         mlir::ValueRange Inputs, mlir::Location Loc) -> mlir::Value {
+        if (Inputs.size() != 1)
+          return nullptr;
+        auto PointerTy =
+            mlir::dyn_cast<mlir::LLVM::LLVMPointerType>(Inputs[0].getType());
+        if (!PointerTy || PointerTy.getAddressSpace() != 7)
+          return nullptr;
+        return mlir::LLVM::LoadOp::create(Builder, Loc, ResultType,
+                                          Inputs[0]);
+      });
 }
 
 feme::spirv::ResourceInfoMap
@@ -3509,7 +3598,6 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       SDotAccSatConversionPattern, UDotAccSatConversionPattern,
       SUDotAccSatConversionPattern, SetMeshOutputsEXTConversionPattern,
       SpecConstantErasurePattern, StageIOGlobalVariablePattern,
-      StageIOArrayAccessChainPattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
@@ -3523,6 +3611,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
                                    FeMeBenefit + 1);
   Patterns.add<StageIOAddressOfPattern>(Patterns.getContext(), TypeConverter,
                                         FeMeBenefit, StageIOVariables);
+  Patterns.add<StageIOArrayAccessChainPattern>(Patterns.getContext(),
+                                               TypeConverter, FeMeBenefit);
   Patterns.add<
       FloatControlArithmeticPattern<mlir::spirv::FAddOp, mlir::LLVM::FAddOp,
                                     mlir::LLVM::ConstrainedFAddIntr>,
