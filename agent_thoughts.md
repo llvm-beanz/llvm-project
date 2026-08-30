@@ -45402,3 +45402,75 @@ pre-existing multi-layer/MSAA gap unrelated to this row (cross-checked
 against `r8g8b8a8_unorm`); `alpha_to_coverage_unused_attachment.*` now fails
 on H7s's own gap instead of the format gap. `ninja check-feme`: 2035/2094,
 0 failed, up from 2026/2085 by 9 new tests.
+
+# H7s: `VK_ATTACHMENT_UNUSED` color attachment slots
+
+Picked up exactly where H7r's session left off: `alpha_to_coverage_unused_attachment.*`
+now clears the packed-16-bit-format gate but fails pipeline creation with
+`"an unused color attachment slot is not implemented"`. Before touching any
+code I traced every place that string appears -- exactly two, one in
+`GraphicsPipeline.cpp`'s `getRenderTargets` (creation time) and one in
+`CommandBuffer.cpp`'s `buildRenderTargetBinding` (render-pass-binding time)
+-- and then traced the *entire* downstream data flow from both before writing
+a single line, because my hunch going in was that this concept already
+existed somewhere in the codebase under a different name. It did: `VK_KHR_
+maintenance5`'s dynamic-rendering `VkRenderingAttachmentInfo::imageView ==
+VK_NULL_HANDLE` (roadmap E5) is *exactly* "present but unused" already, and
+every single consumer downstream of `RenderTargetView::View` -- `resolve
+DrawAttachments`, `Executor.cpp`'s fragment-output linkage, `Executor.cpp`'s
+color-merge loop -- already treats a null view / empty `AttachmentView`
+generically as "nothing to read or write here." This is exactly the kind of
+investigation that pays for itself: rather than inventing a new "unused slot"
+representation and plumbing it through three files, the fix became "stop
+erroring, push the same placeholder E5 already uses, done" -- two small,
+mechanical edits, zero changes anywhere in `Executor.cpp`.
+
+Where it got interesting: fixing both rejection points and writing a real
+classic-`VkRenderPass` unit test (mirroring the existing dynamic-rendering
+one almost line for line) passed cleanly. But the *real* CTS case still
+failed pipeline creation, now with a new message: `"fragment stage has no
+4-component floating-point output at location 1 (SV_Target1)"`. This is a
+second, genuinely distinct bug `validateStageInterfaces` had: its per-color-
+attachment output-location loop assumed *every* location up to
+`colorAttachmentCount` needs a real `SV_TargetN` fragment output, including
+unused ones -- which is wrong, an unused slot has nothing to write to and a
+shader is not obligated to declare an output there at all. Fixing this needed
+threading the render targets' own per-slot format list down into
+`validateStageInterfaces` (it previously only got a bare count), so it could
+tell which locations are real and skip validating the unused one.
+
+Even with *that* fixed, the real CTS case still doesn't pass -- but the
+failure mode changed a third time, revealing a third, independent gap: the
+real (used) attachment's own fragment output in this specific test is a
+`vec3` (`fragColor1 = vtxColor.rgb`, no alpha), and both `validateStageInterfaces`
+and `Executor.cpp` hard-require exactly 4 components for a used attachment's
+output today. This is legal per spec (missing components are implicitly
+defined -- alpha defaults to 1.0) but is a real, separate feature gap
+unrelated to the unused-slot mechanism this row is about. I confirmed it's
+unrelated by checking that this row's own new unit test -- which uses full
+4-component outputs throughout -- passes cleanly with no vec3 anywhere in
+sight. Tracked as a new follow-on, H7t, rather than trying to squeeze a third
+unrelated fix into this row's own commit.
+
+Before calling it done I ran the full `dEQP-VK.pipeline.monolithic.
+multisample.*` sweep (10576 cases) for regressions. It showed some failures
+I hadn't seen before in this specific filtered view (`mixed_count.*`,
+`sampled_image.*`, `a2c_with_a2one.*`, `compatible_render_pass.dynamic`,
+`sample_rate_a2c.*`, some `3d.*` cases) -- rather than assume any of these
+were mine, I `git stash`ed my changes, rebuilt just the two touched Vulkan
+object files, and re-ran each distinct failing group's first case against
+the *pre-fix* binary. Every single one failed identically before my change
+too (a mix of pre-existing `VK_ERROR_FORMAT_NOT_SUPPORTED` sampled-image
+gaps, a pre-existing sample-count-mismatch gap in mixed-attachment-sample-
+count subpasses, and other clearly unrelated pre-existing gaps) -- none were
+introduced by this row. This "diff against the pre-fix binary for anything
+suspicious in a broad sweep, rather than trusting a filtered `*_unused*`
+search alone" step is one I'll keep doing: it would have been easy to either
+falsely blame this row for pre-existing failures, or (worse) to miss a real
+regression by only checking the narrowly-named cases.
+
+`ninja check-feme`: 2036/2095, 0 failed, up from H7r's own 2035/2094 by
+the 1 new test this row adds. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` needed no changes (grepped both for any
+mention of attachment-unused/H7r/H7s -- none -- confirming this is purely a
+core render-pass capability, not a feature bit or extension).
