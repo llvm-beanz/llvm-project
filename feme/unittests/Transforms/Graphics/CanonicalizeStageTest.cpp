@@ -1074,6 +1074,86 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenStores, 1u);
 }
 
+/// (Roadmap H7w) `gl_ClipDistance[i]`/`gl_CullDistance[i]` with a
+/// non-constant (loop-carried) index `i` -- the shape a real
+/// `dEQP-VK.clipping.user_defined.clip_distance_dynamic_index`/
+/// `clip_cull_distance_dynamic_index` vertex shader compiles a
+/// `for (int i = ...; ...) gl_ClipDistance[i] = ...;`-style write into,
+/// confirmed via a real `glslangValidator`/`feme-translate` IR reduction.
+/// Unlike `ThreadsDynamicVertexIndexIntoOutputStore`/
+/// `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberStore`'s own
+/// non-constant index into a stage-IO global's *outer* per-vertex/
+/// per-primitive array dimension (roadmap H5b/H6b, threaded through as
+/// `Vertex`), this is a non-constant index into a builtin interface
+/// block *member*'s own inner array dimension (`ClipDistance`, a plain
+/// `[N x float]`) -- threaded through as `Row` instead, via
+/// `getDynamicRowIndexedAccess`. Before this row,
+/// `getStageIOBaseAndOffset`'s `stripAndAccumulateConstantOffsets` walk
+/// could not fold a non-constant index at all, leaving this shape an
+/// unrewritten raw store on a still-`external` global, diagnosed by
+/// `ValidateStagePass` as an "unresolved stage-IO global-variable access."
+TEST(CanonicalizeStageTest, ThreadsDynamicRowIndexIntoClipDistanceOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PerVertex = external addrspace(8) global { <4 x float>, float, [3 x float], [2 x float] }, !feme.spirv.MemberDecorations !10
+    define void @main(i32 %i, float %v) #0 {
+      %p = getelementptr inbounds { <4 x float>, float, [3 x float], [2 x float] }, ptr addrspace(8) @gl_PerVertex, i32 0, i32 2, i32 %i
+      store float %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !10 = !{!11, !12, !13, !14}
+    !11 = !{i32 0, !15}
+    !12 = !{i32 1, !16}
+    !13 = !{i32 2, !17}
+    !14 = !{i32 3, !18}
+    !15 = !{!19}
+    !19 = !{i32 11, i32 0}
+    !16 = !{!20}
+    !20 = !{i32 11, i32 1}
+    !17 = !{!21}
+    !21 = !{i32 11, i32 3}
+    !18 = !{!22}
+    !22 = !{i32 11, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+  Argument *VArg = F->getArg(1);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 4u);
+  EXPECT_EQ(Sig->Elements[2].SystemValue, SignatureSystemValue::ClipDistance);
+  EXPECT_EQ(Sig->Elements[2].RowCount, 3u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[2].ElementID);
+    // `Row` (operand 1) is the non-constant loop index itself, not a
+    // constant -- unlike every access this pass recognized before H7w.
+    EXPECT_EQ(CI->getArgOperand(1), IArg);
+    EXPECT_FALSE(isa<Constant>(CI->getArgOperand(1)));
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Component=*/2), 0u);
+    EXPECT_EQ(CI->getArgOperand(3), VArg);
+  }
+  EXPECT_EQ(SeenStores, 1u);
+
+  // No store targets `@gl_PerVertex` directly anymore -- the only
+  // `StoreInst` left is the shadow alloca's own write-through (roadmap
+  // H2e/H7w), an ordinary local, not the original stage-IO global.
+  for (Instruction &I : instructions(F))
+        if (auto *SI = dyn_cast<StoreInst>(&I))
+      EXPECT_FALSE(isa<GlobalVariable>(SI->getPointerOperand()));
+}
+
 /// (Roadmap H6k) A multi-`ElementID` builtin interface block whose own
 /// value type is an arrayed `StructType` (a mesh entry's own
 /// `PerPrimitiveEXT`/`PerVertexEXT`-decorated block, e.g.

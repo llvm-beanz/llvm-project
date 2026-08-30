@@ -648,38 +648,78 @@ bool isTaskPayloadGlobal(const GlobalVariable *GV) {
 /// value" forward walk could not: a read-back on one control-flow path may
 /// not be dominated by a write on another, exactly the shape a compiler's
 /// own `mem2reg` pass -- not a linear scan -- is built to resolve.
+///
+/// (Roadmap H7w) That per-leaf-scalar scheme only works when `Row` is a
+/// compile-time constant -- a distinct alloca per (ElementID, Row,
+/// Component) triple, one per array element, is exactly how a
+/// `gl_ClipDistance`/`gl_CullDistance`-shaped *constant*-indexed write
+/// (e.g. a compile-time-unrolled loop) already gets handled. A
+/// non-constant `Row` (a genuinely loop-carried index) has no compile-time
+/// value to key such an alloca on, so it instead gets one `RowCount`-sized
+/// array alloca per (ElementID, Component), GEP'd by the runtime `Row`
+/// value for both its read-back load and its store.
+/// `llvm::isAllocaPromotable` does not accept a variable-index GEP into an
+/// alloca, so this array alloca is deliberately left out of
+/// `takeAllocas()`'s own list: `PromoteMemToReg` never sees it, and it
+/// stays ordinary stack memory rather than being lifted to SSA registers
+/// -- correct, if a little less optimized, and the only option a
+/// genuinely dynamic index leaves open (mirroring how a real GPU driver's
+/// own dynamically indexed local array likewise cannot live in
+/// registers).
 class ShadowValueMap {
 public:
-  explicit ShadowValueMap(Function &F) : F(F) {}
+  ShadowValueMap(Function &F, const EntrySignature &Sig) : F(F), Sig(Sig) {}
 
-  AllocaInst *getOrCreate(uint32_t ElementID, Value *Row, Value *Component,
-                          Type *Ty) {
-    Key K{ElementID, cast<ConstantInt>(Row)->getZExtValue(),
-          cast<ConstantInt>(Component)->getZExtValue()};
-    AllocaInst *&Slot = Allocas[K];
+  Value *getOrCreate(uint32_t ElementID, Value *Row, Value *Component,
+                     Type *Ty, IRBuilderBase &B) {
+    uint64_t ComponentVal = cast<ConstantInt>(Component)->getZExtValue();
+    if (auto *RowC = dyn_cast<ConstantInt>(Row)) {
+      Key K{ElementID, RowC->getZExtValue(), ComponentVal};
+      AllocaInst *&Slot = ScalarAllocas[K];
+      if (!Slot) {
+        IRBuilder<> EntryBuilder(&F.getEntryBlock(),
+                                 F.getEntryBlock().getFirstInsertionPt());
+        Slot =
+            EntryBuilder.CreateAlloca(Ty, nullptr, "feme.stage.output.shadow");
+      }
+      return Slot;
+    }
+
+    DynamicKey DK{ElementID, ComponentVal};
+    AllocaInst *&Slot = DynamicAllocas[DK];
     if (!Slot) {
+      uint32_t RowCount =
+          ElementID < Sig.Elements.size() ? Sig.Elements[ElementID].RowCount : 1;
       IRBuilder<> EntryBuilder(&F.getEntryBlock(),
                                F.getEntryBlock().getFirstInsertionPt());
-      Slot = EntryBuilder.CreateAlloca(Ty, nullptr, "feme.stage.output.shadow");
+      Slot = EntryBuilder.CreateAlloca(ArrayType::get(Ty, RowCount), nullptr,
+                                       "feme.stage.output.shadow.dyn");
     }
-    return Slot;
+    return B.CreateInBoundsGEP(Slot->getAllocatedType(), Slot,
+                               {B.getInt32(0), Row});
   }
 
-  bool empty() const { return Allocas.empty(); }
+  bool empty() const { return ScalarAllocas.empty(); }
 
-  /// All shadow allocas created so far, for `PromoteMemToReg` to convert to
-  /// SSA form once every instruction has been rewritten.
+  /// Every promotable (constant-`Row`) shadow alloca created so far, for
+  /// `PromoteMemToReg` to convert to SSA form once every instruction has
+  /// been rewritten. A dynamic-`Row` array alloca (see this class's own
+  /// comment) is never included: it is not promotable, and stays ordinary
+  /// stack memory instead.
   SmallVector<AllocaInst *, 8> takeAllocas() const {
     SmallVector<AllocaInst *, 8> Result;
-    for (const auto &KV : Allocas)
+    for (const auto &KV : ScalarAllocas)
       Result.push_back(KV.second);
     return Result;
   }
 
 private:
   using Key = std::tuple<uint32_t, uint64_t, uint64_t>;
+  using DynamicKey = std::pair<uint32_t, uint64_t>;
   Function &F;
-  DenseMap<Key, AllocaInst *> Allocas;
+  const EntrySignature &Sig;
+  DenseMap<Key, AllocaInst *> ScalarAllocas;
+  DenseMap<DynamicKey, AllocaInst *> DynamicAllocas;
 };
 
 /// Recursively loads \p Ty's value out of stage-IO element \p ElementID,
@@ -721,8 +761,8 @@ Value *loadStageIOValue(IRBuilderBase &B, Type *Ty, uint32_t ElementID,
     return New;
   }
   if (Shadow)
-    return B.CreateLoad(Ty, Shadow->getOrCreate(ElementID, Row, Component, Ty),
-                        Name);
+    return B.CreateLoad(
+        Ty, Shadow->getOrCreate(ElementID, Row, Component, Ty, B), Name);
   // (Roadmap H6m) A `bool` (`i1`) leaf scalar was canonicalized to a
   // 32-bit element by `getComponentType` above, so the `feme.stage.
   // input.load` this element actually reads is `i32`-typed; narrow the
@@ -779,7 +819,7 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
       Ty->isIntegerTy(1) ? B.CreateZExt(Val, B.getInt32Ty()) : Val;
   createStageOutputStore(B, ElementID, Row, Component, StoredVal, Zero);
   if (Shadow)
-    B.CreateStore(Val, Shadow->getOrCreate(ElementID, Row, Component, Ty));
+    B.CreateStore(Val, Shadow->getOrCreate(ElementID, Row, Component, Ty, B));
 }
 
 /// (Roadmap H2g) SPIR-V's clip-space Y increases downward, matching
@@ -1071,17 +1111,96 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL) {
   return std::make_tuple(GV, VertexIndex, ByteOffset);
 }
 
-/// The stage-IO global \p Ptr addresses, trying both
-/// `getStageIOBaseAndOffset`'s constant-offset resolution and (roadmap
-/// H5b) `getDynamicVertexIndexedAccess`'s dynamic-vertex-indexed one --
+/// (Roadmap H7w) `gl_ClipDistance`/`gl_CullDistance` (or any other
+/// stage-IO element whose own declared type is an array) addressed
+/// through a non-constant index into that array's own row dimension --
+/// e.g. `gl_ClipDistance[i]` with a loop-carried `i`, the shape a real
+/// `dEQP-VK.clipping.user_defined.clip_distance_dynamic_index.*` vertex
+/// shader compiles into -- as opposed to `getDynamicVertexIndexedAccess`'s
+/// own non-constant *outer* per-vertex/per-primitive array dimension
+/// (roadmap H5b/H6b). This shape is rooted directly at the stage-IO
+/// global itself (no per-vertex array dimension to peel first), with
+/// every index up to the array's own row dimension constant and only that
+/// one final index non-constant. `getStageIOBaseAndOffset`'s
+/// `stripAndAccumulateConstantOffsets` walk cannot fold a non-constant
+/// index at all, so a `GetElementPtrInst` with one is left entirely
+/// unresolved by every path that predates this one -- exactly the shape
+/// that first hit `ValidateStagePass`'s "unresolved stage-IO
+/// global-variable access" diagnostic in that real CTS case.
+///
+/// Returns \p GV, the index into \p GV's own per-member `ElementIDs` slice
+/// (in `resolveStageIOAccess`'s own `ElementIDs` map) that the constant
+/// prefix selects -- 0 for a plain, non-block stage-IO global, which only
+/// ever has one -- and the non-constant row index itself, or
+/// `std::nullopt` if \p Ptr is not this exact shape. Deliberately excludes
+/// any global `getDynamicVertexIndexedAccess` already recognizes
+/// (`isDynamicIndexedArrayGlobal`), so a genuinely per-vertex-/
+/// per-primitive-arrayed global's own outer dimension is never
+/// double-recognized as a member's own row dimension instead. A
+/// component-level index after the row (e.g. a vector-typed row) is not
+/// modeled: no real CTS shape needs it yet, and it is left for
+/// `ValidateStagePass` to diagnose like any other unsupported shape.
+std::optional<std::tuple<GlobalVariable *, unsigned, Value *>>
+getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL) {
+  auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
+  if (!GEP)
+    return std::nullopt;
+  auto *GV = dyn_cast<GlobalVariable>(GEP->getPointerOperand());
+  unsigned AddrSpace = 0;
+  if (!isSPIRVStageIOGlobal(GV, AddrSpace) ||
+      isDynamicIndexedArrayGlobal(GV, AddrSpace))
+    return std::nullopt;
+
+  auto IdxIt = GEP->idx_begin();
+  auto *OuterIdx = dyn_cast<ConstantInt>(*IdxIt);
+  if (!OuterIdx || !OuterIdx->isZero())
+    return std::nullopt;
+
+  Type *CurTy = GV->getValueType();
+  unsigned Member = 0;
+  Value *RowIndex = nullptr;
+  for (++IdxIt; IdxIt != GEP->idx_end(); ++IdxIt) {
+    if (auto *CI = dyn_cast<ConstantInt>(*IdxIt)) {
+      uint64_t Idx = CI->getZExtValue();
+      if (auto *ST = dyn_cast<StructType>(CurTy)) {
+        Member = Idx;
+        CurTy = ST->getElementType(Idx);
+        continue;
+      }
+      if (auto *ArrTy = dyn_cast<ArrayType>(CurTy)) {
+        CurTy = ArrTy->getElementType();
+        continue;
+      }
+      return std::nullopt;
+    }
+    // The one non-constant index: must directly select a row within an
+    // array, and must be the final index -- a component-level index
+    // after it is not modeled (see this function's own comment).
+    if (RowIndex || !isa<ArrayType>(CurTy) ||
+        std::next(IdxIt) != GEP->idx_end())
+      return std::nullopt;
+    RowIndex = *IdxIt;
+  }
+  if (!RowIndex)
+    return std::nullopt;
+  return std::make_tuple(GV, Member, RowIndex);
+}
+
+/// The stage-IO global \p Ptr addresses, trying
+/// `getStageIOBaseAndOffset`'s constant-offset resolution, (roadmap H5b)
+/// `getDynamicVertexIndexedAccess`'s dynamic-vertex-indexed one, and
+/// (roadmap H7w) `getDynamicRowIndexedAccess`'s dynamic-row-indexed one --
 /// every place that only needs to discover *which* global a load/store
 /// touches (as opposed to `resolveStageIOAccess`'s full per-instruction
-/// resolution) goes through this so neither discovery loop below misses a
-/// geometry entry's own `gl_in[i]`-shaped access.
+/// resolution) goes through this so no discovery loop below misses a
+/// geometry entry's own `gl_in[i]`-shaped access or a
+/// `gl_ClipDistance[i]`-shaped one.
 GlobalVariable *getStageIOGlobal(Value *Ptr, const DataLayout &DL) {
   if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL))
     return BaseAndOffset->first;
   if (auto Dyn = getDynamicVertexIndexedAccess(Ptr, DL))
+    return std::get<0>(*Dyn);
+  if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL))
     return std::get<0>(*Dyn);
   return nullptr;
 }
@@ -1696,10 +1815,12 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
 /// address a recognized stage-IO global at all. Tries
 /// `getDynamicVertexIndexedAccess`'s dynamically-vertex-indexed shape
 /// (roadmap H5b) first, falling back to `getStageIOBaseAndOffset`'s
-/// ordinary constant-byte-offset one -- see `resolveOffsetWithinElement`'s
-/// own comment for how each resolves from there. (Roadmap H5f) The
-/// constant-offset fallback itself peels a per-vertex-arrayed `Input`
-/// global's own outer array dimension into `Vertex` too, via
+/// ordinary constant-byte-offset one, and (roadmap H7w)
+/// `getDynamicRowIndexedAccess`'s dynamically-row-indexed one last -- see
+/// `resolveOffsetWithinElement`'s own comment for how each of the first
+/// two resolves from there. (Roadmap H5f) The constant-offset fallback
+/// itself peels a per-vertex-arrayed `Input` global's own outer array
+/// dimension into `Vertex` too, via
 /// `isPerVertexArrayInputGlobal`, so a *constant* `gl_in[k]` index is
 /// routed the same way a non-constant one already is, rather than folding
 /// into `Row` -- deliberately `Input`-only for every stage but `Mesh`
@@ -1731,8 +1852,26 @@ std::optional<StageIOAccess> resolveStageIOAccess(
 
   std::optional<std::pair<GlobalVariable *, uint64_t>> BaseAndOffset =
       getStageIOBaseAndOffset(Ptr, DL);
-  if (!BaseAndOffset)
+  if (!BaseAndOffset) {
+    // (Roadmap H7w) Neither of the above matched -- try a non-constant
+    // index into a stage-IO element's own row dimension instead (e.g.
+    // `gl_ClipDistance[i]` with a loop-carried `i`). Unlike the two paths
+    // above, this one resolves directly to a single scalar element (a
+    // plain float/int array member, never itself a vector or further
+    // nested aggregate in any real shape seen so far), so it builds its
+    // own `StageIOAccess` rather than routing through
+    // `resolveOffsetWithinElement`'s byte-offset-based recursion, which
+    // has no way to represent a non-constant `Row` mid-recursion.
+    if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL)) {
+      auto [GV, Member, RowIndex] = *Dyn;
+      auto It = ElementIDs.find(GV);
+      if (It == ElementIDs.end())
+        return std::nullopt;
+      return StageIOAccess{ArrayRef(It->second).slice(Member, 1), RowIndex,
+                           nullptr, nullptr, OutputGlobals.contains(GV)};
+    }
     return std::nullopt;
+  }
   auto [GV, ByteOffset] = *BaseAndOffset;
   auto It = ElementIDs.find(GV);
   if (It == ElementIDs.end())
@@ -2003,7 +2142,7 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   // `OutputGlobalSet` lets `resolveStageIOAccess` tell the two apart.
   DenseSet<GlobalVariable *> OutputGlobalSet(OutputGlobals.begin(),
                                              OutputGlobals.end());
-  ShadowValueMap ShadowValues(F);
+  ShadowValueMap ShadowValues(F, Sig);
 
   for (Instruction &I : llvm::make_early_inc_range(instructions(F))) {
     IRBuilder<> B(&I);
