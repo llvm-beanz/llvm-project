@@ -46085,3 +46085,116 @@ new `CanonicalizeStageTest.cpp` test, (2) documentation
 `Vulkan14FeatureInventory.md`'s two updated rows, `Roadmap.md`'s H7w
 strikethrough -- `VulkanExtensionInventory.md` needed no change, a core
 feature-bit row not an extension), (3) this file.
+
+# H7x: fragment-stage read-back of gl_ClipDistance/gl_CullDistance
+
+Continuing the H7h chain (H7w already closed dynamic indexing), this
+session's assigned row was H7x: a fragment shader cannot read back the
+interpolated `gl_ClipDistance`/`gl_CullDistance` value written by the
+vertex stage.
+
+## Investigation
+
+Reduced the exact CTS shape with `glslangValidator -V` on a minimal
+GLSL vertex+fragment pair (fragment reads `gl_ClipDistance[0]`), then
+ran it through `feme-translate --import-spirv --no-implicit-module
+--spirv-to-llvmir`. This crashed immediately with a verifier error:
+`'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but
+got '!llvm.array<1 x f32>'`.
+
+Root cause, layer 1: unlike the vertex-stage `Output` side (always
+wrapped in the `gl_PerVertex` interface block, which `CanonicalizeStage`
+already fully understands), glslang emits a fragment-stage
+`gl_ClipDistance`/`gl_CullDistance` *read* as a standalone,
+`BuiltIn`-decorated `Input`-storage-class array global, not part of any
+struct. `StageIOAddressOfPattern` (pre-existing, roadmap R19) already
+eagerly loads any non-builtin `Input` variable's whole value at its own
+`addressof` site — this makes sense for a scalar/vector builtin input,
+but produces a value-modeled *array*, and no existing pattern in
+`SPIRVToLLVMPatterns.cpp` legalizes an `spirv.AccessChain` into such a
+value (only the generic, pointer-assuming one exists, plus
+`BuiltInAccessChainPattern` for the vector/`extractelement` case).
+
+Fix: added `StageIOArrayAccessChainPattern`, directly mirroring
+`BuiltInAccessChainPattern`'s shape but emitting `llvm.extractvalue`
+instead of `llvm.extractelement`, matched only when the index is a
+compile-time constant (via `matchPattern`/`m_ConstantInt`, the same
+idiom `AccessChainPattern` itself uses elsewhere). A non-constant index
+is deliberately left unmatched — that's H7w's territory one array
+dimension over, not a new regression to worry about here — and falls
+through to the existing generic pattern, which now reports a clean
+diagnosed error instead of crashing. Verified via lit tests (extended
+`spirv-to-llvm-stage-io.mlir`, added a new invalid-index test file) and
+via clang-format scoped tightly to just the new lines after an
+accidental whole-file clang-format run needed reverting.
+
+Root cause, layer 2, found only once layer 1 was fixed and the IR
+reduction proceeded further into `Executor.cpp`: the fragment/vertex
+varying-linking loop had no case for a fragment input whose
+`SystemValue` is `ClipDistance`/`CullDistance` (these carry no
+`Location`, so the loop's existing location-based matching skipped them
+outright, and downstream code hit a null-`VSClipDistance`-style access).
+Fixed by adding a `SystemValue`-based link path alongside the existing
+`Location`-based one, reusing the same `LinkedVarying` mechanism that
+already handles arbitrary user varyings' interpolation — once linked,
+nothing else needed to change, since `RowCount`-driven interpolation is
+already fully generic.
+
+While debugging a crash in the resulting unit test (`SelectInst::init`
+assertion), found two more required carve-outs, both stemming from the
+same underlying assumption ("every fragment system-value input comes
+from the per-invocation record, never ordinary stage storage") now
+being false for exactly these two builtins:
+`StageStorage.cpp::buildStageStorage` (skipped allocating storage for
+any system-value input) and `FragmentWrapper.cpp::lowerFragmentInputLoad`
+(routed every system-value input through `loadFragmentSystemValue`,
+which has no ClipDistance/CullDistance case). Both gained a narrow
+exception for these two builtins specifically.
+
+## Real CTS re-run — a third, deeper blocker
+
+With `shaderClipDistance`/`shaderCullDistance` provisionally flipped to
+`VK_TRUE` (backed up first, reverted after measuring, per established
+discipline), re-ran the 16
+`dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}.vert.*_fragmentshader_read`
+cases. Result: 0/16, but the `getelementptr` crash this row's own two
+fixes targeted is gone entirely, replaced by a new failure one layer
+further down: `feme-cpu-simdize` (`SIMDize.cpp`) explicitly rejects a
+divergent (per-fragment-lane-varying) SSA value of *aggregate* type —
+here, the whole `[N x float]` array `StageIOAddressOfPattern` loads,
+before this row's own new `extractvalue` narrows it down to a scalar.
+The pass's own producer/consumer precondition loop only recognizes
+scalar/vector divergent shapes today; an aggregate is categorically
+unhandled, and it fails cleanly with a named diagnostic rather than
+building invalid IR or asserting.
+
+This is clearly a new, previously undiscovered gap (never surfaced by
+any prior roadmap row's CTS re-run) and is generic — any divergent
+aggregate value would hit the same wall, nothing clip/cull-distance
+specific about it. Given the session's already-substantial three-layer
+depth, I judged the right call was to document it as its own new
+roadmap row (H7z, the next free top-level letter, avoiding any deeper
+nesting per the standing "one lowercase letter deep" constraint) rather
+than attempt a fix in the same session — fixing `SIMDize.cpp` properly
+needs its own real investigation into whether decomposing a divergent
+aggregate in place is more tractable than preventing an aggregate from
+ever reaching that point (e.g. having `StageIOAddressOfPattern` or a
+later canonicalization step emit per-element scalar loads up front).
+
+## Outcome
+
+H7x is closed at the two layers its own text asked about (both real,
+tested, confirmed via IR reduction) but not struck through, since the
+row's real CTS target still fails end to end — the new H7z blocker
+prevents that. `shaderClipDistance`/`shaderCullDistance` stay `VK_FALSE`.
+Updated `FeMeGraphicsDesign.md` (new H7x status subsection),
+`VulkanCTSReport.md` (new "Roadmap H7x: measured impact" section),
+`Roadmap.md` (H7x annotated as partially closed, new H7z row added),
+and `Vulkan14FeatureInventory.md` (both rows re-pointed at H7x/H7z).
+`VulkanExtensionInventory.md` needed no change — confirmed, a core
+feature-bit row, not an extension.
+
+Commits this session: (1) SPIRVToLLVM `StageIOArrayAccessChainPattern`
++ lit tests, (2) `Executor.cpp`/`StageStorage.cpp`/`FragmentWrapper.cpp`
+fragment-side clip/cull-distance linking + `ExecutorTest.cpp` case,
+(3) documentation updates, (4) this file.
