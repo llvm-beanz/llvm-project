@@ -135,16 +135,29 @@ BoundResourceClass getResourceClass(HandleKind Kind) {
   llvm_unreachable("unhandled HandleKind");
 }
 
-/// A bound `spirv.VulkanBuffer` handle's identity: (descriptor set,
-/// binding), playing the same role DXIL's (register space, register) pair
-/// does -- see the header comment's "SPIR-V's (descriptor set, binding)
-/// pair" note.
+/// A bound handle's identity: (descriptor set, binding, resource class),
+/// playing the same role DXIL's (register space, register) pair does --
+/// see the header comment's "SPIR-V's (descriptor set, binding) pair"
+/// note. `Class` (roadmap H13d) is part of the identity, not just
+/// (Set, Binding): an ordinary Vulkan binding provides exactly one
+/// resource class, but `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` is a
+/// single binding that legitimately backs *two* -- an `Image`-class and a
+/// `Sampler`-class handle -- once `splitCombinedSampledImageHandles`
+/// takes its one combined `handlefrombinding` call apart into two,
+/// sharing that one binding's (set, binding) exactly as the real
+/// descriptor does. Without `Class` in the key, those two would collide
+/// at the same `(Set, Binding)` and be flagged an (incorrect) conflicting
+/// re-declaration; two independently-declared bindings can still never
+/// share the same (set, binding, class) tuple validly, so the conflict
+/// check below remains exactly as strict as before for every other case.
 struct RangeKey {
   uint32_t Set;
   uint32_t Binding;
+  BoundResourceClass Class;
 
   bool operator<(const RangeKey &Other) const {
-    return std::tie(Set, Binding) < std::tie(Other.Set, Other.Binding);
+    return std::tie(Set, Binding, Class) <
+           std::tie(Other.Set, Other.Binding, Other.Class);
   }
 };
 
@@ -695,6 +708,98 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
   return true;
 }
 
+/// Whether \p Ty is a two-element `{image, sampler}` struct -- a combined
+/// sampled-image handle's result type (see
+/// `splitCombinedSampledImageHandles`'s own comment): its first element is
+/// a `spirv.Image`/`spirv.SignedImage` handle, its second a `spirv.Sampler`
+/// handle, with no other fields -- matched structurally rather than by
+/// identity, since `TypeConverter.addConversion(mlir::spirv::SampledImageType)`
+/// (SPIRVToLLVMPatterns.cpp) produces an anonymous (literal) struct type,
+/// but a `.ll` file's own named type alias (e.g. `%pair = type {...}`,
+/// which this file's own unit tests use for readability) is a distinct,
+/// identified `StructType` with the identical body -- both must match here.
+bool isCombinedSampledImageStructType(Type *Ty) {
+  auto *StructTy = dyn_cast<StructType>(Ty);
+  if (!StructTy || StructTy->getNumElements() != 2)
+    return false;
+  auto *ImageTy = dyn_cast<TargetExtType>(StructTy->getElementType(0));
+  if (!ImageTy || (ImageTy->getName() != "spirv.Image" &&
+                   ImageTy->getName() != "spirv.SignedImage"))
+    return false;
+  auto *SamplerTy = dyn_cast<TargetExtType>(StructTy->getElementType(1));
+  return SamplerTy && SamplerTy->getName() == "spirv.Sampler";
+}
+
+/// Splits a `handlefrombinding` call whose own result type is already the
+/// combined `{image, sampler}` struct `isCombinedSampledImageStructType`
+/// recognizes -- the shape `ResourceAddressOfPattern`
+/// (SPIRVToLLVMPatterns.cpp) produces for an ordinary GLSL
+/// `uniform sampler2D` declaration (a single `OpTypeSampledImage`
+/// `UniformConstant` variable) -- into two synthetic `handlefrombinding`
+/// calls, one per element type, sharing the original call's own (set,
+/// binding, range size, index, name) operands. This is the *other* real
+/// combined-sampled-image shape besides the one `foldSampledImageStructs`
+/// already handles: that one is a genuine `OpSampledImage` instruction
+/// combining two *separately*-declared handles (an `insertvalue` chain
+/// this pass can trace back through with `FindInsertedValue`), while this
+/// one is a single call already returning the pair directly, with nothing
+/// for `FindInsertedValue` to trace -- it only ever seeds from a
+/// `Constant`, `InsertValueInst`, or `ExtractValueInst`, never a `CallInst`
+/// (see `llvm::FindInsertedValue`'s own doc comment), so a call's own
+/// `extractvalue` users are left untouched otherwise. Redirecting each
+/// such user to the matching synthetic call makes the two shapes converge
+/// on one downstream representation: an ordinary, separately-declared
+/// image handle and sampler handle, exactly as if the module's own source
+/// had declared them independently and combined them via `OpSampledImage`
+/// to begin with.
+///
+/// Left entirely alone if any user is not a single-index `extractvalue`
+/// selecting element 0 or 1 -- this pass does not need to model what a
+/// combined-handle call means used any other way (e.g. passed to another
+/// function, or extracted with more than one index), and leaving it
+/// unsplit means `collectHandles` correctly declines the whole function
+/// rather than silently mis-lowering an unrecognized shape.
+void splitCombinedSampledImageHandles(Function &F) {
+  SmallVector<CallInst *, 4> Combined;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || getIntrinsicID(CI) != Intrinsic::spv_resource_handlefrombinding)
+      continue;
+    if (!isCombinedSampledImageStructType(CI->getType()))
+      continue;
+    if (llvm::all_of(CI->users(), [](const User *U) {
+          const auto *EV = dyn_cast<ExtractValueInst>(U);
+          return EV && EV->getNumIndices() == 1 && EV->getIndices()[0] <= 1;
+        }))
+      Combined.push_back(CI);
+  }
+
+  Module *M = F.getParent();
+  for (CallInst *CI : Combined) {
+    auto *StructTy = cast<StructType>(CI->getType());
+    SmallVector<Value *, 5> Args(CI->args());
+    IRBuilder<> Builder(CI);
+    Function *ImageFn = Intrinsic::getOrInsertDeclaration(
+        M, Intrinsic::spv_resource_handlefrombinding,
+        {StructTy->getElementType(0)});
+    Function *SamplerFn = Intrinsic::getOrInsertDeclaration(
+        M, Intrinsic::spv_resource_handlefrombinding,
+        {StructTy->getElementType(1)});
+    Value *ImageHandle = Builder.CreateCall(ImageFn, Args);
+    Value *SamplerHandle = Builder.CreateCall(SamplerFn, Args);
+
+    SmallVector<ExtractValueInst *, 4> Extracts;
+    for (User *U : CI->users())
+      Extracts.push_back(cast<ExtractValueInst>(U));
+    for (ExtractValueInst *EV : Extracts) {
+      EV->replaceAllUsesWith(EV->getIndices()[0] == 0 ? ImageHandle
+                                                      : SamplerHandle);
+      EV->eraseFromParent();
+    }
+    CI->eraseFromParent();
+  }
+}
+
 /// Folds away the `{image, sampler}` struct
 /// `feme::spirv::SampledImagePattern` builds for `OpSampledImage`: every
 /// `extractvalue` over the pair is replaced with the handle the matching
@@ -794,7 +899,8 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
       return std::nullopt; // Unbounded range: see the header comment.
 
     RangeKey Key{static_cast<uint32_t>(SetC->getZExtValue()),
-                 static_cast<uint32_t>(BindingC->getZExtValue())};
+                 static_cast<uint32_t>(BindingC->getZExtValue()),
+                 getResourceClass(Classification->Kind)};
     Handles.push_back(BoundHandle{CI, Key, Classification->Kind,
                                   Classification->Stride,
                                   Classification->ElementStruct,
@@ -1351,8 +1457,15 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
   MapVector<Function *, SmallVector<BoundHandle, 4>> PerFunctionHandles;
   std::map<RangeKey, RangeEntry> Ranges;
   for (Function &F : M) {
-    // A combined sampled-image value has to be taken apart before a handle's
-    // own users can be classified (see `foldSampledImageStructs`).
+    // A single `handlefrombinding` call already returning the combined
+    // `{image, sampler}` pair (an ordinary GLSL `uniform sampler2D`
+    // declaration's own shape) is split into two ordinary handles first
+    // (see `splitCombinedSampledImageHandles`'s own comment for why
+    // `foldSampledImageStructs` alone cannot fold this shape). A combined
+    // sampled-image value built from two *separately*-declared handles
+    // then has to be taken apart before a handle's own users can be
+    // classified (see `foldSampledImageStructs`).
+    splitCombinedSampledImageHandles(F);
     foldSampledImageStructs(F);
     std::optional<SmallVector<BoundHandle, 4>> Handles = collectHandles(F);
     if (!Handles || Handles->empty())

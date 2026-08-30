@@ -991,6 +991,89 @@ TEST(SPIRVResourceLoweringTest, LowersSampledImageAndSamplerPairToImageSample) {
 }
 
 TEST(SPIRVResourceLoweringTest,
+     LowersCombinedSampledImageHandleToImageSample) {
+  // Roadmap H13d: the shape `ResourceAddressOfPattern` produces for an
+  // ordinary GLSL `uniform sampler2D` declaration -- a single
+  // `handlefrombinding` call whose own result type is already the combined
+  // `{image, sampler}` struct, with no separate `OpSampledImage`/two
+  // independently-declared handles for `foldSampledImageStructs` to trace
+  // an `insertvalue` chain through at all. Distinct from `SampleShader`
+  // above (two handles, composed via `insertvalue`, read apart via
+  // `extractvalue`): here the `extractvalue`s read directly off the one
+  // combined call.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %pair = type { target("spirv.Image", float, 1, 0, 0, 0, 1, 0), target("spirv.Sampler") }
+    define <4 x float> @main(<2 x float> %coord) {
+      %h = call %pair
+          @llvm.spv.resource.handlefrombinding.tpair(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %i = extractvalue %pair %h, 0
+      %s = extractvalue %pair %h, 1
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %i,
+          target("spirv.Sampler") %s, <2 x float> %coord, <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare %pair
+        @llvm.spv.resource.handlefrombinding.tpair(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4f32");
+  ASSERT_TRUE(Sample);
+  EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
+  EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
+
+  // Neither the combined handle call nor its `extractvalue`s survive.
+  for (Instruction &I : instructions(*F)) {
+    EXPECT_FALSE(isa<ExtractValueInst>(&I));
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        EXPECT_NE(Callee->getIntrinsicID(),
+                 Intrinsic::spv_resource_handlefrombinding);
+  }
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LeavesCombinedSampledImageHandleWithOtherUseUnchanged) {
+  // A combined handle used any other way (here, passed whole to another
+  // function) is left entirely alone -- `collectHandles` then declines the
+  // whole function, the same honest "leave unmodified rather than
+  // partially rewrite" contract every other unsupported shape gets.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %pair = type { target("spirv.Image", float, 1, 0, 0, 0, 1, 0), target("spirv.Sampler") }
+    define void @main() {
+      %h = call %pair
+          @llvm.spv.resource.handlefrombinding.tpair(i32 0, i32 0, i32 1, i32 0, ptr null)
+      call void @consume(%pair %h)
+      ret void
+    }
+    declare void @consume(%pair)
+    declare %pair
+        @llvm.spv.resource.handlefrombinding.tpair(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundCombinedHandle = false;
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getIntrinsicID() ==
+            Intrinsic::spv_resource_handlefrombinding)
+          FoundCombinedHandle = true;
+  EXPECT_TRUE(FoundCombinedHandle);
+}
+
+TEST(SPIRVResourceLoweringTest,
      FragmentStageImplicitSampleSynthesizesRealDerivatives) {
   // Roadmap H7i: the same shape as `SampleShader` above, except `main`
   // now carries a real `feme.shader.stage`="fragment" attribute -- the
