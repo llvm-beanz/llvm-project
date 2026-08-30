@@ -46582,3 +46582,109 @@ Commits this session: (1) `FeMeRuntimeCPU.c` implementation, (2) shared
 updates for that flip, (6) revert of the feature-bit flip once the CTS
 blocker was found, (7) doc updates recording the blocker and new H13d
 row, (8) this file.
+
+# Session: H13d (combined sampled-image handle recognition)
+
+## Task
+
+Continue H13d, the follow-on roadmap row H7i's own investigation
+tracked to completion: `SPIRVResourceLoweringPass` did not recognize a
+single combined `OpTypeSampledImage`-style `handlefrombinding` call --
+the IR shape glslang emits for an ordinary GLSL `uniform sampler2D`
+declaration -- causing `vkCreateGraphicsPipelines` to fail with
+`VK_ERROR_INITIALIZATION_FAILED` for essentially every GLSL-style
+combined-sampler graphics pipeline.
+
+## Investigation
+
+Traced `SPIRVToLLVMPatterns.cpp` to find there are genuinely two
+distinct IR shapes for a combined sampled image, and only one was
+previously handled:
+
+1. **Separately-declared image + sampler, composed via
+   `OpSampledImage`**: two independent `handlefrombinding` calls,
+   combined via a real `insertvalue`/`insertvalue` chain into a
+   `{Image, Sampler}` struct, later read apart via
+   `extractvalue`/`extractvalue`. The pre-existing
+   `foldSampledImageStructs` handles this via `llvm::FindInsertedValue`,
+   which traces back through a genuine `InsertValueInst` chain.
+2. **A single combined `OpTypeSampledImage` `UniformConstant` variable**
+   (glslang's idiomatic `uniform sampler2D` shape): `ResourceAddressOfPattern`
+   produces *one* `handlefrombinding` call whose result type is
+   *already* the `{Image, Sampler}` struct -- no `insertvalue` chain at
+   all, just `extractvalue`s straight off the call.
+   `llvm::FindInsertedValue` returns `nullptr` for a plain `CallInst`
+   aggregate operand (confirmed by reading its LLVM source), so
+   `foldSampledImageStructs` correctly, but unhelpfully, leaves this
+   alone -- and nothing else in the file recognized a struct-returning
+   `handlefrombinding` call, so `collectHandles` bailed the whole
+   function, cascading to `UnsupportedOps.cpp`'s generic diagnostic and
+   a real pipeline-creation failure.
+
+## Fix
+
+Added `isCombinedSampledImageStructType` (structural match: a two-element
+struct of `spirv.Image`/`spirv.SignedImage` + `spirv.Sampler`
+`TargetExtType`s -- deliberately *not* requiring `isLiteral()`, since
+hand-written `.ll` test IR's `%name = type {...}` syntax always
+produces a named/identified struct even when structurally identical to
+what the real MLIR conversion's genuinely anonymous/literal struct
+produces) and `splitCombinedSampledImageHandles` (splits a matching
+call into two synthetic single-resource `handlefrombinding` calls when
+every use is a simple `extractvalue`; leaves any other shape alone).
+Wired to run before `foldSampledImageStructs`, after which both shapes
+reach `collectHandles` in the same normalized form.
+
+## An unexpected second bug
+
+The split's two synthetic handles legitimately share one `(Set,
+Binding)` -- an Image-class handle and a Sampler-class handle at the
+same identity, exactly what a real `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`
+binding is. But `RangeKey` (used purely for conflicting-re-declaration
+detection) was keyed only on `(Set, Binding)`, shared module-wide
+across every resource kind -- so this collided as a false conflicting
+re-declaration and silently suppressed lowering for both handles. This
+was invisible from the split logic alone (confirmed via a standalone
+`feme-opt --llvm -passes=feme-cpu-lower-spirv-resources -S` repro with
+temporary `errs()` instrumentation, which showed the split succeeding
+but the sample intrinsic never lowering) -- it took tracing
+`collectHandles`'s conflict-detection map itself to find. Fixed by
+widening `RangeKey`'s identity to `(Set, Binding, BoundResourceClass)`,
+confirmed via the full existing conflict-detection test set that no
+other case's behavior changed.
+
+## Verification
+
+- New unit tests `LowersCombinedSampledImageHandleToImageSample`/
+  `LeavesCombinedSampledImageHandleWithOtherUseUnchanged`, plus a new
+  lit test `spirv-resource-lowering-combined-sampled-image.ll` mirroring
+  the pre-existing two-handle-shape coverage in
+  `spirv-resource-lowering-image.ll`.
+- `ninja check-feme` (assertions + ccache): 2057/2116, 0 `Failed`, 59
+  pre-existing `Unsupported`, up 3 tests from this row's own new
+  coverage.
+- Real CTS re-run of `dEQP-VK.texture.filtering.2d.*` (1698 cases):
+  confirmed this row's own specific scope fixed -- no case fails at
+  `vkCreateGraphicsPipelines` any longer. Still 0/1698 passing overall,
+  but now 258 real `Fail`s (running pipelines, wrong pixel values) +
+  1440 honest `NotSupported`, rather than all init-failures.
+
+## Scoping decision
+
+The newly-exposed real-pixel-verification failures are a materially
+separate investigation from the handle-recognition fix (likely a heap-
+index mixup in the split's two synthetic handles, or a pre-existing,
+previously-unreachable sampling-kernel bug). Rather than chase this
+under H13d (which would blur what H13d's own text actually promised to
+fix, and risk an open-ended session), it's tracked as new roadmap H14,
+and H13d is struck through on its own, narrower, honest merits.
+`samplerAnisotropy` (H7i) is not revisited: `filtering_anisotropy.*` is
+gated on that feature bit itself, unaffected by this fix either way.
+
+## Commits this session
+
+1. `SPIRVResourceLowering.cpp` fix (combined-handle recognition/split +
+   `RangeKey` widening) + unit tests + lit test, one commit.
+2. `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`
+   updates recording H13d's closure and the new H14 row.
+3. This file.
