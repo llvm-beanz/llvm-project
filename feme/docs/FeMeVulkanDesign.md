@@ -2911,6 +2911,29 @@ the non-mandatory partial-component integer formats (`R32_UINT`/
 decoded either, the same "mechanical, added on demand" scoping this row's
 own predecessor used.
 
+**Update (roadmap H7r, closed):** 7 more packed 16-bit formats --
+`R4G4B4A4_UNORM_PACK16`, `B4G4R4A4_UNORM_PACK16`, `R5G6B5_UNORM_PACK16`,
+`B5G6R5_UNORM_PACK16`, `R5G5B5A1_UNORM_PACK16`, `B5G5R5A1_UNORM_PACK16`,
+and `A1R5G5B5_UNORM_PACK16` -- gained real, working color-attachment
+support (`Format.cpp`'s `mapVkFormat`/`formatElementSize`, `RenderPass.cpp`'s
+`isSupportedColorAttachmentFormat`, `ImageFixture.cpp`'s `getFormatInfo`/
+`packClearColor`/`unpackColor`), matching `A1B5G5R5_UNORM`'s tier of
+support (a real, functional attachment) rather than `A4R4G4B4_UNORM`'s
+recognized-only one, since the CTS case motivating this row
+(`alpha_to_coverage_unused_attachment.*`, hard-coded to
+`VK_FORMAT_R5G6B5_UNORM_PACK16`) needs a real attachment. None of the 7
+gets a `FeMeRuntimeCPU.c` sampling case (matching `A4R4G4B4_UNORM`'s
+precedent for un-sampled recognized formats), so `formatFeatureFlags`
+correctly leaves `SAMPLED_IMAGE_BIT` unset for all 7. All 7 are appended
+at the very end of the `ResourceFormat` enum (after `ASTC_12x12_SFLOAT`),
+not grouped near their thematic siblings, because `FeMeRuntimeCPU.c`'s
+image-sampling tables switch on `ResourceFormat`'s raw ordinal via
+hard-coded integer case labels, not symbolic names -- any future addition
+to `ResourceFormat` must follow this same append-only convention, or
+manually update every hard-coded case in `FeMeRuntimeCPU.c` to match the
+new ordinals instead. See VulkanCTSReport.md's "Roadmap H7r: measured
+impact" for the CTS numbers this unblocked.
+
 **Update (roadmap E20, closed):** that block-aligned layout rework has
 landed. `computeSubresourceLayouts` (Image.cpp) now takes a block
 width/height/bytes-per-block triple (`Format.h`'s `blockWidth`/

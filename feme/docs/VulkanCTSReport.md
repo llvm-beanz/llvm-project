@@ -14084,3 +14084,113 @@ pipeline-state field, not an extension). `FeMeVulkanDesign.md`'s H7 status
 paragraph updated. `Roadmap.md`'s H7n struck through; H7q (the
 render-target-sample-count fix) struck through alongside it; H7r (the
 `R5G6B5` format gap) added as a new, open, P3 follow-on.
+
+## Roadmap H7r: measured impact (packed 16-bit formats)
+
+**Gap.** `dEQP-VK.pipeline.monolithic.multisample.alpha_to_coverage_unused_attachment.*`
+(H7n's own follow-on) failed every feme-supported-sample-count case at
+`vkCreateImage` time with `VK_ERROR_FORMAT_NOT_SUPPORTED`, because
+`AlphaToCoverageColorUnusedAttachmentInstance`'s own real color image is
+hard-coded to `VK_FORMAT_R5G6B5_UNORM_PACK16`, and no packed 16-bit format
+had any support anywhere in `feme`'s image/format layer. Investigating the
+real CTS's own test structure (`vktPipelineMultisampleTests.cpp`) further
+showed this CTS case in fact needs *two* independent things: real
+`R5G6B5_UNORM_PACK16` support (this row's own scope), and support for a
+`VK_ATTACHMENT_UNUSED` color attachment slot in a subpass (a separate,
+larger, previously-untracked gap, broken out as H7s below rather than
+attempted here).
+
+**Format survey.** The real CTS's own `vktApiImageClearingTests.cpp`
+`colorImageFormatsToTest` array is a ready-made, authoritative "packed
+16-bit formats worth testing" list. Cross-referencing it against `feme`'s
+existing `ResourceFormat` enum selected 7 missing core Vulkan 1.0 formats:
+`R4G4B4A4_UNORM_PACK16`, `B4G4R4A4_UNORM_PACK16` (distinct bit order from
+the already-supported EXT `A4R4G4B4`/`A4B4G4R4`), `R5G6B5_UNORM_PACK16`,
+`B5G6R5_UNORM_PACK16` (3-component, no alpha), `R5G5B5A1_UNORM_PACK16`,
+`B5G5R5A1_UNORM_PACK16`, and `A1R5G5B5_UNORM_PACK16`. `R4G4_UNORM_PACK8` was
+excluded as out of the "16-bit" scope. Exact bit layouts were confirmed
+against the real Vulkan spec's own "Packed Formats" section
+(`docs.vulkan.org/spec/latest/chapters/formats.html`), not trusted from an
+initial, partially-unreliable web-search summary alone.
+
+**A critical layering constraint.** `feme/runtime/CPU/FeMeRuntimeCPU.c`'s
+image-sampling tables (`femeRTImageFormatElementSize`/
+`femeRTUnpackImageTexel`/`femeRTUnpackImageTexelI32`) switch on
+`ResourceFormat`'s raw enum *ordinal* via hard-coded integer case labels
+(e.g. `case 28:`), not symbolic names -- an ABI the compiler and CPU
+runtime share informally. Inserting the 7 new values anywhere before the
+existing tail (`ASTC_12x12_SFLOAT`) would silently renumber every
+subsequent value and break these hard-coded cases. All 7 were instead
+appended at the very end of the enum, guaranteeing zero ordinal shift for
+any existing value.
+
+**Implementation.** The 7 new formats are real, working color-attachment
+formats -- matching `A1B5G5R5_UNORM`'s precedent (roadmap E5), not
+`A4R4G4B4_UNORM`/`A4B4G4R4_UNORM`'s recognized-only one (roadmap E19),
+since the blocking CTS case needs a real, functional attachment, not just
+a legal `VkFormat`. `Format.cpp`'s `mapVkFormat`/`formatElementSize`,
+`RenderPass.cpp`'s `isSupportedColorAttachmentFormat`, and
+`ImageFixture.cpp`'s `getFormatInfo`/`parseFixtureFormat`/
+`packClearColor`/`unpackColor` were all updated with real bit-packing
+logic per the confirmed layouts. None of the 7 gets a `FeMeRuntimeCPU.c`
+sampling case (matching the `A4R4G4B4_UNORM` precedent for un-sampled
+recognized formats), so `Format.cpp`'s `formatFeatureFlags` correctly
+leaves `SAMPLED_IMAGE_BIT` unset for all 7 via its existing `default:`
+fallthrough -- verified by inspection, no code change needed there.
+`R5G6B5_UNORM`/`B5G6R5_UNORM` have no alpha channel: `packClearColor`
+ignores the clear color's alpha component and `unpackColor` always reads
+it back as fully opaque (`1.0`), the same "missing channel reads as its
+identity value" precedent `A8_UNORM` already uses for its own missing
+color channels.
+
+**Unit tests (new).** `ImageFixtureTest.cpp` adds 7 round-trip
+pack/unpack tests, one per new format, using a color with 4 (or 3 plus an
+ignored alpha) distinguishable components so a bit-width or component-swap
+mistake would be caught; `PacksAndUnpacksB4G4R4A4Unorm` additionally
+confirms the packed word actually differs from `R4G4B4A4_UNORM`'s for the
+same input color (i.e. the R/B swap is real). `FormatTest.cpp` adds
+`MapsRemainingPackedSixteenBitFormats` (all 7 `VkFormat` values map
+correctly and report a 2-byte element size). `RenderPassTest.cpp` adds
+`CompilesRemainingPackedSixteenBitColorAttachments` (all 7 now compile a
+real one-color-attachment render pass), and retargets the pre-existing
+`RejectsUnsupportedAttachmentFormat` from `R5G6B5_UNORM_PACK16` (now
+supported) to `A4R4G4B4_UNORM_PACK16` (still not attachment-capable).
+
+**Real CTS re-run.** `dEQP-VK.api.image_clearing.core.clear_color_image.*`
+filtered to each of the 7 new formats: 0 failures attributable to this
+change for any format (some pre-existing `NotSupported` results for
+specific 3D image extents/multi-subresource-range shapes, confirmed
+identical across every format tested, including long-established ones,
+via a `deqp-vk` cross-check against `r8g8b8a8_unorm`).
+`dEQP-VK.api.image_clearing.core.clear_color_attachment.*` (full group,
+5145 cases): 618 failures total, but every failure touching one of the 7
+new formats is confined to the `cube_layers`/`multiple_layers` subgroups
+or an MSAA `sample_count_{2,4,8}` variant within `single_layer` -- and a
+`deqp-vk` cross-check confirmed the *identical* failure pattern for
+`r8g8b8a8_unorm` (a long-established, fully-supported format) and for the
+pre-existing `a1b5g5r5_unorm_pack16` (roadmap E5) in the same subgroups,
+confirming these are a pre-existing, generic multi-layer/MSAA-attachment-
+clear gap, not anything introduced by this row's own format work; every
+`single_layer`, non-MSAA case for all 7 new formats passes.
+
+Re-running the original blocker, `alpha_to_coverage_unused_attachment.*`,
+confirms the format gate is now cleared: every case now fails at
+`vkCreateGraphicsPipelines` with `"an unused color attachment slot is not
+implemented"` (`GraphicsPipeline.cpp`'s `getRenderTargets`, confirmed via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`) instead of
+`VK_ERROR_FORMAT_NOT_SUPPORTED`. This confirms H7r's own format gap is
+fully closed; the remaining `VK_ATTACHMENT_UNUSED` subpass gap is tracked
+as a new, separate follow-on, H7s.
+
+**`ninja check-feme`.** Passes in full at **2035/2094** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7n/H7q's own 2026/2085
+baseline by 9 new tests: `ImageFixtureTest`'s 7 pack/unpack round-trip
+cases, `FormatTest.MapsRemainingPackedSixteenBitFormats`, and
+`RenderPassTest.CompilesRemainingPackedSixteenBitColorAttachments`.
+
+**Documentation.** `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+confirmed no change needed (these are core format capabilities, not
+feature bits or extensions). `FeMeVulkanDesign.md`'s format-support section
+updated with the 7 new formats and the append-only `ResourceFormat`
+ordinal-safety rationale. `Roadmap.md`'s H7r struck through; H7s (the
+`VK_ATTACHMENT_UNUSED` subpass gap) added as a new, open, P2 follow-on.
