@@ -45568,3 +45568,134 @@ Commits, small and separate as instructed: (1) the core fix across
 documentation (`Roadmap.md` strikethrough, `VulkanCTSReport.md`'s new
 "Roadmap H7t: measured impact" section, `FeMeVulkanDesign.md`'s H7 status
 paragraph), (4) this file.
+
+# H7g: storage-buffer writes from vertex/fragment stages (plus H7u/H7v)
+
+Picked up "continue working on H7g or other milestones that block completing
+H7g" -- the `vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics`
+feature bits, both `VK_FALSE`, with no prior evidence found of a
+non-compute stage being able to write a storage buffer/image at all.
+
+My first move was to actually read `feme::cpu::runPipeline`
+(`Pipeline.cpp`) end to end rather than guess. Every pass that touches a
+resource store -- `SPIRVResourceLoweringPass`, `ResourceLoweringPass`,
+`LinearizePass`, `SIMDizePass`, `WaveLoweringPass` -- operates identically
+regardless of `StageCompileOptions::Stage`. The only stage-conditioned
+branches anywhere in the pipeline are (a) whether graphics stage-IO
+validation runs at all (skipped for compute, which has no `feme.stage.*`
+ops to canonicalize) and (b) which stage-specific entry-wrapper pass runs
+last. Neither of those touches storage resources. So my working hypothesis
+going in was "this probably already works, and the feature bits are simply
+unclaimed" -- the same shape as H7a's "already-implemented feature bits"
+discovery.
+
+Before writing any test I wanted to make sure I wasn't accidentally
+scoping in real atomic operations. A `rg` for `OpAtomicIAdd` and friends in
+`SPIRVToLLVMPatterns.cpp` came back empty -- genuinely nothing implements
+real SPIR-V atomics, for any stage, including compute. The existing
+compute "storage buffer" unit test turned out to use a plain
+load-add-store, not a true atomic RMW. That could have been a scope
+blocker, except the real CTS's own `vktBindingShaderAccessTests.cpp`
+(`checkSupportShaderAccess`) settled it: it throws `NotSupportedError`
+purely based on descriptor type + active stage, with no dependency on
+whether the shader body actually performs an atomic op. So the Vulkan
+feature bit's "Atomics" naming is inherited from the spec's bit name, not a
+requirement that this driver implement real atomics before claiming it --
+a plain store is sufficient evidence. I made sure both my new tests
+(`VertexStageWritesStorageBuffer`/`FragmentStageWritesStorageBuffer`) never
+depend on true atomicity either: the vertex one writes a distinct array
+slot per invocation (`buf[gl_VertexIndex]`), and the fragment one writes an
+identical constant every time (`buf[0] = 42`), so ordering/racing between
+invocations can never make the test flaky or mask a real bug.
+
+I also confirmed `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE` writes don't exist
+anywhere, for any stage -- `Format.cpp`'s own comment already says as
+much. That's a separate, much bigger, pre-existing gap, and I made sure to
+reason carefully about whether it should block this row: it doesn't,
+because the feature bits only promise that storage-resource *kinds the
+device already supports* are writable from these stages -- storage buffers
+and (via the existing `Buffer`-dim `spirv.ImageWrite` lowering) storage
+texel buffers. Neither test touches an actual 2D storage image.
+
+Both new tests passed immediately against the unmodified compiler and
+executor -- zero code changes needed to make the feature real, exactly
+like H7a. Flipped both feature bits in `PhysicalDeviceInfo.cpp`, updated
+the all-features `PhysicalDeviceInfoTest.cpp` assertion, `ninja
+check-feme` clean.
+
+Then the real CTS. Baseline confirmed the expected "0/0/640
+NotSupported" for `dEQP-VK.binding_model.shader_access.*.storage_buffer.
+vertex*` before the flip. After flipping, I got real passes -- but the run
+SIGSEGV'd on the very first `with_push` case. This is exactly the kind of
+"newly reachable, previously gated by an earlier NotSupported check" gap
+this whole H6/H7 chain keeps surfacing, so I didn't panic and assume I'd
+broken something; I went and found the actual root cause with gdb.
+`bt` showed a null function-pointer call inside CTS's own
+`vk::DescriptorSetUpdateBuilder::updateWithPush`, meaning
+`vkGetDeviceProcAddr` had returned null for whatever push-descriptor
+symbol CTS resolved. I checked `ImplementedEntrypoints.txt` and found only
+the core, unsuffixed `vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWithTemplate`
+registered -- never the `_KHR`-suffixed originals. Comparing against how
+`vkCmdBeginRenderingKHR` is handled (registered under its extension name
+in `vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` list, with a detailed
+comment explaining exactly this "loader/CTS may resolve either spelling"
+concern for several other promoted extensions), I found the actual bug:
+`VK_KHR_push_descriptor` was never added to that list, even though
+`PhysicalDeviceInfo.cpp` has advertised it since F12. That's a real,
+mechanical gap with an established fix pattern already in the same file --
+so rather than just filing a new roadmap row and moving on, I fixed it:
+added the extension to `SUPPORTED_EXTENSIONS`, registered the two `_KHR`
+names, implemented them as thin forwarders to the core names (had to
+fully-qualify the calls with `feme::vulkan::` to avoid an ambiguous-overload
+error against the identically-named Vulkan-Headers declaration pulled in
+by the ICD's exported symbol), and added a regression test calling the
+`_KHR` name directly. I also had to update the `vk-gen-entrypoints-
+split-features.test` lit test's own synthetic `vk-split-features.xml`
+fixture, since it's a self-contained mini-`vk.xml` that doesn't know about
+real extensions -- without adding a matching command+extension block there,
+the generator immediately rejected `VK_KHR_push_descriptor` as "not
+declared in vk.xml" against that fixture. Small thing, but worth noting:
+this generator hard-fails loudly rather than silently ignoring an unknown
+`SUPPORTED_EXTENSIONS` entry, which is exactly the kind of "fail fast on a
+config that doesn't do what you think it does" I want to see more of.
+
+Re-ran the `with_push` subset after the fix: 20/20 pass, crash gone.
+
+I also went looking for whether the exact same class of bug existed
+elsewhere before declaring victory -- and it does, but differently.
+`bind2` (`vkCmdBindDescriptorSets2`, from `VK_KHR_maintenance6`) also
+crashes for vertex/fragment, and fails outright (not a crash, just a clean
+`VK_ERROR_INITIALIZATION_FAILED`) for compute. Since CTS's own generated
+init code tries the core name first and only falls back to the `_KHR` name
+if that's null, and our core name *is* registered, this can't be the same
+"missing SUPPORTED_EXTENSIONS entry" bug -- I confirmed with a disassembly
+walk that the crashing call site loads a non-null function pointer, so
+something else is going on. Rather than chase this down (it would have
+meant reverse-engineering `VkBindDescriptorSetsInfo` handling in
+`CommandBuffer.cpp` from scratch, a genuinely separate investigation), I
+did the responsible due-diligence check instead: `git stash`ed my whole
+working tree, rebuilt, and re-ran `bind2.storage_buffer.compute*` against
+the pre-H7g binary. It failed identically, 30/30, `VK_ERROR_
+INITIALIZATION_FAILED` -- proving this is entirely pre-existing and
+stage-independent, not something my feature-bit flip created or made
+worse for vertex/fragment specifically (it just changed *how* the failure
+manifests for those two stages, from `NotSupported` skip to a real crash,
+because they can now reach real pipeline/command-buffer construction for
+the first time). I filed this as roadmap H7v and left it open, rather than
+trying to squeeze a second unrelated fix into this row.
+
+Final real CTS numbers for H7g's own scope (excluding `bind2`): 1200/1200
+pass, 0 fail, 0 NotSupported, across every `.vertex`/`.fragment`/
+`.vertex_fragment` combination of `bind`/`bind.with_push`/
+`bind.with_template`/`secondary_cmd_buf` variants of
+`storage_buffer`/`storage_buffer_dynamic`. `ninja check-feme`: 2042/2101,
+0 failed, up from 2039/2098 by the 3 new tests (2 DrawTest + 1
+CommandBufferTest).
+
+Commits, small and separate: (1) the H7g feature-bit flip plus its two
+DrawTest.cpp tests and the PhysicalDeviceInfoTest.cpp update, (2) the H7u
+push-descriptor `_KHR` fix plus its own test and lit-test fixture update,
+(3) documentation (Roadmap.md strikethrough plus new H7v row,
+VulkanCTSReport.md's new "Roadmap H7g: measured impact" section,
+Vulkan14FeatureInventory.md, VulkanExtensionInventory.md,
+FeMeVulkanDesign.md), (4) this file.
