@@ -251,7 +251,13 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // report here than the type itself allows.
   Limits.maxDrawIndirectCount = std::numeric_limits<uint32_t>::max();
   Limits.maxSamplerLodBias = 2.0f;
-  Limits.maxSamplerAnisotropy = 1.0f;
+  // Roadmap H7i: `samplerAnisotropy` is now advertised `VK_TRUE` (below),
+  // with a real `femeRTPlanImplicitLod`-driven multi-tap filter bounded
+  // by the sampler's own `MaxAnisotropy`; `16.0` matches the common
+  // conformant floor real GPU drivers advertise and has no smaller real
+  // ceiling of its own -- `femeRTPlanImplicitLod`'s tap loop has no fixed
+  // cap beyond the sampler descriptor's own requested value.
+  Limits.maxSamplerAnisotropy = 16.0f;
   // Roadmap H3 implements exactly Vulkan's mandatory multi-viewport floor:
   // 16 independent viewport/scissor slots (`MaxViewportCount`), no larger
   // arbitrary value until a test needs one. Every consuming loop in
@@ -669,6 +675,25 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // H7y (tessellation/geometry-stage clip/cull-distance).
   // `Info.Features.shaderClipDistance`/`shaderCullDistance` are therefore
   // intentionally left at their zero-initialized `VK_FALSE`.
+
+  // (Roadmap H7i) `samplerAnisotropy`: `Image.cpp` already stored
+  // `anisotropyEnable`/`maxAnisotropy` on the sampler descriptor at
+  // creation time, but nothing consumed it -- every implicit-LOD sample
+  // hardcoded mip level 0, with no screen-space-derivative computation
+  // anywhere in the sampling path at all (a prerequisite this feature's
+  // own real CTS coverage depends on just as much as the anisotropic
+  // filter kernel itself). `FeMeRuntimeCPU.c`'s `femeRTPlanImplicitLod`
+  // now computes a real per-sample mip level from genuine
+  // `feme.stage.derivative.*`-synthesized screen-space partials of (U, V)
+  // (synthesized at the `ResourceLowering.cpp`/`SPIRVResourceLowering.cpp`
+  // boundary for a Fragment-stage implicit `Plain2D` sample), and widens
+  // to a multi-tap average along the footprint's major axis, bounded by
+  // `MaxAnisotropy`, whenever anisotropic filtering is enabled -- scoped
+  // to the plain `sampler2D` (`Sample2D`) shape only, the one the real
+  // `dEQP-VK.texture.filtering.2d.*anisotropy*` cases exercise
+  // (`Sample2DArray`/`SampleCube`/`SampleCubeArray` implicit samples still
+  // resolve to mip level 0, a known, pre-existing, unrelated limitation).
+  Info.Features.samplerAnisotropy = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
