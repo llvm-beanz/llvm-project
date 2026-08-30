@@ -2135,9 +2135,33 @@ to null, SIGSEGV'ing any `with_push` case -- fixed (roadmap H7u, folded
 into H7g's own commit) by registering both as thin forwarders to their
 already-implemented core names. A second, pre-existing `VK_KHR_
 maintenance6` `bind2` (`vkCmdBindDescriptorSets2`) failure, confirmed
-stage-independent via `git stash`, remains open as roadmap H7v. See
-"Roadmap H7g: measured impact" in VulkanCTSReport.md for the full
-before/after CTS breakdown. The rest of H7's own survey
+stage-independent via `git stash`, was investigated further as roadmap
+H7v (closed): the "compute fails cleanly" half turned out to be an
+unrelated, pre-existing, `bind2`-independent gap -- every real
+`dEQP-VK.binding_model.shader_access.*.storage_buffer.compute*` case
+failed at `vkCreateComputePipelines`, regardless of update method,
+because `classifyVulkanBufferHandle` (`SPIRVResourceLowering.cpp`)
+misclassified a pre-1.3-spelled storage buffer block (`Uniform` storage
+class plus a `BufferBlock` decoration, still glslang's default spelling)
+as a read-only uniform block, since that ambiguous storage-class value is
+shared with a real uniform block and only the handle's own `Writable` int
+parameter -- previously ignored -- tells them apart; fixed, confirmed by
+a real re-run (80/80 non-`bind2` `storage_buffer.compute*` cases passing,
+up from 0/80). The actual `bind2` SIGSEGV itself, once re-investigated
+with a fresh gdb backtrace against both a `vertex` and (now reachable for
+the first time) a `compute` case, is the identical crash shape in both: a
+call through a null function-pointer slot in CTS's own cached
+device-dispatch struct, traced to this environment's system Vulkan loader
+(`libvulkan.so.1` 1.3.275.0, predating `VK_KHR_maintenance6`) never
+querying this ICD for a device command name it does not itself know --
+even though this ICD's own `EntryPoints.cpp`/`ProcAddr.cpp` fully
+implement and expose `vkCmdBindDescriptorSets2` correctly (confirmed via
+the existing `CommandBufferTest.cpp` unit test calling it directly). This
+is an environment/toolchain limitation outside this repository, not a
+feme defect, so H7v closes as "root-caused, no in-repo fix possible or
+needed." See "Roadmap H7g: measured impact" and "Roadmap H7v: measured
+impact" in VulkanCTSReport.md for the full before/after CTS breakdown.
+The rest of H7's own survey
 (`shaderClipDistance`/`shaderCullDistance`, `samplerAnisotropy`, and the
 four `shaderStorageImage*` bits) each need real, independent work first
 and remain open.

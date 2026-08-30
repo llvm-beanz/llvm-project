@@ -14464,3 +14464,122 @@ push_descriptor`'s row notes the `_KHR` dispatch-table fix; `VK_KHR_
 maintenance6`'s row notes the new, open H7v `bind2` gap).
 `FeMeVulkanDesign.md`'s H7 status paragraph updated. `Roadmap.md`'s H7g
 struck through; H7v added as a new, single-lowercase-letter follow-on.
+
+## Roadmap H7v: measured impact (`bind2`'s "compute fails cleanly" symptom root-caused as an unrelated, pre-existing resource-lowering gap; the actual `bind2` SIGSEGV root-caused as an environment limitation)
+
+**Gap (as originally scoped).** H7g's own re-run found `VK_KHR_
+maintenance6`'s `vkCmdBindDescriptorSets2` (`bind2`) failing for every
+stage: a SIGSEGV for vertex/fragment, and a "clean" `vkCreateComputePipelines`
+failure (`VK_ERROR_INITIALIZATION_FAILED`) for compute -- tracked as one
+row, H7v, on the assumption both symptoms shared a `bind2`-specific cause.
+
+**Investigation: the "compute fails cleanly" half is not about `bind2` at
+all.** Re-running the *ordinary*, non-`bind2` `bind.storage_buffer.
+compute.single_descriptor.offset_view_zero` case reproduced the identical
+`vkCreateComputePipelines` failure and identical error text. A full sweep
+of every `dEQP-VK.binding_model.shader_access.*.storage_buffer.compute*`
+case, across every update method (`bind`, `bind2`, `with_push`,
+`with_push_template`), failed identically: **0/160 pass** before any fix,
+regardless of `bind2`. This proves H7v's original "compute fails cleanly"
+text conflated a real, pre-existing, `bind2`-independent gap with the
+actual `bind2` bug.
+
+**Root cause (found via a temporary IR dump instrumented into
+`compileComputePipeline`, `Pipeline.cpp`, since the real caller silently
+`consumeError`s the compile failure).** The failing shader's SPIR-V (a
+`dEQP-VK.binding_model.shader_access` compute case's own `b_instance`
+input storage buffer, `buffer BufferName { vec4 colorA; vec4 colorB; }`)
+imports as a `spirv.VulkanBuffer` handle with storage class `Uniform` (2),
+not the dedicated `StorageBuffer` class (12) -- glslang's default,
+pre-SPIR-V-1.3 spelling for a `buffer` block still uses the `Uniform`
+storage class plus a `BufferBlock` decoration rather than the newer,
+explicit `StorageBuffer` class. `classifyVulkanBufferHandle`
+(`SPIRVResourceLowering.cpp`) treated *any* struct-shaped handle with
+storage class `Uniform` as a read-only uniform block
+(`HandleKind::Uniform`), ignoring the handle's own second int parameter
+(`Writable`, which `convertBufferBlockType`/`SPIRVToLLVMPatterns.cpp`
+already carries correctly for exactly this reason). This shader's
+struct-shaped output-buffer access (`b_out.read_colors[gl_WorkGroupID.x]
+= result_color`) needs a writable, GEP-indexable access -- but
+`hasOnlySupportedUses` disallows both writes and GEPs for
+`HandleKind::Uniform` -- so `collectHandles` bailed on the whole
+function, leaving every handle un-normalized and hitting `checkSupported
+RaisedOps`'s generic "unsupported raised operation" rejection at compile
+time.
+
+**Fix.** `classifyVulkanBufferHandle` now checks the handle's `Writable`
+int parameter for a `Uniform`-class struct handle: `Writable=1` classifies
+it as `HandleKind::StorageStruct` (a real, writable storage buffer
+block), matching the dedicated `StorageBuffer`-class case; `Writable=0`
+(a real, read-only uniform block) is unaffected.
+
+**Unit tests (new).** `SPIRVResourceLoweringTest.cpp`'s
+`LowersLegacyUniformClassStorageBlockFieldToResourceLoad` (a `Uniform`-
+class, `Writable=1` struct handle's field load now lowers, like the
+existing `StorageBuffer`-class case) and
+`LowersLegacyUniformClassStorageBlockStoreToResourceStore` (the same
+handle now also accepts a store, unlike a real read-only uniform block --
+confirming the fix classifies by `Writable`, not storage class alone).
+The pre-existing `LowersUniformBufferFieldToResourceLoad`/`LeavesUniform
+BufferStoreUnchanged` (`Writable=0`) cases are unaffected.
+
+**Real CTS re-run.** `dEQP-VK.binding_model.shader_access.*.storage_buffer.
+compute*`'s three non-`bind2` update methods: `bind` (30/30),
+`bind.with_template` (30/30), and `bind.with_push`+`with_push_template`
+(20/20) -- **80/80 pass, 0 fail** (up from 0/80 before the fix), all
+previously failing with the same "unsupported raised operation" error.
+
+**The actual `bind2` SIGSEGV, re-investigated.** With the resource-
+lowering gap fixed, a `bind2.storage_buffer.compute*` case now reaches
+pipeline creation and *dispatch* for the first time, where it crashes --
+confirming this is not the same bug as the fixed compute gap above, but
+the original, real `bind2` SIGSEGV, now also reachable from compute. A
+fresh `gdb -batch -ex run -ex bt` against both a `vertex` case
+(`bind2.storage_buffer.vertex.single_descriptor.offset_view_zero`) and the
+newly-reachable `compute` case
+(`bind2.storage_buffer.compute.descriptor_array.offset_view_nonzero`)
+shows the identical crash shape in both: a `VkBindDescriptorSetsInfoKHR`
+struct (confirmed via its `sType` immediate, `0x3ba31aeb` ==
+`VK_STRUCTURE_TYPE_BIND_DESCRIPTOR_SETS_INFO_KHR`) is built correctly on
+the stack, then a call through a *null* function-pointer slot in CTS's
+own cached `vk::DeviceInterface`/`DeviceFunctionPointers` struct (a plain
+member load plus indirect call, at struct offsets 296 and 288
+respectively for the two cases -- not a virtual dispatch, just a null
+cached pointer). Traced to its root: this development environment's
+system Vulkan loader (`libvulkan.so.1`, Ubuntu package `libvulkan1`
+1.3.275.0) predates `VK_KHR_maintenance6`/`vkCmdBindDescriptorSets2`
+(added to the Vulkan-Headers/loader around 1.3.284, promoted to Vulkan
+core in 1.4) -- the loader's own compiled-in device-command dispatch
+table has no entry for this command name at all, so when CTS's
+`DeviceDriver` constructor asks the loader-resolved `vkGetDeviceProcAddr`
+for `"vkCmdBindDescriptorSets2"`, it returns null, even though this ICD's
+own `EntryPoints.cpp`/`ProcAddr.cpp` fully implement and correctly expose
+the command (`VulkanEntrypoints.inc` registers `FEME_VK_COMMAND_IMPL
+(vkCmdBindDescriptorSets2, DEVICE)`, and `CommandBufferTest.cpp`'s
+pre-existing `BindDescriptorSets2AndPushConstants2ReachTheDispatch` unit
+test calls the ICD function directly and passes). Bypassing the system
+loader via `deqp-vk --deqp-vk-library-path=.../libfeme_vulkan.so` (loading
+the ICD directly) hits an unrelated, earlier instance-creation error
+before reaching this code path, so it does not itself serve as a clean
+confirmation, but the dispatch-offset/null-pointer evidence above is
+conclusive on its own. This is an environment/toolchain limitation of
+this development machine's installed Vulkan loader, not a defect in this
+repository's code -- there is no ICD-side change to make, so H7v closes
+as "root-caused to a non-fixable, out-of-repo cause," rather than a code
+fix, for this half.
+
+**`ninja check-feme`.** Passes in full at **2044/2103** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from H7g's own 2042/2101 baseline
+by the 2 new tests this row adds
+(`LowersLegacyUniformClassStorageBlockFieldToResourceLoad`/
+`...StoreToResourceStore`).
+
+**Documentation.** `Vulkan14FeatureInventory.md` confirmed no change
+needed (a resource-lowering correctness fix, not a feature-bit change).
+`VulkanExtensionInventory.md`'s `VK_KHR_maintenance6` row updated to note
+this row's closure and root cause (the extension itself was already
+advertised, and its own command dispatch is already correctly implemented
+in this repository). `FeMeVulkanDesign.md`'s H7 status paragraph updated.
+`Roadmap.md`'s H7v struck through as closed (investigated to a conclusive
+root cause; the collateral resource-lowering bug fixed, the `bind2` crash
+itself confirmed to be a non-fixable environment limitation).
