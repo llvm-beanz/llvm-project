@@ -353,11 +353,12 @@ struct GraphicsPipelineState {
   /// (roadmap H7f) `VkPipelineMultisampleStateCreateInfo::
   /// sampleShadingEnable`/`alphaToOneEnable`; see
   /// `feme::graphics::GraphicsPipeline::getSampleShadingEnable`/
-  /// `getAlphaToOneEnable`'s own comments. `alphaToCoverageEnable` has no
-  /// field here -- it remains rejected at pipeline-creation time (roadmap
-  /// H7n).
+  /// `getAlphaToOneEnable`'s own comments. (roadmap H7n)
+  /// `alphaToCoverageEnable`; see `getAlphaToCoverageEnable`'s own
+  /// comment.
   bool SampleShadingEnable = false;
   bool AlphaToOneEnable = false;
+  bool AlphaToCoverageEnable = false;
   std::vector<feme::graphics::AttachmentFormat> Attachments;
   std::vector<VertexInputBinding> VertexBindings;
   std::vector<VertexInputAttribute> VertexAttributes;

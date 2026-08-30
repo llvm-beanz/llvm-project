@@ -376,8 +376,9 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // attachment's output alpha to `1.0`, confirmed conformant against a real
   // `dEQP-VK.pipeline.monolithic.multisample.alpha_to_one.*` re-run (4/4
   // feme-supported-sample-count cases pass), so this one honestly flips to
-  // `VK_TRUE`. `alphaToCoverageEnable` remains rejected at pipeline-creation
-  // time (roadmap H7n) and has no feature bit of its own to flip.
+  // `VK_TRUE`. `alphaToCoverageEnable` itself has no `VkPhysicalDeviceFeatures`
+  // bit of its own to flip -- it is now implemented regardless (roadmap
+  // H7n), see `GraphicsPipeline::getAlphaToCoverageEnable()`'s own comment.
   //
   // `sampleRateShading` now flips to `VK_TRUE`, closing roadmap H7o/H7p:
   // `SIMDize.cpp`'s `checkVectorDecompositionSupported` had no producer

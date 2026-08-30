@@ -481,19 +481,18 @@ public:
   /// pStages-06894`/neighbors), running only vertex-stage clip/rasterize/
   /// early-depth-test with no per-fragment shading at all. Callers must
   /// check `hasFragmentStage()` before calling `getFragmentStage()`.
-  GraphicsPipeline(std::shared_ptr<cpu::CompiledStage> VertexStage,
-                   std::shared_ptr<cpu::CompiledStage> FragmentStage,
-                   PrimitiveTopology Topology, RasterState Raster,
-                   DepthState Depth, BlendMode Blend, uint32_t SampleCount,
-                   std::vector<AttachmentFormat> Attachments,
-                   StencilState Stencil = StencilState{},
-                   std::vector<BlendState> ColorBlends = {BlendState{}},
-                   bool LogicOpEnable = false, LogicOp Logic = LogicOp::Copy,
-                   std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f,
-                                                          0.0f},
-                   bool PrimitiveRestartEnable = false,
-                   bool SampleShadingEnable = false,
-                   bool AlphaToOneEnable = false);
+  GraphicsPipeline(
+      std::shared_ptr<cpu::CompiledStage> VertexStage,
+      std::shared_ptr<cpu::CompiledStage> FragmentStage,
+      PrimitiveTopology Topology, RasterState Raster, DepthState Depth,
+      BlendMode Blend, uint32_t SampleCount,
+      std::vector<AttachmentFormat> Attachments,
+      StencilState Stencil = StencilState{},
+      std::vector<BlendState> ColorBlends = {BlendState{}},
+      bool LogicOpEnable = false, LogicOp Logic = LogicOp::Copy,
+      std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f, 0.0f},
+      bool PrimitiveRestartEnable = false, bool SampleShadingEnable = false,
+      bool AlphaToOneEnable = false, bool AlphaToCoverageEnable = false);
 
   const cpu::CompiledStage &getVertexStage() const { return *VertexStage; }
   /// Whether this pipeline has a fragment stage at all (roadmap H2j); false
@@ -536,10 +535,16 @@ public:
   bool getSampleShadingEnable() const { return SampleShadingEnable; }
   /// (roadmap H7f) Whether every color attachment's output alpha is
   /// forced to `1.0` after shading, before blending
-  /// (`VkPipelineMultisampleStateCreateInfo::alphaToOneEnable`). Distinct
-  /// from `alphaToCoverageEnable`, which remains rejected at
-  /// pipeline-creation time (roadmap H7n).
+  /// (`VkPipelineMultisampleStateCreateInfo::alphaToOneEnable`).
   bool getAlphaToOneEnable() const { return AlphaToOneEnable; }
+  /// (roadmap H7n) Whether a per-sample coverage mask is generated from
+  /// the fragment stage's own output at location 0's alpha component
+  /// before the depth/stencil test and color merge
+  /// (`VkPipelineMultisampleStateCreateInfo::alphaToCoverageEnable`; see
+  /// `Executor.cpp`'s own `computeAlphaToCoverageMask`-adjacent commentary
+  /// for the per-sample threshold this project uses). Distinct from, and
+  /// independent of, `alphaToOneEnable`/`sampleShadingEnable` above.
+  bool getAlphaToCoverageEnable() const { return AlphaToCoverageEnable; }
 
   /// Attaches the three compiled stages a tessellation-enabled pipeline
   /// runs between its vertex stage and rasterization -- a hull shader's
@@ -689,6 +694,7 @@ private:
   bool PrimitiveRestartEnable;
   bool SampleShadingEnable;
   bool AlphaToOneEnable;
+  bool AlphaToCoverageEnable;
 };
 
 } // namespace feme::graphics

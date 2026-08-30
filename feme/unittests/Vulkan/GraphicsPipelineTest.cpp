@@ -1066,11 +1066,12 @@ TEST_F(GraphicsPipelineTest, TranslatesDepthClampAndBiasState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// (roadmap H7f) `sampleShadingEnable`/`alphaToOneEnable` translate into
-/// `GraphicsPipeline::getSampleShadingEnable()`/`getAlphaToOneEnable()`;
-/// `alphaToCoverageEnable` remains rejected (roadmap H7n) even when the
-/// other two are enabled alongside it -- see
-/// `RejectsAlphaToCoverageEnable` below for that half of the check.
+/// (roadmap H7f/H7n) `sampleShadingEnable`/`alphaToOneEnable`/
+/// `alphaToCoverageEnable` translate into
+/// `GraphicsPipeline::getSampleShadingEnable()`/`getAlphaToOneEnable()`/
+/// `getAlphaToCoverageEnable()` -- all three now real, unlike the
+/// original roadmap H7f text's now-superseded claim that
+/// `alphaToCoverageEnable` stayed rejected.
 TEST_F(GraphicsPipelineTest, TranslatesSampleShadingAndAlphaToOneState) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
@@ -1079,6 +1080,7 @@ TEST_F(GraphicsPipelineTest, TranslatesSampleShadingAndAlphaToOneState) {
   Multisample.sampleShadingEnable = VK_TRUE;
   Multisample.minSampleShading = 1.0f;
   Multisample.alphaToOneEnable = VK_TRUE;
+  Multisample.alphaToCoverageEnable = VK_TRUE;
   VkPipeline Pipe = VK_NULL_HANDLE;
   ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
   ASSERT_NE(Pipe, VK_NULL_HANDLE);
@@ -1088,29 +1090,37 @@ TEST_F(GraphicsPipelineTest, TranslatesSampleShadingAndAlphaToOneState) {
       Graphics->buildExecutorPipeline(DynamicGraphicsState{});
   EXPECT_TRUE(Executor.getSampleShadingEnable());
   EXPECT_TRUE(Executor.getAlphaToOneEnable());
+  EXPECT_TRUE(Executor.getAlphaToCoverageEnable());
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// (roadmap H7f/H7n) `alphaToCoverageEnable` remains unimplemented and
-/// rejected at pipeline-creation time, unlike its two
-/// `VkPipelineMultisampleStateCreateInfo` neighbors above.
-TEST_F(GraphicsPipelineTest, RejectsAlphaToCoverageEnable) {
+/// (roadmap H7n) `alphaToCoverageEnable` alone (without the other two
+/// `VkPipelineMultisampleStateCreateInfo` fields above) also translates
+/// cleanly, and defaults to `false` when left unset.
+TEST_F(GraphicsPipelineTest, TranslatesAlphaToCoverageState) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
-  VkPipeline Pipe = VK_NULL_HANDLE;
 
   VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
   Multisample.alphaToCoverageEnable = VK_TRUE;
-  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
-  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
 
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  feme::graphics::GraphicsPipeline Executor =
+      Graphics->buildExecutorPipeline(DynamicGraphicsState{});
+  EXPECT_TRUE(Executor.getAlphaToCoverageEnable());
+  EXPECT_FALSE(Executor.getSampleShadingEnable());
+  EXPECT_FALSE(Executor.getAlphaToOneEnable());
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
-
 
 /// (`DynamicLineWidthAndStippleOverrideStaticState`), a pipeline may
 /// declare this dynamic and `buildExecutorPipeline` then reads the

@@ -1036,7 +1036,7 @@ Error translateDepthStencilState(
   }
 
   NeedsDepth = NeedsDepth || Info->depthTestEnable || Info->depthWriteEnable ||
-              Info->depthBoundsTestEnable;
+               Info->depthBoundsTestEnable;
   if (NeedsDepth) {
     if (!Targets.DepthStencil ||
         !isSupportedDepthAttachmentFormat(*Targets.DepthStencil))
@@ -1064,7 +1064,8 @@ Error translateDepthStencilState(
     // (the `min`/`maxDepthBounds` values, `VK_DYNAMIC_STATE_DEPTH_BOUNDS`)
     // are independently-dynamic states, exactly like `StencilOpDynamic`
     // and the stencil reference/compare/write masks below.
-    bool BoundsRangeDynamic = (Out.DynamicStates & DynamicStateDepthBounds) != 0;
+    bool BoundsRangeDynamic =
+        (Out.DynamicStates & DynamicStateDepthBounds) != 0;
     if (BoundsDynamic) {
       // Ignored per the comment above; resolved from
       // `DynamicGraphicsState::DepthBoundsTestEnable` instead (see
@@ -1078,7 +1079,6 @@ Error translateDepthStencilState(
       Out.Depth.MaxDepthBounds = Info->maxDepthBounds;
     }
   }
-
 
   NeedsStencil = NeedsStencil || Info->stencilTestEnable;
   if (!NeedsStencil)
@@ -1340,6 +1340,7 @@ serializeFixedFunctionState(const GraphicsPipelineState &State) {
   appendScalar(Out, State.SampleCount);
   appendScalar(Out, State.SampleShadingEnable);
   appendScalar(Out, State.AlphaToOneEnable);
+  appendScalar(Out, State.AlphaToCoverageEnable);
   appendScalar(Out, State.DynamicStates);
   appendScalar(Out, State.LogicOpEnable);
   appendScalar(Out, State.Logic);
@@ -1671,10 +1672,13 @@ Error translateFixedFunctionState(
       return createStringError(inconvertibleErrorCode(),
                                "the pipeline's rasterization sample count "
                                "disagrees with its render target's");
-    if (Multisample->alphaToCoverageEnable)
-      return createStringError(inconvertibleErrorCode(),
-                               "alpha-to-coverage is not implemented "
-                               "(roadmap H7n)");
+    // (roadmap H7n) `alphaToCoverageEnable` has no `VkPhysicalDeviceFeatures`
+    // gate of its own in the spec -- unlike `alphaToOneEnable`, which is
+    // gated by its own feature bit, this one is always legal to enable
+    // whenever multisampling itself is -- so no rejection here; see
+    // `Executor.cpp`'s own per-sample coverage-mask handling.
+    Result.AlphaToCoverageEnable =
+        Multisample->alphaToCoverageEnable != VK_FALSE;
     // (roadmap H7f) `sampleShadingEnable`: this ICD always shades at the
     // full sample rate when set, regardless of `minSampleShading`'s own
     // fractional value -- see `GraphicsPipeline::getSampleShadingEnable`'s
@@ -2365,7 +2369,7 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
       isDynamic(DynamicStateBlendConstants) ? Dynamic.BlendConstants
                                             : State.BlendConstants,
       State.PrimitiveRestartEnable, State.SampleShadingEnable,
-      State.AlphaToOneEnable);
+      State.AlphaToOneEnable, State.AlphaToCoverageEnable);
   // (roadmap H4b) `Artifact->HullStage` is set exactly when this pipeline
   // declared tessellation stages (see `compileAndValidateStages`'s own
   // comment); `PatchConstantStage`/`DomainStage` are always set alongside
