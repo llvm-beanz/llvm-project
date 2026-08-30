@@ -46688,3 +46688,145 @@ gated on that feature bit itself, unaffected by this fix either way.
 2. `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`
    updates recording H13d's closure and the new H14 row.
 3. This file.
+
+# Session: H14 (fragment/vertex-stage image/sampler sampling produced all-zero pixels)
+
+## Starting point
+
+Continuing from H13d, which closed `SPIRVResourceLoweringPass`'s
+combined-sampled-image-handle recognition gap and, in doing so, let a
+combined-sampler graphics pipeline create and *run* for the first
+time -- but exposed a new, distinct bug: every rendered pixel was
+wrong (100% invalid), tracked as roadmap H14. The user's actual
+request this session was to continue H7i (`samplerAnisotropy`) or any
+prerequisite H-series work; H14 blocks honestly measuring H7i (the
+anisotropic filter kernel from a prior session's H7i work is never
+even reached if sampling itself is broken), so it was the right
+prerequisite to chase.
+
+## Bisection methodology
+
+Rather than debugging inside the full CTS harness (slow, and every
+failure could be a different one of many possible causes), built a
+series of small, standalone Vulkan client reproductions
+(`g++ ... -lvulkan`, driving the feme ICD directly via
+`VK_ICD_FILENAMES`) to isolate the bug one variable at a time:
+
+1. Baseline repro (combined sampler, set 1, implicit LOD) -- confirmed
+   all-zero, matching the CTS symptom.
+2. Moved the sampler to descriptor set 0 -- still all-zero (rules out
+   a set-index-specific bug).
+3. Replaced the fragment shader with a solid-color shader (no
+   sampling) on the same pipeline layout -- rendered correctly (rules
+   out a draw/pipeline-layout-level bug).
+4. Split the combined sampler into separate `SAMPLED_IMAGE`+`SAMPLER`
+   descriptors -- still all-zero (rules out combined-vs-separate
+   descriptor shape, and rules out H13d's own split logic as the
+   cause).
+5. Used explicit `textureLod` instead of implicit `texture()` --
+   still all-zero (rules out implicit-LOD/derivative synthesis).
+6. Used a UBO read from the fragment stage instead of an image/sampler
+   -- worked correctly (proves fragment-stage resource reads work in
+   general; narrows the bug to image/sampler reads specifically).
+7. Wrote the interpolated UV directly as the fragment color (no
+   sampling at all) -- worked correctly (rules out vertex-to-fragment
+   interpolation).
+
+Conclusion: the bug is specific to *any* image/sampler read from a
+fragment (and, it turned out, vertex) stage in a real graphics draw,
+independent of set index, descriptor shape, or LOD mode -- i.e.
+something in the draw path's own resource plumbing, not the SPIR-V
+lowering or sampling kernel at all.
+
+## Root cause
+
+Added temporary `fprintf` debug instrumentation (later reverted) to
+`ResourceHeap.cpp`'s `materializeHeap` and `CommandBuffer.cpp`'s
+`buildBoundResources`, confirming the bound-resource list is built
+correctly upstream, but by the time `materializeImageHeap`/
+`materializeSamplerHeap` run inside `PreparedFragmentBatch::create`,
+the bindings array they see is empty.
+
+Traced this to `Executor.cpp`: constructing the fragment stage's
+`FragmentResources FRes` (and, identically, the vertex stage's
+`VertexResources VRes`) copies `.ResourceHeap`, `.BoundResources`,
+`.ImageHeap`, `.SamplerHeap`, `.RootConstants` from `Draw.Resources`,
+but never copies `.BoundImages`/`.BoundSamplers` -- the two fields
+`materializeImageHeap`/`materializeSamplerHeap` actually consume.
+`.ImageHeap`/`.SamplerHeap` are always empty at this point in the call
+chain anyway (they're populated later, by materialization itself), so
+copying only those two was a no-op that silently masked the omission.
+The mesh/task/geometry stages' own resource-struct construction sites
+(a few hundred lines later in the same file) already copy both fields
+correctly -- confirming this was a copy-paste omission specific to the
+two oldest (vertex/fragment) construction sites, not a structural
+design flaw. (An initial hypothesis -- a lifetime/dangling-reference
+issue between `runPreparedDraw` and the deferred `executeDraws` call --
+was investigated and ruled out: `executeDraws` runs synchronously
+within `runPreparedDraw`'s own stack frame.)
+
+## Fix
+
+Added the two missing assignments at both construction sites in
+`feme/lib/Graphics/Executor.cpp`:
+`FRes.BoundImages = Draw.Resources.BoundImages;` /
+`FRes.BoundSamplers = Draw.Resources.BoundSamplers;`, and the `VRes.`
+counterparts. Four lines total.
+
+## Test
+
+New regression test `DrawTest.cpp`'s `FragmentStageSamplesBoundImage`:
+a real draw whose fragment stage samples a bound 1x1 image/sampler
+pair (distinctive color `0x10,0x20,0x30,0xFF`) via a new SPIR-V-dialect
+fragment shader `SampledImageFragmentSource` (explicit LOD, matching
+the existing compute-only `kSampledImageShader` convention). Confirmed
+this test fails with the exact all-zero symptom when the fix is
+reverted (via a temporary `git stash` of just `Executor.cpp`), and
+passes with the fix restored. No prior test in the repo exercised
+fragment- or vertex-stage image/sampler sampling in a real graphics
+draw at all (confirmed via grep before writing this test), which is
+why this bug had gone uncaught.
+
+## Formatting note
+
+Running whole-file `clang-format -i` on `Executor.cpp` reformatted
+unrelated, pre-existing code elsewhere in the file (function
+signatures for `clipAgainstPlane`/`isCulledByCullDistance`/
+`clipTriangle`, an unrelated `Alpha` expression) -- a side effect of
+formatting the whole file rather than just the changed lines. Reverted
+those changes and used `git-clang-format --diff` instead (diff-only
+formatting), which reported no changes needed for either modified
+file -- keeping the actual diff limited to the four new lines in
+`Executor.cpp` plus the new shader constant and test in `DrawTest.cpp`.
+
+## Verification
+
+- `ninja check-feme` (assertions + ccache): 2058/2117, 0 `Failed`, 59
+  pre-existing `Unsupported`, up 1 test from this row's own new
+  coverage.
+- Standalone repros (set 0, set 1, separate descriptors, implicit and
+  explicit LOD) all now produce correct, non-zero sampled values.
+- Real CTS re-run of `dEQP-VK.texture.filtering.2d.*` (1698 cases):
+  50/1698 now genuinely pass (0/1698 before), 208 `Fail` (down from
+  258, but now a real-but-wrong-gradient shape rather than all-zero),
+  1440 honest `NotSupported`.
+
+## Scoping decision
+
+The remaining 208 fails are a real but numerically-wrong sampling
+result (not all-zero), a materially different and still-unscoped bug
+(likely texel-coordinate quantization or a wrap-mode edge case in the
+sampling kernel itself). Tracked as new roadmap H15 rather than chasing
+it under H14, which is struck through on its own, narrower, honest
+merits (the catastrophic all-zero bug it names is genuinely fixed).
+`samplerAnisotropy` (H7i) is not revisited: `filtering_anisotropy.*`
+remains 0/128, all honest `NotSupported`, gated on the feature bit
+itself and now also on H15's remaining correctness gap -- flipping it
+would still be unverifiable.
+
+## Commits this session
+
+1. `Executor.cpp` fix + `DrawTest.cpp` regression test, one commit.
+2. `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`
+   updates recording H14's closure and the new H15 row.
+3. This file.
