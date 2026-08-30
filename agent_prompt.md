@@ -37,32 +37,46 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H13d or any prerequisite work required to complete
+Can you continue working on H7i or any prerequisite work required to complete
 the H-series milestones?
 
-> **`SPIRVResourceLoweringPass` does not recognize a single combined
-> `OpTypeSampledImage`-style `handlefrombinding` call**, discovered via roadmap
-> H7i's own real re-run of
-> `dEQP-VK.texture.filtering_anisotropy.*`/`dEQP-VK.texture.filtering.2d.*`
-> (0/128, 0/1698 respectively -- every graphics-pipeline case in both groups):
-> `vkCreateGraphicsPipelines` fails with `VK_ERROR_INITIALIZATION_FAILED`,
-> root-caused via `FEME_VULKAN_LOG_CREATION_ERRORS=1` to `UnsupportedOps.cpp`'s
-> generic "register-bound resource handle the FeMe CPU target cannot normalize"
-> diagnostic firing on a `handlefrombinding` call whose result type is a literal
-> struct combining `spirv.Image` and `spirv.Sampler` in one handle (the shape
-> glslang actually emits for an ordinary, idiomatic GLSL `uniform sampler2D`
-> declaration) -- `classifySampledImage2DHandle`/`classifySamplerHandle`
-> (`SPIRVResourceLowering.cpp`) only recognize a *separately*-declared image
-> handle and sampler handle later composed by `insertvalue`/read apart by
-> `extractvalue`, not a single call already returning the combined pair.
-> Confirmed generic, not anisotropy-specific: an ordinary, unrelated
-> `dEQP-VK.texture.filtering.2d.combinations.*` sweep reproduces the identical
-> failure. Needs a real investigation into recognizing this combined-handle
-> shape directly in `collectNormalizableHandles`/`classifySampledImage2DHandle`
-> (most likely: detect a `handlefrombinding` call whose return type is a literal
-> struct of exactly `{spirv.Image, spirv.Sampler}`, and treat every direct use
-> of it as if it had first been split via a synthetic image/sampler pair,
-> without requiring a real `insertvalue`/`extractvalue` round-trip to exist in
-> the IR) -- this blocks nearly all real Vulkan CTS graphics-pipeline
-> conformance for GLSL-style combined-sampler shaders, not just
-> `samplerAnisotropy`
+> **`samplerAnisotropy`**: `Image.cpp` already stores
+> `anisotropyEnable`/`maxAnisotropy` on the sampler descriptor at creation time,
+> but no anisotropic filtering logic was found in the actual texture-sampling
+> implementation -- sampling still appears isotropic regardless of the stored
+> state. Needs the real anisotropic filter kernel wired into the sampling path
+> before this can honestly flip (and `maxSamplerAnisotropy`, currently the
+> degenerate `1.0f`, would need raising to match) (in progress: a real
+> screen-space-derivative-based implicit-LOD computation and a genuine bounded
+> multi-tap anisotropic filter are now implemented (`FeMeRuntimeCPU.c`'s
+> `femeRTPlanImplicitLod`, `ImageCalls.h`/`.cpp`'s widened `Sample2D` shape,
+> both `ResourceLowering.cpp` and `SPIRVResourceLowering.cpp`'s
+> `getOrSynthesizeSample2DDerivatives`), covering the plain `sampler2D`
+> (`Sample2D`) shape only. Four new unit tests confirm the real behavior end to
+> end: `ImageSamplingTest.cpp`'s
+> `ImplicitLodWithNoDerivativesReadsBaseLevel`/`ImplicitLodSelectsCoarserMipFromDerivatives`/`AnisotropicSampleDiffersFromIsotropicSample`,
+> and `SPIRVResourceLoweringTest.cpp`'s
+> `FragmentStageImplicitSampleSynthesizesRealDerivatives`. However, a real
+> re-run of `dEQP-VK.texture.filtering_anisotropy.*` found the filter kernel is
+> never actually reached: 0/128 pass (64 Fail, 64 `NotSupported` for unrelated
+> compute-format gaps), every graphics case failing at
+> `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`. Root-caused
+> via `FEME_VULKAN_LOG_CREATION_ERRORS=1` to `SPIRVResourceLoweringPass` not
+> recognizing a single combined `OpTypeSampledImage`-style `handlefrombinding`
+> call -- the shape glslang actually emits for an ordinary GLSL `uniform
+> sampler2D` declaration, as opposed to the separately-declared-then-composed
+> image+sampler pattern the pass's existing classification logic expects. A
+> broader sweep confirmed this is not specific to anisotropy or this row's own
+> changes: `dEQP-VK.texture.filtering.2d.*` (1698 cases) is 0/1698 passing
+> overall (258 Fail, all the same graphics-pipeline-creation error; 1440
+> `NotSupported`), and classification fails structurally upstream of anything
+> this row's own derivative-synthesis code touches, so that code is never
+> reached either way -- confirmed pre-existing and unrelated to H7i.
+> `samplerAnisotropy` therefore stays `VK_FALSE` (reverted from an earlier
+> premature `VK_TRUE`) and `maxSamplerAnisotropy` stays at its degenerate `1.0f`
+> floor -- flipping either would be an unverifiable conformance claim. `ninja
+> check-feme` (assertions-enabled, ccache build) passes in full, 2054/2113 (59
+> pre-existing, unrelated `Unsupported`, 0 `Failed`). Tracked to completion as
+> new roadmap follow-on H13d (the `SPIRVResourceLoweringPass`
+> combined-sampled-image-handle gap itself). See "Roadmap H7i: measured impact"
+> in VulkanCTSReport.md for the full reproduction)
