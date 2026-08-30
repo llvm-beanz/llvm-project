@@ -15922,3 +15922,83 @@ Images-and-sampling section). `Vulkan14FeatureInventory.md`/
 `VkPhysicalDeviceFeatures` bit or extension is honestly flippable by this
 row's own scope alone (H19d tracks that once the format/configuration
 breadth catches up).
+
+## Roadmap H19b: measured impact
+
+**Scope.** Arrayed (`2D_ARRAY`) storage-image read/write for the same
+6-format mandatory floor H19a already covers. `classifyStorageImage2DHandle`/
+`hasOnlySupportedStorageImageUses` (`SPIRVResourceLowering.cpp`) previously
+required `Dim == 2D`, `Arrayed == 0` -- any arrayed storage-image handle
+was left entirely unrewritten.
+
+**Fix.** Widened `classifyStorageImage2DHandle` to accept `Arrayed == 1`,
+mapping to the pre-existing `ImageShape::Array2D` (already shared with
+`SampledImage2D`'s own arrayed sample/fetch, roadmap H7b-a) instead of
+unconditionally rejecting. Widened `hasOnlySupportedStorageImageUses` to
+take a `Shape` parameter and require a 3-component `(x, y, layer)`
+coordinate for `Array2D` (2-component for `Plain2D`, unchanged).
+`MS` (multisample) is still rejected regardless of `Arrayed` -- that stays
+H19d's own scope. Added `Store2DArray`/`Store2DArrayI32` call vocabulary
+(`ImageCalls.h`/`.cpp`) and `femeRTStoreTexel2DArray`/
+`femeRTStoreTexel2DArrayI32` runtime helpers plus
+`femeCpuImageStore2DArrayV4F32`/`femeCpuImageStore2DArrayV4I32` entry
+points (`FeMeRuntimeCPU.c`), mirroring `femeRTFetchTexel2D`'s own existing
+`Layer * Layout->SlicePitch` addressing (roadmap H7b-a's read-side
+counterpart) and `femeCpuImageLoad2DArrayV4F32`'s own `Layer < 0` guard
+convention.
+
+**Fix summary.**
+- `feme/include/feme/Transforms/CPU/ImageCalls.h`,
+  `feme/lib/Transforms/CPU/ImageCalls.cpp`: `ImageCallKind::Store2DArray`/
+  `Store2DArrayI32`, a `(heap, heap_count, index, x, y, layer, texel,
+  mask) -> void` call shape, mirroring `Store2D`/`Store2DI32`'s own
+  writing `MemoryEffects::argMemOnly(ModRefInfo::Mod)`.
+- `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`:
+  `classifyStorageImage2DHandle` (accepts `Arrayed == 1`),
+  `hasOnlySupportedStorageImageUses` (`Shape`-parameterized coordinate
+  width), `collectHandles` (passes `Classification->Shape` through),
+  `lowerImageAccesses` (dispatches to `createStore2DArray`/
+  `createStore2DArrayI32` when `Shape == ImageShape::Array2D`, reusing the
+  already-computed `Layer` value the read side already extracts).
+- `feme/runtime/CPU/FeMeRuntimeCPU.c`: `femeRTStoreTexel2DArray`/
+  `femeRTStoreTexel2DArrayI32` helpers, `femeCpuImageStore2DArrayV4F32`/
+  `femeCpuImageStore2DArrayV4I32` entry points.
+
+**Test.** 4 new unit tests in `SPIRVResourceLoweringTest.cpp`
+(`LowersArrayedStorageImageWriteToImageStoreArray`,
+`LowersIntegerArrayedStorageImageWriteToImageStoreArrayV4I32`,
+`LowersArrayedStorageImageLoadStoreToBothCalls`,
+`LeavesAMultisampledStorageImageHandleAlone` -- replacing the now-stale
+`LeavesAnArrayedStorageImageHandleAlone` negative test), 3 in
+`ImageSamplingTest.cpp` (`StoreArrayWritesTexelIntoTheAddressedLayerOnly`,
+`StoreArrayWritesTexelIntoR32G32B32A32Uint`,
+`StoreArrayOutOfBoundsLayerIsANoOp`).
+
+**`ninja check-feme`** (assertions + ccache): 2086/2145, 0 `Failed`, 59
+pre-existing `Unsupported`.
+
+**Real CTS re-run.** `dEQP-VK.image.load_store.with_format.2d_array.*`
+(156 cases): 24 Pass, 0 Fail, 132 `NotSupported`. The 24 passes are
+exactly the 6-format mandatory floor's own plain/`_linear`-tiling x
+multi-layer/`_single_layer` cases (24 = 6 formats x 2 tilings x 2 layer
+variants) -- the multi-layer half of these previously failed at
+`vkCreateComputePipelines` with `VK_ERROR_INITIALIZATION_FAILED` before
+this fix (the `_single_layer` half already passed under H19a's own
+`Plain2D`-only classification, since a single-layer `2D_ARRAY` view still
+binds a genuinely non-arrayed handle in this case). The remaining 132
+`NotSupported` are exactly every format outside the 6-format floor --
+correct, honest behavior unrelated to this row.
+
+A follow-up probe of two `1d_array.*` cases (`r32_uint`,
+`r32g32b32a32_uint`) confirms they still `Fail` the same way as before --
+`Dim == 1D` is untouched by this row's own `Dim == 2D` requirement,
+correctly left to roadmap H19c instead (H19c's own row description above
+already scoped itself to `1d.*`/`3d.*`; this row's final scope is
+`2d_array` only, not `1d_array` as an earlier draft of this row's own text
+had loosely implied).
+
+**Remaining gap.** H19c (1D/3D) and H19d (cube/cube-array, multisample,
+format/configuration breadth) remain open, tracked as before.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: no `VkPhysicalDeviceFeatures` bit or extension is honestly
+flippable by this row's own scope alone.
