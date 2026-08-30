@@ -15208,6 +15208,64 @@ unstruck (not fully closed), with an "in progress" note describing both
 the real implementation and the newly-discovered blocker, and a new
 `H13d` row added for the blocker itself.
 
+### H7i closure (following H13d/H14/H15/H16/H17/H18)
+
+**Every blocker this row's own investigation surfaced is now closed.**
+H13d (the `SPIRVResourceLoweringPass` combined-sampled-image-handle gap
+itself) was fixed by splitting a combined-handle `handlefrombinding` call
+into synthetic single-resource calls before existing lowering logic runs.
+That closure exposed a chain of four further, distinct sampling-
+correctness gaps in the newly-reachable `dEQP-VK.texture.filtering.2d.*`
+graphics-pipeline path, each root-caused and fixed in its own roadmap
+row: H14 (every fragment-/vertex-stage image/sampler resource read
+all-zero, a resource-plumbing bug), H15 (a missing `LodBias`/`MinLod`/
+`MaxLod` clamp), H16 (every sampling entry point consulting `MagFilter`
+alone regardless of magnifying/minifying), H17 (no real trilinear/
+`mipmapMode=LINEAR` blend), and H18 (an off-by-one bit shift corrupting
+`R11G11B10_FLOAT`'s own packed-minifloat decode). With all five closed,
+`dEQP-VK.texture.filtering.2d.*` is fully clean: 258/1698 Pass, 1440
+honest `NotSupported`, **0 Fail**.
+
+**Feature-bit decision, revisited.** With every real blocker this row's
+own investigation found now fixed, `PhysicalDeviceInfo.cpp` now
+advertises `Info.Features.samplerAnisotropy = VK_TRUE` and raises
+`Limits.maxSamplerAnisotropy` from its prior degenerate `1.0f` floor to
+`16.0f` (the value real GPU drivers typically report, comfortably above
+every `anisotropy_max`/fractional-value CTS case this feature's own
+mandatory conformance floor exercises).
+
+**Real CTS re-run: `dEQP-VK.texture.filtering_anisotropy.*`.** 128 cases:
+**64 Pass / 0 Fail / 64 NotSupported** (the same, unrelated,
+pre-existing `_compute`-variant "Format not supported" gap as before,
+unaffected by this row) -- every real graphics-pipeline case in this
+group now passes, up from 0 Pass / 64 Fail in the original reproduction
+above. This confirms the anisotropic filter kernel this row's own
+implementation section describes (`femeRTPlanImplicitLod`'s multi-tap,
+`MaxAnisotropy`-bounded average) is now genuinely reached by real CTS
+cases and produces conformant output, not merely present in the code.
+
+**Regression check: `dEQP-VK.texture.filtering.2d.*`.** Re-run after this
+feature-bit flip (1698 cases): still 258 Pass, 1440 NotSupported, **0
+Fail** -- unchanged from the pre-flip baseline, confirming advertising
+`samplerAnisotropy` introduced no regression to the broader, non-
+anisotropic-specific filtering test group.
+
+**Test.** `PhysicalDeviceInfoTest.cpp`'s
+`OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised`
+now asserts `Info.Features.samplerAnisotropy == VK_TRUE` alongside the
+feature's other already-advertised siblings, and clears it in the
+"nothing else sneaks to true" memcmp check the same way.
+
+**`ninja check-feme`.** Passes in full at **2068/2127** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`).
+
+**Documentation.** `FeMeGraphicsDesign.md`'s "Canonical image operations"
+section updated to record the real closure (no longer "in progress").
+`Vulkan14FeatureInventory.md`'s `samplerAnisotropy` row updated to "yes"
+via this closure narrative. `VulkanExtensionInventory.md` confirmed no
+change needed. `Roadmap.md`'s H7i is now struck through with the full
+closure narrative.
+
 ## Roadmap H13d: measured impact
 
 **Fix.** `SPIRVResourceLoweringPass` now recognizes the combined

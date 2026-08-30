@@ -2463,11 +2463,18 @@ that group (0/128), and in the broader, unrelated
 `OpTypeSampledImage`-style `handlefrombinding` call, the shape glslang
 emits for an ordinary GLSL `uniform sampler2D` declaration, as opposed to
 the separately-declared-then-composed image+sampler pattern its
-classification logic expects. Tracked as new roadmap H13d.
-`PhysicalDeviceInfo.cpp` therefore does *not* advertise `samplerAnisotropy`
-yet (`maxSamplerAnisotropy` stays at its degenerate `1.0f` floor) --
-flipping it before H13d unblocks a real passing case would be an
-unverifiable conformance claim.
+classification logic expects. Tracked as roadmap H13d, since closed, along
+with four further sampling-correctness gaps its own closure exposed
+(roadmap H14 through H18: all-zero resource reads, a missing LOD clamp,
+mag/min filter selection swapped, no trilinear blend, and an off-by-one
+bit shift in one packed texture format's own decoder, respectively) --
+`dEQP-VK.texture.filtering.2d.*` is now fully clean (0 `Fail`), and a real
+re-run of `dEQP-VK.texture.filtering_anisotropy.*` confirms this filter
+kernel is genuinely reached and passes (64/64 real graphics-pipeline
+cases, the other 64 honestly `NotSupported` for an unrelated
+compute-format gap). `PhysicalDeviceInfo.cpp` now advertises
+`samplerAnisotropy` (`maxSamplerAnisotropy` raised to `16.0f`, the value
+real GPU drivers typically report).
 
 ### Texture layout and formats
 
