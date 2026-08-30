@@ -630,6 +630,29 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Info.Features.vertexPipelineStoresAndAtomics = VK_TRUE;
   Info.Features.fragmentStoresAndAtomics = VK_TRUE;
 
+  // Roadmap H7h: `shaderClipDistance`/`shaderCullDistance` gate whether a
+  // vertex (or other pre-rasterization) stage may write `gl_ClipDistance`/
+  // `gl_CullDistance` at all. `CanonicalizeStage.cpp`'s
+  // `getSystemValueForBuiltIn` now maps SPIR-V `BuiltIn ClipDistance`/
+  // `CullDistance` onto their own `SignatureSystemValue`s (previously
+  // `None`, an unmodeled system value, the same treatment an unrecognized
+  // DXIL semantic gets), and `Executor.cpp`'s `clipTriangle`/
+  // `RasterizePrimitives` consume each as a real per-vertex, up-to-8-plane
+  // output: `gl_ClipDistance` becomes one additional Sutherland-Hodgman
+  // half-space clip per declared plane, evaluated directly against the
+  // shader's own per-vertex value (rather than derived from clip-space
+  // position, unlike the fixed frustum planes); `gl_CullDistance`
+  // discards a whole point/line/polygon primitive outright, before it
+  // ever reaches clipping, when one declared plane is negative for every
+  // one of its vertices (`isCulledByCullDistance`). Confirmed by
+  // `ExecutorTest.cpp`'s new `ClipsATriangleAgainstAWrittenClipDistance`/
+  // `CullsATriangleWhenCullDistanceIsNegativeForEveryVertex`. Both feature
+  // bits flip to `VK_TRUE`; `maxClipDistances`/`maxCullDistances`/
+  // `maxCombinedClipAndCullDistances` (`PhysicalDeviceInfo.cpp`, already
+  // the honest value 8) needed no change.
+  Info.Features.shaderClipDistance = VK_TRUE;
+  Info.Features.shaderCullDistance = VK_TRUE;
+
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
   MemProps.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |

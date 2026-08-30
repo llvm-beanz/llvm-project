@@ -107,6 +107,40 @@ constexpr char Vec3FragmentShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="fragment" }
 )";
 
+// (roadmap H7h) Like VertexShaderIR above, but with two extra scalar
+// inputs (location 2: `gl_ClipDistance[0]`, location 3:
+// `gl_CullDistance[0]`) passed straight through to their own system-value
+// outputs (elements 6/7), rather than derived from position -- letting a
+// test set each vertex's clip/cull-distance value independently of its
+// position.
+constexpr char ClipCullDistanceVertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %cr = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %cg = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+    %cb = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+    %ca = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 0)
+    %clip = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 0)
+    %cull = call float @feme.stage.input.load.f32(i32 3, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 4, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 5, i32 0, i32 0, float %cr, i32 0)
+    call void @feme.stage.output.store.f32(i32 5, i32 0, i32 1, float %cg, i32 0)
+    call void @feme.stage.output.store.f32(i32 5, i32 0, i32 2, float %cb, i32 0)
+    call void @feme.stage.output.store.f32(i32 5, i32 0, i32 3, float %ca, i32 0)
+    call void @feme.stage.output.store.f32(i32 6, i32 0, i32 0, float %clip, i32 0)
+    call void @feme.stage.output.store.f32(i32 7, i32 0, i32 0, float %cull, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
 // (Roadmap C8) A vertex shader like VertexShaderIR above, but its color
 // varying (element 4, location 1) is a 2x2 matrix -- `RowCount == 2`,
 // `ComponentCount == 2` -- rather than a plain float4, packing the same
@@ -235,6 +269,87 @@ buildPipeline(Context &Ctx, RasterState Raster,
                           /*SampleCount=*/1, std::move(Attachments), Stencil,
                           std::vector<BlendState>{ColorBlend}, LogicOpEnable,
                           Logic, BlendConstants, PrimitiveRestartEnable);
+}
+
+/// (roadmap H7h) Builds a `TriangleList` pipeline using
+/// `ClipCullDistanceVertexShaderIR`: like `buildPipeline`'s own
+/// color-passthrough pair, but with two extra per-vertex scalar inputs
+/// (location 2/3) feeding a real `gl_ClipDistance[0]`/`gl_CullDistance[0]`
+/// output apiece, letting a test set each vertex's clip/cull-distance
+/// value independently of its position.
+Expected<GraphicsPipeline> buildClipCullDistancePipeline(Context &Ctx,
+                                                          RasterState Raster) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/2),
+      makeElement(3, SignatureDirection::Input, 1, /*Location=*/3),
+      makeElement(4, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(5, SignatureDirection::Output, 4, /*Location=*/0),
+      makeElement(6, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::ClipDistance, /*RowCount=*/1),
+      makeElement(7, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::CullDistance, /*RowCount=*/1)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, ClipCullDistanceVertexShaderIR, "vs_main", VSSig,
+                  ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  return GraphicsPipeline(std::move(*VS), std::move(*FS),
+                          PrimitiveTopology::TriangleList, Raster,
+                          DepthState{}, BlendMode::Replace,
+                          /*SampleCount=*/1, std::move(Attachments),
+                          StencilState{}, std::vector<BlendState>{BlendState{}});
+}
+
+/// Prepares a single-triangle draw against `buildClipCullDistancePipeline`'s
+/// signature: interleaved position (xyz), color (rgba), clip-distance and
+/// cull-distance, 9 floats/vertex.
+PreparedDraw
+prepareClipCullDistanceDraw(std::array<uint8_t, 64> &AttachmentStorage,
+                            std::vector<float> &VertexData,
+                            std::array<VertexBufferBinding, 1> &Bindings,
+                            std::array<AttachmentView, 1> &Attachments,
+                            AttachmentView &Color) {
+  static const std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12},
+      {2, cpu::ResourceFormat::R32_FLOAT, 28},
+      {3, cpu::ResourceFormat::R32_FLOAT, 32}};
+  Color = AttachmentView{AttachmentStorage, cpu::ResourceFormat::R8G8B8A8_UNORM,
+                         4, 4};
+  Attachments = {Color};
+  Bindings = {VertexBufferBinding{
+      0, 36,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = static_cast<uint32_t>(VertexData.size() / 9);
+  Cmd.InstanceCount = 1;
+  static std::array<DrawCommand, 1> Draws;
+  Draws = {Cmd};
+  Draw.Draws = Draws;
+  return Draw;
 }
 
 struct TriangleScene {
@@ -1377,6 +1492,81 @@ TEST(ExecutorTest, PolygonModePointRastersOnlyTheTrianglesThreeVertices) {
         continue;
       EXPECT_EQ(texel(X, Y)[3], 0) << "x=" << X << " y=" << Y;
     }
+}
+
+// (roadmap H7h) `shaderClipDistance`: a triangle covering the whole
+// [-1, 1] NDC square (`FillsFullyCoveredTriangleWithSolidColor`'s own
+// full-screen-triangle trick), each vertex's own `gl_ClipDistance[0]`
+// written equal to its own NDC Y coordinate -- an affine function that,
+// being linearly interpolated the same way NDC Y itself is (both vertex
+// attributes with the triangle's own constant W = 1), evaluates to
+// exactly the fragment's own NDC Y everywhere inside the primitive. Only
+// the NDC-Y->0 half-plane (`ClipDistance >= 0`) survives clipping: rows 0
+// and 1 (positive NDC Y, `PolygonModePointRastersOnlyTheTrianglesThree
+// Vertices`'s own "positive Y = top row" convention) stay lit; rows 2 and
+// 3 (negative NDC Y) are clipped away entirely.
+TEST(ExecutorTest, ClipsATriangleAgainstAWrittenClipDistance) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildClipCullDistancePipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Interleaved position (xyz), color (rgba), clip-distance, cull-distance
+  // (9 floats/vertex). Cull-distance is a uniformly positive 1.0 so it
+  // never interferes with this test's own clip-only scenario.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, -1.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, -1.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 3.0f,  1.0f, // v2
+  };
+  std::array<uint8_t, 64> AttachmentStorage{};
+  std::array<VertexBufferBinding, 1> Bindings;
+  std::array<AttachmentView, 1> Attachments;
+  AttachmentView Color;
+  PreparedDraw Draw = prepareClipCullDistanceDraw(
+      AttachmentStorage, VertexData, Bindings, Attachments, Color);
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t Y : {0u, 1u})
+    for (uint32_t X = 0; X != 4; ++X)
+      EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
+  for (uint32_t Y : {2u, 3u})
+    for (uint32_t X = 0; X != 4; ++X)
+      EXPECT_EQ(texel(X, Y)[3], 0) << "x=" << X << " y=" << Y;
+}
+
+// (roadmap H7h) `shaderCullDistance`: the same full-screen triangle as
+// `ClipsATriangleAgainstAWrittenClipDistance`, but with every vertex's own
+// `gl_CullDistance[0]` written negative -- per the Vulkan spec, a whole
+// primitive is discarded, before it ever reaches clipping, when one
+// declared cull plane is negative for *every* one of its vertices.
+// Clip-distance is a uniformly positive 1.0 so it never interferes.
+TEST(ExecutorTest, CullsATriangleWhenCullDistanceIsNegativeForEveryVertex) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildClipCullDistancePipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, -1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, -1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, -1.0f, // v2
+  };
+  std::array<uint8_t, 64> AttachmentStorage{};
+  std::array<VertexBufferBinding, 1> Bindings;
+  std::array<AttachmentView, 1> Attachments;
+  AttachmentView Color;
+  PreparedDraw Draw = prepareClipCullDistanceDraw(
+      AttachmentStorage, VertexData, Bindings, Attachments, Color);
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I)
+    EXPECT_EQ(AttachmentStorage[I * 4 + 3], 0) << "texel " << I;
 }
 
 TEST(ExecutorTest, InterpolatesColorAcrossTheTriangle) {

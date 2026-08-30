@@ -88,6 +88,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -294,6 +295,18 @@ struct RasterVertex {
   /// primitive's vertices. Defaults to Vulkan's own documented fallback
   /// for an unwritten `gl_PointSize` (1.0).
   float PointSize = 1.0f;
+  /// (roadmap H7h) `gl_ClipDistance`: up to `maxClipDistances` (8) planes'
+  /// worth of arbitrary application-supplied clip-plane distances, one
+  /// real half-space clip per declared plane (`clipTriangle`'s own
+  /// per-plane loop); only the first `SignatureElement::RowCount`
+  /// (`VSClipDistance`, roadmap H7h) entries are ever declared/populated,
+  /// the rest staying at the harmless default `0.0`.
+  std::array<float, 8> ClipDistances{};
+  /// (roadmap H7h) `gl_CullDistance`: up to `maxCullDistances` (8) planes,
+  /// each testing whether every vertex of a primitive has a *negative*
+  /// value for the same plane index (`isCulledByCullDistance`) -- a whole
+  /// primitive is discarded before it ever reaches clipping if so.
+  std::array<float, 8> CullDistances{};
 };
 
 RasterVertex lerpVertex(const RasterVertex &A, const RasterVertex &B, float T,
@@ -302,6 +315,14 @@ RasterVertex lerpVertex(const RasterVertex &A, const RasterVertex &B, float T,
   Out.PointSize = A.PointSize;
   for (unsigned I = 0; I != 4; ++I)
     Out.Clip[I] = A.Clip[I] + (B.Clip[I] - A.Clip[I]) * T;
+  // (roadmap H7h) An ordinary, linearly-interpolated `Float` value, like
+  // any other varying -- needed so a later clip-distance plane's own
+  // evaluation (`clipTriangle`'s per-plane loop) sees a consistent value
+  // at a vertex clipping against an *earlier* plane introduced.
+  for (unsigned I = 0; I != A.ClipDistances.size(); ++I)
+    Out.ClipDistances[I] =
+        A.ClipDistances[I] + (B.ClipDistances[I] - A.ClipDistances[I]) * T;
+  Out.CullDistances = A.CullDistances;
   Out.Varyings.resize(A.Varyings.size());
   unsigned Idx = 0;
   for (const LinkedVarying &V : Varyings) {
@@ -324,12 +345,17 @@ RasterVertex lerpVertex(const RasterVertex &A, const RasterVertex &B, float T,
 
 /// One homogeneous clip-space half-space, `Distance(V) >= 0` meaning
 /// "inside". Sutherland-Hodgman clips a polygon against each of these in
-/// turn (see the file comment above's guard-band-plane note).
+/// turn (see the file comment above's guard-band-plane note). (Roadmap
+/// H7h) Takes the whole `RasterVertex`, not just its clip-space position,
+/// so a `gl_ClipDistance`-plane's own distance function (the shader's own
+/// per-vertex output, not derived from `Clip` at all) can share this same
+/// Sutherland-Hodgman machinery as the fixed frustum planes.
 constexpr float ClipEpsilon = 1e-5f;
 
+using PlaneDistanceFn = std::function<float(const RasterVertex &)>;
+
 std::vector<RasterVertex>
-clipAgainstPlane(std::vector<RasterVertex> In,
-                 float (*Distance)(const std::array<float, 4> &),
+clipAgainstPlane(std::vector<RasterVertex> In, const PlaneDistanceFn &Distance,
                  ArrayRef<LinkedVarying> Varyings) {
   if (In.empty())
     return In;
@@ -337,8 +363,8 @@ clipAgainstPlane(std::vector<RasterVertex> In,
   for (size_t I = 0; I != In.size(); ++I) {
     const RasterVertex &Cur = In[I];
     const RasterVertex &Prev = In[(I + In.size() - 1) % In.size()];
-    float DCur = Distance(Cur.Clip);
-    float DPrev = Distance(Prev.Clip);
+    float DCur = Distance(Cur);
+    float DPrev = Distance(Prev);
     bool CurIn = DCur >= 0.0f;
     bool PrevIn = DPrev >= 0.0f;
     if (CurIn != PrevIn) {
@@ -353,16 +379,17 @@ clipAgainstPlane(std::vector<RasterVertex> In,
 
 std::vector<RasterVertex> clipTriangle(std::array<RasterVertex, 3> Tri,
                                        ArrayRef<LinkedVarying> Varyings,
-                                       bool DepthClampEnable) {
+                                       bool DepthClampEnable,
+                                       unsigned ClipDistanceCount = 0) {
   std::vector<RasterVertex> Poly(Tri.begin(), Tri.end());
-  static constexpr float (*Planes[])(const std::array<float, 4> &) = {
-      [](const std::array<float, 4> &C) { return C[3] - ClipEpsilon; },
-      [](const std::array<float, 4> &C) { return C[3] - C[0]; },
-      [](const std::array<float, 4> &C) { return C[3] + C[0]; },
-      [](const std::array<float, 4> &C) { return C[3] - C[1]; },
-      [](const std::array<float, 4> &C) { return C[3] + C[1]; },
-      [](const std::array<float, 4> &C) { return C[3] - C[2]; },
-      [](const std::array<float, 4> &C) { return C[2]; },
+  static const PlaneDistanceFn FrustumPlanes[] = {
+      [](const RasterVertex &V) { return V.Clip[3] - ClipEpsilon; },
+      [](const RasterVertex &V) { return V.Clip[3] - V.Clip[0]; },
+      [](const RasterVertex &V) { return V.Clip[3] + V.Clip[0]; },
+      [](const RasterVertex &V) { return V.Clip[3] - V.Clip[1]; },
+      [](const RasterVertex &V) { return V.Clip[3] + V.Clip[1]; },
+      [](const RasterVertex &V) { return V.Clip[3] - V.Clip[2]; },
+      [](const RasterVertex &V) { return V.Clip[2]; },
   };
   // (roadmap H7d) `depthClampEnable`: per the Vulkan spec, a primitive is
   // *not* clipped against the near/far planes when depth clamp is
@@ -373,13 +400,44 @@ std::vector<RasterVertex> clipTriangle(std::array<RasterVertex, 3> Tri,
   // only the last two entries above are the actual near/far Z-clip
   // planes.
   size_t PlaneCount =
-      DepthClampEnable ? std::size(Planes) - 2 : std::size(Planes);
+      DepthClampEnable ? std::size(FrustumPlanes) - 2 : std::size(FrustumPlanes);
   for (size_t I = 0; I != PlaneCount; ++I) {
-    Poly = clipAgainstPlane(std::move(Poly), Planes[I], Varyings);
+    Poly = clipAgainstPlane(std::move(Poly), FrustumPlanes[I], Varyings);
+    if (Poly.size() < 3)
+      return {};
+  }
+  // (roadmap H7h) `gl_ClipDistance`: each declared plane is an ordinary
+  // arbitrary half-space clip against the shader's own per-vertex output
+  // value directly (rather than a value derived from clip-space
+  // position), applied after the fixed frustum planes above -- Vulkan
+  // does not specify a relative order between the two clip families, and
+  // this project's own guard-band note already documents that clip order
+  // is otherwise unconstrained.
+  for (unsigned I = 0; I != ClipDistanceCount; ++I) {
+    Poly = clipAgainstPlane(
+        std::move(Poly),
+        [I](const RasterVertex &V) { return V.ClipDistances[I]; }, Varyings);
     if (Poly.size() < 3)
       return {};
   }
   return Poly;
+}
+
+/// (roadmap H7h) `gl_CullDistance`: per the Vulkan spec, a point, line or
+/// polygon primitive is discarded outright, before it ever reaches
+/// clipping, if any one declared cull-plane index has a *negative* value
+/// at every one of the primitive's own vertices (each vertex may cull on a
+/// different plane, but a primitive only culls when the *same* plane
+/// index is negative for all of them).
+bool isCulledByCullDistance(ArrayRef<RasterVertex> Vertices,
+                           unsigned CullDistanceCount) {
+  for (unsigned I = 0; I != CullDistanceCount; ++I) {
+    if (llvm::all_of(Vertices, [I](const RasterVertex &V) {
+          return V.CullDistances[I] < 0.0f;
+        }))
+      return true;
+  }
+  return false;
 }
 
 /// One clipped, culled, viewport-transformed triangle ready for rasterization.
@@ -1310,6 +1368,21 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // and only a point-topology draw's own quad expansion ever reads it.
   const SignatureElement *VSPointSize = findElement(
       RasterSig, SignatureDirection::Output, SignatureSystemValue::PointSize);
+  // (roadmap H7h) Optional: not every vertex shader writes
+  // `gl_ClipDistance`/`gl_CullDistance`; `RowCount` gives how many of the
+  // up to `maxClipDistances`/`maxCullDistances` (8) planes were actually
+  // declared, read by `clipTriangle`'s/`isCulledByCullDistance`'s own
+  // per-plane loops below.
+  const SignatureElement *VSClipDistance =
+      findElement(RasterSig, SignatureDirection::Output,
+                  SignatureSystemValue::ClipDistance);
+  const SignatureElement *VSCullDistance =
+      findElement(RasterSig, SignatureDirection::Output,
+                  SignatureSystemValue::CullDistance);
+  unsigned ClipDistanceCount =
+      VSClipDistance ? std::min<unsigned>(VSClipDistance->RowCount, 8) : 0;
+  unsigned CullDistanceCount =
+      VSCullDistance ? std::min<unsigned>(VSCullDistance->RowCount, 8) : 0;
   if (!VSPosition)
     return createStringError(inconvertibleErrorCode(),
                              "the last pre-rasterization stage does not "
@@ -1636,6 +1709,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         V.Clip[C] = RasterOut->readFloat(VSPosition->ElementID, C, Flat);
       if (VSPointSize)
         V.PointSize = RasterOut->readFloat(VSPointSize->ElementID, 0, Flat);
+      for (unsigned Row = 0; Row != ClipDistanceCount; ++Row)
+        V.ClipDistances[Row] =
+            RasterOut->readFloat(VSClipDistance->ElementID, 0, Flat, Row);
+      for (unsigned Row = 0; Row != CullDistanceCount; ++Row)
+        V.CullDistances[Row] =
+            RasterOut->readFloat(VSCullDistance->ElementID, 0, Flat, Row);
       V.Varyings.resize(0);
       for (const LinkedVarying &LV : Varyings)
         for (uint32_t Row = 0; Row != LV.RowCount; ++Row)
@@ -1974,8 +2053,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         continue;
       std::array<RasterVertex, 3> V = {vertexAt(Tri[0]), vertexAt(Tri[1]),
                                        vertexAt(Tri[2])};
-      std::vector<RasterVertex> Clipped =
-          clipTriangle(V, Varyings, Pipeline.getRasterState().DepthClampEnable);
+      // (roadmap H7h) `gl_CullDistance`: a whole-primitive discard, tested
+      // before clipping even runs (a primitive already culled here has no
+      // fragments to clip toward regardless).
+      if (isCulledByCullDistance(V, CullDistanceCount))
+        continue;
+      std::vector<RasterVertex> Clipped = clipTriangle(
+          V, Varyings, Pipeline.getRasterState().DepthClampEnable,
+          ClipDistanceCount);
       for (size_t I = 1; I + 1 < Clipped.size(); ++I) {
         std::array<const RasterVertex *, 3> Poly = {&Clipped[0], &Clipped[I],
                                                     &Clipped[I + 1]};
