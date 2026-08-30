@@ -137,3 +137,30 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Geometry], []> {
   spirv.GlobalVariable @gl_in : !spirv.ptr<!spirv.array<3 x !spirv.struct<(vector<4xf32> [BuiltIn=0 : i32], f32 [BuiltIn=1 : i32])>>, Input>
 }
+
+// -----
+
+// (Roadmap H7x) A fragment stage's own read of `gl_ClipDistance`/
+// `gl_CullDistance` -- unlike the vertex-stage `Output` side, glslang
+// emits these as a standalone (not `gl_PerVertex`-block-wrapped) `Input`
+// array global, `BuiltIn`-decorated same as any other builtin, so it
+// converts through this ordinary stage-IO path (StageIOAddressOfPattern),
+// which -- like any non-builtin `Input` -- eagerly loads the whole array
+// at the `spirv.mlir.addressof` site, producing a value rather than a
+// pointer. A single *constant*-indexed `spirv.AccessChain` into that
+// value converts directly to `llvm.extractvalue` rather than falling
+// through to MLIR's own pointer-assuming `spirv.AccessChain` pattern.
+
+// CHECK-LABEL: llvm.func @read_clip_distance_0
+// CHECK: %[[ARR:.*]] = llvm.load %{{.*}} : !llvm.ptr<7> -> !llvm.array<1 x f32>
+// CHECK: llvm.extractvalue %[[ARR]][0] : !llvm.array<1 x f32>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ClipDistance], []> {
+  spirv.GlobalVariable @gl_ClipDistance built_in("ClipDistance") : !spirv.ptr<!spirv.array<1 x f32>, Input>
+  spirv.func @read_clip_distance_0() -> f32 "None" {
+    %0 = spirv.mlir.addressof @gl_ClipDistance : !spirv.ptr<!spirv.array<1 x f32>, Input>
+    %c0 = spirv.Constant 0 : i32
+    %1 = spirv.AccessChain %0[%c0] : !spirv.ptr<!spirv.array<1 x f32>, Input>, i32 -> !spirv.ptr<f32, Input>
+    %2 = spirv.Load "Input" %1 : f32
+    spirv.ReturnValue %2 : f32
+  }
+}

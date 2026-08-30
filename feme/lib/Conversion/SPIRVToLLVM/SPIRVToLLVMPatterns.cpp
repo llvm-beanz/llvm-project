@@ -13,6 +13,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
@@ -1200,6 +1201,75 @@ public:
 
     Rewriter.replaceOpWithNewOp<mlir::LLVM::ExtractElementOp>(
         Op, ResultType, Adaptor.getBasePtr(), Indices[0]);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.AccessChain` selecting one constant element of a
+/// value-modeled *array*-typed `Input` stage-IO variable -- (roadmap H7x)
+/// `gl_ClipDistance[0]`/`gl_CullDistance[0]`, a fragment stage's own read
+/// of a per-vertex clip/cull-distance plane, the standalone (not
+/// interface-block-wrapped, unlike the vertex-stage `Output` side) `in
+/// float gl_ClipDistance[N]`/`gl_CullDistance[N]` builtin SPIR-V's own
+/// fragment-stage import always produces. `StageIOAddressOfPattern`
+/// converts a non-builtin `Input` variable's own address eagerly into the
+/// whole variable's own loaded value (mirroring a compute builtin's
+/// value-modeled convention, since `Input`'s pointee-type conversion
+/// cannot otherwise tell the two apart -- see that pattern's own comment),
+/// so any `spirv.AccessChain` indexing into it sees an aggregate *value*
+/// (here, an `!llvm.array`) as its own base operand rather than a real
+/// pointer -- something MLIR's own `AccessChainPattern` (which always
+/// builds a `getelementptr`, assuming its base operand converts to
+/// `!llvm.ptr`) cannot handle at all, the array-shaped counterpart of
+/// `BuiltInAccessChainPattern`'s own vector-shaped one just above.
+///
+/// Only a *constant* index is legalized this way, via `llvm.extractvalue`
+/// (whose own index operands are compile-time-constant only, unlike
+/// `llvm.extractelement`'s vector-lane one): a non-constant index into a
+/// value-modeled array has no such representation to select with at all.
+/// No real CTS case needs one yet -- that shape is roadmap H7w's own
+/// dynamic-index gap, combined with a fragment-side read, which stays a
+/// separate, open gap; a non-constant index here is left to this
+/// function's own `notifyMatchFailure`, falling through to MLIR's own
+/// generic `spirv.AccessChain` pattern, which then reports a clean,
+/// diagnosed `llvm.getelementptr` verifier error (still not a crash) for
+/// its own now-invalid, non-pointer base operand.
+class StageIOArrayAccessChainPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto ArrayTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(
+        Adaptor.getBasePtr().getType());
+    if (!ArrayTy)
+      return Rewriter.notifyMatchFailure(
+          Op, "base is not a value-modeled stage-IO array");
+
+    mlir::ValueRange Indices = Op.getIndices();
+    if (Indices.size() != 1)
+      return Rewriter.notifyMatchFailure(Op, "expected a single array index");
+
+    llvm::APInt IndexValue;
+    if (!mlir::matchPattern(Indices[0], mlir::m_ConstantInt(&IndexValue)))
+      return Rewriter.notifyMatchFailure(
+          Op, "a non-constant index into a value-modeled stage-IO array has "
+              "no llvm.extractvalue representation");
+
+    mlir::Type ResultType =
+        getTypeConverter()->convertType(Op.getComponentPtr().getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    if (ResultType != ArrayTy.getElementType())
+      return Rewriter.notifyMatchFailure(Op, "not selecting a scalar element");
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ExtractValueOp>(
+        Op, ResultType, Adaptor.getBasePtr(),
+        llvm::ArrayRef<int64_t>{
+            static_cast<int64_t>(IndexValue.getZExtValue())});
     return mlir::success();
   }
 };
@@ -3439,6 +3509,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       SDotAccSatConversionPattern, UDotAccSatConversionPattern,
       SUDotAccSatConversionPattern, SetMeshOutputsEXTConversionPattern,
       SpecConstantErasurePattern, StageIOGlobalVariablePattern,
+      StageIOArrayAccessChainPattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
