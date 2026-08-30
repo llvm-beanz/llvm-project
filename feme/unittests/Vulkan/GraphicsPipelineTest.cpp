@@ -1639,6 +1639,40 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap H7t) A fragment stage's `SV_Target0` output may legally have
+/// fewer than 4 components (e.g. a `vec3`, discovered via a real
+/// `dEQP-VK.pipeline.monolithic.multisample.alpha_to_coverage_unused_attachment.*`
+/// re-run whose real attachment writes exactly this shape) -- the missing
+/// trailing components are simply never written by the shader and read
+/// back as their SPIR-V/GLSL-defined identity value at draw time
+/// (`Executor.cpp`'s `readFragmentColor`), not a creation-time error.
+TEST_F(GraphicsPipelineTest, AcceptsFragmentOutputNarrowerThan4Components) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<3xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %c = spirv.Constant dense<[0.0, 1.0, 0.0]> : vector<3xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<3xf32>, Output>
+    spirv.Store "Output" %p, %c : vector<3xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir");
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_SUCCESS);
+  EXPECT_NE(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// A fragment input at a location no vertex output writes is a mislinked
 /// varying; cross-stage interface matching catches it at creation.
 TEST_F(GraphicsPipelineTest, RejectsUnmatchedVarying) {

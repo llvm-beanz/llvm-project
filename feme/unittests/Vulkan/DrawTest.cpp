@@ -237,6 +237,23 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (roadmap H7t) Solid green into a 3-component `SV_Target0` -- no alpha
+/// channel written at all. Legal per spec, the missing alpha reads back as
+/// its identity value (`1.0`, fully opaque).
+constexpr llvm::StringLiteral Vec3GreenFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<3xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %c = spirv.Constant dense<[0.0, 1.0, 0.0]> : vector<3xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<3xf32>, Output>
+    spirv.Store "Output" %p, %c : vector<3xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
 /// Half-alpha red into SV_Target0, for `BlendState::BlendEnable` coverage.
 constexpr llvm::StringLiteral HalfAlphaRedFragmentSource = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
@@ -993,6 +1010,40 @@ TEST_F(DrawTest, RendersTriangleThroughRenderPass) {
       std::array<uint8_t, 4> Texel = texel(X, Y);
       EXPECT_EQ(Texel[0], 0xFF) << "at (" << X << ", " << Y << ")";
       EXPECT_EQ(Texel[1], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[2], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[3], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H7t) Mirrors `RendersTriangleThroughRenderPass` above, but the
+/// fragment stage's `SV_Target0` output is a 3-component `vec3` (no alpha
+/// channel written): the real R8G8B8A8_UNORM attachment must still read
+/// back fully opaque (missing alpha defaults to `1.0` per spec), and the
+/// RGB write must land correctly despite the narrower output.
+TEST_F(DrawTest, RendersFragmentOutputNarrowerThan4Components) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(Vec3GreenFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  // Clear to a color that would be mistaken for "correct" if the missing
+  // alpha were left as garbage/zero rather than defaulted to opaque.
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texel(X, Y);
+      EXPECT_EQ(Texel[0], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 0xFF) << "at (" << X << ", " << Y << ")";
       EXPECT_EQ(Texel[2], 0x00) << "at (" << X << ", " << Y << ")";
       EXPECT_EQ(Texel[3], 0xFF) << "at (" << X << ", " << Y << ")";
     }

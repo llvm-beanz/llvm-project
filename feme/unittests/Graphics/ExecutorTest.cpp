@@ -87,6 +87,26 @@ constexpr char FragmentShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="fragment" }
 )";
 
+// (roadmap H7t) Like FragmentShaderIR above, but only stores its 3 color
+// components (r, g, b) to SV_Target0 -- no alpha write at all, matching a
+// `vec3` fragment output's own signature (`ComponentCount == 3`), legal
+// per spec with the missing alpha reading back as its identity value
+// (`1.0`).
+constexpr char Vec3FragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    %r = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %g = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %b = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %r, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %g, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %b, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
 // (Roadmap C8) A vertex shader like VertexShaderIR above, but its color
 // varying (element 4, location 1) is a 2x2 matrix -- `RowCount == 2`,
 // `ComponentCount == 2` -- rather than a plain float4, packing the same
@@ -306,6 +326,75 @@ TEST(ExecutorTest, FillsFullyCoveredTriangleWithSolidColor) {
     EXPECT_EQ(Texel[1], 0) << "texel " << I;
     EXPECT_EQ(Texel[2], 0) << "texel " << I;
     EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
+}
+
+/// (roadmap H7t) The same fully-covered, solid-color triangle as
+/// `FillsFullyCoveredTriangleWithSolidColor`, but the fragment stage's own
+/// `SV_Target0` output is a 3-component `vec3` (`Vec3FragmentShaderIR`,
+/// `ComponentCount == 3`) rather than a plain float4 -- legal per spec, no
+/// alpha write at all. The attachment (R8G8B8A8_UNORM) is initialized to
+/// fully transparent black before the draw so that a wrong "missing alpha
+/// reads as zero" implementation would leave every texel's own alpha
+/// untouched (0), distinguishably wrong from this test's expected fully
+/// opaque (255) result.
+TEST(ExecutorTest, FillsTriangleWithColorOutputNarrowerThan4Components) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 3, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, Vec3FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  Expected<GraphicsPipeline> Pipeline = GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A triangle covering the whole [-1, 1] NDC square (and more), CCW-wound,
+  // every vertex a solid green -- the alpha component below is never
+  // consulted (the fragment stage's own output has no alpha to read), it
+  // only exercises that a wider vertex-side varying feeding a narrower
+  // fragment output is not itself rejected.
+  TriangleScene Scene;
+  Scene.AttachmentStorage.fill(0);
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = Scene.AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 0) << "texel " << I;
+    EXPECT_EQ(Texel[1], 255) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I << " (missing alpha should "
+                                                 "default to fully opaque)";
   }
 }
 
