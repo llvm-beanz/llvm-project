@@ -46198,3 +46198,136 @@ Commits this session: (1) SPIRVToLLVM `StageIOArrayAccessChainPattern`
 + lit tests, (2) `Executor.cpp`/`StageStorage.cpp`/`FragmentWrapper.cpp`
 fragment-side clip/cull-distance linking + `ExecutorTest.cpp` case,
 (3) documentation updates, (4) this file.
+
+# H7y: fixing the getelementptr-into-non-pointer crash for tess/geom clip/cull-distance writes
+
+## Task
+
+Continue working on roadmap H7y: writing `gl_ClipDistance`/
+`gl_CullDistance` from a tessellation-evaluation or geometry stage
+(rather than the vertex stage) fails at shader-compilation time with
+`'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but
+got '!llvm.array<N x ...>'`.
+
+## Investigation
+
+A real IR reduction (`glslangValidator -V` on a minimal geometry
+shader looping over `gl_in[i].gl_Position`, then `feme-translate
+--import-spirv --no-implicit-module --spirv-to-llvmir`) reproduced the
+crash exactly and let me bisect it down to `StageIOAddressOfPattern` in
+`SPIRVToLLVMPatterns.cpp`. That pattern eagerly loads *any*
+`Input`-storage-class stage-IO variable into an SSA value at its own
+`spirv.mlir.addressof` site -- fine for a scalar/vector, since
+`llvm.extractvalue` only needs a constant index, but fundamentally
+incompatible with a genuinely dynamic (loop-carried) array index like
+`gl_in[i]`, which has no `extractvalue` representation at all. This
+isn't specific to `gl_in`/geometry/tessellation -- any array-typed
+`Input` stage-IO variable hits the same wall, including H7x's own
+standalone fragment-stage `gl_ClipDistance`/`gl_CullDistance` read
+(which H7x had patched around with a constant-index-only
+`extractvalue` pattern -- a fix that could never generalize to a
+dynamic index no matter how much more code was piled on top of it).
+
+The fix -- keep an array-typed `Input` variable as a real pointer,
+exactly like `Output` already is -- sounds like a one-line change but
+turned out to require three separate, coordinated pieces of the
+SPIRVToLLVM conversion infrastructure to all agree, discovered
+iteratively via `feme-opt --debug-only=dialect-conversion` traces:
+
+1. `StageIOAddressOfPattern` itself (the obvious one).
+2. A separate `addConversion(spirv::PointerType)` callback that MLIR's
+   dialect-conversion framework and other patterns query as the
+   "declared" answer for what a SPIR-V pointer type becomes -- a
+   parallel source of truth from what patterns actually produce, and it
+   has to agree or the framework's own internal remapping bookkeeping
+   silently produces wrongly-typed values instead of erroring
+   immediately. This was the hardest bug to find: the symptom was a
+   downstream verifier crash on an unrelated-looking op, and the
+   `--debug-only=dialect-conversion` trace's own "Note: Replacing op
+   result of type X with value(s) of type Y, but the legalized type(s)
+   is/are Z" diagnostic was the only signal pointing at the real cause.
+3. A new, dedicated pattern (`StageIOArrayAccessChainPattern`) to
+   legalize the access chain itself, since MLIR's own generic
+   `AccessChainPattern` computes its GEP's result type by re-deriving it
+   from the access chain's *leaf* SPIR-V pointer type -- which for a
+   scalar/vector leaf is genuinely, unavoidably ambiguous (a standalone
+   scalar `Input` variable's own address must stay a value; the same
+   SPIR-V type as an access-chain leaf into this array must become a
+   pointer; nothing in the type itself distinguishes the two). I first
+   tried to also patch around the *load* that follows with a bespoke
+   pattern, but the cleaner fix was a fourth piece: an
+   `addTargetMaterialization` callback that resolves this exact
+   ambiguity generically, by inserting an `llvm.load` whenever the
+   framework needs a value of the "expected" type but only has this
+   real pointer on hand. That let the *existing*, unmodified
+   `LoadValuePattern` handle the resulting load with no further changes.
+
+## Validation
+
+Rewrote the H7x-era constant-index lit test to expect
+`getelementptr`+`load` instead of `extractvalue`, added new positive
+tests for a genuinely dynamic-index read and a two-level
+`gl_in[i].gl_Position` read, and deleted the now-invalid
+`spirv-to-llvm-stage-io-array-access-invalid.mlir` (its premise no
+longer holds). All 42 tests in the `Conversion/SPIRVToLLVM` lit
+directory pass. `ninja check-feme` passes in full: 2049/2108 (59
+pre-existing `Unsupported`, 0 `Failed`).
+
+Re-verified the original real-world IR reductions
+(`glslangValidator`/`feme-translate`) for `plain.geom`/`const.geom`: both
+now produce clean LLVM IR with no crash. A third, more elaborate
+reduction (`test.geom`, which also *writes* `gl_ClipDistance` as an
+output through a `gl_PerVertex` block, in addition to reading `gl_in`)
+and the tessellation-evaluation reduction (`tese.tese`) both still fail,
+but at a completely different, earlier stage: SPIR-V *deserialization*
+itself (`"failed to deserialize SPIR-V module"`), a pre-existing
+importer limitation entirely unrelated to this fix (a different
+compilation phase; my changes only touch the SPIRVToLLVM conversion
+pass, which never runs if deserialization fails first). Not chased
+further -- out of scope for this row, and not required to validate the
+fix, since the simpler `gl_in`-only reductions and the real CTS re-run
+below already confirm the crash this row targets is gone.
+
+Ran a real Vulkan CTS re-run against
+`dEQP-VK.clipping.user_defined.clip_distance.vert_tess.*`/`vert_geom.*`
+(32 cases total), with `shaderClipDistance`/`shaderCullDistance`
+provisionally flipped to `VK_TRUE` in `PhysicalDeviceInfo.cpp` just for
+the measurement (reverted before committing, matching the discipline
+established by H7h/H7w/H7x). Confirmed the `getelementptr` crash is
+gone everywhere in both case lists -- but every case still fails, now
+on three distinct, separate, previously-undiscovered errors:
+
+- `vert_geom` (plain): a stage-linkage signature mismatch between a
+  geometry stage's per-vertex-arrayed `gl_ClipDistance` input and the
+  vertex stage's non-arrayed output of the same builtin (found via
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1`, an existing opt-in env var I
+  hadn't used before this session -- worth remembering for future rows).
+- `vert_tess`: `feme-cpu-wrap-patch-constant` doesn't support this as a
+  patch-constant input system value.
+- `*_fragmentshader_read` (both): `feme-cpu-wrap-fragment`'s synthetic
+  fragment layouts only support a vertex-stage producer.
+
+None of these three is in H7y's own scope (they're one layer below the
+array/pointer representation bug this row targeted), and none is
+specific to clip/cull-distance, though clip/cull-distance is the first
+real CTS coverage to reach any of them. Broken out as new top-level
+milestone H13 (H13a/H13b/H13c) rather than nested under H7, since H7's
+own single-letter suffix space (H7a-H7z) is now completely exhausted
+and the project's "no more than one lowercase letter of nesting"
+convention rules out `H7aa`.
+
+## Outcome
+
+Roadmap H7y struck through (its own targeted crash is genuinely fixed
+and CTS-confirmed gone). `shaderClipDistance`/`shaderCullDistance` stay
+`VK_FALSE` -- this fix, while real and tested, doesn't by itself clear
+a real passing CTS case end to end; H7w/H7x/H7z's own already-open gaps
+plus the three new H13 gaps all remain. Also caught and fixed a stale
+description in H7x's own "Status" doc section in
+`FeMeGraphicsDesign.md`, since this row's fix supersedes (rewrites) the
+same-named `StageIOArrayAccessChainPattern` class H7x originally added
+for the `extractvalue`-based approach.
+
+Commits this session: (1) `SPIRVToLLVMPatterns.cpp` fix + lit test
+updates, (2) documentation updates (Roadmap.md, FeMeGraphicsDesign.md,
+VulkanCTSReport.md, Vulkan14FeatureInventory.md), (3) this file.
