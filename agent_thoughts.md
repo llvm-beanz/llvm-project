@@ -45189,3 +45189,98 @@ scope and stays open, as does the rest of H7's own survey (H7g-H7m).
 
 No new code changes were needed this session -- this was purely a
 documentation-closure pass confirming and formalizing work already done.
+
+## Session: completing H7n (`alphaToCoverageEnable`)
+
+**Goal.** Implement `VkPipelineMultisampleStateCreateInfo::alphaToCoverageEnable`
+for real: `GraphicsPipeline.cpp` had rejected it at pipeline-creation time,
+and (unlike its neighbor `alphaToOneEnable`, closed in H7f) no coverage-mask
+handling existed anywhere in `Executor.cpp`'s blend path.
+
+**Reading the real CTS first.** Rather than guess at a coverage algorithm, I
+read the actual test bodies in `vktPipelineMultisampleTests.cpp`
+(`AlphaToCoverageInstance::verifyImage` and its "no color attachment"/"unused
+attachment" siblings). Two facts fell out immediately: the check is a
+resolved-average *tolerance* bound, not an exact match, and every geometry
+type's vertex alpha is one of exactly three values (`1.0`/`0.25`/`0.0`). That
+made the algorithm choice easy and low-risk: a per-sample ordered-dither
+threshold `T_S = (S + 0.5) / SampleCount`, clearing a sample's coverage bit
+when the fragment's alpha falls below it. I checked this by hand against all
+three tolerance bounds before writing a line of code -- it produces exactly
+`round(alpha * SampleCount)` covered samples, which lands comfortably inside
+every bound the CTS actually checks.
+
+**Design decisions worth recording:**
+- The coverage mask depends on the fragment stage's own shaded alpha output,
+  so `UseEarlyDepthStencil` must become `false` whenever the feature is
+  enabled -- exactly the same reasoning as the pre-existing `SV_Depth`/
+  discard/demote cases, so I didn't invent a new mechanism, just extended an
+  existing one.
+- I looked up the alpha value via a *new*, independent `FSAlphaToCoverage`
+  element (`findElementByLocation(FSSig, Output, 0)`) rather than reusing
+  `FSColors[0]`. This was driven entirely by reading the CTS's own
+  `AlphaToCoverageColorUnusedAttachmentInstance`, which writes its real color
+  to output location 1 while location 0 (unbound to any real attachment) is
+  the only alpha-to-coverage-relevant output. `FSColors[AttIdx]` is indexed
+  by bound attachment slot and would never find this. Worth noting: this
+  design is currently *only* verified by a unit test -- the real CTS group
+  exercising it (`alpha_to_coverage_unused_attachment.*`) hits an unrelated,
+  pre-existing format gap (below) before ever reaching this code path for
+  real, so I can't yet claim it's CTS-confirmed, only unit-tested and
+  logically sound from reading the CTS source.
+- Introduced a `BaseCoverage` local (raw coverage ANDed with the alpha mask)
+  read by both the depth/stencil test loop and its own post-test `PassMask`
+  fallback, so the masking behavior doesn't silently differ based on whether
+  a depth/stencil test happens to run for a given pipeline.
+
+**Two gaps this row's own real CTS re-run surfaced, both out of H7n's own
+scope.** Running the main `alpha_to_coverage.*` group first (12/12 pass) gave
+me confidence the core mechanism was right before widening the sweep. The
+wider sweep across all three related CTS groups turned up two more things,
+neither about the coverage-mask logic itself:
+
+1. `alpha_to_coverage_no_color_attachment.*` (a depth/stencil-only render)
+   failed every case at pipeline creation with "the pipeline's rasterization
+   sample count disagrees with its render target's". `FEME_VULKAN_LOG_
+   CREATION_ERRORS=1` made this trivial to diagnose from `deqp-vk`'s
+   otherwise-terse retcode-only failure report. Reading `getRenderTargets`
+   showed the bug immediately: `Targets.SampleCount` is only ever set inside
+   the loop over `Subpass.ColorAttachments`, which is empty for a
+   depth/stencil-only subpass, silently leaving it at the single-sample
+   default. This felt tightly coupled enough to H7n's own investigation (same
+   file, same pipeline-creation-time validation, found *because of* testing
+   this row) to fix immediately rather than deferring -- but distinct enough
+   in root cause (a render-target-derivation bug with nothing to do with
+   alpha-to-coverage itself) that I gave it its own roadmap row, H7q, and its
+   own commit, rather than folding it silently into H7n's own commit. Fixed
+   by falling back to the depth/stencil attachment's own sample count when no
+   color attachment supplied one. New regression test,
+   `AcceptsMultisampledZeroColorRenderPass`, confirmed to fail without the
+   fix before committing it.
+2. `alpha_to_coverage_unused_attachment.*` fails at `vkCreateImage` with
+   `VK_ERROR_FORMAT_NOT_SUPPORTED` -- that CTS instance hard-codes
+   `VK_FORMAT_R5G6B5_UNORM_PACK16`, and a repo-wide grep confirms no packed
+   16-bit format has any support anywhere in the image layer. This is a much
+   bigger, generic gap (survey + real format/image/sampling/blend support for
+   an unknown number of packed formats) that has nothing to do with
+   alpha-to-coverage's own logic, so I left it open as a new follow-on, H7r,
+   rather than trying to squeeze a format-layer feature into this row.
+
+**Commit-splitting note.** I initially let `git add` stage more than I meant
+to (a leftover index state from an earlier `git reset --soft` picked up
+files across intended commit boundaries) and caught it by inspecting `git
+show --stat` on the just-made commit before moving on, rather than trusting
+the command had done what I intended. Unstaged everything and redid it
+file-by-file. Worth remembering: after any `reset --soft`, treat the index
+as dirty/stale rather than assuming a subsequent `git add <files>` starts
+from a clean slate.
+
+**Verification.** `ninja check-feme`: 2026/2085 (up from the prior session's
+2025/2084 baseline by 1 net test -- 3 new tests added, `TranslatesAlphaToCoverageState`,
+`AlphaToCoverageEnableGeneratesPerSampleCoverageFromAlpha`,
+`AcceptsMultisampledZeroColorRenderPass`, minus `RejectsAlphaToCoverageEnable`
+removed as obsolete), 0 failures, 59 pre-existing unrelated `Unsupported`.
+Real CTS: `alpha_to_coverage.*` 12/12 pass; `alpha_to_coverage_no_color_attachment.*`
+3/3 pass (after H7q); `alpha_to_coverage_unused_attachment.*` still fails on
+H7r's own format gap; a broader 10576-case `multisample.*` sweep confirmed
+every other failure pre-existing and unrelated.
