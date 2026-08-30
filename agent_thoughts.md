@@ -46830,3 +46830,131 @@ would still be unverifiable.
 2. `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`
    updates recording H14's closure and the new H15 row.
 3. This file.
+
+# Session: H15 (missing sampler LodBias/MinLod/MaxLod clamp in mip-level selection)
+
+## Starting point
+
+Continuing from the prior H14 session (which fixed the catastrophic
+all-zero fragment/vertex-stage sampling bug), the user again asked to
+continue H7i (`samplerAnisotropy`) or any prerequisite H-series work.
+H14's own closure left a new roadmap entry, H15, blocking H7i: a real,
+running combined-sampler pipeline that still produced a real but
+numerically-wrong rendered gradient (208/1698
+`dEQP-VK.texture.filtering.2d.*` fails). That was the natural
+prerequisite to chase this session.
+
+## Investigation
+
+Extracted the `Rendered`/`Reference` PNG images embedded in a CTS QPA
+log (`dEQP-VK.texture.filtering.2d.combinations.nearest.nearest.repeat.repeat`)
+via the same base64-PNG-extraction technique used in the H14 session.
+Comparing raw pixel values row by row revealed a distinctive pattern:
+the rendered image was a real, correctly-shaped gradient, but organized
+into coarse, blocky ~3-pixel-wide bands (identical values repeated
+across each band), rather than the reference's smooth per-pixel
+gradient -- and critically, each band's rendered value was close to
+the *average* of the reference's own finer-grained values across that
+band. That "blocky, box-averaged" signature is exactly what a real GPU
+produces when it nearest-samples a too-coarse mip level and magnifies
+it back up (since a coarser mip level's own texel is typically a
+box-filtered average of several base-level texels) -- not a wrap-mode
+or texel-indexing bug, which would produce a differently-shaped error
+(wrong location, not a coarsened version of the right one).
+
+Confirmed via the CTS source (`vktTextureFilteringTests.cpp`) that this
+test's own filter-combination cases always use the same four
+hard-coded, deliberately significant minification/magnification LOD
+cases (`lodX`/`lodY` from `1.6`/`2.9` down to `-2.64`) regardless of
+which filter/wrap combination is under test -- so a `minFilter=NEAREST`
+case (meaning, in GL/Vulkan terms, "never read anything but the base
+level, regardless of LOD") still requires a real, working `MaxLod`
+clamp to force level 0, since the underlying derivative-based LOD
+computation is genuinely non-zero. Confirmed via `vkImageUtil.cpp`'s
+own `mapSampler` that this is exactly how CTS realizes a non-mipmapped
+`VkFilter`: it sets `maxLod = 0.25` specifically for this purpose.
+
+Grepped the runtime and confirmed `FemeRTSamplerDescriptor` already
+carries `LodBias`/`MinLod`/`MaxLod` fields (populated correctly from
+`VkSamplerCreateInfo` in `Image.cpp`), but `femeRTSelectMipLevel`
+(`FeMeRuntimeCPU.c`) never read any of them -- the Vulkan spec's own
+`lod = clamp(lod + mipLodBias, minLod, maxLod)` step was simply absent
+from mip-level selection, letting any sampler's computed LOD select
+whatever real mip level the derivatives implied, ignoring the
+sampler's own clamp entirely.
+
+## Fix
+
+Widened `femeRTSelectMipLevel`'s own signature from taking a bare
+`MipFilter` value to taking the full `const FemeRTSamplerDescriptor *`,
+and added the bias-then-clamp step (`L += Samp->LodBias; L =
+clamp(L, Samp->MinLod, Samp->MaxLod);`) before the existing clamp to
+the image's own valid mip range. Applied uniformly at all six call
+sites in the file (2D, cube, 2D-array, cube-array, and the
+depth-comparison sample paths), since the Vulkan spec's own bias/clamp
+step applies identically whether `lod` came from an implicit
+computation or an explicit operand.
+
+## Test
+
+Discovered while writing tests that the existing `makeSampler` test
+helper set `MaxLod = 0.0f` unconditionally -- previously harmless
+(nothing read it), but would have newly clamped every mip-level test in
+`ImageSamplingTest.cpp` down to level 0 once this fix landed, silently
+breaking `ExplicitLodSelectsMipLevel` and
+`ImplicitLodSelectsCoarserMipFromDerivatives` (both of which expect a
+coarser level 1 to be reachable). Widened the helper's default to
+`1000.0f` (`VK_LOD_CLAMP_NONE`) to preserve those tests' actual intent
+(an unclamped mip range), then added three new, purpose-built tests:
+`MaxLodClampsImplicitSampleToBaseLevel` (the exact CTS shape --
+derivatives imply a coarser level, but a small `MaxLod` clamps back to
+base), `MinLodClampsExplicitSampleAboveBaseLevel` (an explicit `Lod=0`
+clamped *up* by a nonzero `MinLod`), and `LodBiasShiftsSelectedLevel`
+(an explicit `Lod=0` plus a `LodBias` of `1.0` reads level 1).
+
+## Verification
+
+- `ninja check-feme` (assertions + ccache): 2061/2120, 0 `Failed`, 59
+  pre-existing `Unsupported`, up 3 tests from this row's own new
+  coverage.
+- The exact reduction case
+  (`filtering.2d.combinations.nearest.nearest.repeat.repeat`) now
+  passes outright (previously "got 4041 invalid pixels" of 4096).
+- Real CTS re-run of `dEQP-VK.texture.filtering.2d.*` (1698 cases):
+  102 now pass (up from 50), 156 `Fail` (down from 208), 1440 honest
+  `NotSupported` (unchanged).
+- `dEQP-VK.texture.filtering_anisotropy.*` re-confirmed unaffected:
+  still 0/128, all honest `NotSupported`, gated on the feature bit
+  itself.
+
+## Scoping decision
+
+A quick pixel-level look at one of the 156 remaining fails
+(`combinations.nearest.linear.repeat.repeat`) showed a materially
+different, much smaller-scale symptom: rendered and reference values
+differ by roughly +/-1 of 255 per channel (e.g. `(50, 84, 171, 50)` vs.
+`(49, 85, 170, 49)`), not a wrong texel or wrong mip level. A quick
+breakdown of all 156 fails by test-name prefix confirmed every one is a
+`magFilter=LINEAR` magnification case -- a distinct, narrower rounding-
+scale question (bilinear-weight or format-quantization precision, not a
+level-selection logic bug), tracked as new roadmap H16 rather than
+continuing to chase it under H15. `samplerAnisotropy` (H7i) is not
+revisited: still blocked on the feature-bit gate and now H16's own
+narrower gap rather than H15's now-fixed gross one.
+
+## Formatting note
+
+Used `git-clang-format --diff` again (diff-only formatting) rather than
+whole-file `clang-format -i`, avoiding the H14 session's incidental-
+reformatting issue; it found a few genuinely-changed lines in
+`FeMeRuntimeCPU.c` needing reformatting (a two-line call that now fits
+on one line after the signature widening) and applied them cleanly via
+`git apply` on its own diff output.
+
+## Commits this session
+
+1. `FeMeRuntimeCPU.c` fix (`femeRTSelectMipLevel` bias/clamp) +
+   `ImageSamplingTest.cpp` new/updated tests, one commit.
+2. `Roadmap.md`/`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`
+   updates recording H15's closure and the new H16 row.
+3. This file.
