@@ -383,6 +383,172 @@ TEST_F(ImageSamplingTest, ImplicitLodMinifyingUsesMinFilterNotMagFilter) {
   EXPECT_FLOAT_EQ(Out[1], 2.0f);
 }
 
+TEST_F(ImageSamplingTest, ExplicitLodTrilinearBlendsBetweenTwoMipLevels) {
+  // Roadmap H17: a `mipmapMode=LINEAR` (`MipFilter=Linear`) sampler must
+  // blend the two adjacent mip levels an explicit `Lod` falls between,
+  // weighted by `Lod`'s own fractional part -- not round to a single
+  // nearest level the way a `mipmapMode=NEAREST` sampler does. Same
+  // two-level image as `ImplicitLodSelectsCoarserMipFromDerivatives`
+  // (level 0 uniformly `1.0`, level 1 uniformly `9.0`): an explicit
+  // `Lod=0.5` must read exactly the midpoint, `5.0`.
+  float Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                           {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  float Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    float L0[2][2][4];
+    float L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MipFilter = static_cast<uint32_t>(SamplerFilter::Linear);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/0.5f, /*UseExplicitLod=*/true, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 5.0f);
+}
+
+TEST_F(ImageSamplingTest, ExplicitLodNearestMipFilterStillRoundsToOneLevel) {
+  // Roadmap H17 regression: the pre-H17 behavior (round to a single
+  // nearest level, no trilinear blend) must be preserved for
+  // `mipmapMode=NEAREST` (`MipFilter=Nearest`, `makeSampler`'s own
+  // default). Same image and `Lod=0.5` as
+  // `ExplicitLodTrilinearBlendsBetweenTwoMipLevels` above, but this
+  // sampler's own default `MipFilter=Nearest` must instead round
+  // `Lod=0.5` up to level 1 and read `9.0` outright, not blend.
+  float Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                           {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  float Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    float L0[2][2][4];
+    float L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/0.5f, /*UseExplicitLod=*/true, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
+}
+
+TEST_F(ImageSamplingTest, ImplicitLodTrilinearBlendsBetweenTwoMipLevels) {
+  // Roadmap H17: the implicit-LOD counterpart of
+  // `ExplicitLodTrilinearBlendsBetweenTwoMipLevels` above -- a caller's
+  // own screen-space derivatives (not an explicit `Lod` operand) resolve
+  // to a LOD strictly between the two levels (a per-pixel `dU/dx` of
+  // `sqrt(2)/2` across this image's 2-texel width is a scale factor of
+  // `sqrt(2)` texels/pixel, `log2(sqrt(2)) == 0.5`), and a `MipFilter=
+  // Linear` sampler must blend both levels rather than read either one
+  // outright -- the result must land strictly between the two levels'
+  // own values (not equal to either), unlike a `MipFilter=Nearest`
+  // sampler's single-level read. (`femeRTFastLog2`'s own approximation
+  // error keeps the resolved LOD from landing at exactly `0.5`, so this
+  // asserts the blend occurred at all, rather than pinning an exact
+  // value a closed-form `log2` would produce.)
+  float Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                           {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  float Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    float L0[2][2][4];
+    float L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MipFilter = static_cast<uint32_t>(SamplerFilter::Linear);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/0.70710678f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, true, Out);
+  EXPECT_GT(Out[0], 1.0f);
+  EXPECT_LT(Out[0], 9.0f);
+}
+
 TEST_F(ImageSamplingTest, RepeatAddressingWrapsCoordinate) {
   // Sampling just past the right edge with Repeat addressing must wrap
   // around to the left column.
