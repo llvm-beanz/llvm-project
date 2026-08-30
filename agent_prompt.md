@@ -37,47 +37,23 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7i or any prerequisite work required to complete
+Can you continue working on H16 or any prerequisite work required to complete
 the H-series milestones?
 
-> **`samplerAnisotropy`**: `Image.cpp` already stores
-> `anisotropyEnable`/`maxAnisotropy` on the sampler descriptor at creation time,
-> but no anisotropic filtering logic was found in the actual texture-sampling
-> implementation -- sampling still appears isotropic regardless of the stored
-> state. Needs the real anisotropic filter kernel wired into the sampling path
-> before this can honestly flip (and `maxSamplerAnisotropy`, currently the
-> degenerate `1.0f`, would need raising to match) (in progress: a real
-> screen-space-derivative-based implicit-LOD computation and a genuine bounded
-> multi-tap anisotropic filter are now implemented (`FeMeRuntimeCPU.c`'s
-> `femeRTPlanImplicitLod`, `ImageCalls.h`/`.cpp`'s widened `Sample2D` shape,
-> both `ResourceLowering.cpp` and `SPIRVResourceLowering.cpp`'s
-> `getOrSynthesizeSample2DDerivatives`), covering the plain `sampler2D`
-> (`Sample2D`) shape only. Four new unit tests confirm the real behavior end to
-> end: `ImageSamplingTest.cpp`'s
-> `ImplicitLodWithNoDerivativesReadsBaseLevel`/`ImplicitLodSelectsCoarserMipFromDerivatives`/`AnisotropicSampleDiffersFromIsotropicSample`,
-> and `SPIRVResourceLoweringTest.cpp`'s
-> `FragmentStageImplicitSampleSynthesizesRealDerivatives`. However, a real
-> re-run of `dEQP-VK.texture.filtering_anisotropy.*` found the filter kernel is
-> never actually reached: 0/128 pass (64 Fail, 64 `NotSupported` for unrelated
-> compute-format gaps), every graphics case failing at
-> `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`. Root-caused
-> via `FEME_VULKAN_LOG_CREATION_ERRORS=1` to `SPIRVResourceLoweringPass` not
-> recognizing a single combined `OpTypeSampledImage`-style `handlefrombinding`
-> call -- the shape glslang actually emits for an ordinary GLSL `uniform
-> sampler2D` declaration, as opposed to the separately-declared-then-composed
-> image+sampler pattern the pass's existing classification logic expects. A
-> broader sweep confirmed this is not specific to anisotropy or this row's own
-> changes: `dEQP-VK.texture.filtering.2d.*` (1698 cases) is 0/1698 passing
-> overall (258 Fail, all the same graphics-pipeline-creation error; 1440
-> `NotSupported`), and classification fails structurally upstream of anything
-> this row's own derivative-synthesis code touches, so that code is never
-> reached either way -- confirmed pre-existing and unrelated to H7i.
-> `samplerAnisotropy` therefore stays `VK_FALSE` (reverted from an earlier
-> premature `VK_TRUE`) and `maxSamplerAnisotropy` stays at its degenerate `1.0f`
-> floor -- flipping either would be an unverifiable conformance claim. `ninja
-> check-feme` (assertions-enabled, ccache build) passes in full, 2054/2113 (59
-> pre-existing, unrelated `Unsupported`, 0 `Failed`). Tracked to completion as
-> new roadmap follow-on H13d (the `SPIRVResourceLoweringPass`
-> combined-sampled-image-handle gap itself). See "Roadmap H7i: measured impact"
-> in VulkanCTSReport.md for the full reproduction)
-
+> **A `magFilter=LINEAR` magnification sample still produces slightly-wrong
+> (roughly +/-1 of 255 per channel) pixel values**, discovered via H15's own
+> real re-run of `dEQP-VK.texture.filtering.2d.*`: 156 remaining `Fail`s, all
+> real re-runs isolated to a `magFilter=LINEAR` case
+> (`combinations.nearest.linear.*`, `combinations.linear.linear.*`, plus the
+> `_mipmap_*` groups' own magnification cases) -- unlike H15's own gross
+> wrong-mip-level symptom, this is a small, consistent rounding-scale
+> discrepancy (e.g. `(50, 84, 171, 50)` rendered vs. `(49, 85, 170, 49)`
+> reference), suggesting a bilinear-weight or format-conversion rounding-mode
+> mismatch rather than a wrong texel or wrong level being read. Not yet
+> root-caused: needs a real, careful comparison of `femeRTSampleLinear2D`'s own
+> float-domain blend arithmetic (`FeMeRuntimeCPU.c`) and the UNORM8
+> encode/decode round-trip against the exact rounding convention
+> `tcu::TexLookupVerifier`'s own tolerance expects, to determine whether the gap
+> is in the bilinear weight computation itself, the final float-to-UNORM8
+> quantization, or a genuine (if small) tolerance mismatch in the verifier's own
+> assumptions
