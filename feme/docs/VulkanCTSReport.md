@@ -15641,3 +15641,75 @@ values), not a design decision change. `Vulkan14FeatureInventory.md`
 updated to reflect H17's closure; `VulkanExtensionInventory.md` confirmed
 no change needed (no extension is affected by this row).
 
+## Roadmap H18: measured impact
+
+**Root cause.** A hand pixel-level reduction of the simplest remaining
+case, `dEQP-VK.texture.filtering.2d.formats.b10g11r11_ufloat.nearest` (no
+mip, no blend), pointed straight at `femeRTUnpackR11G11B10Float`
+(`feme/runtime/CPU/FeMeRuntimeCPU.c`). This function decodes each of the
+format's three packed minifloat channels by reusing `femeRTHalfToFloat`
+(the existing binary16 decoder): each channel's own 5-bit exponent plus
+`MantBits`-bit mantissa field (6 bits for R/G, 5 for B) is extracted as a
+single contiguous bit-string and left-shifted so its bits land in
+binary16's own exponent/mantissa positions. The shift amount used,
+`11 - MantBits`, was one bit too many -- the correct amount is
+`10 - MantBits` (binary16's mantissa field is 10 bits; the shift needed is
+exactly `10` minus this format's own narrower mantissa width). With the
+bug, every channel's own exponent field lands one bit higher than
+intended -- for large enough exponents, as high as binary16's own *sign*
+bit -- corrupting the decoded value for almost any non-zero input (hand
+example: this format's own encoded `1.0` decoded as `32768.0`, `2.0` as
+`-0.0`). A confirming Python reproduction of both the buggy and fixed
+shift against a hand-written reference minifloat decoder is in this
+session's own `agent_thoughts.md` entry.
+
+The only pre-existing unit test for this format
+(`LoadFetchesR11G11B10Float` in `ImageSamplingTest.cpp`) used an
+all-zero-bits texel -- decodes to `(0, 0, 0, 1.0)` regardless of the shift
+amount, since `0` shifted by anything is still `0` -- so it could not have
+caught this bug no matter how carefully it was reviewed; it tested the
+one input value structurally immune to the defect.
+
+**Fix.** Changed the three shift amounts in `femeRTUnpackR11G11B10Float`
+from 5/5/6 (R/G/B) to the correct 4/4/5, matching `femeRTHalfToFloat`'s
+actual binary16 field layout. No other part of the decode (the bit-masks
+that extract each channel's own field width, or `femeRTHalfToFloat`
+itself) needed any change -- confirmed by re-deriving the correct shift
+amount from first principles (mantissa bits must land in binary16's own
+top `MantBits` mantissa bits, i.e. `10 - MantBits` from the bottom) rather
+than guessing.
+
+**Test.** One new unit test in
+`feme/unittests/Runtime/CPU/ImageSamplingTest.cpp`:
+`LoadFetchesR11G11B10FloatNonZeroValues`, packing a distinct, exactly
+representable non-zero value into each channel (R=1.0, G=2.0, B=1.5) and
+asserting the exact decoded result -- the coverage gap the pre-existing
+all-zero test above left open.
+
+**`ninja check-feme`** (assertions + ccache): 2068/2127, 0 `Failed`, 59
+pre-existing `Unsupported`, up 1 test from this row's own new coverage.
+
+**Real CTS re-run.** `dEQP-VK.texture.filtering.2d.formats.
+b10g11r11_ufloat.nearest` (the case this row's own reduction started
+from) now passes outright. The full `dEQP-VK.texture.filtering.2d.*`
+sweep (1698 cases): 258 now pass (up from 252), 1440 honest
+`NotSupported` (unchanged), **0 `Fail`** (down from 6) -- every case in
+this entire test group now either passes or is honestly `NotSupported`;
+none fail. This closes out the whole H14/H15/H16/H17/H18 investigation
+chain into `dEQP-VK.texture.filtering.2d.*`'s own real fails.
+
+**Remaining gap.** None for this group: `dEQP-VK.texture.filtering.2d.*`
+is fully clean (`Fail` count `0`). The 1440 `NotSupported` cases are
+unrelated compute-format-support gaps (already-tracked, separate work,
+not part of this chain's own scope).
+
+`samplerAnisotropy` (H7i) still stays `VK_FALSE`: unaffected by this fix,
+still blocked on H13d's combined-sampler gap rather than any format-decode
+bug.
+
+No `FeMeGraphicsDesign.md` deviation: this is a pure bug fix in an
+existing format decoder's own bit arithmetic, not a design decision
+change. `Vulkan14FeatureInventory.md` updated to reflect H18's closure;
+`VulkanExtensionInventory.md` confirmed no change needed (no extension is
+affected by this row).
+
