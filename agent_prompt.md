@@ -37,14 +37,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7h?
+Can you continue working on H7w?
 
-> **`shaderClipDistance`/`shaderCullDistance`**: no
-> `ClipDistance`/`CullDistance` SPIR-V builtin support exists anywhere in the
-> stage-IO pipeline (`CanonicalizeStage.cpp`) or the executor's own clipping
-> path (`Executor.cpp`'s `clipTriangle`, which only clips against the fixed
-> homogeneous clip planes, with no per-vertex application-supplied plane
-> distances at all) despite `maxClipDistances`/`maxCullDistances` already being
-> set to the honest value `8`. Needs real stage-IO plumbing for both builtins
-> plus a clip-distance consumer in `clipTriangle` and a cull-distance consumer
-> wherever primitive culling happens
+> **`gl_ClipDistance[i]`/`gl_CullDistance[i]` with a non-constant (dynamically
+> computed) index `i` is rejected outright**, discovered via H7h's own real
+> re-run of
+> `dEQP-VK.clipping.user_defined.clip_distance_dynamic_index.*`/`clip_cull_distance_dynamic_index.*`
+> (0/32): `feme-graphics-validate-stage` fails every case with `"function 'main'
+> has an unresolved stage-IO global-variable access to 'spirv_varN', a shape
+> CanonicalizeStagePass does not yet canonicalize into a 'feme.stage.*' call"`
+> -- `CanonicalizeStagePass` only recognizes a constant
+> `OpAccessChain`/`OpCompositeExtract` index into a `gl_PerVertex` array member
+> today, not a runtime value (e.g. a loop-varying `int`). Needs a real
+> investigation into what canonicalization a dynamically-indexed stage-IO array
+> member requires (likely lowering to a bounds-checked runtime read/write
+> against the element's own backing storage, rather than the current
+> constant-index-only `feme.stage.*` call shape)
