@@ -2378,9 +2378,12 @@ documented reason rather than an oversight:
   status note), so only the DXIL import half is blocked upstream; bias/
   gradient sampling has no import-side blocker but is simply not
   implemented yet.
-- **1D and 3D/cube sampling**, and on the SPIR-V side an arrayed,
-  multisampled, or storage image (a storage image would need a
-  `feme.cpu.image.store.*` helper `runtime/CPU` does not implement yet).
+- **1D and 3D/cube sampling**, and on the SPIR-V side an arrayed or
+  multisampled storage image, or a non-mandatory-format/format-agnostic
+  storage image (roadmap H19a closed the non-arrayed, non-multisampled,
+  mandatory-format-floor `Plain2D` storage-image read/write case -- see
+  its own "Update" below; H19b/H19c/H19d track the remaining shapes/format
+  breadth).
   The runtime helpers' addressing/format/filtering building blocks are
   dimension-agnostic (see `runtime/CPU`'s own scope note), so these are a
   mechanical, on-demand extension rather than a redesign. A SPIR-V image
@@ -2475,6 +2478,61 @@ cases, the other 64 honestly `NotSupported` for an unrelated
 compute-format gap). `PhysicalDeviceInfo.cpp` now advertises
 `samplerAnisotropy` (`maxSamplerAnisotropy` raised to `16.0f`, the value
 real GPU drivers typically report).
+
+**Update (roadmap H19a, closed):** a storage image (`Sampled == 2`) can now
+be read *and* written, for the plain, non-arrayed, non-multisampled 2D
+shape and exactly the Vulkan spec's mandatory storage-image format floor
+(`R32_{SFLOAT,UINT,SINT}`, `R32G32B32A32_{SFLOAT,UINT,SINT}`) --
+previously `SPIRVResourceLoweringPass::classifySampledImage2DHandle`
+explicitly rejected any storage image outright, and no
+`feme.cpu.image.store.*` runtime entry point existed at all.
+`ImageCalls.h`/`.cpp` gained `ImageCallKind::Store2D`/`Store2DI32`
+(`feme.cpu.image.store.2d.v4f32`/`v4i32`), a `(heap, heap_count, index, x,
+y, texel, mask) -> void` call shape annotated with a writing
+`MemoryEffects::argMemOnly(ModRefInfo::Mod)` (every other `feme.cpu.image.*`
+call only reads, `ModRefInfo::Ref`). A new `HandleKind::StorageImage2D` in
+`SPIRVResourceLoweringPass` classifies a storage-image handle
+(`classifyStorageImage2DHandle`, mirroring the existing sampled-image
+classifier but requiring `Sampled == 2`, `Dim == 2D`, non-arrayed,
+non-multisampled, `Plain2D` only) and `hasOnlySupportedStorageImageUses`
+accepts a `getpointer` call used by a `LoadInst`, a `StoreInst`, or both on
+the same binding (the CTS's own `load_store` idiom reads and writes
+through the same descriptor). `femeCpuImageStore2DV4F32`/`V4I32`
+(`FeMeRuntimeCPU.c`) mirror the existing bounds-checked fetch helpers'
+shape for a bounds-checked, format-encoding write, closing a pre-existing,
+narrower gap along the way: `R32_UINT`/`R32_SINT`'s unpack side had never
+been added for a *storage* image (roadmap E26 only closed it for
+*sampled*-image mandatory formats). `Format.cpp` now advertises
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` for exactly the 6-format floor.
+
+A real CTS re-run surfaced two further, genuinely separate compiler-phase
+gaps this shape's own real shader reached for the first time -- neither
+storage-image-specific, both real, general prerequisites this row's own
+verification exposed rather than caused: `feme-cpu-simdize`'s
+`widenImageCall` had only ever widened read-only `feme.cpu.image.*`
+calls, so it looked its new `Store2D`/`Store2DI32` calls' vector-typed
+`Texel` operand up in the scalar `Widened` map instead of
+`WidenedVectorComponents` (where a divergent vector value is actually
+decomposed, exactly like `widenResourceCall`'s own vector `StoredValue`),
+used the wrong lane mask (`Env.EntryMask`, a read's mask, rather than
+`Env.SideEffectMask`, a write's), and never accounted for a void-returning
+call's `Result`-vector construction at all; and a
+`dEQP-VK.image.load_store.with_format.2d.r32_sfloat` reduction found this
+shape's own `gl_GlobalInvocationID.xy` coordinate computation spills
+through a vector-typed `alloca` accessed one element at a time via
+`getelementptr` -- the common SPIR-V `Function`-storage-class local
+variable lowering -- which `PreparePass`'s existing `PromotePass`
+(`mem2reg`) alone refuses to promote at all (`isAllocaPromotable`'s
+documented precondition excludes any `getelementptr` use), so
+`PreparePass` now runs `SROAPass` first, splitting such an `alloca` into
+per-element scalars `mem2reg` can then promote away entirely into pure SSA
+`insertelement`/`extractelement`. A real re-run of
+`dEQP-VK.image.load_store.with_format.2d.*` (the non-arrayed subset, 78
+cases) confirms the fix: the 12 mandatory-format cases now all Pass (down
+from 12 `Fail`), the remaining 66 honestly `NotSupported`. This is scoped
+to the `Plain2D` shape only -- an arrayed, 1D/3D, cube/cube-array, or
+non-mandatory-format/format-agnostic/multisampled storage image is still
+unimplemented, tracked as roadmap H19b/H19c/H19d.
 
 ### Texture layout and formats
 

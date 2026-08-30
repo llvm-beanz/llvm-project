@@ -15771,3 +15771,154 @@ change. `Vulkan14FeatureInventory.md` updated to reflect H18's closure;
 `VulkanExtensionInventory.md` confirmed no change needed (no extension is
 affected by this row).
 
+
+## Roadmap H19a: measured impact
+
+**Scope.** Plain, non-arrayed, non-multisampled 2D storage-image
+read/write (`OpImageRead`/`OpImageWrite` in the shader-IO sense) for
+exactly the Vulkan spec's mandatory storage-image format floor:
+`R32_SFLOAT`/`R32_UINT`/`R32_SINT`,
+`R32G32B32A32_SFLOAT`/`R32G32B32A32_UINT`/`R32G32B32A32_SINT`. No
+`feme.cpu.image.store.*` runtime entry point, and no storage-image
+classification in `SPIRVResourceLoweringPass` at all, existed before this
+row.
+
+**Initial CTS probe.** `dEQP-VK.image.load_store.with_format.2d.*` (78
+non-arrayed cases): before any change, 0 pass, 12 honest `NotSupported`
+were expected to grow once `Format.cpp` advertised the floor; instead the
+first real run (after the IR-lowering/runtime-helper work landed but
+before `Format.cpp`'s own change) reported all 78 cases `NotSupported`
+(the classification/runtime work was real but unreachable until the
+feature-bit-equivalent format-feature flag was set).
+
+**First real run (after `Format.cpp`'s change).** 0/78 pass, 12 `Fail`, 66
+`NotSupported`. The 66 `NotSupported` are exactly every format outside the
+6-format floor -- correct, honest behavior. The 12 `Fail` are exactly the
+6 mandatory formats' plain + `_linear`-tiling variants, each failing at
+`vkCreateComputePipelines` with `VK_ERROR_INITIALIZATION_FAILED`.
+
+**Root cause #1 (SIMDize).** `FEME_VULKAN_LOG_CREATION_ERRORS=1` pointed
+at `feme-cpu-simdize`: "has a divergent vector value '' used outside a
+supported ... pattern". A temporary debug dump of the offending function
+(removed before the final commit) showed the *actual* divergent value was
+not this row's own `Texel` operand at all, but a `shufflevector <3 x i32>
+... to <2 x i32>` computing `gl_GlobalInvocationID.xy`, whose result was
+`store`d into a vector-typed `alloca` and immediately `getelementptr`-ed
+back out one component at a time -- the ordinary SPIR-V
+`Function`-storage-class local-variable lowering. `checkVectorDecompositionSupported`
+had no case at all for a `StoreInst` consumer of a divergent vector value
+(only a matched resource-store call's own stored-value operand was
+accepted), so this rejected outright regardless of storage images.
+
+**Root cause #2 (Prepare, the actual fix).** `PreparePass`'s existing
+`PromotePass` (`mem2reg`) already runs early in Phase 1, but `mem2reg`
+refuses to promote any `alloca` with a `getelementptr` use at all
+(`llvm::isAllocaPromotable`'s documented precondition) -- exactly this
+shader's own shape. Reproduced standalone: `opt -passes=sroa` on a
+hand-reduced 18-line IR file eliminates the `alloca` (and every
+`getelementptr`/`load`/`store` through it) entirely into pure SSA
+`insertelement`/`extractelement`/`shufflevector`, a pattern
+`feme-cpu-simdize` already widens without any change. Fixed by adding
+`SROAPass` before `PromotePass` in `feme/lib/Transforms/CPU/Prepare.cpp`'s
+`prepareFunction`.
+
+**A second, real, independent latent bug (fixed alongside, not yet CTS-exercised
+on its own).** While investigating, `feme-cpu-simdize`'s `widenImageCall`
+was found to have a genuine, separate bug of its own once a
+*write*-shaped `feme.cpu.image.*` call (this row's own `Store2D`/
+`Store2DI32`) existed for the first time: its generic per-operand
+widening loop looked every operand up in the scalar `Widened` map, but a
+vector-typed operand (the `Texel` being stored) is decomposed into
+`WidenedVectorComponents` instead, so a genuinely divergent `Texel` would
+have silently fallen through to `getWidened`'s uniform-broadcast fallback,
+building an illegal `<W x <4 x T>>` splat; the lane mask was
+unconditionally `Env.EntryMask` (a read's mask) rather than
+`Env.SideEffectMask` (the write's own real side-effect gate); and a
+void-returning call's `Result`-vector construction was never guarded,
+which would build an illegal `<W x void>` type outright. Fixed all three
+(`SIMDize.cpp`'s `widenImageCall`), verified via a new
+`SIMDizeTest.cpp` unit test
+(`DecomposesInsertElementChainIntoImageStore`) exercising a divergent
+`Texel` directly -- this project's own real CTS coverage does not yet
+reach a *divergent* stored texel (every mandatory-format case's own
+`Texel` in this CTS group turns out to be uniform per-invocation, since
+each invocation writes its own distinct pixel using a per-invocation
+*address*, not a per-invocation *texel value* that varies enough to stay
+divergent all the way to the store), so this fix is unit-test-verified
+only, not (yet) independently real-CTS-verified in isolation from the
+`SROAPass` fix above.
+
+**Fix summary.**
+- `feme/runtime/CPU/FeMeRuntimeCPU.c`: `femeCpuImageStore2DV4F32`/`V4I32`
+  (bounds-checked, format-encoding write helpers, mirroring the existing
+  fetch helpers), plus `R32_UINT`/`R32_SINT` added to
+  `femeRTImageFormatElementSize`/`femeRTUnpackImageTexelI32` (previously
+  only added for *sampled*-image mandatory formats by roadmap E26, never
+  for storage images).
+- `feme/include/feme/Transforms/CPU/ImageCalls.h`,
+  `feme/lib/Transforms/CPU/ImageCalls.cpp`: `ImageCallKind::Store2D`/
+  `Store2DI32`, a `(heap, heap_count, index, x, y, texel, mask) -> void`
+  call shape with a writing `MemoryEffects::argMemOnly(ModRefInfo::Mod)`.
+- `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`:
+  `HandleKind::StorageImage2D`, `classifyStorageImage2DHandle`,
+  `hasOnlySupportedStorageImageUses` (accepts a `getpointer` call used by
+  a `LoadInst`, a `StoreInst`, or both on the same binding).
+- `feme/lib/Vulkan/Format.cpp`: `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` for
+  exactly the 6-format floor.
+- `feme/lib/Transforms/CPU/SIMDize.cpp`: `widenImageCall`'s `Texel`
+  handling (see above).
+- `feme/lib/Transforms/CPU/Prepare.cpp`: `SROAPass` added before
+  `PromotePass` (see above).
+
+**Test.** 5 new unit tests in `SPIRVResourceLoweringTest.cpp`
+(`LowersStorageImageWriteToImageStore`,
+`LowersIntegerStorageImageWriteToImageStoreV4I32`,
+`LowersStorageImageLoadStoreToBothCalls`,
+`LeavesAnArrayedStorageImageHandleAlone`, plus one more covering the
+combined load+store binding shape), 6 in `ImageSamplingTest.cpp`
+(exercising `femeCpuImageStore2DV4F32`/`V4I32` directly via JIT), 1 in
+`SIMDizeTest.cpp` (`DecomposesInsertElementChainIntoImageStore`), 1 in
+`PrepareTest.cpp`
+(`PromotesVectorAllocaAccessedThroughGetElementPtr`), 1 in
+`FormatTest.cpp` (rewritten from a now-stale "never advertises storage
+image" assertion into
+`FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloor`).
+
+**`ninja check-feme`** (assertions + ccache): 2080/2139, 0 `Failed`, 59
+pre-existing `Unsupported`.
+
+**Real CTS re-run (after both fixes).**
+`dEQP-VK.image.load_store.with_format.2d.*` (78 non-arrayed cases): the 12
+mandatory-format cases (6 formats x plain/`_linear` tiling) now **all
+Pass** (down from 12 `Fail`), the remaining 66 honestly `NotSupported`
+(formats outside the floor) -- 0 `Fail` in this group.
+
+A broader real re-run of the full `dEQP-VK.image.load_store*` group (4400
+cases, every shape/subgroup) confirms this row's own scope is honestly
+bounded: 66 Pass, 84 Fail, 4250 `NotSupported`. The 84 fails are exactly
+the mandatory-format floor's own cases in every shape this row
+deliberately left out of scope: `dEQP-VK.image.load_store.with_format.1d.*`
+(12), `.1d_array.*` (24, both the base and per-layer sub-cases),
+`.2d_array.*` (12, its own multi-layer cases specifically -- a
+`single_layer` sub-case of `2d_array`/`cube`/`cube_array` passes, since it
+binds a genuinely non-arrayed `image2D` view this row's own `Plain2D`-only
+classification already covers), `.3d.*` (12), `.cube.*` (12),
+`.cube_array.*` (12). `dEQP-VK.image.load_store_multisample.*` remains all
+honestly `NotSupported` (`shaderStorageImageMultisample` is `VK_FALSE`).
+Tracked as new roadmap H19b (arrayed `2D_ARRAY`), H19c (1D/3D), H19d
+(cube/cube-array plus the format/configuration breadth H7j's own four
+feature bits still need).
+
+**Remaining gap.** H19b/H19c/H19d (above); `shaderStorageImageExtendedFormats`/
+`shaderStorageImageMultisample`/`shaderStorageImageReadWithoutFormat`/
+`shaderStorageImageWriteWithoutFormat` (H7j) stay `VK_FALSE` -- this row's
+own scope (a known, fixed 6-format floor, no multisample, no
+runtime-format-agnostic access) does not honestly support flipping any of
+them yet.
+
+`FeMeGraphicsDesign.md` updated ("Update (roadmap H19a, closed)" in its
+Images-and-sampling section). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` confirmed no change needed: no
+`VkPhysicalDeviceFeatures` bit or extension is honestly flippable by this
+row's own scope alone (H19d tracks that once the format/configuration
+breadth catches up).
