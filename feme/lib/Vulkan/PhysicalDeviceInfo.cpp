@@ -251,13 +251,15 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // report here than the type itself allows.
   Limits.maxDrawIndirectCount = std::numeric_limits<uint32_t>::max();
   Limits.maxSamplerLodBias = 2.0f;
-  // Roadmap H7i: `samplerAnisotropy` is now advertised `VK_TRUE` (below),
-  // with a real `femeRTPlanImplicitLod`-driven multi-tap filter bounded
-  // by the sampler's own `MaxAnisotropy`; `16.0` matches the common
-  // conformant floor real GPU drivers advertise and has no smaller real
-  // ceiling of its own -- `femeRTPlanImplicitLod`'s tap loop has no fixed
-  // cap beyond the sampler descriptor's own requested value.
-  Limits.maxSamplerAnisotropy = 16.0f;
+  // Roadmap H7i: a real `femeRTPlanImplicitLod`-driven multi-tap
+  // anisotropic filter now exists (bounded by the sampler's own
+  // `MaxAnisotropy`, no fixed cap of its own), but `samplerAnisotropy`
+  // itself is *not* advertised (below) -- real CTS re-verification found
+  // an unrelated, pre-existing `SPIRVResourceLoweringPass` gap
+  // (roadmap H7u) blocks every real `dEQP-VK.texture.filtering.2d.*`
+  // graphics-pipeline case, anisotropy included, so this limit stays at
+  // its conformant degenerate floor until H7u unblocks a real pass.
+  Limits.maxSamplerAnisotropy = 1.0f;
   // Roadmap H3 implements exactly Vulkan's mandatory multi-viewport floor:
   // 16 independent viewport/scissor slots (`MaxViewportCount`), no larger
   // arbitrary value until a test needs one. Every consuming loop in
@@ -693,7 +695,22 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // `dEQP-VK.texture.filtering.2d.*anisotropy*` cases exercise
   // (`Sample2DArray`/`SampleCube`/`SampleCubeArray` implicit samples still
   // resolve to mip level 0, a known, pre-existing, unrelated limitation).
-  Info.Features.samplerAnisotropy = VK_TRUE;
+  // Real re-verification against `dEQP-VK.texture.filtering_anisotropy.*`
+  // found the filter kernel itself is never actually reached: every
+  // graphics-pipeline case in this whole CTS group (also true of the
+  // unrelated, ordinary `dEQP-VK.texture.filtering.2d.*` group broadly,
+  // 0/1698 passing) fails at `vkCreateGraphicsPipelines` because
+  // `SPIRVResourceLoweringPass`'s handle classification does not
+  // recognize a single combined `OpTypeSampledImage`-style
+  // `handlefrombinding` call (the idiomatic GLSL `uniform sampler2D`
+  // shape glslang actually emits) -- a real, pre-existing gap unrelated
+  // to this row (confirmed structurally: classification fails upstream
+  // of anything this row's own derivative/anisotropic code touches, so
+  // that code is never even reached), tracked as new roadmap follow-on
+  // H7u. `samplerAnisotropy` therefore stays `VK_FALSE` until H7u
+  // unblocks a real, honest CTS pass -- flipping it now would be an
+  // unverifiable conformance claim.
+  Info.Features.samplerAnisotropy = VK_FALSE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
