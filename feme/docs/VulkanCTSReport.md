@@ -15116,3 +15116,94 @@ confirmed no change needed (a core feature-bit row, not an extension).
 `Roadmap.md`'s H7z is now struck through, noting the closure required no
 code change of its own (beyond the new direct unit test) and crediting
 H7y's own fix.
+
+## Roadmap H7i: measured impact (`samplerAnisotropy`)
+
+**Implementation.** A real screen-space-derivative-based implicit-LOD
+computation was implemented end to end: `ImageCalls.h`/`.cpp` widens the
+`Sample2D` call shape with four new `DUdX`/`DUdY`/`DVdX`/`DVdY` float
+operands, and a new shared `feme::cpu::getOrSynthesizeSample2DDerivatives`
+helper synthesizes real `feme.stage.derivative.{x,y}.coarse` calls on the
+sample coordinates for a Fragment-stage implicit sample (both
+`ResourceLowering.cpp` and `SPIRVResourceLowering.cpp` call it
+symmetrically). `FeMeRuntimeCPU.c`'s new `femeRTPlanImplicitLod`
+implements the standard "scale factor and level of detail" formula from
+those real derivatives, producing a genuine per-sample mip level and,
+when the sampler's anisotropy is enabled, a `MaxAnisotropy`-bounded
+multi-tap average spread along the footprint's major axis. Scoped to the
+plain `sampler2D` (`Sample2D`) shape only. Four new unit tests confirm
+this real behavior end to end (`ImageSamplingTest.cpp`'s
+`ImplicitLodWithNoDerivativesReadsBaseLevel`/
+`ImplicitLodSelectsCoarserMipFromDerivatives`/
+`AnisotropicSampleDiffersFromIsotropicSample`, and
+`SPIRVResourceLoweringTest.cpp`'s
+`FragmentStageImplicitSampleSynthesizesRealDerivatives`).
+
+**CTS re-run: `dEQP-VK.texture.filtering_anisotropy.*`.** 128 cases: **0
+Pass / 64 Fail / 64 NotSupported** (the `NotSupported` half is the
+`_compute` variants, an unrelated, pre-existing "Format not supported"
+gap; every graphics variant Fails). All 64 Fails are the identical
+`vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED`.
+
+**Root cause, found via `FEME_VULKAN_LOG_CREATION_ERRORS=1`.** The real
+diagnostic text is `UnsupportedOps.cpp`'s generic "... is a register-bound
+resource handle the FeMe CPU target cannot normalize into a heap access
+..." firing on an `llvm.spv.resource.handlefrombinding` call whose result
+type is a literal struct combining `spirv.Image` and `spirv.Sampler` in
+one handle (confirmed via the CTS log's own SPIR-V disassembly: an
+ordinary, idiomatic GLSL `uniform sampler2D` declaration compiles to a
+single `OpVariable` of `OpTypeSampledImage` type). `SPIRVResourceLowering.
+cpp`'s `classifySampledImage2DHandle`/`classifySamplerHandle` only
+recognize a *separately*-declared image handle and sampler handle later
+composed by `insertvalue` (and read apart by `extractvalue`) -- the shape
+this project's own existing unit tests are built around -- not a single
+`handlefrombinding` call whose return type is already the combined pair.
+
+**Confirmed generic, not anisotropy-specific.** A broader sweep,
+`dEQP-VK.texture.filtering.2d.*` (1698 cases): **0 Pass / 258 Fail / 1440
+NotSupported**. Every one of the 258 Fails is the identical
+`VK_ERROR_INITIALIZATION_FAILED` graphics-pipeline-creation error; the
+1440 `NotSupported` are the same unrelated `_compute`-variant format gap.
+A narrower, ordinary, previously-assumed-passing case,
+`dEQP-VK.texture.filtering.2d.combinations.linear.linear.clamp_to_edge.
+clamp_to_edge` (non-compute), reproduces the identical failure in
+isolation, confirming this is not specific to this row's own changes.
+
+**Confirmed not caused by this row's own changes.** Classification (the
+step this gap lives in) fails structurally *before* anything this row's
+own derivative-synthesis code (`getOrSynthesizeSample2DDerivatives`)
+would ever run -- a combined-handle `Sample2D` call is never even
+constructed, since the pass bails out of lowering the whole function
+before reaching that call-construction step. This is a pre-existing gap,
+newly discovered (not newly introduced) by this row's own mandatory
+real-CTS-run step, since no prior roadmap milestone had previously
+exercised a plain GLSL `uniform sampler2D` declaration through a real
+Vulkan CTS graphics-pipeline case.
+
+**Feature-bit decision.** `samplerAnisotropy` stays `VK_FALSE` (an
+earlier, premature `VK_TRUE` flip was reverted once this blocker was
+found) and `maxSamplerAnisotropy` stays at its degenerate `1.0f` floor --
+flipping either now would be an unverifiable conformance claim, since
+zero real CTS cases for this feature can currently pass. The newly
+discovered `SPIRVResourceLoweringPass` combined-sampled-image-handle gap
+is tracked as new roadmap milestone H13d; it blocks nearly all real
+Vulkan CTS graphics-pipeline conformance for GLSL-style combined-sampler
+shaders, not just `samplerAnisotropy`, and is scoped as future work
+rather than folded into this row (a materially larger, separate
+investigation).
+
+**`ninja check-feme`.** Passes in full at **2054/2113** (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`), up from the prior baseline of
+2050/2109 by the 4 new tests this row adds (unaffected by the later
+feature-bit revert, which touched no test behavior beyond the
+`PhysicalDeviceInfoTest.cpp` feature-enumeration assertions).
+
+**Documentation.** `FeMeGraphicsDesign.md`'s "Canonical image operations"
+section updated to record the implementation as real but blocked
+(re-marked "in progress" rather than "closed"). `Vulkan14FeatureInventory.
+md`'s `samplerAnisotropy` row stays "no", with the full rationale and a
+pointer to H13d. `VulkanExtensionInventory.md` confirmed no change needed
+(a core feature-bit row, not an extension). `Roadmap.md`'s H7i is left
+unstruck (not fully closed), with an "in progress" note describing both
+the real implementation and the newly-discovered blocker, and a new
+`H13d` row added for the blocker itself.

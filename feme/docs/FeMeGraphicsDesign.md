@@ -2421,7 +2421,7 @@ scalar helper's result element type, so a divergent
 `feme.cpu.image.load.2d.v4i32` call widens the same way a divergent
 `v4f32` one already did.
 
-**Update (roadmap H7i, closed):** "Implicit LOD uses fragment derivatives
+**Update (roadmap H7i, in progress):** "Implicit LOD uses fragment derivatives
 of the coordinates" above was, until now, aspirational rather than real:
 every implicit-LOD sample resolved to mip level 0 unconditionally, since
 no screen-space-derivative computation existed anywhere in the sampling
@@ -2453,9 +2453,21 @@ fields. This is scoped to the plain `Sample2D` shape only -- the one the
 real `dEQP-VK.texture.filtering.2d.*anisotropy*` CTS cases exercise --
 `Sample2DArray`/`SampleCube`/`SampleCubeArray` implicit samples are
 unchanged, still always resolving to mip level 0, a known, pre-existing,
-unrelated limitation left for a later increment. `PhysicalDeviceInfo.cpp`
-now advertises `samplerAnisotropy` and raises `maxSamplerAnisotropy` to
-`16.0f` to match.
+unrelated limitation left for a later increment. A real
+`dEQP-VK.texture.filtering_anisotropy.*` CTS re-run, however, found this
+filter kernel is never actually reached: every graphics-pipeline case in
+that group (0/128), and in the broader, unrelated
+`dEQP-VK.texture.filtering.2d.*` group (0/1698), fails
+`vkCreateGraphicsPipelines` on a pre-existing, generic
+`SPIRVResourceLoweringPass` gap -- it does not recognize a single combined
+`OpTypeSampledImage`-style `handlefrombinding` call, the shape glslang
+emits for an ordinary GLSL `uniform sampler2D` declaration, as opposed to
+the separately-declared-then-composed image+sampler pattern its
+classification logic expects. Tracked as new roadmap H13d.
+`PhysicalDeviceInfo.cpp` therefore does *not* advertise `samplerAnisotropy`
+yet (`maxSamplerAnisotropy` stays at its degenerate `1.0f` floor) --
+flipping it before H13d unblocks a real passing case would be an
+unverifiable conformance claim.
 
 ### Texture layout and formats
 
