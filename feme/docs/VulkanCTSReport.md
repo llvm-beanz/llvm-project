@@ -15033,3 +15033,86 @@ this section. `VulkanExtensionInventory.md` confirmed no change needed
 struck through (its own targeted gap is genuinely closed), with the
 three newly-discovered, out-of-scope blockers broken out as new
 milestone H13.
+
+## Roadmap H7z: measured impact (`feme-cpu-simdize` divergent-aggregate diagnostic)
+
+**Investigation.** This row's own text asked whether `SIMDize.cpp`
+should learn to decompose a divergent aggregate into per-lane, per-field
+scalars, or whether an aggregate should instead be prevented from ever
+reaching this pass as a single divergent value. Re-running the exact 16
+`dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}.vert.
+*_fragmentshader_read` cases this row's own text names (with
+`shaderClipDistance`/`shaderCullDistance` provisionally flipped to
+`VK_TRUE` purely to let CTS attempt them, reverted before committing,
+matching this project's own established measurement discipline) found
+the second option had **already happened, incidentally, as a side
+effect of roadmap H7y's own fix** -- made for an entirely unrelated
+reason (supporting a genuinely dynamic array index into `gl_in[]`).
+`StageIOAddressOfPattern` now keeps an array-typed `Input` stage-IO
+variable as a real pointer instead of eagerly loading its whole value,
+so `StageIOArrayAccessChainPattern`'s `getelementptr` + an ordinary
+scalar `llvm.load` reads exactly one `f32` element for a
+`gl_ClipDistance[i]`/`gl_CullDistance[i]` read, never the whole
+`[N x f32]` array as a single aggregate value the way it did when H7x's
+own CTS re-run first discovered this row.
+
+```
+Test run totals (dEQP-VK.clipping.user_defined.clip_distance.vert.*_fragmentshader_read):
+  Passed:        1/8 (12.5%)
+  Failed:        7/8 (87.5%)
+
+Test run totals (dEQP-VK.clipping.user_defined.clip_cull_distance.vert.*_fragmentshader_read):
+  Passed:        0/8 (0.0%)
+  Failed:        8/8 (100.0%)
+```
+
+The `"has a divergent value ... of aggregate type; component
+decomposition is not yet supported"` diagnostic this row's own text
+named **no longer occurs anywhere in either case list**. Every failure
+instead now reproduces (via `FEME_VULKAN_LOG_CREATION_ERRORS=1`) the
+already-tracked roadmap H13c diagnostic exactly:
+
+```
+error: feme-cpu-wrap-fragment: synthetic fragment layouts only support
+vertex operand 0
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED)
+```
+
+(The one passing case, `clip_distance.vert.1_fragmentshader_read`,
+presumably reaches `feme-cpu-wrap-fragment` with only the vertex-stage
+operand H13c's own gap already supports -- not investigated further
+here, since this row's own scope is the aggregate-decomposition
+diagnostic, not H13c.)
+
+**No code change was made to `SIMDize.cpp` itself** -- there is no
+longer a real, reachable case in this project's own CTS coverage that
+needs the pass to learn aggregate decomposition, and the generic
+diagnostic already does the right, safe thing (a clean, actionable
+error rather than a miscompile or an assertion) for the hypothetical
+case where some other divergent-aggregate producer does reach it in the
+future. That protection was, however, previously only reachable --
+and therefore only ever exercised by this project's own test suite --
+via this now-closed clip/cull-distance path, leaving it with no direct
+unit test of its own. Added one: `SIMDizeTest.cpp`'s new
+`DiagnosesUnsupportedDivergentAggregate` case, a synthetic divergent
+`[2 x float]` load through a thread-ID-derived address (independent of
+any stage-IO machinery), confirming the diagnostic still fires exactly
+as before.
+
+**`ninja check-feme`.** Passes in full at **2050/2109** (59
+pre-existing, unrelated `Unsupported`, 0 `Failed`), up from H7y's own
+2049/2108 baseline by the 1 new test this row adds.
+
+**Feature-bit decision.** `shaderClipDistance`/`shaderCullDistance` stay
+`VK_FALSE` -- this row's own targeted gap is closed (incidentally, by
+H7y), but the already-tracked H13c gap alone still blocks every one of
+these 16 cases from passing end to end.
+
+**Documentation.** `FeMeGraphicsDesign.md` gained a new "Status (roadmap
+H7z)" subsection. `Vulkan14FeatureInventory.md`'s
+`shaderClipDistance`/`shaderCullDistance` rows updated to reflect H7z's
+closure and the new H13c blocker. `VulkanExtensionInventory.md`
+confirmed no change needed (a core feature-bit row, not an extension).
+`Roadmap.md`'s H7z is now struck through, noting the closure required no
+code change of its own (beyond the new direct unit test) and crediting
+H7y's own fix.

@@ -1207,6 +1207,57 @@ real passing CTS case end to end -- the same standard as H7h/H7w/H7x).
 See "Roadmap H7y: measured impact" in `VulkanCTSReport.md` for the full
 reproduction.
 
+#### Status (roadmap H7z)
+
+`SIMDize.cpp`'s own producer/consumer precondition-checking loop
+diagnoses, rather than miscompiles or asserts on, any divergent
+(per-lane) SSA value of aggregate type it does not yet know how to
+decompose into `N` per-lane, per-field scalars -- roadmap H7x's own CTS
+re-run of the fragment-stage `gl_ClipDistance`/`gl_CullDistance`
+read-back cases hit exactly this diagnostic, since `StageIOAddressOfPattern`
+at the time loaded the whole `[N x f32]` array as one aggregate value
+before H7x's own `extractvalue` ever narrowed it to a scalar.
+
+This row's own investigation found **no code change was needed here**:
+roadmap H7y's own fix -- made for an entirely unrelated reason
+(supporting a genuinely dynamic array index for `gl_in[]`) -- keeps an
+array-typed `Input` stage-IO variable as a real pointer instead of
+eagerly loading it, so the fragment-stage read now reads exactly one
+`f32` element through an ordinary scalar `llvm.load`, never the whole
+array as a single aggregate value. This incidentally means the specific
+shape this row's own text names no longer reaches `SIMDize.cpp` at all.
+Confirmed by a real CTS re-run of the exact 16
+`dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}.vert.
+*_fragmentshader_read` cases this row's own text names (feature bits
+provisionally flipped on to measure, then reverted): the `"has a
+divergent value ... of aggregate type"` diagnostic no longer occurs
+anywhere in either case list.
+
+`SIMDize.cpp`'s own generic aggregate-diagnostic check is deliberately
+left in place (not removed) -- it remains real, load-bearing protection
+against any *other* divergent-aggregate producer this pass does not yet
+support (a struct-typed load, or an array reached some other way), which
+was previously only reachable -- and therefore only exercised by this
+project's own test suite -- via this now-closed clip/cull-distance path.
+A new, direct `SIMDizeTest.cpp` case,
+`DiagnosesUnsupportedDivergentAggregate` (a synthetic divergent array
+load through a thread-ID-derived address, independent of any stage-IO
+machinery), gives this diagnostic real, dedicated coverage of its own
+rather than relying on an indirect path that no longer reaches it.
+
+**The CTS re-run's own remaining 16/16 failures are the already-tracked
+roadmap H13c gap**, not a new blocker: `feme-cpu-wrap-fragment`'s own
+synthetic fragment-input layout construction still only supports a
+vertex-stage producer of the varying being read, confirmed by the
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` diagnostic text
+(`"feme-cpu-wrap-fragment: synthetic fragment layouts only support
+vertex operand 0"`) matching H13c's own exactly. `ninja check-feme`
+passes in full, 2050/2109 (59 pre-existing, unrelated `Unsupported`, 0
+`Failed`, up 1 test from this row's own new case). `shaderClipDistance`/
+`shaderCullDistance` stay `VK_FALSE` (H13c alone still blocks a real
+passing case end to end). See "Roadmap H7z: measured impact" in
+`VulkanCTSReport.md` for the full reproduction.
+
 ### Tessellation and geometry stage model
 
 DXIL hull/domain stages and SPIR-V tessellation-control/evaluation stages map
