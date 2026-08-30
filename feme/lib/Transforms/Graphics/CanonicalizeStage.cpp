@@ -443,17 +443,19 @@ parseSPIRVMemberDecorations(const MDNode *MD) {
 /// this comment used to list as unrepresented is down to just the device-
 /// index one (`DeviceIndex`, `VK_KHR_device_group`, still unimplemented).
 ///
-/// (Roadmap H2d) `ClipDistance`/`CullDistance` (`gl_ClipDistance`/
-/// `gl_CullDistance`) map to `None`: neither has a real ABI-field consumer
-/// anywhere downstream (`shaderClipDistance`/`shaderCullDistance` are still
-/// `VK_FALSE`, see roadmap H7), the same "unmodeled system value" treatment
-/// an unrecognized DXIL semantic already gets (`SignatureImport.cpp`'s own
-/// `getSystemValue` default case). Before this milestone these two SPIR-V
-/// `BuiltIn`s were unreachable in practice -- GLSL/SPIR-V never declares
-/// either as a standalone variable, only as `gl_PerVertex` interface-block
-/// members (H2a/H2c), which this function never saw until H2d's own
-/// per-member decomposition -- so this is a change in *what* gets produced,
-/// not in any previously-observable behavior.
+/// (Roadmap H7h) `ClipDistance`/`CullDistance` (`gl_ClipDistance`/
+/// `gl_CullDistance`) now map to `SignatureSystemValue::ClipDistance`/
+/// `CullDistance`: `Executor.cpp`'s `clipTriangle`/`RasterizePrimitives`
+/// consume each as a real per-vertex `[8 x float]`-shaped output
+/// (`SignatureElement::RowCount` gives how many of the up to
+/// `maxClipDistances`/`maxCullDistances` (8) planes the shader actually
+/// declared), lowering `shaderClipDistance`/`shaderCullDistance`
+/// (`PhysicalDeviceInfo.cpp`) to `VK_TRUE`. Before this milestone these two
+/// SPIR-V `BuiltIn`s were unreachable in practice -- GLSL/SPIR-V never
+/// declares either as a standalone variable, only as `gl_PerVertex`
+/// interface-block members (H2a/H2c), which this function never saw until
+/// H2d's own per-member decomposition -- so mapping them here is a change
+/// in *what* gets produced, not in any previously-observable behavior.
 ///
 /// (Roadmap H7e) `PointSize` (`gl_PointSize`) maps to
 /// `SignatureSystemValue::PointSize`: the last pre-rasterization stage's
@@ -466,6 +468,10 @@ SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
     return SignatureSystemValue::Position;
   case 1: // PointSize
     return SignatureSystemValue::PointSize;
+  case 3: // ClipDistance
+    return SignatureSystemValue::ClipDistance;
+  case 4: // CullDistance
+    return SignatureSystemValue::CullDistance;
   case 5:  // VertexId
   case 42: // VertexIndex
     return SignatureSystemValue::VertexID;

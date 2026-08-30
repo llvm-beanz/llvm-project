@@ -279,6 +279,47 @@ TEST(CanonicalizeStageTest, MapsSPIRVPointSizeBuiltInToSystemValue) {
   EXPECT_FALSE(PointSize.Location.has_value());
 }
 
+/// (Roadmap H7h) `BuiltIn ClipDistance`/`CullDistance` (SPIR-V codes 3/4,
+/// `gl_ClipDistance`/`gl_CullDistance`) map to
+/// `SignatureSystemValue::ClipDistance`/`CullDistance` -- each a real,
+/// array-shaped (`RowCount` many planes) vertex-stage output
+/// `Executor.cpp`'s clip/cull consumers read.
+TEST(CanonicalizeStageTest, MapsSPIRVClipCullDistanceBuiltInsToSystemValues) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_ClipDistance = external addrspace(8) global [3 x float], !spirv.Decorations !0
+    @gl_CullDistance = external addrspace(8) global [2 x float], !spirv.Decorations !1
+    define void @main() #0 {
+      store [3 x float] zeroinitializer, ptr addrspace(8) @gl_ClipDistance
+      store [2 x float] zeroinitializer, ptr addrspace(8) @gl_CullDistance
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 11, i32 3}
+    !3 = !{i32 11, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  const SignatureElement &ClipDistance = Sig->Elements[0];
+  EXPECT_EQ(ClipDistance.Direction, SignatureDirection::Output);
+  EXPECT_EQ(ClipDistance.SystemValue, SignatureSystemValue::ClipDistance);
+  EXPECT_EQ(ClipDistance.RowCount, 3u);
+  EXPECT_EQ(ClipDistance.ComponentType, SignatureComponentType::Float);
+
+  const SignatureElement &CullDistance = Sig->Elements[1];
+  EXPECT_EQ(CullDistance.Direction, SignatureDirection::Output);
+  EXPECT_EQ(CullDistance.SystemValue, SignatureSystemValue::CullDistance);
+  EXPECT_EQ(CullDistance.RowCount, 2u);
+  EXPECT_EQ(CullDistance.ComponentType, SignatureComponentType::Float);
+}
+
 /// (Roadmap H2a) glslang emits `gl_Position`/`gl_PointSize`/
 /// `gl_ClipDistance`/`gl_CullDistance` as members of an implicit
 /// `gl_PerVertex` interface *block* (a struct-typed `Output` variable)
@@ -385,16 +426,15 @@ TEST(CanonicalizeStageTest, RecognizesMemberDecoratedInterfaceBlockAsStageIO) {
   EXPECT_EQ(Position.SystemValue, SignatureSystemValue::Position);
   EXPECT_EQ(Position.ComponentCount, 4u);
 
-  // (Roadmap H7e) `PointSize` (member 1) now maps to
-  // `SignatureSystemValue::PointSize`. `ClipDistance`/`CullDistance`
-  // (members 2/3) still have no ABI-field consumer anywhere downstream
-  // (roadmap H7's still-`VK_FALSE` `shaderClipDistance`/
-  // `shaderCullDistance`), so they still map to `None`, the same
-  // "unmodeled system value" treatment an unrecognized DXIL semantic
-  // already gets.
+  // (Roadmap H7e) `PointSize` (member 1) maps to
+  // `SignatureSystemValue::PointSize`. (Roadmap H7h) `ClipDistance`/
+  // `CullDistance` (members 2/3) now map to their own system values too,
+  // each a real `Executor.cpp` clip-plane/cull-plane consumer
+  // (`shaderClipDistance`/`shaderCullDistance`, `PhysicalDeviceInfo.cpp`,
+  // are now `VK_TRUE`).
   EXPECT_EQ(Sig->Elements[2].SystemValue, SignatureSystemValue::PointSize);
-  for (unsigned I = 3; I != 5; ++I)
-    EXPECT_EQ(Sig->Elements[I].SystemValue, SignatureSystemValue::None);
+  EXPECT_EQ(Sig->Elements[3].SystemValue, SignatureSystemValue::ClipDistance);
+  EXPECT_EQ(Sig->Elements[4].SystemValue, SignatureSystemValue::CullDistance);
 
   unsigned StoreCount = 0;
   for (Instruction &I : instructions(F))
