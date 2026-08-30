@@ -45807,3 +45807,146 @@ plus its two new `SPIRVResourceLoweringTest.cpp` cases, (2) documentation
 paragraph, VulkanCTSReport.md's new "Roadmap H7v: measured impact"
 section, VulkanExtensionInventory.md's `VK_KHR_maintenance6` row), (3)
 this file.
+
+# H7h: gl_ClipDistance/gl_CullDistance vertex-stage consumer
+
+The request was to complete roadmap H7h: no `ClipDistance`/`CullDistance`
+SPIR-V builtin support existed anywhere in the stage-IO pipeline or the
+executor's clipping path, despite `maxClipDistances`/`maxCullDistances`
+already honestly set to 8.
+
+## Scoping first
+
+I started by confirming what already existed vs. what was actually
+missing, since this codebase's history (H7g, H7v, H7f/H7n/H7r/H7s/H7t)
+has repeatedly shown that a roadmap row's own text can be stale or
+overly broad. Reading `Signature.h` showed
+`SignatureSystemValue::ClipDistance`/`CullDistance` already existed as
+enum values -- unused, always mapped to `None` by
+`CanonicalizeStage.cpp`'s `getSystemValueForBuiltIn`. Reading
+`getStageIORowShape` showed the generic array-to-`RowCount` folding
+already handled `gl_PerVertex`'s `float gl_ClipDistance[8]` shape with
+zero new code needed. So the real gap was narrower than the roadmap text
+implied: (1) the builtin-to-system-value mapping itself, and (2) a real
+consumer in the executor. Nothing else in the stage-IO plumbing needed
+to change.
+
+I deliberately used the H7e (`PointSize`) precedent as my structural
+model throughout, since it is the closest prior example of "map a SPIR-V
+builtin onto a system value, then make the executor consume it."
+
+I also read the real CTS source (`vktClippingTests.cpp`) early, before
+writing any code, to understand exactly what shapes of test existed:
+`vert`/`vert_tess`/`vert_geom`/`vert_tess_geom` stage combinations,
+static vs. dynamic array indexing, and a `_fragmentshader_read` variant
+that expects the *fragment* stage to read back the interpolated
+clip/cull-distance value. I made an explicit, and in retrospect correct,
+scoping decision up front: implement only what the roadmap row's own
+text asked for (vertex-stage output, a clip-distance consumer in
+`clipTriangle`, a cull-distance consumer wherever culling happens), and
+treat fragment-side reads, dynamic indexing, and non-vertex
+pre-rasterization stages as potential follow-ons to be discovered by a
+real CTS run rather than assumed necessary up front.
+
+## Implementation
+
+The builtin mapping itself was a one-line-per-builtin change plus doc
+comment updates, mirroring `PointSize`'s own mapping. I updated one
+existing test's stale `None` assertions and added a new test mirroring
+the existing `PointSize` test.
+
+The executor consumer took more care. I needed clip-distance planes to
+share the same Sutherland-Hodgman clipping machinery as the seven fixed
+frustum planes, but a clip-distance plane's own "distance" function needs
+to close over a per-plane index (there are up to 8 declared planes, and
+each is evaluated as `V.ClipDistances[I]`) -- something a raw function
+pointer, the pre-existing pattern, cannot do. I switched
+`clipAgainstPlane`'s callback type from a plain function pointer over a
+clip-space position to a `std::function<float(const RasterVertex&)>`,
+which let both the frustum planes (now taking the whole vertex rather
+than just its position) and the new clip-distance planes share one
+implementation.
+
+For cull-distance, I read the Vulkan spec's own wording carefully: a
+whole primitive is discarded when *one* declared cull-plane index is
+negative for *every* one of the primitive's vertices. This has to be
+evaluated against the *original*, pre-clip vertices -- clipping can add
+new vertices at plane intersections, and those synthetic vertices should
+not participate in (or be re-tested against) the cull decision. I
+therefore ran the cull check before `clipTriangle`, on the raw 3-vertex
+triangle only.
+
+## Deriving the new unit test's expected pixels
+
+For `ClipsATriangleAgainstAWrittenClipDistance`, I needed a way to
+predict, without running the test, which screen rows would end up lit.
+Rather than guessing, I found and reused the exact NDC-Y-to-screen-row
+mapping an existing, known-good test
+(`PolygonModePointRastersOnlyTheTrianglesThreeVertices`) already
+established: NDC Y = +0.75 lands at screen row 0 (top), NDC Y = -0.75
+lands at screen row 3 (bottom). Setting `gl_ClipDistance[0]` equal to
+each vertex's own NDC Y on a full-screen-covering triangle then lets me
+predict exactly which two of four rows survive clipping (the positive-Y
+half) without any guesswork.
+
+## Real CTS run: the scoping decision was right, but revealed more work
+
+Once the vertex-stage consumer built and its own new unit tests passed
+(226/226, no regressions), and `ninja check-feme` passed in full
+(2047/2106, 0 failed, up by exactly the 3 new tests this row added), I
+flipped `shaderClipDistance`/`shaderCullDistance` on and ran the real CTS
+to measure.
+
+The result confirmed the scoping decision was correct in spirit --
+vertex-stage, static-index, non-fragment-read cases genuinely pass
+(16/16) -- but also, as anticipated, surfaced exactly the three gaps I
+had deliberately left unimplemented: dynamic indexing (a distinct
+`CanonicalizeStagePass` "unresolved stage-IO global-variable access"
+error, meaning it isn't just a smaller version of the same problem --
+it's a wholly separate canonicalization gap), fragment-shader read-back
+(no fragment-side system-value input path exists at all), and
+tessellation/geometry-stage writes (an unrelated LLVM
+`getelementptr`-into-an-array-typed-SSA-value lowering error, distinct
+from and probably pre-existing this row's own changes).
+
+The interesting judgment call was what to do with the feature bits given
+this data. Initially I flipped them to `VK_TRUE` reflexively (following
+the H7e/H7g pattern of "implement the row's scope, flip the bit"), but
+once the real CTS numbers came back -- only ~16 of this feature's own
+~330 real mandatory cases passing -- I reconsidered against this
+project's own precedent from H7o/`sampleRateShading`: that row explicitly
+kept a feature bit `VK_FALSE` specifically because "advertising it before
+a real conformance case exercising it can pass would be a conformance
+violation," even though the underlying implementation existed and was
+unit-tested. The same standard clearly applies here, more so: `H7o` had
+*zero* passing cases blocking it; here we have *some* real passing cases,
+but they are a small minority of the feature's total mandatory surface.
+I judged that advertising `shaderClipDistance`/`shaderCullDistance` today
+-- which would make CTS attempt, and genuinely fail, the ~66+ sampled
+non-passing cases I found (and likely many more across the untested
+remainder of the ~330) -- would itself be a conformance violation, so I
+reverted the feature-bit flip (keeping the real vertex-stage
+implementation and its unit tests, which remain valid, tested progress)
+and instead broke the three newly-discovered gaps into their own
+single-letter-nested follow-on rows: H7w (dynamic indexing), H7x
+(fragment-shader read-back), H7y (tessellation/geometry-stage
+clip/cull-distance). This required amending my initial feature-bit-flip
+commit's test assertions and PhysicalDeviceInfo.cpp comment once the
+real numbers came in, since the assumption behind that first commit
+turned out to be premature.
+
+## Commits
+
+Broken into: (1) the builtin-mapping change plus its tests
+(`CanonicalizeStage.cpp`, `CanonicalizeStageTest.cpp`), (2) the executor
+consumer plus its tests, *without* the feature bit flip
+(`Executor.cpp`, `ExecutorTest.cpp`, `PhysicalDeviceInfo.cpp`'s
+provisional `VK_TRUE`, `PhysicalDeviceInfoTest.cpp`), (3) a correction
+commit reverting the feature-bit flip back to `VK_FALSE` once the real
+CTS run showed it was premature, with a full rationale in both the code
+comment and the commit message, (4) documentation
+(`FeMeGraphicsDesign.md`'s new H7h status subsection,
+`VulkanCTSReport.md`'s new "Roadmap H7h: measured impact" section,
+`Vulkan14FeatureInventory.md`'s two updated rows, `Roadmap.md`'s H7h
+strikethrough plus three new H7w/H7x/H7y rows -- `VulkanExtensionInventory.md`
+needed no change), (5) this file.
