@@ -81,7 +81,15 @@ enum class HandleKind {
   TexelStorage,
   TexelUniform,
   SampledImage2D,
-  Sampler
+  Sampler,
+  /// A plain, non-arrayed, non-multisampled storage image (roadmap H19a):
+  /// `OpImageRead`/`OpImageWrite` through a `Sampled == 2` handle, lowered
+  /// to `feme.cpu.image.{load,store}.2d.*` rather than the sampled-image
+  /// `feme.cpu.image.sample.*` shapes. Unlike `SampledImage2D`, this kind
+  /// is scoped to `ImageShape::Plain2D` only for now (see
+  /// `classifyStorageImage2DHandle`'s comment) -- there is no `Shape` field
+  /// distinction to make since every instance is that one shape.
+  StorageImage2D
 };
 
 /// Which of the four sampled-image shapes `HandleKind::SampledImage2D`
@@ -114,7 +122,8 @@ bool isTexelHandleKind(HandleKind Kind) {
 /// Whether \p Kind's accesses go through `feme.cpu.resource.*` (every
 /// buffer kind) rather than `feme.cpu.image.*`.
 bool isBufferHandleKind(HandleKind Kind) {
-  return Kind != HandleKind::SampledImage2D && Kind != HandleKind::Sampler;
+  return Kind != HandleKind::SampledImage2D && Kind != HandleKind::Sampler &&
+        Kind != HandleKind::StorageImage2D;
 }
 
 /// The heap \p Kind's descriptors are assigned slots in.
@@ -128,6 +137,7 @@ BoundResourceClass getResourceClass(HandleKind Kind) {
   case HandleKind::TexelUniform:
     return BoundResourceClass::Buffer;
   case HandleKind::SampledImage2D:
+  case HandleKind::StorageImage2D:
     return BoundResourceClass::Image;
   case HandleKind::Sampler:
     return BoundResourceClass::Sampler;
@@ -425,8 +435,8 @@ constexpr unsigned SPIRVDimCube = 3;
 /// scope note; roadmap H7b-a widened this beyond plain, non-arrayed 2D to
 /// also cover `Texture2DArray`/`TextureCube`/`TextureCubeArray`, recorded in
 /// the returned classification's own `Shape`). Every other dimension, a
-/// multisampled image, and a storage image (`Sampled == 2`, which would
-/// need a `feme.cpu.image.store.*` helper that does not exist yet) return
+/// multisampled image, and a storage image (`Sampled == 2`, handled
+/// instead by `classifyStorageImage2DHandle` below, roadmap H19a) return
 /// `std::nullopt`. An integer-channel handle is classified the same as a
 /// float one here -- `hasOnlySupportedImageUses` (roadmap E26) is what
 /// narrows its *uses* to fetch only, since SPIR-V never legalizes a
@@ -462,6 +472,42 @@ classifySampledImage2DHandle(const CallInst &Handle) {
     Shape = Arrayed ? ImageShape::CubeArray : ImageShape::Cube;
   return HandleClassification{HandleKind::SampledImage2D, 0, nullptr,
                               ChannelType, Shape};
+}
+
+/// Returns \p Handle's classification if its type is a plain, non-arrayed,
+/// non-multisampled storage-image handle (`Sampled == 2`, roadmap H19a):
+/// the counterpart of `classifySampledImage2DHandle` above for
+/// `OpImageRead`/`OpImageWrite` rather than a filtered sample. Scoped to
+/// `Dim::2D`, non-arrayed, non-multisampled only for now -- an arrayed or
+/// cube storage image, or a multisampled one, is left as unstarted
+/// follow-on work (see Roadmap.md's H19b/H19c breakdown), so every other
+/// shape returns `std::nullopt` here, exactly like
+/// `classifySampledImage2DHandle`'s own multisample/other-dimension
+/// rejections.
+std::optional<HandleClassification>
+classifyStorageImage2DHandle(const CallInst &Handle) {
+  auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
+  if (!HandleTy || (HandleTy->getName() != "spirv.Image" &&
+                    HandleTy->getName() != "spirv.SignedImage"))
+    return std::nullopt;
+  if (HandleTy->getNumTypeParameters() != 1 ||
+      HandleTy->getNumIntParameters() != 6)
+    return std::nullopt;
+  // [Dim, Depth, Arrayed, MS, Sampled, Format].
+  if (HandleTy->getIntParameter(0) != SPIRVDim2D)
+    return std::nullopt;
+  if (HandleTy->getIntParameter(2) != 0) // Arrayed: not yet supported.
+    return std::nullopt;
+  if (HandleTy->getIntParameter(3) != 0) // MS: not yet supported.
+    return std::nullopt;
+  if (HandleTy->getIntParameter(4) != SPIRVSampledWithoutSampler)
+    return std::nullopt;
+
+  Type *ChannelType = HandleTy->getTypeParameter(0);
+  if (!ChannelType->isFloatTy() && !ChannelType->isIntegerTy(32))
+    return std::nullopt; // No other channel shape is decodable today.
+  return HandleClassification{HandleKind::StorageImage2D, 0, nullptr,
+                              ChannelType, ImageShape::Plain2D};
 }
 
 /// Returns \p Handle's classification if its type is a `spirv.Sampler`
@@ -593,6 +639,41 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       const auto *LI = dyn_cast<LoadInst>(PU);
       if (!LI || !(IsInteger ? isV4I32(LI->getType()) : isV4F32(LI->getType())))
         return false;
+    }
+  }
+  return true;
+}
+
+/// Checks that every use of a `HandleKind::StorageImage2D` handle (roadmap
+/// H19a) is a plain `getpointer` texel access (`OpImageRead`/`OpImageWrite`,
+/// same shape `hasOnlySupportedImageUses` accepts for a sampled image's own
+/// fetch), whose own users are `Load`s and/or `Store`s of the matching
+/// `<4 x float>`/`<4 x i32>` type -- both may appear on the *same*
+/// `getpointer` call, since the CTS's own `load_store` shader pattern reads
+/// and writes the same binding (a copy-shader idiom), unlike every other
+/// pointer-use check in this file, which does not need to consider that.
+bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger) {
+  for (const User *U : Handle.users()) {
+    const auto *CI = dyn_cast<CallInst>(U);
+    if (!CI || getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
+      return false;
+    if (!isCoordN(CI->getArgOperand(1), /*Width=*/2, /*Float=*/false))
+      return false;
+    for (const User *PU : CI->users()) {
+      if (const auto *LI = dyn_cast<LoadInst>(PU)) {
+        if (IsInteger ? !isV4I32(LI->getType()) : !isV4F32(LI->getType()))
+          return false;
+        continue;
+      }
+      if (const auto *SI = dyn_cast<StoreInst>(PU)) {
+        if (SI->getPointerOperand() != CI)
+          return false;
+        Type *ValTy = SI->getValueOperand()->getType();
+        if (IsInteger ? !isV4I32(ValTy) : !isV4F32(ValTy))
+          return false;
+        continue;
+      }
+      return false;
     }
   }
   return true;
@@ -861,6 +942,8 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
     if (!Classification)
       Classification = classifySampledImage2DHandle(*CI);
     if (!Classification)
+      Classification = classifyStorageImage2DHandle(*CI);
+    if (!Classification)
       Classification = classifySamplerHandle(*CI);
     if (!Classification)
       return std::nullopt; // Not one of the kinds this pass normalizes.
@@ -870,6 +953,11 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
       if (!hasOnlySupportedImageUses(
               *CI, Classification->TexelElementType->isIntegerTy(32),
               Classification->Shape))
+        return std::nullopt;
+      break;
+    case HandleKind::StorageImage2D:
+      if (!hasOnlySupportedStorageImageUses(
+              *CI, Classification->TexelElementType->isIntegerTy(32)))
         return std::nullopt;
       break;
     case HandleKind::Sampler:
@@ -1313,10 +1401,11 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         continue;
       }
 
-      // `OpImageFetch`: a `getpointer` whose result is only loaded from.
-      // `hasOnlySupportedImageUses` already rejected this branch for
-      // `Cube`/`CubeArray` (no fetch shape exists for either), so only
-      // `Plain2D`/`Array2D` reach here.
+      // `OpImageFetch`/`OpImageRead`/`OpImageWrite`: a `getpointer` whose
+      // result is loaded from and/or (roadmap H19a, `StorageImage2D` only)
+      // stored to. `hasOnlySupportedImageUses` already rejected this
+      // branch for `Cube`/`CubeArray` (no fetch shape exists for either),
+      // so only `Plain2D`/`Array2D` reach here.
       IRBuilder<> Builder(CI);
       Value *Coord = CI->getArgOperand(1);
       Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
@@ -1325,6 +1414,23 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
                         ? Builder.CreateExtractElement(Coord, uint64_t{2})
                         : nullptr;
       for (User *PU : llvm::make_early_inc_range(CI->users())) {
+        // `HandleKind::StorageImage2D` (roadmap H19a) accepts a `StoreInst`
+        // user here too -- `hasOnlySupportedStorageImageUses` already
+        // guaranteed its shape (matching value type, pointer operand ==
+        // this `getpointer` call), unlike `hasOnlySupportedImageUses`,
+        // which never accepts a store against a sampled image's own
+        // read-only fetch.
+        if (auto *SI = dyn_cast<StoreInst>(PU)) {
+          IRBuilder<> StoreBuilder(SI);
+          Value *Texel = SI->getValueOperand();
+          bool IsInteger = isV4I32(Texel->getType());
+          if (IsInteger)
+            createStore2DI32(StoreBuilder, Env, ImageIndex, X, Y, Texel, Mask);
+          else
+            createStore2D(StoreBuilder, Env, ImageIndex, X, Y, Texel, Mask);
+          SI->eraseFromParent();
+          continue;
+        }
         auto *LI = cast<LoadInst>(PU);
         IRBuilder<> LoadBuilder(LI);
         // Mip level 0: `feme::spirv::ImageLoadPattern` does not thread
