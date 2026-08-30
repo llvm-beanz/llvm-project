@@ -2421,6 +2421,42 @@ scalar helper's result element type, so a divergent
 `feme.cpu.image.load.2d.v4i32` call widens the same way a divergent
 `v4f32` one already did.
 
+**Update (roadmap H7i, closed):** "Implicit LOD uses fragment derivatives
+of the coordinates" above was, until now, aspirational rather than real:
+every implicit-LOD sample resolved to mip level 0 unconditionally, since
+no screen-space-derivative computation existed anywhere in the sampling
+path. `ImageCalls.h`/`.cpp`'s `Sample2D` call shape gains four new
+`DUdX`/`DUdY`/`DVdX`/`DVdY` float operands (between the `v` coordinate and
+`lod`), and a new shared `feme::cpu::getOrSynthesizeSample2DDerivatives`
+helper synthesizes real `feme.stage.derivative.{x,y}.coarse` calls on the
+`(U, V)` operands for a Fragment-stage implicit sample -- the only stage
+an implicit `texture()`/`Sample()` is ever legal from -- returning zero
+constants otherwise (unchanged prior behavior). Both
+`ResourceLowering.cpp` (DXIL) and `SPIRVResourceLowering.cpp` (SPIR-V)
+call this helper symmetrically for their `Plain2D` sample case. Since
+resource lowering runs before `LinearizePass`/`SIMDizePass`/
+`WaveLoweringPass` in the CPU pipeline (`Pipeline.cpp`), these synthesized
+derivative calls flow through the rest of the pipeline exactly like a
+user-authored `dFdx`/`dFdy` call, reusing `WaveLoweringPass`'s existing
+quad-lane derivative machinery with no changes needed there.
+`runtime/CPU/FeMeRuntimeCPU.c`'s new `femeRTPlanImplicitLod` consumes
+those real derivatives, implementing the standard "scale factor and level
+of detail" formula (texel-space footprint extents along each screen axis,
+the major/minor extents' ratio) to produce a genuine per-sample mip
+level, and -- when `FEME_SAMPLER_ANISOTROPY_ENABLE` is set -- a tap count
+bounded by the sampler's own `MaxAnisotropy`, with per-tap UV offsets
+spread symmetrically along the footprint's major axis;
+`femeCpuImageSample2DV4F32` averages these taps at the one derived mip
+level. `SIMDize.cpp`'s `widenImageCall` needed no change, since it widens
+`feme.cpu.image.*` calls generically by argument count rather than named
+fields. This is scoped to the plain `Sample2D` shape only -- the one the
+real `dEQP-VK.texture.filtering.2d.*anisotropy*` CTS cases exercise --
+`Sample2DArray`/`SampleCube`/`SampleCubeArray` implicit samples are
+unchanged, still always resolving to mip level 0, a known, pre-existing,
+unrelated limitation left for a later increment. `PhysicalDeviceInfo.cpp`
+now advertises `samplerAnisotropy` and raises `maxSamplerAnisotropy` to
+`16.0f` to match.
+
 ### Texture layout and formats
 
 The API-neutral image descriptor supports linear and FeMe-private tiled
