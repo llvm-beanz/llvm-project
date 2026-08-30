@@ -2683,6 +2683,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         cpu::FragmentResources FRes;
         FRes.ResourceHeap = Draw.Resources.ResourceHeap;
         FRes.BoundResources = Draw.Resources.BoundResources;
+        FRes.BoundImages = Draw.Resources.BoundImages;
+        FRes.BoundSamplers = Draw.Resources.BoundSamplers;
         FRes.ImageHeap = Draw.Resources.ImageHeap;
         FRes.SamplerHeap = Draw.Resources.SamplerHeap;
         FRes.RootConstants = Draw.Resources.RootConstants;
@@ -3368,6 +3370,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     cpu::VertexResources VRes;
     VRes.ResourceHeap = Draw.Resources.ResourceHeap;
     VRes.BoundResources = Draw.Resources.BoundResources;
+    VRes.BoundImages = Draw.Resources.BoundImages;
+    VRes.BoundSamplers = Draw.Resources.BoundSamplers;
     VRes.ImageHeap = Draw.Resources.ImageHeap;
     VRes.SamplerHeap = Draw.Resources.SamplerHeap;
     VRes.RootConstants = Draw.Resources.RootConstants;

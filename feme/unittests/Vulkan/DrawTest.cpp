@@ -357,6 +357,40 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (Roadmap H14) Samples a bound `set = 0` image (binding 0) through a
+/// separate bound sampler (binding 1) at a constant, explicit-LOD-0 UV and
+/// writes the result straight to `@color` -- the fragment-stage
+/// counterpart of `kSampledImageShader` (`CommandBufferTest.cpp`'s
+/// compute-only sampled image coverage). An explicit LOD is used, exactly
+/// like `kSampledImageShader`, since correctness here is about whether the
+/// *sample itself* reaches the shader at all (see H14's own root cause: a
+/// missing `BoundImages`/`BoundSamplers` copy into the fragment stage's
+/// own `FragmentResources`, `Executor.cpp`), not about implicit-LOD
+/// derivative computation (already covered by the anisotropic-sampling
+/// tests, roadmap H7i).
+constexpr llvm::StringLiteral SampledImageFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %image = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %1 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %sampler = spirv.Load "UniformConstant" %1 : !spirv.sampler
+    %si = spirv.SampledImage %image, %sampler : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %uv = spirv.Constant dense<[5.000000e-01, 5.000000e-01]> : vector<2xf32>
+    %lod = spirv.Constant 0.000000e+00 : f32
+    %texel = spirv.ImageSampleExplicitLod %si, %uv ["Lod"], %lod : !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32 -> vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %texel : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @img, @samp, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
 /// (Roadmap F8a) Reads `input_attachment_index = 0`'s currently-bound
 /// color attachment via `subpassLoad` (`Dim::SubpassData` `spirv.ImageRead`,
 /// coordinate `(0, 0)` -- "relative to the current fragment location") and
@@ -1303,6 +1337,162 @@ TEST_F(DrawTest, FragmentStageWritesStorageBuffer) {
   vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
   vkDestroyBuffer(Device, Buf, nullptr);
   vkFreeMemory(Device, BufMemory, nullptr);
+}
+
+/// Roadmap H14: the fragment stage samples a bound `set = 0` image
+/// (binding 0) through a bound sampler (binding 1) and writes the result
+/// straight to the color attachment. H14's own root cause was that
+/// `Executor.cpp` built the fragment stage's `FragmentResources` (`FRes`)
+/// without copying `Draw.Resources.BoundImages`/`.BoundSamplers` into it
+/// (unlike the mesh/task/geometry stages' own resource structs, which do),
+/// so `materializeImageHeap`/`materializeSamplerHeap` always saw an empty
+/// binding list and every fragment-stage sample read back the all-zero
+/// (`Kind::None`) descriptor -- this test's 1x1 texture is a distinctive
+/// non-black, non-white color so a silently-zeroed sample is
+/// distinguishable from a correct one.
+TEST_F(DrawTest, FragmentStageSamplesBoundImage) {
+  VkDeviceMemory TexMemory = VK_NULL_HANDLE;
+  VkImage TexImage = VK_NULL_HANDLE;
+  VkImageView TexView = VK_NULL_HANDLE;
+  {
+    VkImageCreateInfo ImageInfo{};
+    ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+    ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ImageInfo.extent = {1, 1, 1};
+    ImageInfo.mipLevels = 1;
+    ImageInfo.arrayLayers = 1;
+    ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ImageInfo.tiling = VK_IMAGE_TILING_LINEAR;
+    ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &TexImage),
+              VK_SUCCESS);
+    VkMemoryRequirements Reqs{};
+    vkGetImageMemoryRequirements(Device, TexImage, &Reqs);
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = Reqs.size;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &TexMemory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindImageMemory(Device, TexImage, TexMemory, 0), VK_SUCCESS);
+    auto *Img = fromHandle<Image>(TexImage);
+    auto *Texels = static_cast<uint8_t *>(Img->data());
+    Texels[0] = 0x10;
+    Texels[1] = 0x20;
+    Texels[2] = 0x30;
+    Texels[3] = 0xFF;
+    VkImageViewCreateInfo ViewInfo{};
+    ViewInfo.image = TexImage;
+    ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ViewInfo.subresourceRange.levelCount = 1;
+    ViewInfo.subresourceRange.layerCount = 1;
+    ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &TexView),
+              VK_SUCCESS);
+  }
+
+  VkSamplerCreateInfo SamplerInfo{};
+  SamplerInfo.magFilter = VK_FILTER_NEAREST;
+  SamplerInfo.minFilter = VK_FILTER_NEAREST;
+  SamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  SamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  VkSampler Sampler = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &Sampler),
+            VK_SUCCESS);
+
+  VkDescriptorSetLayoutBinding Bindings[2]{};
+  Bindings[0].binding = 0;
+  Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+  Bindings[0].descriptorCount = 1;
+  Bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Bindings[1].binding = 1;
+  Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+  Bindings[1].descriptorCount = 1;
+  Bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 2;
+  SetLayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout SampledLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &SampledLayout),
+      VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSizes[2] = {
+      {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1},
+      {VK_DESCRIPTOR_TYPE_SAMPLER, 1},
+  };
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 2;
+  PoolInfo.pPoolSizes = PoolSizes;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+            VK_SUCCESS);
+  VkDescriptorSetAllocateInfo DSAllocInfo{};
+  DSAllocInfo.descriptorPool = DescPool;
+  DSAllocInfo.descriptorSetCount = 1;
+  DSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+  VkDescriptorImageInfo ImgInfo{};
+  ImgInfo.imageView = TexView;
+  ImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  VkDescriptorImageInfo SampInfo{};
+  SampInfo.sampler = Sampler;
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+  Writes[0].pImageInfo = &ImgInfo;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+  Writes[1].pImageInfo = &SampInfo;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(SampledImageFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment, nullptr, SampledLayout);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, SampledLayout,
+                          0, 1, &Set, 0, nullptr);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Every covered fragment samples the same 1x1 texture, so a correct
+  // sample reproduces its distinctive color exactly; H14's own bug left
+  // every fragment reading the all-zero (never-written) descriptor
+  // instead, rendering solid black.
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texel(X, Y);
+      EXPECT_EQ(Texel, (std::array<uint8_t, 4>{0x10, 0x20, 0x30, 0xFF}))
+          << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyDescriptorPool(Device, DescPool, nullptr);
+  vkDestroyPipelineLayout(Device, SampledLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+  vkDestroySampler(Device, Sampler, nullptr);
+  vkDestroyImageView(Device, TexView, nullptr);
+  vkDestroyImage(Device, TexImage, nullptr);
+  vkFreeMemory(Device, TexMemory, nullptr);
 }
 
 /// Roadmap C6: an imageless framebuffer (`VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT`)
