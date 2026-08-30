@@ -47259,3 +47259,80 @@ scoped is now fully closed with no residual gap in
 `dEQP-VK.texture.filtering.2d.*` itself. Cleaned up scratch caselist files
 under `VK-GL-CTS/run/` except the final `h18_full.qpa` log, kept for
 traceability per this project's own established convention.
+
+# Session: Roadmap H7i closure (samplerAnisotropy)
+
+Returned to H7i itself now that every prerequisite it had spun off was
+closed: H13d (the `SPIRVResourceLoweringPass` combined-sampled-image-
+handle gap) plus the H14 through H18 chain that closure exposed (all-zero
+resource reads, a missing LOD clamp, mag/min filter selection swapped, no
+trilinear blend, an off-by-one shift in `R11G11B10_FLOAT`'s decode) were
+all closed in prior sessions, and the real anisotropic filter kernel
+(`femeRTPlanImplicitLod`'s multi-tap, `MaxAnisotropy`-bounded average) has
+been sitting implemented-but-unverifiable since the original H7i attempt.
+
+First re-ran the real `dEQP-VK.texture.filtering_anisotropy.*` CTS group
+(before touching any code) to see the *current* state: all 128 cases were
+`NotSupported`, because the CTS module itself checks the
+`samplerAnisotropy` feature bit up front and skips every case when it
+reads `VK_FALSE` -- confirming the only remaining blocker really was the
+feature bit itself, not some new pipeline-creation or sampling bug (which
+would instead have shown up as `Fail`, not `NotSupported`).
+
+Flipped `PhysicalDeviceInfo.cpp`'s `Info.Features.samplerAnisotropy` to
+`VK_TRUE` and raised `Limits.maxSamplerAnisotropy` from its degenerate
+`1.0f` floor to `16.0f` (the value real GPU drivers commonly report,
+comfortably above any `anisotropy_max` value this feature's own mandatory
+CTS coverage requests). Noticed while editing that the surrounding
+comments still referenced an old roadmap ID, `H7u`, for what is now H13d
+(apparently renamed at some point after these comments were written,
+without updating them) -- fixed those stale references while touching
+this code anyway, since they'd otherwise permanently mislead a future
+reader chasing "H7u" to a dead end.
+
+Added an explicit `EXPECT_EQ(Info.Features.samplerAnisotropy, VK_TRUE)`
+(and the matching `Cleared.samplerAnisotropy = VK_FALSE` in the "nothing
+else sneaks to true" memcmp check) to
+`PhysicalDeviceInfoTest.cpp`'s existing
+`OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised`
+test -- there was no pre-existing assertion on this feature bit at all
+before this row, an oversight from the original (reverted) H7i attempt
+that's worth closing regardless of this session's own change, so a future
+regression here would be caught immediately.
+
+Rebuilt and ran `ninja check-feme`: 2068/2127 passed, 0 Failed, 59
+pre-existing `Unsupported` (no test-count change, since only an
+assertion inside an existing test was added, not a new `TEST`).
+Committed the feature-bit flip + limit raise + test update together.
+
+Real CTS re-run: `dEQP-VK.texture.filtering_anisotropy.*` (128 cases):
+64 Pass (every real graphics-pipeline case), 64 honestly `NotSupported`
+(the same unrelated `_compute`-variant format gap seen in every prior
+session's own reproduction, unaffected by this change), **0 Fail** -- a
+clean, complete pass rate for this feature bit's real conformance
+surface. Also re-ran the broader `dEQP-VK.texture.filtering.2d.*` sweep
+as a regression check (flipping a global feature bit could, in principle,
+perturb unrelated cases via some shared code path) -- unchanged at
+258/1698 Pass, 0 Fail, confirming no regression.
+
+No `FeMeGraphicsDesign.md` deviation from a design standpoint (the design
+document already anticipated this feature's real conformance path; this
+row just confirms and records the closure), but updated its "Canonical
+image operations" section's own narrative from "in progress" to
+"closed" since it had been left mid-story since the original attempt.
+
+Struck through H7i in `Roadmap.md` with the full closure narrative,
+appended an "H7i closure" subsection to the existing H7i report in
+`VulkanCTSReport.md` (rather than starting a wholly new top-level
+section, since this is a direct continuation/resolution of that same
+row's own earlier, incomplete report), and flipped
+`Vulkan14FeatureInventory.md`'s `samplerAnisotropy` row from "no" to
+"yes". `VulkanExtensionInventory.md` needed no change (a core feature-bit
+row, not an extension). Committed the runtime change, the doc updates,
+and this file as three separate commits, per the small-changes
+instruction. Cleaned up scratch caselist/log files under `VK-GL-CTS/run/`
+except the final anisotropy re-run log, kept for traceability.
+
+This closes out the entire H7i/H13d/H14/H15/H16/H17/H18 investigation
+chain that began several sessions ago from `samplerAnisotropy`'s original
+"implemented but unreachable" state.
