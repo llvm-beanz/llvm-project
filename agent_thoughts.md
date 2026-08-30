@@ -47336,3 +47336,155 @@ except the final anisotropy re-run log, kept for traceability.
 This closes out the entire H7i/H13d/H14/H15/H16/H17/H18 investigation
 chain that began several sessions ago from `samplerAnisotropy`'s original
 "implemented but unreachable" state.
+
+# Session: H7j / H19 -- storage-image read/write prerequisite (Plain2D, mandatory-format floor)
+
+**Task.** Continue H7j (`shaderStorageImageExtendedFormats`/
+`shaderStorageImageMultisample`/`shaderStorageImageReadWithoutFormat`/
+`shaderStorageImageWriteWithoutFormat`) or any prerequisite. H7j's own
+roadmap text already named the real prerequisite: no `OpImageRead`/
+`OpImageWrite` lowering existed anywhere in the transform path for a
+storage image at all -- a much larger gap than a narrow format
+restriction. Rather than nest this arbitrarily deep under H7 (violating
+the standing "no more than one lowercase letter of nesting" rule), I split
+it out as its own top-level milestone, H19, broken into H19a-H19d, and
+worked H19a this session: Plain2D (non-arrayed, non-multisampled)
+storage-image read/write for exactly the Vulkan spec's mandatory
+storage-image format floor.
+
+**Investigation.** Confirmed via `SPIRVResourceLowering.cpp` reading that
+`classifySampledImage2DHandle` explicitly rejected any storage image
+(`Sampled == 2`), with a comment already naming the exact gap: "would need
+a `feme.cpu.image.store.*` helper that does not exist yet." Confirmed via
+a 4-case CTS probe that every storage-image format test reports
+`NotSupported` today. Re-confirmed the ICD path this session needs:
+`VK_DRIVER_FILES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json`
+(not under `VK-GL-CTS/build`).
+
+**Implementation (the bulk of the session).** Added `femeCpuImageStore2DV4F32`/
+`V4I32` runtime helpers (`FeMeRuntimeCPU.c`), closing a small pre-existing
+gap along the way (`R32_UINT`/`R32_SINT` unpack support had only ever
+been added for *sampled*-image mandatory formats by roadmap E26, never for
+storage images). Added `ImageCallKind::Store2D`/`Store2DI32` to the call
+vocabulary (`ImageCalls.h`/`.cpp`), giving them a writing
+`MemoryEffects::argMemOnly(ModRefInfo::Mod)` unlike every other
+(read-only) `feme.cpu.image.*` call. Added `HandleKind::StorageImage2D`
+classification/lowering to `SPIRVResourceLowering.cpp`
+(`classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`,
+accepting a `getpointer` call used by a `LoadInst`, a `StoreInst`, or
+both -- the CTS's own `load_store` idiom reads and writes the same
+binding). Flipped `Format.cpp` to advertise
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` for the 6-format floor. Added unit
+tests at every layer (`SPIRVResourceLoweringTest.cpp`,
+`ImageSamplingTest.cpp`, `FormatTest.cpp`, rewriting one now-stale
+assertion). All committed in 3 separate small commits; `ninja check-feme`
+passed in full after each.
+
+**Real CTS surfaced two further, genuinely separate, non-storage-image-specific
+gaps.** Running `dEQP-VK.image.load_store.with_format.2d.*` (78 cases)
+found the mandatory floor's own 12 cases (6 formats x plain/`_linear`)
+all failing at `vkCreateComputePipelines`, root-caused via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` to `feme-cpu-simdize`: "has a
+divergent vector value ... used outside a supported ... pattern." A
+temporary debug dump (added, used, then reverted before committing --
+never left in the tree) of the offending function's IR showed the actual
+divergent value was *not* this row's own `Store2D` `Texel` operand at
+all, but a `shufflevector <3 x i32> ... to <2 x i32>` (computing
+`gl_GlobalInvocationID.xy`) whose result was stored into a vector-typed
+`alloca` and immediately read back one element at a time via
+`getelementptr` -- the ordinary SPIR-V `Function`-storage-class local
+variable lowering. This was a red herring relative to my initial
+hypothesis (that the gap was specifically about widening a divergent
+stored `Texel`), but investigating it fully paid off in two ways:
+
+1. **The real, actual blocking bug**: `PreparePass`'s existing
+   `PromotePass` (`mem2reg`) already runs early in Phase 1, but `mem2reg`
+   categorically refuses to promote any `alloca` with a `getelementptr`
+   use at all (`llvm::isAllocaPromotable`'s documented precondition) --
+   exactly this shader's own shape. I verified the fix standalone first,
+   cheaply, before touching any pass pipeline: hand-reduced the IR to 18
+   lines and ran `opt -passes=sroa` on it directly, confirming SROA
+   eliminates the `alloca` (and every `getelementptr`/`load`/`store`
+   through it) entirely into pure SSA `insertelement`/`extractelement`/
+   `shufflevector` -- a pattern `feme-cpu-simdize` already widens with no
+   further change needed. Fixed by adding `SROAPass` before `PromotePass`
+   in `Prepare.cpp`'s `prepareFunction`. This is the fix that actually
+   unblocked the real CTS cases.
+
+2. **A second, real, independent latent bug I found and fixed alongside,
+   even though it turned out not to be what was blocking these particular
+   CTS cases**: while reading `widenImageCall` closely to rule it out, I
+   found it genuinely was buggy for a write-shaped image call (which had
+   simply never existed before this row): its generic per-operand
+   widening loop looked every operand up in the scalar `Widened` map, but
+   a vector-typed operand (`Texel`) is decomposed into
+   `WidenedVectorComponents` instead -- so a genuinely divergent stored
+   texel would silently fall through to `getWidened`'s uniform-broadcast
+   fallback and build an illegal `<W x <4 x T>>` splat. The lane mask was
+   also unconditionally `Env.EntryMask` (a read's mask) rather than
+   `Env.SideEffectMask` (matching `widenResourceCall`'s own correct
+   choice for its `StoredValue` case), and a void-returning call's
+   `Result`-vector construction was never guarded against, which would
+   build an illegal `<W x void>` type. Fixed all three and added a
+   dedicated `SIMDizeTest.cpp` unit test
+   (`DecomposesInsertElementChainIntoImageStore`) mirroring the existing
+   `DecomposesInsertElementChainIntoResourceStore` test, since this
+   project's own real CTS coverage in this group turns out not to
+   independently exercise a genuinely *divergent* stored texel (every
+   mandatory-format case's own per-invocation write varies its *address*,
+   not its *texel value*, enough to keep the value uniform) -- this fix
+   is unit-test-verified only, not (yet) independently real-CTS-verified
+   in isolation from the `SROAPass` fix. I judged it worth fixing now
+   regardless, since leaving a known, real, reachable-by-construction bug
+   in a function I was already deep in reading would have been a
+   deliberate half-measure, not a scoping decision -- and it is
+   plausible a future storage-image CTS case (a per-invocation gradient
+   write, say) would have hit it for real.
+
+**Verification.** `ninja check-feme`: 2080/2139, 0 `Failed`, 59
+pre-existing `Unsupported`, after both fixes. Real CTS re-run of
+`dEQP-VK.image.load_store.with_format.2d.*`: the 12 mandatory-format
+cases now all Pass (down from 12 Fail), 66 honestly `NotSupported` -- 0
+`Fail` in this group. A broader real re-run of the full
+`dEQP-VK.image.load_store*` group (4400 cases) confirmed the row's own
+scope stayed honestly bounded: 66 Pass, 84 Fail (every one of them
+exactly the mandatory floor's own cases in a shape this row deliberately
+left out -- 1D, 1D-array, 2D-array's multi-layer cases, 3D, cube,
+cube-array; a `single_layer` sub-case of `2d_array`/`cube`/`cube_array`
+correctly passes, since it binds a genuinely non-arrayed `image2D` view),
+4250 honest `NotSupported`. Tracked the remaining shapes/format breadth as
+new roadmap H19b (arrayed 2D), H19c (1D/3D), H19d (cube/cube-array plus
+the format/configuration breadth H7j's own four bits still need).
+
+**Docs.** Struck through H19a in `Roadmap.md` with the full closure
+narrative (including both SIMDize/Prepare fixes), added H19/H19b/H19c/H19d
+rows, and updated H7j's own row to reference H19. Updated
+`FeMeGraphicsDesign.md`'s "Images and sampling" section (the stale "would
+need a `feme.cpu.image.store.*` helper... does not exist yet" line, plus
+a full "Update (roadmap H19a, closed)" entry mirroring the H7i/E26
+precedent style). Appended a "Roadmap H19a: measured impact" section to
+`VulkanCTSReport.md`. Added notes to the four `shaderStorageImage*` rows
+in `Vulkan14FeatureInventory.md` (all still "no", but now cross-referenced
+to H19/H19d rather than blank). `VulkanExtensionInventory.md` confirmed no
+change needed (grepped for any storage-image-related extension entry;
+none exists).
+
+**Commits.** Five small commits this session: (1) runtime helpers + call
+vocabulary + runtime unit tests, (2) SPIR-V lowering + its unit tests, (3)
+`Format.cpp` + its rewritten unit test, (4) the `SIMDize.cpp` `widenImageCall`
+fix + its unit test, (5) the `Prepare.cpp` `SROAPass` fix + its unit test.
+Documentation updates and this file will be committed separately, per the
+standing instruction.
+
+**A process note for future sessions.** The most valuable single step in
+this investigation was reproducing the SIMDize/SROA question *standalone*
+with `opt -passes=sroa` on an 18-line hand-reduced IR file, before
+touching any pass pipeline code at all -- confirming the fix idea was
+right in about 30 seconds, versus a full edit-rebuild-rerun-CTS cycle
+(which takes several minutes) to find out the same thing. The temporary
+`FEME_SIMDIZE_DEBUG_DUMP`-style env-var debug dump added directly to
+`SIMDize.cpp` to get the exact offending IR out of a real CTS run (via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`) was likewise essential to get from
+"an opaque error string with no value name" to a concrete, reducible
+repro at all -- and was fully reverted before committing, leaving no
+debug-only code behind.
