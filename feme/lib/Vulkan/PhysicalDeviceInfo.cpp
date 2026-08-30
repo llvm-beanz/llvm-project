@@ -253,13 +253,16 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxSamplerLodBias = 2.0f;
   // Roadmap H7i: a real `femeRTPlanImplicitLod`-driven multi-tap
   // anisotropic filter now exists (bounded by the sampler's own
-  // `MaxAnisotropy`, no fixed cap of its own), but `samplerAnisotropy`
-  // itself is *not* advertised (below) -- real CTS re-verification found
-  // an unrelated, pre-existing `SPIRVResourceLoweringPass` gap
-  // (roadmap H7u) blocks every real `dEQP-VK.texture.filtering.2d.*`
-  // graphics-pipeline case, anisotropy included, so this limit stays at
-  // its conformant degenerate floor until H7u unblocks a real pass.
-  Limits.maxSamplerAnisotropy = 1.0f;
+  // `MaxAnisotropy`), and every real, pre-existing blocker discovered
+  // while scoping this row (the `SPIRVResourceLoweringPass`
+  // combined-sampled-image-handle gap, roadmap H13d; the four distinct
+  // sampling-correctness gaps roadmap H14/H15/H16/H17/H18 tracked to
+  // completion) is now closed -- `dEQP-VK.texture.filtering.2d.*` is
+  // fully clean (0 `Fail`, see H18's own closure). `maxSamplerAnisotropy`
+  // is raised to `16.0f`, the value real GPU drivers typically report and
+  // comfortably above every `anisotropy_max`/fractional-value CTS case
+  // this feature's own mandatory conformance floor exercises.
+  Limits.maxSamplerAnisotropy = 16.0f;
   // Roadmap H3 implements exactly Vulkan's mandatory multi-viewport floor:
   // 16 independent viewport/scissor slots (`MaxViewportCount`), no larger
   // arbitrary value until a test needs one. Every consuming loop in
@@ -695,22 +698,30 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // `dEQP-VK.texture.filtering.2d.*anisotropy*` cases exercise
   // (`Sample2DArray`/`SampleCube`/`SampleCubeArray` implicit samples still
   // resolve to mip level 0, a known, pre-existing, unrelated limitation).
-  // Real re-verification against `dEQP-VK.texture.filtering_anisotropy.*`
-  // found the filter kernel itself is never actually reached: every
+  // An earlier re-verification against `dEQP-VK.texture.filtering_anisotropy.*`
+  // found this filter kernel was never actually reached: every
   // graphics-pipeline case in this whole CTS group (also true of the
-  // unrelated, ordinary `dEQP-VK.texture.filtering.2d.*` group broadly,
-  // 0/1698 passing) fails at `vkCreateGraphicsPipelines` because
-  // `SPIRVResourceLoweringPass`'s handle classification does not
+  // unrelated, ordinary `dEQP-VK.texture.filtering.2d.*` group broadly)
+  // failed at `vkCreateGraphicsPipelines` because
+  // `SPIRVResourceLoweringPass`'s handle classification did not
   // recognize a single combined `OpTypeSampledImage`-style
   // `handlefrombinding` call (the idiomatic GLSL `uniform sampler2D`
   // shape glslang actually emits) -- a real, pre-existing gap unrelated
-  // to this row (confirmed structurally: classification fails upstream
-  // of anything this row's own derivative/anisotropic code touches, so
-  // that code is never even reached), tracked as new roadmap follow-on
-  // H7u. `samplerAnisotropy` therefore stays `VK_FALSE` until H7u
-  // unblocks a real, honest CTS pass -- flipping it now would be an
-  // unverifiable conformance claim.
-  Info.Features.samplerAnisotropy = VK_FALSE;
+  // to this row, tracked as roadmap H13d and now closed. Two further,
+  // separate sampling-correctness gaps that closure exposed
+  // (`dEQP-VK.texture.filtering.2d.*` going from an outright pipeline-
+  // creation failure to a real-but-wrong render) were tracked to
+  // completion as roadmap H14 (all-zero resource reads), H15 (a missing
+  // LOD clamp), H16 (mag/min filter selection swapped), H17 (no
+  // trilinear blend), and H18 (an off-by-one bit shift in this format's
+  // own decoder) -- `dEQP-VK.texture.filtering.2d.*` is now fully clean
+  // (0 `Fail`). With every real, non-anisotropy-specific blocker this
+  // row's own investigation surfaced now closed, a real re-run of
+  // `dEQP-VK.texture.filtering_anisotropy.*` (below) confirms this row's
+  // own filter kernel is now genuinely reached and passes its real
+  // conformance cases -- `samplerAnisotropy` is therefore advertised
+  // `VK_TRUE`.
+  Info.Features.samplerAnisotropy = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;

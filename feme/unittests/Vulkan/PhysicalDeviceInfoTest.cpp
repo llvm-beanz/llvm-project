@@ -148,12 +148,18 @@ TEST(PhysicalDeviceInfo,
   // Roadmap H7i implemented a real screen-space-derivative-based
   // implicit-LOD computation plus a genuine bounded multi-tap anisotropic
   // filter for the plain `sampler2D` shape (`FeMeRuntimeCPU.c`'s
-  // `femeRTPlanImplicitLod`), but `samplerAnisotropy` itself stays
-  // `VK_FALSE`: real re-verification found every real
-  // `dEQP-VK.texture.filtering.2d.*` graphics-pipeline case (anisotropy
-  // included) blocked by an unrelated, pre-existing
-  // `SPIRVResourceLoweringPass` gap (roadmap H7u), so the filter kernel
-  // is never actually reached by any real CTS case yet.
+  // `femeRTPlanImplicitLod`), but left `samplerAnisotropy` at `VK_FALSE`:
+  // real re-verification found every real `dEQP-VK.texture.filtering.2d.*`
+  // graphics-pipeline case (anisotropy included) blocked by an unrelated,
+  // pre-existing `SPIRVResourceLoweringPass` gap (roadmap H13d), so the
+  // filter kernel was never actually reached by any real CTS case. H13d,
+  // and the further sampling-correctness gaps its own closure exposed
+  // (roadmap H14 through H18), are now all closed -- `dEQP-VK.texture.
+  // filtering.2d.*` is fully clean, and a real re-run of `dEQP-VK.texture.
+  // filtering_anisotropy.*` confirms the filter kernel is now genuinely
+  // reached and passes, so `samplerAnisotropy` now flips to `VK_TRUE`
+  // (see PhysicalDeviceInfo.cpp's own comment and "Roadmap H7i: measured
+  // impact" in VulkanCTSReport.md for the full reproduction).
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
@@ -177,6 +183,7 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.sampleRateShading, VK_TRUE);
   EXPECT_EQ(Info.Features.vertexPipelineStoresAndAtomics, VK_TRUE);
   EXPECT_EQ(Info.Features.fragmentStoresAndAtomics, VK_TRUE);
+  EXPECT_EQ(Info.Features.samplerAnisotropy, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -201,6 +208,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.sampleRateShading = VK_FALSE;
   Cleared.vertexPipelineStoresAndAtomics = VK_FALSE;
   Cleared.fragmentStoresAndAtomics = VK_FALSE;
+  Cleared.samplerAnisotropy = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }
