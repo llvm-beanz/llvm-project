@@ -104,9 +104,16 @@ protected:
   }
 };
 
+/// `feme.cpu.image.sample.2d.v4f32`'s own operand shape: image/sampler
+/// heaps and descriptor indices, `(U, V)`, the four screen-space partial
+/// derivatives of `(U, V)` an implicit-LOD sample's real mip/anisotropy
+/// selection consults (roadmap H7i; ignored, but still present, for an
+/// explicit-LOD sample), `Lod`/`UseExplicitLod`, an active-lane mask, and
+/// the `<4 x float>` result written through the trailing `out` pointer.
 using SampleFn = void (*)(const FemeImageDescriptor *, uint32_t,
                           const FemeSamplerDescriptor *, uint32_t, uint32_t,
-                          uint32_t, float, float, float, bool, bool, void *);
+                          uint32_t, float, float, float, float, float, float,
+                          float, bool, bool, void *);
 using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
                              const FemeSamplerDescriptor *, uint32_t, uint32_t,
                              uint32_t, float, float, float, bool, float, bool,
@@ -248,7 +255,7 @@ TEST_F(ImageSamplingTest, PointSampleIdentityFormat) {
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   // Texel (1, 0)'s center is at normalized coordinates (0.75, 0.25).
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, 0.25f, 0.0f, true, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 5.0f);
   EXPECT_FLOAT_EQ(Out[1], 6.0f);
   EXPECT_FLOAT_EQ(Out[2], 7.0f);
@@ -272,7 +279,7 @@ TEST_F(ImageSamplingTest, LinearSampleBlendsFourTexels) {
   SampleFn Fn =
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
   EXPECT_FLOAT_EQ(Out[1], 2.0f);
 }
@@ -294,7 +301,7 @@ TEST_F(ImageSamplingTest, RepeatAddressingWrapsCoordinate) {
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   // 1.25 wraps to 0.25, texel 0's center: reads the first (value-1) texel.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.25f, 0.5f, 0.0f, true, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.25f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
 }
 
@@ -316,7 +323,7 @@ TEST_F(ImageSamplingTest, ClampToBorderReadsBorderColor) {
   SampleFn Fn =
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 2.0f, 2.0f, 0.0f, true, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 2.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.1f);
   EXPECT_FLOAT_EQ(Out[1], 0.2f);
   EXPECT_FLOAT_EQ(Out[2], 0.3f);
@@ -341,7 +348,7 @@ TEST_F(ImageSamplingTest, SRGBDecodeOnSample) {
   SampleFn Fn =
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, true, Out);
   EXPECT_NEAR(Out[0], 0.5f, 0.01f);
   EXPECT_NEAR(Out[1], 0.5f, 0.01f);
   EXPECT_NEAR(Out[2], 0.5f, 0.01f);
@@ -391,8 +398,164 @@ TEST_F(ImageSamplingTest, ExplicitLodSelectsMipLevel) {
   SampleFn Fn =
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 1.0f, true, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, true, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
+}
+
+TEST_F(ImageSamplingTest, ImplicitLodWithNoDerivativesReadsBaseLevel) {
+  // Roadmap H7i: an implicit-LOD sample (`UseExplicitLod` false) given no
+  // screen-space derivatives at all (every `D*` operand zero, e.g. a
+  // caller outside the fragment stage) must still read the base level --
+  // no measurable minification was reported, so `femeRTPlanImplicitLod`
+  // resolves to level 0 exactly as this sample always did before this
+  // row.
+  float Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                           {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  float Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    float L0[2][2][4];
+    float L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, ImplicitLodSelectsCoarserMipFromDerivatives) {
+  // Roadmap H7i: an implicit-LOD sample now derives a real mip level from
+  // the caller's own screen-space partial derivatives of (U, V), instead
+  // of always reading level 0. A per-pixel `dU/dx` of 1.0 across this
+  // image's 2-texel width is a scale factor of 2 texels/pixel -- `log2(2)
+  // == 1` -- so this sample must read level 1, the coarser of the two.
+  float Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                           {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  float Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    float L0[2][2][4];
+    float L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/1.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
+}
+
+TEST_F(ImageSamplingTest, AnisotropicSampleDiffersFromIsotropicSample) {
+  // Roadmap H7i: this is the exact shape
+  // `dEQP-VK.texture.filtering.2d.*anisotropy*`'s own test logic requires
+  // (vktTextureFilteringAnisotropyTests.cpp's `FilteringAnisotropyInstance`)
+  // -- the same (U, V) and derivatives, sampled once with anisotropic
+  // filtering enabled and once without, must read a measurably different
+  // result; an inert `MaxAnisotropy` would make the two reads identical
+  // and fail that real CTS assertion. A single-column (1x8) image whose
+  // eight texels hold distinct values along V, sampled with a footprint
+  // whose derivatives are elongated entirely along V (`DVdY` nonzero,
+  // every other derivative zero -- a surface viewed edge-on along U, the
+  // classic anisotropic case), exercises this directly: an isotropic
+  // (`MaxAnisotropy` disabled) sample reads exactly one texel, while an
+  // anisotropic one averages several taps spread along that footprint.
+  float Storage[8][1][4];
+  for (int I = 0; I != 8; ++I)
+    Storage[I][0][0] = Storage[I][0][1] = Storage[I][0][2] =
+        Storage[I][0][3] = (float)I;
+
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), /*Width=*/1, /*Height=*/8,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  FemeSamplerDescriptor Isotropic =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor Anisotropic = Isotropic;
+  Anisotropic.Flags |= FEME_SAMPLER_ANISOTROPY_ENABLE;
+  Anisotropic.MaxAnisotropy = 4.0f;
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+
+  FemeSamplerDescriptor IsotropicHeap[1] = {Isotropic};
+  float IsotropicOut[4];
+  Fn(ImageHeap, 1, IsotropicHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/0.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.5f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, true, IsotropicOut);
+
+  FemeSamplerDescriptor AnisotropicHeap[1] = {Anisotropic};
+  float AnisotropicOut[4];
+  Fn(ImageHeap, 1, AnisotropicHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/0.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.5f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, true, AnisotropicOut);
+
+  // The isotropic sample reads exactly one texel (row 4); the anisotropic
+  // one averages four taps spread across rows 2-5, a measurably different
+  // (lower) value -- exactly the divergence the real CTS case requires.
+  EXPECT_FLOAT_EQ(IsotropicOut[0], 4.0f);
+  EXPECT_FLOAT_EQ(AnisotropicOut[0], 3.5f);
+  EXPECT_NE(IsotropicOut[0], AnisotropicOut[0]);
 }
 
 TEST_F(ImageSamplingTest, ComparisonSamplingLessEqualPasses) {
@@ -775,8 +938,8 @@ TEST_F(ImageSamplingTest, InactiveLaneReadsZero) {
   SampleFn Fn =
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4] = {9, 9, 9, 9};
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true,
-     /*Mask=*/false, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
+     0.0f, true, /*Mask=*/false, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
 }

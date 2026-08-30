@@ -13,7 +13,7 @@
 
 ; CHECK-LABEL: define void @main(
 ; CHECK-NOT: <4 x <4 x float>>
-; CHECK-COUNT-4: call <4 x float> @feme.cpu.image.sample.2d.v4f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float {{%.*}}, float 0.000000e+00, float 0.000000e+00, i1 false, i1 {{%.*}})
+; CHECK-COUNT-4: call <4 x float> @feme.cpu.image.sample.2d.v4f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float {{%.*}}, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, i1 false, i1 {{%.*}})
 ; CHECK: fadd <4 x float>
 define void @main() #0 {
   %img = call target("dx.Texture", <4 x float>, 0, 0, 0, 2)

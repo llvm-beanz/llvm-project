@@ -969,18 +969,75 @@ TEST(SPIRVResourceLoweringTest, LowersSampledImageAndSamplerPairToImageSample) {
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4f32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, v, lod, use_explicit_lod, mask).
+  //  u, v, dudx, dudy, dvdx, dvdy, lod, use_explicit_lod, mask).
   EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
   EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
   // Both are the sole binding of their own heap, so both resolve to slot 0.
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
+  // `main` here carries no `feme.shader.stage` attribute at all (i.e. it
+  // is not recognized as a Fragment-stage entry point), so this implicit
+  // sample gets zero-constant derivatives rather than a real
+  // `feme.stage.derivative.*` synthesis (roadmap H7i's own Fragment-only
+  // gate; see `getOrSynthesizeSample2DDerivatives`).
+  for (unsigned ArgNo : {8, 9, 10, 11})
+    EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(ArgNo))->isZero());
   // An implicit-LOD sample asks the runtime for level 0, not for `%lod`.
-  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(9))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(13))->isZero());
 
   // Neither the combined sampled-image struct nor the handles survive.
   for (Instruction &I : instructions(*F))
     EXPECT_FALSE(isa<InsertValueInst>(&I) || isa<ExtractValueInst>(&I));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     FragmentStageImplicitSampleSynthesizesRealDerivatives) {
+  // Roadmap H7i: the same shape as `SampleShader` above, except `main`
+  // now carries a real `feme.shader.stage`="fragment" attribute -- the
+  // only stage an implicit-LOD `texture()`/`OpImageSampleImplicitLod` is
+  // ever legal from. This must get real `feme.stage.derivative.*` calls
+  // synthesized as its new derivative operands, not zero constants.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %pair = type { target("spirv.Image", float, 1, 0, 0, 0, 1, 0), target("spirv.Sampler") }
+    define <4 x float> @main(<2 x float> %coord) #0 {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %p0 = insertvalue %pair poison, target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img, 0
+      %p1 = insertvalue %pair %p0, target("spirv.Sampler") %samp, 1
+      %i = extractvalue %pair %p1, 0
+      %s = extractvalue %pair %p1, 1
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %i,
+          target("spirv.Sampler") %s, <2 x float> %coord, <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4f32");
+  ASSERT_TRUE(Sample);
+  // Argument operands 8-11 are (dudx, dudy, dvdx, dvdy); none may be a
+  // plain zero constant now that a real derivative can be synthesized.
+  for (unsigned ArgNo : {8, 9, 10, 11}) {
+    Value *Deriv = Sample->getArgOperand(ArgNo);
+    EXPECT_FALSE(isa<ConstantFP>(Deriv));
+    auto *DerivCall = dyn_cast<CallInst>(Deriv);
+    ASSERT_TRUE(DerivCall);
+    Function *Callee = DerivCall->getCalledFunction();
+    ASSERT_TRUE(Callee);
+    EXPECT_TRUE(Callee->getName().starts_with("feme.stage.derivative."));
+  }
 }
 
 TEST(SPIRVResourceLoweringTest, AssignsImageAndSamplerTheirOwnHeapClasses) {

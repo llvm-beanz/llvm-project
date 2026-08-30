@@ -26,7 +26,7 @@ define <4 x float> @sample(<2 x float> %coord) {
   %s = extractvalue %sampled_image %pair1, 1
   ; CHECK: %[[U:.*]] = extractelement <2 x float> %coord, i64 0
   ; CHECK: %[[V:.*]] = extractelement <2 x float> %coord, i64 1
-  ; CHECK: call <4 x float> @feme.cpu.image.sample.2d.v4f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %[[U]], float %[[V]], float 0.000000e+00, i1 false, i1 true)
+  ; CHECK: call <4 x float> @feme.cpu.image.sample.2d.v4f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %[[U]], float %[[V]], float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, i1 false, i1 true)
   %r = call <4 x float> @llvm.spv.resource.sample(
       target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %i,
       target("spirv.Sampler") %s, <2 x float> %coord, <2 x i32> zeroinitializer)
@@ -42,7 +42,7 @@ define <4 x float> @sample_level(<2 x float> %coord, float %lod) {
       @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
-  ; CHECK: call <4 x float> @feme.cpu.image.sample.2d.v4f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %{{.*}}, float %{{.*}}, float %lod, i1 true, i1 true)
+  ; CHECK: call <4 x float> @feme.cpu.image.sample.2d.v4f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %{{.*}}, float %{{.*}}, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float %lod, i1 true, i1 true)
   %r = call <4 x float> @llvm.spv.resource.samplelevel(
       target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <2 x float> %coord, float %lod,

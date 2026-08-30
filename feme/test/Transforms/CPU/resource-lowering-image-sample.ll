@@ -8,7 +8,11 @@
 ; function gains the same eight trailing ABI parameters
 ; resource-lowering-typed-buffer.ll documents (image/sampler-only functions
 ; still get all eight, not just `image_heap`/`image_heap_count` -- see
-; `addResourceEnvParams`).
+; `addResourceEnvParams`). Since neither function below carries a
+; `feme.shader.stage`="fragment" attribute, roadmap H7i's four new
+; screen-space-derivative operands (inserted between the `v` coordinate and
+; `lod`) are always the zero constants `getOrSynthesizeSample2DDerivatives`
+; falls back to outside the Fragment stage.
 
 target datalayout = "e-m:e-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-pc-shadermodel6.6-compute"
@@ -50,6 +54,7 @@ define <4 x float> @sample_2d(i32 %idx, i32 %sampidx, float %u, float %v) {
   ; CHECK-SAME: ptr %image_heap, i32 %image_heap_count,
   ; CHECK-SAME: ptr %sampler_heap, i32 %sampler_heap_count,
   ; CHECK-SAME: i32 %idx, i32 %sampidx, float [[U]], float [[V]],
+  ; CHECK-SAME: float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00,
   ; CHECK-SAME: float 0.000000e+00, i1 false, i1 true)
   %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx, i1 false)
   %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx, i1 false)
