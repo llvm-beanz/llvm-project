@@ -47064,3 +47064,110 @@ spec-compliance bug fix (implementing a rule the spec already mandates),
 not a design decision. Committed the runtime fix + tests, then the
 Roadmap/VulkanCTSReport/Vulkan14FeatureInventory updates, as two separate
 commits (this file as the third and last).
+
+# Session: Roadmap H17 (trilinear / mipmapMode=LINEAR filtering)
+
+Picked up where the prior session's H16 closure left off: 70 of the 74
+remaining `dEQP-VK.texture.filtering.2d.*` fails cluster into every
+`minFilter` with a `_mipmap_linear` suffix, because `femeRTPlanImplicitLod`'s
+own comment already flagged `Samp->MipFilter` as accepted-but-unconsulted --
+both `Nearest` and `Linear` `mipmapMode` rounded to a single nearest mip
+level via the old `femeRTSelectMipLevel`, never blending between the two
+adjacent levels a real `mipmapMode=LINEAR` sampler requires.
+
+Reviewed `feme/.instructions.md` again at the start (LLVM coding standards,
+C++17, no RTTI/exceptions, small testable changes, clang-format via
+`git clang-format --diff` on changed lines only) and confirmed the runtime
+bitcode compile still uses `-Wall -Wextra -Werror` (so any function that
+becomes fully superseded must be deleted outright, not merely left
+unreferenced, or the build breaks).
+
+Design: added a `FemeRTMipTrilinearPlan` struct (`Level0`, `Level1`, `Frac`)
+and `femeRTSelectMipLevels`, replacing the old single-level
+`femeRTSelectMipLevel`. Added a shared `femeRTSampleFiltered2D` helper
+combining H16's mag/min filter selection with the new mip blend, used by
+all four vector-returning sample entry points (including the anisotropic
+multi-tap path, one call per tap -- accepted the small redundant per-tap
+`femeRTSelectMipLevels` recomputation for code simplicity, since `Plan.
+ClampedLod` is shared across taps and this isn't a hot path at this
+project's scale). The depth-comparison path
+(`femeCpuImageSampleCmp2DF32`) fetches raw texels rather than calling
+`femeRTSampleLinear2D`/`femeRTSamplePoint2D`, so it got a parallel
+`femeRTSampleCmp2DAtLevel` helper plus the identical inline blend instead.
+Removed the `Level` field from `FemeRTImplicitLodPlan` since only
+`ClampedLod` is needed now (verified `Img` stays used for `Ux`/`Uy`/`Vx`/`Vy`
+scaling, so no new unused-parameter risk from `-Werror`).
+
+Added 4 new `ImageSamplingTest.cpp` unit tests up front (before considering
+the implementation done), reusing the existing 2-level test-image
+construction pattern from `ImplicitLodSelectsCoarserMipFromDerivatives`.
+Building and running them caught a real regression immediately:
+`ExplicitLodNearestMipFilterStillRoundsToOneLevel` (a `Lod=0.5`,
+`MipFilter=Nearest` case) expected the pre-H17 round-to-nearest behavior
+(level 1, since the old code did `(uint32_t)(L + 0.5f)`) but the first cut
+of `femeRTSampleFiltered2D` always used `MipPlan.Level0` -- the *floor* --
+for the non-trilinear case, a different (and wrong) rounding mode. This is
+exactly the kind of thing the "write tests per phase before considering
+the change done" instruction is for: it caught a real, silent behavior
+change that would have shipped as a fresh bug disguised as a feature.
+
+Fixed by adding a small `femeRTNearestMipLevel` helper
+(`Frac < 0.5f ? Level0 : Level1`) and using it for the `MipFilter !=
+Linear` case in both `femeRTSampleFiltered2D` and
+`femeCpuImageSampleCmp2DF32`, rather than duplicating the ternary inline in
+two places (kept in the spirit of this session's own earlier
+`femeRTSampleFiltered2D`/`femeRTSampleCmp2DAtLevel` factoring). Hand-verified
+this rule is exactly equivalent to the old truncation-based rounding at the
+boundary cases (`Frac == 0.5` exact tie rounds up to `Level1`, matching old
+`(uint32_t)(L + 0.5f)`'s behavior for `L = k + 0.5`).
+
+Rebuilt, reran the full `ImageSamplingTest` suite (all 47 tests, not just
+the filtered subset) -- all passing, confirming the fix didn't regress
+anything else. Ran `git clang-format --diff` again (found two trivial
+whitespace nits from my own manual edits, an alignment shift and a stray
+blank line) and fixed them by hand since `git apply` on the diff failed
+(likely a line-ending/context mismatch after my edits) -- confirmed
+`git clang-format --diff` reports clean afterward.
+
+Ran the full `ninja check-feme` target: 2067/2126 passed, 59 pre-existing
+`Unsupported`, 0 `Failed` (up 3 tests from H16's 2064/2123 baseline).
+Committed the runtime fix + tests together as one commit.
+
+Real CTS re-run: had to rediscover the correct `deqp-vk` invocation syntax
+this session (`--deqp-caselist-file`, not `--deqp-caselistfile`, and
+`--deqp-case-filter` isn't a real flag -- a single `--deqp-case` or a
+generated caselist file via `--deqp-caselist-file` are the two working
+forms). Built a 1698-line caselist from `vk-default/texture.txt` filtered
+to `dEQP-VK.texture.filtering.2d.*` (matching the count referenced in
+prior sessions' own narrative) and ran the full sweep against the real
+`deqp-vk` binary already built under `/home/dev/dev/VK-GL-CTS/build`, with
+`VK_DRIVER_FILES` pointed at the feme ICD. Result: 252/1698 Pass (up from
+184), only 6 Fail remaining (down from 74), 1440 honest `NotSupported`
+unchanged. Spot-checked one previously-failing case directly
+(`combinations.nearest_mipmap_linear.nearest.repeat.repeat`) and confirmed
+it now passes outright.
+
+Grouped the 6 remaining fails: all `formats.b10g11r11_ufloat.*`, across
+every one of the six filter-mode combinations for that format (not just
+the 4 H16's own narrower sample caught, since that sample pre-dated H17's
+fix and couldn't separate this format's own `_mipmap_linear`-suffixed
+fails from the then-still-broken generic trilinear gap). This confirms
+H18 (filed last session) was scoped correctly as a distinct,
+format-specific gap, but its own fail count needed correcting from 4 to 6
+-- updated accordingly rather than leaving a stale, now-provably-wrong
+number in the roadmap.
+
+No `FeMeGraphicsDesign.md` deviation -- this row implements exactly the
+`mipmapMode` behavior the design doc already anticipated (nothing new
+being designed, just a gap being closed), so no design update was needed.
+
+Struck through H17 in `Roadmap.md` with the full closure narrative,
+corrected H18's fail count, appended a "Roadmap H17: measured impact"
+section to `VulkanCTSReport.md` matching the H14/H15/H16 format, and
+updated `Vulkan14FeatureInventory.md`'s `samplerAnisotropy` row to note
+H17's closure and the corrected H18 blocker. Committed the runtime change,
+the doc updates, and this file as three separate commits, per the
+small-changes instruction. Cleaned up the scratch caselist/log files under
+`VK-GL-CTS/run/` except the final `h17_full.qpa` log (kept for traceability,
+matching this project's own established convention of keeping named
+`.qpa` logs from prior sessions in that directory).
