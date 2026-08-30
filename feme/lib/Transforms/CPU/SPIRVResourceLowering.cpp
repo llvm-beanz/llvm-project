@@ -265,7 +265,22 @@ constexpr unsigned SPIRVStorageClassStorageBuffer = 12;
 /// A struct parameter is normally a direct-field uniform buffer, but a
 /// `StorageBuffer`-class handle with one is a glslang-style storage buffer
 /// block emitted directly as a fixed-layout struct rather than `dxc`'s
-/// one-member runtime-array wrapper.
+/// one-member runtime-array wrapper. A struct parameter whose storage class
+/// is instead `Uniform` is ambiguous by storage class alone: a real,
+/// read-only uniform block (`convertUniformBlockType`, always
+/// `Writable=0`) and a *pre-1.3* storage buffer block -- spelled as
+/// `Uniform` storage class plus a `BufferBlock` decoration rather than the
+/// dedicated `StorageBuffer` class (`convertBufferBlockType`'s own
+/// `isBufferBlockStorage`; still the form glslang emits by default for a
+/// `buffer` block, as seen in this project's own real
+/// `dEQP-VK.binding_model.shader_access.*.storage_buffer.compute.*` CTS
+/// coverage) -- both carry the identical `Uniform` storage-class int
+/// parameter. The second int parameter (`Writable`) is what actually
+/// distinguishes them: `convertUniformBlockType` always emits `0`, while
+/// `convertBufferBlockType` emits the real, possibly-`NonWritable`-derived
+/// bit for every storage buffer block regardless of which storage class
+/// spells it. So a writable `Uniform`-class struct is this legacy storage
+/// buffer spelling, not an actual uniform block.
 ///
 /// Returns `std::nullopt` for any other handle kind (an image/sampler
 /// resource, or a `spirv.VulkanBuffer` shape this pass still does not
@@ -288,7 +303,9 @@ classifyVulkanBufferHandle(const CallInst &Handle, const DataLayout &DL) {
                                 nullptr};
   }
   if (auto *StructTy = dyn_cast<StructType>(Param)) {
-    if (HandleTy->getIntParameter(0) == SPIRVStorageClassStorageBuffer)
+    bool Writable = HandleTy->getIntParameter(1) != 0;
+    if (HandleTy->getIntParameter(0) == SPIRVStorageClassStorageBuffer ||
+        (HandleTy->getIntParameter(0) == SPIRVStorageClassUniform && Writable))
       return HandleClassification{HandleKind::StorageStruct, 0, StructTy};
     if (HandleTy->getIntParameter(0) == SPIRVStorageClassUniform)
       return HandleClassification{HandleKind::Uniform, 0, StructTy};

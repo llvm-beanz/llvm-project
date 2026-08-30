@@ -402,6 +402,80 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(FieldOffset->getZExtValue(), 16u);
 }
 
+// Roadmap H7v: a pre-1.3 storage buffer block is spelled with the `Uniform`
+// storage class (2) plus a `BufferBlock` decoration rather than the
+// dedicated `StorageBuffer` class (12) -- still glslang's default spelling,
+// as seen in a real `dEQP-VK.binding_model.shader_access.*.storage_buffer.
+// compute.*` shader's own SPIR-V. `convertBufferBlockType` (SPIRVToLLVM
+// Patterns.cpp) still carries the real writability bit as this handle's
+// second int parameter even in that spelling, so a `Uniform`-class struct
+// handle with `Writable=1` must classify as a real (writable) storage
+// buffer block, not the read-only uniform block `LowersUniformBufferField
+// ToResourceLoad`'s `Writable=0` shape represents -- both share the
+// identical storage-class int parameter, so only the writability bit tells
+// them apart.
+TEST(SPIRVResourceLoweringTest,
+     LowersLegacyUniformClassStorageBlockFieldToResourceLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main() {
+      %h = call target("spirv.VulkanBuffer", {<4 x float>, <4 x float>}, 2, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {<4 x float>, <4 x float>}, 2, 1) %h, i32 1)
+      %v = load <4 x float>, ptr %ptr
+      ret <4 x float> %v
+    }
+    declare target("spirv.VulkanBuffer", {<4 x float>, <4 x float>}, 2, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {<4 x float>, <4 x float>}, 2, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceLoadCall(*F));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersLegacyUniformClassStorageBlockStoreToResourceStore) {
+  // Unlike a real read-only uniform block, this `Writable=1` handle must
+  // accept a store -- confirming the fix classifies it as a genuine
+  // storage buffer block (`HandleKind::StorageStruct`), not a read-only
+  // `HandleKind::Uniform` one.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<4 x float> %v) {
+      %h = call target("spirv.VulkanBuffer", {<4 x float>, <4 x float>}, 2, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {<4 x float>, <4 x float>}, 2, 1) %h, i32 0)
+      store <4 x float> %v, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", {<4 x float>, <4 x float>}, 2, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {<4 x float>, <4 x float>}, 2, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundStoreCall = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getName().starts_with(
+            "feme.cpu.resource.store.raw"))
+      FoundStoreCall = true;
+  }
+  EXPECT_TRUE(FoundStoreCall);
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+}
+
 TEST(SPIRVResourceLoweringTest,
      LeavesDirectStorageBlockDynamicFieldSelectorUnchanged) {
   LLVMContext Ctx;
