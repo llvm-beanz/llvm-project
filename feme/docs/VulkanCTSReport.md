@@ -15461,3 +15461,97 @@ design decision change. `Vulkan14FeatureInventory.md` updated to reflect
 H15's closure and H16 as the new, narrower blocker;
 `VulkanExtensionInventory.md` confirmed no change needed (no extension is
 affected by this row).
+
+## Roadmap H16: measured impact
+
+**Root cause.** H16's own roadmap description (from H15's own real re-run)
+characterized the remaining 156 fails as a small, `magFilter=LINEAR`-
+specific rounding-scale discrepancy. That characterization turned out to be
+wrong on re-investigation: a fresh pixel-level reduction of
+`dEQP-VK.texture.filtering.2d.combinations.nearest.linear.repeat.repeat`
+found errors as large as 75/255 concentrated at specific columns -- far
+too large to be a rounding-mode mismatch. Regrouping the full
+`dEQP-VK.texture.filtering.2d.combinations.*` sweep's own 120 fails by
+`(minFilter, magFilter)` pair (correcting an earlier grouping mistake that
+had grouped by `minFilter` alone) revealed the real, generic pattern:
+every failing group is exactly the set where `minFilter` and `magFilter`
+differ in base type (`nearest`/`linear`), all 16/16 or 12/16 failing;
+`linear.linear` and `nearest.nearest` (identical `minFilter`/`magFilter`)
+have zero failures. Root-caused via code inspection to every sampling
+entry point in `feme/runtime/CPU/FeMeRuntimeCPU.c`
+(`femeCpuImageSample2DV4F32` and its comparison/array/cube/cube-array
+siblings) unconditionally branching on `Samp.MagFilter` alone to choose
+point-vs-bilinear filtering, regardless of whether the sample was actually
+magnifying or minifying -- `Samp.MinFilter`, already correctly populated
+from `VkSamplerCreateInfo::minFilter` at sampler-creation time
+(`Image.cpp`), was never read anywhere in the sampling kernel. Per the
+Vulkan spec's own image level-of-detail operation, the mag/min filter
+choice must be based on the *sign* of the computed (biased-and-clamped)
+LOD value -- `lod <= 0` (magnifying) uses `magFilter`, `lod > 0`
+(minifying) uses `minFilter` -- not always `magFilter`. This was invisible
+whenever `minFilter`/`magFilter` shared the same base type (H15's own
+`MaxLod` clamp fix was sufficient for those combinations regardless of
+which one got consulted), only exposed for the 8 `(minFilter, magFilter)`
+groups where the base type genuinely differs.
+
+**Fix.** Refactored `femeRTSelectMipLevel` to split out
+`femeRTComputeClampedLod` (the shared `L = clamp(lod + LodBias, MinLod,
+MaxLod)` bias/clamp computation) from the integer mip-level rounding step,
+so the resulting clamped-but-unrounded LOD float can be shared by a new
+`femeRTUseLinearFilter` helper that picks `MagFilter` when
+`ClampedLod <= 0.0f`, `MinFilter` otherwise. `FemeRTImplicitLodPlan` (the
+struct `femeRTPlanImplicitLod` returns) now also carries this
+`ClampedLod`, so the implicit-LOD single-tap and anisotropic multi-tap
+paths make the same correct decision as the explicit-LOD path. Applied at
+all five affected call sites (`femeCpuImageSample2DV4F32`,
+`femeCpuImageSampleCmp2DF32`, `femeCpuImageSample2DArrayV4F32`,
+`femeCpuImageSampleCubeV4F32`, `femeCpuImageSampleCubeArrayV4F32`).
+
+**Test.** Four new unit tests in
+`feme/unittests/Runtime/CPU/ImageSamplingTest.cpp`:
+`ExplicitLodMinifyingUsesMinFilterNotMagFilter` and
+`ExplicitLodMagnifyingUsesMagFilterNotMinFilter` (a `MagFilter=Nearest`/
+`MinFilter=Linear` sampler, explicit positive vs. negative `Lod`, asserting
+a bilinear blend vs. an exact single-texel read respectively), and
+`ImplicitLodMinifyingUsesMinFilterNotMagFilter` (the same assertion via
+real screen-space derivatives instead of an explicit `Lod` operand).
+
+**`ninja check-feme`** (assertions + ccache): 2064/2123, 0 `Failed`, 59
+pre-existing `Unsupported`, up 4 tests from this row's own new coverage.
+
+**Real CTS re-run.** `dEQP-VK.texture.filtering.2d.combinations.nearest.linear.repeat.repeat`
+(the case this row's own reduction started from) now passes outright. The
+broader `dEQP-VK.texture.filtering.2d.combinations.*` sweep (1350 cases):
+144 now pass (up from 72), 48 `Fail` (down from 120), 1158 honest
+`NotSupported` (unchanged). The full `dEQP-VK.texture.filtering.2d.*` sweep
+(1698 cases): 184 now pass (up from 102), 74 `Fail` (down from 156), 1440
+honest `NotSupported` (unchanged). `dEQP-VK.texture.filtering_anisotropy.*`
+remains unaffected (still 0/128, all honest `NotSupported`, gated on the
+`samplerAnisotropy` feature bit itself -- confirmed by a direct re-run).
+
+**Remaining gap.** All 48 remaining `combinations.*` fails (and 70 of the
+74 remaining `filtering.2d.*` fails overall) cluster cleanly into
+`minFilter` values with the `_mipmap_linear` suffix (`nearest_mipmap_linear`,
+`linear_mipmap_linear`) regardless of `magFilter` -- a real, distinct, and
+already partially-documented gap: `femeRTPlanImplicitLod`'s own comment
+already notes `Samp->MipFilter` is "accepted for the API shape a future
+trilinear blend needs, but not yet consulted: both `Nearest` and `Linear`
+currently round to the nearer single level" -- i.e. real trilinear
+(mip-to-mip) blending was never implemented; every mipmapped sample reads
+exactly one rounded-to-nearest level regardless of `mipmapMode`. Tracked as
+new roadmap H17. The remaining 4 `filtering.2d.*` fails (all
+`b10g11r11_ufloat`, both `linear`/`nearest` and `*_mipmap_nearest`
+variants, no `mipmap_linear` involved) are a separate, unrelated,
+pre-existing format-conversion gap (noted but not yet scoped in the H15
+session) -- tracked as new roadmap H18.
+
+`samplerAnisotropy` (H7i) still stays `VK_FALSE`: unaffected by this fix,
+still blocked on the feature-bit gate and (now) H13d's combined-sampler
+gap plus H17/H18's own narrower remaining correctness gaps rather than
+H16's now-fixed mag/min filter selection bug.
+
+No `FeMeGraphicsDesign.md` deviation: this is a spec-compliance bug fix
+(the Vulkan mag/min filter selection rule), not a design decision change.
+`Vulkan14FeatureInventory.md` updated to reflect H16's closure and H17/H18
+as the new, narrower blockers; `VulkanExtensionInventory.md` confirmed no
+change needed (no extension is affected by this row).
