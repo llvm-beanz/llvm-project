@@ -258,6 +258,131 @@ TEST(ImageFixtureTest, PacksAndUnpacksA1B5G5R5Unorm) {
   EXPECT_NEAR(Unpacked[3], 1.0, 0.01);
 }
 
+// Roadmap H7r's remaining core-1.0 packed 16-bit formats: each is a
+// round-trip test of `packClearColor`/`unpackColor` for one format, using
+// a color with 4 distinguishable components (or 3 plus an ignored alpha,
+// for the two formats below with no alpha channel) so a component swap or
+// bit-width mistake would be caught.
+TEST(ImageFixtureTest, PacksAndUnpacksR4G4B4A4Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R4G4B4A4_UNORM,
+                                   {1.0, 0.0, 2.0 / 3.0, 1.0 / 3.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R4G4B4A4_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.07);
+  EXPECT_NEAR(Unpacked[1], 0.0, 0.07);
+  EXPECT_NEAR(Unpacked[2], 2.0 / 3.0, 0.07);
+  EXPECT_NEAR(Unpacked[3], 1.0 / 3.0, 0.07);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksB4G4R4A4Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::B4G4R4A4_UNORM,
+                                   {1.0, 0.0, 2.0 / 3.0, 1.0 / 3.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::B4G4R4A4_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.07);
+  EXPECT_NEAR(Unpacked[1], 0.0, 0.07);
+  EXPECT_NEAR(Unpacked[2], 2.0 / 3.0, 0.07);
+  EXPECT_NEAR(Unpacked[3], 1.0 / 3.0, 0.07);
+
+  // B and R occupy swapped bit positions relative to `R4G4B4A4_UNORM`
+  // above: confirm the packed word itself actually differs for the same
+  // input color (i.e. the swap is real, not a no-op given this symmetric
+  // test color).
+  std::array<uint8_t, 2> RTexel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R4G4B4A4_UNORM,
+                                   {1.0, 0.0, 2.0 / 3.0, 1.0 / 3.0}, RTexel),
+                    Succeeded());
+  EXPECT_NE(Texel, RTexel);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR5G6B5Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R5G6B5_UNORM,
+                                   {1.0, 2.0 / 3.0, 0.0, 0.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R5G6B5_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.05);
+  EXPECT_NEAR(Unpacked[1], 2.0 / 3.0, 0.02);
+  EXPECT_NEAR(Unpacked[2], 0.0, 0.05);
+  // No alpha channel: reads back as fully opaque regardless of the clear
+  // color's own (ignored) alpha component.
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksB5G6R5Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::B5G6R5_UNORM,
+                                   {1.0, 2.0 / 3.0, 0.0, 0.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::B5G6R5_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.05);
+  EXPECT_NEAR(Unpacked[1], 2.0 / 3.0, 0.02);
+  EXPECT_NEAR(Unpacked[2], 0.0, 0.05);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR5G5B5A1Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R5G5B5A1_UNORM,
+                                   {1.0, 0.0, 2.0 / 3.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R5G5B5A1_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.05);
+  EXPECT_NEAR(Unpacked[1], 0.0, 0.05);
+  EXPECT_NEAR(Unpacked[2], 2.0 / 3.0, 0.05);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksB5G5R5A1Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::B5G5R5A1_UNORM,
+                                   {1.0, 0.0, 2.0 / 3.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::B5G5R5A1_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.05);
+  EXPECT_NEAR(Unpacked[1], 0.0, 0.05);
+  EXPECT_NEAR(Unpacked[2], 2.0 / 3.0, 0.05);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksA1R5G5B5Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::A1R5G5B5_UNORM,
+                                   {1.0, 2.0 / 3.0, 0.0, 1.0}, Texel),
+                    Succeeded());
+  uint16_t Word;
+  memcpy(&Word, Texel.data(), 2);
+  EXPECT_EQ((static_cast<uint32_t>(Word) >> 15) & 0x1u, 1u); // A = 1.0
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::A1R5G5B5_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.05);
+  EXPECT_NEAR(Unpacked[1], 2.0 / 3.0, 0.05);
+  EXPECT_NEAR(Unpacked[2], 0.0, 0.05);
+  EXPECT_NEAR(Unpacked[3], 1.0, 0.01);
+}
+
 // Roadmap C1's combined depth+stencil format: `packDepthClear`/
 // `packStencilClear` must be independent read-modify-writes of the same
 // 4-byte word, and `unpackDepth`/`unpackStencil` their inverse.

@@ -130,6 +130,17 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     // layout, so it is described as one opaque 2-byte "component" here,
     // the same convention `R10G10B10A2_UNORM` above uses.
     return FormatInfo{1, 2, false};
+  case ResourceFormat::R4G4B4A4_UNORM:
+  case ResourceFormat::B4G4R4A4_UNORM:
+  case ResourceFormat::R5G6B5_UNORM:
+  case ResourceFormat::B5G6R5_UNORM:
+  case ResourceFormat::R5G5B5A1_UNORM:
+  case ResourceFormat::B5G5R5A1_UNORM:
+  case ResourceFormat::A1R5G5B5_UNORM:
+    // (Roadmap H7r) The remaining core-1.0 packed 16-bit formats: also a
+    // single opaque 2-byte word each, the same convention as
+    // `A1B5G5R5_UNORM` immediately above.
+    return FormatInfo{1, 2, false};
   default:
     return createStringError(inconvertibleErrorCode(),
                              "image fixture format is not yet supported "
@@ -183,6 +194,13 @@ Expected<ResourceFormat> parseFixtureFormat(StringRef Format) {
           .Case("a1b5g5r5-unorm", ResourceFormat::A1B5G5R5_UNORM)
           .Case("a4r4g4b4-unorm", ResourceFormat::A4R4G4B4_UNORM)
           .Case("a4b4g4r4-unorm", ResourceFormat::A4B4G4R4_UNORM)
+          .Case("r4g4b4a4-unorm", ResourceFormat::R4G4B4A4_UNORM)
+          .Case("b4g4r4a4-unorm", ResourceFormat::B4G4R4A4_UNORM)
+          .Case("r5g6b5-unorm", ResourceFormat::R5G6B5_UNORM)
+          .Case("b5g6r5-unorm", ResourceFormat::B5G6R5_UNORM)
+          .Case("r5g5b5a1-unorm", ResourceFormat::R5G5B5A1_UNORM)
+          .Case("b5g5r5a1-unorm", ResourceFormat::B5G5R5A1_UNORM)
+          .Case("a1r5g5b5-unorm", ResourceFormat::A1R5G5B5_UNORM)
           .Default(ResourceFormat::Unknown);
   if (Result == ResourceFormat::Unknown)
     return createStringError(inconvertibleErrorCode(),
@@ -247,6 +265,90 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
         (static_cast<uint16_t>(std::lround(std::clamp(Clear[3], 0.0, 1.0)))
          << 15) |
         (Norm5(Clear[2]) << 10) | (Norm5(Clear[1]) << 5) | Norm5(Clear[0]));
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+
+  // (Roadmap H7r) The remaining core-1.0 packed 16-bit formats: the same
+  // single-packed-word special case as `A1B5G5R5_UNORM` above, just with
+  // each format's own bit widths/ordering (see the Vulkan spec's own
+  // "Packed Formats" section) and, for the two 3-component formats below
+  // (`R5G6B5_UNORM`/`B5G6R5_UNORM`), a `Clear` alpha component that is
+  // simply ignored -- neither format has any bits to store it in.
+  if (Format == ResourceFormat::R4G4B4A4_UNORM ||
+      Format == ResourceFormat::B4G4R4A4_UNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    auto Norm4 = [](double V) -> uint16_t {
+      return static_cast<uint16_t>(std::lround(std::clamp(V, 0.0, 1.0) * 15.0));
+    };
+    // R4G4B4A4: R[15:12] G[11:8] B[7:4] A[3:0]. B4G4R4A4: the same, with
+    // R and B swapped.
+    unsigned FirstIdx = Format == ResourceFormat::R4G4B4A4_UNORM ? 0 : 2;
+    unsigned ThirdIdx = Format == ResourceFormat::R4G4B4A4_UNORM ? 2 : 0;
+    uint16_t Word = static_cast<uint16_t>(
+        (Norm4(Clear[FirstIdx]) << 12) | (Norm4(Clear[1]) << 8) |
+        (Norm4(Clear[ThirdIdx]) << 4) | Norm4(Clear[3]));
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+  if (Format == ResourceFormat::R5G6B5_UNORM ||
+      Format == ResourceFormat::B5G6R5_UNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    auto Norm5 = [](double V) -> uint16_t {
+      return static_cast<uint16_t>(std::lround(std::clamp(V, 0.0, 1.0) * 31.0));
+    };
+    auto Norm6 = [](double V) -> uint16_t {
+      return static_cast<uint16_t>(std::lround(std::clamp(V, 0.0, 1.0) * 63.0));
+    };
+    // R5G6B5: R[15:11] G[10:5] B[4:0]. B5G6R5: the same, with R and B
+    // swapped. Neither has an alpha bit -- `Clear[3]` is ignored.
+    unsigned FirstIdx = Format == ResourceFormat::R5G6B5_UNORM ? 0 : 2;
+    unsigned ThirdIdx = Format == ResourceFormat::R5G6B5_UNORM ? 2 : 0;
+    uint16_t Word = static_cast<uint16_t>((Norm5(Clear[FirstIdx]) << 11) |
+                                          (Norm6(Clear[1]) << 5) |
+                                          Norm5(Clear[ThirdIdx]));
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+  if (Format == ResourceFormat::R5G5B5A1_UNORM ||
+      Format == ResourceFormat::B5G5R5A1_UNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    auto Norm5 = [](double V) -> uint16_t {
+      return static_cast<uint16_t>(std::lround(std::clamp(V, 0.0, 1.0) * 31.0));
+    };
+    // R5G5B5A1: R[15:11] G[10:6] B[5:1] A[0]. B5G5R5A1: the same, with R
+    // and B swapped.
+    unsigned FirstIdx = Format == ResourceFormat::R5G5B5A1_UNORM ? 0 : 2;
+    unsigned ThirdIdx = Format == ResourceFormat::R5G5B5A1_UNORM ? 2 : 0;
+    uint16_t Word = static_cast<uint16_t>(
+        (Norm5(Clear[FirstIdx]) << 11) | (Norm5(Clear[1]) << 6) |
+        (Norm5(Clear[ThirdIdx]) << 1) |
+        static_cast<uint16_t>(std::lround(std::clamp(Clear[3], 0.0, 1.0))));
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+  if (Format == ResourceFormat::A1R5G5B5_UNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    auto Norm5 = [](double V) -> uint16_t {
+      return static_cast<uint16_t>(std::lround(std::clamp(V, 0.0, 1.0) * 31.0));
+    };
+    // A1R5G5B5: A[15] R[14:10] G[9:5] B[4:0].
+    uint16_t Word = static_cast<uint16_t>(
+        (static_cast<uint16_t>(std::lround(std::clamp(Clear[3], 0.0, 1.0)))
+         << 15) |
+        (Norm5(Clear[0]) << 10) | (Norm5(Clear[1]) << 5) | Norm5(Clear[2]));
     memcpy(Texel.data(), &Word, sizeof(Word));
     return Error::success();
   }
@@ -367,6 +469,78 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     Out[0] = (Word & 0x1F) / 31.0;
     Out[1] = ((Word >> 5) & 0x1F) / 31.0;
     Out[2] = ((Word >> 10) & 0x1F) / 31.0;
+    Out[3] = ((Word >> 15) & 0x1) / 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H7r) The remaining core-1.0 packed 16-bit formats: the
+  // inverse of `packClearColor`'s special cases above.
+  if (Format == ResourceFormat::R4G4B4A4_UNORM ||
+      Format == ResourceFormat::B4G4R4A4_UNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint16_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    unsigned FirstIdx = Format == ResourceFormat::R4G4B4A4_UNORM ? 0 : 2;
+    unsigned ThirdIdx = Format == ResourceFormat::R4G4B4A4_UNORM ? 2 : 0;
+    Out[FirstIdx] = ((Word >> 12) & 0xF) / 15.0;
+    Out[1] = ((Word >> 8) & 0xF) / 15.0;
+    Out[ThirdIdx] = ((Word >> 4) & 0xF) / 15.0;
+    Out[3] = (Word & 0xF) / 15.0;
+    return Error::success();
+  }
+  if (Format == ResourceFormat::R5G6B5_UNORM ||
+      Format == ResourceFormat::B5G6R5_UNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint16_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    unsigned FirstIdx = Format == ResourceFormat::R5G6B5_UNORM ? 0 : 2;
+    unsigned ThirdIdx = Format == ResourceFormat::R5G6B5_UNORM ? 2 : 0;
+    Out[FirstIdx] = ((Word >> 11) & 0x1F) / 31.0;
+    Out[1] = ((Word >> 5) & 0x3F) / 63.0;
+    Out[ThirdIdx] = (Word & 0x1F) / 31.0;
+    // Neither format has an alpha channel -- read back as opaque, matching
+    // `A8_UNORM`'s own "missing channel reads as its identity value" style
+    // precedent below (there `0`, here `1.0` since color reads default to
+    // fully opaque).
+    Out[3] = 1.0;
+    return Error::success();
+  }
+  if (Format == ResourceFormat::R5G5B5A1_UNORM ||
+      Format == ResourceFormat::B5G5R5A1_UNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint16_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    unsigned FirstIdx = Format == ResourceFormat::R5G5B5A1_UNORM ? 0 : 2;
+    unsigned ThirdIdx = Format == ResourceFormat::R5G5B5A1_UNORM ? 2 : 0;
+    Out[FirstIdx] = ((Word >> 11) & 0x1F) / 31.0;
+    Out[1] = ((Word >> 6) & 0x1F) / 31.0;
+    Out[ThirdIdx] = ((Word >> 1) & 0x1F) / 31.0;
+    Out[3] = (Word & 0x1) / 1.0;
+    return Error::success();
+  }
+  if (Format == ResourceFormat::A1R5G5B5_UNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint16_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    Out[0] = ((Word >> 10) & 0x1F) / 31.0;
+    Out[1] = ((Word >> 5) & 0x1F) / 31.0;
+    Out[2] = (Word & 0x1F) / 31.0;
     Out[3] = ((Word >> 15) & 0x1) / 1.0;
     return Error::success();
   }
@@ -800,6 +974,21 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "a4r4g4b4-unorm";
   case ResourceFormat::A4B4G4R4_UNORM:
     return "a4b4g4r4-unorm";
+  // (Roadmap H7r) The remaining core-1.0 packed 16-bit formats.
+  case ResourceFormat::R4G4B4A4_UNORM:
+    return "r4g4b4a4-unorm";
+  case ResourceFormat::B4G4R4A4_UNORM:
+    return "b4g4r4a4-unorm";
+  case ResourceFormat::R5G6B5_UNORM:
+    return "r5g6b5-unorm";
+  case ResourceFormat::B5G6R5_UNORM:
+    return "b5g6r5-unorm";
+  case ResourceFormat::R5G5B5A1_UNORM:
+    return "r5g5b5a1-unorm";
+  case ResourceFormat::B5G5R5A1_UNORM:
+    return "b5g5r5a1-unorm";
+  case ResourceFormat::A1R5G5B5_UNORM:
+    return "a1r5g5b5-unorm";
   // (Roadmap E20) ASTC block-compressed formats: no clear-color/texel
   // fixture support exists for them yet (see `getFixtureFormatElementSize`
   // below), but they still need a name for diagnostics.
