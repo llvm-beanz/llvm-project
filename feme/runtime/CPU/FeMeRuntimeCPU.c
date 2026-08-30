@@ -1154,11 +1154,21 @@ __attribute__((always_inline)) static FemeRTv4f32
 femeRTUnpackR11G11B10Float(uint32_t Raw) {
   // An unsigned 5-bit-exponent minifloat with `MantBits` mantissa bits
   // shares binary16's exponent bias (15) and special-value encoding, so
-  // `femeRTHalfToFloat` decodes it once its mantissa is left-shifted into
-  // binary16's own 10-bit mantissa field.
-  uint32_t R10 = ((Raw & 0x7FFu) << 5) & 0xFFFFu;    // 6-bit mantissa -> 10.
-  uint32_t G10 = (((Raw >> 11) & 0x7FFu) << 5) & 0xFFFFu;
-  uint32_t B10 = (((Raw >> 22) & 0x3FFu) << 6) & 0xFFFFu; // 5-bit mantissa.
+  // `femeRTHalfToFloat` decodes it once its `5 + MantBits`-bit field (
+  // exponent and mantissa together, packed contiguously from the LSB up)
+  // is left-shifted by `10 - MantBits` -- placing the mantissa's top bits
+  // at binary16's own mantissa field's own top bits (bits `10 - MantBits`
+  // through 9) and the exponent right above it (bits 10 through 14),
+  // exactly where binary16 expects it. (roadmap H18: this shift was
+  // previously `11 - MantBits`, one bit too many -- pushing the exponent's
+  // own top bit as high as binary16's *sign* bit and corrupting every
+  // non-zero value; e.g. this format's own `1.0` decoded as `32768.0`.
+  // Verified against the format's mantissa/exponent field widths this
+  // function's own header comment already documented correctly -- only
+  // the shift amount itself was wrong.)
+  uint32_t R10 = ((Raw & 0x7FFu) << 4) & 0xFFFFu; // 6-bit mantissa -> 10.
+  uint32_t G10 = (((Raw >> 11) & 0x7FFu) << 4) & 0xFFFFu;
+  uint32_t B10 = (((Raw >> 22) & 0x3FFu) << 5) & 0xFFFFu; // 5-bit mantissa.
   FemeRTv4f32 V;
   V[0] = femeRTHalfToFloat((uint16_t)R10);
   V[1] = femeRTHalfToFloat((uint16_t)G10);

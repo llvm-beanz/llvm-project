@@ -1159,6 +1159,35 @@ TEST_F(ImageSamplingTest, LoadFetchesR11G11B10Float) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f);
 }
 
+TEST_F(ImageSamplingTest, LoadFetchesR11G11B10FloatNonZeroValues) {
+  // Roadmap H18 regression coverage: an all-zero-bits texel (the only
+  // case the pre-existing `LoadFetchesR11G11B10Float` test above covers)
+  // cannot distinguish a correct decode from the real bug this row fixed
+  // (`femeRTUnpackR11G11B10Float`'s field-to-binary16 shift was one bit
+  // too many, `0` shifted by any amount is still `0`). Use a non-zero,
+  // distinct value for each channel instead: R=1.0 (11-bit field, 6-bit
+  // mantissa: exponent 15, mantissa 0), G=2.0 (exponent 16, mantissa 0),
+  // B=1.5 (10-bit field, 5-bit mantissa: exponent 15, mantissa 16 --
+  // 1 + 16/32 = 1.5). Packed from the LSB up: R (bits 0-10), G (bits
+  // 11-21), B (bits 22-31).
+  uint32_t RRaw = (15u << 6) | 0u;
+  uint32_t GRaw = (16u << 6) | 0u;
+  uint32_t BRaw = (15u << 5) | 16u;
+  uint32_t Storage[1][1] = {{RRaw | (GRaw << 11) | (BRaw << 22)}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R11G11B10_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 2.0f);
+  EXPECT_FLOAT_EQ(Out[2], 1.5f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
 TEST_F(ImageSamplingTest, LoadFetchesR16G16B16A16Float) {
   // binary16 1.0 is 0x3C00; -2.0 is 0xC000.
   uint16_t Storage[1][1][4] = {{{0x3C00, 0x0000, 0xC000, 0x3C00}}};
