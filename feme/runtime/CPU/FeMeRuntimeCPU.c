@@ -1517,12 +1517,13 @@ femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
   return femeRTUnpackImageTexelI32(Img->Format, Ptr);
 }
 
-// Selects the mip level a sample reads from: `Lod` clamped to
-// `[0, MipLevels - 1]` for an explicit-LOD sample, or level 0 for an
-// implicit-LOD one (see the file header comment's scope note on why --
-// no fragment-derivative computation exists yet). `MipFilter` is accepted
-// for the API shape a future trilinear blend needs, but not yet consulted:
-// both `Nearest` and `Linear` currently round to the nearer single level.
+// Selects the mip level a sample reads from, `Lod` clamped to
+// `[0, MipLevels - 1]` -- used directly by an explicit-LOD sample, and (as
+// of roadmap H7i) by an implicit-LOD one too, given the `Lod`
+// `femeRTPlanImplicitLod` computes from real screen-space derivatives
+// rather than a hard-coded level 0. `MipFilter` is accepted for the API
+// shape a future trilinear blend needs, but not yet consulted: both
+// `Nearest` and `Linear` currently round to the nearer single level.
 __attribute__((always_inline)) static uint32_t
 femeRTSelectMipLevel(const FemeRTImageDescriptor *Img, float Lod,
                      _Bool UseExplicitLod, uint32_t MipFilter) {
@@ -1543,6 +1544,100 @@ __attribute__((always_inline)) static uint32_t
 femeRTMipExtent(uint32_t BaseExtent, uint32_t Level) {
   uint32_t Extent = BaseExtent >> Level;
   return Extent == 0 ? 1 : Extent;
+}
+
+// A fast, approximate base-2 logarithm of a positive, finite, normal
+// `float`, used only to turn `femeRTPlanImplicitLod`'s texel-space scale
+// factor into a mip level (`femeRTSelectMipLevel` immediately rounds and
+// clamps the result to an integer level anyway, so the approximation's
+// small error near each power of two never changes which level is
+// chosen). This file is compiled freestanding (see `femeRTHalfToFloat`'s
+// own comment), so it reinterprets the value's own IEEE-754 bit pattern
+// directly -- the well-known "float-as-int" approximate log2, exact at
+// each power of two and linear in between -- rather than call a
+// transcendental libm routine this build cannot assume exists.
+__attribute__((always_inline)) static float femeRTFastLog2(float X) {
+  uint32_t Bits;
+  __builtin_memcpy(&Bits, &X, sizeof(Bits));
+  float Y = (float)Bits;
+  return Y * (1.0f / 8388608.0f) - 126.94269504f;
+}
+
+// The mip level and (when the sampler enables anisotropic filtering) the
+// multi-tap anisotropic footprint an implicit-LOD 2D color sample reads,
+// computed from the caller's own screen-space partial derivatives of the
+// normalized `(U, V)` coordinate (roadmap H7i) -- the standard OpenGL/
+// Direct3D "scale factor" construction (see the OpenGL spec's "Scale
+// Factor and Level of Detail"): the texel-space footprint's two screen-
+// axis extents `Px`/`Py`, `Pmax`/`Pmin` their max/min, the isotropic LOD
+// `log2(Pmax)` an ordinary (non-anisotropic) implicit sample would use,
+// and -- only when anisotropy is enabled and the footprint is not already
+// isotropic (`Pmin` unequal to `Pmax`) -- a `TapCount` (bounded by
+// `MaxAnisotropy`) of bilinear taps spread along the major (most-
+// minified) screen axis's own UV gradient, each reading a less-minified
+// `log2(Pmax / TapCount)` level than the isotropic choice, matching how
+// hardware anisotropic filtering trades extra same-level taps for a
+// sharper per-tap level. `TapCount` is always at least 1 -- a plain
+// isotropic sample -- so a caller with no anisotropy configured, or with
+// no measurable minification along one axis, degenerates to the ordinary
+// single-tap path unchanged.
+typedef struct {
+  uint32_t Level;
+  uint32_t TapCount;
+  float StepU, StepV; // Per-tap UV offset along the major axis.
+} FemeRTImplicitLodPlan;
+
+__attribute__((always_inline)) static FemeRTImplicitLodPlan
+femeRTPlanImplicitLod(const FemeRTImageDescriptor *Img,
+                     const FemeRTSamplerDescriptor *Samp, float DUdX,
+                     float DUdY, float DVdX, float DVdY) {
+  float Ux = DUdX * (float)Img->Width, Uy = DUdY * (float)Img->Width;
+  float Vx = DVdX * (float)Img->Height, Vy = DVdY * (float)Img->Height;
+  float Px = __builtin_sqrtf(Ux * Ux + Vx * Vx);
+  float Py = __builtin_sqrtf(Uy * Uy + Vy * Vy);
+  float Pmax = Px > Py ? Px : Py;
+  float Pmin = Px < Py ? Px : Py;
+
+  FemeRTImplicitLodPlan Plan;
+  Plan.TapCount = 1;
+  Plan.StepU = 0.0f;
+  Plan.StepV = 0.0f;
+
+  float Lod;
+  if (Pmax <= 0.0f) {
+    Lod = 0.0f; // No measurable minification (e.g. no derivatives at all).
+  } else {
+    _Bool AnisoEnabled =
+        (Samp->Flags & 2u) != 0 && // FEME_SAMPLER_ANISOTROPY_ENABLE.
+        Samp->MaxAnisotropy > 1.0f;
+    if (AnisoEnabled && Pmax > Pmin) {
+      // `Pmin == 0` (the footprint has no extent at all along its minor
+      // axis -- e.g. a surface viewed edge-on, so one axis's own
+      // derivatives are exactly zero) is the maximally anisotropic case,
+      // capped by `MaxAnisotropy` like any other; `N` would otherwise be
+      // an infinite (divide-by-zero) ratio.
+      float N = Pmin > 0.0f ? Pmax / Pmin : Samp->MaxAnisotropy;
+      if (N > Samp->MaxAnisotropy)
+        N = Samp->MaxAnisotropy;
+      uint32_t TapCount = (uint32_t)(N + 0.5f);
+      if (TapCount < 1)
+        TapCount = 1;
+      Plan.TapCount = TapCount;
+      Lod = femeRTFastLog2(Pmax / (float)TapCount);
+      if (TapCount > 1) {
+        _Bool MajorIsX = Px >= Py;
+        float StepScale = 1.0f / (float)TapCount;
+        Plan.StepU = (MajorIsX ? DUdX : DUdY) * StepScale;
+        Plan.StepV = (MajorIsX ? DVdX : DVdY) * StepScale;
+      }
+    } else {
+      Lod = femeRTFastLog2(Pmax);
+    }
+  }
+
+  Plan.Level =
+      femeRTSelectMipLevel(Img, Lod, /*UseExplicitLod=*/1, Samp->MipFilter);
+  return Plan;
 }
 
 // The four address-mode-resolved texel corners and fractional weights a 2D
@@ -1658,20 +1753,27 @@ femeRTApplyCompare(uint32_t Func, float Ref, float Texel) {
 // `feme.cpu.image.sample.2d.v4f32`: samples a 2D sampled image (an SRV-like
 // texture, `FEME_IMAGE_SAMPLED == 1 << 0`) at normalized coordinates
 // `(U, V)`, using `Samp`'s magnification filter (`MagFilter`) to choose
-// point or bilinear filtering and `Lod`/`UseExplicitLod` to choose the mip
-// level (see `femeRTSelectMipLevel`). An inactive lane, an unsampled or
+// point or bilinear filtering. An explicit-LOD sample (`UseExplicitLod`)
+// reads `Lod`'s single mip level directly (see `femeRTSelectMipLevel`);
+// an implicit-LOD one instead derives its own level -- and, when `Samp`
+// enables anisotropic filtering, a multi-tap anisotropic footprint --
+// from the caller's own screen-space partial derivatives of `(U, V)`
+// (`DUdX`/`DUdY`/`DVdX`/`DVdY`, roadmap H7i; see `femeRTPlanImplicitLod`),
+// ignoring `Lod` entirely in that case. An inactive lane, an unsampled or
 // unwritten image, reads as zero (see "Bounds checking").
 FemeRTv4f32 femeCpuImageSample2DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
-    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
-    _Bool UseExplicitLod, _Bool Mask) asm("feme.cpu.image.sample.2d.v4f32");
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float DUdX,
+    float DUdY, float DVdX, float DVdY, float Lod, _Bool UseExplicitLod,
+    _Bool Mask) asm("feme.cpu.image.sample.2d.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
-    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
-    _Bool UseExplicitLod, _Bool Mask) {
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float DUdX,
+    float DUdY, float DVdX, float DVdY, float Lod, _Bool UseExplicitLod,
+    _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -1681,11 +1783,40 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  uint32_t Level =
-      femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
-  return Samp.MagFilter == 1 // SamplerFilter::Linear.
-             ? femeRTSampleLinear2D(&Img, &Samp, U, V, Level, /*Layer=*/0)
-             : femeRTSamplePoint2D(&Img, &Samp, U, V, Level, /*Layer=*/0);
+
+  if (UseExplicitLod) {
+    uint32_t Level =
+        femeRTSelectMipLevel(&Img, Lod, /*UseExplicitLod=*/1, Samp.MipFilter);
+    return Samp.MagFilter == 1 // SamplerFilter::Linear.
+               ? femeRTSampleLinear2D(&Img, &Samp, U, V, Level, /*Layer=*/0)
+               : femeRTSamplePoint2D(&Img, &Samp, U, V, Level, /*Layer=*/0);
+  }
+
+  FemeRTImplicitLodPlan Plan =
+      femeRTPlanImplicitLod(&Img, &Samp, DUdX, DUdY, DVdX, DVdY);
+  if (Plan.TapCount <= 1)
+    return Samp.MagFilter == 1
+               ? femeRTSampleLinear2D(&Img, &Samp, U, V, Plan.Level,
+                                     /*Layer=*/0)
+               : femeRTSamplePoint2D(&Img, &Samp, U, V, Plan.Level,
+                                    /*Layer=*/0);
+
+  // Anisotropic footprint: average `Plan.TapCount` same-level taps spread
+  // symmetrically along the major axis, centered on `(U, V)` so the mean
+  // sample point is exactly the original coordinate.
+  FemeRTv4f32 Sum = {0.0f, 0.0f, 0.0f, 0.0f};
+  float FirstOffset = -0.5f * (float)(Plan.TapCount - 1);
+  for (uint32_t Tap = 0; Tap != Plan.TapCount; ++Tap) {
+    float Offset = FirstOffset + (float)Tap;
+    float TapU = U + Offset * Plan.StepU;
+    float TapV = V + Offset * Plan.StepV;
+    Sum += Samp.MagFilter == 1
+              ? femeRTSampleLinear2D(&Img, &Samp, TapU, TapV, Plan.Level,
+                                    /*Layer=*/0)
+              : femeRTSamplePoint2D(&Img, &Samp, TapU, TapV, Plan.Level,
+                                   /*Layer=*/0);
+  }
+  return Sum * (1.0f / (float)Plan.TapCount);
 }
 
 // `feme.cpu.image.samplecmp.2d.f32`: depth-comparison samples a 2D sampled
