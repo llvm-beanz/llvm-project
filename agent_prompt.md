@@ -37,12 +37,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7g?
+Can you continue working on H7v?
 
-> **`vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics`**: no evidence
-> found of storage-buffer/storage-image write or atomic-operation lowering
-> reachable from a vertex/tessellation/geometry stage, nor a fragment stage
-> specifically (as opposed to compute, where this already works) -- needs an
-> investigation of whatever gates a non-compute stage's `OpStore`/`OpAtomic*`
-> against a `StorageBuffer`/storage-image resource today, and what (if anything)
-> needs to change per-stage to allow it
+> **`VK_KHR_maintenance6`'s `vkCmdBindDescriptorSets2` (`bind2`) fails for every
+> stage, including compute.** Discovered via H7g's own real CTS re-run of
+> `dEQP-VK.binding_model.shader_access.*.bind2.storage_buffer.*`: the
+> `vertex`/`fragment`-stage cases SIGSEGV (a null-pointer call inside
+> `writeDrawCmdBuffer`'s `bindDescriptorSets` helper), while the `compute`-stage
+> cases instead fail cleanly at `vkCreateComputePipelines` with
+> `VK_ERROR_INITIALIZATION_FAILED` -- both confirmed via a `git
+> stash`/rebuild/re-run to reproduce identically without any of H7g's own
+> changes, so this is pre-existing and entirely unrelated to storage-buffer
+> stage-write support itself (H7g's own non-`bind2` re-run, 1200/1200, is
+> unaffected). Needs a real investigation into why `vkCmdBindDescriptorSets2`'s
+> `VkBindDescriptorSetsInfo` path (`CommandBuffer.cpp`) diverges from the
+> already-working `vkCmdBindDescriptorSets` path enough to fail pipeline
+> creation/execution outright, for every stage
