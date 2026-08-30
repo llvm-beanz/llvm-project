@@ -15555,3 +15555,89 @@ No `FeMeGraphicsDesign.md` deviation: this is a spec-compliance bug fix
 `Vulkan14FeatureInventory.md` updated to reflect H16's closure and H17/H18
 as the new, narrower blockers; `VulkanExtensionInventory.md` confirmed no
 change needed (no extension is affected by this row).
+
+## Roadmap H17: measured impact
+
+**Root cause.** Confirmed exactly as H16's own roadmap description: every
+sampling entry point in `feme/runtime/CPU/FeMeRuntimeCPU.c` picked a
+single mip level via the old `femeRTSelectMipLevel` (round the clamped LOD
+to the nearest integer), regardless of `Samp->MipFilter`. A real
+`mipmapMode=VK_SAMPLER_MIPMAP_MODE_LINEAR` sampler never blended between
+the two adjacent levels the Vulkan spec's own trilinear filtering
+operation requires -- `MipFilter` was accepted into the sampler descriptor
+shape but never consulted, exactly as the pre-existing code comment
+flagged.
+
+**Fix.** Replaced `femeRTSelectMipLevel` with `femeRTSelectMipLevels`,
+which floors the clamped LOD to get `Level0`, computes
+`Level1 = min(Level0 + 1, MaxLevel)`, and keeps the LOD's fractional part
+as `Frac` -- the blend weight between the two levels. Added a shared
+`femeRTSampleFiltered2D` helper that combines H16's mag/min filter
+selection (`femeRTUseLinearFilter`) with this new mip-level blend, wired
+into all four vector-returning sample entry points
+(`femeCpuImageSample2DV4F32`, `femeCpuImageSample2DArrayV4F32`,
+`femeCpuImageSampleCubeV4F32`, `femeCpuImageSampleCubeArrayV4F32`,
+including the anisotropic multi-tap path, one call per tap). The
+depth-comparison path (`femeCpuImageSampleCmp2DF32`) fetches raw texels
+and applies a compare function rather than calling
+`femeRTSampleLinear2D`/`femeRTSamplePoint2D`, so it got a parallel
+`femeRTSampleCmp2DAtLevel` helper plus the identical inline blend instead
+of reusing `femeRTSampleFiltered2D` directly. For `mipmapMode=NEAREST`
+(`Samp->MipFilter != 1`), a single level is still read, but via a new
+`femeRTNearestMipLevel` helper (whichever of `Level0`/`Level1` `Frac` is
+closer to, ties rounding up to `Level1`) rather than always `Level0` (the
+floor) -- an initial version of this fix used the floor unconditionally,
+which regressed the pre-H17 round-to-nearest behavior for `mipmapMode=
+NEAREST` samples; this was caught by a new regression unit test
+(`ExplicitLodNearestMipFilterStillRoundsToOneLevel`) before it shipped,
+and the `Frac < 0.5f` rule was hand-verified equivalent to the old
+`(uint32_t)(L + 0.5f)` truncation-based rounding at every edge case
+checked (including the `Frac == 0.5` tie).
+
+**Test.** Three new unit tests in
+`feme/unittests/Runtime/CPU/ImageSamplingTest.cpp`:
+`ExplicitLodTrilinearBlendsBetweenTwoMipLevels` (an explicit `Lod=0.5`,
+`MipFilter=Linear` sampler over a synthetic two-level image, asserting the
+exact blended value between the two levels' distinct constant colors),
+`ExplicitLodNearestMipFilterStillRoundsToOneLevel` (the regression
+coverage described above, `MipFilter=Nearest`/default), and
+`ImplicitLodTrilinearBlendsBetweenTwoMipLevels` (the same blend via real
+screen-space derivatives instead of an explicit `Lod` operand -- asserted
+with a bounds check rather than an exact value, since
+`femeRTFastLog2`'s own approximation no longer lands on exactly the
+midpoint once its fractional part feeds a real blend weight directly,
+rather than being rounded away).
+
+**`ninja check-feme`** (assertions + ccache): 2067/2126, 0 `Failed`, 59
+pre-existing `Unsupported`, up 3 tests from this row's own new coverage.
+
+**Real CTS re-run.** `dEQP-VK.texture.filtering.2d.combinations.
+nearest_mipmap_linear.nearest.repeat.repeat` (a case this row's own gap
+directly named) now passes outright. The full
+`dEQP-VK.texture.filtering.2d.*` sweep (1698 cases): 252 now pass (up from
+184), only 6 `Fail` remain (down from 74), 1440 honest `NotSupported`
+(unchanged). `dEQP-VK.texture.filtering_anisotropy.*` remains unaffected
+(still gated on the `samplerAnisotropy` feature bit and H13d's combined-
+sampler gap, unrelated to mip-level selection).
+
+**Remaining gap.** All 6 remaining fails are `formats.b10g11r11_ufloat.*`
+-- across every one of the six filter-mode combinations for this one
+format, not just the 4 non-`_mipmap_linear`-suffixed cases H16's own
+narrower sample happened to catch (that sample pre-dated H17's fix, so it
+never saw the `_mipmap_linear` variants of this format's own failures
+separately from the (now-fixed) generic trilinear gap). This is the
+pre-existing, unrelated, format-specific gap already tracked as roadmap
+H18; H18's own fail count is corrected from 4 to 6 to reflect the real,
+complete set. H17 itself is fully closed: the trilinear/mipmap-linear gap
+it targeted no longer appears anywhere in this sweep.
+
+`samplerAnisotropy` (H7i) still stays `VK_FALSE`: unaffected by this fix,
+still blocked on H13d's combined-sampler gap rather than any mip-level or
+filter-selection bug.
+
+No `FeMeGraphicsDesign.md` deviation: this is the trilinear filtering
+implementation the design document already anticipated (`mipmapMode`'s two
+values), not a design decision change. `Vulkan14FeatureInventory.md`
+updated to reflect H17's closure; `VulkanExtensionInventory.md` confirmed
+no change needed (no extension is affected by this row).
+
