@@ -47488,3 +47488,79 @@ right in about 30 seconds, versus a full edit-rebuild-rerun-CTS cycle
 "an opaque error string with no value name" to a concrete, reducible
 repro at all -- and was fully reverted before committing, leaving no
 debug-only code behind.
+
+# Session: H19b (arrayed 2D_ARRAY storage-image read/write)
+
+**Goal.** Roadmap H19b: widen the H19a plain-2D storage-image read/write
+support to arrayed (`2D_ARRAY`) storage images, for the same 6-format
+mandatory floor, mirroring how `Sample2DArray`/`Load2DArray` already
+extend the non-arrayed *sampled*-image read shapes.
+
+**Scope decision.** `classifyStorageImage2DHandle` only checks `Dim == 2D`
+and (now) `Arrayed`; it does not touch `Dim == 1D` at all. So this row's
+fix only closes `2d_array.*` cases, not `1d_array.*` -- despite H19b's
+original row text loosely mentioning `1d_array.*` too. Verified this
+distinction with a real CTS probe of two `1d_array.*` cases after landing
+the fix: both still `Fail` the same way as before, confirming `1d_array`
+correctly stays H19c's own scope (1D and 3D), not this row's.
+
+**Implementation.** Three source-level changes, each mirroring an
+existing pattern:
+1. `ImageCalls.h`/`.cpp`: `Store2DArray`/`Store2DArrayI32` call kinds,
+   mirroring `Store2D`/`Store2DI32` but with an added `Layer` operand
+   (same shape as `Load2DArray`'s own read-side `Layer` operand).
+2. `SPIRVResourceLowering.cpp`: `classifyStorageImage2DHandle` accepts
+   `Arrayed == 1` now (mapping to the pre-existing `ImageShape::Array2D`,
+   already shared with `SampledImage2D`); `hasOnlySupportedStorageImageUses`
+   takes a `Shape` parameter, requiring a 3-component coordinate for
+   `Array2D`; `lowerImageAccesses`'s store branch dispatches to the new
+   array helpers when `Shape == Array2D`, reusing the `Layer` value the
+   read side (already `Array2D`-aware from H7b-a) already extracts.
+3. `FeMeRuntimeCPU.c`: `femeRTStoreTexel2DArray`/`femeRTStoreTexel2DArrayI32`
+   helpers mirroring `femeRTFetchTexel2D`'s own `Layer * SlicePitch`
+   addressing; `femeCpuImageStore2DArrayV4F32`/`V4I32` entry points
+   mirroring `femeCpuImageStore2DV4F32`/`V4I32` plus a `Layer < 0` guard
+   (matching `femeCpuImageLoad2DArrayV4F32`'s own convention).
+
+**A costly mid-session mistake and recovery.** Ran a bare `clang-format -i`
+directly on the six already-partially-formatted files to match LLVM
+coding standards, which reformatted each file in its *entirety* (692
+insertions/347 deletions total -- far more than the actual diff). Tried
+to undo this with `git checkout -- <files>`, forgetting that none of the
+session's work had been committed or stashed yet -- this **permanently
+discarded all uncommitted H19b work** with no recovery path (nothing
+staged, nothing stashed, nothing committed: no dangling blob for `git
+fsck`/reflog to find). Recovered by manually re-typing every edit from
+the conversation's own history, carefully re-verifying each file's
+original content before each `edit` call to make sure the "old_str" match
+would apply cleanly. Lesson for future sessions, stated plainly so it
+isn't repeated a third time: **never run bare `clang-format -i` on a file
+that mixes pre-existing and new code** (use `git-clang-format` restricted
+to a diff instead, which itself requires committing/staging first) **and
+always `git stash` before any destructive `git checkout --`/`git reset
+--hard` when there is any uncommitted work that has not yet been
+committed or stashed.**
+
+**Testing.** 4 new tests in `SPIRVResourceLoweringTest.cpp` (3 positive:
+plain float write, integer write, combined load+store; 1 negative:
+multisample storage image still correctly rejected, replacing a
+now-stale "arrayed storage image rejected" negative test that no longer
+holds), 3 new tests in `ImageSamplingTest.cpp` (layer-isolation, integer
+format, out-of-bounds layer no-op). `ninja FeMeTransformsCPUTests`:
+231/231. `FeMeRuntimeCPUTests --gtest_filter="ImageSamplingTest.*"`:
+57/57. Full `ninja check-feme`: 2086/2145 Passed, 0 Failed, 59
+pre-existing `Unsupported`.
+
+**Real CTS.** `dEQP-VK.image.load_store.with_format.2d_array.*` (156
+cases): 24 Pass / 0 Fail / 132 NotSupported. The 24 passes are exactly
+the 6-format mandatory floor's multi-layer and single-layer cases (the
+multi-layer half previously failed at pipeline creation); the 132
+NotSupported are correctly every format outside the floor.
+
+**Commits.** Three small commits for the code+tests (call vocabulary,
+SPIR-V lowering + its tests, runtime helpers + its tests), one for the
+Roadmap.md/VulkanCTSReport.md documentation update, and this file
+committed separately at the end, per the standing instruction. No
+`FeMeGraphicsDesign.md` deviation and no `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` change were needed -- H19b does not flip
+any feature bit or extension on its own.
