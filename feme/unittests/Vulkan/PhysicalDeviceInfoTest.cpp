@@ -111,15 +111,14 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
 
 TEST(PhysicalDeviceInfo,
      OnlyRobustBufferAccessDualSrcBlendASTCLDRAndMultiViewportAreAdvertised) {
-  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c/H7d/H7e/H7f/H7g/H7h/H7o/H7p)
+  // (V4/C4/E22/H3/H4b/H5e/H7a/H7b-a/H7c/H7d/H7e/H7f/H7g/H7o/H7p)
   // `robustBufferAccess`/`dualSrcBlend`/`textureCompressionASTC_LDR`/
   // `multiViewport`/`tessellationShader`/`geometryShader`/
   // `independentBlend`/`logicOp`/`occlusionQueryPrecise`/
   // `multiDrawIndirect`/`drawIndirectFirstInstance`/`imageCubeArray`/
   // `fillModeNonSolid`/`depthClamp`/`depthBiasClamp`/`depthBounds`/
   // `wideLines`/`largePoints`/`alphaToOne`/`sampleRateShading`/
-  // `vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics`/
-  // `shaderClipDistance`/`shaderCullDistance` are the
+  // `vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics` are the
   // only core features this milestone can honestly claim (see
   // PhysicalDeviceInfo.cpp's comment); every other `VkBool32` stays
   // false, since nothing else has been implemented that could back one
@@ -134,14 +133,18 @@ TEST(PhysicalDeviceInfo,
   // pipeline found no stage-conditioned gate on a storage-buffer store
   // anywhere, confirmed by a real vertex/fragment-stage storage-buffer
   // write draw (`DrawTest.cpp`'s `VertexStageWritesStorageBuffer`/
-  // `FragmentStageWritesStorageBuffer`). `shaderClipDistance`/
-  // `shaderCullDistance` flip to `VK_TRUE` as of roadmap H7h:
-  // `CanonicalizeStage.cpp` now maps `gl_ClipDistance`/`gl_CullDistance`
-  // onto real system values, and `Executor.cpp`'s `clipTriangle`/
-  // `RasterizePrimitives` consume each as a real per-vertex clip-plane/
-  // cull-plane, confirmed by `ExecutorTest.cpp`'s new
+  // `FragmentStageWritesStorageBuffer`). Roadmap H7h implemented a real
+  // `gl_ClipDistance`/`gl_CullDistance` vertex-stage, static-index
+  // consumer (`Executor.cpp`'s `clipTriangle`/`RasterizePrimitives`,
+  // confirmed by `ExecutorTest.cpp`'s new
   // `ClipsATriangleAgainstAWrittenClipDistance`/
-  // `CullsATriangleWhenCullDistanceIsNegativeForEveryVertex`.
+  // `CullsATriangleWhenCullDistanceIsNegativeForEveryVertex`) but left
+  // `shaderClipDistance`/`shaderCullDistance` at `VK_FALSE`: a real CTS
+  // re-run shows only 16 of this feature's ~330 mandatory cases passing
+  // (the vertex-stage, static-index, non-fragment-shader-read subset);
+  // dynamic indexing, fragment-shader read-back, and tessellation/
+  // geometry-stage clip/cull-distance are all real, separate gaps (see
+  // PhysicalDeviceInfo.cpp's own comment and roadmap H7w/H7x/H7y).
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
@@ -165,8 +168,6 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.sampleRateShading, VK_TRUE);
   EXPECT_EQ(Info.Features.vertexPipelineStoresAndAtomics, VK_TRUE);
   EXPECT_EQ(Info.Features.fragmentStoresAndAtomics, VK_TRUE);
-  EXPECT_EQ(Info.Features.shaderClipDistance, VK_TRUE);
-  EXPECT_EQ(Info.Features.shaderCullDistance, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -191,8 +192,6 @@ TEST(PhysicalDeviceInfo,
   Cleared.sampleRateShading = VK_FALSE;
   Cleared.vertexPipelineStoresAndAtomics = VK_FALSE;
   Cleared.fragmentStoresAndAtomics = VK_FALSE;
-  Cleared.shaderClipDistance = VK_FALSE;
-  Cleared.shaderCullDistance = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }

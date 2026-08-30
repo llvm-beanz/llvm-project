@@ -646,12 +646,29 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // ever reaches clipping, when one declared plane is negative for every
   // one of its vertices (`isCulledByCullDistance`). Confirmed by
   // `ExecutorTest.cpp`'s new `ClipsATriangleAgainstAWrittenClipDistance`/
-  // `CullsATriangleWhenCullDistanceIsNegativeForEveryVertex`. Both feature
-  // bits flip to `VK_TRUE`; `maxClipDistances`/`maxCullDistances`/
-  // `maxCombinedClipAndCullDistances` (`PhysicalDeviceInfo.cpp`, already
-  // the honest value 8) needed no change.
-  Info.Features.shaderClipDistance = VK_TRUE;
-  Info.Features.shaderCullDistance = VK_TRUE;
+  // `CullsATriangleWhenCullDistanceIsNegativeForEveryVertex`, and by a
+  // real `dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}.
+  // vert.*` (non-`_fragmentshader_read`) re-run, 16/16 passing once the
+  // bit was flipped on for that measurement.
+  //
+  // The bit stays `VK_FALSE`, however: that same re-run also exercises
+  // `_fragmentshader_read` (fragment-stage read-back of the interpolated
+  // value; 0/16, an unimplemented fragment-side system-value consumer),
+  // `*_dynamic_index` (a non-constant `gl_ClipDistance`/`gl_CullDistance`
+  // array index; 0/32, `CanonicalizeStagePass` does not yet canonicalize
+  // this shape at all -- "an unresolved stage-IO global-variable access"),
+  // and `vert_tess`/`vert_geom` (clip/cull-distance written from a
+  // tessellation-evaluation or geometry stage rather than the vertex
+  // stage; 0/2 sampled, an LLVM GEP-into-an-array-typed-SSA-value lowering
+  // failure). Only the vertex-stage, static-index, non-fragment-read
+  // subset (16 of this feature's ~330 real CTS cases) is real today --
+  // advertising the bit before the bulk of its own mandatory conformance
+  // surface can pass would be a conformance violation, matching the
+  // standard set by roadmap H7o/`sampleRateShading`. Tracked as three new
+  // follow-ons: H7w (dynamic indexing), H7x (fragment-shader read-back),
+  // H7y (tessellation/geometry-stage clip/cull-distance).
+  // `Info.Features.shaderClipDistance`/`shaderCullDistance` are therefore
+  // intentionally left at their zero-initialized `VK_FALSE`.
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
