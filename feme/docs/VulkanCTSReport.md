@@ -15275,3 +15275,104 @@ already-documented two-independent-handle shape rather than introducing
 a new one. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 confirmed no change needed (this row fixes a pipeline-creation bug, not
 a feature bit or extension).
+
+## Roadmap H14: measured impact
+
+**Root cause.** Not in `splitCombinedSampledImageHandles`/SPIR-V-to-LLVM
+lowering at all (ruled out via a standalone reproduction: a real
+compute-dispatch reproduction of the identical combined-descriptor
+shape, at both descriptor set 0 and set 1, sampled correctly). Built a
+from-scratch standalone Vulkan graphics-pipeline reproduction instead
+(a real render pass, a full-screen triangle, a 2x2 sampled texture, a
+nearest/nearest sampler, `vkCmdDraw`) to isolate the bug to the
+graphics (vertex+fragment) draw path specifically, then bisected it by
+descriptor set index (set 0 vs. set 1: both fail identically),
+descriptor shape (combined vs. separate `SAMPLED_IMAGE`/`SAMPLER`: both
+fail identically), and implicit- vs. explicit-LOD sampling (both fail
+identically) -- ruling all of those out one at a time and narrowing the
+bug to "any fragment-stage image/sampler read in a real draw, full
+stop" (a bound `UNIFORM_BUFFER` read from the same fragment stage, by
+contrast, worked correctly, ruling out fragment-stage resource reads
+generically).
+
+Temporary host-side instrumentation in `ResourceHeap.cpp`'s
+`materializeHeap` and `CommandBuffer.cpp`'s `buildBoundResources` (both
+removed before the final fix; freestanding `FeMeRuntimeCPU.c` cannot
+safely host `fprintf`, so the instrumentation lived in the ordinary,
+non-bitcode-compiled C++ code around it instead) showed
+`buildBoundResources` correctly built a non-empty `BoundImageBinding`/
+`BoundSamplerBinding` entry for the bound descriptor, but by the time
+`materializeImageHeap`/`materializeSamplerHeap` ran for the *fragment*
+stage, the `Bindings` array they received was empty -- pointing at a
+break somewhere between `runPreparedDraw` (`CommandBuffer.cpp`, which
+builds `Draw.Resources.BoundImages`/`.BoundSamplers` correctly) and
+`PreparedFragmentBatch::create` (`ResourceHeap.cpp`, which is what
+actually calls `materializeImageHeap`/`materializeSamplerHeap`).
+
+Found in `Executor.cpp`: constructing the fragment stage's own
+`FragmentResources` (`FRes`) copied `Draw.Resources.ResourceHeap`,
+`.BoundResources`, `.ImageHeap`, `.SamplerHeap`, and `.RootConstants`,
+but never `.BoundImages`/`.BoundSamplers` -- the two fields
+`materializeImageHeap`/`materializeSamplerHeap` actually read from
+(`.ImageHeap`/`.SamplerHeap` are themselves always empty at this point;
+they are what `PreparedFragmentBatch::create` *produces*, by
+materializing them fresh from `.BoundImages`/`.BoundSamplers`, not
+what it consumes). The vertex stage's own `VertexResources` (`VRes`)
+construction, a few hundred lines below, had the identical gap. Both
+were compared against the mesh/task/geometry stages' own resource
+structs (`MRes`/`TRes`/`GRes`), which correctly copy both fields --
+confirming this was a copy-paste omission specific to the two oldest
+(vertex/fragment) resource-struct constructions in this file, not a
+structural gap in the underlying heap-materialization design.
+
+**Fix.** Added the two missing assignments,
+`FRes.BoundImages = Draw.Resources.BoundImages;` /
+`FRes.BoundSamplers = Draw.Resources.BoundSamplers;` (and the `VRes.`
+counterparts), to `feme/lib/Graphics/Executor.cpp`.
+
+**New test.** `DrawTest.cpp`'s `FragmentStageSamplesBoundImage`: a real
+draw whose fragment stage samples a bound 1x1 `SAMPLED_IMAGE`/`SAMPLER`
+pair (a distinctive, non-black, non-white color) and writes the result
+straight to the color attachment. Confirmed to fail with exactly H14's
+own all-zero symptom when the fix is reverted (verified via a temporary
+`git stash` of the `Executor.cpp` change alone, leaving the test in
+place) before adding the fix back.
+
+**`ninja check-feme`.** Passes in full at **2058/2117** (59
+pre-existing, unrelated `Unsupported`, 0 `Failed`), up from the prior
+2057/2116 baseline by this row's own one new test.
+
+**Real CTS re-run.** `dEQP-VK.texture.filtering.2d.*` (1698 cases): a
+real, substantial improvement, but not full closure. Before this fix:
+0/1698 pass, 258 `Fail` (every failure the catastrophic all-zero-render
+shape), 1440 honest `NotSupported`. After: **50/1698 now genuinely
+pass** (up from 0), 208 `Fail` (down from 258), 1440 honest
+`NotSupported` (unchanged). Inspected the rendered/reference/error-mask
+images embedded in the QPA log for a still-failing case
+(`nearest.nearest.repeat.repeat`): the rendered image is no longer
+uniformly black -- it is a real, varying gradient, structurally similar
+to (but numerically different from) the reference image. This is a
+materially different, smaller-scale failure than H14 itself scoped (a
+resource-plumbing bug producing an all-zero render): the remaining 208
+fails look like a real sampling-precision or coordinate-quantization
+bug in the filtering kernel itself, tracked as new roadmap **H15**
+rather than folded into this row.
+
+`dEQP-VK.texture.filtering_anisotropy.*` (128 cases): unaffected by
+this fix, as expected -- still 128/128 `NotSupported` ("Skipping
+anisotropic tests since the device does not support anisotropic
+filtering"), gated on the `samplerAnisotropy` feature bit itself (still
+`VK_FALSE`, per H7i), not pipeline creation or sampling correctness.
+`samplerAnisotropy` is not revisited by this row: even setting aside
+the feature-bit gate, H15's own remaining sampling-correctness gap
+means a real anisotropic-filtering measurement still would not be
+honest yet.
+
+**Documentation.** `Roadmap.md`'s H14 struck through, with the real
+measured impact and a pointer to the new H15 follow-on (capped at one
+top-level letter, per this project's own nesting-depth convention,
+rather than `H14a`). No `FeMeGraphicsDesign.md` deviation: this is a
+resource-materialization bug fix, not a design decision change.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed
+no change needed (no feature bit or extension is affected by this
+row).
