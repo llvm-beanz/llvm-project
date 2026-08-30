@@ -885,10 +885,18 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
 
   for (size_t I = 0; I != Desc.ColorAttachments.size(); ++I) {
     uint32_t Index = Desc.ColorAttachments[I];
-    if (Index == VK_ATTACHMENT_UNUSED)
-      return createStringError(inconvertibleErrorCode(),
-                               "an unused color attachment slot is not "
-                               "implemented");
+    if (Index == VK_ATTACHMENT_UNUSED) {
+      // (roadmap H7s) A present-but-unused color attachment slot: the
+      // default-constructed `RenderTargetView` (`View == nullptr`) is
+      // exactly the same "no bound image" shape a `VK_NULL_HANDLE`
+      // `VkRenderingAttachmentInfo::imageView` already produces
+      // (`normalizeRenderingAttachment` below, roadmap E5) --
+      // `resolveDrawAttachments`'s own `!View.View` branch already
+      // resolves either one into an empty `AttachmentView` that every
+      // draw-time read/write already treats as "nothing to do here".
+      Binding.Colors.push_back(RenderTargetView{});
+      continue;
+    }
     RenderTargetView View = makeView(Index, /*UseStencilOps=*/false);
     if (I < Desc.ResolveAttachments.size() &&
         Desc.ResolveAttachments[I] != VK_ATTACHMENT_UNUSED)

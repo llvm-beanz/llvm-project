@@ -544,9 +544,9 @@ getStageSignature(const feme::cpu::CompiledStage &Stage) {
 /// creation, rather than leaving them for the first draw.
 ///
 /// \p FragmentStage is `nullptr` for a pipeline that legally omitted its
-/// fragment stage (roadmap H2j, only possible when \p ColorAttachmentCount
-/// is 0, matching `VUID-VkGraphicsPipelineCreateInfo-pStages-06894`'s own
-/// condition): every fragment-side check below (varying linkage, per-
+/// fragment stage (roadmap H2j, only possible when \p ColorAttachments
+/// is empty, matching `VUID-VkGraphicsPipelineCreateInfo-pStages-06894`'s
+/// own condition): every fragment-side check below (varying linkage, per-
 /// attachment outputs) is skipped in that case, since there is no fragment
 /// signature to check them against.
 ///
@@ -571,7 +571,7 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                               const feme::cpu::CompiledStage *FragmentStage,
                               const feme::cpu::CompiledStage *DomainStage,
                               const feme::cpu::CompiledStage *GeometryStage,
-                              uint32_t ColorAttachmentCount,
+                              llvm::ArrayRef<AttachmentFormat> ColorAttachments,
                               llvm::ArrayRef<VertexInputAttribute> Attributes) {
   Expected<feme::EntrySignature> VSSig = getStageSignature(VertexStage);
   if (!VSSig)
@@ -663,7 +663,17 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
       }
     }
 
-    for (uint32_t I = 0; I != ColorAttachmentCount; ++I) {
+    for (uint32_t I = 0; I != ColorAttachments.size(); ++I) {
+      // (roadmap H7s) A `VK_ATTACHMENT_UNUSED` color-attachment slot
+      // (`GraphicsPipeline.cpp`'s own `getRenderTargets` placeholder,
+      // `ResourceFormat::Unknown`) still counts toward
+      // `colorAttachmentCount()`/this location range, but has no real
+      // attachment for a fragment output at that location to write to --
+      // the write is discarded either way (`Executor.cpp`'s own
+      // `Att.Data.empty()` handling), so the fragment stage is not
+      // required to declare an output there at all.
+      if (ColorAttachments[I].Format == feme::cpu::ResourceFormat::Unknown)
+        continue;
       const feme::SignatureElement *Color =
           findLocation(*FSSig, feme::SignatureDirection::Output, I);
       if (!Color || Color->ComponentCount != 4 ||
@@ -675,7 +685,7 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                                  I, I);
     }
   }
-  assert((FragmentStage || ColorAttachmentCount == 0) &&
+  assert((FragmentStage || ColorAttachments.empty()) &&
          "a fragment-less pipeline must not declare color attachments");
 
   // Every located vertex *input* must be supplied by a vertex attribute:
@@ -736,13 +746,37 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
                                "VkRenderPass does not have",
                                CreateInfo.subpass);
     const SubpassDescription &Subpass = Pass.subpasses()[CreateInfo.subpass];
+    // (roadmap H7s) Whether any slot in `Subpass.ColorAttachments` supplied
+    // a real sample count below -- tracked explicitly rather than
+    // inferring it from `Subpass.ColorAttachments.empty()` the way H7n's
+    // own depth/stencil-only fallback below still does, since a subpass
+    // may have a non-empty color attachment list where every slot is
+    // `VK_ATTACHMENT_UNUSED` (this row's own motivating shape has one real
+    // slot and one unused one, but nothing rules out all-unused either).
+    bool AnyColorSampleCount = false;
     for (uint32_t Index : Subpass.ColorAttachments) {
-      if (Index == VK_ATTACHMENT_UNUSED)
-        return createStringError(inconvertibleErrorCode(),
-                                 "an unused color attachment slot is not "
-                                 "implemented");
+      if (Index == VK_ATTACHMENT_UNUSED) {
+        // (roadmap H7s) A present-but-unused color attachment slot
+        // (`VK_ATTACHMENT_UNUSED`, e.g. `dEQP-VK.pipeline.monolithic.
+        // multisample.alpha_to_coverage_unused_attachment.*`'s own
+        // location-0 slot): this mirrors a `VK_NULL_HANDLE`
+        // `VkRenderingAttachmentInfo::imageView` (roadmap E5) -- the slot
+        // still counts toward `colorAttachmentCount()`/`ColorBlends` (so
+        // `Info->attachmentCount` and the fragment stage's own output
+        // locations still line up one-to-one with real attachment
+        // indices), but carries no format of its own and never
+        // contributes a sample count. `ResourceFormat::Unknown` is never
+        // consulted for an unused slot downstream (`buildRenderTargetBinding`,
+        // CommandBuffer.cpp, resolves it to an empty `AttachmentView`
+        // that every write already skips, the same "not bound" handling
+        // an unused dynamic-rendering slot gets), so any placeholder
+        // value here is safe.
+        Targets.Colors.push_back(feme::cpu::ResourceFormat::Unknown);
+        continue;
+      }
       Targets.Colors.push_back(Pass.attachments()[Index].Format);
       Targets.SampleCount = Pass.attachments()[Index].SampleCount;
+      AnyColorSampleCount = true;
     }
     if (Subpass.DepthStencilAttachment != VK_ATTACHMENT_UNUSED) {
       Targets.DepthStencil =
@@ -758,8 +792,11 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
       // "disagreeing" with a render target whose real sample count this
       // code never actually consulted. Fall back to the depth/stencil
       // attachment's own sample count whenever no color attachment
-      // supplied one.
-      if (Subpass.ColorAttachments.empty())
+      // supplied one -- extended by roadmap H7s to also cover a subpass
+      // whose color attachment list is non-empty but every slot in it is
+      // unused (the same "no color attachment actually set it" gap, just
+      // reached a different way).
+      if (!AnyColorSampleCount)
         Targets.SampleCount =
             Pass.attachments()[Subpass.DepthStencilAttachment].SampleCount;
     }
@@ -1831,7 +1868,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     const VkPipelineShaderStageCreateInfo *MeshInfo,
     const VkPipelineShaderStageCreateInfo *TaskInfo,
     const PipelineLayout &Layout, const VkPhysicalDeviceLimits &Limits,
-    uint32_t ColorAttachmentCount,
+    llvm::ArrayRef<AttachmentFormat> ColorAttachments,
     llvm::ArrayRef<VertexInputAttribute> VertexAttributes,
     feme::graphics::TessellationState &Tessellation,
     feme::graphics::GeometryState &Geometry, feme::graphics::MeshState &Mesh) {
@@ -2129,7 +2166,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   if (VertexStage) {
     if (Error E = validateStageInterfaces(
             *VertexStage, FragmentStage.get(), DomainStage.get(),
-            GeometryStageCompiled.get(), ColorAttachmentCount,
+            GeometryStageCompiled.get(), ColorAttachments,
             VertexAttributes))
       return std::move(E);
   }
@@ -2277,7 +2314,7 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
             VertexInfo, FragmentInfo, TessControlInfo, TessEvalInfo,
             GeometryInfo, MeshInfo, TaskInfo, Layout,
             DeviceInfo.Properties.limits,
-            static_cast<uint32_t>(Result.Attachments.size()),
+            llvm::ArrayRef(Result.Attachments),
             Result.VertexAttributes, Result.Tessellation, Result.Geometry,
             Result.Mesh);
     if (!Compiled)
