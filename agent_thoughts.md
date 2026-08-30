@@ -47171,3 +47171,91 @@ small-changes instruction. Cleaned up the scratch caselist/log files under
 `VK-GL-CTS/run/` except the final `h17_full.qpa` log (kept for traceability,
 matching this project's own established convention of keeping named
 `.qpa` logs from prior sessions in that directory).
+
+# Session: Roadmap H18 (b10g11r11_ufloat texture filtering fix)
+
+Picked up the last open item from the H14-H18 `dEQP-VK.texture.filtering.2d.*`
+investigation chain: all 6 remaining fails (after H17's trilinear fix) were
+`formats.b10g11r11_ufloat.*`, across every filter-mode combination for that
+one packed-float format, with no mip/blend involvement -- clearly a
+format-decode bug rather than anything filter-selection- or mip-related.
+
+Started with a real pixel-level reduction as instructed: picked the
+simplest of the six failing cases, `formats.b10g11r11_ufloat.nearest` (no
+mip, no blend, so any wrongness has to be in the decode itself). Went
+straight to `femeRTUnpackR11G11B10Float` in `FeMeRuntimeCPU.c`, which
+decodes this format's three packed unsigned minifloat channels (11-bit
+R/G with a 6-bit mantissa, 10-bit B with a 5-bit mantissa) by reusing the
+existing `femeRTHalfToFloat` binary16 decoder -- each channel's own
+5-bit-exponent+mantissa field is extracted as a contiguous bit-string and
+left-shifted into binary16's own exponent/mantissa bit positions.
+
+Worked out the correct shift amount by hand rather than guessing: binary16
+has a 10-bit mantissa field, so a `MantBits`-bit mantissa needs to land in
+the *top* `MantBits` bits of that 10-bit field, meaning the whole
+`(5 + MantBits)`-bit exponent+mantissa chunk (exponent directly above
+mantissa in both this format and binary16) needs to shift left by exactly
+`10 - MantBits`. The code shifted by `11 - MantBits` instead -- one bit too
+many for both channels (5 for R/G's 6-bit mantissa instead of 4; 6 for
+B's 5-bit mantissa instead of 5).
+
+Verified this hypothesis with a small Python reproduction before touching
+any code: implemented both a from-scratch reference minifloat decoder
+(the mathematically-correct definition, independent of `femeRTHalfToFloat`'s
+own binary16 machinery) and a copy of the buggy shift-then-reuse-half-decode
+approach, and compared them across a spread of raw bit patterns. The
+buggy shift decoded this format's own encoded `1.0` as `32768.0` and `2.0`
+as `-0.0` -- a stark, unambiguous confirmation, not a subtle rounding
+difference. The proposed shift-by-one-less fix matched the reference
+decoder exactly across every value tried.
+
+Also checked why the existing `LoadFetchesR11G11B10Float` unit test never
+caught this: it only exercises an all-zero-bits texel, which decodes to
+`(0,0,0,1.0)` under *any* shift amount, since `0 << n == 0` regardless of
+`n`. That test was structurally incapable of catching a shift-amount bug
+no matter how the review had gone -- a good reminder that an all-zero (or
+otherwise degenerate) fixture value being the *only* coverage of a
+bit-packing routine is itself a code smell worth flagging, even outside a
+dedicated review pass; noting this in case a future session encounters
+the same pattern for another packed format.
+
+Applied the fix (shift amounts 4/4/5 instead of 5/5/6), rebuilt, and
+added a new unit test with a distinct, exactly-representable value per
+channel (R=1.0, G=2.0, B=1.5) asserting the exact decoded result. Ran
+`git clang-format --diff` (no changes needed after normalizing one
+manual comment-alignment edit by hand). Ran the full `ImageSamplingTest`
+suite (all 79 tests, not just the new/filtered ones) -- all passing.
+
+Ran the full `ninja check-feme` target: 2068/2127 passed, 59 pre-existing
+`Unsupported`, 0 `Failed` (up 1 test from H18's own new coverage).
+Committed the runtime fix + test as one commit.
+
+Real CTS re-run: rebuilt the same 1698-case `dEQP-VK.texture.filtering.2d.*`
+caselist from `vk-default/texture.txt` used in the H17 session (same
+`--deqp-caselist-file`/`VK_DRIVER_FILES` invocation), plus a direct
+`--deqp-case` spot-check of the exact reduction case
+(`formats.b10g11r11_ufloat.nearest`, now passes outright). Full sweep
+result: 258/1698 Pass (up from 252), 1440 honest `NotSupported`
+(unchanged), **0 Fail** (down from 6) -- this entire test group is now
+completely clean, closing out the whole H14 through H18 investigation
+chain that started several sessions ago from a 0/1698-passing, all-zero-
+render baseline.
+
+No `FeMeGraphicsDesign.md` deviation -- this is a pure bit-arithmetic bug
+fix in an existing format decoder, not any kind of design decision.
+
+Struck through H18 in `Roadmap.md` with the closure narrative, appended a
+"Roadmap H18: measured impact" section to `VulkanCTSReport.md` matching
+the established H14-H17 format, and updated
+`Vulkan14FeatureInventory.md`'s `samplerAnisotropy` row -- its only
+remaining blocker is now H13d (the combined-sampled-image-handle gap in
+`SPIRVResourceLoweringPass`) alone, since every gap the H14-H18 chain
+found in the sampling/filtering path itself is now closed.
+`VulkanExtensionInventory.md` needed no change (no extension touches this
+row). Committed the runtime change, the doc updates, and this file as
+three separate commits, per the small-changes instruction. Did not find
+or need to file any new roadmap follow-on -- the investigation this row
+scoped is now fully closed with no residual gap in
+`dEQP-VK.texture.filtering.2d.*` itself. Cleaned up scratch caselist files
+under `VK-GL-CTS/run/` except the final `h18_full.qpa` log, kept for
+traceability per this project's own established convention.
