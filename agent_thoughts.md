@@ -45284,3 +45284,121 @@ Real CTS: `alpha_to_coverage.*` 12/12 pass; `alpha_to_coverage_no_color_attachme
 3/3 pass (after H7q); `alpha_to_coverage_unused_attachment.*` still fails on
 H7r's own format gap; a broader 10576-case `multisample.*` sweep confirmed
 every other failure pre-existing and unrelated.
+
+# H7r: packed 16-bit formats
+
+## Scoping the request
+
+Continuing from H7n's own discovery: `alpha_to_coverage_unused_attachment.*`
+fails at `vkCreateImage` with `VK_ERROR_FORMAT_NOT_SUPPORTED` because its own
+`AlphaToCoverageColorUnusedAttachmentInstance` hard-codes
+`VK_FORMAT_R5G6B5_UNORM_PACK16` as its real color attachment. Before writing
+any code, I read the actual CTS test source
+(`vktPipelineMultisampleTests.cpp`) to understand exactly what shape this
+case needs, and found something the roadmap text alone didn't make obvious:
+the render pass's subpass declares *two* color attachment slots -- location 0
+is `VK_ATTACHMENT_UNUSED`, location 1 is the real R5G6B5 image. So this CTS
+case actually needs two independent things to pass: real R5G6B5 format
+support, and support for an unused color-attachment slot in a subpass.
+`GraphicsPipeline.cpp`'s `getRenderTargets` rejects the latter outright today
+("an unused color attachment slot is not implemented") -- a gap nobody had
+tracked yet.
+
+I decided to keep this session strictly scoped to what H7r's own roadmap text
+asked for (the format gap), verify it thoroughly with a *different* CTS group
+that doesn't also need the unused-attachment-slot feature
+(`dEQP-VK.api.image_clearing.*`, which properly gates on format-support
+queries rather than hard-failing), and open a brand-new roadmap row (H7s) for
+the unused-attachment-slot gap rather than attempt it here. This keeps each
+row's diff matched to its own text, the same discipline the H7n/H7q/H7r chain
+already established.
+
+## Choosing which formats to add, and how confident to be about it
+
+Rather than guess which packed 16-bit formats were "worth adding" (the
+roadmap text's own hedge -- "R5G6B5, R5G5B5A1, B5G6R5, etc."), I found the
+real CTS's own `vktApiImageClearingTests.cpp` `colorImageFormatsToTest` array
+and used it as an authoritative survey: it already lists every packed 16-bit
+format the CTS itself considers worth testing for image clearing. That gave
+me 8 candidates; I excluded `R4G4_UNORM_PACK8` since it's 8-bit, not 16-bit,
+leaving exactly 7: `R4G4B4A4`, `B4G4R4A4`, `R5G6B5`, `B5G6R5`, `R5G5B5A1`,
+`B5G5R5A1_UNORM_PACK16`, `A1R5G5B5_UNORM_PACK16`.
+
+For the exact bit layouts, I initially got a web-search summary that seemed
+plausible but I didn't fully trust it -- packed-format bit-order mistakes are
+exactly the kind of thing that "looks right" on a skim but silently swaps two
+channels. I fetched the actual Vulkan spec's "Formats" chapter
+(docs.vulkan.org) and cross-checked every layout by hand against it before
+writing any packing code. This caught nothing wrong in this case (the
+web-search summary held up), but the check was worth doing given how easy a
+silent R/B swap would be to miss in review.
+
+## The `FeMeRuntimeCPU.c` ordinal trap
+
+While looking for every place `ResourceFormat` needed updating, I found
+`feme/runtime/CPU/FeMeRuntimeCPU.c`'s sampling tables switch on the *raw
+integer value* of `ResourceFormat`, not the symbolic enum name (e.g.
+`case 28: // ResourceFormat::A1B5G5R5_UNORM`). This is a landmine: if I'd
+added the 7 new formats anywhere in the enum other than the very end, every
+case label after that point would still compile (they're just integers) but
+would now silently refer to the *wrong* format at runtime -- a bug that would
+be nearly invisible in review (nothing looks wrong in a diff of an enum
+insertion) and would only surface as mysteriously-wrong pixel values in some
+unrelated, far-later format's sampling path. I appended all 7 new values
+after the existing tail (`ASTC_12x12_SFLOAT`) specifically to avoid this,
+and documented the constraint in `RuntimeABI.h`'s own comment so the next
+person (or the next me) doesn't repeat the mistake.
+
+## Choosing the support tier: real attachment, not just recognized
+
+The codebase has (at least) two tiers of "format support": recognized-only
+(`A4R4G4B4_UNORM`/`A4B4G4R4_UNORM`, roadmap E19 -- legal `VkFormat`, no
+attachment or sampling capability) and real-attachment (`A1B5G5R5_UNORM`,
+roadmap E5 -- backed by real `packClearColor`/`unpackColor`). Since the
+actual blocking CTS case needs to *create and use* a real R5G6B5 color
+attachment, recognized-only would not have been enough -- I implemented the
+full real-attachment tier for all 7 new formats, matching `A1B5G5R5_UNORM`'s
+precedent, including a deliberate scope limit to *not* add a runtime sampling
+case (matching `A4R4G4B4_UNORM`'s precedent for the "not sampled yet" gap),
+which keeps `SAMPLED_IMAGE_BIT` correctly unset without any extra code (it
+already falls through the existing `default:` case in `formatFeatureFlags`).
+
+I made sure to land the format-mapping/attachment-capability commit and the
+actual pack/unpack-implementation commit close together conceptually (though
+still as two separate commits, per the small-changes instruction) -- if
+`isSupportedColorAttachmentFormat` claimed support before `packClearColor`/
+`unpackColor` actually implemented it, that would be a real regression (a
+pipeline could be created against the format, then fail unpredictably at
+first render). I sequenced the commits so the first commit's own tests (which
+don't exercise pack/unpack) still pass on their own, but conceptually treated
+the pair as one unit of "real, working support."
+
+## Validating without touching the harder problem
+
+To confirm the format implementation was actually correct (not just "doesn't
+crash"), I ran the real `deqp-vk` against
+`dEQP-VK.api.image_clearing.core.clear_color_image.*` and
+`clear_color_attachment.*` filtered to each new format. `clear_color_image`
+came back clean (0 failures for any of the 7 formats). `clear_color_attachment`
+showed some failures, which worried me until I checked whether the *same*
+failures occurred for `r8g8b8a8_unorm` (a format that has worked for a very
+long time) in the same subgroups (`cube_layers`/`multiple_layers`/certain
+MSAA `sample_count` variants) -- they did, identically, confirming this is a
+pre-existing, generic multi-layer/MSAA-attachment-clear gap that has nothing
+to do with my format work. This is the same "diff against a known-good
+baseline format" technique I should keep using whenever a new format's CTS
+run shows any failures at all, rather than assuming a failure is mine just
+because it appears in the same run.
+
+Finally, I re-ran the actual original blocker
+(`alpha_to_coverage_unused_attachment.*`) and confirmed the failure mode
+changed from `VK_ERROR_FORMAT_NOT_SUPPORTED` to `vkCreateGraphicsPipelines`
+rejecting the unused-attachment-slot shape -- concrete proof the format gap
+is closed, and a clean, well-defined boundary for the new H7s follow-on.
+
+Real CTS: `clear_color_image.*` clean across all 7 new formats (0 failures);
+`clear_color_attachment.*` full group 618/5145 fail, all attributable to a
+pre-existing multi-layer/MSAA gap unrelated to this row (cross-checked
+against `r8g8b8a8_unorm`); `alpha_to_coverage_unused_attachment.*` now fails
+on H7s's own gap instead of the format gap. `ninja check-feme`: 2035/2094,
+0 failed, up from 2026/2085 by 9 new tests.
