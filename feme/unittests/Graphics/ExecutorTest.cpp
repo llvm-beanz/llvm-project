@@ -794,7 +794,7 @@ constexpr char PointSizeVertexShaderIR[] = R"(
 /// `RasterState` (so a test can set `MaxPointSize` to any test-local
 /// clamp bound without needing a real device-sized render target).
 Expected<GraphicsPipeline> buildPointSizePipeline(Context &Ctx,
-                                                   RasterState Raster) {
+                                                  RasterState Raster) {
   EntrySignature VSSig;
   VSSig.Elements = {
       makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
@@ -843,7 +843,7 @@ PreparedDraw preparePointSizeDraw(std::array<uint8_t, 64> &AttachmentStorage,
       {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12},
       {2, cpu::ResourceFormat::R32_FLOAT, 28}};
   Color = AttachmentView{AttachmentStorage, cpu::ResourceFormat::R8G8B8A8_UNORM,
-                        4, 4};
+                         4, 4};
   Attachments = {Color};
   Bindings = {VertexBufferBinding{
       0, 32,
@@ -2439,9 +2439,8 @@ TEST(ExecutorTest, SampleShadingEnableInvokesFragmentOncePerSample) {
   SampleIndexIn.SystemValue = SignatureSystemValue::SampleIndex;
   SampleIndexIn.ComponentType = SignatureComponentType::UInt;
   EntrySignature FSSig;
-  FSSig.Elements = {SampleIndexIn,
-                    makeElement(1, SignatureDirection::Output, 4,
-                                /*Location=*/0)};
+  FSSig.Elements = {SampleIndexIn, makeElement(1, SignatureDirection::Output, 4,
+                                               /*Location=*/0)};
   Expected<std::shared_ptr<CompiledStage>> FS =
       compileStage(Ctx, SampleIndexFragmentShaderIR, "fs_sampleindex", FSSig,
                    ShaderStage::Fragment);
@@ -2497,8 +2496,8 @@ TEST(ExecutorTest, SampleShadingEnableInvokesFragmentOncePerSample) {
   // replaces).
   for (uint32_t S = 0; S != Samples; ++S) {
     size_t Off = S * 4;
-    uint8_t Expected = static_cast<uint8_t>(
-        std::lround(255.0 * static_cast<double>(S) / 3.0));
+    uint8_t Expected =
+        static_cast<uint8_t>(std::lround(255.0 * static_cast<double>(S) / 3.0));
     EXPECT_NEAR(MSStorage[Off], Expected, 2) << "sample " << S;
   }
   EXPECT_NE(MSStorage[0], MSStorage[1 * 4]);
@@ -2607,10 +2606,7 @@ TEST(ExecutorTest, SampleShadingEnableVariesFragCoordPerSamplePosition) {
   // must match that sample's own real position -- not the pixel-center
   // (0.5, 0.5) every sample would show under the pre-H7p bug.
   constexpr std::array<std::array<float, 2>, Samples> ExpectedOffsets = {
-      {{0.375f, 0.125f},
-       {0.875f, 0.375f},
-       {0.125f, 0.625f},
-       {0.625f, 0.875f}}};
+      {{0.375f, 0.125f}, {0.875f, 0.375f}, {0.125f, 0.625f}, {0.625f, 0.875f}}};
   for (uint32_t S = 0; S != Samples; ++S) {
     size_t Off = S * 4;
     uint8_t ExpectedR = static_cast<uint8_t>(
@@ -2682,6 +2678,80 @@ TEST(ExecutorTest, AlphaToOneEnableForcesOutputAlphaToOne) {
     const uint8_t *Texel = Scene.AttachmentStorage.data() + I * 4;
     EXPECT_EQ(Texel[0], 255) << "texel " << I;
     EXPECT_EQ(Texel[3], 255) << "texel " << I << " (alphaToOne)";
+  }
+}
+
+/// (roadmap H7n) `alphaToCoverageEnable` clears a sample's coverage bit
+/// when the fragment stage's own output at location 0's alpha falls
+/// below that sample's own per-sample threshold `(S + 0.5) /
+/// SampleCount`, before either the depth/stencil test or the color merge
+/// -- so an `alpha == 0.25` quad at `SampleCount == 4` covers exactly
+/// sample 0 (`0.25 >= (0 + 0.5) / 4 == 0.125`) and clears samples 1-3
+/// (`0.25 < (1 + 0.5) / 4 == 0.375`, and likewise for 2 and 3), leaving
+/// those three samples at whatever the attachment already held (`0` here,
+/// its zero-initialized clear value) rather than the shaded color.
+TEST(ExecutorTest, AlphaToCoverageEnableGeneratesPerSampleCoverageFromAlpha) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/4,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}},
+      StencilState{}, std::vector<BlendState>{BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/false,
+      /*AlphaToOneEnable=*/false, /*AlphaToCoverageEnable=*/true);
+
+  constexpr uint32_t Samples = 4;
+  std::vector<uint8_t> MSStorage(4u * 4u * Samples * 4u, 0);
+  AttachmentView MSColor{MSStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{MSColor};
+
+  TriangleScene Scene;
+  // Same fully-covering triangle as `AlphaToOneEnableForcesOutputAlphaToOne`,
+  // but every vertex's alpha is 0.25.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.25f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.25f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 0.25f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+  Draw.Attachments = Attachs;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  for (uint32_t Pixel = 0; Pixel != 16; ++Pixel) {
+    for (uint32_t S = 0; S != Samples; ++S) {
+      const uint8_t *Texel = MSStorage.data() + (Pixel * Samples + S) * 4;
+      if (S == 0) {
+        EXPECT_EQ(Texel[0], 255) << "pixel " << Pixel << " sample " << S;
+        EXPECT_EQ(Texel[3], 64)
+            << "pixel " << Pixel << " sample " << S << " (unorm8 0.25)";
+      } else {
+        EXPECT_EQ(Texel[0], 0) << "pixel " << Pixel << " sample " << S
+                               << " (alphaToCoverage should have culled "
+                                  "this sample)";
+      }
+    }
   }
 }
 

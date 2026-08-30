@@ -372,8 +372,8 @@ std::vector<RasterVertex> clipTriangle(std::array<RasterVertex, 3> Tri,
   // the four XY side planes (`Planes[1..4]`) always still run regardless:
   // only the last two entries above are the actual near/far Z-clip
   // planes.
-  size_t PlaneCount = DepthClampEnable ? std::size(Planes) - 2
-                                      : std::size(Planes);
+  size_t PlaneCount =
+      DepthClampEnable ? std::size(Planes) - 2 : std::size(Planes);
   for (size_t I = 0; I != PlaneCount; ++I) {
     Poly = clipAgainstPlane(std::move(Poly), Planes[I], Varyings);
     if (Poly.size() < 3)
@@ -384,9 +384,9 @@ std::vector<RasterVertex> clipTriangle(std::array<RasterVertex, 3> Tri,
 
 /// One clipped, culled, viewport-transformed triangle ready for rasterization.
 struct ScreenTriangle {
-  std::array<std::array<float, 2>, 3> Pos;  // pixel-space x/y
-  std::array<float, 3> InvW;                // 1/clip-space w, for SV_Position.w
-  std::array<float, 3> Depth;               // viewport-mapped depth
+  std::array<std::array<float, 2>, 3> Pos; // pixel-space x/y
+  std::array<float, 3> InvW;               // 1/clip-space w, for SV_Position.w
+  std::array<float, 3> Depth;              // viewport-mapped depth
   /// (roadmap H7d) `depthClampEnable`'s single choke point: the owning
   /// pipeline's viewport `[minDepth, maxDepth]` range (already sorted
   /// low/high), applied to each fragment's *interpolated* depth -- see
@@ -1024,7 +1024,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                              Draw.Attachments.size());
   const DepthState &PipelineDepth = Pipeline.getDepthState();
   if ((PipelineDepth.TestEnable || PipelineDepth.WriteEnable ||
-      PipelineDepth.BoundsTestEnable) &&
+       PipelineDepth.BoundsTestEnable) &&
       Draw.DepthStencil.Depth.Data.empty())
     return createStringError(inconvertibleErrorCode(),
                              "depth testing/writes are enabled but the draw "
@@ -1419,6 +1419,31 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "4-component floating-point output");
   }
 
+  // (roadmap H7n) `alphaToCoverageEnable` generates its coverage mask from
+  // the fragment stage's own output at location 0 -- independent of
+  // `vkCmdSetRenderingAttachmentLocations`'s own remapping (`FSColors`
+  // above) and of whether attachment 0 is even bound/written at all (a
+  // real conformance case, `dEQP-VK.pipeline.*.multisample.
+  // alpha_to_coverage_color_unused_attachment.*`, writes its quad color to
+  // location 1 and leaves location 0's own alpha as the only
+  // coverage-relevant output, with attachment 0 itself unused), so this is
+  // looked up directly rather than reusing `FSColors[0]`.
+  const SignatureElement *FSAlphaToCoverage = nullptr;
+  if (Pipeline.getAlphaToCoverageEnable()) {
+    FSAlphaToCoverage =
+        findElementByLocation(FSSig, SignatureDirection::Output, 0);
+    if (!FSAlphaToCoverage)
+      return createStringError(inconvertibleErrorCode(),
+                               "alphaToCoverageEnable is set but the "
+                               "fragment stage has no output at location 0");
+    if (FSAlphaToCoverage->ComponentCount != 4 ||
+        FSAlphaToCoverage->ComponentType != SignatureComponentType::Float)
+      return createStringError(inconvertibleErrorCode(),
+                               "the output at location 0 must be a "
+                               "4-component floating-point output when "
+                               "alphaToCoverageEnable is set");
+  }
+
   // (Roadmap E5/H3) The extent used to clamp each selected scissor rect
   // below: the first bound (non-unused) color attachment, or else the
   // depth/stencil attachment, since attachment 0 itself may be an unused
@@ -1495,9 +1520,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // even when neither the regular depth test nor a depth write is
   // enabled -- a pipeline may legally enable only the bounds test.
   bool NeedsDepthStencil = DepthTestOrWrite || PipelineDepth.BoundsTestEnable ||
-                          PipelineStencil.TestEnable;
-  bool UseEarlyDepthStencil =
-      NeedsDepthStencil && !FSDepthOut && !FSStencilRefOut && !FSMayDiscard;
+                           PipelineStencil.TestEnable;
+  // (roadmap H7n) `alphaToCoverageEnable` also forces the late path: its
+  // own coverage mask depends on the fragment stage's shaded alpha output,
+  // which isn't known until after the fragment stage runs, exactly like a
+  // `SV_Depth`/`SV_StencilRef` write or a discard/demote above.
+  bool UseEarlyDepthStencil = NeedsDepthStencil && !FSDepthOut &&
+                              !FSStencilRefOut && !FSMayDiscard &&
+                              !Pipeline.getAlphaToCoverageEnable();
   // (roadmap H4) Which primitive class actually reaches the rasterizer. A
   // patch-list pipeline's own topology says nothing about that -- the
   // tessellator's `TessOutputPrimitive` does -- so this is the
@@ -1742,10 +1772,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       ST.Pos = Screen;
       ST.InvW = InvW;
       ST.Depth = Depth;
-      ST.DepthClampLo = std::min(Primitive.Viewport->MinDepth,
-                                 Primitive.Viewport->MaxDepth);
-      ST.DepthClampHi = std::max(Primitive.Viewport->MinDepth,
-                                 Primitive.Viewport->MaxDepth);
+      ST.DepthClampLo =
+          std::min(Primitive.Viewport->MinDepth, Primitive.Viewport->MaxDepth);
+      ST.DepthClampHi =
+          std::max(Primitive.Viewport->MinDepth, Primitive.Viewport->MaxDepth);
       ST.IsLine = IsLine;
       ST.EdgeDistance = Edge;
       ST.ArcLength = Arc;
@@ -1788,9 +1818,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     auto emitPointQuad = [&](std::array<float, 2> P, float InvW, float Depth,
                              const RasterVertex &Vtx,
                              const PrimitiveState &Primitive) {
-      float Half =
-          std::clamp(Vtx.PointSize, 1.0f, Pipeline.getRasterState().MaxPointSize) *
-          0.5f;
+      float Half = std::clamp(Vtx.PointSize, 1.0f,
+                              Pipeline.getRasterState().MaxPointSize) *
+                   0.5f;
       QuadCorner TL{{P[0] - Half, P[1] - Half}, InvW, Depth, &Vtx};
       QuadCorner TR{{P[0] + Half, P[1] - Half}, InvW, Depth, &Vtx};
       QuadCorner BR{{P[0] + Half, P[1] + Half}, InvW, Depth, &Vtx};
@@ -1982,9 +2012,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           }
           float MaxZ = std::max({Depth[0], Depth[1], Depth[2]});
           float R = depthBiasR(Draw.DepthStencil.Depth.Format, MaxZ);
-          float FragmentBias =
-              Bias.DepthBiasConstantFactor * R +
-              Bias.DepthBiasSlopeFactor * MaxSlope;
+          float FragmentBias = Bias.DepthBiasConstantFactor * R +
+                               Bias.DepthBiasSlopeFactor * MaxSlope;
           if (Bias.DepthBiasClamp > 0.0f)
             FragmentBias = std::min(FragmentBias, Bias.DepthBiasClamp);
           else if (Bias.DepthBiasClamp < 0.0f)
@@ -2556,7 +2585,34 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             // fragment's one shaded color/depth candidate, but each has
             // its own stored depth/stencil value and therefore its own
             // pass/fail result.
-            uint32_t PassMask = PassInvocations[Q].Coverage[Lane];
+            uint32_t BaseCoverage = PassInvocations[Q].Coverage[Lane];
+            // (roadmap H7n) `alphaToCoverageEnable` clears a sample's
+            // coverage bit before either the depth/stencil test or the
+            // color merge below when the fragment stage's own output at
+            // location 0's alpha component falls below that sample's own
+            // per-sample threshold `(S + 0.5) / SampleCount` -- an evenly
+            // spaced per-sample dither, so `round(alpha * SampleCount)`
+            // samples end up covered for any alpha in `[0, 1]` (e.g. an
+            // `alpha == 0.25` quad covers 1 of 4 samples, not 0 or all 4),
+            // matching "Alpha to Coverage" (`fragops.adoc`)'s own "a
+            // temporary coverage value... derived from the alpha
+            // component of the fragment shader's output at location 0
+            // ... ANDed with the fragment's coverage" without over- or
+            // under-covering at either extreme. Computed once per lane,
+            // ahead of the depth/stencil test below, since a
+            // coverage-culled sample must not be depth/stencil-tested or
+            // -written either -- consistent with `UseEarlyDepthStencil`
+            // being forced off above whenever this is enabled.
+            if (Pipeline.getAlphaToCoverageEnable()) {
+              double Alpha = FSOutput->readFloat(FSAlphaToCoverage->ElementID,
+                                                 3, Q * 4 + Lane);
+              uint32_t AlphaCoverage = 0;
+              for (uint32_t S = 0; S != SampleCount; ++S)
+                if (Alpha >= (static_cast<double>(S) + 0.5) / SampleCount)
+                  AlphaCoverage |= (1u << S);
+              BaseCoverage &= AlphaCoverage;
+            }
+            uint32_t PassMask = BaseCoverage;
             if (!UseEarlyDepthStencil && NeedsDepthStencil) {
               float FragDepth = PassInvocations[Q].Position[Lane][2];
               if (FSDepthOut)
@@ -2568,7 +2624,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                     FSStencilRefOut->ElementID, 0, Q * 4 + Lane));
               PassMask = 0;
               for (uint32_t S = 0; S != SampleCount; ++S) {
-                if (!((PassInvocations[Q].Coverage[Lane] >> S) & 1u))
+                if (!((BaseCoverage >> S) & 1u))
                   continue;
                 Expected<bool> Pass = testDepthStencil(
                     PipelineDepth, PipelineStencil, DepthAttachment,
