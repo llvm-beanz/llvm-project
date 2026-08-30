@@ -37,22 +37,25 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7y?
+Can you continue working on H7z?
 
-> **Writing `gl_ClipDistance`/`gl_CullDistance` from a tessellation-evaluation
-> or geometry stage (rather than the vertex stage) fails at shader-compilation
-> time**, discovered via H7h's own real re-run of
-> `dEQP-VK.clipping.user_defined.clip_distance.vert_tess.*`/`vert_geom.*`: fails
-> with `"'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but
-> got '!llvm.array<N x ...>'"`, an LLVM lowering gap where a
-> `gl_ClipDistance`/`gl_CullDistance` array member reached as an SSA value (not
-> a pointer) inside a non-vertex pre-rasterization stage's own
-> output-composition code is indexed with a `getelementptr` that requires a
-> pointer operand -- unrelated to H7h's own vertex-stage consumer, which stores
-> the same array through a real pointer-backed path (`VertexWrapper.cpp`'s
-> `lowerVertexOutputStore`). Needs a real investigation into why the
-> tessellation-evaluation/geometry stage's own output-composition lowering
-> produces an array SSA value here instead of a pointer, and what has to change
-> to fix it generically (this may not be specific to clip/cull-distance -- worth
-> checking whether any other array-shaped tessellation/geometry stage output
-> hits the same gap)
+> **`feme-cpu-simdize` rejects a divergent (per-fragment-varying) SSA value of
+> aggregate type outright**, discovered via H7x's own real re-run of
+> `dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}.vert.*_fragmentshader_read`
+> (0/16, once H7x's own two fixes let these cases clear the
+> SPIR-V-to-LLVM/varying-linking gates for the first time): `SIMDize.cpp`'s own
+> producer/consumer precondition-checking loop fails every case with `"has a
+> divergent value '' of aggregate type; component decomposition is not yet
+> supported (roadmap milestone 7 deviation)"` -- the pass's own wave-lane
+> decomposition logic already handles a divergent scalar or vector value, but
+> not yet a divergent aggregate (here, the whole `[N x float]`
+> `gl_ClipDistance`/`gl_CullDistance` array `StageIOAddressOfPattern` loads as
+> one value before H7x's own `extractvalue` narrows it to a scalar). Generic to
+> any divergent aggregate-typed value reaching this pass, not specific to these
+> two builtins. Needs a real investigation into whether `SIMDize.cpp` should
+> learn to decompose a divergent aggregate into N per-lane, per-field scalars
+> (analogous to how a vector is already decomposed), or whether an aggregate
+> should instead be prevented from ever reaching this point as a single
+> divergent value (e.g. teaching `StageIOAddressOfPattern` or a later
+> canonicalization step to decompose the array into per-element scalar loads
+> before this pass ever sees it)
