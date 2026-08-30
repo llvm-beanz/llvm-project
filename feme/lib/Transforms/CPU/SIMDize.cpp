@@ -765,6 +765,16 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         std::optional<MatchedResourceCall> Matched = matchResourceCall(*UserCI);
         if (Matched && Matched->StoredValue == &I)
           continue;
+        // Roadmap H19a: a `feme.cpu.image.store.2d.*` call's own stored
+        // `Texel` operand is decomposed exactly like a matched
+        // resource-store call's stored value above -- the shape an
+        // `imageStore()` GLSL builtin's own per-lane divergent value
+        // takes, confirmed by reducing a real failing
+        // `dEQP-VK.image.load_store.with_format.2d.*` case down to its
+        // exact IR shape.
+        std::optional<MatchedImageCall> ImgMatched = matchImageCall(*UserCI);
+        if (ImgMatched && ImgMatched->Texel == &I)
+          continue;
         // A `feme.cpu.masked.store.*` call (see MaskIntrinsics.h) is
         // `feme::cpu::LinearizePass`'s masked form of an ordinary `store`
         // under divergent control flow -- the shape a mesh entry point's
@@ -1396,22 +1406,48 @@ void FunctionWidener::widenImageCall(CallInst &CI,
   // divergent coordinate, LOD, comparison reference, or descriptor index
   // is handled without this function knowing which kind of call it is; the
   // leading heap pointer/count operands are entry-point parameters and
-  // therefore never divergent.
+  // therefore never divergent. Roadmap H19a: the sole exception is a
+  // `feme.cpu.image.store.2d.*` call's `Texel` operand, since (unlike every
+  // other operand this function widens) it is itself vector-typed and, when
+  // divergent, is decomposed into per-component wide vectors
+  // (`WidenedVectorComponents`) rather than a single `<W x T>`
+  // (`Widened`) -- the same distinction `widenResourceCall` already makes
+  // for its own vector-typed `StoredValue`.
   unsigned MaskIdx = CI.arg_size() - 1;
-  bool AnyDivergent = Widened.count(Matched.Mask) != 0;
-  for (unsigned I = 0; I != MaskIdx; ++I)
+  int TexelArgIdx = -1;
+  if (Matched.Texel)
+    for (unsigned I = 0; I != MaskIdx; ++I)
+      if (CI.getArgOperand(I) == Matched.Texel) {
+        TexelArgIdx = static_cast<int>(I);
+        break;
+      }
+  bool TexelDivergent =
+      Matched.Texel && WidenedVectorComponents.count(Matched.Texel);
+
+  bool AnyDivergent = Widened.count(Matched.Mask) != 0 || TexelDivergent;
+  for (unsigned I = 0; I != MaskIdx; ++I) {
+    if (static_cast<int>(I) == TexelArgIdx)
+      continue;
     AnyDivergent |= Widened.count(CI.getArgOperand(I)) != 0;
+  }
   if (!AnyDivergent)
-    return; // A uniform sample: leave the scalar call as-is.
+    return; // A uniform sample/store: leave the scalar call as-is.
 
   SmallVector<Value *, 12> WideArgs(MaskIdx, nullptr);
-  for (unsigned I = 0; I != MaskIdx; ++I)
+  for (unsigned I = 0; I != MaskIdx; ++I) {
+    if (static_cast<int>(I) == TexelArgIdx)
+      continue;
     if (Widened.count(CI.getArgOperand(I)))
       WideArgs[I] = getWidened(CI.getArgOperand(I), Builder);
+  }
+  SmallVector<Value *, 4> WideTexelComponents;
+  if (TexelDivergent)
+    WideTexelComponents = WidenedVectorComponents.lookup(Matched.Texel);
 
-  // Every image operation is a read, so the wave's entry mask (not its
-  // side-effect mask) is what decides which lanes may run the helper.
-  Value *LaneMaskBase = Env.EntryMask;
+  // A store's governing mask must gate the real memory side effect it
+  // causes (matching `widenResourceCall`'s own `Env.SideEffectMask` choice
+  // for its `StoredValue` case); a read only needs the wave's entry mask.
+  Value *LaneMaskBase = Matched.Texel ? Env.SideEffectMask : Env.EntryMask;
   if (!isa<Constant>(Matched.Mask))
     LaneMaskBase = Builder.CreateAnd(
         LaneMaskBase, getWidened(Matched.Mask, Builder), "image.mask");
@@ -1419,27 +1455,51 @@ void FunctionWidener::widenImageCall(CallInst &CI,
   Function *Callee = CI.getCalledFunction();
   Value *Result = nullptr;
   SmallVector<Value *, 4> LoadComponents;
-  bool ResultIsVector = CI.getType()->isVectorTy();
+  bool ResultIsVoid = CI.getType()->isVoidTy();
+  bool ResultIsVector = !ResultIsVoid && CI.getType()->isVectorTy();
   if (ResultIsVector) {
     auto *VecTy = cast<FixedVectorType>(CI.getType());
     LoadComponents.assign(VecTy->getNumElements(),
                           PoisonValue::get(FixedVectorType::get(
                               VecTy->getElementType(), WaveSize)));
-  } else {
+  } else if (!ResultIsVoid) {
     Result = PoisonValue::get(FixedVectorType::get(CI.getType(), WaveSize));
   }
 
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     SmallVector<Value *, 12> CallArgs;
-    for (unsigned I = 0; I != MaskIdx; ++I)
+    for (unsigned I = 0; I != MaskIdx; ++I) {
+      if (static_cast<int>(I) == TexelArgIdx) {
+        if (!TexelDivergent) {
+          // A uniform stored texel is identical for every lane, so it
+          // needs no per-lane extraction.
+          CallArgs.push_back(Matched.Texel);
+          continue;
+        }
+        Value *LaneVector = PoisonValue::get(Matched.Texel->getType());
+        for (unsigned Component = 0,
+                      NumComponents = WideTexelComponents.size();
+             Component != NumComponents; ++Component) {
+          Value *LaneScalar = Builder.CreateExtractElement(
+              WideTexelComponents[Component], Builder.getInt32(Lane),
+              "lane.texel.elt");
+          LaneVector = Builder.CreateInsertElement(
+              LaneVector, LaneScalar, Builder.getInt32(Component));
+        }
+        CallArgs.push_back(LaneVector);
+        continue;
+      }
       CallArgs.push_back(WideArgs[I] ? Builder.CreateExtractElement(
                                            WideArgs[I], Builder.getInt32(Lane),
                                            "lane.image.arg")
                                      : CI.getArgOperand(I));
+    }
     CallArgs.push_back(Builder.CreateExtractElement(
         LaneMaskBase, Builder.getInt32(Lane), "lane.mask"));
 
     Value *LaneResult = Builder.CreateCall(Callee, CallArgs);
+    if (ResultIsVoid)
+      continue;
     if (!ResultIsVector) {
       Result = Builder.CreateInsertElement(Result, LaneResult,
                                            Builder.getInt32(Lane));
@@ -1456,7 +1516,7 @@ void FunctionWidener::widenImageCall(CallInst &CI,
 
   if (ResultIsVector)
     WidenedVectorComponents[&CI] = std::move(LoadComponents);
-  else
+  else if (Result)
     Widened[&CI] = Result;
   ToErase.push_back(&CI);
 }

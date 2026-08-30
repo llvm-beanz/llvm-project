@@ -1173,5 +1173,56 @@ TEST(SIMDizeTest, DecomposesHomogeneousVectorizableIntrinsicCall) {
   EXPECT_EQ(MaxNumCount, 4u);
 }
 
+TEST(SIMDizeTest, DecomposesInsertElementChainIntoImageStore) {
+  // Roadmap H19a: a `feme.cpu.image.store.2d.*` call's `Texel` operand is
+  // vector-typed (unlike every other operand `widenImageCall` widens), so
+  // it needs the same per-component decomposition
+  // `DecomposesInsertElementChainIntoResourceStore` above already exercises
+  // for `feme.cpu.resource.store.*` -- confirmed by reducing a real failing
+  // `dEQP-VK.image.load_store.with_format.2d.*` case down to its exact IR
+  // shape.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %image_heap, i32 %image_heap_count) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = uitofp i32 %tid to float
+      %v0 = insertelement <4 x float> poison, float %tidf, i32 0
+      %v1 = insertelement <4 x float> %v0, float %tidf, i32 1
+      %v2 = insertelement <4 x float> %v1, float %tidf, i32 2
+      %v3 = insertelement <4 x float> %v2, float 1.000000e+00, i32 3
+      call void @feme.cpu.image.store.2d.v4f32(
+          ptr %image_heap, i32 %image_heap_count, i32 0, i32 %tid, i32 %tid,
+          <4 x float> %v3, i1 true)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.cpu.image.store.2d.v4f32(ptr, i32, i32, i32, i32, <4 x float>, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Decomposition never builds an illegal `<4 x <4 x float>>`, and the
+  // scalarized call keeps its original, whole-vector `<4 x float>` Texel
+  // argument type, reassembled per lane from the widened components.
+  unsigned StoreCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getName() ==
+            "feme.cpu.image.store.2d.v4f32") {
+      ++StoreCallCount;
+      EXPECT_TRUE(CI->getArgOperand(5)->getType()->isVectorTy());
+    }
+  }
+  EXPECT_EQ(StoreCallCount, 4u);
+}
+
 } // namespace
 
