@@ -744,9 +744,25 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
       Targets.Colors.push_back(Pass.attachments()[Index].Format);
       Targets.SampleCount = Pass.attachments()[Index].SampleCount;
     }
-    if (Subpass.DepthStencilAttachment != VK_ATTACHMENT_UNUSED)
+    if (Subpass.DepthStencilAttachment != VK_ATTACHMENT_UNUSED) {
       Targets.DepthStencil =
           Pass.attachments()[Subpass.DepthStencilAttachment].Format;
+      // (roadmap H7n) A subpass with no color attachments at all (a real
+      // depth/stencil-only render, e.g. `dEQP-VK.pipeline.monolithic.
+      // multisample.alpha_to_coverage_no_color_attachment.*`'s own
+      // `RENDER_TYPE_DEPTHSTENCIL_ONLY`) left `Targets.SampleCount` at its
+      // single-sample default above -- the `for` loop over
+      // `Subpass.ColorAttachments` above, the only place that ever set it,
+      // never executes when that list is empty -- silently rejecting
+      // every genuinely multisampled depth/stencil-only pipeline as
+      // "disagreeing" with a render target whose real sample count this
+      // code never actually consulted. Fall back to the depth/stencil
+      // attachment's own sample count whenever no color attachment
+      // supplied one.
+      if (Subpass.ColorAttachments.empty())
+        Targets.SampleCount =
+            Pass.attachments()[Subpass.DepthStencilAttachment].SampleCount;
+    }
     return Targets;
   }
 

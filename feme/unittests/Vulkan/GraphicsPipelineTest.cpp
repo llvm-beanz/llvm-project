@@ -1733,6 +1733,66 @@ TEST_F(GraphicsPipelineTest, AcceptsZeroColorAttachments) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap H7n: a `VkRenderPass` subpass with zero color attachments (a
+/// real depth/stencil-only render, e.g. `dEQP-VK.pipeline.monolithic.
+/// multisample.alpha_to_coverage_no_color_attachment.*`'s own
+/// `RENDER_TYPE_DEPTHSTENCIL_ONLY`) must derive its render target sample
+/// count from the depth/stencil attachment rather than silently staying at
+/// the single-sample default (the only place that ever set it, the loop
+/// over `Subpass.ColorAttachments`, never executes when that list is
+/// empty) -- otherwise a genuinely multisampled depth/stencil-only
+/// pipeline is wrongly rejected as "disagreeing" with a render target
+/// whose real sample count this code never actually consulted.
+TEST_F(GraphicsPipelineTest, AcceptsMultisampledZeroColorRenderPass) {
+  VkAttachmentDescription DepthOnlyAttachment{};
+  DepthOnlyAttachment.format = VK_FORMAT_D32_SFLOAT;
+  DepthOnlyAttachment.samples = VK_SAMPLE_COUNT_4_BIT;
+  DepthOnlyAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  DepthOnlyAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference DepthOnlyRef{
+      0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription DepthOnlySubpass{};
+  DepthOnlySubpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  DepthOnlySubpass.colorAttachmentCount = 0;
+  DepthOnlySubpass.pDepthStencilAttachment = &DepthOnlyRef;
+  VkRenderPassCreateInfo DepthOnlyPassInfo{};
+  DepthOnlyPassInfo.attachmentCount = 1;
+  DepthOnlyPassInfo.pAttachments = &DepthOnlyAttachment;
+  DepthOnlyPassInfo.subpassCount = 1;
+  DepthOnlyPassInfo.pSubpasses = &DepthOnlySubpass;
+  VkRenderPass DepthOnlyPass = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateRenderPass(Device, &DepthOnlyPassInfo, nullptr, &DepthOnlyPass),
+      VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(NoColorOutputFragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = DepthOnlyPass;
+  Blend.attachmentCount = 0;
+  Blend.pAttachments = nullptr;
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT;
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthTestEnable = VK_TRUE;
+  DepthInfo.depthWriteEnable = VK_TRUE;
+  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+  Info.pDepthStencilState = &DepthInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe))
+                ->colorAttachmentCount(),
+            0u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyRenderPass(Device, DepthOnlyPass, nullptr);
+}
+
 /// Roadmap H2j: a depth-only pipeline may omit the fragment stage from
 /// `pStages` entirely -- distinct from `AcceptsZeroColorAttachments` above
 /// (whose fragment stage is present but merely writes no color output) --
