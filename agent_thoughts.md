@@ -47870,3 +47870,75 @@ and lowering pieces split more cleanly given how much of the lowering
 logic was already drafted before this session's compaction boundary).
 Documentation (Roadmap.md/VulkanCTSReport.md) committed together as a
 fifth commit, with this file committed separately last as the sixth.
+
+# Session: H19f (storage-image extended formats/without-format breadth)
+
+Continued the H19 storage-image series with H19f -- "The
+format/configuration breadth `shaderStorageImageExtendedFormats`/
+`shaderStorageImageReadWithoutFormat`/`shaderStorageImageWriteWithoutFormat`
+actually need", split out of H19d's original bundled scope.
+
+Started with investigation rather than code, since this row's own text
+explicitly asked for a real CTS-scoped gap size before implementing.
+First found the read/write asymmetry: `femeRTFetchTexel2D` et al. reuse
+the same `femeRTUnpackImageTexel`/`I32` (`FeMeRuntimeCPU.c`) sampled-image
+reads use, so storage-image *reads* already worked for any format
+`femeRTImageFormatElementSize` recognizes -- a much broader set than the
+6-format mandatory floor `femeRTPackImageTexel`/`I32` (the write side)
+were scoped to. This made the real, narrower target obvious:
+`shaderStorageImageExtendedFormats`'s gap is almost entirely a write-side
+(pack) gap, not a symmetric read+write implementation from scratch.
+
+Picked `R16G16B16A16_{FLOAT,UINT,SINT}` as the first slice to close,
+since the surrounding format tables (`femeRTImageFormatElementSize`,
+`femeRTUnpackImageTexel(I32)`) already fully supported them -- the only
+missing piece was the pack side, plus a new `femeRTFloatToHalf` helper
+(hand-written IEEE-754 float-to-half, the inverse of the existing
+`femeRTHalfToFloat`) for the float case. Chose not to attempt the full
+mandatory extended-format list in one sitting: that list includes many
+formats (`R8`/`R16`/`R32` single/two-channel, packed `10:10:10:2`/
+`11:11:10`) with no existing `ResourceFormat` enum entry or pack-table
+case at all, a much larger and more error-prone undertaking (especially
+the packed formats, where getting component order to actually agree
+between what glslang emits and what our own sampled-image decode already
+assumes needs real verification, not just assumption) than this session's
+effort budget could responsibly cover with real testing.
+
+Investigated `shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`
+in parallel, expecting to find a compiler-side gate on the SPIR-V
+handle's compile-time `Format` operand. Found none: grepping
+`SPIRVResourceLowering.cpp` for any `getIntParameter(5)` call turned up
+nothing -- the classification logic simply never inspects that
+parameter, meaning a `Format == Unknown` storage-image handle very likely
+already lowers identically to a declared-format one. This was a genuine
+surprise; my first assumption (that these two feature bits needed new
+compiler work to accept an `Unknown` format) turned out to be wrong.
+Cross-checked against the real CTS source
+(`vktImageLoadStoreTests.cpp`'s `LoadStoreTest::checkSupport`) and found
+the actual gate these tests use is a *format-feature* bit pair
+(`VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT`, from
+`vkGetPhysicalDeviceFormatProperties2`/`VkFormatProperties3`), not the
+device-feature bits directly -- and `Format.cpp` computes neither bit for
+any format today. This is a distinct, and by CTS case count (828
+`without_format.*` cases spanning the full extended-format list) a
+larger, gap than the plain pack/unpack breadth work this session's own
+code change addresses. Rather than attempt a rushed, partial version of
+that work this session, I split it into its own roadmap row (H19i) to be
+scoped and implemented properly, alongside a second new row (H19h) for
+the rest of the mandatory extended-format list H19f's own narrower scope
+didn't reach.
+
+This splits cleanly to two commits: (1) the runtime pack widening +
+`Format.cpp` feature-bit widening + their unit tests, and (2) the
+documentation updates (Roadmap.md's H19f row updated in place rather than
+struck through, since it's honestly a partial closure; two new sibling
+rows H19h/H19i added, respecting the one-lowercase-letter nesting cap;
+Vulkan14FeatureInventory.md's three affected rows repointed;
+VulkanCTSReport.md's new "Roadmap H19f: measured impact" section). This
+file is the third and final commit.
+
+Build: `ninja check-feme` (ccache, assertions) passed in full,
+2122/2181 (59 pre-existing `Unsupported`, 0 `Failed`). Real CTS re-run of
+`dEQP-VK.image.load_store.with_format.*.r16g16b16a16_{sfloat,uint,sint}*`
+(140 cases): 66 Pass (up from 0), 0 Fail, 74 honestly `NotSupported`
+(the `_unorm`/`_snorm` variants outside this row's own scope).
