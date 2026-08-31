@@ -37,52 +37,43 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H19f or any prerequisite work required to complete
+Can you continue working on H19n or any prerequisite work required to complete
 the H-series milestones?
 
-> **The format/configuration breadth
-> `shaderStorageImageExtendedFormats`/`shaderStorageImageReadWithoutFormat`/`shaderStorageImageWriteWithoutFormat`
-> actually need**, split out of H19d's own original bundled scope once H19d
-> itself narrowed to cube/cube-array shape support only.
-> `shaderStorageImageExtendedFormats` needs every `VkFormat` beyond the current
-> 6-format mandatory floor (`Format.cpp`'s `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`
-> advertisement) to actually round-trip through `FeMeRuntimeCPU.c`'s fetch/store
-> helpers, not just the floor H19a hard-coded.
-> `shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat` need a shader to
-> declare a storage image with no `layout(format)` qualifier at all (SPIR-V's
-> `Format == Unknown`) and still read/write correctly against whatever format
-> the bound view actually has at runtime, rather than assuming the compiled
-> shader's own declared format always matches -- a real re-run of
-> `dEQP-VK.image.format_reinterpret.*`/an unqualified-format subset of
-> `load_store.*` needed to scope the actual gap size once attempted (partially
-> closed: confirmed storage-image *reads* already worked for any format
-> `femeRTImageFormatElementSize` recognizes -- `femeRTFetchTexel2D` et al. reuse
-> the same `femeRTUnpackImageTexel(I32)` sampled-image reads use -- so the real
-> gap was write-side only. Widened
-> `femeRTPackImageTexel`/`femeRTPackImageTexelI32` (`FeMeRuntimeCPU.c`) and
-> `Format.cpp`'s `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` switch to also cover
-> `R16G16B16A16_{SFLOAT,UINT,SINT}` (a new `femeRTFloatToHalf` helper, the
-> inverse of the existing `femeRTHalfToFloat`, for the float case; 16-bit
-> truncation for the integer cases) -- three new unit tests in
-> `ImageSamplingTest.cpp`, one widened in `FormatTest.cpp`. `ninja check-feme`
-> passes in full, 2122/2181 (59 pre-existing `Unsupported`, 0 `Failed`). A real
-> re-run of
-> `dEQP-VK.image.load_store.with_format.*.r16g16b16a16_{sfloat,uint,sint}*` (140
-> cases) confirms the fix: 66 Pass (up from 0), 0 Fail, 74 honestly
-> `NotSupported` (the `_unorm`/`_snorm` variants of the same 4-channel-16-bit
-> format, still outside this row's own pack support).
-> `shaderStorageImageExtendedFormats` itself stays `VK_FALSE`: the real Vulkan
-> mandatory extended-format list is far larger than the one format family this
-> change closes (single- and two-channel `R8`/`R16`/`R32` formats,
-> `10:10:10:2`/`11:11:10` packed formats, etc.), most without any
-> `ResourceFormat`/pack-table entry yet.
-> `shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat` also stay
-> `VK_FALSE`: `dEQP-VK.image.load_store.without_format.*`'s own `checkSupport`
-> (`vktImageLoadStoreTests.cpp`) gates on the *format's own*
-> `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` tiling features,
-> which `Format.cpp` does not compute at all today (a distinct, larger gap than
-> this row's own pack/unpack breadth work, and dependent on the full
-> extended-format list existing first since `without_format.*`'s own 828 real
-> CTS cases exercise exactly that list). Split into two new sibling rows below:
-> H19h (the rest of the mandatory extended-format list) and H19i (the
-> without-format format-feature-bit work))~~
+> **The rest of the mandatory `shaderStorageImageExtendedFormats` list**, split
+> out of H19j once it narrowed to the single-channel
+> `R8_{UNORM,SNORM,UINT,SINT}` slice only. Needs entirely new `ResourceFormat`
+> enum entries for `R8G8_{UNORM,SNORM,UINT,SINT}`,
+> `R16_{UNORM,SNORM,UINT,SINT,SFLOAT}`, `R16G16_{UNORM,SNORM,UINT,SINT,SFLOAT}`,
+> and `R32G32_{UINT,SINT}`'s own storage-mandatory partial-component siblings,
+> plus the packed 32-bit formats
+> `A2B10G10R10_{UNORM,UINT}_PACK32`/`B10G11R11_UFLOAT_PACK32` (still needing
+> their own component-order verification against the existing sampled-image
+> decode, per H19j's own unresolved note). Only once this list is materially
+> complete should `shaderStorageImageExtendedFormats` itself flip to `VK_TRUE`,
+> and only then can H19i's own `without_format.*` work proceed, since that row's
+> 828 real CTS cases exercise this same full list (partially closed: added the
+> two-channel `R8G8_{UNORM,SNORM,UINT,SINT}` slice only (4 new `ResourceFormat`
+> entries appended at the enum's own tail,
+> `mapVkFormat`/`formatElementSize`/sampled- and storage-feature-bit wiring in
+> `Format.cpp`, and 8 new always-inline pack/unpack helpers in
+> `FeMeRuntimeCPU.c` -- each a straightforward two-lane widening of the existing
+> single-channel `R8` helpers H19j added, packed/unpacked little-endian via
+> `__builtin_memcpy` into/out of a `uint16_t` the same way the existing
+> 4-component 16-bit-per-lane helpers already do -- wired into all five existing
+> dispatch tables). `ImageFixture.cpp`'s
+> `formatFixtureName`/`parseFixtureFormat` and `feme-run.cpp`'s
+> `imageFormatElementSize` needed new cases too, same as H19j's own R8 slice.
+> New unit tests: 8 in `ImageSamplingTest.cpp` (read float/int and write
+> float/int paths), 1 new (`MapsTwoChannelR8G8Formats`) plus 2 widened in
+> `FormatTest.cpp`. `ninja check-feme` passes in full, 2166/2225 (59
+> pre-existing `Unsupported`, 0 `Failed`). A real re-run of
+> `dEQP-VK.image.load_store.with_format.*.r8g8_*` (112 cases) confirms the fix:
+> 88 Pass (up from 0), 0 Fail, 24 honestly `NotSupported` (the same shape
+> variants outside existing coverage as H19j's own R8 re-run, unrelated to
+> format). The `load-store.txt` mustpass regression caselist (3446 cases) shows
+> 436 Pass (up from the H19j-era 348 baseline by exactly the +88 new R8G8
+> passes), 0 Fail, 3010 `NotSupported` -- 0 regressions. `R16_*`, `R16G16_*`,
+> `R32G32_{UINT,SINT}`, and the packed 32-bit formats all remain entirely
+> unimplemented; `shaderStorageImageExtendedFormats` itself stays `VK_FALSE`.
+> See "Roadmap H19n: measured impact" in `VulkanCTSReport.md`)
