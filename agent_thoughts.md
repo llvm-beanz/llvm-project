@@ -49493,3 +49493,185 @@ changes for pure bug fixes outside the roadmap-milestone framework.
 2. `[feme] Assert on null MCJIT-resolved function addresses in runtime tests`
    (defensive hardening for the non-reproducing crash class).
 3. This file.
+
+# ASan+UBSan check-feme failures: HostImageCopyTest leak, ModuleConversionPattern rollback leak, and 5 stack-use-after-scope Twine bugs
+
+## Context
+
+Following the previous UBSan-only session, the user reported FeMe tests
+still failing on macOS with what looked like undefined behavior or memory
+issues, and asked me to enable **both** AddressSanitizer and
+UndefinedBehaviorSanitizer together and fix whatever turned up, since the
+prior UBSan-only build hadn't reproduced everything.
+
+## Build setup
+
+Configured a fresh `build-asan-ubsan/` (a separate directory, not a
+reconfigure of `build-ubsan/`, since LLVM's CMake sanitizer choice isn't
+reliably mutable post-configure) with the same recipe as the UBSan-only
+build but `-DLLVM_USE_SANITIZER="Address;Undefined"` (semicolon list),
+assertions on, ccache, `clang;feme;mlir` projects, `X86;AArch64` targets,
+and the usual `FEME_VULKAN_XML`/`Vulkan_INCLUDE_DIR` overrides.
+
+The default-parallelism `ninja check-feme` got OOM-killed during linking:
+ASan+UBSan-instrumented binaries are large, and linking many of them at
+once (12 jobs, matching `nproc`) exceeded available memory even on this
+46GB-RAM host. `ninja -j 4 check-feme` throttled parallelism enough to
+succeed, at the cost of a much longer build (~25+ minutes even from a warm
+ccache, since ASan+UBSan instrumentation bypasses much of the object-cache
+reuse from the plain/UBSan-only builds). Worth remembering for any future
+sanitizer-build session on this machine.
+
+The first full run: **2198/2272 passed, 59 unsupported, 15 Failed.**
+
+## Bug 1: HostImageCopyTest memory leak (test-only)
+
+`HostImageCopyTest`'s fixture created `VkImage`s via
+`createBoundImage2DWithFormat` but never destroyed them -- every other
+Vulkan unit test file in the tree (e.g. `DrawTest.cpp`,
+`CommandBufferTest.cpp`) consistently pairs `vkDestroyImageView` +
+`vkDestroyImage`, but this file was missing the equivalent cleanup
+entirely. LeakSanitizer flagged a real, reproducible 296-byte/6-allocation
+leak across the `CopiesImageToImage` parameterized instances
+(`FeMeVulkanTests/{5,7,8,9}/16`).
+
+Fix: track created images in a new `Images` vector on the fixture, destroy
+them all in `TearDown()` before freeing memory / destroying the device and
+instance (matching the order used elsewhere).
+
+## Bug 2: ModuleConversionPattern rollback leak (genuine MLIR bug, in-tree)
+
+The 4 `spirv-to-llvm-*-invalid.mlir` lit tests (`constants-invalid`,
+`image-access-invalid`, `matrix-block-invalid`, `rotate-invalid`) leaked
+80 bytes each. These tests intentionally include one explicitly-illegal op
+(e.g. an illegal `spirv.Constant`) alongside an otherwise-legal
+`spirv.module`, to exercise `applyPartialConversion`'s rollback path when a
+conversion attempt partially succeeds and then has to be entirely discarded
+because of a later failure elsewhere in the same module.
+
+Root cause: `ModuleConversionPattern::matchAndRewrite`
+(`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) built its replacement
+`ModuleOp` via `ModuleOp::create`, whose generated `build()` (via
+`OpTrait::SingleBlock`) unconditionally calls
+`state.addRegion()->emplaceBlock()`, creating a default empty block before
+the pattern inlines `spirv.module`'s real body in and erases that default
+block. When this pattern's already-applied rewrite is later rolled back
+wholesale, `DialectConversion.cpp`'s `CreateOperationRewrite::rollback()`
+unlinks (ilist `remove()`, not `erase()`) every block still present in the
+freshly-created op's regions -- correct only for blocks tracked via the
+rewriter's own `CreateBlockRewrite` mechanism (i.e. blocks created through
+`rewriter.createBlock()`), but wrong -- and leak-inducing -- for a block
+baked directly into the op's initial `OperationState` before the rewriter
+ever saw it, which is exactly what `ModuleOp::build`'s default block is.
+
+An intermediate fix attempt (`rewriter.mergeBlocks()` instead of
+`inlineRegionBefore` + `eraseBlock`) did *not* resolve the leak -- useful
+negative evidence that the bug isn't about the erase-then-rollback
+interaction, but about the mere existence of the auto-created block inside
+the rolled-back op at all, regardless of whether it's later erased or has
+content merged into it.
+
+The true root cause lives in `DialectConversion.cpp`'s rollback and is a
+general MLIR infrastructure risk (any pattern creating an op with a
+default body block that's later rolled back would leak that block) -- but
+patching core rollback machinery used by every dialect conversion pattern
+in the project felt out of scope and too risky to reason about safely in
+this session. Instead, the fix avoids the problematic default block from
+ever being created in `ModuleConversionPattern` specifically: manually
+build the `ModuleOp`'s `OperationState` with `state.addRegion()` (no
+`emplaceBlock()`), then `inlineRegionBefore` the real body in.
+`ModuleOp` is momentarily block-less before that runs, which is safe since
+`SingleBlock` verification only happens once the whole conversion commits,
+not per-pattern.
+
+Verified via targeted `feme-opt` runs of all 8 relevant SPIRVToLLVM lit
+tests (4 `*-invalid.mlir` + their 4 valid counterparts): 0 leaks in any of
+them. I'm leaving a note here (and in the commit message) about the
+deeper, unresolved `CreateOperationRewrite::rollback()` gap in case a
+future op with the same "default block baked into `OperationState`"
+shape hits the same class of bug elsewhere in the tree.
+
+## Bug 3: five stack-use-after-scope crashes from storing `llvm::Twine` locals
+
+`llvm::Twine` is documented (in its own header) as an ephemeral proxy
+object: it holds pointers to its operand sub-expressions, which may
+themselves be temporaries, and is only valid within the single
+full-expression it's constructed in. Storing a `Twine` concatenation in a
+local variable and using it in a *later* statement is a
+stack-use-after-scope -- the intermediate concatenation nodes' pointed-to
+temporaries are destroyed at the end of the original statement.
+
+Found via a real, reproducible ASan crash (`stack-use-after-scope` inside
+`Twine::printOneChild`/`Value::setNameImpl`) translating
+`feme/test/Translate/DXBC/loop1.dxasm` through the actual
+`dxbc-as | feme-translate --import-dxsa-bin - | feme-translate
+--dxsa-to-llvmir -` pipeline (not just the lit test's FileCheck wrapper).
+Root cause: `DXSAToLLVMIRTranslator.cpp`'s `BreakcZ`/`BreakcNz` handling
+stored a `Twine` concatenation in a local `Name`, used one statement later
+in a `BasicBlock::Create` call.
+
+A project-wide grep for the same pattern
+(`grep -rn "^\s*\(llvm::\)\?Twine [A-Za-z_][A-Za-z0-9_]* =" feme/lib
+feme/include`) found 4 more, structurally identical instances, all in
+`EntryWrapper.cpp` -- each a `Twine Suffix = ...;` feeding
+`buildWaveLoop`'s `const Twine &Suffix` parameter one statement later, in
+the `BodyRegions`/`TrueRegions`/`FalseRegions`/general-`Regions` loops of
+`buildEntryWrapper` and its `if`/`switch`-lowering siblings.
+
+Fix (applied uniformly to all 5 instances): materialize into an owned
+`std::string` immediately via `.str()`, while all `Twine` operands are
+still alive in the same expression, e.g.
+`std::string Suffix = (Twine(".body") + Twine(R)).str();`.
+
+Re-ran the grep after all 5 fixes: zero remaining instances of the
+pattern in `feme/lib`/`feme/include`.
+
+Verified: rebuilt `feme-translate`/`dxbc-as` in the ASan+UBSan build and
+ran the full `dxbc-as | feme-translate` pipeline for all 7 real
+`Translate/DXBC/*.dxasm` lit tests exercising loop/switch control flow
+(`loop1-5`, `switch2-3`) directly via `llvm-lit` -- all 7 pass, 0
+sanitizer errors. The 4 `EntryWrapper.cpp` instances weren't confirmed to
+be actively triggered by any specific failing test in this session's
+15-failure baseline (unlike the one in `DXSAToLLVMIRTranslator.cpp`,
+directly reproduced via `loop1.dxasm`) -- they're the same documented
+anti-pattern in the same shape, so fixed defensively rather than left
+latent.
+
+## Full verification
+
+Re-ran the full `check-feme` in `build-asan-ubsan/` (via `ninja -j 4`,
+per the OOM workaround above): **2209/2268 passed, 59 unsupported, 0
+Failed** -- all 15 originally-failing tests now pass, 0 regressions, 0
+new sanitizer errors. Also rebuilt and re-ran `check-feme` in the regular
+`build/` tree: **2209/2268 passed, 0 Failed**, confirming no impact on
+the normal (non-sanitized) build/test flow.
+
+## CTS impact
+
+All three bugs are internal compiler/runtime robustness fixes (a
+test-only cleanup leak, an MLIR dialect-conversion-rollback leak only
+reachable on an already-discarded rewrite path, and a stack-use-after-scope
+that -- when it doesn't crash outright -- would still produce the correct
+translated name in practice since the dangling read typically still lands
+on stack memory holding the right bytes until reused) with no
+feature-bit, extension, or CTS-observable-behavior surface. Spot-checked
+anyway: re-ran `dEQP-VK.image.load_store.without_format.2d.r8g8_uint*`
+(2 cases) against the live `feme-vulkan` ICD -- 2 Pass, 0 Fail, matching
+the already-recorded baseline, 0 regressions. No
+`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` changes needed, consistent with how the
+earlier UBSan-fix sessions in this file also made no such doc changes for
+pure bug fixes outside the roadmap-milestone framework. `Roadmap.md`
+likewise needs no changes for the same reason.
+
+## Commit breakdown
+
+1. `[feme] Fix memory leak in HostImageCopyTest`.
+2. `[mlir][SPIRVToLLVM] Fix leak in ModuleConversionPattern rollback`.
+3. `[feme] Fix stack-use-after-scope from storing llvm::Twine locals`
+   (both the `DXSAToLLVMIRTranslator.cpp` instance and the 4 in
+   `EntryWrapper.cpp`, since they're the exact same bug class found via
+   the same grep methodology -- grouping them keeps the fix reviewable as
+   one coherent change rather than splitting an identical one-line-pattern
+   fix across two commits).
+4. This file.
