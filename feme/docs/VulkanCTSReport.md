@@ -17287,3 +17287,76 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19n_final.qpa
 ```
+
+## Roadmap H19o: measured impact (final `A2B10G10R10_{SNORM,SINT}_PACK32` gap)
+
+**Scope.** Closes the sole remaining gap in the mandatory
+`shaderStorageImageExtendedFormats` format list:
+`A2B10G10R10_{SNORM,SINT}_PACK32`. Two new `ResourceFormat` enum
+entries (appended at the tail: `SNORM`=103, `SINT`=104), `mapVkFormat`/
+`formatElementSize` wiring, and new `femeRTUnpackR10G10B10A2Snorm`/
+`femeRTPackR10G10B10A2Snorm` helpers in `FeMeRuntimeCPU.c`.
+
+**Correctness finding: this roadmap row's own premise was wrong.** The
+row's own text asserted `_SINT` needs "no new pack/unpack helper at
+all... bit-for-bit identical to `_UINT`". This is false for sub-32-bit
+packed fields: only the *pack* side is legitimately shared between
+`_UINT`/`_SINT` (truncating a two's-complement value to N bits produces
+an identical bit pattern regardless of the value's original
+signedness), but *unpacking* (reading back and sign/zero-extending to a
+wider container) requires the two to differ, or any field with its top
+bit set silently comes back positive instead of negative. This exactly
+mirrors the pre-existing `femeRTUnpackR8G8B8A8Uint`/`Sint` asymmetry
+already in the file. Added a real `femeRTUnpackR10G10B10A2Sint`
+(sign-extending) rather than reusing the `_UINT` unpack, and two new
+unit tests (`LoadI32FetchesR10G10B10A2Sint`,
+`StoreWritesTexelIntoR10G10B10A2Sint`) deliberately using field values
+with their top bits set, specifically to catch this class of bug.
+
+**Direct format groups.** Real CTS coverage for these two formats turns
+out to be narrower than expected: SPIR-V has no `Rgb10a2Snorm`/
+`Rgb10a2Sint` image-format literal at all (confirmed via VK-GL-CTS's
+own `hasSpirvFormat`/`spirvFormats` table in `vkImageUtil.cpp` --
+only `Rgb10A2`/`Rgb10a2ui`, for `UNORM`/`UINT`, are registered), so no
+shader can ever declare `layout(format)` for `SNORM`/`SINT`. The
+mustpass caselist reflects this: `dEQP-VK.image.load_store.with_format
+.*.a2b10g10r10_s*` has **0 cases** (confirmed via a live run: 0/0). The
+only mustpass coverage for these two formats is under
+`without_any_format`, which is a different feature entirely
+(`shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`, roadmap
+H19i, not yet implemented -- `Format.cpp` does not compute the
+`VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` tiling
+features at all yet):
+
+`dEQP-VK.image.load_store.without_any_format.*.a2b10g10r10_s*` (40
+cases):
+
+```
+Passed:        0/40 (0.0%)
+Failed:        0/40 (0.0%)
+Not supported: 40/40 (100.0%)
+```
+
+All honestly `NotSupported` (blocked on H19i), not `Fail` -- confirms
+the new pack/unpack code introduces no crashes or corruption even
+though it currently has no live CTS exerciser via the `with_format`
+path. Correctness is instead verified by the new unit tests.
+
+**Regression check.** The `load-store.txt` mustpass regression caselist
+(3446 cases):
+
+```
+822/3446 Pass, 0 Fail, 2624 NotSupported
+```
+
+Unchanged from the H19n-era 822/3446 baseline, as expected (no
+`with_format` cases exist for `A2B10G10R10_{SNORM,SINT}`, so this
+row's own work cannot move this particular caselist's Pass count).
+**0 regressions.**
+
+**Outcome.** With the full mandatory `shaderStorageImageExtendedFormats`
+format list now complete (H19a through H19o), the feature bit itself
+flipped to `VK_TRUE` in `PhysicalDeviceInfo.cpp`. `ninja check-feme`
+passes in full: 2202/2261 (59 pre-existing `Unsupported`, 0 `Failed`).
+H19i's own `without_format.*` work (828 real CTS cases) can now
+proceed, since it depends on this full format list existing first.
