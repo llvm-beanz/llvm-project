@@ -99,8 +99,16 @@ protected:
   }
 
   template <typename FnTy> FnTy resolve(Function *F) {
-    return reinterpret_cast<FnTy>(
-        Engine->getFunctionAddress(F->getName().str()));
+    uint64_t Addr = Engine->getFunctionAddress(F->getName().str());
+    // A null address here means MCJIT failed to resolve/finalize this
+    // symbol; calling through it crashes with an uninformative `pc=0x0`
+    // segfault and no diagnostic at all (this is exactly what a batch of
+    // reported UBSan `StoreWritesTexelInto*` failures looked like on
+    // another host/toolchain, and which did not reproduce here -- this
+    // assert turns any recurrence into an immediate, named failure
+    // instead of a bare crash).
+    assert(Addr && "MCJIT failed to resolve a runtime function address");
+    return reinterpret_cast<FnTy>(Addr);
   }
 
   /// Resolves \p Name directly, with no `addWrapper` IR wrapper -- for

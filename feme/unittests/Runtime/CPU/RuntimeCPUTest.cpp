@@ -177,8 +177,13 @@ protected:
   /// add-then-immediately-resolve shorthand for the common single-wrapper
   /// case.
   template <typename FnTy> FnTy resolve(Function *F) {
-    return reinterpret_cast<FnTy>(
-        Engine->getFunctionAddress(F->getName().str()));
+    uint64_t Addr = Engine->getFunctionAddress(F->getName().str());
+    // A null address means MCJIT failed to resolve/finalize this symbol;
+    // calling through it crashes with an uninformative `pc=0x0` segfault
+    // and no diagnostic at all (see ImageSamplingTest.cpp's identical
+    // helper for the specific reported failure this guards against).
+    assert(Addr && "MCJIT failed to resolve a runtime function address");
+    return reinterpret_cast<FnTy>(Addr);
   }
 
   LoadFn getLoadWrapper(StringRef Name, StringRef Callee) {
