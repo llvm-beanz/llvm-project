@@ -697,6 +697,13 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
   if (!Callee)
     return std::nullopt;
 
+  // NOTE: every ImageCallKind must be listed here or matchImageCall will
+  // silently return std::nullopt for it, leaving its operand-extraction case
+  // in the switch below unreachable dead code (see roadmap H19l: this table
+  // omitted Store2DMS/Store2DMSI32 for a long time without being caught,
+  // since nothing enforces that this array and the enum/switch stay in
+  // sync). Keep new ImageCallKind values added here whenever they are added
+  // to the enum and to the switch below.
   static constexpr ImageCallKind AllKinds[] = {
       ImageCallKind::Sample2D,      ImageCallKind::SampleCmp2D,
       ImageCallKind::Load2D,        ImageCallKind::Load2DI32,
@@ -710,7 +717,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::Load3DI32, ImageCallKind::Store3D,
       ImageCallKind::Store3DI32, ImageCallKind::Load1DArray,
       ImageCallKind::Load1DArrayI32, ImageCallKind::Store1DArray,
-      ImageCallKind::Store1DArrayI32};
+      ImageCallKind::Store1DArrayI32, ImageCallKind::Store2DMS,
+      ImageCallKind::Store2DMSI32};
 
   ImageCallKind Kind;
   bool Found = false;

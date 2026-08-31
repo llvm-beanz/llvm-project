@@ -1224,5 +1224,59 @@ TEST(SIMDizeTest, DecomposesInsertElementChainIntoImageStore) {
   EXPECT_EQ(StoreCallCount, 4u);
 }
 
+TEST(SIMDizeTest, DecomposesInsertElementChainIntoImageStore2DMS) {
+  // Roadmap H19l: `feme.cpu.image.store.2dms.v4i32`'s own `Texel` operand
+  // (unlike its plain `Store2D` counterpart, already exercised by
+  // `DecomposesInsertElementChainIntoImageStore` above) was never actually
+  // reaching `widenImageCall` at all -- `matchImageCall`'s own `AllKinds`
+  // lookup table never listed `Store2DMS`/`Store2DMSI32`, an oversight
+  // from roadmap H19g's own original implementation, silently unexercised
+  // until a real CTS re-run (once roadmap H19k's own `feme-cpu-linearize`
+  // fix let one reach this far) confirmed every
+  // `dEQP-VK.image.load_store_multisample.2d.*` case's own per-sample
+  // `imageStore` call hit `feme-cpu-simdize`'s generic "used outside a
+  // supported ... pattern" diagnostic. Confirmed via a real IR reduction of
+  // that exact case (`glslangValidator` -> `feme-translate` ->
+  // `feme-opt`'s `feme-cpu-fold-spirv-builtins,feme-cpu-prepare,...,
+  // feme-cpu-linearize,feme-cpu-simdize` pipeline).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %image_heap, i32 %image_heap_count) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %v0 = insertelement <4 x i32> poison, i32 %tid, i32 0
+      %v1 = insertelement <4 x i32> %v0, i32 %tid, i32 1
+      %v2 = insertelement <4 x i32> %v1, i32 %tid, i32 2
+      %v3 = insertelement <4 x i32> %v2, i32 1, i32 3
+      call void @feme.cpu.image.store.2dms.v4i32(
+          ptr %image_heap, i32 %image_heap_count, i32 0, i32 %tid, i32 %tid,
+          i32 0, <4 x i32> %v3, i1 true)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.cpu.image.store.2dms.v4i32(ptr, i32, i32, i32, i32, i32, <4 x i32>, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned StoreCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getName() ==
+            "feme.cpu.image.store.2dms.v4i32") {
+      ++StoreCallCount;
+      EXPECT_TRUE(CI->getArgOperand(6)->getType()->isVectorTy());
+    }
+  }
+  EXPECT_EQ(StoreCallCount, 4u);
+}
+
 } // namespace
 
