@@ -47785,3 +47785,88 @@ Committed in 3 total commits this session: the `SPIRVResourceLowering.cpp`
 classification widening + its 5 new/replaced unit tests, the
 Roadmap.md/VulkanCTSReport.md/Vulkan14FeatureInventory.md documentation
 update, with this file committed separately last.
+
+# Session: H19e (arrayed 1D_ARRAY storage-image read/write)
+
+## Approach
+
+Continued the H19 storage-image-read/write series with the last uncovered
+dimension: arrayed 1D (`Dim1D`, `Arrayed == 1`). H19b closed `2D_ARRAY`,
+H19c closed non-arrayed `1D`/`3D`, H19d closed `Cube`/`CubeArray` (mapped
+onto `Array2D`); `1D_ARRAY` was the one shape left rejected by
+`classifyStorageImage2DHandle`'s combined
+`Dim != Dim2D && Dim != DimCube && Arrayed -> reject` check, which also
+(correctly) rejected illegal arrayed `Dim3D`.
+
+Split the check into just `Dim3D && Arrayed -> reject`, letting arrayed
+`Dim1D` through to a new `ImageShape::Array1D`. The interesting subtlety
+this session (flagged during the earlier, compacted portion of the
+session and confirmed correct on resumption) is that `Array1D`'s
+coordinate is 2-component `(x, layer)`, not 3-component like `Array2D`'s
+`(x, y, layer)` -- a 1D image has no spatial `Y` to begin with, so the
+array layer occupies the coordinate's *second* component (index 1), not
+its third (index 2) the way `Array2D`/`Plain3D`'s own layer/Z occupies.
+This meant the existing `C2` variable (originally named for "coordinate
+component 2", i.e. index 2) needed to become `Coord[1]` specifically for
+`Array1D`, while staying `Coord[2]` for `Array2D`/`Plain3D` -- a slightly
+awkward reuse of one variable name for two different indices depending on
+shape, but the least invasive way to plumb a "layer or Z" value through
+the existing store/load dispatch switches without restructuring them.
+
+On the runtime side, the fetch helper turned out to need no new
+addressing math at all: `femeRTFetchTexel2D` already threads its `Layer`
+parameter through for every 2D fetch (plain or arrayed, since a plain 2D
+image is just `ArrayLayers == 1`), so `femeRTFetchTexel1DArray` is a thin
+wrapper passing `Y == 0` and `Layer` straight through -- mirroring H19c's
+own `Plain1D`-over-2D-fetch precedent, just with a non-zero layer this
+time. The store side thin-wraps the existing `femeRTStoreTexel2DArray`
+the same way. This confirmed the "1D-array runtime addressing hypothesis"
+flagged as unverified in the pre-compaction summary: yes, the existing
+array-aware 2D helpers already handle `Height == 1` + a real `Layer`
+correctly with no changes.
+
+Also fixed `materializeImageDescriptor` (`CommandBuffer.cpp`) to accept
+`Texture1DArray` -- the same class of gap H19c's own closure hit for
+`Texture1D`/`Texture3D` (a real bound `VkImageView` silently
+descriptor-materializing to all-zero if its dimension isn't in the
+switch, even once the compiler-side lowering is otherwise correct).
+Unlike H19c's `Texture3D` fix, this needed no `Dst.Depth` computation
+change: a 1D array's `Height`/`Depth` are already 1, and only
+`ArrayLayers` varies, already handled correctly by the pre-existing
+per-layer logic every other arrayed dimension shares.
+
+One existing negative unit test, `LeavesAnArrayed1DStorageImageHandleAlone`,
+asserted the *old*, pre-fix rejection and had to be replaced with positive
+tests once this row made that case succeed -- renamed the arrayed-3D
+rejection test (which does still hold) to
+`LeavesAnArrayed3DStorageImageHandleAlone` to keep exactly one negative
+test covering `classifyStorageImage2DHandle`'s one remaining rejection.
+
+## Results
+
+`ninja check-feme`: 2119/2178, 0 Failed, 59 pre-existing Unsupported.
+Real CTS re-run of `with_format.1d_array.*` (156 cases): 24 Pass (up from
+0, all 24 mandatory-format cases previously failing at
+`vkCreateComputePipelines` with `VK_ERROR_INITIALIZATION_FAILED`), 0
+Fail, 132 honestly `NotSupported` (formats outside the 6-format floor) --
+a clean close matching H19a/H19b/H19c/H19d's own pattern exactly.
+
+## Roadmap bookkeeping
+
+Struck through H19e in full; no remaining work to break out from this
+row's own scope (the format/configuration breadth and multisample bits
+H7j originally bundled were already split out as H19f/H19g by H19d's own
+closure, unaffected by this row). Confirmed (as with every prior H19 row)
+no `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+needed -- no `VkPhysicalDeviceFeatures` bit or extension is honestly
+flippable by a coordinate-shape-only fix like this one.
+
+Committed in 4 total commits this session: the `ImageCalls.h`/`.cpp` call
+vocabulary, the `SPIRVResourceLowering.cpp` lowering + its unit tests, the
+`FeMeRuntimeCPU.c` runtime helpers + their unit tests, and the
+`CommandBuffer.cpp` descriptor-materialization fix -- mirroring H19c's
+own 3-4-commit precedent (one more piece here since the call-vocabulary
+and lowering pieces split more cleanly given how much of the lowering
+logic was already drafted before this session's compaction boundary).
+Documentation (Roadmap.md/VulkanCTSReport.md) committed together as a
+fifth commit, with this file committed separately last as the sixth.
