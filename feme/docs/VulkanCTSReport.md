@@ -16471,3 +16471,114 @@ this project's existing sampled-image decode for the same formats) have
 no `ResourceFormat` enum entry at all yet. Split into new roadmap row
 H19j. `Vulkan14FeatureInventory.md` updated to point at H19j instead of
 H19h.
+
+## Roadmap H19g: measured impact
+
+**Scope.** `shaderStorageImageMultisample`, split out of H19d's own
+original bundled scope. Investigation of the real CTS test source
+(`vktImageMultisampleLoadStoreTests.cpp`) confirmed both `IMAGE_TYPE_2D`
+and `IMAGE_TYPE_2D_ARRAY` shapes exist in the group, but every shader
+declares a storage image (`uniform image2DMS`), never a sampled
+`sampler2DMS` -- this row's whole scope is `OpImageRead`/`OpImageWrite`
+with an explicit `Sample` image operand against a storage image. This
+session scoped to the plain (non-arrayed) `Dim::2D` shape only,
+deferring `2D_ARRAY` to a future follow-on row (consistent with this
+project's own H19-series precedent of splitting by shape).
+
+**Fix.** `llvm.spv.resource.getpointer` is a real, fixed 2-operand
+upstream LLVM SPIR-V-backend intrinsic shared with the DXIL-to-SPIR-V
+direction, so it cannot grow a 3rd "Sample" operand. Instead, `Sample`
+folds into the `Coordinate` vector's own trailing lane -- structurally
+identical to how `Array2D`'s own array-layer is already the
+coordinate's 3rd component. A new `appendVectorLane` helper
+(`SPIRVToLLVMPatterns.cpp`) widens the coordinate by one lane; a new
+`isPlainMultisampled2DImage` check gates this to a non-arrayed `Dim2D`
+image only. `ImageLoadPattern`'s `matchAndRewrite` (via `if constexpr`,
+since only `ImageReadOp`, not `ImageFetchOp`, can legally target a
+storage image) and `ImageWritePattern::matchAndRewrite` both detect a
+lone `Sample` image operand, validate the plain-multisampled-2D case,
+and widen the coordinate before calling `createResourcePointer`.
+
+`SPIRVResourceLowering.cpp` gained `ImageShape::Plain2DMS` (a
+3-component `(x, y, sample)` coordinate); `classifyStorageImage2DHandle`
+now accepts `MS == 1` only for a non-arrayed `Dim::2D` handle (every
+other multisampled combination -- arrayed, cube -- still rejects, since
+those need a 4-component coordinate no vocabulary implements yet).
+`hasOnlySupportedStorageImageUses`'s `CoordWidth` and
+`lowerImageAccesses`'s coordinate extraction/dispatch switches were
+widened to treat `Plain2DMS` like `Array2D`/`Plain3D` (reusing the
+existing 3rd-component (`C2`) extraction unchanged).
+
+`ImageCalls.h`/`.cpp` gained `Store2DMS`/`Store2DMSI32` call
+vocabulary, and widened `Load2DI32`'s own signature to carry a `Sample`
+operand (mirroring `Load2D`'s existing one from roadmap F8c).
+`FeMeRuntimeCPU.c`'s per-sample storage layout
+(`FemeImageSubresourceLayout::SampleStride`) was already fully
+multisample-ready from earlier F8b/F8c work -- only the fetch/store
+*helper functions'* own signatures needed widening: new
+`femeRTStoreTexel2DMS`/`I32` helpers (mirroring
+`femeRTStoreTexel2DArray`/`I32`'s own structure, addressing via
+`Sample * Layout->SampleStride` instead of `Layer * Layout->SlicePitch`),
+and `femeRTFetchTexel2DI32`/`femeCpuImageLoad2DV4I32` widened to accept
+`Sample` (mirroring `femeRTFetchTexel2D`'s own pre-existing parameter).
+
+**Fix summary.**
+- `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`: new
+  `appendVectorLane`/`isPlainMultisampled2DImage` helpers;
+  `ImageLoadPattern`/`ImageWritePattern` widened to accept a `Sample`
+  image operand for a plain multisampled 2D image.
+- `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`: new
+  `ImageShape::Plain2DMS`; `classifyStorageImage2DHandle`,
+  `hasOnlySupportedStorageImageUses`, `lowerImageAccesses` all widened.
+- `feme/include/feme/Transforms/CPU/ImageCalls.h`,
+  `feme/lib/Transforms/CPU/ImageCalls.cpp`: new
+  `Store2DMS`/`Store2DMSI32`; `Load2DI32` widened to carry `Sample`.
+- `feme/runtime/CPU/FeMeRuntimeCPU.c`: new
+  `femeRTStoreTexel2DMS`/`I32`/`femeCpuImageStore2DMSV4F32`/`V4I32`;
+  `femeRTFetchTexel2DI32`/`femeCpuImageLoad2DV4I32` widened.
+
+**Test.** Four new/renamed `SPIRVResourceLoweringTest.cpp` cases
+(`LowersPlain2DMultisampledStorageImageWriteToImageStore`/`I32`,
+`LowersPlain2DMultisampledStorageImageReadToImageLoad`, and a renamed
+`LeavesAnArrayedMultisampledStorageImageHandleAlone` replacing the now-
+stale non-arrayed rejection test), six new `ImageSamplingTest.cpp`
+runtime cases
+(`LoadFetchesExplicitSampleOfMultisampledTexel`'s existing float case
+plus a new `LoadI32FetchesExplicitSampleOfMultisampledTexel`,
+`StoreMSWritesTexelIntoTheAddressedSampleOnly`,
+`StoreMSWritesTexelIntoR32G32B32A32Uint`,
+`StoreMSOutOfBoundsSampleIsANoOp`), and a new lit test
+`spirv-to-llvm-image-access-multisample.mlir` (plus one new
+`expected-error` case in `spirv-to-llvm-image-access-invalid.mlir`
+confirming an arrayed multisampled storage image's own `Sample`
+operand still correctly fails to legalize).
+
+**`ninja check-feme`** (assertions + ccache): 2134/2193, 0 `Failed`, 59
+pre-existing `Unsupported`.
+
+**Real CTS re-run.** With `shaderStorageImageMultisample` temporarily
+forced `VK_TRUE` purely to probe the actual shader path (reverted
+before landing -- the bit is not honestly closeable yet), a re-run of
+`dEQP-VK.image.load_store_multisample.2d.*` (84 cases) found: 0 Pass,
+27 Fail, 57 `NotSupported` (formats outside today's mandatory storage
+floor). Every one of the 27 failures hit the *same* error at pipeline
+creation: `feme-cpu-linearize: function 'main': loop at '' has an
+internal branch in 'Flow'; unsupported` -- every one of this group's
+own verification shaders contains a
+`for (int sampleNdx = 0; sampleNdx < N; ++sampleNdx) { imageStore(...) }`
+loop that this project's control-flow linearizer rejects outright, a
+distinct, larger, unrelated prerequisite gap that blocks 100% of this
+row's own real CTS coverage regardless of how complete the
+storage-image addressing side is. A regression check of the existing
+`load-store.txt` mustpass caselist (H19a-j's own combined regression
+suite, 3446 cases) after reverting the feature-bit probe: 260 Pass, 0
+Fail, 3186 `NotSupported` -- unchanged from before this session,
+confirming no regression.
+
+**Remaining gap.** `shaderStorageImageMultisample` stays `VK_FALSE`: 0
+real passes were observed even with the bit forced on, so flipping it
+now would be dishonest. The storage-image addressing side (this row's
+own original scope) is now complete for the plain (non-arrayed) 2D
+case; what remains is (1) the control-flow-linearization prerequisite
+(split into new roadmap row H19k) and (2) a future arrayed-2D
+multisample follow-on row once H19k closes.
