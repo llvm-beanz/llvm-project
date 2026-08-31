@@ -37,11 +37,17 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H19c or any prerequisite work required to complete
+Can you continue working on H19d or any prerequisite work required to complete
 the H-series milestones?
 
-> **1D and 3D storage-image read/write** for the same mandatory format floor --
-> a real re-run confirms every
-> `dEQP-VK.image.load_store.with_format.1d.*`/`3d.*` case fails the same way.
-> Needs its own coordinate-shape runtime entry points (a single scalar `X` for
-> 1D; `X`/`Y`/`Z` for 3D), distinct from H19b's own array-layer shape
+> **Cube and cube-array storage-image read/write, plus the format/configuration
+> breadth H7j's own four bits actually need**
+> (`shaderStorageImageExtendedFormats`'s non-mandatory formats,
+> `shaderStorageImageMultisample`,
+> `shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`'s
+> runtime-format-agnostic access) -- a real re-run confirms every
+> `dEQP-VK.image.load_store.with_format.cube.*`/`cube_array.*` case fails the
+> same way H19b/H19c's own shapes do, and
+> `dEQP-VK.image.load_store_multisample.*` is still all honestly `NotSupported`
+> on `shaderStorageImageMultisample`. Likely the largest of H19's own follow-on
+> rows; may itself need splitting once scoped
