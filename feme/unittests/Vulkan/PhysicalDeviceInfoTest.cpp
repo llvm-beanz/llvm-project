@@ -185,6 +185,11 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.fragmentStoresAndAtomics, VK_TRUE);
   EXPECT_EQ(Info.Features.samplerAnisotropy, VK_TRUE);
   EXPECT_EQ(Info.Features.shaderStorageImageMultisample, VK_TRUE);
+  // (Roadmap H19o) The real Vulkan spec's own mandatory
+  // `shaderStorageImageExtendedFormats` list is now materially complete
+  // (see PhysicalDeviceInfo.cpp's own comment for the full H19a-H19o
+  // chain).
+  EXPECT_EQ(Info.Features.shaderStorageImageExtendedFormats, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -211,6 +216,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.fragmentStoresAndAtomics = VK_FALSE;
   Cleared.samplerAnisotropy = VK_FALSE;
   Cleared.shaderStorageImageMultisample = VK_FALSE;
+  Cleared.shaderStorageImageExtendedFormats = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }

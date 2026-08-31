@@ -747,6 +747,29 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // with no real, in-scope failure left, so this feature honestly flips to
   // `VK_TRUE`.
   Info.Features.shaderStorageImageMultisample = VK_TRUE;
+  // `shaderStorageImageExtendedFormats` (roadmap H19: H19a through H19o):
+  // the real Vulkan spec's own mandatory extended-format list for storage
+  // images is now materially complete. H19a-H19m closed the mandatory
+  // storage-image format floor and its `R16G16B16A16`/single- and
+  // two-channel `R8`/`R16` slices; H19n closed `R32G32_{UINT,SINT}`, the
+  // packed 32-bit formats `A2B10G10R10_{UNORM,UINT}_PACK32`/
+  // `B10G11R11_UFLOAT_PACK32`, and `R8G8B8A8_{SNORM,SINT}` (the last a
+  // real mandatory entry discovered via the Vulkan spec's own full
+  // mandatory-format table, not originally called out by this row's
+  // earlier scope text); H19o closed the sole remaining gap that same
+  // spec table surfaced, `A2B10G10R10_{SNORM,SINT}_PACK32` (a new
+  // `femeRTUnpackR10G10B10A2Snorm`/`femeRTPackR10G10B10A2Snorm` helper
+  // pair for `_SNORM`, and a real, dedicated sign-extending unpack helper
+  // for `_SINT` -- not, as this row's own text once assumed, a reuse of
+  // `R10G10B10A2_UINT`'s zero-extending unpack, which would have silently
+  // produced the wrong value for any field with its top bit set; the
+  // *pack* side does reuse `UINT`'s implementation correctly, since
+  // truncating a two's-complement value to a field's own bit width
+  // produces the same bit pattern regardless of signedness). See
+  // Roadmap.md's H19o row for the real CTS re-run that confirms 0
+  // failures across every format this feature's own mandatory list
+  // requires.
+  Info.Features.shaderStorageImageExtendedFormats = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
