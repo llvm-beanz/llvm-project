@@ -74,6 +74,21 @@
 // `MatchedImageCall::U`'s doc): it is a single value, not a two-component
 // `(U, V)` pair like every other kind here.
 //
+// Update (roadmap H19d): a storage cube/cube-array handle now maps to
+// the pre-existing `ImageShape::Array2D` (no new call vocabulary needed --
+// `Store2DArray`/`Load2DArray` above already cover it, since a storage
+// cube's own `(x, y, face)` addressing is structurally identical to an
+// ordinary 2D array's `(x, y, layer)`).
+//
+// Update (roadmap H19e): four more kinds, `Load1DArray`/`Load1DArrayI32`/
+// `Store1DArray`/`Store1DArrayI32`, cover an arrayed 1D storage image's own
+// read/write -- the one dimension left out of both H19b's array scope
+// (`Texture2DArray` only) and H19c's non-arrayed scope (`Plain1D`/`Plain3D`
+// only). Unlike `Load2DArray`'s 3-component `(X, Y, Layer)` coordinate, a
+// 1D array has only one spatial coordinate to begin with, giving a
+// 2-component `(X, Layer)` shape -- mirroring `Load1D`'s single `X` plus
+// `Load2DArray`'s integer array-layer operand.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_IMAGECALLS_H
@@ -180,6 +195,22 @@ enum class ImageCallKind : uint8_t {
   /// counterpart of `Store3D`, mirroring `Store2DI32`'s relationship to
   /// `Store2D`.
   Store3DI32,
+  /// `feme.cpu.image.load.1darray.v4f32` (roadmap H19e): the arrayed-1D
+  /// counterpart of `Load1D`, adding an integer array-layer coordinate --
+  /// mirroring exactly how `Load2DArray` extends `Load2D`.
+  Load1DArray,
+  /// `feme.cpu.image.load.1darray.v4i32` (roadmap H19e): the integer-format
+  /// counterpart of `Load1DArray`, mirroring `Load2DArrayI32`'s
+  /// relationship to `Load2DArray`.
+  Load1DArrayI32,
+  /// `feme.cpu.image.store.1darray.v4f32` (roadmap H19e): the write-side
+  /// counterpart of `Load1DArray`, mirroring `Store2DArray`'s relationship
+  /// to `Load2DArray`.
+  Store1DArray,
+  /// `feme.cpu.image.store.1darray.v4i32` (roadmap H19e): the
+  /// integer-format counterpart of `Store1DArray`, mirroring
+  /// `Store2DArrayI32`'s relationship to `Store2DArray`.
+  Store1DArrayI32,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -214,6 +245,11 @@ struct MatchedImageCall {
   /// kinds, unlike every other kind above.
   /// `Load3D`/`Load3DI32`/`Store3D`/`Store3DI32` (roadmap H19c): the
   /// integer `X`/`Y` texel coordinates (`Z` below carries the third).
+  /// `Load1DArray`/`Load1DArrayI32`/`Store1DArray`/`Store1DArrayI32`
+  /// (roadmap H19e): the single integer `X` texel coordinate, same as
+  /// `Load1D`'s own `U` -- `V` is likewise null for these four kinds (the
+  /// array layer is carried separately, in `Layer` below, same as
+  /// `Load2DArray`'s own convention).
   llvm::Value *U = nullptr;
   llvm::Value *V = nullptr;
   /// `Sample2D` only (roadmap H7i): the caller's own screen-space partial
@@ -232,8 +268,9 @@ struct MatchedImageCall {
   /// `Load2DArrayI32`, which instead use `Layer` below.
   llvm::Value *ArrayLayer = nullptr;
   /// `Load2DArray`/`Load2DArrayI32`/`Store2DArray`/`Store2DArrayI32`
-  /// (roadmap H19b) only: the integer array-layer texel coordinate; null
-  /// for every other kind.
+  /// (roadmap H19b) and `Load1DArray`/`Load1DArrayI32`/`Store1DArray`/
+  /// `Store1DArrayI32` (roadmap H19e) only: the integer array-layer texel
+  /// coordinate; null for every other kind.
   llvm::Value *Layer = nullptr;
   /// `Load3D`/`Load3DI32`/`Store3D`/`Store3DI32` (roadmap H19c) only: the
   /// integer `Z` texel coordinate (a real depth-slice index, not an array
@@ -257,8 +294,9 @@ struct MatchedImageCall {
   /// one.
   llvm::Value *Sample = nullptr;
   /// `Store2D`/`Store2DI32`/`Store2DArray`/`Store2DArrayI32`/`Store1D`/
-  /// `Store1DI32`/`Store3D`/`Store3DI32` only: the `<4 x float>`/
-  /// `<4 x i32>` texel value being written; null for every read-only kind.
+  /// `Store1DI32`/`Store3D`/`Store3DI32`/`Store1DArray`/`Store1DArrayI32`
+  /// only: the `<4 x float>`/`<4 x i32>` texel value being written; null
+  /// for every read-only kind.
   llvm::Value *Texel = nullptr;
   llvm::Value *Mask = nullptr;
 };
@@ -458,6 +496,41 @@ llvm::CallInst *createStore3DI32(llvm::IRBuilderBase &Builder,
                                  llvm::Value *Y, llvm::Value *Z,
                                  llvm::Value *Texel, llvm::Value *Mask,
                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.load.1darray.v4f32` call (roadmap H19e). See
+/// `createLoad2D`'s `Sample` doc for its meaning here.
+llvm::CallInst *createLoad1DArray(llvm::IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env,
+                                  llvm::Value *ImageIndex, llvm::Value *X,
+                                  llvm::Value *Layer, llvm::Value *Mip,
+                                  llvm::Value *Sample, llvm::Value *Mask,
+                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.load.1darray.v4i32` call (roadmap H19e).
+llvm::CallInst *createLoad1DArrayI32(llvm::IRBuilderBase &Builder,
+                                     const ImageCallEnv &Env,
+                                     llvm::Value *ImageIndex, llvm::Value *X,
+                                     llvm::Value *Layer, llvm::Value *Mip,
+                                     llvm::Value *Mask,
+                                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.store.1darray.v4f32` call (roadmap H19e):
+/// writes \p Texel to an arrayed 1D storage image at integer coordinate
+/// \p X, array layer \p Layer, mip level 0.
+llvm::CallInst *createStore1DArray(llvm::IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env,
+                                   llvm::Value *ImageIndex, llvm::Value *X,
+                                   llvm::Value *Layer, llvm::Value *Texel,
+                                   llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.store.1darray.v4i32` call (roadmap H19e).
+llvm::CallInst *createStore1DArrayI32(llvm::IRBuilderBase &Builder,
+                                      const ImageCallEnv &Env,
+                                      llvm::Value *ImageIndex,
+                                      llvm::Value *X, llvm::Value *Layer,
+                                      llvm::Value *Texel, llvm::Value *Mask,
+                                      const llvm::Twine &Name = "");
 
 /// Recognizes \p CI as one of the canonical `feme.cpu.image.*` calls,
 /// returning its decoded operands, or `std::nullopt` if \p CI's callee isn't
