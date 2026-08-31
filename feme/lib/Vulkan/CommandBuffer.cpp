@@ -373,10 +373,18 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   // (see `Image.cpp`'s own `computeSubresourceLayouts`), so only
   // `Dst.Depth` below needs a 3D-specific value; the CPU runtime's own
   // `femeRTFetchTexel3D`/`femeRTStoreTexel3D` (`FeMeRuntimeCPU.c`) do the
-  // rest. `Texture1DArray`/multisampled dimensions stay out of scope
-  // here (tracked as roadmap H19e for `Texture1DArray`).
+  // rest.
+  // (Roadmap H19e) `Texture1DArray` likewise needs no addressing changes
+  // here: like `Texture2DArray`, it has `Height == Depth == 1` but
+  // (potentially) more than one array layer, so it falls straight
+  // through the same per-layer logic below unchanged -- only the CPU
+  // runtime's own `femeRTFetchTexel1DArray`/`femeRTStoreTexel1DArray`
+  // (`FeMeRuntimeCPU.c`) needed a new, narrower (X-only spatial)
+  // coordinate shape, not this function. Multisampled dimensions stay
+  // out of scope here.
   switch (View->dimension()) {
   case feme::cpu::ImageDimension::Texture1D:
+  case feme::cpu::ImageDimension::Texture1DArray:
   case feme::cpu::ImageDimension::Texture2D:
   case feme::cpu::ImageDimension::Texture2DArray:
   case feme::cpu::ImageDimension::Texture3D:
