@@ -351,6 +351,66 @@ femeRTPackR8G8B8A8Snorm(FemeRTv4f32 Value) {
          ((uint32_t)I3 << 24);
 }
 
+// Unpacks a `R16G16B16A16_UNORM` value (four normalized `[0, 65535]`
+// 16-bit words, little-endian) into a `<4 x float>` in `[0.0, 1.0]` --
+// roadmap H19h, the 16-bit-per-component analogue of
+// `femeRTUnpackR8G8B8A8Unorm` above.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR16G16B16A16Unorm(const uint16_t Raw[4]) {
+  FemeRTv4f32 V;
+  V[0] = (float)Raw[0] / 65535.0f;
+  V[1] = (float)Raw[1] / 65535.0f;
+  V[2] = (float)Raw[2] / 65535.0f;
+  V[3] = (float)Raw[3] / 65535.0f;
+  return V;
+}
+
+// The inverse of `femeRTUnpackR16G16B16A16Unorm`: clamps each component to
+// `[0.0, 1.0]`, scales to `[0, 65535]`, and packs the four rounded words
+// little-endian into \p Out.
+__attribute__((always_inline)) static void
+femeRTPackR16G16B16A16Unorm(FemeRTv4f32 Value, uint16_t Out[4]) {
+  float C0 = __builtin_fminf(__builtin_fmaxf(Value[0], 0.0f), 1.0f);
+  float C1 = __builtin_fminf(__builtin_fmaxf(Value[1], 0.0f), 1.0f);
+  float C2 = __builtin_fminf(__builtin_fmaxf(Value[2], 0.0f), 1.0f);
+  float C3 = __builtin_fminf(__builtin_fmaxf(Value[3], 0.0f), 1.0f);
+  Out[0] = (uint16_t)__builtin_roundf(C0 * 65535.0f);
+  Out[1] = (uint16_t)__builtin_roundf(C1 * 65535.0f);
+  Out[2] = (uint16_t)__builtin_roundf(C2 * 65535.0f);
+  Out[3] = (uint16_t)__builtin_roundf(C3 * 65535.0f);
+}
+
+// Unpacks a `R16G16B16A16_SNORM` value (four signed-normalized
+// `[-32767, 32767]` 16-bit words, little-endian) into a `<4 x float>` in
+// `[-1.0, 1.0]` -- roadmap H19h, the 16-bit-per-component analogue of
+// `femeRTUnpackR8G8B8A8Snorm` above. `-32768` clamps to `-1.0` the same
+// way `femeRTUnpackR8G8B8A8Snorm`'s own `-128` does, matching the Vulkan
+// spec's own SNORM decode (`max(c / 32767, -1.0)`).
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR16G16B16A16Snorm(const uint16_t Raw[4]) {
+  FemeRTv4f32 V;
+  V[0] = __builtin_fmaxf((float)(int16_t)Raw[0] / 32767.0f, -1.0f);
+  V[1] = __builtin_fmaxf((float)(int16_t)Raw[1] / 32767.0f, -1.0f);
+  V[2] = __builtin_fmaxf((float)(int16_t)Raw[2] / 32767.0f, -1.0f);
+  V[3] = __builtin_fmaxf((float)(int16_t)Raw[3] / 32767.0f, -1.0f);
+  return V;
+}
+
+// The inverse of `femeRTUnpackR16G16B16A16Snorm`: clamps each component to
+// `[-1.0, 1.0]`, scales to `[-32767, 32767]`, and packs the four rounded
+// words little-endian into \p Out.
+__attribute__((always_inline)) static void
+femeRTPackR16G16B16A16Snorm(FemeRTv4f32 Value, uint16_t Out[4]) {
+  float C0 = __builtin_fminf(__builtin_fmaxf(Value[0], -1.0f), 1.0f);
+  float C1 = __builtin_fminf(__builtin_fmaxf(Value[1], -1.0f), 1.0f);
+  float C2 = __builtin_fminf(__builtin_fmaxf(Value[2], -1.0f), 1.0f);
+  float C3 = __builtin_fminf(__builtin_fmaxf(Value[3], -1.0f), 1.0f);
+  Out[0] = (uint16_t)(int16_t)__builtin_roundf(C0 * 32767.0f);
+  Out[1] = (uint16_t)(int16_t)__builtin_roundf(C1 * 32767.0f);
+  Out[2] = (uint16_t)(int16_t)__builtin_roundf(C2 * 32767.0f);
+  Out[3] = (uint16_t)(int16_t)__builtin_roundf(C3 * 32767.0f);
+}
+
 //--- Typed-buffer `<4 x float>` view ------------------------------------------
 
 // `feme.cpu.resource.load.typed.v4f32` (see `feme::cpu::ResourceCalls`):
@@ -1083,6 +1143,8 @@ femeRTImageFormatElementSize(uint32_t Format) {
   case 17: // R8G8B8A8_UNORM_SRGB
     return 4;
   case 18: // R16G16B16A16_FLOAT
+  case 19: // R16G16B16A16_UNORM (roadmap H19h)
+  case 20: // R16G16B16A16_SNORM (roadmap H19h)
   case 21: // R16G16B16A16_UINT
   case 22: // R16G16B16A16_SINT
     return 8;
@@ -1351,6 +1413,16 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
                      femeRTHalfToFloat(Raw[2]), femeRTHalfToFloat(Raw[3])};
     return V;
   }
+  case 19: { // R16G16B16A16_UNORM (roadmap H19h)
+    uint16_t Raw[4];
+    __builtin_memcpy(Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR16G16B16A16Unorm(Raw);
+  }
+  case 20: { // R16G16B16A16_SNORM (roadmap H19h)
+    uint16_t Raw[4];
+    __builtin_memcpy(Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR16G16B16A16Snorm(Raw);
+  }
   case 23: { // R11G11B10_FLOAT
     uint32_t Raw;
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
@@ -1497,19 +1569,20 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
 
 // Packs \p Texel back into `Format`'s own bytes at \p Ptr -- the write-side
 // mirror of `femeRTUnpackImageTexel` above, for `feme.cpu.image.store.2d.
-// v4f32` (roadmap H19a, widened by H19f). Originally scoped to exactly the
-// two float-channel formats the Vulkan spec's own mandatory storage-image
-// format floor requires: `R32_FLOAT` and `R32G32B32A32_FLOAT`, both the
-// identity case (no scalar conversion). Roadmap H19f adds
-// `R16G16B16A16_FLOAT`, encoding each lane with `femeRTFloatToHalf` --
-// still only a first real step towards the full
-// `shaderStorageImageExtendedFormats` list (see that roadmap row and
-// `Format.cpp`'s own updated scope comment for what remains). A write
-// through any other format -- reachable only if a future row widens
-// `Format.cpp`'s own `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` gate beyond
-// this floor without widening this switch to match -- is silently
-// dropped, mirroring `femeRTUnpackImageTexel`'s own "all-zero for an
-// unmodeled format" default rather than trapping.
+// v4f32` (roadmap H19a, widened by H19f/H19h). Originally scoped to
+// exactly the two float-channel formats the Vulkan spec's own mandatory
+// storage-image format floor requires: `R32_FLOAT` and
+// `R32G32B32A32_FLOAT`, both the identity case (no scalar conversion).
+// Roadmap H19f added `R16G16B16A16_FLOAT`, encoding each lane with
+// `femeRTFloatToHalf`; roadmap H19h adds `R16G16B16A16_UNORM`/`_SNORM`,
+// quantizing each lane with `femeRTPackR16G16B16A16Unorm`/`Snorm` -- still
+// only a step towards the full `shaderStorageImageExtendedFormats` list
+// (see that roadmap row and `Format.cpp`'s own updated scope comment for
+// what remains). A write through any other format -- reachable only if a
+// future row widens `Format.cpp`'s own `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`
+// gate beyond this floor without widening this switch to match -- is
+// silently dropped, mirroring `femeRTUnpackImageTexel`'s own "all-zero for
+// an unmodeled format" default rather than trapping.
 __attribute__((always_inline)) static void
 femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
   switch (Format) {
@@ -1524,6 +1597,18 @@ femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
   case 18: { // R16G16B16A16_FLOAT (roadmap H19f).
     uint16_t Raw[4] = {femeRTFloatToHalf(Texel[0]), femeRTFloatToHalf(Texel[1]),
                        femeRTFloatToHalf(Texel[2]), femeRTFloatToHalf(Texel[3])};
+    __builtin_memcpy(Ptr, Raw, sizeof(Raw));
+    return;
+  }
+  case 19: { // R16G16B16A16_UNORM (roadmap H19h).
+    uint16_t Raw[4];
+    femeRTPackR16G16B16A16Unorm(Texel, Raw);
+    __builtin_memcpy(Ptr, Raw, sizeof(Raw));
+    return;
+  }
+  case 20: { // R16G16B16A16_SNORM (roadmap H19h).
+    uint16_t Raw[4];
+    femeRTPackR16G16B16A16Snorm(Texel, Raw);
     __builtin_memcpy(Ptr, Raw, sizeof(Raw));
     return;
   }

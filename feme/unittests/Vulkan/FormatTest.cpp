@@ -292,13 +292,17 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
   // (femeRTImageFormatElementSize/femeRTUnpackImageTexel, FeMeRuntimeCPU.c)
   // now implements, plus every ASTC LDR format (bridged to one of those by
   // materializeImageDescriptor, roadmap E23), can actually be sampled --
-  // with filtering.
+  // with filtering. Roadmap H19h adds `R16G16B16A16_{UNORM,SNORM}`, newly
+  // implemented (both for sampling and storage-image writes) alongside
+  // this row's own storage-image format-breadth work.
   for (ResourceFormat Format :
        {ResourceFormat::R32_FLOAT, ResourceFormat::R32G32_FLOAT,
         ResourceFormat::R32G32B32_FLOAT, ResourceFormat::R32G32B32A32_FLOAT,
         ResourceFormat::R8G8B8A8_UNORM, ResourceFormat::R8G8B8A8_SNORM,
         ResourceFormat::R8G8B8A8_UNORM_SRGB,
-        ResourceFormat::R16G16B16A16_FLOAT, ResourceFormat::R11G11B10_FLOAT,
+        ResourceFormat::R16G16B16A16_FLOAT,
+        ResourceFormat::R16G16B16A16_UNORM,
+        ResourceFormat::R16G16B16A16_SNORM, ResourceFormat::R11G11B10_FLOAT,
         ResourceFormat::R10G10B10A2_UNORM, ResourceFormat::B8G8R8A8_UNORM,
         ResourceFormat::A8_UNORM, ResourceFormat::A1B5G5R5_UNORM,
         ResourceFormat::ASTC_4x4_UNORM, ResourceFormat::ASTC_12x12_SRGB}) {
@@ -359,12 +363,13 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   // exactly the Vulkan spec's own mandatory storage-image format floor --
   // `R32_{SFLOAT,UINT,SINT}`/`R32G32B32A32_{SFLOAT,UINT,SINT}` -- so
   // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is set for those. Roadmap H19f
-  // widens the same pack helpers (and this bit) to also cover
-  // `R16G16B16A16_{SFLOAT,UINT,SINT}`, a first slice of the full
+  // widened the same pack helpers (and this bit) to also cover
+  // `R16G16B16A16_{SFLOAT,UINT,SINT}`; roadmap H19h adds
+  // `R16G16B16A16_{UNORM,SNORM}` -- a further slice of the full
   // `shaderStorageImageExtendedFormats` list; every other format is still
   // left unset (`R8G8B8A8_UNORM` included), matching
   // `shaderStorageImageExtendedFormats` staying unclaimed (see Roadmap.md's
-  // H19f and its own follow-on rows).
+  // H19h and its own follow-on rows).
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32_FLOAT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32B32A32_FLOAT) &
@@ -378,6 +383,10 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32B32A32_SINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16G16B16A16_FLOAT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16G16B16A16_UNORM) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16G16B16A16_SNORM) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16G16B16A16_UINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);

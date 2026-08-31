@@ -484,6 +484,8 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::R8G8B8A8_SNORM:
   case ResourceFormat::R8G8B8A8_UNORM_SRGB:
   case ResourceFormat::R16G16B16A16_FLOAT:
+  case ResourceFormat::R16G16B16A16_UNORM:
+  case ResourceFormat::R16G16B16A16_SNORM:
   case ResourceFormat::R11G11B10_FLOAT:
   case ResourceFormat::R10G10B10A2_UNORM:
   case ResourceFormat::B8G8R8A8_UNORM:
@@ -521,17 +523,17 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `R32G32B32A32_{SFLOAT,UINT,SINT}`, the only formats
   // `femeRTStoreTexel2D`/`femeRTStoreTexel2DI32`'s own
   // `femeRTPackImageTexel`/`femeRTPackImageTexelI32` tables (FeMeRuntimeCPU.c)
-  // used to encode. Roadmap H19f adds `R16G16B16A16_{SFLOAT,UINT,SINT}`
-  // now that those two tables' own pack helpers encode them too (a first
-  // real slice of the full `shaderStorageImageExtendedFormats` list --
-  // `VkPhysicalDeviceFeatures::shaderStorageImageExtendedFormats` itself
+  // used to encode. Roadmap H19f added `R16G16B16A16_{SFLOAT,UINT,SINT}`;
+  // roadmap H19h adds `R16G16B16A16_{UNORM,SNORM}` -- both a further slice
+  // of the full `shaderStorageImageExtendedFormats` list
+  // (`VkPhysicalDeviceFeatures::shaderStorageImageExtendedFormats` itself
   // stays `VK_FALSE` until the rest of that list's own pack support
-  // lands, see Roadmap.md's H19f/H19-follow-on rows); every other format
-  // is still honestly left unset until a matching pack case exists.
-  // Plain2D-only for now (no arrayed/cube/multisampled storage image
-  // lowering exists yet, see `SPIRVResourceLowering.cpp`'s
-  // `classifyStorageImage2DHandle`), but this format-feature bit is
-  // per-format, not per-view-shape, so it is still honest to set here.
+  // lands, see Roadmap.md's H19h); every other format is still honestly
+  // left unset until a matching pack case exists. Plain2D-only for now
+  // (no arrayed/cube/multisampled storage image lowering exists yet, see
+  // `SPIRVResourceLowering.cpp`'s `classifyStorageImage2DHandle`), but
+  // this format-feature bit is per-format, not per-view-shape, so it is
+  // still honest to set here.
   switch (Format) {
   case ResourceFormat::R32_FLOAT:
   case ResourceFormat::R32G32B32A32_FLOAT:
@@ -540,6 +542,8 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::R32_SINT:
   case ResourceFormat::R32G32B32A32_SINT:
   case ResourceFormat::R16G16B16A16_FLOAT:
+  case ResourceFormat::R16G16B16A16_UNORM:
+  case ResourceFormat::R16G16B16A16_SNORM:
   case ResourceFormat::R16G16B16A16_UINT:
   case ResourceFormat::R16G16B16A16_SINT:
     Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;

@@ -1392,6 +1392,45 @@ TEST_F(ImageSamplingTest, LoadFetchesR16G16B16A16Float) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f);
 }
 
+TEST_F(ImageSamplingTest, LoadFetchesR16G16B16A16Unorm) {
+  // Roadmap H19h: 65535/0/32768/0 normalize to 1.0/0.0/~0.5/0.0.
+  uint16_t Storage[1][1][4] = {{{65535, 0, 32768, 0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R16G16B16A16_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_NEAR(Out[2], 0.5f, 0.001f);
+  EXPECT_FLOAT_EQ(Out[3], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesR16G16B16A16Snorm) {
+  // Roadmap H19h: 32767/-32767/-32768/0 normalize to 1.0/-1.0/-1.0/0.0
+  // (`-32768` clamps to `-1.0`, mirroring the 8-bit SNORM formats' own
+  // `-128` clamp).
+  uint16_t Storage[1][1][4] = {{{(uint16_t)32767, (uint16_t)-32767,
+                                 (uint16_t)-32768, (uint16_t)0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R16G16B16A16_SNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], -1.0f);
+  EXPECT_FLOAT_EQ(Out[2], -1.0f);
+  EXPECT_FLOAT_EQ(Out[3], 0.0f);
+}
+
 TEST_F(ImageSamplingTest, LoadFetchesA8Unorm) {
   uint8_t Storage[1][1] = {{128}}; // ~0.502.
   FemeImageSubresourceLayout Layout;
@@ -1990,6 +2029,49 @@ TEST_F(ImageSamplingTest, StoreWritesTexelIntoR16G16B16A16Sint) {
   EXPECT_EQ(Storage[0][0][1], -32768);
   EXPECT_EQ(Storage[0][0][2], 32767);
   EXPECT_EQ(Storage[0][0][3], 0);
+}
+
+// Roadmap H19h: `R16G16B16A16_{UNORM,SNORM}` widen
+// `femeRTPackImageTexel`/`femeRTUnpackImageTexel` further past the
+// mandatory storage-image format floor, alongside a new sampled-image
+// (`VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT`) advertisement for the same two
+// formats -- previously entirely unimplemented (not even readable) at
+// the runtime level, unlike H19f's `_SFLOAT`/`_UINT`/`_SINT` siblings.
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR16G16B16A16UnormQuantized) {
+  uint16_t Storage[1][1][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R16G16B16A16_UNORM, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {1.0f, 0.0f, 0.5f, 2.0f}; // Last: out-of-range, clamps.
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], 65535u);
+  EXPECT_EQ(Storage[0][0][1], 0u);
+  EXPECT_NEAR(Storage[0][0][2], 32768u, 1u);
+  EXPECT_EQ(Storage[0][0][3], 65535u); // Clamped to 1.0 before quantizing.
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR16G16B16A16SnormQuantized) {
+  int16_t Storage[1][1][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R16G16B16A16_SNORM, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {1.0f, -1.0f, 0.0f, -2.0f}; // Last: out-of-range, clamps.
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], 32767);
+  EXPECT_EQ(Storage[0][0][1], -32767);
+  EXPECT_EQ(Storage[0][0][2], 0);
+  EXPECT_EQ(Storage[0][0][3], -32767); // Clamped to -1.0 before quantizing.
 }
 
 TEST_F(ImageSamplingTest, StoreOutOfBoundsCoordinateIsANoOp) {
