@@ -213,6 +213,20 @@ enum class ResourceFormat : uint32_t {
   R8_SNORM,
   R8_UINT,
   R8_SINT,
+
+  // (Roadmap H19n) The two-channel `R8G8` mandatory
+  // `shaderStorageImageExtendedFormats` formats, split out of H19j's own
+  // remaining scope after it narrowed to the single-channel `R8` formats
+  // only. Also appended at the enum's own tail for the same hard-coded-
+  // switch-case reason as above. Each is the two-component analogue of
+  // one of `R8G8B8A8_UNORM`/`_SNORM`/`_UINT`/`_SINT`'s own existing four
+  // channels: unpacking pads the missing B channel `0.0` and the missing
+  // alpha channel `1.0`, mirroring the single-channel `R8` formats' own
+  // partial-component convention above.
+  R8G8_UNORM,
+  R8G8_SNORM,
+  R8G8_UINT,
+  R8G8_SINT,
 };
 
 /// Whether \p Format is one of the ASTC block-compressed formats above.

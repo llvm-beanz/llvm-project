@@ -85,6 +85,19 @@ TEST(FormatTest, MapsSingleChannelR8Formats) {
     EXPECT_EQ(formatElementSize(Format), 1u);
 }
 
+TEST(FormatTest, MapsTwoChannelR8G8Formats) {
+  // Roadmap H19n: the two-channel `R8G8` mandatory
+  // `shaderStorageImageExtendedFormats` formats.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R8G8_UNORM), ResourceFormat::R8G8_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R8G8_SNORM), ResourceFormat::R8G8_SNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R8G8_UINT), ResourceFormat::R8G8_UINT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R8G8_SINT), ResourceFormat::R8G8_SINT);
+  for (ResourceFormat Format :
+       {ResourceFormat::R8G8_UNORM, ResourceFormat::R8G8_SNORM,
+        ResourceFormat::R8G8_UINT, ResourceFormat::R8G8_SINT})
+    EXPECT_EQ(formatElementSize(Format), 2u);
+}
+
 TEST(FormatTest, RejectsUnsupportedFormat) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGB_UNORM_BLOCK), std::nullopt);
   EXPECT_EQ(mapVkFormat(VK_FORMAT_UNDEFINED), std::nullopt);
@@ -320,7 +333,9 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         ResourceFormat::A8_UNORM, ResourceFormat::A1B5G5R5_UNORM,
         ResourceFormat::ASTC_4x4_UNORM, ResourceFormat::ASTC_12x12_SRGB,
         // Roadmap H19j: `R8_UNORM`/`_SNORM`.
-        ResourceFormat::R8_UNORM, ResourceFormat::R8_SNORM}) {
+        ResourceFormat::R8_UNORM, ResourceFormat::R8_SNORM,
+        // Roadmap H19n: `R8G8_UNORM`/`_SNORM`.
+        ResourceFormat::R8G8_UNORM, ResourceFormat::R8G8_SNORM}) {
     VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
@@ -336,7 +351,9 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         ResourceFormat::R16G16B16A16_UINT, ResourceFormat::R16G16B16A16_SINT,
         ResourceFormat::R10G10B10A2_UINT,
         // Roadmap H19j: `R8_UINT`/`_SINT`.
-        ResourceFormat::R8_UINT, ResourceFormat::R8_SINT}) {
+        ResourceFormat::R8_UINT, ResourceFormat::R8_SINT,
+        // Roadmap H19n: `R8G8_UINT`/`_SINT`.
+        ResourceFormat::R8G8_UINT, ResourceFormat::R8G8_SINT}) {
     VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
@@ -382,8 +399,9 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is set for those. Roadmap H19f
   // widened the same pack helpers (and this bit) to also cover
   // `R16G16B16A16_{SFLOAT,UINT,SINT}`; roadmap H19h added
-  // `R16G16B16A16_{UNORM,SNORM}`; roadmap H19j adds
-  // `R8_{UNORM,SNORM,UINT,SINT}` -- a further slice of the full
+  // `R16G16B16A16_{UNORM,SNORM}`; roadmap H19j added
+  // `R8_{UNORM,SNORM,UINT,SINT}`; roadmap H19n adds
+  // `R8G8_{UNORM,SNORM,UINT,SINT}` -- a further slice of the full
   // `shaderStorageImageExtendedFormats` list; every other format is still
   // left unset (`R8G8B8A8_UNORM` included), matching
   // `shaderStorageImageExtendedFormats` staying unclaimed (see Roadmap.md's
@@ -417,6 +435,14 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8_UINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8_SINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8_UNORM) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8_SNORM) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8_UINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8_SINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
               VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);

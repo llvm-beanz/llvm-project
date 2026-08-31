@@ -59,6 +59,16 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::R8_UINT;
   case VK_FORMAT_R8_SINT:
     return ResourceFormat::R8_SINT;
+  // (Roadmap H19n) The two-channel `R8G8` mandatory
+  // `shaderStorageImageExtendedFormats` formats.
+  case VK_FORMAT_R8G8_UNORM:
+    return ResourceFormat::R8G8_UNORM;
+  case VK_FORMAT_R8G8_SNORM:
+    return ResourceFormat::R8G8_SNORM;
+  case VK_FORMAT_R8G8_UINT:
+    return ResourceFormat::R8G8_UINT;
+  case VK_FORMAT_R8G8_SINT:
+    return ResourceFormat::R8G8_SINT;
   case VK_FORMAT_B8G8R8A8_UNORM:
     return ResourceFormat::B8G8R8A8_UNORM;
   case VK_FORMAT_R16G16B16A16_SFLOAT:
@@ -252,6 +262,13 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::R8_UINT:
   case ResourceFormat::R8_SINT:
     return 1;
+  // (Roadmap H19n) `R8G8_{UNORM,SNORM,UINT,SINT}`: two bytes, two
+  // components.
+  case ResourceFormat::R8G8_UNORM:
+  case ResourceFormat::R8G8_SNORM:
+  case ResourceFormat::R8G8_UINT:
+  case ResourceFormat::R8G8_SINT:
+    return 2;
   // (Roadmap E5) `VK_FORMAT_A8_UNORM`: one byte, one component.
   case ResourceFormat::A8_UNORM:
     return 1;
@@ -513,6 +530,10 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `femeRTUnpackImageTexel`'s own `R8_UNORM`/`_SNORM` cases.
   case ResourceFormat::R8_UNORM:
   case ResourceFormat::R8_SNORM:
+  // (Roadmap H19n) `R8G8_UNORM`/`_SNORM`: the two-channel analogues of
+  // `R8_UNORM`/`_SNORM` above.
+  case ResourceFormat::R8G8_UNORM:
+  case ResourceFormat::R8G8_SNORM:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     break;
@@ -536,6 +557,10 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `femeRTUnpackImageTexelI32`'s own `R8_UINT`/`_SINT` cases.
   case ResourceFormat::R8_UINT:
   case ResourceFormat::R8_SINT:
+  // (Roadmap H19n) `R8G8_UINT`/`_SINT`: the two-channel analogues of
+  // `R8_UINT`/`_SINT` above.
+  case ResourceFormat::R8G8_UINT:
+  case ResourceFormat::R8G8_SINT:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     break;
   default:
@@ -581,6 +606,14 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::R8_SNORM:
   case ResourceFormat::R8_UINT:
   case ResourceFormat::R8_SINT:
+  // (Roadmap H19n) `R8G8_{UNORM,SNORM,UINT,SINT}`: the two-channel
+  // mandatory-extended-format formats, backed by new
+  // `femeRTPackImageTexel`/`femeRTPackImageTexelI32` cases
+  // (FeMeRuntimeCPU.c).
+  case ResourceFormat::R8G8_UNORM:
+  case ResourceFormat::R8G8_SNORM:
+  case ResourceFormat::R8G8_UINT:
+  case ResourceFormat::R8G8_SINT:
     Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     break;
   default:

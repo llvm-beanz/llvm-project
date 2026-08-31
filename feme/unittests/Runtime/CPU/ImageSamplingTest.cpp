@@ -1492,6 +1492,38 @@ TEST_F(ImageSamplingTest, LoadFetchesR8Snorm) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f);
 }
 
+TEST_F(ImageSamplingTest, LoadFetchesR8G8Unorm) {
+  uint8_t Storage[1][1][2] = {{{255, 128}}}; // 255/255=1.0, 128/255~=0.502.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8G8_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_NEAR(Out[1], 128.0f / 255.0f, 1e-6f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesR8G8Snorm) {
+  int8_t Storage[1][1][2] = {{{-127, 64}}}; // -127/127=-1.0, 64/127~=0.504.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8G8_SNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], -1.0f);
+  EXPECT_NEAR(Out[1], 64.0f / 127.0f, 1e-6f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
 TEST_F(ImageSamplingTest, LoadFetchesA8Unorm) {
   uint8_t Storage[1][1] = {{128}}; // ~0.502.
   FemeImageSubresourceLayout Layout;
@@ -1804,6 +1836,38 @@ TEST_F(ImageSamplingTest, LoadI32FetchesR8Sint) {
   Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_EQ(Out[0], -1); // Sign-extended, not zero-extended.
   EXPECT_EQ(Out[1], 0);
+  EXPECT_EQ(Out[2], 0);
+  EXPECT_EQ(Out[3], 1);
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesR8G8Uint) {
+  uint8_t Storage[1][1][2] = {{{255, 128}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8G8_UINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_EQ(Out[0], 255); // Zero-extended, not sign-extended.
+  EXPECT_EQ(Out[1], 128);
+  EXPECT_EQ(Out[2], 0);
+  EXPECT_EQ(Out[3], 1);
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesR8G8Sint) {
+  int8_t Storage[1][1][2] = {{{-1, -2}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8G8_SINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_EQ(Out[0], -1); // Sign-extended, not zero-extended.
+  EXPECT_EQ(Out[1], -2);
   EXPECT_EQ(Out[2], 0);
   EXPECT_EQ(Out[3], 1);
 }
@@ -2308,6 +2372,69 @@ TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8Sint) {
   FeMeTestV4I32 Texel = {-1, 0, 0, 0};
   Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
   EXPECT_EQ(Storage[0][0], -1);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8G8UnormQuantized) {
+  uint8_t Storage[1][1][2] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8G8_UNORM, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {2.0f, 0.5f, 0.0f, 0.0f}; // R out-of-range, clamps.
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], 255u); // Clamped to 1.0 before quantizing.
+  EXPECT_EQ(Storage[0][0][1], 128u); // round(0.5 * 255) == 128.
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8G8SnormQuantized) {
+  int8_t Storage[1][1][2] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8G8_SNORM, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {-2.0f, 0.5f, 0.0f, 0.0f}; // R out-of-range, clamps.
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], -127); // Clamped to -1.0 before quantizing.
+  EXPECT_EQ(Storage[0][0][1], 64);   // round(0.5 * 127) == 64.
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8G8Uint) {
+  uint8_t Storage[1][1][2] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8G8_UINT, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  // 0x102 truncates to 0x02 -- confirms the store truncates to 8 bits.
+  FeMeTestV4I32 Texel = {0x102, 0x203, 0, 0};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], 0x02u);
+  EXPECT_EQ(Storage[0][0][1], 0x03u);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8G8Sint) {
+  int8_t Storage[1][1][2] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8G8_SINT, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  FeMeTestV4I32 Texel = {-1, -2, 0, 0};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], -1);
+  EXPECT_EQ(Storage[0][0][1], -2);
 }
 
 TEST_F(ImageSamplingTest, StoreOutOfBoundsCoordinateIsANoOp) {
