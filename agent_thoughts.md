@@ -47564,3 +47564,129 @@ committed separately at the end, per the standing instruction. No
 `FeMeGraphicsDesign.md` deviation and no `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` change were needed -- H19b does not flip
 any feature bit or extension on its own.
+
+# Session: H19c
+
+Continuing the H19 (storage-image read/write) breakdown: this session's
+request was H19c, "1D and 3D storage-image read/write for the same
+mandatory format floor" -- the non-arrayed shapes H19a (`Plain2D`) and
+H19b (`Array2D`) don't cover.
+
+## Compiler/runtime lowering
+
+The bulk of the code-shape work mirrored H19b closely: widen the
+classification/coordinate-width logic in `SPIRVResourceLowering.cpp`, add
+new `ImageCallKind` entries to the call vocabulary, add new runtime entry
+points to `FeMeRuntimeCPU.c`, add unit tests at both layers. Two wrinkles
+worth recording:
+
+- **1D's coordinate is a bare scalar, not a 1-element vector.** SPIR-V
+  spells a 1D image's fetch/store coordinate as `i32`, not `<1 x i32>` --
+  confirmed via MLIR's own SPIR-V dialect doc comments. `isCoordN` needed
+  a genuine `N == 1` special case (inspect the scalar type directly)
+  rather than just widening a "coordinate must be an N-element vector"
+  check to N=1, since an actual 1-element `FixedVectorType` never appears
+  in real IR for this case. This is the kind of thing that would be very
+  easy to get wrong by pattern-matching H19b's own array-index-as-third-
+  vector-component code without checking the actual IR shape first.
+
+- **1D needs no new addressing math; 3D does, and differently than
+  arrays.** A 1D image naturally has `Height == 1` (`Image.cpp`'s own
+  `computeSubresourceLayouts`), so the existing 2D fetch/store helpers
+  called with `Y=0` already compute the right offset -- 1D got thin
+  wrapper functions, not new logic. 3D's `Z * SlicePitch` offset formula
+  is identical to `Array2D`'s `Layer * SlicePitch`, but the *bounds check*
+  differs: a real 3D image's `ArrayLayers` is always 1 per the Vulkan
+  spec (`arrayLayers` must be 1 for `VK_IMAGE_TYPE_3D`), so `Z` has to be
+  checked against `Img->Depth` instead -- and per-mip-shifted
+  (`max(1, Depth >> Level)`) for fetch, since a 3D image's depth halves
+  with each mip level the same way width/height do, but always
+  `Img->Depth` directly for store (store is always mip 0 in this ABI).
+
+Built and tested clean end to end at this stage: `ninja
+FeMeTransformsCPU`/`FeMeRuntimeCPU`/`*Tests` all green, 56/56 +
+69/69 targeted unit tests, `ninja check-feme` 2106/2165 (0 Failed, 59
+pre-existing Unsupported). Committed in 3 small commits (call vocabulary,
+lowering, runtime).
+
+## The real CTS surfaced a second, distinct gap
+
+Running `dEQP-VK.image.load_store.with_format.1d.*`/`3d.*` (156 cases,
+from the pre-existing `vk-default` mustpass caselist filtered to
+`with_format\.1d\.`/`with_format\.3d\.`) against the freshly rebuilt ICD
+showed **0 Pass, 24 Fail** ("Image comparison failed", not
+`NotSupported` and not a pipeline-creation error) -- real progress from
+before (these previously failed at pipeline creation entirely) but not
+yet a clean close.
+
+The failing case's own dumped shader source
+(`imageStore(u_image1, pos, imageLoad(u_image0, 63-pos))` against a
+`uimage1D`) confirmed the compiler was reaching and compiling this shape
+correctly -- so the bug had to be somewhere the SPIRVResourceLowering/
+FeMeRuntimeCPU unit tests structurally can't see: those tests hand-build
+a `FemeImageDescriptor` directly and drive the runtime call from there,
+never going through a *real* Vulkan descriptor-set binding. Grepped for
+where a real bound `VkImageView` becomes a `FemeImageDescriptor` and found
+`materializeImageDescriptor` (`CommandBuffer.cpp`) -- its dimension switch
+only ever accepted the `Texture2D` family (added piecemeal by roadmap
+H7b), with an explicit comment scoping `Texture1D`/`Texture1DArray`/
+`Texture3D` out and a `default: return;` that leaves `Dst` as the
+all-zero descriptor `Heap.assign(..., FemeImageDescriptor{})` initializes
+it to. Every real 1D/3D storage-image binding was silently reading/
+writing zero.
+
+This is exactly the kind of gap the "no unit test exercises this layer at
+all, for any dimension" note below is about: H19a/H19b's own closures
+apparently never added a `CommandBufferTest.cpp`-level storage-image
+dispatch test either (confirmed via `git log` on that file), relying on
+the real CTS to be the first exerciser of this path. That's a reasonable
+tradeoff given how heavy a full real-pipeline dispatch fixture is to
+stand up (SPIR-V module, descriptor set, compute pipeline, command
+buffer) versus how much it would duplicate what the CTS itself already
+does end to end -- but it does mean this class of bug (a Vulkan-API-layer
+gap orthogonal to the compiler/runtime work) is only caught by the CTS
+step this project's standing instructions already require after every
+change, not by `ninja check-feme` alone. Worth remembering for future
+`H19*` follow-ons (H19d, H19e): re-run the real CTS before declaring a row
+closed, even when every unit test at the compiler/runtime layer passes.
+
+**The fix.** Added `Texture1D`/`Texture3D` to `materializeImageDescriptor`'s
+accepted-dimension switch. Both fall through the existing per-layer
+addressing logic below the switch completely unchanged: a 1D image is
+always non-arrayed with `Height == Depth == 1` (so `Range.baseArrayLayer`
+is always 0, `LayerCount` always 1, the same as an ordinary non-arrayed
+`Texture2D` view), and a 3D image's `Img->arrayLayers()` is always 1 too
+(per the Vulkan spec), so no new layer-handling logic was needed -- only
+`Dst.Depth`, previously hard-coded to `1` for every dimension, needed to
+become `std::max(1u, Img->depth() >> Range.baseMipLevel)` specifically
+for `Texture3D`, mirroring `Image.cpp`'s own per-mip depth formula that
+the CPU runtime's `femeRTFetchTexel3D`/`femeRTStoreTexel3D` already
+bounds-check against.
+
+Re-running the same 156-case CTS slice after this one-file fix: **24
+Pass, 0 Fail, 132 NotSupported** -- exactly the 6-format mandatory floor,
+cleanly. A follow-up probe of `1d_array.r32_uint` confirms it's still
+correctly untouched (fails at pipeline creation the same pre-fix way),
+since `Texture1DArray` was deliberately left out of both this fix's and
+H19c's own scope.
+
+## Roadmap bookkeeping
+
+Struck through H19c with a closure summary covering both fixes. Added a
+new `H19e` row (one lowercase letter under `H19`, per the standing
+nesting-depth rule) for the now-clearly-scoped `Texture1DArray` gap --
+it needs three things none of H19b/H19c individually cover: a
+`Dim1D`+`Arrayed` classification, a coordinate shape carrying both `X`
+and a layer index, and the same kind of `materializeImageDescriptor`
+dimension-switch widening this session's second fix just did for
+`Texture1D`/`Texture3D`. Confirmed (as with H19a/H19b) that no
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` entry needs to
+change -- the existing `shaderStorageImage*` rows already correctly point
+at H19d for the remaining feature-bit breadth, and this row's own
+coordinate-shape work doesn't flip any of them.
+
+Committed in 4 total commits this session: call vocabulary, lowering +
+its tests, runtime + its tests (continuing from the prior, summarized
+session's numbering), then the `CommandBuffer.cpp` descriptor fix, then
+the Roadmap.md/VulkanCTSReport.md update, with this file committed
+separately last.
