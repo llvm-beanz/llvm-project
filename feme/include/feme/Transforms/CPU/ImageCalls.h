@@ -89,6 +89,19 @@
 // 2-component `(X, Layer)` shape -- mirroring `Load1D`'s single `X` plus
 // `Load2DArray`'s integer array-layer operand.
 //
+// Update (roadmap H19m): an arrayed multisampled 2D storage image
+// (`ImageShape::Array2DMS`) needs a 4-component `(X, Y, Layer, Sample)`
+// coordinate. The read side needed no new call vocabulary at all:
+// `Load2DArray` already carries both a `Layer` and a `Sample` operand (the
+// latter added for a different reason, `subpassLoad`'s explicit-sample
+// array form), and `Load2DArrayI32` is simply widened in place to add the
+// `Sample` operand it was missing -- mirroring exactly how roadmap H19g
+// widened `Load2DI32` to add the same operand `Load2D` already had. The
+// write side has no such existing operand to widen: two new kinds,
+// `Store2DArrayMS`/`Store2DArrayMSI32`, add both a `Layer` and a `Sample`
+// operand to `Store2D`'s own shape, mirroring `Store2DMS`/`Store2DMSI32`'s
+// relationship to `Store2D` but for an arrayed image.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_IMAGECALLS_H
@@ -222,6 +235,16 @@ enum class ImageCallKind : uint8_t {
   /// counterpart of `Store2DMS`, mirroring `Store2DArrayI32`'s
   /// relationship to `Store2DArray`.
   Store2DMSI32,
+  /// `feme.cpu.image.store.2darrayms.v4f32` (roadmap H19m): the arrayed
+  /// multisampled counterpart of `Store2D`, adding both an integer array-
+  /// layer operand (like `Store2DArray`'s own) and an integer sample-index
+  /// operand (like `Store2DMS`'s own) -- unlike either of those two kinds,
+  /// never both at once.
+  Store2DArrayMS,
+  /// `feme.cpu.image.store.2darrayms.v4i32` (roadmap H19m): the
+  /// integer-format counterpart of `Store2DArrayMS`, mirroring
+  /// `Store2DMSI32`'s relationship to `Store2DMS`.
+  Store2DArrayMSI32,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -279,9 +302,10 @@ struct MatchedImageCall {
   /// `Load2DArrayI32`, which instead use `Layer` below.
   llvm::Value *ArrayLayer = nullptr;
   /// `Load2DArray`/`Load2DArrayI32`/`Store2DArray`/`Store2DArrayI32`
-  /// (roadmap H19b) and `Load1DArray`/`Load1DArrayI32`/`Store1DArray`/
-  /// `Store1DArrayI32` (roadmap H19e) only: the integer array-layer texel
-  /// coordinate; null for every other kind.
+  /// (roadmap H19b), `Load1DArray`/`Load1DArrayI32`/`Store1DArray`/
+  /// `Store1DArrayI32` (roadmap H19e), and `Store2DArrayMS`/
+  /// `Store2DArrayMSI32` (roadmap H19m) only: the integer array-layer
+  /// texel coordinate; null for every other kind.
   llvm::Value *Layer = nullptr;
   /// `Load3D`/`Load3DI32`/`Store3D`/`Store3DI32` (roadmap H19c) only: the
   /// integer `Z` texel coordinate (a real depth-slice index, not an array
@@ -299,15 +323,16 @@ struct MatchedImageCall {
   llvm::Value *UseExplicitLod = nullptr;
   /// `SampleCmp2D` only: the depth-comparison reference value.
   llvm::Value *Dref = nullptr;
-  /// `Load2D`/`Load2DI32`/`Load2DArray` only (roadmap F8c/H19g): the
-  /// multisample index a `subpassLoad`'s explicit-sample form (`Load2D`)
-  /// or a plain multisampled storage image's own `OpImageRead`
-  /// (`Load2DI32`, roadmap H19g) threads through; null for every sampled
-  /// kind and for `Load2DArrayI32`, which never carries one.
+  /// `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32` only (roadmap
+  /// F8c/H19g/H19m): the multisample index a `subpassLoad`'s
+  /// explicit-sample form (`Load2D`) or a plain or arrayed multisampled
+  /// storage image's own `OpImageRead` (`Load2DI32`, roadmap H19g;
+  /// `Load2DArrayI32`, roadmap H19m) threads through; null for every
+  /// sampled kind.
   llvm::Value *Sample = nullptr;
   /// `Store2D`/`Store2DI32`/`Store2DArray`/`Store2DArrayI32`/`Store1D`/
   /// `Store1DI32`/`Store3D`/`Store3DI32`/`Store1DArray`/`Store1DArrayI32`/
-  /// `Store2DMS`/`Store2DMSI32`
+  /// `Store2DMS`/`Store2DMSI32`/`Store2DArrayMS`/`Store2DArrayMSI32`
   /// only: the `<4 x float>`/`<4 x i32>` texel value being written; null
   /// for every read-only kind.
   llvm::Value *Texel = nullptr;
@@ -423,6 +448,28 @@ llvm::CallInst *createStore2DMSI32(llvm::IRBuilderBase &Builder,
                                    llvm::Value *Texel, llvm::Value *Mask,
                                    const llvm::Twine &Name = "");
 
+/// Builds a `feme.cpu.image.store.2darrayms.v4f32` call (roadmap H19m):
+/// writes \p Texel to an arrayed multisampled storage image at integer
+/// coordinates (\p X, \p Y), array layer \p Layer, sample \p Sample, mip
+/// level 0 -- combining `createStore2DArray`'s own `Layer` operand with
+/// `createStore2DMS`'s own `Sample` operand.
+llvm::CallInst *createStore2DArrayMS(llvm::IRBuilderBase &Builder,
+                                     const ImageCallEnv &Env,
+                                     llvm::Value *ImageIndex, llvm::Value *X,
+                                     llvm::Value *Y, llvm::Value *Layer,
+                                     llvm::Value *Sample, llvm::Value *Texel,
+                                     llvm::Value *Mask,
+                                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.store.2darrayms.v4i32` call (roadmap H19m).
+llvm::CallInst *createStore2DArrayMSI32(llvm::IRBuilderBase &Builder,
+                                        const ImageCallEnv &Env,
+                                        llvm::Value *ImageIndex,
+                                        llvm::Value *X, llvm::Value *Y,
+                                        llvm::Value *Layer, llvm::Value *Sample,
+                                        llvm::Value *Texel, llvm::Value *Mask,
+                                        const llvm::Twine &Name = "");
+
 /// Builds a `feme.cpu.image.sample.2darray.v4f32` call (roadmap H7b-a).
 llvm::CallInst *
 createSample2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
@@ -441,12 +488,17 @@ llvm::CallInst *createLoad2DArray(llvm::IRBuilderBase &Builder,
                                   llvm::Value *Mask,
                                   const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.load.2darray.v4i32` call (roadmap H7b-a).
+/// Builds a `feme.cpu.image.load.2darray.v4i32` call (roadmap H7b-a). \p
+/// Sample (roadmap H19m) is the multisample index a plain multisampled
+/// storage image's own `OpImageRead` (`Load2DI32`, roadmap H19g) threads
+/// through -- see `createLoad2D`'s own `Sample` doc; pass a constant `0`
+/// for a single-sample image.
 llvm::CallInst *createLoad2DArrayI32(llvm::IRBuilderBase &Builder,
                                     const ImageCallEnv &Env,
                                     llvm::Value *ImageIndex, llvm::Value *X,
                                     llvm::Value *Y, llvm::Value *Layer,
-                                    llvm::Value *Mip, llvm::Value *Mask,
+                                    llvm::Value *Mip, llvm::Value *Sample,
+                                    llvm::Value *Mask,
                                     const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.cube.v4f32` call (roadmap H7b-a). \p

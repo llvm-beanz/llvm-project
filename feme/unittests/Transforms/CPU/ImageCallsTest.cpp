@@ -103,4 +103,82 @@ TEST_F(ImageCallsTest, MatchesStore2DMSI32Call) {
   EXPECT_EQ(Matched->Sample, Builder.getInt32(0));
 }
 
+// Roadmap H19m: `Store2DArrayMS`/`Store2DArrayMSI32` are new call kinds
+// combining `Store2DArray`'s own `Layer` operand and `Store2DMS`'s own
+// `Sample` operand -- neither existing kind had a spare operand slot for
+// the other axis, so a dedicated pair of kinds was added rather than
+// widening either in place (see `ImageCalls.h`'s own comment). This test
+// guards against a repeat of H19l's own `AllKinds` omission bug for these
+// two new kinds specifically.
+TEST_F(ImageCallsTest, MatchesStore2DArrayMSCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *Texel = ConstantVector::get(
+      {ConstantFP::get(Builder.getFloatTy(), 0.0),
+       ConstantFP::get(Builder.getFloatTy(), 0.0),
+       ConstantFP::get(Builder.getFloatTy(), 0.0),
+       ConstantFP::get(Builder.getFloatTy(), 1.0)});
+  CallInst *CI = createStore2DArrayMS(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(4), Builder.getInt32(0), Texel,
+      Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Store2DArrayMS);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Layer, Builder.getInt32(4));
+  EXPECT_EQ(Matched->Sample, Builder.getInt32(0));
+  EXPECT_EQ(Matched->Texel, Texel);
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+TEST_F(ImageCallsTest, MatchesStore2DArrayMSI32Call) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *Texel = ConstantVector::get(
+      {Builder.getInt32(0), Builder.getInt32(0), Builder.getInt32(0),
+       Builder.getInt32(0)});
+  CallInst *CI = createStore2DArrayMSI32(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(4), Builder.getInt32(0), Texel,
+      Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Store2DArrayMSI32);
+  EXPECT_EQ(Matched->Layer, Builder.getInt32(4));
+  EXPECT_EQ(Matched->Sample, Builder.getInt32(0));
+  EXPECT_EQ(Matched->Texel, Texel);
+}
+
+// Roadmap H19m: `Load2DArrayI32` was widened in place to add a `Sample`
+// operand before `Mask` -- confirm `matchImageCall` extracts a real
+// (non-zero) sample value through the new operand position correctly.
+TEST_F(ImageCallsTest, MatchesLoad2DArrayI32CallWithRealSample) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createLoad2DArrayI32(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(4), Builder.getInt32(0),
+      Builder.getInt32(5), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Load2DArrayI32);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Layer, Builder.getInt32(4));
+  EXPECT_EQ(Matched->Lod, Builder.getInt32(0));
+  EXPECT_EQ(Matched->Sample, Builder.getInt32(5));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
 } // namespace

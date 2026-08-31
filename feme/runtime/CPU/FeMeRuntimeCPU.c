@@ -1963,6 +1963,72 @@ femeRTStoreTexel2DMSI32(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
   femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
 }
 
+// The arrayed-*and*-multisampled counterpart of `femeRTStoreTexel2D`
+// above, for `feme.cpu.image.store.2darrayms.v4f32` (roadmap H19m): writes
+// \p Texel to the texel at integer coordinates `(X, Y)`, array layer
+// \p Layer, sample \p Sample, mip level 0 of \p Img -- combining
+// `femeRTStoreTexel2DArray`'s own per-layer addressing and
+// `femeRTStoreTexel2DMS`'s own per-sample addressing in one offset, the
+// same combined formula `femeRTFetchTexel2D`'s own independent `Layer`/
+// `Sample` parameters already compute on the read side (see that
+// function's own comment). `Layer >= Img->ArrayLayers` or
+// `Sample >= Img->SampleCount` is silently dropped, mirroring
+// `femeRTStoreTexel2DArray`/`femeRTStoreTexel2DMS`'s own out-of-bounds
+// handling.
+__attribute__((always_inline)) static void
+femeRTStoreTexel2DArrayMS(const FemeRTImageDescriptor *Img, int32_t X,
+                         int32_t Y, uint32_t Layer, uint32_t Sample,
+                         FemeRTv4f32 Texel) {
+  if (!Img->Data || Img->MipLayoutCount == 0 || Layer >= Img->ArrayLayers ||
+      Sample >= Img->SampleCount)
+    return;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img->Width || (uint32_t)Y >= Img->Height)
+    return;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t SampleOffset = (uint64_t)Sample * Layout->SampleStride;
+  uint64_t Offset = Layout->Offset + (uint64_t)Layer * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch +
+                    (uint64_t)X * TexelStride + SampleOffset;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return;
+  unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
+  femeRTPackImageTexel(Img->Format, Ptr, Texel);
+}
+
+// The integer counterpart of `femeRTStoreTexel2DArrayMS` above, for
+// `feme.cpu.image.store.2darrayms.v4i32` (roadmap H19m).
+__attribute__((always_inline)) static void
+femeRTStoreTexel2DArrayMSI32(const FemeRTImageDescriptor *Img, int32_t X,
+                            int32_t Y, uint32_t Layer, uint32_t Sample,
+                            FemeRTv4i32 Texel) {
+  if (!Img->Data || Img->MipLayoutCount == 0 || Layer >= Img->ArrayLayers ||
+      Sample >= Img->SampleCount)
+    return;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img->Width || (uint32_t)Y >= Img->Height)
+    return;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t SampleOffset = (uint64_t)Sample * Layout->SampleStride;
+  uint64_t Offset = Layout->Offset + (uint64_t)Layer * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch +
+                    (uint64_t)X * TexelStride + SampleOffset;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return;
+  unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
+  femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
+}
+
 // The plain-1D counterpart of `femeRTFetchTexel2D` above, for
 // `feme.cpu.image.load.1d.v4f32` (roadmap H19c). A 1D image's own
 // `computeSubresourceLayouts` (Image.cpp) always produces `Height == 1`,
@@ -2827,6 +2893,51 @@ __attribute__((always_inline)) void femeCpuImageStore2DMSV4I32(
   femeRTStoreTexel2DMSI32(&Img, X, Y, Sample, Texel);
 }
 
+// `feme.cpu.image.store.2darrayms.v4f32` (roadmap H19m): the
+// arrayed-*and*-multisampled counterpart of `feme.cpu.image.store.2d.v4f32`
+// above, combining `feme.cpu.image.store.2darray.v4f32`'s own integer
+// `Layer` operand and `feme.cpu.image.store.2dms.v4f32`'s own integer
+// `Sample` operand -- a new, dedicated entry point rather than a widened
+// `Store2DArray`/`Store2DMS`, since neither existing one had a spare
+// operand slot for the other axis (see `ImageCalls.h`'s own
+// `Store2DArrayMS` comment).
+void femeCpuImageStore2DArrayMSV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer,
+    uint32_t Sample, FemeRTv4f32 Texel,
+    _Bool Mask) asm("feme.cpu.image.store.2darrayms.v4f32");
+
+__attribute__((always_inline)) void femeCpuImageStore2DArrayMSV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer,
+    uint32_t Sample, FemeRTv4f32 Texel, _Bool Mask) {
+  if (!Mask || Layer < 0)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel2DArrayMS(&Img, X, Y, (uint32_t)Layer, Sample, Texel);
+}
+
+// `feme.cpu.image.store.2darrayms.v4i32` (roadmap H19m): the
+// integer-format counterpart of `feme.cpu.image.store.2darrayms.v4f32`
+// above.
+void femeCpuImageStore2DArrayMSV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer,
+    uint32_t Sample, FemeRTv4i32 Texel,
+    _Bool Mask) asm("feme.cpu.image.store.2darrayms.v4i32");
+
+__attribute__((always_inline)) void femeCpuImageStore2DArrayMSV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer,
+    uint32_t Sample, FemeRTv4i32 Texel, _Bool Mask) {
+  if (!Mask || Layer < 0)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel2DArrayMSI32(&Img, X, Y, (uint32_t)Layer, Sample, Texel);
+}
+
 // `feme.cpu.image.load.1d.v4f32` (roadmap H19c): the plain-1D counterpart
 // of `feme.cpu.image.load.2d.v4f32` above, taking a single integer `X`
 // texel coordinate instead of an `(X, Y)` pair -- see
@@ -3174,15 +3285,19 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DArrayV4F32(
 // `feme.cpu.image.load.2darray.v4i32` (roadmap H7b-a): the integer-format
 // counterpart of `feme.cpu.image.load.2darray.v4f32` above, mirroring how
 // `feme.cpu.image.load.2d.v4i32` relates to `feme.cpu.image.load.2d.v4f32`.
+// Takes a `Sample` operand (roadmap H19m), mirroring
+// `feme.cpu.image.load.2darray.v4f32`'s own -- widened in place the same
+// way roadmap H19g widened `feme.cpu.image.load.2d.v4i32` to add the
+// operand its float counterpart already had.
 FemeRTv4i32 femeCpuImageLoad2DArrayV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer, uint32_t Mip,
-    _Bool Mask) asm("feme.cpu.image.load.2darray.v4i32");
+    uint32_t Sample, _Bool Mask) asm("feme.cpu.image.load.2darray.v4i32");
 
 __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DArrayV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Layer, uint32_t Mip,
-    _Bool Mask) {
+    uint32_t Sample, _Bool Mask) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Mask)
     return Zero;
@@ -3193,7 +3308,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DArrayV4I32(
   if (X < 0 || Y < 0 || Layer < 0 || (uint32_t)X >= Img.Width ||
       (uint32_t)Y >= Img.Height || (uint32_t)Layer >= Img.ArrayLayers)
     return Zero;
-  return femeRTFetchTexel2DI32(&Img, Mip, (uint32_t)Layer, X, Y, /*Sample=*/0);
+  return femeRTFetchTexel2DI32(&Img, Mip, (uint32_t)Layer, X, Y, Sample);
 }
 
 // The classic "major axis" cube-face-selection algorithm (Vulkan spec

@@ -133,10 +133,17 @@ enum class ImageShape {
   /// `HandleKind::StorageImage2D` only): a 3-component `(X, Y, Sample)`
   /// fetch coordinate -- structurally identical in width to `Array2D`'s
   /// `(X, Y, Layer)`, but the 3rd component selects a sample of one texel
-  /// rather than an array layer. An arrayed or cube multisampled storage
-  /// image is still unstarted follow-on work (see Roadmap.md's H19g
-  /// breakdown).
+  /// rather than an array layer.
   Plain2DMS,
+  /// An arrayed multisampled `Texture2D` (roadmap H19m,
+  /// `HandleKind::StorageImage2D` only): a 4-component `(X, Y, Layer,
+  /// Sample)` fetch coordinate -- `Array2D`'s own 3-component `(X, Y,
+  /// Layer)` with a trailing sample-index component appended, the same
+  /// way `Plain2DMS` appends one to `Plain2D`'s 2-component coordinate. A
+  /// cube or 3D multisampled storage image remains out of scope (SPIR-V
+  /// disallows a multisampled `Dim::Cube`/`Dim::3D` image outright, unlike
+  /// `Dim::2D`, which both `Plain2DMS`/`Array2DMS` cover).
+  Array2DMS,
 };
 
 /// Whether \p Kind is one of the two texel-buffer kinds (see `HandleKind`).
@@ -563,12 +570,13 @@ classifyStorageImage2DHandle(const CallInst &Handle) {
   bool Arrayed = HandleTy->getIntParameter(2) != 0; // Roadmap H19b/H19d/H19e.
   if (Dim == SPIRVDim3D && Arrayed)
     return std::nullopt; // Arrayed 3D is illegal in SPIR-V.
-  bool MS = HandleTy->getIntParameter(3) != 0; // Roadmap H19g.
-  // A multisampled handle only classifies for a plain (non-arrayed), non-3D,
-  // non-cube `Dim::2D` image today -- an arrayed or cube multisampled
-  // storage image needs a 4-component coordinate no call vocabulary or
-  // runtime helper implements yet (see Roadmap.md's H19g breakdown).
-  if (MS && (Dim != SPIRVDim2D || Arrayed))
+  bool MS = HandleTy->getIntParameter(3) != 0; // Roadmap H19g/H19m.
+  // A multisampled handle only classifies for a `Dim::2D` image today
+  // (plain or arrayed) -- SPIR-V itself disallows a multisampled
+  // `Dim::3D`/`Dim::Cube` image, so no further scope limit is needed here
+  // for those. Roadmap H19m added the arrayed case; only `Plain2DMS`
+  // (roadmap H19g) was supported before it.
+  if (MS && Dim != SPIRVDim2D)
     return std::nullopt;
   if (HandleTy->getIntParameter(4) != SPIRVSampledWithoutSampler)
     return std::nullopt;
@@ -589,7 +597,7 @@ classifyStorageImage2DHandle(const CallInst &Handle) {
     // one, `Dim::Cube` always needs the 3-component `Array2D` shape.
     Shape = ImageShape::Array2D;
   else if (MS)
-    Shape = ImageShape::Plain2DMS; // Roadmap H19g; Arrayed is false here.
+    Shape = Arrayed ? ImageShape::Array2DMS : ImageShape::Plain2DMS; // H19g/m.
   else
     Shape = Arrayed ? ImageShape::Array2D : ImageShape::Plain2D;
   return HandleClassification{HandleKind::StorageImage2D, 0, nullptr,
@@ -750,17 +758,18 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
 /// `load_store` shader pattern reads and writes the same binding (a
 /// copy-shader idiom), unlike every other pointer-use check in this file,
 /// which does not need to consider that. \p Shape is `Plain1D`, `Array1D`,
-/// `Plain2D`, `Array2D`, `Plain3D`, or `Plain2DMS` -- `classifyStorageImage2DHandle`
-/// never returns `Cube`/`CubeArray` for a storage image today (a storage
-/// cube handle's own `Array2D` shape is indistinguishable from an ordinary
-/// 2D array's here, roadmap H19d) -- and selects the coordinate width
-/// exactly like `hasOnlySupportedImageUses`'s own `FetchCoordWidth`.
-/// `Array1D`'s 2-component `(x, layer)` coordinate happens to share its
-/// width with `Plain2D`'s `(x, y)`, so both fall into the same `else`
-/// branch below.
+/// `Plain2D`, `Array2D`, `Plain3D`, `Plain2DMS`, or `Array2DMS` --
+/// `classifyStorageImage2DHandle` never returns `Cube`/`CubeArray` for a
+/// storage image today (a storage cube handle's own `Array2D` shape is
+/// indistinguishable from an ordinary 2D array's here, roadmap H19d) --
+/// and selects the coordinate width exactly like
+/// `hasOnlySupportedImageUses`'s own `FetchCoordWidth`. `Array1D`'s
+/// 2-component `(x, layer)` coordinate happens to share its width with
+/// `Plain2D`'s `(x, y)`, so both fall into the same `else` branch below.
 bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
                                       ImageShape Shape) {
-  unsigned CoordWidth = Shape == ImageShape::Plain1D ? 1
+  unsigned CoordWidth = Shape == ImageShape::Plain1D             ? 1
+                       : Shape == ImageShape::Array2DMS          ? 4
                        : (Shape == ImageShape::Array2D ||
                           Shape == ImageShape::Plain3D ||
                           Shape == ImageShape::Plain2DMS)
@@ -1513,15 +1522,16 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         case ImageShape::Array1D:
         case ImageShape::Plain3D:
         case ImageShape::Plain2DMS:
+        case ImageShape::Array2DMS:
           // None of these shapes is ever reached here:
           // `classifySampledImage2DHandle` (unlike
-          // `classifyStorageImage2DHandle`, roadmap H19c/H19e/H19g) never
-          // produces a `Plain1D`/`Array1D`/`Plain3D`/`Plain2DMS` shape for
-          // a *sampled* image handle -- only a storage-image handle can be
-          // 1D/3D/multisampled today.
+          // `classifyStorageImage2DHandle`, roadmap H19c/H19e/H19g/H19m)
+          // never produces a `Plain1D`/`Array1D`/`Plain3D`/`Plain2DMS`/
+          // `Array2DMS` shape for a *sampled* image handle -- only a
+          // storage-image handle can be 1D/3D/multisampled today.
           llvm_unreachable(
               "no sampled-image shape produces Plain1D/Array1D/Plain3D/"
-              "Plain2DMS");
+              "Plain2DMS/Array2DMS");
         }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
@@ -1550,20 +1560,33 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
                     : Builder.CreateExtractElement(Coord, uint64_t{1});
       // The coordinate's own array-layer/depth-slice/sample component: an
       // array layer for `Array1D` (roadmap H19e, the coordinate's 2nd
-      // component) or `Array2D` (roadmap H19b, the coordinate's 3rd
+      // component), `Array2D` (roadmap H19b, the coordinate's 3rd
+      // component), or `Array2DMS` (roadmap H19m, also the 3rd
       // component), a real depth-slice `Z` coordinate for `Plain3D`
       // (roadmap H19c, also the 3rd component), or a multisample index for
       // `Plain2DMS` (roadmap H19g, also the 3rd component,
       // `SPIRVToLLVMPatterns.cpp`'s own `Sample`-image-operand-to-
       // coordinate widening) -- distinct concepts sharing one variable
       // here, never more than one at once (`classifyStorageImage2DHandle`
-      // never returns a shape that is both arrayed and 3D/multisampled).
+      // never returns a shape that is both arrayed and 3D, nor an
+      // ordinary-vs-multisample distinction at this same component;
+      // `Array2DMS` alone needs a 4th component too, see `C3` below).
       Value *C2 = Shape == ImageShape::Array1D
                      ? Builder.CreateExtractElement(Coord, uint64_t{1})
                  : (Shape == ImageShape::Array2D ||
                     Shape == ImageShape::Plain3D ||
-                    Shape == ImageShape::Plain2DMS)
+                    Shape == ImageShape::Plain2DMS ||
+                    Shape == ImageShape::Array2DMS)
                      ? Builder.CreateExtractElement(Coord, uint64_t{2})
+                     : nullptr;
+      // `Array2DMS`'s own 4th coordinate component (roadmap H19m): the
+      // multisample index, the same concept `Plain2DMS`'s own `C2`
+      // carries for the non-arrayed case -- `Array2DMS`'s coordinate is
+      // `(x, y, layer, sample)`, one component wider than every other
+      // shape's own coordinate, since it is the only shape combining an
+      // array layer and a multisample index at once.
+      Value *C3 = Shape == ImageShape::Array2DMS
+                     ? Builder.CreateExtractElement(Coord, uint64_t{3})
                      : nullptr;
       for (User *PU : llvm::make_early_inc_range(CI->users())) {
         // `HandleKind::StorageImage2D` (roadmap H19a/H19b/H19c) accepts a
@@ -1626,6 +1649,19 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
               createStore2DMS(StoreBuilder, Env, ImageIndex, X, Y, C2, Texel,
                               Mask);
             break;
+          case ImageShape::Array2DMS:
+            // Roadmap H19m: `C2` is the array layer and `C3` is the
+            // multisample index -- `createStore2DArrayMS`/`I32` are new,
+            // dedicated call kinds (not a widened `Store2DArray`/
+            // `Store2DMS`) since neither existing kind had a spare operand
+            // slot for the other axis.
+            if (IsInteger)
+              createStore2DArrayMSI32(StoreBuilder, Env, ImageIndex, X, Y, C2,
+                                     C3, Texel, Mask);
+            else
+              createStore2DArrayMS(StoreBuilder, Env, ImageIndex, X, Y, C2, C3,
+                                  Texel, Mask);
+            break;
           case ImageShape::Cube:
           case ImageShape::CubeArray:
             llvm_unreachable(
@@ -1685,7 +1721,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           Loaded =
               IsInteger
                   ? createLoad2DArrayI32(LoadBuilder, Env, ImageIndex, X, Y,
-                                        C2, LoadBuilder.getInt32(0), Mask,
+                                        C2, LoadBuilder.getInt32(0),
+                                        LoadBuilder.getInt32(0), Mask,
                                         LI->getName())
                   : createLoad2DArray(LoadBuilder, Env, ImageIndex, X, Y,
                                       C2, LoadBuilder.getInt32(0),
@@ -1715,6 +1752,23 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
                       : createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
                                     LoadBuilder.getInt32(0), C2, Mask,
                                     LI->getName());
+          break;
+        case ImageShape::Array2DMS:
+          // Roadmap H19m: `C2` is the array layer and `C3` is the real
+          // multisample index. Unlike the write side, neither read-side
+          // runtime helper needed new vocabulary: `Load2DArray`'s own
+          // float entry point already accepted a real `Sample` operand
+          // (it just always saw `getInt32(0)` before this row); only
+          // `Load2DArrayI32` needed widening to add the same operand
+          // `Load2DArray` already had, mirroring how roadmap H19g widened
+          // `Load2DI32` to match `Load2D`.
+          Loaded = IsInteger
+                      ? createLoad2DArrayI32(LoadBuilder, Env, ImageIndex, X,
+                                            Y, C2, LoadBuilder.getInt32(0),
+                                            C3, Mask, LI->getName())
+                      : createLoad2DArray(LoadBuilder, Env, ImageIndex, X, Y,
+                                         C2, LoadBuilder.getInt32(0), C3,
+                                         Mask, LI->getName());
           break;
         case ImageShape::Cube:
         case ImageShape::CubeArray:

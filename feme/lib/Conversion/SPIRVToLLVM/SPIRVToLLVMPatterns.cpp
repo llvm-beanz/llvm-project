@@ -1928,15 +1928,20 @@ mlir::Value appendVectorLane(mlir::ConversionPatternRewriter &Rewriter,
                                              LastIndex);
 }
 
-/// Whether \p ImageType is a plain (non-arrayed), non-cube, non-3D,
-/// multisampled `Dim::2D` image -- the one multisampled shape roadmap
-/// H19g's `Sample`-image-operand-to-coordinate widening (`appendVectorLane`
-/// above) supports today; an arrayed or cube multisampled image needs a
-/// 4-component coordinate no call vocabulary or runtime helper implements
-/// yet (see Roadmap.md's H19g breakdown).
-bool isPlainMultisampled2DImage(mlir::spirv::ImageType ImageType) {
+/// Whether \p ImageType is a non-cube, non-3D, multisampled `Dim::2D`
+/// image, plain or arrayed -- the multisampled shapes roadmap H19g/H19m's
+/// `Sample`-image-operand-to-coordinate widening (`appendVectorLane`
+/// above) supports today. SPIR-V's own `Coordinate` operand for an arrayed
+/// image already carries the array layer as an ordinary coordinate
+/// component (see `SPIRVResourceLowering.cpp`'s own `Array2D`/`Array2DMS`
+/// comments) -- `appendVectorLane` needs no changes to append a `Sample`
+/// lane after it, whatever the input width; only this gate needed
+/// widening to admit the arrayed case. A cube multisampled image remains
+/// out of scope: SPIR-V disallows a multisampled `Dim::Cube` image
+/// outright (unlike `Dim::2D`, which both the plain and arrayed cases of
+/// this check cover).
+bool isMultisampled2DImage(mlir::spirv::ImageType ImageType) {
   return ImageType.getDim() == mlir::spirv::Dim::Dim2D &&
-        ImageType.getArrayedInfo() == mlir::spirv::ImageArrayedInfo::NonArrayed &&
         ImageType.getSamplingInfo() == mlir::spirv::ImageSamplingInfo::MultiSampled;
 }
 
@@ -1988,7 +1993,8 @@ bool hasExactImageOperands(
 /// (`appendVectorLane`), which `SPIRVResourceLowering.cpp`'s
 /// `classifyStorageImage2DHandle`/`lowerImageAccesses` then extract exactly
 /// like `Array2D`'s own array-layer/`Plain3D`'s own depth-slice 3rd
-/// component (`ImageShape::Plain2DMS`).
+/// component (`ImageShape::Plain2DMS`, or roadmap H19m's `Array2DMS` when
+/// the image is also arrayed).
 template <typename ImageOpTy>
 class ImageLoadPattern : public mlir::SPIRVToLLVMConversion<ImageOpTy> {
 public:
@@ -2007,9 +2013,9 @@ public:
       if (HasSample) {
         auto ImageType =
             mlir::dyn_cast<mlir::spirv::ImageType>(Op.getImage().getType());
-        if (!ImageType || !isPlainMultisampled2DImage(ImageType))
+        if (!ImageType || !isMultisampled2DImage(ImageType))
           return Rewriter.notifyMatchFailure(
-              Op, "Sample image operand only supported for a plain "
+              Op, "Sample image operand only supported for a "
                   "multisampled 2D storage image");
         if (Adaptor.getOperandArguments().size() != 1)
           return Rewriter.notifyMatchFailure(
@@ -2381,9 +2387,9 @@ public:
 };
 
 /// Converts `spirv.ImageWrite` into a store through the written location.
-/// Roadmap H19g: like `ImageLoadPattern` above, a lone `Sample` image
-/// operand is accepted for a plain multisampled 2D storage image, appended
-/// to the coordinate the same way.
+/// Roadmap H19g/H19m: like `ImageLoadPattern` above, a lone `Sample` image
+/// operand is accepted for a plain or arrayed multisampled 2D storage
+/// image, appended to the coordinate the same way.
 class ImageWritePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageWriteOp> {
 public:
@@ -2400,9 +2406,9 @@ public:
     if (HasSample) {
       auto ImageType =
           mlir::dyn_cast<mlir::spirv::ImageType>(Op.getImage().getType());
-      if (!ImageType || !isPlainMultisampled2DImage(ImageType))
+      if (!ImageType || !isMultisampled2DImage(ImageType))
         return Rewriter.notifyMatchFailure(
-            Op, "Sample image operand only supported for a plain "
+            Op, "Sample image operand only supported for a "
                 "multisampled 2D storage image");
       if (Adaptor.getOperandArguments().size() != 1)
         return Rewriter.notifyMatchFailure(

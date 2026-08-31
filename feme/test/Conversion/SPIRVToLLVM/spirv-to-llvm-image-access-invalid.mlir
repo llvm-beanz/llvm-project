@@ -20,23 +20,3 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.6, [Shader], []> {
     spirv.ReturnValue %5 : vector<4xf32>
   }
 }
-
-// -----
-
-// Roadmap H19g only widens a plain (non-arrayed) `Dim::2D` multisampled
-// storage image's own `Sample` image operand -- an *arrayed* multisampled
-// storage image still needs a 4-component coordinate no call vocabulary or
-// runtime helper implements yet (see Roadmap.md's H19g breakdown), so its
-// own `Sample` operand must still be rejected.
-
-spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
-  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, Arrayed, MultiSampled, NoSampler, Rgba32f>, UniformConstant>
-  spirv.func @read_arrayed_ms(%coord : vector<3xi32>, %sample : si32) -> vector<4xf32> "None" {
-    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, Arrayed, MultiSampled, NoSampler, Rgba32f>, UniformConstant>
-    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, Arrayed, MultiSampled, NoSampler, Rgba32f>
-    // expected-error@+1 {{failed to legalize operation 'spirv.ImageRead' that was explicitly marked illegal}}
-    %2 = spirv.ImageRead %1, %coord ["Sample"], %sample : !spirv.image<f32, Dim2D, NoDepth, Arrayed, MultiSampled, NoSampler, Rgba32f>, vector<3xi32>, si32 -> vector<4xf32>
-    spirv.ReturnValue %2 : vector<4xf32>
-  }
-}
-
