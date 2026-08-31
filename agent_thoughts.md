@@ -48673,3 +48673,75 @@ list (R8G8/R16/R16G16/R32G32-storage/packed-32-bit) to land before its
 Landed in three commits: (1) core R8 implementation + all new unit
 tests, (2) roadmap/inventory/CTS-report doc updates, (3) this
 agent_thoughts.md entry.
+
+# Session: H19f (already closed) / H19n (two-channel R8G8 storage formats)
+
+Asked to continue H19f. Checking the roadmap confirmed it was already
+fully closed (struck through) from a prior session -- nothing left to
+do there. Per the task's own "or any prerequisite work required to
+complete the H-series milestones" framing, picked up the next open item
+in the same dependency chain: H19n (split out of H19j once it narrowed
+to the single-channel R8 formats, itself a further slice of H19h's own
+remaining mandatory-extended-format-list work, all ultimately blocking
+H19i's `without_format.*` closure).
+
+Scoped the next deliverable slice of H19n: the two-channel
+`R8G8_{UNORM,SNORM,UINT,SINT}` formats, continuing straight down H19n's
+own listed order (R8G8 first, then R16/R16G16/R32G32-storage/packed-32,
+deferred).
+
+Implementation mechanically mirrored H19j's own R8 precedent almost
+exactly: 4 new `ResourceFormat` enum entries appended at the tail
+(confirmed the correct next ordinals -- 89 through 92 -- by writing a
+small Python script that walks the enum literal and counts entries in
+declaration order, rather than trusting a manual count by eye this
+time, after the previous session's numbering worked out fine but felt
+error-prone), `Format.cpp` wiring, and 8 new `FeMeRuntimeCPU.c` helpers.
+The two-byte raw value is threaded through the dispatch tables via
+`__builtin_memcpy` into/out of a `uint16_t` (matching how the existing
+4-component 16-bit-per-lane helpers already handle unaligned raw
+pointers), rather than the single-byte direct-dereference the R8
+helpers use.
+
+While editing `Format.cpp`'s two feature-flag switches, had to be
+careful this time: adding a `case` label sequence via `edit`'s
+old_str/new_str risks silently dropping the following comment/case if
+the match boundary is drawn wrong (this bit two of my own edits last
+session in `ImageSamplingTest.cpp`). Caught and fixed one instance in
+this session too, where an edit's `old_str` boundary swallowed the
+"(Roadmap E26) The mandatory-sampled..." comment immediately following
+the `R8_UNORM`/`_SNORM` case block -- restored it explicitly before
+moving on. Worth continuing to double-check `view` output immediately
+after any edit that inserts new `case` labels into an existing switch,
+since these silent comment-drops don't produce a compile error, only a
+correctness/readability regression.
+
+Verification: targeted `FeMeRuntimeCPUTests --gtest_filter=*R8*` (25/25
+pass, including all the prior R8 tests) and `FeMeVulkanTests
+--gtest_filter=FormatTest.*` (21/21 pass) before the full suite; `ninja
+check-feme` came back 2166/2225 (59 pre-existing `Unsupported`, 0
+`Failed`) -- +9 new tests, no regressions.
+
+Real Vulkan CTS: `dEQP-VK.image.load_store.with_format.*.r8g8_*` (112
+cases) came back 88 Pass (up from 0), 0 Fail, 24 `NotSupported` (the
+same shape-variant gap the R8 re-run hit, unrelated to format). The
+`load-store.txt` mustpass regression caselist (3446 cases) came back
+436 Pass (up from the H19j-era 348 baseline by exactly the +88 new
+passes), 0 Fail, 3010 `NotSupported` -- confirmed 0 regressions.
+
+Documented H19n's partial closure in `Roadmap.md` (not struck through,
+since R16/R16G16/R32G32-storage/packed-32-bit formats remain within the
+*same* row rather than being split further -- no new sibling row was
+needed this time since H19n's own scope already enumerated the
+remaining work item-by-item), updated
+`Vulkan14FeatureInventory.md`'s `shaderStorageImageExtendedFormats` row,
+and added a new "Roadmap H19n: measured impact" section to
+`VulkanCTSReport.md`. `VulkanExtensionInventory.md` needed no change.
+
+H19i itself remains blocked: it still needs the rest of H19n's own list
+(R16/R16G16/R32G32-storage/packed-32-bit formats) to land before its
+828-case `without_format.*` CTS group can be meaningfully scoped.
+
+Landed in two commits: (1) core R8G8 implementation + all new unit
+tests, (2) roadmap/inventory/CTS-report doc updates. This
+agent_thoughts.md entry is the third and final commit.
