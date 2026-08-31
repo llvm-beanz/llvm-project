@@ -37,21 +37,24 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H19m or any prerequisite work required to complete
+Can you continue working on H19i or any prerequisite work required to complete
 the H-series milestones?
 
-> **Arrayed 2D multisample storage-image read/write** -- split out of H19g/H19l
-> once both were confirmed otherwise-complete for the plain (non-arrayed) case.
-> A real probe of `dEQP-VK.image.load_store_multisample.2d_array.*` (27 cases,
-> `shaderStorageImageMultisample` temporarily forced `VK_TRUE`) confirms every
-> case fails pipeline creation with `error: failed to legalize operation
-> 'spirv.ImageWrite' ... : (!spirv.image<..., Dim2D, ..., Arrayed, MultiSampled,
-> ...>, ...)`, since `SPIRVToLLVMPatterns.cpp`'s own
-> `isPlainMultisampled2DImage` check (added by H19g) explicitly rejects any
-> `Arrayed` multisampled image. Needs a 4th coordinate component (`x`, `y`,
-> `layer`, `sample`) threaded through
-> `appendVectorLane`/`ImageShape`/`ImageCalls`/the runtime fetch-store helpers
-> -- likely a new `ImageShape::Array2DMS` mirroring `Plain2DMS`'s existing
-> sample-lane handling plus `Array2D`'s existing layer-lane handling combined --
-> and is the last row blocking an honest `shaderStorageImageMultisample =
-> VK_TRUE` flip
+> **`shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`**, split out of
+> H19f. `dEQP-VK.image.load_store.without_format.*`'s own `checkSupport` gates
+> on the per-format
+> `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` tiling-feature
+> bits (`vktImageLoadStoreTests.cpp`), which `Format.cpp` does not compute at
+> all today -- a
+> `VkFormatProperties3`/`vkGetPhysicalDeviceFormatProperties2`-only pair of bits
+> distinct from the plain `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` this project
+> already advertises. `SPIRVResourceLowering.cpp`'s own storage-image
+> classification already ignores the SPIR-V handle's compile-time `Format`
+> int-parameter entirely (confirmed: no `getIntParameter(5)` call anywhere in
+> `classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`), so a
+> `Format == Unknown` handle likely already lowers identically to a
+> declared-format one -- the real gap is the format-feature-bit advertisement
+> plus the underlying `shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`
+> device-feature bits themselves, not the compiler lowering. Needs H19h's own
+> broader format list to land first, since `without_format.*`'s 828 real CTS
+> cases exercise that same list
