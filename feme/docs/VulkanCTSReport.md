@@ -17422,3 +17422,33 @@ that reference it:
 pre-existing `Unsupported`, 0 `Failed`). `shaderStorageImageReadWithoutFormat`/
 `WriteWithoutFormat` flip to `VK_TRUE`, closing the last row split out of
 H19f.
+
+## Roadmap H7j: closure confirmation
+
+H7j itself named four feature bits (`shaderStorageImageExtendedFormats`,
+`shaderStorageImageMultisample`, `shaderStorageImageReadWithoutFormat`,
+`shaderStorageImageWriteWithoutFormat`) as blocked on a larger prerequisite
+(no `OpImageRead`/`OpImageWrite` lowering existing at all) and split that
+prerequisite into its own top-level milestone, H19. With H19's own
+shape/format/without-format/multisample sub-chains (H19a-H19o) all now
+real-CTS-verified and closed, all four bits H7j named are `VK_TRUE` in
+`PhysicalDeviceInfo.cpp`. No new code change was made this session -- this
+is a documentation-only closure of H7j (and its H19 container), confirmed
+by re-running the same two CTS groups the underlying rows already
+validated, with the build unchanged since the last session:
+
+```
+load-store.txt            (3446 cases): 1918 Pass, 0 Fail  (byte-identical to the H19i-era result)
+load-store-multisample.txt ( 252 cases):   99 Pass, 0 Fail  (up from the 81 Pass H19m's own closure recorded)
+```
+
+The multisample group's own Pass count rose from 81 to 99 purely as a side
+effect of the format-breadth work landed afterwards (H19n/H19o): more
+mandatory storage-image formats are now real, and several of them are also
+exercised by `load_store_multisample.*`'s own caselist. This is expected,
+not a new fix -- no multisample-specific code changed this session. 0
+`Fail` in both groups confirms the full H7j/H19 chain holds together with
+no interaction regressions across its own many sub-rows. See each
+individual row's own "measured impact" section above (H19f, H19g, H19h,
+H19i, H19j, H19k, H19l, H19m, H19n, H19o) for the detailed, incremental
+history of how this closure was reached.
