@@ -37,4 +37,5 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working the H-series milestones from the roadmap?
+Can you continue working on H19n or other parts of the H-series milestones from
+the roadmap?
