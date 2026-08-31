@@ -17015,3 +17015,57 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19j.qpa
 ```
+
+## Roadmap H19n: measured impact (two-channel `R8G8` storage formats)
+
+**Scope.** Continues H19j's own remaining scope (the rest of the mandatory
+`shaderStorageImageExtendedFormats` list) with the two-channel
+`R8G8_{UNORM,SNORM,UINT,SINT}` formats -- 4 new `ResourceFormat` enum
+entries, `Format.cpp` mapping/feature-bit wiring, and 8 new
+`FeMeRuntimeCPU.c` pack/unpack helpers (little-endian two-byte
+widenings of H19j's own single-channel `R8` helpers) wired into all 5
+existing dispatch tables.
+
+**Direct format group.** `dEQP-VK.image.load_store.with_format.*.r8g8_*`
+(112 cases, all shapes):
+
+```
+Passed:        88/112 (78.6%)
+Failed:        0/112 (0.0%)
+Not supported: 24/112 (21.4%)
+```
+
+Up from 0 Pass before this change. The 24 `NotSupported` cases are the
+same shape variants outside this project's existing storage-image shape
+coverage that H19j's own `r8_*` re-run also hit, unrelated to format.
+
+**Regression check.** The `load-store.txt` mustpass regression caselist
+(3446 cases):
+
+```
+Passed:        436/3446 (12.7%)
+Failed:        0/3446 (0.0%)
+Not supported: 3010/3446 (87.3%)
+```
+
+Up from the H19j-era 348/3446 baseline by exactly the +88 new R8G8
+`with_format` passes; `Failed` stays 0. **0 regressions.**
+
+**Remaining gap.** `R16_*`, `R16G16_*`, `R32G32_{UINT,SINT}`, and the
+packed 32-bit formats (`A2B10G10R10_{UNORM,UINT}_PACK32`,
+`B10G11R11_UFLOAT_PACK32`) all remain entirely unimplemented;
+`shaderStorageImageExtendedFormats` itself stays `VK_FALSE`. H19i
+remains blocked pending the rest of this list.
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                                # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.image.load_store.with_format.*.r8g8_*" --deqp-log-filename=r8g8_all.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19n.qpa
+```
