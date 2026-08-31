@@ -759,6 +759,138 @@ std::optional<SmallVector<BasicBlock *, 4>> straightChain(BasicBlock *From,
   return Chain;
 }
 
+/// Roadmap H19k: `StructurizeCFG` unconditionally routes *every* two-way
+/// region through a shared "Flow" reconvergence block, including a loop's
+/// own uniform trip-count check whenever it sits in a block distinct from
+/// the loop's latch -- the ordinary C-style `for (init; cond; ++i) { body }`
+/// shape, since `cond` and `++i` land in different blocks. That splits what
+/// `LoopLinearizer::linearizeCycle` needs to see as a single exit-check
+/// block into two: the real check, and \p BB (a candidate "Flow" block)
+/// re-deriving the identical decision from a `phi` selecting between two
+/// compile-time-constant booleans, one per predecessor -- reduced from a
+/// real failing `dEQP-VK.image.load_store_multisample.2d.*` case, whose
+/// `for (sampleNdx...)` verification loop takes exactly this shape.
+///
+/// Recognizes that redundancy narrowly and, if \p BB matches it, rewrites
+/// each of its predecessors to branch directly to whichever of \p BB's own
+/// two successors that predecessor's own constant selects -- bypassing
+/// \p BB entirely -- then erases it. Returns whether \p BB was folded away.
+///
+/// This is deliberately far narrower than a general jump-threading/
+/// `SimplifyCFG`-style fold: it requires \p BB's condition to be a `phi`
+/// located in \p BB itself with every incoming value a literal
+/// `ConstantInt` (so the fold can never accidentally erase a genuine
+/// divergent decision, only a compile-time-provable re-derivation of a
+/// decision predecessors already made), requires exactly two predecessors
+/// that resolve to \p BB's two *different* successors (so every other
+/// value `phi` in \p BB has exactly one real forwarding predecessor per
+/// successor once bypassed, with no ambiguity to resolve), and touches
+/// nothing outside \p BB and its immediate predecessors/successors -- unlike
+/// a whole-function `SimplifyCFG` pass, it cannot touch an unrelated
+/// multi-exit loop's own legitimate exit-unification blocks (e.g. an early
+/// `return` inside a loop body reconverging with the loop's normal fall-
+/// through, `loop-early-return.ll`'s shape), since those blocks' own
+/// selecting `phi` is never *entirely* constant-valued the way this one is.
+bool foldRedundantFlowBlock(BasicBlock *BB) {
+  auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
+  if (!Br)
+    return false;
+  auto *CondPN = dyn_cast<PHINode>(Br->getCondition());
+  if (!CondPN || CondPN->getParent() != BB)
+    return false;
+  if (CondPN->getNumIncomingValues() != 2)
+    return false;
+
+  BasicBlock *Preds[2];
+  BasicBlock *Targets[2];
+  for (unsigned I = 0; I < 2; ++I) {
+    auto *K = dyn_cast<ConstantInt>(CondPN->getIncomingValue(I));
+    if (!K)
+      return false; // Not every incoming value is a compile-time constant.
+    Preds[I] = CondPN->getIncomingBlock(I);
+    Targets[I] = K->isOne() ? Br->getSuccessor(0) : Br->getSuccessor(1);
+  }
+  if (Preds[0] == Preds[1] || Targets[0] == Targets[1])
+    return false; // Not a real two-way split once bypassed.
+
+  // Every other `phi` in `BB` (the loop-carried values `Cond`'s own
+  // decision was computed alongside) must have exactly these same two
+  // predecessors too, so each can be forwarded to the matching real
+  // predecessor below without ambiguity.
+  for (PHINode &PN : BB->phis())
+    if (&PN != CondPN && (PN.getNumIncomingValues() != 2 ||
+                          PN.getBasicBlockIndex(Preds[0]) < 0 ||
+                          PN.getBasicBlockIndex(Preds[1]) < 0))
+      return false;
+
+  for (unsigned I = 0; I < 2; ++I) {
+    BasicBlock *Pred = Preds[I];
+    BasicBlock *Target = Targets[I];
+    Instruction *PredTerm = Pred->getTerminator();
+    for (unsigned S = 0, SE = PredTerm->getNumSuccessors(); S != SE; ++S)
+      if (PredTerm->getSuccessor(S) == BB)
+        PredTerm->setSuccessor(S, Target);
+
+    // `Target` itself may be a pure single-predecessor, phi-less relay --
+    // `BreakCriticalEdges`'s own trampoline for the edge `BB` used to have
+    // into it, since `BB` (a `CondBrInst`) branching into a block with more
+    // than one predecessor is exactly a critical edge. Any phi actually
+    // consuming one of `BB`'s own values sits at the real merge point past
+    // any such chain of relays, keyed on whichever block in the chain is
+    // its own immediate, still-standing predecessor -- `BB` itself only if
+    // there is no relay at all.
+    BasicBlock *IncomingBlock = BB;
+    BasicBlock *Merge = Target;
+    while (Merge->phis().empty()) {
+      auto *UBr = dyn_cast<UncondBrInst>(Merge->getTerminator());
+      if (!UBr)
+        break;
+      IncomingBlock = Merge;
+      Merge = UBr->getSuccessor(0);
+    }
+    for (PHINode &MergePN : Merge->phis()) {
+      int Idx = MergePN.getBasicBlockIndex(IncomingBlock);
+      if (Idx < 0)
+        continue; // `Merge`'s own natural value, unrelated to `BB`.
+      Value *Forwarded = MergePN.getIncomingValue(Idx);
+      if (auto *ForwardedPN = dyn_cast<PHINode>(Forwarded);
+          ForwardedPN && ForwardedPN->getParent() == BB)
+        Forwarded = ForwardedPN->getIncomingValueForBlock(Pred);
+      MergePN.setIncomingValue(Idx, Forwarded);
+      if (IncomingBlock == BB)
+        MergePN.setIncomingBlock(Idx, Pred);
+      // Else `IncomingBlock` is a relay that still stands, unaffected by
+      // `BB`'s own removal below -- only the value needed fixing.
+    }
+  }
+
+  BB->eraseFromParent();
+  return true;
+}
+
+/// Repeatedly applies `foldRedundantFlowBlock` to every block \p C contains
+/// besides \p Header/\p Latch until none match, folding away as many
+/// redundant "Flow" re-derivations as this cycle happens to have (ordinarily
+/// at most one, for the single loop-exit-check shape roadmap H19k targets).
+/// Returns whether anything was folded.
+bool foldRedundantFlowBlocksInCycle(CycleInfo &CI, CycleRef C,
+                                    BasicBlock *Header, BasicBlock *Latch) {
+  bool Changed = false;
+  bool FoldedThisPass = true;
+  while (FoldedThisPass) {
+    FoldedThisPass = false;
+    for (BasicBlock &BB : *Header->getParent()) {
+      if (!CI.contains(C, &BB) || &BB == Header || &BB == Latch)
+        continue;
+      if (foldRedundantFlowBlock(&BB)) {
+        Changed = FoldedThisPass = true;
+        break; // `BB` (and the range) is invalidated; restart the scan.
+      }
+    }
+  }
+  return Changed;
+}
+
 std::optional<LoopLinearizer::ExitCheck>
 LoopLinearizer::matchExitCheck(BasicBlock &BB, BasicBlock *ExitBlock) {
   auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
@@ -834,6 +966,14 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     diagnose(F, "loop at '" + Header->getName() + "' has no latch");
     return false;
   }
+
+  // Roadmap H19k: fold away any redundant "Flow" re-derivation of a
+  // decision a predecessor already made at compile time, before looking
+  // for this cycle's own single exit-check block below -- see
+  // `foldRedundantFlowBlock`'s comment. Leaves a genuine divergent check
+  // (whose condition is a real runtime value, not a constant-selected
+  // `phi`) completely untouched.
+  foldRedundantFlowBlocksInCycle(CI, C, Header, Latch);
 
   LLVMContext &Ctx = F.getContext();
   Type *I1Ty = Type::getInt1Ty(Ctx);
@@ -933,6 +1073,36 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
     BasicBlock *CheckBlock = OtherCondBrBlocks.front();
     std::optional<ExitCheck> CheckExit = matchExitCheck(*CheckBlock, ExitBlock);
+    if (!CheckExit) {
+      // Roadmap H19k: `foldRedundantFlowBlock` above may have left
+      // `CheckBlock`'s own "exit" arm reaching `ExitBlock` only through a
+      // `BreakCriticalEdges` relay (a pure, single-predecessor trampoline
+      // with no `phi`s of its own, left behind by breaking the critical
+      // edge a redundant "Flow" block's own exit arm used to be) rather
+      // than directly -- try each of `CheckBlock`'s two successors as a
+      // candidate "exit" arm reaching `ExitBlock` via such a straight
+      // chain before giving up. The relay itself is left as dead code:
+      // `CheckExit->Br` below is always replaced with an unconditional
+      // branch to `CheckExit->StayInLoop` (a real divergent exit
+      // deactivates lanes rather than truly branching away, see below),
+      // so nothing ever reaches it at runtime once linearized.
+      auto *Br = cast<CondBrInst>(CheckBlock->getTerminator());
+      for (unsigned I = 0; I != 2; ++I) {
+        BasicBlock *Candidate = Br->getSuccessor(I);
+        if (!straightChain(Candidate, ExitBlock))
+          continue;
+        ExitCheck EC;
+        EC.Br = Br;
+        EC.Cond = Br->getCondition();
+        EC.ExitOnTrue = (I == 0);
+        EC.StayInLoop = Br->getSuccessor(1 - I);
+        if (CheckExit) {
+          CheckExit = std::nullopt; // Both arms reach it: ambiguous.
+          break;
+        }
+        CheckExit = EC;
+      }
+    }
     if (!CheckExit) {
       diagnose(F, "loop at '" + Header->getName() +
                       "' has an internal branch in '" + CheckBlock->getName() +
