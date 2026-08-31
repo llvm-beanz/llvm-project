@@ -48745,3 +48745,83 @@ H19i itself remains blocked: it still needs the rest of H19n's own list
 Landed in two commits: (1) core R8G8 implementation + all new unit
 tests, (2) roadmap/inventory/CTS-report doc updates. This
 agent_thoughts.md entry is the third and final commit.
+
+# Session: H19n (single-channel R16 storage formats)
+
+Continued H19n's own remaining `shaderStorageImageExtendedFormats`
+scope: the R8G8 slice was already landed in the prior session, so this
+session's job was to pick the next slice off H19n's own enumerated
+list. Chose the single-channel `R16_{FLOAT,UNORM,SNORM,UINT,SINT}`
+formats next, following the row's own stated order (R8G8 done,
+R16 next, then R16G16/R32G32-storage/packed-32-bit remain).
+
+Appended `R16_FLOAT`(93)/`R16_UNORM`(94)/`R16_SNORM`(95)/`R16_UINT`(96)/
+`R16_SINT`(97) at the tail of `ResourceFormat` (`RuntimeABI.h`), verified
+via the same Python enum-parsing script used last session (now the
+default verification method over manual counting). Wired
+`mapVkFormat`/`formatElementSize`/both `formatFeatureFlags` switches in
+`Format.cpp`.
+
+The interesting wrinkle this session: `R16_FLOAT` cannot follow the same
+"dedicated helper function" pattern as `UNORM`/`SNORM`/`UINT`/`SINT`.
+The existing `R16G16B16A16_FLOAT` precedent is implemented *inline* in
+the `femeRTUnpackImageTexel`/`femeRTPackImageTexel` switch bodies using
+`femeRTHalfToFloat`/`femeRTFloatToHalf`, because those two conversion
+helpers are themselves defined later in the file (after the small
+per-format pack/unpack helpers near the top). A standalone
+`femeRTUnpackR16Float`/`femeRTPackR16Float` placed alongside the other
+new `R16` helpers would have been a use-before-declaration error in C.
+So `R16_UNORM`/`_SNORM`/`_UINT`/`_SINT` got real dedicated helper
+functions (mirroring the `R8G8` two-lane widening, but single-component),
+while `R16_FLOAT`'s single-lane half-float conversion was wired directly
+into the switch cases instead, matching `R16G16B16A16_FLOAT`'s own
+precedent exactly. `femeRTPackR16Sint` shares `femeRTPackR16Uint`'s
+truncation, same signedness-sharing convention as `R8G8`.
+
+One incidental fallout from R16_UNORM landing: `ImageTest.cpp` had two
+pre-existing tests (`RejectsUnsupportedFormat`,
+`GetDeviceImageMemoryRequirementsZeroForUnsupportedFormat`) that used
+`VK_FORMAT_R16_UNORM` specifically as their own "known unmapped format"
+fixture. Once `R16_UNORM` became a real mapped format, both tests
+started failing (`vkCreateImage` no longer rejected it). Fixed by
+switching both to `VK_FORMAT_R16G16_UNORM`, which is still genuinely
+unmapped (it's part of H19n's own still-remaining `R16G16_*` slice).
+This is the same kind of "creeping format coverage invalidates a test's
+own unrelated-format placeholder" issue as any prior slice could in
+principle have hit, just the first time it actually did.
+
+Verification: targeted `FeMeRuntimeCPUTests --gtest_filter=*R16*`
+(19/19 pass) and `FeMeVulkanTests --gtest_filter=FormatTest.*` (22/22
+pass) before the full suite. Full suite initially came back with the 2
+`ImageTest.cpp` failures above; after the `VK_FORMAT_R16G16_UNORM`
+fix, `ninja check-feme` came back clean: 2177/2236 (59 pre-existing
+`Unsupported`, 0 `Failed`) -- +11 net new tests (10 runtime + 1 format,
+minus the fixture edits which added no new tests), no regressions.
+
+Real Vulkan CTS: `dEQP-VK.image.load_store.with_format.*.r16_*` (140
+cases) came back 110 Pass (up from 0), 0 Fail, 30 `NotSupported` (the
+same shape-variant gap every prior slice's own re-run hit, unrelated to
+format). The `load-store.txt` mustpass regression caselist (3446 cases)
+came back 546 Pass (up from the R8G8-era 436 baseline by exactly the
++110 new passes), 0 Fail, 2900 `NotSupported` -- confirmed 0
+regressions.
+
+Documented the R16 slice's results as a further partial-closure note
+within H19n's own existing Roadmap.md row (not struck through, same
+reasoning as the R8G8 session: the row's own scope already enumerates
+the remaining items one by one, so no new sibling row was needed).
+Updated `Vulkan14FeatureInventory.md`'s
+`shaderStorageImageExtendedFormats` row and added a new "Roadmap H19n:
+measured impact (single-channel R16 storage formats)" section to
+`VulkanCTSReport.md`. `VulkanExtensionInventory.md` needed no change.
+
+H19i itself remains blocked: `R16G16_*`/`R32G32_{UINT,SINT}`-storage/
+packed-32-bit formats are still the only items left on H19n's own list
+before `shaderStorageImageExtendedFormats` can flip `VK_TRUE` and
+H19i's 828-case `without_format.*` CTS group can be meaningfully
+scoped.
+
+Landed in two commits: (1) core R16 implementation + all new unit
+tests + the `ImageTest.cpp` fixture fix, (2) roadmap/inventory/CTS-
+report doc updates. This `agent_thoughts.md` entry is the third and
+final commit.
