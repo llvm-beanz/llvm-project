@@ -16221,3 +16221,102 @@ change needed: no `VkPhysicalDeviceFeatures` bit or extension is honestly
 flippable by this row's own shape-support-only scope alone (the four
 `shaderStorageImage*` bits H7j named all still correctly point at H19f/
 H19g now, not this row).
+
+## Roadmap H19e: measured impact
+
+**Scope.** Arrayed (`1D_ARRAY`) storage-image read/write for the same
+6-format mandatory floor H19a/H19b/H19c/H19d already cover -- the one
+dimension left out of both H19b's own array scope (`2D_ARRAY` only) and
+H19c's own non-arrayed scope (`1D`/`3D` only). `classifyStorageImage2DHandle`
+(`SPIRVResourceLowering.cpp`) previously rejected any arrayed `Dim1D`
+storage-image handle outright, via a single combined check
+(`Dim != Dim2D && Dim != DimCube && Arrayed -> reject`) that also
+(correctly) rejected arrayed `Dim3D`.
+
+**Fix.** Narrowed that check to reject only `Dim3D && Arrayed` (illegal
+in SPIR-V regardless), letting an arrayed `Dim1D` handle through to a new
+`ImageShape::Array1D` -- distinct from `Array2D`'s 3-component
+`(x, y, layer)` coordinate, since a 1D image's own fetch coordinate has
+only one spatial component to begin with, giving a 2-component
+`(x, layer)` shape (the same total width as `Plain2D`'s `(x, y)`, so the
+existing `CoordWidth`/`FetchCoordWidth` ternary's `else 2` fallback
+already covered it with no code change -- only its doc comment needed
+updating). `lowerImageAccesses`' coordinate-extraction block needed two
+changes: `Y` stays null for `Array1D` too (no spatial `Y` component,
+same as `Plain1D`), and the existing `C2` "layer/Z" slot becomes
+`Coord[1]` (not `Coord[2]`) for this shape alone, since there is no
+spatial `Y` occupying index 1 the way `Array2D`/`Plain3D` have. Both the
+load- and store-dispatch switches got a new `Array1D` case calling the
+new `createLoad1DArray*`/`createStore1DArray*` builders.
+
+Added `Load1DArray`/`Load1DArrayI32`/`Store1DArray`/`Store1DArrayI32`
+call vocabulary (`ImageCalls.h`/`.cpp`), reusing `MatchedImageCall`'s
+existing `U` (X coordinate, already used by `Load1D`) and `Layer` (array
+layer, already used by `Load2DArray`) fields rather than adding new ones.
+Added `femeRTFetchTexel1DArray`/`femeRTFetchTexel1DArrayI32`/
+`femeRTStoreTexel1DArray`/`femeRTStoreTexel1DArrayI32` runtime helpers
+(`FeMeRuntimeCPU.c`): the fetch side is a thin wrapper reusing
+`femeRTFetchTexel2D`'s own array-layer parameter (already present on
+every 2D fetch, plain or arrayed, since a plain 2D image is simply an
+arrayed one with `ArrayLayers == 1`) with `Y == 0`; the store side
+thin-wraps the existing `femeRTStoreTexel2DArray`/`I32` the same way --
+no new addressing math needed, mirroring H19c's own `Plain1D`-over-2D
+thin-wrapper precedent. Added the matching `femeCpuImageLoad1DArrayV4F32`/
+`V4I32`/`femeCpuImageStore1DArrayV4F32`/`V4I32` entry points.
+
+Finally, added `Texture1DArray` to `materializeImageDescriptor`'s
+(`CommandBuffer.cpp`) accepted-dimension switch -- the same class of gap
+H19c's own closure fixed for `Texture1D`/`Texture3D` (a real bound
+`VkImageView` silently descriptor-materializing to all-zero otherwise,
+even once the compiler/runtime lowering above is correct). Unlike
+H19c's `Texture3D` case, `Texture1DArray` needed no `Dst.Depth`
+computation change: a 1D array's own `Height`/`Depth` are already `1` via
+`Image.cpp`'s existing per-mip extent computation, and only
+`Dst.ArrayLayers` varies -- already computed correctly for every
+dimension by the pre-existing per-layer logic `Texture2DArray` shares.
+
+**Fix summary.**
+- `feme/include/feme/Transforms/CPU/ImageCalls.h`,
+  `feme/lib/Transforms/CPU/ImageCalls.cpp`: new `Load1DArray`/
+  `Load1DArrayI32`/`Store1DArray`/`Store1DArrayI32` call vocabulary.
+- `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`:
+  `classifyStorageImage2DHandle` narrowed to reject only arrayed `Dim3D`;
+  new `ImageShape::Array1D`; `lowerImageAccesses` coordinate-extraction
+  and both load/store dispatch switches widened.
+- `feme/runtime/CPU/FeMeRuntimeCPU.c`: new
+  `femeRTFetchTexel1DArray`/`I32`/`femeRTStoreTexel1DArray`/`I32` helpers
+  and `feme.cpu.image.{load,store}.1darray.v4f32`/`v4i32` entry points.
+- `feme/lib/Vulkan/CommandBuffer.cpp`: `Texture1DArray` added to
+  `materializeImageDescriptor`'s accepted-dimension switch.
+
+**Test.** 7 new unit tests in `SPIRVResourceLoweringTest.cpp`
+(`LowersArray1DStorageImageWriteToImageStoreArray`,
+`LowersIntegerArray1DStorageImageWriteToImageStoreArrayV4I32`,
+`LowersArray1DStorageImageLoadStoreToBothCalls` -- plus a renamed
+`LeavesAnArrayed3DStorageImageHandleAlone` covering the one rejection
+that remains, replacing the now-stale `LeavesAnArrayed1DStorageImageHandleAlone`
+negative test that asserted the old, pre-fix rejection), 6 in
+`ImageSamplingTest.cpp` (`Load1DArrayReadsRequestedLayer`,
+`Load1DArrayOutOfRangeLayerReadsZero`, `Load1DArrayI32ReadsRequestedLayer`,
+`Store1DArrayWritesRequestedLayer`, `Store1DArrayI32WritesIntegerTexel`,
+`Store1DArrayOutOfRangeLayerIsANoOp`).
+
+**`ninja check-feme`** (assertions + ccache): 2119/2178, 0 `Failed`, 59
+pre-existing `Unsupported`.
+
+**Real CTS re-run.** `dEQP-VK.image.load_store.with_format.1d_array.*`
+(156 cases): 24 Pass, 0 Fail, 132 `NotSupported` (up from 0 Pass, all 24
+mandatory-format cases failing at `vkCreateComputePipelines` with
+`VK_ERROR_INITIALIZATION_FAILED` before this fix). The 24 passes are
+exactly the 6-format mandatory floor's own plain/`_linear`-tiling x
+multi-layer/`_single_layer` cases; the remaining 132 `NotSupported` are
+every format outside the floor -- correct, honest behavior unrelated to
+this row.
+
+**Remaining gap.** None for this row's own scope -- H19e is now fully
+closed. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+confirmed no change needed: no `VkPhysicalDeviceFeatures` bit or
+extension is honestly flippable by this row's own coordinate-shape-only
+scope alone (the same reasoning as H19b/H19c/H19d's own closures). H19f
+(format/configuration breadth) and H19g (`shaderStorageImageMultisample`)
+remain the last open H19 follow-ons.
