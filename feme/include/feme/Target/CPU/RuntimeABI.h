@@ -257,6 +257,18 @@ enum class ResourceFormat : uint32_t {
   R16G16_SNORM,
   R16G16_UINT,
   R16G16_SINT,
+
+  // (Roadmap H19o) The final two mandatory `shaderStorageImageExtendedFormats`
+  // formats: the signed siblings of `R10G10B10A2_{UNORM,UINT}` above
+  // (`VK_FORMAT_A2B10G10R10_{SNORM,SINT}_PACK32`), appended at the enum's
+  // own tail for the same hard-coded-switch-case reason as every prior
+  // slice. Same MSB-down `A2B10G10R10` bit layout as their unsigned
+  // siblings; `_SNORM` reads/writes each field as a signed fixed-point
+  // value in `[-1.0, 1.0]`, `_SINT` reads/writes each field as a raw
+  // signed integer (bit-for-bit identical storage to `_UINT`, per every
+  // prior `_UINT`/`_SINT` pair in this project).
+  R10G10B10A2_SNORM,
+  R10G10B10A2_SINT,
 };
 
 /// Whether \p Format is one of the ASTC block-compressed formats above.

@@ -111,6 +111,13 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::R10G10B10A2_UNORM;
   case VK_FORMAT_A2B10G10R10_UINT_PACK32:
     return ResourceFormat::R10G10B10A2_UINT;
+  // (Roadmap H19o) The signed siblings of the two `A2B10G10R10` formats
+  // above -- the final two formats in the real Vulkan spec's own
+  // mandatory `shaderStorageImageExtendedFormats` list.
+  case VK_FORMAT_A2B10G10R10_SNORM_PACK32:
+    return ResourceFormat::R10G10B10A2_SNORM;
+  case VK_FORMAT_A2B10G10R10_SINT_PACK32:
+    return ResourceFormat::R10G10B10A2_SINT;
   case VK_FORMAT_D16_UNORM:
     return ResourceFormat::D16_UNORM;
   case VK_FORMAT_D32_SFLOAT:
@@ -254,6 +261,10 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::R11G11B10_FLOAT:
   case ResourceFormat::R10G10B10A2_UNORM:
   case ResourceFormat::R10G10B10A2_UINT:
+  // (Roadmap H19o) `R10G10B10A2_{SNORM,SINT}`: packed into the same
+  // single 4-byte word as their unsigned siblings above.
+  case ResourceFormat::R10G10B10A2_SNORM:
+  case ResourceFormat::R10G10B10A2_SINT:
   case ResourceFormat::D32_FLOAT:
   case ResourceFormat::D24_UNORM_S8_UINT:
     return 4;
@@ -562,6 +573,10 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::R16G16B16A16_SNORM:
   case ResourceFormat::R11G11B10_FLOAT:
   case ResourceFormat::R10G10B10A2_UNORM:
+  // (Roadmap H19o) `R10G10B10A2_SNORM`: the signed-normalized sibling of
+  // `R10G10B10A2_UNORM` above, decoded by `femeRTUnpackImageTexel`'s own
+  // `R10G10B10A2_SNORM` case.
+  case ResourceFormat::R10G10B10A2_SNORM:
   case ResourceFormat::B8G8R8A8_UNORM:
   case ResourceFormat::A8_UNORM:
   case ResourceFormat::A1B5G5R5_UNORM:
@@ -603,6 +618,10 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::R16G16B16A16_UINT:
   case ResourceFormat::R16G16B16A16_SINT:
   case ResourceFormat::R10G10B10A2_UINT:
+  // (Roadmap H19o) `R10G10B10A2_SINT`: the signed-integer sibling of
+  // `R10G10B10A2_UINT` above, bit-for-bit identical storage (see
+  // `femeRTUnpackR10G10B10A2Uint`'s own comment).
+  case ResourceFormat::R10G10B10A2_SINT:
   case ResourceFormat::R32G32B32A32_UINT:
   case ResourceFormat::R32G32B32A32_SINT:
   // (Roadmap H19j) `R8_UINT`/`_SINT`: the single-channel analogues of
@@ -724,6 +743,16 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // own texel-buffer conversion path and reused here as-is.
   case ResourceFormat::R8G8B8A8_SNORM:
   case ResourceFormat::R8G8B8A8_SINT:
+    Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    break;
+  // (Roadmap H19o) `R10G10B10A2_{SNORM,SINT}`: the final two formats in
+  // the real Vulkan spec's own mandatory `shaderStorageImageExtendedFormats`
+  // list, backed by a new `femeRTUnpackR10G10B10A2Snorm`/
+  // `femeRTPackR10G10B10A2Snorm` helper pair (`_SNORM`) and reused
+  // `femeRTUnpackR10G10B10A2Uint`/`femeRTPackR10G10B10A2Uint` dispatch
+  // (`_SINT`, bit-for-bit identical storage to `_UINT`).
+  case ResourceFormat::R10G10B10A2_SNORM:
+  case ResourceFormat::R10G10B10A2_SINT:
     Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     break;
   default:

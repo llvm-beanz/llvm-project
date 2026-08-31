@@ -1350,6 +1350,30 @@ TEST_F(ImageSamplingTest, LoadFetchesR10G10B10A2Unorm) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f);
 }
 
+TEST_F(ImageSamplingTest, LoadFetchesR10G10B10A2Snorm) {
+  // Roadmap H19o: the signed-normalized sibling of
+  // `LoadFetchesR10G10B10A2Unorm` above, same MSB-down bit layout but
+  // each field a signed fixed-point value. R = 0x1FF (511, the maximum
+  // positive 10-bit signed value) decodes to 1.0; G = 0x200 (-512, the
+  // most negative 10-bit signed value) decodes to -512/511, which clamps
+  // to -1.0 per the Vulkan spec's own SNORM conversion; B = 0 decodes to
+  // 0.0; A = 1 (the maximum positive 2-bit signed value) decodes to 1.0.
+  uint32_t Storage[1][1] = {{(1u << 30) | (0x200u << 10) | 0x1FFu}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R10G10B10A2_SNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], -1.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
 TEST_F(ImageSamplingTest, LoadFetchesR11G11B10Float) {
   // An all-zero-bits texel decodes to (0, 0, 0, 1.0): every field's
   // exponent and mantissa are zero, i.e. positive zero, and this format
@@ -2099,6 +2123,34 @@ TEST_F(ImageSamplingTest, LoadI32FetchesR10G10B10A2Uint) {
   EXPECT_EQ(Out[1], 256);
   EXPECT_EQ(Out[2], 512);
   EXPECT_EQ(Out[3], 3);
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesR10G10B10A2Sint) {
+  // Roadmap H19o: the same raw bit pattern
+  // `LoadI32FetchesR10G10B10A2Uint` above reads (A = 0b11, B = 0x200,
+  // G = 0x100, R = 1), but this time decoded as signed fields -- R's top
+  // bit (bit 9) is clear, so it stays +1 the same as the UINT case; G's
+  // top bit is also clear (0x100 = bit 8 only), so it stays +256 too; but
+  // B's top bit (bit 9, since B = 0x200) is set, sign-extending to -512
+  // (not +512 like the UINT case above); and A's both bits are set
+  // (0b11), sign-extending the 2-bit field to -1 (not +3). This is the
+  // exact asymmetry `femeRTUnpackR10G10B10A2Sint`'s own comment discusses
+  // -- reusing `R10G10B10A2_UINT`'s zero-extending unpack would have
+  // silently produced the wrong (positive) values for B and A here.
+  uint32_t Storage[1][1] = {{(3u << 30) | (512u << 20) | (256u << 10) | 1u}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R10G10B10A2_SINT,
+      Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_EQ(Out[0], 1);
+  EXPECT_EQ(Out[1], 256);
+  EXPECT_EQ(Out[2], -512);
+  EXPECT_EQ(Out[3], -1);
 }
 
 TEST_F(ImageSamplingTest, LoadI32OutOfRangeCoordinateReadsZero) {
@@ -2906,6 +2958,58 @@ TEST_F(ImageSamplingTest, StoreWritesTexelIntoR10G10B10A2Uint) {
   EXPECT_EQ((Raw >> 10) & 0x3FFu, 512u);
   EXPECT_EQ((Raw >> 20) & 0x3FFu, 256u);
   EXPECT_EQ((Raw >> 30) & 0x3u, 1u);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR10G10B10A2Snorm) {
+  // Roadmap H19o: the signed-normalized sibling of
+  // `StoreWritesTexelIntoR10G10B10A2UnormQuantized` above. R out-of-range
+  // (clamps to 1.0 -> round(1.0 * 511) == 511); G = -1.0 -> round(-1.0 *
+  // 511) == -511, whose 10-bit two's-complement bit pattern is 0x201; B =
+  // 0.0 -> 0; A = -1.0 -> round(-1.0 * 1) == -1, whose 2-bit two's-
+  // complement bit pattern is 0b11.
+  uint32_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R10G10B10A2_SNORM, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {2.0f, -1.0f, 0.0f, -1.0f};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  uint32_t Raw = Storage[0][0];
+  EXPECT_EQ(Raw & 0x3FFu, 511u);
+  EXPECT_EQ((Raw >> 10) & 0x3FFu, 0x201u);
+  EXPECT_EQ((Raw >> 20) & 0x3FFu, 0u);
+  EXPECT_EQ((Raw >> 30) & 0x3u, 0x3u);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR10G10B10A2Sint) {
+  // Roadmap H19o: confirms the pack side is genuinely shared with
+  // `R10G10B10A2_UINT` (a negative signed lane truncates to the same bit
+  // pattern a large-enough unsigned lane would) -- -512 truncates to
+  // 0x200 in the 10-bit B field, and -1 truncates to 0b11 in the 2-bit A
+  // field, the same raw bit patterns
+  // `LoadI32FetchesR10G10B10A2Sint`'s own unpack side reads back as -512
+  // and -1 respectively.
+  uint32_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R10G10B10A2_SINT, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  FeMeTestV4I32 Texel = {1, 256, -512, -1};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  uint32_t Raw = Storage[0][0];
+  EXPECT_EQ(Raw & 0x3FFu, 1u);
+  EXPECT_EQ((Raw >> 10) & 0x3FFu, 256u);
+  EXPECT_EQ((Raw >> 20) & 0x3FFu, 0x200u);
+  EXPECT_EQ((Raw >> 30) & 0x3u, 0x3u);
 }
 
 // (Roadmap H19n) `R8G8B8A8_SNORM`/`_SINT`: a real mandatory

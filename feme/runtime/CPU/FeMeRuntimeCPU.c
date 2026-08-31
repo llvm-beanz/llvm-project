@@ -1512,6 +1512,11 @@ femeRTImageFormatElementSize(uint32_t Format) {
   case 101: // R16G16_UINT
   case 102: // R16G16_SINT
     return 4;
+  // (Roadmap H19o) `R10G10B10A2_{SNORM,SINT}`: packed into the same
+  // single 4-byte word as their unsigned siblings (cases 24/25 above).
+  case 103: // R10G10B10A2_SNORM
+  case 104: // R10G10B10A2_SINT
+    return 4;
   default:
     return 0;
   }
@@ -1654,6 +1659,50 @@ femeRTPackR10G10B10A2Unorm(FemeRTv4f32 Value) {
   uint32_t I1 = (uint32_t)__builtin_roundf(C1 * 1023.0f);
   uint32_t I2 = (uint32_t)__builtin_roundf(C2 * 1023.0f);
   uint32_t I3 = (uint32_t)__builtin_roundf(C3 * 3.0f);
+  return (I0 & 0x3FFu) | ((I1 & 0x3FFu) << 10) | ((I2 & 0x3FFu) << 20) |
+         ((I3 & 0x3u) << 30);
+}
+
+// Unpacks a `R10G10B10A2_SNORM` value (`VK_FORMAT_A2B10G10R10_SNORM_PACK32`:
+// same MSB-down `A2B10G10R10` bit layout as `R10G10B10A2_UNORM` above, but
+// each field is a signed fixed-point value) into a `<4 x float>` in
+// `[-1.0, 1.0]`, per the Vulkan spec's SNORM conversion (the same
+// `max(c / (2^(bits-1) - 1), -1.0)` rule `femeRTUnpackR8G8B8A8Snorm` uses,
+// just with 10-bit R/G/B fields (sign-extended from bit 9, scaled by 511)
+// and a 2-bit A field (sign-extended from bit 1, scaled by 1)) -- roadmap
+// H19o, the final mandatory `shaderStorageImageExtendedFormats` format.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR10G10B10A2Snorm(uint32_t Raw) {
+  // Sign-extend each 10-bit field by left-shifting its sign bit to bit 31
+  // then arithmetic-shifting back down, the same trick used elsewhere in
+  // this file for narrower-than-32-bit signed fields.
+  int32_t R10 = ((int32_t)(Raw << 22)) >> 22;
+  int32_t G10 = ((int32_t)(Raw << 12)) >> 22;
+  int32_t B10 = ((int32_t)(Raw << 2)) >> 22;
+  int32_t A2 = ((int32_t)Raw) >> 30;
+  FemeRTv4f32 V;
+  V[0] = __builtin_fmaxf((float)R10 / 511.0f, -1.0f);
+  V[1] = __builtin_fmaxf((float)G10 / 511.0f, -1.0f);
+  V[2] = __builtin_fmaxf((float)B10 / 511.0f, -1.0f);
+  V[3] = __builtin_fmaxf((float)A2 / 1.0f, -1.0f);
+  return V;
+}
+
+// (Roadmap H19o) The inverse of `femeRTUnpackR10G10B10A2Snorm` above:
+// clamps each component to `[-1.0, 1.0]`, scales R/G/B to `[-511, 511]`
+// and A to `[-1, 1]`, and packs the four rounded fields into one
+// `uint32_t` in the same MSB-down `A2B10G10R10` bit layout the unpack
+// side reads.
+__attribute__((always_inline)) static uint32_t
+femeRTPackR10G10B10A2Snorm(FemeRTv4f32 Value) {
+  float C0 = __builtin_fminf(__builtin_fmaxf(Value[0], -1.0f), 1.0f);
+  float C1 = __builtin_fminf(__builtin_fmaxf(Value[1], -1.0f), 1.0f);
+  float C2 = __builtin_fminf(__builtin_fmaxf(Value[2], -1.0f), 1.0f);
+  float C3 = __builtin_fminf(__builtin_fmaxf(Value[3], -1.0f), 1.0f);
+  uint32_t I0 = (uint32_t)(int32_t)__builtin_roundf(C0 * 511.0f);
+  uint32_t I1 = (uint32_t)(int32_t)__builtin_roundf(C1 * 511.0f);
+  uint32_t I2 = (uint32_t)(int32_t)__builtin_roundf(C2 * 511.0f);
+  uint32_t I3 = (uint32_t)(int32_t)__builtin_roundf(C3 * 1.0f);
   return (I0 & 0x3FFu) | ((I1 & 0x3FFu) << 10) | ((I2 & 0x3FFu) << 20) |
          ((I3 & 0x3u) << 30);
 }
@@ -1813,6 +1862,11 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackR10G10B10A2Unorm(Raw);
   }
+  case 103: { // R10G10B10A2_SNORM (roadmap H19o)
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR10G10B10A2Snorm(Raw);
+  }
   case 26: { // B8G8R8A8_UNORM
     uint32_t Raw;
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
@@ -1947,6 +2001,42 @@ femeRTPackR10G10B10A2Uint(FemeRTv4i32 Texel) {
          ((I3 & 0x3u) << 30);
 }
 
+// Unpacks a `R10G10B10A2_SINT` value
+// (`VK_FORMAT_A2B10G10R10_SINT_PACK32`: same MSB-down `A2B10G10R10` bit
+// layout as `R10G10B10A2_UINT` above, but each field is a signed integer)
+// into a `<4 x i32>` by sign-extending each field -- roadmap H19o. Unlike
+// `femeRTPackR10G10B10A2Uint`'s pack side below (shared as-is by both
+// formats, since truncating a two's-complement value to N bits produces
+// the same bit pattern regardless of signedness), the *unpack* side does
+// need its own signed variant here: zero-extending a field whose top bit
+// is set would silently produce the wrong (positive rather than
+// negative) value, exactly the same `_UINT`/`_SINT` asymmetry
+// `femeRTUnpackR8G8B8A8Uint`/`Sint` already show above (sign-extend using
+// the same left-shift/arithmetic-right-shift technique
+// `femeRTUnpackR10G10B10A2Snorm` uses, just without that function's own
+// `[-1.0, 1.0]` float scaling).
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackR10G10B10A2Sint(uint32_t Raw) {
+  FemeRTv4i32 V;
+  V[0] = ((int32_t)(Raw << 22)) >> 22;
+  V[1] = ((int32_t)(Raw << 12)) >> 22;
+  V[2] = ((int32_t)(Raw << 2)) >> 22;
+  V[3] = ((int32_t)Raw) >> 30;
+  return V;
+}
+
+// The inverse of `femeRTUnpackR10G10B10A2Sint`: truncating a two's-
+// complement value to its field width produces the same bit pattern
+// `femeRTPackR10G10B10A2Uint` already computes, so this shares that
+// implementation exactly -- kept as a separate, identically named-per-
+// format entry point for symmetry with the unpack side above, where the
+// sign extension does differ (mirroring `femeRTPackR8G8B8A8Sint`'s own
+// wrapper-around-`Uint` precedent).
+__attribute__((always_inline)) static uint32_t
+femeRTPackR10G10B10A2Sint(FemeRTv4i32 Texel) {
+  return femeRTPackR10G10B10A2Uint(Texel);
+}
+
 // Unpacks one texel of `Format` at `Ptr` into a `<4 x i32>`, or all-zero
 // for a format this table doesn't know (guarded by
 // `femeRTImageFormatElementSize`'s own 0 return at every call site, so this
@@ -2013,6 +2103,14 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
     uint32_t Raw;
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackR10G10B10A2Uint(Raw);
+  }
+  case 104: { // R10G10B10A2_SINT (roadmap H19o): unlike the pack side
+              // below, the unpack side needs real sign-extension, not a
+              // reuse of `R10G10B10A2_UINT`'s own zero-extending unpack
+              // (see `femeRTUnpackR10G10B10A2Sint`'s own comment for why).
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR10G10B10A2Sint(Raw);
   }
   case 87: // R8_UINT (roadmap H19j)
     return femeRTUnpackR8Uint(*Ptr);
@@ -2157,6 +2255,12 @@ femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
     __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
     return;
   }
+  case 103: { // R10G10B10A2_SNORM (roadmap H19o, packed into one 4-byte
+              // word).
+    uint32_t Raw = femeRTPackR10G10B10A2Snorm(Texel);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
   case 14: { // R8G8B8A8_SNORM (roadmap H19n): a real mandatory
              // `shaderStorageImageExtendedFormats` entry, not just
              // covered by this project's own texel-buffer conversion
@@ -2251,6 +2355,16 @@ femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
   case 25: { // R10G10B10A2_UINT (roadmap H19n, packed into one 4-byte
              // word).
     uint32_t Raw = femeRTPackR10G10B10A2Uint(Texel);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
+  case 104: { // R10G10B10A2_SINT (roadmap H19o): pack truncates to the
+              // same bit pattern regardless of signedness, so this uses
+              // `femeRTPackR10G10B10A2Sint` (itself a thin wrapper
+              // around `Uint`'s implementation) -- see
+              // `femeRTUnpackR10G10B10A2Sint`'s own comment for why the
+              // *unpack* side above does need a real, separate helper.
+    uint32_t Raw = femeRTPackR10G10B10A2Sint(Texel);
     __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
     return;
   }

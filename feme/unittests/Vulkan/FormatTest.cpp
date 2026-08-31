@@ -128,6 +128,20 @@ TEST(FormatTest, MapsTwoChannelR16G16Formats) {
     EXPECT_EQ(formatElementSize(Format), 4u);
 }
 
+TEST(FormatTest, MapsSignedPacked32BitFormats) {
+  // Roadmap H19o: the final two mandatory
+  // `shaderStorageImageExtendedFormats` formats -- the signed siblings of
+  // `R10G10B10A2_{UNORM,UINT}`, same MSB-down `A2B10G10R10` bit layout,
+  // packed into the same single 4-byte word.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A2B10G10R10_SNORM_PACK32),
+           ResourceFormat::R10G10B10A2_SNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A2B10G10R10_SINT_PACK32),
+           ResourceFormat::R10G10B10A2_SINT);
+  for (ResourceFormat Format :
+       {ResourceFormat::R10G10B10A2_SNORM, ResourceFormat::R10G10B10A2_SINT})
+    EXPECT_EQ(formatElementSize(Format), 4u);
+}
+
 TEST(FormatTest, RejectsUnsupportedFormat) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGB_UNORM_BLOCK), std::nullopt);
   EXPECT_EQ(mapVkFormat(VK_FORMAT_UNDEFINED), std::nullopt);
@@ -371,7 +385,9 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         ResourceFormat::R16_SNORM,
         // Roadmap H19n: `R16G16_FLOAT`/`_UNORM`/`_SNORM`.
         ResourceFormat::R16G16_FLOAT, ResourceFormat::R16G16_UNORM,
-        ResourceFormat::R16G16_SNORM}) {
+        ResourceFormat::R16G16_SNORM,
+        // Roadmap H19o: `R10G10B10A2_SNORM`.
+        ResourceFormat::R10G10B10A2_SNORM}) {
     VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
@@ -393,7 +409,9 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         // Roadmap H19n: `R16_UINT`/`_SINT`.
         ResourceFormat::R16_UINT, ResourceFormat::R16_SINT,
         // Roadmap H19n: `R16G16_UINT`/`_SINT`.
-        ResourceFormat::R16G16_UINT, ResourceFormat::R16G16_SINT}) {
+        ResourceFormat::R16G16_UINT, ResourceFormat::R16G16_SINT,
+        // Roadmap H19o: `R10G10B10A2_SINT`.
+        ResourceFormat::R10G10B10A2_SINT}) {
     VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
@@ -448,12 +466,13 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   // `A2B10G10R10_{UNORM,UINT}_PACK32`/`B10G11R11_UFLOAT_PACK32`, and
   // `R8G8B8A8_{SNORM,SINT}` (a real mandatory entry discovered via the
   // Vulkan spec's own full mandatory list, distinct from
-  // `R8G8B8A8_{UNORM,UINT}` staying unclaimed) -- further slices of the
-  // full
-  // `shaderStorageImageExtendedFormats` list; every other format is still
-  // left unset (`R8G8B8A8_UNORM` included), matching
-  // `shaderStorageImageExtendedFormats` staying unclaimed (see Roadmap.md's
-  // H19j and its own follow-on rows).
+  // `R8G8B8A8_{UNORM,UINT}` staying unclaimed); roadmap H19o adds the
+  // final two, `R10G10B10A2_{SNORM,SINT}`, completing the real Vulkan
+  // spec's own full mandatory `shaderStorageImageExtendedFormats` list.
+  // Every other format is still left unset (`R8G8B8A8_UNORM` included),
+  // even though the mandatory list itself is now complete -- see
+  // `PhysicalDeviceInfo.cpp` for the actual device-feature-bit flip and
+  // Roadmap.md's H19o row for the CTS re-run that justifies it.
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32_FLOAT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32B32A32_FLOAT) &
@@ -525,6 +544,13 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R10G10B10A2_UNORM) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R10G10B10A2_UINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  // (Roadmap H19o) `R10G10B10A2_{SNORM,SINT}`: the final two formats in
+  // the real Vulkan spec's own mandatory `shaderStorageImageExtendedFormats`
+  // list -- with these, the full mandatory list is now complete.
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R10G10B10A2_SNORM) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R10G10B10A2_SINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   // (Roadmap H19n) `R8G8B8A8_SNORM`/`_SINT`: a real mandatory entry
   // distinct from `R8G8B8A8_UNORM`/`_UINT` staying unset.

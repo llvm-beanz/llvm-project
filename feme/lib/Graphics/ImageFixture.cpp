@@ -971,6 +971,13 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "r10g10b10a2-unorm";
   case ResourceFormat::R10G10B10A2_UINT:
     return "r10g10b10a2-uint";
+  // (Roadmap H19o) `R10G10B10A2_{SNORM,SINT}`: same rationale as
+  // `R8_{SNORM,SINT}` above -- no clear-color/texel fixture support
+  // exists for them yet, but they still need a name for diagnostics.
+  case ResourceFormat::R10G10B10A2_SNORM:
+    return "r10g10b10a2-snorm";
+  case ResourceFormat::R10G10B10A2_SINT:
+    return "r10g10b10a2-sint";
   case ResourceFormat::D16_UNORM:
     return "d16-unorm";
   case ResourceFormat::D32_FLOAT:
