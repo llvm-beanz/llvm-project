@@ -17127,3 +17127,66 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19n_r16.qpa
 ```
+
+## Roadmap H19n: measured impact (two-channel `R16G16` storage formats)
+
+**Scope.** Continues H19n's own remaining scope with the two-channel
+`R16G16_{FLOAT,UNORM,SNORM,UINT,SINT}` formats -- 5 new `ResourceFormat`
+enum entries, `Format.cpp` mapping/feature-bit wiring, and new
+`FeMeRuntimeCPU.c` pack/unpack support: dedicated array-based
+(`const uint16_t Raw[2]`/`uint16_t Out[2]`) helpers for
+`UNORM`/`SNORM`/`UINT`/`SINT` (following the `R16G16B16A16_*`
+multi-16-bit-lane precedent rather than `R8G8`'s single-packed-scalar
+precedent), while `FLOAT` is again wired directly into the unpack/pack
+switch tables using `femeRTHalfToFloat`/`femeRTFloatToHalf` twice per
+texel, mirroring `R16_FLOAT`'s own prior asymmetry for the same
+use-before-declaration reason. A pre-existing pair of `ImageTest.cpp`
+tests that used `VK_FORMAT_R16G16_UNORM` as their "known unmapped
+format" fixture (set there by the `R16` slice) needed to switch to
+`VK_FORMAT_R16G16B16_UNORM` instead, since `R16G16_UNORM` is now
+mapped -- the third session in a row this exact pattern has recurred.
+
+**Direct format group.**
+`dEQP-VK.image.load_store.with_format.*.r16g16_*` (140 cases, all
+shapes):
+
+```
+Passed:        110/140 (78.6%)
+Failed:        0/140 (0.0%)
+Not supported: 30/140 (21.4%)
+```
+
+Up from 0 Pass before this change. The 30 `NotSupported` cases are the
+same shape variants outside this project's existing storage-image shape
+coverage that the prior `R8`/`R8G8`/`R16` re-runs also hit, unrelated to
+format.
+
+**Regression check.** The `load-store.txt` mustpass regression caselist
+(3446 cases):
+
+```
+Passed:        656/3446 (19.0%)
+Failed:        0/3446 (0.0%)
+Not supported: 2790/3446 (81.0%)
+```
+
+Up from the `R16`-era 546/3446 baseline by exactly the +110 new
+`R16G16` `with_format` passes; `Failed` stays 0. **0 regressions.**
+
+**Remaining gap.** `R32G32_{UINT,SINT}` and the packed 32-bit formats
+(`A2B10G10R10_{UNORM,UINT}_PACK32`, `B10G11R11_UFLOAT_PACK32`) remain
+entirely unimplemented; `shaderStorageImageExtendedFormats` itself
+stays `VK_FALSE`. H19i remains blocked pending the rest of this list.
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                                # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.image.load_store.with_format.*.r16g16_*" --deqp-log-filename=r16g16_all.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19n_r16g16.qpa
+```
