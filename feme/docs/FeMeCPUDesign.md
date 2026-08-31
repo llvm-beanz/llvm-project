@@ -494,6 +494,25 @@ where it's discussed, and summarized here:
   its own) is still diagnosed and left alone: that is `DiamondFlattener`'s
   own pre-existing "empty diamond arm" narrowing (see two bullets above),
   not a loop-linearizer-specific gap.
+- (Roadmap H19k) `StructurizeCFG` unconditionally splits a loop's own
+  uniform trip-count check into two `CondBr` blocks whenever that check is
+  not already fused with the latch -- the ordinary
+  `for (init; cond; ++i) { body }` shape: the check itself, plus a "Flow"
+  block re-deriving the identical decision via a `phi` of two compile-time-
+  constant `i1`s. `LoopLinearizer` (`Linearize.cpp`) now recognizes and
+  folds away exactly this redundant re-derivation (`foldRedundantFlowBlock`,
+  called from `linearizeCycle` before the header/latch/exit-check search
+  runs) whenever the `CondBr` condition is a `PHINode` in that same block
+  with exactly 2 incoming values that are both literal `ConstantInt`s
+  selecting the block's two different successors -- a syntactic,
+  conservative precondition chosen so it can never fold away a genuine
+  divergent decision (whose condition is always a real runtime value, not
+  a phi of pure literal constants). This is a narrower, more targeted
+  extension than the whole-pipeline `SimplifyCFGPass` insertion first
+  attempted for H19k and abandoned (it also unconditionally tail-merges
+  same-terminator-type blocks, corrupting the genuinely different
+  `loop-early-return.ll` multi-exit shape) -- see "Roadmap H19k: measured
+  impact" in `VulkanCTSReport.md`.
 - **As of this milestone, masking was implemented only for the canonical
   `feme.cpu.resource.*` calls** (which already carry a mask operand -- see
   `feme::cpu::ResourceCalls`), by rewriting that operand from the constant

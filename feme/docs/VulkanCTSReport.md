@@ -16582,3 +16582,107 @@ own original scope) is now complete for the plain (non-arrayed) 2D
 case; what remains is (1) the control-flow-linearization prerequisite
 (split into new roadmap row H19k) and (2) a future arrayed-2D
 multisample follow-on row once H19k closes.
+
+## Roadmap H19k: measured impact (`feme-cpu-linearize`'s Flow-block loop fold)
+
+**Root cause, precisely.** A real IR reduction of the exact CTS shader
+(`glslangValidator` -> `feme-translate` -> `feme-opt`, stage by stage)
+confirmed LLVM's own `StructurizeCFGPass` (run inside `feme-cpu-prepare`)
+unconditionally splits a loop's own uniform trip-count check into two
+separate `CondBr` blocks whenever that check is not already fused with
+the latch -- the ordinary `for (init; cond; ++i) { body }` shape: the
+check itself, plus a "Flow" block that re-derives the *identical*
+decision via a `phi` of two compile-time-constant `i1`s. `feme-cpu-
+linearize` rejected this shape outright.
+
+**Approach abandoned first.** Adding `SimplifyCFGPass` to `feme-cpu-
+prepare`'s own pipeline (between `StructurizeCFGPass` and
+`BreakCriticalEdgesPass`) does fold the redundant Flow-phi-of-constants
+pattern, but also unconditionally runs `tailMergeBlocksWithSimilarFunctionTerminators`
+(`llvm/lib/Transforms/Scalar/SimplifyCFGPass.cpp`, not gated by any
+`SimplifyCFGOptions` toggle), which corrupted a genuinely different,
+legitimate two-exit-destination loop shape
+(`Transforms/CPU/CFG/loop-early-return.ll`), violating
+`feme::cpu::verifyStructured`'s "cycle has exactly one exit block"
+invariant. Reverted `Prepare.cpp` entirely; no whole-pipeline pass
+change landed.
+
+**The actual fix.** A narrow, dedicated fold directly inside
+`feme::cpu::LoopLinearizer` (`Linearize.cpp`): `foldRedundantFlowBlock`
+recognizes only a block whose `CondBr` condition is a `PHINode`
+physically in that block with exactly 2 incoming values that are both
+literal `ConstantInt`s mapping to the block's two different successors
+-- a syntactic, conservative precondition that can never misfire on
+real divergent control flow (whose condition is always a genuine
+runtime value). Confirmed `loop-early-return.ll`'s own analogous guard
+(fed by a *nested*, non-constant phi) correctly fails to match and
+stays untouched. `Prepare.cpp` needed no change at all in the final
+fix.
+
+**`ninja check-feme`** (assertions + ccache): 2136/2195, 0 `Failed`, 59
+pre-existing `Unsupported` -- up from H19g's own 2134/2193 by 2 net new
+tests (`loop-uniform-check-separate-structurized.ll`,
+`loop-value-diamond-check-separate-structurized.ll`, both new lit
+tests; `loop-break-structurized.ll` reverted to its pre-existing
+content). All 249 `FeMeTransformsCPUTests` gtest cases pass. The full
+`Transforms/CPU/` lit suite (139 tests, including the
+`loop-early-return.ll` regression guard) passes with zero failures.
+
+**Real CTS re-run.** With `shaderStorageImageMultisample` again
+temporarily forced `VK_TRUE` purely to probe the real shader path
+(reverted before landing), a re-run of
+`dEQP-VK.image.load_store_multisample.2d.*` (84 cases):
+
+```
+Passed:        0/84 (0.0%)
+Failed:        27/84 (32.1%)
+Not supported: 57/84 (67.9%)
+```
+
+Same raw totals as H19g's own baseline, but the *cause* of all 27
+failures changed completely: **0 of the 27 still hit the "internal
+branch in 'Flow'" error** -- H19k's own targeted bug is fully fixed.
+All 27 now hit one, different, later error instead:
+
+```
+feme-cpu-simdize: function 'main' has a divergent vector value ''
+used outside a supported insertelement-chain/resource-store/
+extractelement/select/shufflevector/phi/elementwise/comparison/
+reduce/vectorizable-intrinsic pattern; component decomposition is
+not yet supported for this use (roadmap milestone 7 deviation)
+```
+
+A pre-existing `feme-cpu-simdize` scope limit, not anything this row's
+own linearizer fold introduced. Split into new roadmap row H19l.
+
+**Regression check.** The `load-store.txt` mustpass regression
+caselist (H19a-k's own combined regression suite, 3446 cases), run
+after reverting the feature-bit probe:
+
+```
+Passed:        260/3446 (7.5%)
+Failed:        0/3446 (0.0%)
+Not supported: 3186/3446 (92.5%)
+```
+
+Byte-identical to H19g's own recorded baseline. **0 regressions, 0 new
+passes** (expected: this row is a pure control-flow-linearizer
+prerequisite fix, gated entirely behind the still-`VK_FALSE`
+`shaderStorageImageMultisample` bit for every real mustpass case).
+
+**Remaining gap.** `shaderStorageImageMultisample` stays `VK_FALSE`:
+H19l's own newly-discovered `feme-cpu-simdize` gap still blocks every
+real case in this group.
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                                # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.image.load_store_multisample.2d.*" --deqp-log-filename=ms_h19k.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19k.qpa
+```
