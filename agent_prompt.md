@@ -37,24 +37,17 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H19i or other prerequisites of the H-series
+Can you continue working on H7j or other prerequisites of the H-series
 milestones from the roadmap?
 
-> **`shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`**, split out of
-> H19f. `dEQP-VK.image.load_store.without_format.*`'s own `checkSupport` gates
-> on the per-format
-> `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` tiling-feature
-> bits (`vktImageLoadStoreTests.cpp`), which `Format.cpp` does not compute at
-> all today -- a
-> `VkFormatProperties3`/`vkGetPhysicalDeviceFormatProperties2`-only pair of bits
-> distinct from the plain `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` this project
-> already advertises. `SPIRVResourceLowering.cpp`'s own storage-image
-> classification already ignores the SPIR-V handle's compile-time `Format`
-> int-parameter entirely (confirmed: no `getIntParameter(5)` call anywhere in
-> `classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`), so a
-> `Format == Unknown` handle likely already lowers identically to a
-> declared-format one -- the real gap is the format-feature-bit advertisement
-> plus the underlying `shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`
-> device-feature bits themselves, not the compiler lowering. Needs H19h's own
-> broader format list to land first, since `without_format.*`'s 828 real CTS
-> cases exercise that same list
+> **`shaderStorageImageExtendedFormats`/`shaderStorageImageMultisample`/`shaderStorageImageReadWithoutFormat`/`shaderStorageImageWriteWithoutFormat`**:
+> no `OpImageRead`/`OpImageWrite` lowering was found anywhere in the transform
+> path for a storage image at all, so these four format/configuration bits have
+> no shader-side storage-image read/write implementation to be honest about yet
+> -- a larger prerequisite than a narrow format restriction to lift. Needs
+> storage-image read/write lowering built first (likely its own, larger
+> milestone), with these four bits as a follow-on once it exists (split out as
+> its own top-level milestone, H19, rather than nested further under H7 -- H19a
+> now closes the base Plain2D/mandatory-format-floor read/write case; H19d
+> specifically tracks this row's own remaining four feature bits, which need
+> format/configuration breadth beyond what H19a itself claims)
