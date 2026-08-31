@@ -491,19 +491,36 @@ classifySampledImage2DHandle(const CallInst &Handle) {
 }
 
 /// Returns \p Handle's classification if its type is a plain, arrayed, 1D,
-/// or 3D, non-multisampled storage-image handle (`Sampled == 2`, roadmap
-/// H19a/H19b/H19c): the counterpart of `classifySampledImage2DHandle`
-/// above for `OpImageRead`/`OpImageWrite` rather than a filtered sample.
-/// A cube storage image, a multisampled one, or an arrayed 1D one, is
-/// left as unstarted follow-on work (see Roadmap.md's H19d/H19e
-/// breakdown), so every other shape returns `std::nullopt` here, exactly
-/// like `classifySampledImage2DHandle`'s own multisample/other-dimension
-/// rejections. Unlike the sampled-image classifier above, there is no
-/// `Cube`/`CubeArray` case to distinguish, so `Dim`/`Arrayed` map directly
-/// to `Plain1D`/`Plain2D`/`Array2D`/`Plain3D` with no `Cube` branch
-/// needed; `Arrayed` is only meaningful for `Dim::2D` here (SPIR-V
-/// disallows an arrayed `Dim::3D` image outright, and an arrayed `Dim::1D`
-/// one is rejected below as roadmap H19e's own remaining scope).
+/// 3D, cube, or cube-array, non-multisampled storage-image handle
+/// (`Sampled == 2`, roadmap H19a/H19b/H19c/H19d): the counterpart of
+/// `classifySampledImage2DHandle` above for `OpImageRead`/`OpImageWrite`
+/// rather than a filtered sample. A multisampled storage image or an
+/// arrayed 1D one is left as unstarted follow-on work (see Roadmap.md's
+/// H19e/H19g breakdown), so every other shape returns `std::nullopt` here,
+/// exactly like `classifySampledImage2DHandle`'s own multisample rejection.
+///
+/// Unlike the sampled-image classifier above, a storage cube/cube-array
+/// handle maps to `ImageShape::Array2D` here, *not* a distinct
+/// `Cube`/`CubeArray` shape: a filtered cube *sample* addresses its texel
+/// by a 3-component direction vector that a real cube-face-selection
+/// algorithm resolves (`createSampleCube`'s own scope), but a storage cube
+/// image's `imageLoad`/`imageStore` (GLSL's `imageCube`/`imageCubeArray`)
+/// addresses its texel by an ordinary `(x, y, face)` (or, for
+/// `imageCubeArray`, an already-flattened `layer * 6 + face`) triple --
+/// structurally identical to `Array2D`'s own `(x, y, layer)` triple, and
+/// consistent with this project's existing "a cube(array) view is purely a
+/// view-level convention over consecutive array layers" treatment
+/// (`CommandBuffer.cpp`'s `materializeImageDescriptor`, roadmap H7b).
+/// Confirmed via a real CTS shader dump
+/// (`dEQP-VK.image.load_store.with_format.cube.r32_uint`): `imageStore(...,
+/// pos, imageLoad(u_image0, ivec3(63-pos.x, pos.y, pos.z)))` where `pos.z`
+/// is a bare face index, not a direction-vector component. So `Dim`/
+/// `Arrayed` map directly to `Plain1D`/`Plain2D`/`Array2D`/`Plain3D`, with
+/// `Dim::Cube` folded into the `Array2D`/`Plain2D` branch alongside
+/// `Dim::2D` rather than needing its own case; `Arrayed` is only
+/// meaningful for `Dim::2D`/`Dim::Cube` here (SPIR-V disallows an arrayed
+/// `Dim::3D` image outright, and an arrayed `Dim::1D` one is rejected below
+/// as roadmap H19e's own remaining scope).
 std::optional<HandleClassification>
 classifyStorageImage2DHandle(const CallInst &Handle) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
@@ -515,10 +532,11 @@ classifyStorageImage2DHandle(const CallInst &Handle) {
     return std::nullopt;
   // [Dim, Depth, Arrayed, MS, Sampled, Format].
   unsigned Dim = HandleTy->getIntParameter(0);
-  if (Dim != SPIRVDim1D && Dim != SPIRVDim2D && Dim != SPIRVDim3D)
+  if (Dim != SPIRVDim1D && Dim != SPIRVDim2D && Dim != SPIRVDim3D &&
+      Dim != SPIRVDimCube)
     return std::nullopt;
-  bool Arrayed = HandleTy->getIntParameter(2) != 0; // Roadmap H19b.
-  if (Dim != SPIRVDim2D && Arrayed)
+  bool Arrayed = HandleTy->getIntParameter(2) != 0; // Roadmap H19b/H19d.
+  if (Dim != SPIRVDim2D && Dim != SPIRVDimCube && Arrayed)
     return std::nullopt; // Arrayed 1D: roadmap H19e. Arrayed 3D: illegal.
   if (HandleTy->getIntParameter(3) != 0) // MS: not yet supported.
     return std::nullopt;
@@ -533,6 +551,13 @@ classifyStorageImage2DHandle(const CallInst &Handle) {
     Shape = ImageShape::Plain1D;
   else if (Dim == SPIRVDim3D)
     Shape = ImageShape::Plain3D;
+  else if (Dim == SPIRVDimCube)
+    // A cube's own face index always occupies the coordinate's third
+    // component, even when `Arrayed == 0` (a plain, non-array cube still
+    // has 6 faces to select between) -- unlike `Dim::2D`, where `Arrayed`
+    // itself is what turns a 2-component coordinate into a 3-component
+    // one, `Dim::Cube` always needs the 3-component `Array2D` shape.
+    Shape = ImageShape::Array2D;
   else
     Shape = Arrayed ? ImageShape::Array2D : ImageShape::Plain2D;
   return HandleClassification{HandleKind::StorageImage2D, 0, nullptr,

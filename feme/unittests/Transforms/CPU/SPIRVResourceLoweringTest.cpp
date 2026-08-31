@@ -1888,10 +1888,18 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.3d.v4i32"));
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesACubeStorageImageHandleAlone) {
-  // A cube storage image (`Dim == DimCube == 3`) is still rejected --
-  // H19c only widens `Dim` acceptance to `{Dim1D, Dim2D, Dim3D}`, not
-  // `DimCube` (roadmap H19d's scope).
+// Roadmap H19d: a cube storage image (`Dim == DimCube == 3`) now
+// classifies as `HandleKind::StorageImage2D` with `ImageShape::Array2D`
+// (not a distinct `Cube` shape) -- confirmed via a real CTS shader dump
+// that a storage cube image's `imageLoad`/`imageStore` addresses its
+// texel by an ordinary `(x, y, face)` triple, structurally identical to
+// `Array2D`'s own `(x, y, layer)` triple, unlike a *sampled* cube's
+// direction-vector addressing. So its `OpImageWrite` lowers to the same
+// `feme.cpu.image.store.2darray.v4f32` an arrayed 2D storage image already
+// uses (roadmap H19b), with no new call vocabulary or runtime helper
+// needed.
+
+TEST(SPIRVResourceLoweringTest, LowersCubeStorageImageWriteToImageStoreArray) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main(<3 x i32> %coord, <4 x float> %texel) {
@@ -1912,7 +1920,115 @@ TEST(SPIRVResourceLoweringTest, LeavesACubeStorageImageHandleAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.store.3d.v4f32"));
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darray.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersIntegerCubeStorageImageWriteToImageStoreArrayV4I32) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<3 x i32> %coord, <4 x i32> %texel) {
+      %img = call target("spirv.Image", i32, 3, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", i32, 3, 0, 0, 0, 2, 0) %img, <3 x i32> %coord)
+      store <4 x i32> %texel, ptr %p
+      ret void
+    }
+    declare target("spirv.Image", i32, 3, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", i32, 3, 0, 0, 0, 2, 0), <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darray.v4i32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersCubeStorageImageLoadStoreToBothCalls) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<3 x i32> %coord) {
+      %img = call target("spirv.Image", float, 3, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 3, 0, 0, 0, 2, 0) %img, <3 x i32> %coord)
+      %v = load <4 x float>, ptr %p
+      store <4 x float> %v, ptr %p
+      ret void
+    }
+    declare target("spirv.Image", float, 3, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 3, 0, 0, 0, 2, 0), <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.load.2darray.v4f32"));
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darray.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersCubeArrayStorageImageWriteToImageStoreArray) {
+  // `Dim == DimCube` with `Arrayed == 1` (`imageCubeArray`'s own
+  // already-flattened `layer * 6 + face` coordinate) lowers exactly the
+  // same way a non-arrayed cube storage image does above -- `Arrayed`
+  // does not change the coordinate shape here, only what value ends up
+  // in its third component.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<3 x i32> %coord, <4 x float> %texel) {
+      %img = call target("spirv.Image", float, 3, 0, 1, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 3, 0, 1, 0, 2, 0) %img, <3 x i32> %coord)
+      store <4 x float> %texel, ptr %p
+      ret void
+    }
+    declare target("spirv.Image", float, 3, 0, 1, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 3, 0, 1, 0, 2, 0), <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darray.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesAMultisampledCubeStorageImageHandleAlone) {
+  // A multisampled cube storage image is still rejected -- H19d only
+  // widens the `Dim` axis to accept `DimCube`, not `MS` (roadmap H19g's
+  // scope).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<3 x i32> %coord, <4 x float> %texel) {
+      %img = call target("spirv.Image", float, 3, 0, 0, 1, 2, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 3, 0, 0, 1, 2, 0) %img, <3 x i32> %coord)
+      store <4 x float> %texel, ptr %p
+      ret void
+    }
+    declare target("spirv.Image", float, 3, 0, 0, 1, 2, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 3, 0, 0, 1, 2, 0), <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.store.2darray.v4f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
