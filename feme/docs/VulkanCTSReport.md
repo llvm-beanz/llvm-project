@@ -16820,3 +16820,140 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19l.qpa
 ```
+
+## Roadmap H19m: measured impact (arrayed 2D multisample storage-image read/write)
+
+**Root cause, precisely.** H19l's own closure left one real gap
+documented in its own report: probing the *full*
+`dEQP-VK.image.load_store_multisample.*` group with
+`shaderStorageImageMultisample` forced `VK_TRUE` found all 27
+remaining `Failed` cases confined to `2d_array.*`, every one failing
+pipeline creation at `spirv.ImageWrite` MLIR legalization for an
+`Arrayed`+`MultiSampled` `Dim2D` image -- `SPIRVToLLVMPatterns.cpp`'s
+own `isPlainMultisampled2DImage` gate (added by H19g) explicitly
+rejected any `Arrayed` multisampled image, a scope narrowing H19g
+itself documented at the time.
+
+**The actual fix.** Widened the addressing/call-vocabulary chain to
+carry a 4th coordinate component (`x`, `y`, `layer`, `sample`):
+
+- A new `ImageShape::Array2DMS` enum value
+  (`SPIRVResourceLowering.cpp`), and a loosened
+  `classifyStorageImage2DHandle` gate (`if (MS && Dim != SPIRVDim2D)`,
+  dropping the old `|| Arrayed` exclusion) that assigns this new shape
+  whenever both `Arrayed` and `MS` are set.
+- On the **read** side: `femeRTFetchTexel2D`/`femeRTFetchTexel2DI32`
+  (the runtime's shared offset-computation helpers) already
+  independently accepted both a `Layer` and a `Sample` parameter via
+  one generalized formula, and `computeSubresourceLayouts` (`Image.
+  cpp`) already computed correct `SlicePitch`/`RowPitch` for any
+  array/sample combination -- so this side needed **zero runtime
+  layout changes**. `Load2DArrayI32` (the only caller lacking a real
+  `Sample` operand) was widened in place to add one, mirroring H19g's
+  own earlier `Load2DI32` widening; the float-channel `Load2DArray`
+  path needed no changes at all (it already threaded a real, if
+  previously-always-`0`, `Sample` argument end-to-end).
+- On the **write** side, neither `Store2DArray` nor `Store2DMS` had a
+  spare operand slot for the other axis, so two new dedicated call
+  kinds were added instead of widening in place -- mirroring H19g's
+  own precedent of adding new kinds only when no existing kind's ABI
+  can safely absorb the new operand: `ImageCallKind::Store2DArrayMS`/
+  `Store2DArrayMSI32` (`ImageCalls.h`/`.cpp`, including the `AllKinds`
+  table entry, added deliberately carefully given H19l's own bug
+  class), and two new runtime entry points
+  `femeCpuImageStore2DArrayMSV4F32`/`V4I32` (`FeMeRuntimeCPU.c`,
+  backed by new static helpers `femeRTStoreTexel2DArrayMS`/`I32`
+  combining `Layer`+`Sample` bounds-checking and offset math).
+- `SPIRVToLLVMPatterns.cpp`'s own `isPlainMultisampled2DImage` gate was
+  renamed `isMultisampled2DImage` and loosened to drop its `NonArrayed`
+  restriction; `appendVectorLane` itself needed no changes, since
+  SPIR-V's own `Coordinate` operand for an `Arrayed`+`MultiSampled`
+  `Dim2D` image is already a 3-wide `(x, y, layer)` vector before
+  `Sample` is appended as a 4th lane by this already-fully-generic
+  helper.
+
+**New test coverage.** Three `SPIRVResourceLoweringTest.cpp` cases
+(`LowersArrayedMultisampledStorageImageWriteToImageStoreArrayMSV4F32`,
+`LowersIntegerArrayedMultisampledStorageImageWriteToImageStoreArrayMSV4I32`,
+`LowersArrayedMultisampledStorageImageLoadStoreToBothCalls`),
+replacing the old negative test
+(`LeavesAnArrayedMultisampledStorageImageHandleAlone`) that used to
+assert rejection of exactly this now-supported case; three new
+`ImageCallsTest.cpp` cases (`MatchesStore2DArrayMSCall`,
+`MatchesStore2DArrayMSI32Call`,
+`MatchesLoad2DArrayI32CallWithRealSample`); four new/updated
+`ImageSamplingTest.cpp` runtime tests
+(`StoreArrayMSWritesTexelIntoTheAddressedLayerAndSampleOnly`,
+`StoreArrayMSWritesTexelIntoR32G32B32A32Uint`,
+`StoreArrayMSOutOfBoundsLayerOrSampleIsANoOp`,
+`Load2DArrayI32ReadsRequestedLayerAndSample`), plus a widened existing
+`Load2DArrayI32ReadsRequestedLayer` call site. A new positive lit test
+block `read_write_arrayed_ms` was added to `spirv-to-llvm-image-
+access-multisample.mlir` (4-wide coordinate, `CHECK` assertions for
+the widened runtime call names); the old negative block in
+`spirv-to-llvm-image-access-invalid.mlir` was removed.
+
+**`ninja check-feme`** (assertions + ccache): 2148/2207, 0 `Failed`, 59
+pre-existing `Unsupported` -- up from H19l's own 2139/2198 by exactly
+9 net new tests, 0 regressions.
+
+**Real CTS re-run.** With `shaderStorageImageMultisample` now
+permanently `VK_TRUE`, a re-run of the *full*
+`dEQP-VK.image.load_store_multisample.*` group (252 cases):
+
+```
+Passed:        81/252 (32.1%)
+Failed:        0/252 (0.0%)
+Not supported: 171/252 (67.9%)
+```
+
+**All 27 of H19l's own previously-`Failed` `2d_array.*` cases now
+`Pass`, 0 `Failed` anywhere in the group.** Isolating the
+`2d_array.*` subset alone (168 cases) confirms this row's own specific
+contribution:
+
+```
+Passed:        54/168 (32.1%)
+Failed:        0/168 (0.0%)
+Not supported: 114/168 (67.9%)
+```
+
+54 = the net new passing cases (up from 0 pre-H19m). The remaining 171
+`NotSupported` across the full group are honestly outside today's
+storage-image mandatory format floor (`r8g8b8a8_{unorm,snorm,uint,
+sint}`, `a8_unorm`, and sample counts beyond the rasterizer's existing
+8-sample ceiling) -- the same, already-tracked H19a/H19f/H19h/R33/C4b
+gaps H19l's own report already documented, not anything new in this
+row's own scope. With 0 real, in-scope failures left anywhere in the
+group, `shaderStorageImageMultisample` flips permanently to `VK_TRUE`
+(`PhysicalDeviceInfo.cpp`) -- the last row in the H19g/H19k/H19l/H19m
+chain.
+
+**Regression check.** The `load-store.txt` mustpass regression
+caselist (3446 cases), run after the permanent feature-bit flip:
+
+```
+Passed:        260/3446 (7.5%)
+Failed:        0/3446 (0.0%)
+Not supported: 3186/3446 (92.5%)
+```
+
+Byte-identical to H19l's own recorded baseline. **0 regressions** --
+flipping `shaderStorageImageMultisample` on does not newly gate any
+`checkSupport` path this broader caselist exercises differently.
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                                # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.image.load_store_multisample.*" --deqp-log-filename=ms_all_h19m.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.image.load_store_multisample.2d_array.*" --deqp-log-filename=ms_array_h19m.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19m.qpa
+```
