@@ -49348,3 +49348,148 @@ worth picking up next if continuing the H7 cluster specifically. The
 `*_with_adjacency` topology gap surfaced by this session's own CTS re-run
 is not yet tracked as its own roadmap row and may be worth filing if
 picked up.
+
+# UBSan check-feme failures: SPIRVImporter misaligned load, and 21 non-reproducing StoreWritesTexelInto* SEGVs
+
+## The report
+
+This session's task handed me a fresh `ubsan-errors.txt` (1860 lines) at the
+repo root, from a macOS `build-dbg` tree I don't have access to
+(`/Users/cbieneman/dev/llvm-project/build-dbg/...`). Scanning it for actual
+`runtime error: ...` diagnostics (as opposed to bare crash logs) turned up
+exactly **one** genuine UBSan-instrumented failure:
+`SPIRVImporterTest.RejectsMalformedBinary` hit `llvm/include/llvm/ADT/
+SmallVector.h:524:53: runtime error: load of misaligned address ... for type
+'const unsigned int *', which requires 4 byte alignment`. The other 21
+`FAIL:` blocks were all `ImageSamplingTest.StoreWritesTexelInto*` variants
+(`R8Sint`, `R16UnormQuantized`, etc.), every one crashing with a bare `SEGV
+on unknown address 0x000000000000 (pc 0x000000000000 ...)` and **no**
+preceding UBSan diagnostic line at all -- a fundamentally different failure
+signature from the one real bug.
+
+## Building an actual UBSan configuration (again)
+
+No `build-ubsan/` directory existed this time either (matching the pattern
+in the two earlier "UBSan check-feme failures" entries above). Same recipe
+as before applied cleanly:
+`sudo apt-get install libclang-rt-18-dev` (host Clang 18/aarch64 UBSan
+runtime archives), then
+```
+cmake -G Ninja ../llvm -DLLVM_ENABLE_PROJECTS="clang;feme;mlir" \
+  -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_USE_SANITIZER=Undefined \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+  -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
+  -DFEME_VULKAN_XML=/home/dev/dev/vulkan-headers/registry/vk.xml \
+  -DVulkan_INCLUDE_DIR=/home/dev/dev/vulkan-headers/include
+```
+Two new wrinkles versus the prior session's recipe, both Vulkan-header
+staleness, not sanitizer-related: the system `/usr/share/vulkan/registry/
+vk.xml` is missing `VK_KHR_line_rasterization` (needs `FEME_VULKAN_XML`
+pointed at the newer `/home/dev/dev/vulkan-headers/` checkout), and even
+with that fixed, CMake's `find_package(Vulkan)` was still picking up the
+stale system `/usr/include/vulkan/vulkan_core.h` (1.3-era, missing
+`VkPipelineRobustnessBufferBehavior`/`VK_INDEX_TYPE_UINT8`/etc.) for actual
+header includes -- needed `Vulkan_INCLUDE_DIR` set explicitly too, matching
+what the main `build/`'s `CMakeCache.txt` already had configured.
+
+## The one real bug: reproduces, root-caused, fixed
+
+`SPIRVImporter::import()` did:
+```cpp
+auto RawBinary = llvm::ArrayRef(
+    reinterpret_cast<const uint32_t *>(Buffer.getBufferStart()),
+    Buffer.getBufferSize() / sizeof(uint32_t));
+```
+`Buffer` is an `llvm::MemoryBufferRef` wrapping an arbitrary caller-supplied
+byte range -- `RejectsMalformedBinary` constructs one straight from a 4-byte
+string-literal-backed `StringRef`, which has no alignment guarantee beyond
+1 byte. `reinterpret_cast`-ing that raw pointer to `const uint32_t *` and
+reading through it (which `stripNonSemanticExtInst`'s `SmallVector::append`
+does internally) is undefined behavior on any target where an unaligned
+load actually traps; aarch64/x86_64 tolerate it silently (just slower),
+which is exactly why this had never been caught without UBSan.
+
+Fixed by reading each word through `llvm::support::endian::
+read32<llvm::endianness::native>` (an alignment-safe memcpy-based read, the
+standard LLVM idiom for this exact situation), copying into a
+`SmallVector<uint32_t>` -- whose own heap allocation is naturally
+word-aligned -- before handing it to `stripNonSemanticExtInst` unchanged.
+Verified in isolation: `SPIRVImporterTest.RejectsMalformedBinary` under the
+fresh UBSan build now runs clean (no diagnostic, `[ OK ]`). Full
+`ninja check-feme` on that same UBSan build: **2209/2268, 0 Failed**. Also
+re-ran full `check-feme` on the regular (non-sanitized) assertions+ccache
+`build/` directory with the identical fix applied: same **2209/2268,
+0 Failed** -- no regression in the normal build/test flow.
+
+## The 21 `StoreWritesTexelInto*` SEGVs: investigated, does not reproduce here
+
+Ran `FeMeRuntimeCPUTests --gtest_filter="*StoreWritesTexelInto*"` in
+isolation against the from-scratch UBSan build: **all 34 matching tests
+pass cleanly**, no crash, no UBSan diagnostic. This matches the established
+pattern from the two earlier "UBSan check-feme failures" entries in this
+file: a macOS-reported crash, from a `build-dbg` tree this environment has
+no access to, that simply does not reproduce on a genuine from-scratch
+Linux/aarch64 UBSan build of the current source.
+
+The crash signature itself is telling and different in kind from the one
+real bug: `pc = 0x0`/`address 0x0`, with **no** preceding `runtime error:
+...` line -- the signature of jumping through a null function pointer, not
+a UBSan-instrumented check firing. Both `ImageSamplingTest.cpp`'s and
+`RuntimeCPUTest.cpp`'s `resolve<FnTy>` helpers JIT-resolve a runtime
+function's address via `Engine->getFunctionAddress(...)` (legacy MCJIT,
+used only by these test harnesses, not by feme's production JIT path) and
+call straight through the result with **no null check at all** -- so if
+MCJIT ever fails to resolve/finalize a symbol on some host/toolchain
+combination (plausible causes: a stale ccache/ORC artifact, a
+platform-specific MCJIT relocation quirk, or straightforward flakiness in
+the reporting environment), the *only* possible outcome is exactly this
+uninformative `pc=0x0` segfault, on any platform, not just macOS.
+
+Tried to push further with `valgrind --track-origins=yes` against the same
+filtered test binary (the technique that successfully found a real,
+non-UBSan-caught use-after-free in an earlier "Use-after-free" entry
+above), hoping to catch any latent issue Linux's allocator happens to mask.
+Impractical here: MCJIT-generated code running under valgrind's own JIT
+sat for 10+ minutes without producing any output at all (valgrind's binary
+translation of the LLVM ORC/MCJIT-compiled machine code, invoked through
+gtest's usual startup path, appears to make no meaningful progress in a
+reasonable time budget), so this avenue was abandoned rather than left to
+run indefinitely.
+
+Given (a) a genuine, correctly-configured, from-scratch UBSan build
+reproduces the one real bug byte-for-byte but not a single one of the 21
+SEGVs, and (b) the crash signature is consistent with a null-function-
+pointer call rather than any UBSan-detected pattern, I'm treating this as
+non-reproducing on this platform/toolchain, consistent with the established
+pattern in this file. Since a null-checked JIT resolution costs nothing and
+directly targets the exact failure mode reported (turning any recurrence,
+here or elsewhere, into an immediately diagnosable assertion instead of a
+bare crash), I added `assert(Addr && "MCJIT failed to resolve a runtime
+function address")` to both `resolve<FnTy>` helpers as a cheap defensive
+improvement, even though the underlying non-reproducing crash itself
+couldn't be root-caused further.
+
+## CTS impact
+
+This fix is purely in `SPIRVImporter::import()`'s handling of malformed/
+misaligned input -- real CTS-supplied SPIR-V modules are always emitted by
+a real compiler (glslang/DXC) and are word-aligned in practice, so there is
+no expected CTS-observable behavior change. Spot-checked anyway: re-ran
+`dEQP-VK.image.load_store.with_format.*.r8_*` (112 cases, the same slice
+exercising the `ImageSamplingTest`-adjacent store code this session touched
+defensively) against the live `feme-vulkan` ICD -- **88 Pass, 0 Fail, 24
+NotSupported**, byte-identical to the already-recorded H19j baseline, 0
+regressions. No `VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` changes needed: no feature bit, extension, or
+CTS pass/fail count changes as a result of this fix, consistent with how
+the two earlier UBSan-fix sessions in this file also made no such doc
+changes for pure bug fixes outside the roadmap-milestone framework.
+`Roadmap.md` likewise needs no changes for the same reason.
+
+## Commit breakdown
+
+1. `[feme] Fix UBSan misaligned-load in SPIRVImporter::import` (the real fix).
+2. `[feme] Assert on null MCJIT-resolved function addresses in runtime tests`
+   (defensive hardening for the non-reproducing crash class).
+3. This file.
