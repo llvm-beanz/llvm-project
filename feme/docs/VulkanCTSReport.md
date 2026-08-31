@@ -16401,3 +16401,73 @@ H19h (the rest of the mandatory `shaderStorageImageExtendedFormats`
 list) and H19i (the without-format format-feature-bit work, plus the two
 device-feature bits themselves). `Vulkan14FeatureInventory.md` updated to
 point at these new rows instead of H19f.
+
+## Roadmap H19h: measured impact
+
+**Scope.** The rest of the mandatory `shaderStorageImageExtendedFormats`
+list, split out of H19f once it narrowed to `R16G16B16A16_{SFLOAT,UINT,
+SINT}` only. Investigation found `R16G16B16A16_UNORM`/`_SNORM` already
+existed as `ResourceFormat` enum values -- `mapVkFormat` (`Format.cpp`)
+already mapped both real `VkFormat`s to them -- but neither was
+implemented at the runtime level at all: `femeRTImageFormatElementSize`
+(`FeMeRuntimeCPU.c`) had no case for either format's numeric code, so
+every read through either decoded all-zero (the "unmodeled format"
+default), and neither was advertised for sampling
+(`VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT`) at all -- a strictly larger gap
+than H19f's own `_SFLOAT`/`_UINT`/`_SINT` siblings, which were already
+readable before that row started (H19f's own gap was write-side only).
+
+**Fix.** Added `femeRTImageFormatElementSize` cases for both formats (8
+bytes each, matching the existing `_FLOAT`/`_UINT`/`_SINT` 4-component
+16-bit-per-channel siblings). Added
+`femeRTUnpackR16G16B16A16Unorm`/`Snorm` and their pack-side inverses
+`femeRTPackR16G16B16A16Unorm`/`Snorm` (`FeMeRuntimeCPU.c`) -- the
+16-bit-per-component analogues of the existing
+`femeRTUnpackR8G8B8A8Unorm`/`Snorm`/`femeRTPackR8G8B8A8Unorm`/`Snorm`
+helpers, quantizing to/from `[0, 65535]` (UNORM) or `[-32767, 32767]`
+(SNORM, `-32768` clamping to `-1.0` on decode, matching the Vulkan
+spec's own asymmetric SNORM convention and this project's existing
+8-bit SNORM precedent). Wired both new formats into
+`femeRTUnpackImageTexel`/`femeRTPackImageTexel`'s dispatch switches.
+Added both formats to `Format.cpp`'s sampled-image feature switch (with
+`_FILTER_LINEAR_BIT`, since both are normalized types like their
+`_FLOAT` sibling) and its storage-image feature switch.
+
+**Fix summary.**
+- `feme/runtime/CPU/FeMeRuntimeCPU.c`: new
+  `femeRTUnpackR16G16B16A16Unorm`/`Snorm`/`femeRTPackR16G16B16A16Unorm`/
+  `Snorm` helpers; `femeRTImageFormatElementSize`/
+  `femeRTUnpackImageTexel`/`femeRTPackImageTexel` widened.
+- `feme/lib/Vulkan/Format.cpp`: sampled-image and storage-image feature
+  switches both widened to cover `R16G16B16A16_{UNORM,SNORM}`.
+
+**Test.** 4 new unit tests in `ImageSamplingTest.cpp`
+(`LoadFetchesR16G16B16A16Unorm`, `LoadFetchesR16G16B16A16Snorm`,
+`StoreWritesTexelIntoR16G16B16A16UnormQuantized`,
+`StoreWritesTexelIntoR16G16B16A16SnormQuantized`), 2 widened in
+`FormatTest.cpp`
+(`FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope`,
+`FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloor`).
+
+**`ninja check-feme`** (assertions + ccache): 2126/2185, 0 `Failed`, 59
+pre-existing `Unsupported`.
+
+**Real CTS re-run.**
+`dEQP-VK.image.load_store.with_format.*.r16g16b16a16_{unorm,snorm}*` (56
+cases across every dimension/view-shape/tiling combination H19a-e
+already support, plus the `buffer.*` texel-buffer variants): 44 Pass (up
+from 0), 0 Fail, 12 `NotSupported` -- every one of the 12 is a
+`buffer.*` (storage texel buffer) case, gated on the distinct
+`VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT` capability
+(`isTexelBufferFormatSupported`, `Format.cpp`) this row's own image-only
+scope does not cover -- correct, honest behavior matching this
+project's pre-existing narrower texel-buffer format scope.
+
+**Remaining gap.** `shaderStorageImageExtendedFormats` stays `VK_FALSE`:
+the real mandatory extended-format list's single- and two-channel
+`R8`/`R16`/`R32` formats and the packed 32-bit formats (under their
+storage-specific component ordering, still needing verification against
+this project's existing sampled-image decode for the same formats) have
+no `ResourceFormat` enum entry at all yet. Split into new roadmap row
+H19j. `Vulkan14FeatureInventory.md` updated to point at H19j instead of
+H19h.
