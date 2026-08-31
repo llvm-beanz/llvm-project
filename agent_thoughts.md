@@ -49157,3 +49157,49 @@ is commit (4).
 
 With H19i closed, the H19f-H19i sub-chain (extended storage-image formats
 plus without-format support) is now fully resolved end-to-end.
+
+# H7j: closing out the storage-image feature-bit cluster (no code change)
+
+Picked up H7j per the user's request, and quickly realized it was already
+done in substance: H7j's own row named four feature bits
+(`shaderStorageImageExtendedFormats`, `shaderStorageImageMultisample`,
+`shaderStorageImageReadWithoutFormat`, `shaderStorageImageWriteWithoutFormat`)
+and deferred them to a new milestone, H19, once it became clear no
+`OpImageRead`/`OpImageWrite` lowering existed for storage images at all.
+Checked `PhysicalDeviceInfo.cpp` directly rather than trusting the roadmap
+text alone (which can get stale, as this whole H19 chain's own history of
+never striking intermediate split rows demonstrates) and confirmed all four
+bits are `VK_TRUE` today, each closed by a real-CTS-verified terminal row
+within H19's own a-through-o chain: extended formats via
+H19a/H19f/H19h/H19j/H19n/H19o, multisample via H19g/H19k/H19l/H19m,
+without-format via H19f/H19i (the row from two sessions ago). Cross-checked
+`Vulkan14FeatureInventory.md`'s own four rows, which already say "yes" and
+already cite H7j and H19 explicitly -- further confirming this was a
+documentation-consistency gap, not an implementation gap.
+
+Made no code changes this session. Instead: struck through H7j itself and
+the top-level H19 container row in `Roadmap.md`, with closure notes
+summarizing the whole sub-chain (deliberately *not* going back to strike
+the intermediate split rows H19f/g/h/j/n, matching this project's own
+established convention throughout the H19 chain of only striking the
+terminal row in each split lineage, never revisiting predecessors). Still
+re-ran the two most relevant real CTS groups as a sanity check before
+declaring closure, given the standing "run CTS after each change" rule --
+even a documentation-only change deserves a check that the underlying
+implementation this text describes still actually holds:
+`load-store.txt` reproduced its expected 1918/3446 Pass, 0 Fail exactly;
+`load-store-multisample.txt` came back *higher* than H19m's own recorded
+number (99/252 vs. 81/252) purely because later, unrelated format-breadth
+work (H19n/H19o) happened to also unlock a few more multisample cases --
+a nice confirmation that the whole chain composes correctly with no
+interaction regressions, not a new fix of its own. Added a short "H7j:
+closure confirmation" section to `VulkanCTSReport.md` capturing this,
+cross-referencing every row's own detailed section rather than repeating
+their content.
+
+Two commits: (1) the Roadmap.md/VulkanCTSReport.md strike-through and
+closure-confirmation writeup, (2) this file.
+
+With H7j and H19 both now closed, H7's own remaining open sub-rows are
+H7k/H7l/H7m (primitive-topology/coverage gaps, unrelated to storage
+images) -- worth picking up next if continuing the H7 cluster specifically.
