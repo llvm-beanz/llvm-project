@@ -16686,3 +16686,137 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19k.qpa
 ```
+
+## Roadmap H19l: measured impact (`matchImageCall`'s `Store2DMS`/`Store2DMSI32` `AllKinds` fix)
+
+**Root cause, precisely.** A real IR reduction (hand-written minimal
+GLSL mirroring the actual CTS shader's per-sample `imageStore`/
+`imageLoad` loop, compiled via `glslangValidator` then run through the
+exact `feme-cpu-fold-spirv-builtins,...,feme-cpu-linearize,feme-cpu-
+simdize` pass pipeline `Pipeline.cpp` uses) plus temporary debug
+instrumentation at `SIMDize.cpp`'s own diagnostic-emission site found
+the "component decomposition" text from H19k's own report was a **red
+herring**: the actual failing pair was a `<4 x i32>` insertelement-
+chain result used as the `Texel` argument of a
+`feme.cpu.image.store.2dms.v4i32` call -- a normally-fully-supported
+producer/consumer shape identical to the plain (non-multisampled)
+`Store2D` case that already worked.
+
+The real bug: `feme::cpu::matchImageCall`'s own `static constexpr
+ImageCallKind AllKinds[]` lookup table (`ImageCalls.cpp`) never listed
+`ImageCallKind::Store2DMS`/`Store2DMSI32` at all, even though the enum,
+`getImageCallName`, the `createStore2DMS`/`createStore2DMSI32` builder
+functions, and the operand-extraction `switch` immediately below
+already had fully-correct entries for both. An isolated oversight from
+H19g's own original implementation: because H19g's own feature bit
+stayed `VK_FALSE` the whole time (first blocked by H19k's own
+Flow-block bug), this dead-switch-case was never actually exercised by
+any real code path until this session's CTS re-run reached it for the
+first time -- and was never caught by H19g's own unit tests either,
+which tested the builder functions and runtime pack/unpack helpers in
+isolation but never `matchImageCall`'s recognition of the resulting
+call. This also meant `FunctionWidener::widenImageCall`'s own gating
+check (`if (std::optional<MatchedImageCall> Matched =
+matchImageCall(*CI))`) silently skipped widening these calls entirely
+-- a second, unrelated latent bug beyond just the diagnostic, never
+exercised for the same reason.
+
+**The actual fix.** Added `ImageCallKind::Store2DMS,
+ImageCallKind::Store2DMSI32` to `AllKinds`. `widenImageCall` itself
+needed no changes: confirmed fully generic, driving entirely off
+`MatchedImageCall`'s own fields.
+
+**New test coverage.** A new `ImageCallsTest.cpp` (the first dedicated
+test file for `matchImageCall`/`create*` in isolation) with
+`MatchesStore2DMSCall`/`MatchesStore2DMSI32Call`; a new
+`DecomposesInsertElementChainIntoImageStore2DMS` in `SIMDizeTest.cpp`
+exercising the fix end-to-end through the real `SIMDizePass`. A `git
+stash` round-trip (reverting just `ImageCalls.cpp` while keeping the
+new tests) confirmed all three correctly fail -- two `matchImageCall`
+calls return `false` instead of `true`; the SIMDize test reproduces
+the literal real CTS diagnostic and gets 1 store call instead of 4 --
+without the fix.
+
+**`ninja check-feme`** (assertions + ccache): 2139/2198, 0 `Failed`, 59
+pre-existing `Unsupported` -- up from H19k's own 2136/2195 by exactly
+3 net new tests, 0 regressions.
+
+**Real CTS re-run.** With `shaderStorageImageMultisample` again
+temporarily forced `VK_TRUE` purely to probe the real shader path
+(reverted before landing), a re-run of
+`dEQP-VK.image.load_store_multisample.2d.*` (84 cases):
+
+```
+Passed:        27/84 (32.1%)
+Failed:        0/84 (0.0%)
+Not supported: 57/84 (67.9%)
+```
+
+**All 27 of H19k's own previously-`Failed` cases now `Pass`, 0
+`Failed`** -- a full, clean closure of every case reachable through
+the plain-2D path. The remaining 57 are honestly `NotSupported`: all 9
+of the 6-format mandatory-storage floor's own formats
+(`r32{,g32b32a32}_{sfloat,uint,sint}`, `r16g16b16a16_{sfloat,uint,
+sint}`) `Pass` at `samples_2`/`4`/`8` (the rasterizer's own existing
+8-sample ceiling, R33/C4b, unrelated to this row), and are honestly
+`NotSupported` at `samples_16`/`32`/`64` (beyond that same ceiling);
+the remaining formats this CTS group also exercises
+(`r8g8b8a8_{unorm,snorm,uint,sint}`, `a8_unorm`) are honestly
+`NotSupported` for a distinct, pre-existing reason -- they are simply
+outside the storage-image mandatory format floor entirely (H19a/H19f/
+H19h's own scope, unrelated to multisample addressing).
+
+**Regression check.** The `load-store.txt` mustpass regression
+caselist (3446 cases), run after reverting the feature-bit probe:
+
+```
+Passed:        260/3446 (7.5%)
+Failed:        0/3446 (0.0%)
+Not supported: 3186/3446 (92.5%)
+```
+
+Byte-identical to H19k's own recorded baseline. **0 regressions.**
+
+**Remaining gap -- why `shaderStorageImageMultisample` still stays
+`VK_FALSE`.** Probing the *full* `dEQP-VK.image.load_store_multisample.*`
+group (252 cases, both `2d.*` and `2d_array.*`) with the bit forced on:
+
+```
+Passed:        54/252 (21.4%)
+Failed:        27/252 (10.7%)
+Not supported: 171/252 (67.9%)
+```
+
+All 27 `Failed` are in `2d_array.*` -- every case fails pipeline
+creation with:
+
+```
+error: failed to legalize operation 'spirv.ImageWrite' that was
+explicitly marked illegal: "spirv.ImageWrite"(...) <{image_operands =
+#spirv.image_operands<Sample>}> : (!spirv.image<..., Dim2D, ...,
+Arrayed, MultiSampled, ...>, ...) -> ()
+```
+
+This confirms H19g's own documented scope narrowing ("gated ... only
+for a plain multisampled 2D image", via `SPIRVToLLVMPatterns.cpp`'s
+`isPlainMultisampled2DImage` check, which explicitly rejects `Arrayed`)
+is still the accurate boundary today -- flipping the bit now would
+newly attempt, and fail, this entire sub-group, a real conformance
+regression. Split the arrayed-2D-multisample gap into new roadmap row
+H19m.
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                                # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.image.load_store_multisample.2d.*" --deqp-log-filename=ms_h19l.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.image.load_store_multisample.*" --deqp-log-filename=ms_all_h19l.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19l.qpa
+```
