@@ -17452,3 +17452,75 @@ no interaction regressions across its own many sub-rows. See each
 individual row's own "measured impact" section above (H19f, H19g, H19h,
 H19i, H19j, H19k, H19l, H19m, H19n, H19o) for the detailed, incremental
 history of how this closure was reached.
+
+## Roadmap H7k: measured impact (point/line near/far Z-clip fix)
+
+**Corrected premise.** H7k's own roadmap text (filed from H7d's reproduction
+session) hypothesized a coverage-tie-break bug: a point/line quad centered
+exactly on a pixel-grid intersection supposedly renders zero pixels because
+`Executor.cpp`'s top-left-rule coverage test excludes the covering pixel on
+both sides of the boundary. This session found that hypothesis does not
+reproduce -- a hand simulation of the exact quad-split/coverage-test math,
+plus a real unit-test probe drawing a single grid-aligned point, both show
+the existing coverage test already renders exactly one consistent pixel
+(the "TL" corner) per such a quad, matching the standard top-left-inclusive/
+bottom-right-exclusive fill-rule convention. No code change was needed for
+that half of the original diagnosis.
+
+**Real root cause**, found via a full real
+`dEQP-VK.clipping.clip_volume.depth_clamp.point_list` reproduction (built
+`deqp-vk`, ran with `--deqp-log-images=enable`, decoded the embedded result
+PNGs, and cross-referenced against the real CTS source's own
+`genVertices`/`countPixels` in `vktClippingTests.cpp`): unlike a triangle
+(`clipTriangle`'s `FrustumPlanes`), a `Point`- or `Line`-class primitive was
+never tested against the near/far Z clip planes at all -- only the
+pre-existing degenerate-`W` `ClipEpsilon` guard applied. Every one of the
+CTS case's 5 points (2 with Z behind the near plane, 2 beyond the far
+plane, depending on the case) rendered identically regardless of
+`depthClampEnable`, which is the actual failure `countPixels`'s own
+lenient per-region color-count check was catching.
+
+**Fix.** `pointPassesDepthClip` (all-or-nothing point accept/reject) and
+`clipLineDepthRange` (a real 2-vertex near/far segment clip reusing
+`lerpVertex`), both honoring `DepthClampEnable` exactly like `clipTriangle`
+already does. Deliberately does not add X/Y side-plane clipping for
+points/lines (the existing scissor/tile-binning bounding-box test already
+excludes out-of-bounds points/lines for every case exercised so far); noted
+as a known, minor, out-of-scope limitation in the roadmap entry.
+
+**Unit tests.** `ninja check-feme` (ccache, assertions-enabled build) passes
+in full:
+
+```
+Total Discovered Tests: 2268
+  Unsupported:   59 (2.60%)
+  Passed     : 2209 (97.40%)
+```
+
+0 `Failed`, up from H7e's own 2016/2075 baseline by exactly the 4 new
+`ExecutorTest.cpp` tests this row adds
+(`DiscardsAPointBehindTheNearPlaneWhenDepthClampIsDisabled`/
+`RendersAPointBehindTheNearPlaneWhenDepthClampIsEnabled`,
+`ClipsALineAtTheNearPlaneWhenDepthClampIsDisabled`/
+`RendersAFullLineAcrossTheNearPlaneWhenDepthClampIsEnabled`).
+
+**Real CTS re-run.**
+
+```
+dEQP-VK.clipping.clip_volume.depth_clamp.point_list       Pass (was Fail)
+dEQP-VK.clipping.clip_volume.depth_clamp.line_list        Pass (was Fail)
+dEQP-VK.clipping.clip_volume.depth_clamp.line_strip       Pass (was Fail)
+```
+
+The broader `dEQP-VK.clipping.*` group (308 cases):
+
+```
+Passed:        21/308 (6.8%)
+Failed:        12/308 (3.9%)
+Not supported: 275/308 (89.3%)
+```
+
+All 12 failures are the pre-existing, unrelated `*_with_adjacency` topology
+gap (`VK_ERROR_INITIALIZATION_FAILED` at pipeline creation -- those
+primitive topologies are not implemented at all yet, unrelated to this
+row) -- 0 regressions from this change.
