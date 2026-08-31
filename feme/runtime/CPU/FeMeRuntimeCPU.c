@@ -474,6 +474,51 @@ femeRTPackR16Snorm(FemeRTv4f32 Value) {
   return (uint16_t)(int16_t)__builtin_roundf(C0 * 32767.0f);
 }
 
+// Unpacks a `R16G16_UNORM` value (two normalized `[0, 65535]` 16-bit
+// words, little-endian: R, G) into a `<4 x float>` in `[0.0, 1.0]` --
+// roadmap H19n, the two-channel analogue of `femeRTUnpackR16Unorm`
+// above. The unread B channel pads `0.0`, alpha pads `1.0`.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR16G16Unorm(const uint16_t Raw[2]) {
+  FemeRTv4f32 V = {(float)Raw[0] / 65535.0f, (float)Raw[1] / 65535.0f, 0.0f,
+                   1.0f};
+  return V;
+}
+
+// The inverse of `femeRTUnpackR16G16Unorm`: clamps each component to
+// `[0.0, 1.0]`, scales to `[0, 65535]`, and packs the two rounded words
+// little-endian into \p Out.
+__attribute__((always_inline)) static void
+femeRTPackR16G16Unorm(FemeRTv4f32 Value, uint16_t Out[2]) {
+  float C0 = __builtin_fminf(__builtin_fmaxf(Value[0], 0.0f), 1.0f);
+  float C1 = __builtin_fminf(__builtin_fmaxf(Value[1], 0.0f), 1.0f);
+  Out[0] = (uint16_t)__builtin_roundf(C0 * 65535.0f);
+  Out[1] = (uint16_t)__builtin_roundf(C1 * 65535.0f);
+}
+
+// Unpacks a `R16G16_SNORM` value (two signed-normalized `[-32767,
+// 32767]` 16-bit words, little-endian: R, G) into a `<4 x float>` in
+// `[-1.0, 1.0]` -- roadmap H19n, the two-channel analogue of
+// `femeRTUnpackR16Snorm` above.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR16G16Snorm(const uint16_t Raw[2]) {
+  FemeRTv4f32 V = {__builtin_fmaxf((float)(int16_t)Raw[0] / 32767.0f, -1.0f),
+                   __builtin_fmaxf((float)(int16_t)Raw[1] / 32767.0f, -1.0f),
+                   0.0f, 1.0f};
+  return V;
+}
+
+// The inverse of `femeRTUnpackR16G16Snorm`: clamps each component to
+// `[-1.0, 1.0]`, scales to `[-32767, 32767]`, and packs the two rounded
+// words little-endian into \p Out.
+__attribute__((always_inline)) static void
+femeRTPackR16G16Snorm(FemeRTv4f32 Value, uint16_t Out[2]) {
+  float C0 = __builtin_fminf(__builtin_fmaxf(Value[0], -1.0f), 1.0f);
+  float C1 = __builtin_fminf(__builtin_fmaxf(Value[1], -1.0f), 1.0f);
+  Out[0] = (uint16_t)(int16_t)__builtin_roundf(C0 * 32767.0f);
+  Out[1] = (uint16_t)(int16_t)__builtin_roundf(C1 * 32767.0f);
+}
+
 // Unpacks a `R16G16B16A16_UNORM` value (four normalized `[0, 65535]`
 // 16-bit words, little-endian) into a `<4 x float>` in `[0.0, 1.0]` --
 // roadmap H19h, the 16-bit-per-component analogue of
@@ -793,6 +838,41 @@ femeRTUnpackR16Sint(uint16_t Raw) {
 __attribute__((always_inline)) static uint16_t
 femeRTPackR16Sint(FemeRTv4i32 Value) {
   return femeRTPackR16Uint(Value);
+}
+
+// Unpacks a `R16G16_UINT` value (two unsigned 16-bit words,
+// little-endian) into a `<4 x i32>` by zero-extending each -- roadmap
+// H19n, the two-channel analogue of `femeRTUnpackR16Uint` above.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackR16G16Uint(const uint16_t Raw[2]) {
+  FemeRTv4i32 V = {(int32_t)Raw[0], (int32_t)Raw[1], 0, 1};
+  return V;
+}
+
+// The inverse of `femeRTUnpackR16G16Uint`: truncates each lane to its
+// low word into \p Out, little-endian.
+__attribute__((always_inline)) static void
+femeRTPackR16G16Uint(FemeRTv4i32 Value, uint16_t Out[2]) {
+  Out[0] = (uint16_t)Value[0];
+  Out[1] = (uint16_t)Value[1];
+}
+
+// Unpacks a `R16G16_SINT` value (two signed 16-bit words, little-endian)
+// into a `<4 x i32>` by sign-extending each -- roadmap H19n, the
+// two-channel analogue of `femeRTUnpackR16Sint` above.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackR16G16Sint(const uint16_t Raw[2]) {
+  FemeRTv4i32 V = {(int32_t)(int16_t)Raw[0], (int32_t)(int16_t)Raw[1], 0, 1};
+  return V;
+}
+
+// The inverse of `femeRTUnpackR16G16Sint`: truncating each lane to its
+// low word produces the same bit pattern regardless of signedness, so
+// this shares `femeRTPackR16G16Uint`'s implementation exactly, mirroring
+// `femeRTPackR16Sint`'s own analogous sharing.
+__attribute__((always_inline)) static void
+femeRTPackR16G16Sint(FemeRTv4i32 Value, uint16_t Out[2]) {
+  femeRTPackR16G16Uint(Value, Out);
 }
 
 // `feme.cpu.resource.load.typed.v4i32` (V4, see `feme::cpu::ResourceCalls`):
@@ -1419,6 +1499,14 @@ femeRTImageFormatElementSize(uint32_t Format) {
   case 96: // R16_UINT
   case 97: // R16_SINT
     return 2;
+  // (Roadmap H19n) `R16G16_{FLOAT,UNORM,SNORM,UINT,SINT}`: four bytes
+  // each.
+  case 98:  // R16G16_FLOAT
+  case 99:  // R16G16_UNORM
+  case 100: // R16G16_SNORM
+  case 101: // R16G16_UINT
+  case 102: // R16G16_SINT
+    return 4;
   default:
     return 0;
   }
@@ -1743,6 +1831,23 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackR16Snorm(Raw);
   }
+  case 98: { // R16G16_FLOAT (roadmap H19n)
+    uint16_t Raw[2];
+    __builtin_memcpy(Raw, Ptr, sizeof(Raw));
+    FemeRTv4f32 V = {femeRTHalfToFloat(Raw[0]), femeRTHalfToFloat(Raw[1]),
+                     0.0f, 1.0f};
+    return V;
+  }
+  case 99: { // R16G16_UNORM (roadmap H19n)
+    uint16_t Raw[2];
+    __builtin_memcpy(Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR16G16Unorm(Raw);
+  }
+  case 100: { // R16G16_SNORM (roadmap H19n)
+    uint16_t Raw[2];
+    __builtin_memcpy(Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR16G16Snorm(Raw);
+  }
   default:
     return Zero;
   }
@@ -1867,6 +1972,16 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackR16Sint(Raw);
   }
+  case 101: { // R16G16_UINT (roadmap H19n)
+    uint16_t Raw[2];
+    __builtin_memcpy(Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR16G16Uint(Raw);
+  }
+  case 102: { // R16G16_SINT (roadmap H19n)
+    uint16_t Raw[2];
+    __builtin_memcpy(Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR16G16Sint(Raw);
+  }
   default:
     return Zero;
   }
@@ -1948,6 +2063,23 @@ femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
     __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
     return;
   }
+  case 98: { // R16G16_FLOAT (roadmap H19n).
+    uint16_t Raw[2] = {femeRTFloatToHalf(Texel[0]), femeRTFloatToHalf(Texel[1])};
+    __builtin_memcpy(Ptr, Raw, sizeof(Raw));
+    return;
+  }
+  case 99: { // R16G16_UNORM (roadmap H19n).
+    uint16_t Raw[2];
+    femeRTPackR16G16Unorm(Texel, Raw);
+    __builtin_memcpy(Ptr, Raw, sizeof(Raw));
+    return;
+  }
+  case 100: { // R16G16_SNORM (roadmap H19n).
+    uint16_t Raw[2];
+    femeRTPackR16G16Snorm(Texel, Raw);
+    __builtin_memcpy(Ptr, Raw, sizeof(Raw));
+    return;
+  }
   default:
     return;
   }
@@ -2007,6 +2139,18 @@ femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
   case 97: { // R16_SINT (roadmap H19n).
     uint16_t Raw = femeRTPackR16Sint(Texel);
     __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
+  case 101: { // R16G16_UINT (roadmap H19n).
+    uint16_t Raw[2];
+    femeRTPackR16G16Uint(Texel, Raw);
+    __builtin_memcpy(Ptr, Raw, sizeof(Raw));
+    return;
+  }
+  case 102: { // R16G16_SINT (roadmap H19n).
+    uint16_t Raw[2];
+    femeRTPackR16G16Sint(Texel, Raw);
+    __builtin_memcpy(Ptr, Raw, sizeof(Raw));
     return;
   }
   default:

@@ -81,6 +81,18 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::R16_UINT;
   case VK_FORMAT_R16_SINT:
     return ResourceFormat::R16_SINT;
+  // (Roadmap H19n) The two-channel `R16G16` mandatory
+  // `shaderStorageImageExtendedFormats` formats.
+  case VK_FORMAT_R16G16_SFLOAT:
+    return ResourceFormat::R16G16_FLOAT;
+  case VK_FORMAT_R16G16_UNORM:
+    return ResourceFormat::R16G16_UNORM;
+  case VK_FORMAT_R16G16_SNORM:
+    return ResourceFormat::R16G16_SNORM;
+  case VK_FORMAT_R16G16_UINT:
+    return ResourceFormat::R16G16_UINT;
+  case VK_FORMAT_R16G16_SINT:
+    return ResourceFormat::R16G16_SINT;
   case VK_FORMAT_B8G8R8A8_UNORM:
     return ResourceFormat::B8G8R8A8_UNORM;
   case VK_FORMAT_R16G16B16A16_SFLOAT:
@@ -289,6 +301,14 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::R16_UINT:
   case ResourceFormat::R16_SINT:
     return 2;
+  // (Roadmap H19n) `R16G16_{FLOAT,UNORM,SNORM,UINT,SINT}`: four bytes,
+  // two components.
+  case ResourceFormat::R16G16_FLOAT:
+  case ResourceFormat::R16G16_UNORM:
+  case ResourceFormat::R16G16_SNORM:
+  case ResourceFormat::R16G16_UINT:
+  case ResourceFormat::R16G16_SINT:
+    return 4;
   // (Roadmap E5) `VK_FORMAT_A8_UNORM`: one byte, one component.
   case ResourceFormat::A8_UNORM:
     return 1;
@@ -562,6 +582,14 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     break;
+  // (Roadmap H19n) `R16G16_{FLOAT,UNORM,SNORM}`: the two-channel
+  // analogues of `R16_{FLOAT,UNORM,SNORM}` above.
+  case ResourceFormat::R16G16_FLOAT:
+  case ResourceFormat::R16G16_UNORM:
+  case ResourceFormat::R16G16_SNORM:
+    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+             VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    break;
   // (Roadmap E26) The mandatory-sampled `_UINT`/`_SINT` formats
   // `femeRTUnpackImageTexelI32` (FeMeRuntimeCPU.c) decodes for
   // `feme.cpu.image.load.2d.v4i32`. No `_FILTER_LINEAR_BIT`: SPIR-V never
@@ -590,6 +618,10 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `R16G16B16A16_UINT`/`_SINT` above.
   case ResourceFormat::R16_UINT:
   case ResourceFormat::R16_SINT:
+  // (Roadmap H19n) `R16G16_UINT`/`_SINT`: the two-channel analogues of
+  // `R16_UINT`/`_SINT` above.
+  case ResourceFormat::R16G16_UINT:
+  case ResourceFormat::R16G16_SINT:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     break;
   default:
@@ -652,6 +684,15 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::R16_SNORM:
   case ResourceFormat::R16_UINT:
   case ResourceFormat::R16_SINT:
+  // (Roadmap H19n) `R16G16_{FLOAT,UNORM,SNORM,UINT,SINT}`: the
+  // two-channel mandatory-extended-format formats, backed by new
+  // `femeRTPackImageTexel`/`femeRTPackImageTexelI32` cases
+  // (FeMeRuntimeCPU.c).
+  case ResourceFormat::R16G16_FLOAT:
+  case ResourceFormat::R16G16_UNORM:
+  case ResourceFormat::R16G16_SNORM:
+  case ResourceFormat::R16G16_UINT:
+  case ResourceFormat::R16G16_SINT:
     Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     break;
   default:
