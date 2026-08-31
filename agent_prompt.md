@@ -37,16 +37,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H19b or any prerequisite work required to complete
+Can you continue working on H19c or any prerequisite work required to complete
 the H-series milestones?
 
-> **Arrayed (`2D_ARRAY`) storage-image read/write** for the same mandatory
-> format floor H19a already covers --
-> `classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`
-> (`SPIRVResourceLowering.cpp`) currently require `Dim == 2D`, non-arrayed only;
+> **1D and 3D storage-image read/write** for the same mandatory format floor --
 > a real re-run confirms every
-> `dEQP-VK.image.load_store.with_format.2d_array.*`/`1d_array.*` multi-layer
-> case fails at pipeline creation the same way H19a's own cases did before it
-> landed. Needs a real `Array2D` runtime entry point/call shape carrying a layer
-> index, mirroring how `Sample2DArray`/`Load2DArray` already extend the
-> non-arrayed read shapes
+> `dEQP-VK.image.load_store.with_format.1d.*`/`3d.*` case fails the same way.
+> Needs its own coordinate-shape runtime entry points (a single scalar `X` for
+> 1D; `X`/`Y`/`Z` for 3D), distinct from H19b's own array-layer shape
