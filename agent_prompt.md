@@ -37,26 +37,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H19l or any prerequisite work required to complete
+Can you continue working on H19m or any prerequisite work required to complete
 the H-series milestones?
 
-> **`feme-cpu-simdize`'s own inability to decompose a divergent vector value
-> used outside its supported use-pattern set**, discovered as a new, distinct
-> prerequisite immediately downstream of H19k's own closure: with H19k's
-> Flow-fold fix in place and `shaderStorageImageMultisample` temporarily forced
-> `VK_TRUE` to probe the real shader path, all 27 of
-> `dEQP-VK.image.load_store_multisample.2d.*`'s
-> previously-`feme-cpu-linearize`-blocked cases now instead fail pipeline
-> creation with `feme-cpu-simdize: function 'main' has a divergent vector value
-> '' used outside a supported
-> insertelement-chain/resource-store/extractelement/select/shufflevector/phi/elementwise/comparison/reduce/vectorizable-intrinsic
-> pattern; component decomposition is not yet supported for this use (roadmap
-> milestone 7 deviation)` -- a pre-existing `feme-cpu-simdize` scope limit (per
-> its own "roadmap milestone 7 deviation" note), not anything H19k's own
-> linearizer fold introduced. Needs a real IR reduction of this exact case (the
-> same technique the H6g-b/H6j/H6k/H6l/H19k chain has used throughout) to
-> identify the specific divergent-vector use shape this loop's own per-sample
-> body produces that falls outside `feme-cpu-simdize`'s current
-> supported-pattern set, and what a fix looks like -- likely its own, larger
-> milestone given the existing "roadmap milestone 7 deviation" note, not a
-> narrow follow-on
+> **Arrayed 2D multisample storage-image read/write** -- split out of H19g/H19l
+> once both were confirmed otherwise-complete for the plain (non-arrayed) case.
+> A real probe of `dEQP-VK.image.load_store_multisample.2d_array.*` (27 cases,
+> `shaderStorageImageMultisample` temporarily forced `VK_TRUE`) confirms every
+> case fails pipeline creation with `error: failed to legalize operation
+> 'spirv.ImageWrite' ... : (!spirv.image<..., Dim2D, ..., Arrayed, MultiSampled,
+> ...>, ...)`, since `SPIRVToLLVMPatterns.cpp`'s own
+> `isPlainMultisampled2DImage` check (added by H19g) explicitly rejects any
+> `Arrayed` multisampled image. Needs a 4th coordinate component (`x`, `y`,
+> `layer`, `sample`) threaded through
+> `appendVectorLane`/`ImageShape`/`ImageCalls`/the runtime fetch-store helpers
+> -- likely a new `ImageShape::Array2DMS` mirroring `Plain2DMS`'s existing
+> sample-lane handling plus `Array2D`'s existing layer-lane handling combined --
+> and is the last row blocking an honest `shaderStorageImageMultisample =
+> VK_TRUE` flip
