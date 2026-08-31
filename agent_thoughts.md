@@ -48475,3 +48475,129 @@ No design-doc deviation this time: this was a straightforward bugfix
 inside already-documented H19g machinery, not a new design decision,
 so no `FeMeCPUDesign.md`/`FeMeGraphicsDesign.md` changes were needed
 beyond the in-code maintenance comment.
+
+# Session: H19m
+
+## Task
+
+Continue roadmap H19m: "Arrayed 2D multisample storage-image
+read/write" -- the arrayed-2D-multisample gap H19l's own real CTS
+probe surfaced (27 real `Fail`s in `dEQP-VK.image.load_store_multisample.
+2d_array.*`, confirmed unaffected by H19l's own fix), and the last row
+blocking an honest `shaderStorageImageMultisample = VK_TRUE` flip.
+
+## Investigation
+
+Confirmed the read side needed essentially no new runtime work: the
+runtime's `femeRTFetchTexel2D`/`femeRTFetchTexel2DI32` helpers already
+computed a fully general offset (`Offset + Layer*SlicePitch +
+Y*RowPitch + X*TexelStride + Sample*SampleStride`) and
+`computeSubresourceLayouts` already produced correct `SlicePitch`/
+`RowPitch` for any array/sample combination -- so only the *signature*
+of `Load2DArrayI32` (the one caller lacking a real `Sample` operand)
+needed widening, not any new addressing math. The float-channel
+`Load2DArray` path already threaded a real (if previously-always-`0`)
+`Sample` argument, so it needed literally zero changes.
+
+The write side had no equivalent shortcut: neither `Store2DArray` nor
+`Store2DMS` had a spare operand slot for the other axis, so two brand
+new call kinds (`Store2DArrayMS`/`Store2DArrayMSI32`) were added,
+mirroring H19g's own precedent of adding new call-vocabulary entries
+rather than widening in place whenever an existing kind's ABI can't
+safely absorb the new operand.
+
+On the MLIR side, confirmed via inspection that SPIR-V's own
+`Coordinate` operand for an `Arrayed`+`MultiSampled` `Dim2D` image is
+already a 3-wide `(x, y, layer)` vector before the existing, fully
+generic `appendVectorLane` helper appends `Sample` as a 4th lane --
+meaning the *only* MLIR-side change needed was loosening the gate
+(`isPlainMultisampled2DImage`, renamed `isMultisampled2DImage`) that
+had been explicitly rejecting any `Arrayed` multisampled image.
+
+Given H19l's own bug class (a call kind fully implemented everywhere
+except one `AllKinds` table entry, silently making it dead code), took
+extra care this session to double- and triple-check that both new call
+kinds were added to every one of `ImageCalls.cpp`'s five relevant
+spots: `getImageCallName`, `getOrInsertImageCall`'s FunctionType
+switch, the `create*` builder bodies, the `AllKinds` array itself, and
+`matchImageCall`'s own extraction switch. Also added a dedicated new
+unit test per new call kind in `ImageCallsTest.cpp` exercising
+`matchImageCall` directly (rather than only exercising the higher-level
+`SPIRVResourceLoweringTest.cpp`/`SIMDizeTest.cpp` paths), specifically
+because that's exactly the layer H19l's bug slipped through.
+
+## Implementation
+
+Landed as three separate commits per the standing convention of
+isolating feature-bit flips from the underlying fix, plus docs as a
+final commit before this note:
+
+1. The core fix: new `ImageShape::Array2DMS`, widened
+   `classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`/
+   `lowerImageAccesses` (`SPIRVResourceLowering.cpp`); widened
+   `Load2DArrayI32` and new `Store2DArrayMS`/`Store2DArrayMSI32` call
+   kinds (`ImageCalls.h`/`.cpp`); loosened `isMultisampled2DImage`
+   (`SPIRVToLLVMPatterns.cpp`); new runtime helpers/entry points
+   (`FeMeRuntimeCPU.c`). New/updated tests across every phase
+   (`SPIRVResourceLoweringTest.cpp`, `ImageCallsTest.cpp`,
+   `ImageSamplingTest.cpp`) plus lit coverage (a new positive
+   `read_write_arrayed_ms` block replacing the old negative-test block
+   this shape used to require).
+2. The feature-bit flip itself (`PhysicalDeviceInfo.cpp` +
+   `PhysicalDeviceInfoTest.cpp`), with a permanent doc comment
+   replacing the session's temporary probe marker, citing the real CTS
+   numbers below.
+3. Docs: `Roadmap.md` (H19m struck through),
+   `Vulkan14FeatureInventory.md` (`shaderStorageImageMultisample`:
+   `no` -> `yes`), `VulkanCTSReport.md` (new "Roadmap H19m: measured
+   impact" section).
+
+## Verification
+
+`ninja check-feme` (assertions + ccache): 2148/2207 passed, 59
+pre-existing `Unsupported`, 0 `Failed` -- up from H19l's own
+2139/2198 by 9 net new tests, 0 regressions.
+
+Real CTS re-run of the *full* `dEQP-VK.image.load_store_multisample.*`
+group (252 cases), with `shaderStorageImageMultisample` now
+permanently `VK_TRUE`:
+
+```
+Passed:        81/252 (32.1%)
+Failed:        0/252 (0.0%)
+Not supported: 171/252 (67.9%)
+```
+
+All 27 of H19l's own previously-`Failed` `2d_array.*` cases now
+`Pass`, 0 `Failed` anywhere. Isolating `2d_array.*` alone (168 cases):
+54 Pass (up from 0), 0 Fail, 114 honestly `NotSupported` (outside
+today's storage-image mandatory format floor or the rasterizer's
+sample-count ceiling -- both separate, already-tracked gaps, unrelated
+to this row's own scope). Re-ran twice: once immediately after landing
+the core fix (bit still temporarily forced on to probe), and again
+after making the flip permanent, to confirm the permanent flip
+reproduces the identical numbers.
+
+`load-store.txt` mustpass regression caselist (3446 cases), re-run
+after the permanent feature-bit flip: 260 Pass, 0 Fail, 3186
+NotSupported -- byte-identical to the pre-H19m baseline. 0
+regressions from flipping the bit.
+
+## Docs
+
+Struck through H19m in `Roadmap.md` with a full done summary. Updated
+`Vulkan14FeatureInventory.md`'s `shaderStorageImageMultisample` row
+from `no` to `yes`, citing the complete H19g/H19k/H19l/H19m chain.
+Added a new "Roadmap H19m: measured impact" section to
+`VulkanCTSReport.md`. Checked `VulkanExtensionInventory.md` for
+relevance -- none needed, this row is a core 1.0 feature bit, not an
+extension.
+
+No design-doc deviation this session: this closes out an already-
+documented H19g design (multisampled storage images), it doesn't
+introduce a new one, so no `FeMeCPUDesign.md`/`FeMeGraphicsDesign.md`
+changes were needed beyond in-code maintenance comments.
+
+With H19m closed, the entire H19g/H19k/H19l/H19m
+`shaderStorageImageMultisample` chain (opened at H19g, split by two
+compiler-bug prerequisites at H19k/H19l, and completed here) is done.
