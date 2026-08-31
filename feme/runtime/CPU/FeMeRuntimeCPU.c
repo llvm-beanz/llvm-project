@@ -1743,6 +1743,159 @@ femeRTStoreTexel2DArrayI32(const FemeRTImageDescriptor *Img, int32_t X,
   femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
 }
 
+// The plain-1D counterpart of `femeRTFetchTexel2D` above, for
+// `feme.cpu.image.load.1d.v4f32` (roadmap H19c). A 1D image's own
+// `computeSubresourceLayouts` (Image.cpp) always produces `Height == 1`,
+// so `RowPitch`/`SlicePitch` already collapse such that passing `Y == 0`
+// straight through to the existing 2D fetch produces the correct byte
+// offset -- no new addressing math is needed, just a thin wrapper with a
+// narrower (X-only) coordinate.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTFetchTexel1D(const FemeRTImageDescriptor *Img, uint32_t Level,
+                   int32_t X, uint32_t Sample, _Bool UseBorder,
+                   const float BorderColor[4]) {
+  return femeRTFetchTexel2D(Img, Level, /*Layer=*/0, X, /*Y=*/0, Sample,
+                            UseBorder, BorderColor);
+}
+
+// The integer counterpart of `femeRTFetchTexel1D` above, for
+// `feme.cpu.image.load.1d.v4i32` (roadmap H19c).
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTFetchTexel1DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
+                      int32_t X) {
+  return femeRTFetchTexel2DI32(Img, Level, /*Layer=*/0, X, /*Y=*/0);
+}
+
+// The plain-1D counterpart of `femeRTStoreTexel2D` above, for
+// `feme.cpu.image.store.1d.v4f32` (roadmap H19c) -- see
+// `femeRTFetchTexel1D`'s own comment for why `Y == 0` is a correct thin
+// wrapper rather than a new addressing formula.
+__attribute__((always_inline)) static void
+femeRTStoreTexel1D(const FemeRTImageDescriptor *Img, int32_t X,
+                   FemeRTv4f32 Texel) {
+  femeRTStoreTexel2D(Img, X, /*Y=*/0, Texel);
+}
+
+// The integer counterpart of `femeRTStoreTexel1D` above, for
+// `feme.cpu.image.store.1d.v4i32` (roadmap H19c).
+__attribute__((always_inline)) static void
+femeRTStoreTexel1DI32(const FemeRTImageDescriptor *Img, int32_t X,
+                      FemeRTv4i32 Texel) {
+  femeRTStoreTexel2DI32(Img, X, /*Y=*/0, Texel);
+}
+
+// The plain-3D counterpart of `femeRTFetchTexel2D` above, for
+// `feme.cpu.image.load.3d.v4f32` (roadmap H19c). The byte-offset formula
+// is identical to `femeRTFetchTexel2D`'s own array-layer addressing
+// (`Z * Layout->SlicePitch`), but the bounds check is not: a real 3D
+// image's own `ArrayLayers` is always `1` per the Vulkan spec
+// (`VkImageCreateInfo.arrayLayers` must be 1 for `VK_IMAGE_TYPE_3D`), so
+// the real per-mip depth extent to check `Z` against is instead
+// `max(1, Img->Depth >> Level)` -- mirroring `Image.cpp`'s own
+// `computeSubresourceLayouts`' identical `LevelDepth` calculation -- which
+// is why this cannot be a thin wrapper around `femeRTFetchTexel2D` the way
+// `femeRTFetchTexel1D` above is.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTFetchTexel3D(const FemeRTImageDescriptor *Img, uint32_t Level,
+                   int32_t X, int32_t Y, int32_t Z, _Bool UseBorder,
+                   const float BorderColor[4]) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (UseBorder) {
+    FemeRTv4f32 Border = {BorderColor[0], BorderColor[1], BorderColor[2],
+                          BorderColor[3]};
+    return Border;
+  }
+  if (!Img->Data || Level >= Img->MipLayoutCount || Z < 0)
+    return Zero;
+  uint32_t LevelDepth = Img->Depth >> Level;
+  if (LevelDepth == 0)
+    LevelDepth = 1;
+  if ((uint32_t)Z >= LevelDepth)
+    return Zero;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return Zero;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[Level];
+  uint64_t Offset = Layout->Offset + (uint64_t)Z * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return Zero;
+  const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
+  return femeRTUnpackImageTexel(Img->Format, Ptr);
+}
+
+// The integer counterpart of `femeRTFetchTexel3D` above, for
+// `feme.cpu.image.load.3d.v4i32` (roadmap H19c).
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTFetchTexel3DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
+                      int32_t X, int32_t Y, int32_t Z) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Img->Data || Level >= Img->MipLayoutCount || Z < 0)
+    return Zero;
+  uint32_t LevelDepth = Img->Depth >> Level;
+  if (LevelDepth == 0)
+    LevelDepth = 1;
+  if ((uint32_t)Z >= LevelDepth)
+    return Zero;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return Zero;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[Level];
+  uint64_t Offset = Layout->Offset + (uint64_t)Z * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return Zero;
+  const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
+  return femeRTUnpackImageTexelI32(Img->Format, Ptr);
+}
+
+// The plain-3D counterpart of `femeRTStoreTexel2D` above, for
+// `feme.cpu.image.store.3d.v4f32` (roadmap H19c): always mip level 0, so
+// the real depth extent to bound `Z` against is simply `Img->Depth`
+// itself (`LevelDepth` at level 0 -- see `femeRTFetchTexel3D`'s own
+// comment -- collapses to `Img->Depth` for any real, nonzero-depth image).
+__attribute__((always_inline)) static void
+femeRTStoreTexel3D(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
+                   int32_t Z, FemeRTv4f32 Texel) {
+  if (!Img->Data || Img->MipLayoutCount == 0)
+    return;
+  if (X < 0 || Y < 0 || Z < 0 || (uint32_t)X >= Img->Width ||
+      (uint32_t)Y >= Img->Height || (uint32_t)Z >= Img->Depth)
+    return;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t Offset = Layout->Offset + (uint64_t)Z * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return;
+  unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
+  femeRTPackImageTexel(Img->Format, Ptr, Texel);
+}
+
+// The integer counterpart of `femeRTStoreTexel3D` above, for
+// `feme.cpu.image.store.3d.v4i32` (roadmap H19c).
+__attribute__((always_inline)) static void
+femeRTStoreTexel3DI32(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
+                      int32_t Z, FemeRTv4i32 Texel) {
+  if (!Img->Data || Img->MipLayoutCount == 0)
+    return;
+  if (X < 0 || Y < 0 || Z < 0 || (uint32_t)X >= Img->Width ||
+      (uint32_t)Y >= Img->Height || (uint32_t)Z >= Img->Depth)
+    return;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t Offset = Layout->Offset + (uint64_t)Z * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return;
+  unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
+  femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
+}
+
 
 // either an explicit-LOD sample's own `Lod` operand or (`UseExplicitLod`
 // false) an implicit-LOD sample's `Lod == 0.0` starting point (a caller
@@ -2367,6 +2520,183 @@ __attribute__((always_inline)) void femeCpuImageStore2DArrayV4I32(
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
   femeRTStoreTexel2DArrayI32(&Img, X, Y, (uint32_t)Layer, Texel);
+}
+
+// `feme.cpu.image.load.1d.v4f32` (roadmap H19c): the plain-1D counterpart
+// of `feme.cpu.image.load.2d.v4f32` above, taking a single integer `X`
+// texel coordinate instead of an `(X, Y)` pair -- see
+// `femeRTFetchTexel1D`'s own comment for why `Y == 0` needs no new
+// addressing math.
+FemeRTv4f32
+femeCpuImageLoad1DV4F32(const FemeRTImageDescriptor *ImageHeap,
+                        uint32_t ImageHeapCount, uint32_t ImageIndex,
+                        int32_t X, uint32_t Mip, uint32_t Sample,
+                        _Bool Mask) asm("feme.cpu.image.load.1d.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad1DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, uint32_t Mip, uint32_t Sample,
+    _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  if (X < 0 || (uint32_t)X >= Img.Width)
+    return Zero;
+  static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  return femeRTFetchTexel1D(&Img, Mip, X, Sample, /*UseBorder=*/0, NoBorder);
+}
+
+// `feme.cpu.image.load.1d.v4i32` (roadmap H19c): the integer-format
+// counterpart of `feme.cpu.image.load.1d.v4f32` above.
+FemeRTv4i32
+femeCpuImageLoad1DV4I32(const FemeRTImageDescriptor *ImageHeap,
+                        uint32_t ImageHeapCount, uint32_t ImageIndex,
+                        int32_t X, uint32_t Mip,
+                        _Bool Mask) asm("feme.cpu.image.load.1d.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad1DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, uint32_t Mip, _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  if (X < 0 || (uint32_t)X >= Img.Width)
+    return Zero;
+  return femeRTFetchTexel1DI32(&Img, Mip, X);
+}
+
+// `feme.cpu.image.store.1d.v4f32` (roadmap H19c): writes one texel of a 1D
+// storage image at integer coordinate `X`, mip level 0 (see
+// `femeRTStoreTexel1D`'s own scope comment) -- Vulkan's `OpImageWrite`.
+void femeCpuImageStore1DV4F32(const FemeRTImageDescriptor *ImageHeap,
+                              uint32_t ImageHeapCount, uint32_t ImageIndex,
+                              int32_t X, FemeRTv4f32 Texel,
+                              _Bool Mask) asm("feme.cpu.image.store.1d.v4f32");
+
+__attribute__((always_inline)) void femeCpuImageStore1DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, FemeRTv4f32 Texel, _Bool Mask) {
+  if (!Mask)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel1D(&Img, X, Texel);
+}
+
+// `feme.cpu.image.store.1d.v4i32` (roadmap H19c): the integer-format
+// counterpart of `feme.cpu.image.store.1d.v4f32` above.
+void femeCpuImageStore1DV4I32(const FemeRTImageDescriptor *ImageHeap,
+                              uint32_t ImageHeapCount, uint32_t ImageIndex,
+                              int32_t X, FemeRTv4i32 Texel,
+                              _Bool Mask) asm("feme.cpu.image.store.1d.v4i32");
+
+__attribute__((always_inline)) void femeCpuImageStore1DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, FemeRTv4i32 Texel, _Bool Mask) {
+  if (!Mask)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel1DI32(&Img, X, Texel);
+}
+
+// `feme.cpu.image.load.3d.v4f32` (roadmap H19c): the plain-3D counterpart
+// of `feme.cpu.image.load.2d.v4f32` above, taking an `(X, Y, Z)` texel
+// coordinate. Never arrayed -- SPIR-V disallows an arrayed `Dim::3D`
+// image -- so, unlike `feme.cpu.image.load.2darray.v4f32`, there is no
+// separate array-layer operand to carry.
+FemeRTv4f32
+femeCpuImageLoad3DV4F32(const FemeRTImageDescriptor *ImageHeap,
+                        uint32_t ImageHeapCount, uint32_t ImageIndex,
+                        int32_t X, int32_t Y, int32_t Z, uint32_t Mip,
+                        uint32_t Sample,
+                        _Bool Mask) asm("feme.cpu.image.load.3d.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad3DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Z, uint32_t Mip,
+    uint32_t Sample, _Bool Mask) {
+  (void)Sample; // A real 3D image is never multisampled (Vulkan spec).
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
+    return Zero;
+  static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  return femeRTFetchTexel3D(&Img, Mip, X, Y, Z, /*UseBorder=*/0, NoBorder);
+}
+
+// `feme.cpu.image.load.3d.v4i32` (roadmap H19c): the integer-format
+// counterpart of `feme.cpu.image.load.3d.v4f32` above.
+FemeRTv4i32
+femeCpuImageLoad3DV4I32(const FemeRTImageDescriptor *ImageHeap,
+                        uint32_t ImageHeapCount, uint32_t ImageIndex,
+                        int32_t X, int32_t Y, int32_t Z, uint32_t Mip,
+                        _Bool Mask) asm("feme.cpu.image.load.3d.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad3DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Z, uint32_t Mip,
+    _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
+    return Zero;
+  return femeRTFetchTexel3DI32(&Img, Mip, X, Y, Z);
+}
+
+// `feme.cpu.image.store.3d.v4f32` (roadmap H19c): writes one texel of a 3D
+// storage image at integer coordinates `(X, Y, Z)`, mip level 0 (see
+// `femeRTStoreTexel3D`'s own scope comment) -- Vulkan's `OpImageWrite`.
+void femeCpuImageStore3DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Z, FemeRTv4f32 Texel,
+    _Bool Mask) asm("feme.cpu.image.store.3d.v4f32");
+
+__attribute__((always_inline)) void femeCpuImageStore3DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Z, FemeRTv4f32 Texel,
+    _Bool Mask) {
+  if (!Mask)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel3D(&Img, X, Y, Z, Texel);
+}
+
+// `feme.cpu.image.store.3d.v4i32` (roadmap H19c): the integer-format
+// counterpart of `feme.cpu.image.store.3d.v4f32` above.
+void femeCpuImageStore3DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Z, FemeRTv4i32 Texel,
+    _Bool Mask) asm("feme.cpu.image.store.3d.v4i32");
+
+__attribute__((always_inline)) void femeCpuImageStore3DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Z, FemeRTv4i32 Texel,
+    _Bool Mask) {
+  if (!Mask)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel3DI32(&Img, X, Y, Z, Texel);
 }
 
 // Rounds `Value` to the nearest integer (per the Vulkan spec's "array

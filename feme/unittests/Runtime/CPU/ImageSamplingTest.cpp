@@ -190,6 +190,34 @@ using StoreArrayFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
 using StoreArrayI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
                                  uint32_t, int32_t, int32_t, int32_t,
                                  FeMeTestV4I32, bool);
+/// The roadmap H19c plain-1D counterpart of `LoadFn`: a single `X` texel
+/// coordinate, no `Y`.
+using Load1DFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                          int32_t, uint32_t, uint32_t, bool, void *);
+/// The roadmap H19c plain-1D counterpart of `LoadI32Fn`.
+using Load1DI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                             int32_t, uint32_t, bool, void *);
+/// The roadmap H19c plain-1D counterpart of `StoreFn`.
+using Store1DFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                           int32_t, FeMeTestV4F32, bool);
+/// The roadmap H19c plain-1D counterpart of `StoreI32Fn`.
+using Store1DI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                              int32_t, FeMeTestV4I32, bool);
+/// The roadmap H19c plain-3D counterpart of `LoadFn`: an `(X, Y, Z)` texel
+/// coordinate, never an array layer -- a 3D image is never arrayed.
+using Load3DFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                          int32_t, int32_t, int32_t, uint32_t, uint32_t, bool,
+                          void *);
+/// The roadmap H19c plain-3D counterpart of `LoadI32Fn`.
+using Load3DI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                             int32_t, int32_t, int32_t, uint32_t, bool,
+                             void *);
+/// The roadmap H19c plain-3D counterpart of `StoreFn`.
+using Store3DFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                           int32_t, int32_t, int32_t, FeMeTestV4F32, bool);
+/// The roadmap H19c plain-3D counterpart of `StoreI32Fn`.
+using Store3DI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                              int32_t, int32_t, int32_t, FeMeTestV4I32, bool);
 
 /// Builds a single-mip-level, single-layer 2D `FemeImageDescriptor` over
 /// \p Storage (assumed row-major, tightly packed at \p Format's element
@@ -252,6 +280,75 @@ FemeImageDescriptor makeImage2DArray(void *Storage, uint64_t SizeInBytes,
   Img.Depth = 1;
   Img.MipLevels = 1;
   Img.ArrayLayers = ArrayLayers;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED | ExtraFlags;
+  Img.MipLayouts = &Layout;
+  Img.MipLayoutCount = 1;
+  return Img;
+}
+
+/// The roadmap H19c plain-1D counterpart of `makeImage2D` above: a
+/// single-mip-level, single-layer, `Height == 1`/`Depth == 1` 1D
+/// `FemeImageDescriptor` over \p Storage. `Height == 1` is exactly what
+/// makes `femeRTFetchTexel1D`/`femeRTStoreTexel1D`'s own thin-wrapper
+/// reuse of the existing 2D addressing math (`Y == 0`) correct -- see
+/// that pair's own comment in FeMeRuntimeCPU.c.
+FemeImageDescriptor makeImage1D(void *Storage, uint64_t SizeInBytes,
+                                uint32_t Width, ResourceFormat Format,
+                                FemeImageSubresourceLayout &Layout,
+                                uint32_t ExtraFlags = 0) {
+  Layout = {0, 0, 0, 0};
+  uint64_t ElemSize = SizeInBytes / (uint64_t)Width;
+  Layout.RowPitch = Width * ElemSize;
+  Layout.SlicePitch = Layout.RowPitch;
+
+  FemeImageDescriptor Img{};
+  Img.Data = Storage;
+  Img.SizeInBytes = SizeInBytes;
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture1D);
+  Img.Format = static_cast<uint32_t>(Format);
+  Img.Width = Width;
+  Img.Height = 1;
+  Img.Depth = 1;
+  Img.MipLevels = 1;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED | ExtraFlags;
+  Img.MipLayouts = &Layout;
+  Img.MipLayoutCount = 1;
+  return Img;
+}
+
+/// The roadmap H19c plain-3D counterpart of `makeImage2D` above: a
+/// single-mip-level 3D `FemeImageDescriptor` over \p Storage (assumed
+/// row-major, tightly packed, slice-major -- each depth slice's own
+/// texels contiguous before the next slice's, addressed via
+/// `SlicePitch`, mirroring `makeImage2DArray`'s own per-layer layout).
+/// `ArrayLayers` stays `1`: a real 3D image is never arrayed per the
+/// Vulkan spec.
+FemeImageDescriptor makeImage3D(void *Storage, uint64_t SizeInBytes,
+                                uint32_t Width, uint32_t Height,
+                                uint32_t Depth, ResourceFormat Format,
+                                FemeImageSubresourceLayout &Layout,
+                                uint32_t ExtraFlags = 0) {
+  Layout = {0, 0, 0, 0};
+  uint64_t ElemSize =
+      SizeInBytes / (uint64_t)Width / (uint64_t)Height / (uint64_t)Depth;
+  Layout.RowPitch = Width * ElemSize;
+  Layout.SlicePitch = Layout.RowPitch * Height;
+
+  FemeImageDescriptor Img{};
+  Img.Data = Storage;
+  Img.SizeInBytes = SizeInBytes;
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture3D);
+  Img.Format = static_cast<uint32_t>(Format);
+  Img.Width = Width;
+  Img.Height = Height;
+  Img.Depth = Depth;
+  Img.MipLevels = 1;
+  Img.ArrayLayers = 1;
   Img.PlaneCount = 1;
   Img.SampleCount = 1;
   Img.Flags = FEME_IMAGE_SAMPLED | ExtraFlags;
@@ -1864,6 +1961,217 @@ TEST_F(ImageSamplingTest, StoreArrayOutOfBoundsLayerIsANoOp) {
       resolveRuntime<StoreArrayFn>("feme.cpu.image.store.2darray.v4f32");
   FeMeTestV4F32 Texel = {9.0f, 9.0f, 9.0f, 9.0f};
   Store(ImageHeap, 1, 0, 0, 0, /*Layer=*/5, Texel, /*Mask=*/true);
+  EXPECT_FLOAT_EQ(Storage[0][0][0][0], 1.0f);
+}
+
+// Roadmap H19c: `feme.cpu.image.load.1d.v4f32`/`.v4i32`/
+// `feme.cpu.image.store.1d.v4f32`/`.v4i32`, the plain-1D counterparts of
+// the plain-2D load/store pair above.
+
+TEST_F(ImageSamplingTest, Load1DFetchesTexelAtX) {
+  float Storage[3][4] = {{1, 2, 3, 4}, {5, 6, 7, 8}, {9, 10, 11, 12}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1D(
+      Storage, sizeof(Storage), 3, ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  Load1DFn Fn =
+      resolve<Load1DFn>(addWrapper("load1d", "feme.cpu.image.load.1d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, /*X=*/1, /*Mip=*/0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 5.0f);
+  EXPECT_FLOAT_EQ(Out[1], 6.0f);
+  EXPECT_FLOAT_EQ(Out[2], 7.0f);
+  EXPECT_FLOAT_EQ(Out[3], 8.0f);
+}
+
+TEST_F(ImageSamplingTest, Load1DOutOfBoundsXReadsZero) {
+  float Storage[1][4] = {{1, 2, 3, 4}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1D(
+      Storage, sizeof(Storage), 1, ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  Load1DFn Fn =
+      resolve<Load1DFn>(addWrapper("load1d", "feme.cpu.image.load.1d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, /*X=*/5, /*Mip=*/0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, Load1DI32FetchesIntegerTexel) {
+  int32_t Storage[2][4] = {{-1, -2, -3, -4}, {10, 20, 30, 40}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1D(
+      Storage, sizeof(Storage), 2, ResourceFormat::R32G32B32A32_SINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  Load1DI32Fn Fn = resolve<Load1DI32Fn>(
+      addWrapper("load1di32", "feme.cpu.image.load.1d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, /*X=*/1, /*Mip=*/0, true, Out);
+  EXPECT_EQ(Out[0], 10);
+  EXPECT_EQ(Out[3], 40);
+}
+
+TEST_F(ImageSamplingTest, Store1DWritesTexelAtX) {
+  float Storage[2][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage1D(Storage, sizeof(Storage), 2,
+                 ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                 FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  Store1DFn Store = resolveRuntime<Store1DFn>("feme.cpu.image.store.1d.v4f32");
+  FeMeTestV4F32 Texel = {5.0f, 6.0f, 7.0f, 8.0f};
+  Store(ImageHeap, 1, 0, /*X=*/1, Texel, /*Mask=*/true);
+
+  EXPECT_FLOAT_EQ(Storage[1][0], 5.0f);
+  EXPECT_FLOAT_EQ(Storage[1][3], 8.0f);
+  // Every other texel is untouched.
+  EXPECT_FLOAT_EQ(Storage[0][0], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, Store1DI32WritesIntegerTexel) {
+  int32_t Storage[1][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage1D(Storage, sizeof(Storage), 1,
+                 ResourceFormat::R32G32B32A32_SINT, Layout,
+                 FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  Store1DI32Fn Store =
+      resolveRuntime<Store1DI32Fn>("feme.cpu.image.store.1d.v4i32");
+  FeMeTestV4I32 Texel = {-7, 0, 0, 0};
+  Store(ImageHeap, 1, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0], -7);
+}
+
+TEST_F(ImageSamplingTest, Store1DOutOfBoundsXIsANoOp) {
+  float Storage[1][4] = {{1, 2, 3, 4}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage1D(Storage, sizeof(Storage), 1,
+                 ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                 FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  Store1DFn Store = resolveRuntime<Store1DFn>("feme.cpu.image.store.1d.v4f32");
+  FeMeTestV4F32 Texel = {9.0f, 9.0f, 9.0f, 9.0f};
+  Store(ImageHeap, 1, 0, /*X=*/5, Texel, /*Mask=*/true);
+  EXPECT_FLOAT_EQ(Storage[0][0], 1.0f);
+}
+
+// Roadmap H19c: `feme.cpu.image.load.3d.v4f32`/`.v4i32`/
+// `feme.cpu.image.store.3d.v4f32`/`.v4i32`, the plain-3D counterparts,
+// addressing a real depth slice via `SlicePitch` (like an array layer)
+// but bounds-checked against `Img.Depth`, not `Img.ArrayLayers`.
+
+TEST_F(ImageSamplingTest, Load3DFetchesTexelAtXYZ) {
+  float Storage[2][2][2][4] = {}; // [Z][Y][X][Channel].
+  Storage[1][1][0][0] = 42.0f;
+  Storage[1][1][0][1] = 43.0f;
+  Storage[1][1][0][2] = 44.0f;
+  Storage[1][1][0][3] = 45.0f;
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage3D(Storage, sizeof(Storage), 2, 2, 2,
+                 ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  Load3DFn Fn =
+      resolve<Load3DFn>(addWrapper("load3d", "feme.cpu.image.load.3d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, /*X=*/0, /*Y=*/1, /*Z=*/1, /*Mip=*/0, /*Sample=*/0, true,
+     Out);
+  EXPECT_FLOAT_EQ(Out[0], 42.0f);
+  EXPECT_FLOAT_EQ(Out[1], 43.0f);
+  EXPECT_FLOAT_EQ(Out[2], 44.0f);
+  EXPECT_FLOAT_EQ(Out[3], 45.0f);
+  // A different (X, Y, Z) reads the untouched zero texel.
+  Fn(ImageHeap, 1, 0, /*X=*/0, /*Y=*/0, /*Z=*/0, /*Mip=*/0, /*Sample=*/0, true,
+     Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, Load3DOutOfBoundsZReadsZero) {
+  float Storage[1][1][1][4] = {{{{1, 2, 3, 4}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage3D(Storage, sizeof(Storage), 1, 1, 1,
+                 ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  Load3DFn Fn =
+      resolve<Load3DFn>(addWrapper("load3d", "feme.cpu.image.load.3d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, /*X=*/0, /*Y=*/0, /*Z=*/5, /*Mip=*/0, /*Sample=*/0, true,
+     Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, Load3DI32FetchesIntegerTexel) {
+  int32_t Storage[2][1][1][4] = {}; // [Z][Y][X][Channel].
+  Storage[1][0][0][0] = 10;
+  Storage[1][0][0][3] = 40;
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage3D(
+      Storage, sizeof(Storage), 1, 1, 2, ResourceFormat::R32G32B32A32_SINT,
+      Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  Load3DI32Fn Fn = resolve<Load3DI32Fn>(
+      addWrapper("load3di32", "feme.cpu.image.load.3d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, /*X=*/0, /*Y=*/0, /*Z=*/1, /*Mip=*/0, true, Out);
+  EXPECT_EQ(Out[0], 10);
+  EXPECT_EQ(Out[3], 40);
+}
+
+TEST_F(ImageSamplingTest, Store3DWritesTexelIntoTheAddressedSliceOnly) {
+  float Storage[2][2][2][4] = {}; // [Z][Y][X][Channel].
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage3D(Storage, sizeof(Storage), 2, 2, 2,
+                 ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                 FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  Store3DFn Store = resolveRuntime<Store3DFn>("feme.cpu.image.store.3d.v4f32");
+  FeMeTestV4F32 Texel = {5.0f, 6.0f, 7.0f, 8.0f};
+  Store(ImageHeap, 1, 0, /*X=*/1, /*Y=*/1, /*Z=*/1, Texel, /*Mask=*/true);
+
+  EXPECT_FLOAT_EQ(Storage[1][1][1][0], 5.0f);
+  EXPECT_FLOAT_EQ(Storage[1][1][1][3], 8.0f);
+  // Slice 0's identical (X, Y) is untouched -- confirms the write actually
+  // addresses one depth slice, not every slice.
+  EXPECT_FLOAT_EQ(Storage[0][1][1][0], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, Store3DI32WritesIntegerTexel) {
+  int32_t Storage[1][1][1][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage3D(
+      Storage, sizeof(Storage), 1, 1, 1, ResourceFormat::R32G32B32A32_SINT,
+      Layout, FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  Store3DI32Fn Store =
+      resolveRuntime<Store3DI32Fn>("feme.cpu.image.store.3d.v4i32");
+  FeMeTestV4I32 Texel = {-7, 0, 0, 0};
+  Store(ImageHeap, 1, 0, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0][0], -7);
+}
+
+TEST_F(ImageSamplingTest, Store3DOutOfBoundsZIsANoOp) {
+  float Storage[1][1][1][4] = {{{{1, 2, 3, 4}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage3D(Storage, sizeof(Storage), 1, 1, 1,
+                 ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                 FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  Store3DFn Store = resolveRuntime<Store3DFn>("feme.cpu.image.store.3d.v4f32");
+  FeMeTestV4F32 Texel = {9.0f, 9.0f, 9.0f, 9.0f};
+  Store(ImageHeap, 1, 0, /*X=*/0, /*Y=*/0, /*Z=*/5, Texel, /*Mask=*/true);
   EXPECT_FLOAT_EQ(Storage[0][0][0][0], 1.0f);
 }
 
