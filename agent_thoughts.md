@@ -48601,3 +48601,75 @@ changes were needed beyond in-code maintenance comments.
 With H19m closed, the entire H19g/H19k/H19l/H19m
 `shaderStorageImageMultisample` chain (opened at H19g, split by two
 compiler-bug prerequisites at H19k/H19l, and completed here) is done.
+
+# Session: H19i / H19j (single-channel R8 storage formats)
+
+Asked to continue H19i (`shaderStorageImageReadWithoutFormat`/
+`WriteWithoutFormat`). Re-reading the roadmap confirmed H19i explicitly
+depends on H19h's own broader mandatory extended-format list, which
+itself only partially closed and was split further into H19j
+(single/two-channel R8/R16/R32 formats plus packed 32-bit formats).
+H19i's own `without_format.*` CTS group (828 cases) exercises the *full*
+mandatory list, so there is no way to make honest progress on H19i itself
+without that prerequisite work landing first. Per the task's own "or any
+prerequisite work required" framing, pivoted to H19j.
+
+H19j's own list is large (R8G8, R16, R16G16, R32G32-storage, plus two
+packed 32-bit formats with an open component-order question). Scoped a
+first deliverable slice: the single-channel `R8_{UNORM,SNORM,UINT,SINT}`
+formats only, deferring the rest.
+
+Implementation followed the exact pattern H19h itself established for
+`R16G16B16A16_{UNORM,SNORM}`: new `ResourceFormat` enum entries (must be
+appended at the tail -- confirmed via `RuntimeABI.h`'s own doc comment
+that the runtime's dispatch tables switch on raw ordinal values, so any
+mid-enum insertion would silently renumber and corrupt every later case),
+`Format.cpp` mapping/feature-bit wiring, and new pack/unpack helpers in
+`FeMeRuntimeCPU.c`. Unlike some of the historical rows (which staged
+read-then-write separately), did both sides in the same change since the
+single-channel case is simple.
+
+Found two more exhaustive `switch (ResourceFormat)` tables (deliberately
+without a `default:`, so the compiler forces attention at every new
+enum value) that needed new cases: `ImageFixture.cpp`'s
+`formatFixtureName`/`parseFixtureFormat` and `feme-run.cpp`'s
+`imageFormatElementSize`. Confirmed `feme-run.cpp`'s separate
+`parseResourceFormat` switch is a deliberately curated allowlist with a
+`default:`, so left it untouched.
+
+Hit a couple of self-inflicted `edit` mistakes this session: two of the
+new `TEST_F` insertions accidentally dropped the following test's own
+`TEST_F(...) {` signature line (the `old_str`/`new_str` boundary ate the
+next test's header), producing "ambiguous reference"/"expected
+unqualified-id" compile errors that took a moment to diagnose since the
+error messages pointed at unrelated-looking lines further down the file.
+Fixed both by restoring the missing signature lines.
+
+Verification: targeted `FeMeRuntimeCPUTests --gtest_filter=*R8*` (17/17
+pass) and `FeMeVulkanTests --gtest_filter=FormatTest.*` (20/20 pass)
+before the full suite; `ninja check-feme` came back 2157/2216 (59
+pre-existing `Unsupported`, 0 `Failed`) -- +9 new tests, no regressions
+vs. the historical baseline.
+
+Real Vulkan CTS: `dEQP-VK.image.load_store.with_format.*.r8_*` (112
+cases) came back 88 Pass (up from 0), 0 Fail, 24 `NotSupported` (shape
+variants outside existing coverage, unrelated to format). The
+`load-store.txt` mustpass regression caselist (3446 cases) came back 348
+Pass (up from the 260 baseline by exactly the +88 new passes), 0 Fail,
+3098 `NotSupported` -- confirmed 0 regressions.
+
+Documented H19j as partially closed in `Roadmap.md` (not struck through),
+split the remainder into a new sibling row H19n (not a further nested
+letter, per the standing anti-nesting instruction), and updated
+`Vulkan14FeatureInventory.md`'s `shaderStorageImageExtendedFormats` row
+and `VulkanCTSReport.md` with a new "Roadmap H19j: measured impact"
+section. `VulkanExtensionInventory.md` needed no change (this is a core
+1.0 feature, not an extension).
+
+H19i itself remains blocked: it still needs H19n's own broader format
+list (R8G8/R16/R16G16/R32G32-storage/packed-32-bit) to land before its
+828-case `without_format.*` CTS group can be meaningfully scoped.
+
+Landed in three commits: (1) core R8 implementation + all new unit
+tests, (2) roadmap/inventory/CTS-report doc updates, (3) this
+agent_thoughts.md entry.
