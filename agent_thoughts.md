@@ -49076,3 +49076,84 @@ Broke the change into four commits: (1) the format/runtime implementation
 and its unit tests, (2) the feature-flag flip and its regression-test fix,
 (3) docs (roadmap strike-through, feature inventory, CTS report), and (4)
 this file.
+
+# H19i: shaderStorageImageReadWithoutFormat/WriteWithoutFormat
+
+Picked up H19i, the row split out of H19f for the pair of `without_format`
+feature bits, gated behind the H19h/H19n/H19o extended-format-list chain
+finally being "materially complete" (per H19o's own closing note). With
+that chain closed, this row's own remaining gap was purely advertisement:
+compute the per-format `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT`
+tiling/buffer feature bits (a `VkFormatProperties3`-only pair with no
+32-bit equivalent) and flip the two device feature bits that gate on them.
+
+Before touching any code, spent real effort ruling out a red herring: CTS's
+`Context::getRequiredFormatProperties` (`vktTestCase.cpp`) has its own
+synthetic fallback path that ORs in these exact WITHOUT_FORMAT bits itself,
+based on `isExtendedStorageFormat` plus the device's own feature bits --
+which raised the question of whether feme's driver needed to compute
+anything in `vkGetPhysicalDeviceFormatProperties2` at all, or whether just
+flipping the feature bits would be enough for CTS to synthesize the rest.
+Traced `isDeviceFunctionalitySupported("VK_KHR_format_feature_flags2")` and
+confirmed it returns true unconditionally for any device with API version
+>= 1.3 (feme reports 1.4), regardless of whether the extension name itself
+is advertised -- meaning CTS always takes the *real*
+`vkGetPhysicalDeviceFormatProperties2` query path for this driver, never
+the synthetic fallback. So the driver-side computation really was required;
+the fallback path is dead code from feme's own perspective. Worth
+remembering for any future H-series row that touches `VkFormatProperties3`:
+don't assume CTS's synthetic paths apply just because they exist in the
+test source.
+
+Confirmed directly (not just repeated from the task's own speculation) that
+there is no compiler-side lowering gap paired with this one: grepped
+`SPIRVResourceLowering.cpp` for any `getIntParameter(5)` call (the SPIR-V
+image handle's `Format` operand index) in `classifyStorageImage2DHandle`/
+`hasOnlySupportedStorageImageUses` and found none -- a `Format == Unknown`
+storage-image handle already lowers identically to a declared-format one.
+This is a nice contrast with several recent H19-series rows (e.g. H19d,
+H19j) where the task's own stated premise turned out to be wrong or
+incomplete once actually checked; this time it held up exactly as stated,
+and the entire row really was advertisement-only.
+
+Implementation mirrors the pre-existing `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT`
+pattern (roadmap F11) in `EntryPoints.cpp` exactly, since both bit pairs
+share the same "only exists in the 2-suffixed enum, can't be derived from
+widening the 32-bit result" shape. Two independent format-capability checks
+gate the two feature types: `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` for the
+tiling (image) bits, `isTexelBufferFormatSupported` for the buffer bits --
+these only partially overlap (e.g. `R32_UINT` is storage-image-capable but
+not texel-buffer-capable; `R8G8B8A8_UINT` is the reverse), which is why
+`EntryPointsTest.cpp` gained two separate positive-case tests plus one
+negative case rather than a single combined test.
+
+Real CTS: full `load-store.txt` (3446 cases) went from 822 Pass to 1918
+Pass, 0 Fail -- `without_format.*`'s own 828-case count matched the task's
+original scope estimate exactly, closing at 534 Pass/0 Fail;
+`without_any_format.*` (1526 cases) closed at 562 Pass/0 Fail;
+`with_format.*` stayed put at 822 Pass as expected (it never touches this
+row's own bits). Also ran two broader smoke checks given this is a
+device-level feature flip (not a narrow format-specific one): a 3000-case
+robustness sample stayed fully `NotSupported` (gated on the separate,
+still-unimplemented `robustImageAccess`, so no new surface opened), and a
+~992-case `spirv_assembly.instruction.*image*` sweep surfaced a real,
+pre-existing crash (`UNREACHABLE executed at llvm/lib/IR/Value.cpp:99`,
+"Uses remain when a value is destroyed!") in a sampled-image
+function-parameter-passing pattern
+(`imagesample.*.pass_image_and_sampler_to_function*`). Confirmed this is
+unrelated to storage images or this row's own feature bits, and pre-existing
+rather than newly introduced. Documented it in `VulkanCTSReport.md` but
+deliberately did not file it as a new roadmap row -- it wasn't part of
+this session's request, and the standing guidance has been to avoid
+unrequested scope creep; flagging it here in case a future session (or the
+user directly) wants to track it as a new H-series or miscellaneous-bugs
+row.
+
+Broke the change into three commits: (1) the `EntryPoints.cpp`
+implementation and its new/widened unit tests, (2) the
+`PhysicalDeviceInfo.cpp` feature-flag flip and its regression-test fix, and
+(3) docs (roadmap strike-through, feature inventory, CTS report). This file
+is commit (4).
+
+With H19i closed, the H19f-H19i sub-chain (extended storage-image formats
+plus without-format support) is now fully resolved end-to-end.
