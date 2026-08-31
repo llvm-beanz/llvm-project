@@ -48314,3 +48314,164 @@ never continuing into the "stay in loop" arm to look for further,
 unrelated nested diamonds positioned *after* the loop's own exit check
 -- was not touched this session and remains an open, undecided
 question (no roadmap row yet; may just need a documentation note).
+
+# Session: H19l
+
+## Task
+
+Continue roadmap H19l -- a downstream gap discovered right after H19k's
+own closure. With H19k's Flow-fold fix in place and
+`shaderStorageImageMultisample` temporarily forced `VK_TRUE` to probe
+the real shader path, all 27 previously-`feme-cpu-linearize`-blocked
+`dEQP-VK.image.load_store_multisample.2d.*` cases instead hit a
+`feme-cpu-simdize` "divergent vector value ... used outside a
+supported ... pattern; component decomposition is not yet supported
+for this use" diagnostic.
+
+## Methodology
+
+Same real-IR-reduction technique the H6g-b/H6j/H6k/H6l/H19k chain has
+used throughout: hand-wrote a minimal GLSL reduction
+(`ms_store.comp`/`ms_load.comp`) mirroring the actual CTS shader's
+per-sample `imageStore`/`imageLoad` loop (found in
+`vktImageMultisampleLoadStoreTests.cpp` in the VK-GL-CTS checkout),
+compiled to SPIR-V via `glslangValidator -V`, translated to LLVM IR via
+`feme-translate --import-spirv --no-implicit-module
+--spirv-to-llvmir`, then ran the exact CPU-target pass pipeline
+`Pipeline.cpp` assembles (reconstructed stage by stage:
+`feme-cpu-fold-spirv-builtins,feme-cpu-prepare,feme-cpu-normalize-bound-resources,feme-cpu-lower-root-constants,feme-cpu-lower-spirv-resources,feme-cpu-lower-spirv-push-constants,feme-cpu-lower-resources,feme-cpu-linearize,feme-cpu-simdize`
+via `feme-opt`) to reproduce the exact CTS failure deterministically,
+outside the full CTS harness.
+
+## The red herring
+
+The "component decomposition is not yet supported for this use"
+diagnostic text made this look like a real, novel gap in
+`feme-cpu-simdize`'s own divergent-vector decomposition support (as
+H19k's own report speculated). Dumping the pre-simdize IR showed a
+`<4 x i32>` insertelement-chain result used as the `Texel` argument of
+a `feme.cpu.image.store.2dms.v4i32` call -- a shape that already has
+full, working support elsewhere (the plain, non-multisampled
+`Store2D` case uses the identical pattern and works fine). Adding
+temporary `errs()` debug prints at the exact diagnostic-emission site
+in `SIMDize.cpp` confirmed this exact insertelement-chain/Texel-
+argument pair was the one triggering the fallback diagnostic -- so the
+real question became "why doesn't `feme-cpu-simdize` recognize this
+otherwise-supported shape for this one call kind?", not "what new
+decomposition pattern is missing?".
+
+## The actual root cause
+
+Traced the `Texel`-argument recognition path to `matchImageCall`
+(`ImageCalls.cpp`), the single dispatch point both `feme-cpu-simdize`'s
+validator and `FunctionWidener::widenImageCall`'s own gating check use.
+It works by scanning a `static constexpr ImageCallKind AllKinds[]`
+array by mangled callee name to find a call's `ImageCallKind`, then
+dispatches to a `switch` that extracts the shape-specific operands.
+**`Store2DMS`/`Store2DMSI32` were fully present in the enum,
+`getImageCallName`, the `createStore2DMS`/`createStore2DMSI32`
+builders, and the switch's own operand-extraction case -- but were
+simply never added to `AllKinds`.** This made `matchImageCall` always
+return `std::nullopt` for these two kinds, silently making the
+already-correct switch case dead code, and silently making
+`widenImageCall`'s own gating check skip widening these calls
+entirely (a second, unrelated latent bug beyond the diagnostic).
+
+This is an isolated oversight from roadmap H19g's own original
+implementation: the enum/switch/builder changes are in one place in
+the file, `AllKinds` is a separate array elsewhere that must be kept
+manually in sync, and nothing enforces this at compile time. It was
+never caught by H19g's own unit tests (which tested the builder
+functions and runtime pack/unpack helpers directly, but never
+`matchImageCall`'s recognition of the resulting calls), and was never
+exercised by any real code path because H19g's own feature bit stayed
+`VK_FALSE` the entire time (first blocked by H19k's own, separate,
+now-fixed `feme-cpu-linearize` bug) -- this CTS re-run was the first
+time this exact path was ever actually reached.
+
+## The fix
+
+Added `ImageCallKind::Store2DMS, ImageCallKind::Store2DMSI32` to
+`AllKinds`. Confirmed `widenImageCall` itself needed no changes at
+all -- it is fully generic, driving entirely off `MatchedImageCall`'s
+own fields rather than any per-`Kind` special-casing beyond the
+already-correct `Texel` extraction. Added a short maintenance-risk
+comment above `AllKinds` noting that every `ImageCallKind` must be
+listed there too, to reduce the chance of the same class of bug
+recurring for a future call kind.
+
+## Testing
+
+- New `ImageCallsTest.cpp` (the first dedicated test file exercising
+  `matchImageCall`/`create*` in isolation, mirroring
+  `ResourceCallsTest.cpp`'s fixture style): `MatchesStore2DMSCall`,
+  `MatchesStore2DMSI32Call`, both directly building the calls and
+  asserting `matchImageCall` now correctly recognizes them and
+  populates every field.
+- New `DecomposesInsertElementChainIntoImageStore2DMS` in
+  `SIMDizeTest.cpp`, mirroring the existing `Store2D` variant of the
+  same test but exercising the `2dms` call shape end-to-end through
+  the real `SIMDizePass`.
+- Sanity-checked all three tests actually catch the regression: `git
+  stash push` on just `ImageCalls.cpp` (keeping the new tests),
+  rebuilt, reran -- all 3 failed exactly as expected (2 `matchImageCall`
+  tests got `false`; the SIMDize test reproduced the literal real CTS
+  diagnostic and got 1 store call instead of 4). `git stash pop` to
+  restore the fix -- all passing again.
+- `ninja check-feme`: 2139/2198 passing, 59 pre-existing
+  `Unsupported`, 0 `Failed` -- exactly +3 tests over H19k's own
+  2136/2195 baseline, 0 regressions.
+
+## Real Vulkan CTS re-run
+
+Temporarily forced `shaderStorageImageMultisample = VK_TRUE` in
+`PhysicalDeviceInfo.cpp` (same "TEMPORARY (roadmap H19l CTS
+verification probe...)" pattern used for H19k's own probe) purely to
+exercise the real shader path, reverted before landing.
+
+`dEQP-VK.image.load_store_multisample.2d.*` (84 cases): **27 Passed, 0
+Failed, 57 NotSupported** -- a full, clean pass of every case reachable
+through the plain-2D path, up from 0 Pass/27 Fail at the very start of
+this session (H19k's own baseline). Checked the 57 `NotSupported`
+cases individually: all 9 mandatory-floor formats Pass at
+`samples_2`/`4`/`8` and are honestly `NotSupported` only at
+`samples_16`/`32`/`64` (the rasterizer's existing 8-sample ceiling,
+R33/C4b, unrelated to this row); the remaining formats this CTS group
+also exercises (`r8g8b8a8_*`, `a8_unorm`) are honestly `NotSupported`
+for an entirely separate, pre-existing reason -- they're simply outside
+the storage-image mandatory format floor (H19a/H19f/H19h's own scope).
+
+Given this clean closure, investigated whether
+`shaderStorageImageMultisample` could now honestly flip to `VK_TRUE`
+permanently. Probed the *full* `dEQP-VK.image.load_store_multisample.*`
+group (252 cases, both `2d.*` and `2d_array.*`) with the bit still
+forced on: **54 Passed, 27 Failed, 171 NotSupported**. All 27 failures
+are in `2d_array.*`, every one hitting an MLIR SPIR-V-to-LLVM
+legalization failure on `spirv.ImageWrite` for an `Arrayed`+
+`MultiSampled` image dim -- confirming H19g's own documented scope
+narrowing (`isPlainMultisampled2DImage` in `SPIRVToLLVMPatterns.cpp`
+explicitly rejects `Arrayed`) is still the accurate boundary today.
+Flipping the bit now would newly attempt, and fail, this entire
+sub-group -- a real conformance regression, not an improvement. Kept
+the bit `VK_FALSE` and split the arrayed-2D-multisample gap into a new
+roadmap row, H19m (one lowercase letter of nesting under H19).
+
+`load-store.txt` mustpass regression caselist (3446 cases), re-run
+after reverting the feature-bit probe: 260 Pass, 0 Fail, 3186
+NotSupported -- byte-identical to the pre-H19l baseline. 0 regressions.
+
+## Docs
+
+Struck through H19l in `Roadmap.md` with a full done summary (true
+root cause called out explicitly: a `matchImageCall` table omission,
+not a real `feme-cpu-simdize` decomposition gap). Added new roadmap row
+H19m for the arrayed-2D-multisample follow-on. Added a new "Roadmap
+H19l: measured impact" section to `VulkanCTSReport.md`. Updated
+`Vulkan14FeatureInventory.md`'s `shaderStorageImageMultisample` row to
+describe H19l's closure and the new H19m follow-on as the last
+remaining blocker to an honest `VK_TRUE` flip.
+
+No design-doc deviation this time: this was a straightforward bugfix
+inside already-documented H19g machinery, not a new design decision,
+so no `FeMeCPUDesign.md`/`FeMeGraphicsDesign.md` changes were needed
+beyond the in-code maintenance comment.
