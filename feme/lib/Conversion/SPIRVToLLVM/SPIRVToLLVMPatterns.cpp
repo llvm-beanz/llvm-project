@@ -1895,6 +1895,51 @@ mlir::Value createResourcePointer(mlir::ConversionPatternRewriter &Rewriter,
       {Handle, Coordinate});
 }
 
+/// Returns a new vector one lane wider than \p Coordinate, with \p
+/// Coordinate's own lanes copied in order followed by \p ExtraLane as the
+/// trailing lane (roadmap H19g). `llvm.spv.resource.getpointer` (a real,
+/// fixed 2-operand LLVM intrinsic shared with the DXIL -> SPIR-V direction)
+/// has no operand slot of its own for a multisampled storage image's
+/// `Sample` image operand, so this widens the ordinary `(x, y)` coordinate
+/// into a 3-component `(x, y, sample)` one instead -- exactly the same
+/// coordinate shape `SPIRVResourceLowering.cpp`'s `classifyStorageImage2DHandle`/
+/// `lowerImageAccesses` already extract an array layer or depth-slice
+/// from for `Array2D`/`Plain3D` (see `ImageShape::Plain2DMS`'s own
+/// comment), rather than inventing a separate mechanism to carry `Sample`.
+mlir::Value appendVectorLane(mlir::ConversionPatternRewriter &Rewriter,
+                             mlir::Location Loc, mlir::Value Coordinate,
+                             mlir::Value ExtraLane) {
+  auto CoordVecTy = mlir::cast<mlir::VectorType>(Coordinate.getType());
+  auto WideTy = mlir::VectorType::get(
+      {CoordVecTy.getNumElements() + 1}, CoordVecTy.getElementType());
+  mlir::Value Wide = mlir::LLVM::PoisonOp::create(Rewriter, Loc, WideTy);
+  for (int64_t I = 0, E = CoordVecTy.getNumElements(); I != E; ++I) {
+    mlir::Value Index = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(I));
+    mlir::Value Lane = mlir::LLVM::ExtractElementOp::create(
+        Rewriter, Loc, Coordinate, Index);
+    Wide = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Wide, Lane,
+                                               Index);
+  }
+  mlir::Value LastIndex = mlir::LLVM::ConstantOp::create(
+      Rewriter, Loc, Rewriter.getI64Type(),
+      Rewriter.getI64IntegerAttr(CoordVecTy.getNumElements()));
+  return mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Wide, ExtraLane,
+                                             LastIndex);
+}
+
+/// Whether \p ImageType is a plain (non-arrayed), non-cube, non-3D,
+/// multisampled `Dim::2D` image -- the one multisampled shape roadmap
+/// H19g's `Sample`-image-operand-to-coordinate widening (`appendVectorLane`
+/// above) supports today; an arrayed or cube multisampled image needs a
+/// 4-component coordinate no call vocabulary or runtime helper implements
+/// yet (see Roadmap.md's H19g breakdown).
+bool isPlainMultisampled2DImage(mlir::spirv::ImageType ImageType) {
+  return ImageType.getDim() == mlir::spirv::Dim::Dim2D &&
+        ImageType.getArrayedInfo() == mlir::spirv::ImageArrayedInfo::NonArrayed &&
+        ImageType.getSamplingInfo() == mlir::spirv::ImageSamplingInfo::MultiSampled;
+}
+
 /// SPIR-V 1.6's `Nontemporal` image-operand bit is a cache hint with no
 /// correctness effect (see the SPIR-V spec's Image Operands table); this
 /// converter has no caching model to honor it with, so every pattern below
@@ -1933,6 +1978,17 @@ bool hasExactImageOperands(
 /// (`spirv.ImageFetch`'s only legal operand, per its verifier) rather than
 /// from which intrinsic produced the load -- see `generateImageReadOrFetch`
 /// in `llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`.
+///
+/// Roadmap H19g: a `spirv.ImageRead` against a plain (non-arrayed)
+/// multisampled 2D storage image may also carry a lone `Sample` image
+/// operand (SPIR-V requires one whenever the image's own `MS == 1`); this
+/// is accepted only for `ImageReadOp` (an `ImageFetchOp`'s own multisampled-
+/// *sampled*-image case is still unstarted follow-on work) and its operand
+/// value is appended as the coordinate vector's own trailing lane
+/// (`appendVectorLane`), which `SPIRVResourceLowering.cpp`'s
+/// `classifyStorageImage2DHandle`/`lowerImageAccesses` then extract exactly
+/// like `Array2D`'s own array-layer/`Plain3D`'s own depth-slice 3rd
+/// component (`ImageShape::Plain2DMS`).
 template <typename ImageOpTy>
 class ImageLoadPattern : public mlir::SPIRVToLLVMConversion<ImageOpTy> {
 public:
@@ -1942,15 +1998,38 @@ public:
   mlir::LogicalResult
   matchAndRewrite(ImageOpTy Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (hasImageOperands(Op.getImageOperands()))
+    std::optional<mlir::spirv::ImageOperands> ImageOperands =
+        Op.getImageOperands();
+    bool HasSample = false;
+    if constexpr (std::is_same_v<ImageOpTy, mlir::spirv::ImageReadOp>) {
+      HasSample = hasExactImageOperands(ImageOperands,
+                                        mlir::spirv::ImageOperands::Sample);
+      if (HasSample) {
+        auto ImageType =
+            mlir::dyn_cast<mlir::spirv::ImageType>(Op.getImage().getType());
+        if (!ImageType || !isPlainMultisampled2DImage(ImageType))
+          return Rewriter.notifyMatchFailure(
+              Op, "Sample image operand only supported for a plain "
+                  "multisampled 2D storage image");
+        if (Adaptor.getOperandArguments().size() != 1)
+          return Rewriter.notifyMatchFailure(
+              Op, "Sample image operand needs exactly one operand argument");
+      }
+    }
+    if (hasImageOperands(ImageOperands) && !HasSample)
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
 
     mlir::Type ResultType = this->getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
-    mlir::Value Pointer = createResourcePointer(
-        Rewriter, Op.getLoc(), Adaptor.getImage(), Adaptor.getCoordinate());
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+    if (HasSample)
+      Coordinate = appendVectorLane(Rewriter, Op.getLoc(), Coordinate,
+                                    Adaptor.getOperandArguments()[0]);
+
+    mlir::Value Pointer = createResourcePointer(Rewriter, Op.getLoc(),
+                                                Adaptor.getImage(), Coordinate);
     Rewriter.replaceOpWithNewOp<mlir::LLVM::LoadOp>(Op, ResultType, Pointer);
     return mlir::success();
   }
@@ -2302,6 +2381,9 @@ public:
 };
 
 /// Converts `spirv.ImageWrite` into a store through the written location.
+/// Roadmap H19g: like `ImageLoadPattern` above, a lone `Sample` image
+/// operand is accepted for a plain multisampled 2D storage image, appended
+/// to the coordinate the same way.
 class ImageWritePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageWriteOp> {
 public:
@@ -2311,11 +2393,31 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::ImageWriteOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (hasImageOperands(Op.getImageOperands()))
+    std::optional<mlir::spirv::ImageOperands> ImageOperands =
+        Op.getImageOperands();
+    bool HasSample =
+        hasExactImageOperands(ImageOperands, mlir::spirv::ImageOperands::Sample);
+    if (HasSample) {
+      auto ImageType =
+          mlir::dyn_cast<mlir::spirv::ImageType>(Op.getImage().getType());
+      if (!ImageType || !isPlainMultisampled2DImage(ImageType))
+        return Rewriter.notifyMatchFailure(
+            Op, "Sample image operand only supported for a plain "
+                "multisampled 2D storage image");
+      if (Adaptor.getOperandArguments().size() != 1)
+        return Rewriter.notifyMatchFailure(
+            Op, "Sample image operand needs exactly one operand argument");
+    }
+    if (hasImageOperands(ImageOperands) && !HasSample)
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
 
-    mlir::Value Pointer = createResourcePointer(
-        Rewriter, Op.getLoc(), Adaptor.getImage(), Adaptor.getCoordinate());
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+    if (HasSample)
+      Coordinate = appendVectorLane(Rewriter, Op.getLoc(), Coordinate,
+                                    Adaptor.getOperandArguments()[0]);
+
+    mlir::Value Pointer = createResourcePointer(Rewriter, Op.getLoc(),
+                                                Adaptor.getImage(), Coordinate);
     Rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(Op, Adaptor.getTexel(),
                                                      Pointer);
     return mlir::success();
