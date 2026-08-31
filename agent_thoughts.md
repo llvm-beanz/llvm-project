@@ -49203,3 +49203,148 @@ closure-confirmation writeup, (2) this file.
 With H7j and H19 both now closed, H7's own remaining open sub-rows are
 H7k/H7l/H7m (primitive-topology/coverage gaps, unrelated to storage
 images) -- worth picking up next if continuing the H7 cluster specifically.
+
+# H7k: point/line near/far Z-clip fix
+
+Picked up H7k from the roadmap: "Point/line-primitive quad coverage
+excludes exact pixel-grid-aligned centers," originally diagnosed (in an
+earlier session, from H7d's own reproduction work) as a top-left-rule
+coverage tie-break bug.
+
+## Investigation: the original diagnosis was wrong
+
+Before touching any code, I tried to actually reproduce the claimed bug.
+The roadmap text hypothesized that a point/line quad centered exactly on
+a pixel-grid intersection (e.g. `(8,8)` expanding to `[7.5,8.5]x[7.5,8.5]`)
+renders *zero* pixels because `Executor.cpp`'s coverage test excludes the
+covering pixel on both sides of the boundary.
+
+I wrote a standalone C++ simulation (`/tmp/edgetest.cpp`) replicating the
+exact quad-triangle-split and coverage-test math from `Executor.cpp`
+(`edgeFn`/`edgeFnD`/`isTopLeftEdge`) for that exact `(8,8)` case. It showed
+exactly 1 of the 4 candidate corner pixels ("TL") covered -- not zero.
+I didn't trust a hand simulation alone, so I also added a temporary debug
+unit test (`DEBUGProbeGridAlignedPoint`) to `ExecutorTest.cpp` drawing a
+single grid-aligned point through the real executor, built
+`FeMeGraphicsTests`, and ran it: same result, exactly 1 pixel covered.
+This confirmed the top-left-rule coverage test already does the right
+thing for this exact case, and the roadmap's own diagnosis doesn't
+reproduce. I removed the debug test afterward (it's not a permanent
+regression test, since it doesn't test anything H7k's real fix touches).
+
+This is the second time in this project's own history a filed roadmap
+row's diagnosis turned out to be wrong on closer investigation (mirroring
+the project's own "corrected premise" pattern from H19d/H19j/H19o) --
+worth normalizing as an expected outcome of doing the real repro work
+rather than trusting a prior session's filed description at face value.
+
+## Finding the real bug
+
+Since the coverage math checked out, I went back to the actual real CTS
+case the roadmap cited: `dEQP-VK.clipping.clip_volume.depth_clamp.
+point_list`. Built `deqp-vk`, ran it with `--deqp-log-images=enable`,
+wrote a small Python script to regex-extract and base64-decode the
+embedded `<Image>` blocks from the `.qpa` log, and opened them with PIL
+to see the actual rendered output.
+
+Cross-referencing against the real CTS source (`vktClippingTests.cpp`'s
+`genVertices` for `POINT_LIST`, and the case tables `countPixels` checks
+against) showed the test draws 5 points per case, with Z values chosen to
+straddle the near/far planes -- some intentionally invalid depending on
+whether the case is a "near" or "far" variant. All 5 points land at exact
+pixel-grid-intersection screen coordinates, which is exactly why the
+original diagnosis's author saw a grid-aligned point and assumed a
+coverage bug -- the geometry really is grid-aligned, just not for the
+reason originally guessed.
+
+Tracing `Executor.cpp`'s `RasterPrimitiveClass::Point`/`::Line` loops, I
+found they only ever test `V.Clip[3] <= ClipEpsilon` (a degenerate-`W`
+guard) before rasterizing -- there is no near/far Z-range test at all,
+unlike `clipTriangle`, which gets this via its own `FrustumPlanes` array
+(gated off when `DepthClampEnable` is set, per the Vulkan spec). This
+means every CTS point in this case renders regardless of whether its Z is
+actually in front of the near plane or behind the far plane, and
+regardless of `depthClampEnable`'s own setting -- which is the actual bug
+`countPixels`'s lenient per-region color-count check was catching.
+
+## The fix
+
+Factored the near/far plane-distance lambdas out of `clipTriangle`'s
+`FrustumPlanes` array into file-scope `farPlaneDistance`/
+`nearPlaneDistance` functions (pure refactor, no behavior change to
+`clipTriangle` itself), then added two new helpers that reuse them:
+
+- `pointPassesDepthClip`: an all-or-nothing accept/reject test for a
+  point. Points can't be partially clipped (Vulkan has no notion of "half
+  a point"), so this is a simple boolean, not a real clip.
+- `clipLineDepthRange`: a proper 2-vertex near/far segment clip, reusing
+  the existing `lerpVertex` helper the same way `clipAgainstPlane` already
+  does for a triangle edge (though specialized for an open 2-vertex
+  segment rather than `clipAgainstPlane`'s cyclic-polygon assumption,
+  which doesn't hold for a line).
+
+Both honor `DepthClampEnable` exactly like `clipTriangle` already does:
+when set, near/far clipping is skipped entirely (the later per-fragment
+depth clamp handles the out-of-range depth instead).
+
+Wired both into the `RasterPrimitiveClass::Point`/`::Line` loops ahead of
+`projectVertex`/`emitPointQuad`/`emitLineSegment`.
+
+**Deliberate scope-narrowing**: this only adds near/far (Z) clipping, not
+X/Y side-plane clipping (which triangles also get via `clipTriangle`'s
+other 4 planes). Reasoned this is fine because the existing scissor/
+tile-binning bounding-box test already excludes out-of-bounds points/
+lines for coverage purposes -- the only theoretical gap is extreme
+extrapolated interpolation for an X/Y-clipped line's varyings, which no
+real CTS case exercised this session. Documented as a known, minor,
+out-of-scope limitation in the roadmap entry rather than silently
+dropped.
+
+## A debugging detour worth recording
+
+While writing the new permanent unit tests, one of them
+(`RendersAPointBehindTheNearPlaneWhenDepthClampIsEnabled`) failed in a way
+that looked like it might be a real bug in the fix -- the point wasn't
+rendering even with depth clamp enabled, which should bypass the near/far
+test entirely. I added temporary `fprintf` debug statements at every stage
+of the pipeline (point emission, tile-quad coverage, per-lane side-effect
+mask, final color-write `PassMask`) and traced it all the way through:
+the point *was* being covered, shaded, and written correctly. The actual
+bug was in my own test data -- I'd accidentally written 8 floats per
+vertex instead of the fixture's expected 7 (position xyz + color rgba),
+which shifted the color's alpha channel into a value that happened to
+read as the position/color data misaligned, ultimately writing alpha 0
+instead of the intended 1. Once I fixed the vertex data, both new point
+tests and both new line tests passed cleanly, and I removed all the debug
+prints before committing. Worth remembering: when a new test fails
+unexpectedly right after being freshly written, checking the test's own
+fixture data for an off-by-one field count is cheap and should happen
+before assuming the production code is broken.
+
+## Validation
+
+- `ninja FeMeGraphicsTests`: 231/231 pass (227 pre-existing + 4 new).
+- `ninja check-feme` (ccache + assertions build): 2209/2268 total, 59
+  pre-existing `Unsupported`, 0 `Failed`.
+- Real `deqp-vk` re-run of `dEQP-VK.clipping.clip_volume.depth_clamp.
+  {point_list,line_list,line_strip}`: all 3 now `Pass` (previously all 3
+  `Fail`).
+- Real `deqp-vk` re-run of the broader `dEQP-VK.clipping.*` group (308
+  cases): 21 `Pass`, 12 `Fail` (all pre-existing `*_with_adjacency`
+  topology gaps, unrelated to this fix, 0 regressions), 275
+  `NotSupported`.
+
+## Commits
+
+1. `Executor.cpp` fix + 4 new `ExecutorTest.cpp` unit tests.
+2. Docs: `Roadmap.md` (struck through with corrected diagnosis),
+   `VulkanCTSReport.md` (new "Roadmap H7k: measured impact" section),
+   `Vulkan14FeatureInventory.md` (amended `depthClamp` row's rationale).
+3. This file.
+
+H7's remaining open sub-rows after this session: H7l, H7m (both still
+primitive-topology/coverage-adjacent gaps unrelated to storage images) --
+worth picking up next if continuing the H7 cluster specifically. The
+`*_with_adjacency` topology gap surfaced by this session's own CTS re-run
+is not yet tracked as its own roadmap row and may be worth filing if
+picked up.
