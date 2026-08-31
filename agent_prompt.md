@@ -37,17 +37,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H7j or other prerequisites of the H-series
+Can you continue working on H7k or other prerequisites of the H-series
 milestones from the roadmap?
 
-> **`shaderStorageImageExtendedFormats`/`shaderStorageImageMultisample`/`shaderStorageImageReadWithoutFormat`/`shaderStorageImageWriteWithoutFormat`**:
-> no `OpImageRead`/`OpImageWrite` lowering was found anywhere in the transform
-> path for a storage image at all, so these four format/configuration bits have
-> no shader-side storage-image read/write implementation to be honest about yet
-> -- a larger prerequisite than a narrow format restriction to lift. Needs
-> storage-image read/write lowering built first (likely its own, larger
-> milestone), with these four bits as a follow-on once it exists (split out as
-> its own top-level milestone, H19, rather than nested further under H7 -- H19a
-> now closes the base Plain2D/mandatory-format-floor read/write case; H19d
-> specifically tracks this row's own remaining four feature bits, which need
-> format/configuration breadth beyond what H19a itself claims)
+> **Point/line-primitive quad coverage excludes exact pixel-grid-aligned
+> centers.** Found via H7d's own real
+> `deqp-vk.clipping.clip_volume.depth_clamp.{line_list,line_strip,point_list}`
+> reproduction: every one of that CTS case's own point/line vertices lands with
+> its rasterized quad centered exactly on an integer pixel-grid intersection
+> (e.g. a point at `(8,8)` expands to a `[7.5,8.5]x[7.5,8.5]` quad), and
+> `Executor.cpp`'s `pushQuadTriangle`/coverage test excludes the covering pixel
+> on *both* sides of that boundary, rendering zero pixels for a primitive that
+> should render some. Nothing in this project's own unit-test coverage exercises
+> a point-topology draw at all yet, so this is a pre-existing gap, not a
+> regression from H7d. Needs the coverage test's own inclusive/exclusive edge
+> convention audited against a real GPU's fill rule (the classic "top-left"
+> rule, or equivalent) so an exact grid-aligned primitive is guaranteed exactly
+> one consistent side of coverage, not both-excluded
