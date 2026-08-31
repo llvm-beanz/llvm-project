@@ -346,9 +346,9 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `fragmentStoresAndAtomics` | yes | roadmap H7g, same reproduction as `vertexPipelineStoresAndAtomics` above (`dEQP-VK...storage_buffer.fragment*`/`.vertex_fragment*`, part of the same 1200/1200 re-run) |
 | feature | VK_VERSION_1_0 | `shaderTessellationAndGeometryPointSize` | no |  |
 | feature | VK_VERSION_1_0 | `shaderImageGatherExtended` | no |  |
-| feature | VK_VERSION_1_0 | `shaderStorageImageExtendedFormats` | no | roadmap H7j, tracked to H19: H19a closed the real prerequisite (no `OpImageRead`/`OpImageWrite` lowering existed for a storage image at all) for the plain 2D, non-arrayed, non-multisampled, mandatory-format-floor case only; this bit needs format breadth beyond that floor, tracked as H19d |
-| feature | VK_VERSION_1_0 | `shaderStorageImageMultisample` | no | roadmap H7j, tracked to H19: H19a's own scope is explicitly non-multisampled; this bit needs multisample storage-image support, tracked as H19d |
-| feature | VK_VERSION_1_0 | `shaderStorageImageReadWithoutFormat` | no | roadmap H7j, tracked to H19: H19a's own storage-image read/write always assumes a known, declared format; this bit needs runtime-format-agnostic access, tracked as H19d |
+| feature | VK_VERSION_1_0 | `shaderStorageImageExtendedFormats` | no | roadmap H7j, tracked to H19: H19a closed the real prerequisite (no `OpImageRead`/`OpImageWrite` lowering existed for a storage image at all) for the plain 2D, non-arrayed, non-multisampled, mandatory-format-floor case only; this bit needs format breadth beyond that floor, tracked as H19f |
+| feature | VK_VERSION_1_0 | `shaderStorageImageMultisample` | no | roadmap H7j, tracked to H19: H19a's own scope is explicitly non-multisampled; this bit needs multisample storage-image support, tracked as H19g |
+| feature | VK_VERSION_1_0 | `shaderStorageImageReadWithoutFormat` | no | roadmap H7j, tracked to H19: H19a's own storage-image read/write always assumes a known, declared format; this bit needs runtime-format-agnostic access, tracked as H19f |
 | feature | VK_VERSION_1_0 | `shaderStorageImageWriteWithoutFormat` | no | roadmap H7j, tracked to H19, same rationale as `shaderStorageImageReadWithoutFormat` above |
 | feature | VK_VERSION_1_0 | `shaderUniformBufferArrayDynamicIndexing` | no |  |
 | feature | VK_VERSION_1_0 | `shaderSampledImageArrayDynamicIndexing` | no |  |

@@ -16129,3 +16129,95 @@ configuration breadth) and the newly tracked H19e (arrayed 1D) remain
 open. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 confirmed no change needed: no `VkPhysicalDeviceFeatures` bit or extension
 is honestly flippable by this row's own scope alone.
+
+## Roadmap H19d: measured impact
+
+**Scope.** Cube and cube-array (non-arrayed/arrayed `DimCube`)
+storage-image read/write for the same 6-format mandatory floor
+H19a/H19b/H19c already cover. `classifyStorageImage2DHandle`
+(`SPIRVResourceLowering.cpp`) previously rejected any `Dim == DimCube`
+storage-image handle outright, alongside the format/configuration breadth
+and multisample support H19d's own original row text also bundled (both
+now split out separately below).
+
+**Fix.** Widened `classifyStorageImage2DHandle` to accept `Dim ==
+DimCube` (arrayed or not), mapping directly to the pre-existing
+`ImageShape::Array2D` rather than introducing a distinct
+`Cube`/`CubeArray` storage shape. This is deliberately *not* symmetric
+with `classifySampledImage2DHandle`'s own `Cube`/`CubeArray` shapes (used
+for a filtered *sample*, addressed by a 3-component direction vector a
+real cube-face-selection algorithm resolves, `createSampleCube`'s own
+scope): confirmed via a real CTS shader dump
+(`dEQP-VK.image.load_store.with_format.cube.r32_uint`'s own
+`imageStore(u_image1, pos, imageLoad(u_image0, ivec3(63-pos.x, pos.y,
+pos.z)))`) that a storage cube image's `imageLoad`/`imageStore`
+(GLSL's `imageCube`/`imageCubeArray`) addresses its texel by an ordinary
+`(x, y, face)` triple (or, for `imageCubeArray`, an already-flattened
+`layer * 6 + face`) -- structurally identical to `Array2D`'s own
+`(x, y, layer)` triple, and consistent with this project's existing
+"a cube(array) view is purely a view-level convention over consecutive
+array layers" treatment (`CommandBuffer.cpp`'s
+`materializeImageDescriptor`, roadmap H7b). A non-arrayed cube still
+needs the 3-component coordinate (six faces to select between even
+without `Arrayed`), unlike `Dim::2D` where `Arrayed` itself is what turns
+a 2-component coordinate into a 3-component one -- so `DimCube` maps to
+`Array2D` unconditionally, independent of the `Arrayed` flag (an earlier
+attempt that reused the `Arrayed`-gated `Array2D`/`Plain2D` branch as-is
+for `DimCube` too failed 3 of the 5 new unit tests below, since a
+non-arrayed cube handle was wrongly classified `Plain2D`, a 2-component
+shape).
+
+Because this maps to the same `Array2D` shape H19b already lowers fully,
+no new call vocabulary, no new runtime helper, and no `CommandBuffer.cpp`
+change were needed at all: the existing `Store2DArray`/`Load2DArray`
+call shape and `materializeImageDescriptor`'s existing
+`TextureCube`/`TextureCubeArray` dimension-switch cases (both already
+landed by roadmap H7b/H19b, long before this row) already cover
+everything a cube storage image needs end to end.
+
+**Fix summary.**
+- `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`:
+  `classifyStorageImage2DHandle` widened to accept `Dim == DimCube`,
+  mapping unconditionally to `ImageShape::Array2D`.
+
+**Test.** 5 new unit tests in `SPIRVResourceLoweringTest.cpp`
+(`LowersCubeStorageImageWriteToImageStoreArray`,
+`LowersIntegerCubeStorageImageWriteToImageStoreArrayV4I32`,
+`LowersCubeStorageImageLoadStoreToBothCalls`,
+`LowersCubeArrayStorageImageWriteToImageStoreArray`,
+`LeavesAMultisampledCubeStorageImageHandleAlone` -- replacing the
+now-stale `LeavesACubeStorageImageHandleAlone` negative test that
+asserted the old, pre-fix rejection).
+
+**`ninja check-feme`** (assertions + ccache): 2110/2169, 0 `Failed`, 59
+pre-existing `Unsupported`.
+
+**Real CTS re-run.** `dEQP-VK.image.load_store.with_format.cube.*`/
+`cube_array.*` (312 cases): 48 Pass, 0 Fail, 264 `NotSupported` (up from
+0 Pass, 312 either `Fail`/pipeline-creation-failure or `NotSupported`
+before this fix). The 48 passes are exactly the 6-format mandatory
+floor's own plain/`_linear`-tiling cases across both `cube` and
+`cube_array` (48 = 6 formats x 2 tilings x (`cube`'s single-face case +
+`cube_array`'s multi-layer/`_single_layer` variants messily averaging
+out to the same 24-per-dimension count H19b/H19c's own closures saw).
+The remaining 264 `NotSupported` are exactly every format outside the
+floor -- correct, honest behavior unrelated to this row.
+
+A probe of `dEQP-VK.image.load_store_multisample.2d.r32_uint.samples_2`
+confirms it is still correctly, honestly `NotSupported`
+("Requested core feature is not supported: shaderStorageImageMultisample"),
+untouched by this row's non-multisample-only scope.
+
+**Remaining gap.** H19d's own original row text bundled the
+format/configuration breadth (`shaderStorageImageExtendedFormats`'s
+non-mandatory formats, `shaderStorageImageReadWithoutFormat`/
+`WriteWithoutFormat`) and `shaderStorageImageMultisample` alongside
+cube/cube-array shape support; both are split out as new roadmap rows
+(H19f, H19g respectively) now that H19d itself has narrowed to
+cube/cube-array shape support only, closed by this fix. H19e (arrayed
+1D) also remains open, tracked as before.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: no `VkPhysicalDeviceFeatures` bit or extension is honestly
+flippable by this row's own shape-support-only scope alone (the four
+`shaderStorageImage*` bits H7j named all still correctly point at H19f/
+H19g now, not this row).
