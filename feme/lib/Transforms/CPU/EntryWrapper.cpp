@@ -1300,7 +1300,15 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
 
   BasicBlock *BodyPred = LoopBodyBB;
   for (unsigned R = 0, E = BodyRegions.size(); R != E; ++R) {
-    Twine Suffix = Twine(".body") + Twine(R);
+    // Materialize to a `std::string` immediately (`.str()`) rather than
+    // storing the `Twine` concatenation itself: `Twine`'s own nodes hold
+    // pointers to their (here, temporary) operands, which are destroyed
+    // at the end of this full expression -- storing the result and using
+    // it on the next statement (as `buildWaveLoop` below does) is a
+    // stack-use-after-scope (see DXSAToLLVMIRTranslator.cpp's
+    // `breakc`/`breakc_nz` handling for the identical bug, confirmed via
+    // ASan).
+    std::string Suffix = (Twine(".body") + Twine(R)).str();
     BasicBlock *ExitBB =
         buildWaveLoop(*Wrapper, BodyPred, *BodyRegions[R], WEnv, WaveSize,
                       GroupSizeTotal, WavesPerGroup, Suffix, LoopScalars);
@@ -1584,7 +1592,9 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
 
   BasicBlock *TrueExit = TrueEntryBB;
   for (unsigned R = 0, E = TrueRegions->size(); R != E; ++R) {
-    Twine Suffix = Twine(".true.body") + Twine(R);
+    // See BodyRegions' loop above for why this must be a `std::string`
+    // rendered eagerly via `.str()`, not a stored `Twine`.
+    std::string Suffix = (Twine(".true.body") + Twine(R)).str();
     BasicBlock *ExitBB =
         buildWaveLoop(*Wrapper, TrueExit, *(*TrueRegions)[R], WEnv, WaveSize,
                       GroupSizeTotal, WavesPerGroup, Suffix);
@@ -1599,7 +1609,9 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
 
   BasicBlock *FalseExit = FalseEntryBB;
   for (unsigned R = 0, E = FalseRegions->size(); R != E; ++R) {
-    Twine Suffix = Twine(".false.body") + Twine(R);
+    // See BodyRegions' loop above for why this must be a `std::string`
+    // rendered eagerly via `.str()`, not a stored `Twine`.
+    std::string Suffix = (Twine(".false.body") + Twine(R)).str();
     BasicBlock *ExitBB =
         buildWaveLoop(*Wrapper, FalseExit, *(*FalseRegions)[R], WEnv, WaveSize,
                       GroupSizeTotal, WavesPerGroup, Suffix);
@@ -1710,7 +1722,9 @@ Function *buildWrapper(Function &WaveBodyIn) {
 
   BasicBlock *Pred = EntryBB;
   for (unsigned R = 0, E = Regions.size(); R != E; ++R) {
-    Twine Suffix = E == 1 ? Twine() : Twine(".") + Twine(R);
+    // See BodyRegions' loop above for why this must be a `std::string`
+    // rendered eagerly via `.str()`, not a stored `Twine`.
+    std::string Suffix = (E == 1 ? Twine() : Twine(".") + Twine(R)).str();
     BasicBlock *ExitBB =
         buildWaveLoop(*Wrapper, Pred, *Regions[R], WEnv, WaveSize,
                       GroupSizeTotal, WavesPerGroup, Suffix);

@@ -3475,10 +3475,19 @@ bool Translator::translateControlFlow(mlir::Operation *Op, bool &Handled) {
     llvm::Value *Cond = conditional(llvm::isa<dxsa::BreakcNz>(Op));
     if (!Cond)
       return false;
-    llvm::Twine Name =
-        S->K == Scope::Kind::Loop
-            ? "loop" + llvm::Twine(S->Id) + ".breakc" + llvm::Twine(S->Breaks)
-            : "switch" + llvm::Twine(S->Id) + ".break" + llvm::Twine(S->Breaks);
+    // Materialize to a `std::string` immediately (`.str()`), rather than
+    // storing the `llvm::Twine` expression itself in a local variable:
+    // `Twine`'s own concatenation nodes hold pointers to their operand
+    // sub-`Twine`s, which are temporaries destroyed at the end of this
+    // full expression -- storing the result and using it afterward (as
+    // `deferredBlock(Name)` below does) is a stack-use-after-scope,
+    // confirmed by a real ASan failure translating loop1.dxasm.
+    std::string Name =
+        (S->K == Scope::Kind::Loop
+             ? "loop" + llvm::Twine(S->Id) + ".breakc" + llvm::Twine(S->Breaks)
+             : "switch" + llvm::Twine(S->Id) + ".break" +
+                   llvm::Twine(S->Breaks))
+            .str();
     ++S->Breaks;
     llvm::BasicBlock *Fallthrough = deferredBlock(Name);
     Builder.CreateCondBr(Cond, S->EndBB, Fallthrough);
