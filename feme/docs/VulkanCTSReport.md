@@ -16320,3 +16320,84 @@ extension is honestly flippable by this row's own coordinate-shape-only
 scope alone (the same reasoning as H19b/H19c/H19d's own closures). H19f
 (format/configuration breadth) and H19g (`shaderStorageImageMultisample`)
 remain the last open H19 follow-ons.
+
+## Roadmap H19f: measured impact
+
+**Scope.** The format/configuration breadth `shaderStorageImageExtendedFormats`/
+`shaderStorageImageReadWithoutFormat`/`shaderStorageImageWriteWithoutFormat`
+actually need, split out of H19d's own original bundled scope. Investigation
+first established the real shape of the gap: storage-image *reads* already
+worked for any format `femeRTImageFormatElementSize` recognizes, because
+`femeRTFetchTexel2D`/related fetch helpers reuse the same
+`femeRTUnpackImageTexel`/`femeRTUnpackImageTexelI32` (`FeMeRuntimeCPU.c`)
+sampled-image reads use -- so the real, narrower gap was write-side only:
+`femeRTPackImageTexel`/`femeRTPackImageTexelI32` were scoped to exactly the
+6-format mandatory storage-image floor, even though the format tables
+around them already recognized a much larger set.
+
+**Fix.** Widened `femeRTPackImageTexel`/`femeRTPackImageTexelI32`
+(`FeMeRuntimeCPU.c`) to also encode `R16G16B16A16_FLOAT` (via a new
+`femeRTFloatToHalf` helper -- the inverse of the existing
+`femeRTHalfToFloat`, hand-written for the same freestanding-build reason,
+round-to-nearest-even with saturate-to-infinity overflow and flush-to-zero
+underflow) and `R16G16B16A16_UINT`/`_SINT` (truncating each 32-bit lane to
+its own 16-bit word, matching SPIR-V's own `OpUConvert`/`OpSConvert`-to-i16
+truncation). Widened `Format.cpp`'s `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`
+switch to advertise these three formats to match, and corrected its stale
+`H19b` roadmap cross-reference to `H19f`/its own follow-ons.
+
+This is a deliberately narrow first slice: the real Vulkan mandatory
+`shaderStorageImageExtendedFormats` list is far larger (single- and
+two-channel `R8`/`R16`/`R32` formats, packed `10:10:10:2`/`11:11:10`
+formats, etc.), most without an existing `ResourceFormat` enum entry or
+pack-table case at all. `shaderStorageImageReadWithoutFormat`/
+`WriteWithoutFormat` were also investigated:
+`SPIRVResourceLowering.cpp`'s storage-image classification
+(`classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`) was
+confirmed to never inspect the SPIR-V handle's 6th int parameter (the
+compile-time-declared `Format` operand) at all -- no `getIntParameter(5)`
+call exists anywhere in the classification/lowering path -- so a
+`Format == Unknown` handle likely already lowers identically to a
+declared-format one. The real blocker for these two bits instead turned
+out to be `dEQP-VK.image.load_store.without_format.*`'s own `checkSupport`
+(`vktImageLoadStoreTests.cpp`), which gates on the *format's own*
+`VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` tiling
+features -- a `VkFormatProperties3`-only pair of bits `Format.cpp` does
+not compute at all today, distinct from the plain
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` this project already advertises --
+and that those 828 real CTS cases exercise the same broad extended-format
+list this row's own investigation found still largely unimplemented.
+
+**Fix summary.**
+- `feme/runtime/CPU/FeMeRuntimeCPU.c`: new `femeRTFloatToHalf` helper;
+  `femeRTPackImageTexel`/`femeRTPackImageTexelI32` widened to cover
+  `R16G16B16A16_{FLOAT,UINT,SINT}`.
+- `feme/lib/Vulkan/Format.cpp`: `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`
+  switch widened to match; stale `H19b` cross-reference corrected.
+
+**Test.** 3 new unit tests in `ImageSamplingTest.cpp`
+(`StoreWritesTexelIntoR16G16B16A16FloatViaHalfEncode`,
+`StoreWritesTexelIntoR16G16B16A16Uint`,
+`StoreWritesTexelIntoR16G16B16A16Sint`), 1 widened in `FormatTest.cpp`
+(`FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloor`).
+
+**`ninja check-feme`** (assertions + ccache): 2122/2181, 0 `Failed`, 59
+pre-existing `Unsupported`.
+
+**Real CTS re-run.**
+`dEQP-VK.image.load_store.with_format.*.r16g16b16a16_{sfloat,uint,sint}*`
+(140 cases across every dimension/view-shape/tiling combination H19a-e
+already support): 66 Pass (up from 0), 0 Fail, 74 `NotSupported` (the
+`_unorm`/`_snorm` variants of the same 4-channel-16-bit format family,
+still outside this row's own pack support -- correct, honest behavior).
+
+**Remaining gap.** `shaderStorageImageExtendedFormats` stays `VK_FALSE`
+(only 3 of the real mandatory extended-format list's formats are
+supported so far). `shaderStorageImageReadWithoutFormat`/
+`WriteWithoutFormat` stay `VK_FALSE` (the format-feature-bit
+advertisement gap identified above is unaddressed, and depends on the
+broader format list existing first). Split into two new roadmap rows:
+H19h (the rest of the mandatory `shaderStorageImageExtendedFormats`
+list) and H19i (the without-format format-feature-bit work, plus the two
+device-feature bits themselves). `Vulkan14FeatureInventory.md` updated to
+point at these new rows instead of H19f.
