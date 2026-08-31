@@ -1156,6 +1156,58 @@ __attribute__((always_inline)) static float femeRTHalfToFloat(uint16_t H) {
   return F;
 }
 
+// Converts a `float` to an IEEE 754 binary16 ("half float") bit pattern,
+// the inverse of `femeRTHalfToFloat` above -- written by hand for the same
+// freestanding-build reason. Ties round to nearest-even; a magnitude too
+// large for binary16 saturates to +/-infinity rather than wrapping, and a
+// magnitude too small to represent even as a subnormal flushes to +/-zero
+// (matching SPIR-V's own `OpFConvert`-to-half rounding behavior, the
+// operation `imageStore` into an `R16G16B16A16_SFLOAT` storage image
+// implicitly performs).
+__attribute__((always_inline)) static uint16_t femeRTFloatToHalf(float F) {
+  uint32_t Bits;
+  __builtin_memcpy(&Bits, &F, sizeof(Bits));
+  uint32_t Sign = (Bits >> 16) & 0x8000u;
+  int32_t Exp = (int32_t)((Bits >> 23) & 0xFFu) - 127 + 15;
+  uint32_t Mant = Bits & 0x7FFFFFu;
+  if (((Bits >> 23) & 0xFFu) == 0xFFu) {
+    // Infinity or NaN: preserve, collapsing any mantissa down to binary16's
+    // own 10-bit field (keeping at least one set bit so a NaN stays a NaN).
+    return (uint16_t)(Sign | 0x7C00u | (Mant ? (Mant >> 13) | 1u : 0u));
+  }
+  if (Exp >= 0x1F) {
+    return (uint16_t)(Sign | 0x7C00u); // Overflow: saturate to infinity.
+  }
+  if (Exp <= 0) {
+    if (Exp < -10) {
+      return (uint16_t)Sign; // Underflow: flush to zero.
+    }
+    // Subnormal half: shift the implicit-leading-1 mantissa right by the
+    // exponent's own shortfall, rounding the bits shifted out to nearest,
+    // ties to even.
+    Mant |= 0x800000u;
+    uint32_t Shift = (uint32_t)(14 - Exp);
+    uint32_t Half = Mant >> Shift;
+    uint32_t Rem = Mant & ((1u << Shift) - 1u);
+    uint32_t RoundBit = 1u << (Shift - 1);
+    if (Rem > RoundBit || (Rem == RoundBit && (Half & 1u)))
+      ++Half;
+    return (uint16_t)(Sign | Half);
+  }
+  // Normal half: round the 23-bit mantissa down to 10 bits, ties to even.
+  uint32_t Half = Mant >> 13;
+  uint32_t Rem = Mant & 0x1FFFu;
+  if (Rem > 0x1000u || (Rem == 0x1000u && (Half & 1u)))
+    ++Half;
+  if (Half & 0x400u) { // Mantissa rounded up into the exponent.
+    Half = 0;
+    ++Exp;
+    if (Exp >= 0x1F)
+      return (uint16_t)(Sign | 0x7C00u);
+  }
+  return (uint16_t)(Sign | ((uint32_t)Exp << 10) | Half);
+}
+
 // Unpacks a `B8G8R8A8_UNORM` value (four normalized `[0, 255]` bytes,
 // little-endian: B, G, R, A) into a `<4 x float>` in `[0.0, 1.0]` -- the
 // same conversion as `femeRTUnpackR8G8B8A8Unorm`, just with the red and
@@ -1445,17 +1497,19 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
 
 // Packs \p Texel back into `Format`'s own bytes at \p Ptr -- the write-side
 // mirror of `femeRTUnpackImageTexel` above, for `feme.cpu.image.store.2d.
-// v4f32` (roadmap H19a). Scoped to exactly the two float-channel formats
-// the Vulkan spec's own mandatory storage-image format floor requires
-// (`VkPhysicalDeviceFeatures::shaderStorageImageExtendedFormats` unset):
-// `R32_FLOAT` and `R32G32B32A32_FLOAT`, both the identity case (no scalar
-// conversion, unlike e.g. `R8G8B8A8_UNORM`'s own quantizing pack this
-// function does not yet need to mirror). A write through any other format
-// -- reachable only if a future row widens `Format.cpp`'s own
-// `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` gate beyond this floor without
-// widening this switch to match -- is silently dropped, mirroring
-// `femeRTUnpackImageTexel`'s own "all-zero for an unmodeled format"
-// default rather than trapping.
+// v4f32` (roadmap H19a, widened by H19f). Originally scoped to exactly the
+// two float-channel formats the Vulkan spec's own mandatory storage-image
+// format floor requires: `R32_FLOAT` and `R32G32B32A32_FLOAT`, both the
+// identity case (no scalar conversion). Roadmap H19f adds
+// `R16G16B16A16_FLOAT`, encoding each lane with `femeRTFloatToHalf` --
+// still only a first real step towards the full
+// `shaderStorageImageExtendedFormats` list (see that roadmap row and
+// `Format.cpp`'s own updated scope comment for what remains). A write
+// through any other format -- reachable only if a future row widens
+// `Format.cpp`'s own `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` gate beyond
+// this floor without widening this switch to match -- is silently
+// dropped, mirroring `femeRTUnpackImageTexel`'s own "all-zero for an
+// unmodeled format" default rather than trapping.
 __attribute__((always_inline)) static void
 femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
   switch (Format) {
@@ -1467,17 +1521,26 @@ femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
   case 4: // R32G32B32A32_FLOAT: identity format, no conversion.
     *(FemeRTv4f32Unaligned *)Ptr = (FemeRTv4f32Unaligned)Texel;
     return;
+  case 18: { // R16G16B16A16_FLOAT (roadmap H19f).
+    uint16_t Raw[4] = {femeRTFloatToHalf(Texel[0]), femeRTFloatToHalf(Texel[1]),
+                       femeRTFloatToHalf(Texel[2]), femeRTFloatToHalf(Texel[3])};
+    __builtin_memcpy(Ptr, Raw, sizeof(Raw));
+    return;
+  }
   default:
     return;
   }
 }
 
-// The integer counterpart of `femeRTPackImageTexel` above, covering the
-// mandatory storage-image format floor's two integer-channel formats,
-// `R32_UINT`/`R32_SINT` and `R32G32B32A32_UINT`/`_SINT` -- both identity
-// formats (a signed/unsigned 32-bit scalar's bit pattern is stored as-is
-// either way), mirroring `femeRTUnpackImageTexelI32`'s own read-side
-// treatment of the same four formats.
+// The integer counterpart of `femeRTPackImageTexel` above, originally
+// covering the mandatory storage-image format floor's two integer-channel
+// formats, `R32_UINT`/`R32_SINT` and `R32G32B32A32_UINT`/`_SINT` -- both
+// identity formats (a signed/unsigned 32-bit scalar's bit pattern is
+// stored as-is either way), mirroring `femeRTUnpackImageTexelI32`'s own
+// read-side treatment of the same four formats. Roadmap H19f adds
+// `R16G16B16A16_UINT`/`_SINT`, truncating each 32-bit lane down to its
+// own 16-bit word (matching SPIR-V's own `OpUConvert`/`OpSConvert`-to-i16
+// truncation an `imageStore` into this format implicitly performs).
 __attribute__((always_inline)) static void
 femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
                         FemeRTv4i32 Texel) {
@@ -1492,6 +1555,13 @@ femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
   case 12: // R32G32B32A32_SINT: identity format, no conversion.
     *(FemeRTv4i32Unaligned *)Ptr = (FemeRTv4i32Unaligned)Texel;
     return;
+  case 21: // R16G16B16A16_UINT
+  case 22: { // R16G16B16A16_SINT (roadmap H19f): truncate to 16 bits.
+    uint16_t Raw[4] = {(uint16_t)Texel[0], (uint16_t)Texel[1],
+                       (uint16_t)Texel[2], (uint16_t)Texel[3]};
+    __builtin_memcpy(Ptr, Raw, sizeof(Raw));
+    return;
+  }
   default:
     return;
   }

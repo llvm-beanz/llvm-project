@@ -1925,6 +1925,73 @@ TEST_F(ImageSamplingTest, StoreWritesOnlyRedComponentIntoR32Sint) {
   EXPECT_EQ(Storage[0][0], -7);
 }
 
+// Roadmap H19f: `R16G16B16A16_{SFLOAT,UINT,SINT}` widen
+// `femeRTPackImageTexel`/`femeRTPackImageTexelI32` past the mandatory
+// storage-image format floor -- a first slice of the full
+// `shaderStorageImageExtendedFormats` list.
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR16G16B16A16FloatViaHalfEncode) {
+  uint16_t Storage[1][1][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R16G16B16A16_FLOAT, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store =
+      resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {1.0f, -2.5f, 0.0f, 65504.0f}; // Last: half's max.
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+
+  // 1.0f -> 0x3C00, -2.5f -> 0xC100, 0.0f -> 0x0000, 65504.0f -> 0x7BFF,
+  // the standard binary16 bit patterns for each value.
+  EXPECT_EQ(Storage[0][0][0], 0x3C00u);
+  EXPECT_EQ(Storage[0][0][1], 0xC100u);
+  EXPECT_EQ(Storage[0][0][2], 0x0000u);
+  EXPECT_EQ(Storage[0][0][3], 0x7BFFu);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR16G16B16A16Uint) {
+  uint16_t Storage[1][1][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R16G16B16A16_UINT, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  // 0x10203 truncates to 0x0203 -- confirms the store truncates to 16
+  // bits rather than clamping or wrapping some other way.
+  FeMeTestV4I32 Texel = {0x10203, 65535, 0, 1};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], 0x0203u);
+  EXPECT_EQ(Storage[0][0][1], 65535u);
+  EXPECT_EQ(Storage[0][0][2], 0u);
+  EXPECT_EQ(Storage[0][0][3], 1u);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR16G16B16A16Sint) {
+  int16_t Storage[1][1][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R16G16B16A16_SINT, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  FeMeTestV4I32 Texel = {-1, -32768, 32767, 0};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], -1);
+  EXPECT_EQ(Storage[0][0][1], -32768);
+  EXPECT_EQ(Storage[0][0][2], 32767);
+  EXPECT_EQ(Storage[0][0][3], 0);
+}
+
 TEST_F(ImageSamplingTest, StoreOutOfBoundsCoordinateIsANoOp) {
   float Storage[1][1][4] = {{{1, 2, 3, 4}}};
   FemeImageSubresourceLayout Layout;

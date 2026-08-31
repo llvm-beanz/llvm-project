@@ -358,10 +358,13 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   // exists (`femeRTStoreTexel2D`/`I32`, FeMeRuntimeCPU.c), but only for
   // exactly the Vulkan spec's own mandatory storage-image format floor --
   // `R32_{SFLOAT,UINT,SINT}`/`R32G32B32A32_{SFLOAT,UINT,SINT}` -- so
-  // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is set for those and left unset
-  // for every other format (`R8G8B8A8_UNORM` included), matching
+  // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is set for those. Roadmap H19f
+  // widens the same pack helpers (and this bit) to also cover
+  // `R16G16B16A16_{SFLOAT,UINT,SINT}`, a first slice of the full
+  // `shaderStorageImageExtendedFormats` list; every other format is still
+  // left unset (`R8G8B8A8_UNORM` included), matching
   // `shaderStorageImageExtendedFormats` staying unclaimed (see Roadmap.md's
-  // H19b).
+  // H19f and its own follow-on rows).
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32_FLOAT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32B32A32_FLOAT) &
@@ -373,6 +376,12 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32_SINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32B32A32_SINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16G16B16A16_FLOAT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16G16B16A16_UINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16G16B16A16_SINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
               VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
