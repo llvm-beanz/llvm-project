@@ -48825,3 +48825,70 @@ Landed in two commits: (1) core R16 implementation + all new unit
 tests + the `ImageTest.cpp` fixture fix, (2) roadmap/inventory/CTS-
 report doc updates. This `agent_thoughts.md` entry is the third and
 final commit.
+
+# Session: H19n — two-channel R16G16 storage formats
+
+Continued H19n's own enumerated remaining-work order (R8G8 → single-channel
+R16 → two-channel R16G16 → still-remaining R32G32_{UINT,SINT}/packed 32-bit),
+picking up exactly where the prior R16 session left off.
+
+## What I did
+
+- Added `R16G16_{FLOAT,UNORM,SNORM,UINT,SINT}` (ordinals 98-102) to the
+  `ResourceFormat` enum tail, verified via the established Python
+  enum-ordinal-parsing script rather than hand-counting.
+- Wired `Format.cpp`'s `mapVkFormat`/`formatElementSize`/sampled- and
+  storage-feature-bit switches for all five.
+- Added `FeMeRuntimeCPU.c` pack/unpack helpers. Departed from the R8G8
+  precedent (single packed scalar) in favor of the R16G16B16A16 precedent
+  (`const uint16_t Raw[2]`/`uint16_t Out[2]` arrays), since R16G16 is a more
+  natural two-lane sibling of the existing 16-bit-per-lane 4-component
+  helpers than of R8G8's 8-bit-per-lane packing. `R16G16_FLOAT` again has no
+  standalone helper — same use-before-declaration constraint as `R16_FLOAT`
+  last session (the half-float conversion helpers are defined further down
+  the file) — so it's wired directly into the unpack/pack switch cases.
+- Fixed `ImageFixture.cpp`/`feme-run.cpp`'s exhaustive switches (the
+  `-Wswitch` warning again did its job as a forcing function, appearing
+  right where expected).
+- **Recurring pattern, third time now**: `ImageTest.cpp`'s
+  `RejectsUnsupportedFormat`/`GetDeviceImageMemoryRequirementsZeroForUnsupportedFormat`
+  use a "known unmapped format" fixture that keeps getting invalidated by
+  each new slice mapping its predecessor's placeholder (R16_UNORM → mapped by
+  R16 slice, so R16 session switched to R16G16_UNORM; this session mapped
+  R16G16_UNORM, so switched again to R16G16B16_UNORM — a 3-channel 16-bit
+  format nobody has any near-term reason to map). This is a systemic gap: a
+  short-lived placeholder fixture format is fragile against exactly the kind
+  of incremental format-coverage work this project keeps doing. A future
+  session might consider a more deliberately-permanent "this will never be
+  mapped" choice (e.g. a deprecated/obsolete VkFormat enum value, or an
+  explicitly out-of-scope block-compressed format) to stop this churn, but I
+  didn't want to scope-creep that judgment call into this slice.
+- New unit tests: `MapsTwoChannelR16G16Formats` plus widened feature-flag
+  tests in `FormatTest.cpp`; 10 new tests (3 float-load, 2 int-load, 5
+  store) in `ImageSamplingTest.cpp`.
+- `ninja check-feme`: 2188/2247 passed (59 pre-existing `Unsupported`, 0
+  `Failed`) — no regressions after the `ImageTest.cpp` fixture fix.
+- Real Vulkan CTS re-runs:
+  - `dEQP-VK.image.load_store.with_format.*.r16g16_*` (140 cases): 110 Pass
+    (up from 0), 0 Fail, 30 `NotSupported` (same pre-existing shape gaps as
+    every prior slice, unrelated to format).
+  - `load-store.txt` mustpass regression caselist (3446 cases): 656 Pass (up
+    from the R16-era 546 baseline by exactly +110), 0 Fail, 2790
+    `NotSupported`. 0 regressions.
+- Updated `Roadmap.md` (H19n row, further partial-closure note),
+  `Vulkan14FeatureInventory.md` (`shaderStorageImageExtendedFormats` row),
+  and `VulkanCTSReport.md` (new measured-impact section). No
+  `VulkanExtensionInventory.md` change needed (core 1.0 feature).
+- Committed in 2 commits: (1) implementation + tests + the `ImageTest.cpp`
+  fixture fix, (2) docs. This commit (agent_thoughts.md) is the third.
+
+## What's left for H19n
+
+`R32G32_{UINT,SINT}`'s storage-mandatory partial-component siblings, and the
+packed 32-bit formats `A2B10G10R10_{UNORM,UINT}_PACK32`/
+`B10G11R11_UFLOAT_PACK32` (still needing their own component-order
+verification against the existing sampled-image decode before reuse, per
+H19j's original unresolved note — Vulkan doesn't guarantee a sampled-image
+format's bit layout matches a storage-image format's bit layout for the same
+`VkFormat`). Only once that's done should `shaderStorageImageExtendedFormats`
+flip to `VK_TRUE`, unblocking H19i's `without_format.*` work.
