@@ -17069,3 +17069,61 @@ VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
   --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19n.qpa
 ```
+
+## Roadmap H19n: measured impact (single-channel `R16` storage formats)
+
+**Scope.** Continues H19n's own remaining scope with the single-channel
+`R16_{FLOAT,UNORM,SNORM,UINT,SINT}` formats -- 5 new `ResourceFormat`
+enum entries, `Format.cpp` mapping/feature-bit wiring, and new
+`FeMeRuntimeCPU.c` pack/unpack support: dedicated helpers for
+`UNORM`/`SNORM`/`UINT`/`SINT` (mirroring the two-channel `R8G8`
+helpers, but single-component), while `FLOAT` is wired directly into
+the unpack/pack switch tables using the existing
+`femeRTHalfToFloat`/`femeRTFloatToHalf` helpers (mirroring
+`R16G16B16A16_FLOAT`'s own precedent, since those helpers are defined
+later in the file than the small helpers near the other `R16` cases).
+
+**Direct format group.** `dEQP-VK.image.load_store.with_format.*.r16_*`
+(140 cases, all shapes):
+
+```
+Passed:        110/140 (78.6%)
+Failed:        0/140 (0.0%)
+Not supported: 30/140 (21.4%)
+```
+
+Up from 0 Pass before this change. The 30 `NotSupported` cases are the
+same shape variants outside this project's existing storage-image shape
+coverage that the prior `R8`/`R8G8` re-runs also hit, unrelated to
+format.
+
+**Regression check.** The `load-store.txt` mustpass regression caselist
+(3446 cases):
+
+```
+Passed:        546/3446 (15.8%)
+Failed:        0/3446 (0.0%)
+Not supported: 2900/3446 (84.2%)
+```
+
+Up from the `R8G8`-era 436/3446 baseline by exactly the +110 new R16
+`with_format` passes; `Failed` stays 0. **0 regressions.**
+
+**Remaining gap.** `R16G16_*`, `R32G32_{UINT,SINT}`, and the packed
+32-bit formats (`A2B10G10R10_{UNORM,UINT}_PACK32`,
+`B10G11R11_UFLOAT_PACK32`) all remain entirely unimplemented;
+`shaderStorageImageExtendedFormats` itself stays `VK_FALSE`. H19i
+remains blocked pending the rest of this list.
+
+**Reproducing.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run  # or any directory with a `vulkan` symlink
+                                # to external/vulkancts/data/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.image.load_store.with_format.*.r16_*" --deqp-log-filename=r16_all.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=load-store.txt --deqp-log-filename=loadstore_h19n_r16.qpa
+```
