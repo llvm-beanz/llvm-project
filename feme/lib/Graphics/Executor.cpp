@@ -377,6 +377,16 @@ clipAgainstPlane(std::vector<RasterVertex> In, const PlaneDistanceFn &Distance,
   return Out;
 }
 
+/// (roadmap H7k) The far ("Z <= W") clip-space half-space -- factored out
+/// to file scope (rather than an inline lambda local to `clipTriangle`'s
+/// own `FrustumPlanes`) so a `Point`/`Line`-class primitive, which never
+/// calls `clipTriangle` at all, can share exactly the same near/far test
+/// `pointPassesDepthClip`/`clipLineDepthRange` below need.
+float farPlaneDistance(const RasterVertex &V) { return V.Clip[3] - V.Clip[2]; }
+/// (roadmap H7k) The near ("Z >= 0") clip-space half-space; see
+/// `farPlaneDistance`'s own comment.
+float nearPlaneDistance(const RasterVertex &V) { return V.Clip[2]; }
+
 std::vector<RasterVertex> clipTriangle(std::array<RasterVertex, 3> Tri,
                                        ArrayRef<LinkedVarying> Varyings,
                                        bool DepthClampEnable,
@@ -388,8 +398,8 @@ std::vector<RasterVertex> clipTriangle(std::array<RasterVertex, 3> Tri,
       [](const RasterVertex &V) { return V.Clip[3] + V.Clip[0]; },
       [](const RasterVertex &V) { return V.Clip[3] - V.Clip[1]; },
       [](const RasterVertex &V) { return V.Clip[3] + V.Clip[1]; },
-      [](const RasterVertex &V) { return V.Clip[3] - V.Clip[2]; },
-      [](const RasterVertex &V) { return V.Clip[2]; },
+      farPlaneDistance,
+      nearPlaneDistance,
   };
   // (roadmap H7d) `depthClampEnable`: per the Vulkan spec, a primitive is
   // *not* clipped against the near/far planes when depth clamp is
@@ -421,6 +431,64 @@ std::vector<RasterVertex> clipTriangle(std::array<RasterVertex, 3> Tri,
       return {};
   }
   return Poly;
+}
+
+/// (roadmap H7k) Whether a `Point`-class primitive's single vertex passes
+/// the near/far Z test, honoring the same `DepthClampEnable` convention
+/// `clipTriangle` already uses (skip the near/far test entirely -- the
+/// per-fragment depth clamp handles it instead). Unlike a triangle
+/// (partially clippable via Sutherland-Hodgman) or a line (partially
+/// clippable to its valid sub-segment, see `clipLineDepthRange` below), a
+/// point is an all-or-nothing primitive: Vulkan has no notion of "half a
+/// point", so this is a simple accept/reject test, not a clip. Before
+/// this, no `Point`/`Line`-class primitive was tested against the near/far
+/// planes at all (only the degenerate-`W` guard `ClipEpsilon` already
+/// tests in the caller) -- confirmed via a real `deqp-vk` reproduction of
+/// `dEQP-VK.clipping.clip_volume.depth_clamp.point_list` that every one of
+/// its 5 points still rendered regardless of `depthClampEnable`,
+/// including the 2 whose Z lies behind the near plane (a rasterizer bug
+/// distinct from -- and, on real reproduction, the actual root cause
+/// blocking this CTS case instead of -- this row's own originally
+/// hypothesized coverage-tie-break gap at an exact pixel-grid-aligned
+/// quad center, which a direct probe found already renders exactly one
+/// consistent covered pixel per corner as the top-left rule intends).
+bool pointPassesDepthClip(const RasterVertex &V, bool DepthClampEnable) {
+  if (DepthClampEnable)
+    return true;
+  return nearPlaneDistance(V) >= 0.0f && farPlaneDistance(V) >= 0.0f;
+}
+
+/// (roadmap H7k) Clips a `Line`-class primitive's 2-vertex segment against
+/// the near/far Z planes, honoring the same `DepthClampEnable` convention
+/// as `clipTriangle`/`pointPassesDepthClip` above. Unlike a point, a line
+/// segment *can* be partially valid (one endpoint behind the near plane,
+/// the other in front): this returns the clipped sub-segment (possibly
+/// the original segment unchanged, or with one endpoint replaced by the
+/// plane intersection via the same `lerpVertex` interpolation
+/// `clipAgainstPlane` uses for a triangle edge) rather than an
+/// all-or-nothing decision, or `std::nullopt` if the whole segment lies
+/// outside both planes.
+std::optional<std::array<RasterVertex, 2>>
+clipLineDepthRange(RasterVertex A, RasterVertex B,
+                   ArrayRef<LinkedVarying> Varyings, bool DepthClampEnable) {
+  if (DepthClampEnable)
+    return std::array<RasterVertex, 2>{A, B};
+  for (const PlaneDistanceFn &Distance :
+       {PlaneDistanceFn(nearPlaneDistance), PlaneDistanceFn(farPlaneDistance)}) {
+    float DA = Distance(A), DB = Distance(B);
+    bool AIn = DA >= 0.0f, BIn = DB >= 0.0f;
+    if (!AIn && !BIn)
+      return std::nullopt;
+    if (AIn != BIn) {
+      float T = DA / (DA - DB);
+      RasterVertex Mid = lerpVertex(A, B, T, Varyings);
+      if (AIn)
+        B = Mid;
+      else
+        A = Mid;
+    }
+  }
+  return std::array<RasterVertex, 2>{A, B};
 }
 
 /// (roadmap H7h) `gl_CullDistance`: per the Vulkan spec, a point, line or
@@ -2232,6 +2300,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         RasterVertex V = vertexAt(J);
         if (V.Clip[3] <= ClipEpsilon)
           continue;
+        // (roadmap H7k) Per the Vulkan spec, a point primitive outside
+        // the near/far Z range is discarded outright when depth clamp
+        // is disabled (a point cannot be partially clipped like a
+        // triangle or line -- see `pointPassesDepthClip`'s own comment).
+        if (!pointPassesDepthClip(V, Pipeline.getRasterState().DepthClampEnable))
+          continue;
         std::array<float, 2> P;
         float InvW, Depth;
         projectVertex(V, *Primitive->Viewport, P, InvW, Depth);
@@ -2261,6 +2335,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         RasterVertex V1 = vertexAt(Ln[1]);
         if (V0.Clip[3] <= ClipEpsilon || V1.Clip[3] <= ClipEpsilon)
           continue;
+        // (roadmap H7k) Per the Vulkan spec, a line segment straddling
+        // the near/far plane is clipped to its own valid sub-segment
+        // when depth clamp is disabled (unlike a point, a line is not
+        // all-or-nothing -- see `clipLineDepthRange`'s own comment).
+        std::optional<std::array<RasterVertex, 2>> ClippedLine =
+            clipLineDepthRange(V0, V1, Varyings,
+                              Pipeline.getRasterState().DepthClampEnable);
+        if (!ClippedLine)
+          continue;
+        V0 = (*ClippedLine)[0];
+        V1 = (*ClippedLine)[1];
         std::array<float, 2> P0, P1;
         float InvW0, Depth0, InvW1, Depth1;
         projectVertex(V0, *Primitive->Viewport, P0, InvW0, Depth0);

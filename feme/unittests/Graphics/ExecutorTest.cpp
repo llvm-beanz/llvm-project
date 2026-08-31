@@ -1030,6 +1030,66 @@ TEST(ExecutorTest, RendersAPointList) {
   EXPECT_EQ(Untouched[3], 0);
 }
 
+// roadmap H7k: unlike a triangle (`clipTriangle`), a `Point`/`Line`-class
+// primitive was never tested against the near/far Z planes at all before
+// this row -- confirmed via a real `dEQP-VK.clipping.clip_volume.
+// depth_clamp.point_list` reproduction that every one of its points still
+// rendered regardless of `depthClampEnable`, including ones behind the
+// near plane. A point with Z < 0 (behind the near plane, `VertexShaderIR`
+// writes clip.w = 1.0 unconditionally, so clip-space Z equals NDC Z
+// directly) is discarded outright when depth clamp is disabled --
+// `pointPassesDepthClip`'s own all-or-nothing test, since Vulkan has no
+// notion of "half a point".
+TEST(ExecutorTest, DiscardsAPointBehindTheNearPlaneWhenDepthClampIsDisabled) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.DepthClampEnable = false;
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, Raster, PrimitiveTopology::PointList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // Pixel (1, 1)'s center, but at clip-space Z = -0.5: behind the near
+  // plane (valid range is [0, w] = [0, 1] here).
+  Scene.VertexData = {
+      -0.25f, 0.25f, -0.5f, 1.0f, 0.0f, 0.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint8_t Byte : Scene.AttachmentStorage)
+    EXPECT_EQ(Byte, 0);
+}
+
+// roadmap H7k: the same point as above, but with depth clamp enabled --
+// per the Vulkan spec, depth clamp disables near/far clipping entirely
+// (the out-of-range depth is clamped per-fragment instead), so the point
+// renders normally at pixel (1, 1).
+TEST(ExecutorTest, RendersAPointBehindTheNearPlaneWhenDepthClampIsEnabled) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.DepthClampEnable = true;
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, Raster, PrimitiveTopology::PointList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -0.25f, 0.25f, -0.5f, 1.0f, 0.0f, 0.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  const uint8_t *Red = texel(1, 1);
+  EXPECT_EQ(Red[0], 255);
+  EXPECT_EQ(Red[3], 255);
+}
+
 // A vertex shader like `VertexShaderIR` above, but with a third input
 // attribute (element 0, location 2: one float) it writes straight through
 // to a new `SignatureSystemValue::PointSize` output (element 4) alongside
@@ -1274,6 +1334,67 @@ TEST(ExecutorTest, RendersAHorizontalLineList) {
   // The row above/below the line is untouched.
   EXPECT_EQ(texel(0, 0)[3], 0);
   EXPECT_EQ(texel(0, 2)[3], 0);
+}
+
+// roadmap H7k: unlike `DiscardsAPointBehindTheNearPlaneWhenDepthClampIs
+// Disabled` above (points are all-or-nothing, per the Vulkan spec), a line
+// segment straddling the near plane is *partially* clipped:
+// `clipLineDepthRange` interpolates a fresh endpoint exactly at the near
+// plane, so only the segment's still-valid portion draws. This line runs
+// from clip Z = -1 (invalid, behind the near plane) at screen-left to
+// clip Z = 1 (valid) at screen-right, crossing Z = 0 at NDC x = 0 (screen
+// x = 2): only the right half (screen columns 2-3) should render.
+TEST(ExecutorTest, ClipsALineAtTheNearPlaneWhenDepthClampIsDisabled) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.DepthClampEnable = false;
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, Raster, PrimitiveTopology::LineList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, 0.25f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      1.0f,  0.25f, 1.0f,  1.0f, 1.0f, 1.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  EXPECT_EQ(texel(0, 1)[3], 0);
+  EXPECT_EQ(texel(1, 1)[3], 0);
+  EXPECT_EQ(texel(2, 1)[3], 255);
+  EXPECT_EQ(texel(3, 1)[3], 255);
+}
+
+// roadmap H7k: the same straddling line as above, but with depth clamp
+// enabled -- near/far clipping is disabled entirely, so the full line
+// (all four columns) renders.
+TEST(ExecutorTest, RendersAFullLineAcrossTheNearPlaneWhenDepthClampIsEnabled) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.DepthClampEnable = true;
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, Raster, PrimitiveTopology::LineList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, 0.25f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      1.0f,  0.25f, 1.0f,  1.0f, 1.0f, 1.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t X = 0; X != 4; ++X)
+    EXPECT_EQ(texel(X, 1)[3], 255) << "x=" << X;
 }
 
 // roadmap C4: a `LineStrip` connects consecutive vertices, and an indexed
