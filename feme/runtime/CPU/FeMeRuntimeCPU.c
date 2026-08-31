@@ -1441,6 +1441,11 @@ femeRTImageFormatElementSize(uint32_t Format) {
   case 9:  // R32_SINT
     return 4;
   case 2:  // R32G32_FLOAT
+  // (Roadmap H19n) `R32G32_UINT`/`R32G32_SINT`: the storage-mandatory
+  // two-component partial siblings of `R32G32B32A32_{UINT,SINT}`, one
+  // 32-bit scalar per lane, matching `R32G32_FLOAT`'s own size.
+  case 6:  // R32G32_UINT
+  case 10: // R32G32_SINT
     return 8;
   case 3:  // R32G32B32_FLOAT
     return 12;
@@ -1635,6 +1640,24 @@ femeRTUnpackR10G10B10A2Unorm(uint32_t Raw) {
   return V;
 }
 
+// (Roadmap H19n) The inverse of `femeRTUnpackR10G10B10A2Unorm` above:
+// clamps each component to `[0.0, 1.0]`, scales R/G/B to `[0, 1023]` and A
+// to `[0, 3]`, and packs the four rounded fields into one `uint32_t` in
+// the same MSB-down `A2B10G10R10` bit layout the unpack side reads.
+__attribute__((always_inline)) static uint32_t
+femeRTPackR10G10B10A2Unorm(FemeRTv4f32 Value) {
+  float C0 = __builtin_fminf(__builtin_fmaxf(Value[0], 0.0f), 1.0f);
+  float C1 = __builtin_fminf(__builtin_fmaxf(Value[1], 0.0f), 1.0f);
+  float C2 = __builtin_fminf(__builtin_fmaxf(Value[2], 0.0f), 1.0f);
+  float C3 = __builtin_fminf(__builtin_fmaxf(Value[3], 0.0f), 1.0f);
+  uint32_t I0 = (uint32_t)__builtin_roundf(C0 * 1023.0f);
+  uint32_t I1 = (uint32_t)__builtin_roundf(C1 * 1023.0f);
+  uint32_t I2 = (uint32_t)__builtin_roundf(C2 * 1023.0f);
+  uint32_t I3 = (uint32_t)__builtin_roundf(C3 * 3.0f);
+  return (I0 & 0x3FFu) | ((I1 & 0x3FFu) << 10) | ((I2 & 0x3FFu) << 20) |
+         ((I3 & 0x3u) << 30);
+}
+
 // Unpacks a `R11G11B10_FLOAT` value (`VK_FORMAT_B10G11R11_UFLOAT_PACK32`:
 // from the LSB up, an unsigned 6-bit-mantissa/5-bit-exponent 11-bit float
 // for R, another for G, then a 5-bit-mantissa/5-bit-exponent 10-bit float
@@ -1665,6 +1688,24 @@ femeRTUnpackR11G11B10Float(uint32_t Raw) {
   V[2] = femeRTHalfToFloat((uint16_t)B10);
   V[3] = 1.0f;
   return V;
+}
+
+// (Roadmap H19n) The inverse of `femeRTUnpackR11G11B10Float` above: clamps
+// each of R/G/B to `[0.0, +inf)` (this format is unsigned, no sign bit),
+// encodes each with `femeRTFloatToHalf`, then right-shifts each binary16
+// result back down by the same amount the unpack side shifted up by (4
+// for the 11-bit R/G fields' 6-bit mantissa, 5 for the 10-bit B field's
+// 5-bit mantissa) to recover each field's own narrower exponent+mantissa
+// bit pattern, and packs the three fields LSB-up into one `uint32_t`.
+__attribute__((always_inline)) static uint32_t
+femeRTPackR11G11B10Float(FemeRTv4f32 Value) {
+  float C0 = __builtin_fmaxf(Value[0], 0.0f);
+  float C1 = __builtin_fmaxf(Value[1], 0.0f);
+  float C2 = __builtin_fmaxf(Value[2], 0.0f);
+  uint32_t R11 = ((uint32_t)femeRTFloatToHalf(C0) >> 4) & 0x7FFu;
+  uint32_t G11 = ((uint32_t)femeRTFloatToHalf(C1) >> 4) & 0x7FFu;
+  uint32_t B10 = ((uint32_t)femeRTFloatToHalf(C2) >> 5) & 0x3FFu;
+  return R11 | (G11 << 11) | (B10 << 22);
 }
 
 // Unpacks an `A8_UNORM` value (a single normalized `[0, 255]` alpha byte,
@@ -1892,6 +1933,20 @@ femeRTUnpackR10G10B10A2Uint(uint32_t Raw) {
   return V;
 }
 
+// (Roadmap H19n) The inverse of `femeRTUnpackR10G10B10A2Uint` above:
+// truncates R/G/B down to 10 bits and A down to 2 bits, packing the four
+// fields into one `uint32_t` in the same MSB-down `A2B10G10R10` bit
+// layout the unpack side reads.
+__attribute__((always_inline)) static uint32_t
+femeRTPackR10G10B10A2Uint(FemeRTv4i32 Texel) {
+  uint32_t I0 = (uint32_t)Texel[0];
+  uint32_t I1 = (uint32_t)Texel[1];
+  uint32_t I2 = (uint32_t)Texel[2];
+  uint32_t I3 = (uint32_t)Texel[3];
+  return (I0 & 0x3FFu) | ((I1 & 0x3FFu) << 10) | ((I2 & 0x3FFu) << 20) |
+         ((I3 & 0x3u) << 30);
+}
+
 // Unpacks one texel of `Format` at `Ptr` into a `<4 x i32>`, or all-zero
 // for a format this table doesn't know (guarded by
 // `femeRTImageFormatElementSize`'s own 0 return at every call site, so this
@@ -1921,6 +1976,17 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
     int32_t R;
     __builtin_memcpy(&R, Ptr, sizeof(R));
     FemeRTv4i32 V = {R, 0, 0, 1};
+    return V;
+  }
+  // (Roadmap H19n) `R32G32_UINT`/`R32G32_SINT`: the two-component
+  // identity siblings of `R32_{UINT,SINT}` above; the unread B component
+  // pads `0`, alpha pads `1`, matching `femeRTUnpackImageTexel`'s own
+  // partial-component convention (`R32G32_FLOAT` et al.).
+  case 6:  // R32G32_UINT
+  case 10: { // R32G32_SINT
+    int32_t RG[2];
+    __builtin_memcpy(RG, Ptr, sizeof(RG));
+    FemeRTv4i32 V = {RG[0], RG[1], 0, 1};
     return V;
   }
   case 15: { // R8G8B8A8_UINT
@@ -2080,6 +2146,26 @@ femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
     __builtin_memcpy(Ptr, Raw, sizeof(Raw));
     return;
   }
+  case 23: { // R11G11B10_FLOAT (roadmap H19n, packed into one 4-byte word).
+    uint32_t Raw = femeRTPackR11G11B10Float(Texel);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
+  case 24: { // R10G10B10A2_UNORM (roadmap H19n, packed into one 4-byte
+             // word).
+    uint32_t Raw = femeRTPackR10G10B10A2Unorm(Texel);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
+  case 14: { // R8G8B8A8_SNORM (roadmap H19n): a real mandatory
+             // `shaderStorageImageExtendedFormats` entry, not just
+             // covered by this project's own texel-buffer conversion
+             // path -- reuses `femeRTPackR8G8B8A8Snorm` (already defined
+             // for that other path).
+    uint32_t Raw = femeRTPackR8G8B8A8Snorm(Texel);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
   default:
     return;
   }
@@ -2102,6 +2188,15 @@ femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
   case 9: { // R32_SINT: only the first component is stored.
     int32_t R = Texel[0];
     __builtin_memcpy(Ptr, &R, sizeof(R));
+    return;
+  }
+  // (Roadmap H19n) `R32G32_UINT`/`R32G32_SINT`: the two-component
+  // identity siblings of `R32_{UINT,SINT}` above; only the first two
+  // components are stored.
+  case 6:  // R32G32_UINT
+  case 10: { // R32G32_SINT
+    int32_t RG[2] = {Texel[0], Texel[1]};
+    __builtin_memcpy(Ptr, RG, sizeof(RG));
     return;
   }
   case 8:  // R32G32B32A32_UINT
@@ -2151,6 +2246,20 @@ femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
     uint16_t Raw[2];
     femeRTPackR16G16Sint(Texel, Raw);
     __builtin_memcpy(Ptr, Raw, sizeof(Raw));
+    return;
+  }
+  case 25: { // R10G10B10A2_UINT (roadmap H19n, packed into one 4-byte
+             // word).
+    uint32_t Raw = femeRTPackR10G10B10A2Uint(Texel);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
+  case 16: { // R8G8B8A8_SINT (roadmap H19n): a real mandatory
+             // `shaderStorageImageExtendedFormats` entry; reuses
+             // `femeRTPackR8G8B8A8Sint` (already defined for the
+             // texel-buffer conversion path).
+    uint32_t Raw = femeRTPackR8G8B8A8Sint(Texel);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
     return;
   }
   default:

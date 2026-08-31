@@ -442,8 +442,14 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   // `R16G16B16A16_{UNORM,SNORM}`; roadmap H19j added
   // `R8_{UNORM,SNORM,UINT,SINT}`; roadmap H19n adds
   // `R8G8_{UNORM,SNORM,UINT,SINT}`,
-  // `R16_{FLOAT,UNORM,SNORM,UINT,SINT}`, and
-  // `R16G16_{FLOAT,UNORM,SNORM,UINT,SINT}` -- further slices of the full
+  // `R16_{FLOAT,UNORM,SNORM,UINT,SINT}`,
+  // `R16G16_{FLOAT,UNORM,SNORM,UINT,SINT}`,
+  // `R32G32_{UINT,SINT}`, the packed 32-bit formats
+  // `A2B10G10R10_{UNORM,UINT}_PACK32`/`B10G11R11_UFLOAT_PACK32`, and
+  // `R8G8B8A8_{SNORM,SINT}` (a real mandatory entry discovered via the
+  // Vulkan spec's own full mandatory list, distinct from
+  // `R8G8B8A8_{UNORM,UINT}` staying unclaimed) -- further slices of the
+  // full
   // `shaderStorageImageExtendedFormats` list; every other format is still
   // left unset (`R8G8B8A8_UNORM` included), matching
   // `shaderStorageImageExtendedFormats` staying unclaimed (see Roadmap.md's
@@ -505,6 +511,26 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16G16_UINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16G16_SINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  // (Roadmap H19n) `R32G32_UINT`/`R32G32_SINT`: the storage-mandatory
+  // two-component partial siblings of `R32G32B32A32_{UINT,SINT}`.
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32_UINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32_SINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  // (Roadmap H19n) The packed 32-bit formats
+  // `A2B10G10R10_{UNORM,UINT}_PACK32`/`B10G11R11_UFLOAT_PACK32`.
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R11G11B10_FLOAT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R10G10B10A2_UNORM) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R10G10B10A2_UINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  // (Roadmap H19n) `R8G8B8A8_SNORM`/`_SINT`: a real mandatory entry
+  // distinct from `R8G8B8A8_UNORM`/`_UINT` staying unset.
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8B8A8_SNORM) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8B8A8_SINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
               VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);

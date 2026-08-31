@@ -693,6 +693,37 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::R16G16_SNORM:
   case ResourceFormat::R16G16_UINT:
   case ResourceFormat::R16G16_SINT:
+  // (Roadmap H19n) `R32G32_UINT`/`R32G32_SINT`: the storage-mandatory
+  // two-component partial siblings of `R32G32B32A32_{UINT,SINT}`, an
+  // identity format needing no scalar conversion, backed by new
+  // `femeRTPackImageTexelI32` cases (FeMeRuntimeCPU.c).
+  case ResourceFormat::R32G32_UINT:
+  case ResourceFormat::R32G32_SINT:
+    Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    break;
+  // (Roadmap H19n) The packed 32-bit formats
+  // `A2B10G10R10_{UNORM,UINT}_PACK32`/`B10G11R11_UFLOAT_PACK32`, backed
+  // by new `femeRTPackR10G10B10A2Unorm`/`Uint`/`femeRTPackR11G11B10Float`
+  // helpers (FeMeRuntimeCPU.c) that are each the mathematical inverse of
+  // this project's own existing sampled-image unpack helper for the same
+  // format -- confirmed by a real CTS re-run
+  // (`dEQP-VK.image.load_store.with_format.*.{a2b10g10r10,b10g11r11}*`)
+  // that this project's own storage-image bit layout for these formats
+  // does in fact match its sampled-image decode.
+  case ResourceFormat::R11G11B10_FLOAT:
+  case ResourceFormat::R10G10B10A2_UNORM:
+  case ResourceFormat::R10G10B10A2_UINT:
+    Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    break;
+  // (Roadmap H19n) `R8G8B8A8_SNORM`/`_SINT`: a real mandatory
+  // `shaderStorageImageExtendedFormats` entry discovered via the Vulkan
+  // spec's own full mandatory list (Table "Required format support for
+  // storage images with extended formats"), distinct from
+  // `R8G8B8A8_UNORM`/`_UINT` staying unset -- backed by
+  // `femeRTPackR8G8B8A8Snorm`/`Sint`, already defined for this project's
+  // own texel-buffer conversion path and reused here as-is.
+  case ResourceFormat::R8G8B8A8_SNORM:
+  case ResourceFormat::R8G8B8A8_SINT:
     Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     break;
   default:

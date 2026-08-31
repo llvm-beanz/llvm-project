@@ -2046,6 +2046,42 @@ TEST_F(ImageSamplingTest, LoadI32FetchesR16G16Sint) {
   EXPECT_EQ(Out[3], 1);
 }
 
+// (Roadmap H19n) `R32G32_UINT`/`_SINT`: the storage-mandatory two-component
+// partial siblings of `R32G32B32A32_{UINT,SINT}`. Identity format, no
+// scalar conversion needed -- confirms the two 32-bit lanes round-trip
+// directly, unlike every narrower-scalar format above.
+TEST_F(ImageSamplingTest, LoadI32FetchesR32G32Uint) {
+  uint32_t Storage[1][1][2] = {{{4000000000u, 128u}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R32G32_UINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_EQ((uint32_t)Out[0], 4000000000u);
+  EXPECT_EQ(Out[1], 128);
+  EXPECT_EQ(Out[2], 0);
+  EXPECT_EQ(Out[3], 1);
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesR32G32Sint) {
+  int32_t Storage[1][1][2] = {{{-1, -2}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R32G32_SINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_EQ(Out[0], -1);
+  EXPECT_EQ(Out[1], -2);
+  EXPECT_EQ(Out[2], 0);
+  EXPECT_EQ(Out[3], 1);
+}
+
 TEST_F(ImageSamplingTest, LoadI32FetchesR10G10B10A2Uint) {
   // From the MSB down: 2 bits of A, 10 bits of B, 10 bits of G, 10 bits of
   // R -- A = 3, B = 512, G = 256, R = 1.
@@ -2765,6 +2801,153 @@ TEST_F(ImageSamplingTest, StoreWritesTexelIntoR16G16Sint) {
   Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
   EXPECT_EQ((int16_t)Storage[0][0][0], -1);
   EXPECT_EQ((int16_t)Storage[0][0][1], -2);
+}
+
+// (Roadmap H19n) `R32G32_UINT`/`_SINT`: identity format, no truncation --
+// confirms only the first two lanes are stored, unlike
+// `R32G32B32A32_{UINT,SINT}`'s own four-lane identity store.
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR32G32Uint) {
+  uint32_t Storage[1][1][2] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R32G32_UINT, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  FeMeTestV4I32 Texel = {(int32_t)4000000000u, 128, 0, 0};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], 4000000000u);
+  EXPECT_EQ(Storage[0][0][1], 128u);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR32G32Sint) {
+  int32_t Storage[1][1][2] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R32G32_SINT, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  FeMeTestV4I32 Texel = {-1, -2, 0, 0};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0][0], -1);
+  EXPECT_EQ(Storage[0][0][1], -2);
+}
+
+// (Roadmap H19n) The packed 32-bit formats
+// `A2B10G10R10_{UNORM,UINT}_PACK32`/`B10G11R11_UFLOAT_PACK32`: each pack
+// helper is the mathematical inverse of this project's own existing
+// sampled-image unpack helper for the same format.
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR10G10B10A2UnormQuantized) {
+  uint32_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R10G10B10A2_UNORM, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  // R out-of-range (clamps to 1.0 -> 1023); G = 0.0 -> 0; B = 0.5 ->
+  // round(0.5 * 1023) == 512 (10-bit fields); A = 1.0 -> round(1.0 * 3)
+  // == 3 (2-bit field).
+  FeMeTestV4F32 Texel = {2.0f, 0.0f, 0.5f, 1.0f};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  uint32_t Raw = Storage[0][0];
+  EXPECT_EQ(Raw & 0x3FFu, 1023u);
+  EXPECT_EQ((Raw >> 10) & 0x3FFu, 0u);
+  EXPECT_EQ((Raw >> 20) & 0x3FFu, 512u);
+  EXPECT_EQ((Raw >> 30) & 0x3u, 3u);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR11G11B10FloatViaHalfEncode) {
+  uint32_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R11G11B10_FLOAT,
+      Layout, FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  // R=1.0, G=2.0, B=1.5, matching `LoadFetchesR11G11B10FloatNonZeroValues`
+  // above -- confirms the round trip in the opposite direction.
+  FeMeTestV4F32 Texel = {1.0f, 2.0f, 1.5f, 0.0f};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  uint32_t Raw = Storage[0][0];
+  uint32_t RRaw = Raw & 0x7FFu;
+  uint32_t GRaw = (Raw >> 11) & 0x7FFu;
+  uint32_t BRaw = (Raw >> 22) & 0x3FFu;
+  EXPECT_EQ(RRaw, (15u << 6) | 0u);
+  EXPECT_EQ(GRaw, (16u << 6) | 0u);
+  EXPECT_EQ(BRaw, (15u << 5) | 16u);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR10G10B10A2Uint) {
+  uint32_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R10G10B10A2_UINT, Layout,
+                  FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  // 0x400 (1024) truncates to 0 in a 10-bit field -- confirms the store
+  // truncates rather than clamping.
+  FeMeTestV4I32 Texel = {0x400, 512, 256, 1};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  uint32_t Raw = Storage[0][0];
+  EXPECT_EQ(Raw & 0x3FFu, 0u);
+  EXPECT_EQ((Raw >> 10) & 0x3FFu, 512u);
+  EXPECT_EQ((Raw >> 20) & 0x3FFu, 256u);
+  EXPECT_EQ((Raw >> 30) & 0x3u, 1u);
+}
+
+// (Roadmap H19n) `R8G8B8A8_SNORM`/`_SINT`: a real mandatory
+// `shaderStorageImageExtendedFormats` entry discovered via the Vulkan
+// spec's own full mandatory list -- reuses `femeRTPackR8G8B8A8Snorm`/
+// `Sint`, already defined for this project's own texel-buffer conversion
+// path.
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8G8B8A8SnormQuantized) {
+  uint32_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R8G8B8A8_SNORM, Layout, FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {2.0f, -1.0f, 0.5f, 0.0f}; // R out-of-range, clamps.
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  uint32_t Raw = Storage[0][0];
+  EXPECT_EQ((int8_t)(Raw & 0xFFu), 127); // Clamped to 1.0 before quantizing.
+  EXPECT_EQ((int8_t)((Raw >> 8) & 0xFFu), -127);
+  EXPECT_EQ((int8_t)((Raw >> 16) & 0xFFu), 64); // round(0.5 * 127) == 64.
+  EXPECT_EQ((int8_t)((Raw >> 24) & 0xFFu), 0);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8G8B8A8Sint) {
+  uint32_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R8G8B8A8_SINT, Layout, FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  FeMeTestV4I32 Texel = {-1, -2, 3, 0};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  uint32_t Raw = Storage[0][0];
+  EXPECT_EQ((int8_t)(Raw & 0xFFu), -1);
+  EXPECT_EQ((int8_t)((Raw >> 8) & 0xFFu), -2);
+  EXPECT_EQ((int8_t)((Raw >> 16) & 0xFFu), 3);
+  EXPECT_EQ((int8_t)((Raw >> 24) & 0xFFu), 0);
 }
 
 TEST_F(ImageSamplingTest, StoreOutOfBoundsCoordinateIsANoOp) {
