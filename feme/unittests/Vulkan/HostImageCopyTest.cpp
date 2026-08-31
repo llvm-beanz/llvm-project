@@ -40,6 +40,8 @@ protected:
     ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
   }
   void TearDown() override {
+    for (VkImage Img : Images)
+      vkDestroyImage(Device, Img, nullptr);
     for (VkDeviceMemory Memory : Allocations)
       vkFreeMemory(Device, Memory, nullptr);
     vkDestroyDevice(Device, nullptr);
@@ -77,6 +79,7 @@ protected:
               VK_SUCCESS);
     EXPECT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
     Allocations.push_back(Memory);
+    Images.push_back(Img);
     return Img;
   }
 
@@ -84,6 +87,7 @@ protected:
   VkPhysicalDevice Physical = VK_NULL_HANDLE;
   VkDevice Device = VK_NULL_HANDLE;
   std::vector<VkDeviceMemory> Allocations;
+  std::vector<VkImage> Images;
 };
 
 TEST_F(HostImageCopyTest, CopiesMemoryToImageAndBack) {
