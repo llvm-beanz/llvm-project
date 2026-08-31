@@ -209,6 +209,11 @@ Expected<ResourceFormat> parseFixtureFormat(StringRef Format) {
           .Case("r8g8-snorm", ResourceFormat::R8G8_SNORM)
           .Case("r8g8-uint", ResourceFormat::R8G8_UINT)
           .Case("r8g8-sint", ResourceFormat::R8G8_SINT)
+          .Case("r16-float", ResourceFormat::R16_FLOAT)
+          .Case("r16-unorm", ResourceFormat::R16_UNORM)
+          .Case("r16-snorm", ResourceFormat::R16_SNORM)
+          .Case("r16-uint", ResourceFormat::R16_UINT)
+          .Case("r16-sint", ResourceFormat::R16_SINT)
           .Default(ResourceFormat::Unknown);
   if (Result == ResourceFormat::Unknown)
     return createStringError(inconvertibleErrorCode(),
@@ -1019,6 +1024,18 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "r8g8-uint";
   case ResourceFormat::R8G8_SINT:
     return "r8g8-sint";
+  // (Roadmap H19n) `R16_{FLOAT,UNORM,SNORM,UINT,SINT}`: same rationale as
+  // the single-channel `R8` formats above.
+  case ResourceFormat::R16_FLOAT:
+    return "r16-float";
+  case ResourceFormat::R16_UNORM:
+    return "r16-unorm";
+  case ResourceFormat::R16_SNORM:
+    return "r16-snorm";
+  case ResourceFormat::R16_UINT:
+    return "r16-uint";
+  case ResourceFormat::R16_SINT:
+    return "r16-sint";
   // (Roadmap E20) ASTC block-compressed formats: no clear-color/texel
   // fixture support exists for them yet (see `getFixtureFormatElementSize`
   // below), but they still need a name for diagnostics.

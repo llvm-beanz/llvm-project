@@ -69,6 +69,18 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::R8G8_UINT;
   case VK_FORMAT_R8G8_SINT:
     return ResourceFormat::R8G8_SINT;
+  // (Roadmap H19n) The single-channel `R16` mandatory
+  // `shaderStorageImageExtendedFormats` formats.
+  case VK_FORMAT_R16_SFLOAT:
+    return ResourceFormat::R16_FLOAT;
+  case VK_FORMAT_R16_UNORM:
+    return ResourceFormat::R16_UNORM;
+  case VK_FORMAT_R16_SNORM:
+    return ResourceFormat::R16_SNORM;
+  case VK_FORMAT_R16_UINT:
+    return ResourceFormat::R16_UINT;
+  case VK_FORMAT_R16_SINT:
+    return ResourceFormat::R16_SINT;
   case VK_FORMAT_B8G8R8A8_UNORM:
     return ResourceFormat::B8G8R8A8_UNORM;
   case VK_FORMAT_R16G16B16A16_SFLOAT:
@@ -268,6 +280,14 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::R8G8_SNORM:
   case ResourceFormat::R8G8_UINT:
   case ResourceFormat::R8G8_SINT:
+    return 2;
+  // (Roadmap H19n) `R16_{FLOAT,UNORM,SNORM,UINT,SINT}`: two bytes, one
+  // component.
+  case ResourceFormat::R16_FLOAT:
+  case ResourceFormat::R16_UNORM:
+  case ResourceFormat::R16_SNORM:
+  case ResourceFormat::R16_UINT:
+  case ResourceFormat::R16_SINT:
     return 2;
   // (Roadmap E5) `VK_FORMAT_A8_UNORM`: one byte, one component.
   case ResourceFormat::A8_UNORM:
@@ -534,6 +554,11 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `R8_UNORM`/`_SNORM` above.
   case ResourceFormat::R8G8_UNORM:
   case ResourceFormat::R8G8_SNORM:
+  // (Roadmap H19n) `R16_FLOAT`/`_UNORM`/`_SNORM`: the single-channel
+  // analogues of `R16G16B16A16_FLOAT`/`_UNORM`/`_SNORM` above.
+  case ResourceFormat::R16_FLOAT:
+  case ResourceFormat::R16_UNORM:
+  case ResourceFormat::R16_SNORM:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     break;
@@ -561,6 +586,10 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `R8_UINT`/`_SINT` above.
   case ResourceFormat::R8G8_UINT:
   case ResourceFormat::R8G8_SINT:
+  // (Roadmap H19n) `R16_UINT`/`_SINT`: the single-channel analogues of
+  // `R16G16B16A16_UINT`/`_SINT` above.
+  case ResourceFormat::R16_UINT:
+  case ResourceFormat::R16_SINT:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     break;
   default:
@@ -614,6 +643,15 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::R8G8_SNORM:
   case ResourceFormat::R8G8_UINT:
   case ResourceFormat::R8G8_SINT:
+  // (Roadmap H19n) `R16_{FLOAT,UNORM,SNORM,UINT,SINT}`: the
+  // single-channel mandatory-extended-format formats, backed by new
+  // `femeRTPackImageTexel`/`femeRTPackImageTexelI32` cases
+  // (FeMeRuntimeCPU.c).
+  case ResourceFormat::R16_FLOAT:
+  case ResourceFormat::R16_UNORM:
+  case ResourceFormat::R16_SNORM:
+  case ResourceFormat::R16_UINT:
+  case ResourceFormat::R16_SINT:
     Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     break;
   default:

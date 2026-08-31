@@ -98,6 +98,21 @@ TEST(FormatTest, MapsTwoChannelR8G8Formats) {
     EXPECT_EQ(formatElementSize(Format), 2u);
 }
 
+TEST(FormatTest, MapsSingleChannelR16Formats) {
+  // Roadmap H19n: the single-channel `R16` mandatory
+  // `shaderStorageImageExtendedFormats` formats.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R16_SFLOAT), ResourceFormat::R16_FLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R16_UNORM), ResourceFormat::R16_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R16_SNORM), ResourceFormat::R16_SNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R16_UINT), ResourceFormat::R16_UINT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_R16_SINT), ResourceFormat::R16_SINT);
+  for (ResourceFormat Format :
+       {ResourceFormat::R16_FLOAT, ResourceFormat::R16_UNORM,
+        ResourceFormat::R16_SNORM, ResourceFormat::R16_UINT,
+        ResourceFormat::R16_SINT})
+    EXPECT_EQ(formatElementSize(Format), 2u);
+}
+
 TEST(FormatTest, RejectsUnsupportedFormat) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGB_UNORM_BLOCK), std::nullopt);
   EXPECT_EQ(mapVkFormat(VK_FORMAT_UNDEFINED), std::nullopt);
@@ -335,7 +350,10 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         // Roadmap H19j: `R8_UNORM`/`_SNORM`.
         ResourceFormat::R8_UNORM, ResourceFormat::R8_SNORM,
         // Roadmap H19n: `R8G8_UNORM`/`_SNORM`.
-        ResourceFormat::R8G8_UNORM, ResourceFormat::R8G8_SNORM}) {
+        ResourceFormat::R8G8_UNORM, ResourceFormat::R8G8_SNORM,
+        // Roadmap H19n: `R16_FLOAT`/`_UNORM`/`_SNORM`.
+        ResourceFormat::R16_FLOAT, ResourceFormat::R16_UNORM,
+        ResourceFormat::R16_SNORM}) {
     VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
@@ -353,7 +371,9 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         // Roadmap H19j: `R8_UINT`/`_SINT`.
         ResourceFormat::R8_UINT, ResourceFormat::R8_SINT,
         // Roadmap H19n: `R8G8_UINT`/`_SINT`.
-        ResourceFormat::R8G8_UINT, ResourceFormat::R8G8_SINT}) {
+        ResourceFormat::R8G8_UINT, ResourceFormat::R8G8_SINT,
+        // Roadmap H19n: `R16_UINT`/`_SINT`.
+        ResourceFormat::R16_UINT, ResourceFormat::R16_SINT}) {
     VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
@@ -401,7 +421,8 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   // `R16G16B16A16_{SFLOAT,UINT,SINT}`; roadmap H19h added
   // `R16G16B16A16_{UNORM,SNORM}`; roadmap H19j added
   // `R8_{UNORM,SNORM,UINT,SINT}`; roadmap H19n adds
-  // `R8G8_{UNORM,SNORM,UINT,SINT}` -- a further slice of the full
+  // `R8G8_{UNORM,SNORM,UINT,SINT}` and
+  // `R16_{FLOAT,UNORM,SNORM,UINT,SINT}` -- further slices of the full
   // `shaderStorageImageExtendedFormats` list; every other format is still
   // left unset (`R8G8B8A8_UNORM` included), matching
   // `shaderStorageImageExtendedFormats` staying unclaimed (see Roadmap.md's
@@ -443,6 +464,16 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8_UINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8_SINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16_FLOAT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16_UNORM) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16_SNORM) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16_UINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R16_SINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
               VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);

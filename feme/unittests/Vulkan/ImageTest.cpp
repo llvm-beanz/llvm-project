@@ -127,7 +127,7 @@ TEST_F(ImageTest, MipChainSizeIsSumOfLevels) {
 TEST_F(ImageTest, RejectsUnsupportedFormat) {
   VkImageCreateInfo ImageInfo{};
   ImageInfo.imageType = VK_IMAGE_TYPE_2D;
-  ImageInfo.format = VK_FORMAT_R16_UNORM; // Not mapped by `mapVkFormat`.
+  ImageInfo.format = VK_FORMAT_R16G16_UNORM; // Not mapped by `mapVkFormat`.
   ImageInfo.extent = {1, 1, 1};
   ImageInfo.mipLevels = 1;
   ImageInfo.arrayLayers = 1;
@@ -342,7 +342,7 @@ TEST_F(ImageTest, GetDeviceImageMemoryRequirementsMatchesLiveImage) {
 TEST_F(ImageTest, GetDeviceImageMemoryRequirementsZeroForUnsupportedFormat) {
   VkImageCreateInfo ImageInfo{};
   ImageInfo.imageType = VK_IMAGE_TYPE_2D;
-  ImageInfo.format = VK_FORMAT_R16_UNORM;
+  ImageInfo.format = VK_FORMAT_R16G16_UNORM;
   ImageInfo.extent = {1, 1, 1};
   ImageInfo.mipLevels = 1;
   ImageInfo.arrayLayers = 1;
