@@ -37,25 +37,24 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H19o or other prerequisites of the H-series
+Can you continue working on H19i or other prerequisites of the H-series
 milestones from the roadmap?
 
-> **The final `A2B10G10R10_{SNORM,SINT}_PACK32` gap in the mandatory
-> `shaderStorageImageExtendedFormats` list**, split out of H19n once every other
-> format in the real Vulkan spec's own mandatory-format table was closed. Needs
-> 2 new `ResourceFormat` enum entries (appended at the tail, per this project's
-> own append-only convention), `mapVkFormat`/`formatElementSize` wiring, and new
-> `femeRTUnpackR10G10B10A2Snorm`/`femeRTPackR10G10B10A2Snorm` helpers in
-> `FeMeRuntimeCPU.c` (the signed-normalized sibling of the existing
-> `R10G10B10A2_UNORM` helpers H19n added, same MSB-down `A2B10G10R10` bit
-> layout, clamped to `[-1.0, 1.0]`/scaled to a 9-bit signed range per component,
-> mirroring `femeRTUnpackR8G8B8A8Snorm`'s own clamp-and-scale convention) --
-> `_SINT` needs no new pack/unpack helper at all, only new dispatch-table
-> wiring, since it is bit-for-bit identical to the already-implemented
-> `R10G10B10A2_UINT` case (a signed/unsigned integer field's bit pattern is
-> stored identically either way, matching every prior `_UINT`/`_SINT` pair in
-> this project). Also needs the corresponding sampled-image feature-bit and
-> `ImageFixture.cpp`/`feme-run.cpp` fixture-name cases, since neither format is
-> mapped at all today. Only once this lands should
-> `shaderStorageImageExtendedFormats` itself flip to `VK_TRUE`, and only then
-> can H19i's own `without_format.*` work proceed.
+> **`shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`**, split out of
+> H19f. `dEQP-VK.image.load_store.without_format.*`'s own `checkSupport` gates
+> on the per-format
+> `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` tiling-feature
+> bits (`vktImageLoadStoreTests.cpp`), which `Format.cpp` does not compute at
+> all today -- a
+> `VkFormatProperties3`/`vkGetPhysicalDeviceFormatProperties2`-only pair of bits
+> distinct from the plain `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` this project
+> already advertises. `SPIRVResourceLowering.cpp`'s own storage-image
+> classification already ignores the SPIR-V handle's compile-time `Format`
+> int-parameter entirely (confirmed: no `getIntParameter(5)` call anywhere in
+> `classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`), so a
+> `Format == Unknown` handle likely already lowers identically to a
+> declared-format one -- the real gap is the format-feature-bit advertisement
+> plus the underlying `shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`
+> device-feature bits themselves, not the compiler lowering. Needs H19h's own
+> broader format list to land first, since `without_format.*`'s 828 real CTS
+> cases exercise that same list
