@@ -351,6 +351,44 @@ femeRTPackR8G8B8A8Snorm(FemeRTv4f32 Value) {
          ((uint32_t)I3 << 24);
 }
 
+// Unpacks a `R8_UNORM` value (one normalized `[0, 255]` byte) into a
+// `<4 x float>` in `[0.0, 1.0]` -- roadmap H19j, the single-channel
+// analogue of `femeRTUnpackR8G8B8A8Unorm` above. The unread G/B components
+// pad `0.0`, alpha pads `1.0`, matching `femeRTUnpackImageTexel`'s own
+// partial-component convention (`R32_FLOAT` et al.).
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR8Unorm(uint8_t Raw) {
+  FemeRTv4f32 V = {(float)Raw / 255.0f, 0.0f, 0.0f, 1.0f};
+  return V;
+}
+
+// The inverse of `femeRTUnpackR8Unorm`: clamps the first component to
+// `[0.0, 1.0]`, scales to `[0, 255]`, and rounds to the nearest byte.
+__attribute__((always_inline)) static uint8_t
+femeRTPackR8Unorm(FemeRTv4f32 Value) {
+  float C0 = __builtin_fminf(__builtin_fmaxf(Value[0], 0.0f), 1.0f);
+  return (uint8_t)__builtin_roundf(C0 * 255.0f);
+}
+
+// Unpacks a `R8_SNORM` value (one signed-normalized byte) into a
+// `<4 x float>` in `[-1.0, 1.0]` -- roadmap H19j, the single-channel
+// analogue of `femeRTUnpackR8G8B8A8Snorm` above.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR8Snorm(uint8_t Raw) {
+  int8_t B0 = (int8_t)Raw;
+  FemeRTv4f32 V = {__builtin_fmaxf((float)B0 / 127.0f, -1.0f), 0.0f, 0.0f,
+                   1.0f};
+  return V;
+}
+
+// The inverse of `femeRTUnpackR8Snorm`: clamps the first component to
+// `[-1.0, 1.0]`, scales to `[-127, 127]`, and rounds to the nearest byte.
+__attribute__((always_inline)) static uint8_t
+femeRTPackR8Snorm(FemeRTv4f32 Value) {
+  float C0 = __builtin_fminf(__builtin_fmaxf(Value[0], -1.0f), 1.0f);
+  return (uint8_t)(int8_t)__builtin_roundf(C0 * 127.0f);
+}
+
 // Unpacks a `R16G16B16A16_UNORM` value (four normalized `[0, 65535]`
 // 16-bit words, little-endian) into a `<4 x float>` in `[0.0, 1.0]` --
 // roadmap H19h, the 16-bit-per-component analogue of
@@ -561,6 +599,42 @@ femeRTUnpackR8G8B8A8Sint(uint32_t Raw) {
 __attribute__((always_inline)) static uint32_t
 femeRTPackR8G8B8A8Sint(FemeRTv4i32 Value) {
   return femeRTPackR8G8B8A8Uint(Value);
+}
+
+// Unpacks a `R8_UINT` value (one unsigned byte) into a `<4 x i32>` by
+// zero-extending it -- roadmap H19j, the single-channel analogue of
+// `femeRTUnpackR8G8B8A8Uint` above.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackR8Uint(uint8_t Raw) {
+  FemeRTv4i32 V = {(int32_t)Raw, 0, 0, 1};
+  return V;
+}
+
+// The inverse of `femeRTUnpackR8Uint`: truncates the first lane to its low
+// byte (clamping is the application's own responsibility, matching
+// `femeRTPackR8G8B8A8Uint`'s own "undefined results" rule for a UINT
+// format).
+__attribute__((always_inline)) static uint8_t
+femeRTPackR8Uint(FemeRTv4i32 Value) {
+  return (uint8_t)Value[0];
+}
+
+// Unpacks a `R8_SINT` value (one signed byte) into a `<4 x i32>` by
+// sign-extending it -- roadmap H19j, the single-channel analogue of
+// `femeRTUnpackR8G8B8A8Sint` above.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackR8Sint(uint8_t Raw) {
+  FemeRTv4i32 V = {(int32_t)(int8_t)Raw, 0, 0, 1};
+  return V;
+}
+
+// The inverse of `femeRTUnpackR8Sint`: truncating the first lane to its
+// low byte produces the same bit pattern regardless of signedness, so
+// this shares `femeRTPackR8Uint`'s implementation exactly, mirroring
+// `femeRTPackR8G8B8A8Sint`'s own analogous sharing.
+__attribute__((always_inline)) static uint8_t
+femeRTPackR8Sint(FemeRTv4i32 Value) {
+  return femeRTPackR8Uint(Value);
 }
 
 // `feme.cpu.resource.load.typed.v4i32` (V4, see `feme::cpu::ResourceCalls`):
@@ -1168,6 +1242,12 @@ femeRTImageFormatElementSize(uint32_t Format) {
     return 4;
   case 35: // S8_UINT
     return 1;
+  // (Roadmap H19j) `R8_{UNORM,SNORM,UINT,SINT}`: a single byte each.
+  case 85: // R8_UNORM
+  case 86: // R8_SNORM
+  case 87: // R8_UINT
+  case 88: // R8_SINT
+    return 1;
   default:
     return 0;
   }
@@ -1462,6 +1542,10 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     FemeRTv4f32 V = {(float)*Ptr / 255.0f, 0.0f, 0.0f, 1.0f};
     return V;
   }
+  case 85: // R8_UNORM (roadmap H19j)
+    return femeRTUnpackR8Unorm(*Ptr);
+  case 86: // R8_SNORM (roadmap H19j)
+    return femeRTUnpackR8Snorm(*Ptr);
   default:
     return Zero;
   }
@@ -1562,6 +1646,10 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackR10G10B10A2Uint(Raw);
   }
+  case 87: // R8_UINT (roadmap H19j)
+    return femeRTUnpackR8Uint(*Ptr);
+  case 88: // R8_SINT (roadmap H19j)
+    return femeRTUnpackR8Sint(*Ptr);
   default:
     return Zero;
   }
@@ -1612,6 +1700,12 @@ femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
     __builtin_memcpy(Ptr, Raw, sizeof(Raw));
     return;
   }
+  case 85: // R8_UNORM (roadmap H19j).
+    *Ptr = femeRTPackR8Unorm(Texel);
+    return;
+  case 86: // R8_SNORM (roadmap H19j).
+    *Ptr = femeRTPackR8Snorm(Texel);
+    return;
   default:
     return;
   }
@@ -1647,6 +1741,12 @@ femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
     __builtin_memcpy(Ptr, Raw, sizeof(Raw));
     return;
   }
+  case 87: // R8_UINT (roadmap H19j).
+    *Ptr = femeRTPackR8Uint(Texel);
+    return;
+  case 88: // R8_SINT (roadmap H19j).
+    *Ptr = femeRTPackR8Sint(Texel);
+    return;
   default:
     return;
   }

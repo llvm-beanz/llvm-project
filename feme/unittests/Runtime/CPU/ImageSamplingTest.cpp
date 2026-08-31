@@ -1455,6 +1455,43 @@ TEST_F(ImageSamplingTest, LoadFetchesR16G16B16A16Snorm) {
   EXPECT_FLOAT_EQ(Out[3], 0.0f);
 }
 
+// Roadmap H19j: `R8_{UNORM,SNORM,UINT,SINT}`, the single-channel
+// mandatory `shaderStorageImageExtendedFormats` formats -- the missing
+// G/B components read `0.0`/`0`, alpha reads `1.0`/`1`, matching the
+// existing partial-component convention.
+
+TEST_F(ImageSamplingTest, LoadFetchesR8Unorm) {
+  uint8_t Storage[1][1] = {{255}}; // 255/255 = 1.0.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesR8Snorm) {
+  int8_t Storage[1][1] = {{-127}}; // -127/127 = -1.0.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8_SNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], -1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
 TEST_F(ImageSamplingTest, LoadFetchesA8Unorm) {
   uint8_t Storage[1][1] = {{128}}; // ~0.502.
   FemeImageSubresourceLayout Layout;
@@ -1737,6 +1774,38 @@ TEST_F(ImageSamplingTest, LoadI32FetchesR16G16B16A16Uint) {
   EXPECT_EQ(Out[1], 2);
   EXPECT_EQ(Out[2], 3);
   EXPECT_EQ(Out[3], 65535); // Zero-extended, not sign-extended.
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesR8Uint) {
+  uint8_t Storage[1][1] = {{255}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8_UINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_EQ(Out[0], 255); // Zero-extended, not sign-extended.
+  EXPECT_EQ(Out[1], 0);
+  EXPECT_EQ(Out[2], 0);
+  EXPECT_EQ(Out[3], 1);
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesR8Sint) {
+  int8_t Storage[1][1] = {{-1}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8_SINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_EQ(Out[0], -1); // Sign-extended, not zero-extended.
+  EXPECT_EQ(Out[1], 0);
+  EXPECT_EQ(Out[2], 0);
+  EXPECT_EQ(Out[3], 1);
 }
 
 TEST_F(ImageSamplingTest, LoadI32FetchesR10G10B10A2Uint) {
@@ -2173,6 +2242,72 @@ TEST_F(ImageSamplingTest, StoreWritesTexelIntoR16G16B16A16SnormQuantized) {
   EXPECT_EQ(Storage[0][0][1], -32767);
   EXPECT_EQ(Storage[0][0][2], 0);
   EXPECT_EQ(Storage[0][0][3], -32767); // Clamped to -1.0 before quantizing.
+}
+
+// Roadmap H19j: `R8_{UNORM,SNORM,UINT,SINT}` widen
+// `femeRTPackImageTexel`/`femeRTPackImageTexelI32` further past the
+// mandatory storage-image format floor, the single-channel siblings of
+// H19h's `R16G16B16A16_{UNORM,SNORM}` widening above. Only the first
+// component is ever stored, matching `R32_FLOAT`/`R32_UINT`/`_SINT`'s own
+// single-component storage-image convention.
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8UnormQuantized) {
+  uint8_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8_UNORM, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {2.0f, 0.0f, 0.0f, 0.0f}; // Out-of-range, clamps.
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0], 255u); // Clamped to 1.0 before quantizing.
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8SnormQuantized) {
+  int8_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8_SNORM, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {-2.0f, 0.0f, 0.0f, 0.0f}; // Out-of-range, clamps.
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0], -127); // Clamped to -1.0 before quantizing.
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8Uint) {
+  uint8_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8_UINT, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  // 0x102 truncates to 0x02 -- confirms the store truncates to 8 bits.
+  FeMeTestV4I32 Texel = {0x102, 0, 0, 0};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0], 0x02u);
+}
+
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8Sint) {
+  int8_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8_SINT, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  FeMeTestV4I32 Texel = {-1, 0, 0, 0};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0], -1);
 }
 
 TEST_F(ImageSamplingTest, StoreOutOfBoundsCoordinateIsANoOp) {

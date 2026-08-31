@@ -518,6 +518,12 @@ uint32_t imageFormatElementSize(ResourceFormat Format) {
   case ResourceFormat::B5G5R5A1_UNORM:
   case ResourceFormat::A1R5G5B5_UNORM:
     return 2;
+  // (Roadmap H19j) `R8_{UNORM,SNORM,UINT,SINT}`: one byte each.
+  case ResourceFormat::R8_UNORM:
+  case ResourceFormat::R8_SNORM:
+  case ResourceFormat::R8_UINT:
+  case ResourceFormat::R8_SINT:
+    return 1;
   // (Roadmap E20) Block-compressed formats have no per-texel size, and
   // the heap YAML's `images` entries do not support one yet either way
   // (see this function's own comment).
