@@ -1,5 +1,5 @@
 ---
-model: claude-sonnet-5
+model: claude-opus-5
 resume: 50bf9c01-6e85-44df-8b7a-5c13ed0b05e1
 ---
 # Initial Guidelines
@@ -37,7 +37,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-A bunch of FeMe's tests are failing on macOS. These seem to be either undefined
-behavior or memory access issues. Your last run said that you couldn't reproduce
-issues with UBSan. Can you try enabling UBSan and ASan, and address any issues
-you encounter?
+A bunch of FeMe's tests are still failing on macOS. These seem to be either
+undefined behavior or memory access issues. Your last run said that you couldn't
+reproduce issues with UBSan. Can you try enabling UBSan, ASan, and LSan,
+building with clang, libc++, and using lld as the linker? This will more closely
+mimic the macOS environment (and speed up your builds). Please address any
+issues you encounter.
