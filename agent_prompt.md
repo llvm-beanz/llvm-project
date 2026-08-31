@@ -37,17 +37,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H19d or any prerequisite work required to complete
+Can you continue working on H19e or any prerequisite work required to complete
 the H-series milestones?
 
-> **Cube and cube-array storage-image read/write, plus the format/configuration
-> breadth H7j's own four bits actually need**
-> (`shaderStorageImageExtendedFormats`'s non-mandatory formats,
-> `shaderStorageImageMultisample`,
-> `shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`'s
-> runtime-format-agnostic access) -- a real re-run confirms every
-> `dEQP-VK.image.load_store.with_format.cube.*`/`cube_array.*` case fails the
-> same way H19b/H19c's own shapes do, and
-> `dEQP-VK.image.load_store_multisample.*` is still all honestly `NotSupported`
-> on `shaderStorageImageMultisample`. Likely the largest of H19's own follow-on
-> rows; may itself need splitting once scoped
+> **Arrayed (`1D_ARRAY`) storage-image read/write** -- the one dimension left
+> out of both H19b's own array scope (`2D_ARRAY` only) and H19c's own
+> non-arrayed scope (`1D`/`3D` only). A real re-run confirms
+> `dEQP-VK.image.load_store.with_format.1d_array.*` still fails at
+> `vkCreateComputePipelines` with `VK_ERROR_INITIALIZATION_FAILED`, the same
+> pre-H19b/H19c pipeline-creation failure mode. Needs
+> `classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`
+> (`SPIRVResourceLowering.cpp`) to accept `Dim1D`+`Arrayed`, a coordinate shape
+> carrying both an `X` and a layer index (distinct from H19b's `(x, y, layer)`
+> and H19c's bare scalar `X`), and `materializeImageDescriptor`
+> (`CommandBuffer.cpp`) to accept `Texture1DArray` in its dimension switch (the
+> same descriptor-materialization gap H19c's own closure just fixed for
+> `Texture1D`/`Texture3D`)
