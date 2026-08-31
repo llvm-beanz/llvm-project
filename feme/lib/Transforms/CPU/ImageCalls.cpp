@@ -48,6 +48,22 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.store.2darray.v4f32";
   case ImageCallKind::Store2DArrayI32:
     return "feme.cpu.image.store.2darray.v4i32";
+  case ImageCallKind::Load1D:
+    return "feme.cpu.image.load.1d.v4f32";
+  case ImageCallKind::Load1DI32:
+    return "feme.cpu.image.load.1d.v4i32";
+  case ImageCallKind::Store1D:
+    return "feme.cpu.image.store.1d.v4f32";
+  case ImageCallKind::Store1DI32:
+    return "feme.cpu.image.store.1d.v4i32";
+  case ImageCallKind::Load3D:
+    return "feme.cpu.image.load.3d.v4f32";
+  case ImageCallKind::Load3DI32:
+    return "feme.cpu.image.load.3d.v4i32";
+  case ImageCallKind::Store3D:
+    return "feme.cpu.image.store.3d.v4f32";
+  case ImageCallKind::Store3DI32:
+    return "feme.cpu.image.store.3d.v4i32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -173,6 +189,67 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
         {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, V4I32Ty, I1Ty},
         /*isVarArg=*/false);
     break;
+  case ImageCallKind::Load1D:
+    // (image_heap, image_heap_count, image_index, x, mip, sample, mask)
+    // -> <4 x float> (roadmap H19c). Narrower than Load2D: a single
+    // scalar `x` coordinate, no `y`.
+    FTy = FunctionType::get(
+        V4F32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Load1DI32:
+    // Same shape as Load1D, but returns <4 x i32>.
+    FTy = FunctionType::get(V4I32Ty,
+                            {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Store1D:
+    // (image_heap, image_heap_count, image_index, x, value, mask) -> void
+    // (roadmap H19c).
+    FTy = FunctionType::get(
+        Type::getVoidTy(Ctx),
+        {PtrTy, I32Ty, I32Ty, I32Ty, V4F32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Store1DI32:
+    // Same shape as Store1D, but the value operand is <4 x i32>.
+    FTy = FunctionType::get(
+        Type::getVoidTy(Ctx),
+        {PtrTy, I32Ty, I32Ty, I32Ty, V4I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Load3D:
+    // (image_heap, image_heap_count, image_index, x, y, z, mip, sample,
+    //  mask) -> <4 x float> (roadmap H19c). Wider than Load2D: a third
+    // `z` coordinate, never an array layer -- a 3D image is never
+    // arrayed.
+    FTy = FunctionType::get(
+        V4F32Ty,
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Load3DI32:
+    // Same shape as Load3D, but returns <4 x i32>.
+    FTy = FunctionType::get(
+        V4I32Ty,
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Store3D:
+    // (image_heap, image_heap_count, image_index, x, y, z, value, mask)
+    // -> void (roadmap H19c).
+    FTy = FunctionType::get(
+        Type::getVoidTy(Ctx),
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, V4F32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::Store3DI32:
+    // Same shape as Store3D, but the value operand is <4 x i32>.
+    FTy = FunctionType::get(
+        Type::getVoidTy(Ctx),
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, V4I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
   }
 
   StringRef Name = getImageCallName(Kind);
@@ -185,7 +262,11 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     bool IsStore = Kind == ImageCallKind::Store2D ||
                    Kind == ImageCallKind::Store2DI32 ||
                    Kind == ImageCallKind::Store2DArray ||
-                   Kind == ImageCallKind::Store2DArrayI32;
+                   Kind == ImageCallKind::Store2DArrayI32 ||
+                   Kind == ImageCallKind::Store1D ||
+                   Kind == ImageCallKind::Store1DI32 ||
+                   Kind == ImageCallKind::Store3D ||
+                   Kind == ImageCallKind::Store3DI32;
     F->setMemoryEffects(MemoryEffects::argMemOnly(
         IsStore ? ModRefInfo::Mod : ModRefInfo::Ref));
     F->setWillReturn();
@@ -373,6 +454,100 @@ CallInst *feme::cpu::createSampleCubeArray(
       Name);
 }
 
+CallInst *feme::cpu::createLoad1D(IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env, Value *ImageIndex,
+                                  Value *X, Value *Mip, Value *Sample,
+                                  Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Load1D);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Mip, Sample, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createLoad1DI32(IRBuilderBase &Builder,
+                                     const ImageCallEnv &Env,
+                                     Value *ImageIndex, Value *X, Value *Mip,
+                                     Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Load1DI32);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Mip, Mask}, Name);
+}
+
+CallInst *feme::cpu::createStore1D(IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env, Value *ImageIndex,
+                                   Value *X, Value *Texel, Value *Mask,
+                                   const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Store1D);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Texel, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createStore1DI32(IRBuilderBase &Builder,
+                                      const ImageCallEnv &Env,
+                                      Value *ImageIndex, Value *X,
+                                      Value *Texel, Value *Mask,
+                                      const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Store1DI32);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Texel, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createLoad3D(IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env, Value *ImageIndex,
+                                  Value *X, Value *Y, Value *Z, Value *Mip,
+                                  Value *Sample, Value *Mask,
+                                  const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Load3D);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X,
+                             Y, Z, Mip, Sample, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createLoad3DI32(IRBuilderBase &Builder,
+                                     const ImageCallEnv &Env,
+                                     Value *ImageIndex, Value *X, Value *Y,
+                                     Value *Z, Value *Mip, Value *Mask,
+                                     const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Load3DI32);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Y, Z, Mip, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createStore3D(IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env, Value *ImageIndex,
+                                   Value *X, Value *Y, Value *Z, Value *Texel,
+                                   Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Store3D);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X,
+                             Y, Z, Texel, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createStore3DI32(IRBuilderBase &Builder,
+                                      const ImageCallEnv &Env,
+                                      Value *ImageIndex, Value *X, Value *Y,
+                                      Value *Z, Value *Texel, Value *Mask,
+                                      const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Store3DI32);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X,
+                             Y, Z, Texel, Mask},
+                            Name);
+}
+
 std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
   const Function *Callee = CI.getCalledFunction();
   if (!Callee)
@@ -385,7 +560,11 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::Load2DArrayI32, ImageCallKind::SampleCube,
       ImageCallKind::SampleCubeArray, ImageCallKind::Store2D,
       ImageCallKind::Store2DI32, ImageCallKind::Store2DArray,
-      ImageCallKind::Store2DArrayI32};
+      ImageCallKind::Store2DArrayI32, ImageCallKind::Load1D,
+      ImageCallKind::Load1DI32, ImageCallKind::Store1D,
+      ImageCallKind::Store1DI32, ImageCallKind::Load3D,
+      ImageCallKind::Load3DI32, ImageCallKind::Store3D,
+      ImageCallKind::Store3DI32};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -558,6 +737,76 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.U = CI.getArgOperand(3);
     Result.V = CI.getArgOperand(4);
     Result.Layer = CI.getArgOperand(5);
+    Result.Texel = CI.getArgOperand(6);
+    Result.Mask = CI.getArgOperand(7);
+    break;
+  case ImageCallKind::Load1D:
+    if (CI.arg_size() != 7)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.Lod = CI.getArgOperand(4);
+    Result.Sample = CI.getArgOperand(5);
+    Result.Mask = CI.getArgOperand(6);
+    break;
+  case ImageCallKind::Load1DI32:
+    if (CI.arg_size() != 6)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.Lod = CI.getArgOperand(4);
+    Result.Mask = CI.getArgOperand(5);
+    break;
+  case ImageCallKind::Store1D:
+  case ImageCallKind::Store1DI32:
+    if (CI.arg_size() != 6)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.Texel = CI.getArgOperand(4);
+    Result.Mask = CI.getArgOperand(5);
+    break;
+  case ImageCallKind::Load3D:
+    if (CI.arg_size() != 9)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Z = CI.getArgOperand(5);
+    Result.Lod = CI.getArgOperand(6);
+    Result.Sample = CI.getArgOperand(7);
+    Result.Mask = CI.getArgOperand(8);
+    break;
+  case ImageCallKind::Load3DI32:
+    if (CI.arg_size() != 8)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Z = CI.getArgOperand(5);
+    Result.Lod = CI.getArgOperand(6);
+    Result.Mask = CI.getArgOperand(7);
+    break;
+  case ImageCallKind::Store3D:
+  case ImageCallKind::Store3DI32:
+    if (CI.arg_size() != 8)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Z = CI.getArgOperand(5);
     Result.Texel = CI.getArgOperand(6);
     Result.Mask = CI.getArgOperand(7);
     break;
