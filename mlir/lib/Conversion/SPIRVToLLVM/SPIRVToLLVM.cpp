@@ -2144,12 +2144,35 @@ public:
   matchAndRewrite(spirv::ModuleOp spvModuleOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto newModuleOp =
-        ModuleOp::create(rewriter, spvModuleOp.getLoc(), spvModuleOp.getName());
-    rewriter.inlineRegionBefore(spvModuleOp.getRegion(), newModuleOp.getBody());
+    // Build the new module's OperationState by hand -- rather than via
+    // `ModuleOp::create`/`ModuleOp::build`, which unconditionally does
+    // `state.addRegion()->emplaceBlock()` -- so its single region starts
+    // out with no block at all, and `inlineRegionBefore` below moves
+    // spvModuleOp's own block in directly. This sidesteps a genuine leak
+    // in DialectConversion's own rollback path: an op created fresh
+    // during a pattern that is later rolled back (because some other,
+    // unrelated part of the same conversion attempt fails) has its
+    // regions' blocks merely unlinked, never deleted
+    // (`CreateOperationRewrite::rollback()` in
+    // mlir/lib/Transforms/Utils/DialectConversion.cpp calls
+    // `Region::getBlocks().remove()`, not `.erase()`) -- correct only for
+    // blocks created via the rewriter's own tracked block-creation API,
+    // which never applies to a block baked directly into an op's initial
+    // `OperationState` the way `ModuleOp::build`'s default block is.
+    // Confirmed via an ASan LeakSanitizer run against
+    // spirv-to-llvm-constants-invalid.mlir, where an unrelated, explicitly
+    // illegal spirv.Constant elsewhere in the module rolls back this
+    // pattern's already-"successful" rewrite along with everything else.
+    OperationState state(spvModuleOp.getLoc(), ModuleOp::getOperationName());
+    state.addRegion();
+    if (std::optional<StringRef> name = spvModuleOp.getName())
+      state.attributes.push_back(rewriter.getNamedAttr(
+          SymbolTable::getSymbolAttrName(), rewriter.getStringAttr(*name)));
+    auto newModuleOp = cast<ModuleOp>(rewriter.create(state));
 
-    // Remove the terminator block that was automatically added by builder
-    rewriter.eraseBlock(&newModuleOp.getBodyRegion().back());
+    rewriter.inlineRegionBefore(spvModuleOp.getRegion(),
+                                newModuleOp.getBodyRegion(),
+                                newModuleOp.getBodyRegion().end());
     rewriter.eraseOp(spvModuleOp);
     return success();
   }
