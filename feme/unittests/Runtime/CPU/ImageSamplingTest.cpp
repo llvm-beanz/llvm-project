@@ -132,9 +132,10 @@ using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
 using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                         int32_t, int32_t, uint32_t, uint32_t, bool, void *);
 /// The `feme.cpu.image.load.2d.v4i32` (roadmap E26) counterpart of `LoadFn`,
-/// same operand shape but a `<4 x i32>`-shaped `out`.
+/// same operand shape but a `<4 x i32>`-shaped `out` -- also takes a
+/// `Sample` operand (roadmap H19g), like `LoadFn`'s own.
 using LoadI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
-                           int32_t, int32_t, uint32_t, bool, void *);
+                           int32_t, int32_t, uint32_t, uint32_t, bool, void *);
 /// The roadmap H7b-a `Texture2DArray` counterpart of `SampleFn`, adding a
 /// float `ArrayLayer` coordinate (rounded to nearest, clamped) before
 /// `Lod`.
@@ -190,6 +191,16 @@ using StoreArrayFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
 using StoreArrayI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
                                  uint32_t, int32_t, int32_t, int32_t,
                                  FeMeTestV4I32, bool);
+/// The roadmap H19g plain (non-arrayed) multisampled 2D counterpart of
+/// `StoreFn`, adding an integer `Sample` coordinate before the texel
+/// value -- the write-side counterpart of `LoadFn`'s own `Sample` operand
+/// (mirroring `StoreArrayFn`'s relationship to `LoadArrayFn` above, but
+/// for a per-sample index instead of an array layer).
+using StoreMSFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                           int32_t, int32_t, uint32_t, FeMeTestV4F32, bool);
+/// The roadmap H19g integer-format counterpart of `StoreMSFn`.
+using StoreMSI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                              int32_t, int32_t, uint32_t, FeMeTestV4I32, bool);
 /// The roadmap H19c plain-1D counterpart of `LoadFn`: a single `X` texel
 /// coordinate, no `Y`.
 using Load1DFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
@@ -1627,6 +1638,40 @@ TEST_F(ImageSamplingTest, InactiveLaneReadsZero) {
 // mandatory-sampled `_UINT`/`_SINT` formats `femeRTUnpackImageTexelI32`
 // decodes.
 
+// Roadmap H19g: `femeRTFetchTexel2DI32`'s own `Sample` operand -- the
+// integer counterpart of `LoadFetchesExplicitSampleOfMultisampledTexel`
+// above, confirming the widening actually reads each sample distinctly.
+TEST_F(ImageSamplingTest, LoadI32FetchesExplicitSampleOfMultisampledTexel) {
+  int32_t Storage[1][1][4] = {{{10, 20, 30, 40}}};
+  FemeImageSubresourceLayout Layout{};
+  Layout.RowPitch = 4 * sizeof(int32_t);
+  Layout.SlicePitch = Layout.RowPitch;
+  Layout.SampleStride = sizeof(int32_t);
+  FemeImageDescriptor Img{};
+  Img.Data = Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32_UINT);
+  Img.Width = 1;
+  Img.Height = 1;
+  Img.Depth = 1;
+  Img.MipLevels = 1;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 4;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = &Layout;
+  Img.MipLayoutCount = 1;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_EQ(Out[0], 10);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/2, true, Out);
+  EXPECT_EQ(Out[0], 30);
+}
+
 TEST_F(ImageSamplingTest, LoadI32FetchesIdentityFormat) {
   // `R32G32B32A32_UINT`/`_SINT` need no scalar conversion: the four 32-bit
   // lanes are reinterpreted directly.
@@ -1639,7 +1684,7 @@ TEST_F(ImageSamplingTest, LoadI32FetchesIdentityFormat) {
   LoadI32Fn Fn = resolve<LoadI32Fn>(
       addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
   int32_t Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_EQ(Out[0], 1);
   EXPECT_EQ(Out[1], -2);
   EXPECT_EQ(Out[2], 3);
@@ -1657,7 +1702,7 @@ TEST_F(ImageSamplingTest, LoadI32FetchesR8G8B8A8Sint) {
   LoadI32Fn Fn = resolve<LoadI32Fn>(
       addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
   int32_t Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_EQ(Out[0], -1);
   EXPECT_EQ(Out[1], 2);
   EXPECT_EQ(Out[2], -3);
@@ -1674,7 +1719,7 @@ TEST_F(ImageSamplingTest, LoadI32FetchesR16G16B16A16Uint) {
   LoadI32Fn Fn = resolve<LoadI32Fn>(
       addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
   int32_t Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_EQ(Out[0], 1);
   EXPECT_EQ(Out[1], 2);
   EXPECT_EQ(Out[2], 3);
@@ -1693,7 +1738,7 @@ TEST_F(ImageSamplingTest, LoadI32FetchesR10G10B10A2Uint) {
   LoadI32Fn Fn = resolve<LoadI32Fn>(
       addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
   int32_t Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_EQ(Out[0], 1);
   EXPECT_EQ(Out[1], 256);
   EXPECT_EQ(Out[2], 512);
@@ -1710,7 +1755,7 @@ TEST_F(ImageSamplingTest, LoadI32OutOfRangeCoordinateReadsZero) {
   LoadI32Fn Fn = resolve<LoadI32Fn>(
       addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
   int32_t Out[4] = {5, 5, 5, 5};
-  Fn(ImageHeap, 1, 0, /*X=*/1, /*Y=*/0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, /*X=*/1, /*Y=*/0, 0, /*Sample=*/0, true, Out);
   EXPECT_EQ(Out[0], 0);
   EXPECT_EQ(Out[1], 0);
   EXPECT_EQ(Out[2], 0);
@@ -1727,7 +1772,7 @@ TEST_F(ImageSamplingTest, LoadI32InactiveLaneReadsZero) {
   LoadI32Fn Fn = resolve<LoadI32Fn>(
       addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
   int32_t Out[4] = {9, 9, 9, 9};
-  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Mask=*/false, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, /*Mask=*/false, Out);
   EXPECT_EQ(Out[0], 0);
   EXPECT_EQ(Out[1], 0);
   EXPECT_EQ(Out[2], 0);
@@ -2162,6 +2207,115 @@ TEST_F(ImageSamplingTest, StoreArrayOutOfBoundsLayerIsANoOp) {
   FeMeTestV4F32 Texel = {9.0f, 9.0f, 9.0f, 9.0f};
   Store(ImageHeap, 1, 0, 0, 0, /*Layer=*/5, Texel, /*Mask=*/true);
   EXPECT_FLOAT_EQ(Storage[0][0][0][0], 1.0f);
+}
+
+// Roadmap H19g: `feme.cpu.image.store.2dms.v4f32`/`.v4i32`, the plain
+// (non-arrayed) multisampled counterpart of `feme.cpu.image.store.2d.*`
+// above -- addresses one sample of one texel, mirroring
+// `LoadFetchesExplicitSampleOfMultisampledTexel`'s own manually-built
+// multisample layout (`SampleStride`) on the write side.
+
+TEST_F(ImageSamplingTest, StoreMSWritesTexelIntoTheAddressedSampleOnly) {
+  // A 1x1, 4-sample R32G32B32A32_FLOAT storage image: each sample's own
+  // 4-channel texel is stored contiguously (`SampleStride ==
+  // 4 * sizeof(float)`, one channel-quad per sample).
+  float Storage[4][4] = {}; // [Sample][Channel].
+  FemeImageSubresourceLayout Layout{};
+  Layout.RowPitch = 4 * 4 * sizeof(float);
+  Layout.SlicePitch = Layout.RowPitch;
+  Layout.SampleStride = 4 * sizeof(float);
+  FemeImageDescriptor Img{};
+  Img.Data = Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 1;
+  Img.Height = 1;
+  Img.Depth = 1;
+  Img.MipLevels = 1;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 4;
+  Img.Flags = FEME_IMAGE_STORAGE;
+  Img.MipLayouts = &Layout;
+  Img.MipLayoutCount = 1;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreMSFn Store =
+      resolveRuntime<StoreMSFn>("feme.cpu.image.store.2dms.v4f32");
+  FeMeTestV4F32 Texel = {5.0f, 6.0f, 7.0f, 8.0f};
+  Store(ImageHeap, 1, 0, /*X=*/0, /*Y=*/0, /*Sample=*/2, Texel,
+       /*Mask=*/true);
+
+  EXPECT_FLOAT_EQ(Storage[2][0], 5.0f);
+  EXPECT_FLOAT_EQ(Storage[2][1], 6.0f);
+  EXPECT_FLOAT_EQ(Storage[2][2], 7.0f);
+  EXPECT_FLOAT_EQ(Storage[2][3], 8.0f);
+  // Sample 0's identical (X, Y) is untouched -- confirms the write
+  // actually addresses one sample, not every sample.
+  EXPECT_FLOAT_EQ(Storage[0][0], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, StoreMSWritesTexelIntoR32G32B32A32Uint) {
+  uint32_t Storage[2][4] = {}; // [Sample][Channel].
+  FemeImageSubresourceLayout Layout{};
+  Layout.RowPitch = 2 * 4 * sizeof(uint32_t);
+  Layout.SlicePitch = Layout.RowPitch;
+  Layout.SampleStride = 4 * sizeof(uint32_t);
+  FemeImageDescriptor Img{};
+  Img.Data = Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_UINT);
+  Img.Width = 1;
+  Img.Height = 1;
+  Img.Depth = 1;
+  Img.MipLevels = 1;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 2;
+  Img.Flags = FEME_IMAGE_STORAGE;
+  Img.MipLayouts = &Layout;
+  Img.MipLayoutCount = 1;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreMSI32Fn Store =
+      resolveRuntime<StoreMSI32Fn>("feme.cpu.image.store.2dms.v4i32");
+  FeMeTestV4I32 Texel = {10, 20, 30, 40};
+  Store(ImageHeap, 1, 0, 0, 0, /*Sample=*/1, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[1][0], 10u);
+  EXPECT_EQ(Storage[1][3], 40u);
+  EXPECT_EQ(Storage[0][0], 0u);
+}
+
+TEST_F(ImageSamplingTest, StoreMSOutOfBoundsSampleIsANoOp) {
+  float Storage[1][4] = {{1, 2, 3, 4}};
+  FemeImageSubresourceLayout Layout{};
+  Layout.RowPitch = 1 * 4 * sizeof(float);
+  Layout.SlicePitch = Layout.RowPitch;
+  Layout.SampleStride = 4 * sizeof(float);
+  FemeImageDescriptor Img{};
+  Img.Data = Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 1;
+  Img.Height = 1;
+  Img.Depth = 1;
+  Img.MipLevels = 1;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_STORAGE;
+  Img.MipLayouts = &Layout;
+  Img.MipLayoutCount = 1;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreMSFn Store =
+      resolveRuntime<StoreMSFn>("feme.cpu.image.store.2dms.v4f32");
+  FeMeTestV4F32 Texel = {9.0f, 9.0f, 9.0f, 9.0f};
+  Store(ImageHeap, 1, 0, 0, 0, /*Sample=*/5, Texel, /*Mask=*/true);
+  EXPECT_FLOAT_EQ(Storage[0][0], 1.0f);
 }
 
 // Roadmap H19c: `feme.cpu.image.load.1d.v4f32`/`.v4i32`/
