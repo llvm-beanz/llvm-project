@@ -2644,6 +2644,31 @@ TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8Sint) {
   EXPECT_EQ(Storage[0][0], -1);
 }
 
+/// Clang gives an `asm("...")`-labelled runtime entry point a leading
+/// `GlobalValue::dropLLVMManglingEscape` ('\01') byte in its IR name on any
+/// target with a non-empty global prefix (Darwin's '_'), but not on ELF.
+/// Resolving such a name has to work regardless: rename one runtime entry
+/// point to its escaped spelling and confirm it still resolves and runs.
+TEST_F(ImageSamplingTest, ResolvesRuntimeFunctionWithManglingEscape) {
+  Function *F = getRuntimeFunction(*M, "feme.cpu.image.store.2d.v4i32");
+  ASSERT_NE(F, nullptr);
+  if (!F->getName().starts_with("\1"))
+    F->setName("\1feme.cpu.image.store.2d.v4i32");
+  ASSERT_TRUE(F->getName().starts_with("\1"));
+
+  int8_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::R8_SINT, Layout,
+                                        FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreI32Fn Store = resolve<StoreI32Fn>(F);
+  FeMeTestV4I32 Texel = {-1, 0, 0, 0};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  EXPECT_EQ(Storage[0][0], -1);
+}
+
 TEST_F(ImageSamplingTest, StoreWritesTexelIntoR8G8UnormQuantized) {
   uint8_t Storage[1][1][2] = {};
   FemeImageSubresourceLayout Layout;
