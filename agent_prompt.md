@@ -37,7 +37,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-A bunch of FeMe's tests are failing due to undefined behavior. You should be
-able to reproduce by building with UBSan enabled. Can you please fix these?
-
-The failures I'm seeing are in the ubsan-errors.txt file.
+A bunch of FeMe's tests are failing on macOS. These seem to be either undefined
+behavior or memory access issues. Your last run said that you couldn't reproduce
+issues with UBSan. Can you try enabling UBSan and ASan, and address any issues
+you encounter?
