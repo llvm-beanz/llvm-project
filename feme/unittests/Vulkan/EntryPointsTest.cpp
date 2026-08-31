@@ -256,7 +256,11 @@ TEST_F(EntryPointsTest, FormatProperties2FillsChainedFormatProperties3) {
   // (roadmap F11) `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT` has no
   // 32-bit `VkFormatFeatureFlags` equivalent, so `Props3` carries it in
   // addition to every bit the widened 32-bit `Props2.formatProperties`
-  // already reports, rather than being exactly equal to it.
+  // already reports, rather than being exactly equal to it. `R8G8B8A8_
+  // UNORM` is not one of the formats the storage-image pack/unpack
+  // switch in `Format.cpp` recognizes (unlike its `_SNORM`/`_SINT`
+  // siblings), so its tiling features carry no `VK_FORMAT_FEATURE_2_
+  // STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` (roadmap H19i) either.
   EXPECT_EQ(Props3.linearTilingFeatures,
             (VkFormatFeatureFlags2)Props2.formatProperties.linearTilingFeatures |
                 VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
@@ -264,8 +268,15 @@ TEST_F(EntryPointsTest, FormatProperties2FillsChainedFormatProperties3) {
       Props3.optimalTilingFeatures,
       (VkFormatFeatureFlags2)Props2.formatProperties.optimalTilingFeatures |
           VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
+  // (Roadmap H19i) `R8G8B8A8_UNORM` *is* one of the identity 4-component
+  // formats `isTexelBufferFormatSupported` recognizes, so unlike the two
+  // tiling-feature fields above, `bufferFeatures` does carry both
+  // `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` in
+  // addition to the widened 32-bit result.
   EXPECT_EQ(Props3.bufferFeatures,
-            (VkFormatFeatureFlags2)Props2.formatProperties.bufferFeatures);
+            (VkFormatFeatureFlags2)Props2.formatProperties.bufferFeatures |
+                VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+                VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
   EXPECT_TRUE(Props3.optimalTilingFeatures &
               VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT);
 }
@@ -297,6 +308,96 @@ TEST_F(EntryPointsTest,
               VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
   EXPECT_FALSE(Props3.optimalTilingFeatures &
               VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
+}
+
+TEST_F(EntryPointsTest,
+       FormatProperties3ReportsStorageWithoutFormatForStorageCapableFormat) {
+  // (Roadmap H19i) `shaderStorageImageReadWithoutFormat`/
+  // `WriteWithoutFormat`: any format already reporting
+  // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` also gets both
+  // `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` on its
+  // tiling features -- `SPIRVResourceLowering.cpp`'s storage-image handle
+  // classification never inspects a handle's compile-time SPIR-V `Format`
+  // operand, so a `Format == Unknown` handle for any already-storage-
+  // capable format lowers identically to a declared-format one. `R32_UINT`
+  // is part of the mandatory storage-image format floor (roadmap H19a)
+  // but is not one of the identity 4-component formats
+  // `isTexelBufferFormatSupported` recognizes, so `bufferFeatures` must
+  // *not* pick up either bit.
+  VkFormatProperties3 Props3{};
+  Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
+  VkFormatProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+  Props2.pNext = &Props3;
+  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R32_UINT, &Props2);
+  EXPECT_TRUE(Props3.linearTilingFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_TRUE(Props3.linearTilingFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+  EXPECT_TRUE(Props3.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_TRUE(Props3.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+  EXPECT_FALSE(Props3.bufferFeatures &
+               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_FALSE(Props3.bufferFeatures &
+               VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+}
+
+TEST_F(EntryPointsTest,
+       FormatProperties3ReportsStorageWithoutFormatForTexelBufferFormat) {
+  // (Roadmap H19i) `R8G8B8A8_UINT` is one of the identity 4-component
+  // formats `isTexelBufferFormatSupported` recognizes (`Format.cpp`), so
+  // it must gain both `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_
+  // FORMAT_BIT` on `bufferFeatures` -- but it is *not* one of the formats
+  // the storage-image pack/unpack switch in `Format.cpp` recognizes
+  // (unlike its `_SNORM`/`_SINT` siblings, added by roadmap H19n), so its
+  // tiling features must not pick up either bit.
+  VkFormatProperties3 Props3{};
+  Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
+  VkFormatProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+  Props2.pNext = &Props3;
+  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R8G8B8A8_UINT,
+                                       &Props2);
+  EXPECT_TRUE(Props3.bufferFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_TRUE(Props3.bufferFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+  EXPECT_FALSE(Props3.linearTilingFeatures &
+               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_FALSE(Props3.linearTilingFeatures &
+               VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+  EXPECT_FALSE(Props3.optimalTilingFeatures &
+               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_FALSE(Props3.optimalTilingFeatures &
+               VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+}
+
+TEST_F(EntryPointsTest,
+       FormatProperties3OmitsStorageWithoutFormatForNonStorageFormat) {
+  // `B8G8R8A8_UNORM` is sampled- and attachment-capable only -- neither a
+  // storage-image-capable format nor an `isTexelBufferFormatSupported`
+  // one -- so none of the three feature fields should pick up either
+  // `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT`.
+  VkFormatProperties3 Props3{};
+  Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
+  VkFormatProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+  Props2.pNext = &Props3;
+  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_B8G8R8A8_UNORM,
+                                       &Props2);
+  EXPECT_TRUE(Props3.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT);
+  EXPECT_FALSE(Props3.linearTilingFeatures &
+               (VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+                VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT));
+  EXPECT_FALSE(Props3.optimalTilingFeatures &
+               (VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+                VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT));
+  EXPECT_FALSE(Props3.bufferFeatures &
+               (VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+                VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT));
 }
 
 /// Roadmap E19 (`VK_EXT_tooling_info`): this ICD wraps no debugging tool,

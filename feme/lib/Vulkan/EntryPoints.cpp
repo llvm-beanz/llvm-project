@@ -2001,6 +2001,35 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
   VkFormatFeatureFlags2 HostImageTransfer =
       Format ? VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT
              : VkFormatFeatureFlags2(0);
+  // (Roadmap H19i) `shaderStorageImageReadWithoutFormat`/
+  // `WriteWithoutFormat`: `SPIRVResourceLowering.cpp`'s storage-image
+  // handle classification (`classifyStorageImage2DHandle`/
+  // `hasOnlySupportedStorageImageUses`) never inspects a handle's
+  // compile-time SPIR-V `Format` operand at all, so a storage image
+  // declared with `Format == Unknown` (no `layout(format)` qualifier in
+  // the shader) already lowers identically to a declared-format one --
+  // the real, and only, gap is this advertisement. Like
+  // `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT` above, neither
+  // `_STORAGE_READ_WITHOUT_FORMAT_BIT` nor `_STORAGE_WRITE_WITHOUT_FORMAT_
+  // BIT` has a 32-bit `VkFormatFeatureFlags` equivalent, so they can't be
+  // set by the widen-from-32-bit path either; computed here directly,
+  // tracking whichever of `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` (images)
+  // or `VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT` (texel buffers) that
+  // same format already reports, since neither `checkSupport` (CTS's own
+  // `vktImageLoadStoreTests.cpp`) nor this bit's own Vulkan spec
+  // definition requires the format to be usable as a storage resource
+  // *and* declare no format -- it must simply already be usable as one.
+  VkFormatFeatureFlags2 StorageWithoutFormatImage =
+      (Format && (formatFeatureFlags(*Format) &
+                  VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+          ? (VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+             VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)
+          : VkFormatFeatureFlags2(0);
+  VkFormatFeatureFlags2 StorageWithoutFormatBuffer =
+      (Format && isTexelBufferFormatSupported(*Format))
+          ? (VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+             VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)
+          : VkFormatFeatureFlags2(0);
   for (auto *Base = static_cast<VkBaseOutStructure *>(pFormatProperties->pNext);
        Base; Base = Base->pNext) {
     if (Base->sType != VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3)
@@ -2008,11 +2037,12 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
     auto *Props3 = reinterpret_cast<VkFormatProperties3 *>(Base);
     Props3->linearTilingFeatures =
         pFormatProperties->formatProperties.linearTilingFeatures |
-        HostImageTransfer;
+        HostImageTransfer | StorageWithoutFormatImage;
     Props3->optimalTilingFeatures =
         pFormatProperties->formatProperties.optimalTilingFeatures |
-        HostImageTransfer;
-    Props3->bufferFeatures = pFormatProperties->formatProperties.bufferFeatures;
+        HostImageTransfer | StorageWithoutFormatImage;
+    Props3->bufferFeatures = pFormatProperties->formatProperties.bufferFeatures |
+                             StorageWithoutFormatBuffer;
   }
 }
 
