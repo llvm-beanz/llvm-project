@@ -37,19 +37,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H19e or any prerequisite work required to complete
+Can you continue working on H19f or any prerequisite work required to complete
 the H-series milestones?
 
-> **Arrayed (`1D_ARRAY`) storage-image read/write** -- the one dimension left
-> out of both H19b's own array scope (`2D_ARRAY` only) and H19c's own
-> non-arrayed scope (`1D`/`3D` only). A real re-run confirms
-> `dEQP-VK.image.load_store.with_format.1d_array.*` still fails at
-> `vkCreateComputePipelines` with `VK_ERROR_INITIALIZATION_FAILED`, the same
-> pre-H19b/H19c pipeline-creation failure mode. Needs
-> `classifyStorageImage2DHandle`/`hasOnlySupportedStorageImageUses`
-> (`SPIRVResourceLowering.cpp`) to accept `Dim1D`+`Arrayed`, a coordinate shape
-> carrying both an `X` and a layer index (distinct from H19b's `(x, y, layer)`
-> and H19c's bare scalar `X`), and `materializeImageDescriptor`
-> (`CommandBuffer.cpp`) to accept `Texture1DArray` in its dimension switch (the
-> same descriptor-materialization gap H19c's own closure just fixed for
-> `Texture1D`/`Texture3D`)
+> **The format/configuration breadth
+> `shaderStorageImageExtendedFormats`/`shaderStorageImageReadWithoutFormat`/`shaderStorageImageWriteWithoutFormat`
+> actually need**, split out of H19d's own original bundled scope once H19d
+> itself narrowed to cube/cube-array shape support only.
+> `shaderStorageImageExtendedFormats` needs every `VkFormat` beyond the current
+> 6-format mandatory floor (`Format.cpp`'s `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`
+> advertisement) to actually round-trip through `FeMeRuntimeCPU.c`'s fetch/store
+> helpers, not just the floor H19a hard-coded.
+> `shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat` need a shader to
+> declare a storage image with no `layout(format)` qualifier at all (SPIR-V's
+> `Format == Unknown`) and still read/write correctly against whatever format
+> the bound view actually has at runtime, rather than assuming the compiled
+> shader's own declared format always matches -- a real re-run of
+> `dEQP-VK.image.format_reinterpret.*`/an unqualified-format subset of
+> `load_store.*` needed to scope the actual gap size once attempted
