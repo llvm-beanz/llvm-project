@@ -363,14 +363,23 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   // layers (see `RenderPass.cpp`'s `resolveAttachmentView`, which
   // already relies on exactly this for render-target attachments) -- so
   // the same per-layer addressing below covers all four uniformly.
-  // `Texture1D`/`Texture1DArray`/`Texture3D`/multisampled dimensions stay
-  // out of scope here: nothing in this roadmap row asks for them, and a
-  // 3D image's depth slices use a different pitch convention
-  // (`Image::texelPointer`'s own `ArrayPitch`/`DepthPitch` split) this
-  // fix does not attempt to generalize to.
+  // (Roadmap H19c) `Texture1D` needs no addressing changes below: a 1D
+  // image always has `Height == Depth == 1` and a single array layer
+  // (`Texture1D`, not `Texture1DArray`), so it falls straight through
+  // the same per-layer logic `Texture2D` already uses. `Texture3D` also
+  // falls through the same layer logic unchanged (`Image::arrayLayers()`
+  // is always 1 for a 3D image per the Vulkan spec), but its depth
+  // slices use `SlicePitch` the same way `Texture2DArray`'s layers do
+  // (see `Image.cpp`'s own `computeSubresourceLayouts`), so only
+  // `Dst.Depth` below needs a 3D-specific value; the CPU runtime's own
+  // `femeRTFetchTexel3D`/`femeRTStoreTexel3D` (`FeMeRuntimeCPU.c`) do the
+  // rest. `Texture1DArray`/multisampled dimensions stay out of scope
+  // here (tracked as roadmap H19e for `Texture1DArray`).
   switch (View->dimension()) {
+  case feme::cpu::ImageDimension::Texture1D:
   case feme::cpu::ImageDimension::Texture2D:
   case feme::cpu::ImageDimension::Texture2DArray:
+  case feme::cpu::ImageDimension::Texture3D:
   case feme::cpu::ImageDimension::TextureCube:
   case feme::cpu::ImageDimension::TextureCubeArray:
     break;
@@ -399,7 +408,14 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   Dst.Dimension = static_cast<uint32_t>(View->dimension());
   Dst.Width = std::max(1u, Img->width() >> Range.baseMipLevel);
   Dst.Height = std::max(1u, Img->height() >> Range.baseMipLevel);
-  Dst.Depth = 1;
+  // (Roadmap H19c) Only a `Texture3D` has more than one depth slice;
+  // every other dimension here keeps the degenerate `Depth == 1` a 2D
+  // image already had, matching `Image.cpp`'s own per-mip depth
+  // computation (`std::max(1u, Depth >> Level)`) that the CPU runtime's
+  // `femeRTFetchTexel3D`/`femeRTStoreTexel3D` bounds-check against.
+  Dst.Depth = View->dimension() == feme::cpu::ImageDimension::Texture3D
+                  ? std::max(1u, Img->depth() >> Range.baseMipLevel)
+                  : 1;
   Dst.MipLevels = LevelCount;
   Dst.ArrayLayers = LayerCount;
   Dst.PlaneCount = 1;
