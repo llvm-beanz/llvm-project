@@ -47690,3 +47690,98 @@ its tests, runtime + its tests (continuing from the prior, summarized
 session's numbering), then the `CommandBuffer.cpp` descriptor fix, then
 the Roadmap.md/VulkanCTSReport.md update, with this file committed
 separately last.
+
+# Session: H19d
+
+Request was H19d, "Cube and cube-array storage-image read/write, plus
+the format/configuration breadth H7j's own four bits actually need" --
+already flagged in its own row text as "likely the largest of H19's own
+follow-on rows; may itself need splitting once scoped."
+
+## Scoping decision
+
+Rather than attempt all four bundled things (cube/cube-array shape,
+extended-format breadth, multisample, read/write-without-format) in one
+sweep, I scoped the cube/cube-array shape piece first since it's most
+directly analogous to prior H19b/H19c work, then split the remaining
+three into their own rows once the cube/cube-array piece was done and
+its own real size became clear. This matches the standing instruction
+("if you do not complete a milestone, add entries to break down the
+remaining work") and the row's own explicit anticipation that it would
+need splitting.
+
+## The pleasant surprise: cube maps directly onto Array2D
+
+Before touching any code, I pulled up the actual failing CTS case's own
+dumped shader source
+(`dEQP-VK.image.load_store.with_format.cube.r32_uint`):
+
+```glsl
+layout (binding = 0, r32ui) readonly uniform uimageCube u_image0;
+...
+imageStore(u_image1, pos, imageLoad(u_image0, ivec3(63-pos.x, pos.y, pos.z)));
+```
+
+`pos.z` here is a bare face index (from `gl_GlobalInvocationID.z`), not
+a component of a direction vector. That's the key fact: a storage cube
+image's own `imageLoad`/`imageStore` addresses texels by `(x, y, face)`,
+exactly like `Array2D`'s `(x, y, layer)` -- unlike a *sampled* cube
+(`samplerCube`), which addresses by a 3-component direction vector a real
+cube-face-selection algorithm has to resolve (`createSampleCube`'s own
+scope, a materially harder problem this row doesn't need to solve at all).
+`cube_array`'s shader confirmed the same for `imageCubeArray`, with an
+already-flattened `layer * 6 + face` in the same slot.
+
+This meant `classifyStorageImage2DHandle` could just map `Dim == DimCube`
+straight onto the existing `ImageShape::Array2D` -- no new
+`ImageCallKind`, no new runtime helper, no `CommandBuffer.cpp` change.
+`materializeImageDescriptor` already accepted `TextureCube`/
+`TextureCubeArray` in its dimension switch (added by the much older H7b,
+for sampled cube images) and treats them identically to `Texture2DArray`
+throughout, so a real bound cube storage-image view was *already*
+producing a correct descriptor -- H19c's own `Texture1D`/`Texture3D`
+descriptor-materialization gap simply didn't exist here.
+
+One real mistake caught by the unit tests, worth recording: my first
+attempt reused the existing `Arrayed ? Array2D : Plain2D` ternary as-is
+for `Dim == DimCube` too, reasoning "arrayed cube is like arrayed 2D,
+non-arrayed cube is like non-arrayed 2D." That's wrong -- a *non-arrayed*
+cube still has 6 faces and therefore always needs the 3-component
+coordinate, unlike a non-arrayed 2D image which only ever needs 2. Three
+of five new unit tests failed immediately with this bug (the two
+non-arrayed-cube store tests and the combined load-store test), which is
+exactly the kind of thing "break changes into small, individually tested
+steps" is meant to catch before it reaches a much slower real CTS run.
+Fixed by giving `DimCube` its own unconditional-`Array2D` branch, separate
+from `Dim::2D`'s `Arrayed`-gated one.
+
+## Results
+
+`ninja check-feme`: 2110/2169, 0 Failed, 59 pre-existing Unsupported.
+Real CTS re-run of `with_format.cube.*`/`cube_array.*` (312 cases): 48
+Pass (up from 0), 0 Fail, 264 honestly `NotSupported` (formats outside
+the 6-format floor) -- a clean close matching H19a/H19b/H19c's own
+pattern. A probe of `load_store_multisample.2d.r32_uint.samples_2`
+confirmed multisample storage images remain correctly untouched
+(`NotSupported` on `shaderStorageImageMultisample`), now tracked as its
+own H19g row.
+
+## Roadmap bookkeeping
+
+Struck through H19d, narrowed its own final scope note to cube/cube-array
+shape support only. Added H19f (format/configuration breadth:
+`shaderStorageImageExtendedFormats`'s non-mandatory formats,
+`shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`) and H19g
+(`shaderStorageImageMultisample`) as new sibling rows under H19 (one
+lowercase letter deep, per the standing nesting rule) rather than nesting
+further under H19d. Repointed the three `Vulkan14FeatureInventory.md` rows
+that named H19d as their tracking milestone to H19f/H19g as appropriate,
+since H19d itself no longer covers that scope. Confirmed (as with every
+prior H19 row) no `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+*feature bit* newly flips from this row's own shape-support-only scope --
+only the *tracking* column needed to move.
+
+Committed in 3 total commits this session: the `SPIRVResourceLowering.cpp`
+classification widening + its 5 new/replaced unit tests, the
+Roadmap.md/VulkanCTSReport.md/Vulkan14FeatureInventory.md documentation
+update, with this file committed separately last.
