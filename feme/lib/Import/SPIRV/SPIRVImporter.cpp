@@ -18,6 +18,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/Error.h"
 
 using namespace feme;
@@ -139,10 +140,26 @@ llvm::Expected<Module> SPIRVImporter::import(llvm::MemoryBufferRef Buffer,
   mlir::MLIRContext &MLIRCtx = Ctx.getMLIRContext();
   MLIRCtx.loadDialect<mlir::spirv::SPIRVDialect>();
 
-  auto RawBinary = llvm::ArrayRef(
-      reinterpret_cast<const uint32_t *>(Buffer.getBufferStart()),
-      Buffer.getBufferSize() / sizeof(uint32_t));
-  llvm::SmallVector<uint32_t> Filtered = stripNonSemanticExtInst(RawBinary);
+  // `Buffer.getBufferStart()` has no alignment guarantee at all (it may
+  // point into a `std::string`/string-literal-backed `StringRef`, neither
+  // of which promises 4-byte alignment) -- reinterpret_cast'ing it
+  // directly to `const uint32_t *` and reading through that pointer is
+  // undefined behavior on a target where an unaligned load actually
+  // traps (confirmed by a real UBSan `RejectsMalformedBinary` failure:
+  // "load of misaligned address ... for type 'const unsigned int *'").
+  // `llvm::support::endian::read32<native>` performs the same load via an
+  // unaligned-safe memcpy under the hood, so copying every word through
+  // it into a `SmallVector<uint32_t>` (whose own allocation is
+  // word-aligned) is both portable and gives `stripNonSemanticExtInst`
+  // the same word-array view it already expects.
+  size_t WordCount = Buffer.getBufferSize() / sizeof(uint32_t);
+  llvm::SmallVector<uint32_t> RawWords;
+  RawWords.reserve(WordCount);
+  const char *Data = Buffer.getBufferStart();
+  for (size_t I = 0; I != WordCount; ++I)
+    RawWords.push_back(llvm::support::endian::read32<llvm::endianness::native>(
+        Data + I * sizeof(uint32_t)));
+  llvm::SmallVector<uint32_t> Filtered = stripNonSemanticExtInst(RawWords);
   llvm::ArrayRef<uint32_t> Binary = Filtered;
 
   mlir::spirv::DeserializationOptions DeserOpts;
