@@ -722,6 +722,31 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // conformance cases -- `samplerAnisotropy` is therefore advertised
   // `VK_TRUE`.
   Info.Features.samplerAnisotropy = VK_TRUE;
+  // `shaderStorageImageMultisample` (roadmap H19g/H19k/H19l/H19m): closes
+  // out the multisampled-storage-image chain begun at H19g. H19g first
+  // widened `StageStorage`'s coordinate/call vocabulary for a plain
+  // (non-arrayed) multisampled `Dim::2D` storage image; H19k then found and
+  // fixed a `feme-cpu-linearize` control-flow gap (a uniform-trip-count
+  // loop's own redundant "Flow" re-derivation block) blocking every real
+  // verification shader from even reaching that widening; H19l found and
+  // fixed a second bug immediately downstream (`matchImageCall`'s own
+  // `AllKinds` table never listed `Store2DMS`/`Store2DMSI32`, silently
+  // making an otherwise-correct widening path unreachable) and confirmed
+  // the plain (non-arrayed) case fully closed (`dEQP-VK.image.
+  // load_store_multisample.2d.*`: 27/84 Pass, 0/84 Fail, the rest honestly
+  // `NotSupported` outside today's mandatory format floor); H19m then
+  // widened the same machinery to also accept an *arrayed* multisampled
+  // image (a new `ImageShape::Array2DMS`, `Store2DArrayMS`/
+  // `Store2DArrayMSI32` call kinds, and a loosened
+  // `isPlainMultisampled2DImage` -> `isMultisampled2DImage` MLIR gate). A
+  // real re-run of the *full* `dEQP-VK.image.load_store_multisample.*`
+  // group (252 cases, both `2d.*` and `2d_array.*`) now confirms **81/252
+  // Pass, 0/252 Fail**, 171 honestly `NotSupported` (the same
+  // outside-the-mandatory-format-floor gap H19g's own closure already
+  // documented, now also covering `2d_array.*`) -- a fully clean group
+  // with no real, in-scope failure left, so this feature honestly flips to
+  // `VK_TRUE`.
+  Info.Features.shaderStorageImageMultisample = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;

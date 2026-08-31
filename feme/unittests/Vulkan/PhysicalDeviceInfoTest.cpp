@@ -184,6 +184,7 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.vertexPipelineStoresAndAtomics, VK_TRUE);
   EXPECT_EQ(Info.Features.fragmentStoresAndAtomics, VK_TRUE);
   EXPECT_EQ(Info.Features.samplerAnisotropy, VK_TRUE);
+  EXPECT_EQ(Info.Features.shaderStorageImageMultisample, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -209,6 +210,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.vertexPipelineStoresAndAtomics = VK_FALSE;
   Cleared.fragmentStoresAndAtomics = VK_FALSE;
   Cleared.samplerAnisotropy = VK_FALSE;
+  Cleared.shaderStorageImageMultisample = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }
