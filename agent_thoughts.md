@@ -49004,3 +49004,75 @@ already-implemented `_UINT` case). I split this out as roadmap row H19o
 rather than continuing to grow H19n's own already-very-long row further,
 in keeping with the standing instruction to avoid excessive nesting/growth
 within a single milestone entry.
+
+# Session: H19o (final `A2B10G10R10_{SNORM,SINT}_PACK32` gap, completing `shaderStorageImageExtendedFormats`)
+
+Picked up H19o, the last split-out row before `shaderStorageImageExtendedFormats`
+could honestly flip to `VK_TRUE`. Added the two missing `ResourceFormat` enum
+entries (appended at the tail per the append-only convention), `Format.cpp`
+wiring, and new pack/unpack helpers in `FeMeRuntimeCPU.c`.
+
+**The roadmap task's own premise was wrong, again.** This is becoming a
+recurring pattern worth calling out explicitly: the H19o row's own text
+asserted that `_SINT` needs "no new pack/unpack helper at all... bit-for-bit
+identical to `_UINT`... matching every prior `_UINT`/`_SINT` pair in this
+project." I almost implemented it exactly that way, then cross-checked
+against the codebase's own existing `R8G8B8A8_{UINT,SINT}` precedent before
+committing to it, and found the premise is false for sub-32-bit packed
+fields: only the *pack* side can be safely shared, because truncating a
+two's-complement value to N bits produces an identical bit pattern
+regardless of the original value's signedness. The *unpack* side (reading a
+packed field back and sign/zero-extending it to a wider container) requires
+sign extension for `_SINT`, or any field with its top bit set silently comes
+back as a positive value instead of negative. The claim "matching every
+prior `_UINT`/`_SINT` pair" is itself only true for full-32-bit-width
+identity formats (e.g. `R32G32_{UINT,SINT}`, which need no extension at all
+since the full 32 bits already are the value) -- it does not hold for
+sub-word packed fields like R10G10B10A2's 10-bit/2-bit lanes or R8G8B8A8's
+8-bit lanes, where the existing `femeRTUnpackR8G8B8A8Uint`/`Sint` are
+genuinely different functions in this same file. I built the new
+`femeRTUnpackR10G10B10A2Sint` as a real sign-extending helper, and wrote two
+new unit tests (`LoadI32FetchesR10G10B10A2Sint`,
+`StoreWritesTexelIntoR10G10B10A2Sint`) using field values with their top
+bits set specifically to catch this class of bug if it ever regresses. This
+is the same category of discovery as a prior session's finding that roadmap
+task text can undersell or misstate the real ground truth -- worth trusting
+the codebase's own existing precedent over a roadmap row's prose whenever
+the two disagree.
+
+**A second surprise showed up at CTS time.** I expected
+`dEQP-VK.image.load_store.with_format.*.a2b10g10r10_s*` to gain new passes
+now that both formats are implemented, matching every prior H19-series
+slice's own pattern. Instead it returned 0/0 -- no matching cases exist at
+all. Digging into VK-GL-CTS's own `vktImageLoadStoreTests.cpp`, the
+`with_format`/`without_format` test groups are gated on `hasSpirvFormat()`,
+which checks a `spirvFormats` table in `vkImageUtil.cpp` mapping `VkFormat`
+to a SPIR-V image-format-literal string (e.g. `"Rgb10A2"` for
+`A2B10G10R10_UNORM_PACK32`, `"Rgb10a2ui"` for `_UINT`). No such literal
+exists for `_SNORM`/`_SINT` at all -- SPIR-V itself has no
+`Rgb10a2Snorm`/`Rgb10a2Sint` format token, so no shader can ever declare
+`layout(format)` for these two formats, and CTS only tests them under
+`without_any_format` (no format qualifier at all in the shader), which is
+gated on an entirely different feature
+(`shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`, roadmap H19i,
+still unimplemented). Ran those 40 `without_any_format` cases anyway to
+confirm they're honestly `NotSupported` (not `Fail`) given H19i's own gap --
+they were, 40/40. This means this row's own implementation is real and
+spec-correct (verified by unit tests with adversarial sign-extension-probing
+field values), but has **zero live CTS exercise** in this mustpass caselist
+until H19i lands. Recorded this explicitly in `VulkanCTSReport.md` and
+`Vulkan14FeatureInventory.md` rather than letting the report imply CTS
+"confirmed" something it structurally cannot test yet.
+
+Flipped `shaderStorageImageExtendedFormats` to `VK_TRUE` in
+`PhysicalDeviceInfo.cpp`, updating `PhysicalDeviceInfoTest.cpp`'s
+comprehensive "only these bits are set" regression test (both the
+assertion list and the "clear known bits, expect the rest zero" list) to
+match, per the same recurring test-shape as every prior feature-flag flip
+this session's predecessors have done. Struck through H19o on the roadmap
+and closed out the H19a-H19o chain in `Vulkan14FeatureInventory.md`.
+
+Broke the change into four commits: (1) the format/runtime implementation
+and its unit tests, (2) the feature-flag flip and its regression-test fix,
+(3) docs (roadmap strike-through, feature inventory, CTS report), and (4)
+this file.
