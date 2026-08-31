@@ -295,6 +295,14 @@ Module *MCJIT::findModuleForSymbol(const std::string &Name,
   if (DemangledName[0] == getDataLayout().getGlobalPrefix())
     DemangledName = DemangledName.substr(1);
 
+  // A global whose IR name begins with the '\01' "do not mangle" marker (what
+  // Clang emits for an `asm("...")` label on a target with a non-empty global
+  // prefix) reaches the object file's symbol table -- and therefore this
+  // lookup -- with the marker already stripped by Mangler. Search for that
+  // spelling too, or such a global's defining module is never found, and so
+  // never compiled.
+  std::string NoManglePrefixedName = ("\01" + DemangledName).str();
+
   std::lock_guard<sys::Mutex> locked(lock);
 
   // If it hasn't already been generated, see if it's in one of our modules.
@@ -302,14 +310,17 @@ Module *MCJIT::findModuleForSymbol(const std::string &Name,
                               E = OwnedModules.end_added();
        I != E; ++I) {
     Module *M = *I;
-    Function *F = M->getFunction(DemangledName);
-    if (F && !F->isDeclaration())
-      return M;
-    if (!CheckFunctionsOnly) {
-      GlobalVariable *G = M->getGlobalVariable(DemangledName);
-      if (G && !G->isDeclaration())
+    for (StringRef Candidate :
+         {DemangledName, StringRef(NoManglePrefixedName)}) {
+      Function *F = M->getFunction(Candidate);
+      if (F && !F->isDeclaration())
         return M;
-      // FIXME: Do we need to worry about global aliases?
+      if (!CheckFunctionsOnly) {
+        GlobalVariable *G = M->getGlobalVariable(Candidate);
+        if (G && !G->isDeclaration())
+          return M;
+        // FIXME: Do we need to worry about global aliases?
+      }
     }
   }
   // We didn't find the symbol in any of our modules.

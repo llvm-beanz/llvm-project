@@ -77,6 +77,26 @@ TEST_F(MCJITTest, add_function) {
   EXPECT_EQ(-40, AddPtr(-10, -30));
 }
 
+// A global whose IR name carries the leading '\01' "do not mangle" marker
+// (what Clang emits for an `asm("...")` label on a target with a non-empty
+// global prefix, e.g. Darwin's '_') must still be resolvable by name, even
+// though the marker is stripped on the way to the object file's own symbol
+// table. Regression test: getSymbolAddress() strips the marker before
+// consulting findModuleForSymbol(), which used to look up only the stripped
+// spelling and so never found -- nor compiled -- the defining module.
+TEST_F(MCJITTest, add_function_with_no_mangle_prefix) {
+  SKIP_UNSUPPORTED_PLATFORM;
+
+  Function *F = insertAddFunction(M.get(), "\01add.asm.label");
+  createJIT(std::move(M));
+  uint64_t AddPtr = TheJIT->getFunctionAddress(F->getName().str());
+  ASSERT_NE(0u, AddPtr) << "Unable to get pointer to function from JIT";
+
+  int (*Add)(int, int) = reinterpret_cast<int (*)(int, int)>(AddPtr);
+  EXPECT_EQ(3, Add(1, 2));
+  EXPECT_EQ(-5, Add(-2, -3));
+}
+
 TEST_F(MCJITTest, run_main) {
   SKIP_UNSUPPORTED_PLATFORM;
 
