@@ -48150,3 +48150,167 @@ H19g itself is not struck through: it is addressing-complete for the
 plain 2D case, but not yet honestly closeable (the feature bit stays
 `VK_FALSE`) until H19k's own prerequisite closes, plus a future
 arrayed-2D-multisample follow-on row once it does.
+
+# Session: H19k (feme-cpu-linearize Flow-block loop fold)
+
+Task: close roadmap H19k, a hard prerequisite discovered by H19g's own
+real CTS re-run -- every `dEQP-VK.image.load_store_multisample.2d.*`
+verification shader's own `for (int sampleNdx = 0; ...) { imageStore/
+imageLoad(...) }` loop hit `feme-cpu-linearize: function 'main': loop
+at '' has an internal branch in 'Flow'; unsupported`, regardless of how
+complete H19g's own storage-image addressing side was.
+
+## Root-causing (real IR reduction, the established methodology)
+
+Compiled the actual CTS GLSL shader source via `glslangValidator`, then
+fed the resulting SPIR-V through `feme-translate`/`feme-opt` stage by
+stage, watching the IR at each pass boundary. Confirmed: LLVM's own
+`StructurizeCFGPass` (run inside `feme-cpu-prepare`) unconditionally
+restructures *every* two-way-branching region into an "if"-style
+construct with a shared "Flow" reconvergence block -- this includes a
+loop's own uniform trip-count check whenever that check is not fused
+into the same block as the latch (i.e. the ordinary, overwhelmingly
+common `for (init; cond; ++i) { body }` C-style shape). The result: the
+loop's real exit decision ends up split across two separate `CondBr`
+blocks -- the original check, and "Flow", which re-derives the
+*identical* decision via a `phi` selecting between two literal
+constants (`true`/`false`) depending on which predecessor reached it.
+This is a pure `StructurizeCFG` artifact, not anything shader-specific
+or divergence-specific -- any ordinary uniform loop with its check
+separate from its latch hits it, once structurized this way.
+
+## First approach (abandoned): whole-pipeline SimplifyCFGPass
+
+Tried adding `SimplifyCFGPass` to `feme-cpu-prepare`'s own pipeline,
+between `StructurizeCFGPass` and `BreakCriticalEdgesPass`. It does
+correctly fold the redundant Flow-phi-of-constants pattern (via its own
+internal `foldCondBranchOnValueKnownInPredecessor`). But running the
+*full* `Transforms/CPU/` lit suite (not just `Linearize/`) surfaced a
+serious regression: `Transforms/CPU/CFG/loop-early-return.ll` (a loop
+with an early `return` in its body, alongside its normal exit --
+genuinely two different exit *destinations*) started failing
+`feme::cpu::verifyStructured`'s "cycle has exactly one exit block"
+invariant. Traced this to `SimplifyCFGPass`'s own
+`tailMergeBlocksWithSimilarFunctionTerminators` sub-transform (in
+`llvm/lib/Transforms/Scalar/SimplifyCFGPass.cpp`), which merges *any*
+two blocks sharing the same terminator type (e.g. two separate `ret
+void` blocks belonging to genuinely different loop-exit destinations)
+into one shared block -- and, critically, this sub-transform is **not
+gated by any `SimplifyCFGOptions` toggle**; tried
+`speculateBlocks(false)` and the `no-simplify-cond-branch` pipeline
+alias, neither avoided it while still keeping the needed fold. There is
+no safe way to scope a generic `SimplifyCFGPass` invocation narrowly
+enough for this fix. Reverted `Prepare.cpp` entirely back to its
+original state and abandoned this direction.
+
+## Final approach: a narrow, dedicated fold inside LoopLinearizer
+
+Implemented `foldRedundantFlowBlock(BasicBlock *BB)` directly in
+`feme::cpu::LoopLinearizer` (`Linearize.cpp`). It recognizes *only* a
+block whose `CondBr` condition is a `PHINode` physically located in
+that same block, with exactly 2 incoming values that are **both
+literal `ConstantInt`s** (a syntactic check, not a deeper constant-
+folding analysis), mapping to the block's two *different* successors.
+This precondition is narrow and provably safe: a genuine divergent
+decision's condition is always a real runtime value, never a phi of
+pure literal constants -- confirmed directly against
+`loop-early-return.ll`'s own analogous guard block, whose phi is fed by
+a *nested*, non-constant phi one level down, so the fold's precondition
+correctly fails to match it and it stays completely untouched.
+
+When a match is found, the fold rewires each predecessor to branch
+directly to the correct successor (bypassing the folded block),
+resolves/forwards any of the block's own other "value" phis, and erases
+the dead block. Added a driver `foldRedundantFlowBlocksInCycle` that
+applies this repeatedly to every non-Header/Latch block of a cycle,
+called from the top of `LoopLinearizer::linearizeCycle` right after
+`Latch` is determined.
+
+Two follow-on bugs needed fixing, both from `BreakCriticalEdges`'s own
+pre-existing relay/trampoline blocks (phi-less, single-predecessor
+blocks inserted between a `CondBr` and any successor with multiple
+predecessors) interacting with the fold:
+
+1. **Crash**: "Use still stuck around after Def is destroyed" --  the
+   fold's value-phi-forwarding logic needed to walk *forward* through
+   chains of these relay blocks to find the real downstream merge
+   block holding the actual phi, and correctly distinguish "the
+   phi's incoming-block index needs updating to the new direct
+   predecessor" (only true if zero relays were walked) from "only the
+   forwarded *value* needs updating, the incoming-block index stays as
+   the still-standing relay's own name" (true whenever one or more
+   relays exist, since the relay persists unaffected by the folded
+   block's removal).
+2. **Diagnostic**: "has an internal branch ... that does not reach the
+   loop's exit block" -- after folding, a check block's own "exit" arm
+   could point at a still-standing relay rather than directly at
+   `ExitBlock`. Extended (only) the `OtherCondBrBlocks`/`CheckBlock`
+   handling path in `linearizeCycle`: when the existing `matchExitCheck`
+   fails a direct match, try each of `CheckBlock`'s two successors as a
+   candidate exit arm via `straightChain(Candidate, ExitBlock)`
+   (tolerating relay blocks), accepting it only if exactly one
+   candidate succeeds (rejecting as ambiguous otherwise). Left
+   `matchExitCheck` itself, and Header/Latch's own handling, completely
+   unchanged to avoid loosening their existing, more conservative
+   checks.
+
+## Verification
+
+- Two real-CTS-reduced repros (`/tmp/h19k/ms_store.ll`,
+  `/tmp/h19k/ms_load.ll`) now linearize successfully with
+  `-verify-structured` passing, using this fix alone, with `Prepare.cpp`
+  completely unmodified.
+- Full `Transforms/CPU/` lit suite: 139/139 passing (including the
+  `loop-early-return.ll` regression guard that killed the earlier
+  approach). Three lit tests written/touched during the abandoned
+  SimplifyCFG attempt were corrected to match the final fix's actual
+  output: `loop-uniform-check-separate-structurized.ll` and
+  `loop-value-diamond-check-separate-structurized.ll` (new, exercising
+  the fold directly; both now show the check branching to a persisting
+  `%check.Flow_crit_edge` relay rather than straight to `%exit`, and the
+  value-diamond test still shows `DiamondFlattener`'s own masked
+  `select`s, unaffected by this narrower fix) and
+  `loop-break-structurized.ll` (reverted to its untouched original
+  content, since `Prepare.cpp` needed no change in the end).
+- `ninja check-feme`: full pass, 2136/2195 (59 pre-existing
+  `Unsupported`, 0 `Failed`).
+- All 249 `FeMeTransformsCPUTests` gtest cases pass.
+- Real CTS re-run of `dEQP-VK.image.load_store_multisample.2d.*` (84
+  cases, `shaderStorageImageMultisample` temporarily forced `VK_TRUE`
+  purely to probe the shader path, reverted before landing): 0 Pass, 27
+  Fail, 57 NotSupported -- same raw totals as H19g's own baseline, but
+  **0 of the 27 failures still hit the Flow-block error**. All 27 now
+  hit a different, later error: `feme-cpu-simdize: function 'main' has
+  a divergent vector value '' used outside a supported ... pattern;
+  component decomposition is not yet supported for this use (roadmap
+  milestone 7 deviation)`. This confirms H19k's own targeted bug is
+  genuinely and completely fixed; a new, distinct downstream gap is now
+  the blocker. Split this into new roadmap row H19l rather than trying
+  to absorb it into H19k's own already-closed scope.
+- `load-store.txt` mustpass regression caselist (3446 cases), re-run
+  after reverting the feature-bit probe: 260 Pass, 0 Fail, 3186
+  NotSupported -- byte-identical to the pre-H19k baseline. 0
+  regressions.
+
+## Docs
+
+Struck through H19k in `Roadmap.md` with a full done summary. Added new
+roadmap row H19l for the freshly-discovered `feme-cpu-simdize` gap (one
+lowercase letter of nesting under H19, per the standing instruction).
+Added a new "Roadmap H19k: measured impact" section to
+`VulkanCTSReport.md`. Updated `Vulkan14FeatureInventory.md`'s
+`shaderStorageImageMultisample` row (bit stays `VK_FALSE`; H19k closed,
+H19l now tracks the remaining gap). Added a short note to
+`FeMeCPUDesign.md`'s existing milestone 6 deviation section documenting
+`foldRedundantFlowBlock`'s existence, scope, and why it was chosen over
+the abandoned whole-pipeline `SimplifyCFGPass` approach.
+
+## Residual, deliberately out of scope
+
+`DiamondFlattener::validate()`'s own limitation (noted in this
+session's earlier, summarized portion) -- it stops recursing the
+instant it reaches a block recognized as a loop's own control decision,
+never continuing into the "stay in loop" arm to look for further,
+unrelated nested diamonds positioned *after* the loop's own exit check
+-- was not touched this session and remains an open, undecided
+question (no roadmap row yet; may just need a documentation note).
