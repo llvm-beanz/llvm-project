@@ -1784,6 +1784,50 @@ femeRTStoreTexel1DI32(const FemeRTImageDescriptor *Img, int32_t X,
   femeRTStoreTexel2DI32(Img, X, /*Y=*/0, Texel);
 }
 
+// The arrayed-1D counterpart of `femeRTFetchTexel1D` above, for
+// `feme.cpu.image.load.1darray.v4f32` (roadmap H19e). Unlike `Plain1D`,
+// this cannot wrap the non-arrayed `femeRTFetchTexel2D` call with
+// `Layer == 0` -- it instead passes `Layer` straight through to
+// `femeRTFetchTexel2D`'s own array-layer parameter (already present on
+// every 2D fetch, plain or arrayed, since a plain 2D image is simply an
+// arrayed one with `ArrayLayers == 1`), with `Y == 0` for the same reason
+// `femeRTFetchTexel1D` passes it: a 1D(-array) image's own
+// `computeSubresourceLayouts` (Image.cpp) always produces `Height == 1`.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTFetchTexel1DArray(const FemeRTImageDescriptor *Img, uint32_t Level,
+                        int32_t X, uint32_t Layer, uint32_t Sample,
+                        _Bool UseBorder, const float BorderColor[4]) {
+  return femeRTFetchTexel2D(Img, Level, Layer, X, /*Y=*/0, Sample, UseBorder,
+                            BorderColor);
+}
+
+// The integer counterpart of `femeRTFetchTexel1DArray` above, for
+// `feme.cpu.image.load.1darray.v4i32` (roadmap H19e).
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTFetchTexel1DArrayI32(const FemeRTImageDescriptor *Img, uint32_t Level,
+                          int32_t X, uint32_t Layer) {
+  return femeRTFetchTexel2DI32(Img, Level, Layer, X, /*Y=*/0);
+}
+
+// The arrayed-1D counterpart of `femeRTStoreTexel1D` above, for
+// `feme.cpu.image.store.1darray.v4f32` (roadmap H19e) -- a thin wrapper
+// over the existing `femeRTStoreTexel2DArray` with `Y == 0`, mirroring
+// `femeRTFetchTexel1DArray`'s own reuse of the 2D fetch's array-layer
+// parameter.
+__attribute__((always_inline)) static void
+femeRTStoreTexel1DArray(const FemeRTImageDescriptor *Img, int32_t X,
+                        uint32_t Layer, FemeRTv4f32 Texel) {
+  femeRTStoreTexel2DArray(Img, X, /*Y=*/0, Layer, Texel);
+}
+
+// The integer counterpart of `femeRTStoreTexel1DArray` above, for
+// `feme.cpu.image.store.1darray.v4i32` (roadmap H19e).
+__attribute__((always_inline)) static void
+femeRTStoreTexel1DArrayI32(const FemeRTImageDescriptor *Img, int32_t X,
+                          uint32_t Layer, FemeRTv4i32 Texel) {
+  femeRTStoreTexel2DArrayI32(Img, X, /*Y=*/0, Layer, Texel);
+}
+
 // The plain-3D counterpart of `femeRTFetchTexel2D` above, for
 // `feme.cpu.image.load.3d.v4f32` (roadmap H19c). The byte-offset formula
 // is identical to `femeRTFetchTexel2D`'s own array-layer addressing
@@ -2606,6 +2650,96 @@ __attribute__((always_inline)) void femeCpuImageStore1DV4I32(
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
   femeRTStoreTexel1DI32(&Img, X, Texel);
+}
+
+// `feme.cpu.image.load.1darray.v4f32` (roadmap H19e): the arrayed-1D
+// counterpart of `feme.cpu.image.load.1d.v4f32` above, adding an integer
+// `Layer` operand -- mirroring exactly how `feme.cpu.image.load.2darray.
+// v4f32` extends `feme.cpu.image.load.2d.v4f32`.
+FemeRTv4f32 femeCpuImageLoad1DArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Layer, uint32_t Mip,
+    uint32_t Sample, _Bool Mask) asm("feme.cpu.image.load.1darray.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad1DArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Layer, uint32_t Mip,
+    uint32_t Sample, _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  if (X < 0 || Layer < 0 || (uint32_t)X >= Img.Width ||
+      (uint32_t)Layer >= Img.ArrayLayers)
+    return Zero;
+  static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  return femeRTFetchTexel1DArray(&Img, Mip, X, (uint32_t)Layer, Sample,
+                                 /*UseBorder=*/0, NoBorder);
+}
+
+// `feme.cpu.image.load.1darray.v4i32` (roadmap H19e): the integer-format
+// counterpart of `feme.cpu.image.load.1darray.v4f32` above.
+FemeRTv4i32 femeCpuImageLoad1DArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Layer, uint32_t Mip,
+    _Bool Mask) asm("feme.cpu.image.load.1darray.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad1DArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Layer, uint32_t Mip,
+    _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  if (X < 0 || Layer < 0 || (uint32_t)X >= Img.Width ||
+      (uint32_t)Layer >= Img.ArrayLayers)
+    return Zero;
+  return femeRTFetchTexel1DArrayI32(&Img, Mip, X, (uint32_t)Layer);
+}
+
+// `feme.cpu.image.store.1darray.v4f32` (roadmap H19e): writes one texel of
+// an arrayed 1D storage image at integer coordinate `X`, array layer
+// `Layer`, mip level 0 -- Vulkan's `OpImageWrite`, mirroring
+// `feme.cpu.image.store.2darray.v4f32`'s own shape.
+void femeCpuImageStore1DArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Layer, FemeRTv4f32 Texel,
+    _Bool Mask) asm("feme.cpu.image.store.1darray.v4f32");
+
+__attribute__((always_inline)) void femeCpuImageStore1DArrayV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Layer, FemeRTv4f32 Texel,
+    _Bool Mask) {
+  if (!Mask || Layer < 0)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel1DArray(&Img, X, (uint32_t)Layer, Texel);
+}
+
+// `feme.cpu.image.store.1darray.v4i32` (roadmap H19e): the integer-format
+// counterpart of `feme.cpu.image.store.1darray.v4f32` above.
+void femeCpuImageStore1DArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Layer, FemeRTv4i32 Texel,
+    _Bool Mask) asm("feme.cpu.image.store.1darray.v4i32");
+
+__attribute__((always_inline)) void femeCpuImageStore1DArrayV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Layer, FemeRTv4i32 Texel,
+    _Bool Mask) {
+  if (!Mask || Layer < 0)
+    return;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  femeRTStoreTexel1DArrayI32(&Img, X, (uint32_t)Layer, Texel);
 }
 
 // `feme.cpu.image.load.3d.v4f32` (roadmap H19c): the plain-3D counterpart
