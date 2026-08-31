@@ -37,15 +37,26 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue working on H19g or any prerequisite work required to complete
+Can you continue working on H19k or any prerequisite work required to complete
 the H-series milestones?
 
-> **`shaderStorageImageMultisample`**, split out of H19d's own original bundled
-> scope. `dEQP-VK.image.load_store_multisample.*` (252 cases) is still all
-> honestly `NotSupported` on this bit today (confirmed via a probe of
-> `load_store_multisample.2d.r32_uint.samples_2`, unaffected by H19d's own
-> cube/cube-array closure). Needs `classifyStorageImage2DHandle` to accept `MS
-> == 1`, a per-sample coordinate component the runtime's fetch/store helpers do
-> not take today (no `feme.cpu.image.*` entry point accepts a sample index), and
-> `PhysicalDeviceInfo.cpp` to flip the feature bit plus raise whatever
-> `VkPhysicalDeviceLimits` sample-count field gates it once real
+> **`feme-cpu-linearize`'s own inability to linearize a loop containing an
+> internal branch in `Flow`**, discovered as a hard, unrelated prerequisite
+> blocking H19g's own real CTS closure: every
+> `dEQP-VK.image.load_store_multisample.2d.*` verification shader contains a
+> `for (int sampleNdx = 0; sampleNdx < N; ++sampleNdx) {
+> imageStore/imageLoad(...) }` loop that `feme-cpu-linearize` rejects at
+> pipeline-creation time with "loop ... has an internal branch in 'Flow';
+> unsupported", regardless of how complete the storage-image addressing side is
+> -- confirmed via a real CTS re-run with `shaderStorageImageMultisample`
+> temporarily forced `VK_TRUE`: 0/84 real passes, 27/84 hit this exact error,
+> the remaining 57/84 `NotSupported` on formats outside today's mandatory floor.
+> Needs a real investigation into `feme-cpu-linearize`'s own
+> control-flow-linearization algorithm (`feme/lib/Transforms/CPU/` -- exact file
+> not yet identified) to determine why this particular loop shape's own internal
+> branch is unsupported (a simple bounded counting loop with a
+> compile-time-constant trip count, structurally unlike the more complex
+> divergent-control-flow cases this milestone's own `Flow`-based linearization
+> already handles elsewhere) and what a fix looks like -- likely its own, larger
+> milestone given the "roadmap milestone 6 deviation" note already attached to
+> the existing error message, not a narrow follow-on
