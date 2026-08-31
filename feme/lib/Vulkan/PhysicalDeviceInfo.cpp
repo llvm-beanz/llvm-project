@@ -770,6 +770,29 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // failures across every format this feature's own mandatory list
   // requires.
   Info.Features.shaderStorageImageExtendedFormats = VK_TRUE;
+  // `shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat` (roadmap
+  // H19i, split out of H19f): `dEQP-VK.image.load_store.without_format.*`/
+  // `without_any_format.*`'s own `checkSupport` (`vktImageLoadStoreTests.
+  // cpp`) gates on the per-format `VK_FORMAT_FEATURE_2_STORAGE_
+  // {READ,WRITE}_WITHOUT_FORMAT_BIT` tiling/buffer feature bits
+  // (`EntryPoints.cpp`'s `vkGetPhysicalDeviceFormatProperties2`, which now
+  // computes them for any format already reporting
+  // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`/`_STORAGE_TEXEL_BUFFER_BIT`),
+  // not on this feature bit directly -- but a real GPU only advertises
+  // those per-format bits when this device-level feature is itself
+  // enabled (see the real Vulkan spec's own definition of both
+  // features), so this bit and `EntryPoints.cpp`'s computation are two
+  // halves of one gap. `SPIRVResourceLowering.cpp`'s storage-image handle
+  // classification (`classifyStorageImage2DHandle`/
+  // `hasOnlySupportedStorageImageUses`) never inspects a handle's
+  // compile-time SPIR-V `Format` operand at all (confirmed: no
+  // `getIntParameter(5)` call anywhere in either), so a `Format ==
+  // Unknown` storage-image handle already lowers identically to a
+  // declared-format one -- there was no compiler-side gap to close here,
+  // only this advertisement. See Roadmap.md's H19i row for the real CTS
+  // re-run.
+  Info.Features.shaderStorageImageReadWithoutFormat = VK_TRUE;
+  Info.Features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;

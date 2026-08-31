@@ -190,6 +190,14 @@ TEST(PhysicalDeviceInfo,
   // (see PhysicalDeviceInfo.cpp's own comment for the full H19a-H19o
   // chain).
   EXPECT_EQ(Info.Features.shaderStorageImageExtendedFormats, VK_TRUE);
+  // (Roadmap H19i) `SPIRVResourceLowering.cpp` never inspected a storage
+  // image handle's compile-time SPIR-V `Format` operand, so a
+  // `Format == Unknown` handle already lowered identically to a
+  // declared-format one -- the only real gap was this advertisement plus
+  // `EntryPoints.cpp`'s per-format `VK_FORMAT_FEATURE_2_STORAGE_
+  // {READ,WRITE}_WITHOUT_FORMAT_BIT` computation.
+  EXPECT_EQ(Info.Features.shaderStorageImageReadWithoutFormat, VK_TRUE);
+  EXPECT_EQ(Info.Features.shaderStorageImageWriteWithoutFormat, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
@@ -217,6 +225,8 @@ TEST(PhysicalDeviceInfo,
   Cleared.samplerAnisotropy = VK_FALSE;
   Cleared.shaderStorageImageMultisample = VK_FALSE;
   Cleared.shaderStorageImageExtendedFormats = VK_FALSE;
+  Cleared.shaderStorageImageReadWithoutFormat = VK_FALSE;
+  Cleared.shaderStorageImageWriteWithoutFormat = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }
