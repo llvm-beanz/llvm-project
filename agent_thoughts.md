@@ -48002,3 +48002,151 @@ Build: `ninja check-feme` (ccache, assertions) passed in full,
 cases): 44 Pass (up from 0), 0 Fail, 12 honestly `NotSupported` (all
 `buffer.*` texel-buffer variants, out of this row's own image-only
 scope).
+
+# Session: H19g
+
+## Task
+
+Continue roadmap H19g: `shaderStorageImageMultisample`, split out of
+H19d's own original bundled scope. `dEQP-VK.image.load_store_multisample.*`
+(252 cases) was all honestly `NotSupported`. Scope: `classifyStorageImage2DHandle`
+accepting `MS == 1`, a per-sample coordinate the runtime's fetch/store
+helpers don't take, and `PhysicalDeviceInfo.cpp` flipping the feature bit
+if honestly earned.
+
+## Investigation
+
+Read the real CTS source (`vktImageMultisampleLoadStoreTests.cpp`) first,
+rather than assuming scope from the roadmap entry alone. Confirmed:
+
+- `checkSupport` only requires `DEVICE_CORE_FEATURE_SHADER_STORAGE_IMAGE_
+  MULTISAMPLE` plus format/sample-count image-format-properties checks --
+  it does *not* independently validate `storageImageSampleCounts` against
+  the feature bit, so this project's pre-existing `storageImageSampleCounts
+  = 1|2|4|8` advertisement (while the feature bit stays `VK_FALSE`) is not
+  itself a CTS-detectable violation in this group. Deprioritized further
+  investigation of that discrepancy.
+- Every test shader declares a storage image (`uniform image2DMS`), never
+  a sampled `sampler2DMS` -- `imageStore(u_msImage, coord, sampleNdx,
+  color)`/`imageLoad(u_msImage, coord, sampleNdx)`, i.e. `OpImageWrite`/
+  `OpImageRead` with an explicit `Sample` image operand against a storage
+  image. This narrowed the real scope from "multisample sampling and
+  storage" down to "storage-image `Sample` operand support" alone.
+- Both `IMAGE_TYPE_2D` and `IMAGE_TYPE_2D_ARRAY` are exercised. Scoped this
+  session to the plain (non-arrayed) 2D shape only, deferring arrayed to a
+  future follow-on row -- consistent with this project's own H19-series
+  precedent of splitting by shape one at a time.
+
+Traced the full pipeline for `OpImageRead`/`OpImageWrite` against a 2D
+storage image and found the runtime's own multisample storage layout
+(`FemeImageSubresourceLayout::SampleStride`) was already fully correct and
+populated for every multisampled image (from earlier F8b/F8c subpass
+work) -- the real gap was narrower than expected, confined to: (1)
+`SPIRVToLLVMPatterns.cpp` unconditionally rejecting any `Sample` image
+operand against a non-subpass image, (2) `classifyStorageImage2DHandle`
+rejecting any `MS != 0` handle, (3) `Load2DI32`/`Store2D`/`Store2DI32`
+lacking a `Sample` parameter, (4) the runtime lacking per-sample-aware
+store helpers and an I32-Sample-aware fetch helper.
+
+## Key design constraint: `llvm.spv.resource.getpointer`'s fixed arity
+
+`llvm.spv.resource.getpointer` is a real, upstream LLVM SPIR-V-backend
+intrinsic (`IntrinsicsSPIRV.td`) with a fixed 2-operand signature, shared
+with the DXIL-to-SPIR-V direction -- it cannot grow a 3rd "Sample" operand
+without a much larger, riskier upstream-adjacent change. The chosen fix
+folds `Sample` into the `Coordinate` operand as an extra trailing vector
+lane instead: this is minimally invasive and precisely mirrors how
+`Array2D`'s own array-layer is already the coordinate's 3rd component --
+`SPIRVResourceLowering.cpp`'s existing generic 3rd-component (`C2`)
+extraction logic needed zero structural changes beyond adding
+`Plain2DMS` to its enumeration lists. A new `appendVectorLane` helper in
+`SPIRVToLLVMPatterns.cpp` builds the widened coordinate via the same
+`PoisonOp`/`ExtractElementOp`/`InsertElementOp` idiom already used
+elsewhere in that file (e.g. `ExpectConversionPattern`).
+
+`ImageReadPattern`/`ImageFetchPattern` share one template
+(`ImageLoadPattern<ImageOpTy>`) for both `spirv.ImageRead` (storage,
+`Sampled==2`) and `spirv.ImageFetch` (sampled image, `Sampled==1`). Only
+`ImageReadOp` can legally target a storage image, so the new
+Sample-operand-acceptance logic is gated with `if constexpr` to apply only
+when `ImageOpTy == mlir::spirv::ImageReadOp` -- an `ImageFetchOp` with a
+`Sample` operand (a multisampled *sampled*-image fetch) is out of this
+row's scope entirely and continues to be rejected via the ordinary
+`hasImageOperands` check.
+
+## Implementation
+
+- `SPIRVResourceLowering.cpp`: new `ImageShape::Plain2DMS`;
+  `classifyStorageImage2DHandle` accepts `MS == 1` only for a non-arrayed
+  `Dim::2D` handle; `hasOnlySupportedStorageImageUses`'s `CoordWidth` and
+  `lowerImageAccesses`'s coordinate extraction/dispatch switches widened
+  to treat `Plain2DMS` like `Array2D`/`Plain3D`.
+- `ImageCalls.h`/`.cpp`: new `Store2DMS`/`Store2DMSI32` call vocabulary;
+  `Load2DI32` widened to carry a `Sample` operand.
+- `SPIRVToLLVMPatterns.cpp`: new `appendVectorLane`/
+  `isPlainMultisampled2DImage` helpers; `ImageLoadPattern`/
+  `ImageWritePattern` widened.
+- `FeMeRuntimeCPU.c`: new `femeRTStoreTexel2DMS`/`I32` helpers and their
+  exported `femeCpuImageStore2DMSV4F32`/`V4I32` entry points;
+  `femeRTFetchTexel2DI32`/`femeCpuImageLoad2DV4I32` widened to accept
+  `Sample`.
+
+## Testing
+
+Four new/renamed `SPIRVResourceLoweringTest.cpp` cases (a renamed
+`LeavesAnArrayedMultisampledStorageImageHandleAlone`, replacing a now-
+stale non-arrayed rejection test whose assumption this change makes
+false, plus three new positive `Plain2DMS` tests), six new
+`ImageSamplingTest.cpp` runtime cases, a new lit test
+`spirv-to-llvm-image-access-multisample.mlir`, and a new `expected-error`
+case in `spirv-to-llvm-image-access-invalid.mlir` confirming an arrayed
+multisampled storage image's own `Sample` operand still correctly fails
+to legalize. `ninja check-feme` (ccache + assertions): 2134/2193, 0
+`Failed`, 59 pre-existing `Unsupported`.
+
+## Real CTS finding: a distinct, unrelated prerequisite
+
+Since this session only closes the plain 2D shape, and this project's own
+precedent is to only flip a feature bit once the *entire* named CTS group
+passes, I did not flip `shaderStorageImageMultisample` for the real
+commits. To actually validate the implementation end-to-end, though, I
+temporarily forced the bit `VK_TRUE` (uncommitted, reverted before
+landing) purely to probe the real shader path with
+`dEQP-VK.image.load_store_multisample.2d.*` (84 cases).
+
+Result: 0 Pass, 27 Fail, 57 `NotSupported` (formats outside today's
+mandatory storage floor). Every one of the 27 failures hit the *same*
+error at pipeline creation: `feme-cpu-linearize: function 'main': loop at
+'' has an internal branch in 'Flow'; unsupported`. Reading the CTS shader
+source confirmed every one of this group's own verification shaders
+contains a `for (int sampleNdx = 0; sampleNdx < N; ++sampleNdx) {
+imageStore(...) }` loop -- a real, pre-existing control-flow-linearization
+gap, entirely unrelated to storage-image multisample addressing itself,
+that blocks 100% of this row's own real CTS coverage no matter how
+complete the addressing-side fix is.
+
+This is a good example of why "run the real CTS after each change" is
+valuable even when a feature bit isn't being flipped: it surfaced a
+genuinely separate, larger prerequisite that a unit-test-only validation
+strategy would never have found, since none of the hand-written IR/lit
+tests exercise a real loop-shaped shader body.
+
+Reverted the temporary bit flip (kept `VK_FALSE`), confirmed
+`FeMeVulkanCore`/`libfeme_vulkan.so` rebuild cleanly afterward, and ran
+the existing `load-store.txt` mustpass regression caselist (3446 cases,
+H19a-j's own combined regression suite) to confirm no regression from
+this session's changes: 260 Pass, 0 Fail, 3186 `NotSupported` -- identical
+to the pre-session baseline, as expected, since the addressing changes
+only take effect once the feature bit is on.
+
+## Roadmap disposition
+
+Updated H19g's own roadmap entry with the real fix and the real CTS
+finding, and added a new roadmap row H19k for the control-flow-
+linearization prerequisite (`feme-cpu-linearize`'s own inability to
+handle a loop with an internal branch in `Flow`) -- capped at one
+lowercase letter of nesting under H19, per the standing instruction.
+H19g itself is not struck through: it is addressing-complete for the
+plain 2D case, but not yet honestly closeable (the feature bit stays
+`VK_FALSE`) until H19k's own prerequisite closes, plus a future
+arrayed-2D-multisample follow-on row once it does.
