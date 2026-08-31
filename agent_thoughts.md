@@ -49675,3 +49675,186 @@ likewise needs no changes for the same reason.
    one coherent change rather than splitting an identical one-line-pattern
    fix across two commits).
 4. This file.
+
+# macOS test failures: an MCJIT symbol-resolution bug behind every `pc=0x0` crash
+
+## Context
+
+Two sessions ago a macOS UBSan run (`ubsan-errors.txt`) reported 23 failing
+FeMe unit-test shards. One was a genuine misaligned load in
+`SPIRVImporter::import()`, fixed then. The other 22 were `SEGV on unknown
+address 0x0 (pc 0x0)` crashes in `ImageSamplingTest.StoreWritesTexelInto*`
+that I could not reproduce with a from-scratch UBSan build, nor with an
+ASan+UBSan build last session -- so they were left as "non-reproducing on
+this platform", with only a defensive `assert(Addr && ...)` added to the
+tests' `resolve<FnTy>` JIT-resolution helper.
+
+The user then asked me to build with **UBSan + ASan + LSan, clang, libc++,
+and lld**, to more closely mimic macOS. That combination is what finally
+made the difference -- though, as it turns out, not because a sanitizer
+caught anything new. It was `ubsan-errors.txt` itself, read more carefully.
+
+## Build setup
+
+Configured `build-san-libcxx/` (assertions, ccache, `clang;feme;mlir`,
+`X86;AArch64`, the usual `FEME_VULKAN_XML`/`Vulkan_INCLUDE_DIR` overrides)
+adding `-DLLVM_ENABLE_LIBCXX=ON -DLLVM_USE_LINKER=lld` on top of
+`-DLLVM_USE_SANITIZER="Address;Undefined"`. libc++ wasn't installed on this
+host (`apt-get install libc++-18-dev libc++abi-18-dev` fixed that).
+
+`lld` made the OOM problem from last session's ASan+UBSan build go away
+entirely -- last session needed `ninja -j 4` to avoid getting OOM-killed
+while linking with BFD ld; `-j 6` with lld peaked around 6 GB used out of
+46 GB. Worth remembering: **use lld for any future sanitizer build here**,
+it's both faster and dramatically lighter on memory.
+
+Full `ninja -j 6 check-feme` in that tree: **2209/2268, 0 Failed**. So even
+the closest-to-macOS configuration available on this Linux host reproduced
+nothing. That's a meaningful negative result: it says the macOS failures are
+not sanitizer-detectable UB at all, and pushed me to stop hunting for a
+sanitizer report and instead re-derive the crash from first principles.
+
+## Root cause
+
+Re-reading `ubsan-errors.txt` for the *shape* of the failures rather than
+their sanitizer output, one pattern stood out immediately:
+
+- Every crashing test resolves a runtime entry point through
+  `ImageSamplingTest::resolveRuntime` -- the **direct**,
+  no-IR-wrapper path.
+- Every *passing* test in the same fixture resolves through `addWrapper`,
+  which builds a fresh, plainly-named IR wrapper that *calls* the runtime
+  entry point.
+
+That's a resolution problem, not a codegen or UB problem: `pc=0x0` means
+`Engine->getFunctionAddress()` returned 0 and the test called through it.
+
+The mechanism, end to end:
+
+- Every `feme.cpu.*` runtime entry point in `FeMeRuntimeCPU.c` carries an
+  `asm("feme.cpu....")` label so the dotted name survives to the symbol
+  table verbatim.
+- Clang marks such a name with a leading `'\01'`
+  `GlobalValue::dropLLVMManglingEscape` byte **only when the target has a
+  non-empty global prefix** -- Darwin's `'_'`. On ELF the prefix is empty,
+  mangling is the identity, and no escape byte is added. I confirmed this
+  directly: `llvm-dis` on this host's `FeMeRuntimeCPU.bc` shows
+  `define dso_local void @feme.cpu.image.store.2d.v4i32(...)`, with no
+  escape byte. On macOS the very same source yields
+  `@"\01feme.cpu.image.store.2d.v4i32"`. (The tests' own
+  `getRuntimeFunction` helper already knew this, trying both spellings --
+  its comment even explains why. What nobody had checked was whether
+  *resolving* the escaped spelling worked.)
+- `MCJIT::getSymbolAddress()` mangles the requested name up front, which
+  strips the escape byte. Good: the stripped spelling is exactly what's in
+  the object file's symbol table.
+- But `MCJIT::findSymbol()` then asks `findModuleForSymbol()` -- which
+  searches the **not-yet-compiled** modules by IR name -- for that same
+  stripped spelling. On Darwin the IR name still has the escape byte, so
+  the lookup misses, the defining module is never code-generated, and
+  `findExistingSymbol` finds nothing in RuntimeDyld's table either.
+- `getFunctionAddress()` returns 0. The test calls it. `pc=0x0`.
+
+`addWrapper` sidesteps all of this because its wrapper has an ordinary IR
+name with no escape byte, so the stripped-and-searched spellings agree.
+
+This is a real upstream-shaped MCJIT bug, not a FeMe one: it silently
+breaks resolving *any* `asm`-labelled global on *any* target with a
+non-empty global prefix.
+
+## Reproducing it on Linux
+
+The nicest part: once the mechanism is understood, the bug reproduces on
+this ELF host with no macOS involved at all, simply by naming a function
+with an explicit `'\01'` prefix rather than relying on the target's own
+mangling to add one. `MCJITTest.add_function_with_no_mangle_prefix` does
+exactly that, and fails on trunk with `getFunctionAddress` returning 0 --
+the same failure macOS was hitting, now reproducible anywhere.
+
+## The fix
+
+`findModuleForSymbol()` now searches for the escaped spelling in addition
+to the plain one. Two lines of intent, and it makes the round trip
+symmetric: the mangled name goes out to the object symbol table, and either
+IR spelling maps back to the defining module.
+
+I deliberately did *not* "fix" this on the FeMe side (e.g. by calling
+`finalizeObject()` before resolving, or by resolving through a wrapper
+always). Those would paper over a genuine MCJIT bug that any other
+`asm`-labelled-symbol user would keep hitting.
+
+On the FeMe side I added a test instead:
+`ImageSamplingTest.ResolvesRuntimeFunctionWithManglingEscape` renames one
+runtime entry point to its escaped spelling before resolving it,
+reproducing the Darwin IR naming on any host. Verified it genuinely fails
+without the MCJIT fix (it trips last session's `resolve` assert) and passes
+with it.
+
+Between the two tests, both layers are now covered: MCJIT's own resolution
+contract, and FeMe's use of it.
+
+## Extra sanitizer sweep
+
+Since the headline bug turned out not to be sanitizer-detectable, I also
+did a deliberate sweep with non-default ASan checks turned on, to be sure
+nothing else was lurking:
+`detect_stack_use_after_return`, `strict_string_checks`,
+`check_initialization_order`, `alloc_dealloc_mismatch`,
+`new_delete_type_mismatch`, `strict_memcmp`, plus leak detection.
+Full suite: **2210/2269, 0 Failed** -- clean.
+
+Two options were excluded, both deliberately:
+- `detect_invalid_pointer_pairs` needs `-fsanitize=pointer-compare` at
+  compile time, which isn't in this build.
+- `strict_init_order` fires immediately on a pre-existing static
+  initialization-order issue in upstream LLVM's own
+  `SchedulerRegistry`/`MachinePassRegistry` (`ScheduleDAGVLIW.cpp`'s
+  global constructor reading `SelectionDAGISel.cpp`'s `ISHeuristic`),
+  entirely outside FeMe and unrelated to any reported failure. It's a
+  non-default check on every platform including macOS. Noted, not chased.
+
+I also confirmed libc++'s ASan **container-overflow** annotations are
+genuinely active in this build (verified with a standalone reproducer
+reading past `size()` but within `capacity()`). That's real added coverage
+over the previous libstdc++ sanitizer builds -- and the suite is clean
+under it, which is a useful thing to be able to state rather than assume.
+
+## CTS impact
+
+None expected, and none observed. The fix changes symbol resolution only
+for IR names carrying a mangling-escape byte, which on ELF never occur, so
+the Linux CTS path is bit-identical. Spot-checked anyway against the live
+`feme-vulkan` ICD: `dEQP-VK.image.load_store.with_format.2d.r8_*` 8/8 Pass,
+and `dEQP-VK.image.load_store.without_format.2d.*` 72 Pass / 0 Fail / 6
+NotSupported -- both matching their recorded baselines, 0 regressions.
+No `VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`/`Roadmap.md` changes needed: no feature bit,
+extension, or CTS pass/fail count moved, consistent with how the earlier
+sanitizer-fix sessions in this file were handled.
+
+## Verification
+
+- `MCJITTests`: 42 tests, 41 Pass / 1 Skipped (a Darwin-only case), in both
+  the regular and the sanitizer build.
+- `check-feme` in `build-san-libcxx/` (ASan+UBSan+LSan, libc++, lld):
+  2210/2269, 0 Failed -- and again with the aggressive ASan option set.
+- `check-feme` in the regular `build/`: 2210/2269, 0 Failed.
+
+## Commit breakdown
+
+1. `[MCJIT] Find modules defining globals with a mangling-escape name`
+   (the fix plus its own MCJIT regression test).
+2. `[feme] Test resolving a runtime entry point by its escaped IR name`
+   (FeMe-side coverage of the same path).
+3. This file.
+
+## Note for future sessions
+
+Two things worth carrying forward. First, **use lld for sanitizer builds
+here** -- it removes the OOM-during-link problem that forced `-j 4` last
+session. Second, when a failure reproduces on one platform only and no
+sanitizer catches it, the platform difference itself is the lead: here,
+"which tests crash" (`resolveRuntime` vs `addWrapper`) localized the bug
+far faster than any amount of instrumentation, and the resulting fix came
+with a test that reproduces on *every* platform, which is strictly better
+than one that only fails on the reporter's machine.
