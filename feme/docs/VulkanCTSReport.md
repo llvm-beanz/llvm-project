@@ -17360,3 +17360,65 @@ flipped to `VK_TRUE` in `PhysicalDeviceInfo.cpp`. `ninja check-feme`
 passes in full: 2202/2261 (59 pre-existing `Unsupported`, 0 `Failed`).
 H19i's own `without_format.*` work (828 real CTS cases) can now
 proceed, since it depends on this full format list existing first.
+
+## Roadmap H19i: measured impact (`shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat`)
+
+**Scope.** Advertises `VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT`/
+`_WRITE_WITHOUT_FORMAT_BIT` (a `VkFormatProperties3`-only pair of bits,
+like roadmap F11's `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT`, with no
+32-bit `VkFormatFeatureFlags` equivalent) for any format already reporting
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` (tiling features) or
+`VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT` (buffer features), then flips
+`shaderStorageImageReadWithoutFormat`/`WriteWithoutFormat` to `VK_TRUE`.
+
+**Confirmed, not merely assumed: no compiler-side gap.** This row's own
+task text speculated that `SPIRVResourceLowering.cpp`'s storage-image
+handle classification "likely already" ignores a handle's compile-time
+SPIR-V `Format` operand. Verified directly: neither
+`classifyStorageImage2DHandle` nor `hasOnlySupportedStorageImageUses`
+calls `getIntParameter(5)` (the `Format` operand's index) anywhere, so a
+`Format == Unknown` storage-image handle already lowers identically to a
+declared-format one. The entire gap really was the advertisement, exactly
+as speculated -- no `SPIRVResourceLowering.cpp` change was needed at all.
+
+**Direct format groups.** Full `load-store.txt` mustpass regression
+(3446 cases), broken down by its own three subgroups:
+
+```
+with_format.*        (1092 cases): 822 Pass, 0 Fail  (unchanged from H19o)
+without_format.*     ( 828 cases): 534 Pass, 0 Fail  (was 0 Pass)
+without_any_format.* (1526 cases): 562 Pass, 0 Fail  (was 0 Pass)
+------------------------------------------------------------------
+Total                (3446 cases): 1918 Pass, 0 Fail  (was 822 Pass)
+```
+
+`without_format.*`'s own case count (828) matches this roadmap row's
+original scope-estimate exactly. `with_format.*` is untouched, as
+expected: every `with_format.*` case already declares a format, so this
+row's own work cannot move it. **+1096 new passes, 0 regressions.**
+
+**Broader smoke check.** Since this feature bit gates `checkSupport`
+project-wide, not just `load_store.*`, checked two other real CTS groups
+that reference it:
+
+- `dEQP-VK.robustness.image_robustness.*.storage_image.no_fmt_qual.*`/
+  `storage_texel_buffer.no_fmt_qual.*` (a 3000-case sample of this
+  23856-case slice): stays fully `NotSupported` (0 Pass, 0 Fail) --
+  gated on the separate, still-unimplemented `robustImageAccess`
+  feature (`vktRobustnessExtsTests.cpp`'s own `checkSupport`), so this
+  row's own change opens no new surface there.
+- `dEQP-VK.spirv_assembly.instruction.*image*` (a 992-case sweep):
+  surfaced a real, pre-existing crash (`UNREACHABLE executed at
+  llvm/lib/IR/Value.cpp:99`, "Uses remain when a value is destroyed!")
+  in `imagesample.*.pass_image_and_sampler_to_function*` -- confirmed
+  unrelated to this row's own scope: it is a sampled-image (not
+  storage-image) function-parameter-passing pattern, with no
+  `shaderStorageImage{Read,Write}WithoutFormat` requirement anywhere
+  near it, and pre-existing rather than newly introduced by this
+  change. Left untouched and not filed as a new roadmap row (out of
+  scope for H19).
+
+**Outcome.** `ninja check-feme` passes in full: 2205/2264 (59
+pre-existing `Unsupported`, 0 `Failed`). `shaderStorageImageReadWithoutFormat`/
+`WriteWithoutFormat` flip to `VK_TRUE`, closing the last row split out of
+H19f.
