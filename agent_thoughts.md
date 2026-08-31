@@ -47942,3 +47942,63 @@ Build: `ninja check-feme` (ccache, assertions) passed in full,
 `dEQP-VK.image.load_store.with_format.*.r16g16b16a16_{sfloat,uint,sint}*`
 (140 cases): 66 Pass (up from 0), 0 Fail, 74 honestly `NotSupported`
 (the `_unorm`/`_snorm` variants outside this row's own scope).
+
+# Session: H19h (R16G16B16A16_{UNORM,SNORM} storage/sampling support)
+
+Continued the H19 storage-image-format-breadth thread with H19h -- "The
+rest of the mandatory `shaderStorageImageExtendedFormats` list", split
+out of H19f once that row narrowed to `R16G16B16A16_{SFLOAT,UINT,SINT}`
+only.
+
+Started by checking whether `R16G16B16A16_UNORM`/`_SNORM` already had a
+`ResourceFormat` enum entry (they did -- `RuntimeABI.h` already listed
+both, and `Format.cpp`'s `mapVkFormat` already mapped the real
+`VkFormat`s to them). This made the natural next slice obvious: unlike
+H19f's own three formats (which were already readable, only the write
+side was missing), these two formats had *no* runtime support at all --
+`femeRTImageFormatElementSize` had no case for either's numeric code, so
+they weren't even sampled-image-readable, let alone storage-image-
+writable. This is a genuinely different, larger kind of gap than H19f's
+own (a full unpack+pack implementation from scratch, not just a pack
+addition on top of existing unpack/element-size support), but still a
+self-contained, scopeable slice since both formats' 16-bit-per-component
+shape is structurally identical to the already-well-covered
+`R16G16B16A16_FLOAT`/`_UINT`/`_SINT` siblings -- just needing the actual
+normalize/denormalize math (which the project already had a working
+8-bit precedent for, `femeRTUnpackR8G8B8A8Unorm`/`Snorm`, mechanically
+adaptable to 16 bits).
+
+Followed the SNORM asymmetry convention the existing 8-bit
+`femeRTUnpackR8G8B8A8Snorm` already established (clamping the most
+negative representable value up to `-1.0` on decode, rather than
+`-32768/32767` producing a value slightly past `-1.0`) rather than
+inventing a new convention, keeping this row consistent with existing
+project precedent.
+
+Chose not to attempt the single/two-channel `R8`/`R16`/`R32` formats or
+the packed 32-bit formats this same session: those need entirely new
+`ResourceFormat` enum entries (a larger, more foundational change,
+touching `RuntimeABI.h` itself rather than just wiring up existing enum
+values), and the packed 32-bit formats specifically raised a real,
+unresolved question during scoping -- whether this project's existing
+`R10G10B10A2`/`R11G11B10` *sampled*-image decode actually agrees with
+what a real storage-image `imageStore` through the same `VkFormat`
+expects, which needs its own real verification (likely via a CTS shader
+dump, the same technique this whole H19 chain has used throughout)
+before any code gets written, not an assumption. Split that remainder
+into its own new roadmap row (H19j) rather than rushing a possibly-wrong
+implementation this session.
+
+Three commits: (1) the runtime unpack/pack + `Format.cpp` feature-bit
+widening + their unit tests, (2) documentation updates (Roadmap.md's
+H19h row updated in place with the partial-closure outcome and a new
+H19j sibling row added; `Vulkan14FeatureInventory.md` repointed;
+`VulkanCTSReport.md`'s new "Roadmap H19h: measured impact" section).
+This file is the third and final commit.
+
+Build: `ninja check-feme` (ccache, assertions) passed in full,
+2126/2185 (59 pre-existing `Unsupported`, 0 `Failed`). Real CTS re-run of
+`dEQP-VK.image.load_store.with_format.*.r16g16b16a16_{unorm,snorm}*` (56
+cases): 44 Pass (up from 0), 0 Fail, 12 honestly `NotSupported` (all
+`buffer.*` texel-buffer variants, out of this row's own image-only
+scope).
