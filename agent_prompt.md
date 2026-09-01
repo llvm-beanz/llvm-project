@@ -37,25 +37,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please work on H7 or any prerequisite work to continue making progress on the
-H-series milestones.
+The offload-test-suite checkout at /home/dev/dev/offload-test-suite has a remote
+named beanz which has a branch named feme, which has changes to enable running
+the tests in that suite against the feme ICD (the target is named
+check-hlsl-feme-vk).
 
-> **The optional core 1.0 graphics feature bits.** `PhysicalDeviceInfo.cpp`
-> reports exactly three `VkPhysicalDeviceFeatures` bits `VK_TRUE`
-> (`robustBufferAccess`, `dualSrcBlend`, `textureCompressionASTC_LDR`, lines
-> 349-373); the other ~52 are all `VK_FALSE`. Each is *optional* for a 1.4
-> submission, so none blocks a conformance claim — but each is a block of
-> mandatory-list cases reported `NotSupported`, and several are cheap on a
-> software device (`imageCubeArray`, `independentBlend`, `fillModeNonSolid`,
-> `depthClamp`, `depthBiasClamp`, `depthBounds`, `wideLines`/`largePoints` once
-> F5's line rasterization lands, `sampleRateShading`, `alphaToOne`, `logicOp`,
-> `occlusionQueryPrecise`, `multiDrawIndirect`, `drawIndirectFirstInstance`,
-> `vertexPipelineStoresAndAtomics`, `fragmentStoresAndAtomics`,
-> `shaderClipDistance`, `shaderCullDistance`, `samplerAnisotropy`,
-> `shaderStorageImage*`). Split into sub-rows per cluster when assigned; do
-> **not** land as one commit (broken down below the same way H4/H5/H6 were,
-> after a full survey of every candidate bit's own real implementation status:
-> H7a closes the first, lowest-risk cluster -- five bits the executor/pipeline
-> layer already genuinely implements and simply never advertised; H7b-H7j each
-> track one remaining cluster that needs real new work first, none of it started
-> yet -- milestone remains open, depending on H7b-H7j) | G-track per cluster
+At the moment, I'm seeing a lot of failures, some of which are expected because
+of missing features in the ICD, but some of them I expected to work. Can you
+build and run the vulkan tests, inspect the failures and ensure that the work to
+address them is covered on the roadmap?
+
+If you encounter any obvious fixable bugs, please just fix them instead of
+adding them to the roadmap.
