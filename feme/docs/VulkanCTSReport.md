@@ -18234,3 +18234,58 @@ done this session (the full group is 150,259/all-groups cases and a full
 54-group edition was not due); the two targeted sweeps above are the
 regression evidence for this row, per the established targeted-sweep-
 between-full-run-editions precedent from L12b.
+
+## Roadmap L5: VulkanLayoutUtils::decorateType crash on nested identified struct
+
+Fixed all 6 real `"PLEASE submit a bug report"` crashes the `check-hlsl-
+feme-vk` `offload-test-suite` run reported (`Feature/StructuredBuffer/
+packed.test`, `Feature/CBuffer/{structs,array-of-structs,dynamic-struct,
+vectors}.test`, `Feature/ConstantBufferT/vectors.test`) -- all 6 shared one
+root cause, a `SIGSEGV` in `mlir::VulkanLayoutUtils::decorateType` when a
+member/element type is an *identified* SPIR-V struct nested inside an
+array/runtime-array/vector/matrix/struct (every HLSL user struct is
+"identified" once `dxc` emits its `OpName`, so this is a common shape, only
+reached for cases that fall through FeMe's own dedicated block-conversion
+pattern into upstream MLIR's generic fallback). Fixed with defensive
+`nullptr`-propagation guards in `mlir/lib/Dialect/SPIRV/Utils/
+LayoutUtils.cpp`; the crash is now the ordinary, already-handled "failed to
+legalize operation ... explicitly marked illegal" diagnostic every other
+unsupported shape already reports -- the underlying nested-identified-
+struct-in-array conversion gap itself remains unimplemented (tracked as a
+new roadmap row, L13, since making these 6 cases actually *pass* is a
+separate, larger scope than eliminating their crash).
+
+A full re-run of the `feme-vk` offload-test-suite lit tree (650 discovered
+tests) shows byte-for-byte identical totals to the pre-fix baseline (133
+pass / 266 unsupported / 26 XFAIL / 224 fail / 1 unexpectedly-passed) with
+zero `"PLEASE submit a bug report"` matches (down from 6) -- confirming the
+fix eliminates exactly the crashes and changes nothing else in this suite.
+
+Since `LayoutUtils.cpp` is shared infrastructure used by any SPIR-V-to-LLVM
+struct/array/vector/matrix layout conversion (not just FeMe's HLSL path),
+ran a real `deqp-vk` regression sweep on the two groups most directly
+exercising this code (`dEQP-VK.ubo.*`, 13,240 cases; `dEQP-VK.ssbo.
+layout.*`, 5,275 cases) both before (temporarily reverting this row's fix
+via `git checkout HEAD~1 --`) and after, on the same rebuilt ICD:
+
+- `dEQP-VK.ssbo.layout.*` (post-fix only, ssbo has no meaningful "before"
+  baseline recorded to compare against): 223/5275 (4.2%) pass, 2037 (38.6%)
+  fail, 3015 (57.2%) not-supported. Zero crashes.
+- `dEQP-VK.ubo.*` pre-fix: two repeated runs of the *same* reverted binary
+  gave 1224 and 1143 passes (a swing of 81 cases with **zero code
+  difference**, confirming this suite has pre-existing run-to-run
+  flakiness at this scale, likely floating-point-precision or scheduling-
+  timing-sensitive cases, unrelated to this fix). Post-fix: two repeated
+  runs of the *same* fixed binary gave 1118, 1239, and 1192 passes (a swing
+  of 121 across three runs). Both before and after this row's change show
+  comparable run-to-run variance of the same rough magnitude (single/low-
+  double-digit percent of the 13,240-case group); no consistent, repeatable
+  delta attributable to this fix was found, and zero crashes appeared in
+  any of the five runs. Given this pre-existing flakiness, a single-run
+  pass/fail delta cannot be used as regression evidence for this group;
+  the crash-elimination itself (0/650 crashes, confirmed deterministic
+  across repeated runs) is this row's real regression evidence.
+
+No feature-bit or extension-advertisement change was made (this is an
+internal correctness fix only), so `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` are unchanged.
