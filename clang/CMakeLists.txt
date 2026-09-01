@@ -527,7 +527,12 @@ option(CLANG_INCLUDE_TESTS
        "Generate build targets for the Clang unit tests."
        ${LLVM_INCLUDE_TESTS})
 
-option(CLANG_ENABLE_HLSL "Include HLSL build products" Off)
+set(default_CLANG_ENABLE_HLSL Off)
+if("DirectX" IN_LIST LLVM_TARGETS_TO_BUILD OR "SPIRV" IN_LIST LLVM_TARGETS_TO_BUILD)
+  set(default_CLANG_ENABLE_HLSL On)
+endif()
+
+option(CLANG_ENABLE_HLSL "Include HLSL build products" ${default_CLANG_ENABLE_HLSL})
 # While HLSL support is experimental this should stay hidden.
 mark_as_advanced(CLANG_ENABLE_HLSL)
 
