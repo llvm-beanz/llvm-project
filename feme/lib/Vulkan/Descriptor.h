@@ -102,6 +102,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace feme::vulkan {
@@ -160,8 +161,29 @@ struct DescriptorSetLayoutBinding {
   /// `VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK`, where Vulkan repurposes
   /// `VkDescriptorSetLayoutBinding::descriptorCount` to mean the inline
   /// block's byte size instead (there is no array of separate descriptors
-  /// to count).
+  /// to count). (roadmap L12c) For a binding with \c VariableCount set,
+  /// this is the *maximum* a real allocated `VkDescriptorSet` may request
+  /// via `VkDescriptorSetVariableDescriptorCountAllocateInfo` -- see that
+  /// field's own comment.
   uint32_t Count = 0;
+  /// (roadmap L12c) Whether `VkDescriptorSetLayoutCreateInfo`'s chained
+  /// `VkDescriptorSetLayoutBindingFlagsCreateInfo` set
+  /// `VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT` for this binding
+  /// -- per spec, only the layout's own highest-numbered binding may set
+  /// it (`vkCreateDescriptorSetLayout` rejects any other placement). A real
+  /// `VkDescriptorSet` allocated from a layout with this bit set may
+  /// request any *real* element count from `0` up to \c Count via
+  /// `VkDescriptorSetVariableDescriptorCountAllocateInfo` at allocation
+  /// time (see `DescriptorPool::allocate`); one allocated without
+  /// supplying that chained struct at all gets the full \c Count, matching
+  /// the spec's "As if it was...set to descriptorCount of the descriptor
+  /// set layout" default. A shader that indexes past a real allocated
+  /// instance's smaller count (but still within \c Count) reads back as
+  /// zero, exactly like this ICD's `descriptorBindingPartiallyBound`
+  /// zero-fill convention already established for an unwritten descriptor
+  /// (`ResourceHeap.cpp`'s `materializeHeap`, which the same
+  /// `min(RangeSize, real array size)` clamp already serves unmodified).
+  bool VariableCount = false;
 };
 
 /// A `VkDescriptorSetLayout`: an ordered (ascending by binding number) list
@@ -229,7 +251,18 @@ struct DescriptorImageBinding {
 /// time. Not dispatchable.
 class DescriptorSet {
 public:
-  explicit DescriptorSet(const DescriptorSetLayout &Layout);
+  /// Constructs a set from \p Layout, sizing every binding's array to its
+  /// declared `Count` -- except (roadmap L12c) the layout's own
+  /// `VariableCount`-flagged binding (if any), which is instead sized to
+  /// \p VariableDescriptorCount if supplied (from a chained
+  /// `VkDescriptorSetVariableDescriptorCountAllocateInfo`, already
+  /// range-checked against `Count` by the caller -- see
+  /// `vkAllocateDescriptorSets`) or to the layout's own `Count` otherwise,
+  /// matching the spec's stated default for an allocation that does not
+  /// chain that struct at all.
+  explicit DescriptorSet(
+      const DescriptorSetLayout &Layout,
+      std::optional<uint32_t> VariableDescriptorCount = std::nullopt);
 
   const DescriptorSetLayout &getLayout() const { return *Layout; }
 
@@ -340,8 +373,12 @@ public:
       : MaxSets(MaxSets), RemainingSets(MaxSets) {}
 
   /// Allocates one set from \p Layout, or null if the pool has no
-  /// remaining set slots (`VK_ERROR_OUT_OF_POOL_MEMORY`).
-  DescriptorSet *allocate(const DescriptorSetLayout &Layout);
+  /// remaining set slots (`VK_ERROR_OUT_OF_POOL_MEMORY`). \p
+  /// VariableDescriptorCount is forwarded to `DescriptorSet`'s own
+  /// constructor -- see its comment (roadmap L12c).
+  DescriptorSet *
+  allocate(const DescriptorSetLayout &Layout,
+           std::optional<uint32_t> VariableDescriptorCount = std::nullopt);
 
   /// `vkFreeDescriptorSets`: returns \p Set's slot to the pool.
   void free(DescriptorSet *Set);

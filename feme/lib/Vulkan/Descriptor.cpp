@@ -94,15 +94,23 @@ uint32_t DescriptorSetLayout::dynamicOffsetCount() const {
   return Count;
 }
 
-DescriptorSet::DescriptorSet(const DescriptorSetLayout &Layout)
+DescriptorSet::DescriptorSet(const DescriptorSetLayout &Layout,
+                             std::optional<uint32_t> VariableDescriptorCount)
     : Layout(&Layout) {
   for (const DescriptorSetLayoutBinding &B : Layout.bindings()) {
+    // (roadmap L12c) Only the layout's own `VariableCount`-flagged binding
+    // (at most one, and always the highest-numbered one -- enforced by
+    // `vkCreateDescriptorSetLayout`) is ever sized to anything other than
+    // its own declared `Count`.
+    uint32_t RealCount =
+        (B.VariableCount && VariableDescriptorCount) ? *VariableDescriptorCount
+                                                     : B.Count;
     if (isInlineUniformBlockDescriptorType(B.Type))
-      InlineUniformBlockBindings[B.Binding].resize(B.Count);
+      InlineUniformBlockBindings[B.Binding].resize(RealCount);
     else if (isImageDescriptorType(B.Type) || isSamplerDescriptorType(B.Type))
-      ImageBindings[B.Binding].resize(B.Count);
+      ImageBindings[B.Binding].resize(RealCount);
     else
-      Bindings[B.Binding].resize(B.Count);
+      Bindings[B.Binding].resize(RealCount);
   }
 }
 
@@ -170,10 +178,13 @@ DescriptorSet::inlineUniformBlockData(uint32_t Binding) const {
   return It->second;
 }
 
-DescriptorSet *DescriptorPool::allocate(const DescriptorSetLayout &Layout) {
+DescriptorSet *
+DescriptorPool::allocate(const DescriptorSetLayout &Layout,
+                         std::optional<uint32_t> VariableDescriptorCount) {
   if (RemainingSets == 0)
     return nullptr;
-  auto Set = std::make_unique<DescriptorSet>(Layout);
+  auto Set =
+      std::make_unique<DescriptorSet>(Layout, VariableDescriptorCount);
   DescriptorSet *Result = Set.get();
   Sets.push_back(std::move(Set));
   --RemainingSets;
@@ -200,14 +211,47 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
     VkDevice, const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator,
     VkDescriptorSetLayout *pSetLayout) {
+  // (roadmap L12c) `VkDescriptorSetLayoutBindingFlagsCreateInfo`'s
+  // `pBindingFlags[I]` corresponds index-for-index to
+  // `pCreateInfo->pBindings[I]` (not to that binding's own `.binding`
+  // number), per spec. Per spec, `VK_DESCRIPTOR_BINDING_VARIABLE_
+  // DESCRIPTOR_COUNT_BIT` may only be set for the layout's own
+  // highest-numbered binding -- checked below by comparing each flagged
+  // index's own `.binding` against the largest one seen.
+  const VkDescriptorBindingFlags *BindingFlags = nullptr;
+  for (const auto *Next =
+           static_cast<const VkBaseInStructure *>(pCreateInfo->pNext);
+       Next; Next = Next->pNext) {
+    if (Next->sType ==
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO) {
+      const auto *Flags =
+          reinterpret_cast<const VkDescriptorSetLayoutBindingFlagsCreateInfo *>(
+              Next);
+      if (Flags->bindingCount != pCreateInfo->bindingCount)
+        return VK_ERROR_INITIALIZATION_FAILED;
+      BindingFlags = Flags->pBindingFlags;
+      break;
+    }
+  }
+
+  uint32_t HighestBinding = 0;
+  for (uint32_t I = 0; I != pCreateInfo->bindingCount; ++I)
+    HighestBinding = std::max(HighestBinding, pCreateInfo->pBindings[I].binding);
+
   std::vector<DescriptorSetLayoutBinding> Bindings;
   Bindings.reserve(pCreateInfo->bindingCount);
   for (uint32_t I = 0; I != pCreateInfo->bindingCount; ++I) {
     const VkDescriptorSetLayoutBinding &Binding = pCreateInfo->pBindings[I];
     if (!isSupportedDescriptorType(Binding.descriptorType))
       return VK_ERROR_INITIALIZATION_FAILED;
+    bool VariableCount =
+        BindingFlags && (BindingFlags[I] &
+                        VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT);
+    if (VariableCount && Binding.binding != HighestBinding)
+      return VK_ERROR_INITIALIZATION_FAILED;
     Bindings.push_back(DescriptorSetLayoutBinding{
-        Binding.binding, Binding.descriptorType, Binding.descriptorCount});
+        Binding.binding, Binding.descriptorType, Binding.descriptorCount,
+        VariableCount});
   }
 
   Allocator Alloc(pAllocator);
@@ -263,11 +307,47 @@ VKAPI_ATTR VkResult VKAPI_CALL vkResetDescriptorPool(
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateDescriptorSets(
     VkDevice, const VkDescriptorSetAllocateInfo *pAllocateInfo,
     VkDescriptorSet *pDescriptorSets) {
+  // (roadmap L12c) `VkDescriptorSetVariableDescriptorCountAllocateInfo`'s
+  // `pDescriptorCounts[I]` corresponds index-for-index to
+  // `pAllocateInfo->pSetLayouts[I]`; an entry is only meaningful (and, per
+  // spec, only consulted) for a set whose own layout has a
+  // `VariableCount`-flagged binding at all -- ignored otherwise.
+  const uint32_t *DescriptorCounts = nullptr;
+  for (const auto *Next =
+           static_cast<const VkBaseInStructure *>(pAllocateInfo->pNext);
+       Next; Next = Next->pNext) {
+    if (Next->sType ==
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO) {
+      const auto *Counts = reinterpret_cast<
+          const VkDescriptorSetVariableDescriptorCountAllocateInfo *>(Next);
+      if (Counts->descriptorSetCount != pAllocateInfo->descriptorSetCount)
+        return VK_ERROR_INITIALIZATION_FAILED;
+      DescriptorCounts = Counts->pDescriptorCounts;
+      break;
+    }
+  }
+
   auto *Pool = fromHandle<DescriptorPool>(pAllocateInfo->descriptorPool);
   for (uint32_t I = 0; I != pAllocateInfo->descriptorSetCount; ++I) {
     auto *Layout =
         fromHandle<DescriptorSetLayout>(pAllocateInfo->pSetLayouts[I]);
-    DescriptorSet *Set = Pool->allocate(*Layout);
+
+    std::optional<uint32_t> VariableDescriptorCount;
+    if (DescriptorCounts && !Layout->bindings().empty()) {
+      const DescriptorSetLayoutBinding &LastBinding = Layout->bindings().back();
+      if (LastBinding.VariableCount) {
+        if (DescriptorCounts[I] > LastBinding.Count) {
+          for (uint32_t J = 0; J != I; ++J)
+            Pool->free(fromHandle<DescriptorSet>(pDescriptorSets[J]));
+          for (uint32_t J = 0; J != pAllocateInfo->descriptorSetCount; ++J)
+            pDescriptorSets[J] = VK_NULL_HANDLE;
+          return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        VariableDescriptorCount = DescriptorCounts[I];
+      }
+    }
+
+    DescriptorSet *Set = Pool->allocate(*Layout, VariableDescriptorCount);
     if (!Set) {
       // Per spec: on failure, every set successfully allocated by this
       // call is freed back to the pool and every element of
@@ -465,6 +545,40 @@ VKAPI_ATTR void VKAPI_CALL vkGetDescriptorSetLayoutSupport(
     Supported =
         isSupportedDescriptorType(pCreateInfo->pBindings[I].descriptorType);
   pSupport->supported = Supported ? VK_TRUE : VK_FALSE;
+
+  // (roadmap L12c) This ICD advertises no descriptor-count limit beyond a
+  // binding's own declared `descriptorCount` (see this function's own file
+  // comment above), so the flagged binding's own maximum real count is
+  // exactly that same value -- no narrower cap exists to report here.
+  for (auto *Next = static_cast<VkBaseOutStructure *>(pSupport->pNext); Next;
+       Next = Next->pNext) {
+    if (Next->sType ==
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_LAYOUT_SUPPORT) {
+      auto *Out = reinterpret_cast<
+          VkDescriptorSetVariableDescriptorCountLayoutSupport *>(Next);
+      Out->maxVariableDescriptorCount = 0;
+      const VkDescriptorBindingFlags *BindingFlags = nullptr;
+      for (const auto *In =
+               static_cast<const VkBaseInStructure *>(pCreateInfo->pNext);
+           In; In = In->pNext) {
+        if (In->sType ==
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO) {
+          const auto *Flags = reinterpret_cast<
+              const VkDescriptorSetLayoutBindingFlagsCreateInfo *>(In);
+          if (Flags->bindingCount == pCreateInfo->bindingCount)
+            BindingFlags = Flags->pBindingFlags;
+          break;
+        }
+      }
+      if (BindingFlags)
+        for (uint32_t I = 0; I != pCreateInfo->bindingCount; ++I)
+          if (BindingFlags[I] &
+              VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT)
+            Out->maxVariableDescriptorCount =
+                pCreateInfo->pBindings[I].descriptorCount;
+      break;
+    }
+  }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(

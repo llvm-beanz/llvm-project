@@ -814,4 +814,234 @@ TEST_F(DescriptorTest, InlineUniformBlockCopyBetweenSets) {
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
+/// (roadmap L12c) `VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT` on
+/// the layout's own highest-numbered binding, with no chained
+/// `VkDescriptorSetVariableDescriptorCountAllocateInfo` at allocation time:
+/// the allocated set's binding array is the full layout-declared `Count`,
+/// matching the spec's stated default ("as if... set to descriptorCount of
+/// the descriptor set layout").
+TEST_F(DescriptorTest, VariableDescriptorCountDefaultsToLayoutMax) {
+  VkDescriptorSetLayoutBinding Bindings[2]{};
+  Bindings[0].binding = 0;
+  Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Bindings[0].descriptorCount = 1;
+  Bindings[1].binding = 1;
+  Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Bindings[1].descriptorCount = 3;
+
+  VkDescriptorBindingFlags Flags[2] = {
+      0, VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
+  VkDescriptorSetLayoutBindingFlagsCreateInfo FlagsInfo{};
+  FlagsInfo.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+  FlagsInfo.bindingCount = 2;
+  FlagsInfo.pBindingFlags = Flags;
+
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.pNext = &FlagsInfo;
+  LayoutInfo.bindingCount = 2;
+  LayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+  EXPECT_TRUE(fromHandle<DescriptorSetLayout>(Layout)->find(1)->VariableCount);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+  EXPECT_EQ(fromHandle<DescriptorSet>(Set)->bindingArray(1).size(), 3u);
+
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// A chained `VkDescriptorSetVariableDescriptorCountAllocateInfo` requesting
+/// fewer than the layout's declared max sizes that one allocated instance's
+/// array to the smaller, real count -- independent of the layout's own
+/// (unchanged) max, which any other set allocated from the same layout may
+/// still use in full.
+TEST_F(DescriptorTest, VariableDescriptorCountAllocationSizesSmallerReal) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 5;
+
+  VkDescriptorBindingFlags Flag =
+      VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+  VkDescriptorSetLayoutBindingFlagsCreateInfo FlagsInfo{};
+  FlagsInfo.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+  FlagsInfo.bindingCount = 1;
+  FlagsInfo.pBindingFlags = &Flag;
+
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.pNext = &FlagsInfo;
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  uint32_t RealCount = 2;
+  VkDescriptorSetVariableDescriptorCountAllocateInfo CountInfo{};
+  CountInfo.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
+  CountInfo.descriptorSetCount = 1;
+  CountInfo.pDescriptorCounts = &RealCount;
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.pNext = &CountInfo;
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+  EXPECT_EQ(fromHandle<DescriptorSet>(Set)->bindingArray(0).size(), 2u);
+
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// A requested real count exceeding the layout's own declared max is
+/// rejected, per `VkDescriptorSetVariableDescriptorCountAllocateInfo`'s own
+/// "must be less than or equal to the descriptorCount of that binding"
+/// spec text.
+TEST_F(DescriptorTest, VariableDescriptorCountAboveLayoutMaxIsRejected) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 3;
+
+  VkDescriptorBindingFlags Flag =
+      VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+  VkDescriptorSetLayoutBindingFlagsCreateInfo FlagsInfo{};
+  FlagsInfo.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+  FlagsInfo.bindingCount = 1;
+  FlagsInfo.pBindingFlags = &Flag;
+
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.pNext = &FlagsInfo;
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  uint32_t RealCount = 4; // Exceeds the layout's declared Count == 3.
+  VkDescriptorSetVariableDescriptorCountAllocateInfo CountInfo{};
+  CountInfo.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
+  CountInfo.descriptorSetCount = 1;
+  CountInfo.pDescriptorCounts = &RealCount;
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.pNext = &CountInfo;
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  EXPECT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set),
+            VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// Per spec, `VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT` may only
+/// be used on a layout's own highest-numbered binding; setting it on any
+/// other binding is rejected at layout creation rather than silently
+/// accepted (matching this codebase's "malformed input fails cleanly"
+/// convention).
+TEST_F(DescriptorTest, VariableDescriptorCountOnNonLastBindingIsRejected) {
+  VkDescriptorSetLayoutBinding Bindings[2]{};
+  Bindings[0].binding = 0;
+  Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Bindings[0].descriptorCount = 1;
+  Bindings[1].binding = 1;
+  Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Bindings[1].descriptorCount = 1;
+
+  VkDescriptorBindingFlags Flags[2] = {
+      VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT, 0};
+  VkDescriptorSetLayoutBindingFlagsCreateInfo FlagsInfo{};
+  FlagsInfo.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+  FlagsInfo.bindingCount = 2;
+  FlagsInfo.pBindingFlags = Flags;
+
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.pNext = &FlagsInfo;
+  LayoutInfo.bindingCount = 2;
+  LayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
+/// `vkGetDescriptorSetLayoutSupport`'s own chained
+/// `VkDescriptorSetVariableDescriptorCountLayoutSupport` reports the
+/// flagged binding's own declared `descriptorCount` as its maximum -- this
+/// ICD advertises no narrower per-binding limit (see that function's own
+/// file comment).
+TEST_F(DescriptorTest, GetLayoutSupportReportsMaxVariableDescriptorCount) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 7;
+
+  VkDescriptorBindingFlags Flag =
+      VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+  VkDescriptorSetLayoutBindingFlagsCreateInfo FlagsInfo{};
+  FlagsInfo.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+  FlagsInfo.bindingCount = 1;
+  FlagsInfo.pBindingFlags = &Flag;
+
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.pNext = &FlagsInfo;
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+
+  VkDescriptorSetVariableDescriptorCountLayoutSupport CountSupport{};
+  CountSupport.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_LAYOUT_SUPPORT;
+  VkDescriptorSetLayoutSupport Support{};
+  Support.pNext = &CountSupport;
+
+  vkGetDescriptorSetLayoutSupport(Device, &LayoutInfo, &Support);
+  EXPECT_EQ(Support.supported, VK_TRUE);
+  EXPECT_EQ(CountSupport.maxVariableDescriptorCount, 7u);
+}
+
 } // namespace
