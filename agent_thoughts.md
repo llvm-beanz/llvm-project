@@ -52370,3 +52370,97 @@ end-to-end against the real `feme_vulkan` ICD, plus a bonus fix for
 `array-dynamic-index.test`; `check-hlsl-vk-feature-cbuffer` shows 0
 unexpected failures; `ninja check-feme` shows 0 failures (2289/2316,
 27 pre-existing unsupported). L17 struck through on the roadmap.
+
+# L18: a raw, un-remapped operand bug in llvm.cond_br construction, and a genuinely new gap it exposed
+
+The milestone's own hypothesis was strong and specific: it drew a direct
+analogy to L10's already-fixed `IntegerGroupNonUniformReducePattern` bug
+(an upstream pattern building an op directly from a raw SPIR-V-signed
+value instead of running it through the type converter), and guessed the
+upstream `spirv.BranchConditional`-to-`llvm.cond_br` conversion pattern
+had the identical class of bug for a block argument. I confirmed this by
+reading the actual upstream `BranchConditionalConversionPattern`
+(`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) directly: it builds
+`llvm.cond_br`'s successor operands from `op.getTrueBlockArguments()`/
+`op.getFalseBlockArguments()` (the *original* op's own accessors) rather
+than `adaptor.getTrueTargetOperands()`/`adaptor.getFalseTargetOperands()`
+(the dialect conversion's own remapped operands) -- exactly the bug
+predicted, confirmed by reducing `packed.test`'s own real SPIR-V through
+`feme-opt` and reproducing the exact `llvm.cond_br`/`si32` error verbatim.
+
+The fix itself (`BranchConditionalPattern`) is a small, surgical override,
+notably *simpler in scope* than L10's own fix: L10 had to special-case
+nine specific integer-typed reduce ops, since a float reduction's result
+type is already a valid LLVM type unchanged. Here, using the adaptor's
+own already-correctly-remapped operands is a strict improvement with zero
+downside for *any* `spirv.BranchConditional`, regardless of its successor
+operands' types -- so I registered it unconditionally, not gated on any
+particular operand type the way `IntegerGroupNonUniformReducePattern` is.
+
+After confirming the fix in isolation, I rebuilt `feme_vulkan` (remembering
+last session's own hard-learned lesson: it's a separate ninja target from
+`feme-opt`/`offloader` and must be rebuilt independently) and ran
+`packed.test` for real against the actual ICD. This is where it got
+interesting: the milestone's own cond_br error was gone, confirmed via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader` directly -- but the test
+still failed, now with an entirely different error (`'llvm.store' op
+operand #1 must be LLVM pointer type, but got
+'!llvm.target<"spirv.VulkanBuffer", ...>'`). I made sure not to just wave
+this away as "still broken, nothing changed" -- I did a real before/after
+comparison (temporary `git checkout <prior-commit> --
+SPIRVToLLVMPatterns.cpp`, rebuild, direct offloader run, then revert and
+rebuild again) to confirm this really is a *different*, later error than
+before the fix, which it is.
+
+I chased this new error down to its actual root cause rather than leaving
+it a mystery for a future session: `isBufferBlockStorage`
+(`SPIRVToLLVMPatterns.cpp`) has a real bug -- for a `StorageBuffer`-class
+pointer, it returns `true` unconditionally, without ever checking whether
+the pointee struct actually carries the `Block` decoration (unlike its own
+`Uniform`-class branch just below, which does check for `BufferBlock`).
+This means *any* struct-typed pointer with `StorageBuffer` storage class
+-- not just a real top-level buffer block -- gets misclassified as a
+buffer block itself and converted into a *second*, spurious resource
+handle. `packed.test` is (as far as I can tell from surveying every other
+`StructuredBuffer` test) the *only* real test that happens to produce this
+exact shape, because it uses a "read a whole struct into a local, mutate
+the local, write the whole local struct back" idiom
+(`Doggo Fido = Buf[GI]; ...; Buf[GI] = Fido;`) rather than always
+navigating directly to an individual scalar/vector field via a single
+multi-index access chain (which every other `StructuredBuffer` test does,
+and which never actually creates an intermediate `AccessChain` whose
+`ComponentPtr` type is itself a struct pointer). I verified this
+distinction carefully by inspecting `simple.test`/`layout.test`/etc.'s
+own HLSL and confirming none of them use the whole-struct-copy pattern.
+
+I deliberately did **not** attempt to fix this new bug within L18's own
+scope -- it's a genuinely separate root cause (a missing decoration check
+in a completely different helper function, `isBufferBlockStorage`, not
+`BranchConditionalPattern`) with its own, non-trivial blast-radius
+question (would tightening this check regress any currently-passing
+`StructuredBuffer`/`cbuffer` test whose own top-level block struct might
+somehow lack the `Block` decoration in some code path I haven't checked?).
+This matches the project's own established pattern (L13a splitting off
+L16/L17/L18 rather than trying to fix everything found along the way in
+one commit) -- I split it into a new roadmap row, L19, with the full
+root-cause diagnosis already done so a future session can move straight
+to implementing and testing the fix rather than re-deriving it.
+
+For CTS verification, I again did a real, careful before/after comparison
+(not a single unpaired run) via the same temporary-revert methodology as
+L17, this time on `dEQP-VK.ssbo.layout.*`/`dEQP-VK.ssbo.*`. Both measured
+byte-for-byte identical totals before and after -- unlike L17's own noisy
+`dEQP-VK.ubo.*` sweep, this family showed *zero* run-to-run variance at
+all for this fix, which makes sense: this fix's own target shape (an
+HLSL/`dxc`-emitted `si32` value merged across branch successors) simply
+isn't a shape this GLSL/SPIR-V-assembly-sourced CTS family happens to
+exercise. I made sure to report this honestly as "no regression evident,
+but no signal either way" rather than either omitting it or
+mischaracterizing an absence of change as confirmation of a fix.
+
+Outcome: L18's own scope (the cond_br/si32 bug) is fully fixed and
+verified (isolated `feme-opt` reduction, a new lit test, `ninja
+check-feme` with 0 regressions, and a direct real-ICD confirmation that
+the named error is gone). `packed.test` itself still fails end-to-end,
+now advancing to a distinct, already-root-caused gap tracked as new
+roadmap row L19. Struck through L18 on the roadmap; added L19.
