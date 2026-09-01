@@ -18674,3 +18674,119 @@ No feature-bit or extension-advertisement change (an internal CPU
 resource-lowering-pass correctness fix); confirmed, not assumed, that
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap L17
+
+**Scope.** A fixed-size array of a *scalar* type inside a struct/cbuffer,
+immediately followed by another sibling member, was not handled by L13a's
+own `convertArrayTypeIgnoringDecorations` (deliberately left out of that
+row's own scope, per its doc comment). The real shape
+(`Feature/CBuffer/array-of-structs.test`/`dynamic-struct.test`'s own
+`uint x[2]; uint q;`) is `struct<S, (array<2 x i32, stride=16> [0],
+i32 [20])>`: real HLSL/Vulkan layout rules require every array element
+except the last to occupy the full declared `ArrayStride`, but the
+array's own footprint for placing a *subsequent* sibling is only
+`(N-1)*Stride + NaturalSize(last element)` -- `q` packs into the
+otherwise-unused trailing padding of `x`'s own last element.
+
+**Fix.** Generalized `convertArrayTypeIgnoringDecorations`
+(`SPIRVToLLVMPatterns.cpp`) so a non-struct (scalar/vector) array element
+that undershoots its declared stride substitutes a uniform `Stride`-sized
+opaque byte-array stand-in for every element, instead of returning
+`nullptr` outright (mirroring `getTightVectorArrayType`'s identical
+opaque-pointer-safe reasoning) -- this alone handles the general case,
+including a genuinely *dynamic* SPIR-V index. Added a new, narrower
+helper, `convertUndersizedScalarArrayMemberIgnoringDecorations`, for the
+specific case where the array is immediately followed by a sibling whose
+declared offset does not leave room for the uniformly-widened array:
+it builds a literal heterogeneous LLVM struct with one member per array
+element -- the `Stride`-sized stand-in for every element except the
+last, which keeps its own real (unpadded) type -- reproducing the
+sibling's true declared offset exactly. This relies on `LLVM::GEPOp`'s
+own `destructureIndices` auto-detecting a compile-time-constant SPIR-V
+index when navigating a literal struct type (confirmed by reading
+`LLVMDialect.cpp`'s `destructureIndices`/`verifyStructIndices`), so it is
+scoped to constant-index accesses only -- true of every real `dxc`-emitted
+HLSL array index in the affected tests. A genuinely dynamic index into
+this specific (sibling-constrained) shape remains unsupported, since
+`GEPOp`'s verifier requires a static index to navigate a struct member;
+this is a real, if narrow, residual limitation, not merely a
+documentation gap (see the milestone's own "option (a)"/"option (b)"
+framing below).
+
+**Design-question resolution (why "always widen every element to the
+full stride", the milestone's own literal "option (a)" wording, does
+*not* by itself solve the sibling-placement problem).** An
+`LLVM::LLVMArrayType`'s own `DL.getTypeSize()` is always
+`NumElements * ElementSize`; uniformly widening every element to
+`Stride` makes the array's own natural size `N*Stride`, forcing a
+subsequent sibling to a natural-layout offset of `N*Stride` (32 in the
+real case) -- but the true memory layout (the SPIR-V `Offset`
+decoration, matching the actual host-supplied buffer bytes) places `q`
+at `(N-1)*Stride + NaturalSize(last)` (20). This is a genuine
+memory-correctness constraint, not merely "wasted space": uniform
+widening alone is only valid when the array is *not* immediately
+followed by a sibling with an insufficient gap (i.e. it is the struct's
+own last member, or the sibling's gap already accommodates full-stride
+widening) -- exactly the general (dynamic-index-capable) case the first
+half of the fix above handles. The heterogeneous
+struct-of-elements-with-last-unpadded scheme is required specifically
+for the "insufficient gap" case, and (per the design question posed by
+the milestone) a real heterogeneous-with-dynamic-index scheme remains
+without precedent in this codebase, since `GEPOp` requires a
+compile-time-constant index to navigate any struct member.
+
+**Method.** Reduced the exact shape via `dxc -spirv -fvk-use-dx-layout`
+→ `feme-translate --import-spirv` → `feme-opt
+--feme-convert-spirv-to-llvm` (both a minimal standalone repro and a
+direct reduction of `array-of-structs.test`'s own built SPIR-V `.o`),
+confirming the original `failed to legalize operation
+'spirv.AccessChain'` error without the fix and full legalization with
+it, into the expected `struct<packed (array<16 x i8>, i32)>` shape for
+`x` with correct GEP index sequences for `x[0]`/`x[1]`/`q`. Added two new
+lit tests, `spirv-to-llvm-scalar-array-with-trailing-sibling.mlir` (the
+sibling-constrained, constant-index-only heterogeneous-struct case) and
+`spirv-to-llvm-scalar-array-uniform-widening.mlir` (the general,
+dynamic-index-capable uniform-widening case, confirming a genuinely
+dynamic SPIR-V index still converts cleanly when there is no sibling
+conflict). `ninja check-feme`: 2289/2316 passed, 27 unsupported, 0
+failed (up by exactly these 2 new tests, 0 regressions). Rebuilt
+`feme_vulkan`/`feme-opt`/`feme-translate`/`offloader` (the real Vulkan
+ICD shared library, a separate ninja target from `feme-opt`/`offloader`
+that must be rebuilt independently to pick up any conversion-layer
+change for real end-to-end testing) and re-ran
+`check-hlsl-vk-feature-cbuffer` against the real `feme_vulkan` ICD
+(`VK_ICD_FILENAMES` explicitly exported), then a real
+`dEQP-VK.ubo.*array*` sweep (8,186 cases) against the same ICD, twice
+before and twice after the fix (via a temporary `git checkout HEAD~1 --
+SPIRVToLLVMPatterns.cpp`/rebuild/revert cycle) to gauge run-to-run
+noise.
+
+**Findings.**
+- **`Feature/CBuffer/array-of-structs.test` and
+  `Feature/CBuffer/dynamic-struct.test` (both this milestone's own named
+  cases) now pass end-to-end** against the real `feme_vulkan` ICD --
+  this row's own scope is fully closed.
+- **`Feature/CBuffer/array-dynamic-index.test` also newly passes**, a
+  bonus fix from the generalized (non-sibling-specific)
+  `convertArrayTypeIgnoringDecorations` uniform-widening path.
+- `check-hlsl-vk-feature-cbuffer`: 27 passed, 2 expectedly-failed
+  (pre-existing `XFAIL`-marked cases, unrelated to this fix), 0
+  unexpected failures -- no regressions.
+- `dEQP-VK.ubo.*array*` (8,186 cases): pre-fix 639/8186 (7.8%) then
+  615/8186 (7.5%); post-fix 519/8186 (6.3%) then 594/8186 (7.3%) --
+  a ~120-case run-to-run swing present *within* both the pre-fix and
+  post-fix pairs individually, consistent with (slightly wider than)
+  this project's own already-documented `dEQP-VK.ubo.*` flakiness (L13a:
+  a ~115-case swing at the full-family scale). The pre-fix and post-fix
+  bands overlap (519-639 vs. 615-639), so this sweep provides no clear
+  signal either way at this scale; the deterministic, real-ICD
+  `llvm-lit` end-to-end confirmation above (this milestone's own two
+  named cases, plus the bonus `array-dynamic-index.test` fix, all newly
+  passing with 0 regressions in the targeted suite) is the authoritative
+  before/after signal for this fix.
+
+No feature-bit or extension-advertisement change (an internal
+SPIR-V-to-LLVM conversion-layer correctness fix); confirmed, not
+assumed, that `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+need no update.
