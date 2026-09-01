@@ -1666,6 +1666,46 @@ void FunctionWidener::widenMaskedStore(CallInst &CI,
   // `MeshOutputWrapper.cpp`'s `lowerMeshOutputStore` already uses for its
   // own per-lane conditional writes.
   if (Matched.ValueOperand->getType()->isVectorTy()) {
+    // (Roadmap L15) A groupshared address (e.g. a masked write to a whole
+    // `float4` row of a `groupshared float4x4` at a per-lane row index,
+    // reduced from a real `WaveOps/GroupSharedMatrixRowComponentDataRace
+    // .test` failure) cannot use the generic per-lane load-select-store
+    // idiom below: that idiom extracts each lane's own scalar pointer out
+    // of `WidePtr` with an `extractelement`, a leaf `feme::cpu::
+    // rewriteGroupSharedGlobals` does not (and, since a groupshared
+    // address is retargeted to an entirely different, real per-wave
+    // buffer rather than an ordinary heap address, safely cannot)
+    // recognize as one of its own supported groupshared leaf users. A
+    // groupshared address instead decomposes into `N` per-component
+    // `llvm.masked.scatter`s, mirroring `widenMaskedLoad`'s own vector
+    // case exactly (one `getelementptr` per component off the same
+    // `<W x ptr>` row address, each scattering that component's own
+    // widened value) -- the second-level-getelementptr-feeding-a-
+    // masked-gather-or-scatter shape `rewriteGroupSharedGlobals`'s own
+    // validation and retargeting already generically support (see its
+    // own comments), so no further change is needed there.
+    if (isGroupSharedPointerType(Matched.Ptr->getType())) {
+      auto *VecTy = cast<FixedVectorType>(Matched.ValueOperand->getType());
+      Type *ElemTy = VecTy->getElementType();
+      const DataLayout &DL = NewF->getParent()->getDataLayout();
+      uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
+      SmallVector<Value *, 4> Components =
+          getVectorComponents(Matched.ValueOperand, Builder);
+      for (unsigned Idx = 0, End = VecTy->getNumElements(); Idx != End;
+           ++Idx) {
+        Value *ElemPtr = Builder.CreateGEP(
+            VecTy, WidePtr, {Builder.getInt32(0), Builder.getInt32(Idx)},
+            CI.getName() + ".elt" + Twine(Idx) + ".ptr");
+        Align ElemAlign =
+            commonAlignment(Align(Matched.Align ? Matched.Align : 1),
+                            Idx * ElemSize);
+        Builder.CreateMaskedScatter(Components[Idx], ElemPtr, ElemAlign,
+                                    EffectiveMask);
+      }
+      ToErase.push_back(&CI);
+      return;
+    }
+
     SmallVector<Value *, 4> Components =
         getVectorComponents(Matched.ValueOperand, Builder);
     Type *ValueTy = Matched.ValueOperand->getType();
