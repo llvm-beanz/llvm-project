@@ -17731,3 +17731,100 @@ not stage-specific, so no additional per-stage test is needed).
 
 No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes: no
 feature bit or extension changed by this investigation.
+
+## Roadmap H13b: measured impact (patch-constant-phase `Position`/`ClipDistance`/`CullDistance` input)
+
+**Symptom.** `vkCreateGraphicsPipelines` failed every real
+`dEQP-VK.clipping.user_defined.{clip_distance,clip_cull_distance}.vert_tess.*`
+case (feature bits provisionally flipped on to measure) with
+`"feme-cpu-wrap-patch-constant: unsupported patch-constant input system
+value"`, reported while wrapping the synthetic `<entry>.patchconstant`
+function.
+
+**Root cause.** Root-caused via a standalone IR reduction (compiling the
+exact `vktClippingTests.cpp`-shaped tessellation-control GLSL through
+`glslangValidator` directly, then a debug print added temporarily to
+`PatchConstantWrapper.cpp`'s own dispatch to see which `SignatureSystemValue`
+was actually failing): `CanonicalizeStage.cpp`'s `classifySPIRVElement`, for
+a `Hull`-stage function compiled as the patch-constant phase, only set an
+`AddrSpace == 7` (Input) element's `FromInputPatch` flag for an ordinary
+varying (`SystemValue == None`) or `PatchVertices` -- leaving every *other*
+system-value-tagged builtin input (`Position`, `ClipDistance`,
+`CullDistance`) unclassified as `FromInputPatch`, so `PatchConstantWrapper
+.cpp`'s dispatch fell through to `lowerPatchConstantSystemValue`'s narrow
+two-case special-casing (`OutputControlPointID`/`PatchVertices` only) and
+failed. This is not clip/cull-distance-specific: the real reproduction's
+*first* hit was actually `Position` (`gl_in[gl_InvocationID].gl_Position`,
+read by every real tessellation-control shader that passes its own position
+through to `gl_out[]`) -- `ClipDistance`/`CullDistance` would have hit the
+identical gap immediately afterward.
+
+**Fix.** `classifySPIRVElement`'s `FromInputPatch` condition widened to
+`Sys != SignatureSystemValue::OutputControlPointID` -- the only truly
+non-addressable, current-invocation-implicit scalar system value this phase
+reads (always `0`, the current invocation's own index; never a *different*
+control point's own copy of anything). `PatchConstantWrapper.cpp`'s own
+`InputLoad` dispatch narrowed to match: `lowerPatchConstantSystemValue` is
+now only called for the two system values it actually implements
+(`OutputControlPointID`/`PatchVertices`); every other system value (or none)
+takes `lowerPatchConstantInputLoad`'s already-correct, generic per-control-
+point array addressing. New unit test `PatchConstantWrapperTest.
+LowersClipDistanceAndCullDistanceInputPatchElements`.
+
+**Build/test.** `ninja check-feme` (assertions-enabled, ccache build)
+passes in full: 2245/2272 (27 pre-existing, unrelated `Unsupported`, 0
+`Failed`, up 1 test from this row's own new coverage).
+
+**Real CTS re-run** (feature bits provisionally flipped on to measure, then
+reverted before commit):
+
+```
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case=dEQP-VK.clipping.user_defined.clip_distance.vert_tess.1_fragmentshader_read
+```
+
+Before this row's fix: `"feme-cpu-wrap-patch-constant: unsupported
+patch-constant input system value"` (this row's own literal symptom).
+
+After this row's fix: that diagnostic is gone entirely -- confirming the fix
+-- but the same case (and every other `vert_tess.*` case) now fails one
+layer further in, with a *different* diagnostic:
+`"feme-cpu-wrap-patch-constant: masked output store references an unknown
+patch-output signature element"`. Root-caused (same live-reduction
+technique) to the same file's `AddrSpace == 8` (Output) branch of
+`classifySPIRVElement` for the patch-constant phase: an ordinary
+per-control-point output store (`gl_out[gl_InvocationID].gl_Position`) that
+ends up in the same compiled clone as genuine patch-constant outputs (tess
+factors) -- which `splitTessellationControlEntry`'s barrier-based split
+(roadmap H4a) allows whenever the source module's own `OpControlBarrier`
+precedes such a write in program order -- falls through to a bare
+`Info.Direction = SignatureDirection::Input;` placeholder never meant to be
+reached by a real case. This is a distinct, pre-existing gap in the split's
+own boundary assumption ("everything after the barrier is patch-frequency",
+falsified by this real, unremarkable shader), not specific to clip/cull-
+distance, `Position`, or even this row's own scope -- tracked as new roadmap
+H13e rather than blocking this row, which closes on its own literal,
+now-fixed terms (consuming these builtins as a patch-constant *input*).
+
+A full `dEQP-VK.clipping.user_defined.clip_distance.vert_tess.*` sweep (16
+cases, feature bits flipped) after this row's fix shows a further, useful
+detail for H13c's own row: `.1`/`.2`/.../`.8` (non-`_fragmentshader_read`)
+all hit H13e's masked-output-store error; `.1_fragmentshader_read` still
+hits H13e's error too, but `.2_fragmentshader_read` through
+`.8_fragmentshader_read` instead reach H13c's own "vertex operand 0"
+diagnostic directly (`vkCreateGraphicsPipelines` fails while wrapping the
+fragment stage's own `main`, not the hull's `main.patchconstant`) --
+correcting H13c's row text and H7y's original write-up, both of which
+claimed a clean, uniform "`_fragmentshader_read` hits H13c" split; the real
+behavior is case-shape-dependent, most likely because the fragment stage's
+own `Vertex`-operand read is only sometimes constant-foldable to a literal
+`0` depending on `numClipPlanes`-driven code shape. `vert_geom.*` is
+unaffected by this row's fix (still hits H13a's own stage-linkage error,
+unchanged, for both `.1` and `.1_fragmentshader_read`).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes yet:
+`shaderClipDistance`/`shaderCullDistance` remain `VK_FALSE` (H13a, H13c, and
+the newly-found H13e all still block a real pass), per `PhysicalDeviceInfo
+.cpp`'s own standing comment.
