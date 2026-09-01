@@ -531,7 +531,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   // dedicated-struct cross-check these must agree with.
   EXPECT_EQ(Props13.minSubgroupSize, 4u);
   EXPECT_EQ(Props13.maxSubgroupSize, 128u);
-  EXPECT_EQ(Props13.maxComputeWorkgroupSubgroups, 32u);
+  EXPECT_EQ(Props13.maxComputeWorkgroupSubgroups, 256u);
   EXPECT_EQ(Props13.requiredSubgroupSizeStages,
             static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_COMPUTE_BIT));
   // (roadmap E14) Real once `VK_EXT_inline_uniform_block` landed: see
@@ -869,7 +869,7 @@ TEST_F(
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
   EXPECT_EQ(SubgroupSizeControlProps.minSubgroupSize, 4u);
   EXPECT_EQ(SubgroupSizeControlProps.maxSubgroupSize, 128u);
-  EXPECT_EQ(SubgroupSizeControlProps.maxComputeWorkgroupSubgroups, 32u);
+  EXPECT_EQ(SubgroupSizeControlProps.maxComputeWorkgroupSubgroups, 256u);
   EXPECT_EQ(SubgroupSizeControlProps.requiredSubgroupSizeStages,
             static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_COMPUTE_BIT));
 

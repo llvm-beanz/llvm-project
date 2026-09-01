@@ -230,9 +230,9 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxComputeWorkGroupCount[0] = 65535;
   Limits.maxComputeWorkGroupCount[1] = 65535;
   Limits.maxComputeWorkGroupCount[2] = 65535;
-  Limits.maxComputeWorkGroupInvocations = 128;
-  Limits.maxComputeWorkGroupSize[0] = 128;
-  Limits.maxComputeWorkGroupSize[1] = 128;
+  Limits.maxComputeWorkGroupInvocations = 1024;
+  Limits.maxComputeWorkGroupSize[0] = 1024;
+  Limits.maxComputeWorkGroupSize[1] = 1024;
   Limits.maxComputeWorkGroupSize[2] = 64;
   // (roadmap E7) The worst case for `maxComputeWorkgroupSubgroups`: every
   // subgroup launched at the smallest allowed size still fits within one
