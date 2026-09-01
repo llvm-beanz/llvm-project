@@ -184,7 +184,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_EXT_depth_range_unrestricted` | Not implemented |  |
 | `VK_EXT_descriptor_buffer` | Not implemented |  |
 | `VK_EXT_descriptor_heap` | Not implemented |  |
-| `VK_EXT_descriptor_indexing` | Planned (in scope, not implemented) | roadmap J2: needed in large part by the ray-tracing CTS corpus, independent of ray tracing itself; also roadmap L12b/L12c, needed for an unbounded (runtime-sized) resource array to be usable end to end once L12a's own SPIR-V-to-LLVM conversion-layer fix lands |
+| `VK_EXT_descriptor_indexing` | Planned (in scope, not implemented) | roadmap J2: needed in large part by the ray-tracing CTS corpus, independent of ray tracing itself; L12a/L12c's own conversion-layer and descriptor-set-layout/allocation-time work for an unbounded (runtime-sized) resource array is now done and usable end to end (confirmed via `overflow-unbounded-array.test`), but the extension itself still is not advertised, since the aggregate `descriptorIndexing` feature bit remains false (blocked on roadmap L7's unimplemented `NonUniform` SPIR-V decoration) |
 | `VK_EXT_device_address_binding_report` | Not implemented |  |
 | `VK_EXT_device_fault` | Not implemented |  |
 | `VK_EXT_device_generated_commands` | Not implemented |  |

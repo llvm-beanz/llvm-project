@@ -435,8 +435,8 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_2 | `descriptorBindingStorageTexelBufferUpdateAfterBind` | yes | roadmap L12b: same synchronous-submission reasoning |
 | feature | VK_VERSION_1_2 | `descriptorBindingUpdateUnusedWhilePending` | yes | roadmap L12b: same synchronous-submission reasoning |
 | feature | VK_VERSION_1_2 | `descriptorBindingPartiallyBound` | yes | roadmap L12b: Descriptor.h's own zero-fill-on-unwritten behavior already satisfies this; confirmed with a real dispatch |
-| feature | VK_VERSION_1_2 | `descriptorBindingVariableDescriptorCount` | no | reserved for roadmap L12c's VARIABLE_DESCRIPTOR_COUNT plumbing |
-| feature | VK_VERSION_1_2 | `runtimeDescriptorArray` | no | reserved for roadmap L12c's VARIABLE_DESCRIPTOR_COUNT plumbing |
+| feature | VK_VERSION_1_2 | `descriptorBindingVariableDescriptorCount` | yes | roadmap L12c: `VkDescriptorSetLayoutBindingFlagsCreateInfo`/`VkDescriptorSetVariableDescriptorCountAllocateInfo` plumbed end-to-end in `Descriptor.cpp` |
+| feature | VK_VERSION_1_2 | `runtimeDescriptorArray` | yes | roadmap L12c: an unbounded (`Buf[]`) resource-array shader now compiles and dispatches correctly, its `RangeSize` resolved against the pipeline layout in `Pipeline.cpp` |
 | feature | VK_VERSION_1_2 | `samplerFilterMinmax` | no |  |
 | feature | VK_VERSION_1_2 | `scalarBlockLayout` | no |  |
 | feature | VK_VERSION_1_2 | `imagelessFramebuffer` | yes |  |

@@ -1067,6 +1067,49 @@ Roadmap L12b advertises the `shader{UniformTexelBuffer,
 StorageTexelBuffer}ArrayDynamicIndexing` bits on this basis, without waiting
 on L7.
 
+**Unbounded arrays and `VARIABLE_DESCRIPTOR_COUNT` (roadmap L12c).** An
+unbounded resource array (HLSL `RWBuffer<int> Buf[]`, SPIR-V's
+`spirv.rtarray`) has no compile-time-known element count in the shader IR
+itself: `SPIRVToLLVMPatterns.cpp`'s `getArrayedResourceCount` (L12a) encodes
+this with a reserved `RangeSize == 0` sentinel on the `handlefrombinding`
+intrinsic call rather than leaving the array unrecognized. That sentinel is
+resolved at Vulkan pipeline-compile time, not by the CPU-target lowering
+passes: `feme::vulkan::patchUnboundedResourceRanges` (`Pipeline.cpp`) walks
+the imported module right after `importShaderModule` and rewrites every
+constant-`0` `RangeSize` operand to the matching `(set, binding)`'s declared
+`DescriptorSetLayoutBinding::Count` from the pipeline layout, before the
+module reaches `SPIRVResourceLoweringPass`. Once patched, the array is an
+ordinary bounded array as far as every later pass is concerned -- no changes
+to `SPIRVResourceLoweringPass` itself were needed.
+
+A binding's own declared `Count` may itself be smaller than the heap range
+`VkDescriptorSetLayoutBinding::descriptorCount` alone would suggest, when the
+binding uses `VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT`: the real
+element count is deferred to `vkAllocateDescriptorSets` time, supplied via a
+chained `VkDescriptorSetVariableDescriptorCountAllocateInfo`. `Descriptor.h`/
+`.cpp` model this with a `DescriptorSetLayoutBinding::VariableCount` flag (set
+only on a layout's own highest-numbered binding, the only placement the spec
+permits) and an `std::optional<uint32_t> VariableDescriptorCount` threaded
+through `DescriptorSet`'s constructor and `DescriptorPool::allocate`,
+defaulting to the layout's declared maximum when a real allocation does not
+override it. No new runtime bounds-check code was needed for the case where a
+real allocation is smaller than the compile-time `RangeSize`:
+`ResourceHeap.cpp`'s `materializeHeap` already computes
+`NumToCopy = min(RangeSize, real descriptor count)` against a pre-zeroed
+heap -- a mechanism built for `descriptorBindingPartiallyBound` that
+transparently satisfies `VARIABLE_DESCRIPTOR_COUNT`'s own zero-fill semantics
+for an out-of-range index, for free.
+
+Advertising the extension itself (`VK_EXT_descriptor_indexing`) still waits
+on the aggregate `descriptorIndexing` feature bit, which in turn waits on
+roadmap L7's `NonUniform` SPIR-V decoration support -- unrelated to this
+section's own runtime-array/variable-count plumbing, which is complete and
+independently useful (an application may request the two sub-feature bits
+directly via `VkPhysicalDeviceDescriptorIndexingFeaturesEXT`/the aggregate
+Vulkan 1.2 struct without the extension name itself being enumerable, since
+the ICD does not yet list `VK_EXT_descriptor_indexing` in
+`vkEnumerateDeviceExtensionProperties`).
+
 | Vulkan descriptor type | Initial FeMe representation | Status |
 |---|---|---|
 | Storage buffer | Raw/structured `FemeDescriptor`, writable | Done (V2) |

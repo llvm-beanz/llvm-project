@@ -18176,3 +18176,61 @@ reviewed and left unchanged -- it already accurately describes the
 extension as a whole remaining unadvertised (the meta `descriptorIndexing`
 bit stays false), which is still correct after this session's sub-feature-
 level flips.
+
+## Roadmap L12c: unbounded resource array + VARIABLE_DESCRIPTOR_COUNT
+
+Real `overflow-unbounded-array.test` (`offload-test-suite`'s `feme-vk` lit
+suite) now **passes** end to end (was failing before this session), via a
+new `feme::vulkan::patchUnboundedResourceRanges` that resolves L12a's own
+reserved `RangeSize == 0` sentinel against the pipeline layout, plus a full
+`VARIABLE_DESCRIPTOR_COUNT` descriptor-set-layout/allocation object model
+(`Descriptor.h`/`.cpp`). The rest of `Feature/ResourceArrays/*` (5 pass, 2
+XFAIL, 6 unsupported) and the full `feme-vk` lit suite (484 pass, 111
+unsupported, 42 XFAIL, the same 13 pre-existing unrelated failures) show no
+regressions.
+
+`descriptorBindingVariableDescriptorCount`/`runtimeDescriptorArray` flipped
+`VK_TRUE` in both the aggregate `VkPhysicalDeviceVulkan12Features` and the
+`_EXT` pre-promotion twin, following L12b's own established convention.
+
+A real `deqp-vk` run of `descriptor-indexing.txt` (full mustpass caselist,
+115 cases) found **all 115 still report `NotSupported`**, including
+`dEQP-VK.descriptor_indexing.misc_variable_count` -- the one case that
+should most directly exercise this session's own new feature bits. Traced
+this to `vktTestCase.cpp`'s `isDeviceFunctionalitySupported`: since this
+ICD's `apiVersion` is already >= 1.2, a core-promoted extension like
+`VK_EXT_descriptor_indexing` is checked via the aggregate
+`VkPhysicalDeviceVulkan12Features::descriptorIndexing` bit alone, not the
+individual sub-bits this session flipped nor the device extension name
+list. `descriptorIndexing` correctly remains `VK_FALSE` (per L12b's own
+still-accurate reasoning: its own spec "Feature Requirements" section needs
+nearly all `shader*ArrayNonUniformIndexing` sub-bits too, blocked on roadmap
+L7's unimplemented `NonUniform` SPIR-V decoration) -- so every
+`descriptor_indexing` CTS case reporting `NotSupported` here is expected,
+correct ICD behavior, not a bug this session introduced or should chase.
+Confirmed `VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME` is (correctly, still)
+absent from `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions()` --
+no change made there, since advertising the extension name without the
+aggregate feature it promotes would not change any CTS outcome and is not
+otherwise useful until L7 lands.
+
+A regression sweep (chosen since every pipeline-compile call site was
+touched by `patchUnboundedResourceRanges`'s wiring, and `Descriptor.cpp`'s
+allocation path was substantially extended):
+- `dEQP-VK.api.info.*` (10,481 cases): 5382 pass / 569 fail -- byte-for-byte
+  identical to L12b's own baseline measurement of the same group; the 569
+  failures are entirely pre-existing `image_format_properties`/
+  `format_properties`/`get_physical_device_properties2` gaps unrelated to
+  descriptors or pipeline layouts.
+- `dEQP-VK.binding_model.*` filtered to cases with `compute` in the name
+  (6,026 cases): 1143 pass / 673 fail / remainder not-supported --
+  consistent with (well within) the already-documented
+  `dEQP-VK.binding_model.*` baseline of 10,318 total failures out of
+  150,259 cases; no failure in this subset names a descriptor-count- or
+  variable-array-related diagnostic.
+
+No dedicated full `dEQP-VK.binding_model.*`/`dEQP-VK.pipeline.*` re-run was
+done this session (the full group is 150,259/all-groups cases and a full
+54-group edition was not due); the two targeted sweeps above are the
+regression evidence for this row, per the established targeted-sweep-
+between-full-run-editions precedent from L12b.
