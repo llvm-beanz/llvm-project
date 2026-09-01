@@ -591,6 +591,17 @@ femeRTPackR16G16B16A16Snorm(FemeRTv4f32 Value, uint16_t Out[4]) {
 // time. `ResourceKind::Typed == 1`. An inactive lane (`Mask == false`) or a
 // failing bounds/kind check reads as zero, never touching `Heap`'s memory
 // (see "Bounds checking").
+//
+// (Roadmap L9) `R32_FLOAT` (`== 1`) is also accepted here: `OpImageFetch`/
+// `OpImageRead` always return a full `<4 x T>` per SPIR-V's own spec
+// regardless of the underlying format's real channel count, so a
+// single-channel-format texel buffer's *read* side still goes through this
+// 4-wide load, not the scalar `feme.cpu.resource.load.typed.f32` roadmap L9
+// itself added (that one is only reached by a scalar-typed *store*, whose
+// Texel operand SPIR-V shapes to match the shader's own declared element
+// type). The unread G/B lanes pad `0`, alpha pads `1`, matching
+// `femeRTUnpackImageTexel`'s own partial-component convention for the same
+// format.
 FemeRTv4f32 femeCpuResourceLoadTypedV4F32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex,
@@ -603,7 +614,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuResourceLoadTypedV4F32(
   _Bool IsUnorm = Desc.Format == 13; // ResourceFormat::R8G8B8A8_UNORM.
   _Bool IsSnorm = Desc.Format == 14; // ResourceFormat::R8G8B8A8_SNORM.
   _Bool IsPacked = IsUnorm || IsSnorm;
-  uint64_t ElemSize = IsPacked ? 4 : 16;
+  _Bool IsScalar = Desc.Format == 1; // (L9) ResourceFormat::R32_FLOAT.
+  uint64_t ElemSize = (IsPacked || IsScalar) ? 4 : 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
       femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
@@ -618,6 +630,12 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuResourceLoadTypedV4F32(
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return IsSnorm ? femeRTUnpackR8G8B8A8Snorm(Raw)
                    : femeRTUnpackR8G8B8A8Unorm(Raw);
+  }
+  if (IsScalar) {
+    float R;
+    __builtin_memcpy(&R, Ptr, sizeof(R));
+    FemeRTv4f32 V = {R, 0.0f, 0.0f, 1.0f};
+    return V;
   }
   return (FemeRTv4f32) * (const FemeRTv4f32Unaligned *)Ptr;
 }
@@ -644,7 +662,8 @@ femeCpuResourceStoreTypedV4F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   _Bool IsUnorm = Desc.Format == 13; // ResourceFormat::R8G8B8A8_UNORM.
   _Bool IsSnorm = Desc.Format == 14; // ResourceFormat::R8G8B8A8_SNORM.
   _Bool IsPacked = IsUnorm || IsSnorm;
-  uint64_t ElemSize = IsPacked ? 4 : 16;
+  _Bool IsScalar = Desc.Format == 1; // (L9) ResourceFormat::R32_FLOAT.
+  uint64_t ElemSize = (IsPacked || IsScalar) ? 4 : 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
       femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
@@ -657,6 +676,11 @@ femeCpuResourceStoreTypedV4F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
     uint32_t Raw = IsSnorm ? femeRTPackR8G8B8A8Snorm(Value)
                            : femeRTPackR8G8B8A8Unorm(Value);
     __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
+  if (IsScalar) {
+    float R = Value[0];
+    __builtin_memcpy(Ptr, &R, sizeof(R));
     return;
   }
   *(FemeRTv4f32Unaligned *)Ptr = (FemeRTv4f32Unaligned)Value;
@@ -888,6 +912,11 @@ femeRTPackR16G16Sint(FemeRTv4i32 Value, uint16_t Out[2]) {
 // a failing bounds/kind check reads as zero, never touching `Heap`'s
 // memory, exactly like the `<4 x float>` load above (see "Bounds
 // checking").
+//
+// (Roadmap L9) `R32_UINT`/`R32_SINT` (`== 5`/`9`) are also accepted here,
+// for the same "`OpImageFetch`/`OpImageRead` always return a full `<4 x
+// T>`" reason `femeCpuResourceLoadTypedV4F32`'s own comment explains for
+// `R32_FLOAT`. The unread G/B lanes pad `0`, alpha pads `1`.
 FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex,
@@ -900,7 +929,9 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
   _Bool IsUint = Desc.Format == 15; // ResourceFormat::R8G8B8A8_UINT.
   _Bool IsSint = Desc.Format == 16; // ResourceFormat::R8G8B8A8_SINT.
   _Bool IsPacked = IsUint || IsSint;
-  uint64_t ElemSize = IsPacked ? 4 : 16;
+  // (L9) ResourceFormat::R32_UINT/R32_SINT.
+  _Bool IsScalar = Desc.Format == 5 || Desc.Format == 9;
+  uint64_t ElemSize = (IsPacked || IsScalar) ? 4 : 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
       femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
@@ -915,6 +946,12 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return IsSint ? femeRTUnpackR8G8B8A8Sint(Raw)
                   : femeRTUnpackR8G8B8A8Uint(Raw);
+  }
+  if (IsScalar) {
+    int32_t R;
+    __builtin_memcpy(&R, Ptr, sizeof(R));
+    FemeRTv4i32 V = {R, 0, 0, 1};
+    return V;
   }
   return (FemeRTv4i32) * (const FemeRTv4i32Unaligned *)Ptr;
 }
@@ -935,7 +972,9 @@ femeCpuResourceStoreTypedV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   _Bool IsUint = Desc.Format == 15; // ResourceFormat::R8G8B8A8_UINT.
   _Bool IsSint = Desc.Format == 16; // ResourceFormat::R8G8B8A8_SINT.
   _Bool IsPacked = IsUint || IsSint;
-  uint64_t ElemSize = IsPacked ? 4 : 16;
+  // (L9) ResourceFormat::R32_UINT/R32_SINT.
+  _Bool IsScalar = Desc.Format == 5 || Desc.Format == 9;
+  uint64_t ElemSize = (IsPacked || IsScalar) ? 4 : 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
       femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
@@ -948,6 +987,11 @@ femeCpuResourceStoreTypedV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
     uint32_t Raw =
         IsSint ? femeRTPackR8G8B8A8Sint(Value) : femeRTPackR8G8B8A8Uint(Value);
     __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
+  if (IsScalar) {
+    int32_t R = Value[0];
+    __builtin_memcpy(Ptr, &R, sizeof(R));
     return;
   }
   *(FemeRTv4i32Unaligned *)Ptr = (FemeRTv4i32Unaligned)Value;

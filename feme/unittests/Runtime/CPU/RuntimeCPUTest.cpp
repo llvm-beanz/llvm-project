@@ -576,6 +576,95 @@ TEST_F(RuntimeCPUTest, TypedLoadOutOfRangeOffsetReadsZero) {
   EXPECT_FLOAT_EQ(Result[0], 0.0f);
 }
 
+// Roadmap L9 follow-up: `OpImageFetch`/`OpImageRead` always return a full
+// `<4 x T>` per SPIR-V's own spec regardless of the underlying format's
+// real channel count, so a single-channel-format texel buffer's own
+// *read* side still goes through the `<4 x float>`/`<4 x i32>` (V4) views
+// above, not the scalar ones below -- `femeCpuResourceLoadTypedV4F32`/
+// `V4I32` (FeMeRuntimeCPU.c) must therefore also decode `R32_FLOAT`/
+// `R32_UINT`/`R32_SINT` directly (zero/one-padding the unread G/B/A
+// lanes), not just the identity 4-component and packed byte formats they
+// already handled.
+TEST_F(RuntimeCPUTest, TypedLoadV4F32ScalarFormat) {
+  float Storage[1] = {3.5f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_v4f32_scalar_format",
+                               "feme.cpu.resource.load.typed.v4f32");
+  ASSERT_TRUE(Load);
+  float Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_FLOAT_EQ(Result[0], 3.5f);
+  EXPECT_FLOAT_EQ(Result[1], 0.0f);
+  EXPECT_FLOAT_EQ(Result[2], 0.0f);
+  EXPECT_FLOAT_EQ(Result[3], 1.0f);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreV4F32ScalarFormatStoresOnlyFirstLane) {
+  float Storage[1] = {0.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper = addStoreWrapper(
+      "test_typed_store_v4f32_scalar_format",
+      "feme.cpu.resource.store.typed.v4f32",
+      FixedVectorType::get(Type::getFloatTy(Ctx), 4));
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  ASSERT_TRUE(Store);
+
+  float ToStore[4] = {7.5f, 8.5f, 9.5f, 10.5f};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_FLOAT_EQ(Storage[0], 7.5f);
+}
+
+TEST_F(RuntimeCPUTest, TypedLoadV4I32ScalarFormat) {
+  int32_t Storage[1] = {-7};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_SINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_v4i32_scalar_format",
+                               "feme.cpu.resource.load.typed.v4i32");
+  ASSERT_TRUE(Load);
+  int32_t Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], -7);
+  EXPECT_EQ(Result[1], 0);
+  EXPECT_EQ(Result[2], 0);
+  EXPECT_EQ(Result[3], 1);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreV4I32ScalarFormatStoresOnlyFirstLane) {
+  int32_t Storage[1] = {0};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper = addStoreWrapper(
+      "test_typed_store_v4i32_scalar_format",
+      "feme.cpu.resource.store.typed.v4i32",
+      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  ASSERT_TRUE(Store);
+
+  int32_t ToStore[4] = {42, 43, 44, 45};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_EQ(Storage[0], 42);
+}
+
 // Roadmap L9: the scalar (single-channel-format) typed-buffer view, the
 // shape `dxc`'s own `OpImageWrite` emits for a single-channel
 // `RWBuffer<int>`/`RWBuffer<float>` -- see
