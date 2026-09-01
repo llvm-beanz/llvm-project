@@ -52291,3 +52291,82 @@ Struck through L16 with a completion note. No new milestone needed --
 the only remaining gaps this row's own audit touched
 (`array-of-structs.test`/`dynamic-struct.test`/`packed.test`) are
 already their own, separately-tracked, pre-existing rows (L17/L18).
+
+# L17: a scalar array member followed by a sibling, and a GEPOp constant-index insight
+
+The milestone's own framing posed a real design question: can a fixed-size
+scalar array whose stride exceeds its natural element size, immediately
+followed by a sibling member that doesn't leave room for uniform widening,
+be legalized at all -- and if so, does it require a genuinely dynamic index
+to work, or is a narrower, constant-index-only fix defensible?
+
+I resolved this by reading `LLVM::GEPOp`'s actual verifier machinery
+(`LLVMDialect.cpp`'s `destructureIndices`/`verifyStructIndices`), and found
+the crux: `destructureIndices` auto-detects a compile-time-constant SSA
+value (`matchPattern(val, m_ConstantInt(&intC))`) whenever the *current*
+type being navigated is a literal `LLVMStructType`, converting it into a
+static `rawConstantIndices` entry -- even though `AccessChainPattern`
+(upstream, unmodified) always passes indices as plain dynamic `Value`s.
+This means a heterogeneous-struct representation for an array is safe to
+introduce *without* touching `AccessChainPattern` at all, as long as the
+SPIR-V index actually used at that array position is a real constant --
+true of every real `dxc`-emitted HLSL array index (`x[0]`, `x[1]`, never a
+runtime value) in both of this milestone's own named tests. A genuinely
+dynamic index into this same shape remains fundamentally unsupported
+(`verifyStructIndices` rejects a non-constant struct-member index outright)
+-- this is a real, narrow residual gap, not a documentation shortcut, and I
+made sure to say so plainly in both the code doc comments and this
+milestone's roadmap/report entries rather than paper over it.
+
+I also want to flag that the milestone's own literal "option (a)" wording
+("always widening the last element too... wasting space but requiring no
+representation change") undersells the actual constraint: uniformly
+widening every element to the full stride doesn't just waste space, it
+*breaks* the sibling's own declared offset, because an
+`LLVM::LLVMArrayType`'s size is always `NumElements * ElementSize` --
+there's no way to widen only the non-last elements within a single
+homogeneous array type. So "option (a)" alone only ever works when there's
+no sibling-placement conflict in the first place (which is exactly the
+*other*, simpler half of this fix -- the generalized
+`convertArrayTypeIgnoringDecorations` uniform-widening path, which also
+happens to support a dynamic index, as a nice side benefit). The
+sibling-conflicting case genuinely needs the heterogeneous-struct
+representation (closer to the milestone's own "option (b)"), with the
+constant-index scoping limitation named above.
+
+Split the fix into these two independent halves (general uniform-widening
+vs. sibling-conflict-specific heterogeneous struct) with one new lit test
+each, so each test documents and exercises exactly one of the two design
+paths and their respective (dynamic-index-capable vs. constant-index-only)
+scopes.
+
+While validating, I hit a real time sink: after rebuilding `feme-opt`/
+`feme-translate`/`offloader`, the real end-to-end tests kept failing with
+the exact pre-fix error, even though the standalone `feme-opt` repro
+clearly worked. Root cause: `offloader` doesn't statically link the
+conversion library at all -- it loads `libfeme_vulkan.so` (the actual
+Vulkan ICD) dynamically at runtime via the Vulkan loader, and that shared
+library is a wholly separate ninja target (`feme_vulkan`) that must be
+rebuilt independently of `feme-opt`/`offloader` to pick up any
+conversion-layer change. This cost real debugging time and is worth
+calling out explicitly for any future feme session doing end-to-end
+Vulkan-ICD verification: **always rebuild `feme_vulkan` too**, not just
+`feme-opt`/`feme-translate`/`offloader`.
+
+For the CTS sweep, I did a real, careful before/after comparison
+(`dEQP-VK.ubo.*array*`, 8,186 cases, two runs on each side via a temporary
+`git checkout HEAD~1 --`/rebuild/revert cycle on just the one changed
+file) rather than a single unpaired snapshot, precisely because this
+project's own `dEQP-VK.ubo.*` family is already documented as flaky at
+scale (L13a). The pre-fix and post-fix bands (639/615 vs. 519/594)
+overlap, so this large sweep alone would have been ambiguous or even
+misleading (a naive single-run comparison could easily have looked like a
+regression); the real signal is the deterministic `llvm-lit` run against
+the real ICD, where both named tests newly pass and nothing regresses.
+
+Outcome: `Feature/CBuffer/array-of-structs.test` and
+`Feature/CBuffer/dynamic-struct.test` (L17's own two named cases) now pass
+end-to-end against the real `feme_vulkan` ICD, plus a bonus fix for
+`array-dynamic-index.test`; `check-hlsl-vk-feature-cbuffer` shows 0
+unexpected failures; `ninja check-feme` shows 0 failures (2289/2316,
+27 pre-existing unsupported). L17 struck through on the roadmap.
