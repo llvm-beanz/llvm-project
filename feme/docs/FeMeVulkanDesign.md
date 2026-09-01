@@ -2671,15 +2671,37 @@ Deviations from this section's sketch:
   counterparts, added in a follow-up V4 pass alongside the 32-bit float
   identity formats and `R8G8B8A8_UNORM` -- see
   `feme::vulkan::isTexelBufferFormatSupported`, the single place that
-  whitelist lives and is enforced at `vkCreateBufferView`). Every other
-  format `feme::cpu::ResourceFormat` lists -- the narrower-channel-count
-  32-bit-identity formats (`R32_UINT`, `R32G32_UINT`, ...: SPIR-V's own
-  `OpImageRead`/`OpImageFetch`/`OpImageWrite` always operate on a full
-  four-component vector regardless of the underlying format's real
-  channel count, so supporting these needs per-format zero/one-padding
-  logic this milestone does not add, not just another mangled call), the
+  whitelist lives and is enforced at `vkCreateBufferView`). ~~Roadmap L9~~
+  (done): the single-channel 32-bit-identity formats (`R32_FLOAT`,
+  `R32_UINT`, `R32_SINT` -- the `RWBuffer<int>`/`RWBuffer<float>` shape)
+  are now supported too, at all three layers a single-channel texel
+  buffer touches: `feme::cpu::SPIRVResourceLoweringPass::
+  isSupportedTexelElementType` accepts a bare scalar `float`/`i32`
+  element type (not just `<4 x float>`/`<4 x i32>`), matching the scalar
+  shape `dxc`'s own `OpImageWrite` emits for one (`OpImageRead`/
+  `OpImageFetch`'s Texel operand is unaffected -- SPIR-V's own spec
+  already requires a full `<4 x T>` there regardless of channel count,
+  which is why `femeCpuResourceLoadTypedV4F32`/`V4I32` needed their own
+  fix below, not just the pass); `feme::vulkan::isTexelBufferFormatSupported`
+  now accepts these three `VkFormat`s at `vkCreateBufferView`; and
+  `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32`/`LoadTypedV4I32`/
+  `StoreTypedV4I32` (FeMeRuntimeCPU.c) now recognize these formats
+  directly, zero/one-padding the unread G/B/A lanes on load and writing
+  only the addressed R lane on store -- this last piece was only found by
+  writing a real end-to-end `vkCmdDispatch` unit test
+  (`ScalarIntTexelBufferDispatchTest`, CommandBufferTest.cpp): without it,
+  a genuinely-bound `R32_UINT`/`R32_FLOAT`/`R32_SINT` buffer's *read* side
+  silently produced zero, an entirely separate gap from the one the
+  milestone's own text named. A distinct, dedicated scalar entry point
+  pair (`femeCpuResourceLoadTypedF32`/`StoreTypedF32`/`LoadTypedI32`/
+  `StoreTypedI32`) also exists, reusing the image-sampling path's own
+  `femeRTImageFormatElementSize`/`femeRTUnpackImageTexel(I32)` tables,
+  for any future caller that needs a scalar (rather than `<4 x T>`)
+  load/store ABI directly. Every other format `feme::cpu::ResourceFormat`
+  lists -- the narrower-than-32-bit-per-component and multi-channel
+  narrower-than-`<4 x T>` formats (`R32G32_UINT`, ...), the
   16-bit-per-component packed formats (`R16G16B16A16_*`), and the
-  `R11G11B10_FLOAT`/`R10G10B10A2_*` formats -- is rejected at
+  `R11G11B10_FLOAT`/`R10G10B10A2_*` formats -- is still rejected at
   `vkCreateBufferView` rather than misconverted.
 - **The persistent pipeline cache blob carries no object code.** Per this
   section's own original sketch: "Persistent cache support therefore

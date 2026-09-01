@@ -17914,3 +17914,44 @@ case list to avoid it rather than a broad `dEQP-VK.compute.*` glob.
 `maxComputeWorkGroupInvocations`/`maxComputeWorkGroupSize` are limits, not
 feature or extension bits, and neither inventory document has a
 limits-table entry for them, so no change needed in either.
+
+## Roadmap L9: real `deqp-vk` sweep after single-channel texel-buffer fix
+
+```
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.image.format_reinterpret.buffer.r32_*" \
+  --deqp-log-filename=r32texelbuffer.qpa
+```
+
+L9's own milestone text named `Basic/Matrix/*.test` (an `offload-test-suite`
+HLSL group) as this fix's expected payoff, but a real `check-hlsl-feme-vk`
+re-run (below) shows that group still fully blocked by unrelated,
+already-tracked L7 gaps -- so a real `deqp-vk` case exercising the same
+single-channel-format texel-buffer shape directly was needed to demonstrate
+this fix's actual CTS-visible impact instead.
+
+**Finding.** `dEQP-VK.image.format_reinterpret.buffer.*` reinterprets a
+storage texel buffer written with one format and read back with another,
+in-place, across a `VkBufferView` pair -- exactly the `vkCreateBufferView`
+plus typed load/store path this milestone's three fixes touch.
+`dEQP-VK.image.format_reinterpret.buffer.r32_uint_r32_sint` (single-channel
+`R32_UINT` written, reinterpreted as `R32_SINT`) went from `NotSupported`
+("Format not supported for storage texel buffers",
+`vktImageLoadStoreTests.cpp:1339`, i.e. rejected before ever reaching
+`vkCreateBufferView`'s underlying implementation) to a real `Pass`,
+confirmed by reverting the three fixed files (`git stash`) and rebuilding
+`libfeme_vulkan.so` to reproduce the `NotSupported` result, then restoring
+and rebuilding again to confirm the `Pass`. A broader sweep of the same
+group's `r32_*` cases (42 total, each reinterpreting one of `R32_UINT`/
+`R32_SINT`/`R32_SFLOAT` against a second format) shows **18 now `Pass`**
+(every pairing where *both* sides are one of `R32_UINT`/`R32_SINT`/
+`R32_SFLOAT`) with the remaining 24 still correctly `NotSupported` (the
+second format in those pairs -- `A2B10G10R10_*`, `R16G16_*`,
+`R8G8B8A8_*` -- is not in `isTexelBufferFormatSupported`'s whitelist at
+all, an intentionally out-of-scope gap, not a regression). 0 `Failed`
+throughout.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed again:
+no feature or extension bit changed by this fix (only an existing
+mandatory-format's texel-buffer usability), so no update needed in either.
