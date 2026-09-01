@@ -37,23 +37,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L10:
+Please investigate and fix the issues tracked by milestone L11:
 
-> **A handful of small, distinct residual cases from L2's own triage, each
-> needing its own individual scoping rather than sharing a root cause**:
-> `Feature/PushConstant/types.test`'s own "shader's root-constant span is not
-> fully covered by a VkPushConstantRange" failure (the test's own
-> `PushConstants:` YAML block only ever supplies one `float` value at offset 0,
-> while the shader's own `S` struct spans several more members past it -- likely
-> an `offload-test-suite`-side test-authoring gap in how its own harness sizes
-> the generated `VkPushConstantRange`, not necessarily a `feme` bug, so needs
-> checking against the harness's own range-sizing logic before assuming which
-> side to fix); a couple of `feme-cpu-simdize` "groupshared global ... feeds an
-> unrecognized broadcast"/"feeds a nested getelementptr" diagnostics
-> (`WaveOps/GroupMemoryBarrierWithGroupSync.test`,
-> `WaveOps/GroupSharedMatrixElementExprComponentDataRace.test`,
-> `WaveOps/GroupSharedMatrixRowComponentDataRace.test`); an
-> `'llvm.getelementptr'`/`'llvm.call'` "must be LLVM dialect-compatible type,
-> but got 'si32'" MLIR-dialect-conversion error
-> (`Feature/ResourceArrays/overflow-unbounded-array.test`,
-> `WaveOps/WaveActiveSum.convergence.test`)
+> **`SIMDize.cpp`'s `widenGroupSharedLoad` does not support a vector-typed
+> result for a divergent groupshared address** -- found as an L10
+> milestone-description correction:
+> `WaveOps/GroupSharedMatrixRowComponentDataRace.test` was grouped under L10's
+> own "unrecognized broadcast"/"nested getelementptr" family, but its real
+> failure is a distinct, already-documented (in a `SIMDize.cpp` comment, ~line
+> 745: "A groupshared address keeps its own dedicated gather-based widening
+> (`widenGroupSharedLoad`), which does not (yet) support a vector-typed result")
+> scope gap: a divergent groupshared address whose load result is a full row
+> (e.g. `float4`, not a scalar) has nowhere to go once `SIMDize.cpp`'s own
+> general divergent-value handling reports "function 'main' has a divergent
+> value '' of vector type" instead. Needs its own scoping pass to determine
+> whether `widenGroupSharedLoad`'s existing scalar gather-based approach extends
+> cleanly to a vector element type (likely a per-lane gather of the whole row,
+> then a `shufflevector`/`insertelement` assembly, mirroring how the scalar case
+> already gathers one lane at a time) or needs a different strategy entirely
