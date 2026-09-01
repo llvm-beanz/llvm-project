@@ -576,6 +576,156 @@ TEST_F(RuntimeCPUTest, TypedLoadOutOfRangeOffsetReadsZero) {
   EXPECT_FLOAT_EQ(Result[0], 0.0f);
 }
 
+// Roadmap L9: the scalar (single-channel-format) typed-buffer view, the
+// shape `dxc`'s own `OpImageWrite` emits for a single-channel
+// `RWBuffer<int>`/`RWBuffer<float>` -- see
+// `isSupportedTexelElementType`'s own comment, SPIRVResourceLowering.cpp.
+// Unlike the `<4 x float>`/`<4 x i32>` (V4) views above,
+// `femeCpuResourceLoadTypedF32`/`I32` reuse the image-sampling path's own
+// `femeRTImageFormatElementSize`/`femeRTUnpackImageTexel(I32)` tables, so
+// these tests exercise that reuse directly rather than a second,
+// independent conversion implementation.
+
+TEST_F(RuntimeCPUTest, TypedLoadScalarF32IdentityFormat) {
+  float Storage[1] = {3.5f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_scalar_f32",
+                               "feme.cpu.resource.load.typed.f32");
+  ASSERT_TRUE(Load);
+  float Result = 0.0f;
+  Load(Heap, 1, 0, 0, true, &Result);
+  EXPECT_FLOAT_EQ(Result, 3.5f);
+}
+
+TEST_F(RuntimeCPUTest, TypedLoadScalarF32InactiveMaskReadsZero) {
+  float Storage[1] = {3.5f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_scalar_f32_inactive_mask",
+                               "feme.cpu.resource.load.typed.f32");
+  ASSERT_TRUE(Load);
+  float Result = 1.0f;
+  Load(Heap, 1, 0, 0, /*mask=*/false, &Result);
+  EXPECT_FLOAT_EQ(Result, 0.0f);
+}
+
+TEST_F(RuntimeCPUTest, TypedLoadScalarF32UnrecognizedFormatReadsZero) {
+  // A format `femeRTImageFormatElementSize` does not decode (here, a
+  // block-compressed one this project never uses for a typed buffer)
+  // reads zero rather than aliasing element 0 -- see that function's own
+  // comment.
+  float Storage[1] = {3.5f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::ASTC_4x4_UNORM);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_scalar_f32_unrecognized",
+                               "feme.cpu.resource.load.typed.f32");
+  ASSERT_TRUE(Load);
+  float Result = 1.0f;
+  Load(Heap, 1, 0, 0, true, &Result);
+  EXPECT_FLOAT_EQ(Result, 0.0f);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreScalarF32RoundTrips) {
+  float Storage[1] = {0.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  StoreFn Store =
+      getStoreWrapper("test_typed_store_scalar_f32",
+                      "feme.cpu.resource.store.typed.f32", Type::getFloatTy(Ctx));
+  ASSERT_TRUE(Store);
+  float ToStore = 42.5f;
+  Store(Heap, 1, 0, 0, &ToStore, true);
+  EXPECT_FLOAT_EQ(Storage[0], 42.5f);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreScalarF32DroppedWithoutUavFlag) {
+  float Storage[1] = {3.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  StoreFn Store = getStoreWrapper("test_typed_store_scalar_f32_no_uav",
+                                  "feme.cpu.resource.store.typed.f32",
+                                  Type::getFloatTy(Ctx));
+  ASSERT_TRUE(Store);
+  float ToStore = 9.0f;
+  Store(Heap, 1, 0, 0, &ToStore, true);
+  EXPECT_FLOAT_EQ(Storage[0], 3.0f);
+}
+
+TEST_F(RuntimeCPUTest, TypedLoadScalarI32IdentityFormat) {
+  int32_t Storage[1] = {-7};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_SINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_scalar_i32",
+                               "feme.cpu.resource.load.typed.i32");
+  ASSERT_TRUE(Load);
+  int32_t Result = 0;
+  Load(Heap, 1, 0, 0, true, &Result);
+  EXPECT_EQ(Result, -7);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreScalarI32RoundTrips) {
+  // The exact shape this milestone's own `Basic/Matrix/*.test` reduction
+  // (`RWBuffer<int> In/Out; Out[0] = In[0];`) hits.
+  int32_t Storage[1] = {0};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_SINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  StoreFn Store =
+      getStoreWrapper("test_typed_store_scalar_i32",
+                      "feme.cpu.resource.store.typed.i32", Type::getInt32Ty(Ctx));
+  ASSERT_TRUE(Store);
+  int32_t ToStore = 123;
+  Store(Heap, 1, 0, 0, &ToStore, true);
+  EXPECT_EQ(Storage[0], 123);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreScalarI32DroppedWithoutUavFlag) {
+  int32_t Storage[1] = {3};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  StoreFn Store = getStoreWrapper("test_typed_store_scalar_i32_no_uav",
+                                  "feme.cpu.resource.store.typed.i32",
+                                  Type::getInt32Ty(Ctx));
+  ASSERT_TRUE(Store);
+  int32_t ToStore = 9;
+  Store(Heap, 1, 0, 0, &ToStore, true);
+  EXPECT_EQ(Storage[0], 3);
+}
+
 TEST_F(RuntimeCPUTest, TrustedFlagSkipsOffsetCheck) {
   // FEME_DESCRIPTOR_TRUSTED lets a deliberately over-reported access
   // through -- see "Per-descriptor control". The buffer is intentionally
