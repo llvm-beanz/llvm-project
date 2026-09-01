@@ -45,6 +45,13 @@ VulkanLayoutUtils::decorateType(spirv::StructType structType,
 
     Type memberType =
         decorateType(structType.getElementType(i), memberSize, memberAlignment);
+    // A member that itself cannot be decorated (e.g. a nested identified
+    // struct -- see the `nullptr` return below) leaves this struct equally
+    // undecoratable; propagate the failure instead of building a struct with
+    // a null member type, which every one of `StructType::get`'s own callers
+    // (its verifier included) assumes never happens.
+    if (!memberType)
+      return nullptr;
     structMemberOffset = llvm::alignTo(structMemberOffset, memberAlignment);
     memberTypes.push_back(memberType);
     offsetInfo.push_back(
@@ -113,6 +120,12 @@ Type VulkanLayoutUtils::decorateType(VectorType vectorType,
   Size elementAlignment = 1;
 
   Type memberType = decorateType(elementType, elementSize, elementAlignment);
+  // A vector's element type is always an `spirv::ScalarType` per the SPIR-V
+  // spec, which `decorateType` never fails to decorate -- but guard anyway,
+  // symmetrically with the array/struct cases below, rather than relying on
+  // that invariant silently continuing to hold.
+  if (!memberType)
+    return nullptr;
   // According to the Vulkan spec:
   // 1. "A two-component vector has a base alignment equal to twice its scalar
   // alignment."
@@ -132,6 +145,12 @@ Type VulkanLayoutUtils::decorateType(spirv::ArrayType arrayType,
   Size elementAlignment = 1;
 
   Type memberType = decorateType(elementType, elementSize, elementAlignment);
+  // An element type that cannot itself be decorated (e.g. a nested
+  // identified struct -- see the `nullptr` return in the struct overload)
+  // leaves the whole array equally undecoratable; propagate the failure
+  // instead of building an `ArrayType` with a null element type.
+  if (!memberType)
+    return nullptr;
   // According to the Vulkan spec:
   // "An array has a base alignment equal to the base alignment of its element
   // type."
@@ -167,7 +186,12 @@ Type VulkanLayoutUtils::decorateType(spirv::MatrixType matrixType,
   Size elementSize = 0;
   Size elementAlignment = 1;
 
-  decorateType(elementType, elementSize, elementAlignment);
+  Type memberType = decorateType(elementType, elementSize, elementAlignment);
+  // A matrix's element type is always an `spirv::ScalarType`, which never
+  // fails to decorate -- guarded anyway, symmetrically with the vector case
+  // above.
+  if (!memberType)
+    return nullptr;
   // According to the Vulkan spec:
   // "A matrix type inherits scalar alignment from the equivalent array
   // declaration."
@@ -182,6 +206,12 @@ Type VulkanLayoutUtils::decorateType(spirv::RuntimeArrayType arrayType,
   Size elementSize = 0;
 
   Type memberType = decorateType(elementType, elementSize, alignment);
+  // An element type that cannot itself be decorated (e.g. a nested
+  // identified struct) leaves the whole runtime array equally
+  // undecoratable; propagate the failure instead of building a
+  // `RuntimeArrayType` with a null element type.
+  if (!memberType)
+    return nullptr;
   return spirv::RuntimeArrayType::get(memberType, elementSize);
 }
 
