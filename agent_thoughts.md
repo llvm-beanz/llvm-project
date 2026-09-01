@@ -50771,3 +50771,159 @@ matches `FeMeCPUDesign.md`'s own existing "Phase 4: Widening" description;
 sub-issue 3's new conversion pattern follows the exact
 `RotateConversionPattern`/`FeMeBenefit` precedent
 `FeMeVulkanDesign.md` already documents for F2).
+
+# Roadmap L11: groupshared vector-row load widening
+
+## Investigation
+
+L10's own investigation had already split this out: `WaveOps/
+GroupSharedMatrixRowComponentDataRace.test` was originally grouped under
+L10's "unrecognized broadcast"/"nested getelementptr" diagnostic family,
+but turned out to hit a distinct, already-documented scope gap instead --
+`SIMDize.cpp`'s own file comment on `widenGroupSharedLoad` said outright
+that a groupshared address's *vector-typed* load result (e.g. reading a
+whole `float4` row out of a `groupshared float4x4` at a per-lane row
+index) was not yet supported, reporting "function 'main' has a divergent
+value '' of vector type" instead of a real diagnostic naming the actual
+gap. Confirmed this framing exactly by reading `checkVectorDecomposition
+Supported`'s per-`LoadInst` producer check (an explicit `!isGroupShared
+PointerType(...)` exclusion) and the existing `widenGroupSharedLoad`
+(a single scalar `llvm.masked.gather`, no vector case at all).
+
+## The two-file fix
+
+Looked at `widenScalarizedFallback` (the *ordinary*, non-groupshared
+vector-load decomposition, added for H7o) as the design precedent: it
+decomposes a divergent-address vector load into `N` separate `<W x
+elemT>` components via per-lane clone-and-reassemble, recorded in
+`WidenedVectorComponents`. A groupshared address is different -- it's
+already a real `<W x ptr>` vector-of-pointers value (built by
+`widenGroupSharedGEP`), not a value needing per-lane extraction -- so
+the natural fix is a per-*component* `getelementptr` off that same row
+address (LLVM treats a fixed-vector source element type as an indexable
+sequential type exactly like an array, and broadcasts a scalar index
+across a vector base pointer automatically -- the same rule
+`widenGroupSharedGEP` already exploits one level up for the outer array
+index), then one `llvm.masked.gather` per component.
+
+Implemented this in `widenGroupSharedLoad`, updated the producer-check
+comment and exclusion in `checkVectorDecompositionSupported` to accept
+it, and wrote a new lit test (`simdize-groupshared-vector-row-load.ll`)
+reading a `<4 x float>` row from a `groupshared` array at a divergent
+index, result left unused (mirroring `simdize-groupshared-divergent-
+index.ll`'s own established pattern of isolating the load's own
+widening from any particular consumer shape).
+
+Running the new test surfaced a second, necessary fix: the per-component
+`getelementptr` is a *second-level* GEP (off the first-level, already-
+widened row-address GEP), a shape `GroupShared.cpp`'s
+`rewriteGroupSharedGlobals` had never anticipated -- its validation loop
+rejected any GEP user of a first-level GEP unless it was a recognized
+leaf or broadcast, and `retargetGroupSharedProducer`'s trailing loop
+unconditionally skipped every `GetElementPtrInst` use (relying on a
+separate caller loop that only ever handles *first*-level GEPs). Fixed
+both: extended the validation loop to accept a second-level nested GEP
+whose own users are all ordinary leaf accesses, and extended
+`retargetGroupSharedProducer` to rebuild and recursively retarget a
+nested GEP off a first-level-GEP producer (rather than skip it), using
+`isa<GlobalVariable>(OldProducer)` to distinguish "this GEP use is
+handled by someone else" (true only when retargeting `GV` itself) from
+"this GEP use needs handling right here" (true when retargeting a
+first-level GEP that itself has a nested-GEP user).
+
+## A subtlety caught before committing: over-generalizing the nested-GEP acceptance
+
+My first version of the `GroupShared.cpp` validation-loop fix accepted
+*any* second-level nested GEP whose own users were ordinary leaves, with
+no further gate. Running the full groupshared lit-test suite caught this
+immediately: `simdize-groupshared-nested-gep-unsupported.ll` -- an
+existing test asserting that an *ordinary, uniform* nested array-of-
+arrays access (`shared[0][2]`, both indices constant) is still correctly
+rejected, per milestone 9's own original scope narrowing -- started
+passing through instead of erroring. The fix was too broad: it couldn't
+tell "a per-component GEP off a divergent, already-widened row address"
+(the new, legitimately-supported L11 shape) apart from "an ordinary
+nested GEP chain into groupshared memory" (the shape milestone 9
+deliberately left unsupported and this test exists specifically to
+guard). Added the missing gate: `GEP->getType()->isVectorTy()`, checking
+that the *first*-level GEP's own result type is a vector of pointers
+(true only when it was built by `widenGroupSharedGEP` widening a
+divergent index; false for an ordinary uniform GEP chain, whose type
+stays a scalar `ptr`). Re-ran the full groupshared suite after the fix:
+all 9 tests, including the nested-gep-unsupported one, pass correctly.
+This is exactly the kind of validation-loop scope creep the standing
+instructions' "small, surgical changes" guidance warns against, and
+worth flagging here since it would have silently widened this pass's
+accepted-shape surface well beyond what L11 asked for.
+
+## A second subtlety: alignment and null-pointer crash from `OldF`
+
+First implementation of the per-component gather's alignment simply
+reused `LI.getAlign()` (the whole row load's own alignment) unchanged
+for every component. This is unsound: a 16-byte-aligned `<4 x float>`
+row's second element sits at only a 4-byte-aligned offset, not 16, so
+claiming `align 16` on that component's gather pointer overstates its
+real alignment and would be a real correctness bug (not merely
+suboptimal) if the vectorizer or backend ever relied on it. Fixed by
+computing each component's alignment via `commonAlignment(LI.getAlign(),
+Idx * ElemSize)`, using the module's `DataLayout` for `ElemSize`.
+
+Getting the `DataLayout` crashed at first: I reached for `OldF->getParent
+()->getDataLayout()`, not noticing `OldF`'s own declaration comment --
+"null from that point on" once `buildWidenedFunction` splices the old
+function's body into `NewF` and erases `OldF`, specifically so a stray
+post-widening use of the freed function crashes loudly instead of
+reading freed memory. `widenGroupSharedLoad` runs well into Pass 2,
+after that point, so `OldF` was already `nullptr`. Fixed by using
+`NewF->getParent()` instead (the live function being built, same
+module, same `DataLayout`) -- exactly the safety net that comment
+describes working as intended, once I read it.
+
+## Verification
+
+`feme-opt`-based `FileCheck` test passes (`align 16`/`align 4`/`align 8`/
+`align 4` per component, matching each component's real, narrower-than-
+the-row alignment). All 9 `simdize-groupshared-*.ll` lit tests pass, all
+145 `Transforms/CPU` lit tests pass, and a full `ninja -C build check-feme`
+(assertions-enabled, ccache build) passes 2269/2296 (27 pre-existing,
+unrelated `Unsupported`, 0 `Failed`). A real `deqp-vk` smoke sweep
+(`dEQP-VK.api.info.*`, 10484 cases) shows no regression versus the
+pre-fix baseline; `dEQP-VK.compute.shared_memory.*` resolves to zero
+cases in this CTS build, and no other `deqp-vk` group plausibly reaches
+this fix's own code path, so (consistent with L9/L10's own precedent)
+this fix remains confirmed only via its own direct `offload-test-suite`/
+reduced-IR reproduction, recorded in `VulkanCTSReport.md`'s new "Roadmap
+L11" section.
+
+Did not attempt a full `offload-test-suite`/`check-hlsl-feme-vk` rebuild-
+and-rerun of the real `GroupSharedMatrixRowComponentDataRace.test` this
+session -- no cached build tree exists for that suite in this
+environment, and configuring+building it from scratch was out of
+proportion to this milestone's own scope given the lit reduction already
+reproduces the exact divergent-vector-groupshared-load code path this
+milestone names. Flagging this explicitly rather than silently skipping
+it, in case a future session has that build tree available and can close
+the loop.
+
+## Design doc and roadmap bookkeeping
+
+Updated `FeMeCPUDesign.md`'s "Vectors become components, not nested
+vectors" deviation note to add this as an eleventh decomposition
+producer shape, and its groupshared-canonicalization note to record the
+narrow, specifically-gated exception (first-level GEP type is a vector
+of pointers) to the "nested getelementptr remains unsupported" scope
+limit. Struck through roadmap L11 with a full writeup. No
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change needed
+-- an internal compiler-pass correctness fix, no feature or extension
+surface touched.
+
+An unrelated, pre-existing crash bug was found (and deliberately not
+fixed) while iterating on the new test: `widenGroupSharedStore`
+unconditionally does `Widened.lookup(SI.getPointerOperand())` for its
+`WidePtr`, with no uniform-pointer fallback the way
+`widenGroupSharedAtomicRMW` has -- a raw store with a *uniform* address
+but *divergent* value null-derefs into `CreateMaskedScatter`. Out of
+L11's own scope (the real CTS test's store side goes through the
+already-correct `widenMaskedStore`, not this raw-store path) and not
+otherwise reachable from any currently-tracked roadmap row, so not added
+as a new row this session; noting it here in case it resurfaces.
