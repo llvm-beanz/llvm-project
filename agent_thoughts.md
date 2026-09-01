@@ -51462,3 +51462,128 @@ No feature-bit or extension changes this session — purely an internal
 MLIR correctness fix, so `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` were left untouched (confirmed, not just
 assumed).
+
+# Session: Roadmap L13 — nested-identified-struct-in-array conversion gap
+
+## Task
+
+L5's own fix (previous session) stopped a `mlir::VulkanLayoutUtils::
+decorateType` crash on a nested identified struct, but left the shape
+itself unconverted -- 6 real `offload-test-suite` cases still failed
+gracefully with `"failed to legalize operation 'spirv.AccessChain' that
+was explicitly marked illegal"`. This session's job: root-cause and fix
+(or scope) that remaining gap.
+
+## Investigation
+
+Reduced all 6 real failing tests from scratch (`dxc` -> `feme-translate
+--import-spirv` -> `feme-opt --feme-convert-spirv-to-llvm`), confirming
+each uses `-fvk-use-scalar-layout`/`-fvk-use-dx-layout` (HLSL/DirectX-
+style tight constant-buffer packing). Added temporary debug prints inside
+`convertOffsetStructTypeIgnoringDecorations`'s offset-validation loop to
+see exactly which member/offset disagreed, and found the milestone's own
+framing (a "nested identified struct" problem) was not quite right: a
+nested identified struct converts recursively just fine on its own. The
+*actual* blocker is that function's own natural-ABI-layout check failing
+to reproduce a declared offset for a **vector-typed member** specifically
+-- e.g. `int3 Legs` at offset 0 followed by `int TailState` at offset 12
+(tightly packed, as `-fvk-use-dx-layout` emits) versus LLVM's own vector
+ABI size/alignment, which rounds the innermost dimension up to the next
+power of two (`vector<3xi32>`'s own ABI size/align computed as if it were
+4 lanes, i.e. 16 bytes, not the tightly-packed 12 the real offset needs).
+This is a `DataLayoutInterfaces.cpp`-level LLVM/MLIR behavior, not
+something under FeMe's control directly -- it exists purely for hardware
+SIMD-register purposes and has nothing to do with SPIR-V/HLSL's own
+packing rules.
+
+Initially worried there might be a *second*, materially larger root cause
+too: SPIR-V/HLSL cbuffer fixed-size arrays of a small element (`uint
+x[2]`) declare a 16-byte-per-element stride (HLSL's mandatory "one
+register per array element" rule) that doesn't match
+`VulkanLayoutUtils::getNaturalArrayStride`'s tight computation, which
+would need a real "slot-padded array + extra GEP index" scheme touching
+every AccessChain conversion path -- a much bigger, riskier change. Went
+as far as scoping how that would need to work (a `spirv::ArrayType`
+override producing a padded array representation, plus teaching both
+FeMe's own `rewriteBlockAccess` and upstream's generic `AccessChainPattern`
+to inject a trailing index-0) before deciding to defer it to a follow-up
+row if actually needed. It turned out **not** to be needed: once the
+vector-offset gap was fixed, all 6 real tests -- including the 3 with
+fixed-size cbuffer arrays (`structs.test`, `array-of-structs.test`,
+`dynamic-struct.test`) -- passed end-to-end. Their own arrays' declared
+strides happened to already match `getNaturalArrayStride`'s computation
+(worth remembering for next time: don't assume a theoretically-plausible
+second root cause is actually present in the real test set without
+checking end-to-end first).
+
+## The fix
+
+Two changes, both in `SPIRVToLLVMPatterns.cpp`:
+
+1. **`convertOffsetStructTypeIgnoringDecorations`'s "tight-vector
+   retry"**: if the ordinary natural-ABI-layout attempt fails and at
+   least one member is vector-typed, retry once with every vector member
+   represented as a same-bit-width, tightly-packed `!llvm.array<N x
+   ScalarTy>` instead (whose own natural alignment/size has no
+   power-of-two rounding), redoing the offset validation. This is a pure
+   fallback -- only reachable once the ordinary attempt already failed --
+   so it cannot change the representation of any struct shape that
+   already converts successfully today. Zero regression risk by
+   construction, which mattered a lot given how central this function is
+   (shared by every uniform/storage-buffer-block struct conversion).
+
+2. **A struct case for `CompositeConstructPattern`**: while confirming
+   the fix worked end-to-end, discovered `packed.test`'s own `Doggo Fido
+   = Buf[GI]; ...; Buf[GI] = Fido;` shape assembles the whole struct
+   value via `spirv.CompositeConstruct` before storing it -- and MLIR
+   has *no* conversion pattern at all for a struct-typed
+   `CompositeConstruct` (only a 1-D-vector case existed, confirmed by
+   grepping both FeMe's own patterns and upstream `SPIRVToLLVM.cpp`).
+   This is a genuinely separate, pre-existing gap, not something the
+   vector-offset fix introduced -- it would have blocked `packed.test`
+   regardless. Added the struct case: one `llvm.insertvalue` per member
+   in SPIR-V's own required 1:1 constituent-to-member order. Tried a
+   `llvm.bitcast` first to reinterpret a real-vector constituent as the
+   substituted array-typed field, but `llvm.bitcast`'s own verifier
+   rejects any aggregate result outright -- switched to a lane-by-lane
+   `llvm.extractelement` + `llvm.insertvalue` reassembly instead, which
+   works for any vector/array pair of matching lane count.
+
+Also renamed L5's own negative regression lit test
+(`spirv-to-llvm-nested-identified-struct-invalid.mlir`, which exercised
+exactly this shape and expected the graceful failure) to
+`spirv-to-llvm-nested-identified-struct.mlir` and flipped it to a
+`CHECK`-verified positive test, since the shape it names now converts
+successfully -- keeping a stale "invalid" test around that's actually
+valid now would be misleading.
+
+## Verification
+
+`ninja check-feme` (assertions-enabled, ccache build): 2281/2308 passed,
+27 pre-existing unrelated `Unsupported`, 0 `Failed`. Rebuilt `offloader`/
+`feme_vulkan` and ran the real `feme-vk` offload-test-suite lit tree: all
+6 targeted tests now pass individually and as part of a full-suite run
+(650 discovered, 13 unrelated pre-existing failures remain -- `HLSLLib`
+math functions, `InlineRT` ray tracing, `Bugs/UAV`, `Tools/BufferFormats`
+-- none touched by this session). Ran a targeted `dEQP-VK.ubo.*`/`dEQP-VK.
+ssbo.layout.*` sweep against the real `deqp-vk` CTS (same groups L5's own
+sweep used, for direct comparability): `ubo.*` (1169/13240, 8.8% pass)
+falls inside L5's own documented run-to-run flakiness band (1118-1239
+across five runs with zero code difference); `ssbo.layout.*` (227/5275,
+4.3% pass) is a small, real improvement over L5's own recorded baseline
+(223/5275, 4.2%), consistent with this fix's own scope. No crash in
+either sweep.
+
+## Scope call
+
+Considered whether to hold off on the `CompositeConstructPattern` struct
+case (a second, distinct-feeling change) and land only the tight-vector
+retry this session, deferring `packed.test` to a follow-up row. Decided
+against it once it became clear the struct-construct gap was small,
+narrowly scoped (SPIR-V's struct-construct semantics require an exact
+1:1 constituent-to-member match, unlike the vector case's "contiguous
+subset" flexibility, so the pattern extension is simple), and needed to
+actually clear all 6 real cases the milestone named -- landing only half
+the fix and calling L13 "partially done" felt like an artificial split
+for its own sake rather than a genuinely separate unit of work. Roadmap
+L13 is struck through in full; no follow-up sub-milestone needed.
