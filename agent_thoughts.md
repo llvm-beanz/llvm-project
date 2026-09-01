@@ -51863,3 +51863,158 @@ a distinct SIMDize.cpp gap, not a sub-part of L11 -- following the same
 "new row for a milestone-description correction" convention L6/L10/L11
 already established) to track the two real gaps found. Neither attempted
 within this same session, matching L14's own explicitly audit-only scope.
+
+# L13a: identified-struct array/member stride padding
+
+## Root cause
+
+`mlir::VulkanLayoutUtils::decorateType` (`mlir/lib/Dialect/SPIRV/Utils/
+LayoutUtils.cpp`) unconditionally returns `nullptr` when asked to
+re-decorate an *identified* (named) struct — identified structs are
+uniqued by name, so a second, differently-decorated copy isn't possible
+in MLIR's own type system. That means `VulkanLayoutUtils::
+getNaturalArrayStride`, which upstream's own `convertArrayType`
+(`SPIRVToLLVM.cpp`) calls to check whether a converted array type's
+natural stride matches the SPIR-V type's own declared `ArrayStride`,
+always fails for an array whose element is an identified struct —
+regardless of whether the stride is actually reproducible some other
+way. The same shape recurs for a plain (non-array) struct member: L13's
+own "tight-vector retry" fallback in `convertOffsetStructTypeIgnoringDe
+corations` already handles a vector-typed member's ABI-rounding gap, but
+had no equivalent path for a struct-typed member (or array-of-struct-
+typed member) whose *own* natural size undershoots the declared gap to
+its next sibling.
+
+## Design: append, don't wrap
+
+The fix (`padStructToSize`) pads an already-bodied `LLVM::LLVMStructType`
+by *appending* a new trailing byte-array member to its existing body —
+never by wrapping it in a brand-new outer struct. This is the single
+most important design decision in this change, and worth writing down
+precisely why:
+
+Struct layout computation (both LLVM's own ABI layout and this project's
+own explicit-offset conversion) is strictly forward-only: member `i`'s
+own offset depends only on members `0..i-1`, never on anything after it.
+Appending a new member at the very end can therefore never change any
+*earlier*, already-real member's own offset. That means:
+
+- GEP-based navigation into any pre-existing (real) field computes
+  byte-for-byte identical offsets whether it uses the unpadded or the
+  padded version of the struct's own type.
+- FeMe's own `rewriteBlockAccess` pattern (`SPIRVToLLVMPatterns.cpp`)
+  re-derives an accessed member's type fresh from the *original*
+  (unpadded) SPIR-V type each time, rather than reusing the padded
+  substitution embedded in the outer struct — and this is safe, not a
+  bug, precisely because of the append-only/forward-only property above.
+  **No consumer-side (`AccessChain`/GEP) code change was needed at all**
+  for this fix, unlike L13's own tight-vector substitution, which does
+  require `CompositeConstructPattern`'s struct case to know how to
+  reassemble a tight-vector-substituted member.
+
+I verified this by hand — tracing `structs.test`'s own multi-field
+struct `Z`, which has a non-zero-offset field `y` positioned *after* the
+struct member this fix pads — through to a successful legalization, and
+by writing a lit test (`spirv-to-llvm-array-of-identified-struct-stride
+.mlir`) that checks the exact GEP index sequence for both the array-
+element case and the standalone-member case, confirming neither needs an
+extra "unwrap" index.
+
+By contrast, *wrapping* a member in a brand-new `{OriginalType, Padding}`
+outer struct would add a genuine extra level of GEP nesting that every
+consumer would need to know to unwrap — the approach I deliberately did
+not take.
+
+## What I deliberately left out of scope
+
+While investigating, I found and then reverted a "scalar-wrap" fallback
+that would have also padded a *scalar*-typed array element (e.g. `uint
+x[2]` inside a struct, immediately followed by another member `uint q`).
+The real semantics there are more subtle than the identified-struct case:
+every array element *except the last* must occupy the full declared
+stride (so a dynamic index into the array still addresses correctly),
+but the array's own *overall* footprint — for the purposes of where a
+*subsequent* sibling member gets placed — is only `(N-1)*Stride +
+NaturalSize(last element)`, since a real HLSL/Vulkan-valid layout allows
+that next sibling to pack into the otherwise-unused trailing padding of
+the array's own last element. A single, homogeneous `LLVM::LLVMArrayType`
+cannot represent "N-1 stride-wide elements plus one natural-size
+element" at all. Representing it as a heterogeneous struct instead
+(`struct<(array<(N-1) x Padded>, Unpadded)>`) would in turn break dynamic
+indexing, since LLVM `getelementptr` struct-member selection requires a
+compile-time-constant index. This is a strictly harder problem than the
+append-only padding above, and materially outside what L13a's own stated
+scope (the tight-vector-retry fallback specifically) asked for — I
+tracked it as new roadmap row L17 rather than trying to solve it in the
+same change.
+
+I also found, only by actually rebuilding and rerunning the real
+`offload-test-suite`/`feme-vk` suite against the real `feme_vulkan` ICD
+(not just `feme-opt`), that this fix is necessary but *not* sufficient
+for `structs.test` to pass end to end: `SPIRVResourceLowering.cpp`'s own
+`hasOnlySupportedUses`/`hasOnlySupportedPointerUses` never allows a
+`getelementptr` past a `cbuffer` (`HandleKind::Uniform`) resource's own
+`getpointer` result at all — a pre-existing limitation of a completely
+different compiler phase (LLVM-IR-to-CPU-runtime resource lowering, not
+SPIR-V-to-LLVM-dialect conversion) that this row's own scope never
+touched. I only found this by setting `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+and running `offloader` directly (bypassing `llvm-lit`, whose own
+`lit.cfg.py` strips that env var), the same diagnostic technique roadmap
+row L2 established. Tracked as new roadmap row L16 — this is the single
+most important finding of this session, since without it I would have
+(incorrectly) believed the milestone was fully, end-to-end complete
+based on the `feme-opt` reduction alone.
+
+Finally, `packed.test` — one of L5's own original 6 crash cases, and one
+of L13's own 4 still-graceful-failure cases — now reaches a *different*
+failure than either of those rows saw (`'llvm.cond_br' op operand #1 ...
+got 'si32'`) once this fix advances its own legalization further. This
+looks structurally similar to L10's own already-fixed `si32`
+`GroupNonUniformReduce` gap (an upstream MLIR pattern building an op
+directly from a raw, un-type-converted SPIR-V-signed type), but for
+`spirv.BranchConditional`'s own block-argument type instead — not yet
+root-caused with a real IR reduction, so tracked as new roadmap row L18
+rather than guessed-and-fixed blind.
+
+## Verification
+
+Confirmed via direct `feme-opt --feme-convert-spirv-to-llvm` reduction
+that `structs.test`'s own real SPIR-V (and a minimal `X x1; X x2;`
+repro) now fully legalizes, and that the two already-passing L13 cases
+(`CBuffer/vectors.test`, `ConstantBufferT/vectors.test`) still legalize
+unchanged. New lit test `spirv-to-llvm-array-of-identified-struct-stride
+.mlir`; `ninja check-feme` (ccache + assertions) passes in full,
+2283/2310 (27 pre-existing unrelated `Unsupported`, 0 `Failed`, up by
+exactly this session's 1 new lit test).
+
+Re-ran `check-hlsl-vk-feature-{cbuffer,structuredbuffer,constantbuffert}`
+against the real `feme_vulkan` ICD (confirmed via `vulkaninfo --summary`
+reporting `FeMe CPU Vulkan Device`, with `VK_ICD_FILENAMES` explicitly
+exported per `feme/.instructions.md`) and a `dEQP-VK.ubo.*`/`dEQP-VK.ssbo
+.layout.*` sweep from `/home/dev/dev/VK-GL-CTS/`. The `ubo.*` sweep
+turned out to be measurably flaky at this scale in this container — two
+back-to-back runs of the identical post-fix binary measured 1051/13240
+and 1166/13240 respectively, a ~115-case swing with no code change in
+between. I reported both numbers rather than picking whichever one made
+the fix look better, and noted both bracket the prior L14-recorded
+baseline (1160/13240) with no clear regression evident within that noise
+band — a i-am-not-sure-and-am-saying-so situation is better than a false
+confident claim, especially given this project's own already-documented
+history (L13, L14) of a milestone's own "confirmed" note turning out not
+to hold under a later, more careful rerun. `ssbo.layout.*` was
+byte-for-byte identical to the prior baseline, as expected since this
+fix's own shape (a uniform-block/`cbuffer` struct member) is not
+exercised by that SSBO-only family.
+
+## Roadmap
+
+Struck through L13a with a completion note distinguishing what it fixed
+(confirmed, tested, in-scope) from what a real end-to-end rerun found
+still blocked (three distinct, deeper gaps this row's own scope never
+touched). Added three new top-level rows — L16, L17, L18 — each citing
+L13a as parent, rather than nesting them one letter deeper under L13a
+itself, since L13a already used up L13's own one-lowercase-letter
+nesting allowance (matching the precedent L2's own L9/L10/L11/L12
+child rows, and L10's own L11/L12 children, already established: a
+milestone-description correction discovered from an already-nested row
+gets a fresh top-level letter, not a second level of nesting).
