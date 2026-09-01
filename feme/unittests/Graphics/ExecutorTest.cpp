@@ -894,22 +894,52 @@ TEST(ExecutorTest, CullsEveryTriangleWithFrontAndBack) {
     EXPECT_EQ(Byte, 0);
 }
 
-TEST(ExecutorTest, RejectsUnsupportedTopology) {
+// (roadmap H7l) Every adjacency topology is legal on a pipeline with no
+// bound geometry stage at all -- `VUID-VkGraphicsPipelineCreateInfo-
+// topology-00738`/neighbors require the `geometryShader` *device feature*
+// (this ICD always advertises it), not that this particular pipeline
+// binds a geometry stage. Found via a real `dEQP-VK.clipping.clip_volume.
+// depth_clamp.triangle_list_with_adjacency` reproduction, whose own
+// vertex/fragment-only pipeline is exactly this combination. Per the
+// spec's own "Primitive Topologies" text, "if there is no geometry
+// shader, ... adjacency ... is ignored" -- rasterization proceeds exactly
+// as `stripAdjacency(Topology)` (here, `TriangleList`) would, reading
+// only each primitive's 3 core vertices out of its 6-vertex adjacency
+// window (`v0, adj01, v1, adj12, v2, adj20`, `SplitPrimitiveAdjacency`'s
+// own documented order).
+TEST(ExecutorTest, RendersTriangleListWithAdjacencyCoreTriangleWithoutAGeometryStage) {
   Context Ctx;
-  // `*WithAdjacency` topologies need a geometry stage (roadmap R34), still
-  // unimplemented; every other topology is now accepted (roadmap C4).
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
       Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
       PrimitiveTopology::TriangleListWithAdjacency);
   ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
 
+  // Core vertices (0, 2, 4) are the same full-viewport-covering, opaque
+  // red triangle `FillsFullyCoveredTriangleWithSolidColor` uses; the
+  // adjacency-only vertices (1, 3, 5) sit at a position a leaked core
+  // triangle could never reach (far outside the [-1, 1] NDC square) and
+  // in a different, easily distinguished color (blue), so accidentally
+  // rasterizing them would visibly fail the all-red check below.
   TriangleScene Scene;
-  Scene.VertexData = {-1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
-                      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
-                      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0 (core)
+      50.0f, 50.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, // adj01
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1 (core)
+      50.0f, 50.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, // adj12
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2 (core)
+      50.0f, 50.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, // adj20
+  };
   PreparedDraw Draw = Scene.prepare();
 
-  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw), Failed());
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = Scene.AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 255) << "texel " << I;
+    EXPECT_EQ(Texel[1], 0) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
 }
 
 // roadmap C4: `mapTopology` beyond `TriangleList`/`TriangleStrip`. A
@@ -4240,21 +4270,41 @@ TEST(ExecutorTest, GeometryStageInvocationsRunOncePerDeclaredInvocationCount) {
   }
 }
 
-TEST(ExecutorTest, RejectsAdjacencyTopologyWithoutAGeometryStage) {
+// (roadmap H7l) Same fix as `RendersTriangleListWithAdjacencyCoreTriangle
+// WithoutAGeometryStage` above, exercised through `LineListWithAdjacency`
+// instead: each 4-vertex adjacency window is `(adj0, v0, v1, adj1)`
+// (`SplitPrimitiveAdjacency`'s own documented line order), so the core
+// line is indices 1 and 2. Mirrors `RendersAHorizontalLineList`'s own
+// verification (a horizontal line through screen row 1, rows 0/2
+// untouched), with the two adjacency-only vertices placed off-canvas so a
+// leak would visibly paint outside that row.
+TEST(ExecutorTest, RendersLineListWithAdjacencyCoreLineWithoutAGeometryStage) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
       Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
-      PrimitiveTopology::TriangleListWithAdjacency);
+      PrimitiveTopology::LineListWithAdjacency);
   ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
   TriangleScene Scene;
   Scene.VertexData = {
-      -1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
-      0.0f,  0.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f, 0.0f,
-      0.0f,  0.0f,  1.0f, 0.0f,  0.0f, 1.0f, 0.0f, 0.0f, 0.0f,  1.0f, 0.0f,
-      0.0f,  1.0f,  0.0f, 0.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+      50.0f, 50.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // adj0
+      -1.0f, 0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // v0 (core)
+      1.0f,  0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // v1 (core)
+      50.0f, 50.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // adj1
   };
   PreparedDraw Draw = Scene.prepare();
-  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t X = 0; X != 4; ++X) {
+    const uint8_t *Texel = texel(X, 1);
+    EXPECT_EQ(Texel[3], 255) << "x=" << X;
+  }
+  EXPECT_EQ(texel(0, 0)[3], 0);
+  EXPECT_EQ(texel(0, 2)[3], 0);
 }
 
 // (Roadmap H6e) Chains the mesh path into `executeDraws`: this reuses

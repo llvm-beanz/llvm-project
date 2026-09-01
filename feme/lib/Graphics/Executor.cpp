@@ -1207,6 +1207,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     case PrimitiveTopology::TriangleList:
     case PrimitiveTopology::TriangleStrip:
     case PrimitiveTopology::TriangleFan:
+    case PrimitiveTopology::LineListWithAdjacency:
+    case PrimitiveTopology::LineStripWithAdjacency:
+    case PrimitiveTopology::TriangleListWithAdjacency:
+    case PrimitiveTopology::TriangleStripWithAdjacency:
+      // (roadmap H7l) An adjacency topology's own adjacency vertices are
+      // visible only to a bound geometry stage (`VUID-VkPipelineInput
+      // AssemblyStateCreateInfo-topology-00738` requires the
+      // `geometryShader` *device feature*, which this ICD always
+      // advertises -- not that this particular pipeline binds a geometry
+      // stage). Without one, the primitives below are assembled from the
+      // adjacency topology's own *core* vertices only (`stripAdjacency`),
+      // exactly as the spec's own "Primitive Topologies" text describes:
+      // "if there is no geometry shader, ... adjacency ... is ignored".
       if (Pipeline.hasTessellationStages())
         return createStringError(inconvertibleErrorCode(),
                                  "a pipeline with tessellation stages must "
@@ -1217,18 +1230,6 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         return createStringError(inconvertibleErrorCode(),
                                  "the patch-list topology requires a "
                                  "pipeline with tessellation stages");
-      break;
-    case PrimitiveTopology::LineListWithAdjacency:
-    case PrimitiveTopology::LineStripWithAdjacency:
-    case PrimitiveTopology::TriangleListWithAdjacency:
-    case PrimitiveTopology::TriangleStripWithAdjacency:
-      // (roadmap H5d) An adjacency topology's whole purpose is handing a
-      // geometry stage its primitives' neighboring vertices; without one
-      // there is nowhere for that adjacency data to go.
-      if (!Pipeline.hasGeometryStages())
-        return createStringError(inconvertibleErrorCode(),
-                                 "an adjacency topology requires a pipeline "
-                                 "with a geometry stage");
       break;
     }
     if (!Draw.MeshDraws.empty())
@@ -1775,7 +1776,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   } else if (Pipeline.getTopology() == PrimitiveTopology::PointList) {
     RasterClass = RasterPrimitiveClass::Point;
   } else if (Pipeline.getTopology() == PrimitiveTopology::LineList ||
-             Pipeline.getTopology() == PrimitiveTopology::LineStrip) {
+             Pipeline.getTopology() == PrimitiveTopology::LineStrip ||
+             Pipeline.getTopology() ==
+                 PrimitiveTopology::LineListWithAdjacency ||
+             Pipeline.getTopology() ==
+                 PrimitiveTopology::LineStripWithAdjacency) {
     RasterClass = RasterPrimitiveClass::Line;
   }
   uint32_t PrimitiveCounter = 0;
@@ -3607,6 +3612,61 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       } else {
         emitStripSegment(0, PerInstance, TriIndices);
       }
+    } else if (Pipeline.getTopology() ==
+                   PrimitiveTopology::TriangleListWithAdjacency &&
+              !GSSig) {
+      // (roadmap H7l) No geometry stage is bound to consume the adjacency
+      // vertices, so only each primitive's own 3 core vertices --
+      // `SplitPrimitiveAdjacency::Primitive`, the same ones a bound
+      // geometry stage's own `Primitives` assembly below reorders
+      // adjacency around -- are rasterized, exactly as
+      // `TriangleList`/`stripAdjacency(Topology)` would be.
+      uint32_t VertsPerPrim = getListPrimitiveVertexCount(
+          PrimitiveTopology::TriangleListWithAdjacency);
+      for (uint32_t P = 0; P + VertsPerPrim <= PerInstance;
+           P += VertsPerPrim) {
+        SmallVector<uint32_t, 6> Window;
+        for (uint32_t K = 0; K != VertsPerPrim; ++K)
+          Window.push_back(P + K);
+        SplitPrimitiveAdjacency Split = splitListPrimitiveAdjacency(
+            PrimitiveTopology::TriangleListWithAdjacency, Window);
+        TriIndices.push_back(
+            {Split.Primitive[0], Split.Primitive[1], Split.Primitive[2]});
+      }
+    } else if (Pipeline.getTopology() ==
+                   PrimitiveTopology::TriangleStripWithAdjacency &&
+              !GSSig) {
+      // As above, but windowed like every other strip topology
+      // (`splitStripPrimitiveAdjacency`), honoring restart exactly as
+      // `TriangleStrip` does.
+      auto emitCoreStripSegment =
+          [](uint32_t Start, uint32_t End,
+             SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
+            SmallVector<uint32_t, 16> Window;
+            for (uint32_t T = Start; T != End; ++T)
+              Window.push_back(T);
+            uint32_t Count = getStripPrimitiveCount(
+                PrimitiveTopology::TriangleStripWithAdjacency,
+                static_cast<uint32_t>(Window.size()));
+            for (uint32_t P = 0; P != Count; ++P) {
+              SplitPrimitiveAdjacency Split = splitStripPrimitiveAdjacency(
+                  PrimitiveTopology::TriangleStripWithAdjacency, Window, P);
+              Out.push_back({Split.Primitive[0], Split.Primitive[1],
+                             Split.Primitive[2]});
+            }
+          };
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitCoreStripSegment(SegStart, J, TriIndices);
+          SegStart = J + 1;
+        }
+        emitCoreStripSegment(SegStart, PerInstance, TriIndices);
+      } else {
+        emitCoreStripSegment(0, PerInstance, TriIndices);
+      }
     }
 
     // Assembles a line-list/line-strip topology's line segments (as
@@ -3634,6 +3694,52 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         emitLineStripSegment(SegStart, PerInstance, LineIndices);
       } else {
         emitLineStripSegment(0, PerInstance, LineIndices);
+      }
+    } else if (Pipeline.getTopology() ==
+                   PrimitiveTopology::LineListWithAdjacency &&
+              !GSSig) {
+      // (roadmap H7l) As the triangle-list-with-adjacency case above, but
+      // for `LineList`'s own 2 core vertices out of each 4-vertex window.
+      uint32_t VertsPerPrim = getListPrimitiveVertexCount(
+          PrimitiveTopology::LineListWithAdjacency);
+      for (uint32_t P = 0; P + VertsPerPrim <= PerInstance;
+           P += VertsPerPrim) {
+        SmallVector<uint32_t, 4> Window;
+        for (uint32_t K = 0; K != VertsPerPrim; ++K)
+          Window.push_back(P + K);
+        SplitPrimitiveAdjacency Split = splitListPrimitiveAdjacency(
+            PrimitiveTopology::LineListWithAdjacency, Window);
+        LineIndices.push_back({Split.Primitive[0], Split.Primitive[1]});
+      }
+    } else if (Pipeline.getTopology() ==
+                   PrimitiveTopology::LineStripWithAdjacency &&
+              !GSSig) {
+      auto emitCoreLineStripSegment =
+          [](uint32_t Start, uint32_t End,
+             SmallVectorImpl<std::array<uint32_t, 2>> &Out) {
+            SmallVector<uint32_t, 16> Window;
+            for (uint32_t T = Start; T != End; ++T)
+              Window.push_back(T);
+            uint32_t Count = getStripPrimitiveCount(
+                PrimitiveTopology::LineStripWithAdjacency,
+                static_cast<uint32_t>(Window.size()));
+            for (uint32_t P = 0; P != Count; ++P) {
+              SplitPrimitiveAdjacency Split = splitStripPrimitiveAdjacency(
+                  PrimitiveTopology::LineStripWithAdjacency, Window, P);
+              Out.push_back({Split.Primitive[0], Split.Primitive[1]});
+            }
+          };
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitCoreLineStripSegment(SegStart, J, LineIndices);
+          SegStart = J + 1;
+        }
+        emitCoreLineStripSegment(SegStart, PerInstance, LineIndices);
+      } else {
+        emitCoreLineStripSegment(0, PerInstance, LineIndices);
       }
     }
 
