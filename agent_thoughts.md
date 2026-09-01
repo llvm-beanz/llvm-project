@@ -50927,3 +50927,157 @@ L11's own scope (the real CTS test's store side goes through the
 already-correct `widenMaskedStore`, not this raw-store path) and not
 otherwise reachable from any currently-tracked roadmap row, so not added
 as a new row this session; noting it here in case it resurfaces.
+
+# Session: L12 — resource-array access-chain conversion
+
+Tasked with investigating and fixing roadmap milestone L12: indexing an
+unbounded (runtime-sized) array of resource handles (`RWBuffer<int>
+Buf[]`) fails pipeline creation with an `llvm.getelementptr` verifier
+error (`result #0 must be LLVM pointer type ..., but got
+'!llvm.target<"spirv.SignedImage", ...>'`), split out during L10's own
+triage as structurally distinct from the `si32` family it was originally
+grouped under.
+
+## Reduction
+
+Read `Feature/ResourceArrays/overflow-unbounded-array.test`'s HLSL source:
+`RWBuffer<int> Buf0` (ordinary), `RWBuffer<int> Buf[]` (an *unbounded*
+array declared with `[]`, even though the test's own pipeline YAML gives
+it a real runtime `ArraySize: 3`). Compiled with `dxc -T cs_6_0 -spirv`,
+disassembled with `spirv-dis` (confirmed `OpTypeRuntimeArray` +
+`RuntimeDescriptorArray` capability + `SPV_EXT_descriptor_indexing`
+extension), imported with `feme-translate --import-spirv`, then ran
+`feme-opt --feme-convert-spirv-to-llvm` — reproduced the milestone's exact
+verifier error.
+
+## The milestone's own premise was wrong
+
+The milestone claimed this gap was "distinct from -- and a strictly
+larger gap than -- `SPIRVResourceLowering.cpp`'s existing
+bounded-array-of-handles support." I wrote a second, from-scratch,
+compile-time-*bounded* HLSL reduction (`RWBuffer<int> Buf[3]`), ran it
+through the identical pipeline, and got the *identical* verifier error.
+So there was no existing bounded-array-of-handles support to begin with —
+neither bounded nor unbounded arrays of image/sampled-image/sampler
+resources converted at all. I confirmed this by reading
+`ResourceGlobalVariablePattern`/`getArrayedBlockCount`/`prepareResource
+Variables`: the existing array machinery only ever recognized arrays of
+storage/uniform *buffer blocks* (memory-backed structs via
+`spirv.array<N x !spirv.struct<..., Block>>`), never arrays of opaque
+image/sampled-image/sampler handles. This meant the real scope of the fix
+needed was larger than the milestone described, but also more clearly
+delineated once I understood exactly what was missing.
+
+I also found that LLVM's own SPIRV backend already supports arrayed
+resource handles generically — `llvm.spv.resource.handlefrombinding`'s
+signature is `(Set, Binding, ArraySize, Index, NamePtr)`, and
+`SPIRVInstructionSelector` already threads `ArraySize`/`Index` through for
+both ordinary and counter-handle cases. So the entire gap was on feme's
+own SPIR-V-dialect-to-LLVM-dialect conversion side, not upstream.
+
+## Two-layer scope decision
+
+I decided this session would fix only the SPIR-V-to-LLVM
+*conversion-layer* gap (recognizing and converting an access chain into an
+array of resources, bounded or unbounded, into a `handlefrombinding` call)
+and leave the Vulkan-*runtime*-layer gap (the entire `VK_EXT_descriptor_
+indexing` feature cluster is `VK_FALSE` in `EntryPoints.cpp`; no
+`VARIABLE_DESCRIPTOR_COUNT`/`VkDescriptorSetVariableDescriptorCountAllocate
+Info` plumbing exists anywhere) as follow-on roadmap work. Doing the full
+Vulkan-layer plumbing in the same session would have been a much larger,
+separate effort with its own design questions (how heap allocation should
+represent an unbounded array's real, allocation-time-only-known count).
+
+## The fix
+
+Added `getArrayedResourceCount`, a sibling to the existing
+`getArrayedBlockCount`: for a `spirv.array` of Image/SampledImage/Sampler,
+returns its real compile-time count; for a `spirv.rtarray` (unbounded),
+returns a new reserved sentinel `0` (never a real Vulkan descriptor
+count, since Vulkan has no zero-descriptor binding). Extended
+`prepareResourceVariables` to try this helper after `getArrayedBlockCount`
+fails, so an image-array global now gets a real `ResourceInfo` entry.
+
+The trickiest part was getting `Count`'s comparison semantics right
+across every consumer. Previously `Count == 1` meant ordinary/non-arrayed
+and any `Count > 1` meant an array-of-blocks. I had to introduce `Count ==
+0` as "unbounded array of resources" and audit every comparison:
+`ResourceAddressOfPattern`'s `Count > 1` had to become `Count != 1` (so
+the new `0` sentinel takes the same "erase, let the access-chain build
+the handle" path as any other arrayed case) — but `ArrayedBlockAccessChain
+Pattern`'s existing `Count <= 1` guard had to be left *unchanged*, not
+widened to `!= 1`, because that pattern unconditionally casts the pointee
+to `spirv::ArrayType`, which would assert-crash on an `rtarray` (`Count ==
+0`) pointee. I caught this by reasoning through the cast's safety rather
+than by a build/test failure — a case where the semantic change I was
+making needed careful case-by-case auditing of every existing consumer
+rather than a blanket regex-style substitution.
+
+Added `ResourceArrayAccessChainPattern`, structurally simpler than
+`ArrayedBlockAccessChainPattern`: an array-of-resources element *is* the
+whole opaque handle value (no further content-indexing needed, unlike an
+array-of-blocks element, which is a memory-backed struct needing further
+byte-offset indexing once the right descriptor is selected via the shared
+`rewriteBlockAccess` helper). So the new pattern just replaces the access
+chain's SSA result directly with the `handlefrombinding` call's result,
+using the chain's own leading index as the intrinsic's `Index` operand,
+relying on the pre-existing, unmodified `LoadValuePattern` identity-load
+fallback to handle any subsequent `spirv.Load` of that handle value —
+exactly mirroring how the existing non-arrayed `ResourceAddressOfPattern`
+case already works.
+
+## Verification
+
+Rebuilt `feme-opt`, re-ran both reduced cases (unbounded and bounded)
+through `--feme-convert-spirv-to-llvm`: both now convert cleanly, and I
+inspected the resulting IR directly to confirm the `handlefrombinding`
+call's `Count`/`Index` operands are exactly right (`Count == 0` for the
+unbounded case, `Count == 3` for the bounded one, `Index` matching each
+access chain's own array-index operand).
+
+Tried to push the reduction one step further, through `feme-translate
+--llvmdialect-to-llvmir`, to see if a new downstream gap would surface —
+but hit a pre-existing, unrelated quirk: `feme-opt`'s conversion pass
+output is wrapped in an extra `module { ... }` layer that
+`feme-translate`'s `mlir-translate`-based tool doesn't unwrap, so the
+translation silently produces an empty LLVM module regardless of the
+input's real content. I confirmed this reproduces identically on a
+trivial no-op shader with none of this session's changes involved, so
+it's an existing quirk of manually chaining these two CLI tools from the
+shell (the real driver presumably passes the MLIR module via API,
+avoiding the round-trip through text), not something introduced or
+uncovered by this fix — not worth fixing as part of this task, since it's
+unrelated to L12 and the standing instructions say not to fix unrelated
+pre-existing issues.
+
+Added lit coverage (`spirv-to-llvm-resource-arrays.mlir`, bounded and
+unbounded cases) following the existing `spirv-to-llvm-arrayed-blocks
+.mlir` test's conventions — no separate unit test, matching this same
+conversion layer's own established convention (the sibling
+`ArrayedBlockAccessChainPattern` fix has no unit-test counterpart either;
+lit is this phase's test form). Ran the full `Conversion/SPIRVToLLVM`
+lit suite (45/45 pass) and `ninja check-feme` (2270 passed, 0 failed, no
+regressions).
+
+Ran a real `deqp-vk` smoke sweep (`dEQP-VK.api.info.*`) — identical
+pass/fail/not-supported totals to the L11 baseline, confirming no
+regression. Searched for any `deqp-vk` case that might exercise an
+array-of-resources access chain differently
+(`*resource*array*`/`*descriptor_indexing*` group names) and found none
+(0/0 both) — expected, since the entire `VK_EXT_descriptor_indexing`
+feature cluster is still `VK_FALSE`, so any such real case is already
+`NotSupported` regardless of this fix.
+
+## Roadmap
+
+Did not strike L12 (the Vulkan-runtime-layer half is still open). Broke
+it into: L12a (this session's conversion-layer fix, struck through),
+L12b (survey/implement the `VK_EXT_descriptor_indexing` feature-bit
+cluster), L12c (descriptor-set-layout `VARIABLE_DESCRIPTOR_COUNT`
+plumbing), each depending on the previous, respecting the "max one
+lowercase letter of nesting" rule. Cross-referenced L12b/L12c from
+`VulkanExtensionInventory.md`'s existing `VK_EXT_descriptor_indexing`
+entry (previously only pointing at J2). Added a new "Roadmap L12a"
+section to `VulkanCTSReport.md` documenting the smoke sweep. No
+`Vulkan14FeatureInventory.md` change needed — this session touched no
+feature bit, only a compiler-pass conversion gap.
