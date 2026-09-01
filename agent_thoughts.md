@@ -52168,3 +52168,126 @@ that a fully-completed milestone gets struck through rather than
 broken down further. No new milestone needed this session -- the only
 remaining blocker for the real target test (H19p) is already its own,
 separately-tracked, pre-existing row.
+
+# L16: allowing a GEP past a Uniform (cbuffer) resource getpointer
+
+## Task
+
+Investigate and fix roadmap milestone L16: `SPIRVResourceLowering.cpp`'s
+`hasOnlySupportedUses`/`hasOnlySupportedPointerUses` never allows a
+`getelementptr` past a `HandleKind::Uniform` (real read-only `cbuffer`)
+resource's own `llvm.spv.resource.getpointer` result (`AllowGEPs` was
+hard-coded to `Storage`/`StorageStruct` only). This was itself
+discovered as an L13a milestone-description correction: L13a's own
+conversion-layer fix let `structs.test`'s struct-typed cbuffer member
+convert cleanly at the SPIR-V-to-LLVM layer for the first time, but the
+CPU resource-lowering pass this row names still rejected the resulting
+`getpointer`-then-`getelementptr` chain outright.
+
+## Investigation
+
+Read `hasOnlySupportedUses`/`hasOnlySupportedPointerUses` closely: the
+`AllowGEPs` flag gates whether a GEP off a `getpointer` result is
+tolerated at all. It was `true` only for
+`Storage`/`StorageStruct` -- never `Uniform` -- even though the
+underlying machinery a GEP needs (`hasResolvableGEPByteOffset`,
+`computePointerOffset`, `lowerRawPointerUses`, and `lowerAccesses`'s own
+dispatch) is entirely generic over handle kind and already reused by
+`StorageStruct` (a direct-field *storage* block) for the identical
+"further field navigation beyond the top-level `getpointer` selection"
+shape. This made the fix look like a single hard-coded boolean
+expression -- but I wanted a real reduction to confirm nothing else was
+missing, per this project's own repeated experience that a plausible-
+looking one-line fix can still miss a downstream gap (see L15's own
+store-side surprise this same session).
+
+I reduced the exact real-world shape with a minimal two-struct-field
+cbuffer HLSL snippet, compiled through `dxc`, imported via `feme-
+translate --import-spirv`, converted through
+`feme-opt --feme-convert-spirv-to-llvm`, and exported to real LLVM IR
+via `feme-translate --llvmdialect-to-llvmir` (the target-extension-type
+handle plumbing only translates correctly this way; a naive `--mlir-to-
+llvmir`/module-wrapper mismatch initially produced an empty module, a
+minor tooling wrinkle worth remembering: the `--feme-convert-spirv-to-
+llvm` output wraps its own `llvm.func`-bearing module in an *extra*
+outer `builtin.module`, and `--llvmdialect-to-llvmir` needs that outer
+wrapper stripped first). Running this reduced `.ll` through `feme-opt
+--llvm -passes=feme-cpu-lower-spirv-resources -S` directly confirmed
+the precise pre-fix failure (the whole handle/getpointer/GEP chain left
+completely unlowered, since `hasOnlySupportedUses` rejected it outright
+and the pass's own module-scope loop simply skips an unsupported
+handle rather than partially lowering it) and, separately, confirmed
+via a real `offloader` run (`FEME_VULKAN_LOG_CREATION_ERRORS=1`, since
+`llvm-lit`'s own `lit.cfg.py` strips that env var, matching the
+milestone's own note) that the exact "register-bound resource handle...
+cannot normalize" diagnostic reproduces standalone.
+
+## Fix
+
+Enabled `AllowGEPs` for `HandleKind::Uniform` in `hasOnlySupportedUses`,
+with an inline comment explaining why only the `Writable` flag (already
+correctly excluding `Uniform`, matching Vulkan's own read-only
+`VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER` restriction) needs to differ, not
+this GEP-tolerance shape. Re-ran the same reduced `.ll` through the pass
+directly and confirmed both fields now resolve to the correct combined
+byte offset (0 for the first field, 20 for the second -- 16 bytes for
+the first `X` struct's own std140-padded size plus 4 bytes for the
+second field's own natural offset within its own `X`), with no other
+code change needed anywhere else in the file (`lowerAccesses`'s own
+existing `Uniform`/`StorageStruct` compile-time-constant-field-offset
+branch already calls `lowerRawPointerUses` for both kinds identically).
+
+## Testing
+
+Added a new unit test
+(`LowersUniformBufferNestedStructFieldToItsOwnStructLayoutOffset` in
+`SPIRVResourceLoweringTest.cpp`, mirroring the existing
+`LowersUniformBufferSecondFieldToItsOwnStructLayoutOffset`'s structure
+but with a nested nested-struct GEP) and a lit test
+(`spirv-resource-lowering-uniform-nested-struct.ll`, exercising two
+separate struct-typed cbuffer fields to confirm the combined-offset
+math). Confirmed both fail without the fix (via `git stash`) and pass
+with it. Full `ninja check-feme`: 2287/2314 passed, 27 unsupported, 0
+failed, up by exactly these 2 new tests.
+
+## Real end-to-end verification
+
+Rebuilt `feme_vulkan`/`offloader` and ran the real
+`Feature/CBuffer/structs.test` (this row's own named case) against the
+real ICD: **it now passes outright**. Also re-ran
+`array-of-structs.test`/`dynamic-struct.test`/`StructuredBuffer/
+packed.test` (the three other cases L13a's own audit found still
+failing, at three *different* later gaps) to confirm this fix's own
+scope is exactly what it claims to be, not accidentally wider or
+narrower: `array-of-structs.test`/`dynamic-struct.test` still fail, and
+the error is byte-for-byte identical to roadmap L17's own already-
+tracked `failed to legalize operation 'spirv.AccessChain'` diagnostic
+(a distinct, still-unfixed conversion-layer gap); `packed.test` still
+fails, identical to roadmap L18's own already-tracked `'llvm.cond_br'
+op operand #1 ... got 'si32'` diagnostic (also distinct, also
+unfixed). Both are exactly the gaps L13a's own audit predicted this fix
+would not touch, confirming L16's own scope is genuinely, precisely
+closed with no more and no less than what it claimed.
+
+## Vulkan CTS
+
+Ran `dEQP-VK.ubo.*` (13,240 cases): 1406/13240 (10.6%) passed -- at or
+above the high end of L13a's own already-documented ~115-case
+run-to-run flaky band (1051-1166 across two nominally-identical runs),
+consistent with more struct-field-containing UBO cases now passing and
+not attributable to run-to-run noise alone. Ran
+`dEQP-VK.ssbo.layout.*` (5,275 cases): 227/5275, byte-for-byte identical
+to the prior L13a-recorded baseline -- expected and reassuring, since
+this fix only touches the `Uniform` kind and a storage buffer's own
+`AllowGEPs` path (`Storage`/`StorageStruct`) was already supported and
+is entirely untouched here.
+
+No feature-bit or extension-advertisement change: confirmed (grepped
+both inventory docs for any L16 reference, found none), not assumed.
+
+## Roadmap
+
+Struck through L16 with a completion note. No new milestone needed --
+the only remaining gaps this row's own audit touched
+(`array-of-structs.test`/`dynamic-struct.test`/`packed.test`) are
+already their own, separately-tracked, pre-existing rows (L17/L18).
