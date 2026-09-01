@@ -1051,9 +1051,21 @@ the indexed case. The map must instead assign each *binding array* a
 contiguous heap range and record `(base slot, count, stride)`, so a dynamic
 index becomes `base + index` with a bounds check against `count`. Descriptor
 arrays whose length exceeds what the reserved heap can represent must fail
-pipeline creation rather than silently truncate. Non-uniform indexing across a
-wave additionally requires the access to be lowered per lane, which gates
-advertising any descriptor indexing feature.
+pipeline creation rather than silently truncate.
+
+Vulkan distinguishes *dynamic* indexing (an ordinary, non-constant SSA index
+that is uniform within the subgroup/invocation group) from *non-uniform*
+indexing (an index the `NonUniform` SPIR-V decoration marks as potentially
+diverging per-lane). The former needs nothing beyond the ordinary
+`base + index` scheme above, since a uniform-within-the-group index is just a
+runtime value read once and applied identically everywhere it is used; it
+does not require any per-lane lowering. The latter additionally requires the
+access to be lowered per lane, and gates advertising any of the
+`shader*ArrayNonUniformIndexing`/`descriptorIndexing` feature bits (roadmap
+L7 tracks the still-missing `NonUniform` decoration support this needs).
+Roadmap L12b advertises the `shader{UniformTexelBuffer,
+StorageTexelBuffer}ArrayDynamicIndexing` bits on this basis, without waiting
+on L7.
 
 | Vulkan descriptor type | Initial FeMe representation | Status |
 |---|---|---|
