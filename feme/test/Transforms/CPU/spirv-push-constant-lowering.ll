@@ -50,6 +50,31 @@ define float @reads_second_member() {
   ret float %v
 }
 
+; A non-zero-offset member access whose `getelementptr` is written directly
+; as a constant expression on the `load`'s own pointer operand, rather than
+; surviving as a separate `getelementptr` instruction -- the shape LLVM's
+; own constant folder collapses this exact access into by default (both the
+; global's own address and every index are already compile-time constants),
+; and the one a real `dxc`-compiled `offload-test-suite`
+; `Feature/PushConstant/bool.test` case's own second (non-zero-offset)
+; struct member reduced to. Before this row's own fix, only the zero-offset
+; member (needing no `getelementptr` at all, so never hitting this
+; constant-expression shape) was recognized, leaving every other member's
+; own load unrewritten -- still referencing `@pc` itself, an external
+; declaration with no definition -- and producing a JIT symbol-resolution
+; failure at run time rather than a compile-time diagnostic.
+; CHECK-LABEL: define float @reads_member_via_constant_expr_gep(
+; CHECK-SAME: ptr %root_constants, i32 %root_constant_size)
+; CHECK: %push_const.inbounds = icmp ule i32 8, %root_constant_size
+; CHECK: %push_const.ptr = getelementptr inbounds i8, ptr %root_constants, i64 4
+; CHECK: %push_const.load = load float, ptr %push_const.ptr
+; CHECK-NOT: @pc
+define float @reads_member_via_constant_expr_gep() {
+  %v = load float, ptr addrspace(13) getelementptr inbounds (
+      %PushConstants, ptr addrspace(13) @pc, i32 0, i32 1)
+  ret float %v
+}
+
 ; Roadmap H7o: the metadata attached to the original function (here a
 ; stand-in for `!feme.signature`, which a later pass like
 ; `FragmentWrapperPass` requires to resolve stage-IO element IDs) must

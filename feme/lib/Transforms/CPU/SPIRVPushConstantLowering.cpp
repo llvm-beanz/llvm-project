@@ -83,6 +83,41 @@ matchSPIRVPushConstantAccess(Function &F) {
       F.getDataLayout().getTypeStoreSize(PC->getValueType()).getFixedValue();
 
   for (User *U : PC->users()) {
+    // A constant-index GEP off the global's own address is almost always
+    // folded straight to a `ConstantExpr`, not left as a real
+    // `GetElementPtrInst`: the global's own address and every index are
+    // already compile-time constants, and every ordinary constant-folding
+    // IR builder (including the one `feme-translate`'s
+    // `--llvmdialect-to-llvmir` step uses) collapses that eagerly. Handle
+    // it identically to a genuine instruction-typed GEP below (both are a
+    // `GEPOperator`), except a `ConstantExpr`'s own uses can span more than
+    // one function (constants are uniqued module-wide, so two different
+    // push-constant-consuming shaders reading the same struct offset share
+    // the exact same `ConstantExpr` instance) -- unlike an
+    // instruction-typed GEP, already guaranteed single-function by `UI`'s
+    // own `getFunction()` filter above, each of *its* users needs its own
+    // per-load function filter here instead. Missing this case left every
+    // non-zero-offset load unrewritten (still referencing `@buffer`
+    // itself, an external declaration with no definition or initializer),
+    // producing a `JIT session error: Symbols not found: [ buffer ]` at
+    // run time for any push-constant struct with more than one member at
+    // a nonzero offset -- confirmed by reducing a real
+    // `offload-test-suite` `Feature/PushConstant/bool.test` failure (the
+    // first, offset-0 member loaded fine; the second, at offset 4, did
+    // not) down to this exact constant-expression shape.
+    if (auto *CE = dyn_cast<ConstantExpr>(U)) {
+      if (CE->getOpcode() != Instruction::GetElementPtr ||
+          !hasOnlyConstantIndices(cast<GEPOperator>(*CE)))
+        return std::nullopt; // A GEP too dynamic to fold.
+      for (User *GU : CE->users()) {
+        auto *GLoad = dyn_cast<LoadInst>(GU);
+        if (!GLoad || GLoad->getFunction() != &F)
+          continue; // Not a load, or not this function's own use.
+        Access.Loads.push_back(GLoad);
+      }
+      continue;
+    }
+
     auto *UI = dyn_cast<Instruction>(U);
     if (!UI || UI->getFunction() != &F)
       continue; // Not this function's use; visited when that one is.
