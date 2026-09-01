@@ -71,12 +71,24 @@ struct ResourceInfo {
   /// exist in the module as real data rather than as an attribute.
   std::string NameSymbol;
   /// The number of descriptors this binding covers: 1 for an ordinary
-  /// (non-arrayed) resource, or the declared length of an array-of-blocks
-  /// binding (`T blocks[N]` in GLSL). An arrayed block's handle needs which
-  /// descriptor to bind, only known at its own access chain's leading
-  /// (array) index, so its `spirv.mlir.addressof` is erased rather than
-  /// converted (see feme::spirv::populateSPIRVToLLVMTargetPatterns's
-  /// `ArrayedBlockAccessChainPattern`).
+  /// (non-arrayed) resource, the declared length of an array-of-blocks
+  /// binding (`T blocks[N]` in GLSL) or a bounded array-of-resources one
+  /// (`RWBuffer<T> Buf[N]`, roadmap L12a), or `0` -- this map's own
+  /// reserved sentinel, never a real Vulkan descriptor count -- for an
+  /// *unbounded* array-of-resources binding (`RWBuffer<T> Buf[]`,
+  /// L12a): a `spirv.rtarray` of resources has no compile-time-known
+  /// length at all (its real, in-use count is a pipeline/descriptor-set-
+  /// layout-time property, Vulkan's `VARIABLE_DESCRIPTOR_COUNT` binding
+  /// flag, not yet threaded through by this conversion -- see roadmap
+  /// L12b/L12c). Any arrayed binding's handle (bounded or unbounded,
+  /// block or resource) needs which descriptor to bind, only known at its
+  /// own access chain's leading (array) index, so its
+  /// `spirv.mlir.addressof` is erased rather than converted (see
+  /// feme::spirv::populateSPIRVToLLVMTargetPatterns's
+  /// `ArrayedBlockAccessChainPattern`/`ResourceArrayAccessChainPattern`);
+  /// every caller branching on `Count` must therefore compare `!= 1`
+  /// rather than `> 1`, so an unbounded array's own `0` takes the same
+  /// arrayed path a bounded one does.
   uint32_t Count = 1;
 };
 

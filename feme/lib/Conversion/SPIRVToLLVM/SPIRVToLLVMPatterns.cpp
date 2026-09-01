@@ -251,6 +251,49 @@ std::optional<uint32_t> getArrayedBlockCount(mlir::spirv::PointerType Type) {
   return Array.getNumElements();
 }
 
+/// (Roadmap L12a) Returns the descriptor count of \p Type if it is an
+/// array-of-resources pointer -- `RWBuffer<T> Buf[N]`/`Texture2D Tex[N]`/
+/// a `SamplerState`-array's own SPIR-V shape, an image, sampled image, or
+/// sampler array, as opposed to getArrayedBlockCount's array-of-*blocks*
+/// (a storage/uniform buffer or cbuffer array, a structurally distinct
+/// resource kind whose element is a memory-backed struct rather than an
+/// opaque handle) -- or `std::nullopt` if \p Type is not an array of
+/// resources at all. Two distinct SPIR-V shapes both count: a compile-time
+/// `spirv.array` (`RWBuffer<T> Buf[3]`, a fixed descriptor count known
+/// without any pipeline-creation-time information) returns its own real
+/// element count; a `spirv.rtarray` (`RWBuffer<T> Buf[]`, an *unbounded*
+/// array whose real, in-use descriptor count is a pipeline/descriptor-set-
+/// layout-time property -- Vulkan's `VARIABLE_DESCRIPTOR_COUNT` binding
+/// flag -- never encoded in the SPIR-V module itself) returns `0`, this
+/// map's own reserved sentinel for "unbounded"; every caller that branches
+/// on `ResourceInfo::Count` must treat `0` the same as any other multi-
+/// descriptor count (i.e. `!= 1`, never `> 1`), since an unbounded array's
+/// handle needs the exact same per-access-chain-index handle-from-binding
+/// indirection a bounded one does, not the single, index-free handle a
+/// non-arrayed resource's own address-of converts to directly.
+std::optional<uint32_t>
+getArrayedResourceCount(mlir::spirv::PointerType Type) {
+  mlir::Type Pointee = Type.getPointeeType();
+  mlir::Type ElementType;
+  uint32_t Count;
+  if (auto Array = mlir::dyn_cast<mlir::spirv::ArrayType>(Pointee)) {
+    ElementType = Array.getElementType();
+    Count = Array.getNumElements();
+  } else if (auto RTArray =
+                mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Pointee)) {
+    ElementType = RTArray.getElementType();
+    Count = 0;
+  } else {
+    return std::nullopt;
+  }
+  auto ElementPointerType =
+      mlir::spirv::PointerType::get(ElementType, Type.getStorageClass());
+  if (!isResourcePointer(ElementPointerType))
+    return std::nullopt;
+  return Count;
+}
+
+
 /// Emits a call to \p Intrinsic returning \p ResultType, with \p Args.
 mlir::Value createIntrinsicCall(mlir::ConversionPatternRewriter &Rewriter,
                                 mlir::Location Loc, llvm::StringRef Intrinsic,
@@ -1475,12 +1518,17 @@ public:
 /// decorations from the intrinsic, so `!spirv.ptr<image, UniformConstant>`
 /// converts to the handle type itself.
 ///
-/// An array-of-blocks variable's own address is simply erased instead: its
-/// handle needs which descriptor to bind, only known at its own access
-/// chain's leading (array) index -- see ArrayedBlockAccessChainPattern,
-/// which builds that handle itself and is the only legal use of such a
-/// variable's address (a whole descriptor array is never itself loaded
-/// or stored as a value).
+/// An array-of-blocks or array-of-resources (roadmap L12a) variable's own
+/// address is simply erased instead: its handle needs which descriptor to
+/// bind, only known at its own access chain's leading (array) index -- see
+/// ArrayedBlockAccessChainPattern/ResourceArrayAccessChainPattern, which
+/// build that handle themselves and are the only legal use of such a
+/// variable's address (a whole descriptor array is never itself loaded or
+/// stored as a value). `Count == 0` (an *unbounded* array-of-resources,
+/// `getArrayedResourceCount`'s own reserved sentinel) takes this same
+/// path, not the single-handle one below: an unbounded array's handle
+/// still needs a real access-chain index, exactly like a bounded one, just
+/// with no compile-time-known upper bound on it.
 class ResourceAddressOfPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AddressOfOp> {
 public:
@@ -1498,7 +1546,7 @@ public:
     auto It = Resources.find(Op.getVariable());
     if (It == Resources.end())
       return Rewriter.notifyMatchFailure(Op, "not a resource variable");
-    if (It->second.Count > 1) {
+    if (It->second.Count != 1) {
       Rewriter.eraseOp(Op);
       return mlir::success();
     }
@@ -1769,6 +1817,104 @@ public:
 
     return rewriteBlockAccess(Op, Rewriter, *getTypeConverter(), *Element,
                               Handle, Indices, Selector);
+  }
+
+private:
+  const feme::spirv::ResourceInfoMap &Resources;
+};
+
+/// (Roadmap L12a) Converts `spirv.AccessChain` into an array-of-resources
+/// pointer (`RWBuffer<T> Buf[N]`, `Texture2D Tex[]`, or any other image/
+/// sampled-image/sampler array, bounded or unbounded) directly into the
+/// `llvm.spv.resource.handlefrombinding` call producing that one element's
+/// own handle -- mirroring ArrayedBlockAccessChainPattern immediately
+/// above, but simpler: an array-of-*resources* element is itself the whole
+/// handle (an opaque value, never memory), not a block whose *content*
+/// still needs its own further byte-offset indexing once the right
+/// descriptor is selected, so this pattern replaces the access chain with
+/// the handle value directly rather than delegating to
+/// rewriteBlockAccess. Any subsequent `spirv.Load` of that value converts
+/// to the identity via LoadValuePattern, exactly like a non-arrayed
+/// resource's own `spirv.mlir.addressof`-then-`spirv.Load` pair already
+/// does (see ResourceAddressOfPattern's own comment).
+///
+/// Before this pattern, indexing any array of resources -- bounded or
+/// unbounded -- fell through to MLIR's own generic, lower-benefit
+/// `AccessChainPattern`, which treats every `spirv.AccessChain` as an
+/// ordinary in-memory offset computation: it converted the array-of-
+/// resources global into an `!llvm.array<N x target<...>>`/
+/// `!llvm.array<0 x target<...>>` (for a `spirv.rtarray`) and then emitted
+/// an `llvm.getelementptr` indexing directly into it, immediately rejected
+/// by the LLVM dialect's own GEP verifier ("result #0 must be LLVM pointer
+/// type ..., but got '!llvm.target<...>'") since a resource handle is not
+/// a pointer at all -- the exact failure roadmap milestone L12 names.
+class ResourceArrayAccessChainPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+public:
+  ResourceArrayAccessChainPattern(
+      mlir::MLIRContext *Context, const mlir::LLVMTypeConverter &TypeConverter,
+      mlir::PatternBenefit Benefit,
+      const feme::spirv::ResourceInfoMap &Resources)
+      : mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp>(
+            Context, TypeConverter, Benefit),
+        Resources(Resources) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto AddrOf = Op.getBasePtr().getDefiningOp<mlir::spirv::AddressOfOp>();
+    if (!AddrOf)
+      return Rewriter.notifyMatchFailure(Op, "base is not a variable address");
+    auto It = Resources.find(AddrOf.getVariable());
+    if (It == Resources.end() || It->second.Count == 1)
+      return Rewriter.notifyMatchFailure(Op, "not an arrayed resource");
+
+    auto PointerType = mlir::cast<mlir::spirv::PointerType>(AddrOf.getType());
+    std::optional<uint32_t> ArrayedCount =
+        getArrayedResourceCount(PointerType);
+    if (!ArrayedCount)
+      return Rewriter.notifyMatchFailure(Op, "not an array of resources");
+
+    mlir::Type ElementType =
+        mlir::isa<mlir::spirv::RuntimeArrayType>(PointerType.getPointeeType())
+            ? mlir::cast<mlir::spirv::RuntimeArrayType>(
+                  PointerType.getPointeeType())
+                  .getElementType()
+            : mlir::cast<mlir::spirv::ArrayType>(PointerType.getPointeeType())
+                  .getElementType();
+    auto ElementPointerType =
+        mlir::spirv::PointerType::get(ElementType, PointerType.getStorageClass());
+
+    mlir::ValueRange Indices = Adaptor.getIndices();
+    if (Indices.size() != 1)
+      return Rewriter.notifyMatchFailure(
+          Op, "expected a single array-selecting index");
+
+    mlir::Type HandleType = getTypeConverter()->convertType(ElementPointerType);
+    if (!HandleType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type I32 = Rewriter.getI32Type();
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(
+                Rewriter, Loc, "llvm.spv.resource.handlefrombinding",
+                HandleType,
+                {mlir::LLVM::ConstantOp::create(
+                     Rewriter, Loc, I32,
+                     static_cast<int32_t>(It->second.DescriptorSet)),
+                 mlir::LLVM::ConstantOp::create(
+                     Rewriter, Loc, I32,
+                     static_cast<int32_t>(It->second.Binding)),
+                 mlir::LLVM::ConstantOp::create(
+                     Rewriter, Loc, I32,
+                     static_cast<int32_t>(It->second.Count)),
+                 Indices[0],
+                 mlir::LLVM::AddressOfOp::create(
+                     Rewriter, Loc,
+                     mlir::LLVM::LLVMPointerType::get(Rewriter.getContext()),
+                     It->second.NameSymbol)}));
+    return mlir::success();
   }
 
 private:
@@ -3804,6 +3950,8 @@ feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
         !isUniformBlockPointer(PointerType)) {
       std::optional<uint32_t> ArrayedCount = getArrayedBlockCount(PointerType);
       if (!ArrayedCount)
+        ArrayedCount = getArrayedResourceCount(PointerType);
+      if (!ArrayedCount)
         continue;
       Count = *ArrayedCount;
     }
@@ -3879,8 +4027,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
-  Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
-               ResourceGlobalVariablePattern>(
+  Patterns.add<ArrayedBlockAccessChainPattern, ResourceArrayAccessChainPattern,
+               ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
   // Higher benefit than the `FeMeBenefit`-registered `ImageReadPattern`
   // above, so this wins for a `Dim::SubpassData` image read (roadmap F8a);
