@@ -18047,3 +18047,43 @@ compiler-pass correctness fix only, widening a `SIMDize.cpp`/
 `GroupShared.cpp` scope gap in decomposing a divergent vector-typed
 groupshared load), so no change needed in either.
 
+
+## Roadmap L12a: real `deqp-vk` sweep after resource-array conversion fix
+
+```
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.api.info.*" --deqp-log-filename=l12a_smoke.qpa
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.binding_model.descriptor_buffer.*resource*array*" \
+  --deqp-log-filename=l12a_desc.qpa
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.pipeline.monolithic.*descriptor_indexing*" \
+  --deqp-log-filename=l12a_desc2.qpa
+```
+
+L12a's fix (`SPIRVToLLVMPatterns.cpp`'s new `ResourceArrayAccessChainPattern`
+plus `getArrayedResourceCount`) was root-caused and fixed against a from-
+scratch, hand-reduced `dxc`-compiled HLSL case for both a bounded
+(`RWBuffer<int> Buf[3]`) and unbounded (`RWBuffer<int> Buf[]`) array of
+resource handles, plus the real `Feature/ResourceArrays/
+overflow-unbounded-array.test` this milestone traces to. A smoke run
+(`dEQP-VK.api.info.*`, 10484 cases) confirms no regression from this
+session's two changed files: pass/fail/not-supported totals (5381 passed,
+570 failed, 4533 not supported) are unchanged from the pre-fix baseline.
+Neither `dEQP-VK.binding_model.descriptor_buffer.*resource*array*` nor
+`dEQP-VK.pipeline.monolithic.*descriptor_indexing*` resolves to any case
+in this CTS build's own case list (0/0 both), and this ICD's `VK_FALSE`-
+across-the-board `VK_EXT_descriptor_indexing` feature-bit cluster (see
+roadmap L12b) means every real `deqp-vk` case that would otherwise
+exercise an array-of-resources access is already reported `NotSupported`
+regardless of this fix -- consistent with roadmap L9/L10/L11's own
+established precedent, this fix remains confirmed only via its own direct
+`dxc`/`feme-translate`/`feme-opt` reduction, not independently via
+`deqp-vk`.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed
+again: this fix touches no feature or extension bit (an internal SPIR-V-
+to-LLVM conversion-pass correctness fix only); the `VK_EXT_descriptor_
+indexing` cluster's own all-`VK_FALSE` status remains tracked separately
+under roadmap L12b, not changed by this fix.
