@@ -52562,3 +52562,101 @@ plus the test-fixture corrections it required) is fully fixed and
 verified. `packed.test` itself still fails end-to-end, now advancing to a
 distinct, already-root-caused gap tracked as new roadmap row L20. Struck
 through L19 on the roadmap; added L20.
+
+# L20: whole-aggregate resource load/store decomposition
+
+Picked up exactly where L19 left off: `packed.test`'s own post-L19 error
+was `isSupportedRawElementType` (`SPIRVResourceLowering.cpp`) rejecting a
+whole-`Doggo`-struct `load`/`store` off a resource pointer outright, since
+it only ever recognized a scalar or fixed vector. The milestone's own
+description offered two plausible fixes -- (a) teach the mangling scheme
+(`appendScalarMangling`/`mangleResourceCallName`) to describe an
+aggregate's flattened shape in its call name, or (b) decompose the
+whole-aggregate load/store into per-field/per-element raw calls at this
+pass, reassembled with `insertvalue`/`extractvalue`. I chose (b): it has a
+much smaller blast radius (never touches the mangling scheme at all, so
+zero risk of reintroducing the `appendScalarMangling` `llvm_unreachable`
+this same file already has a scoping comment about), and it mirrors an
+existing precedent (`CompositeConstructPattern`'s own struct-reassembly at
+the SPIR-V-to-LLVM layer) rather than inventing a new technique.
+
+My first pass only handled struct types recursively. I built `feme-opt`
+and ran `check-hlsl-vk-feature-structuredbuffer` against the real ICD --
+`packed.test` still failed with the *identical* pre-fix error. Rather than
+assume something was stale, I regenerated the test artifact fresh and
+reran (ruled out staleness), then built an independent, isolated repro at
+`/tmp/l20repro/` matching `packed.test`'s exact HLSL and dxc invocation
+flags, and inspected the real LLVM-dialect MLIR `feme-opt
+--feme-convert-spirv-to-llvm` produces for it directly. That's what found
+the actual root cause my first pass missed: `Doggo`'s own two vector
+fields (`int3 Legs`, `int2 Ears`) convert to fixed-size LLVM *arrays*, not
+LLVM vectors, once nested inside this tightly-packed struct -- a shape the
+milestone's own literal wording ("a struct... accepting only a scalar or
+fixed vector") undersold. This is the kind of thing a from-scratch IR
+reduction catches that guessing from the milestone text alone wouldn't
+have: I would have shipped a "fix" that still didn't resolve the named
+case.
+
+Extending `isSupportedRawElementType`/`lowerRawLoad`/`lowerRawStore` to
+also handle arrays raised a real scoping question I had to think through
+carefully rather than wave away: this same file already has a
+crash-avoidance precedent (a bare top-level array reaching a raw
+load/store used to be deliberately left "unclassified" rather than
+reaching `appendScalarMangling`'s own `llvm_unreachable`, to avoid
+crashing on `dEQP-VK.spirv_assembly.instruction.spirv1p4.
+opselect.array_select`'s own shape). My first instinct was to be
+conservative and only accept an array *nested inside* an already-accepted
+struct, explicitly re-excluding a bare top-level array to avoid disturbing
+that precedent. I built that scoped-down version, and it worked for
+`packed.test` -- but running the full `check-hlsl-vk-feature-
+structuredbuffer` suite showed a regression I hadn't anticipated:
+`matrix.test`/`matrix_assign.test`, which had *started passing* with my
+first (unscoped) array fix, went back to failing with the artificially
+narrowed one. That's when I actually worked out *why* the crash-avoidance
+precedent doesn't need to apply here at all: my decomposition approach
+never calls `createRawLoad`/`createRawStore` (and therefore never reaches
+`appendScalarMangling`) with an aggregate type in the first place --
+whether the aggregate is a bare top-level array or one nested in a
+struct, it's always decomposed down to scalar/vector leaves first. The
+crash this precedent protects against can only happen if an aggregate
+reaches the mangling code directly, which my approach structurally never
+does. So the "safe scoping" I'd added was solving a problem that didn't
+exist for this implementation, at the cost of a real regression. I
+reverted the artificial exclusion, updated the outdated
+`LeavesStorageBufferArrayStoreUnchanged` gtest (renamed
+`LowersStorageBufferArrayStoreToPerElementRawStores`) to reflect that
+arrays -- top-level or nested -- are now genuinely, safely decomposed, and
+re-verified: `matrix.test`/`matrix_assign.test` came back, with 0 new
+regressions elsewhere. This is a case where a first cautious instinct
+(narrow the fix to avoid disturbing an old precedent) turned out to be
+wrong once I actually reasoned about *why* the old precedent existed and
+confirmed my new code path doesn't reintroduce that specific risk --
+worth writing down since "when in doubt, be conservative" isn't always
+the right call once you've actually checked the mechanism.
+
+Verification: `ninja check-feme` (2293/2320 passed, 27 unsupported, 0
+failed, up by exactly the 2 new tests I added -- a lit test and a gtest,
+both covering the exact struct-with-array-fields shape).
+`check-hlsl-vk-feature-structuredbuffer` against the real ICD improved
+from 9/650 to 7/650 failing -- a real, measurable improvement, not just a
+"no regression" result, since two previously-failing tests now pass
+outright. `packed.test` itself still doesn't pass end-to-end: its own
+post-fix error (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1
+offloader`) has advanced past this row's own scope into a distinct,
+already-root-caused gap in `feme::cpu::SIMDizePass` -- a divergent value
+of aggregate type has no component-decomposition support there at all,
+confirmed via its own explicit diagnostic message citing "roadmap
+milestone 7 deviation." Split this into a new roadmap row, L21, rather
+than trying to solve it under L20's own already-closed scope. Ran a
+`dEQP-VK.ssbo.layout.*`/`dEQP-VK.ssbo.*` sweep against the real ICD:
+byte-for-byte identical before and after (260/5275, 361/12225), expected
+since this fix's own target shape (an HLSL-emitted whole-struct-copy
+idiom) isn't one this GLSL/SPIR-V-assembly-sourced CTS family exercises.
+
+Outcome: L20's own scope is fully fixed and verified, with a genuine bonus
+improvement (`matrix.test`/`matrix_assign.test` now passing) beyond its
+own named case. `packed.test` itself still fails end-to-end, now
+advancing to a distinct, already-root-caused gap tracked as new roadmap
+row L21. Struck through L20 on the roadmap; added L21, keeping it at a
+single top-level letter of nesting per the standing instruction not to
+nest milestones more than one lowercase letter deep.
