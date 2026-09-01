@@ -37,21 +37,24 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L11:
+Please investigate and fix the issues tracked by milestone L12:
 
-> **`SIMDize.cpp`'s `widenGroupSharedLoad` does not support a vector-typed
-> result for a divergent groupshared address** -- found as an L10
-> milestone-description correction:
-> `WaveOps/GroupSharedMatrixRowComponentDataRace.test` was grouped under L10's
-> own "unrecognized broadcast"/"nested getelementptr" family, but its real
-> failure is a distinct, already-documented (in a `SIMDize.cpp` comment, ~line
-> 745: "A groupshared address keeps its own dedicated gather-based widening
-> (`widenGroupSharedLoad`), which does not (yet) support a vector-typed result")
-> scope gap: a divergent groupshared address whose load result is a full row
-> (e.g. `float4`, not a scalar) has nowhere to go once `SIMDize.cpp`'s own
-> general divergent-value handling reports "function 'main' has a divergent
-> value '' of vector type" instead. Needs its own scoping pass to determine
-> whether `widenGroupSharedLoad`'s existing scalar gather-based approach extends
-> cleanly to a vector element type (likely a per-lane gather of the whole row,
-> then a `shufflevector`/`insertelement` assembly, mirroring how the scalar case
-> already gathers one lane at a time) or needs a different strategy entirely
+> **Indexing an unbounded (runtime-sized) array of resource handles
+> (`RWBuffer<int> Buf[]`) fails pipeline creation** with `'llvm.getelementptr'
+> op result #0 must be LLVM pointer type or LLVM dialect-compatible vector of
+> LLVM pointer type, but got '!llvm.target<"spirv.SignedImage", i32, 5, 2, 0, 0,
+> 2, 24>'` -- found as an L10 milestone-description correction:
+> `Feature/ResourceArrays/overflow-unbounded-array.test` was grouped under L10's
+> own `si32` family, but its real failure is structurally unrelated (an
+> `llvm.getelementptr` computing an offset directly into a resource-handle-typed
+> value, rather than a byte/element offset into ordinary memory, which the LLVM
+> dialect's own GEP verifier rejects since a handle is not a pointer). Distinct
+> from -- and a strictly larger gap than -- `SPIRVResourceLowering.cpp`'s
+> existing bounded-array-of-handles support (confirmed by checking
+> `classifyTexelBufferHandle`/`ResourceGlobalVariablePattern`'s own existing
+> array handling, which assumes a compile-time-constant array length
+> throughout); needs its own scoping pass to determine where a *runtime*-sized
+> handle array should be represented (most likely a descriptor-indexing-style
+> indirection through `VkDescriptorSetLayoutBinding`'s own
+> `VARIABLE_DESCRIPTOR_COUNT` flag plus a runtime bounds computation, rather
+> than the current fixed-stride GEP scheme) before it can be scoped as a fix
