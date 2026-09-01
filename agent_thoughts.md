@@ -50561,3 +50561,213 @@ small Python script for `RuntimeCPUTest.cpp`'s single contiguous insertion
 block) since both the pass-side scalar-entry-point runtime helpers and the
 later-discovered vector-4 fix touched the same two files in one working
 session.
+
+# Session: Roadmap L10 (push-constant span, groupshared multi-broadcast, si32/ui32 group-reduce)
+
+## Task
+Investigate and fix roadmap milestone L10, a grab-bag of three small, distinct
+residual `check-hlsl-feme-vk` failure families left over from L2's own
+triage, each explicitly flagged as needing its own individual scoping rather
+than sharing a root cause:
+
+1. `Feature/PushConstant/types.test`'s "root-constant span not fully covered
+   by a VkPushConstantRange" failure.
+2. A couple of `feme-cpu-simdize` groupshared "unrecognized broadcast"/
+   "feeds a nested getelementptr" diagnostics across three `WaveOps` tests.
+3. An `'llvm.getelementptr'`/`'llvm.call'` "must be LLVM dialect-compatible
+   type, but got 'si32'" MLIR-dialect-conversion error across two tests.
+
+## Sub-issue 1: push-constant span
+
+Reduced `Feature/PushConstant/types.test` and found `SPIRVPushConstantLowering.cpp`
+was reporting the push-constant struct's full, padded declared size as the
+range the shader accesses, rather than the actual max-accessed byte offset --
+so a shader that only reads the struct's first member still demanded a
+`VkPushConstantRange` covering the whole (larger) struct, which the test's
+own harness never supplied (reasonably: it only sizes the range to what the
+shader's reflection says it actually touches). Fixed by tracking the real
+max-accessed byte across every recognized access and reporting that instead.
+This turned out to be a `feme` bug, not an `offload-test-suite` harness gap
+as the milestone description hedged it might be.
+
+## Sub-issue 2: groupshared multi-broadcast / duplicate-GEP
+
+This was the deepest investigation of the three. `GroupShared.cpp`'s
+`matchPointerBroadcast` (singular) assumed a groupshared global's "broadcast"
+access pattern -- a uniform base address, splatted across every SIMD lane via
+`insertelement`/`shufflevector`, then GEP'd per-lane -- only ever appeared as
+one single expansion chain per function. Two real WaveOps tests broke this
+assumption in two different, increasingly subtle ways:
+
+- `llvm::convertUsersOfConstantsToInstructions` (upstream `ReplaceConstant.cpp`)
+  memoizes its expansion of a `ConstantExpr` into real instructions per
+  `(Constant, BasicBlock)` pair. So the *same* broadcast-splat constant,
+  referenced from two different basic blocks in one function (e.g. two
+  divergent branches each reading the same shared global), expands into two
+  *independent* instruction chains, not one shared chain reused across
+  blocks. `matchPointerBroadcast`'s single-chain assumption silently found
+  only one of the two and left the other's user un-recognized, producing
+  the "unrecognized broadcast" diagnostic.
+- Even *within* a single block, that same upstream function's internal
+  worklist is a LIFO `SetVector`. If it processes two sibling instructions
+  needing the same constant materialized out of the "obvious" program order,
+  its own cache-invalidation logic ("if the cached instruction is after the
+  insertion point, we need to create a new one") discards its previously
+  cached expansion and mints a fresh, structurally-identical-but-distinct
+  clone instead of reusing it. This produced the "nested getelementptr"
+  diagnostic: a real duplicate `GetElementPtrInst` computing the exact same
+  address as another, both feeding the same logical broadcast chain, which
+  the old single-chain-single-clone assumption couldn't reconcile.
+
+Root-caused both purely by temporary `getenv`-gated debug dumps directly in
+`GroupShared.cpp` (never landed, fully reverted once done) since the bug
+only reproduces against real IR from a real dxc-compiled shader through the
+full JIT compile path -- neither `feme-opt`/`feme-translate` alone reaches
+far enough into the CPU backend to see it.
+
+Fixed by: renaming to `matchPointerBroadcasts` (plural) returning every
+independent chain; a new `coalesceIdenticalGroupSharedGEPs` pass merging
+duplicate structurally-identical GEP clones onto one canonical instance
+before any chain-matching happens; rewriting `retargetGroupSharedProducer`
+to loop over every chain independently; and moving the shared replacement
+`Flat` GEP pointer's construction to the function's entry block (the only
+location guaranteed to dominate every use once multiple blocks are
+involved -- building it at an arbitrary use site was fine when there was
+only ever one use site, but became a real "does not dominate all uses"
+verifier failure, initially manifesting as a much harder to diagnose
+`EarlyCSE` "Scope imbalance!" assertion crash several passes downstream,
+once that assumption broke).
+
+A third test grouped under this same milestone bullet,
+`GroupSharedMatrixRowComponentDataRace.test`, turned out **not** to hit this
+bug family at all -- it hits an unrelated, already-documented `SIMDize.cpp`
+scope gap (`widenGroupSharedLoad` doesn't support a vector-typed, i.e.
+full-row, result for a divergent groupshared address yet). Split out to a
+new roadmap row (L11) instead of forcing a fix into this milestone's scope.
+
+## Sub-issue 3: si32/ui32 GroupNonUniform* integer reduce
+
+Reduced `WaveOps/WaveActiveSum.convergence.test` down to a standalone
+`dxc`-compiled repro and ran it through `feme-translate --import-spirv` then
+`feme-opt --feme-convert-spirv-to-llvm`, confirming the milestone's own
+`si32` framing exactly: `WaveActiveSum(10)` over an `int`-typed buffer
+compiles to `spirv.GroupNonUniformIAdd` whose SPIR-V type is `si32`, and the
+*upstream* MLIR `GroupReducePattern` (`mlir/lib/Conversion/SPIRVToLLVM/
+SPIRVToLLVM.cpp`) builds its `llvm.call`/`llvm.func` directly from that raw
+type instead of running it through the type converter first -- correct for
+a float reduce (a SPIR-V float type has no signed/unsigned distinction,
+already valid), wrong for an integer reduce whenever the reduced value
+happens to be `si32` or `ui32` rather than signless `i32` (HLSL's
+`int`/`uint` distinction survives that far into MLIR's own SPIR-V dialect).
+This is a genuine upstream MLIR bug/limitation, not a feme regression.
+
+Since `GroupReducePattern` and all its helper functions (`getGroupFuncName`,
+`getTypeMangling`, `lookupOrCreateSPIRVFn`, `createSPIRVBuiltinCall`) are
+`static`/file-local to the upstream file, feme's own fix couldn't call into
+or patch them directly -- following the exact precedent already established
+by `RotateConversionPattern` (a self-contained feme pattern for an op
+upstream has *no* pattern for at all), wrote a new
+`IntegerGroupNonUniformReducePattern` template class covering the nine
+integer `spirv.GroupNonUniform*` arithmetic reductions an HLSL `Wave*`
+intrinsic can actually reach (`IAdd`/`IMul`/`SMin`/`UMin`/`SMax`/`UMax`/
+`BitwiseAnd`/`Or`/`Xor` -- `WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/
+`Or`/`Xor`'s own SPIR-V shape), registered at `FeMeBenefit` so the greedy
+dialect-conversion pattern applier prefers it over upstream's buggy pattern
+for exactly these ops. It reuses upstream's own name-mangling convention
+unchanged (upstream itself always mangles with `isSigned=false`, so the
+*name string* is identical regardless of real signedness -- only the
+LLVM/MLIR *type object* needs the type-converter-normalized signless type),
+just substituting `getTypeConverter()->convertType(op.getResult().getType())`
+for the raw SPIR-V type everywhere a type object is actually constructed.
+
+A second test grouped under this same milestone bullet,
+`Feature/ResourceArrays/overflow-unbounded-array.test`, turned out **not**
+to hit an `si32` error at all -- its real failure is a structurally
+different `llvm.getelementptr` computing an offset directly into a
+resource-handle-typed value (`!llvm.target<"spirv.SignedImage",...>`),
+which the LLVM dialect's own GEP verifier correctly rejects (a handle isn't
+a pointer). This is an unbounded/runtime-sized resource-array-of-handles
+indexing gap, unrelated to integer signedness and a strictly larger feature
+area than anything else in this milestone. Split out to a new roadmap row
+(L12) instead of attempting a fix within L10's own scope.
+
+## Verification
+
+Confirmed the fix against the real repro: `feme-opt --feme-convert-spirv-to-llvm`
+on the reduced `WaveActiveSum.convergence.test` IR no longer reports the
+`si32` diagnostic, producing valid `i32`-typed LLVM dialect IR. Rebuilt
+`feme_vulkan`/`offloader` and re-ran `WaveActiveSum.convergence.test` via
+`llvm-lit`: the `si32` diagnostic is gone, though the test still does not
+pass end-to-end -- it now hits the same pre-existing, already-tracked H19p
+"unsupported calling convention" abort as two of sub-issue 2's own tests
+(the fixed call's own `spir_func` calling convention is exactly what H19p
+already documents as unsupported by the CPU backend). This mirrors the
+established precedent from sub-issue 2 exactly: a milestone's own bug can
+be genuinely fixed while the test it was found through still fails on a
+separate, already-tracked, unrelated blocker.
+
+New/updated test coverage per sub-issue: a new case in the existing
+`spirv-push-constant-lowering.ll` lit test (sub-issue 1); a new
+`simdize-groupshared-multi-broadcast.ll` lit test plus an update to the
+pre-existing `simdize-groupshared-masked-store-uniform.ll` (sub-issue 2,
+whose `CHECK` lines needed updating for the entry-block `Flat`-placement
+change); and a new `spirv-to-llvm-group-nonuniform-integer.mlir` lit test
+covering both a signed (`si32`, `IAdd`) and unsigned (`ui32`,
+`BitwiseAnd`) case (sub-issue 3).
+
+`ninja check-feme` (assertions-enabled, ccache build) passed in full after
+every commit in this session, ending at 2268/2295 (27 pre-existing,
+unrelated `Unsupported`, 0 `Failed`) -- up by exactly the 3 new/changed
+test cases this session's three fix commits add, no regressions anywhere.
+
+## Real `deqp-vk` sweep
+
+Checked whether any real `deqp-vk` case independently exercises any of the
+three fixes, following this project's own established precedent (see L9's
+own write-up) that a `check-hlsl-feme-vk`-first fix isn't always
+independently reachable from `deqp-vk`'s own coverage:
+
+- `dEQP-VK.subgroups.arithmetic.compute.subgroupadd_int*` (the closest
+  candidate for sub-issue 3): entirely `NotSupported`, gated on an
+  unadvertised `VK_SUBGROUP_FEATURE_ARITHMETIC_BIT`, unrelated to and
+  upstream of this fix.
+- `dEQP-VK.compute.pipeline.basic.shared_var_*` (the closest candidate for
+  sub-issue 2): all `Fail`, but for a separate, unrelated, not-yet-tracked
+  `Device`-scope `spirv.MemoryBarrier` legalization gap (distinct from the
+  `Workgroup`-scope barrier `GroupMemoryBarrierWithGroupSync.test` itself
+  already exercises, which *does* reach this session's fix).
+- No push-constant-focused `deqp-vk` case uses a struct layout wide enough
+  to exercise sub-issue 1's span-accounting fix at all.
+
+None of the three fixes are independently confirmed via a real `deqp-vk`
+case yet; all three remain confirmed only via their own direct
+`offload-test-suite`/reduced-IR reproduction. No regressions found in any
+sweep relative to each fix's own pre-fix baseline (confirmed by reverting
+each fixed file and reproducing the identical pre-fix result). Recorded in
+`VulkanCTSReport.md`'s own new "Roadmap L10" section.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed for any of the three fixes -- all are internal compiler-pass
+correctness fixes (push-constant span accounting, CPU groupshared-widening
+robustness, SPIR-V-to-LLVM type-conversion correctness), touching no
+feature or extension surface.
+
+## Roadmap bookkeeping
+
+Struck through L10 with a detailed writeup of what each of the three
+sub-issues' fixes actually did, including the two milestone-description
+corrections found along the way (`GroupSharedMatrixRowComponentDataRace.test`
+and `overflow-unbounded-array.test` each turning out to hit a different,
+unrelated bug than the one the milestone grouped them under). Added two new
+top-level rows, L11 (groupshared vector-typed/row-result gather support in
+`widenGroupSharedLoad`) and L12 (unbounded/runtime-sized resource-array-of-
+handles indexing), each scoped as its own future work item rather than
+folded into L10's own resolution.
+
+No `FeMeCPUDesign.md`/`FeMeVulkanDesign.md` deviation update needed: all
+three fixes restore or extend already-documented design intent rather than
+deviating from it (sub-issue 2's groupshared-widening robustness fix
+matches `FeMeCPUDesign.md`'s own existing "Phase 4: Widening" description;
+sub-issue 3's new conversion pattern follows the exact
+`RotateConversionPattern`/`FeMeBenefit` precedent
+`FeMeVulkanDesign.md` already documents for F2).
