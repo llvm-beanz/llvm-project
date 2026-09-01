@@ -357,7 +357,24 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props12->shaderRoundingModeRTZFloat16 = VK_FALSE;
       Props12->shaderRoundingModeRTZFloat32 = VK_FALSE;
       Props12->shaderRoundingModeRTZFloat64 = VK_FALSE;
-      Props12->maxUpdateAfterBindDescriptorsInAllPools = 0;
+      // (roadmap L12b) Now that several `descriptorBinding*UpdateAfterBind`
+      // bits above are true, these companion limits below must be raised
+      // to match the plain (non-update-after-bind) limits
+      // `PhysicalDeviceInfo.cpp` already reports for the same descriptor-
+      // type buckets -- a zero limit here would make update-after-bind
+      // unusable in practice even though the feature bit claims support.
+      // Samplers/sampled images share a bucket with
+      // `descriptorBindingSampledImageUpdateAfterBind` per the spec's own
+      // per-type table (`VK_DESCRIPTOR_TYPE_SAMPLER`/
+      // `COMBINED_IMAGE_SAMPLER`/`SAMPLED_IMAGE`, plus uniform texel
+      // buffers counted against the same bucket for limit-accounting
+      // purposes); storage images share a bucket with storage texel
+      // buffers the same way, even though the storage-*image* feature bit
+      // itself stays false. `maxUpdateAfterBindDescriptorsInAllPools` and
+      // `maxPerStageUpdateAfterBindResources` are set to the same modest,
+      // internally-consistent values this software device already uses
+      // for the non-update-after-bind pool/per-stage totals.
+      Props12->maxUpdateAfterBindDescriptorsInAllPools = 4096;
       Props12->shaderUniformBufferArrayNonUniformIndexingNative = VK_FALSE;
       Props12->shaderSampledImageArrayNonUniformIndexingNative = VK_FALSE;
       Props12->shaderStorageBufferArrayNonUniformIndexingNative = VK_FALSE;
@@ -365,20 +382,20 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props12->shaderInputAttachmentArrayNonUniformIndexingNative = VK_FALSE;
       Props12->robustBufferAccessUpdateAfterBind = VK_FALSE;
       Props12->quadDivergentImplicitLod = VK_FALSE;
-      Props12->maxPerStageDescriptorUpdateAfterBindSamplers = 0;
-      Props12->maxPerStageDescriptorUpdateAfterBindUniformBuffers = 0;
-      Props12->maxPerStageDescriptorUpdateAfterBindStorageBuffers = 0;
-      Props12->maxPerStageDescriptorUpdateAfterBindSampledImages = 0;
-      Props12->maxPerStageDescriptorUpdateAfterBindStorageImages = 0;
+      Props12->maxPerStageDescriptorUpdateAfterBindSamplers = 16;
+      Props12->maxPerStageDescriptorUpdateAfterBindUniformBuffers = 12;
+      Props12->maxPerStageDescriptorUpdateAfterBindStorageBuffers = 4;
+      Props12->maxPerStageDescriptorUpdateAfterBindSampledImages = 16;
+      Props12->maxPerStageDescriptorUpdateAfterBindStorageImages = 4;
       Props12->maxPerStageDescriptorUpdateAfterBindInputAttachments = 0;
-      Props12->maxPerStageUpdateAfterBindResources = 0;
-      Props12->maxDescriptorSetUpdateAfterBindSamplers = 0;
-      Props12->maxDescriptorSetUpdateAfterBindUniformBuffers = 0;
+      Props12->maxPerStageUpdateAfterBindResources = 128;
+      Props12->maxDescriptorSetUpdateAfterBindSamplers = 96;
+      Props12->maxDescriptorSetUpdateAfterBindUniformBuffers = 72;
       Props12->maxDescriptorSetUpdateAfterBindUniformBuffersDynamic = 0;
-      Props12->maxDescriptorSetUpdateAfterBindStorageBuffers = 0;
+      Props12->maxDescriptorSetUpdateAfterBindStorageBuffers = 24;
       Props12->maxDescriptorSetUpdateAfterBindStorageBuffersDynamic = 0;
-      Props12->maxDescriptorSetUpdateAfterBindSampledImages = 0;
-      Props12->maxDescriptorSetUpdateAfterBindStorageImages = 0;
+      Props12->maxDescriptorSetUpdateAfterBindSampledImages = 96;
+      Props12->maxDescriptorSetUpdateAfterBindStorageImages = 24;
       Props12->maxDescriptorSetUpdateAfterBindInputAttachments = 0;
       Props12->supportedDepthResolveModes = VK_RESOLVE_MODE_NONE;
       Props12->supportedStencilResolveModes = VK_RESOLVE_MODE_NONE;
@@ -1250,10 +1267,32 @@ void fillFeatures2Chain(void *pNext) {
       Features->shaderSharedInt64Atomics = VK_FALSE;
       Features->shaderFloat16 = VK_FALSE;
       Features->shaderInt8 = VK_FALSE;
+      // (roadmap L12b) `descriptorIndexing` itself, plus every
+      // `shader*ArrayNonUniformIndexing` bit below, stay false: the spec's
+      // own "Feature Requirements" for `descriptorIndexing` require nearly
+      // all of the NonUniformIndexing sub-features too, and a shader that
+      // actually uses non-uniform array indexing needs the SPIR-V
+      // `NonUniform` decoration, which the importer does not yet handle at
+      // all (roadmap L7's own "unhandled Decoration : 'NonUniform'" gap).
       Features->descriptorIndexing = VK_FALSE;
+      // (roadmap L12b) "Dynamic" indexing (an ordinary, non-constant SSA
+      // index, as opposed to a `NonUniform`-decorated one) already works
+      // end to end for every array-of-resource-handle kind these three
+      // cover: L12a's `ResourceArrayAccessChainPattern` threads any index
+      // value (not just a compile-time constant) through to
+      // `llvm.spv.resource.handlefrombinding`, `isResourcePointer`
+      // (`SPIRVToLLVMPatterns.cpp`) matches every image `Dim` including
+      // `Buffer` (texel buffers) and `SubpassData` (input attachments), and
+      // `SPIRVResourceLowering.cpp`'s `BoundHandle` deliberately re-reads
+      // (rather than caches) the index at lowering time specifically
+      // because it may be dynamic. Confirmed for the texel-buffer case by a
+      // real dispatch (`CommandBufferTest.cpp`'s
+      // `TexelBufferArrayDynamicIndexDispatchTest`); the input-attachment
+      // case is left false pending a similar direct confirmation once a
+      // multi-attachment-array test fixture exists.
       Features->shaderInputAttachmentArrayDynamicIndexing = VK_FALSE;
-      Features->shaderUniformTexelBufferArrayDynamicIndexing = VK_FALSE;
-      Features->shaderStorageTexelBufferArrayDynamicIndexing = VK_FALSE;
+      Features->shaderUniformTexelBufferArrayDynamicIndexing = VK_TRUE;
+      Features->shaderStorageTexelBufferArrayDynamicIndexing = VK_TRUE;
       Features->shaderUniformBufferArrayNonUniformIndexing = VK_FALSE;
       Features->shaderSampledImageArrayNonUniformIndexing = VK_FALSE;
       Features->shaderStorageBufferArrayNonUniformIndexing = VK_FALSE;
@@ -1261,14 +1300,44 @@ void fillFeatures2Chain(void *pNext) {
       Features->shaderInputAttachmentArrayNonUniformIndexing = VK_FALSE;
       Features->shaderUniformTexelBufferArrayNonUniformIndexing = VK_FALSE;
       Features->shaderStorageTexelBufferArrayNonUniformIndexing = VK_FALSE;
-      Features->descriptorBindingUniformBufferUpdateAfterBind = VK_FALSE;
-      Features->descriptorBindingSampledImageUpdateAfterBind = VK_FALSE;
+      // (roadmap L12b) `vkQueueSubmit` executes every submission fully
+      // synchronously (see `vkDeviceWaitIdle`'s own comment below), and
+      // command interpretation (`executeCommandsInto`/`runDispatch`/
+      // `buildBoundResources`, `CommandBuffer.cpp`) happens at submission
+      // time, not at record time -- so there is never a real "pending"
+      // window during which a concurrent descriptor update could race with
+      // in-flight use. Any `vkUpdateDescriptorSets` call made any time
+      // before `vkQueueSubmit` returns is guaranteed visible to that
+      // submission, matching this project's existing "vacuously true"
+      // precedent (e.g. `shaderSubgroupExtendedTypes`). Confirmed by a real
+      // dispatch (`CommandBufferTest.cpp`'s
+      // `DescriptorUpdatedAfterBindingIsVisibleAtSubmission`) for every
+      // descriptor type below that is otherwise genuinely usable today.
+      // `descriptorBindingStorageImageUpdateAfterBind` stays false because
+      // storage images are not usable at all yet -- `Format.cpp` never
+      // sets `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` on any format, so no
+      // `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE` descriptor can ever be created.
+      Features->descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+      Features->descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
       Features->descriptorBindingStorageImageUpdateAfterBind = VK_FALSE;
-      Features->descriptorBindingStorageBufferUpdateAfterBind = VK_FALSE;
-      Features->descriptorBindingUniformTexelBufferUpdateAfterBind = VK_FALSE;
-      Features->descriptorBindingStorageTexelBufferUpdateAfterBind = VK_FALSE;
-      Features->descriptorBindingUpdateUnusedWhilePending = VK_FALSE;
-      Features->descriptorBindingPartiallyBound = VK_FALSE;
+      Features->descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+      Features->descriptorBindingUniformTexelBufferUpdateAfterBind = VK_TRUE;
+      Features->descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE;
+      // (roadmap L12b) Same synchronous-submission reasoning as the
+      // update-after-bind cluster above applies here too.
+      // `descriptorBindingUpdateUnusedWhilePending` promises an *unused*
+      // binding may be updated while other bindings are in use -- always
+      // true given there is never a real in-flight window at all.
+      // `descriptorBindingPartiallyBound` promises a statically-declared
+      // binding may have some invalid/unwritten elements, which
+      // `Descriptor.h`'s own zero-fill-on-unwritten behavior already
+      // satisfies (confirmed for the array case by a real dispatch,
+      // `UnwrittenArrayElementReadsAsZeroInsteadOfCrashing`).
+      Features->descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+      Features->descriptorBindingPartiallyBound = VK_TRUE;
+      // (roadmap L12c) Reserved for the descriptor-set-layout/allocation-
+      // time `VARIABLE_DESCRIPTOR_COUNT` plumbing an unbounded resource
+      // array needs; not yet implemented.
       Features->descriptorBindingVariableDescriptorCount = VK_FALSE;
       Features->runtimeDescriptorArray = VK_FALSE;
       Features->samplerFilterMinmax = VK_FALSE;
