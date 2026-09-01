@@ -685,10 +685,33 @@ called out inline where it's discussed, and summarized here:
   `fillWidenedVectorPHIIncoming`/`checkVectorDecompositionSupported` in
   SIMDize.cpp). A `CastInst` whose operand's element count would not line
   up component-for-component with the result (e.g. `bitcast <4 x i32> to
-  <2 x i64>`) remains diagnosed, and every divergent aggregate of any
-  kind is still diagnosed up front rather than attempting to build an
-  illegal type; generalizing either further is a substantial follow-up of
-  its own, not yet scheduled against a specific future milestone.
+  <2 x i64>`) remains diagnosed.
+  A divergent *aggregate* (struct/array) value gets its own analogous
+  decomposition too (roadmap L21): an `insertvalue` chain assembling a
+  struct/array from scalar leaves (or from an already-decomposed
+  sub-aggregate inserted whole at once), consumed by another
+  `insertvalue`'s aggregate-base or inserted-value operand or an
+  `extractvalue`'s aggregate operand -- the latter itself a supported
+  producer when its own result is a genuine scalar leaf or a nested
+  sub-aggregate (`FunctionWidener::checkAggregateValueSupported`/
+  `widenInsertValue`/`widenExtractValue`/
+  `WidenedAggregateComponents`/`getAggregateComponents` in SIMDize.cpp) --
+  the shape `feme::cpu::SPIRVResourceLoweringPass`'s own whole-aggregate
+  resource load/store decomposition (roadmap L20) produces once
+  reassembled through `feme::cpu::LinearizePass`, confirmed by reducing a
+  real `Feature/StructuredBuffer/packed.test` failure. Every leaf this
+  decomposition reaches must itself be a genuine scalar, never a nested
+  vector (no real case has needed one: every vector-typed field seen
+  inside a divergent aggregate so far is already fully scalar-decomposed
+  by the time it reaches this pass); a divergent aggregate built any
+  other way (e.g. an ordinary `LoadInst` of aggregate type, or a
+  `PHINode` of aggregate type -- unlike a vector `phi`, no real case has
+  needed one yet, since `LinearizePass` fully scalarizes every field of a
+  divergent aggregate reassignment into a plain scalar `select` before
+  ever rebuilding the struct itself) remains diagnosed rather than
+  attempting to build an illegal type; generalizing either further is a
+  substantial follow-up of its own, not yet scheduled against a specific
+  future milestone.
 - **A divergent call to a homogeneous, single-overload-type math intrinsic
   widens directly to its vector-typed overload**, rather than being
   rejected: this covers both `llvm::isTriviallyVectorizable`'s

@@ -19104,3 +19104,97 @@ No feature-bit or extension-advertisement change (an internal CPU
 resource-lowering-pass correctness fix); confirmed, not assumed, that
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap L21
+
+**Scope.** `feme::cpu::SIMDizePass`'s `checkVectorDecompositionSupported`
+preflight rejected any divergent value of aggregate (struct or array)
+type outright, with no component-decomposition path at all -- found as
+an L20 milestone-description correction: with L20's own fix landed,
+`Feature/StructuredBuffer/packed.test`'s own `Doggo Fido = Buf[GI]; ...;
+Buf[GI] = Fido;` whole-struct-copy idiom converted and lowered cleanly
+through both the SPIR-V-to-LLVM layer (L19) and the CPU
+resource-lowering pass (L20), producing a whole-`Doggo`-struct value
+that is itself divergent (loaded through `GI`, `SV_GroupIndex`), but
+`feme-cpu-simdize` had never had any aggregate-typed case at all: its
+own preflight loop bailed immediately with `'function \'main\' has a
+divergent value ... of aggregate type; component decomposition is not
+yet supported (roadmap milestone 7 deviation)'` the moment it saw one.
+
+**Fix.** Gave a divergent aggregate value its own flat-scalar-leaf
+decomposition scheme, `WidenedAggregateComponents`
+(`SIMDize.cpp`), mirroring the existing `WidenedVectorComponents`
+scheme exactly but flattened to every scalar leaf of the struct/array
+(in declaration/index order, never descending into a vector-typed
+field -- `isAllScalarAggregateLeaves` requires every leaf be a genuine
+scalar). Producer support is limited to two real shapes: an
+`insertvalue` chain assembling the aggregate (mixing per-scalar-leaf
+inserts with a whole sub-array/sub-struct inserted at once), and an
+`extractvalue` reading either a scalar leaf or a nested sub-aggregate
+back out (`checkAggregateValueSupported`/`getAggregateComponents`/
+`widenInsertValue`/`widenExtractValue`). Consumer support is limited to
+another `insertvalue`'s aggregate-base or inserted-value operand, or
+any `extractvalue`'s aggregate operand. Deliberately excluded an
+aggregate-typed `PHINode`: no real case needs it, since
+`feme::cpu::LinearizePass` always fully scalarizes a divergent
+aggregate field to a plain scalar `select` before ever rebuilding the
+struct, so the struct is always freshly built via `insertvalue` in a
+merge block, never phi-merged directly.
+
+**Method.** Reduced the exact shape via IR reduction: a chain of
+`insertvalue`s (mixing per-scalar-leaf inserts and whole-sub-aggregate
+inserts) building a struct, later read back via a chain of
+`extractvalue`s (including a two-level nested-sub-aggregate extraction)
+feeding per-leaf `feme.cpu.resource.store.raw.i32` calls -- the exact
+shape L20's own whole-aggregate resource-load/store decomposition
+produces once reassembled through `LinearizePass`. Updated
+`simdize-aggregate-unsupported.ll` (its old `insertvalue`-based scenario
+is now a supported shape) to test a still-genuinely-unsupported one
+(an aggregate-typed `load` through a divergent address), and added a
+new lit test (`simdize-aggregate-struct.ll`) and gtest
+(`DecomposesInsertValueChainIntoResourceStore`) proving the new
+capability end-to-end. `ninja check-feme`: 2295/2322 passed, 0 failed,
+27 unsupported (0 regressions, up by 2 new discovered tests). Rebuilt
+`feme_vulkan`/`offloader`/`feme-translate` and ran
+`check-hlsl-vk-feature-structuredbuffer` (direct `llvm-lit` invocation
+on the generated `vk` suite's `Feature/StructuredBuffer` subdirectory,
+which discovers 12 tests, not the full suite's 650) and the broader
+`check-hlsl-vk` full suite, plus a `dEQP-VK.ssbo.layout.*`/
+`dEQP-VK.ssbo.*` sweep against the real `feme_vulkan` ICD, all both
+before and after the fix via a `git stash`/`git stash pop` A/B
+comparison.
+
+**Findings.**
+- **This row's own scope is fully closed, and `packed.test` itself now
+  passes end-to-end for the first time** -- confirmed via both the
+  isolated `feme-opt` reduction and a direct `offloader` run against
+  the real `packed.test` binary (`FEME_VULKAN_LOG_CREATION_ERRORS=1`
+  shows no error at all post-fix).
+- `check-hlsl-vk-feature-structuredbuffer`: 12/12 discovered tests
+  pass (up from 11/12 pre-fix, `packed.test` being the one newly
+  passing case).
+- `check-hlsl-vk` full suite: 13 failures, confirmed via a stash A/B
+  rebuild to be pre-existing and unrelated to this change (HLSLLib math
+  libcalls, InlineRT ray tracing, UAV sequential consistency,
+  BufferFormats -- none touch struct/aggregate resource paths).
+- `dEQP-VK.ssbo.layout.*` (5275 cases) and `dEQP-VK.ssbo.*` (12225
+  cases): byte-for-byte identical pass/fail counts before and after the
+  fix (0 failed in both sweeps, both before and after). The "not
+  supported" counts observed this session (21/5275, 63/12225) differ
+  substantially from the much older baseline figures recorded in this
+  report's own L20 section (260/5275, 361/12225); the stash A/B
+  comparison confirms this drift is from environment/CTS-checkout
+  changes and many intervening milestones' fixes accumulating over
+  time, not a regression from this specific fix.
+- Reviewed `FeMeCPUDesign.md`'s own Phase 4 widening table, which
+  already listed "Divergent value of aggregate type | one widened value
+  per scalar leaf, by the same two rules" as a forward-looking row;
+  updated its "Vector/aggregate leaf decomposition is narrower than the
+  design" deviation note to describe the now-implemented scheme and its
+  remaining exclusions (aggregate-typed `PHINode`, a non-`insertvalue`/
+  `extractvalue` aggregate producer, and a vector-typed leaf).
+
+No feature-bit or extension-advertisement change (an internal CPU
+wave-widening-pass correctness fix); confirmed, not assumed, that
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
