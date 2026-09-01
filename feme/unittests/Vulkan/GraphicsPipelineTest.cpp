@@ -757,15 +757,8 @@ TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   VkShaderModule Fragment = createModule(FragmentSource);
   VkPipeline Pipe = VK_NULL_HANDLE;
 
-  // An unimplemented topology (an adjacency topology, needing a geometry
-  // stage -- roadmap R34/C4c; every other topology is implemented now).
-  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
-  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY;
-  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
-  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
-
   // Rasterizer discard.
-  Info = makeCreateInfo(Vertex, Fragment);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
   Raster.rasterizerDiscardEnable = VK_TRUE;
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
 
@@ -2502,12 +2495,11 @@ TEST_F(GraphicsPipelineTest, AcceptsGeometryStage) {
 }
 
 /// Roadmap H5e: the four `*_WITH_ADJACENCY` topologies, previously
-/// rejected unconditionally by `mapTopology` (see
-/// `RejectsUnimplementedStateCombinations`'s own
-/// `VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY` case, still rejected
-/// today since it binds no geometry stage), now succeed once a geometry
+/// rejected unconditionally by `mapTopology`, now succeed once a geometry
 /// stage is bound -- the executor (roadmap H5d) has been ready to consume
-/// adjacency-assembled primitives all along.
+/// adjacency-assembled primitives all along. (Roadmap H7l:
+/// `AcceptsAdjacencyTopologyWithoutGeometryStage` below covers the
+/// other, also-legal combination -- a geometry stage is never required.)
 TEST_F(GraphicsPipelineTest, AcceptsAdjacencyTopologyWithGeometryStage) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Geometry = createModule(GeometrySource);
@@ -2532,15 +2524,23 @@ TEST_F(GraphicsPipelineTest, AcceptsAdjacencyTopologyWithGeometryStage) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// Roadmap H5e: every one of the four adjacency topologies is still
-/// rejected without a bound geometry stage -- the check is one-directional
-/// (adjacency requires geometry; geometry does not require adjacency, see
-/// `AcceptsGeometryStage` above), mirroring `RejectsTopologyTessellation
-/// StageMismatch`'s own bidirectional `PatchList`/tessellation pairing.
-TEST_F(GraphicsPipelineTest, RejectsAdjacencyTopologyWithoutGeometryStage) {
+/// Roadmap H7l: every one of the four adjacency topologies is accepted
+/// *without* a bound geometry stage too -- `VUID-VkGraphicsPipelineCreate
+/// Info-topology-00738`/neighbors require the `geometryShader` *device
+/// feature* (this ICD always advertises it), not that this particular
+/// pipeline itself binds a geometry stage; `AcceptsAdjacencyTopologyWith
+/// GeometryStage` above covers the other, also-legal combination. Found
+/// via a real `dEQP-VK.clipping.clip_volume.depth_clamp.{triangle,line}_
+/// *_with_adjacency` reproduction, whose own vertex/fragment-only
+/// pipelines are exactly this combination -- `vkCreateGraphicsPipelines`
+/// used to fail all 4 with `VK_ERROR_INITIALIZATION_FAILED` before this
+/// fix. `Executor.cpp`'s own runtime rejection of the same combination
+/// (roadmap H5d) was corrected alongside this row; see
+/// `ExecutorTest.cpp`'s `Renders{TriangleList,LineList}WithAdjacencyCore
+/// {Triangle,Line}WithoutAGeometryStage`.
+TEST_F(GraphicsPipelineTest, AcceptsAdjacencyTopologyWithoutGeometryStage) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
-  VkPipeline Pipe = VK_NULL_HANDLE;
 
   static constexpr VkPrimitiveTopology AdjacencyTopologies[] = {
       VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY,
@@ -2548,12 +2548,28 @@ TEST_F(GraphicsPipelineTest, RejectsAdjacencyTopologyWithoutGeometryStage) {
       VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY,
       VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY,
   };
-  for (VkPrimitiveTopology Topology : AdjacencyTopologies) {
+  static constexpr feme::graphics::PrimitiveTopology ExpectedTopologies[] = {
+      feme::graphics::PrimitiveTopology::LineListWithAdjacency,
+      feme::graphics::PrimitiveTopology::LineStripWithAdjacency,
+      feme::graphics::PrimitiveTopology::TriangleListWithAdjacency,
+      feme::graphics::PrimitiveTopology::TriangleStripWithAdjacency,
+  };
+  for (size_t I = 0;
+       I != sizeof(AdjacencyTopologies) / sizeof(AdjacencyTopologies[0]);
+       ++I) {
     VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
-    InputAssembly.topology = Topology;
-    EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED)
-        << "topology " << Topology;
-    EXPECT_EQ(Pipe, VK_NULL_HANDLE) << "topology " << Topology;
+    InputAssembly.topology = AdjacencyTopologies[I];
+    VkPipeline Handle = VK_NULL_HANDLE;
+    ASSERT_EQ(create(Info, Handle), VK_SUCCESS)
+        << "topology " << AdjacencyTopologies[I];
+
+    auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+    const feme::graphics::GraphicsPipeline Executor =
+        Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+    EXPECT_EQ(Executor.getTopology(), ExpectedTopologies[I])
+        << "topology " << AdjacencyTopologies[I];
+
+    vkDestroyPipeline(Device, Handle, nullptr);
   }
 
   vkDestroyShaderModule(Device, Fragment, nullptr);
@@ -2565,8 +2581,10 @@ TEST_F(GraphicsPipelineTest, RejectsAdjacencyTopologyWithoutGeometryStage) {
 /// `feme::graphics::topologySupportsPrimitiveRestart` lists, not just
 /// `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP` -- `AcceptsPrimitiveRestartOn
 /// TriangleStrip` above already covers that one; this covers the
-/// remaining four, including the two adjacency topologies (which
-/// additionally require a bound geometry stage). Before this fix,
+/// remaining four, including the two adjacency topologies (bound to a
+/// geometry stage here since H7l's own `AcceptsAdjacencyTopologyWithout
+/// GeometryStage` above already covers the geometry-stage-free
+/// combination; either is legal). Before this fix,
 /// `GraphicsPipeline.cpp`'s creation-time gate rejected every one of
 /// these four with `VK_ERROR_INITIALIZATION_FAILED` and no diagnostic
 /// (`RejectsUnimplementedStateCombinations`'s own default-topology case
