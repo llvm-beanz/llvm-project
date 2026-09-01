@@ -351,6 +351,66 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
 /// uniform loop" induction variable (see the file comment above), matched
 /// by \p RegionFn's `loopvarN` parameters the same way every other
 /// `WaveBodyEnv`/`barrier_spill` parameter is matched by name.
+/// Every parameter name the wave-body call below knows how to supply an
+/// argument for: the `feme::cpu::WaveBodyEnv` ABI `SIMDizePass` gives a
+/// widened wave body, plus the `loopvarN` scalars `buildWrapperForLoop`
+/// adds. `checkWaveBodyParameters` rejects anything else up front, so the
+/// dispatch below can treat an unrecognized name as unreachable.
+bool isKnownWaveBodyParameter(StringRef Name) {
+  static constexpr StringLiteral Known[] = {
+      "resource_heap",
+      "resource_heap_count",
+      "sampler_heap",
+      "sampler_heap_count",
+      "root_constants",
+      "root_constant_size",
+      "image_heap",
+      "image_heap_count",
+      "wave_group_id_x",
+      "wave_group_id_y",
+      "wave_group_id_z",
+      "wave_index",
+      "wave_entry_mask",
+      "wave_sideeffect_mask",
+      "wave_groupshared",
+      "barrier_spill",
+      "mesh_vertex_output_layout",
+      "mesh_vertex_outputs",
+      "mesh_primitive_output_layout",
+      "mesh_primitive_outputs",
+      "mesh_max_output_vertices",
+      "mesh_max_output_primitives",
+      "mesh_actual_vertex_count",
+      "mesh_actual_primitive_count",
+      "task_payload",
+      "task_max_payload_bytes",
+  };
+  if (Name.starts_with("loopvar"))
+    return true;
+  return is_contained(Known, Name);
+}
+
+/// Diagnoses a wave body \p F carrying a parameter this pass has no
+/// argument to supply -- an entry point that reached `SIMDizePass` with a
+/// parameter of its own (a shader entry point takes none; its inputs
+/// arrive through stage-IO or resource accesses), whose widened body
+/// therefore keeps that parameter ahead of the `WaveBodyEnv` ABI ones.
+/// Reported through the module's diagnostic handler, which
+/// `feme::cpu::runPipeline`'s `ErrorDiagnosticGuard` turns into a clean
+/// pipeline failure, rather than crashing in `buildWaveLoop`'s dispatch.
+bool checkWaveBodyParameters(Function &F) {
+  for (const Argument &Arg : F.args()) {
+    if (isKnownWaveBodyParameter(Arg.getName()))
+      continue;
+    F.getContext().emitError(
+        "feme-cpu-wrap-entry: function '" + F.getName() +
+        "' has an unsupported parameter '" + Arg.getName() +
+        "'; a shader entry point takes no parameters of its own");
+    return false;
+  }
+  return true;
+}
+
 BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
                           Function &RegionFn, const WrapperEnv &Env,
                           unsigned WaveSize, uint32_t GroupSizeTotal,
@@ -440,6 +500,8 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       (void)Failed;
       CallArgs.push_back(LoopScalars[N]);
     } else
+      // Unreachable: `checkWaveBodyParameters` rejected every name this
+      // dispatch does not handle before any wrapper was built.
       llvm_unreachable("unexpected wave-body parameter for EntryWrapperPass");
   }
   Body.CreateCall(&RegionFn, CallArgs);
@@ -1659,6 +1721,9 @@ Function *buildWrapper(Function &WaveBodyIn) {
       feme::getShaderStage(WaveBodyIn) == feme::ShaderStage::Amplification;
   std::optional<WaveBodyEnv> Env = getWaveBodyEnv(WaveBodyIn);
   if (!Env)
+    return nullptr;
+
+  if (!checkWaveBodyParameters(WaveBodyIn))
     return nullptr;
 
   Function *WaveBody = &WaveBodyIn;

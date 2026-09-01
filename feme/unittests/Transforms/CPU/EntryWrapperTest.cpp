@@ -11,6 +11,7 @@
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -474,6 +475,49 @@ TEST(EntryWrapperTest, SpillsPhiLiveAcrossGroupSyncBarrier) {
   EXPECT_TRUE(FoundPhi);
   EXPECT_TRUE(FoundStoreAfterPhi);
   EXPECT_TRUE(FoundLoad);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// An entry point that reached `SIMDizePass` still carrying a parameter of
+// its own (a shader entry point takes none -- its inputs arrive through
+// stage-IO or resource accesses) leaves that parameter ahead of the
+// `WaveBodyEnv` ABI ones on the widened wave body. This pass has no
+// argument to supply for it, and must diagnose that through the module's
+// `LLVMContext` -- which `feme::cpu::runPipeline`'s `ErrorDiagnosticGuard`
+// turns into a clean pipeline failure -- rather than crashing on the
+// `llvm_unreachable` in its own wave-body call dispatch.
+TEST(EntryWrapperTest, UnsupportedEntryParameterDiagnosesInsteadOfCrashing) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %sum = add i32 %tid, %n
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  // Must not crash the process (before this check existed, the wave-body
+  // call dispatch `llvm_unreachable`'d on '%n' and `SIGABRT`ed here).
+  EntryWrapperPass().run(*M, MAM);
+  EXPECT_TRUE(SawError);
+
+  // No half-built wrapper left behind for a later phase to trip over.
+  EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
