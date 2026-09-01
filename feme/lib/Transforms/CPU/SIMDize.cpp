@@ -631,7 +631,18 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   //    `widenScalarizedFallback`'s per-lane clone, since a groupshared
   //    address is already a real vector-of-pointers `getelementptr`
   //    (`widenGroupSharedGEP`) rather than a value needing per-lane
-  //    extraction,
+  //    extraction, and
+  //  - (roadmap L15) a `feme.cpu.masked.load.*` call producing a
+  //    vector-typed result -- `feme::cpu::LinearizePass`'s masked form of
+  //    the L11 shape above, produced whenever that same groupshared
+  //    vector `load` is itself inside genuinely divergent control flow
+  //    (e.g. a real `if (ThreadID.x == 0)` guard, as
+  //    `WaveOps/GroupSharedMatrixRowComponentDataRace.test` itself has) --
+  //    decomposed into `N` per-component widened gathers exactly like the
+  //    unmasked groupshared case, but against this call's own governing
+  //    mask and its own (possibly divergent) passthru operand rather than
+  //    the wave's bare entry mask and a constant zero (see
+  //    `widenMaskedLoad`'s own vector case),
   //
   // Verify every divergent vector
   // value matches one of those producer shapes, and every use of one
@@ -714,6 +725,16 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       // decomposed into per-component wide vectors exactly like a typed
       // buffer load (see `widenImageCall`).
       if ((Matched && !Matched->StoredValue) || matchImageCall(*CI)) {
+        IsSupportedProducer = true;
+      } else if (matchMaskedLoad(*CI)) {
+        // (Roadmap L15) A `feme.cpu.masked.load.*` call producing a
+        // vector-typed result -- `feme::cpu::LinearizePass`'s masked form
+        // of the already-supported groupshared vector `load` (roadmap
+        // L11), reached once that same access is itself inside genuinely
+        // divergent control flow -- decomposes into `N` per-component
+        // widened gathers exactly like an unmasked groupshared vector
+        // `load` already does (see `widenMaskedLoad`'s own vector case),
+        // rather than one illegal `<W x <N x T>>` `llvm.masked.gather`.
         IsSupportedProducer = true;
       } else if (Function *Callee = CI->getCalledFunction()) {
         // Roadmap H6g-b-a-i-a-i-b: a vector-typed, homogeneous "trivially
@@ -1567,6 +1588,50 @@ void FunctionWidener::widenMaskedLoad(CallInst &CI,
   Value *EffectiveMask =
       Builder.CreateAnd(Env.EntryMask, WideMask, "masked.mask");
   Value *WidePtr = getWidened(Matched.Ptr, Builder);
+
+  // (Roadmap L15) A vector-typed result -- e.g. a masked read of a whole
+  // `float4` row out of a `groupshared float4x4` at a per-lane row index,
+  // the shape `feme::cpu::LinearizePass`'s `maskMemoryOps` produces once
+  // that same L11 access is itself inside genuinely divergent control flow
+  // (a real `if (ThreadID.x == 0)` guard, as
+  // `WaveOps/GroupSharedMatrixRowComponentDataRace.test` itself has) --
+  // cannot gather directly into one illegal `<W x <N x T>>`; it decomposes
+  // into `N` separate per-component gathers instead, mirroring
+  // `widenGroupSharedLoad`'s own vector case exactly (one `getelementptr`
+  // per component off the same `<W x ptr>` row address, LLVM's
+  // fixed-vector-source-element-type GEP indexing plus its
+  // vector-base-pointer scalar-index broadcast), except that each
+  // component's own passthru is this call's own (possibly divergent, so
+  // itself already-decomposed) `ValueOperand`, sliced into its own `N`
+  // widened components by `getVectorComponents` rather than the constant
+  // `zeroinitializer` `widenGroupSharedLoad`'s unmasked raw load always
+  // uses, and gathers using this call's own `EffectiveMask` (the entry
+  // mask further narrowed by this masked load's own governing mask)
+  // instead of the bare `Env.EntryMask` an unmasked raw load gathers with.
+  if (auto *VecTy = dyn_cast<FixedVectorType>(CI.getType())) {
+    Type *ElemTy = VecTy->getElementType();
+    const DataLayout &DL = NewF->getParent()->getDataLayout();
+    uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
+    SmallVector<Value *, 4> PassthruComponents =
+        getVectorComponents(Matched.ValueOperand, Builder);
+    SmallVector<Value *, 4> Components;
+    for (unsigned Idx = 0, End = VecTy->getNumElements(); Idx != End; ++Idx) {
+      Value *ElemPtr = Builder.CreateGEP(
+          VecTy, WidePtr, {Builder.getInt32(0), Builder.getInt32(Idx)},
+          CI.getName() + ".elt" + Twine(Idx) + ".ptr");
+      Align ElemAlign =
+          commonAlignment(Align(Matched.Align ? Matched.Align : 1),
+                          Idx * ElemSize);
+      Components.push_back(Builder.CreateMaskedGather(
+          FixedVectorType::get(ElemTy, WaveSize), ElemPtr, ElemAlign,
+          EffectiveMask, PassthruComponents[Idx],
+          CI.getName() + ".elt" + Twine(Idx)));
+    }
+    WidenedVectorComponents[&CI] = std::move(Components);
+    ToErase.push_back(&CI);
+    return;
+  }
+
   Value *WidePassthru = getWidened(Matched.ValueOperand, Builder);
 
   Value *Result = Builder.CreateMaskedGather(
