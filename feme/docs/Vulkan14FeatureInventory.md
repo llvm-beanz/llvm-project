@@ -416,10 +416,10 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_2 | `shaderSharedInt64Atomics` | no |  |
 | feature | VK_VERSION_1_2 | `shaderFloat16` | no |  |
 | feature | VK_VERSION_1_2 | `shaderInt8` | no |  |
-| feature | VK_VERSION_1_2 | `descriptorIndexing` | no |  |
-| feature | VK_VERSION_1_2 | `shaderInputAttachmentArrayDynamicIndexing` | no |  |
-| feature | VK_VERSION_1_2 | `shaderUniformTexelBufferArrayDynamicIndexing` | no |  |
-| feature | VK_VERSION_1_2 | `shaderStorageTexelBufferArrayDynamicIndexing` | no |  |
+| feature | VK_VERSION_1_2 | `descriptorIndexing` | no | roadmap L12b: blocked on the shader*ArrayNonUniformIndexing sub-features the spec requires, which need roadmap L7's NonUniform SPIR-V decoration support |
+| feature | VK_VERSION_1_2 | `shaderInputAttachmentArrayDynamicIndexing` | no | roadmap L12b: same underlying mechanism as the texel-buffer bits, but not yet confirmed with a real multi-attachment-array dispatch |
+| feature | VK_VERSION_1_2 | `shaderUniformTexelBufferArrayDynamicIndexing` | yes | roadmap L12b: L12a's ResourceArrayAccessChainPattern already threads any (non-constant) index through; confirmed with a real dispatch |
+| feature | VK_VERSION_1_2 | `shaderStorageTexelBufferArrayDynamicIndexing` | yes | roadmap L12b: same as shaderUniformTexelBufferArrayDynamicIndexing above |
 | feature | VK_VERSION_1_2 | `shaderUniformBufferArrayNonUniformIndexing` | no |  |
 | feature | VK_VERSION_1_2 | `shaderSampledImageArrayNonUniformIndexing` | no |  |
 | feature | VK_VERSION_1_2 | `shaderStorageBufferArrayNonUniformIndexing` | no |  |
@@ -427,16 +427,16 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_2 | `shaderInputAttachmentArrayNonUniformIndexing` | no |  |
 | feature | VK_VERSION_1_2 | `shaderUniformTexelBufferArrayNonUniformIndexing` | no |  |
 | feature | VK_VERSION_1_2 | `shaderStorageTexelBufferArrayNonUniformIndexing` | no |  |
-| feature | VK_VERSION_1_2 | `descriptorBindingUniformBufferUpdateAfterBind` | no |  |
-| feature | VK_VERSION_1_2 | `descriptorBindingSampledImageUpdateAfterBind` | no |  |
-| feature | VK_VERSION_1_2 | `descriptorBindingStorageImageUpdateAfterBind` | no |  |
-| feature | VK_VERSION_1_2 | `descriptorBindingStorageBufferUpdateAfterBind` | no |  |
-| feature | VK_VERSION_1_2 | `descriptorBindingUniformTexelBufferUpdateAfterBind` | no |  |
-| feature | VK_VERSION_1_2 | `descriptorBindingStorageTexelBufferUpdateAfterBind` | no |  |
-| feature | VK_VERSION_1_2 | `descriptorBindingUpdateUnusedWhilePending` | no |  |
-| feature | VK_VERSION_1_2 | `descriptorBindingPartiallyBound` | no |  |
-| feature | VK_VERSION_1_2 | `descriptorBindingVariableDescriptorCount` | no |  |
-| feature | VK_VERSION_1_2 | `runtimeDescriptorArray` | no |  |
+| feature | VK_VERSION_1_2 | `descriptorBindingUniformBufferUpdateAfterBind` | yes | roadmap L12b: vkQueueSubmit executes synchronously, so no real in-flight window exists for a concurrent update to race with |
+| feature | VK_VERSION_1_2 | `descriptorBindingSampledImageUpdateAfterBind` | yes | roadmap L12b: same synchronous-submission reasoning |
+| feature | VK_VERSION_1_2 | `descriptorBindingStorageImageUpdateAfterBind` | no | roadmap L12b: storage images are not usable at all yet (Format.cpp never sets VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) |
+| feature | VK_VERSION_1_2 | `descriptorBindingStorageBufferUpdateAfterBind` | yes | roadmap L12b: same synchronous-submission reasoning |
+| feature | VK_VERSION_1_2 | `descriptorBindingUniformTexelBufferUpdateAfterBind` | yes | roadmap L12b: same synchronous-submission reasoning |
+| feature | VK_VERSION_1_2 | `descriptorBindingStorageTexelBufferUpdateAfterBind` | yes | roadmap L12b: same synchronous-submission reasoning |
+| feature | VK_VERSION_1_2 | `descriptorBindingUpdateUnusedWhilePending` | yes | roadmap L12b: same synchronous-submission reasoning |
+| feature | VK_VERSION_1_2 | `descriptorBindingPartiallyBound` | yes | roadmap L12b: Descriptor.h's own zero-fill-on-unwritten behavior already satisfies this; confirmed with a real dispatch |
+| feature | VK_VERSION_1_2 | `descriptorBindingVariableDescriptorCount` | no | reserved for roadmap L12c's VARIABLE_DESCRIPTOR_COUNT plumbing |
+| feature | VK_VERSION_1_2 | `runtimeDescriptorArray` | no | reserved for roadmap L12c's VARIABLE_DESCRIPTOR_COUNT plumbing |
 | feature | VK_VERSION_1_2 | `samplerFilterMinmax` | no |  |
 | feature | VK_VERSION_1_2 | `scalarBlockLayout` | no |  |
 | feature | VK_VERSION_1_2 | `imagelessFramebuffer` | yes |  |
@@ -454,7 +454,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_2 | `shaderOutputViewportIndex` | yes |  |
 | feature | VK_VERSION_1_2 | `shaderOutputLayer` | yes |  |
 | feature | VK_VERSION_1_2 | `subgroupBroadcastDynamicId` | yes |  |
-| extension | VK_VERSION_1_2 | `VK_EXT_descriptor_indexing` | no |  |
+| extension | VK_VERSION_1_2 | `VK_EXT_descriptor_indexing` | no | roadmap L12b: several sub-feature bits now advertised true (see the feature rows above), but the meta bit descriptorIndexing itself stays false, so the extension as a whole is not yet advertised |
 | extension | VK_VERSION_1_2 | `VK_EXT_host_query_reset` | yes | core, not advertised by name: roadmap C6, vkResetQueryPool (QueryPool.cpp) |
 | extension | VK_VERSION_1_2 | `VK_EXT_sampler_filter_minmax` | no |  |
 | extension | VK_VERSION_1_2 | `VK_EXT_scalar_block_layout` | no |  |

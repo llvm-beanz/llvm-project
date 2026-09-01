@@ -18087,3 +18087,92 @@ again: this fix touches no feature or extension bit (an internal SPIR-V-
 to-LLVM conversion-pass correctness fix only); the `VK_EXT_descriptor_
 indexing` cluster's own all-`VK_FALSE` status remains tracked separately
 under roadmap L12b, not changed by this fix.
+
+
+## Roadmap L12b: descriptor-indexing feature-bit survey and safe-subset flip
+
+```
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.api.info.*" --deqp-log-filename=l12b_final.qpa
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.binding_model.*descriptor_indexing*" \
+  --deqp-log-filename=l12b_di.qpa
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.pipeline.*descriptor_indexing*" \
+  --deqp-log-filename=l12b_di2.qpa
+```
+
+Surveyed the entirely-`VK_FALSE` `VK_EXT_descriptor_indexing`
+(core-1.2-promoted) feature-bit cluster (~20 bits,
+`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES`,
+`EntryPoints.cpp`) and flipped the subset already honestly supported end
+to end:
+
+- `shaderUniformTexelBufferArrayDynamicIndexing`/
+  `shaderStorageTexelBufferArrayDynamicIndexing` -- "dynamic" (ordinary,
+  non-constant but group-uniform SSA) array indexing already works
+  generically: roadmap L12a's `ResourceArrayAccessChainPattern` threads
+  any index through to `llvm.spv.resource.handlefrombinding`,
+  `isResourcePointer` matches every image `Dim`, and
+  `SPIRVResourceLowering.cpp`'s `BoundHandle` deliberately re-reads
+  (rather than caches) the index at lowering time. Confirmed with a new
+  real dispatch (`CommandBufferTest.cpp`'s
+  `TexelBufferArrayDynamicIndexDispatchTest.
+  PushConstantIndexSelectsTheRightArrayElement`).
+- `descriptorBinding{UniformBuffer,SampledImage,StorageBuffer,
+  UniformTexelBuffer,StorageTexelBuffer}UpdateAfterBind`,
+  `descriptorBindingUpdateUnusedWhilePending`,
+  `descriptorBindingPartiallyBound` -- `vkQueueSubmit` executes every
+  submission fully synchronously and resolves descriptor contents only
+  at execution time, so there is never a real in-flight window a
+  concurrent update could race with; an unwritten array element already
+  zero-fills rather than crashing. Confirmed with two new real dispatches
+  (`DescriptorUpdatedAfterBindingIsVisibleAtSubmission`,
+  `UnwrittenArrayElementReadsAsZeroInsteadOfCrashing`).
+
+Kept `VK_FALSE`: `descriptorIndexing` and all 7
+`shader*ArrayNonUniformIndexing` bits (blocked on roadmap L7's
+unimplemented `NonUniform` SPIR-V decoration);
+`shaderInputAttachmentArrayDynamicIndexing` (same mechanism as the
+texel-buffer bits, but not yet confirmed with a real multi-attachment-
+array dispatch); `descriptorBindingStorageImageUpdateAfterBind` (storage
+images are not usable at all yet, `Format.cpp` never sets
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`); `descriptorBindingVariable
+DescriptorCount`/`runtimeDescriptorArray` (reserved for roadmap L12c's
+`VARIABLE_DESCRIPTOR_COUNT` plumbing).
+
+A real `deqp-vk` run of the same smoke sweep (`dEQP-VK.api.info.*`,
+10484 cases) caught a real regression this session's first attempt
+introduced: flipping the aggregate `VkPhysicalDeviceVulkan12Features`/
+`VkPhysicalDeviceVulkan12Properties` struct fields alone, without also
+handling the pre-promotion `VkPhysicalDeviceDescriptorIndexingFeatures
+EXT`/`PropertiesEXT` struct cases (previously entirely unhandled, since
+every field was `VK_FALSE`/`0` on both sides before this session), broke
+`dEQP-VK.api.info.vulkan1p2.feature_extensions_consistency` and
+`...property_extensions_consistency` (5381/570 pass/fail baseline became
+5379/572). Root-caused directly via this failing pair (not a hand
+reduction, since the CTS's own diagnostic named the exact mismatched
+struct pair) and fixed by adding the two missing `_EXT`-suffixed struct
+cases (mirroring every other promoted-extension struct pair already
+handled in this file, e.g. `VK_EXT_texel_buffer_alignment`). Re-running
+the same sweep now shows 5382/569 pass/fail -- one *better* than the
+original baseline, since both consistency checks now pass and nothing
+else regressed.
+
+Neither `dEQP-VK.binding_model.*descriptor_indexing*` nor
+`dEQP-VK.pipeline.*descriptor_indexing*` resolves to any case in this CTS
+build's own case list (0/0 both), consistent with roadmap L12a's own
+finding for the same group-name family -- this fix remains confirmed only
+via the new `CommandBufferTest.cpp` dispatches and the `dEQP-VK.api.
+info.*` consistency-check fix above, not independently via a
+descriptor-indexing-specific `deqp-vk` group.
+
+`Vulkan14FeatureInventory.md` updated: the ~10 bits flipped true above
+now read `yes` with a roadmap-L12b note each; the bits kept false each
+gained an explanatory note (L7/L12c/storage-image-support references).
+`VulkanExtensionInventory.md`'s own `VK_EXT_descriptor_indexing` row was
+reviewed and left unchanged -- it already accurately describes the
+extension as a whole remaining unadvertised (the meta `descriptorIndexing`
+bit stays false), which is still correct after this session's sub-feature-
+level flips.
