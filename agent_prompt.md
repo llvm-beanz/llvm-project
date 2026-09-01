@@ -37,35 +37,23 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L9:
+Please investigate and fix the issues tracked by milestone L10:
 
-> **`SPIRVResourceLoweringPass` never normalizes a single-channel-format
-> texel-buffer (`Dim::Buffer` image) store**, discovered via L2's own triage:
-> `classifyTexelBufferHandle`/`hasOnlySupportedUses`/`isSupportedTexelElementType`
-> (`SPIRVResourceLowering.cpp`) already correctly treat every `OpImageRead` as
-> returning a full `<4 x T>` regardless of the underlying format's real channel
-> count (per SPIR-V's own spec, matching the header comment's already-recorded
-> V4 scope note) -- but a **write** to a single-channel format (e.g.
-> `R32i`/`R32f`, `RWBuffer<int>`/`RWBuffer<float>`'s own SPIR-V shape) is not
-> similarly widened by `dxc`/MLIR's own SPIR-V-to-LLVM conversion: reduced
-> directly (a two-line `RWBuffer<int> In/Out; Out[0] = In[0];` shader,
-> `feme-translate --import-spirv`/`feme-opt --feme-convert-spirv-to-llvm`) to
-> `llvm.store %10, %18 : i32, !llvm.ptr` -- a **scalar** `i32` store, not the
-> `<4xi32>` the load side already produces and this pass's own
-> `isSupportedTexelElementType` requires -- so this handle is left un-normalized
-> entirely and falls through to `UnsupportedOps.cpp`'s generic "register-bound
-> resource handle ... cannot normalize into a heap access" diagnostic. Fixing
-> this needs more than just accepting the narrower scalar type at the IR-shape
-> check: `FeMeRuntimeCPU.c`'s own `femeCpuResourceStoreTypedV4I32`/`V4F32`
-> helpers always write a full 16-byte (`<4 x T>`) element stride, which would be
-> wrong for a format whose real per-element stride is 4 bytes (a single channel)
-> -- needs its own format-aware, narrower-than-`<4 x T>` runtime store (and,
-> symmetrically, load) helper pair, exactly the "physically-narrower-than-`<4 x
-> T>` per-format padding this milestone does not add" the pass's own
-> pre-existing header comment (and `FeMeVulkanDesign.md`'s "V4 status note")
-> already flags as deliberately out of scope -- so this is confirmed,
-> scoped-out-until-now work, not a surprise gap. Accounts for the entire
-> `Basic/Matrix/*.test` family's own failures (all of which use `RWBuffer<int>`
-> purely as their I/O mechanism, unrelated to matrices themselves) plus several
-> single-channel `Feature/Textures`/`Feature/StructuredBuffer`/`Feature/CBuffer`
-> cases
+> **A handful of small, distinct residual cases from L2's own triage, each
+> needing its own individual scoping rather than sharing a root cause**:
+> `Feature/PushConstant/types.test`'s own "shader's root-constant span is not
+> fully covered by a VkPushConstantRange" failure (the test's own
+> `PushConstants:` YAML block only ever supplies one `float` value at offset 0,
+> while the shader's own `S` struct spans several more members past it -- likely
+> an `offload-test-suite`-side test-authoring gap in how its own harness sizes
+> the generated `VkPushConstantRange`, not necessarily a `feme` bug, so needs
+> checking against the harness's own range-sizing logic before assuming which
+> side to fix); a couple of `feme-cpu-simdize` "groupshared global ... feeds an
+> unrecognized broadcast"/"feeds a nested getelementptr" diagnostics
+> (`WaveOps/GroupMemoryBarrierWithGroupSync.test`,
+> `WaveOps/GroupSharedMatrixElementExprComponentDataRace.test`,
+> `WaveOps/GroupSharedMatrixRowComponentDataRace.test`); an
+> `'llvm.getelementptr'`/`'llvm.call'` "must be LLVM dialect-compatible type,
+> but got 'si32'" MLIR-dialect-conversion error
+> (`Feature/ResourceArrays/overflow-unbounded-array.test`,
+> `WaveOps/WaveActiveSum.convergence.test`)
