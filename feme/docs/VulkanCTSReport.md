@@ -18999,3 +18999,108 @@ SPIR-V-to-LLVM conversion-layer correctness fix, plus test-fixture
 corrections); confirmed, not assumed, that
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap L20
+
+**Scope.** `feme::cpu::SPIRVResourceLoweringPass`'s
+`isSupportedRawElementType` (`SPIRVResourceLowering.cpp`) rejected a
+whole-struct `load`/`store` off a resource pointer outright, accepting
+only a scalar or fixed vector, found as an L19 milestone-description
+correction: with L19's own fix landed, `Feature/StructuredBuffer/
+packed.test`'s own `Doggo Fido = Buf[GI]; ...; Buf[GI] = Fido;`
+whole-struct-copy idiom converted cleanly at the SPIR-V-to-LLVM layer
+(an ordinary address-space-11 pointer, not a spurious nested handle),
+but `hasOnlySupportedPointerUses`/`hasOnlySupportedUses` still rejected
+the resulting whole-`Doggo`-struct `llvm.load`/`llvm.store`, falling
+through to `UnsupportedOps.cpp`'s generic "register-bound resource
+handle... cannot normalize" diagnostic.
+
+**Fix.** Extended `isSupportedRawElementType` to recursively accept a
+struct or fixed-size array whose own members/elements are themselves
+supported (a scalar half/float/double/integer or a fixed vector of
+one), and added `lowerRawLoad`/`lowerRawStore` helpers
+(`SPIRVResourceLowering.cpp`) that decompose a whole-aggregate
+load/store into one raw call per leaf scalar/vector field/element,
+reassembled with `insertvalue`/`extractvalue` -- approach (b) from the
+roadmap row's own description, mirroring `CompositeConstructPattern`'s
+own struct-reassembly precedent at the SPIR-V-to-LLVM conversion layer,
+and avoiding any change to `appendScalarMangling`/`mangleResourceCallName`
+(`ResourceCalls.cpp`): a leaf is never itself an aggregate, so this
+never risks reaching `appendScalarMangling`'s own `llvm_unreachable`.
+
+A real IR reduction of `packed.test`'s own SPIR-V found the actual shape
+needs array handling too, not just structs: `Doggo`'s own `int3 Legs`/
+`int2 Ears` vector fields convert to fixed-size LLVM *arrays* (not LLVM
+vectors) once nested inside this tightly-packed struct -- a SPIR-V
+vector whose own element count leaves a gap versus its LLVM vector
+representation's natural alignment converts to an ordinary fixed-size
+array instead of a vector once inside a tightly-packed struct member.
+Array support was not scoped to nested-in-struct only: a bare top-level
+array (e.g. `Feature/StructuredBuffer/matrix.test`'s own per-row
+array-of-vectors storage, and this project's own
+`dEQP-VK.spirv_assembly.instruction.spirv1p4.opselect.array_select`
+case, an `OpSelect` between two array-typed operands) never itself
+reaches `appendScalarMangling` either, since it is always decomposed to
+scalar/vector leaves first -- so decomposing it the same way is a real,
+safe improvement with no crash risk, not a distinct scoping decision.
+Renamed the existing `LeavesStorageBufferArrayStoreUnchanged` gtest to
+`LowersStorageBufferArrayStoreToPerElementRawStores` to reflect this.
+
+**Method.** Reduced `packed.test`'s own real SPIR-V via `dxc -spirv
+-fspv-target-env=vulkan1.3 -fvk-use-scalar-layout` → `feme-translate
+--import-spirv` → `feme-opt --feme-convert-spirv-to-llvm` → `mlir-translate
+--mlir-to-llvmir` → `feme-opt --llvm -passes=feme-cpu-lower-spirv-resources`,
+confirming the exact `Doggo` struct-with-array-fields shape
+(`!llvm.struct<(array<3 x i32>, i32, array<2 x i32>)>`) and its
+resolution with the fix. Added a new lit test
+(`spirv-resource-lowering-struct.ll`) and gtest case
+(`LowersWholeStructLoadAndStoreWithArrayFieldsToPerLeafRawCalls`)
+covering the exact struct-with-array-fields whole-load/store
+decomposition. `ninja check-feme`: 2293/2320 passed, 27 unsupported, 0
+failed (up by exactly 2 new tests, 0 regressions). Rebuilt
+`feme_vulkan`/`offloader`/`feme-translate` and confirmed via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader` that the pre-fix
+"register-bound resource handle... cannot normalize" error for
+`packed.test` is gone post-fix. Also ran
+`check-hlsl-vk-feature-structuredbuffer` and a `dEQP-VK.ssbo.layout.*`/
+`dEQP-VK.ssbo.*` sweep against the real `feme_vulkan` ICD
+(`VK_ICD_FILENAMES` explicitly exported), both before and after the fix.
+
+**Findings.**
+- **This row's own scope is fully closed**: the exact "register-bound
+  resource handle... cannot normalize" error this milestone names is
+  confirmed gone post-fix, via both the isolated `feme-opt` reduction
+  and a direct `offloader` run against the real `packed.test` binary.
+- `check-hlsl-vk-feature-structuredbuffer`: improved from 9/650 to
+  7/650 failing. `matrix.test`/`matrix_assign.test` -- two of the 9
+  pre-existing failures, previously hitting the identical
+  "register-bound resource handle... cannot normalize" error for a
+  bare top-level array-of-vectors resource -- now pass, a real bonus
+  fix from generalizing array support beyond just the nested-in-struct
+  case this row's own named failure needed.
+- **`packed.test` itself still does not pass end-to-end.** Its post-fix
+  error (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader`)
+  has advanced past this row's own scope to a distinct, newly-exposed
+  gap in `feme::cpu::SIMDizePass`: `'function \'main\' has a divergent
+  value ... of aggregate type; component decomposition is not yet
+  supported (roadmap milestone 7 deviation)'` -- the whole-`Doggo`
+  struct value, loaded through a divergent per-lane index
+  (`SV_GroupIndex`), has no widening support at all in the wave-lane
+  packing pass, a generic, long-standing scope limit unrelated to
+  resource lowering specifically. Split out to new roadmap row L21.
+- The other 6 pre-existing `check-hlsl-vk-feature-structuredbuffer`
+  failures (`GetDimensions.test`, `dec_counter.test`,
+  `inc_counter*.test`, `layout.test`) are unrelated to this fix or L21
+  (confirmed unchanged before/after); not investigated further, out of
+  scope for this milestone.
+- `dEQP-VK.ssbo.layout.*` (5,275 cases) and `dEQP-VK.ssbo.*` (12,225
+  cases): both measured byte-for-byte identical totals before and after
+  this fix (260/5275 and 361/12225 respectively). Unsurprising: this
+  fix's own target shape (an HLSL-emitted whole-struct-copy idiom) is
+  not one this GLSL/SPIR-V-assembly-sourced CTS family happens to
+  exercise. No regression evident.
+
+No feature-bit or extension-advertisement change (an internal CPU
+resource-lowering-pass correctness fix); confirmed, not assumed, that
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
