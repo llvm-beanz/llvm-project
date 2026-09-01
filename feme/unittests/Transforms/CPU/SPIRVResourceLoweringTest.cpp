@@ -291,15 +291,19 @@ TEST(SPIRVResourceLoweringTest, LeavesConflictingRangeSizeUnchanged) {
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
-// Roadmap E29: a storage-buffer store of an aggregate (here, an array --
-// the shape `OpSelect` produces choosing between two array-typed operands,
+// Roadmap L20 (superseding E29's own narrower scope): a storage-buffer
+// store of an aggregate (here, an array -- the shape `OpSelect` produces
+// choosing between two array-typed operands,
 // dEQP-VK.spirv_assembly.instruction.spirv1p4.opselect.array_select's own
-// case) is left un-normalized rather than reaching
-// `feme::cpu::createRawStore`/`mangleResourceCallName`, which cannot mangle
-// a runtime call name for anything but a scalar or fixed vector of
-// half/float/double/integer (see `isSupportedRawElementType`'s comment) --
-// hitting `appendScalarMangling`'s own `llvm_unreachable` otherwise.
-TEST(SPIRVResourceLoweringTest, LeavesStorageBufferArrayStoreUnchanged) {
+// case) is now decomposed into one raw store per element, exactly like
+// any other supported array/struct shape (see `isSupportedRawElementType`'s
+// comment): the value is never itself passed to
+// `feme::cpu::createRawStore`/`mangleResourceCallName` (which still cannot
+// mangle a runtime call name for anything but a scalar or fixed vector of
+// half/float/double/integer), so this never risks
+// `appendScalarMangling`'s own `llvm_unreachable`.
+TEST(SPIRVResourceLoweringTest,
+     LowersStorageBufferArrayStoreToPerElementRawStores) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main(i32 %idx, [4 x i32] %v) {
@@ -319,10 +323,18 @@ TEST(SPIRVResourceLoweringTest, LeavesStorageBufferArrayStoreUnchanged) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(hasResourceLoadCall(*F));
-  EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.store.raw"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.store.raw"));
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
+
+  unsigned NumStores = 0;
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getName().starts_with("feme.cpu.resource.store.raw"))
+          ++NumStores;
+  EXPECT_EQ(NumStores, 4u);
 }
+
 
 // Roadmap H6g-b-a-i-a-i: glslang can spell a storage buffer block directly
 // as a fixed-layout struct whose members are fixed-size arrays/vectors,
@@ -2345,6 +2357,65 @@ TEST(SPIRVResourceLoweringTest,
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darray.v4f32"));
+}
+
+// Roadmap L20: a whole-struct load/store off a resource pointer (no
+// `getelementptr` navigating into an individual field at all) is
+// decomposed into one raw call per leaf field/element, reassembled with
+// `insertvalue`/`extractvalue`, rather than left for `UnsupportedOps.cpp`'s
+// generic diagnostic. The struct here mirrors
+// `Feature/StructuredBuffer/packed.test`'s own `Doggo` struct
+// (`int3 Legs; int TailState; int2 Ears;`), whose two vector fields
+// convert to fixed-size LLVM *arrays* (not LLVM vectors) at the
+// SPIR-V-to-LLVM layer once nested inside a tightly-packed struct -- this
+// test's own array-typed fields are deliberately not `FixedVectorType`s,
+// to cover that exact nested-array shape (not just a bare scalar struct).
+TEST(SPIRVResourceLoweringTest,
+     LowersWholeStructLoadAndStoreWithArrayFieldsToPerLeafRawCalls) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %idx) {
+      %h = call target("spirv.VulkanBuffer",
+              [0 x {[3 x i32], i32, [2 x i32]}], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer",
+              [0 x {[3 x i32], i32, [2 x i32]}], 12, 1) %h, i32 %idx)
+      %v = load {[3 x i32], i32, [2 x i32]}, ptr %ptr
+      store {[3 x i32], i32, [2 x i32]} %v, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer",
+        [0 x {[3 x i32], i32, [2 x i32]}], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer",
+        [0 x {[3 x i32], i32, [2 x i32]}], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+
+  // One raw load/store per leaf field: `Legs[0..2]`, `TailState`,
+  // `Ears[0..1]` -- 3 + 1 + 2 = 6 of each, none referencing the struct
+  // type itself (no `UnsupportedOps` fallback, no surviving handle).
+  unsigned NumLoads = 0, NumStores = 0;
+  for (Instruction &I : instructions(*F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    Function *Callee = CI->getCalledFunction();
+    if (!Callee)
+      continue;
+    if (Callee->getName().starts_with("feme.cpu.resource.load.raw"))
+      ++NumLoads;
+    else if (Callee->getName().starts_with("feme.cpu.resource.store.raw"))
+      ++NumStores;
+  }
+  EXPECT_EQ(NumLoads, 6u);
+  EXPECT_EQ(NumStores, 6u);
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
 TEST(SPIRVResourceLoweringTest, LeavesAMultisampledCubeStorageImageHandleAlone) {

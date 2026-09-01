@@ -414,16 +414,38 @@ bool isSupportedTexelElementType(Type *Ty) {
 }
 
 /// Whether \p Ty is a shape `feme::cpu::mangleResourceCallName`'s own
-/// `appendScalarMangling` (ResourceCalls.cpp) can mangle: a scalar
-/// half/float/double/integer, or a fixed vector of one. A storage/uniform
-/// buffer load or store of anything else -- most notably a SPIR-V
-/// aggregate (array or struct) value, e.g. `OpSelect`'s result when its
-/// operands are themselves arrays -- is left unclassified by
-/// `hasOnlySupportedUses` below rather than reaching
-/// `createRawLoad`/`createRawStore` and hitting `appendScalarMangling`'s own
-/// `llvm_unreachable` (`dEQP-VK.spirv_assembly.instruction.spirv1p4.
-/// opselect.array_select`'s own crash).
+/// `appendScalarMangling` (ResourceCalls.cpp) can mangle -- a scalar
+/// half/float/double/integer, or a fixed vector of one -- or (roadmap L20)
+/// a struct or fixed-size array every one of whose own members/elements is
+/// itself one of these shapes, recursively: `lowerRawPointerUses` below
+/// decomposes a whole-aggregate load/store into one such call per leaf
+/// field/element rather than ever mangling a call name for the aggregate
+/// itself (see that function's own comment), so this never needs to reach
+/// `appendScalarMangling` with anything but a leaf scalar/vector type --
+/// true of a *top-level* array (e.g. `Feature/StructuredBuffer/matrix.test`'s
+/// own `[3 x float2]` per-element matrix row storage, loaded/stored as a
+/// whole array with no enclosing struct) exactly as much as one nested
+/// inside a struct field (e.g. `Feature/StructuredBuffer/packed.test`'s own
+/// `Doggo` struct, whose `int3 Legs`/`int2 Ears` vector fields convert to
+/// fixed-size LLVM arrays, not LLVM vectors, once nested inside a
+/// tightly-packed struct) -- both go through the identical, per-element
+/// decomposition below, so this function does not need to distinguish
+/// them. This also means a bare array value reaching a raw load/store --
+/// e.g. this project's own
+/// `dEQP-VK.spirv_assembly.instruction.spirv1p4.opselect.array_select`
+/// case, an `OpSelect` between two array-typed operands -- is now
+/// decomposed the same way rather than left unclassified for
+/// `UnsupportedOps.cpp`'s generic diagnostic (see
+/// `LowersStorageBufferArrayStoreToPerElementRawStores` in
+/// SPIRVResourceLoweringTest.cpp).
 bool isSupportedRawElementType(Type *Ty) {
+  if (auto *StructTy = dyn_cast<StructType>(Ty)) {
+    return llvm::all_of(StructTy->elements(), [](Type *ElemTy) {
+      return isSupportedRawElementType(ElemTy);
+    });
+  }
+  if (auto *ArrayTy = dyn_cast<ArrayType>(Ty))
+    return isSupportedRawElementType(ArrayTy->getElementType());
   Type *ElemTy = Ty;
   if (auto *VecTy = dyn_cast<FixedVectorType>(Ty))
     ElemTy = VecTy->getElementType();
@@ -1322,6 +1344,83 @@ Value *computePointerOffset(IRBuilderBase &Builder,
   return Offset;
 }
 
+/// Emits a raw load of \p Ty at \p Offset -- one canonical
+/// `feme.cpu.resource.load.raw.*` call if \p Ty is itself a leaf
+/// scalar/vector `isSupportedRawElementType` shape, or (roadmap L20), if
+/// \p Ty is a struct or fixed-size array, one such call per field/element
+/// instead, reassembled with `insertvalue` -- mirroring how
+/// `CompositeConstructPattern`'s own struct case already reassembles a
+/// struct value from its own constituents at the SPIR-V-to-LLVM conversion
+/// layer. Recurses for a field/element that is itself an aggregate
+/// (`hasOnlySupportedUses`'s own `isSupportedRawElementType` check already
+/// guarantees every leaf reached this way is a supported scalar/vector).
+Value *lowerRawLoad(IRBuilderBase &Builder, const ResourceCallEnv &Env,
+                    Value *DescriptorIndex, Value *Offset, Value *Mask,
+                    Type *Ty, const DataLayout &DL, const Twine &Name) {
+  if (auto *StructTy = dyn_cast<StructType>(Ty)) {
+    const StructLayout *SL = DL.getStructLayout(StructTy);
+    Value *Result = PoisonValue::get(StructTy);
+    for (unsigned I = 0, E = StructTy->getNumElements(); I != E; ++I) {
+      Value *FieldOffset = Builder.CreateAdd(
+          Offset,
+          ConstantInt::get(Offset->getType(), SL->getElementOffset(I)));
+      Value *Field =
+          lowerRawLoad(Builder, Env, DescriptorIndex, FieldOffset, Mask,
+                      StructTy->getElementType(I), DL, "");
+      Result = Builder.CreateInsertValue(Result, Field, I);
+    }
+    return Result;
+  }
+  if (auto *ArrayTy = dyn_cast<ArrayType>(Ty)) {
+    Type *ElemTy = ArrayTy->getElementType();
+    uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
+    Value *Result = PoisonValue::get(ArrayTy);
+    for (unsigned I = 0, E = ArrayTy->getNumElements(); I != E; ++I) {
+      Value *ElemOffset = Builder.CreateAdd(
+          Offset, ConstantInt::get(Offset->getType(), I * ElemSize));
+      Value *Elem = lowerRawLoad(Builder, Env, DescriptorIndex, ElemOffset,
+                                 Mask, ElemTy, DL, "");
+      Result = Builder.CreateInsertValue(Result, Elem, I);
+    }
+    return Result;
+  }
+  return createRawLoad(Builder, Env, DescriptorIndex, Offset, Mask, Ty, Name);
+}
+
+/// The store-side mirror of `lowerRawLoad` above: one canonical
+/// `feme.cpu.resource.store.raw.*` call per leaf scalar/vector field or
+/// element, each split off \p Val with `extractvalue`, rather than one
+/// call mangled for the aggregate type itself.
+void lowerRawStore(IRBuilderBase &Builder, const ResourceCallEnv &Env,
+                   Value *DescriptorIndex, Value *Offset, Value *Val,
+                   Value *Mask, const DataLayout &DL) {
+  if (auto *StructTy = dyn_cast<StructType>(Val->getType())) {
+    const StructLayout *SL = DL.getStructLayout(StructTy);
+    for (unsigned I = 0, E = StructTy->getNumElements(); I != E; ++I) {
+      Value *FieldOffset = Builder.CreateAdd(
+          Offset,
+          ConstantInt::get(Offset->getType(), SL->getElementOffset(I)));
+      Value *Field = Builder.CreateExtractValue(Val, I);
+      lowerRawStore(Builder, Env, DescriptorIndex, FieldOffset, Field, Mask,
+                   DL);
+    }
+    return;
+  }
+  if (auto *ArrayTy = dyn_cast<ArrayType>(Val->getType())) {
+    Type *ElemTy = ArrayTy->getElementType();
+    uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
+    for (unsigned I = 0, E = ArrayTy->getNumElements(); I != E; ++I) {
+      Value *ElemOffset = Builder.CreateAdd(
+          Offset, ConstantInt::get(Offset->getType(), I * ElemSize));
+      Value *Elem = Builder.CreateExtractValue(Val, I);
+      lowerRawStore(Builder, Env, DescriptorIndex, ElemOffset, Elem, Mask,
+                   DL);
+    }
+    return;
+  }
+  createRawStore(Builder, Env, DescriptorIndex, Offset, Val, Mask);
+}
+
 /// Rewrites every raw-buffer load/store reachable from \p Ptr (either
 /// directly or, for a structured storage block, through a GEP chain) using
 /// the already-resolved descriptor index and byte offset.
@@ -1332,16 +1431,16 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
   for (User *U : llvm::make_early_inc_range(Ptr->users())) {
     if (auto *LI = dyn_cast<LoadInst>(U)) {
       IRBuilder<> Builder(LI);
-      CallInst *Loaded = createRawLoad(Builder, Env, DescriptorIndex, Offset,
-                                       Mask, LI->getType(), LI->getName());
+      Value *Loaded = lowerRawLoad(Builder, Env, DescriptorIndex, Offset,
+                                   Mask, LI->getType(), DL, LI->getName());
       LI->replaceAllUsesWith(Loaded);
       LI->eraseFromParent();
       continue;
     }
     if (auto *SI = dyn_cast<StoreInst>(U)) {
       IRBuilder<> Builder(SI);
-      createRawStore(Builder, Env, DescriptorIndex, Offset,
-                     SI->getValueOperand(), Mask);
+      lowerRawStore(Builder, Env, DescriptorIndex, Offset,
+                   SI->getValueOperand(), Mask, DL);
       SI->eraseFromParent();
       continue;
     }
@@ -1354,6 +1453,7 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
     GEP->eraseFromParent();
   }
 }
+
 
 /// Rewrites every access through \p BH.Handle -- a `getpointer` call
 /// followed by a load or store, or, for a structured storage block, a GEP
