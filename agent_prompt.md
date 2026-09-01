@@ -37,22 +37,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L13:
+Please investigate and fix the issues tracked by milestone L6:
 
-> **A nested identified-struct-inside-(runtime-)array conversion gap** --
-> roadmap L5's own fix stopped `mlir::VulkanLayoutUtils::decorateType` from
-> crashing on this shape (a struct/cbuffer member whose own element is itself a
-> user-defined struct, reached whenever FeMe's own dedicated block-conversion
-> pattern in `SPIRVToLLVMPatterns.cpp` declines the shape first), but the shape
-> itself is still not converted at all -- it now fails gracefully with `failed
-> to legalize operation 'spirv.AccessChain' that was explicitly marked illegal`,
-> the same real `Feature/StructuredBuffer/packed.test`,
-> `Feature/CBuffer/{structs,array-of-structs,dynamic-struct,vectors}.test`, and
-> `Feature/ConstantBufferT/vectors.test` cases L5 named still `FAIL` (no longer
-> crash). Needs its own scoping pass: likely extending FeMe's own
-> `convertOffsetStructTypeIgnoringDecorations`/`convertBlockType`
-> (`SPIRVToLLVMPatterns.cpp`) to recognize a nested identified-struct member
-> directly (reusing its own already-decorated layout rather than routing through
-> upstream's generic, identified-struct-refusing `decorateType` path at all),
-> since that dedicated path already handles the sibling
-> non-nested-identified-struct shapes these same tests would otherwise hit
+> **The remaining "Test failed: TestN" numeric-mismatch bucket (27+7+2+1 = 37
+> cases before L1, an unmeasured remainder after)** -- a real
+> `check-hlsl-feme-vk` re-run is needed to determine exactly how many of these
+> 37 L1's fix actually resolved (L1's own measured +26 `Passed`/-26 `Failed`
+> swing strongly suggests most of them, since the
+> composite-construct-after-vector-builtin-call shape is common across this
+> family, but the two numbers are not proven identical without a fresh per-case
+> diff); whatever remains needs its own individual reduction, since "wrong
+> number" can hide an unrelated root cause per case
