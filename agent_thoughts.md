@@ -50067,3 +50067,64 @@ Updated the H5d roadmap row with a forward-reference note (rather than
 rewriting its historical "done" text) pointing at this correction, since
 H5d's own original design decision was the actual root cause, and it felt
 more honest to annotate the history than silently rewrite it.
+
+# H7m: vertex-entry "requires attached feme.signature metadata"
+
+This one turned out to need no code change at all -- the interesting part
+was making sure I didn't just declare victory because the CTS cases
+happened to pass already, without actually understanding why, per the
+task's own explicit instruction not to assume H3a's fix "simply missed the
+vertex side."
+
+First pass: I reproduced the exact 9 cases named in the roadmap row
+directly (`point_size_clamp_max` plus the 8 `line_width.*` cases) and all 9
+passed cleanly against the current tree. That's a good sign but not proof
+of anything by itself -- passing today doesn't tell me *why* it used to
+fail, and a roadmap row that just says "already works, don't know why"
+isn't a real answer.
+
+So I went hunting for every `Function::Create` rebuild site in
+`lib/Transforms/CPU` (there are about two dozen) and checked which ones
+copy function-attached metadata across the rebuild and which don't.
+Several of the wrapper passes (`VertexWrapper.cpp`, `EntryWrapper.cpp`,
+`SIMDize.cpp`) already copy it manually via `getAllMetadata`/`setMetadata`,
+some going back to very old commits (`SIMDize.cpp`'s copy traces back to an
+"R34" milestone commit, long before H3a or H7 existed). That ruled out most
+of the pipeline as ever having been the culprit for a plain vertex shader.
+The two files this row's own roadmap text points at
+(`SPIRVResourceLowering.cpp`/`ResourceLowering.cpp`) were fixed by H3a and
+already copy metadata correctly too.
+
+That left `RootConstantLowering.cpp`/`SPIRVPushConstantLowering.cpp`,
+fixed by a separate roadmap H7o commit (`c760ed7b21b0`) for a completely
+different CTS case (a push-constant-only fragment shader in a
+`min_sample_shading_*` test). Since that fix is stage-agnostic -- it just
+rebuilds whichever function has a push-constant access, vertex or fragment
+-- it was a strong candidate for having fixed this row too, incidentally,
+before anyone connected the two.
+
+Rather than trust that theory, I actually tested it: reverted just those
+two files' diff from the H7o commit (`git apply -R` on the extracted
+patch), rebuilt `feme_vulkan`, and re-ran both case groups. This is where
+it got more interesting than I expected: `point_size_clamp_max` reproduced
+the *exact* `feme-cpu-wrap-vertex` error this row's text names -- its
+vertex shader really does have a push constant (`pointSizeBlk`). But all 8
+`line_width.*` cases instead failed with `feme-cpu-wrap-fragment`, not
+vertex at all -- their fragment shader has its own push constant (a
+`color` uniform), while their vertex shader is about as bare as a vertex
+shader can be (just `gl_Position = vec4(pos.xy, 0, 1)`, no descriptors, no
+constants) and was never broken.
+
+So the roadmap row's own premise -- "9 cases, one vertex-side bug" -- was
+subtly wrong in the same spirit as the H7l investigation earlier this
+session: someone had seen one case's real vertex-side error and generalized
+it across a whole batch of CTS cases without checking each one's actual
+diagnostic individually. The real shape was two bugs (or rather, one bug
+in one pass hitting two different stages across two different cases),
+already fixed together by a single earlier commit that had nothing to do
+with vertex-versus-fragment specifically.
+
+Restored the two files back to their fixed state (`git apply` forward) and
+confirmed check-feme stays at its existing baseline with 0 regressions.
+Wrote the roadmap row up as done, with the bisection evidence rather than
+just an assertion that "it already works."
