@@ -293,6 +293,39 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (Roadmap L9) The *scalar* (single-channel-format) counterpart of
+/// `kIntTexelBufferAddShader` above -- reads one texel from an `R32ui`
+/// uniform texel buffer and writes it to an `R32i` storage texel buffer,
+/// exercising `isSupportedTexelElementType`'s scalar `i32` acceptance and
+/// the new `femeCpuResourceLoadTypedI32`/`StoreTypedI32` runtime helpers
+/// end to end. Unlike `kIntTexelBufferAddShader`'s `vector<4xi32>` shape,
+/// `OpImageFetch` still returns a full `vector<4xi32>` per SPIR-V's own
+/// spec regardless of the single-channel format (so the fetch result is
+/// narrowed with `spirv.CompositeExtract`), but `OpImageWrite`'s own Texel
+/// operand takes exactly the shader-declared scalar `i32` -- the real
+/// SPIR-V asymmetry roadmap L9's own investigation found.
+const char *kIntScalarTexelBufferAddShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @in bind(0, 0) : !spirv.ptr<!spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, R32ui>, UniformConstant>
+  spirv.GlobalVariable @out bind(0, 1) : !spirv.ptr<!spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, UniformConstant>
+  spirv.func @main() -> () "None" {
+    %idx = spirv.Constant 0 : i32
+    %2 = spirv.mlir.addressof @in : !spirv.ptr<!spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, R32ui>, UniformConstant>
+    %img_in = spirv.Load "UniformConstant" %2 : !spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, R32ui>
+    %v4 = spirv.ImageFetch %img_in, %idx : !spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, R32ui>, i32 -> vector<4xi32>
+    %v = spirv.CompositeExtract %v4[0 : i32] : vector<4xi32>
+    %one = spirv.Constant 1 : i32
+    %v2 = spirv.IAdd %v, %one : i32
+    %3 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, UniformConstant>
+    %img_out = spirv.Load "UniformConstant" %3 : !spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>
+    spirv.ImageWrite %img_out, %idx, %v2 : !spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, i32, i32
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @in, @out
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
 /// V3: reads the second field of a `Uniform` storage-class block --
 /// `cbuffer`/`ConstantBuffer<T>` in HLSL -- and writes it to a
 /// `StorageBuffer` element, exercising the SPIR-V shader-side uniform-
@@ -1961,6 +1994,80 @@ TEST_F(IntTexelBufferDispatchTest, ReadsAndWritesThroughPackedByteBufferViews) {
   EXPECT_EQ((uint8_t)Result[1], 201u);
   EXPECT_EQ(Result[2], 4);
   EXPECT_EQ((uint8_t)Result[3], 251u);
+
+  vkDestroyBufferView(Device, InView, nullptr);
+  vkDestroyBufferView(Device, OutView, nullptr);
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+/// (Roadmap L9) The scalar single-channel-format counterpart of
+/// `IntTexelBufferDispatchTest` above -- same fixture, only bound over
+/// `R32_UINT`/`R32_SINT` (one 4-byte scalar texel each) instead of the
+/// 4-component `R32G32B32A32_*` identity formats, proving the new
+/// `femeCpuResourceLoadTypedI32`/`StoreTypedI32` runtime helpers'
+/// conversion end to end through a real compiled-and-dispatched SPIR-V
+/// shader with a scalar `OpImageWrite` Texel operand -- exactly the shape
+/// this milestone's own real `RWBuffer<int>` CTS reduction hit.
+class ScalarIntTexelBufferDispatchTest : public TexelBufferDispatchTest {
+protected:
+  const char *getShaderSource() override {
+    return kIntScalarTexelBufferAddShader;
+  }
+};
+
+TEST_F(ScalarIntTexelBufferDispatchTest,
+       ReadsAndWritesThroughScalarBufferViews) {
+  HostBuffer In = createTexelBuffer(4);  // One scalar R32_UINT texel.
+  HostBuffer Out = createTexelBuffer(4); // One scalar R32_SINT texel.
+  uint32_t InitialValue = 41;
+  std::memcpy(In.Data, &InitialValue, sizeof(InitialValue));
+
+  VkBufferViewCreateInfo InViewInfo{};
+  InViewInfo.buffer = In.Buf;
+  InViewInfo.format = VK_FORMAT_R32_UINT;
+  InViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView InView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &InViewInfo, nullptr, &InView),
+            VK_SUCCESS);
+  VkBufferViewCreateInfo OutViewInfo{};
+  OutViewInfo.buffer = Out.Buf;
+  OutViewInfo.format = VK_FORMAT_R32_SINT;
+  OutViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView OutView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &OutViewInfo, nullptr, &OutView),
+            VK_SUCCESS);
+
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+  Writes[0].pTexelBufferView = &InView;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+  Writes[1].pTexelBufferView = &OutView;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  int32_t Result;
+  std::memcpy(&Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result, (int32_t)InitialValue + 1);
 
   vkDestroyBufferView(Device, InView, nullptr);
   vkDestroyBufferView(Device, OutView, nullptr);
