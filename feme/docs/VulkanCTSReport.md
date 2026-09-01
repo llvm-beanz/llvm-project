@@ -17663,3 +17663,71 @@ VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes: no
 feature bit or extension changed (`geometryShader` was already `VK_TRUE`
 since H5e).
+
+## Roadmap H7m: measured impact (bisection, no code change needed)
+
+**Corrected premise.** H7m's own roadmap text (filed from H7e's reproduction
+session) grouped all 9 originally-failing cases
+(`dEQP-VK.draw.renderpass.point_size_clamp.point_size_clamp_max` and 8
+`dEQP-VK.dynamic_state.monolithic.line_width.*`) under a single "vertex
+stage wrapper requires attached feme.signature metadata" error, framed as
+H3a's fragment-side fix somehow not covering the vertex stage. A real
+bisection found that premise only half right.
+
+**Bisection.** Reverted just the two files roadmap H7o's own "preserve
+function metadata across root/push-constant lowering" commit
+(`c760ed7b21b0`) touched (`RootConstantLowering.cpp`,
+`SPIRVPushConstantLowering.cpp`), rebuilt `feme_vulkan`, and re-ran both
+case groups:
+
+```
+dEQP-VK.draw.renderpass.point_size_clamp.point_size_clamp_max
+  error: feme-cpu-wrap-vertex: vertex stage wrapper requires attached feme.signature metadata
+
+dEQP-VK.dynamic_state.monolithic.line_width.* (all 8)
+  error: feme-cpu-wrap-fragment: fragment stage wrapper requires attached feme.signature metadata
+```
+
+Only `point_size_clamp_max` actually reproduces H7m's own named
+`feme-cpu-wrap-vertex` error -- its vertex shader genuinely declares a push
+constant (`layout(push_constant) uniform pointSizeBlk { float psize; }`).
+Every `line_width.*` case instead hits `feme-cpu-wrap-fragment` for its
+*fragment* shader's own push constant (`layout(push_constant) uniform PC {
+vec4 color; }`); its vertex shader (`gl_Position = vec4(pos.xy, 0.0, 1.0);`,
+no descriptors, no push constant) was never broken at all. H7e's own
+original report conflated a genuine vertex-side bug (1 case) with a
+fragment-side bug that merely happens to affect line-width-gated cases (8
+cases), rather than 9 cases sharing one vertex-side gap.
+
+**Why no fix was needed here.** `SPIRVPushConstantLoweringPass::run`'s
+inline `Function::Create` rebuild is stage-agnostic: it fires for whichever
+entry function's own body matches a push-constant access, vertex or
+fragment alike. Roadmap H7o's fix (an explicit `getAllMetadata`/
+`setMetadata` copy across that rebuild, landed to unblock an unrelated
+push-constant-only fragment shader in
+`dEQP-VK.pipeline.monolithic.multisample.min_sample_shading_*`) already
+closed both halves of this row as a side effect, before this row was even
+investigated directly. Restoring the two files (`git apply` the same diff
+forward) and rebuilding confirms both original errors are gone:
+
+```
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case=dEQP-VK.draw.renderpass.point_size_clamp.point_size_clamp_max
+dEQP-VK.draw.renderpass.point_size_clamp.point_size_clamp_max   Pass
+
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case='dEQP-VK.dynamic_state.monolithic.line_width.*'
+Passed:  8/8 (100.0%)
+Failed:  0/8 (0.0%)
+```
+
+`ninja check-feme` (assertions-enabled, ccache build) is unchanged at
+2244/2271 (27 pre-existing, unrelated `Unsupported`, 0 `Failed`) -- no code
+or test changes were made this row, since H7o's own `RuntimeCPUTest`/lit
+coverage already locks down the metadata-copy behavior generically (it is
+not stage-specific, so no additional per-stage test is needed).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes: no
+feature bit or extension changed by this investigation.
