@@ -2009,13 +2009,18 @@ mlir::Type getTightVectorArrayType(mlir::VectorType VectorTy,
 /// structurally identical, situations this is needed for.
 ///
 /// Deliberately does *not* wrap a non-struct \p Type (a vector, array, or
-/// scalar) this way: no case in this project's own test corpus needs a
-/// vector-or-array element/member padded past its natural size (a vector's
-/// own undershoot, distinct from the ABI-rounding *overshoot* the existing
-/// tight-vector retry already handles, has no real repro yet), so this
+/// scalar) this way: unlike a struct, it has no "own body" a new member
+/// could be appended to without introducing a brand-new wrapping level no
+/// real `spirv.AccessChain` index sequence anticipates, so this
 /// conservatively fails (returns null) rather than risk producing a shape
 /// whose GEP indices silently disagree with what a real `spirv.AccessChain`
-/// expects. Returns \p Type unchanged if it already has exactly the right
+/// expects. A scalar (or vector) array element that needs widening past
+/// its own natural size instead gets a same-depth, differently-typed
+/// stand-in of its own -- see `convertArrayTypeIgnoringDecorations`'s own
+/// uniform byte-array substitution, and
+/// `convertUndersizedScalarArrayMemberIgnoringDecorations`'s per-element
+/// one (roadmap L17) -- neither of which goes through this function at
+/// all. Returns \p Type unchanged if it already has exactly the right
 /// size, or null if it is already too large (a genuinely unrepresentable
 /// gap, e.g. the existing "member too big for its own slot" failure), if it
 /// is not an already-bodied struct, or if the padded struct's own natural
@@ -2101,6 +2106,83 @@ mlir::Type layOutStructIfOffsetsMatch(mlir::spirv::StructType Type,
                                                 /*isPacked=*/false);
 }
 
+/// Returns the LLVM literal struct substituting for a SPIR-V fixed-size
+/// array of a *scalar* (or vector) element -- as opposed to an identified
+/// struct element, already handled via `padStructToSize` in
+/// `convertArrayTypeIgnoringDecorations` -- whenever that array is an
+/// outer struct's own member \p ArrayMemberIndex and is immediately
+/// followed by another sibling member that (per real `-fvk-use-dx-layout`
+/// packing rules) is expected to be packed into the *last* array
+/// element's own otherwise-unused trailing padding, rather than after a
+/// uniformly-padded array's own full `ArrayStride * NumElements` footprint
+/// (roadmap L17; see `convertArrayTypeIgnoringDecorations`'s own comment
+/// for why a single, uniform `LLVM::LLVMArrayType` cannot represent this
+/// shape at all).
+///
+/// Builds one literal struct member per array element instead: every
+/// element except the last uses a `Stride`-sized opaque byte-array
+/// stand-in (mirroring `getTightVectorArrayType`'s own "safe for
+/// pointer-based access" reasoning -- this codebase's pointers are all
+/// opaque, so a differently-typed, same-size stand-in changes no GEP's
+/// own meaning, since whatever `spirv.Load`/`spirv.Store` eventually reads
+/// or writes through the resulting address specifies its own value type
+/// independently); the *last* element keeps its own real (unpadded,
+/// natural-size) converted type, since nothing declared after *it*
+/// (within this array) needs its own space reclaimed -- only \p Type's
+/// own subsequent sibling member does, and that member's placement is
+/// governed entirely by this struct's own overall size, checked by the
+/// caller (`layOutStructIfOffsetsMatch`), not by anything within this
+/// function.
+///
+/// Every element access this way still needs a compile-time-constant
+/// SPIR-V array index (an ordinary `spirv.Constant`, as real `dxc`-emitted
+/// code always uses for a literal HLSL array index like `x[0]`/`x[1]`):
+/// unlike an `LLVM::LLVMArrayType`, `LLVM::GEPOp` only allows indexing a
+/// literal `LLVM::LLVMStructType` member this way with such a constant
+/// (see `verifyStructIndices`, `LLVMDialect.cpp`) -- a genuinely *dynamic*
+/// index into an array with this shape remains unrepresentable; this is a
+/// deliberate, narrower scope than a fully general fix (see roadmap L17's
+/// own text), matching every real case in this project's own test corpus
+/// today (`Feature/CBuffer/array-of-structs.test`,
+/// `Feature/CBuffer/dynamic-struct.test`), where a dynamic index always
+/// selects an *array-of-struct* element (`v[GI]`), never an index into a
+/// scalar array like `x` itself.
+///
+/// Returns null if \p Type's own element is not a scalar or vector (the
+/// identified-struct case is handled elsewhere), if its own converted
+/// element type's natural size is not smaller than the declared
+/// `ArrayStride` (nothing to do, or an already-unrepresentable overshoot),
+/// or if the element type fails to convert.
+mlir::Type convertUndersizedScalarArrayMemberIgnoringDecorations(
+    mlir::spirv::ArrayType Type, const mlir::TypeConverter &Converter,
+    mlir::DataLayout &DL) {
+  mlir::Type SpirvElementTy = Type.getElementType();
+  if (!mlir::isa<mlir::spirv::ScalarType>(SpirvElementTy) &&
+      !mlir::isa<mlir::VectorType>(SpirvElementTy))
+    return nullptr; // Only scalars/vectors: an identified-struct element is
+                     // handled by convertArrayTypeIgnoringDecorations instead.
+
+  mlir::Type ElementType = Converter.convertType(SpirvElementTy);
+  if (!ElementType)
+    return nullptr;
+
+  unsigned Stride = Type.getArrayStride();
+  uint64_t NaturalElementSize = DL.getTypeSize(ElementType);
+  if (Stride == 0 || NaturalElementSize >= Stride)
+    return nullptr;
+
+  unsigned NumElements = Type.getNumElements();
+  if (NumElements == 0)
+    return nullptr;
+
+  mlir::Type Surrogate = mlir::LLVM::LLVMArrayType::get(
+      mlir::IntegerType::get(Type.getContext(), 8), Stride);
+  llvm::SmallVector<mlir::Type, 4> Body(NumElements - 1, Surrogate);
+  Body.push_back(ElementType);
+  return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Body,
+                                                /*isPacked=*/true);
+}
+
 /// Converts a SPIR-V struct type to a non-packed LLVM struct with the same
 /// member sequence (no inserted padding fields, so member index N still
 /// means the same thing to whatever other conversion pattern GEPs into it),
@@ -2184,8 +2266,44 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
     if (mlir::Type Result = layOutStructIfOffsetsMatch(Type, Padded))
       return Result;
 
+  // Retry with any undersized scalar/vector array member (roadmap L17,
+  // see convertUndersizedScalarArrayMemberIgnoringDecorations) rebuilt as
+  // a last-element-unpadded literal struct instead of a uniform
+  // `LLVM::LLVMArrayType`, needed whenever such a member is immediately
+  // followed by a sibling packed into its own last element's trailing
+  // space -- independent of, and tried both alone and combined with, the
+  // vector/padded-member retries below, since a struct can need any
+  // combination of these substitutions at once.
+  llvm::SmallVector<mlir::Type, 8> ScalarArrayAdjusted(Members.begin(),
+                                                       Members.end());
+  bool AdjustedScalarArray = false;
+  {
+    mlir::DataLayout DL;
+    for (unsigned I = 0, E = ScalarArrayAdjusted.size(); I != E; ++I) {
+      auto ArrayTy =
+          mlir::dyn_cast<mlir::spirv::ArrayType>(Type.getElementType(I));
+      if (!ArrayTy)
+        continue;
+      mlir::Type Adjusted = convertUndersizedScalarArrayMemberIgnoringDecorations(
+          ArrayTy, Converter, DL);
+      if (!Adjusted)
+        continue;
+      ScalarArrayAdjusted[I] = Adjusted;
+      AdjustedScalarArray = true;
+    }
+  }
+  if (AdjustedScalarArray) {
+    if (mlir::Type Result =
+            layOutStructIfOffsetsMatch(Type, ScalarArrayAdjusted))
+      return Result;
+    if (padUndersizedMembersIfNeeded(Type, ScalarArrayAdjusted, Padded))
+      if (mlir::Type Result = layOutStructIfOffsetsMatch(Type, Padded))
+        return Result;
+  }
+
   if (!HasVectorMember)
     return nullptr;
+
 
   for (unsigned I = 0, E = Members.size(); I != E; ++I) {
     auto VectorTy = mlir::dyn_cast<mlir::VectorType>(Type.getElementType(I));
@@ -2226,24 +2344,40 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
 /// amount of trailing padding reproduces exactly) as the struct-member
 /// padding retry above.
 ///
-/// Deliberately does not attempt to pad a *scalar* (or vector) element the
-/// same way (see padStructToSize's own comment for why padding a
-/// non-struct type at all is limited to array elements in the first
-/// place): a scalar array like HLSL's own `uint x[2]` needs its *internal*
-/// per-element spacing to stay exactly `ArrayStride` wide (so indexing
-/// `x[1]` computes the right byte offset), but when such an array is *not*
-/// itself a struct's final member, the real (`dxc`-emitted) layout also
-/// expects a *subsequent* sibling member to be packed into whatever's left
-/// of the *last* element's own otherwise-unused trailing padding -- a
-/// shape a single, uniformly-padded `LLVM::LLVMArrayType` cannot represent
-/// at all (every element, including the last, would need to be the same
-/// width). Tracked separately (not part of this identified-struct-scoped
-/// gap): see roadmap L17.
+/// A *scalar* (or vector) element is padded differently (roadmap L17):
+/// unlike a struct element, it has no "own body" to append a trailing
+/// padding member to (see padStructToSize's own comment), so instead this
+/// substitutes a `Stride`-sized opaque byte-array stand-in for every
+/// element uniformly, exactly as `getTightVectorArrayType` already does
+/// (safely, since this codebase's pointers are all opaque throughout) for
+/// a struct member's own vector-to-array substitution -- this changes no
+/// GEP's own addressing depth (still one array index reaches element
+/// `i`'s own stand-in directly), only what nominal type that GEP's result
+/// reports, which nothing but the pointer's own address depends on. This
+/// keeps a scalar array like HLSL's own `uint x[2]` correctly addressable
+/// (`x[1]` computes the right byte offset) whenever it either is not
+/// itself immediately followed by a sibling struct member, or is followed
+/// by one but has room to spare (the declared gap to that sibling is at
+/// least `ArrayStride * NumElements`).
+///
+/// When such an array *is* immediately followed by a sibling with no room
+/// to spare -- the real `dxc`-emitted layout instead expects that sibling
+/// packed into whatever's left of the *last* element's own otherwise-
+/// unused trailing padding, a shape this uniform substitution cannot
+/// represent on its own, since every element (including the last) is the
+/// same `Stride`-wide width here -- see
+/// convertUndersizedScalarArrayMemberIgnoringDecorations's own doc comment
+/// for the separate, struct-member-context-aware substitution
+/// `convertOffsetStructTypeIgnoringDecorations` retries with instead
+/// whenever this function's own (successful, but too-large) result
+/// doesn't reproduce the declared offsets.
 ///
 /// Returns null if the element type fails to convert, or if padding it to
-/// the declared stride fails or is not needed (\p Stride is 0, meaning no
-/// stride was declared at all -- e.g. a workgroup-shared array -- in which
-/// case no padding applies and the plain element type is used directly).
+/// the declared stride fails (the declared stride is narrower than the
+/// element's own natural size) or is not needed (\p Stride is 0, meaning
+/// no stride was declared at all -- e.g. a workgroup-shared array -- in
+/// which case no padding applies and the plain element type is used
+/// directly).
 mlir::Type convertArrayTypeIgnoringDecorations(
     mlir::spirv::ArrayType Type, const mlir::TypeConverter &Converter) {
   mlir::Type ElementType = Converter.convertType(Type.getElementType());
@@ -2252,9 +2386,16 @@ mlir::Type convertArrayTypeIgnoringDecorations(
 
   if (unsigned Stride = Type.getArrayStride()) {
     mlir::DataLayout DL;
-    ElementType = padStructToSize(ElementType, Stride, DL);
-    if (!ElementType)
-      return nullptr;
+    if (mlir::Type Padded = padStructToSize(ElementType, Stride, DL)) {
+      ElementType = Padded;
+    } else {
+      uint64_t NaturalSize = DL.getTypeSize(ElementType);
+      if (NaturalSize > Stride)
+        return nullptr;
+      if (NaturalSize < Stride)
+        ElementType = mlir::LLVM::LLVMArrayType::get(
+            mlir::IntegerType::get(Type.getContext(), 8), Stride);
+    }
   }
   return mlir::LLVM::LLVMArrayType::get(ElementType, Type.getNumElements());
 }
