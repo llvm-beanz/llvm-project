@@ -50388,3 +50388,76 @@ and L7 remain open and unexamined beyond the initial triage pass; none of
 this session's fixes touch feature bits or extensions, so
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` needed no
 changes, confirmed explicitly in both fixed rows' own roadmap write-ups.
+
+# Session: L2 triage (compute-pipeline VkResult=-3 bucket)
+
+Task: investigate and fix roadmap L2, a bucket of `check-hlsl-feme-vk`
+compute-pipeline creation failures collapsing to a bare `VkResult = -3`.
+
+First correction: L2's own text said this VkResult was
+`VK_ERROR_OUT_OF_HOST_MEMORY`'s value. It isn't -- that's `-1`. `-3` is
+`VK_ERROR_INITIALIZATION_FAILED`, which is exactly what `Pipeline.cpp`'s
+`vkCreateComputePipelines` sets on any `compileComputePipeline` failure.
+Small thing, but worth fixing in the roadmap text so the next person isn't
+misled chasing an out-of-memory theory that doesn't match the code.
+
+Root cause of "not yet triaged": `vkCreateComputePipelines` bare
+`consumeError()`'d the real `llvm::Error` instead of routing it through
+the `Diagnostics.h` `logCreationFailure` helper that `vkCreateGraphicsPipelines`
+and `Sync.cpp` already use. One-line-ish fix, but it's what unlocked every
+subsequent bit of investigation this session -- without it, every failure
+in this bucket really was an undiagnosable black box.
+
+Then hit a second wrinkle: `offload-test-suite`'s own `lit.cfg.py` only
+passes a fixed allowlist of Vulkan env vars through to `RUN:` subprocesses
+(`with_system_environment(..., [...])`), silently stripping
+`FEME_VULKAN_LOG_CREATION_ERRORS`. Worked around it by invoking `offloader`
+directly against the `.tmp/pipeline.yaml` + `.tmp.o` artifacts a prior
+`llvm-lit` run leaves behind, bypassing lit's filtering entirely. Also
+re-learned the "VK_ICD_FILENAMES must be an absolute path or everything
+looks like a driver-init crash" lesson from a previous session the hard
+way again -- should really write that one down somewhere more prominent
+than my own memory.
+
+Triaging the diagnostics themselves needed one more refinement: the
+wrapper `Error` message ("failed to convert spirv dialect module to the
+llvm dialect") is not the real cause -- MLIR prints the actual
+"error: failed to legalize operation ..." line directly to stderr through
+its own diagnostic handler, interleaved with (but separate from) the
+`logCreationFailure`-printed wrapper message. Had to capture the first
+`^error:` line, not the `vkCreateComputePipelines:` line, to get the real
+per-op cause.
+
+Found and fixed a second real bug this way: `maxComputeWorkGroupInvocations`/
+`maxComputeWorkGroupSize[0]/[1]` were pinned at 128 -- Vulkan's own bare
+spec minimum, not anything this CPU target's own dispatch loop actually
+enforces (checked `CommandBuffer.cpp`/`ResourceHeap.cpp`/`EntryWrapper.cpp`
+-- all dynamically sized, no fixed-size array anywhere). Raised to 1024.
+Confirmed via CTS (`max_local_size_{x,y,z}`, `zero_initialize_workgroup_memory`)
+that this clears pipeline creation for the affected shapes without
+introducing any new failures, and confirmed the pre-existing
+`branch_past_barrier` process-abort bug (already tracked as H19p) is
+unrelated -- reproduces identically with the limit reverted.
+
+After that, the remaining ~183-case bucket sorted itself into three
+buckets: ~108 already-tracked L7 legalization-gap cases (good news --
+nothing new to scope there, L7's own list already covers it exactly);
+a new, distinct ~36-case single-channel-format texel-buffer *store* gap
+(`OpImageWrite`'s scalar Texel operand for e.g. `R32i`, which
+`isSupportedTexelElementType` doesn't recognize since it only accepts the
+always-4-wide `OpImageRead` shape) -- confirmed via a minimal IR reduction
+this needs new narrower-than-vec4 runtime store/load helpers, real
+follow-up work, not a quick fix, split out as new row L9; and a handful of
+genuinely distinct small residual cases (a PushConstant range-sizing
+question that might be an `offload-test-suite` test-authoring bug rather
+than a feme bug, a few simdize groupshared-access gaps, an LLVM-dialect
+type-conversion error) needing individual scoping, split out as new row
+L10.
+
+Closed L2 (struck through, full findings recorded), landed both real
+fixes as separate commits, split remaining real work into L9/L10, updated
+VulkanCTSReport.md with the confirming CTS sweep. Checked both
+Vulkan14FeatureInventory.md/VulkanExtensionInventory.md and
+FeMeVulkanDesign.md for stale `128` references tied to this change --
+found none needing updates (the design doc's own "limits" prose is still
+generically accurate, no specific number cited there).
