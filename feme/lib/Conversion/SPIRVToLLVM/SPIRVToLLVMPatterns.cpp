@@ -3404,6 +3404,141 @@ mlir::Value flushSubnormalToZero(mlir::ConversionPatternRewriter &Rewriter,
                                        SignedZero, V);
 }
 
+/// Creates an `llvm.mlir.constant` of \p Value, scalar or splatted to match
+/// \p Ty's shape (mirroring upstream `SPIRVToLLVM.cpp`'s own file-local,
+/// inaccessible-from-here `createFPConstant`).
+mlir::Value createSameShapeFPConstant(mlir::ConversionPatternRewriter &Rewriter,
+                                      mlir::Location Loc, mlir::Type Ty,
+                                      double Value) {
+  if (auto Shaped = mlir::dyn_cast<mlir::ShapedType>(Ty)) {
+    auto FloatTy = mlir::cast<mlir::FloatType>(Shaped.getElementType());
+    return mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Ty,
+        mlir::SplatElementsAttr::get(mlir::cast<mlir::ShapedType>(Ty),
+                                     Rewriter.getFloatAttr(FloatTy, Value)));
+  }
+  auto FloatTy = mlir::cast<mlir::FloatType>(Ty);
+  return mlir::LLVM::ConstantOp::create(Rewriter, Loc, Ty,
+                                        Rewriter.getFloatAttr(FloatTy, Value));
+}
+
+/// Converts a GLSL.std.450 "special function" unary op (roadmap H6m) that a
+/// real GPU's own special-function hardware unit typically evaluates via a
+/// fast approximation, by first flushing a subnormal operand to a
+/// same-signed zero (`flushSubnormalToZero`) before the plain LLVM
+/// intrinsic \p LLVMOp itself runs -- unlike `FloatControlArithmeticPattern`
+/// above (ordinary arithmetic, only flushed when an entry point's own
+/// `DenormFlushToZero` execution mode, `VK_KHR_shader_float_controls`,
+/// F15b, asks for it), this flush is unconditional: it models a real
+/// hardware quirk of the special-function unit itself, not a
+/// shader-requested precision relaxation, so it applies regardless of
+/// whether the module declares `DenormFlushToZero` at all (`dxc` never
+/// emits that execution mode for a plain HLSL `log`/`sqrt`/etc. call, yet a
+/// real GPU's own reference output for a subnormal input still behaves as
+/// if it had been flushed first -- see `Feature/HLSLLib/{log,log10,log2,
+/// sqrt,sinh}.32.test`, whose golden `ExpectedOut` data assumes exactly
+/// this). Registered only for the ops whose real math actually differs
+/// from the flushed-input answer at `f32` precision for these tests' own
+/// denormal inputs (`Log`, `Log2`, `Sqrt`, `Sinh`) -- siblings like `Exp`,
+/// `Cos`, `Asin`, etc. already produce the same answer either way (their
+/// own math is continuous and non-singular near zero), so they are left on
+/// MLIR's own unconditional `DirectConversionPattern` rather than needing
+/// this override too.
+template <typename SPIRVOp, typename LLVMOp>
+class TranscendentalFlushInputPattern
+    : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Operand =
+        flushSubnormalToZero(Rewriter, Loc, Adaptor.getOperand());
+    Rewriter.replaceOpWithNewOp<LLVMOp>(Op, DstType, Operand);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.InverseSqrt` (HLSL `rsqrt`, roadmap H6m) the same way
+/// upstream's own `InverseSqrtPattern` does (`1.0 / llvm.sqrt(x)`), except
+/// flushing a subnormal operand to a same-signed zero first, for the same
+/// real-hardware-special-function-unit reason
+/// `TranscendentalFlushInputPattern` above documents: e.g. `rsqrt` of a
+/// negative subnormal is otherwise `1.0 / sqrt(negative) = 1.0 / NaN =
+/// NaN`, while a real GPU's own reference answer (and
+/// `Feature/HLSLLib/rsqrt.32.test`'s own golden data) is `1.0 / sqrt(-0.0)
+/// = -inf`, as if the subnormal operand had been flushed to `-0.0` first.
+class FlushedInverseSqrtPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLInverseSqrtOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLInverseSqrtOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLInverseSqrtOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type SrcType = Op.getType();
+    mlir::Type DstType = getTypeConverter()->convertType(SrcType);
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Operand =
+        flushSubnormalToZero(Rewriter, Loc, Adaptor.getOperand());
+    mlir::Value One = createSameShapeFPConstant(Rewriter, Loc, DstType, 1.0);
+    mlir::Value Sqrt =
+        mlir::LLVM::SqrtOp::create(Rewriter, Loc, DstType, Operand);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::FDivOp>(Op, DstType, One, Sqrt);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.GL.Radians`/`spirv.GL.Degrees` (roadmap H6m) the same way
+/// upstream's own `ScalePattern` does (a plain multiply by a compile-time
+/// constant), except flushing a subnormal operand to a same-signed zero
+/// first, for the same real-hardware-special-function-unit reason
+/// `TranscendentalFlushInputPattern` above documents: unlike an ordinary
+/// `spirv.FMul` by a non-unit constant, scaling a subnormal by `pi/180` or
+/// `180/pi` keeps the result subnormal-scale (nonzero) under real,
+/// denormal-preserving IEEE-754 math, while a real GPU's own reference
+/// answer (and `Feature/HLSLLib/{radians,degrees}.32.test`'s own golden
+/// data) is exactly a same-signed zero, as if the operand had been flushed
+/// first.
+template <typename SPIRVOp>
+class FlushedScalePattern : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  template <typename... Args>
+  FlushedScalePattern(double Scale, Args &&...ArgPack)
+      : mlir::SPIRVToLLVMConversion<SPIRVOp>(std::forward<Args>(ArgPack)...),
+        Scale(Scale) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Operand =
+        flushSubnormalToZero(Rewriter, Loc, Adaptor.getOperand());
+    mlir::Value Factor =
+        createSameShapeFPConstant(Rewriter, Loc, DstType, Scale);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::FMulOp>(Op, DstType, Operand,
+                                                    Factor);
+    return mlir::success();
+  }
+
+private:
+  double Scale;
+};
+
 /// Returns the rounding mode \p Op's own `fp_rounding_mode` decoration
 /// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
 /// roadmap F15c) requests, or none if \p Op carries no such decoration.
@@ -4209,5 +4344,29 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
                                     mlir::LLVM::ConstrainedFRemIntr>>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, RoundingModeRTZWidths,
       DenormFlushToZeroWidths, FastMathDefaults);
+  // Overrides upstream's own unconditional `DirectConversionPattern`/
+  // `InverseSqrtPattern`/`ScalePattern` for these six GLSL.std.450 ops with
+  // an unconditional subnormal-input flush (roadmap H6m), modeling a real
+  // GPU's own special-function-unit hardware behavior; see
+  // `TranscendentalFlushInputPattern`'s own comment above for why only
+  // these ops (and not every GLSL.std.450 op) need it.
+  Patterns.add<
+      TranscendentalFlushInputPattern<mlir::spirv::GLLogOp, mlir::LLVM::LogOp>,
+      TranscendentalFlushInputPattern<mlir::spirv::GLLog2Op,
+                                      mlir::LLVM::Log2Op>,
+      TranscendentalFlushInputPattern<mlir::spirv::GLSqrtOp,
+                                      mlir::LLVM::SqrtOp>,
+      TranscendentalFlushInputPattern<mlir::spirv::GLSinhOp,
+                                      mlir::LLVM::SinhOp>>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
+  Patterns.add<FlushedInverseSqrtPattern>(Patterns.getContext(), TypeConverter,
+                                          FeMeBenefit);
+  // pi / 180
+  Patterns.add<FlushedScalePattern<mlir::spirv::GLRadiansOp>>(
+      0.017453292519943295, Patterns.getContext(), TypeConverter,
+      FeMeBenefit);
+  // 180 / pi
+  Patterns.add<FlushedScalePattern<mlir::spirv::GLDegreesOp>>(
+      57.29577951308232, Patterns.getContext(), TypeConverter, FeMeBenefit);
 }
 
