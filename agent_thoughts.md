@@ -50237,3 +50237,154 @@ are all actually fixed, not just H13b.
 
 `check-feme`: 2246/2273 passed, 27 pre-existing Unsupported, 0 Failed --
 unchanged failure count from before this session's changes.
+
+# Session: offload-test-suite triage (beanz/feme branch)
+
+## Task
+
+Build and run `offload-test-suite`'s `beanz/feme` branch (adds
+`check-hlsl-feme-vk`) against the real feme Vulkan ICD, inspect failures,
+ensure any not directly fixed are tracked on the roadmap, and fix any
+"obvious" bugs encountered directly rather than just filing them.
+
+## Environment setup
+
+`offload-test-suite` needs CMake >=3.31; the system CMake is 3.28.3, so I
+installed a newer one via `pip install cmake` (lands at
+`/home/dev/.local/bin/cmake` -- must invoke that path explicitly, `PATH`
+does not persist across tool calls in this environment). Checked out a
+local `feme` branch tracking `beanz/feme`, wired it in as an
+`LLVM_EXTERNAL_PROJECTS` entry, and confirmed `check-hlsl-feme-vk` builds
+and runs (612 tests total; a large `Unsupported` fraction from genuinely
+missing features, which is expected and not this session's concern).
+
+## Bug #1: SIMDize.cpp widens a uniform vectorizable-intrinsic call
+
+The first full run showed 268 failures. Rather than immediately trying to
+fix all of them or file them all on the roadmap unexamined, I picked the
+single largest-looking bucket ("Test failed: TestN" numeric mismatches) and
+reduced one real case (`Feature/HLSLLib/abs.32.test`) all the way down to
+raw LLVM IR via the same `dxc` -> `feme-translate --import-spirv` ->
+`feme-opt --feme-convert-spirv-to-llvm` -> `feme-translate
+--llvmdialect-to-llvmir` pipeline this whole project's own H-track history
+already established as the standard reduction technique. This found a real,
+narrow bug: `FunctionWidener::widenInstruction`'s special case for a
+vector-typed, homogeneous "trivially vectorizable" intrinsic call (e.g.
+`llvm.fabs.v3f32`) unconditionally decomposed and erased such a call,
+*before* the general `isDivergentAtDef` uniformity gate every other
+producer/consumer shape in the same function respects. A *uniform* such
+call's own `extractelement` consumers, correctly left unchanged by that
+later gate (since they're uniform too), kept referencing the
+now-erased-and-RAUW'd-to-poison call -- a `poison` read masquerading as a
+"wrong number" test failure with no compiler-side diagnostic at all.
+
+Fixed by gating the special case on `UI.isDivergentAtDef(CI)`, so a uniform
+vectorizable-intrinsic call now falls through to the ordinary "uniform:
+leave it unchanged" handling, matching its own already-correctly-gated
+consumers. Added both a lit regression (`simdize-vector-intrinsic-uniform
+.ll`) and a unit test (`SIMDizeTest.LeavesUniformVectorizableIntrinsicCall
+Unchanged`), both confirmed via `git stash` to fail pre-fix and pass
+post-fix. `check-feme` stayed fully clean (2275/2248/0 Failed). Measured
+against the real `check-hlsl-feme-vk` suite: 60 -> 86 Passed (+26), 268 ->
+242 Failed (-26) -- the single highest-leverage fix found this session,
+since the composite-construct-after-vector-builtin-call shape this bug
+covers is common across the whole `Feature/HLSLLib/*.32.test` family.
+
+## Roadmap: new §1.11 "L" track
+
+Added a new roadmap section (L1-L7, later L8) to track this suite's own
+remaining failure buckets, following the same "max one lowercase letter of
+nesting" convention as every other track. L1 (the SIMDize fix above) struck
+through immediately with its measured impact recorded. The other buckets
+(compute-pipeline VkResult=-3, render-pass VkResult=-11, JIT symbol errors,
+crashes, remaining numeric mismatches, a long tail of unimplemented SPIR-V
+legalization patterns) recorded as open rows for future sessions, each with
+its own file/scope pointer where I had enough evidence to name one.
+
+## Bug #2: SPIRVPushConstantLowering.cpp misses ConstantExpr-folded GEPs
+
+Investigated the "JIT session error: Symbols not found: [ buffer ]" bucket
+(10 failures, all in `Feature/PushConstant/*.test`) next, since it looked
+like the highest-confidence remaining bug (a JIT symbol-resolution failure
+for a name, `buffer`, that looked at first glance like it might be a
+missing runtime export). Noticed `simple.test` (a single-member struct,
+only ever read at offset 0) passes while every multi-member struct test
+fails, which was the key clue.
+
+Reduced a real failure (`bool.test`'s own 4-member-struct-derived shape) the
+same way as Bug #1. Found the real root cause: `matchSPIRVPushConstantAccess`
+in `SPIRVPushConstantLowering.cpp` only recognized a genuine, per-function
+`GetElementPtrInst` instruction as a push-constant member access. But a
+constant-index GEP off the push-constant global's own compile-time-constant
+address is almost always folded straight into a `ConstantExpr` by any
+ordinary constant-folding `IRBuilder` (including `feme-translate`'s own
+`--llvmdialect-to-llvmir` step) -- never surviving as a real instruction at
+all. `buffer` isn't a runtime symbol; it's literally the user's own HLSL
+push-constant variable name (`[[vk::push_constant]] S buffer;`). Only the
+zero-offset member (needing no GEP, so never hitting this shape) was ever
+rewritten to read the appended `root_constants` blob; every other member's
+load kept referencing the push-constant global itself, an external
+declaration with no definition -- producing this bucket's own run-time JIT
+error instead of a compile-time diagnostic.
+
+Fixed by adding a `ConstantExpr` branch to the discovery loop, using
+`GEPOperator` (which wraps both a real GEP instruction and a GEP-opcode
+`ConstantExpr` uniformly) and filtering the constant's own users by
+`GLoad->getFunction() != &F` -- necessary because a `ConstantExpr`'s uses
+can span multiple functions (constants are uniqued module-wide), unlike an
+instruction-typed GEP which is already guaranteed single-function. Verified
+the fix pre/post via `git stash` on the existing
+`spirv-push-constant-lowering.ll` lit test (added a new case,
+`reads_member_via_constant_expr_gep`, covering the shape directly) and
+end-to-end against the real feme Vulkan ICD via `offloader` on `bool.test`.
+`check-feme` stayed clean. Measured against `check-hlsl-feme-vk`: 86 -> 95
+Passed (+9), 242 -> 233 Failed (-9) -- 9 of the bucket's 10 cases now pass;
+the 10th (`array_of_matrices.test`) was already marked `XFAIL` upstream in
+`offload-test-suite` for an unrelated reason and now reports "Unexpectedly
+Passed" instead, which is an upstream test-annotation staleness outside
+this repository's own scope to fix.
+
+## Real deqp-vk validation
+
+Per standing instructions to run the real Vulkan CTS after each change, ran
+a targeted `dEQP-VK.pipeline.monolithic.push_constant.*` sweep (the group
+most directly relevant to both fixes) against the real feme ICD. Found the
+sweep's own process silently exits (no crash message at all) partway
+through, right after printing
+`count_1_shader_vert_frag_command2`'s own name. Rather than assume this was
+a regression from either of this session's fixes, confirmed it reproduces
+identically with both `SIMDize.cpp` and `SPIRVPushConstantLowering.cpp`
+reverted to their pre-session state and rebuilt -- so it's a genuine,
+pre-existing gap, newly discovered rather than newly caused. Recorded as
+new roadmap row L8 (a P1, since a silent-exit crash is worse than a
+graceful diagnostic) rather than blocking either L1 or L4, which both close
+cleanly on their own already-measured terms.
+
+## Re-measuring L2/L3 with an env var slip caught along the way
+
+While re-running `check-hlsl-feme-vk` standalone (outside `ninja`) to
+double check current bucket sizes, I passed a *relative* path in
+`VK_ICD_FILENAMES`/`VK_DRIVER_FILES`, which silently broke Vulkan instance
+creation for every single case (`Failed to create Vulkan instance,
+VkResult = -9`) -- worth noting for future sessions, since the failure mode
+looks structurally identical to a real driver bug at a glance and it's easy
+to mistake a harness slip for a regression. Caught it by noticing the
+Passed count dropped to exactly 0, re-ran with absolute paths, and got the
+same 95/233 split `ninja check-hlsl-feme-vk` already measured, confirming
+it really was just my own invocation mistake and not a new regression. With
+that confirmed, re-counted the L2 (compute pipeline, VkResult=-3, 184->175
+after L1/L4, correcting a stale/wrong original "47" estimate) and L3
+(render pass, VkResult=-11, 35, effectively unchanged from L1/L4 as
+expected) buckets and updated the roadmap rows to reflect real, reproducible
+counts rather than repeating an unverifiable earlier estimate.
+
+## What's left
+
+L2 (175 cases) is now clearly the single largest remaining bucket and the
+highest-priority target for the next session -- needs the same
+diagnostic-instrumentation technique the H-track used to find whether it's
+one dominant root cause or several. L3, L5 (crashes, now including L8), L6,
+and L7 remain open and unexamined beyond the initial triage pass; none of
+this session's fixes touch feature bits or extensions, so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` needed no
+changes, confirmed explicitly in both fixed rows' own roadmap write-ups.
