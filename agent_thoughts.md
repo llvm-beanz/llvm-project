@@ -51730,3 +51730,136 @@ Struck through L6 in full, with a completion note covering the root
 cause, the fix, and the exact confirmed A/B numbers. Added the new M1
 milestone (not nested, since it's a genuinely distinct concern) to track
 the still-open per-row audit question above.
+
+# Session: Roadmap L14 — auditing historical feme-vk rerun claims, and finding two real ones were wrong
+
+## What this milestone actually asked for
+
+L14 (originally opened as "M1" in the L6 session, renumbered by whatever
+convention keeps this document's own IDs sequential) asked me to audit
+whether L2 onward's own "confirmed via a real check-hlsl-feme-vk/feme-vk
+rerun" claims actually used the correct `feme_vulkan` ICD, given the L6
+session's own discovery that this container's `VK_ICD_FILENAMES`
+silently defaults to Mesa's `lavapipe`. This is explicitly an audit
+milestone, not a "fix whatever you find" one — but the audit turned up
+two real, confirmed bugs in prior sessions' own claims, which I've
+tracked as new follow-on rows rather than trying to fix within this same
+session (matching how L6 itself handled its own ICD discovery: document
++ open a new row, don't scope-creep the current one).
+
+## Method
+
+1. Rebuilt `feme_vulkan`/`offloader`, exported the correct
+   `VK_ICD_FILENAMES`, and reran the full `feme-vk` suite. Got 650
+   discovered / 145 Passed / 266 Unsupported / 26 XFAIL / 212 Failed / 1
+   Unexpectedly Passed — byte-for-byte identical to L6's own just-recorded
+   numbers. This alone is reassuring: whatever the earlier per-case
+   findings below turn out to be, the aggregate measurement methodology
+   has clearly been stable and correct since at least L6's own commit.
+2. For each of L2/L9/L10/L11/L12/L12a/L12b/L12c/L13, pulled out every
+   concretely *named* real test case each row's own completion note
+   claims to have fixed (or left failing, for the ones split out further).
+   Reran each individually against the correct `feme` ICD via
+   `llvm-lit --filter=...`, and, for anything that looked surprising,
+   also against the default (`lavapipe`) ICD as a direct cross-check.
+
+## What checked out cleanly
+
+L2, L9, L10, L12, L12a, L12c all matched their own claims (L9's own "24
+still-failing Basic/Matrix cases" is now 17 — explained entirely by
+unrelated later fixes improving 7 of them over time, not a discrepancy;
+L10's own two still-failing groupshared cases both still fail exactly on
+the already-tracked H19p "unsupported calling convention" abort, exactly
+as its own row predicted; L12/L12a/L12c's own
+`overflow-unbounded-array.test` claim still holds today).
+
+## Discrepancy 1: L11's own named test still fails
+
+`WaveOps/GroupSharedMatrixRowComponentDataRace.test` reproduces the exact
+pre-L11 error today. This one wasn't an ICD mistake — L11's own row had
+already, honestly, disclosed that no real end-to-end rerun was done
+("due to time/scope"), only a from-scratch lit reduction. I rebuilt the
+real reduction from the actual test's own HLSL through `dxc`, then
+replayed this project's own actual CPU-target pass pipeline
+(`feme-cpu-fold-spirv-builtins`, `feme-cpu-prepare`, ...,
+`feme-cpu-linearize`, `feme-cpu-simdize`, ...) via `feme-opt`, and found
+exactly why: L11's own lit test has no branch in it at all (a plain
+`load <4 x float>, ptr addrspace(3)`), but the real test's own `if
+(ThreadID.x == 0)` guard means `feme-cpu-linearize` needs to mask the
+groupshared row load/store for correct per-lane side effects, so it
+becomes a `feme.cpu.masked.load.v4f32.as3`/`.store...` *call*, not a
+plain `LoadInst`/`StoreInst`. `SIMDize.cpp`'s dispatch that routes to
+L11's own fixed `widenGroupSharedLoad` only ever checks for a plain
+`LoadInst`/`StoreInst` with an addrspace(3) pointer operand — the masked
+call form falls through to the generic vector-producer check instead,
+which has no case at all for a `feme.cpu.masked.load.*` call, so it hits
+the exact same "unsupported producer" diagnostic L11 was supposed to
+close. Opened as new roadmap row L15.
+
+## Discrepancy 2: L13's own claim is false, and *was* measured against lavapipe
+
+This is the bigger finding. L13's own row claims "All 6 real cases this
+milestone named now pass end-to-end against a real
+offload-test-suite/feme-vk rebuild-and-rerun (confirmed individually and
+as part of a full-suite run)". Rerunning all 6 against the real `feme`
+ICD today: only 2 actually pass (`Feature/CBuffer/vectors.test`,
+`Feature/ConstantBufferT/vectors.test`); the other 4
+(`Feature/StructuredBuffer/packed.test`, `Feature/CBuffer/{structs,
+array-of-structs,dynamic-struct}.test`) still fail with the *exact same*
+`failed to legalize operation 'spirv.AccessChain' that was explicitly
+marked illegal` error L13 itself names as the bug it's fixing.
+
+To find out why, I reran those same 4 cases against the *default*
+(`lavapipe`) ICD — and all 4 `PASS`. A real, mature driver's own SPIR-V
+compiler has no trouble at all with this shape. This is about as direct
+a confirmation as I could ask for that L13's own "confirmed... as part of
+a full-suite run" claim really was measured against `lavapipe`, not
+`feme` — precisely the failure mode this whole L14 audit exists to catch,
+and precisely the thing my own earlier (L6-session) cross-check against
+L5's aggregate numbers wasn't sensitive enough to detect (a handful of
+individual case flips are invisible in an aggregate 133/224-vs-137/220
+comparison).
+
+Root-caused the actual remaining gap via a real `feme-opt` reduction of
+`structs.test`'s own SPIR-V: the failing struct has a fixed-size array
+member of an identified struct whose declared per-element `stride`
+doesn't match that struct's own natural (ABI) size — e.g.
+`!spirv.array<2 x !spirv.struct<X, (si32 [0])>, stride=16>`, stride 16
+vs. `X`'s own natural 4-byte size. The delightful (if slightly alarming)
+part: `convertOffsetStructTypeIgnoringDecorations`'s own doc comment,
+written during L13 itself, *already* names this exact gap verbatim —
+"a fixed-size array member whose own declared stride does not match its
+element's natural size -- tracked separately, see roadmap L13a" — but
+`L13a` was never actually added to `Roadmap.md`. Whoever wrote that
+comment (an earlier me, presumably deep in L13's own investigation) knew
+about this gap and intended to track it, but the roadmap row itself never
+got created. This audit restores it as a real new row (L13a), and treats
+it as a pure bookkeeping correction rather than new work discovered by
+this row.
+
+## Why this matters going forward
+
+Between L11 and L13, this audit found that at least one roadmap row's
+own "confirmed" claim was concretely wrong, for the exact reason this
+whole audit was created to check. This raises real doubt about how much
+weight any *specific* historical "confirmed via a real rerun" claim in
+this document should carry without independent reverification — the
+aggregate-baseline cross-check I used in the L6 session is a useful
+sanity check but is not a substitute for rerunning the actual named
+cases. I did not attempt a full audit of every single test name every
+roadmap row has ever mentioned (that would be a much larger undertaking
+than L14's own time budget), but I did check every row from L2 through
+L13 at the granularity of "does the specific named test case this row's
+completion note calls out still do what it claims" — which is what
+turned up both L11 and L15.
+
+## Roadmap
+
+Struck through L14 in full with a completion note covering the method
+and both findings. Added L13a (nested under L13, one lowercase letter
+deep, restoring a citation that already existed in code but never made
+it into this document) and L15 (a fresh top-level row, since it's really
+a distinct SIMDize.cpp gap, not a sub-part of L11 -- following the same
+"new row for a milestone-description correction" convention L6/L10/L11
+already established) to track the two real gaps found. Neither attempted
+within this same session, matching L14's own explicitly audit-only scope.
