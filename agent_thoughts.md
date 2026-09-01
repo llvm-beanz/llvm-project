@@ -51587,3 +51587,146 @@ actually clear all 6 real cases the milestone named -- landing only half
 the fix and calling L13 "partially done" felt like an artificial split
 for its own sake rather than a genuinely separate unit of work. Roadmap
 L13 is struck through in full; no follow-up sub-milestone needed.
+
+# Session: Roadmap L6 — subnormal-input flush for six GLSL.std.450 ops, and a VK_ICD_FILENAMES footgun
+
+## The bug itself
+
+L6 asked me to figure out how many of the "Test failed: TestN" numeric-
+mismatch cases (37 before L1) L1's own composite-construct fix actually
+resolved, and root-cause/fix whatever remained. After L1's fix, 8 real
+`offload-test-suite` HLSLLib cases remained: `degrees`, `log`, `log10`,
+`log2`, `radians`, `rsqrt`, `sinh`, `sqrt` (all `.32.test`). Cross-checking
+every failing case's own `Data:`/`ExpectedOut` YAML found one shared root
+cause: each feeds a subnormal float32 input through one library intrinsic,
+and each test's own golden output assumes the subnormal was flushed to a
+same-signed zero *before* the math ran (e.g. `log(-denormal)` expects
+`-inf`, i.e. `log(-0)`, not the IEEE-754-correct `NaN`). Compiling minimal
+repros with `dxc` and inspecting the SPIR-V with `spirv-dis` confirmed
+`dxc` never emits `OpExecutionMode ... DenormFlushToZero` for these plain
+library calls, so the existing execution-mode-gated flush pattern
+(`FloatControlArithmeticPattern`, roadmap F15b) never applies — this is a
+distinct gap. Checking sibling intrinsics that already pass (`exp`, `cos`,
+`sin`, `atan`, `cosh`, `tanh`, ...) confirmed they're continuous/non-
+singular near zero at float32 precision, so their true math coincidentally
+already matches a "flushed" answer; only functions with either a pole at
+zero (`log`, `log2`/`log10`, `sqrt`'s `1/sqrt` cousin) or a scale-then-trig-
+adjacent shape near the smallest subnormals (`sinh`, `radians`, `degrees`)
+genuinely diverge.
+
+The fix: apply the existing `flushSubnormalToZero` helper *unconditionally*
+(not gated on any execution mode) to exactly six ops — `GLLogOp`,
+`GLLog2Op`, `GLSqrtOp`, `GLSinhOp`, `GLInverseSqrtOp`, `GLRadiansOp`,
+`GLDegreesOp` — in `SPIRVToLLVMPatterns.cpp`, registered at `FeMeBenefit` to
+override upstream's default patterns for just these ops. This models real
+special-function hardware units, which commonly flush subnormal inputs by
+default regardless of any execution mode (as opposed to ordinary ALU
+arithmetic, which round-trips a subnormal faithfully unless told
+otherwise). `log10` needed no dedicated pattern: `dxc` lowers it to
+`GLLog2Op` plus an ordinary `FMul` scale, so it's covered transitively.
+
+Added a new lit test (`spirv-to-llvm-transcendental-flush-to-zero.mlir`,
+7 split-file cases + a vector-typed case) and confirmed the full
+`ninja check-feme` still passes (2282 discovered, 0 Failed, ccache +
+assertions).
+
+## The much bigger finding: VK_ICD_FILENAMES silently defaults to lavapipe
+
+After landing the fix and rebuilding `feme_vulkan`, re-running the full
+`feme-vk` suite showed the same 8 cases *still* failing — seemingly
+contradicting a fix I'd already verified end-to-end at the MLIR and LLVM
+IR level (`feme-translate --import-spirv --no-implicit-module
+--spirv-to-llvmir` showed the flush logic correctly present all the way
+down). After a lot of debugging I found the actual cause: this
+container's shell environment has `VK_ICD_FILENAMES` set **system-wide**
+to Mesa's `lavapipe` driver (`/usr/share/vulkan/icd.d/lvp_icd.json`) —
+present even in a plain non-login `bash -c`, but *not* in a fully clean
+`env -i bash -lc`, so it's injected by the container/session harness
+itself, not `~/.bashrc` or `/etc/environment`. `offload-test-suite`'s own
+`lit.cfg.py` passes this through verbatim (`llvm_config.with_system_
+environment`), by design, since that suite is meant to target any real
+Vulkan driver — it does not default to `feme`'s own ICD. So every `feme-vk`
+lit invocation I'd run up to that point (and, worryingly, the "13 failing
+cases" baseline I'd measured earlier this same session before compaction)
+had silently been running against `lavapipe`, not `feme` at all.
+
+What made this so hard to catch: lavapipe (a mature, real driver) happens
+to produce the *exact same* 13-case failure set with the *exact same*
+error text as `feme` did before my fix — for an entirely unrelated reason
+(lavapipe apparently also doesn't flush denormals for these specific
+library functions). Two completely different systems landed on the same
+symptom, which meant the "fix confirmed, but still failing" contradiction
+was the only signal that anything was wrong at all.
+
+Verified the fix via `vulkaninfo --summary | grep deviceName`: with the
+wrong (default) environment it reports the lavapipe device name; with
+`VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json`
+explicitly exported, it correctly reports `FeMe CPU Vulkan Device`.
+
+Once pointed at the real ICD, the full-suite baseline was dramatically
+different from the lavapipe-measured one: 650 discovered / 145 Passed /
+266 Unsupported / 26 XFAIL / 212 Failed / 1 UnexpectedlyPassed (with the
+fix applied), vs. only 13 Failed via lavapipe. To get a clean, trustworthy
+signal for the fix itself (rather than trusting the absolute numbers), I
+did a real A/B: `git show HEAD~1:...` to get the pre-fix source, rebuilt
+`feme_vulkan`, reran the full suite (137 Passed / 220 Failed), then
+restored the fix and reran (145 Passed / 212 Failed) — a clean, exact
++8/-8 delta matching precisely the 8 targeted cases, with Unsupported/
+XFAIL/UnexpectedlyPassed completely unchanged (266/26/1) between runs.
+This is solid evidence the fix works correctly, independent of whatever
+the "right" absolute baseline turns out to be.
+
+I documented the whole footgun in `feme/.instructions.md` under a new
+"Running `feme-vk` / offload-test-suite against the real driver" section,
+with the required `VK_ICD_FILENAMES` export and the `vulkaninfo` sanity
+check, so no future session (mine or otherwise) loses time to this again.
+
+## Was this a systemic problem, or just this session's mistake?
+
+I compared this session's freshly-measured, correctly-ICD-selected pre-fix
+baseline (137 Passed / 220 Failed) against roadmap row L5's own previously
+*recorded* full-suite baseline (133 Passed / 224 Failed, with byte-for-
+byte identical 266 Unsupported / 26 XFAIL / 1 UnexpectedlyPassed). These
+are close enough (differing only by whatever L6-through-L13's own fixes
+contributed in between) to be strong evidence that L5 — and by extension,
+likely the L9-L13 chain built directly on top of it — *did* correctly use
+the real `feme` ICD historically, and my mistake was localized to this
+session's own earlier (pre-compaction) investigation turns rather than a
+years-long systemic issue. I did **not** prove this with full certainty
+though: a real per-row audit (rerunning each of L2/L9/L10/L11/L12(a/b/c)/
+L13's own named cases individually against the correct ICD and diffing
+against their own recorded numbers) would be needed for full confidence.
+I opened this as a new, separate roadmap milestone (M1, not nested under
+L6, since it's a distinct measurement-methodology concern rather than a
+compiler bug) rather than trying to resolve it within this same session.
+
+## Real deqp-vk validation
+
+Tried the most directly relevant real `deqp-vk` group first —
+`dEQP-VK.glsl.builtin.precision.{log,log2,sqrt,sinh,inversesqrt,degrees,
+radians}.*` — but every single case in it (even a completely unrelated
+`abs` case in the same group) crashes the whole `deqp-vk` process with
+`LLVM ERROR: Cannot select: intrinsic %llvm.spv.num.workgroups`, confirmed
+to be a pre-existing, unrelated bug (reproduces identically with this
+session's own fix reverted). The `float_controls.fp32.*_denorm_{flush_to_
+zero,preserve}` cases that would most directly probe whether this fix's
+*unconditional* flush conflicts with an explicit `DenormPreserve`
+execution mode are all `NotSupported` today (feme doesn't advertise
+`VkPhysicalDeviceFloatControlsProperties`), so there's no live conformance
+exposure yet — but I flagged this as a real caveat in `VulkanCTSReport.md`
+for whenever that feature support lands, since at that point this fix's
+unconditional behavior would need to become conditional (skip the flush
+when `DenormPreserve` is explicitly declared). Fell back to the same
+`ubo.*`/`ssbo.layout.*` regression-check groups L5/L13 used and confirmed
+their pass counts are unchanged (within L5/L13's own documented noise band
+for `ubo.*`; byte-for-byte identical to L13's own `ssbo.layout.*` count),
+so no regression from this fix. No feature-bit or extension-advertisement
+change was needed; confirmed neither inventory file references
+`DenormPreserve`/`shaderDenormPreserveFloat32`.
+
+## Roadmap
+
+Struck through L6 in full, with a completion note covering the root
+cause, the fix, and the exact confirmed A/B numbers. Added the new M1
+milestone (not nested, since it's a genuinely distinct concern) to track
+the still-open per-row audit question above.
