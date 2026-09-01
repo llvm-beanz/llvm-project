@@ -419,6 +419,38 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props12->framebufferIntegerColorSampleCounts = VK_SAMPLE_COUNT_1_BIT;
       break;
     }
+    // (roadmap L12b) `VK_EXT_descriptor_indexing`'s own pre-promotion
+    // properties struct: `dEQP-VK.api.info.vulkan1p2.property_extensions_
+    // consistency` cross-checks every field here against the aggregate
+    // `VkPhysicalDeviceVulkan12Properties` case above, so every field must
+    // agree exactly with its counterpart there.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES_EXT: {
+      auto *Props = reinterpret_cast<VkPhysicalDeviceDescriptorIndexingPropertiesEXT *>(Base);
+      Props->maxUpdateAfterBindDescriptorsInAllPools = 4096;
+      Props->shaderUniformBufferArrayNonUniformIndexingNative = VK_FALSE;
+      Props->shaderSampledImageArrayNonUniformIndexingNative = VK_FALSE;
+      Props->shaderStorageBufferArrayNonUniformIndexingNative = VK_FALSE;
+      Props->shaderStorageImageArrayNonUniformIndexingNative = VK_FALSE;
+      Props->shaderInputAttachmentArrayNonUniformIndexingNative = VK_FALSE;
+      Props->robustBufferAccessUpdateAfterBind = VK_FALSE;
+      Props->quadDivergentImplicitLod = VK_FALSE;
+      Props->maxPerStageDescriptorUpdateAfterBindSamplers = 16;
+      Props->maxPerStageDescriptorUpdateAfterBindUniformBuffers = 12;
+      Props->maxPerStageDescriptorUpdateAfterBindStorageBuffers = 4;
+      Props->maxPerStageDescriptorUpdateAfterBindSampledImages = 16;
+      Props->maxPerStageDescriptorUpdateAfterBindStorageImages = 4;
+      Props->maxPerStageDescriptorUpdateAfterBindInputAttachments = 0;
+      Props->maxPerStageUpdateAfterBindResources = 128;
+      Props->maxDescriptorSetUpdateAfterBindSamplers = 96;
+      Props->maxDescriptorSetUpdateAfterBindUniformBuffers = 72;
+      Props->maxDescriptorSetUpdateAfterBindUniformBuffersDynamic = 0;
+      Props->maxDescriptorSetUpdateAfterBindStorageBuffers = 24;
+      Props->maxDescriptorSetUpdateAfterBindStorageBuffersDynamic = 0;
+      Props->maxDescriptorSetUpdateAfterBindSampledImages = 96;
+      Props->maxDescriptorSetUpdateAfterBindStorageImages = 24;
+      Props->maxDescriptorSetUpdateAfterBindInputAttachments = 0;
+      break;
+    }
     // (roadmap E2) The aggregate `VkPhysicalDeviceVulkan13Properties`
     // struct: every one of its 46 limit fields is written explicitly, for
     // the same guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
@@ -1369,6 +1401,35 @@ void fillFeatures2Chain(void *pNext) {
       // broadcast operation this ICD implements (none) supports a dynamic
       // id, vacuously.
       Features->subgroupBroadcastDynamicId = VK_TRUE;
+      break;
+    }
+    // (roadmap L12b) `VK_EXT_descriptor_indexing`'s own pre-promotion
+    // feature struct: `dEQP-VK.api.info.vulkan1p2.feature_extensions_
+    // consistency` cross-checks every field here against the aggregate
+    // `VkPhysicalDeviceVulkan12Features` case above, so every field must
+    // agree exactly with its counterpart there.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT: {
+      auto *Features = reinterpret_cast<VkPhysicalDeviceDescriptorIndexingFeaturesEXT *>(Base);
+      Features->shaderInputAttachmentArrayDynamicIndexing = VK_FALSE;
+      Features->shaderUniformTexelBufferArrayDynamicIndexing = VK_TRUE;
+      Features->shaderStorageTexelBufferArrayDynamicIndexing = VK_TRUE;
+      Features->shaderUniformBufferArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderSampledImageArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderStorageBufferArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderStorageImageArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderInputAttachmentArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderUniformTexelBufferArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderStorageTexelBufferArrayNonUniformIndexing = VK_FALSE;
+      Features->descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+      Features->descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+      Features->descriptorBindingStorageImageUpdateAfterBind = VK_FALSE;
+      Features->descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+      Features->descriptorBindingUniformTexelBufferUpdateAfterBind = VK_TRUE;
+      Features->descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE;
+      Features->descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+      Features->descriptorBindingPartiallyBound = VK_TRUE;
+      Features->descriptorBindingVariableDescriptorCount = VK_FALSE;
+      Features->runtimeDescriptorArray = VK_FALSE;
       break;
     }
     // (roadmap E1) The aggregate `VkPhysicalDeviceVulkan13Features` struct:
