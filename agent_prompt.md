@@ -37,11 +37,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L5:
+Please investigate and fix the issues tracked by milestone L13:
 
-> **6 failures are real internal crashes** ("PLEASE submit a bug report...",
-> i.e. an uncaught `llvm_unreachable`/assertion/signal, not a graceful
-> diagnostic) -- each needs its own reduction and root-cause pass; a crash
-> silently truncates or corrupts a suite run the same way roadmap C2 and H19p
-> already document for `deqp-vk`, so these are higher priority than an
-> equivalent graceful-failure bucket of the same size
+> **A nested identified-struct-inside-(runtime-)array conversion gap** --
+> roadmap L5's own fix stopped `mlir::VulkanLayoutUtils::decorateType` from
+> crashing on this shape (a struct/cbuffer member whose own element is itself a
+> user-defined struct, reached whenever FeMe's own dedicated block-conversion
+> pattern in `SPIRVToLLVMPatterns.cpp` declines the shape first), but the shape
+> itself is still not converted at all -- it now fails gracefully with `failed
+> to legalize operation 'spirv.AccessChain' that was explicitly marked illegal`,
+> the same real `Feature/StructuredBuffer/packed.test`,
+> `Feature/CBuffer/{structs,array-of-structs,dynamic-struct,vectors}.test`, and
+> `Feature/ConstantBufferT/vectors.test` cases L5 named still `FAIL` (no longer
+> crash). Needs its own scoping pass: likely extending FeMe's own
+> `convertOffsetStructTypeIgnoringDecorations`/`convertBlockType`
+> (`SPIRVToLLVMPatterns.cpp`) to recognize a nested identified-struct member
+> directly (reusing its own already-decorated layout rather than routing through
+> upstream's generic, identified-struct-refusing `decorateType` path at all),
+> since that dedicated path already handles the sibling
+> non-nested-identified-struct shapes these same tests would otherwise hit
