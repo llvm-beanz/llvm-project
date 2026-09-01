@@ -18391,3 +18391,67 @@ internal SPIR-V-to-LLVM conversion correctness fix only), so
 changes; double-checked both files for completeness and confirmed neither
 mentions `VK_KHR_shader_float_controls`'s `DenormPreserve`/
 `shaderDenormPreserveFloat32` state changing, consistent with that.
+
+## Roadmap L14: audit of historical `feme-vk` rerun claims against the real ICD
+
+**Scope.** This row is itself a re-audit, not a compiler fix, so this
+section records what was checked rather than a `deqp-vk` sweep.
+
+**Method.** Rebuilt `feme_vulkan`/`offloader` and re-ran the full
+`feme-vk` suite with `VK_ICD_FILENAMES` correctly exported, confirming
+today's baseline (650 discovered, 145 Passed, 266 Unsupported, 26 XFAIL,
+212 Failed, 1 Unexpectedly Passed) is byte-for-byte identical to roadmap
+L6's own just-recorded numbers. Then individually re-ran every real named
+test case each of L2/L9/L10/L11/L12/L12a/L12b/L12c/L13 claims to have
+fixed (or named as still failing) against both the correctly-selected
+`feme` ICD and, as a direct cross-check for any case whose status looked
+surprising, the default (`lavapipe`) ICD.
+
+**Findings.**
+- L2/L9/L10/L12/L12a/L12c: all consistent (L9's own "24-case still-failing
+  `Basic/Matrix/*.test`" count is now 17, explained entirely by unrelated
+  later fixes improving 7 of them; L10's own two still-failing groupshared
+  cases still fail exactly as predicted, on the already-tracked H19p
+  "unsupported calling convention" abort; L12/L12a/L12c's own
+  `Feature/ResourceArrays/overflow-unbounded-array.test` claim holds,
+  confirmed still `Passed` today).
+- **L11's own named `WaveOps/GroupSharedMatrixRowComponentDataRace.test`
+  still fails today**, reproducing the exact pre-L11 error
+  (`feme-cpu-simdize: ... has a divergent value '' of vector type`). Not
+  an ICD mistake this time (L11's own row already disclosed no real
+  end-to-end rerun was done) -- root-caused via a real reduction replaying
+  this project's own actual CPU-target pass pipeline
+  (`feme-cpu-fold-spirv-builtins,feme-cpu-prepare,...,feme-cpu-linearize,
+  feme-cpu-simdize,...`) to a genuinely different IR shape than L11's own
+  lit test covered: the real test's own divergent `if (ThreadID.x == 0)`
+  branch means `feme-cpu-linearize` masks the groupshared row load/store
+  into a `feme.cpu.masked.load/store.v4f32.as3` *call*, a shape neither
+  `checkVectorDecompositionSupported`'s producer-recognition loop nor
+  `widenMaskedLoad`'s own lowering special-cases for a vector result.
+  Tracked as new roadmap row L15.
+- **L13's own claim that all 6 named cases "now pass end-to-end" does not
+  hold**: only 2 of 6 (`Feature/CBuffer/vectors.test`,
+  `Feature/ConstantBufferT/vectors.test`) pass against the real `feme`
+  ICD today. The other 4 (`Feature/StructuredBuffer/packed.test`,
+  `Feature/CBuffer/{structs,array-of-structs,dynamic-struct}.test`) still
+  fail with the exact same `failed to legalize operation
+  'spirv.AccessChain' that was explicitly marked illegal` error L13 was
+  supposed to close. Re-running these same 4 cases against the default
+  (`lavapipe`) ICD shows **all 4 `PASS`** -- direct, reproduced
+  confirmation that L13's own "confirmed... as part of a full-suite run"
+  claim was made against `lavapipe`, exactly the failure mode this row
+  exists to check for. Root-caused via a real `feme-opt` reduction of
+  `structs.test`'s own SPIR-V: each failing case's struct has a
+  fixed-size array member of an identified struct whose declared
+  per-element `stride` does not match that struct's own natural size
+  (e.g. `!spirv.array<2 x !spirv.struct<X, (si32 [0])>, stride=16>`,
+  stride 16 vs. `X`'s own natural 4-byte size) -- a gap
+  `convertOffsetStructTypeIgnoringDecorations`'s own doc comment already
+  named ("tracked separately, see roadmap L13a") when L13 landed, but
+  `L13a` itself was never actually added to `Roadmap.md` until this audit
+  restored it as its own new row.
+
+No feature-bit or extension-advertisement change was made or is needed
+(an audit-and-bookkeeping pass, not a compiler fix); double-checked both
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` for
+completeness and confirmed neither needs an update.
