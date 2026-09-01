@@ -18328,3 +18328,66 @@ used, on the same rebuilt ICD:
 No feature-bit or extension-advertisement change was made (this is an
 internal SPIR-V-to-LLVM conversion correctness fix only), so
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` are unchanged.
+
+## Roadmap L6: unconditional subnormal-input flush for six GLSL.std.450 ops
+
+**Scope.** This session's own fix (`SPIRVToLLVMPatterns.cpp`: unconditional,
+not execution-mode-gated, subnormal-input flush for `GLLogOp`/`GLLog2Op`/
+`GLSqrtOp`/`GLSinhOp`/`GLInverseSqrtOp`/`GLRadiansOp`/`GLDegreesOp`) was
+found and fixed entirely via `offload-test-suite`'s own `feme-vk` lit
+target, not a real `deqp-vk` run. Per this project's own standing
+instruction, tried the most directly relevant real `deqp-vk` group first:
+
+- `dEQP-VK.glsl.builtin.precision.{log,log2,sqrt,sinh,inversesqrt,degrees,
+  radians}.*` (150 cases) -- the group most directly exercising these same
+  six ops at float32 precision. **Every single case in this group crashes
+  the `deqp-vk` process outright** with `LLVM ERROR: Cannot select:
+  intrinsic %llvm.spv.num.workgroups`, immediately on the very first case
+  attempted. Confirmed this is a pre-existing, unrelated gap and **not**
+  caused by this session's own fix: reproduces byte-for-byte identically
+  (same crash, same point) on `dEQP-VK.glsl.builtin.precision.abs.highp.
+  scalar` -- a completely unrelated builtin (`abs`) this session's own fix
+  never touches -- and reproduces identically with this session's own fix
+  `git checkout`'d back to its pre-session state and `feme_vulkan`
+  rebuilt. Whatever emits a compute-only `num.workgroups` intrinsic into
+  this group's own vertex/fragment graphics-pipeline shaders is a distinct,
+  pre-existing bug well outside this row's own scope (not investigated
+  further here; worth a future roadmap row of its own if this group is
+  ever prioritized).
+- `dEQP-VK.spirv_assembly.instruction.compute.float_controls.fp32.{generated
+  ,input}_args.{degrees,radians}_denorm_{flush_to_zero,preserve}` (8 cases)
+  -- the only real `deqp-vk` cases that construct a shader with an explicit
+  `DenormPreserve`/`DenormFlushToZero` execution mode around `degrees`/
+  `radians`, which would be the most direct way to observe this session's
+  own *unconditional* flush actually diverging from a real `DenormPreserve`
+  declaration's own contract. All 8 report `NotSupported` (`Float controls
+  properties` not advertised by this ICD), so this is not a live
+  conformance exposure today. Recorded here as a caveat for whenever
+  `VkPhysicalDeviceFloatControlsProperties`/`VK_KHR_shader_float_controls`
+  support broadens (`shaderDenormPreserveFloat32`): this session's own
+  fix's unconditional flush would need to become conditional (skipped when
+  `DenormPreserve` is declared) at that point, since a real `DenormPreserve`
+  execution mode is a stronger, explicit contract than the "flush by
+  default, as most real special-function hardware units do" assumption
+  this fix currently encodes unconditionally.
+
+Since neither group could directly exercise this fix end-to-end, also ran
+the same two broad regression-check groups L5/L13's own sweeps used, on the
+same rebuilt ICD, purely to confirm no regression from this session's own
+conversion-pattern change (all six affected ops are otherwise-rare in these
+two groups' own shapes, so no improvement was expected or found):
+
+- `dEQP-VK.ubo.*` (13,240 cases): 1160 pass (8.8%), 4527 fail (34.2%), 7553
+  not-supported (57.0%) -- inside the same already-documented 1118-1239
+  pass-count noise band L5/L13 both recorded for this group with zero code
+  difference. No regression.
+- `dEQP-VK.ssbo.layout.*` (5,275 cases): 227 pass (4.3%), 2033 fail
+  (38.5%), 3015 not-supported (57.2%) -- identical to L13's own
+  post-L13-fix count for this same group. No regression.
+
+No feature-bit or extension-advertisement change was made (this is an
+internal SPIR-V-to-LLVM conversion correctness fix only), so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+changes; double-checked both files for completeness and confirmed neither
+mentions `VK_KHR_shader_float_controls`'s `DenormPreserve`/
+`shaderDenormPreserveFloat32` state changing, consistent with that.
