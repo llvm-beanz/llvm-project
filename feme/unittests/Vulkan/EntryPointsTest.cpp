@@ -319,11 +319,45 @@ TEST_F(EntryPointsTest,
   // tiling features -- `SPIRVResourceLowering.cpp`'s storage-image handle
   // classification never inspects a handle's compile-time SPIR-V `Format`
   // operand, so a `Format == Unknown` handle for any already-storage-
-  // capable format lowers identically to a declared-format one. `R32_UINT`
-  // is part of the mandatory storage-image format floor (roadmap H19a)
-  // but is not one of the identity 4-component formats
+  // capable format lowers identically to a declared-format one.
+  // `R16G16B16A16_UINT` is part of roadmap H19f's storage-image format
+  // floor but is not one of the identity 4-component formats (or,
+  // post-roadmap-L9, single-channel 32-bit identity formats)
   // `isTexelBufferFormatSupported` recognizes, so `bufferFeatures` must
-  // *not* pick up either bit.
+  // *not* pick up either bit. (Unlike `R32_UINT`, which roadmap L9 moved
+  // into `isTexelBufferFormatSupported`'s own scope -- see the sibling
+  // `FormatProperties3ReportsStorageWithoutFormatForTexelBufferFormat`
+  // test below, which now covers that shape too.)
+  VkFormatProperties3 Props3{};
+  Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
+  VkFormatProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+  Props2.pNext = &Props3;
+  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R16G16B16A16_UINT,
+                                       &Props2);
+  EXPECT_TRUE(Props3.linearTilingFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_TRUE(Props3.linearTilingFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+  EXPECT_TRUE(Props3.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_TRUE(Props3.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+  EXPECT_FALSE(Props3.bufferFeatures &
+               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_FALSE(Props3.bufferFeatures &
+               VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+}
+
+TEST_F(EntryPointsTest,
+       FormatProperties3ReportsStorageWithoutFormatForScalarTexelBufferFormat) {
+  // (Roadmap L9) `R32_UINT` is now one of the single-channel 32-bit
+  // identity formats `isTexelBufferFormatSupported` recognizes (`Format.
+  // cpp`), *and* part of the mandatory storage-image format floor
+  // (roadmap H19a) -- so unlike `R16G16B16A16_UINT` above, it must gain
+  // both `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` on
+  // every one of its linear-, optimal-tiling, *and* buffer feature
+  // fields.
   VkFormatProperties3 Props3{};
   Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
   VkFormatProperties2 Props2{};
@@ -338,10 +372,10 @@ TEST_F(EntryPointsTest,
               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
   EXPECT_TRUE(Props3.optimalTilingFeatures &
               VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
-  EXPECT_FALSE(Props3.bufferFeatures &
-               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
-  EXPECT_FALSE(Props3.bufferFeatures &
-               VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+  EXPECT_TRUE(Props3.bufferFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_TRUE(Props3.bufferFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
 }
 
 TEST_F(EntryPointsTest,

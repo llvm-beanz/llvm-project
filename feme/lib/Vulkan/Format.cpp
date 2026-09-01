@@ -522,6 +522,16 @@ bool feme::vulkan::isTexelBufferFormatSupported(ResourceFormat Format) {
   case ResourceFormat::R8G8B8A8_SNORM:
   case ResourceFormat::R8G8B8A8_UINT:
   case ResourceFormat::R8G8B8A8_SINT:
+  // (Roadmap L9) The single-channel 32-bit identity formats
+  // (`RWBuffer<float>`/`RWBuffer<int>`/`RWBuffer<uint>`'s own shape):
+  // `femeCpuResourceLoadTypedF32`/`StoreTypedF32` and `...I32` (added
+  // alongside `SPIRVResourceLoweringPass::isSupportedTexelElementType`'s
+  // scalar-element acceptance) reinterpret the scalar element directly
+  // via the same `femeRTImageFormatElementSize`/`UnpackImageTexel`/
+  // `PackImageTexel` tables the image-sampling path already uses.
+  case ResourceFormat::R32_FLOAT:
+  case ResourceFormat::R32_UINT:
+  case ResourceFormat::R32_SINT:
     return true;
   default:
     return false;

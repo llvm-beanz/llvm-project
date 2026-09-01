@@ -195,7 +195,10 @@ protected:
 TEST_F(BufferViewTest, AcceptsRuntimeSupportedFormats) {
   for (VkFormat Format :
        {VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_UINT,
-        VK_FORMAT_R32G32B32A32_SINT, VK_FORMAT_R8G8B8A8_UNORM}) {
+        VK_FORMAT_R32G32B32A32_SINT, VK_FORMAT_R8G8B8A8_UNORM,
+        // (Roadmap L9) The single-channel identity formats, e.g.
+        // `RWBuffer<float>`/`RWBuffer<int>`/`RWBuffer<uint>`'s own shape.
+        VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_UINT, VK_FORMAT_R32_SINT}) {
     VkBufferViewCreateInfo ViewInfo{};
     ViewInfo.buffer = Buf;
     ViewInfo.format = Format;

@@ -304,8 +304,16 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_SNORM));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UINT));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_SINT));
+  // (Roadmap L9) The single-channel 32-bit identity formats
+  // (`RWBuffer<float>`/`RWBuffer<int>`/`RWBuffer<uint>`'s own shape), now
+  // that `femeCpuResourceLoadTypedF32`/`StoreTypedF32`/`...I32` implement a
+  // conversion for them too.
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32_FLOAT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32_UINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32_SINT));
 
-  EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::R32_FLOAT));
+  EXPECT_FALSE(
+      isTexelBufferFormatSupported(ResourceFormat::R32G32_FLOAT));
   EXPECT_FALSE(
       isTexelBufferFormatSupported(ResourceFormat::R16G16B16A16_FLOAT));
   EXPECT_FALSE(
