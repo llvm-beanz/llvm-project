@@ -37,22 +37,33 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L18:
+Please investigate and fix the issues tracked by milestone L19:
 
-> **`Feature/StructuredBuffer/packed.test` fails with `'llvm.cond_br' op operand
-> #1 must be variadic of LLVM dialect-compatible type, but got 'si32'`**, found
-> as an L13a milestone-description correction: this is a real, distinct,
-> newly-*exposed* (not newly-caused) gap L13a's own fix did not touch --
-> `packed.test` was one of L5's own original 6 crash cases and one of L13's own
-> 4 still-graceful-failure cases, but L13a's own fix advances its legalization
-> far enough to reach a different failure than either of those rows saw. Root
-> cause not yet confirmed, but the shape (a raw, un-type-converted `si32` block
-> argument reaching `llvm.cond_br`) closely mirrors L10's own already-fixed
-> `spirv.GroupNonUniform*`-integer-reduce `si32` gap (an upstream MLIR pattern
-> building an op directly from a raw SPIR-V-signed type rather than running it
-> through the type converter first) -- likely the analogous upstream
-> `spirv.BranchConditional`-to-`llvm.cond_br` conversion pattern
-> (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) has the identical bug for
-> a block argument's own type, needing a feme-side override at `FeMeBenefit` the
-> same way L10's `IntegerGroupNonUniformReducePattern` overrode the analogous
-> group-reduce pattern, once confirmed via its own real IR reduction
+> **A struct-typed storage-buffer array element's own `spirv.ptr<StructType,
+> StorageBuffer>` is misclassified by
+> `isBufferBlockStorage`/`getBufferBlockElement` (`SPIRVToLLVMPatterns.cpp`) as
+> itself a top-level buffer-block pointer**, found as an L18
+> milestone-description correction: `isBufferBlockStorage` returns `true`
+> unconditionally for *any* `StorageBuffer`-storage-class pointer to *any*
+> struct (never checking for a `Block` decoration at all in that branch, unlike
+> its own `Uniform`-storage-class/`BufferBlock`-decoration branch just below
+> it), so a `RWStructuredBuffer<Doggo>`'s own per-element `Doggo` struct pointer
+> (reached once `spirv.AccessChain` has already selected one array element, as
+> `Feature/StructuredBuffer/packed.test`'s own `Doggo Fido = Buf[GI]; ...;
+> Buf[GI] = Fido;` whole-struct-copy idiom does, unlike every other
+> `StructuredBuffer` test, which only ever navigates directly to an individual
+> scalar/vector field via a single multi-index access chain) is spuriously
+> converted into a *second*, nested `spirv.VulkanBuffer` resource handle instead
+> of ordinary memory (address space 11), confirmed directly via
+> `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader` (`'llvm.store' op operand #1
+> must be LLVM pointer type, but got '!llvm.target<"spirv.VulkanBuffer", ...>'`)
+> and a real `feme-opt --feme-convert-spirv-to-llvm` reduction of
+> `packed.test`'s own SPIR-V. Needs its own scoping pass: likely requiring
+> `isBufferBlockStorage`'s `StorageBuffer`-class branch to also check for the
+> struct's own `Block` decoration (mirroring its `Uniform`-class/`BufferBlock`
+> branch immediately below), confirming every currently-passing
+> `StructuredBuffer`/`ConstantBuffer`/`cbuffer` test's own top-level block
+> struct still carries that decoration (so this tightened check does not regress
+> any of them), and checking whether any further pattern (e.g. a struct-typed
+> `spirv.Store`/`spirv.Load` reaching an ordinary address-space-11 pointer)
+> needs its own new support once this misclassification is fixed
