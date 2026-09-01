@@ -64,14 +64,14 @@ bool isSupportedGroupSharedLeafUser(const User *U) {
 }
 
 /// If every uniform-address use of \p V (a groupshared global, or a
-/// first-level `getelementptr` off one) is part of the same-value `<W x
-/// ptr>` broadcast a gather/scatter's pointer argument still needs even
-/// when the underlying address never varies by lane (see
+/// first-level `getelementptr` off one) is part of one or more same-value
+/// `<W x ptr>` broadcasts a gather/scatter's pointer argument still needs
+/// even when the underlying address never varies by lane (see
 /// `feme::cpu::FunctionWidener::widenMaskedLoad`'s comment: "correct
 /// whether that vector turns out to hold the same pointer in every lane
 /// ... or a genuinely different one per lane"), returns the fully-built
-/// `<W x ptr>` value -- either shape `getWidened` broadcasts a uniform
-/// value into:
+/// `<W x ptr>` value of every such broadcast -- either shape `getWidened`
+/// broadcasts a uniform value into:
 ///
 ///  - `IRBuilderBase::CreateVectorSplat`'s two-instruction
 ///    `insertelement`+`shufflevector` shape, when \p V is a
@@ -83,41 +83,140 @@ bool isSupportedGroupSharedLeafUser(const User *U) {
 ///    itself -- this materialized expansion, run just before this
 ///    function, is the only remaining trace of it).
 ///
-/// Returns `nullptr` if \p V's `insertelement` users don't form either
-/// shape (i.e. \p V feeds a leaf access directly, per
-/// `isSupportedGroupSharedLeafUser`, with no broadcast at all).
-Value *matchPointerBroadcast(Value *V) {
+/// \p V commonly feeds *more than one* independent broadcast within the
+/// same function (roadmap L10): `convertUsersOfConstantsToInstructions`
+/// memoizes its expansion of a broadcast-splat constant per (constant,
+/// basic block) pair, so the same splat constant reused across multiple
+/// basic blocks -- one per masked gather/scatter site `feme::cpu::
+/// FunctionWidener` widens, however many that turns out to be -- expands
+/// into one independent `insertelement` chain *per block* rather than a
+/// single one shared function-wide; the `getelementptr`-based two-
+/// instruction shape is likewise rebuilt fresh at every site, whenever
+/// there is more than one. Every returned broadcast is guaranteed
+/// well-formed (a full, `PoisonValue`-based, exactly-\p V-inserting chain
+/// of precisely its own vector type's lane count).
+///
+/// Returns `std::nullopt` if any of \p V's `insertelement` users don't
+/// belong to a well-formed broadcast of either shape above (`emitError`'s
+/// "unrecognized broadcast" diagnostic point). Returns an empty list (not
+/// `std::nullopt`) if \p V has no `insertelement` users at all (i.e. \p V
+/// feeds only a leaf access directly, per `isSupportedGroupSharedLeafUser`,
+/// with no broadcast at all).
+std::optional<SmallVector<Value *, 4>> matchPointerBroadcasts(Value *V) {
   SmallVector<InsertElementInst *, 8> Links;
   for (User *U : V->users())
     if (auto *IE = dyn_cast<InsertElementInst>(U); IE && IE->getOperand(1) == V)
       Links.push_back(IE);
   if (Links.empty())
-    return nullptr;
+    return SmallVector<Value *, 4>{};
 
-  if (Links.size() == 1 && Links[0]->hasOneUse()) {
-    if (auto *SVI = dyn_cast<ShuffleVectorInst>(*Links[0]->user_begin());
-        SVI && SVI->getOperand(0) == Links[0] && SVI->isZeroEltSplat())
-      return SVI; // The two-instruction `CreateVectorSplat` shape.
-  }
+  SmallVector<Value *, 4> Results;
+  unsigned LinksConsumed = 0;
 
-  // The per-lane `insertelement`-chain shape: exactly one link per vector
-  // lane, threaded through each other's vector operand -- find the one
-  // link nothing else in the chain builds on top of.
-  auto *VecTy = dyn_cast<FixedVectorType>(Links[0]->getType());
-  if (!VecTy || Links.size() != VecTy->getNumElements())
-    return nullptr;
-  InsertElementInst *Last = nullptr;
+  // A "final" link -- one nothing else in `Links` builds on top of -- is
+  // the root of some independent broadcast chain feeding `V`; walk each
+  // one back to see whether it forms a well-formed chain of either shape.
   for (InsertElementInst *IE : Links) {
     bool IsFinalLink = llvm::none_of(Links, [&](InsertElementInst *Other) {
       return Other != IE && Other->getOperand(0) == IE;
     });
     if (!IsFinalLink)
       continue;
-    if (Last)
-      return nullptr; // More than one -- not a single linear chain.
-    Last = IE;
+
+    // The two-instruction `CreateVectorSplat` shape: this chain's only
+    // link feeds a zero-splat `shufflevector` and nothing else.
+    if (IE->hasOneUse()) {
+      if (auto *SVI = dyn_cast<ShuffleVectorInst>(*IE->user_begin());
+          SVI && SVI->getOperand(0) == IE && SVI->isZeroEltSplat()) {
+        Results.push_back(SVI);
+        ++LinksConsumed;
+        continue;
+      }
+    }
+
+    // The per-lane `insertelement`-chain shape: walk back through
+    // operand(0) -- each earlier link must also insert `V` -- until a
+    // `PoisonValue` base, verifying the walked length matches this
+    // chain's own vector type's lane count exactly.
+    auto *VecTy = dyn_cast<FixedVectorType>(IE->getType());
+    if (!VecTy)
+      return std::nullopt;
+    unsigned ChainLen = 0;
+    Value *Cur = IE;
+    while (auto *CurIE = dyn_cast<InsertElementInst>(Cur)) {
+      if (CurIE->getOperand(1) != V)
+        return std::nullopt;
+      ++ChainLen;
+      Cur = CurIE->getOperand(0);
+    }
+    if (ChainLen != VecTy->getNumElements() || !isa<PoisonValue>(Cur))
+      return std::nullopt;
+    Results.push_back(IE);
+    LinksConsumed += ChainLen;
   }
-  return Last;
+
+  if (LinksConsumed != Links.size())
+    return std::nullopt; // A link belonged to no well-formed chain.
+  return Results;
+}
+
+/// Whether every broadcast \p V feeds (per `matchPointerBroadcasts`) is
+/// well-formed and feeds only a supported leaf access.
+bool hasOnlySupportedBroadcasts(Value *V) {
+  std::optional<SmallVector<Value *, 4>> Broadcasts = matchPointerBroadcasts(V);
+  return Broadcasts && llvm::all_of(*Broadcasts, [](Value *Final) {
+           return llvm::all_of(Final->users(), isSupportedGroupSharedLeafUser);
+         });
+}
+
+/// `llvm::convertUsersOfConstantsToInstructions`'s per-`(Constant,
+/// BasicBlock)` memoization (`llvm/lib/IR/ReplaceConstant.cpp`) can still
+/// materialize more than one instance of the *same* constant-expression
+/// `getelementptr` within a single basic block: its cache falls back to a
+/// fresh expansion whenever the already-cached instance's position comes
+/// after the point currently being expanded (see its own comment, "If the
+/// cached instruction is after the insertion point, we need to create a
+/// new one"), which processing a per-lane broadcast's own `insertelement`
+/// chain -- several sibling instructions in program order, each
+/// independently requiring the same constant materialized at its own
+/// point, immediately before it -- reliably triggers once the worklist
+/// that drives the expansion (a `SetVector`, popped LIFO) reaches those
+/// siblings out of program order (roadmap L10). The result is several
+/// structurally-identical (`Instruction::isIdenticalTo`), but distinct,
+/// `GetElementPtrInst`s in the same block, each feeding exactly one link
+/// of what is semantically a single broadcast chain --
+/// `matchPointerBroadcasts` has no way to recognize that shape on its
+/// own, since its per-lane walk assumes every link inserts the exact same
+/// producer `Value`. Coalescing every group of structurally-identical
+/// direct `getelementptr` users of \p GV within each basic block back
+/// down to one canonical instance, immediately after
+/// `convertUsersOfConstantsToInstructions` runs (and so before any
+/// analysis below has to reason about the duplicates), restores that
+/// assumption instead of teaching every later `matchPointerBroadcasts`
+/// caller to compare producers by structural equivalence instead of
+/// identity.
+void coalesceIdenticalGroupSharedGEPs(GlobalVariable &GV, Function &F) {
+  for (BasicBlock &BB : F) {
+    SmallVector<GetElementPtrInst *, 8> GEPs;
+    for (Instruction &I : BB)
+      if (auto *GEP = dyn_cast<GetElementPtrInst>(&I);
+          GEP && GEP->getPointerOperand() == &GV)
+        GEPs.push_back(GEP);
+
+    for (unsigned I = 0, E = GEPs.size(); I != E; ++I) {
+      GetElementPtrInst *Canonical = GEPs[I];
+      if (!Canonical)
+        continue; // Already coalesced away as an earlier GEP's duplicate.
+      for (unsigned J = I + 1; J != E; ++J) {
+        GetElementPtrInst *Dup = GEPs[J];
+        if (!Dup || !Canonical->isIdenticalTo(Dup))
+          continue;
+        Dup->replaceAllUsesWith(Canonical);
+        Dup->eraseFromParent();
+        GEPs[J] = nullptr;
+      }
+    }
+  }
 }
 
 /// Rebuilds \p CI (a gather/scatter call whose `Ptrs` argument was \p
@@ -152,12 +251,17 @@ void rebuildGatherScatterCall(CallInst &CI, unsigned PtrOperandNo,
 /// groupshared global, or a first-level `getelementptr` off one, already
 /// verified valid by the validation pass below) onto \p NewProducer (the
 /// corresponding flat, address-space-0 pointer, or `getelementptr` off
-/// one). Handles both a direct leaf access and one reached through the
-/// uniform-address broadcast `matchPointerBroadcast` recognizes.
+/// one). Handles both a direct leaf access and every uniform-address
+/// broadcast `matchPointerBroadcasts` recognizes (there may be more than
+/// one -- see its own comment).
 void retargetGroupSharedProducer(Value *OldProducer, Value *NewProducer) {
-  if (Value *OldWide = matchPointerBroadcast(OldProducer)) {
+  std::optional<SmallVector<Value *, 4>> OldWides =
+      matchPointerBroadcasts(OldProducer);
+  assert(OldWides && "already verified well-formed by "
+                     "rewriteGroupSharedGlobals's own validation pass");
+  for (Value *OldWide : *OldWides) {
     // A uniform address still reaching a gather/scatter (see
-    // `matchPointerBroadcast`'s comment): rebuild the broadcast around
+    // `matchPointerBroadcasts`'s comment): rebuild the broadcast around
     // `NewProducer` instead, right where the old one was built (so it
     // dominates every gather/scatter call the old one did), retarget
     // every gather/scatter it feeds, then erase the old, now-dead
@@ -174,31 +278,40 @@ void retargetGroupSharedProducer(Value *OldProducer, Value *NewProducer) {
       rebuildGatherScatterCall(CI, PtrOperandNo, NewWide, CallBuilder);
     }
 
-    SmallVector<Instruction *, 8> DeadChain;
-    for (User *U : OldProducer->users())
-      if (auto *IE = dyn_cast<InsertElementInst>(U);
-          IE && IE->getOperand(1) == OldProducer)
-        DeadChain.push_back(IE);
-    if (auto *SVI = dyn_cast<ShuffleVectorInst>(OldWide))
-      DeadChain.push_back(SVI);
-
     // Erase in dependency order: `OldWide` is already unused (every use
     // was just retargeted above), so it is always safe to erase first;
     // each earlier link becomes unused in turn as the one built on top of
-    // it is erased.
+    // it is erased. Walking through `operand(0)` alone (rather than a
+    // pre-collected set of every `insertelement` using `OldProducer`, as
+    // a single-broadcast-per-function design could get away with) keeps
+    // this scoped to *this* chain's own links -- `OldProducer` may feed
+    // other, independent broadcast chains too (roadmap L10), each erased
+    // by its own iteration of this loop instead.
     Instruction *Cur = cast<Instruction>(OldWide);
     while (Cur) {
-      auto *Base = dyn_cast<Instruction>(Cur->getOperand(0));
+      auto *Base = dyn_cast<InsertElementInst>(Cur->getOperand(0));
       Cur->eraseFromParent();
-      Cur = (Base && llvm::is_contained(DeadChain, Base)) ? Base : nullptr;
+      Cur = (Base && Base->getOperand(1) == OldProducer) ? Base : nullptr;
     }
-    // `OldProducer` may still have other, non-broadcast uses (a direct
-    // `load`/`store`/`atomicrmw` alongside the broadcast just retargeted
-    // above) -- fall through to retarget those the ordinary way too.
   }
+  // `OldProducer` may still have other, non-broadcast uses (a direct
+  // `load`/`store`/`atomicrmw` alongside every broadcast just retargeted
+  // above) -- retarget those the ordinary way too.
 
+  // `OldProducer` may still have other, non-broadcast uses (a direct
+  // `load`/`store`/`atomicrmw` alongside every broadcast just retargeted
+  // above) -- retarget those the ordinary way too. A `GetElementPtrInst`
+  // use is left untouched here: when `OldProducer` is `GV` itself, `GV`
+  // commonly feeds both a direct broadcast (offset 0, needing no
+  // `getelementptr` at all) and one or more first-level `getelementptr`s
+  // off it at other offsets in the very same function -- each such GEP is
+  // retargeted by `rewriteGroupSharedGlobals`'s own separate loop over
+  // `GEPs`, via its own `retargetGroupSharedProducer(GEP, ...)` call, not
+  // this one.
   for (Use &U : make_early_inc_range(OldProducer->uses())) {
     User *Usr = U.getUser();
+    if (isa<GetElementPtrInst>(Usr))
+      continue;
     if (isa<LoadInst>(Usr) || isa<StoreInst>(Usr) || isa<AtomicRMWInst>(Usr)) {
       U.set(NewProducer);
       continue;
@@ -254,7 +367,7 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
   // or of one reached through a `getelementptr` -- "access through a
   // getelementptr" and "a masked store at a uniform address", also R23),
   // each optionally reached through the uniform-address broadcast
-  // `matchPointerBroadcast` recognizes. An `atomicrmw` is accepted
+  // `matchPointerBroadcasts` recognizes. An `atomicrmw` is accepted
   // alongside `load`/`store` (roadmap step R2, feme/docs/Roadmap.md's
   // §2.3 `histogram.hlsl`): its address is masked exactly the same way a
   // `load`/`store`'s is (see `feme::cpu::LinearizePass::maskMemoryOps`),
@@ -270,6 +383,7 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
     // `F` into ordinary instructions first, so every use handled below is a
     // plain instruction operand.
     convertUsersOfConstantsToInstructions({GV}, &F);
+    coalesceIdenticalGroupSharedGEPs(*GV, F);
 
     for (Use &U : GV->uses()) {
       auto *UserInst = dyn_cast<Instruction>(U.getUser());
@@ -290,9 +404,7 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
         return false;
       }
       if (IsBroadcastLink) {
-        if (!matchPointerBroadcast(GV) ||
-            !llvm::all_of(matchPointerBroadcast(GV)->users(),
-                          isSupportedGroupSharedLeafUser)) {
+        if (!hasOnlySupportedBroadcasts(GV)) {
           Ctx.emitError(
               "feme-cpu-simdize: groupshared global '" + GV->getName() +
               "' feeds an unrecognized broadcast; only the uniform-address "
@@ -307,9 +419,7 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
           if (isSupportedGroupSharedLeafUser(GEPUser))
             continue;
           auto *IE = dyn_cast<InsertElementInst>(GEPUser);
-          if (IE && IE->getOperand(1) == GEP && matchPointerBroadcast(GEP) &&
-              llvm::all_of(matchPointerBroadcast(GEP)->users(),
-                           isSupportedGroupSharedLeafUser))
+          if (IE && IE->getOperand(1) == GEP && hasOnlySupportedBroadcasts(GEP))
             continue;
           Ctx.emitError(
               "feme-cpu-simdize: groupshared global '" + GV->getName() +
@@ -359,11 +469,13 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
     }
 
     if (HasBroadcast) {
-      IRBuilder<> Builder(
-          cast<Instruction>(*llvm::find_if(GV->users(), [&](User *U) {
-            auto *IE = dyn_cast<InsertElementInst>(U);
-            return IE && IE->getOperand(1) == GV;
-          })));
+      // Built at the function's own entry block rather than at any one
+      // broadcast's own use site (as a single-broadcast-per-function
+      // design could get away with): roadmap L10 found that `GV` commonly
+      // feeds *more than one* independent broadcast (one per basic block,
+      // per `matchPointerBroadcasts`'s own comment) -- a `Flat` computed
+      // at just one of those sites would not dominate the others.
+      IRBuilder<> Builder(&*F.getEntryBlock().getFirstInsertionPt());
       Value *Flat =
           Builder.CreateGEP(I8Ty, GroupSharedBase, Builder.getInt64(Offset),
                             GV->getName() + ".flat");

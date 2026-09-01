@@ -12,17 +12,24 @@
 ; same-value broadcast `<4 x ptr>` (built once each address folds through
 ; `ConstantFolder`, then re-materialized into real `insertelement`s by
 ; `llvm::convertUsersOfConstantsToInstructions`) rather than a direct
-; `store`.
+; `store`. Roadmap L10 additionally moved `Flat`'s own insertion point to
+; the function's entry block unconditionally (rather than at an arbitrary
+; broadcast use site) once a groupshared global could feed more than one
+; independent broadcast in different blocks -- see
+; `simdize-groupshared-multi-broadcast.ll` for that shape specifically;
+; this test's own single-broadcast-per-global shape still exercises the
+; entry-block placement, just with only one broadcast to place.
 
 ; CHECK-LABEL: define void @main(
 ; CHECK-SAME: ptr %wave_groupshared)
 ; CHECK-NOT: addrspace(3)
+; CHECK: entry:
+; CHECK-DAG: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
+; CHECK-DAG: %other.flat = getelementptr i8, ptr %wave_groupshared, i64 4
 ; CHECK: if.then:
-; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
 ; CHECK: %shared.flat.splat.splat = shufflevector <4 x ptr> {{.*}}%shared.flat{{.*}}, <4 x ptr> poison, <4 x i32> zeroinitializer
 ; CHECK: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> splat (i32 42), <4 x ptr> align 4 %shared.flat.splat.splat, <4 x i1> %masked.mask)
 ; CHECK: if.else:
-; CHECK: %other.flat = getelementptr i8, ptr %wave_groupshared, i64 4
 ; CHECK: %other.flat.splat.splat = shufflevector <4 x ptr> {{.*}}%other.flat{{.*}}, <4 x ptr> poison, <4 x i32> zeroinitializer
 ; CHECK: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> splat (i32 7), <4 x ptr> align 4 %other.flat.splat.splat, <4 x i1> %masked.mask2)
 define void @main() #0 {
