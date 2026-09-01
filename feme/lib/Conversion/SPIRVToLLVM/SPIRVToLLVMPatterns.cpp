@@ -517,6 +517,163 @@ public:
   }
 };
 
+/// `mlir::GroupReducePattern` (`mlir/lib/Conversion/SPIRVToLLVM/
+/// SPIRVToLLVM.cpp`), the upstream pattern for `spirv.GroupNonUniform*`
+/// arithmetic reductions (`WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/
+/// `Or`/`Xor`'s own SPIR-V shape), builds its call's result (and, for a
+/// binary reduction, its data operand) directly from `op.getResult()`'s
+/// raw SPIR-V type rather than running it through the dialect
+/// conversion's own `TypeConverter` first -- correct for `spirv.GroupNon
+/// UniformFAdd`/`FMin`/`FMax`... (a SPIR-V float type is already a valid,
+/// signedness-free LLVM dialect type unchanged) but not for an *integer*
+/// reduction: HLSL's `int`/`uint` distinction survives into MLIR's SPIR-V
+/// dialect as `si32`/`ui32` (a signless `i32`'s two signedness-carrying
+/// siblings, used only to preserve `OpSConvert`/`OpUConvert`-style
+/// signedness information for as long as possible), and `si32`/`ui32`
+/// are not themselves valid LLVM dialect types at all -- only signless
+/// `i32` is (roadmap L10, reduced from a real `dEQP`-independent
+/// `offload-test-suite` `WaveOps/WaveActiveSum.convergence.test` case
+/// whose `int`-typed `RWBuffer` read feeds `WaveActiveSum` directly,
+/// giving `spirv.GroupNonUniformIAdd`'s own operand and result an `si32`
+/// type the upstream pattern passes straight through to `llvm.call`,
+/// producing the dialect-conversion legalizer's own "result #0 must be
+/// LLVM dialect-compatible type, but got 'si32'" diagnostic). Registered
+/// at `FeMeBenefit` (see `populateSPIRVToLLVMTargetPatterns` below) so it
+/// wins over the upstream pattern for exactly the nine integer-typed
+/// `spirv.GroupNonUniform*` arithmetic reductions HLSL's own `Wave*`
+/// intrinsics can produce; every other `spirv.GroupNonUniform*`/`spirv.
+/// Group*` reduction (float, or workgroup- rather than subgroup-scoped,
+/// neither reachable from any HLSL `Wave*` intrinsic today) is left to
+/// the upstream pattern, which already handles it correctly.
+template <typename ReduceOp>
+constexpr llvm::StringLiteral getIntegerGroupNonUniformFuncName();
+template <>
+constexpr llvm::StringLiteral
+getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformIAddOp>() {
+  return "_Z27__spirv_GroupNonUniformIAddii";
+}
+template <>
+constexpr llvm::StringLiteral
+getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformIMulOp>() {
+  return "_Z27__spirv_GroupNonUniformIMulii";
+}
+template <>
+constexpr llvm::StringLiteral
+getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformSMinOp>() {
+  return "_Z27__spirv_GroupNonUniformSMinii";
+}
+template <>
+constexpr llvm::StringLiteral
+getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformUMinOp>() {
+  return "_Z27__spirv_GroupNonUniformUMinii";
+}
+template <>
+constexpr llvm::StringLiteral
+getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformSMaxOp>() {
+  return "_Z27__spirv_GroupNonUniformSMaxii";
+}
+template <>
+constexpr llvm::StringLiteral
+getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformUMaxOp>() {
+  return "_Z27__spirv_GroupNonUniformUMaxii";
+}
+template <>
+constexpr llvm::StringLiteral getIntegerGroupNonUniformFuncName<
+    mlir::spirv::GroupNonUniformBitwiseAndOp>() {
+  return "_Z33__spirv_GroupNonUniformBitwiseAndii";
+}
+template <>
+constexpr llvm::StringLiteral
+getIntegerGroupNonUniformFuncName<mlir::spirv::GroupNonUniformBitwiseOrOp>() {
+  return "_Z32__spirv_GroupNonUniformBitwiseOrii";
+}
+template <>
+constexpr llvm::StringLiteral getIntegerGroupNonUniformFuncName<
+    mlir::spirv::GroupNonUniformBitwiseXorOp>() {
+  return "_Z33__spirv_GroupNonUniformBitwiseXorii";
+}
+
+/// Mirrors `mlir::getTypeMangling`'s `IntegerType` case (`mlir/lib/
+/// Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) for the 32-bit-only integer
+/// width every `getIntegerGroupNonUniformFuncName` specialization above is
+/// reachable with -- upstream's own call always passes `isSigned=false`
+/// regardless of the reduction's real signedness (matching the SPIR-V
+/// backend's own recognized builtin name mangling, which does not
+/// distinguish `int`/`uint` operands either), so this does not need the
+/// `isSigned`parameter upstream's version carries at all.
+llvm::StringRef getUnsignedIntegerTypeMangling(mlir::Type Type) {
+  auto IntTy = mlir::cast<mlir::IntegerType>(Type);
+  switch (IntTy.getWidth()) {
+  case 32:
+    return "j";
+  case 64:
+    return "m";
+  default:
+    llvm_unreachable("getIntegerGroupNonUniformFuncName's own reductions are "
+                     "only ever 32- or 64-bit");
+  }
+}
+
+template <typename ReduceOp>
+class IntegerGroupNonUniformReducePattern
+    : public mlir::SPIRVToLLVMConversion<ReduceOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<ReduceOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(ReduceOp Op, typename ReduceOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType =
+        this->getTypeConverter()->convertType(Op.getResult().getType());
+    if (!ResultType || !mlir::isa<mlir::IntegerType>(ResultType))
+      return Rewriter.notifyMatchFailure(
+          Op, "result is not an integer type this pattern fixes up");
+
+    llvm::SmallString<40> FuncName(getIntegerGroupNonUniformFuncName<ReduceOp>());
+    FuncName += getUnsignedIntegerTypeMangling(ResultType);
+
+    mlir::Type I32 = Rewriter.getI32Type();
+    llvm::SmallVector<mlir::Type> ParamTypes{I32, I32, ResultType};
+    if (Adaptor.getClusterSize()) {
+      FuncName += "j";
+      ParamTypes.push_back(I32);
+    }
+
+    mlir::Operation *SymbolTable =
+        Op->template getParentWithTrait<mlir::OpTrait::SymbolTable>();
+    auto Func = mlir::dyn_cast_or_null<mlir::LLVM::LLVMFuncOp>(
+        mlir::SymbolTable::lookupSymbolIn(SymbolTable, FuncName));
+    if (!Func) {
+      mlir::OpBuilder Builder(SymbolTable->getRegion(0));
+      Func = mlir::LLVM::LLVMFuncOp::create(
+          Builder, SymbolTable->getLoc(), FuncName,
+          mlir::LLVM::LLVMFunctionType::get(ResultType, ParamTypes));
+      Func.setCConv(mlir::LLVM::cconv::CConv::SPIR_FUNC);
+      Func.setConvergent(true);
+      Func.setNoUnwind(true);
+      Func.setWillReturn(true);
+    }
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Scope = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, I32,
+        static_cast<int32_t>(Adaptor.getExecutionScope()));
+    mlir::Value GroupOp = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, I32,
+        static_cast<int32_t>(Adaptor.getGroupOperation()));
+    llvm::SmallVector<mlir::Value> Operands{Scope, GroupOp};
+    llvm::append_range(Operands, Adaptor.getOperands());
+
+    auto Call = mlir::LLVM::CallOp::create(Rewriter, Loc, Func, Operands);
+    Call.setCConv(Func.getCConv());
+    Call.setConvergentAttr(Func.getConvergentAttr());
+    Call.setNoUnwindAttr(Func.getNoUnwindAttr());
+    Call.setWillReturnAttr(Func.getWillReturnAttr());
+    Rewriter.replaceOp(Op, Call);
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.Dot` -- which, like `spirv.Switch` above, MLIR has no
 /// pattern for at all -- into a per-lane `llvm.intr.fmuladd` chain, mirroring
 /// `feme::dxil::expandFDot`'s expansion of the analogous (post-raising)
@@ -3699,7 +3856,20 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       ExecutionModeIdPattern, ExpectConversionPattern, ImageFetchPattern,
       ImageFetchLodPattern, ImageSampleExplicitLodPattern,
       ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
-      ImageWritePattern, LoadValuePattern, MatrixCompositeExtractPattern,
+      ImageWritePattern,
+      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIAddOp>,
+      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIMulOp>,
+      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformSMinOp>,
+      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformUMinOp>,
+      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformSMaxOp>,
+      IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformUMaxOp>,
+      IntegerGroupNonUniformReducePattern<
+          mlir::spirv::GroupNonUniformBitwiseAndOp>,
+      IntegerGroupNonUniformReducePattern<
+          mlir::spirv::GroupNonUniformBitwiseOrOp>,
+      IntegerGroupNonUniformReducePattern<
+          mlir::spirv::GroupNonUniformBitwiseXorOp>,
+      LoadValuePattern, MatrixCompositeExtractPattern,
       MatrixCompositeInsertPattern, PushConstantGlobalVariablePattern,
       RotateConversionPattern, SampledImagePattern, SDotConversionPattern,
       UDotConversionPattern, SUDotConversionPattern,
