@@ -37,15 +37,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-The offload-test-suite checkout at /home/dev/dev/offload-test-suite has a remote
-named beanz which has a branch named feme, which has changes to enable running
-the tests in that suite against the feme ICD (the target is named
-check-hlsl-feme-vk).
+Please investigate and fix the issues tracked by milestone L2:
 
-At the moment, I'm seeing a lot of failures, some of which are expected because
-of missing features in the ICD, but some of them I expected to work. Can you
-build and run the vulkan tests, inspect the failures and ensure that the work to
-address them is covered on the roadmap?
-
-If you encounter any obvious fixable bugs, please just fix them instead of
-adding them to the roadmap.
+> **A `gpu-exec: error: Failed to create compute pipeline. (VkResult = -3)`
+> (`VK_ERROR_OUT_OF_HOST_MEMORY`'s numeric value, but almost certainly masking a
+> real, more specific internal failure this ICD reports generically) bucket** --
+> re-counted with a fresh, correctly-`VK_ICD_FILENAMES`-absolute-pathed
+> `check-hlsl-feme-vk` re-run after L1/L4 landed: 175 distinct failing cases hit
+> this message (184 before L1/L4, i.e. L1/L4's own fixes only removed 9 of this
+> bucket's cases in passing; this row's own original "47" estimate was measured
+> with a different, since-lost counting method and should be treated as stale --
+> 175/184 is this row's own first reliably-reproducible count). Still not
+> triaged past the raw `VkResult`; needs the same real-ICD-plus-diagnostic
+> technique every H-row above used (temporarily instrumenting the
+> compute-pipeline-creation path with a debug print of the real internal error
+> before it collapses to this generic code) to find whether this is one dominant
+> root cause or several -- by far the largest single remaining bucket, so
+> highest-priority to scope next
