@@ -52660,3 +52660,99 @@ advancing to a distinct, already-root-caused gap tracked as new roadmap
 row L21. Struck through L20 on the roadmap; added L21, keeping it at a
 single top-level letter of nesting per the standing instruction not to
 nest milestones more than one lowercase letter deep.
+
+# L21: teaching the wave-widening pass about divergent aggregates
+
+L20 closed the aggregate-load/store gap in the CPU resource-lowering
+pass, which let `packed.test`'s whole-`Doggo`-struct copy idiom reach
+`feme::cpu::SIMDizePass` for the first time as a genuinely divergent
+value (loaded through `SV_GroupIndex`, a per-invocation index). But
+`SIMDizePass` had never had *any* aggregate-typed case: its own
+preflight loop bailed unconditionally the moment it saw a divergent
+struct or array value, citing "roadmap milestone 7 deviation" -- a
+long-standing, generic scope limit, not specific to resource loads at
+all.
+
+The reduction technique that's carried this whole H6g-b/H6j/H6k/H6l/
+L16-L20 chain paid off again here: rather than staring at `SIMDize.cpp`
+in the abstract, I reduced the real IR shape (via the established
+`dxc` → `feme-translate` → `feme-opt` pipeline chain, stopping right
+before `feme-cpu-simdize`) and got something very concrete -- a chain of
+`insertvalue`s (mixing per-scalar-leaf inserts with a whole
+sub-array/sub-struct inserted at once) building the struct, later read
+back via a chain of `extractvalue`s (including a two-level nested
+sub-aggregate extraction) feeding per-leaf raw resource-store calls.
+That's a small, closed set of shapes -- not the unbounded "arbitrary
+aggregate operations" I'd been mentally bracing for.
+
+The existing `WidenedVectorComponents` scheme (per-lane `<W x elemT>`
+per vector component, built up via `insertelement`/`extractelement`
+support) was the obvious template. I mirrored it almost exactly:
+`WidenedAggregateComponents` holds one widened value per *flattened
+scalar leaf* of the struct/array (never per field/element directly --
+a nested sub-array or sub-struct field just occupies a contiguous run
+of leaf slots, computed via `getAggregateLeafRange`). Producer support
+is deliberately narrow: only `InsertValueInst` and `ExtractValueInst`,
+gated on `isAllScalarAggregateLeaves` (no vector-typed field anywhere
+in the nesting -- a real, if narrow, scope decision, since nothing in
+the concrete repro or any other CTS shape I could find needs a
+vector-typed struct field to survive un-scalarized all the way to this
+pass). Consumer support is similarly narrow: only another
+`InsertValueInst`'s own aggregate-base/inserted-value operand, or any
+`ExtractValueInst`'s aggregate operand.
+
+The one design decision I spent real time on: whether an
+aggregate-typed `PHINode` needs support too, the same way a vector-typed
+`phi` already has support (added back at roadmap step C3). I traced
+through `LinearizePass` carefully and confirmed it doesn't, for a
+principled reason rather than just "no test needs it yet": `LinearizePass`
+always fully scalarizes each *field* of a divergent aggregate
+reassignment down to a plain scalar `select` before ever rebuilding the
+struct -- the struct itself is always freshly built via `insertvalue` in
+a merge block, never phi-merged as a whole aggregate value directly.
+A vector *value* can survive a divergent branch merge intact (hence the
+vector `phi` support), but an aggregate *value* as reconciled by
+`LinearizePass` never does. I documented this exclusion explicitly in
+both the file's own comments and the design doc, rather than silently
+under-scoping and leaving a future reader to rediscover the same
+question.
+
+One nice, if minor, cleanup: the *existing* `simdize-aggregate-unsupported.ll`
+lit test's own scenario (an unused `insertvalue` building a small
+struct) turned out to now be a *supported* shape post-fix -- the test
+would have started asserting the opposite of what actually happens. I
+caught this because I ran the full existing lit suite manually before
+declaring done, not just my own new test; found the assertion flip
+immediately, and retargeted that test at a shape that's still genuinely
+unsupported (an aggregate-typed `load` through a divergent address) so
+it keeps testing something real rather than becoming a stale, silently
+inverted check.
+
+Verification: `ninja check-feme` (2295/2322 passed, 0 failed, 27
+unsupported, 0 regressions, up by 2 new tests -- a lit test and a
+gtest). `check-hlsl-vk-feature-structuredbuffer` against the real ICD:
+12/12 discovered tests pass, `packed.test` itself passing end-to-end for
+the very first time across this entire L16-L21 chain. Ran the broader
+`check-hlsl-vk` full suite and found 13 failures; used a `git stash`/
+`git stash pop` A/B rebuild-and-rerun to confirm all 13 are pre-existing
+and entirely unrelated (HLSLLib math libcalls, InlineRT ray tracing, UAV
+sequential consistency, BufferFormats -- none touch a struct/aggregate
+resource path at all). Did the same stash A/B for a
+`dEQP-VK.ssbo.layout.*`/`dEQP-VK.ssbo.*` sweep against the real ICD:
+byte-for-byte identical pass/fail counts before and after (0 failed in
+both). The "not supported" counts I observed this session differ a lot
+from a much older baseline noted in this same report's own L20 section --
+worth explicitly calling out in the CTS report as environment/CTS-drift
+over many intervening milestones, not a regression, precisely because
+the stash A/B proved it's not this change's doing.
+
+Outcome: L21 is fully closed. `packed.test` -- one of L5's original 6
+crash cases -- now passes end-to-end, having taken the entire L16→L21
+chain (six distinct, narrowly-scoped fixes across the SPIR-V-to-LLVM
+conversion layer, the CPU resource-lowering pass, and the wave-widening
+pass) to get there. Struck through L21 on the roadmap. Updated
+`FeMeCPUDesign.md`'s existing "Vector/aggregate leaf decomposition is
+narrower than the design" deviation note, which already had a
+forward-looking widening-table row anticipating almost exactly this
+fix -- a good sign the original design's shape was sound, it just hadn't
+been implemented yet.
