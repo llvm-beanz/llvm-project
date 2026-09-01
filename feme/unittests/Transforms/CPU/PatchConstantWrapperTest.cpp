@@ -153,6 +153,70 @@ TEST(PatchConstantWrapperTest, LowersInputPatchAndOutputPatchReadsSeparately) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+/// (Roadmap H13b) `gl_ClipDistance`/`gl_CullDistance`, read from the
+/// *original* input patch (`FromInputPatch`) by a barrier-less
+/// tessellation-control entry point whose mixed control-point/patch-
+/// constant body ends up compiled as this phase too (see
+/// `CanonicalizeStage.cpp`'s `isPatchConstantPhase`/
+/// `splitBarrierlessTessellationControlEntry`): despite carrying a
+/// `SystemValue` (they have no `Location` of their own -- see
+/// `FragmentWrapper.cpp`'s analogous roadmap H7x fix), these are ordinary
+/// per-control-point array elements, not scalar system values like
+/// `OutputControlPointID`/`PatchVertices`, so they must take the same
+/// `InputPatch`-addressed path as any other linked input rather than
+/// falling through `lowerPatchConstantSystemValue`'s unsupported-system-
+/// value error.
+TEST(PatchConstantWrapperTest, LowersClipDistanceAndCullDistanceInputPatchElements) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @pc_main() #0 {
+      %clip = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %cull = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 1)
+      %sum = fadd float %clip, %cull
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %sum, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement ClipDistance;
+  ClipDistance.ElementID = 0;
+  ClipDistance.Direction = SignatureDirection::Input;
+  ClipDistance.SystemValue = SignatureSystemValue::ClipDistance;
+  ClipDistance.ComponentType = SignatureComponentType::Float;
+  ClipDistance.FromInputPatch = true;
+  SignatureElement CullDistance;
+  CullDistance.ElementID = 1;
+  CullDistance.Direction = SignatureDirection::Input;
+  CullDistance.SystemValue = SignatureSystemValue::CullDistance;
+  CullDistance.ComponentType = SignatureComponentType::Float;
+  CullDistance.FromInputPatch = true;
+  SignatureElement Out;
+  Out.ElementID = 2;
+  Out.Direction = SignatureDirection::PatchOutput;
+  Out.Frequency = SignatureFrequency::PerPatch;
+  Out.ComponentType = SignatureComponentType::Float;
+  Sig.Elements = {ClipDistance, CullDistance, Out};
+  dxil::setEntrySignature(*M->getFunction("pc_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  PatchConstantWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_pc_main"));
+  for (const Instruction &I : instructions(*M->getFunction("pc_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST(PatchConstantWrapperTest, DiagnosesGroupSyncBarrier) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

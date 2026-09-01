@@ -433,11 +433,32 @@ bool lowerPatchConstantStageOps(Function &F) {
                 "unknown signature element");
         return false;
       }
-      Value *Lowered =
-          Elt->SystemValue == SignatureSystemValue::None
-              ? lowerPatchConstantInputLoad(*CI, *Elt, *WEnv, *PEnv)
-              : lowerPatchConstantSystemValue(*CI, *Elt, *WEnv, *PEnv);
-      if (Elt->SystemValue != SignatureSystemValue::None && !Lowered) {
+      // (roadmap H13b) A per-control-point-addressable builtin input --
+      // `Position`, `ClipDistance`, `CullDistance` -- read from the
+      // *original* input patch by a barrier-less tessellation-control
+      // entry point whose mixed control-point/patch-constant body ends up
+      // compiled as this phase too (see this file's own comment on
+      // `lowerPatchConstantInputLoad` and `CanonicalizeStage.cpp`'s
+      // `isPatchConstantPhase`/`splitBarrierlessTessellationControlEntry`/
+      // `classifySPIRVElement`): despite carrying a `SystemValue` (these
+      // builtins have no `Location` of their own -- see
+      // `FragmentWrapper.cpp`'s analogous roadmap H7x fix), only
+      // `OutputControlPointID` (the current invocation's own index, never
+      // addressable to a *different* control point) and `PatchVertices`
+      // (a true per-patch scalar count) are the genuinely non-addressable
+      // system values `lowerPatchConstantSystemValue` below handles -- any
+      // other system value here (or none at all) is an ordinary array
+      // element read the same `InputPatch`-addressed way as any other
+      // linked input, keyed by `Elt.ElementID` the same way.
+      bool IsScalarSystemValue =
+          Elt->SystemValue == SignatureSystemValue::OutputControlPointID ||
+          Elt->SystemValue == SignatureSystemValue::PatchVertices;
+      Value *Lowered = IsScalarSystemValue
+                           ? lowerPatchConstantSystemValue(*CI, *Elt, *WEnv,
+                                                           *PEnv)
+                           : lowerPatchConstantInputLoad(*CI, *Elt, *WEnv,
+                                                         *PEnv);
+      if (IsScalarSystemValue && !Lowered) {
         F.getContext().emitError(
             CI, "feme-cpu-wrap-patch-constant: unsupported patch-constant "
                 "input system value");
