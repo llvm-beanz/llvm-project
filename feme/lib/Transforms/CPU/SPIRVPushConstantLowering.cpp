@@ -79,8 +79,6 @@ matchSPIRVPushConstantAccess(Function &F) {
 
   SPIRVPushConstantAccess Access;
   Access.Global = PC;
-  Access.BlockSize =
-      F.getDataLayout().getTypeStoreSize(PC->getValueType()).getFixedValue();
 
   for (User *U : PC->users()) {
     // A constant-index GEP off the global's own address is almost always
@@ -151,6 +149,24 @@ uint32_t lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
   Type *I64Ty = Type::getInt64Ty(Ctx);
   const DataLayout &DL = Access.Global->getDataLayout();
 
+  // (Roadmap L10) The tightest root-constant span this access genuinely
+  // needs: the highest byte any recognized load actually reads, not
+  // `Access.Global`'s own declared-type `DataLayout` store size. Those two
+  // differ whenever the CPU target's own struct layout pads the block's
+  // tail wider than any real access reaches -- e.g. a trailing `int3`/
+  // `float3` member's vector alignment rounds up to the next power of two
+  // of its store size (12 -> 16) on a target whose data layout does not
+  // mark vectors as element-aligned, inflating the *whole struct's* size
+  // well past the last byte any `int3`/`float3` load actually touches.
+  // Every access this pass recognizes has a compile-time-constant byte
+  // offset (see the file comment's scope note: no dynamic index is ever
+  // accepted here), so -- unlike `feme::cpu::RootConstantLowering.h`'s own
+  // DXIL root constant, which must report its full declared size because a
+  // dynamic row/array index means there is no longer a fixed set of bytes
+  // to inspect statically -- there is no dynamic access this tighter span
+  // could ever fail to cover.
+  uint32_t MaxAccessedByte = 0;
+
   for (Instruction *LoadI : Access.Loads) {
     auto *Load = cast<LoadInst>(LoadI);
     Value *Ptr = Load->getPointerOperand();
@@ -169,6 +185,8 @@ uint32_t lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
 
     Type *LoadedTy = Load->getType();
     uint64_t LoadSize = DL.getTypeStoreSize(LoadedTy).getFixedValue();
+    MaxAccessedByte =
+        std::max<uint64_t>(MaxAccessedByte, ByteOffset + LoadSize);
 
     IRBuilder<> Builder(Load);
     Value *InBounds = Builder.CreateICmpULE(
@@ -202,7 +220,7 @@ uint32_t lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
     if (auto *GEP = dyn_cast<GetElementPtrInst>(U); GEP && GEP->use_empty())
       GEP->eraseFromParent();
 
-  return Access.BlockSize;
+  return MaxAccessedByte;
 }
 
 PreservedAnalyses SPIRVPushConstantLoweringPass::run(Module &M,

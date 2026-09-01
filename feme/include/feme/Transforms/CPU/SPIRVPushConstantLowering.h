@@ -68,11 +68,6 @@ namespace feme::cpu {
 struct SPIRVPushConstantAccess {
   llvm::GlobalVariable *Global;
   llvm::SmallVector<llvm::Instruction *, 8> Loads;
-  /// The push-constant block's full declared byte size (the global's
-  /// pointee type's `DataLayout` store size) -- the root-constant span this
-  /// access requires, matching `feme::cpu::lowerRootConstantAccess`'s own
-  /// "report the binding's full advertised size" contract.
-  uint32_t BlockSize = 0;
 };
 
 /// Returns \p F's push-constant access if the module has a push-constant
@@ -86,8 +81,22 @@ matchSPIRVPushConstantAccess(llvm::Function &F);
 /// Rewrites every load in \p Access into a bounds-checked load from \p
 /// RootConstants (zero for any byte range outside \p RootConstantSize's
 /// declared span), and erases every instruction \p Access recognized once
-/// unused. Returns \p Access.BlockSize, for the caller to attach to
-/// whichever `!feme.cpu.resources` metadata entry it emits.
+/// unused. Returns the highest byte any recognized load actually reads --
+/// unlike `feme::cpu::lowerRootConstantAccess`'s own DXIL root constant,
+/// which must report its full declared binding size because a dynamic
+/// row/array index means there is no fixed set of bytes to inspect
+/// statically, every access this pass recognizes has a compile-time-
+/// constant byte offset (see the file comment's scope note), so the
+/// tighter "bytes actually touched" span is always safe to report instead
+/// -- and, on a CPU target whose data layout does not mark vectors as
+/// element-aligned, is frequently *narrower* than the push-constant
+/// block's own declared-type `DataLayout` store size (e.g. a trailing
+/// `int3`/`float3` member's vector alignment rounds its store size up to
+/// the next power of two, inflating the whole struct's reported size well
+/// past the last byte any such member's own load actually reaches).
+/// Reporting the wider, padding-inflated size here would spuriously
+/// require a `VkPushConstantRange` to cover bytes no real access ever
+/// touches (roadmap L10).
 uint32_t lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
                                       llvm::Value *RootConstants,
                                       llvm::Value *RootConstantSize);
