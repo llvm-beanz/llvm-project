@@ -90,6 +90,7 @@
 #include "llvm/Analysis/CycleAnalysis.h"
 #include "llvm/Analysis/VectorUtils.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
@@ -101,6 +102,7 @@
 #include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/Alignment.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
@@ -620,7 +622,16 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   //    `positions[gl_VertexIndex]` -- decomposed into `N` widened
   //    components by `widenScalarizedFallback`'s per-lane clone-and-
   //    reassemble, exactly like any divergent-address load whose result is
-  //    already scalar,
+  //    already scalar, and
+  //  - (roadmap L11) a groupshared `load` of vector type through a
+  //    divergent address -- e.g. reading a whole `float4` row out of a
+  //    `groupshared` matrix at a per-lane row index -- decomposed into `N`
+  //    widened components by `widenGroupSharedLoad`'s own per-component
+  //    gather (see that function's comment) rather than
+  //    `widenScalarizedFallback`'s per-lane clone, since a groupshared
+  //    address is already a real vector-of-pointers `getelementptr`
+  //    (`widenGroupSharedGEP`) rather than a value needing per-lane
+  //    extraction,
   //
   // Verify every divergent vector
   // value matches one of those producer shapes, and every use of one
@@ -736,13 +747,14 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       // one illegal `<W x <N x T>>` result: its address, divergent because
       // the index feeding its `getelementptr` is, is scalarized into `W`
       // real per-lane loads, one through each lane's own extracted
-      // pointer. A groupshared address keeps its own dedicated
-      // gather-based widening (`widenGroupSharedLoad`), which does not
-      // (yet) support a vector-typed result, so is deliberately excluded
-      // here rather than silently mis-widened into an illegal nested
-      // vector gather.
-      IsSupportedProducer =
-          LI->isSimple() && !isGroupSharedPointerType(LI->getPointerOperandType());
+      // pointer. A groupshared address's own vector-typed load (roadmap
+      // L11, e.g. reading a whole `float4` row out of a `groupshared`
+      // matrix at a divergent row index -- reduced from a real
+      // `WaveOps/GroupSharedMatrixRowComponentDataRace.test` failure)
+      // decomposes the same way, but via `widenGroupSharedLoad`'s own
+      // per-component gather rather than this fallback's per-lane clone
+      // (see that function's comment).
+      IsSupportedProducer = LI->isSimple();
     }
 
     if (!IsSupportedProducer) {
@@ -1817,6 +1829,52 @@ void FunctionWidener::widenGroupSharedLoad(LoadInst &LI, IRBuilder<> &Builder) {
   // operand, being divergent, was necessarily widened earlier in reverse
   // post-order by `widenGroupSharedGEP` above.
   Value *WidePtr = Widened.lookup(LI.getPointerOperand());
+
+  // (Roadmap L11) A vector-typed result -- e.g. reading a whole `float4`
+  // row out of a `groupshared` matrix at a per-lane row index, reduced
+  // from a real `WaveOps/GroupSharedMatrixRowComponentDataRace.test`
+  // failure -- cannot gather directly into one illegal `<W x <N x T>>`;
+  // it decomposes into `N` separate per-component gathers instead, one
+  // per element of `LI`'s own vector type, recorded in
+  // `WidenedVectorComponents` exactly like every other vector-typed
+  // producer `checkVectorDecompositionSupported` accepts. `WidePtr` is a
+  // `<W x ptr>` pointing at the *whole row* in every lane; LLVM's `getelementptr`
+  // treats a fixed-vector source element type as an indexable sequential
+  // type exactly like an array (a leading `0` index stays at the same
+  // row, a second index selects one of its `N` elements), and broadcasts
+  // that scalar index across every lane of a vector base pointer
+  // automatically, so one such `getelementptr` per component gives each
+  // lane's own per-component address without any extra per-lane
+  // extraction.
+  if (auto *VecTy = dyn_cast<FixedVectorType>(LI.getType())) {
+    Type *ElemTy = VecTy->getElementType();
+    // `OldF` is already null by Pass 2 (see its declaration comment above);
+    // `NewF` is the live function being built and shares the same module
+    // (and therefore the same `DataLayout`) as `OldF` did.
+    const DataLayout &DL = NewF->getParent()->getDataLayout();
+    uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
+    Value *ElemPassthru =
+        Constant::getNullValue(FixedVectorType::get(ElemTy, WaveSize));
+    SmallVector<Value *, 4> Components;
+    for (unsigned Idx = 0, End = VecTy->getNumElements(); Idx != End; ++Idx) {
+      Value *ElemPtr = Builder.CreateGEP(
+          VecTy, WidePtr, {Builder.getInt32(0), Builder.getInt32(Idx)},
+          LI.getName() + ".elt" + Twine(Idx) + ".ptr");
+      // `LI`'s own alignment only bounds the *row's* address, not every
+      // component's: e.g. a 16-byte-aligned `<4 x float>` row's second
+      // element sits at a 4-byte-aligned offset, not a 16-byte-aligned
+      // one, so using `LI.getAlign()` unmodified for every component
+      // would overstate a non-zero-offset component's real alignment.
+      Align ElemAlign = commonAlignment(LI.getAlign(), Idx * ElemSize);
+      Components.push_back(Builder.CreateMaskedGather(
+          FixedVectorType::get(ElemTy, WaveSize), ElemPtr, ElemAlign,
+          Env.EntryMask, ElemPassthru, LI.getName() + ".elt" + Twine(Idx)));
+    }
+    WidenedVectorComponents[&LI] = std::move(Components);
+    ToErase.push_back(&LI);
+    return;
+  }
+
   Value *Passthru =
       Constant::getNullValue(FixedVectorType::get(LI.getType(), WaveSize));
 

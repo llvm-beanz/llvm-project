@@ -296,22 +296,33 @@ void retargetGroupSharedProducer(Value *OldProducer, Value *NewProducer) {
   }
   // `OldProducer` may still have other, non-broadcast uses (a direct
   // `load`/`store`/`atomicrmw` alongside every broadcast just retargeted
-  // above) -- retarget those the ordinary way too.
-
-  // `OldProducer` may still have other, non-broadcast uses (a direct
-  // `load`/`store`/`atomicrmw` alongside every broadcast just retargeted
   // above) -- retarget those the ordinary way too. A `GetElementPtrInst`
-  // use is left untouched here: when `OldProducer` is `GV` itself, `GV`
-  // commonly feeds both a direct broadcast (offset 0, needing no
-  // `getelementptr` at all) and one or more first-level `getelementptr`s
-  // off it at other offsets in the very same function -- each such GEP is
-  // retargeted by `rewriteGroupSharedGlobals`'s own separate loop over
-  // `GEPs`, via its own `retargetGroupSharedProducer(GEP, ...)` call, not
-  // this one.
+  // use off `GV` itself is left untouched here: `GV` commonly feeds both
+  // a direct broadcast (offset 0, needing no `getelementptr` at all) and
+  // one or more first-level `getelementptr`s off it at other offsets in
+  // the very same function -- each such GEP is retargeted by
+  // `rewriteGroupSharedGlobals`'s own separate loop over `GEPs`, via its
+  // own `retargetGroupSharedProducer(GEP, ...)` call, not this one. A
+  // `GetElementPtrInst` use off a first-level GEP itself, though (roadmap
+  // L11: the per-row-component address `widenGroupSharedLoad`'s vector
+  // case builds, one per component of a divergent-address row load), has
+  // no other loop to retarget it -- rebuild it off `NewProducer` with the
+  // same indices and recurse into this same function for its own leaf
+  // users instead of skipping it.
   for (Use &U : make_early_inc_range(OldProducer->uses())) {
     User *Usr = U.getUser();
-    if (isa<GetElementPtrInst>(Usr))
+    if (auto *NestedGEP = dyn_cast<GetElementPtrInst>(Usr)) {
+      if (isa<GlobalVariable>(OldProducer))
+        continue; // Handled by rewriteGroupSharedGlobals's own GEPs loop.
+      IRBuilder<> NestedBuilder(NestedGEP);
+      SmallVector<Value *, 4> Idxs(NestedGEP->indices());
+      Value *NewNestedGEP = NestedBuilder.CreateGEP(
+          NestedGEP->getSourceElementType(), NewProducer, Idxs,
+          NestedGEP->getName(), NestedGEP->isInBounds());
+      retargetGroupSharedProducer(NestedGEP, NewNestedGEP);
+      NestedGEP->eraseFromParent();
       continue;
+    }
     if (isa<LoadInst>(Usr) || isa<StoreInst>(Usr) || isa<AtomicRMWInst>(Usr)) {
       U.set(NewProducer);
       continue;
@@ -421,12 +432,33 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
           auto *IE = dyn_cast<InsertElementInst>(GEPUser);
           if (IE && IE->getOperand(1) == GEP && hasOnlySupportedBroadcasts(GEP))
             continue;
+          // (Roadmap L11) a second-level `getelementptr` off `GEP` --
+          // the per-row-component address `FunctionWidener::
+          // widenGroupSharedLoad`'s vector case builds off a divergent
+          // row address, one per component of the loaded row -- is
+          // supported too, as long as `GEP` itself is a *divergent*,
+          // already-widened vector-of-pointers address (i.e. this is the
+          // specific vector-row-component shape and not an ordinary
+          // uniform nested array/struct access chain, which milestone
+          // 9's own scope narrowing still leaves unsupported) and every
+          // one of the nested GEP's own users is an ordinary leaf access
+          // (in practice always a masked gather, one per component; a
+          // divergent vector-typed groupshared load has no
+          // uniform-address broadcast case to consider, unlike a scalar
+          // one, since its address is already a real vector-of-pointers
+          // `getelementptr` by construction).
+          if (auto *NestedGEP = dyn_cast<GetElementPtrInst>(GEPUser);
+              NestedGEP && GEP->getType()->isVectorTy() &&
+              llvm::all_of(NestedGEP->users(), isSupportedGroupSharedLeafUser))
+            continue;
           Ctx.emitError(
               "feme-cpu-simdize: groupshared global '" + GV->getName() +
               "' feeds a nested getelementptr or another unsupported "
               "user; only a first-level getelementptr feeding a direct "
-              "load, store, atomicrmw, or masked gather/scatter is "
-              "supported (roadmap milestone 9 deviation)");
+              "load, store, atomicrmw, masked gather/scatter, or (for a "
+              "vector-typed row load) a second-level per-component "
+              "getelementptr feeding its own masked gather is supported "
+              "(roadmap milestone 9 deviation)");
           return false;
         }
       }
