@@ -37,15 +37,16 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L12b:
+Please investigate and fix the issues tracked by milestone L12c:
 
-> **Survey and implement the `VK_EXT_descriptor_indexing` (core-1.2-promoted)
-> Vulkan feature-bit cluster**, entirely `VK_FALSE` today (`descriptorIndexing`,
-> `shaderSampledImageArrayNonUniformIndexing`,
-> `descriptorBindingVariableDescriptorCount`, `runtimeDescriptorArray`, and ~16
-> sibling bits, `feme/lib/Vulkan/EntryPoints.cpp` ~line 1252-1273) -- needed
-> before an *unbounded* resource array (L12a's own `Count == 0` case) can be
-> exposed to a real application at all, since advertising
-> `runtimeDescriptorArray`/`descriptorBindingVariableDescriptorCount` `VK_TRUE`
-> without the descriptor-set-layout/allocation-time plumbing those bits promise
-> (see L12c) would be a conformance violation, not merely an omission
+> **Descriptor-set-layout/pipeline-layout support for
+> `VARIABLE_DESCRIPTOR_COUNT`**: `VkDescriptorSetLayoutBinding`'s own
+> `VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT` (declaring a binding's
+> real element count is deferred to descriptor-set-allocation time, via
+> `VkDescriptorSetVariableDescriptorCountAllocateInfo`) and the runtime
+> bounds-checking an unbounded array's own indexing needs at that point are not
+> implemented anywhere in `feme`'s Vulkan layer today; needed for
+> `overflow-unbounded-array.test` (and any other unbounded-array case) to
+> actually pass end-to-end, on top of L12a's conversion-layer fix and L12b's
+> feature-bit advertisement | L12b | `feme/lib/Vulkan/`
+> descriptor-set-layout/pipeline-layout sources (unconfirmed, not yet surveyed)
