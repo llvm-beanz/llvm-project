@@ -1654,19 +1654,21 @@ Error translateFixedFunctionState(
           inconvertibleErrorCode(),
           "VK_PRIMITIVE_TOPOLOGY_PATCH_LIST requires a tessellation-control/"
           "evaluation stage pair, and vice versa");
-    // (roadmap H5e) Symmetric check for the four adjacency topologies:
-    // their whole purpose is handing a geometry stage each primitive's
-    // neighboring vertices (`Executor.cpp`'s own runtime check, mirrored
-    // here so an unsupported combination fails at creation, not at draw
-    // time -- `VUID-VkGraphicsPipelineCreateInfo-topology-00738`/
-    // neighbors). Unlike `PatchList`, this is one-directional: a geometry
-    // stage may run over a non-adjacency topology too (it just never sees
-    // any adjacency data).
-    if (feme::graphics::topologyHasAdjacency(*Topology) && !GeometryInfo)
-      return createStringError(
-          inconvertibleErrorCode(),
-          "an adjacency primitive topology requires a pipeline with a "
-          "geometry stage");
+    // (roadmap H7l) The four adjacency topologies' own adjacency vertices
+    // are only ever *visible* to a geometry stage -- but per
+    // `VUID-VkGraphicsPipelineCreateInfo-topology-00738`/neighbors, what
+    // that requires is the `geometryShader` *device feature* being
+    // enabled (`PhysicalDeviceInfo.cpp` always advertises it, unconditio-
+    // nally, since H5e), not that *this* pipeline itself binds a geometry
+    // stage. H5e's own check here was stricter than the spec requires --
+    // found via a real `dEQP-VK.clipping.clip_volume.depth_clamp.
+    // {triangle,line}_*_with_adjacency` reproduction, whose own vertex/
+    // fragment-only pipelines are exactly this legal, geometry-stage-free
+    // combination. A pipeline with no geometry stage simply never sees
+    // the adjacency vertices at all (`Executor.cpp`'s own primitive
+    // assembly now rasterizes such a pipeline's `stripAdjacency(Topology)`
+    // core vertices only, per the spec's own "Primitive Topologies" text:
+    // "if there is no geometry shader, ... adjacency ... is ignored").
 
     if (HasTessellationStages) {
       const VkPipelineTessellationStateCreateInfo *Tessellation =
