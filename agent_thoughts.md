@@ -52464,3 +52464,101 @@ check-feme` with 0 regressions, and a direct real-ICD confirmation that
 the named error is gone). `packed.test` itself still fails end-to-end,
 now advancing to a distinct, already-root-caused gap tracked as new
 roadmap row L19. Struck through L18 on the roadmap; added L19.
+
+# L19: a one-line fix with a surprisingly large test-fixture blast radius, and a new gap one layer deeper
+
+L19's own milestone description had already done nearly all the root-cause
+work in its own text (an L18-session self-correction): `isBufferBlockStorage`
+returns `true` unconditionally for any `StorageBuffer`-class struct pointer,
+never checking the struct's own `Block` decoration on that branch, unlike
+its `Uniform`/`BufferBlock` branch immediately below. I confirmed this by
+reading the function directly, and the fix itself was genuinely a one-line
+change: `return true;` became
+`return Struct.hasDecoration(mlir::spirv::Decoration::Block);`.
+
+What I did *not* expect, and want to flag clearly for future sessions: this
+tiny, surgical fix broke essentially every synthetic `StorageBuffer` test
+fixture already in the tree -- not just the SPIRVToLLVM lit tests, but
+gtest-embedded SPIR-V strings in `PipelineTest.cpp`/`CommandBufferTest.cpp`/
+`DrawTest.cpp`, and even pre-serialized `.mlir` inputs used by real
+Vulkan-ICD smoke tests (`Vulkan/Inputs/sampled-image-fetch.mlir`,
+`Vulkan/Inputs/storage-buffer-increment.mlir`). Every single one of them
+declared its own top-level `StorageBuffer` block struct *without* the
+`Block` decoration -- something that had been silently tolerated only
+because the very bug I was fixing never checked for it. I want to be
+explicit that I did not treat this as "the fix broke a bunch of tests, so
+loosen the fix" -- I checked carefully first whether real `dxc`/glslang
+output ever omits this decoration for a genuine `StorageBuffer` block
+variable, and confirmed (both by reading the SPIR-V spec's own `Block`
+entry and by directly inspecting real `dxc`-emitted SPIR-V for
+`RWStructuredBuffer`) that it never does; a `StorageBuffer`-class block
+variable's own top-level struct is required to carry `Block` in any
+conformant module. So every one of these test fixtures was already
+spec-invalid SPIR-V that happened to "work" only by accident of the bug
+under investigation -- correcting them (adding the missing decoration) is
+a pure fixture bugfix, not a weakening of the real fix's own scope. I
+verified this belief by running the full affected test set after the
+correction and confirming everything still passes with identical
+behavior to before, plus a genuinely new lit test
+(`spirv-to-llvm-storage-buffer-struct-element.mlir`) that specifically
+targets the shape that was broken and stays broken without the real fix.
+
+I made sure to use the *exact* real-world compiler invocation this
+project's own `offload-test-suite` uses when reducing `packed.test`'s own
+SPIR-V, rather than assuming a default `dxc` flag set. My first repro
+attempt (plain `dxc -spirv -fvk-use-scalar-layout`, no target-env flag)
+produced a *different*, pre-SPIR-V-1.3-style shape (`Uniform` storage
+class + `BufferBlock` decoration for the outer block, and a *distinct*,
+unrelated bug in the sibling `getUniformBlockElement` for the inner
+per-element struct pointer) that is not the shape this project's own real
+test harness ever produces -- I caught this by reading
+`offload-test-suite/test/lit.cfg.py` directly rather than assuming, which
+confirmed `ExtraCompilerArgs` always includes
+`-fspv-target-env=vulkan1.3` when Vulkan is enabled. Recompiling with that
+exact flag reproduced the true `StorageBuffer`/`Block`-decoration shape
+this milestone actually targets. I deliberately did *not* also fix the
+sibling `getUniformBlockElement` gap I stumbled on during this false start
+-- it is genuinely dead code for this project's own real usage (since the
+real harness never emits the pre-1.3 spelling for `RWStructuredBuffer`),
+so fixing it would be speculative work outside this milestone's own real,
+demonstrated scope; I noted it here for completeness rather than filing a
+new roadmap row for something with no live reproduction.
+
+As with L18, I did not stop at "the fix compiles and the isolated repro
+looks right" -- I rebuilt `feme_vulkan` (a separate ninja target, correctly
+remembered again this session) and ran `packed.test` for real against the
+actual ICD. The milestone's own named error was indeed gone, but the test
+still failed, now with a new error one layer deeper:
+`SPIRVResourceLoweringPass` (the CPU backend's own resource-lowering pass)
+rejects the resulting whole-struct `llvm.load`/`llvm.store` outright,
+because `isSupportedRawElementType` only ever recognizes a scalar or fixed
+vector, never a struct. I traced this precisely rather than leaving it
+vague: it's not a GEP-into-a-field problem (that's L16's own,
+already-fixed scope) -- it's specifically that loading/storing an entire
+aggregate value with *no* field navigation at all was apparently never
+supported by this pass, presumably because no real test before
+`packed.test` ever needed to. I split this into a new roadmap row, L20,
+with the root cause and both plausible fix shapes (extend
+`isSupportedRawElementType` and the mangling scheme to describe aggregates,
+or decompose the whole-struct load/store into per-field raw loads/stores
+at this pass) already written down, so a future session doesn't have to
+re-derive any of this.
+
+I again did a full, careful before/after verification pass rather than a
+single unpaired measurement: `ninja check-feme` (0 regressions),
+`check-hlsl-vk-feature-structuredbuffer` against the real ICD (9/650
+unchanged, confirmed via the git-checkout/rebuild/revert cycle), and both
+`dEQP-VK.ssbo.layout.*` and the broader `dEQP-VK.ssbo.*` sweep (260/5275
+and 361/12225 respectively, byte-for-byte identical before and after).
+None of this CTS family exercises this fix's own target shape (an
+intermediate struct-typed pointer from a whole-struct-copy idiom), so
+"no measurable difference" here is the expected, correct outcome, not a
+sign the fix did nothing real -- I made sure to report it that way rather
+than mischaracterizing an absence of CTS signal as either confirmation or
+concern.
+
+Outcome: L19's own scope (the `isBufferBlockStorage` misclassification,
+plus the test-fixture corrections it required) is fully fixed and
+verified. `packed.test` itself still fails end-to-end, now advancing to a
+distinct, already-root-caused gap tracked as new roadmap row L20. Struck
+through L19 on the roadmap; added L20.
