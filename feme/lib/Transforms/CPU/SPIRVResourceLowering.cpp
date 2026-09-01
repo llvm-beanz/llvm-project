@@ -383,24 +383,34 @@ constexpr unsigned SPIRVSampledWithoutSampler = 2;
 constexpr unsigned SPIRVSampledWithSampler = 1;
 
 /// Returns \p Handle's buffer classification if its type is a `Dim::Buffer`
-/// Returns whether \p Ty is `<4 x float>` or (V4) `<4 x i32>`, the shader-
-/// side element shapes the CPU runtime's typed-load/store helpers
-/// implement a format conversion for today (see
-/// femeCpuResourceLoadTypedV4F32/StoreTypedV4F32 and
-/// femeCpuResourceLoadTypedV4I32/StoreTypedV4I32 in
-/// feme/runtime/CPU/FeMeRuntimeCPU.c). A scalar element (a single-channel
-/// format's own shader-visible type, e.g. plain `i32`) is not yet modeled:
-/// SPIR-V's `OpImageRead`/`OpImageFetch` always return a full four-component
-/// vector regardless of the underlying format's real channel count (see
-/// classifyTexelBufferHandle's comment), so supporting it needs the
-/// physically-narrower-than-`<4 x T>` per-format padding this milestone does
-/// not add -- see FeMeVulkanDesign.md's V4 status note.
+/// Returns whether \p Ty is `<4 x float>`/`<4 x i32>` (V4) or, (roadmap L9)
+/// a scalar `float`/`i32`, the shader-side element shapes the CPU runtime's
+/// typed-load/store helpers implement a format conversion for today (see
+/// femeCpuResourceLoadTypedV4F32/StoreTypedV4F32,
+/// femeCpuResourceLoadTypedV4I32/StoreTypedV4I32, and
+/// femeCpuResourceLoadTypedF32/StoreTypedF32,
+/// femeCpuResourceLoadTypedI32/StoreTypedI32 in
+/// feme/runtime/CPU/FeMeRuntimeCPU.c). The scalar shapes are a
+/// single-channel format's own shader-visible element type (e.g. plain
+/// `i32`/`float` for `RWBuffer<int>`/`RWBuffer<float>`): SPIR-V's
+/// `OpImageRead`/`OpImageFetch` always return a full four-component vector
+/// regardless of the underlying format's real channel count (see
+/// classifyTexelBufferHandle's comment), but `OpImageWrite`'s own Texel
+/// operand instead takes exactly the shader-declared element shape -- a
+/// bare scalar for a single-channel `RWBuffer<T>` -- confirmed via a direct
+/// IR reduction (`RWBuffer<int> In/Out; Out[0] = In[0];` lowers its store
+/// to a scalar `i32`, not `<4 x i32>`). A vector of any other width (2 or
+/// 3 components) is still unmodeled: neither `dxc` nor glslang ever emits
+/// one for a texel-buffer access (the SPIR-V Image Instructions always
+/// read/write either a scalar per-channel or a full 4-vector, never a
+/// partial one), so nothing reaches this function with that shape.
 bool isSupportedTexelElementType(Type *Ty) {
-  auto *VecTy = dyn_cast<FixedVectorType>(Ty);
-  if (!VecTy || VecTy->getNumElements() != 4)
-    return false;
-  Type *ElemTy = VecTy->getElementType();
-  return ElemTy->isFloatTy() || ElemTy->isIntegerTy(32);
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
+    if (VecTy->getNumElements() != 4)
+      return false;
+    Ty = VecTy->getElementType();
+  }
+  return Ty->isFloatTy() || Ty->isIntegerTy(32);
 }
 
 /// Whether \p Ty is a shape `feme::cpu::mangleResourceCallName`'s own

@@ -869,22 +869,86 @@ TEST(SPIRVResourceLoweringTest, LowersIntegerStorageTexelBufferToV4I32Calls) {
   EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesUnsupportedTexelElementTypeUnchanged) {
-  // Only <4 x float>/<4 x i32> are supported (see
-  // `isSupportedTexelElementType`'s comment). A *scalar* i32 load/store -- the
-  // shape a single-channel format like R32_UINT would need, since SPIR-V's own
-  // image ops always return a full 4-component vector regardless of the
-  // underlying format's real channel count -- is left un-normalized rather than
-  // mis-lowered.
+TEST(SPIRVResourceLoweringTest, LowersScalarI32TexelBufferToScalarTypedCalls) {
+  // (Roadmap L9) A scalar `i32` load/store -- the shape a single-channel
+  // format like R32_UINT/R32_SINT needs (`RWBuffer<int>` in HLSL): SPIR-V's
+  // own `OpImageRead`/`OpImageFetch` always return a full 4-component
+  // vector regardless of the underlying format's real channel count (see
+  // `LowersIntegerStorageTexelBufferToV4I32Calls` above), but `OpImageWrite`
+  // takes exactly the shader-declared element shape, a bare scalar here --
+  // confirmed via a direct IR reduction (see `isSupportedTexelElementType`'s
+  // own comment, SPIRVResourceLowering.cpp). Lowers to the
+  // `.i32`-mangled scalar typed calls, distinct from `.v4i32`.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define i32 @main(i32 %idx) {
+    define i32 @main(i32 %idx, i32 %v) {
       %h = call target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
           @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
       %ptr = call ptr
           @llvm.spv.resource.getpointer(target("spirv.Image", i32, 5, 0, 0, 0, 2, 0) %h, i32 %idx)
       %loaded = load i32, ptr %ptr
+      store i32 %v, ptr %ptr
       ret i32 %loaded
+    }
+    declare target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.Image", i32, 5, 0, 0, 0, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.i32"));
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.store.typed.i32"));
+  EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.v4i32"));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersScalarF32TexelBufferToScalarTypedCalls) {
+  // The float counterpart of `LowersScalarI32TexelBufferToScalarTypedCalls`
+  // above, e.g. `RWBuffer<float>`'s own R32_FLOAT shape.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(i32 %idx, float %v) {
+      %h = call target("spirv.Image", float, 5, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.Image", float, 5, 0, 0, 0, 2, 0) %h, i32 %idx)
+      %loaded = load float, ptr %ptr
+      store float %v, ptr %ptr
+      ret float %loaded
+    }
+    declare target("spirv.Image", float, 5, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.Image", float, 5, 0, 0, 0, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.f32"));
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.store.typed.f32"));
+  EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.v4f32"));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesUnsupportedTexelElementVectorWidthUnchanged) {
+  // Only a scalar or a full <4 x T> are supported (see
+  // `isSupportedTexelElementType`'s comment) -- neither `dxc` nor glslang
+  // ever emits a <2 x T>/<3 x T> texel-buffer access, but a partial vector
+  // is still left un-normalized rather than mis-lowered if one somehow
+  // reached this pass.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x i32> @main(i32 %idx) {
+      %h = call target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.Image", i32, 5, 0, 0, 0, 2, 0) %h, i32 %idx)
+      %loaded = load <2 x i32>, ptr %ptr
+      ret <2 x i32> %loaded
     }
     declare target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
         @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
