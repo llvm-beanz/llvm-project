@@ -1,8 +1,9 @@
 // RUN: feme-opt --feme-convert-spirv-to-llvm --split-input-file %s | FileCheck %s
 
-// Checks that `spirv.CompositeConstruct` building a vector converts, which
-// MLIR has no pattern for at all: it lowers to an `llvm.mlir.poison` seed
-// with one `llvm.insertelement` per lane.
+// Checks that `spirv.CompositeConstruct` building a vector or struct
+// converts, which MLIR has no pattern for at all: a vector result lowers
+// to an `llvm.mlir.poison` seed with one `llvm.insertelement` per lane; a
+// struct result lowers similarly with one `llvm.insertvalue` per member.
 
 // A splat (e.g. HLSL's `.xxx` swizzle) constructs every lane from the same
 // scalar constituent.
@@ -39,5 +40,58 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @mixed(%v : vector<2xf32>, %z : f32) -> vector<3xf32> "None" {
     %0 = spirv.CompositeConstruct %v, %z : (vector<2xf32>, f32) -> vector<3xf32>
     spirv.ReturnValue %0 : vector<3xf32>
+  }
+}
+
+// -----
+
+// Checks that `spirv.CompositeConstruct` building a struct value (e.g. a
+// whole HLSL struct assembled before storing it in one shot) converts,
+// which MLIR also has no pattern for at all: it lowers to an
+// `llvm.mlir.poison` seed with one `llvm.insertvalue` per member, in
+// order. Every member here lays out naturally (no roadmap L13 tight-vector
+// substitution needed), so each constituent's type matches its member's
+// converted type exactly and no `llvm.bitcast` is emitted.
+
+// CHECK-LABEL: llvm.func @construct_struct
+// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<(i32, vector<4xf32>)>
+// CHECK: %[[V0:.*]] = llvm.insertvalue %arg0, %[[POISON]][0]
+// CHECK: %[[V1:.*]] = llvm.insertvalue %arg1, %[[V0]][1]
+// CHECK: llvm.return %[[V1]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @construct_struct(%x : si32, %v : vector<4xf32>) -> !spirv.struct<Naturally, (si32 [0], vector<4xf32> [16])> "None" {
+    %0 = spirv.CompositeConstruct %x, %v : (si32, vector<4xf32>) -> !spirv.struct<Naturally, (si32 [0], vector<4xf32> [16])>
+    spirv.ReturnValue %0 : !spirv.struct<Naturally, (si32 [0], vector<4xf32> [16])>
+  }
+}
+
+// -----
+
+// Checks that `spirv.CompositeConstruct` building a struct value with a
+// roadmap L13 tight-vector-substituted member (a `vector<3xsi32>` member
+// whose declared offset -- see spirv-to-llvm-nested-identified-struct.mlir
+// -- only lays out as a tightly-packed `!llvm.array<3 x i32>`, not a real
+// LLVM vector) reassembles the real-vector constituent into the
+// substituted array type lane-by-lane before inserting it (`llvm.bitcast`
+// cannot do this directly, since its own verifier requires a
+// non-aggregate result), since `llvm.insertvalue` requires the inserted
+// value's type to match the struct's declared field type exactly.
+
+// CHECK-LABEL: llvm.func @construct_tight_vector_struct
+// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.struct<(array<3 x i32>, i32)>
+// CHECK: %[[ARR:.*]] = llvm.mlir.poison : !llvm.array<3 x i32>
+// CHECK: %[[E0:.*]] = llvm.extractelement %arg0[%{{.*}} : i32] : vector<3xi32>
+// CHECK: %[[A0:.*]] = llvm.insertvalue %[[E0]], %[[ARR]][0]
+// CHECK: %[[E1:.*]] = llvm.extractelement %arg0[%{{.*}} : i32] : vector<3xi32>
+// CHECK: %[[A1:.*]] = llvm.insertvalue %[[E1]], %[[A0]][1]
+// CHECK: %[[E2:.*]] = llvm.extractelement %arg0[%{{.*}} : i32] : vector<3xi32>
+// CHECK: %[[A2:.*]] = llvm.insertvalue %[[E2]], %[[A1]][2]
+// CHECK: %[[V0:.*]] = llvm.insertvalue %[[A2]], %[[POISON]][0]
+// CHECK: %[[V1:.*]] = llvm.insertvalue %arg1, %[[V0]][1]
+// CHECK: llvm.return %[[V1]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @construct_tight_vector_struct(%legs : vector<3xsi32>, %tail : si32) -> !spirv.struct<Doggo, (vector<3xsi32> [0], si32 [12])> "None" {
+    %0 = spirv.CompositeConstruct %legs, %tail : (vector<3xsi32>, si32) -> !spirv.struct<Doggo, (vector<3xsi32> [0], si32 [12])>
+    spirv.ReturnValue %0 : !spirv.struct<Doggo, (vector<3xsi32> [0], si32 [12])>
   }
 }

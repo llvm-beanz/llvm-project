@@ -1956,6 +1956,61 @@ bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
   return true;
 }
 
+/// Returns the LLVM array type substituting for a SPIR-V vector-typed
+/// struct member whenever that member's own natural (ABI-alignment-driven)
+/// layout cannot reproduce a declared offset -- see the "tight-vector
+/// retry" in convertOffsetStructTypeIgnoringDecorations below for why this
+/// is needed at all. An LLVM `VectorType`'s own ABI size/alignment (see
+/// `getDefaultTypeSizeInBits`/`getDefaultABIAlignment` in
+/// `DataLayoutInterfaces.cpp`) rounds its innermost dimension up to the
+/// next power of two purely for hardware SIMD-register purposes -- e.g. a
+/// 3-lane vector is sized/aligned as if it were 4 lanes, and a 2-lane
+/// vector's alignment as 8 bytes rather than 4 -- a rounding that
+/// `-fvk-use-scalar-layout`/`-fvk-use-dx-layout`'s own tightly-packed
+/// member offsets never leave room for (unlike GLSL's own std140/std430
+/// base-alignment rules, which already match this rounding). An LLVM array
+/// type's own size/alignment has no such rounding (its alignment is simply
+/// its element's own alignment, and its size is exactly element count
+/// times element size), so substituting one in reproduces the tightly
+/// packed offsets `dxc` actually emits. This substitution is safe for
+/// pointer-based access (a GEP into this member's address does not care
+/// about its "nominal" element type, since this codebase uses opaque
+/// pointers throughout) -- see CompositeConstructPattern's own struct case
+/// below for the one place a *value* (not just a pointer) crosses this
+/// member's boundary and needs a lane-by-lane reassembly to compensate.
+/// Returns null if the vector's own element type fails to convert.
+mlir::Type getTightVectorArrayType(mlir::VectorType VectorTy,
+                                   const mlir::TypeConverter &Converter) {
+  mlir::Type ElementType = Converter.convertType(VectorTy.getElementType());
+  if (!ElementType)
+    return nullptr;
+  return mlir::LLVM::LLVMArrayType::get(ElementType, VectorTy.getNumElements());
+}
+
+/// Builds the candidate LLVM struct for
+/// convertOffsetStructTypeIgnoringDecorations below out of an
+/// already-computed \p Members list, validating (when \p Type has explicit
+/// offsets) that LLVM's own natural ABI-alignment-driven layout for those
+/// exact member types reproduces every declared offset. Returns null if it
+/// doesn't.
+mlir::Type layOutStructIfOffsetsMatch(mlir::spirv::StructType Type,
+                                      llvm::ArrayRef<mlir::Type> Members) {
+  if (!Type.hasOffset())
+    return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Members,
+                                                  /*isPacked=*/false);
+
+  mlir::DataLayout DL;
+  uint64_t Cursor = 0;
+  for (unsigned I = 0, E = Members.size(); I != E; ++I) {
+    Cursor = llvm::alignTo(Cursor, DL.getTypeABIAlignment(Members[I]));
+    if (Cursor != Type.getMemberOffset(I))
+      return nullptr; // Declared offset doesn't match the natural layout.
+    Cursor += DL.getTypeSize(Members[I]);
+  }
+  return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Members,
+                                                /*isPacked=*/false);
+}
+
 /// Converts a SPIR-V struct type to a non-packed LLVM struct with the same
 /// member sequence (no inserted padding fields, so member index N still
 /// means the same thing to whatever other conversion pattern GEPs into it),
@@ -1979,34 +2034,60 @@ bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
 /// needed to care about. A push-constant block is always `Block`-decorated
 /// in real (`dxc`-compiled or binary-round-tripped) SPIR-V, so
 /// `PushConstantGlobalVariablePattern` below needs its own conversion
-/// rather than the shared upstream one. Returns null for a struct this
-/// cannot lay out (a declared offset naturally-aligned layout cannot
-/// reproduce, a matrix member's declared layout is not representable --
-/// see isMatrixMemberLayoutRepresentable -- or an unconvertible member
-/// type).
+/// rather than the shared upstream one.
+///
+/// If the ordinary (real-vector-typed member) layout doesn't reproduce
+/// \p Type's declared offsets, retries once with every vector-typed member
+/// represented as a tightly-packed array instead (see
+/// getTightVectorArrayType) -- needed for a real
+/// `-fvk-use-scalar-layout`/`-fvk-use-dx-layout` struct with a vector
+/// member whose declared offset assumes a tightly-packed (not
+/// power-of-two-lane-rounded) size/alignment, e.g. HLSL's `int3`/`int2`
+/// placed immediately after a preceding scalar with no padding. This retry
+/// is a pure fallback (only reached once the ordinary attempt above already
+/// failed), so it cannot change the representation of any struct shape that
+/// already converts successfully today. A member whose type was
+/// substituted this way still holds the same bits as the vector SPIR-V
+/// declared it as; whichever pattern assembles a *whole* aggregate value
+/// containing it (rather than just GEP-ing to its address, which this
+/// substitution does not affect at all, since this codebase's pointers are
+/// all opaque) is responsible for reassembling between the two -- see
+/// CompositeConstructPattern's own struct case below, currently the only
+/// such pattern that needs to.
+///
+/// Returns null for a struct neither attempt can lay out (a matrix
+/// member's declared layout is not representable -- see
+/// isMatrixMemberLayoutRepresentable -- an unconvertible member type, or a
+/// declared offset even the tight-vector retry cannot reproduce, e.g. a
+/// fixed-size array member whose own declared stride does not match its
+/// element's natural size -- tracked separately, see roadmap L13a).
 mlir::Type convertOffsetStructTypeIgnoringDecorations(
     mlir::spirv::StructType Type, const mlir::TypeConverter &Converter) {
   llvm::SmallVector<mlir::Type, 8> Members;
+  bool HasVectorMember = false;
   for (unsigned I = 0, E = Type.getNumElements(); I != E; ++I) {
-    mlir::Type MemberTy = Converter.convertType(Type.getElementType(I));
+    mlir::Type ElementTy = Type.getElementType(I);
+    mlir::Type MemberTy = Converter.convertType(ElementTy);
     if (!MemberTy || !isMatrixMemberLayoutRepresentable(Type, I, MemberTy))
       return nullptr;
     Members.push_back(MemberTy);
+    HasVectorMember |= mlir::isa<mlir::VectorType>(ElementTy);
   }
-  if (!Type.hasOffset())
-    return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Members,
-                                                  /*isPacked=*/false);
+  if (mlir::Type Result = layOutStructIfOffsetsMatch(Type, Members))
+    return Result;
+  if (!HasVectorMember)
+    return nullptr;
 
-  mlir::DataLayout DL;
-  uint64_t Cursor = 0;
   for (unsigned I = 0, E = Members.size(); I != E; ++I) {
-    Cursor = llvm::alignTo(Cursor, DL.getTypeABIAlignment(Members[I]));
-    if (Cursor != Type.getMemberOffset(I))
-      return nullptr; // Declared offset doesn't match the natural layout.
-    Cursor += DL.getTypeSize(Members[I]);
+    auto VectorTy = mlir::dyn_cast<mlir::VectorType>(Type.getElementType(I));
+    if (!VectorTy)
+      continue;
+    mlir::Type TightTy = getTightVectorArrayType(VectorTy, Converter);
+    if (!TightTy)
+      return nullptr;
+    Members[I] = TightTy;
   }
-  return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Members,
-                                                /*isPacked=*/false);
+  return layOutStructIfOffsetsMatch(Type, Members);
 }
 
 /// Converts a push constant `spirv.GlobalVariable` to an ordinary
@@ -3018,14 +3099,29 @@ public:
 /// Converts `spirv.CompositeConstruct` building a 1-D vector out of scalar
 /// and/or shorter-vector constituents (e.g. HLSL's `float3(x, x, x)`, which
 /// SPIR-V spells as a `CompositeConstruct` of three scalar constituents, or
-/// a `.xxx` splat's `CompositeConstruct` of the same scalar three times).
+/// a `.xxx` splat's `CompositeConstruct` of the same scalar three times),
+/// or building a struct value out of one constituent per member (e.g.
+/// assembling a whole HLSL struct value before storing it in one shot).
 /// MLIR has no pattern for this op at all, for any of the composite kinds
-/// (vector, array, struct, matrix) it can build; only the vector case is
-/// implemented here; it lowers to an `llvm.mlir.poison` seed with one
-/// `llvm.insertelement` per resulting lane -- each lane's value either the
-/// scalar constituent supplying it directly, or one `llvm.extractelement`
-/// out of the vector constituent supplying a contiguous run of lanes, per
-/// this op's "contiguous subset of scalars" semantics.
+/// (vector, array, struct, matrix) it can build; only the vector and
+/// struct cases are implemented here. The vector case lowers to an
+/// `llvm.mlir.poison` seed with one `llvm.insertelement` per resulting lane
+/// -- each lane's value either the scalar constituent supplying it
+/// directly, or one `llvm.extractelement` out of the vector constituent
+/// supplying a contiguous run of lanes, per this op's "contiguous subset of
+/// scalars" semantics. The struct case lowers to an `llvm.mlir.poison` seed
+/// with one `llvm.insertvalue` per member, in order (SPIR-V's own
+/// `OpCompositeConstruct` for a struct result requires exactly one
+/// constituent per member, each already of that member's own type -- unlike
+/// the vector case's "contiguous subset" flexibility); a constituent whose
+/// type doesn't exactly match its member's converted LLVM type is
+/// reassembled lane-by-lane into that member's type first (an
+/// `llvm.extractelement` per lane followed by an `llvm.insertvalue` into a
+/// poison array at the same position -- `llvm.bitcast` itself cannot do
+/// this directly, since its own verifier requires a non-aggregate result),
+/// needed whenever that member is a vector the struct's own conversion
+/// (see convertOffsetStructTypeIgnoringDecorations's "tight-vector retry")
+/// substituted a same-bit-width tightly-packed array for.
 class CompositeConstructPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeConstructOp> {
 public:
@@ -3035,6 +3131,9 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::CompositeConstructOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(Op.getType()))
+      return convertStruct(Op, Adaptor, Rewriter, StructTy);
+
     auto ResultType = mlir::dyn_cast<mlir::VectorType>(Op.getType());
     if (!ResultType || ResultType.getRank() != 1)
       return Rewriter.notifyMatchFailure(
@@ -3085,6 +3184,64 @@ public:
         Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
                                                      Component, DstIndex);
       }
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+
+private:
+  mlir::LogicalResult convertStruct(mlir::spirv::CompositeConstructOp Op,
+                                    OpAdaptor Adaptor,
+                                    mlir::ConversionPatternRewriter &Rewriter,
+                                    mlir::spirv::StructType StructTy) const {
+    mlir::Type DstType = getTypeConverter()->convertType(StructTy);
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    auto LLVMStructTy = mlir::dyn_cast<mlir::LLVM::LLVMStructType>(DstType);
+    if (!LLVMStructTy)
+      return Rewriter.notifyMatchFailure(Op, "not an LLVM struct result");
+
+    llvm::ArrayRef<mlir::Type> FieldTypes = LLVMStructTy.getBody();
+    if (Adaptor.getConstituents().size() != FieldTypes.size())
+      return Rewriter.notifyMatchFailure(
+          Op, "constituent count does not match struct member count");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstType);
+    for (auto [Index, Constituent] :
+         llvm::enumerate(Adaptor.getConstituents())) {
+      mlir::Type FieldTy = FieldTypes[Index];
+      mlir::Value Field = Constituent;
+      if (Field.getType() != FieldTy) {
+        // Only the "tight-vector retry" substitution described above this
+        // pattern's own comment is expected to disagree here: a real
+        // vector-typed constituent whose member converted to a
+        // same-bit-width tightly-packed array instead. `llvm.bitcast`
+        // itself cannot reinterpret a vector as an array (its own verifier
+        // requires a non-aggregate result), so reassemble lane-by-lane
+        // instead: extract each vector lane and insert it into a poison
+        // array at the same position.
+        auto VecTy = mlir::dyn_cast<mlir::VectorType>(Constituent.getType());
+        auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(FieldTy);
+        if (!VecTy || !ArrTy ||
+            static_cast<uint64_t>(VecTy.getNumElements()) !=
+                ArrTy.getNumElements())
+          return Rewriter.notifyMatchFailure(
+              Op, "constituent type does not match struct member type");
+        mlir::Value Array = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ArrTy);
+        for (int64_t Lane = 0, E = VecTy.getNumElements(); Lane != E; ++Lane) {
+          mlir::Value LaneIndex = mlir::LLVM::ConstantOp::create(
+              Rewriter, Loc, Rewriter.getI32Type(), Lane);
+          mlir::Value Element = mlir::LLVM::ExtractElementOp::create(
+              Rewriter, Loc, Constituent, LaneIndex);
+          Array = mlir::LLVM::InsertValueOp::create(
+              Rewriter, Loc, Array, Element, llvm::ArrayRef<int64_t>{Lane});
+        }
+        Field = Array;
+      }
+      Result = mlir::LLVM::InsertValueOp::create(
+          Rewriter, Loc, Result, Field,
+          llvm::ArrayRef<int64_t>{static_cast<int64_t>(Index)});
     }
     Rewriter.replaceOp(Op, Result);
     return mlir::success();
