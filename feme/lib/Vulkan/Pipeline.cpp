@@ -8,6 +8,7 @@
 
 #include "Pipeline.h"
 #include "Descriptor.h"
+#include "Diagnostics.h"
 #include "GroupSize.h"
 #include "Icd.h"
 #include "Objects.h"
@@ -534,7 +535,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
       Expected<std::shared_ptr<CachedPipelineArtifact>> Compiled =
           compileComputePipeline(CreateInfo, DeviceInfo);
       if (!Compiled) {
-        consumeError(Compiled.takeError());
+        logCreationFailure(Compiled.takeError(), "vkCreateComputePipelines");
         Result = VK_ERROR_INITIALIZATION_FAILED;
         continue;
       }
