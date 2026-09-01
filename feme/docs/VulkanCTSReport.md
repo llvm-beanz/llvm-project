@@ -17524,3 +17524,47 @@ All 12 failures are the pre-existing, unrelated `*_with_adjacency` topology
 gap (`VK_ERROR_INITIALIZATION_FAILED` at pipeline creation -- those
 primitive topologies are not implemented at all yet, unrelated to this
 row) -- 0 regressions from this change.
+
+## `EntryWrapperPass` entry-point-parameter crash fix: measured impact
+
+**Zero measured effect on any `deqp-vk` case, as expected.** This was a
+robustness fix in the AOT/JIT compiler pipeline, not a capability change:
+`feme::cpu::EntryWrapperPass` used to hit an `llvm_unreachable` -- and so
+`SIGABRT` the process -- on a shader entry point that carried a parameter
+of its own, and now reports that through the module's diagnostic handler
+for `runPipeline`'s `ErrorDiagnosticGuard` to turn into a clean pipeline
+failure. No shader `deqp-vk` builds reaches that path (SPIR-V entry points
+take no parameters), so nothing in a CTS run can reach either the old
+crash or the new diagnostic. `dEQP-VK.api.info.*` was re-measured as a
+spot check and is unchanged at 5381 passed / 570 failed / 4533 not
+supported of 10484.
+
+The fix was driven by a real failure of this project's own lit suite --
+`Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll`, since
+retargeted and renamed to `feme-cpu-entry-point-parameter.ll` -- which was
+reported only on macOS because that test carries `REQUIRES:
+directx-registered-target` and no Linux build tree here had the DirectX
+target enabled. DirectX is an *experimental* LLVM target, so it needs an
+explicit `-DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="DirectX"`; without it these
+tests report `UNSUPPORTED` rather than running, which is how a hard crash
+went unnoticed. The sanitizer build trees (`build-ubsan`,
+`build-asan-ubsan`, `build-san-libcxx`) still lack it and should gain it.
+
+### Newly found, pre-existing: an abort that truncates a whole group
+
+Spot-checking `dEQP-VK.compute.pipeline.basic.*` for this change found an
+unrelated, pre-existing defect worth recording (now roadmap H19p):
+`branch_past_barrier` does not fail, it aborts --
+
+```
+Test case 'dEQP-VK.compute.pipeline.basic.branch_past_barrier'..
+LLVM ERROR: unsupported calling convention
+```
+
+-- killing `deqp-vk` itself, so every remaining case in the group goes
+unreported and the group's totals silently under-count. This is the same
+whole-group-truncation failure mode roadmap C2's own asset-path
+`ResourceError` caused. It was confirmed pre-existing by rebuilding
+`feme_vulkan` with this change's source edit reverted and reproducing the
+identical abort. **The `compute` group's totals elsewhere in this report
+should be treated as unreliable until H19p lands.**

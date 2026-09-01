@@ -786,6 +786,21 @@ the first two's own remaining narrowings):
   only one `barrier_spill` buffer per wrapper, which two independently
   split arms cannot safely share) -- both are diagnosed rather than
   mis-compiled.
+- **A wave body carrying a parameter this pass cannot supply is
+  diagnosed, not `llvm_unreachable`'d.** A shader entry point takes no
+  parameters of its own -- its inputs arrive through stage-IO or resource
+  accesses -- so every parameter of the widened wave body belongs to the
+  `feme::cpu::WaveBodyEnv` ABI `feme::cpu::SIMDizePass` appends, plus the
+  `loopvarN` scalars `buildWrapperForLoop` adds, and `buildWaveLoop`
+  dispatches on those names to build its call. An entry point that
+  reached `SIMDizePass` still carrying a parameter of its own keeps it
+  ahead of the ABI ones, which that dispatch has no argument for. An
+  unexpected *input* shape is not an unreachable state, so `buildWrapper`
+  now checks the wave body's parameter names up front and reports an
+  unrecognized one through the module's diagnostic handler --
+  `feme::cpu::runPipeline`'s `ErrorDiagnosticGuard` turns that into a
+  clean pipeline failure -- matching this pass's two existing diagnostics
+  rather than crashing the process.
 - **Values live across a `..._with_group_sync` barrier, including a
   `phi`, are spilled.** Any SSA value -- a `phi` included -- defined in
   one barrier-split region and used by a later one is spilled into a
