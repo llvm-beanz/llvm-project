@@ -37,16 +37,25 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please work on H7l or any prerequisite work to continue making progress on the
+Please work on H7m or any prerequisite work to continue making progress on the
 H-series milestones.
 
-> **`*_with_adjacency` topologies fail pipeline creation for a depth/clip-volume
-> draw.** Found via the same H7d
-> `deqp-vk.clipping.clip_volume.depth_clamp.{triangle,line}_*_with_adjacency`
-> reproduction: `vkCreateGraphicsPipelines` returns
-> `VK_ERROR_INITIALIZATION_FAILED` for these 4 cases specifically, distinct from
-> and unrelated to the depth-clamp/bias/bounds logic itself (the equivalent
-> non-adjacency topologies in the same test group pass). Likely a
-> geometry-shader-adjacent gap in adjacency-topology pipeline construction
-> rather than anything in the depth-clamp path; needs its own root-cause
-> investigation before it can be scoped as a fix
+> **A vertex-entry `vkCreateGraphicsPipelines` fails with "vertex stage wrapper
+> requires attached feme.signature metadata"**, the vertex-side twin of roadmap
+> H3a's own fragment-side finding (already flagged, in `VulkanCTSReport.md`'s
+> own H3a write-up, as "not yet independently tracked for the vertex side").
+> Found via H7e's own real `deqp-vk` reproduction, newly reachable only because
+> H7e's own feature-bit flip lets
+> `dEQP-VK.draw.renderpass.point_size_clamp.point_size_clamp_max` and 8 of
+> `dEQP-VK.dynamic_state.monolithic.line_width.{dyna_static,static_dyna}.*`
+> clear their own `wideLines`/`largePoints` gate for the first time; nothing
+> point-size/line-width-specific about the gap itself. H3a's own fragment-side
+> root cause (`SPIRVResourceLowering.cpp`/`ResourceLowering.cpp`'s
+> `addResourceEnvParams` rebuilding the stage entry function via
+> `Function::Create`+`copyAttributesFrom`, which silently drops the
+> `!feme.signature` metadata `CanonicalizeStagePass` already attached) was fixed
+> with an explicit `NewF->copyMetadata(&F, 0)` for both files at the time, which
+> should already cover the vertex stage too (the fix was not stage-specific) --
+> so this needs its own investigation into why a vertex-entry case still hits
+> the bare "no metadata attached" error rather than H3a's fix simply working,
+> not an assumption that H3a's fix missed the vertex side entirely
