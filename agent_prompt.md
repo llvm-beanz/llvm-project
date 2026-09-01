@@ -37,9 +37,53 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-A bunch of FeMe's tests are still failing on macOS. These seem to be either
-undefined behavior or memory access issues. Your last run said that you couldn't
-reproduce issues with UBSan. Can you try enabling UBSan, ASan, and LSan,
-building with clang, libc++, and using lld as the linker? This will more closely
-mimic the macOS environment (and speed up your builds). Please address any
-issues you encounter.
+I have one remaining test failure under macOS, can you please diagnose and fix.
+The error I'm seeing is:
+
+```
+FAIL: FEME :: Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll (24 of 1006)
+******************** TEST 'FEME :: Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll' FAILED ********************
+Exit Code: 1
+
+Command Output (stdout):
+--
+# RUN: at line 2
+/Users/cbieneman/dev/llvm-project/build-rel/bin/llc /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll --filetype=obj -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.dxcontainer
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/llc /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll --filetype=obj -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.dxcontainer
+# RUN: at line 24
+not /Users/cbieneman/dev/llvm-project/build-rel/bin/feme --target=arm64-apple-darwin25.5.0 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.dxcontainer -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.o 2>&1 | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll
+# executed command: not /Users/cbieneman/dev/llvm-project/build-rel/bin/feme --target=arm64-apple-darwin25.5.0 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.dxcontainer -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.o
+# note: command had no output on stdout or stderr
+# error: command failed with exit status: 1
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll
+# .---command stderr------------
+# | /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll:26:10: error: CHECK: expected string not found in input
+# | ; CHECK: feme-cpu-linearize: function 'main': loop at 'loop' has an internal branch in
+# |          ^
+# | <stdin>:1:1: note: scanning from here
+# | unexpected wave-body parameter for EntryWrapperPass
+# | ^
+# |
+# | Input file: <stdin>
+# | Check file: /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll
+# |
+# | -dump-input=help explains the following input dump.
+# |
+# | Input was:
+# | <<<<<<
+# |             1: unexpected wave-body parameter for EntryWrapperPass
+# | check:26'0    {                                                      search range start (exclusive)
+# | check:26'1                                                           error: no match found in search range
+# |             2: UNREACHABLE executed at /Users/cbieneman/dev/llvm-project/feme/lib/Transforms/CPU/EntryWrapper.cpp:443!
+# | check:26'2                                                                                                             } search range end (exclusive)
+# | >>>>>>
+# `-----------------------------
+# error: command failed with exit status: 1
+
+--
+
+********************
+********************
+Failed Tests (1):
+  FEME :: Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll
+```
