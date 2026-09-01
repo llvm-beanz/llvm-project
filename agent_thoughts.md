@@ -52018,3 +52018,153 @@ nesting allowance (matching the precedent L2's own L9/L10/L11/L12
 child rows, and L10's own L11/L12 children, already established: a
 milestone-description correction discovered from an already-nested row
 gets a fresh top-level letter, not a second level of nesting).
+
+# L15: masked groupshared vector-row load/store widening
+
+## Task
+
+Investigate and fix roadmap milestone L15: `SIMDize.cpp`'s L11 fix
+(`widenGroupSharedLoad`'s per-component vector-row gather) is only
+reachable through a plain, unmasked `LoadInst`/`StoreInst` -- not
+through the `feme.cpu.masked.load/store.*.as3` *call* form
+`feme-cpu-linearize` produces whenever the same groupshared vector-row
+access is itself inside genuinely divergent control flow. This was
+itself discovered as an L14 milestone-description correction: L11's
+own named test (`WaveOps/GroupSharedMatrixRowComponentDataRace.test`)
+still failed identically after L11 landed, because L11's own
+end-to-end verification never actually exercised a divergent branch.
+
+## Investigation
+
+`checkVectorDecompositionSupported` is a whole-function up-front
+validation pass in `SIMDize.cpp` that must recognize every divergent
+vector-typed producer/consumer shape before any widening mutation
+runs. Its `CallInst` producer branch had cases for
+`matchResourceCall`/`matchImageCall`/a homogeneous vectorizable
+intrinsic, but nothing for `matchMaskedLoad` -- so a vector-typed
+`feme.cpu.masked.load.*` call (the masked form `feme-cpu-linearize`
+emits for a groupshared row load once it's inside a real `if
+(ThreadID.x == 0)` guard) hit the generic "divergent value of vector
+type" diagnostic. Even with that recognized, `widenMaskedLoad` itself
+had no vector-typed branch at all and would have built one illegal
+`<W x <4 x float>>` `llvm.masked.gather`.
+
+I reduced this precisely with a minimal groupshared `addrspace(3)`
+`.ll` repro run through `feme-opt --llvm
+-passes=feme-cpu-linearize,feme-cpu-simdize -feme-cpu-wave-size=4 -S`,
+confirming the exact pre-fix error and cross-checking the post-fix IR
+shape against what the real test's own reduced pipeline produces. The
+fix mirrors `widenGroupSharedLoad`'s existing unmasked vector case
+exactly: `N` per-component `getelementptr`s off the same `<W x ptr>`
+row address, each feeding its own `llvm.masked.gather`, except gated
+on the masked call's own governing mask (not the bare wave entry mask)
+and passthru operand (not a constant zero, since a masked load's
+"pass through this value where the mask is false" semantics needs the
+call's own, possibly-divergent, operand -- itself already decomposed
+into per-component wide values via the existing `getVectorComponents`
+helper).
+
+Added a lit test
+(`simdize-groupshared-masked-vector-row-load.ll`), confirmed it fails
+without the fix and passes with it, ran `check-feme` (2284/2311, 0
+failed, up by exactly 1 test), and committed this as its own change.
+
+## The store-side surprise
+
+I then moved to real end-to-end verification, since this project's own
+repeated experience (L13, L14) is that an `.ll`-level `feme-opt`
+reduction alone can look complete while a real ICD run still fails.
+Rebuilding `feme_vulkan`/`offloader` and running the real
+`WaveOps/GroupSharedMatrixRowComponentDataRace.test` directly via
+`llvm-lit --filter=...` (the test lives directly under `WaveOps/`, not
+under `Feature/WaveOps/`, so the usual `check-hlsl-vk-feature-*` target
+naming convention doesn't discover it -- a test-discovery quirk worth
+remembering) confirmed the load-side fix worked, but the real test
+still failed with a *different*, later error from `GroupShared.cpp`:
+"groupshared global 'SharedMat' feeds a nested getelementptr or
+another unsupported user".
+
+This is exactly the methodological lesson this project keeps
+re-learning: the load-side fix's own `.ll`-level verification looked
+complete (no more "divergent value of vector type" error) but was only
+half of L15's real scope, because `GroupShared.cpp`'s
+`rewriteGroupSharedGlobals` runs as a *separate*, later pass with its
+own, stricter validation of what shapes are retargetable to a real
+per-wave flat buffer (only `Load`/`Store`/`AtomicRMW`, or a gather/
+scatter call's own pointer operand) -- and my load-side-only `.ll` test
+never happened to exercise the write side of the real test at all, so
+it couldn't have caught this even in principle.
+
+Root-causing this with its own minimal repro (a masked *store* of a
+vector value through a groupshared GEP address) found the real
+culprit: `widenMaskedStore`'s existing vector-typed branch (added for
+a prior, unrelated roadmap row, already tested and passing for an
+*ordinary* pointer) uses a generic per-lane `extractelement`/load/
+select/store idiom. That produces an `ExtractElementInst` as the
+direct leaf user of the groupshared GEP's widened pointer --
+`GroupShared.cpp`'s own leaf-user check does not (and, since a
+groupshared address is retargeted to something structurally different
+from an ordinary heap address, safely cannot) recognize an
+`extractelement` as a valid leaf.
+
+Reading `GroupShared.cpp`'s `retargetGroupSharedProducer` closely, I
+found it already generically recurses through an arbitrary-depth
+nested `GetElementPtrInst` chain and retargets any gather/scatter call
+it eventually finds, via the address-space-agnostic
+`getGatherScatterPtrOperandNo` helper (added for L11, but written
+generically enough to cover `Intrinsic::masked_scatter` too, despite
+its own comment only naming "gather"/"row load"). That meant the fix
+was to change `widenMaskedStore`, not `GroupShared.cpp`: add a
+groupshared-gated (`isGroupSharedPointerType`) vector-typed branch that
+builds `N` per-component `llvm.masked.scatter`s the same way the
+load-side fix builds gathers, leaving the existing, already-passing
+generic per-lane path untouched for a non-groupshared address (that
+path's own lit test, `simdize-masked-memop-vector-divergent.ll`, has
+`CHECK` lines that specifically expect the per-lane idiom and must not
+regress).
+
+This worked exactly as predicted: no `GroupShared.cpp` change was
+needed at all. Added the store-side companion lit test, confirmed it
+fails pre-fix and passes post-fix, confirmed the non-groupshared test
+still passes unchanged, re-ran `check-feme` (2285/2312, 0 failed), and
+re-ran the real end-to-end test: it now clears both errors this
+milestone targeted and fails only on the pre-existing, separately-
+tracked H19p "unsupported calling convention" abort -- the same
+terminal blocker L10's own two named groupshared cases already hit per
+L14's audit. This confirms L15's own scope is genuinely, fully closed;
+H19p (out of scope here) is the only remaining blocker for this real
+test to pass outright.
+
+## Vulkan CTS
+
+Tried a `dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.*`
+sweep (646 cases) as the closest available groupshared/shared-memory
+compute family in deqp-vk's own GLSL-derived test set. It turned out
+not to be a useful before/after signal for this specific fix: the
+first 46 sub-cases fail on a pre-existing, unrelated SPIR-V
+`OpTypeArray count <id>` gap, and the very next sub-case crashes the
+whole run on the same pre-existing H19p abort before any totals print
+-- consistent with, and not a new instance of, this project's own
+already-documented C2/H19p single-crash-corrupts-a-run risk. The
+genuinely divergent-branch groupshared vector-row masked load/store
+shape this row's fix targets is an HLSL/D3D-matrix-specific pattern,
+not one deqp-vk's own GLSL-derived compute-shared-memory family
+happens to exercise -- so the real offload-test-suite `WaveOps` test
+verified above is the only meaningful end-to-end confirmation
+available for this particular fix; the deqp-vk sweep served only as a
+(clean, no-new-crash) regression check on unrelated shapes.
+
+No feature-bit or extension-advertisement change: confirmed (grepped
+both inventory docs for any L15/masked/groupshared reference, found
+none), not assumed, that `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update -- this is purely an
+internal CPU-target compiler-pass correctness fix.
+
+## Roadmap
+
+Struck through L15 with a completion note covering both the load-side
+and store-side root causes/fixes, matching the standing instruction
+that a fully-completed milestone gets struck through rather than
+broken down further. No new milestone needed this session -- the only
+remaining blocker for the real target test (H19p) is already its own,
+separately-tracked, pre-existing row.
