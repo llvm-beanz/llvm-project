@@ -886,27 +886,42 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
 /// a uniform/uniform-array/texel-uniform buffer is always read-only,
 /// matching Vulkan's own restriction on
 /// `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`/`_UNIFORM_TEXEL_BUFFER`), or, for a
-/// storage-buffer kind only, an ordinary `getelementptr` chain ending in
-/// such a load/store. For `HandleKind::Uniform` and `StorageStruct`, the
-/// `getpointer` index (the field selected within the block's struct) must
-/// also be a compile-time constant: a real cbuffer or direct-field storage
-/// block access is statically typed there. For a texel-buffer kind, every
-/// load's result type (or store's stored-value type) must be one of the
-/// shapes `isSupportedTexelElementType` accepts -- see
+/// storage-buffer or direct-field-storage-block kind (roadmap L16: also a
+/// direct-field uniform/cbuffer kind, since a struct-typed cbuffer member
+/// needs the identical further field navigation), an ordinary
+/// `getelementptr` chain ending in such a load/store. For
+/// `HandleKind::Uniform` and `StorageStruct`, the `getpointer` index (the
+/// field selected within the block's struct) must also be a compile-time
+/// constant: a real cbuffer or direct-field storage block access is
+/// statically typed there. For a texel-buffer kind, every load's result
+/// type (or store's stored-value type) must be one of the shapes
+/// `isSupportedTexelElementType` accepts -- see
 /// `classifyTexelBufferHandle`'s comment for why that check belongs here
 /// rather than on the handle type; for a storage/uniform kind, it must
 /// instead be one `isSupportedRawElementType` accepts, since that is what
 /// `createRawLoad`/`createRawStore` (and, transitively,
 /// `feme::cpu::mangleResourceCallName`) can mangle a runtime call name for.
-/// A nested uniform-buffer field access, or any GEP whose byte offset is not
-/// recoverable from its indices, is still left unmodeled.
+/// Any GEP whose byte offset is not recoverable from its indices is still
+/// left unmodeled.
 bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
   bool Writable = Kind == HandleKind::Storage ||
                   Kind == HandleKind::StorageStruct ||
                   Kind == HandleKind::TexelStorage;
   bool IsTexel = isTexelHandleKind(Kind);
-  bool AllowGEPs =
-      Kind == HandleKind::Storage || Kind == HandleKind::StorageStruct;
+  // (Roadmap L16) A struct-typed direct-field member -- e.g. a real
+  // `cbuffer`'s own `X x1;` where `X` is itself a user-defined struct
+  // (`Feature/CBuffer/structs.test`), reachable once
+  // `feme::spirv::convertOffsetStructTypeIgnoringDecorations` (roadmap
+  // L13a) legalizes the identified-struct-member shape at the SPIR-V-to-
+  // LLVM conversion layer -- needs `getpointer`'s own top-level field
+  // selection followed by a further `getelementptr` navigating into that
+  // field's own struct body, the identical shape `StorageStruct` (a
+  // direct-field *storage* block) already supports; only
+  // `HandleKind::Uniform`/`UniformArray`'s always-read-only-ness (`Writable`
+  // above) differs, not this shape itself.
+  bool AllowGEPs = Kind == HandleKind::Storage ||
+                  Kind == HandleKind::StorageStruct ||
+                  Kind == HandleKind::Uniform;
   const DataLayout &DL = Handle.getModule()->getDataLayout();
   for (const User *U : Handle.users()) {
     const auto *GetPtr = dyn_cast<CallInst>(U);

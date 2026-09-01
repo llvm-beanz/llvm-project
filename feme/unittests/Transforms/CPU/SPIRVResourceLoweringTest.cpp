@@ -570,6 +570,55 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(FoundExpectedOffset);
 }
 
+// Roadmap L16: a struct-typed direct-field member (`cbuffer CBStructs {
+// X x1; X x2; }` where `X` is itself a user-defined `{i32, i32}` struct,
+// `Feature/CBuffer/structs.test`'s own shape once
+// `feme::spirv::convertOffsetStructTypeIgnoringDecorations` (roadmap L13a)
+// legalizes the identified-struct-member conversion) needs a further
+// `getelementptr` navigating into the selected field's own struct body,
+// beyond `getpointer`'s own top-level (compile-time-constant) field
+// selection -- previously rejected outright (`AllowGEPs` was `false` for
+// `HandleKind::Uniform`), even though the identical shape was already
+// supported for a direct-field *storage* block (`HandleKind::StorageStruct`).
+TEST(SPIRVResourceLoweringTest,
+     LowersUniformBufferNestedStructFieldToItsOwnStructLayoutOffset) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %h = call target("spirv.VulkanBuffer", {{i32, i32}, {i32, i32}}, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 2, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {{i32, i32}, {i32, i32}}, 2, 0) %h, i32 1)
+      %fieldptr = getelementptr inbounds {i32, i32}, ptr %ptr, i32 0, i32 1
+      %v = load i32, ptr %fieldptr
+      ret i32 %v
+    }
+    declare target("spirv.VulkanBuffer", {{i32, i32}, {i32, i32}}, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {{i32, i32}, {i32, i32}}, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundExpectedOffset = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction() ||
+        !CI->getCalledFunction()->getName().starts_with(
+            "feme.cpu.resource.load.raw"))
+      continue;
+    // `x2` (field 1 of the outer struct) starts at byte offset 8, and
+    // `.a2` (field 1 of `X`) is naturally aligned at byte offset 4 within
+    // it -- expect the combined 12, not either half alone.
+    auto *Offset = dyn_cast<ConstantInt>(CI->getArgOperand(3));
+    FoundExpectedOffset = Offset && Offset->getZExtValue() == 12;
+  }
+  EXPECT_TRUE(FoundExpectedOffset);
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+}
+
 TEST(SPIRVResourceLoweringTest, LeavesUniformBufferStoreUnchanged) {
   // Vulkan disallows writing `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`: a store
   // through a uniform-buffer handle is not an access shape this pass models
