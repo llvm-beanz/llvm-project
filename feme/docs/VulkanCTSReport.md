@@ -18289,3 +18289,42 @@ via `git checkout HEAD~1 --`) and after, on the same rebuilt ICD:
 No feature-bit or extension-advertisement change was made (this is an
 internal correctness fix only), so `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` are unchanged.
+
+## Roadmap L13: nested-identified-struct-in-array conversion gap
+
+Fixed the remaining conversion gap L5 split out: `convertOffsetStructType
+IgnoringDecorations` (`SPIRVToLLVMPatterns.cpp`) couldn't reproduce a real
+`-fvk-use-scalar-layout`/`-fvk-use-dx-layout` struct's own declared offset
+for a vector-typed member (LLVM's own vector ABI size/alignment rounds up
+to the next power-of-two lane count, which a real HLSL-emitted tightly-
+packed offset never leaves room for), plus a separate, pre-existing gap:
+MLIR has no conversion pattern at all for a struct-typed
+`spirv.CompositeConstruct`. Both fixed this session (see Roadmap.md's L13
+row for the full technical writeup); all 6 real `offload-test-suite`
+cases L5 named (`Feature/StructuredBuffer/packed.test`, `Feature/CBuffer/
+{structs,array-of-structs,dynamic-struct,vectors}.test`, `Feature/
+ConstantBufferT/vectors.test`) now pass end-to-end.
+
+Since `SPIRVToLLVMPatterns.cpp`'s struct conversion is shared
+infrastructure used by any SPIR-V-to-LLVM struct/vector layout conversion
+(not just FeMe's HLSL path, and exercised heavily by uniform/storage-
+buffer-block layout), ran the same two `deqp-vk` groups L5's own sweep
+used, on the same rebuilt ICD:
+
+- `dEQP-VK.ubo.*` (13,240 cases): 1169 pass (8.8%), 4518 fail (34.1%), 7553
+  not-supported (57.0%). L5's own five repeated pre-/post-fix runs of this
+  same group showed pre-existing run-to-run flakiness between 1118 and
+  1239 passes with zero code difference; this run's 1169 falls squarely
+  inside that already-documented noise band, so no regression (or
+  attributable improvement) is distinguishable from noise here. Zero
+  crashes.
+- `dEQP-VK.ssbo.layout.*` (5,275 cases): 227 pass (4.3%), 2033 fail
+  (38.5%), 3015 not-supported (57.2%) -- a small, real improvement over
+  L5's own recorded post-fix baseline for this group (223/5275, 4.2%): 4
+  more cases now pass, consistent with this row's own vector-struct-offset
+  fix (this group's own layout-sensitive struct/array shapes are exactly
+  where such a fix would show up). No crash, no failure count regression.
+
+No feature-bit or extension-advertisement change was made (this is an
+internal SPIR-V-to-LLVM conversion correctness fix only), so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` are unchanged.
