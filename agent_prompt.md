@@ -37,16 +37,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L12c:
+Please investigate and fix the issues tracked by milestone L5:
 
-> **Descriptor-set-layout/pipeline-layout support for
-> `VARIABLE_DESCRIPTOR_COUNT`**: `VkDescriptorSetLayoutBinding`'s own
-> `VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT` (declaring a binding's
-> real element count is deferred to descriptor-set-allocation time, via
-> `VkDescriptorSetVariableDescriptorCountAllocateInfo`) and the runtime
-> bounds-checking an unbounded array's own indexing needs at that point are not
-> implemented anywhere in `feme`'s Vulkan layer today; needed for
-> `overflow-unbounded-array.test` (and any other unbounded-array case) to
-> actually pass end-to-end, on top of L12a's conversion-layer fix and L12b's
-> feature-bit advertisement | L12b | `feme/lib/Vulkan/`
-> descriptor-set-layout/pipeline-layout sources (unconfirmed, not yet surveyed)
+> **6 failures are real internal crashes** ("PLEASE submit a bug report...",
+> i.e. an uncaught `llvm_unreachable`/assertion/signal, not a graceful
+> diagnostic) -- each needs its own reduction and root-cause pass; a crash
+> silently truncates or corrupts a suite run the same way roadmap C2 and H19p
+> already document for `deqp-vk`, so these are higher priority than an
+> equivalent graceful-failure bucket of the same size
