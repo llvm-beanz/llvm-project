@@ -37,24 +37,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L12:
+Please investigate and fix the issues tracked by milestone L12b:
 
-> **Indexing an unbounded (runtime-sized) array of resource handles
-> (`RWBuffer<int> Buf[]`) fails pipeline creation** with `'llvm.getelementptr'
-> op result #0 must be LLVM pointer type or LLVM dialect-compatible vector of
-> LLVM pointer type, but got '!llvm.target<"spirv.SignedImage", i32, 5, 2, 0, 0,
-> 2, 24>'` -- found as an L10 milestone-description correction:
-> `Feature/ResourceArrays/overflow-unbounded-array.test` was grouped under L10's
-> own `si32` family, but its real failure is structurally unrelated (an
-> `llvm.getelementptr` computing an offset directly into a resource-handle-typed
-> value, rather than a byte/element offset into ordinary memory, which the LLVM
-> dialect's own GEP verifier rejects since a handle is not a pointer). Distinct
-> from -- and a strictly larger gap than -- `SPIRVResourceLowering.cpp`'s
-> existing bounded-array-of-handles support (confirmed by checking
-> `classifyTexelBufferHandle`/`ResourceGlobalVariablePattern`'s own existing
-> array handling, which assumes a compile-time-constant array length
-> throughout); needs its own scoping pass to determine where a *runtime*-sized
-> handle array should be represented (most likely a descriptor-indexing-style
-> indirection through `VkDescriptorSetLayoutBinding`'s own
-> `VARIABLE_DESCRIPTOR_COUNT` flag plus a runtime bounds computation, rather
-> than the current fixed-stride GEP scheme) before it can be scoped as a fix
+> **Survey and implement the `VK_EXT_descriptor_indexing` (core-1.2-promoted)
+> Vulkan feature-bit cluster**, entirely `VK_FALSE` today (`descriptorIndexing`,
+> `shaderSampledImageArrayNonUniformIndexing`,
+> `descriptorBindingVariableDescriptorCount`, `runtimeDescriptorArray`, and ~16
+> sibling bits, `feme/lib/Vulkan/EntryPoints.cpp` ~line 1252-1273) -- needed
+> before an *unbounded* resource array (L12a's own `Count == 0` case) can be
+> exposed to a real application at all, since advertising
+> `runtimeDescriptorArray`/`descriptorBindingVariableDescriptorCount` `VK_TRUE`
+> without the descriptor-set-layout/allocation-time plumbing those bits promise
+> (see L12c) would be a conformance violation, not merely an omission
