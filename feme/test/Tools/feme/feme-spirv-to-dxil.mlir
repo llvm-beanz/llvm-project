@@ -26,14 +26,14 @@
 
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @gid built_in("GlobalInvocationId") : !spirv.ptr<vector<3xi32>, Input>
-  spirv.GlobalVariable @out bind(0, 1) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @out bind(0, 1) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>
   spirv.func @main() -> () "None" {
     %0 = spirv.mlir.addressof @gid : !spirv.ptr<vector<3xi32>, Input>
     %1 = spirv.Load "Input" %0 : vector<3xi32>
     %idx = spirv.CompositeExtract %1[0 : i32] : vector<3xi32>
-    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>
+    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>
     %c0 = spirv.Constant 0 : i32
-    %ac = spirv.AccessChain %2[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    %ac = spirv.AccessChain %2[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
     %v = spirv.Load "StorageBuffer" %ac : f32
     %one = spirv.Constant 1.0 : f32
     %v2 = spirv.FAdd %v, %one : f32

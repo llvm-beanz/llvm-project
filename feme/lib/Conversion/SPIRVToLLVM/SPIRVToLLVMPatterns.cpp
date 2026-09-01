@@ -142,7 +142,7 @@ struct BlockElement {
 bool isBufferBlockStorage(mlir::spirv::PointerType Type,
                           mlir::spirv::StructType Struct) {
   if (Type.getStorageClass() == mlir::spirv::StorageClass::StorageBuffer)
-    return true;
+    return Struct.hasDecoration(mlir::spirv::Decoration::Block);
   return Type.getStorageClass() == mlir::spirv::StorageClass::Uniform &&
          Struct.hasDecoration(mlir::spirv::Decoration::BufferBlock);
 }

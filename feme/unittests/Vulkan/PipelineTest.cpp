@@ -108,11 +108,11 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.2, [Shader], []> {
 /// normalizes the access (see that pass's header comment).
 const char *kStorageBufferShader = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
-  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
   spirv.func @main() -> () "None" {
-    %0 = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %0 = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
     %c0 = spirv.Constant 0 : i32
-    %ac = spirv.AccessChain %0[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %ac = spirv.AccessChain %0[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
     %v = spirv.Load "StorageBuffer" %ac : i32
     %c1 = spirv.Constant 1 : i32
     %v2 = spirv.IAdd %v, %c1 : i32
@@ -130,12 +130,12 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 /// compiled pipeline.
 const char *kPushConstantShader = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
-  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
   spirv.GlobalVariable @pc : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>
   spirv.func @main() -> () "None" {
-    %0 = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %0 = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
     %c0 = spirv.Constant 0 : i32
-    %ac = spirv.AccessChain %0[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %ac = spirv.AccessChain %0[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
     %1 = spirv.mlir.addressof @pc : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>
     %pcac = spirv.AccessChain %1[%c0] : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>, i32 -> !spirv.ptr<i32, PushConstant>
     %v = spirv.Load "PushConstant" %pcac : i32

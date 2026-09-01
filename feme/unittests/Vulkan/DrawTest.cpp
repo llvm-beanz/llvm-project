@@ -149,7 +149,7 @@ constexpr llvm::StringLiteral VertexStorageBufferSource = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
   spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
-  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
   spirv.func @main() -> () "None" {
     %vidp = spirv.mlir.addressof @vid : !spirv.ptr<i32, Input>
     %v = spirv.Load "Input" %vidp : i32
@@ -168,8 +168,8 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
     %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
     spirv.Store "Output" %posp, %p : vector<4xf32>
-    %bufp = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
-    %ac = spirv.AccessChain %bufp[%c0, %v] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %bufp = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
+    %ac = spirv.AccessChain %bufp[%c0, %v] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
     %eleven = spirv.Constant 11 : i32
     %vp1 = spirv.IAdd %v, %c1 : i32
     %val = spirv.IMul %vp1, %eleven : i32
@@ -190,14 +190,14 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 constexpr llvm::StringLiteral FragmentStorageBufferSource = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
-  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
   spirv.func @main() -> () "None" {
     %c = spirv.Constant dense<[0.0, 0.0, 1.0, 1.0]> : vector<4xf32>
     %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
     spirv.Store "Output" %p, %c : vector<4xf32>
-    %bufp = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %bufp = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
     %c0 = spirv.Constant 0 : i32
-    %ac = spirv.AccessChain %bufp[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %ac = spirv.AccessChain %bufp[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
     %fortytwo = spirv.Constant 42 : i32
     spirv.Store "StorageBuffer" %ac, %fortytwo : i32
     spirv.Return

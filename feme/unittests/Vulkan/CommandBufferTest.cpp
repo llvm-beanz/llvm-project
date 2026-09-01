@@ -67,18 +67,18 @@ const char *kSubgroupBuiltinShader = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, GroupNonUniform], []> {
   spirv.GlobalVariable @size built_in("SubgroupSize") : !spirv.ptr<i32, Input>
   spirv.GlobalVariable @lane built_in("SubgroupLocalInvocationId") : !spirv.ptr<i32, Input>
-  spirv.GlobalVariable @out bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @out bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
   spirv.func @main() -> () "None" {
     %0 = spirv.mlir.addressof @size : !spirv.ptr<i32, Input>
     %size = spirv.Load "Input" %0 : i32
     %1 = spirv.mlir.addressof @lane : !spirv.ptr<i32, Input>
     %lane = spirv.Load "Input" %1 : i32
-    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
     %c0 = spirv.Constant 0 : i32
     %c1 = spirv.Constant 1 : i32
-    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac0, %size : i32
-    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac1, %lane : i32
     spirv.Return
   }
@@ -94,20 +94,20 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, GroupNonUniform]
 const char *kStorageBufferCopyShader = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @gid built_in("GlobalInvocationId") : !spirv.ptr<vector<3xi32>, Input>
-  spirv.GlobalVariable @in bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
-  spirv.GlobalVariable @out bind(0, 1) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @in bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
+  spirv.GlobalVariable @out bind(0, 1) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
   spirv.func @main() -> () "None" {
     %0 = spirv.mlir.addressof @gid : !spirv.ptr<vector<3xi32>, Input>
     %1 = spirv.Load "Input" %0 : vector<3xi32>
     %idx = spirv.CompositeExtract %1[0 : i32] : vector<3xi32>
-    %2 = spirv.mlir.addressof @in : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %2 = spirv.mlir.addressof @in : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
     %c0 = spirv.Constant 0 : i32
-    %ac_in = spirv.AccessChain %2[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %ac_in = spirv.AccessChain %2[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
     %v = spirv.Load "StorageBuffer" %ac_in : i32
     %c1 = spirv.Constant 1 : i32
     %v2 = spirv.IAdd %v, %c1 : i32
-    %3 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
-    %ac_out = spirv.AccessChain %3[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %3 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
+    %ac_out = spirv.AccessChain %3[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac_out, %v2 : i32
     spirv.Return
   }
@@ -126,7 +126,7 @@ const char *kSampledImageShader = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
   spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
-  spirv.GlobalVariable @out bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @out bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>
   spirv.func @main() -> () "None" {
     %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
     %image = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
@@ -136,7 +136,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     %uv = spirv.Constant dense<[7.500000e-01, 7.500000e-01]> : vector<2xf32>
     %lod = spirv.Constant 0.000000e+00 : f32
     %texel = spirv.ImageSampleExplicitLod %si, %uv ["Lod"], %lod : !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32 -> vector<4xf32>
-    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>
+    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>
     %c0 = spirv.Constant 0 : i32
     %c1 = spirv.Constant 1 : i32
     %c2 = spirv.Constant 2 : i32
@@ -145,13 +145,13 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     %g = spirv.CompositeExtract %texel[1 : i32] : vector<4xf32>
     %b = spirv.CompositeExtract %texel[2 : i32] : vector<4xf32>
     %a = spirv.CompositeExtract %texel[3 : i32] : vector<4xf32>
-    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac0, %r : f32
-    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac1, %g : f32
-    %ac2 = spirv.AccessChain %2[%c0, %c2] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    %ac2 = spirv.AccessChain %2[%c0, %c2] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac2, %b : f32
-    %ac3 = spirv.AccessChain %2[%c0, %c3] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    %ac3 = spirv.AccessChain %2[%c0, %c3] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac3, %a : f32
     spirv.Return
   }
@@ -171,7 +171,7 @@ const char *kCubeArraySampledImageShader = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ImageCubeArray], []> {
   spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
   spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
-  spirv.GlobalVariable @out bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @out bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>
   spirv.func @main() -> () "None" {
     %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
     %image = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>
@@ -181,7 +181,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ImageCubeArray],
     %dirandlayer = spirv.Constant dense<[0.000000e+00, 0.000000e+00, 1.000000e+00, 1.000000e+00]> : vector<4xf32>
     %lod = spirv.Constant 0.000000e+00 : f32
     %texel = spirv.ImageSampleExplicitLod %si, %dirandlayer ["Lod"], %lod : !spirv.sampled_image<!spirv.image<f32, Cube, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>>, vector<4xf32>, f32 -> vector<4xf32>
-    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>
+    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>
     %c0 = spirv.Constant 0 : i32
     %c1 = spirv.Constant 1 : i32
     %c2 = spirv.Constant 2 : i32
@@ -190,13 +190,13 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ImageCubeArray],
     %g = spirv.CompositeExtract %texel[1 : i32] : vector<4xf32>
     %b = spirv.CompositeExtract %texel[2 : i32] : vector<4xf32>
     %a = spirv.CompositeExtract %texel[3 : i32] : vector<4xf32>
-    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac0, %r : f32
-    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac1, %g : f32
-    %ac2 = spirv.AccessChain %2[%c0, %c2] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    %ac2 = spirv.AccessChain %2[%c0, %c2] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac2, %b : f32
-    %ac3 = spirv.AccessChain %2[%c0, %c3] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    %ac3 = spirv.AccessChain %2[%c0, %c3] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac3, %a : f32
     spirv.Return
   }
@@ -213,12 +213,12 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ImageCubeArray],
 /// combination).
 const char *kPushConstantAddShader = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
-  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
   spirv.GlobalVariable @pc : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>
   spirv.func @main() -> () "None" {
-    %0 = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %0 = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
     %c0 = spirv.Constant 0 : i32
-    %ac = spirv.AccessChain %0[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %ac = spirv.AccessChain %0[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
     %v = spirv.Load "StorageBuffer" %ac : i32
     %1 = spirv.mlir.addressof @pc : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>
     %pcac = spirv.AccessChain %1[%c0] : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>, i32 -> !spirv.ptr<i32, PushConstant>
@@ -372,15 +372,15 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 const char *kUniformBufferReadShader = R"mlir(
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @cb bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.struct<(i32 [0], i32 [4])> [0])>, Uniform>
-  spirv.GlobalVariable @out bind(0, 1) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @out bind(0, 1) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
   spirv.func @main() -> () "None" {
     %0 = spirv.mlir.addressof @cb : !spirv.ptr<!spirv.struct<(!spirv.struct<(i32 [0], i32 [4])> [0])>, Uniform>
     %c0 = spirv.Constant 0 : i32
     %c1 = spirv.Constant 1 : i32
     %ac = spirv.AccessChain %0[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.struct<(i32 [0], i32 [4])> [0])>, Uniform>, i32, i32 -> !spirv.ptr<i32, Uniform>
     %v = spirv.Load "Uniform" %ac : i32
-    %1 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
-    %ac_out = spirv.AccessChain %1[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %1 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
+    %ac_out = spirv.AccessChain %1[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
     spirv.Store "StorageBuffer" %ac_out, %v : i32
     spirv.Return
   }
