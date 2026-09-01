@@ -37,35 +37,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L21:
+Can you work on H5 or other prerequisites blocking the H-series milestones?
 
-> **`feme::cpu::SIMDizePass`'s `checkVectorDecompositionSupported`-adjacent
-> preflight check (the loop over `instructions(*OldF)` in `SIMDize.cpp`, ~line
-> 650) rejects any divergent value of aggregate (struct or array) type outright,
-> with no component-decomposition path at all** -- found as an L20
-> milestone-description correction: with L20's own fix landed,
-> `Feature/StructuredBuffer/packed.test`'s own `Doggo Fido = Buf[GI]; ...;
-> Buf[GI] = Fido;` whole-struct-copy idiom now converts and lowers cleanly
-> through both the SPIR-V-to-LLVM layer (L19) and the CPU resource-lowering pass
-> (L20), producing a whole-`Doggo`-struct value that is itself divergent (loaded
-> through `GI`, `SV_GroupIndex`, a per-invocation, per-lane-varying index) --
-> but `feme-cpu-simdize` (the pass that widens a divergent scalar/vector value
-> into its own per-lane-packed `W`-wide form) has never had any aggregate-typed
-> case at all: its own preflight loop bails immediately with `'function \'main\'
-> has a divergent value ... of aggregate type; component decomposition is not
-> yet supported (roadmap milestone 7 deviation)'` the moment it sees one,
-> confirmed directly via `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader`. Distinct
-> from, and blocking end-to-end pass independently of, L20's own scope (the CPU
-> resource-lowering pass's own raw-load/store mangling) and L15's own scope (a
-> `feme.cpu.masked.load/store.*` call producing a *vector* result, not a
-> struct/array): this is a generic, long-standing scope limit in the
-> wave-widening pass itself, for *any* divergent aggregate value, not specific
-> to a resource load. Needs its own scoping pass: likely giving the
-> divergent-aggregate value its own per-field/per-element decomposition
-> mirroring `widenScalarizedFallback`'s existing per-lane clone-and-reassemble
-> (each leaf field/element widened independently, exactly as if it were its own
-> separate divergent scalar/vector value), reassembled back into the widened
-> aggregate's own per-lane structure with `insertvalue`, and checking whether
-> any further consumer of a divergent aggregate (e.g. an
-> `extractvalue`/`insertvalue`-chain into an individual field) needs its own new
-> recognized shape once the preflight bail is lifted
+> **Geometry stage.** Same rejection as H4, same milestone (G5), but an
+> independent feature bit (`geometryShader`), an independent limit block
+> (`maxGeometry*`), stream output, and `multiviewGeometryShader` now that H2 has
+> landed. Whole `dEQP-VK.geometry` group (partially done, and broken down below
+> the same way H4 was: H5a closes the execution-mode half of "reflect a geometry
+> entry point at all" (see H5a's own row for what remains of that -- the
+> per-vertex input addressing gap it found is H5b, a genuinely new piece of
+> machinery neither H4's tessellation precedent nor G5's own wrapper work
+> needed, since a hull control-point phase's own per-control-point inputs are
+> restricted to "this invocation's own", never an arbitrary dynamically-indexed
+> one the way a geometry entry's `gl_in[i]` is). `dEQP-VK.geometry.*` is
+> unaffected so far, still 0 `Pass`/0 `Fail`/200 `NotSupported` -- correctly so,
+> since `CanonicalizeStagePass::run` deliberately does not yet accept
+> `ShaderStage::Geometry` (H5a's own report entry explains why not doing so was
+> the right call, not an oversight). This row stays open until H5a-H5e all
+> close)
