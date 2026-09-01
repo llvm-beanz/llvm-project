@@ -17828,3 +17828,48 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes yet:
 `shaderClipDistance`/`shaderCullDistance` remain `VK_FALSE` (H13a, H13c, and
 the newly-found H13e all still block a real pass), per `PhysicalDeviceInfo
 .cpp`'s own standing comment.
+
+## Roadmap L1/L4: real `deqp-vk` validation after offload-test-suite fixes
+
+**Scope.** This session's own two fixes (roadmap L1, `SIMDize.cpp`'s
+vectorizable-intrinsic-call uniformity gate; L4,
+`SPIRVPushConstantLowering.cpp`'s `ConstantExpr`-GEP recognition) were both
+found and fixed via `offload-test-suite`'s own `check-hlsl-feme-vk` target,
+not a real `deqp-vk` run. Per this project's own standing instruction to run
+the real Vulkan CTS after each change, ran a targeted
+`dEQP-VK.pipeline.monolithic.push_constant.*` sweep (the group most directly
+exercising L4's own fix, and the group most likely to also exercise L1's
+widening fix for any push-constant-driven vertex/fragment shader) against
+the real feme Vulkan ICD:
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.pipeline.monolithic.push_constant.*" --deqp-log-filename=pushconst_h_offload.qpa
+```
+
+**Finding.** The sweep's own process exits silently (no crash message, no
+further log output, exit code textually reported as success only because it
+is piped through `tail`) partway through, immediately after printing
+`dEQP-VK.pipeline.monolithic.push_constant.graphics_pipeline
+.count_1_shader_vert_frag_command2`'s own test-case name -- confirmed via a
+standalone single-case re-run (`--deqp-case=` narrowed to just this one
+case) to reproduce identically and immediately. Confirmed **not** a
+regression from either of this session's own two fixes: reproduced
+identically with both `SIMDize.cpp` and `SPIRVPushConstantLowering.cpp`
+`git checkout`'d back to their pre-session state (commit `37b4b0cdfcfc`) and
+`feme`/`feme_vulkan`/`feme-opt` rebuilt, so this is a pre-existing gap,
+newly discovered rather than newly caused by this session's own work.
+Tracked as new roadmap row L8 rather than blocking either L1 or L4, both of
+which close on their own already-measured `check-hlsl-feme-vk` terms.
+
+**No further real `deqp-vk` sweep run this session** beyond this one
+targeted group: both of this session's own fixes are internal
+compiler-correctness fixes (a widening-uniformity gate, a push-constant GEP
+discovery gap) with no feature or extension surface, so a broader sweep is
+unlikely to surface anything beyond what `check-hlsl-feme-vk` (which exists
+specifically to exercise the HLSL/DXC-authored shapes these two bugs live
+in) already measured directly; `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no changes for either fix, confirmed
+again here.
