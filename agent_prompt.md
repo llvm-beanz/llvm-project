@@ -37,25 +37,29 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L14:
+Please investigate and fix the issues tracked by milestone L13a:
 
-> **Re-audit which of this document's own "confirmed via a real
-> `check-hlsl-feme-vk`/`feme-vk` rerun" claims (L2 onward) actually ran against
-> a correctly-selected `feme_vulkan` ICD**, discovered as an L6
-> milestone-description correction: this container's system-wide
-> `VK_ICD_FILENAMES` silently defaults to Mesa's `lavapipe` software driver
-> rather than `feme`'s own (`feme/.instructions.md`'s new "Running `feme-vk` /
-> offload-test-suite against the real driver" section, added this same session,
-> documents the required override and a `vulkaninfo`-based sanity check), so any
-> session's own `llvm-lit`/`check-hlsl-feme-vk` invocation that omitted it would
-> have silently measured `lavapipe`'s own (real, mature, and entirely unaffected
-> by any `feme` source change) pass/fail counts instead -- a risk this row's own
-> investigation fell into mid-session before catching and correcting it (see
-> L6's own row above). A coarse cross-check this session found L5's own recorded
-> 133/224 baseline plausible (consistent, modulo the L6-L13 fixes landed since,
-> with this row's own freshly-measured, correctly-ICD-selected 137/220
-> pre-L6-fix count), but a real per-row audit -- rerunning each of
-> L2/L9/L10/L11/L12(a/b/c)/L13's own named "before"/"after" cases individually
-> against a correctly-selected `feme_vulkan` ICD and diffing against each row's
-> own recorded numbers -- has not been done, and is the actual scope of this
-> milestone
+> **`convertOffsetStructTypeIgnoringDecorations`'s own "tight-vector retry"
+> fallback (`SPIRVToLLVMPatterns.cpp`) does not handle a fixed-size array member
+> of an identified struct whose declared per-element `stride` does not match
+> that struct's own natural (ABI) size** -- e.g. `!spirv.array<2 x
+> !spirv.struct<X, (si32 [0])>, stride=16>`, a real
+> `-fvk-use-dx-layout`/`-fvk-use-scalar-layout` shape whenever an
+> array-of-structs member is immediately followed by another member needing
+> 16-byte alignment. Already anticipated verbatim in that function's own doc
+> comment ("tracked separately, see roadmap L13a") when L13 landed, but never
+> actually added to this document until this L14 audit restored it (a pure
+> citation-vs-row bookkeeping gap, not new work L14 itself discovered).
+> Confirmed via this L14 audit's own real `feme-opt` reduction of
+> `Feature/CBuffer/structs.test`'s own SPIR-V (and via
+> `Feature/CBuffer/array-of-structs.test`/`dynamic-struct.test`/`Feature/StructuredBuffer/packed.test`,
+> all four hitting the identical `failed to legalize operation
+> 'spirv.AccessChain'` error) to be the exact, complete remaining gap in L13's
+> own scope: with this fixed, all four of L13's own originally-named cases still
+> failing today should pass. Needs its own scoping pass: likely a further
+> fallback alongside the existing tight-vector-array retry -- representing the
+> identified struct's *own* body as a tightly-packed byte-array stand-in
+> stride-wise (mirroring `getTightVectorArrayType`'s own vector case) whenever
+> its natural size undershoots the declared stride, reassembled the same way
+> `CompositeConstructPattern`'s own struct case already reassembles a
+> tight-vector substitution today
