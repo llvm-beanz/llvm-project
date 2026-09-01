@@ -51340,3 +51340,125 @@ Struck through both L12c and its parent L12 on the roadmap, since every
 one of L12's own sub-rows (a, b, c) is now done and the real
 `overflow-unbounded-array.test` this whole sub-tree traces back to passes
 end to end.
+
+# Session: Roadmap L5 — VulkanLayoutUtils::decorateType crash on nested identified struct
+
+L5 asked me to investigate 6 real internal crashes ("PLEASE submit a bug
+report...") in the `check-hlsl-feme-vk` offload-test-suite run, each
+needing its own reduction and root-cause pass, and noted these were
+higher priority than an equivalent graceful-failure bucket since a crash
+can silently corrupt a whole suite run (same concern C2/H19p already
+document for `deqp-vk`).
+
+First step was just running the suite fresh and grepping the log for
+`"PLEASE submit a bug report"` — found exactly 6 matches, matching the
+milestone's own stated count (a nice sanity check that this row had been
+correctly counted before, unlike several L-rows earlier in this project
+whose original counts turned out stale). All 6 stack traces looked
+identical: a SIGSEGV inside `mlir::spirv::RuntimeArrayType::get`/
+`ArrayType::get`, called from `mlir::VulkanLayoutUtils::decorateType`,
+reached via upstream MLIR's generic `AccessChainPattern`/
+`convertStructTypeWithOffset` struct-conversion callback.
+
+Reduced from scratch rather than trusting the stack trace alone: wrote a
+minimal `RWStructuredBuffer<S2> Out` (`S2 { int3 Legs; int TailState; }`)
+HLSL shader, compiled with plain `dxc -spirv -T cs_6_0` (no special
+layout flags), and ran it through `offloader -debug-layer` directly.
+Reproduced the exact same crash. Attached `gdb -p <pid> -batch -ex bt`
+mid-crash — this looked like it hung for a while (process sat in `S`
+"sleeping" state on `do_wait`), which worried me at first, but it turned
+out LLVM's own crash handler spawns a symbolizer subprocess to pretty-
+print the backtrace before exiting, which is just slow (~60-90s), not
+actually stuck. Lesson for next time: if I need the stack trace again,
+just read it out of an already-captured lit log instead of re-attaching
+gdb, since the log already has it and is instant.
+
+Root cause, once I had a clean local repro: `decorateType(spirv::StructType,
+...)` has a documented, deliberate `nullptr` return for an *identified*
+(named) struct nested inside another type — MLIR uniques identified
+structs by name, so it's not safe to hand back "the same struct, but with
+different offsets" a second time. That's a correct design choice. The bug
+is that none of the five call sites that recurse into `decorateType` (the
+struct-member loop itself, plus the `VectorType`/`ArrayType`/`MatrixType`/
+`RuntimeArrayType` overloads) ever checked for that `nullptr` before
+feeding it straight into a `*Type::get(...)` constructor, which
+dereferences it internally via `.getContext()`. A textbook "the callee
+documents a nullable return, the caller doesn't check" bug.
+
+The "why only 6, not dozens" question took some digging into FeMe's own
+`SPIRVToLLVMPatterns.cpp` block-conversion pattern. It turns out most
+`RWStructuredBuffer<T>`/`cbuffer` shapes never reach the buggy upstream
+fallback at all — FeMe has its own dedicated pattern
+(`convertOffsetStructTypeIgnoringDecorations`/`convertBlockType`) that
+intercepts them first, and only falls through to upstream's generic path
+when that pattern's own natural-ABI-alignment check fails (e.g. an
+odd-width vector like `int3`, or `-fvk-use-scalar-layout`/
+`-fvk-use-dx-layout` output). I confirmed this empirically: the exact same
+`S2` struct shape with all-4-wide vectors (`float4`/`int4`) didn't crash,
+but swapping in `int3`/`int2` did. Every HLSL struct is "identified" in
+MLIR (since `dxc` always emits `OpName`), so this isn't really a rare
+shape — it's specifically gated behind FeMe's own pattern rejecting it
+first, which is why the milestone's count was a small, specific 6 rather
+than "every structured-buffer test."
+
+Fix: five `if (!memberType) return nullptr;` guards in
+`LayoutUtils.cpp`, one per recursive call site, converting the crash into
+upstream's own already-correctly-handled graceful failure path (confirmed
+`convertStructTypeWithOffset` already treats `type != decorateType(type)`
+— which is trivially true when `decorateType` returns `nullptr` — as an
+ordinary `notifyMatchFailure`). This is purely additive null-guarding of
+an existing, intentional failure signal; I don't think it changes behavior
+for any shape that previously worked, since a non-null path through these
+functions is completely unaffected.
+
+Verification: rebuilt, re-ran the minimal repro — no crash, clean "failed
+to legalize operation 'spirv.AccessChain'" diagnostic instead. Ran all 6
+originally-crashing lit tests directly: 0 crashes, all 6 still `FAIL` (now
+gracefully) with the same diagnostic. This matches L5's actual ask (kill
+the crash) — it does *not* make these 6 tests pass, since the underlying
+"convert a nested identified-struct-in-array shape at all" gap is a
+separate, larger scope. I split that out as a new roadmap row (L13)
+rather than pretending L5 is "not really done" — L5's own text was
+specifically and only about the crash, and the crash is gone.
+
+Added a lit regression test
+(`spirv-to-llvm-nested-identified-struct-invalid.mlir`) reproducing the
+exact runtime-array-of-identified-struct shape directly in MLIR syntax
+(built by first running the real reduced `.spv` through
+`feme-translate --import-spirv` to get correct, valid MLIR syntax for an
+identified struct, since I wasn't fully sure of the right spelling by
+hand) and confirming it now fails cleanly under
+`--verify-diagnostics` instead of crashing. I also tried a fixed-size
+(non-runtime) array-of-identified-struct variant as a second test case,
+but it turned out FeMe's own dedicated pattern already handles that shape
+fine (a single-`i32`-member struct's natural offset matches), so it
+wasn't actually exercising the bug — removed it rather than keep a
+misleading always-passing test.
+
+`check-feme` passes in full (2281/2308, up by exactly this row's 1 new
+test, 0 regressions). A full `feme-vk` offload-test-suite re-run shows
+byte-for-byte identical totals to the pre-fix baseline (133/266/26/224/1)
+with 0 crash matches (down from 6).
+
+For the Vulkan CTS side, `LayoutUtils.cpp` is shared infrastructure (used
+for any SPIR-V struct/array/vector/matrix layout conversion, not just
+FeMe's HLSL path), so I did a real regression sweep on `dEQP-VK.ubo.*`
+and `dEQP-VK.ssbo.layout.*` before/after (temporarily reverting just this
+row's file via `git checkout HEAD~1 --`). This surfaced something worth
+recording: repeated runs of the *identical* binary (no code difference at
+all) gave pass counts varying by 50-120 cases out of ~13,240 — this suite
+has real, pre-existing run-to-run flakiness at this scale, most likely
+some timing- or floating-point-precision-sensitive subset of cases. That
+meant a naive single-run before/after diff would have been meaningless
+noise, and I nearly mis-read it as a regression on the first pass (pre-fix
+run 1 showed 1224 pass, post-fix run 1 showed 1118 — a scary-looking drop
+until I ran each side twice more and saw the same magnitude of variance
+with zero code change). Recorded this explicitly in `VulkanCTSReport.md`
+so a future session doesn't get fooled by the same noise, and used the
+one clean, deterministic signal available (0/650 crashes, confirmed
+repeatably) as the actual regression evidence for this row instead.
+
+No feature-bit or extension changes this session — purely an internal
+MLIR correctness fix, so `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` were left untouched (confirmed, not just
+assumed).
