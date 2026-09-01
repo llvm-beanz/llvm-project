@@ -37,20 +37,35 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L2:
+Please investigate and fix the issues tracked by milestone L9:
 
-> **A `gpu-exec: error: Failed to create compute pipeline. (VkResult = -3)`
-> (`VK_ERROR_OUT_OF_HOST_MEMORY`'s numeric value, but almost certainly masking a
-> real, more specific internal failure this ICD reports generically) bucket** --
-> re-counted with a fresh, correctly-`VK_ICD_FILENAMES`-absolute-pathed
-> `check-hlsl-feme-vk` re-run after L1/L4 landed: 175 distinct failing cases hit
-> this message (184 before L1/L4, i.e. L1/L4's own fixes only removed 9 of this
-> bucket's cases in passing; this row's own original "47" estimate was measured
-> with a different, since-lost counting method and should be treated as stale --
-> 175/184 is this row's own first reliably-reproducible count). Still not
-> triaged past the raw `VkResult`; needs the same real-ICD-plus-diagnostic
-> technique every H-row above used (temporarily instrumenting the
-> compute-pipeline-creation path with a debug print of the real internal error
-> before it collapses to this generic code) to find whether this is one dominant
-> root cause or several -- by far the largest single remaining bucket, so
-> highest-priority to scope next
+> **`SPIRVResourceLoweringPass` never normalizes a single-channel-format
+> texel-buffer (`Dim::Buffer` image) store**, discovered via L2's own triage:
+> `classifyTexelBufferHandle`/`hasOnlySupportedUses`/`isSupportedTexelElementType`
+> (`SPIRVResourceLowering.cpp`) already correctly treat every `OpImageRead` as
+> returning a full `<4 x T>` regardless of the underlying format's real channel
+> count (per SPIR-V's own spec, matching the header comment's already-recorded
+> V4 scope note) -- but a **write** to a single-channel format (e.g.
+> `R32i`/`R32f`, `RWBuffer<int>`/`RWBuffer<float>`'s own SPIR-V shape) is not
+> similarly widened by `dxc`/MLIR's own SPIR-V-to-LLVM conversion: reduced
+> directly (a two-line `RWBuffer<int> In/Out; Out[0] = In[0];` shader,
+> `feme-translate --import-spirv`/`feme-opt --feme-convert-spirv-to-llvm`) to
+> `llvm.store %10, %18 : i32, !llvm.ptr` -- a **scalar** `i32` store, not the
+> `<4xi32>` the load side already produces and this pass's own
+> `isSupportedTexelElementType` requires -- so this handle is left un-normalized
+> entirely and falls through to `UnsupportedOps.cpp`'s generic "register-bound
+> resource handle ... cannot normalize into a heap access" diagnostic. Fixing
+> this needs more than just accepting the narrower scalar type at the IR-shape
+> check: `FeMeRuntimeCPU.c`'s own `femeCpuResourceStoreTypedV4I32`/`V4F32`
+> helpers always write a full 16-byte (`<4 x T>`) element stride, which would be
+> wrong for a format whose real per-element stride is 4 bytes (a single channel)
+> -- needs its own format-aware, narrower-than-`<4 x T>` runtime store (and,
+> symmetrically, load) helper pair, exactly the "physically-narrower-than-`<4 x
+> T>` per-format padding this milestone does not add" the pass's own
+> pre-existing header comment (and `FeMeVulkanDesign.md`'s "V4 status note")
+> already flags as deliberately out of scope -- so this is confirmed,
+> scoped-out-until-now work, not a surprise gap. Accounts for the entire
+> `Basic/Matrix/*.test` family's own failures (all of which use `RWBuffer<int>`
+> purely as their I/O mechanism, unrelated to matrices themselves) plus several
+> single-channel `Feature/Textures`/`Feature/StructuredBuffer`/`Feature/CBuffer`
+> cases
