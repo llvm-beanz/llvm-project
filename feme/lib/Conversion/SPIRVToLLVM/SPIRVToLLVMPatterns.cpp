@@ -717,6 +717,61 @@ public:
   }
 };
 
+/// `mlir::BranchConditionalConversionPattern` (`mlir/lib/Conversion/
+/// SPIRVToLLVM/SPIRVToLLVM.cpp`), the upstream pattern for
+/// `spirv.BranchConditional`, builds its `llvm.cond_br`'s true/false
+/// successor operands directly from `op.getTrueBlockArguments()`/
+/// `op.getFalseBlockArguments()` -- the *original* op's own raw operand
+/// accessors -- rather than `adaptor.getTrueTargetOperands()`/
+/// `adaptor.getFalseTargetOperands()`, the dialect conversion's own
+/// remapped (type-converted) operands. This is the identical class of bug
+/// roadmap L10's `IntegerGroupNonUniformReducePattern` above fixed for
+/// `spirv.GroupNonUniform*`'s reduce operand/result: whenever a successor
+/// block argument being passed along a conditional branch is itself an
+/// `si32`/`ui32` value (HLSL's `int`/`uint` distinction, preserved in
+/// MLIR's SPIR-V dialect but not a valid LLVM dialect type on its own),
+/// the *original*, un-remapped SSA value still carries that
+/// dialect-conversion-illegal type, producing the dialect conversion
+/// legalizer's own "operand #1 must be variadic of LLVM dialect-compatible
+/// type, but got 'si32'" diagnostic on the freshly built `llvm.cond_br`
+/// (roadmap L18, reduced from the real
+/// `Feature/StructuredBuffer/packed.test`: its `if (Fido.TailState == 0)`
+/// merges an `si32`-typed `TailState` value back into `^bb1` via exactly
+/// this shape). Registered at `FeMeBenefit` so it wins over the upstream
+/// pattern for every `spirv.BranchConditional`; unlike
+/// `IntegerGroupNonUniformReducePattern` (which only needs to special-case
+/// nine specific integer-typed ops), this fix applies uniformly to every
+/// `spirv.BranchConditional` regardless of its successor operands' types,
+/// since simply using the adaptor's own already-correctly-remapped
+/// operands in place of the op's raw ones is a strict improvement with no
+/// downside for any other case.
+class BranchConditionalPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::BranchConditionalOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::BranchConditionalOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::BranchConditionalOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    // Mirrors upstream's own branch-weights handling verbatim; only the
+    // successor operands below differ.
+    mlir::DenseI32ArrayAttr BranchWeights = nullptr;
+    if (auto Weights = Op.getBranchWeights()) {
+      llvm::SmallVector<int32_t> WeightValues;
+      for (auto Weight : Weights->getAsRange<mlir::IntegerAttr>())
+        WeightValues.push_back(Weight.getInt());
+      BranchWeights = mlir::DenseI32ArrayAttr::get(getContext(), WeightValues);
+    }
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(
+        Op, Adaptor.getCondition(), Adaptor.getTrueTargetOperands(),
+        Adaptor.getFalseTargetOperands(), BranchWeights, Op.getTrueBlock(),
+        Op.getFalseBlock());
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.Dot` -- which, like `spirv.Switch` above, MLIR has no
 /// pattern for at all -- into a per-lane `llvm.intr.fmuladd` chain, mirroring
 /// `feme::dxil::expandFDot`'s expansion of the analogous (post-raising)
@@ -4613,9 +4668,10 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const FastMathDefaultMap &FastMathDefaults) {
   Patterns.add<
       ArrayConstantPattern, AssumeTrueConversionPattern,
-      BuiltInAddressOfPattern, BuiltInAccessChainPattern,
-      BuiltInGlobalVariablePattern, BlockAccessChainPattern,
-      CompositeConstructPattern, DemoteToHelperInvocationConversionPattern,
+      BranchConditionalPattern, BuiltInAddressOfPattern,
+      BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
+      BlockAccessChainPattern, CompositeConstructPattern,
+      DemoteToHelperInvocationConversionPattern,
       DotConversionPattern, EmitVertexConversionPattern,
       EndPrimitiveConversionPattern, ExecutionModePattern,
       ExecutionModeIdPattern, ExpectConversionPattern, ImageFetchPattern,
