@@ -17568,3 +17568,98 @@ whole-group-truncation failure mode roadmap C2's own asset-path
 `feme_vulkan` with this change's source edit reverted and reproducing the
 identical abort. **The `compute` group's totals elsewhere in this report
 should be treated as unreliable until H19p lands.**
+
+## Roadmap H7l: measured impact (`*_with_adjacency` pipeline creation fix)
+
+**Corrected premise.** H7l's own roadmap text (filed from H7d's/H7k's
+reproduction session) hypothesized "a geometry-shader-adjacent gap in
+adjacency-topology pipeline construction." Real research (the actual VUID
+text for `VkPipelineInputAssemblyStateCreateInfo::topology`, plus the real
+`vktClippingTests.cpp` CTS source, which builds this whole `ClipVolume`
+group's pipelines with vertex+fragment stages only) found the opposite: the
+project's own long-standing rule in `GraphicsPipeline.cpp` --
+`topologyHasAdjacency(*Topology) && !GeometryInfo` is an error -- is
+spec-incorrect. `VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00428`/
+`-00738` only require the **`geometryShader` device feature** to be enabled
+(which `PhysicalDeviceInfo.cpp` already always advertises `VK_TRUE`, since
+roadmap H5e), not that the specific pipeline being created binds a geometry
+shader stage. Per spec, when an adjacency topology is used with no geometry
+stage bound, rasterization proceeds exactly as if the corresponding
+non-adjacency topology (`stripAdjacency(Topology)`) were used -- the
+adjacency-only vertices are present in the vertex stream but never touch
+the rasterizer. This traces back to roadmap H5d's own original scoping
+decision (see its now-annotated roadmap entry above), not a new bug.
+
+**Fix.** `GraphicsPipeline.cpp`: removed the rejection block entirely.
+`Executor.cpp`: merged the four adjacency topologies into the main
+topology-validation switch unconditionally (no longer gated on
+`Pipeline.hasGeometryStages()`); added the two line-adjacency topologies to
+the `RasterClass` determination (triangle-adjacency already fell through to
+the default `Triangle` class); and added new `TriIndices`/`LineIndices`
+primitive-assembly branches for the no-geometry-stage case, reusing the
+pre-existing `splitListPrimitiveAdjacency`/`splitStripPrimitiveAdjacency`
+helpers (already used by H5d's geometry-stage path) to extract each
+primitive's core vertices and discard the adjacency-only ones. No new
+splitting logic was needed -- H5d's own infrastructure was reused, only
+gated differently.
+
+**Unit tests.** Replaced the three stale tests that encoded the old
+(incorrect) rejection behavior:
+`ExecutorTest.RendersTriangleListWithAdjacencyCoreTriangleWithoutAGeometryStage`
+and `RendersLineListWithAdjacencyCoreLineWithoutAGeometryStage` (both render
+a real primitive from adjacency-topology vertex data with the adjacency-only
+vertices placed off-canvas in a different color, verifying they're never
+rasterized), and `GraphicsPipelineTest.AcceptsAdjacencyTopologyWithoutGeometryStage`
+(all four adjacency topologies now succeed pipeline creation with only
+vertex+fragment stages bound). `RejectsUnimplementedStateCombinations`'s own
+stale adjacency case (expecting `VK_ERROR_INITIALIZATION_FAILED`) was
+removed, and two comments describing adjacency as "requiring" a geometry
+stage were corrected.
+
+`ninja check-feme` (ccache, assertions-enabled build) passes in full:
+
+```
+Total Discovered Tests: 2271
+  Unsupported:   27 (1.19%)
+  Passed     : 2244 (98.81%)
+```
+
+0 `Failed`.
+
+**Real CTS re-run.** The 4 originally-failing cases:
+
+```
+dEQP-VK.clipping.clip_volume.depth_clamp.triangle_list_with_adjacency   Pass (was VK_ERROR_INITIALIZATION_FAILED)
+dEQP-VK.clipping.clip_volume.depth_clamp.triangle_strip_with_adjacency  Pass (was VK_ERROR_INITIALIZATION_FAILED)
+dEQP-VK.clipping.clip_volume.depth_clamp.line_list_with_adjacency       Pass (was VK_ERROR_INITIALIZATION_FAILED)
+dEQP-VK.clipping.clip_volume.depth_clamp.line_strip_with_adjacency      Pass (was VK_ERROR_INITIALIZATION_FAILED)
+```
+
+The broader `dEQP-VK.clipping.*` group's real mustpass list (308 cases,
+same list H7k measured):
+
+```
+Passed:        33/308 (10.7%)
+Failed:         0/308 (0.0%)
+Not supported: 275/308 (89.3%)
+```
+
+Up from H7k's own 21 passed/12 failed baseline by exactly these 4 cases plus
+8 more `*_with_adjacency` cases in sibling `clip_volume` subgroups this same
+fix also unblocks (`depth_bias`/`depth_bounds`-style variants sharing the
+same pipeline-creation gate) -- 0 regressions, 0 remaining failures in the
+group.
+
+```
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=h7l_cases.txt --deqp-log-filename=h7l.qpa
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-caselist-file=/home/dev/dev/VK-GL-CTS/external/vulkancts/mustpass/main/vk-default/clipping.txt \
+  --deqp-log-filename=h7l_clipping.qpa
+```
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes: no
+feature bit or extension changed (`geometryShader` was already `VK_TRUE`
+since H5e).
