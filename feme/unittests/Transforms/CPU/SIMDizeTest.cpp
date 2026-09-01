@@ -1173,6 +1173,64 @@ TEST(SIMDizeTest, DecomposesHomogeneousVectorizableIntrinsicCall) {
   EXPECT_EQ(MaxNumCount, 4u);
 }
 
+TEST(SIMDizeTest, LeavesUniformVectorizableIntrinsicCallUnchanged) {
+  // Roadmap H6m: a homogeneous "trivially vectorizable" intrinsic call
+  // (`llvm.fabs.v3f32`) whose operand is *uniform* (not divergent) must be
+  // left exactly as it is, exactly like any other uniform instruction --
+  // "Uniform: leave it exactly as it is" in "Phase 4: Widening" -- rather
+  // than being unconditionally decomposed into per-component wide vectors
+  // the way `DecomposesHomogeneousVectorizableIntrinsicCall`'s *divergent*
+  // one is. Reduced from a real `dEQP`-adjacent HLSL
+  // `Feature/HLSLLib/abs.32.test` failure whose exact IR shape is
+  // `{abs(In.xyz), abs(In.w)}`: `FunctionWidener::widenInstruction` used to
+  // widen this call's vector-typed elementwise-vectorizable-intrinsic shape
+  // unconditionally, ahead of the general `isDivergentAtDef` gate every
+  // other producer/consumer shape respects, erasing and replacing a
+  // uniform call whose own `extractelement` users -- correctly gated on
+  // uniformity, and so left unchanged -- kept referencing the
+  // since-erased value, observed as a `poison` read (see
+  // `simdize-vector-intrinsic-uniform.ll` and `agent_thoughts.md` for the
+  // full reduction).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %fabs = call <3 x float> @llvm.fabs.v3f32(
+          <3 x float> <float -1.000000e+00, float -2.000000e+00, float -3.000000e+00>)
+      %e0 = extractelement <3 x float> %fabs, i32 0
+      %e1 = extractelement <3 x float> %fabs, i32 1
+      %e2 = extractelement <3 x float> %fabs, i32 2
+      %v0 = insertelement <3 x float> poison, float %e0, i32 0
+      %v1 = insertelement <3 x float> %v0, float %e1, i32 1
+      %v2 = insertelement <3 x float> %v1, float %e2, i32 2
+      ret void
+    }
+    declare <3 x float> @llvm.fabs.v3f32(<3 x float>)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned FAbsV3Count = 0;
+  for (Instruction &I : instructions(F)) {
+    // The uniform `fabs` call, and every one of its `extractelement` users,
+    // must survive completely unwidened -- no `poison` read anywhere.
+    if (auto *EE = dyn_cast<ExtractElementInst>(&I))
+      EXPECT_FALSE(isa<PoisonValue>(EE->getVectorOperand()));
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    Function *Callee = CI->getCalledFunction();
+    if (Callee && Callee->getIntrinsicID() == Intrinsic::fabs &&
+        CI->getType() == FixedVectorType::get(Type::getFloatTy(Ctx), 3))
+      ++FAbsV3Count;
+  }
+  EXPECT_EQ(FAbsV3Count, 1u);
+}
+
 TEST(SIMDizeTest, DecomposesInsertElementChainIntoImageStore) {
   // Roadmap H19a: a `feme.cpu.image.store.2d.*` call's `Texel` operand is
   // vector-typed (unlike every other operand `widenImageCall` widens), so

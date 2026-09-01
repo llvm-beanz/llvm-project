@@ -2250,9 +2250,22 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
         })) {
       // Roadmap H6g-b-a-i-a-i-b: `llvm.minnum`/`llvm.maxnum`/`llvm.smin`/
       // `llvm.smax`/... over an already-decomposed divergent vector
-      // operand (see `widenVectorElementwise`).
-      widenVectorElementwise(*CI, Builder);
-      return true;
+      // operand (see `widenVectorElementwise`). Gated on `isDivergentAtDef`
+      // exactly like every other producer/consumer shape below (roadmap
+      // H6m): unlike the resource/image/masked-call shapes above, a
+      // vector-typed elementwise-vectorizable intrinsic call has an
+      // ordinary, un-widened equivalent when uniform (e.g. `{abs(v.xyz),
+      // abs(v.w)}`'s `llvm.fabs.v3f32` over a uniform load, confirmed by
+      // reducing a real `dEQP`-adjacent HLSL `abs.32.test` failure down to
+      // its exact IR shape) -- widening it unconditionally here, ahead of
+      // the general uniformity gate below, erased and replaced a value
+      // that its own `extractelement` users, correctly gated on
+      // uniformity, left unchanged, leaving them referencing a
+      // since-erased (RAUW'd-to-poison) operand.
+      if (UI.isDivergentAtDef(CI)) {
+        widenVectorElementwise(*CI, Builder);
+        return true;
+      }
     }
     if (std::optional<MatchedMaskedMemOp> Matched = matchMaskedLoad(*CI)) {
       widenMaskedLoad(*CI, *Matched, Builder);
