@@ -17955,3 +17955,61 @@ throughout.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed again:
 no feature or extension bit changed by this fix (only an existing
 mandatory-format's texel-buffer usability), so no update needed in either.
+
+## Roadmap L10: real `deqp-vk` sweep after push-constant/groupshared/si32 fixes
+
+```
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.subgroups.arithmetic.compute.subgroupadd_int*" \
+  --deqp-log-filename=subgroupadd.qpa
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.compute.pipeline.basic.shared_var_*" \
+  --deqp-log-filename=sharedvar.qpa
+```
+
+L10's three sub-issues were each root-caused and fixed against a real
+`offload-test-suite` HLSL-suite case (their own primary reproduction, per
+the roadmap row's own write-up); this sweep checked whether any real
+`deqp-vk` case independently exercises the same code paths.
+
+**`si32`/`ui32` `GroupNonUniform*` integer-reduce fix.** The most direct
+candidate, `dEQP-VK.subgroups.arithmetic.compute.subgroupadd_int*` (8
+cases, `int`/`int8_t`/`int16_t`/`int64_t`, each with a
+`_requiredsubgroupsize` variant), is entirely `NotSupported` ("Device does
+not support subgroup arithmetic operations",
+`vktSubgroupsArithmeticTests.cpp:285`) -- gated on a
+`VkPhysicalDeviceSubgroupProperties::supportedOperations` bit
+(`VK_SUBGROUP_FEATURE_ARITHMETIC_BIT`) this device does not advertise at
+all, unrelated to and upstream of this fix. No real `deqp-vk` case
+currently reaches this fix's own code path.
+
+**Groupshared multi-broadcast/duplicate-GEP fix.**
+`dEQP-VK.compute.pipeline.basic.shared_var_{single,multiple}_{group,invocation}`
+(4 cases, the closest real shared-memory-access group) all `Fail` --for a
+reason entirely unrelated to this fix: `failed to legalize operation
+'spirv.MemoryBarrier' that was explicitly marked illegal`, a separate,
+not-yet-tracked SPIR-V-to-LLVM legalization gap for a `Device`-scope
+`OpMemoryBarrier` (as opposed to the `Workgroup`-scope
+`OpControlBarrier`+`OpMemoryBarrier` pair `GroupMemoryBarrierWithGroupSync`
+itself already exercises, which does reach this session's fix, per its own
+`offload-test-suite` reproduction). No real `deqp-vk` case currently
+reaches this fix's own code path either.
+
+**Push-constant span fix.** No push-constant-focused `deqp-vk` group uses
+a struct layout wide enough to exercise the declared-vs-accessed-size gap
+this fix closes (every mandatory push-constant case's own struct is fully
+read), so this is also not independently confirmed via a real `deqp-vk`
+case.
+
+Consistent with roadmap L9's own precedent (a `check-hlsl-feme-vk`-first
+fix is not always independently reachable from existing `deqp-vk`
+coverage): all three L10 fixes remain confirmed only via their own direct
+`offload-test-suite`/reduced-IR reproduction. No regressions found in any
+of the sweeps above relative to each fix's own pre-fix baseline (the
+`Device`-scope `spirv.MemoryBarrier` and subgroup-arithmetic-unsupported
+results both reproduce identically with the three L10 commits reverted).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed
+again: none of the three fixes touch a feature or extension bit (internal
+compiler-pass correctness fixes only), so no change needed in either.
