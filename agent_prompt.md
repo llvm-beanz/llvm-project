@@ -37,39 +37,35 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L20:
+Please investigate and fix the issues tracked by milestone L21:
 
-> **`feme::cpu::SPIRVResourceLoweringPass`'s `isSupportedRawElementType`
-> (`SPIRVResourceLowering.cpp`) rejects a whole-struct `load`/`store` off a
-> resource pointer outright, accepting only a scalar or fixed vector**, found as
-> an L19 milestone-description correction: with L19's own fix landed,
+> **`feme::cpu::SIMDizePass`'s `checkVectorDecompositionSupported`-adjacent
+> preflight check (the loop over `instructions(*OldF)` in `SIMDize.cpp`, ~line
+> 650) rejects any divergent value of aggregate (struct or array) type outright,
+> with no component-decomposition path at all** -- found as an L20
+> milestone-description correction: with L20's own fix landed,
 > `Feature/StructuredBuffer/packed.test`'s own `Doggo Fido = Buf[GI]; ...;
-> Buf[GI] = Fido;` whole-struct-copy idiom now converts cleanly at the
-> SPIR-V-to-LLVM layer (an ordinary address-space-11 pointer, not a spurious
-> nested handle), but `hasOnlySupportedPointerUses`/`hasOnlySupportedUses` (both
-> in `SPIRVResourceLowering.cpp`) still reject the resulting
-> whole-`Doggo`-struct `llvm.load`/`llvm.store` outright via
-> `isSupportedRawElementType`, which only ever recognizes a
-> half/float/double/integer scalar or a fixed vector of one -- never a struct --
-> so the pass falls through to `UnsupportedOps.cpp`'s generic "is a
-> register-bound resource handle the FeMe CPU target cannot normalize"
-> diagnostic, confirmed directly via `FEME_VULKAN_LOG_CREATION_ERRORS=1
-> offloader`. Distinct from, and blocking end-to-end pass independently of,
-> L16's own already-fixed scope (a struct-typed *field*, reached via
-> `getelementptr`, converting to its own further load/store) and L19's own scope
-> (the SPIR-V-to-LLVM type-conversion layer): this gap is purely in the CPU
-> resource-lowering pass's own raw-load/store mangling, for the specific case of
-> loading/storing an entire aggregate value directly, with no `getelementptr`
-> navigation into an individual field at all. Needs its own scoping pass: likely
-> either (a) extending `isSupportedRawElementType` to accept a struct type too,
-> and teaching `createRawLoad`/`createRawStore`/`mangleResourceCallName`'s own
-> `appendScalarMangling` (`ResourceCalls.cpp`) to describe an aggregate's own
-> flattened field/element types in its mangled name (mirroring how a fixed
-> vector's own element type and width are already encoded), or (b) decomposing a
-> whole-struct load/store into its own per-field raw loads/stores at this pass,
-> reassembled/exploded via `insertvalue`/`extractvalue` the same way
-> `CompositeConstructPattern`'s own struct case already does at the
-> SPIR-V-to-LLVM layer -- whichever avoids ambiguity with
-> `isSupportedTexelElementType`'s own texel-buffer case, which already
-> special-cases a texel buffer's own `<4 x T>` element type for a different
-> reason (see `hasOnlySupportedUses`'s own comment)
+> Buf[GI] = Fido;` whole-struct-copy idiom now converts and lowers cleanly
+> through both the SPIR-V-to-LLVM layer (L19) and the CPU resource-lowering pass
+> (L20), producing a whole-`Doggo`-struct value that is itself divergent (loaded
+> through `GI`, `SV_GroupIndex`, a per-invocation, per-lane-varying index) --
+> but `feme-cpu-simdize` (the pass that widens a divergent scalar/vector value
+> into its own per-lane-packed `W`-wide form) has never had any aggregate-typed
+> case at all: its own preflight loop bails immediately with `'function \'main\'
+> has a divergent value ... of aggregate type; component decomposition is not
+> yet supported (roadmap milestone 7 deviation)'` the moment it sees one,
+> confirmed directly via `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader`. Distinct
+> from, and blocking end-to-end pass independently of, L20's own scope (the CPU
+> resource-lowering pass's own raw-load/store mangling) and L15's own scope (a
+> `feme.cpu.masked.load/store.*` call producing a *vector* result, not a
+> struct/array): this is a generic, long-standing scope limit in the
+> wave-widening pass itself, for *any* divergent aggregate value, not specific
+> to a resource load. Needs its own scoping pass: likely giving the
+> divergent-aggregate value its own per-field/per-element decomposition
+> mirroring `widenScalarizedFallback`'s existing per-lane clone-and-reassemble
+> (each leaf field/element widened independently, exactly as if it were its own
+> separate divergent scalar/vector value), reassembled back into the widened
+> aggregate's own per-lane structure with `insertvalue`, and checking whether
+> any further consumer of a divergent aggregate (e.g. an
+> `extractvalue`/`insertvalue`-chain into an individual field) needs its own new
+> recognized shape once the preflight bail is lifted
