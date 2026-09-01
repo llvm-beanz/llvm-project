@@ -51081,3 +51081,131 @@ entry (previously only pointing at J2). Added a new "Roadmap L12a"
 section to `VulkanCTSReport.md` documenting the smoke sweep. No
 `Vulkan14FeatureInventory.md` change needed — this session touched no
 feature bit, only a compiler-pass conversion gap.
+
+# Session: L12b — descriptor-indexing feature-bit survey
+
+## Task
+
+Investigate and fix roadmap milestone L12b: survey the entirely-`VK_FALSE`
+`VK_EXT_descriptor_indexing` (core-1.2-promoted) feature-bit cluster
+(~20 bits, `EntryPoints.cpp`'s `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_
+1_2_FEATURES` case) and flip whichever bits are honestly already
+supported, without prematurely advertising bits that still need
+unimplemented plumbing (`NonUniform` decoration handling, or L12c's
+`VARIABLE_DESCRIPTOR_COUNT` work).
+
+## Survey approach
+
+Went bit by bit against the real Vulkan spec (fetched the
+`VkPhysicalDeviceDescriptorIndexingFeatures` man page directly rather than
+relying on memory) and against this codebase's own implementation:
+
+- **`descriptorIndexing`** (the meta bit) and all 7
+  `shader*ArrayNonUniformIndexing` bits: the spec's own "Feature
+  Requirements" for `descriptorIndexing` require essentially the full
+  NonUniformIndexing sub-feature set, and this importer has no `NonUniform`
+  SPIR-V decoration support at all (a pre-existing, separately-tracked gap,
+  roadmap L7). Kept `VK_FALSE`, no ambiguity here.
+- **The three `*ArrayDynamicIndexing` bits** (input attachment, uniform
+  texel buffer, storage texel buffer): the key realization is that Vulkan's
+  spec distinguishes "dynamic" indexing (an ordinary, non-constant SSA
+  value, uniform within the subgroup/invocation group) from "non-uniform"
+  indexing (needing the `NonUniform` decoration) -- these are NOT the same
+  gate. Traced through `SPIRVToLLVMPatterns.cpp`'s `isResourcePointer`
+  (matches every image `Dim`, `Dim::Buffer`/`Dim::SubpassData` included)
+  and L12a's own `ResourceArrayAccessChainPattern` (threads any index
+  value, not just a compile-time constant, through to
+  `handlefrombinding`'s `Index` operand) and confirmed with a hand-built
+  MLIR reduction that a push-constant-loaded (genuinely dynamic) index
+  really does reach that operand unmodified. Also read
+  `SPIRVResourceLowering.cpp`'s `BoundHandle` doc comment, which explicitly
+  says the array index is deliberately re-read (not cached) at lowering
+  time specifically because it may be dynamic -- this was a designed-for
+  case from the start, not an accident. Flipped the two texel-buffer bits
+  `VK_TRUE` after confirming with a *real dispatch* (not just an IR
+  inspection) in a new unit test. Left `shaderInputAttachmentArrayDynamic
+  Indexing` `VK_FALSE` -- same underlying mechanism, but input attachments
+  route through a much more involved subpass/render-pass binding path
+  (`CommandBuffer.cpp`'s `DepthInputAttachmentIndex`/render-target-binding
+  machinery) that I did not have time to build a confirming multi-
+  attachment-array dispatch test for this session, and I did not want to
+  advertise a bit on reasoning-by-analogy alone when the sibling bits were
+  each verified with a real dispatch.
+- **The five otherwise-usable `descriptorBinding*UpdateAfterBind` bits,
+  plus `descriptorBindingUpdateUnusedWhilePending`/`descriptorBinding
+  PartiallyBound`**: read `CommandBuffer.cpp` closely and confirmed
+  `vkQueueSubmit` executes every submission fully synchronously (an
+  existing comment already says so), and that command interpretation
+  happens at submission time, not record time. This means there is never
+  a real in-flight/pending window at all -- any `vkUpdateDescriptorSets`
+  call before `vkQueueSubmit` returns is visible to that submission,
+  unconditionally. This is the same "vacuously true" reasoning pattern
+  this project has used before (`shaderSubgroupExtendedTypes`), so I felt
+  comfortable applying it broadly here too, but still wanted real dispatch
+  confirmation rather than resting on reasoning alone -- wrote two more
+  tests (`DescriptorUpdatedAfterBindingIsVisibleAtSubmission`,
+  `UnwrittenArrayElementReadsAsZeroInsteadOfCrashing`) that actually
+  exercise an update-after-bind and a partially-bound scenario through a
+  real dispatch. Kept `descriptorBindingStorageImageUpdateAfterBind`
+  `VK_FALSE` specifically because storage images are not usable at all yet
+  (`Format.cpp` never sets `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`) --
+  advertising update-timing flexibility for a descriptor type that
+  fundamentally doesn't work would be misleading, not merely conservative.
+- **`descriptorBindingVariableDescriptorCount`/`runtimeDescriptorArray`**:
+  explicitly reserved for L12c per the milestone's own text; kept
+  `VK_FALSE`.
+
+## The regression `deqp-vk` caught
+
+After flipping the aggregate `VkPhysicalDeviceVulkan12Features`/
+`VkPhysicalDeviceVulkan12Properties` struct fields and running the full
+`ninja check-feme` (all green), I ran the standard `dEQP-VK.api.info.*`
+smoke sweep as required and found a real regression: pass/fail went from
+the known-good 5381/570 baseline to 5379/572. The two new failures named
+exactly what was wrong: `dEQP-VK.api.info.vulkan1p2.feature_extensions_
+consistency`/`...property_extensions_consistency` failed with "Mismatch
+between VkPhysicalDeviceDescriptorIndexingFeatures and
+VkPhysicalDeviceVulkan12Features" (and the properties equivalent). I had
+only touched the promoted 1.2 aggregate struct's fields; the pre-
+promotion `VkPhysicalDeviceDescriptorIndexingFeaturesEXT`/`PropertiesEXT`
+struct cases were entirely unhandled in `EntryPoints.cpp`'s switch (no
+case at all), so those structs stayed all-zero while the 1.2 struct now
+had several `VK_TRUE`/non-zero fields -- an inconsistency the CTS
+explicitly checks for. This is exactly the kind of thing the standing
+instruction to always run the real CTS after each change is meant to
+catch, and it did. Fixed by adding the two missing `_EXT`-suffixed struct
+cases, following this file's own well-established pattern for every other
+promoted-extension struct pair (e.g. `VK_EXT_texel_buffer_alignment`,
+`VK_EXT_extended_dynamic_state`). Re-ran the same sweep afterward: 5382/
+569, one *better* than the original baseline (the two consistency checks
+now pass, nothing else moved). I did have to bump
+`VkPhysicalDeviceVulkan12Properties`' (and the EXT twin's) previously-
+all-zero `maxDescriptorSetUpdateAfterBind*`/`maxPerStageDescriptorUpdate
+AfterBind*` limits to match the plain (non-update-after-bind) limits
+`PhysicalDeviceInfo.cpp` already reports for the same descriptor-type
+buckets, since a `0` limit would make the newly-`VK_TRUE`
+update-after-bind bits practically unusable even though technically
+"true". Used the spec's own per-type limit-accounting rule (texel buffers
+count against the sampled/storage-image buckets for limit purposes,
+independent of their own separate per-type feature bits) to decide which
+buckets needed raising.
+
+## Design doc
+
+`FeMeVulkanDesign.md`'s Descriptor Model section had a line ("Non-uniform
+indexing across a wave additionally requires the access to be lowered per
+lane, which gates advertising any descriptor indexing feature") that was
+no longer accurate once this session advertised the dynamic-indexing bits
+without that per-lane lowering. Rewrote the paragraph to distinguish
+dynamic vs. non-uniform indexing explicitly and cross-reference L12b/L7.
+
+## Roadmap
+
+Struck through L12b, correcting its own original framing: the milestone's
+text originally implied it was "needed before an unbounded resource array
+can be exposed", but the two bits that actually gate that
+(`runtimeDescriptorArray`/`descriptorBindingVariableDescriptorCount`) were
+deliberately kept false here and remain solely L12c's scope, exactly as
+L12b's own text already anticipated. L12b's real, completable scope was
+the survey-and-flip-the-safe-subset work, which is now done and verified.
+L12's own parent row remains open (still depends on the still-open L12c).
