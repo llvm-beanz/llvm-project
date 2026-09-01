@@ -37,32 +37,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L16:
+Please investigate and fix the issues tracked by milestone L17:
 
-> **`SPIRVResourceLowering.cpp`'s
-> `hasOnlySupportedUses`/`hasOnlySupportedPointerUses` never allows a
-> `getelementptr` past a `HandleKind::Uniform` (real read-only `cbuffer`)
-> resource's own `llvm.spv.resource.getpointer` result** (`AllowGEPs` is
-> hard-coded `Kind == HandleKind::Storage \|\| Kind ==
-> HandleKind::StorageStruct`, never `Uniform`) -- found as an L13a
-> milestone-description correction: `structs.test`'s own struct-typed `cbuffer`
-> member (`X x1;`, `X` an identified struct with its own field `a1`) now
-> converts cleanly at the SPIR-V-to-LLVM layer (L13a's own fix), but the CPU
-> resource-lowering pass this row names still rejects the resulting
-> `getpointer`-then-`getelementptr`-into-`x1.a1` chain outright, via
-> `UnsupportedOps.cpp`'s generic "is a register-bound resource handle the FeMe
-> CPU target cannot normalize" diagnostic (confirmed directly with
-> `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader`, since `llvm-lit`'s own
-> `lit.cfg.py` strips that env var). Distinct from, and blocking end-to-end pass
-> independently of, L13a's own scope: **any**
-> `cbuffer`/direct-field-storage-block member needing further field navigation
-> beyond a single flat scalar/vector load (i.e. any struct-typed member at all,
-> not just the newly-legalizable padded ones) has apparently never been
-> supported by this pass -- `CBuffer/vectors.test`'s own passing case has no
-> struct-typed member, so never exercised this path. Needs its own scoping pass:
-> likely enabling `AllowGEPs` for `HandleKind::Uniform` too, confirming
-> `hasResolvableGEPByteOffset`'s existing byte-offset math needs no
-> `Uniform`-specific change, and checking whatever emits the actual runtime call
-> for a GEP-resolved `Uniform` address (`createRawLoad`/`mangleResourceCallName`
-> and siblings) already handles a nonzero byte offset the same way the
-> already-supported `Storage`/`StorageStruct` GEP path does
+> **A fixed-size array of a *scalar* type inside a struct/cbuffer, immediately
+> followed by another sibling member, is not handled by L13a's own
+> `convertArrayTypeIgnoringDecorations`** -- deliberately left out of that row's
+> own scope (see its doc comment). The real shape
+> (`Feature/CBuffer/array-of-structs.test`/`dynamic-struct.test`'s own `uint
+> x[2]; uint q;`) is `struct<S, (array<2 x i32, stride=16> [0], i32 [20])>`:
+> real HLSL/Vulkan layout semantics require every array element *except the
+> last* to occupy the full declared stride (so a dynamic index into `x[1]` still
+> addresses correctly), but the array's own occupied footprint for a
+> *subsequent* sibling member's own placement is only `(N-1)*Stride +
+> NaturalSize(last element)` -- i.e. `q` is allowed to pack into the
+> otherwise-unused trailing padding of `x`'s own last element. A single,
+> homogeneous `LLVM::LLVMArrayType` cannot represent "N-1 stride-wide elements
+> plus one natural-size element" at all (every element, including the last, must
+> be the same width); representing it instead as a heterogeneous struct
+> (`struct<(array<(N-1) x Padded>, Unpadded)>`) cannot support a *dynamic*
+> (runtime-value) index selecting between the array portion and the
+> final-element portion, since LLVM `getelementptr` struct-member selection
+> requires a compile-time-constant index -- a materially harder problem than
+> L13a's own append-only padding. Needs its own scoping pass to determine
+> whether a dynamic index into such an array can be legalized at all without
+> either (a) always widening the *last* element to the full stride too
+> (over-allocating by `Stride - NaturalSize(last)` bytes, wasting space but
+> preserving a uniform array and requiring no representation change), or (b) a
+> real heterogeneous-with-dynamic-index scheme this codebase does not have a
+> precedent for anywhere yet
