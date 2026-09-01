@@ -425,7 +425,9 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     // `VkPhysicalDeviceVulkan12Properties` case above, so every field must
     // agree exactly with its counterpart there.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES_EXT: {
-      auto *Props = reinterpret_cast<VkPhysicalDeviceDescriptorIndexingPropertiesEXT *>(Base);
+      auto *Props =
+          reinterpret_cast<VkPhysicalDeviceDescriptorIndexingPropertiesEXT *>(
+              Base);
       Props->maxUpdateAfterBindDescriptorsInAllPools = 4096;
       Props->shaderUniformBufferArrayNonUniformIndexingNative = VK_FALSE;
       Props->shaderSampledImageArrayNonUniformIndexingNative = VK_FALSE;
@@ -1409,7 +1411,9 @@ void fillFeatures2Chain(void *pNext) {
     // `VkPhysicalDeviceVulkan12Features` case above, so every field must
     // agree exactly with its counterpart there.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT: {
-      auto *Features = reinterpret_cast<VkPhysicalDeviceDescriptorIndexingFeaturesEXT *>(Base);
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceDescriptorIndexingFeaturesEXT *>(
+              Base);
       Features->shaderInputAttachmentArrayDynamicIndexing = VK_FALSE;
       Features->shaderUniformTexelBufferArrayDynamicIndexing = VK_TRUE;
       Features->shaderStorageTexelBufferArrayDynamicIndexing = VK_TRUE;
