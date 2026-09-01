@@ -18790,3 +18790,104 @@ No feature-bit or extension-advertisement change (an internal
 SPIR-V-to-LLVM conversion-layer correctness fix); confirmed, not
 assumed, that `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 need no update.
+
+## Roadmap L18
+
+**Scope.** `Feature/StructuredBuffer/packed.test` fails with `'llvm.cond_br'
+op operand #1 must be variadic of LLVM dialect-compatible type, but got
+'si32'`, found as an L13a milestone-description correction: a real,
+distinct, newly-*exposed* (not newly-caused) gap L13a's own fix did not
+touch -- L13a's own fix advanced `packed.test`'s legalization far enough
+to reach this different failure.
+
+**Fix.** Confirmed via a real `dxc`/`feme-translate --import-spirv`/
+`feme-opt --feme-convert-spirv-to-llvm` reduction of `packed.test`'s own
+SPIR-V that the root cause matches the milestone's own hypothesis exactly:
+`mlir::BranchConditionalConversionPattern` (upstream,
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) builds `llvm.cond_br`'s
+successor operands directly from `op.getTrueBlockArguments()`/
+`op.getFalseBlockArguments()` -- the *original* op's own raw, un-remapped
+accessors -- rather than `adaptor.getTrueTargetOperands()`/
+`adaptor.getFalseTargetOperands()`, the dialect conversion's own
+type-converted ones. This is invisible whenever every successor operand's
+own type converts to itself unchanged, but an `si32` value (HLSL's `int`,
+preserved as a distinct SPIR-V dialect type for as long as possible, but
+never a valid LLVM dialect type on its own) merged back into a successor
+block exposes it -- the exact same class of bug roadmap L10's
+`IntegerGroupNonUniformReducePattern` fixed for
+`spirv.GroupNonUniform*`'s reduce operand/result.
+
+Added `BranchConditionalPattern` (`SPIRVToLLVMPatterns.cpp`), registered
+at `FeMeBenefit`, mirroring the upstream pattern exactly except for using
+the adaptor's own already-remapped successor operands. Unlike L10's own
+fix (scoped to nine specific integer-typed ops), this applies uniformly
+to every `spirv.BranchConditional`, since substituting the adaptor's own
+correctly-remapped operands for the op's raw ones is a strict improvement
+with no downside for any other case.
+
+**Method.** Reduced `packed.test`'s own real SPIR-V shape (its
+`if (Fido.TailState == 0) { ... }` merges an `si32`-typed value back into
+its join block via exactly this shape) via `dxc -spirv
+-fvk-use-scalar-layout` → `feme-translate --import-spirv` → `feme-opt
+--feme-convert-spirv-to-llvm`, confirming the exact `llvm.cond_br`/`si32`
+error without the fix and full resolution of that specific error with it.
+Added a new lit test, `spirv-to-llvm-branch-conditional-signed-argument
+.mlir`, covering the exact shape in isolation. `ninja check-feme`:
+2290/2317 passed, 27 unsupported, 0 failed (up by exactly this 1 new
+test, 0 regressions). Rebuilt `feme_vulkan`/`feme-opt`/`feme-translate`/
+`offloader` (the real Vulkan ICD shared library) and did a real
+before/after comparison via a temporary `git checkout <pre-L18-commit> --
+SPIRVToLLVMPatterns.cpp`/rebuild/revert cycle (matching L17's own
+methodology): confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader`
+directly that the pre-fix error is exactly the `llvm.cond_br`/`si32`
+error this milestone names, and the post-fix error is a distinct, later
+one (see Findings below). Also ran `check-hlsl-vk-feature-structuredbuffer`
+and a `dEQP-VK.ssbo.layout.*`/`dEQP-VK.ssbo.*` sweep against the real
+`feme_vulkan` ICD (`VK_ICD_FILENAMES` explicitly exported), both before
+and after the fix via the same revert cycle.
+
+**Findings.**
+- **This row's own scope is fully closed**: the exact `llvm.cond_br`
+  operand #1 `si32` error this milestone names is confirmed gone
+  post-fix, via both the isolated `feme-opt` reduction and a direct
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader` run against the real
+  `packed.test` binary.
+- **`packed.test` itself still does not pass end-to-end.** Its real,
+  deterministic `check-hlsl-vk-feature-structuredbuffer` result is
+  unchanged by this fix: 9/650 discovered cases fail, byte-for-byte
+  identical before and after (`GetDimensions.test`, `dec_counter.test`,
+  `inc_counter.test`, `inc_counter_array.test`,
+  `inc_counter_array_imm_idx.test`, `layout.test`, `matrix.test`,
+  `matrix_assign.test`, `packed.test` -- all 9 fail both before and
+  after, confirming 0 regressions). `packed.test`'s own post-fix error
+  (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader`) has
+  advanced to a distinct, deeper, newly-exposed gap: `'llvm.store' op
+  operand #1 must be LLVM pointer type, but got '!llvm.target
+  <"spirv.VulkanBuffer", ...>'`, root-caused to `isBufferBlockStorage`
+  (`SPIRVToLLVMPatterns.cpp`) unconditionally treating *any*
+  `StorageBuffer`-storage-class struct pointer as itself a top-level
+  buffer block (never checking for a `Block` decoration in that branch,
+  unlike its `Uniform`/`BufferBlock` branch just below it) -- so
+  `RWStructuredBuffer<Doggo>`'s own per-element `Doggo` struct pointer
+  (reached only by `packed.test`'s own whole-struct-copy idiom,
+  `Doggo Fido = Buf[GI]; ...; Buf[GI] = Fido;`, unlike every other
+  `StructuredBuffer` test, which always navigates directly to an
+  individual field via one multi-index access chain) is spuriously
+  converted into a second, nested resource handle instead of ordinary
+  memory. Split out to new roadmap row L19; this is a real, distinct
+  root cause, not a documentation gap.
+- The other 8 pre-existing failures (`GetDimensions.test`,
+  `dec_counter.test`, `inc_counter*.test`, `layout.test`, `matrix*.test`)
+  are unrelated to this fix or L19 (confirmed unchanged before/after);
+  not investigated further, out of scope for this milestone.
+- `dEQP-VK.ssbo.layout.*` (5,275 cases) and `dEQP-VK.ssbo.*` (12,225
+  cases): both measured byte-for-byte identical totals before and after
+  this fix (260/5275 for the former); unsurprising, since this fix's own
+  target shape (an HLSL/`dxc`-emitted `si32` branch-successor merge) is
+  not one this GLSL/SPIR-V-assembly-sourced CTS family happens to
+  exercise. No regression evident.
+
+No feature-bit or extension-advertisement change (an internal
+SPIR-V-to-LLVM conversion-layer correctness fix); confirmed, not assumed,
+that `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
