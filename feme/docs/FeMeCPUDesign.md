@@ -599,11 +599,11 @@ called out inline where it's discussed, and summarized here:
   operand the fallback's per-operand extraction does not know to leave
   alone; such a call remains a diagnosed error.
 - **Vector/aggregate leaf decomposition is narrower than the design
-  (widened by roadmap steps R12, C3, and H6g-b-a-i-a-i-b).** "Vectors
+  (widened by roadmap steps R12, C3, H6g-b-a-i-a-i-b, and L11).** "Vectors
   become components, not nested vectors" describes splitting *any*
   divergent `<N x T>` (or aggregate) value into `N` separate `<W x T>`
   components, since LLVM has no `<W x <N x T>>`.
-  `feme::cpu::SIMDizePass` implements ten producer shapes: a
+  `feme::cpu::SIMDizePass` implements eleven producer shapes: a
   constant-index `insertelement` chain assembling a vector from scalar
   components, the one shape a typed-buffer *store*'s raising actually
   produces (`feme::dxil::OpRaisingPass::raiseTypedBufferStore`); (R12) a
@@ -614,10 +614,15 @@ called out inline where it's discussed, and summarized here:
   address (e.g. a per-invocation-divergent index into an ordinary,
   non-groupshared `<4 x float>` array, the classic
   `positions[gl_VertexIndex]` GLSL/HLSL constant-lookup-table idiom),
-  decomposed the same way a resource-call load already was -- a
-  groupshared load of vector type is deliberately excluded, since
-  `widenGroupSharedLoad`'s own gather-based path does not yet support a
-  vector-typed result; and, as of roadmap step C3 (feme/docs/Roadmap.md), a `phi` of vector type
+  decomposed the same way a resource-call load already was; (L11) a
+  groupshared `LoadInst` of vector type at a divergent address (e.g.
+  reading a whole `float4` row out of a `groupshared float4x4` at a
+  per-lane row index), decomposed by `widenGroupSharedLoad`'s own
+  per-component `getelementptr`+`llvm.masked.gather` pair -- one per
+  vector element, off the same already-widened `<W x ptr>` row address --
+  rather than the ordinary-load path's per-lane clone-and-reassemble,
+  since a groupshared address is already a real vector-of-pointers value
+  and needs no per-lane extraction; and, as of roadmap step C3 (feme/docs/Roadmap.md), a `phi` of vector type
   (the shape a uniform diamond's merge block gives a value reconciled
   across two divergent arms), a `select` of vector type (a scalar `i1`
   condition is shared unchanged by every per-component `select`; a
@@ -836,7 +841,13 @@ the first two's own remaining narrowings):
   re-materialize of a direct global reference or `getWidened`'s ordinary
   broadcast of a uniform `getelementptr`). A *nested* `getelementptr` (a
   groupshared array of arrays/structs, one level deeper than a single
-  index) remains unsupported.
+  index) remains unsupported in general -- except (roadmap L11) the one
+  specific shape `widenGroupSharedLoad`'s vector-typed-result case itself
+  produces: a second-level, per-component `getelementptr` off an
+  already-divergent, already-widened first-level `<W x ptr>` row address,
+  which `rewriteGroupSharedGlobals` recognizes and retargets precisely
+  because its own first-level GEP's type (a vector of pointers) marks it
+  as this shape and not an ordinary uniform nested array/struct chain.
 - **`Device` and `All` memory scope are not distinguished.** Both get a
   `fence` visible across host threads (`SyncScope::System`); the design
   only requires the CPU target's memory model, not DXIL's/SPIR-V's finer

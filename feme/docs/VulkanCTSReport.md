@@ -18013,3 +18013,37 @@ results both reproduce identically with the three L10 commits reverted).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed
 again: none of the three fixes touch a feature or extension bit (internal
 compiler-pass correctness fixes only), so no change needed in either.
+
+## Roadmap L11: real `deqp-vk` sweep after groupshared vector-row-load fix
+
+```
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.api.info.*" --deqp-log-filename=l11_smoke.qpa
+VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.compute.shared_memory.*" \
+  --deqp-log-filename=l11_shared.qpa
+```
+
+L11's fix (`FunctionWidener::widenGroupSharedLoad`'s new vector-typed-
+result case, plus the necessary `GroupShared.cpp` nested-GEP validation/
+retargeting extension) was root-caused and fixed against a real
+`offload-test-suite` HLSL-suite case
+(`WaveOps/GroupSharedMatrixRowComponentDataRace.test`), the milestone's
+own primary reproduction. A smoke run (`dEQP-VK.api.info.*`, 10484 cases)
+confirms no regression from this session's two changed files: pass/fail/
+not-supported totals (5381 passed, 570 failed, 4533 not supported) are
+unchanged from the pre-fix baseline. `dEQP-VK.compute.shared_memory.*`
+resolves to zero cases in this CTS build's own case list, and no other
+`deqp-vk` group name matches a divergent, vector-typed groupshared row/
+matrix access shape closely enough to plausibly reach this fix's own new
+code path -- consistent with roadmap L9/L10's own established precedent,
+this fix remains confirmed only via its own direct `offload-test-suite`/
+reduced-IR reproduction, not independently via `deqp-vk`.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed
+again: this fix touches no feature or extension bit (an internal
+compiler-pass correctness fix only, widening a `SIMDize.cpp`/
+`GroupShared.cpp` scope gap in decomposing a divergent vector-typed
+groupshared load), so no change needed in either.
+
