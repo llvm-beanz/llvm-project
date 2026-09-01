@@ -1369,11 +1369,16 @@ void fillFeatures2Chain(void *pNext) {
       // `UnwrittenArrayElementReadsAsZeroInsteadOfCrashing`).
       Features->descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
       Features->descriptorBindingPartiallyBound = VK_TRUE;
-      // (roadmap L12c) Reserved for the descriptor-set-layout/allocation-
-      // time `VARIABLE_DESCRIPTOR_COUNT` plumbing an unbounded resource
-      // array needs; not yet implemented.
-      Features->descriptorBindingVariableDescriptorCount = VK_FALSE;
-      Features->runtimeDescriptorArray = VK_FALSE;
+      // (roadmap L12c) `VkDescriptorSetLayoutBindingFlagsCreateInfo`'s
+      // `VARIABLE_DESCRIPTOR_COUNT_BIT` and
+      // `VkDescriptorSetVariableDescriptorCountAllocateInfo` are now
+      // implemented end to end (`Descriptor.h`/`.cpp`), and a shader-side
+      // unbounded (`RuntimeDescriptorArray`) resource-array declaration now
+      // compiles and dispatches correctly too (`patchUnboundedResourceRanges`
+      // in Pipeline.h/.cpp) -- confirmed by a real
+      // `overflow-unbounded-array.test` dispatch.
+      Features->descriptorBindingVariableDescriptorCount = VK_TRUE;
+      Features->runtimeDescriptorArray = VK_TRUE;
       Features->samplerFilterMinmax = VK_FALSE;
       Features->scalarBlockLayout = VK_FALSE;
       Features->imagelessFramebuffer = VK_TRUE;
@@ -1432,8 +1437,10 @@ void fillFeatures2Chain(void *pNext) {
       Features->descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE;
       Features->descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
       Features->descriptorBindingPartiallyBound = VK_TRUE;
-      Features->descriptorBindingVariableDescriptorCount = VK_FALSE;
-      Features->runtimeDescriptorArray = VK_FALSE;
+      // (roadmap L12c) Mirrors the aggregate `VkPhysicalDeviceVulkan12Features`
+      // case above -- see its own comment.
+      Features->descriptorBindingVariableDescriptorCount = VK_TRUE;
+      Features->runtimeDescriptorArray = VK_TRUE;
       break;
     }
     // (roadmap E1) The aggregate `VkPhysicalDeviceVulkan13Features` struct:
