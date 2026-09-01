@@ -37,31 +37,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L17:
+Please investigate and fix the issues tracked by milestone L18:
 
-> **A fixed-size array of a *scalar* type inside a struct/cbuffer, immediately
-> followed by another sibling member, is not handled by L13a's own
-> `convertArrayTypeIgnoringDecorations`** -- deliberately left out of that row's
-> own scope (see its doc comment). The real shape
-> (`Feature/CBuffer/array-of-structs.test`/`dynamic-struct.test`'s own `uint
-> x[2]; uint q;`) is `struct<S, (array<2 x i32, stride=16> [0], i32 [20])>`:
-> real HLSL/Vulkan layout semantics require every array element *except the
-> last* to occupy the full declared stride (so a dynamic index into `x[1]` still
-> addresses correctly), but the array's own occupied footprint for a
-> *subsequent* sibling member's own placement is only `(N-1)*Stride +
-> NaturalSize(last element)` -- i.e. `q` is allowed to pack into the
-> otherwise-unused trailing padding of `x`'s own last element. A single,
-> homogeneous `LLVM::LLVMArrayType` cannot represent "N-1 stride-wide elements
-> plus one natural-size element" at all (every element, including the last, must
-> be the same width); representing it instead as a heterogeneous struct
-> (`struct<(array<(N-1) x Padded>, Unpadded)>`) cannot support a *dynamic*
-> (runtime-value) index selecting between the array portion and the
-> final-element portion, since LLVM `getelementptr` struct-member selection
-> requires a compile-time-constant index -- a materially harder problem than
-> L13a's own append-only padding. Needs its own scoping pass to determine
-> whether a dynamic index into such an array can be legalized at all without
-> either (a) always widening the *last* element to the full stride too
-> (over-allocating by `Stride - NaturalSize(last)` bytes, wasting space but
-> preserving a uniform array and requiring no representation change), or (b) a
-> real heterogeneous-with-dynamic-index scheme this codebase does not have a
-> precedent for anywhere yet
+> **`Feature/StructuredBuffer/packed.test` fails with `'llvm.cond_br' op operand
+> #1 must be variadic of LLVM dialect-compatible type, but got 'si32'`**, found
+> as an L13a milestone-description correction: this is a real, distinct,
+> newly-*exposed* (not newly-caused) gap L13a's own fix did not touch --
+> `packed.test` was one of L5's own original 6 crash cases and one of L13's own
+> 4 still-graceful-failure cases, but L13a's own fix advances its legalization
+> far enough to reach a different failure than either of those rows saw. Root
+> cause not yet confirmed, but the shape (a raw, un-type-converted `si32` block
+> argument reaching `llvm.cond_br`) closely mirrors L10's own already-fixed
+> `spirv.GroupNonUniform*`-integer-reduce `si32` gap (an upstream MLIR pattern
+> building an op directly from a raw SPIR-V-signed type rather than running it
+> through the type converter first) -- likely the analogous upstream
+> `spirv.BranchConditional`-to-`llvm.cond_br` conversion pattern
+> (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) has the identical bug for
+> a block argument's own type, needing a feme-side override at `FeMeBenefit` the
+> same way L10's `IntegerGroupNonUniformReducePattern` overrode the analogous
+> group-reduce pattern, once confirmed via its own real IR reduction
