@@ -49990,3 +49990,80 @@ Three commits (fix + its two new tests; the tool-level test retarget;
 docs). `ninja check-feme` clean at 2244/2244 with DirectX now enabled, so
 the previously-skipped DirectX tests are genuinely running and none of
 them regressed.
+
+# H7l: `*_with_adjacency` pipeline creation failure
+
+The roadmap entry framed this as "likely a geometry-shader-adjacent gap in
+adjacency-topology pipeline construction" -- i.e., it assumed the fix would
+be about making geometry-shader-adjacent pipeline construction work better.
+Before touching code I went and read the actual thing that decides this:
+the Vulkan spec VUID text for `VkPipelineInputAssemblyStateCreateInfo::
+topology`, via web search, and the real VK-GL-CTS source for the exact
+failing test group (`vktClippingTests.cpp`'s `ClipVolume` tests).
+
+That combination flipped the whole premise. The VUIDs
+(`-topology-00428`/`-00738`) require the `geometryShader` *device feature*
+bit to be on when using an adjacency topology -- feme already advertises
+that unconditionally as `VK_TRUE` -- but say nothing about the specific
+pipeline needing to bind a geometry shader stage itself. And the CTS's own
+`ClipVolume` group builds every one of its pipelines, including the
+`*_with_adjacency` cases, with vertex+fragment stages only. So the bug
+wasn't a missing capability; it was `GraphicsPipeline.cpp`'s own
+`topologyHasAdjacency(*Topology) && !GeometryInfo` check being *too strict*
+relative to spec, a leftover of roadmap H5d/H5e's original (as it turns out,
+mistaken) design decision to always require a geometry stage for these
+topologies. The spec's actual behavior with no geometry stage bound is
+elegant: rasterization proceeds as if the non-adjacency topology were used,
+silently ignoring the adjacency-only vertices in the stream.
+
+Once the premise was corrected, the fix was mostly deletion plus reuse.
+`GraphicsPipeline.cpp` lost its rejection block. `Executor.cpp` needed the
+adjacency topologies un-gated from the main validation switch, and needed
+the same core-vertex-extraction treatment the H5d geometry-stage path
+already had -- but H5d had *already* built the exact helpers needed
+(`splitListPrimitiveAdjacency`/`splitStripPrimitiveAdjacency`,
+`stripAdjacency`, etc.), just wired to only fire when a geometry stage was
+present. No new splitting logic was needed, only reusing it in the other
+branch. `RasterClass` needed the two line-adjacency topologies added to its
+`else if` chain (triangle-adjacency already fell into the default
+`Triangle` case, so no change there).
+
+The trickiest part was making sure this was actually safe when a geometry
+stage *is* bound -- I didn't want to accidentally populate
+`AbsTriIndices`/`AbsLineIndices` with core-only vertices and have that leak
+into the geometry-stage path. Reading further into `executeDraws` confirmed
+the existing `if (GSSig) {...}` block unconditionally `.clear()`s and
+rebuilds both from the merged geometry stream, so the new code is inert
+there regardless -- but I kept an explicit `!GSSig` guard anyway for
+clarity of intent, since the data genuinely isn't meant to be consumed by
+that path.
+
+Three stale unit tests needed correcting, all of which had encoded the old
+(wrong) behavior as their expected result:
+`ExecutorTest::RejectsUnsupportedTopology`/`RejectsAdjacencyTopologyWithout
+AGeometryStage` (replaced with tests that actually render a real primitive
+from adjacency-topology vertex data, verifying the adjacency-only vertices
+-- placed off-canvas in a different color -- never get rasterized), and
+`GraphicsPipelineTest::RejectsAdjacencyTopologyWithoutGeometryStage`/
+`RejectsUnimplementedStateCombinations`'s embedded adjacency case (both
+expected `VK_ERROR_INITIALIZATION_FAILED`, now `VK_SUCCESS`). Also cleaned
+up two doc comments in `GraphicsPipelineTest.cpp` that repeated the old
+"adjacency requires a geometry stage" claim -- one on
+`AcceptsAdjacencyTopologyWithGeometryStage`, one on
+`AcceptsPrimitiveRestartOnStripAndFanTopologies` -- since a stale comment
+next to correct code is just as much a liability, especially when the very
+next test in the file demonstrates the opposite is also legal.
+
+`ninja check-feme` stayed at a clean 2244/2271 (27 unsupported, 0 failed)
+after all the test replacements. Real CTS: all four originally-failing
+`dEQP-VK.clipping.clip_volume.depth_clamp.*_with_adjacency` cases now pass,
+and the broader `dEQP-VK.clipping.*` mustpass group (308 cases) goes from
+H7k's own 21 passed/12 failed to 33 passed/0 failed -- the 12 failures were
+all this same gap surfacing across sibling `clip_volume` subgroups
+(`depth_bias`/`depth_bounds` variants), not new discoveries, so this single
+fix retired the entire group's remaining failures.
+
+Updated the H5d roadmap row with a forward-reference note (rather than
+rewriting its historical "done" text) pointing at this correction, since
+H5d's own original design decision was the actual root cause, and it felt
+more honest to annotate the history than silently rewrite it.
