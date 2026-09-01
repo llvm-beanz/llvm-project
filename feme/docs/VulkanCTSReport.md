@@ -18606,3 +18606,71 @@ No feature-bit or extension-advertisement change (an internal CPU-target
 compiler-pass fix); confirmed, not assumed, that
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap L16
+
+**Scope.** `SPIRVResourceLowering.cpp`'s `hasOnlySupportedUses`/
+`hasOnlySupportedPointerUses` never allowed a `getelementptr` past a
+`HandleKind::Uniform` (real read-only `cbuffer`) resource's own
+`llvm.spv.resource.getpointer` result -- `AllowGEPs` was hard-coded to
+`Storage`/`StorageStruct` only, never `Uniform` -- found as an L13a
+milestone-description correction: L13a's own conversion-layer fix let a
+struct-typed direct-field cbuffer member reach this pass for the first
+time, and it hit `UnsupportedOps.cpp`'s generic "is a register-bound
+resource handle the FeMe CPU target cannot normalize" diagnostic here
+instead.
+
+**Fix.** Enabled `AllowGEPs` for `HandleKind::Uniform` too, in
+`feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`. The existing
+GEP-chain-to-byte-offset machinery (`hasResolvableGEPByteOffset`,
+`computePointerOffset`, `lowerRawPointerUses`) is already fully generic
+across handle kinds and needed no `Uniform`-specific change -- confirmed
+directly by reducing the exact shape.
+
+**Method.** Reduced a minimal `cbuffer CBStructs { X x1; X x2; }` (`X`
+a user-defined `{i32, i32}` struct) case via `dxc`/`feme-translate
+--spirv-to-llvmir`/`feme-opt --llvm
+-passes=feme-cpu-lower-spirv-resources -S`, confirming the exact
+pre-fix behavior (the whole `handlefrombinding`/`getpointer`/`getelementptr`
+chain left completely unlowered, falling through to
+`UnsupportedOps.cpp`'s diagnostic) and the post-fix behavior (both
+fields resolve to the correct combined byte offset -- 0 for `x1.a1`, 20
+for `x2.a2`, i.e. `x1`'s own padded 16-byte struct size plus `.a2`'s own
+naturally-aligned 4-byte offset within `X`). Added a new unit test
+(`LowersUniformBufferNestedStructFieldToItsOwnStructLayoutOffset`) and
+a lit test (`spirv-resource-lowering-uniform-nested-struct.ll`), both
+confirmed to fail without the fix and pass with it. `ninja check-feme`:
+2287/2314 passed, 27 unsupported, 0 failed (up by exactly these 2 new
+tests, 0 regressions).
+
+Then rebuilt `feme_vulkan`/`offloader` and re-ran the real
+`Feature/CBuffer/structs.test` (this row's own named case),
+`array-of-structs.test`, `dynamic-struct.test`, and
+`StructuredBuffer/packed.test` against the real `feme_vulkan` ICD
+(`VK_ICD_FILENAMES` explicitly exported).
+
+**Findings.**
+- **`Feature/CBuffer/structs.test` now passes end-to-end** -- this
+  row's own scope is fully closed.
+- `array-of-structs.test`/`dynamic-struct.test` still fail, confirmed
+  identical to roadmap L17's own already-tracked `failed to legalize
+  operation 'spirv.AccessChain'` error (a distinct, deliberately
+  out-of-scope scalar-array trailing-sibling-compaction gap, not this
+  row's own resource-lowering-pass shape).
+- `StructuredBuffer/packed.test` still fails, confirmed identical to
+  roadmap L18's own already-tracked `'llvm.cond_br' op operand #1 ...
+  got 'si32'` error (a distinct, deliberately out-of-scope gap).
+- `dEQP-VK.ubo.*` (13,240 cases): 1406/13240 (10.6%) passed -- at or
+  above the high end of L13a's own already-documented ~115-case
+  run-to-run flaky band (1051-1166), consistent with more
+  struct-field-containing UBO cases now passing and no regression
+  within that noise band.
+- `dEQP-VK.ssbo.layout.*` (5,275 cases): 227/5275 (4.3%) passed,
+  byte-for-byte identical to the prior L13a-recorded baseline --
+  expected, since a storage-buffer's own `AllowGEPs` path was already
+  supported before this fix and is untouched by it.
+
+No feature-bit or extension-advertisement change (an internal CPU
+resource-lowering-pass correctness fix); confirmed, not assumed, that
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
