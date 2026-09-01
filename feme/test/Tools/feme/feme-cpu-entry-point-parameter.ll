@@ -1,30 +1,40 @@
 ; REQUIRES: directx-registered-target
 ; RUN: llc %s --filetype=obj -o %t.dxcontainer
 
-; A loop with a divergent conditional `continue` (see
-; feme/test/Transforms/CPU/Linearize/unsupported-loop-internal-branch.ll):
-; `feme::cpu::LinearizePass` only recognizes a divergent exit check directly
-; in a loop's header and/or its latch (see the Status section's milestone 6
-; deviation note in feme/docs/FeMeCPUDesign.md), so it diagnoses this shape
-; and leaves it completely untouched, still a genuinely divergent branch.
+; A shader entry point takes no parameters of its own -- its inputs arrive
+; through stage-IO or resource accesses -- so every parameter of a widened
+; wave body belongs to the `feme::cpu::WaveBodyEnv` ABI `feme-cpu-simdize`
+; appends. `@main`'s own `i32 %n` survives DXIL codegen and re-import,
+; reaching `feme::cpu::EntryWrapperPass` with no argument for it to supply.
 ;
-; Before this milestone, `feme::cpu::runPipeline` did not check for that
-; diagnostic between passes (a `ModulePassManager::run` has no `Error` to
-; propagate one through -- see `feme::cpu::checkSupportedRaisedOps`'s own
-; comment for the same constraint), so the pipeline carried on: the
-; unwidened, still-divergent function reached the JIT (`feme-run`) or the
-; retargeted object file (`feme`, tested here) despite `feme-cpu-linearize`
-; already having said it could not handle it -- an object file with no
-; `feme_cpu_entry_main` wrapper (roadmap milestone 7 requires widening to
-; produce one), silently discarding the entry point rather than failing.
-; This is now a hard failure with the underlying diagnostic surfaced (see
-; feme::cpu::Pipeline.cpp's `ErrorDiagnosticGuard`), matching the "divergent
-; branch inside a loop" P0 item roadmap step R2 closes in
-; feme/docs/Roadmap.md's §1.6.
+; `feme::cpu::runPipeline` must surface that as a hard failure with the
+; underlying diagnostic (see feme::cpu::Pipeline.cpp's
+; `ErrorDiagnosticGuard`, whose per-pass `runAndCheck` this exercises for
+; the wrapping stage) rather than either crashing on the `llvm_unreachable`
+; in the wrapper's own wave-body parameter dispatch, or carrying on to emit
+; an object file with no `feme_cpu_entry_main` wrapper at all (roadmap
+; milestone 7 requires widening to produce one), silently discarding the
+; entry point rather than failing. See
+; feme/test/Transforms/CPU/entry-wrapper-entry-point-parameter-unsupported.ll
+; for the same diagnostic at the pass level.
+;
+; The loop below is deliberate. This file previously drove the same
+; end-to-end "diagnostic surfaced, pipeline fails" contract -- roadmap step
+; R2's own P0 item in feme/docs/Roadmap.md's 1.6 -- through
+; `feme-cpu-linearize`'s divergent-conditional-`continue` diagnostic. It no
+; longer does: `llc`'s own `StructurizeCFG` rewrites this shape on the way
+; to DXIL into a `Flow`-block form `feme::cpu::LinearizePass` does handle,
+; so nothing is diagnosed here until the entry parameter reaches the
+; wrapper. That pass's own narrower raw-IR limit (see the Status section's
+; milestone 6 deviation note in feme/docs/FeMeCPUDesign.md) is still covered
+; directly by
+; feme/test/Transforms/CPU/Linearize/unsupported-loop-internal-branch.ll;
+; keeping the loop here keeps the round-trip through it covered too.
 ; RUN: not feme --target=%feme_host_triple %t.dxcontainer -o %t.o 2>&1 | FileCheck %s
 
-; CHECK: feme-cpu-linearize: function 'main': loop at 'loop' has an internal branch in
-; CHECK: feme-cpu pipeline: a diagnostic was reported while linearizing 'main'
+; CHECK: feme-cpu-wrap-entry: function 'main' has an unsupported parameter 'n'
+; CHECK: feme-cpu pipeline: a diagnostic was reported while wrapping 'main'
+
 
 target triple = "dxil-unknown-shadermodel6.5-compute"
 
