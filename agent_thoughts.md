@@ -51209,3 +51209,134 @@ deliberately kept false here and remain solely L12c's scope, exactly as
 L12b's own text already anticipated. L12b's real, completable scope was
 the survey-and-flip-the-safe-subset work, which is now done and verified.
 L12's own parent row remains open (still depends on the still-open L12c).
+
+# L12c: unbounded resource array + VARIABLE_DESCRIPTOR_COUNT
+
+Picked up where L12b left off: L12 (indexing an array of resource handles
+fails pipeline creation) had been split into L12a (SPIR-V-to-LLVM
+conversion-layer fix, done) and L12b (safe feature-bit survey, done, but
+deliberately leaving `descriptorBindingVariableDescriptorCount`/
+`runtimeDescriptorArray` false), leaving L12c as the last open piece: real
+descriptor-set-layout/pipeline-layout support for
+`VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT` and the runtime
+bounds-checking an unbounded array's own indexing needs.
+
+**First surveyed the actual blocker with a real reduction**, since the
+milestone's own framing ("the runtime bounds-checking ... needs at that
+point are not implemented anywhere") turned out to not quite match reality
+once I looked. Compiled the real `overflow-unbounded-array.test` HLSL
+through `dxc`, then through `feme-translate --import-spirv` and
+`feme-opt --feme-convert-spirv-to-llvm`, and inspected the resulting
+`llvm.spv.resource.handlefrombinding` call directly. Two things fell out
+of that:
+
+1. The offload-test-suite harness (`Device.cpp`) never actually uses
+   `VARIABLE_DESCRIPTOR_COUNT_BIT` for this test -- it just declares a
+   plain, fixed `descriptorCount` in the pipeline YAML. So the real
+   blocker for *this specific test* wasn't a missing runtime
+   bounds-check at all; it was that L12a's own `RangeSize == 0` sentinel
+   (used to mark an unbounded `spirv.rtarray` at the conversion layer)
+   is never resolved to a real number anywhere downstream, so
+   `SPIRVResourceLoweringPass::collectHandles` still rejects it outright
+   with the same "unbounded array" diagnostic it always did.
+2. The actual `VARIABLE_DESCRIPTOR_COUNT` bounds-checking the milestone
+   worried about turns out to already exist for free: `ResourceHeap.cpp`'s
+   `materializeHeap` computes `NumToCopy = min(RangeSize, real count)`
+   against a pre-zeroed heap. That mechanism was built for
+   `descriptorBindingPartiallyBound` (L12b), but it transparently
+   satisfies `VARIABLE_DESCRIPTOR_COUNT`'s own "unwritten elements read
+   as zero" semantic too, since both are really the same shape: a
+   compile-time-reserved range that's only partially populated by a real
+   allocation.
+
+This is a good example of why the real-IR-reduction habit this whole
+H6g-b/H6j/H6k/H6l/L9/L10/L11/L12 chain has used pays off again: a
+milestone description written by triaging symptoms from a distance can be
+subtly wrong about *where* the real gap is, even when it correctly
+identifies *that* there's a gap. Fixing this took two changes:
+
+- A small, surgical Vulkan-layer patch (`patchUnboundedResourceRanges` in
+  `Pipeline.cpp`) that rewrites the constant-0 `RangeSize` operand to the
+  pipeline layout's own declared count for that `(set, binding)`, run
+  right after `importShaderModule` and before compilation. This alone was
+  enough to make `overflow-unbounded-array.test` pass end to end -- no
+  changes needed to `SPIRVResourceLoweringPass` itself, since once
+  patched the array looks like an ordinary bounded array to every later
+  pass.
+- Threading `PipelineLayout` through `compileGraphicsStage`'s signature
+  (and all 9 call sites) so the graphics pipeline path gets the same fix
+  as compute, since the milestone's own examples were compute-shader-only
+  but there's nothing compute-specific about the underlying gap.
+
+**Then implemented the milestone's full stated scope anyway**, since the
+object model itself (`VkDescriptorSetLayoutBindingFlagsCreateInfo`,
+`VkDescriptorSetVariableDescriptorCountAllocateInfo`,
+`VkDescriptorSetVariableDescriptorCountLayoutSupport`) is real,
+independently useful, spec-mandated machinery that a real application
+could exercise even though this particular CTS-adjacent test doesn't need
+it. Added `DescriptorSetLayoutBinding::VariableCount`, threaded an
+`std::optional<uint32_t> VariableDescriptorCount` through
+`DescriptorSet`/`DescriptorPool::allocate`, and wired the three pNext-chain
+parsing points in `Descriptor.cpp`. Per spec, the flag may only be set on
+a layout's own highest-numbered binding -- `DescriptorSetLayout::bindings()`
+already returns bindings pre-sorted ascending, so `.back()` was a cheap way
+to find and validate that.
+
+Flipped the two feature bits (`descriptorBindingVariableDescriptorCount`/
+`runtimeDescriptorArray`) true in both the aggregate and `_EXT`-prefixed
+structs, following L12b's own hard-won convention (L12b's first attempt at
+a similar flip broke `feature_extensions_consistency` by missing the `_EXT`
+twin -- didn't want to repeat that mistake here).
+
+**CTS reality check, and a genuinely interesting non-finding.** Ran the
+full `descriptor-indexing.txt` mustpass caselist (115 cases) expecting
+`misc_variable_count` to newly test the feature I'd just implemented.
+Instead, every single case -- all 115 -- still reports `NotSupported:
+"VK_EXT_descriptor_indexing is not supported"`. Traced this down to
+`vktTestCase.cpp`'s `isDeviceFunctionalitySupported`: since this ICD
+already advertises `apiVersion = VK_API_VERSION_1_4`, a core-1.2-promoted
+extension like this one is checked purely via the *aggregate*
+`descriptorIndexing` feature bit on a >=1.2 device, not via the individual
+sub-bits I flipped, and not via the device extension name list either.
+`descriptorIndexing` correctly stays `VK_FALSE` (blocked on roadmap L7's
+`NonUniform` decoration support, exactly as L12b already found and
+documented) -- so nothing in this session's own work was ever going to
+move a `descriptor_indexing` CTS case regardless of how correct the
+underlying implementation is. This isn't a bug or a gap in my fix; it's
+just that this particular CTS group's own gating granularity is coarser
+than the granularity at which Vulkan itself lets you implement the
+feature incrementally. Worth remembering for future feature-bit work: a
+"which CTS group moves" check is not a reliable signal for "is this
+sub-feature real" when the CTS group gates on a broader aggregate bit than
+the one being changed -- the two new unit-test dispatches and the direct
+lit-level `overflow-unbounded-array.test` pass are the real evidence this
+fix works, not a CTS delta.
+
+Considered adding `VK_EXT_descriptor_indexing` to
+`getSupportedDeviceExtensions()` anyway (it wouldn't be strictly dishonest
+-- an ICD can list an extension while several of its sibling feature bits
+report false, as long as it doesn't lie about which ones). Decided against
+it: it wouldn't move any CTS outcome (per the aggregate-bit gating just
+described), and per-project convention appears to be "list an extension
+only once its core promised functionality is genuinely usable," which
+`descriptorIndexing`'s own NonUniform-indexing requirement isn't yet.
+Left `PhysicalDeviceInfo.cpp` untouched and documented the reasoning in
+`VulkanExtensionInventory.md` instead of silently doing nothing.
+
+Regression coverage: ran the full `FeMeVulkanTests` (502 pass) and
+`check-feme` (2280/2307, 27 unsupported, consistent baseline) after each
+commit; ran the full `feme-vk` offload-test-suite lit tree (484 pass, 111
+unsupported, 42 XFAIL, same 13 pre-existing unrelated failures throughout);
+ran a targeted `dEQP-VK.api.info.*` sweep (5382/569 pass/fail, byte-for-
+byte identical to L12b's own recorded baseline) and a `dEQP-VK.
+binding_model.*` compute-filtered subset (1143/673 pass/fail, consistent
+with the well-known, much larger pre-existing `binding_model` failure
+rate) to confirm the pipeline-compile-path and descriptor-allocation-path
+changes introduced no regressions, given how many call sites (`Pipeline.cpp`,
+all 9 `compileGraphicsStage` sites, `Descriptor.cpp`'s allocation/layout
+creation entry points) this session touched.
+
+Struck through both L12c and its parent L12 on the roadmap, since every
+one of L12's own sub-rows (a, b, c) is now done and the real
+`overflow-unbounded-array.test` this whole sub-tree traces back to passes
+end to end.
