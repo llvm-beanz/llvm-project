@@ -37,33 +37,39 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L19:
+Please investigate and fix the issues tracked by milestone L20:
 
-> **A struct-typed storage-buffer array element's own `spirv.ptr<StructType,
-> StorageBuffer>` is misclassified by
-> `isBufferBlockStorage`/`getBufferBlockElement` (`SPIRVToLLVMPatterns.cpp`) as
-> itself a top-level buffer-block pointer**, found as an L18
-> milestone-description correction: `isBufferBlockStorage` returns `true`
-> unconditionally for *any* `StorageBuffer`-storage-class pointer to *any*
-> struct (never checking for a `Block` decoration at all in that branch, unlike
-> its own `Uniform`-storage-class/`BufferBlock`-decoration branch just below
-> it), so a `RWStructuredBuffer<Doggo>`'s own per-element `Doggo` struct pointer
-> (reached once `spirv.AccessChain` has already selected one array element, as
+> **`feme::cpu::SPIRVResourceLoweringPass`'s `isSupportedRawElementType`
+> (`SPIRVResourceLowering.cpp`) rejects a whole-struct `load`/`store` off a
+> resource pointer outright, accepting only a scalar or fixed vector**, found as
+> an L19 milestone-description correction: with L19's own fix landed,
 > `Feature/StructuredBuffer/packed.test`'s own `Doggo Fido = Buf[GI]; ...;
-> Buf[GI] = Fido;` whole-struct-copy idiom does, unlike every other
-> `StructuredBuffer` test, which only ever navigates directly to an individual
-> scalar/vector field via a single multi-index access chain) is spuriously
-> converted into a *second*, nested `spirv.VulkanBuffer` resource handle instead
-> of ordinary memory (address space 11), confirmed directly via
-> `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader` (`'llvm.store' op operand #1
-> must be LLVM pointer type, but got '!llvm.target<"spirv.VulkanBuffer", ...>'`)
-> and a real `feme-opt --feme-convert-spirv-to-llvm` reduction of
-> `packed.test`'s own SPIR-V. Needs its own scoping pass: likely requiring
-> `isBufferBlockStorage`'s `StorageBuffer`-class branch to also check for the
-> struct's own `Block` decoration (mirroring its `Uniform`-class/`BufferBlock`
-> branch immediately below), confirming every currently-passing
-> `StructuredBuffer`/`ConstantBuffer`/`cbuffer` test's own top-level block
-> struct still carries that decoration (so this tightened check does not regress
-> any of them), and checking whether any further pattern (e.g. a struct-typed
-> `spirv.Store`/`spirv.Load` reaching an ordinary address-space-11 pointer)
-> needs its own new support once this misclassification is fixed
+> Buf[GI] = Fido;` whole-struct-copy idiom now converts cleanly at the
+> SPIR-V-to-LLVM layer (an ordinary address-space-11 pointer, not a spurious
+> nested handle), but `hasOnlySupportedPointerUses`/`hasOnlySupportedUses` (both
+> in `SPIRVResourceLowering.cpp`) still reject the resulting
+> whole-`Doggo`-struct `llvm.load`/`llvm.store` outright via
+> `isSupportedRawElementType`, which only ever recognizes a
+> half/float/double/integer scalar or a fixed vector of one -- never a struct --
+> so the pass falls through to `UnsupportedOps.cpp`'s generic "is a
+> register-bound resource handle the FeMe CPU target cannot normalize"
+> diagnostic, confirmed directly via `FEME_VULKAN_LOG_CREATION_ERRORS=1
+> offloader`. Distinct from, and blocking end-to-end pass independently of,
+> L16's own already-fixed scope (a struct-typed *field*, reached via
+> `getelementptr`, converting to its own further load/store) and L19's own scope
+> (the SPIR-V-to-LLVM type-conversion layer): this gap is purely in the CPU
+> resource-lowering pass's own raw-load/store mangling, for the specific case of
+> loading/storing an entire aggregate value directly, with no `getelementptr`
+> navigation into an individual field at all. Needs its own scoping pass: likely
+> either (a) extending `isSupportedRawElementType` to accept a struct type too,
+> and teaching `createRawLoad`/`createRawStore`/`mangleResourceCallName`'s own
+> `appendScalarMangling` (`ResourceCalls.cpp`) to describe an aggregate's own
+> flattened field/element types in its mangled name (mirroring how a fixed
+> vector's own element type and width are already encoded), or (b) decomposing a
+> whole-struct load/store into its own per-field raw loads/stores at this pass,
+> reassembled/exploded via `insertvalue`/`extractvalue` the same way
+> `CompositeConstructPattern`'s own struct case already does at the
+> SPIR-V-to-LLVM layer -- whichever avoids ambiguity with
+> `isSupportedTexelElementType`'s own texel-buffer case, which already
+> special-cases a texel buffer's own `<4 x T>` element type for a different
+> reason (see `hasOnlySupportedUses`'s own comment)
