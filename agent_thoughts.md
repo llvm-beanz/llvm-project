@@ -50461,3 +50461,103 @@ Vulkan14FeatureInventory.md/VulkanExtensionInventory.md and
 FeMeVulkanDesign.md for stale `128` references tied to this change --
 found none needing updates (the design doc's own "limits" prose is still
 generically accurate, no specific number cited there).
+
+# L9: Single-channel-format texel-buffer store normalization
+
+Investigated roadmap L9: `SPIRVResourceLoweringPass` never normalizes a
+single-channel-format (`RWBuffer<int>`/`RWBuffer<float>`) texel-buffer
+*store*, since `OpImageWrite`'s Texel operand is a scalar for this shape
+while `isSupportedTexelElementType` only accepted `<4 x float>`/`<4 x i32>`.
+
+## What I found beyond the milestone's own text
+
+The milestone framed this as a single fix at the `SPIRVResourceLoweringPass`
+level, plus noted `FeMeRuntimeCPU.c`'s runtime store helpers would need to
+grow a narrower-than-`<4 x T>` element stride. In practice the gap spanned
+three independent layers, and getting a real end-to-end proof of the fix
+working was essential to finding all three:
+
+1. **Pass-side (the one the milestone named).** `isSupportedTexelElementType`
+   (`SPIRVResourceLowering.cpp`) now accepts a bare scalar `float`/`i32`
+   element type. Confirmed via a real IR reduction: `dxc -spirv` on a
+   two-line `RWBuffer<int> In/Out; Out[0]=In[0];` shader, run through
+   `feme-translate --import-spirv` then `feme-opt
+   --feme-convert-spirv-to-llvm`, produces exactly `store i32 %4, ptr %18` --
+   confirmed this lowers cleanly with the fix (and falls through to the
+   generic diagnostic without it, via `git stash`/rebuild/compare).
+
+2. **Vulkan API layer (not named in the milestone).** While updating the
+   stale `FeMeVulkanDesign.md` "V4 status note" that this milestone's own
+   scope description quoted, I noticed `feme::vulkan::isTexelBufferFormatSupported`
+   (`Format.cpp`) is a *separate* whitelist gating `vkCreateBufferView`
+   itself. Even with fix (1), a real application could never create the
+   `VkBufferView` for a single-channel format in the first place. This
+   whitelist now accepts `R32_FLOAT`/`R32_UINT`/`R32_SINT` too.
+
+3. **Runtime vector-4 read side (not named in the milestone, and the
+   subtlest one).** I wrote a real end-to-end `vkCmdDispatch` unit test
+   (`ScalarIntTexelBufferDispatchTest.ReadsAndWritesThroughScalarBufferViews`)
+   rather than trusting the IR-level and Vulkan-API-level fixes alone. It
+   initially failed: reading back `1` instead of the expected `42`. Root
+   cause: SPIR-V's `OpImageFetch`/`OpImageRead` always return a full
+   `<4 x T>` regardless of the underlying format's real channel count, so
+   the *read* side of *any* texel buffer -- including a single-channel one
+   -- goes through `femeCpuResourceLoadTypedV4F32`/`V4I32`, not the new
+   scalar helpers from fix (1)'s runtime counterpart. Those vector-4
+   functions had no format-detection branch for the single-channel 32-bit
+   identity formats at all, so a real `R32_UINT`-format descriptor silently
+   read back zero through an unhandled format branch. Extended all four
+   vector-4 typed-buffer functions to recognize these formats, padding
+   `{v,0,0,1}` on load / writing only the first lane on store, matching the
+   convention the pre-existing image-sampling path's
+   `femeRTUnpackImageTexel(I32)`/`femeRTPackImageTexel(I32)` tables already
+   used for the same formats.
+
+This is a good example of why the standing instruction to test "each phase
+of translation" matters: an IR-level lit test alone (phase: CPU codegen
+pass) would have missed gap (2) (Vulkan API validation) and gap (3)
+(runtime conversion) entirely, since neither is reachable from a bare
+`feme-opt` invocation. Only a real dispatch-level test through the full
+Vulkan API surface caught gap (3).
+
+## Verifying against real Vulkan CTS
+
+The milestone's own text claimed this fix "accounts for the entire
+`Basic/Matrix/*.test` family's own failures" (an `offload-test-suite` HLSL
+group). I confirmed via a real `check-hlsl-feme-vk`-style re-run (with
+`VK_ICD_FILENAMES` correctly set and `feme_vulkan` rebuilt -- the
+`check-hlsl-vk-*` ninja targets do *not* rebuild `libfeme_vulkan.so`
+automatically, since it's `dlopen`'d via an ICD JSON, not a link-time
+dependency) that this claim was optimistic: all 24 `Basic/Matrix` cases
+still fail, for reasons entirely unrelated to L9 (a `feme-cpu-linearize`
+loop-internal-branch error and matrix `spirv.CompositeConstruct`
+legalization gaps, both already tracked under roadmap L7). So I looked for
+a real `deqp-vk` case that directly exercises this fix's actual scope
+instead, and found `dEQP-VK.image.format_reinterpret.buffer.r32_*`: a
+group that reinterprets a storage texel buffer written with one format and
+read back with another, through the exact `vkCreateBufferView` plus typed
+load/store path all three of this fix's layers touch. Confirmed via a
+`git stash`-and-rebuild before/after comparison that
+`r32_uint_r32_sint` went from `NotSupported` ("Format not supported for
+storage texel buffers") to a real `Pass`, and a broader sweep of the same
+group's `r32_*` cases shows 18 new passes (every pairing where both sides
+are `R32_UINT`/`R32_SINT`/`R32_SFLOAT`), 0 failures, with the remaining 24
+still correctly `NotSupported` (the other format in those pairs isn't in
+the whitelist at all -- an intentional, separate scope boundary, not a
+regression). This is a much more honest demonstration of this fix's real
+CTS impact than the milestone's own `Basic/Matrix` framing would have been.
+
+## Commit breakdown
+
+Split into six commits: (1) pass-side scalar acceptance + its unit/lit
+tests; (2) the new scalar (non-`<4 x T>`) runtime load/store entry points +
+their unit tests; (3) the vector-4 single-channel-format runtime fix (the
+gap the end-to-end test caught) + focused unit tests; (4) the Vulkan-API-
+layer whitelist fix + its test updates; (5) the end-to-end dispatch unit
+test itself; (6) design doc, roadmap, and CTS report updates. Splitting
+(1)-(3) required manually partitioning a couple of files' diffs (via
+`git add -p` for `FeMeRuntimeCPU.c`'s file-order-interleaved hunks, and a
+small Python script for `RuntimeCPUTest.cpp`'s single contiguous insertion
+block) since both the pass-side scalar-entry-point runtime helpers and the
+later-discovered vector-4 fix touched the same two files in one working
+session.
