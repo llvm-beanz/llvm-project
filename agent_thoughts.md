@@ -49858,3 +49858,135 @@ sanitizer catches it, the platform difference itself is the lead: here,
 far faster than any amount of instrumentation, and the resulting fix came
 with a test that reproduces on *every* platform, which is strictly better
 than one that only fails on the reporter's machine.
+
+# macOS-only failure: `feme-cpu-reject-unwidened-loop-divergent-branch.ll`
+
+## The report
+
+One test failing on macOS. `feme` printed `unexpected wave-body parameter
+for EntryWrapperPass` and `UNREACHABLE executed at EntryWrapper.cpp:443`
+instead of the `feme-cpu-linearize` diagnostic the test's CHECK lines
+expected.
+
+## It was never a macOS bug
+
+First instinct on a platform-specific failure is to look for something
+platform-specific (an ABI difference, a triple, endianness). That was
+wrong. The test carries `REQUIRES: directx-registered-target`, and DirectX
+is an *experimental* LLVM target -- `build/` here had
+`LLVM_TARGETS_TO_BUILD=X86;AArch64` and nothing else, so lit reported the
+test `UNSUPPORTED` and had been doing so on every prior Linux run in this
+project. Adding `-DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="DirectX"` to the
+existing build dir reproduced the failure identically on Linux in one
+rebuild.
+
+Worth stating plainly because it generalizes: a test that reports
+`UNSUPPORTED` is not a test that passes, and a suite whose summary line
+says "2244 passed, 27 unsupported" is quietly hiding whatever those 27
+cover. All three sanitizer trees in this repo (`build-ubsan`,
+`build-asan-ubsan`, `build-san-libcxx`) also lack DirectX, so the recent
+UBSan/ASan sessions could not have caught this either. I left DirectX
+enabled in `build/` and recorded the flag in `VulkanCTSReport.md`.
+
+## Two independent problems behind one failure
+
+The temptation with a failing test is to find *the* cause. There were two,
+and fixing either alone leaves something broken.
+
+**(1) The test's premise had gone stale.** The test round-trips its IR
+through `llc --filetype=obj` to a DXContainer and back. `llc`'s DXIL path
+runs `StructurizeCFG`, which rewrites the raw `body -> {latch, work}`
+divergent-`continue` diamond into a `Flow`-block form -- and
+`LinearizePass` *handles* that form (H19k/H19l work in this same series
+generalized it to). So the round-tripped module linearizes cleanly and no
+diagnostic is emitted at all. The test's CHECK lines could never match
+again, on any platform.
+
+I confirmed the raw-IR limit is genuinely unchanged:
+`Transforms/CPU/Linearize/unsupported-loop-internal-branch.ll` still gets
+the diagnostic. So `FeMeCPUDesign.md`'s milestone-6 deviation note is
+still accurate and needed no correction -- only the *round-tripped* path
+arrives in a supported shape. That distinction is subtle enough that I
+wrote it into the replacement test's header comment rather than leaving it
+to be rediscovered.
+
+**(2) A real crash on unsupported input.** The test's entry point is
+`define void @main(i32 %n)`. Real shader entry points take no parameters
+-- inputs arrive via stage-IO or resource accesses, and all 15+ existing
+`entry-wrapper-*.ll` tests use `define void @main()`. That `%n` survives
+widening and sits ahead of the `WaveBodyEnv` ABI parameters on the wave
+body, and `buildWaveLoop`'s name-based dispatch has no case for `"n"`, so
+it fell off the end into `llvm_unreachable`.
+
+Per `feme/.instructions.md`, `llvm_unreachable` is for unreachable
+*states*. An unexpected *input shape* is not one -- it is exactly what
+this codebase's `Context::emitError` + return-nullptr convention exists
+for, which `runPipeline`'s `ErrorDiagnosticGuard` turns into a clean
+pipeline `Error`. `LinearizePass` already had two precedents (the masked
+load/store bail-outs from H4e). So I added `checkWaveBodyParameters` to
+`buildWrapper`, right next to its existing `if (!Env) return nullptr;`.
+
+## The risk in the fix, and how I contained it
+
+`isKnownWaveBodyParameter` hand-mirrors `buildWaveLoop`'s dispatch chain.
+A name missing from that list turns a *working* shader into a spurious
+compile error -- a strictly worse failure than the crash it replaces.
+So I mechanically extracted both lists and `diff`'d them rather than
+eyeballing: 26 names plus the `loopvar` prefix, exact match. I also noted
+the hazard in the commit message, since the two lists must now be kept in
+sync by hand. (`isUniformWaveBodyArgument` elsewhere in the same file is a
+*different*, smaller list for a different purpose -- easy to confuse.)
+
+## Resolving the stale test rather than deleting it
+
+The original test's contract is still worth having and is not covered
+elsewhere: the pipeline must *hard-fail with the diagnostic surfaced*
+rather than emit an object file with no `feme_cpu_entry_main` wrapper,
+silently discarding the entry point. What changed is only which diagnostic
+drives it. So I retargeted the file at the entry-parameter diagnostic and
+renamed it (`feme-cpu-entry-point-parameter.ll`), keeping the loop so the
+`StructurizeCFG` round-trip through `LinearizePass` stays exercised, and
+keeping the original's roadmap-§1.6 rationale in the header.
+
+Coverage now spans each phase, per the standing instruction: a unit test
+(`EntryWrapperTest.UnsupportedEntryParameterDiagnosesInsteadOfCrashing`,
+modelled on `LinearizeTest`'s own diagnose-instead-of-crash case, which
+also asserts no half-built wrapper is left behind), a pass-level lit test
+(`entry-wrapper-entry-point-parameter-unsupported.ll`), and the tool-level
+end-to-end test.
+
+One small correction mid-way: I had used a `feme-cpu-entry-wrapper:`
+diagnostic prefix, but the pass's two existing diagnostics use its
+registered name `feme-cpu-wrap-entry:`. Matched the existing convention.
+
+## Verifying I had not caused a CTS regression
+
+`dEQP-VK.compute.pipeline.basic.*` aborted with `LLVM ERROR: unsupported
+calling convention`. Since my change adds a new early-bail path, "probably
+unrelated" was not good enough. I reverted just `EntryWrapper.cpp` to
+`HEAD~2`, rebuilt `feme_vulkan`, and reproduced the identical abort --
+pre-existing, confirmed rather than assumed, then restored the fix.
+
+That check turned up something worth its own roadmap row (H19p): the case
+does not *fail*, it `report_fatal_error`s and kills `deqp-vk` itself, so
+every remaining case in the group goes unreported and the `compute`
+group's totals silently under-count. Same whole-group-truncation failure
+mode roadmap C2's asset-path `ResourceError` caused. Recorded in
+`VulkanCTSReport.md` with the caveat that `compute` totals are unreliable
+until it lands.
+
+Also worth noting for anyone reproducing: the group is
+`dEQP-VK.compute.pipeline.basic.*`, not `compute.basic.*`. My first
+invocations returned `0/0` -- a silently empty filter, which looks a lot
+like success if you only read the pass percentage.
+
+No roadmap strike-through: this was a bug fix, not a milestone. No
+inventory change either -- no feature bit or extension advertisement
+moved.
+
+## Where I ended up
+
+Three commits (fix + its two new tests; the tool-level test retarget;
+docs). `ninja check-feme` clean at 2244/2244 with DirectX now enabled, so
+the previously-skipped DirectX tests are genuinely running and none of
+them regressed.
