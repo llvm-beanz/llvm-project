@@ -370,6 +370,83 @@ TEST(SIMDizeTest, DiagnosesUnsupportedDivergentAggregate) {
       << "actual diagnostic: " << ErrorMessage;
 }
 
+// (Roadmap L21) A divergent struct value assembled by a chain of
+// `insertvalue`s (mixing a whole sub-array inserted at once with genuine
+// scalar leaves) and read back apart by a chain of `extractvalue`s (again
+// mixing a whole sub-array extraction with individual scalar-leaf
+// extractions) -- the exact shape `feme::cpu::SPIRVResourceLoweringPass`'s
+// own whole-aggregate resource load/store decomposition (roadmap L20)
+// produces once reassembled through `feme::cpu::LinearizePass`, reduced
+// from a real `Feature/StructuredBuffer/packed.test` failure -- now
+// decomposes into one `<W x T>` per flattened scalar leaf
+// (`WidenedAggregateComponents`) instead of `checkVectorDecompositionSupported`'s
+// former unconditional aggregate bail.
+TEST(SIMDizeTest, DecomposesInsertValueChainIntoResourceStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %resource_heap, i32 %resource_heap_count) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %off = zext i32 %tid to i64
+      %e0 = call i32 @feme.cpu.resource.load.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off, i1 true)
+      %off1 = add i64 %off, 4
+      %e1 = call i32 @feme.cpu.resource.load.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off1, i1 true)
+      %off2 = add i64 %off, 8
+      %scalar = call i32 @feme.cpu.resource.load.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off2, i1 true)
+
+      %a0 = insertvalue [2 x i32] poison, i32 %e0, 0
+      %a1 = insertvalue [2 x i32] %a0, i32 %e1, 1
+      %s0 = insertvalue { [2 x i32], i32 } poison, [2 x i32] %a1, 0
+      %s1 = insertvalue { [2 x i32], i32 } %s0, i32 %scalar, 1
+
+      %arr = extractvalue { [2 x i32], i32 } %s1, 0
+      %r0 = extractvalue [2 x i32] %arr, 0
+      %r1 = extractvalue [2 x i32] %arr, 1
+      %r2 = extractvalue { [2 x i32], i32 } %s1, 1
+
+      call void @feme.cpu.resource.store.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off, i32 %r0, i1 true)
+      call void @feme.cpu.resource.store.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off1, i32 %r1, i1 true)
+      call void @feme.cpu.resource.store.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off2, i32 %r2, i1 true)
+      ret void
+    }
+    declare i32 @feme.cpu.resource.load.raw.i32(ptr, i32, i32, i64, i1)
+    declare void @feme.cpu.resource.store.raw.i32(ptr, i32, i32, i64, i32, i1)
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Decomposition never builds an illegal `<4 x {[2 x i32], i32}>`, and
+  // every per-lane scalarized store's own value operand stays a genuine
+  // scalar `i32` (never a nested vector or an aggregate).
+  unsigned StoreCallCount = 0, LoadCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isAggregateType());
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    StringRef Name = CI->getCalledFunction()->getName();
+    if (Name == "feme.cpu.resource.store.raw.i32") {
+      ++StoreCallCount;
+      EXPECT_TRUE(CI->getArgOperand(4)->getType()->isIntegerTy(32));
+    } else if (Name == "feme.cpu.resource.load.raw.i32") {
+      ++LoadCallCount;
+    }
+  }
+  EXPECT_EQ(LoadCallCount, 3u * 4u);
+  EXPECT_EQ(StoreCallCount, 3u * 4u);
+}
+
 TEST(SIMDizeTest, WidensMaskedLoadStoreToGatherScatter) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

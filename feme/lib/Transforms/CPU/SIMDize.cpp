@@ -422,6 +422,121 @@ std::optional<Constant *> getAtomicRMWIdentity(AtomicRMWInst::BinOp Op,
   llvm_unreachable("unhandled AtomicRMWInst::BinOp");
 }
 
+/// Whether every leaf reachable by recursing through \p Ty's own
+/// `StructType`/`ArrayType` nesting is a genuine scalar (not itself a
+/// vector) -- the shape `FunctionWidener`'s aggregate decomposition
+/// (`WidenedAggregateComponents`, "Vectors become components, not nested
+/// vectors" in "Phase 4: Widening", extended to aggregates by roadmap
+/// milestone L21) supports. A vector-typed leaf (e.g. a struct field that
+/// is itself a `<N x T>`, rather than already fully scalar-decomposed the
+/// way `feme::mlir::CompositeConstructPattern`'s own struct-reassembly
+/// always leaves one by the time it reaches this pass) remains out of
+/// scope: no real case has needed it yet (every vector-typed field this
+/// pass has actually seen inside a divergent aggregate is decomposed into
+/// scalar `extractelement`/`insertvalue` chains before the aggregate is
+/// ever built, confirmed by the real `packed.test` IR reduction L21's own
+/// roadmap row cites), and mixing a per-lane vector-of-components
+/// decomposition inside a per-lane flat-scalar-slot one would need its own
+/// separate representation this row does not attempt.
+bool isAllScalarAggregateLeaves(Type *Ty) {
+  if (auto *StructTy = dyn_cast<StructType>(Ty))
+    return llvm::all_of(StructTy->elements(), isAllScalarAggregateLeaves);
+  if (auto *ArrayTy = dyn_cast<ArrayType>(Ty))
+    return isAllScalarAggregateLeaves(ArrayTy->getElementType());
+  return !Ty->isVectorTy();
+}
+
+/// The total number of scalar leaves \p Ty flattens to -- i.e. the number
+/// of `<W x leafT>` slots `WidenedAggregateComponents` stores for a
+/// divergent value of this (all-scalar-leaves, per
+/// `isAllScalarAggregateLeaves`) type.
+unsigned countAggregateLeafScalars(Type *Ty) {
+  if (auto *StructTy = dyn_cast<StructType>(Ty)) {
+    unsigned Count = 0;
+    for (Type *ElemTy : StructTy->elements())
+      Count += countAggregateLeafScalars(ElemTy);
+    return Count;
+  }
+  if (auto *ArrayTy = dyn_cast<ArrayType>(Ty))
+    return ArrayTy->getNumElements() *
+           countAggregateLeafScalars(ArrayTy->getElementType());
+  return 1;
+}
+
+/// Recursively appends every leaf index path reachable from \p Ty (in
+/// flattening order) to \p Paths, extending \p Prefix as it descends --
+/// used by `FunctionWidener::getAggregateComponents` to build one real
+/// `extractvalue` per leaf for a *uniform* aggregate value that has no
+/// `WidenedAggregateComponents` entry of its own yet.
+void collectAggregateLeafIndexPaths(
+    Type *Ty, SmallVectorImpl<unsigned> &Prefix,
+    SmallVectorImpl<SmallVector<unsigned, 4>> &Paths) {
+  if (auto *StructTy = dyn_cast<StructType>(Ty)) {
+    for (unsigned I = 0, E = StructTy->getNumElements(); I != E; ++I) {
+      Prefix.push_back(I);
+      collectAggregateLeafIndexPaths(StructTy->getElementType(I), Prefix,
+                                     Paths);
+      Prefix.pop_back();
+    }
+    return;
+  }
+  if (auto *ArrayTy = dyn_cast<ArrayType>(Ty)) {
+    for (unsigned I = 0, E = ArrayTy->getNumElements(); I != E; ++I) {
+      Prefix.push_back(I);
+      collectAggregateLeafIndexPaths(ArrayTy->getElementType(), Prefix, Paths);
+      Prefix.pop_back();
+    }
+    return;
+  }
+  Paths.emplace_back(Prefix.begin(), Prefix.end());
+}
+
+/// Returns the `[Offset, Offset + Count)` flat-slot range (into a
+/// `WidenedAggregateComponents` entry for a value of type \p Ty) that an
+/// `insertvalue`/`extractvalue` index path \p Indices selects -- mirroring
+/// those instructions' own index semantics (each index selects one struct
+/// field or array element in turn; an index path never descends into a
+/// `FixedVectorType`, since reaching inside one needs `extractelement`/
+/// `insertelement` instead). \p Count is `1` when \p Indices names a
+/// genuine scalar leaf, and greater than `1` when it names a nested
+/// sub-aggregate instead (e.g. one whole array field of a larger struct).
+std::pair<unsigned, unsigned> getAggregateLeafRange(Type *Ty,
+                                                    ArrayRef<unsigned> Indices) {
+  unsigned Offset = 0;
+  Type *Cur = Ty;
+  for (unsigned Idx : Indices) {
+    if (auto *StructTy = dyn_cast<StructType>(Cur)) {
+      for (unsigned I = 0; I != Idx; ++I)
+        Offset += countAggregateLeafScalars(StructTy->getElementType(I));
+      Cur = StructTy->getElementType(Idx);
+    } else {
+      auto *ArrayTy = cast<ArrayType>(Cur);
+      Offset += Idx * countAggregateLeafScalars(ArrayTy->getElementType());
+      Cur = ArrayTy->getElementType();
+    }
+  }
+  return {Offset, countAggregateLeafScalars(Cur)};
+}
+
+/// Recursively appends every scalar leaf type reachable from \p Ty (in
+/// flattening order) to \p Leaves -- used by
+/// `FunctionWidener::getAggregateComponents` to build one `<W x leafT>`
+/// poison placeholder per leaf for an `undef`/`poison` aggregate value.
+void flattenAggregateLeafScalarTypes(Type *Ty,
+                                     SmallVectorImpl<Type *> &Leaves) {
+  if (auto *StructTy = dyn_cast<StructType>(Ty)) {
+    for (Type *ElemTy : StructTy->elements())
+      flattenAggregateLeafScalarTypes(ElemTy, Leaves);
+    return;
+  }
+  if (auto *ArrayTy = dyn_cast<ArrayType>(Ty)) {
+    for (unsigned I = 0, E = ArrayTy->getNumElements(); I != E; ++I)
+      flattenAggregateLeafScalarTypes(ArrayTy->getElementType(), Leaves);
+    return;
+  }
+  Leaves.push_back(Ty);
+}
+
 /// Widens a single acyclic, uniform-control-flow function to \p WaveSize
 /// lanes. See the file comment above for the algorithm.
 class FunctionWidener {
@@ -452,6 +567,13 @@ class FunctionWidener {
   /// `widenInsertElement`, and "Vectors become components, not nested
   /// vectors" in "Phase 4: Widening").
   DenseMap<Value *, SmallVector<Value *, 4>> WidenedVectorComponents;
+  /// The aggregate analogue of `WidenedVectorComponents` (roadmap milestone
+  /// L21): a divergent, all-scalar-leaves (`isAllScalarAggregateLeaves`)
+  /// struct-or-array value (in the *old* function) -> its decomposed
+  /// widened form, one `<W x leafT>` per *flattened* scalar leaf, in
+  /// flattening order (`countAggregateLeafScalars`/`getAggregateLeafRange`)
+  /// -- see `widenInsertValue`/`widenExtractValue`.
+  DenseMap<Value *, SmallVector<Value *, 8>> WidenedAggregateComponents;
 
   SmallVector<Instruction *, 16> ToErase;
 
@@ -479,9 +601,12 @@ public:
 private:
   bool checkSupportedControlFlow();
   bool checkVectorDecompositionSupported();
+  bool checkAggregateValueSupported(Instruction &I);
   Function *buildWidenedFunction();
   Value *getWidened(Value *V, IRBuilderBase &Builder);
   SmallVector<Value *, 4> getVectorComponents(Value *V, IRBuilderBase &Builder);
+  SmallVector<Value *, 8> getAggregateComponents(Value *V,
+                                                 IRBuilderBase &Builder);
   PHINode *createWidenedPHIStub(PHINode &PN);
   void createWidenedVectorPHIStub(PHINode &PN);
   void fillWidenedPHIIncoming(PHINode &PN, PHINode &NewPN);
@@ -513,6 +638,8 @@ private:
   void widenGroupSharedAtomicRMW(AtomicRMWInst &RMW, IRBuilder<> &Builder);
   void widenInsertElement(InsertElementInst &IE, IRBuilder<> &Builder);
   void widenExtractElement(ExtractElementInst &EE, IRBuilder<> &Builder);
+  void widenInsertValue(InsertValueInst &IV, IRBuilder<> &Builder);
+  void widenExtractValue(ExtractValueInst &EV, IRBuilder<> &Builder);
   void widenShuffleVector(ShuffleVectorInst &SV, IRBuilder<> &Builder);
   void widenVectorSelect(SelectInst &SI, IRBuilder<> &Builder);
   void widenVectorElementwise(Instruction &I, IRBuilder<> &Builder);
@@ -644,22 +771,42 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   //    the wave's bare entry mask and a constant zero (see
   //    `widenMaskedLoad`'s own vector case),
   //
-  // Verify every divergent vector
-  // value matches one of those producer shapes, and every use of one
-  // matches one of the consumer shapes, up front and bail with a
-  // diagnostic, matching every other precondition this pass checks before
-  // mutating anything, rather than let a later step build an invalid
-  // nested vector type and assert.
+  // A divergent *aggregate* (struct/array) value gets its own analogous
+  // decomposition (roadmap milestone L21, extending roadmap step C3's
+  // vector-only narrowing): a chain of `insertvalue`s assembling a struct
+  // or array from scalar components (or from an already-decomposed
+  // sub-aggregate/vector value inserted whole), and an `extractvalue`
+  // reading either a genuine scalar leaf or a nested sub-aggregate back out
+  // -- the shape `feme::cpu::SPIRVResourceLoweringPass`'s own whole-
+  // aggregate resource load/store decomposition (roadmap L20) produces once
+  // reassembled through `feme::cpu::LinearizePass` (confirmed by reducing a
+  // real `Feature/StructuredBuffer/packed.test` failure, its own `Doggo
+  // Fido = Buf[GI]; ...; Buf[GI] = Fido;` whole-struct-copy idiom, down to
+  // its exact IR shape) -- see `checkAggregateValueSupported`,
+  // `widenInsertValue`/`widenExtractValue`. Every leaf this decomposition
+  // reaches must itself be a genuine scalar, not a vector
+  // (`isAllScalarAggregateLeaves`'s own comment); an aggregate-typed `phi`
+  // remains unsupported (no real case has needed one yet: unlike a vector
+  // value reconciled across a uniform control-flow diamond,
+  // `feme::cpu::LinearizePass` fully scalarizes every field of a divergent
+  // aggregate reassignment, e.g. `packed.test`'s own `TailState` field,
+  // into a plain scalar `select` before ever rebuilding the struct itself,
+  // so the struct/array value is always freshly built via `insertvalue` in
+  // the merge block, never merged via a struct-typed `phi` directly).
+  //
+  // Verify every divergent vector or aggregate value matches one of these
+  // producer shapes, and every use of one matches one of the consumer
+  // shapes, up front and bail with a diagnostic, matching every other
+  // precondition this pass checks before mutating anything, rather than let
+  // a later step build an invalid nested vector type and assert.
   for (Instruction &I : instructions(*OldF)) {
     if (!UI.isDivergentAtDef(&I))
       continue;
 
     if (I.getType()->isAggregateType()) {
-      Ctx.emitError("feme-cpu-simdize: function '" + OldF->getName() +
-                    "' has a divergent value '" + I.getName() +
-                    "' of aggregate type; component decomposition is not yet "
-                    "supported (roadmap milestone 7 deviation)");
-      return false;
+      if (!checkAggregateValueSupported(I))
+        return false;
+      continue;
     }
 
     // Both a constant-index and a non-constant-index `extractelement` are
@@ -667,8 +814,12 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
     // producer's side below, since every divergent vector-typed value in
     // this function is visited by this same loop); its own result is
     // scalar, so it does not fall through to the vector-producer checks
-    // below.
-    if (isa<ExtractElementInst>(&I))
+    // below. Likewise for a scalar-result `extractvalue` (its own
+    // aggregate operand's validity is checked when that operand is itself
+    // visited by this same loop, in `checkAggregateValueSupported`); an
+    // aggregate-*result* `extractvalue` (a nested sub-aggregate extraction)
+    // is instead caught by the `isAggregateType()` branch just above.
+    if (isa<ExtractElementInst>(&I) || isa<ExtractValueInst>(&I))
       continue;
 
     if (!I.getType()->isVectorTy())
@@ -891,6 +1042,49 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   return true;
 }
 
+/// The aggregate analogue of the vector-specific producer/consumer checks
+/// inside `checkVectorDecompositionSupported` above (see that function's
+/// own file comment for the full picture, roadmap milestone L21): verifies
+/// that the divergent, aggregate-typed \p I is one of the two supported
+/// producer shapes (an `insertvalue` or a nested sub-aggregate
+/// `extractvalue`, both requiring every leaf `isAllScalarAggregateLeaves`
+/// reaches to be a genuine scalar) and that every use of it is one of the
+/// three supported consumer shapes (another `insertvalue`'s aggregate-base
+/// or inserted-value operand, or an `extractvalue`'s aggregate operand).
+bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
+  bool IsSupportedProducer = false;
+  if (isa<InsertValueInst>(&I) || isa<ExtractValueInst>(&I))
+    IsSupportedProducer = isAllScalarAggregateLeaves(I.getType());
+
+  if (!IsSupportedProducer) {
+    Ctx.emitError(
+        "feme-cpu-simdize: function '" + OldF->getName() +
+        "' has a divergent value '" + I.getName() +
+        "' of aggregate type; component decomposition is not yet supported "
+        "for this producer (only an insertvalue chain or a nested "
+        "sub-aggregate extractvalue, over an all-scalar-leaves struct/"
+        "array, is supported) (roadmap milestone 7/L21 deviation)");
+    return false;
+  }
+
+  for (User *U : I.users()) {
+    if (auto *UserIV = dyn_cast<InsertValueInst>(U))
+      if (UserIV->getAggregateOperand() == &I ||
+          UserIV->getInsertedValueOperand() == &I)
+        continue;
+    if (isa<ExtractValueInst>(U))
+      continue;
+    Ctx.emitError(
+        "feme-cpu-simdize: function '" + OldF->getName() +
+        "' has a divergent aggregate value '" + I.getName() +
+        "' used outside a supported insertvalue/extractvalue pattern; "
+        "component decomposition is not yet supported for this use "
+        "(roadmap milestone 7/L21 deviation)");
+    return false;
+  }
+  return true;
+}
+
 Function *FunctionWidener::buildWidenedFunction() {
   Type *I32Ty = Type::getInt32Ty(Ctx);
   Type *PtrTy = PointerType::get(Ctx, 0);
@@ -997,6 +1191,40 @@ FunctionWidener::getVectorComponents(Value *V, IRBuilderBase &Builder) {
   for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
     Components.push_back(getWidened(
         Builder.CreateExtractElement(V, Builder.getInt32(I)), Builder));
+  return Components;
+}
+
+SmallVector<Value *, 8>
+FunctionWidener::getAggregateComponents(Value *V, IRBuilderBase &Builder) {
+  // The aggregate analogue of `getVectorComponents` (roadmap milestone
+  // L21): either read back an already-decomposed divergent aggregate's
+  // flat leaf components, or build the widened form of each of a
+  // *uniform* aggregate's (constant or not) leaves directly, one
+  // `getWidened` broadcast (or `getVectorComponents`/`getAggregateComponents`
+  // recursive read, if a leaf is itself a vector or nested aggregate --
+  // impossible here, since every leaf is a genuine scalar per
+  // `isAllScalarAggregateLeaves`) per flattened leaf.
+  if (auto It = WidenedAggregateComponents.find(V);
+      It != WidenedAggregateComponents.end())
+    return It->second;
+
+  if (isa<UndefValue>(V)) {
+    SmallVector<Type *, 8> LeafTypes;
+    flattenAggregateLeafScalarTypes(V->getType(), LeafTypes);
+    SmallVector<Value *, 8> Components;
+    for (Type *LeafTy : LeafTypes)
+      Components.push_back(
+          PoisonValue::get(FixedVectorType::get(LeafTy, WaveSize)));
+    return Components;
+  }
+
+  SmallVector<SmallVector<unsigned, 4>, 8> Paths;
+  SmallVector<unsigned, 4> Prefix;
+  collectAggregateLeafIndexPaths(V->getType(), Prefix, Paths);
+  SmallVector<Value *, 8> Components;
+  for (ArrayRef<unsigned> Path : Paths)
+    Components.push_back(
+        getWidened(Builder.CreateExtractValue(V, Path), Builder));
   return Components;
 }
 
@@ -2106,6 +2334,66 @@ void FunctionWidener::widenExtractElement(ExtractElementInst &EE,
   ToErase.push_back(&EE);
 }
 
+void FunctionWidener::widenInsertValue(InsertValueInst &IV,
+                                       IRBuilder<> &Builder) {
+  // The aggregate analogue of `widenInsertElement` (roadmap milestone
+  // L21): start from the aggregate base's own flat leaf components
+  // (`getAggregateComponents` handles both a decomposed divergent base and
+  // a uniform one, including `poison`/`undef`), overwrite the leaf range
+  // `IV`'s own index path selects (`getAggregateLeafRange`) with the
+  // inserted value's own widened form -- a single wide scalar
+  // (`getWidened`) when it names a genuine leaf, or another flat
+  // component list (`getAggregateComponents`) when it names a whole
+  // sub-aggregate inserted at once (e.g. `packed.test`'s own `Legs`
+  // sub-array inserted whole into `Doggo`'s field 0) -- and record the
+  // result for the next link (or an extractvalue/insertvalue consumer);
+  // this instruction itself never gets a single widened `<W x T>`
+  // replacement, exactly like `widenInsertElement`.
+  SmallVector<Value *, 8> Components =
+      getAggregateComponents(IV.getAggregateOperand(), Builder);
+
+  auto [Offset, Count] =
+      getAggregateLeafRange(IV.getAggregateOperand()->getType(), IV.getIndices());
+  Value *Inserted = IV.getInsertedValueOperand();
+  if (Inserted->getType()->isAggregateType()) {
+    SmallVector<Value *, 8> InsertedComponents =
+        getAggregateComponents(Inserted, Builder);
+    for (unsigned I = 0; I != Count; ++I)
+      Components[Offset + I] = InsertedComponents[I];
+  } else {
+    Components[Offset] = getWidened(Inserted, Builder);
+  }
+
+  WidenedAggregateComponents[&IV] = std::move(Components);
+  ToErase.push_back(&IV);
+}
+
+void FunctionWidener::widenExtractValue(ExtractValueInst &EV,
+                                        IRBuilder<> &Builder) {
+  // The dual of `widenInsertValue`: reads the leaf range `EV`'s own index
+  // path selects straight out of `getAggregateComponents` rather than
+  // extracting from a single widened aggregate (there is none -- see
+  // `checkVectorDecompositionSupported`'s file comment for why a divergent
+  // aggregate is never given one). A scalar-result `EV` (a genuine leaf)
+  // gets the usual single `Widened` entry; an aggregate-result `EV` (a
+  // nested sub-aggregate extraction, e.g. `packed.test`'s own two-level
+  // extractvalue chain reading a whole array field before reading its
+  // final scalar element) instead gets its own `WidenedAggregateComponents`
+  // slice, exactly like any other aggregate-typed producer.
+  SmallVector<Value *, 8> Components =
+      getAggregateComponents(EV.getAggregateOperand(), Builder);
+
+  auto [Offset, Count] =
+      getAggregateLeafRange(EV.getAggregateOperand()->getType(), EV.getIndices());
+  if (EV.getType()->isAggregateType()) {
+    WidenedAggregateComponents[&EV] = SmallVector<Value *, 8>(
+        Components.begin() + Offset, Components.begin() + Offset + Count);
+  } else {
+    Widened[&EV] = Components[Offset];
+  }
+  ToErase.push_back(&EV);
+}
+
 void FunctionWidener::widenShuffleVector(ShuffleVectorInst &SV,
                                          IRBuilder<> &Builder) {
   // "A shuffle ... becomes selects across the components" ("Vectors become
@@ -2580,6 +2868,16 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
 
   if (auto *EE = dyn_cast<ExtractElementInst>(&I)) {
     widenExtractElement(*EE, Builder);
+    return true;
+  }
+
+  if (auto *IV = dyn_cast<InsertValueInst>(&I)) {
+    widenInsertValue(*IV, Builder);
+    return true;
+  }
+
+  if (auto *EV = dyn_cast<ExtractValueInst>(&I)) {
+    widenExtractValue(*EV, Builder);
     return true;
   }
 
