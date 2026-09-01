@@ -18455,3 +18455,73 @@ No feature-bit or extension-advertisement change was made or is needed
 (an audit-and-bookkeeping pass, not a compiler fix); double-checked both
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` for
 completeness and confirmed neither needs an update.
+
+## Roadmap L13a
+
+**Scope.** L13a's own row: `convertOffsetStructTypeIgnoringDecorations`'s
+"tight-vector retry" fallback (`SPIRVToLLVMPatterns.cpp`) did not handle a
+fixed-size array member (or standalone member) of an identified struct
+whose declared stride/offset-gap undershoots that struct's own natural
+(ABI) size -- the remaining gap in L13's own scope, per that row's own
+restored-by-L14 citation.
+
+**Fix.** Added `padStructToSize` (append-only trailing byte-array pad
+member, exploiting struct layout's strictly-forward-only offset
+computation so no consumer-side `AccessChain`/GEP change is needed),
+`padUndersizedMembersIfNeeded` (a new struct-member "growth retry"
+alongside the existing tight-vector retry, composable with it), and a new
+`convertArrayTypeIgnoringDecorations` override that pads an
+identified-struct array element to its declared `ArrayStride` the same
+way.
+
+**Method.** Reduced `Feature/CBuffer/structs.test`'s own real SPIR-V (and
+a minimal `X x1; X x2;` repro) via `dxc`/`feme-translate --import-spirv`/
+`feme-opt --feme-convert-spirv-to-llvm`, confirming full legalization with
+the fix and the original `failed to legalize operation 'spirv.AccessChain'`
+error without it. Then rebuilt `feme_vulkan`/`offloader` and re-ran
+`check-hlsl-vk-feature-{cbuffer,structuredbuffer,constantbuffert}` against
+the real `feme_vulkan` ICD (`VK_ICD_FILENAMES` explicitly exported, per
+`feme/.instructions.md`), and a `dEQP-VK.ubo.*`/`dEQP-VK.ssbo.layout.*`
+sweep against the same ICD.
+
+**Findings.**
+- `feme-opt` reduction confirms the conversion-layer gap L13a itself
+  scoped is fixed: `structs.test`'s own struct now legalizes fully, and
+  the 2 already-passing L13 cases (`CBuffer/vectors.test`,
+  `ConstantBufferT/vectors.test`) still legalize unchanged (no
+  regression).
+- **A real `check-hlsl-vk-feature-cbuffer`/`-structuredbuffer` rerun found
+  `structs.test` still fails end to end** -- not at this row's own
+  conversion layer (confirmed fixed above), but at a later, distinct CPU
+  resource-lowering phase this row never touched (`SPIRVResourceLowering
+  .cpp` never allows a `getelementptr` past a `cbuffer` resource's own
+  `getpointer` result at all, confirmed directly via
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader`); split out to new roadmap
+  row L16.
+- `array-of-structs.test`/`dynamic-struct.test` still fail (as before),
+  now confirmed to be a distinct, deliberately-out-of-scope scalar-array
+  trailing-sibling-compaction gap (new roadmap row L17), not the
+  identified-struct gap this row fixed.
+- `packed.test` still fails, but for a *different* error than before this
+  fix (`'llvm.cond_br' op operand #1 ... got 'si32'`, not the
+  `AccessChain` error L13/L13a both targeted) -- this row's own fix
+  advances its legalization far enough to expose a new, distinct,
+  pre-existing gap; split out to new roadmap row L18.
+- `dEQP-VK.ubo.*` (13,240 cases): two repeated runs against the same
+  post-fix binary measured 1051/13240 (7.9%) and 1166/13240 (8.8%)
+  respectively -- a ~115-case swing between two nominally-identical runs,
+  confirming this container's own `dEQP-VK.ubo.*` sweep is measurably
+  flaky at this scale (consistent with, though larger than, this
+  project's own already-documented C2/H19p single-crash-corrupts-a-run
+  risk) rather than attributable to this fix; both numbers bracket the
+  prior L14-recorded baseline (1160/13240), so no regression is evident
+  within this run-to-run noise band.
+- `dEQP-VK.ssbo.layout.*` (5,275 cases): 227 pass (4.3%), 2033 fail
+  (38.5%), 3015 not supported (57.2%) -- byte-for-byte identical to the
+  prior L14-recorded baseline; expected, since this fix's own target
+  shape (a `cbuffer`/uniform-block struct member) is not exercised by
+  this SSBO-only case family.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no change
+(an internal SPIR-V-to-LLVM conversion-layer correctness fix, no
+feature/extension bit touched); confirmed, not assumed.
