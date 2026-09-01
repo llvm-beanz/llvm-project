@@ -18525,3 +18525,84 @@ sweep against the same ICD.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no change
 (an internal SPIR-V-to-LLVM conversion-layer correctness fix, no
 feature/extension bit touched); confirmed, not assumed.
+
+## Roadmap L15
+
+**Scope.** `SIMDize.cpp`'s L11 fix (`widenGroupSharedLoad`'s per-component
+vector-row gather) was only reachable through a plain, unmasked
+`LoadInst`/`StoreInst` -- not through the `feme.cpu.masked.load/store.*.as3`
+*call* form `feme-cpu-linearize` produces whenever the same groupshared
+vector-row access is itself inside genuinely divergent control flow (a
+real `if (ThreadID.x == 0)` guard, as the real
+`WaveOps/GroupSharedMatrixRowComponentDataRace.test` has on both its write
+and read sides).
+
+**Fix.** Two separate, separately-committed gaps, both in
+`feme/lib/Transforms/CPU/SIMDize.cpp`:
+- Load side: added a `matchMaskedLoad` producer case to
+  `checkVectorDecompositionSupported`, and a new vector-typed branch in
+  `widenMaskedLoad` that decomposes into `N` per-component masked gathers
+  off the same `<W x ptr>` row address, mirroring `widenGroupSharedLoad`'s
+  existing unmasked vector case, using the call's own governing mask and
+  (possibly divergent) passthru operand.
+- Store side: a groupshared-gated (`isGroupSharedPointerType`) vector-typed
+  branch in `widenMaskedStore` that decomposes into `N` per-component
+  `llvm.masked.scatter`s the same way, since the existing generic per-lane
+  extractelement/load/select/store idiom there produced an
+  `ExtractElementInst` leaf `feme::cpu::rewriteGroupSharedGlobals`'s own
+  (separate, stricter) groupshared-leaf-user validation could not retarget
+  for a groupshared address (it recognizes only `Load`/`Store`/
+  `AtomicRMW`, or a gather/scatter call's own pointer operand). That pass's
+  existing second-level-getelementptr-feeding-a-masked-gather-or-scatter
+  validation/retargeting logic already generically covers a scatter too
+  (it is address-space-agnostic via `getGatherScatterPtrOperandNo`), so no
+  `GroupShared.cpp` change was needed.
+
+**Method.** Reduced the exact shape via minimal `.ll` repros
+(`feme-opt --llvm -passes=feme-cpu-linearize,feme-cpu-simdize
+-feme-cpu-wave-size=4 -S`) for both the load and store sides separately,
+confirming each fails with its own distinct pre-fix error
+("divergent value ... of vector type" for the load side;
+"groupshared global ... feeds a nested getelementptr or another
+unsupported user" for the store side, thrown by `GroupShared.cpp`, not
+`SIMDize.cpp`) and passes post-fix. Two new lit tests added
+(`simdize-groupshared-masked-vector-row-load.ll`,
+`simdize-groupshared-masked-vector-row-store.ll`); the existing
+non-groupshared `simdize-masked-memop-vector-divergent.ll` still passes
+unchanged (confirming the generic per-lane store path is preserved for a
+non-groupshared address). `ninja check-feme`: 2285/2312 passed, 27
+unsupported, 0 failed (up by exactly these 2 new tests, 0 regressions).
+
+Then rebuilt `feme_vulkan`/`offloader` and ran the real
+`WaveOps/GroupSharedMatrixRowComponentDataRace.test` directly via
+`llvm-lit --filter='WaveOps/GroupSharedMatrixRowComponentDataRace'`
+against the real `feme_vulkan` ICD (`VK_ICD_FILENAMES` explicitly
+exported): confirmed it now clears both the SIMDize (load-side) and
+GroupShared (store-side) errors this milestone targeted -- it still
+fails, but now only on the pre-existing, separately-tracked "unsupported
+calling convention" abort (roadmap H19p), the same terminal blocker L10's
+own two named groupshared cases already hit, per L14's audit. This
+confirms L15's own scope is fully closed; H19p remains the only remaining
+blocker for this specific real test to fully pass.
+
+Also ran a real `dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.*`
+sweep (646 cases, a groupshared/shared-memory-adjacent compute family)
+against the real ICD, for a regression check: the first 46
+`repeat_pipeline.*` sub-cases all fail on a pre-existing, unrelated
+`OpTypeArray count <id> ... can only come from normal constant` SPIR-V
+error (not touched by this fix), and the very next sub-case
+(`shared_memory_blocks.workgroup_size_128`) crashes the whole run with
+the same pre-existing H19p "unsupported calling convention" abort before
+printing any totals -- consistent with this project's own already-documented
+C2/H19p single-crash-corrupts-a-run risk, and confirming this particular
+deqp-vk family does not reach genuinely divergent-branch groupshared
+vector-row masked load/store shape this row's own fix targets (that shape
+is HLSL/D3D-matrix-specific and not represented in this GLSL-derived
+compute family) -- so it provides no useful before/after signal either
+way for this specific fix, only a (pre-existing, already-tracked)
+regression-risk confirmation.
+
+No feature-bit or extension-advertisement change (an internal CPU-target
+compiler-pass fix); confirmed, not assumed, that
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
