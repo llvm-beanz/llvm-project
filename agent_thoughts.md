@@ -50128,3 +50128,112 @@ Restored the two files back to their fixed state (`git apply` forward) and
 confirmed check-feme stays at its existing baseline with 0 regressions.
 Wrote the roadmap row up as done, with the bisection evidence rather than
 just an assertion that "it already works."
+
+# H7 (again) and H13b: chasing "Position, not just ClipDistance/CullDistance"
+
+Asked to work on H7 or its prerequisites. Surveyed every remaining H7 sub-row
+and found H7a-H7g/H7i/H7j all already closed by earlier sessions, leaving only
+H7h (`shaderClipDistance`/`shaderCullDistance`) open -- and H7h is itself
+blocked entirely on H13 (H13a/H13b/H13c), which was never finished. So the
+real available work this session was H13b.
+
+H13b's own roadmap text describes the failure as the tessellation-*evaluation*
+stage failing to consume `ClipDistance`/`CullDistance` as a patch-constant
+input. First surprise: the actual failing code is the tessellation-*control*
+(hull) stage's own patch-constant *phase* (`PatchConstantWrapper.cpp`), not
+Domain/tessellation-evaluation at all -- the roadmap text had the wrong stage
+name. Traced the dispatch in `PatchConstantWrapper.cpp`: any input load with a
+non-`None` `SystemValue` other than `OutputControlPointID`/`PatchVertices`
+hits a narrow `lowerPatchConstantSystemValue` and gets diagnosed as
+unsupported.
+
+First attempt: widen that dispatch to also accept `ClipDistance`/
+`CullDistance`, mirroring `FragmentWrapper.cpp`'s existing precedent. Built,
+tested, looked done. But per the standing instruction to actually verify with
+real Vulkan CTS rather than trust a unit test alone, I temporarily flipped the
+two feature bits and ran the real `deqp-vk` cases. Same error, unchanged. The
+unit test I'd added was testing the fix I *wanted* to be the bug, not the bug
+that was actually there -- a good reminder that a synthetic reduction can
+accidentally assume away the real shape of a problem if you build it from the
+roadmap text instead of the real failure.
+
+Rather than guess again, I added a one-line `llvm::errs()` debug print at the
+diagnostic site, rebuilt just `feme_vulkan`, and re-ran the real CTS case
+directly. That's what actually revealed the true failing `SystemValue`:
+`Position` (value 1), not `ClipDistance`/`CullDistance` at all. The TCS's real
+SPIR-V reads `gl_in[gl_InvocationID].gl_Position` before it ever gets to the
+clip/cull-distance reads the roadmap text called out specifically -- so the
+literal roadmap description was, once again (same pattern as H7l and H7m
+before it), a narrowed, partially-accurate guess rather than the full shape of
+the bug. The real gap is generic: *any* per-control-point-addressable builtin
+input hits it, not just the two named ones.
+
+Root-caused to `CanonicalizeStage.cpp`'s `classifySPIRVElement`: for the
+HullPatchConstant phase, `FromInputPatch` was only set for `SystemValue ==
+None || PatchVertices`, leaving every other builtin (including `Position`)
+unclassified and falling through to the same narrow system-value path.
+Fixed by inverting the condition to `FromInputPatch = Sys !=
+OutputControlPointID` -- `OutputControlPointID` is the one system value this
+phase reads that is a genuinely single, current-invocation-implicit scalar
+rather than a per-control-point array element, so it's the only one that
+should stay off the `FromInputPatch` path. Correspondingly narrowed
+`PatchConstantWrapper.cpp`'s dispatch to route only `OutputControlPointID`/
+`PatchVertices` through `lowerPatchConstantSystemValue`, everything else
+through the generic `lowerPatchConstantInputLoad`.
+
+Re-ran the real CTS case again after this fix: the original error was gone
+completely. But a *new* error appeared -- `"masked output store references an
+unknown patch-output signature element"` -- on the same TCS's `gl_out[...]
+.gl_Position` write. Traced this to the same function's `AddrSpace==8`
+(Output) branch: when a store isn't `Patch`-decorated, it falls through to a
+bare `Info.Direction = SignatureDirection::Input; return Info;` placeholder
+that looks like it was never meant to be hit by a real case -- and indeed
+isn't, until H13b's own fix lets the patch-constant clone actually contain a
+mix of a genuine per-control-point write and genuine patch-constant writes in
+the same function body, something the barrier-based split in
+`splitTessellationControlEntry` allows because it moves *everything* after
+the real `OpControlBarrier` into the patch-constant clone verbatim, not just
+the `Patch`-decorated part.
+
+This is a real, distinct, pre-existing gap in the barrier-split's own
+boundary assumption, not something specific to clip/cull-distance or
+`Position` -- and definitely not something to try to squeeze into the same
+commit as H13b's fix. Followed the project's own established pattern (H13
+itself was spun off from H7y this way, H14 from H13d) and gave it its own new
+row, H13e, rather than either leaving H13b half-fixed or scope-creeping H13b's
+commit into fixing something unrelated under time pressure.
+
+Swept the live CTS further to characterize the after-fix landscape properly
+instead of just checking the one case: all non-`_fragmentshader_read`
+`vert_tess.*` cases now hit H13e. `vert_tess.1_fragmentshader_read` also hits
+H13e, but `.2_fragmentshader_read` through `.8_fragmentshader_read` instead
+hit H13c's pre-existing fragment-stage error directly, bypassing H13e
+entirely -- almost certainly because `GraphicsPipeline.cpp` compiles the
+fragment stage before the hull stages, and H13c's own offending operand is
+apparently constant-foldable to a literal `0` only at `numClipPlanes=1`. I
+didn't chase down exactly why that constant-folding difference exists at the
+IR level -- flagged it in the docs as follow-up work rather than guessing --
+but it was important to record precisely rather than let H13c's roadmap text
+keep claiming (as it did before this session) that every
+`_fragmentshader_read` variant behaves the same way. It doesn't.
+
+Added a targeted unit test directly against `classifySPIRVElement`'s real
+behavior (`CanonicalizeStageTest.
+PatchConstantPhaseMarksPositionAndClipDistanceFromInputPatch`), checking
+`Position`/`ClipDistance` get `FromInputPatch=true` and `OutputControlPointID`
+does not, in the same patch-constant clone -- this pins the exact boundary
+the fix draws, rather than only re-testing the symptom that happened to be in
+the original bug report.
+
+Split the change into three commits: the `CanonicalizeStage.cpp` root-cause
+fix + its test, the `PatchConstantWrapper.cpp` dispatch fix + its test, and a
+third commit for the `Roadmap.md`/`VulkanCTSReport.md` doc updates (H13b
+struck through, H13c's text corrected, H13e added, H13's umbrella row updated
+to mention H13e). Reverted the temporary feature-bit flip in
+`PhysicalDeviceInfo.cpp` before every `check-feme` run and before every
+commit, and double-checked with `git status --short` that it carried zero
+diff at the end -- H7h/H13 still can't be struck through until H13a/H13c/H13e
+are all actually fixed, not just H13b.
+
+`check-feme`: 2246/2273 passed, 27 pre-existing Unsupported, 0 Failed --
+unchanged failure count from before this session's changes.
