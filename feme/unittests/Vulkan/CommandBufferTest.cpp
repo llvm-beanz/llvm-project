@@ -326,6 +326,42 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (Roadmap L12b) An *array* of two uniform texel buffers (binding 0),
+/// dynamically indexed by a `PushConstant`-supplied index -- not a
+/// compile-time constant -- confirming `shaderUniformTexelBufferArray
+/// DynamicIndexing`'s real end-to-end support: `ResourceArrayAccessChain
+/// Pattern` (roadmap L12a) already threads an arbitrary SSA index value
+/// through to `llvm.spv.resource.handlefrombinding`'s own `Index` operand,
+/// and `SPIRVResourceLowering.cpp`'s `BoundHandle::Handle`'s own comment
+/// already documents that this array index is deliberately re-read at
+/// lowering time rather than cached, precisely because it may be dynamic.
+/// Reads texel 0 of `in[idx]` and writes it, unmodified, to a single
+/// (non-arrayed) storage texel buffer (binding 1).
+const char *kTexelBufferArrayDynamicIndexShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @in bind(0, 0) : !spirv.ptr<!spirv.array<2 x !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Rgba32f>>, UniformConstant>
+  spirv.GlobalVariable @out bind(0, 1) : !spirv.ptr<!spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32f>, UniformConstant>
+  spirv.GlobalVariable @pc : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>
+  spirv.func @main() -> () "None" {
+    %c0 = spirv.Constant 0 : i32
+    %1 = spirv.mlir.addressof @pc : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>
+    %pcac = spirv.AccessChain %1[%c0] : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>, i32 -> !spirv.ptr<i32, PushConstant>
+    %idx = spirv.Load "PushConstant" %pcac : i32
+    %coord = spirv.Constant 0 : i32
+    %2 = spirv.mlir.addressof @in : !spirv.ptr<!spirv.array<2 x !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Rgba32f>>, UniformConstant>
+    %ac = spirv.AccessChain %2[%idx] : !spirv.ptr<!spirv.array<2 x !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Rgba32f>>, UniformConstant>, i32 -> !spirv.ptr<!spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Rgba32f>, UniformConstant>
+    %img_in = spirv.Load "UniformConstant" %ac : !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Rgba32f>
+    %v = spirv.ImageFetch %img_in, %coord : !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Rgba32f>, i32 -> vector<4xf32>
+    %3 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32f>, UniformConstant>
+    %img_out = spirv.Load "UniformConstant" %3 : !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32f>
+    spirv.ImageWrite %img_out, %coord, %v : !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32f>, i32, vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @in, @out, @pc
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
 /// V3: reads the second field of a `Uniform` storage-class block --
 /// `cbuffer`/`ConstantBuffer<T>` in HLSL -- and writes it to a
 /// `StorageBuffer` element, exercising the SPIR-V shader-side uniform-
@@ -2074,6 +2110,410 @@ TEST_F(ScalarIntTexelBufferDispatchTest,
   vkDestroyBuffer(Device, In.Buf, nullptr);
   vkDestroyBuffer(Device, Out.Buf, nullptr);
   vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+/// (Roadmap L12b) A real dispatch confirming `shaderUniformTexelBufferArray
+/// DynamicIndexing`/`shaderStorageTexelBufferArrayDynamicIndexing`: binds a
+/// two-element array of uniform texel buffers plus a single storage texel
+/// buffer, and dispatches `kTexelBufferArrayDynamicIndexShader` once per
+/// array index with a `PushConstant`-supplied (not compile-time-constant)
+/// index, confirming each dispatch reads the array element the runtime
+/// index actually names rather than always element 0.
+class TexelBufferArrayDynamicIndexDispatchTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    VkInstanceCreateInfo InstInfo{};
+    ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+    uint32_t Count = 1;
+    ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+              VK_SUCCESS);
+    VkDeviceCreateInfo DevInfo{};
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+
+    VkDescriptorSetLayoutBinding Bindings[2]{};
+    Bindings[0].binding = 0;
+    Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+    Bindings[0].descriptorCount = 2;
+    Bindings[1].binding = 1;
+    Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+    Bindings[1].descriptorCount = 1;
+    VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+    SetLayoutInfo.bindingCount = 2;
+    SetLayoutInfo.pBindings = Bindings;
+    ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr,
+                                          &SetLayout),
+              VK_SUCCESS);
+
+    VkPushConstantRange Range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 4};
+    VkPipelineLayoutCreateInfo LayoutInfo{};
+    LayoutInfo.setLayoutCount = 1;
+    LayoutInfo.pSetLayouts = &SetLayout;
+    LayoutInfo.pushConstantRangeCount = 1;
+    LayoutInfo.pPushConstantRanges = &Range;
+    ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
+              VK_SUCCESS);
+
+    std::vector<uint32_t> Words =
+        assembleSPIRV(kTexelBufferArrayDynamicIndexShader);
+    ASSERT_FALSE(Words.empty());
+    VkShaderModuleCreateInfo ShaderInfo{};
+    ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
+    ShaderInfo.pCode = Words.data();
+    ASSERT_EQ(vkCreateShaderModule(Device, &ShaderInfo, nullptr, &Module),
+              VK_SUCCESS);
+
+    VkComputePipelineCreateInfo PipelineInfo{};
+    PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    PipelineInfo.stage.module = Module;
+    PipelineInfo.stage.pName = "main";
+    PipelineInfo.layout = Layout;
+    ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                       nullptr, &Pipeline),
+              VK_SUCCESS);
+
+    VkDescriptorPoolSize PoolSizes[2] = {
+        {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 2},
+        {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1},
+    };
+    VkDescriptorPoolCreateInfo PoolInfo{};
+    PoolInfo.maxSets = 1;
+    PoolInfo.poolSizeCount = 2;
+    PoolInfo.pPoolSizes = PoolSizes;
+    ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+              VK_SUCCESS);
+
+    VkDescriptorSetAllocateInfo DSAllocInfo{};
+    DSAllocInfo.descriptorPool = DescPool;
+    DSAllocInfo.descriptorSetCount = 1;
+    DSAllocInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+
+    VkCommandPoolCreateInfo CmdPoolInfo{};
+    CmdPoolInfo.queueFamilyIndex = 0;
+    ASSERT_EQ(vkCreateCommandPool(Device, &CmdPoolInfo, nullptr, &Pool),
+              VK_SUCCESS);
+  }
+  void TearDown() override {
+    vkDestroyCommandPool(Device, Pool, nullptr);
+    vkDestroyDescriptorPool(Device, DescPool, nullptr);
+    vkDestroyPipeline(Device, Pipeline, nullptr);
+    vkDestroyShaderModule(Device, Module, nullptr);
+    vkDestroyPipelineLayout(Device, Layout, nullptr);
+    vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+    vkDestroyDevice(Device, nullptr);
+    vkDestroyInstance(Instance, nullptr);
+  }
+
+  VkCommandBuffer allocateCommandBuffer() {
+    VkCommandBufferAllocateInfo AllocInfo{};
+    AllocInfo.commandPool = Pool;
+    AllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    AllocInfo.commandBufferCount = 1;
+    VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+    EXPECT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &CmdBuf),
+              VK_SUCCESS);
+    return CmdBuf;
+  }
+
+  HostBuffer createTexelBuffer(VkDeviceSize Size) {
+    HostBuffer Result;
+    VkBufferCreateInfo BufferInfo{};
+    BufferInfo.size = Size;
+    BufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
+                       VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
+    EXPECT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Result.Buf),
+              VK_SUCCESS);
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = Size;
+    AllocInfo.memoryTypeIndex = 0;
+    EXPECT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Result.Memory),
+              VK_SUCCESS);
+    EXPECT_EQ(vkBindBufferMemory(Device, Result.Buf, Result.Memory, 0),
+              VK_SUCCESS);
+    EXPECT_EQ(
+        vkMapMemory(Device, Result.Memory, 0, VK_WHOLE_SIZE, 0, &Result.Data),
+        VK_SUCCESS);
+    return Result;
+  }
+
+  VkInstance Instance = VK_NULL_HANDLE;
+  VkPhysicalDevice Physical = VK_NULL_HANDLE;
+  VkDevice Device = VK_NULL_HANDLE;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout Layout = VK_NULL_HANDLE;
+  VkShaderModule Module = VK_NULL_HANDLE;
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  VkCommandPool Pool = VK_NULL_HANDLE;
+};
+
+TEST_F(TexelBufferArrayDynamicIndexDispatchTest,
+       PushConstantIndexSelectsTheRightArrayElement) {
+  HostBuffer In0 = createTexelBuffer(16); // Array element 0.
+  HostBuffer In1 = createTexelBuffer(16); // Array element 1.
+  HostBuffer Out = createTexelBuffer(16);
+  float Value0[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float Value1[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+  std::memcpy(In0.Data, Value0, sizeof(Value0));
+  std::memcpy(In1.Data, Value1, sizeof(Value1));
+
+  VkBufferViewCreateInfo View0Info{};
+  View0Info.buffer = In0.Buf;
+  View0Info.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  View0Info.range = VK_WHOLE_SIZE;
+  VkBufferView View0 = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &View0Info, nullptr, &View0),
+            VK_SUCCESS);
+  VkBufferViewCreateInfo View1Info{};
+  View1Info.buffer = In1.Buf;
+  View1Info.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  View1Info.range = VK_WHOLE_SIZE;
+  VkBufferView View1 = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &View1Info, nullptr, &View1),
+            VK_SUCCESS);
+  VkBufferViewCreateInfo OutViewInfo{};
+  OutViewInfo.buffer = Out.Buf;
+  OutViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  OutViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView OutView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &OutViewInfo, nullptr, &OutView),
+            VK_SUCCESS);
+
+  VkWriteDescriptorSet Writes[3]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].dstArrayElement = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+  Writes[0].pTexelBufferView = &View0;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 0;
+  Writes[1].dstArrayElement = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+  Writes[1].pTexelBufferView = &View1;
+  Writes[2].dstSet = Set;
+  Writes[2].dstBinding = 1;
+  Writes[2].descriptorCount = 1;
+  Writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+  Writes[2].pTexelBufferView = &OutView;
+  vkUpdateDescriptorSets(Device, 3, Writes, 0, nullptr);
+
+  // Dispatch once with a push-constant index of 1: only a genuinely
+  // dynamic index (not a compile-time constant baked into the shader)
+  // could select element 1's own distinct value here.
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  uint32_t Index = 1;
+  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4,
+                     &Index);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  float Result[4];
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result[0], Value1[0]);
+  EXPECT_EQ(Result[1], Value1[1]);
+  EXPECT_EQ(Result[2], Value1[2]);
+  EXPECT_EQ(Result[3], Value1[3]);
+
+  vkDestroyBufferView(Device, View0, nullptr);
+  vkDestroyBufferView(Device, View1, nullptr);
+  vkDestroyBufferView(Device, OutView, nullptr);
+  vkDestroyBuffer(Device, In0.Buf, nullptr);
+  vkDestroyBuffer(Device, In1.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In0.Memory, nullptr);
+  vkFreeMemory(Device, In1.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+/// (Roadmap L12b) A real dispatch confirming `descriptorBindingPartially
+/// Bound`: array element 1 of the binding-0 uniform texel buffer array is
+/// never written at all (unlike the sibling test above, which writes both
+/// elements), yet a dispatch that dynamically indexes it (via the same
+/// `PushConstant`-supplied index) still completes and reads back the
+/// all-zero descriptor `Descriptor.h`'s own file comment documents for an
+/// unwritten array element, rather than crashing on an invalid handle.
+TEST_F(TexelBufferArrayDynamicIndexDispatchTest,
+       UnwrittenArrayElementReadsAsZeroInsteadOfCrashing) {
+  HostBuffer In0 = createTexelBuffer(16); // Array element 0 -- written.
+  HostBuffer Out = createTexelBuffer(16);
+  float Value0[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  std::memcpy(In0.Data, Value0, sizeof(Value0));
+
+  VkBufferViewCreateInfo View0Info{};
+  View0Info.buffer = In0.Buf;
+  View0Info.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  View0Info.range = VK_WHOLE_SIZE;
+  VkBufferView View0 = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &View0Info, nullptr, &View0),
+            VK_SUCCESS);
+  VkBufferViewCreateInfo OutViewInfo{};
+  OutViewInfo.buffer = Out.Buf;
+  OutViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  OutViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView OutView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &OutViewInfo, nullptr, &OutView),
+            VK_SUCCESS);
+
+  // Array element 1 is deliberately left unwritten -- no
+  // `VkWriteDescriptorSet` targets `dstArrayElement = 1` at all.
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].dstArrayElement = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+  Writes[0].pTexelBufferView = &View0;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+  Writes[1].pTexelBufferView = &OutView;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  uint32_t Index = 1;
+  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4,
+                     &Index);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  float Result[4];
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result[0], 0.0f);
+  EXPECT_EQ(Result[1], 0.0f);
+  EXPECT_EQ(Result[2], 0.0f);
+  EXPECT_EQ(Result[3], 0.0f);
+
+  vkDestroyBufferView(Device, View0, nullptr);
+  vkDestroyBufferView(Device, OutView, nullptr);
+  vkDestroyBuffer(Device, In0.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In0.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+/// (Roadmap L12b) A real dispatch confirming `descriptorBindingUniform
+/// TexelBufferUpdateAfterBind`/`descriptorBindingStorageTexelBufferUpdate
+/// AfterBind` (and, by the same synchronous-`vkQueueSubmit` reasoning,
+/// every other implemented descriptor type's own update-after-bind bit --
+/// see `EntryPoints.cpp`'s comment on this cluster): `vkUpdateDescriptorSets`
+/// is called again *after* `vkCmdBindDescriptorSets` has already been
+/// recorded into the command buffer, replacing array element 0's own
+/// bound view with a different one, before the command buffer is ever
+/// submitted. `runDispatch` only resolves the bound descriptor sets'
+/// current contents when `vkQueueSubmit` actually executes the recorded
+/// commands (`executeCommandsInto`/`buildBoundResources`, `CommandBuffer.
+/// cpp`), so the dispatch must observe the *second* write, not the one
+/// live at record time -- exactly what update-after-bind promises.
+TEST_F(TexelBufferArrayDynamicIndexDispatchTest,
+       DescriptorUpdatedAfterBindingIsVisibleAtSubmission) {
+  HostBuffer In0 = createTexelBuffer(16);
+  HostBuffer In0Replacement = createTexelBuffer(16);
+  HostBuffer Out = createTexelBuffer(16);
+  float OriginalValue[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float ReplacementValue[4] = {9.0f, 10.0f, 11.0f, 12.0f};
+  std::memcpy(In0.Data, OriginalValue, sizeof(OriginalValue));
+  std::memcpy(In0Replacement.Data, ReplacementValue, sizeof(ReplacementValue));
+
+  VkBufferViewCreateInfo View0Info{};
+  View0Info.buffer = In0.Buf;
+  View0Info.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  View0Info.range = VK_WHOLE_SIZE;
+  VkBufferView View0 = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &View0Info, nullptr, &View0),
+            VK_SUCCESS);
+  VkBufferViewCreateInfo ReplacementViewInfo{};
+  ReplacementViewInfo.buffer = In0Replacement.Buf;
+  ReplacementViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  ReplacementViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView ReplacementView = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateBufferView(Device, &ReplacementViewInfo, nullptr,
+                         &ReplacementView),
+      VK_SUCCESS);
+  VkBufferViewCreateInfo OutViewInfo{};
+  OutViewInfo.buffer = Out.Buf;
+  OutViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  OutViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView OutView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &OutViewInfo, nullptr, &OutView),
+            VK_SUCCESS);
+
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].dstArrayElement = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+  Writes[0].pTexelBufferView = &View0;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+  Writes[1].pTexelBufferView = &OutView;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  uint32_t Index = 0;
+  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4,
+                     &Index);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  // Replace array element 0's own bound view *after* the bind/dispatch
+  // above was already recorded, but before submission.
+  VkWriteDescriptorSet ReplacementWrite{};
+  ReplacementWrite.dstSet = Set;
+  ReplacementWrite.dstBinding = 0;
+  ReplacementWrite.dstArrayElement = 0;
+  ReplacementWrite.descriptorCount = 1;
+  ReplacementWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+  ReplacementWrite.pTexelBufferView = &ReplacementView;
+  vkUpdateDescriptorSets(Device, 1, &ReplacementWrite, 0, nullptr);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  float Result[4];
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result[0], ReplacementValue[0]);
+  EXPECT_EQ(Result[1], ReplacementValue[1]);
+  EXPECT_EQ(Result[2], ReplacementValue[2]);
+  EXPECT_EQ(Result[3], ReplacementValue[3]);
+
+  vkDestroyBufferView(Device, View0, nullptr);
+  vkDestroyBufferView(Device, ReplacementView, nullptr);
+  vkDestroyBufferView(Device, OutView, nullptr);
+  vkDestroyBuffer(Device, In0.Buf, nullptr);
+  vkDestroyBuffer(Device, In0Replacement.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In0.Memory, nullptr);
+  vkFreeMemory(Device, In0Replacement.Memory, nullptr);
   vkFreeMemory(Device, Out.Memory, nullptr);
 }
 
