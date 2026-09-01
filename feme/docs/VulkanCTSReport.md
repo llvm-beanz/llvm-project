@@ -18891,3 +18891,111 @@ No feature-bit or extension-advertisement change (an internal
 SPIR-V-to-LLVM conversion-layer correctness fix); confirmed, not assumed,
 that `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap L19
+
+**Scope.** A struct-typed storage-buffer array element's own
+`spirv.ptr<StructType, StorageBuffer>` is misclassified by
+`isBufferBlockStorage`/`getBufferBlockElement`
+(`SPIRVToLLVMPatterns.cpp`) as itself a top-level buffer-block pointer,
+found as an L18 milestone-description correction: `isBufferBlockStorage`
+returned `true` unconditionally for *any* `StorageBuffer`-storage-class
+pointer to *any* struct, never checking for a `Block` decoration in that
+branch at all (unlike its own `Uniform`-storage-class/`BufferBlock`-
+decoration branch immediately below it), so a `RWStructuredBuffer<Doggo>`'s
+own per-element `Doggo` struct pointer -- reached once `spirv.AccessChain`
+has already selected one array element, as `packed.test`'s own
+`Doggo Fido = Buf[GI]; ...; Buf[GI] = Fido;` whole-struct-copy idiom does
+-- was spuriously converted into a *second*, nested `spirv.VulkanBuffer`
+resource handle instead of ordinary memory (address space 11).
+
+**Fix.** Tightened `isBufferBlockStorage`'s `StorageBuffer`-class branch
+to also require the struct's own `Block` decoration, mirroring the
+`Uniform`-class/`BufferBlock` branch immediately below it. A real
+`RWStructuredBuffer<Doggo>`'s own per-element `Doggo` struct pointer is
+never itself `Block`-decorated (only the top-level wrapper struct is), so
+it now correctly falls through to the ordinary address-space-11 pointer
+conversion.
+
+Every synthetic `StorageBuffer` test fixture already in-tree -- lit tests
+(`spirv-to-llvm-storage-buffer.mlir`, `feme-spirv-to-dxil.mlir`) and
+gtest-embedded SPIR-V alike (`PipelineTest.cpp`, `CommandBufferTest.cpp`,
+`DrawTest.cpp`, `Vulkan/Inputs/sampled-image-fetch.mlir`,
+`Vulkan/Inputs/storage-buffer-increment.mlir`) -- turned out to declare
+its own top-level `StorageBuffer` block struct *without* the `Block`
+decoration, previously invisible since this branch never checked for it.
+Real `dxc`/glslang output always includes it (SPIR-V requires it for any
+conformant `StorageBuffer`-class block variable), so this is a pure
+test-fixture correction, not a behavior change for anything real: added
+the missing `Block` decoration to each.
+
+**Method.** Reduced `packed.test`'s own real SPIR-V via `dxc -spirv
+-fspv-target-env=vulkan1.3 -fvk-use-scalar-layout` (matching
+`offload-test-suite`'s own real invocation flags exactly, confirmed by
+reading `lit.cfg.py`) → `feme-translate --import-spirv` →
+`feme-opt --feme-convert-spirv-to-llvm`, confirming the exact
+`llvm.store`/nested-handle error without the fix and its resolution with
+it. Added a new lit test,
+`spirv-to-llvm-storage-buffer-struct-element.mlir`, covering the exact
+misclassified shape (a whole-struct load/store through a per-array-
+element struct pointer with no `Block` decoration) in isolation;
+confirmed it fails (feme-opt errors) without the fix and passes with it.
+`ninja check-feme`: 2291/2318 passed, 27 unsupported, 0 failed (up by
+exactly 1 new test, 0 regressions). Rebuilt `feme_vulkan`/`feme-opt`/
+`feme-translate`/`offloader` and did a real before/after comparison via a
+temporary `git checkout <pre-L19-commit> -- SPIRVToLLVMPatterns.cpp`/
+rebuild/revert cycle (matching L17/L18's own methodology): confirmed via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader` directly that the pre-fix
+error is exactly the `llvm.store` operand-type error this milestone
+names, and the post-fix error is a distinct, later one (see Findings
+below). Also ran `check-hlsl-vk-feature-structuredbuffer` and a
+`dEQP-VK.ssbo.layout.*`/`dEQP-VK.ssbo.*` sweep against the real
+`feme_vulkan` ICD (`VK_ICD_FILENAMES` explicitly exported), both before
+and after the fix via the same revert cycle.
+
+**Findings.**
+- **This row's own scope is fully closed**: the exact `llvm.store`
+  operand-type error this milestone names (a spurious nested
+  `spirv.VulkanBuffer` handle reaching `llvm.store`) is confirmed gone
+  post-fix, via both the isolated `feme-opt` reduction and a direct
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader` run against the real
+  `packed.test` binary.
+- `check-hlsl-vk-feature-structuredbuffer`: 9/650 discovered cases fail,
+  byte-for-byte identical before and after (0 regressions, confirmed via
+  the revert cycle).
+- **`packed.test` itself still does not pass end-to-end.** Its post-fix
+  error (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader`) has
+  advanced to a distinct, deeper, newly-exposed gap: `vkCreateCompute
+  Pipelines: unsupported raised operation:
+  'llvm.spv.resource.handlefrombinding...' is a register-bound resource
+  handle the FeMe CPU target cannot normalize`, root-caused to
+  `isSupportedRawElementType` (`SPIRVResourceLowering.cpp`) rejecting a
+  whole-struct `load`/`store` off a resource pointer outright -- it only
+  ever recognizes a half/float/double/integer scalar or a fixed vector of
+  one, never a struct, so `hasOnlySupportedPointerUses` rejects the
+  entire handle, falling through to `UnsupportedOps.cpp`'s generic
+  diagnostic. Distinct from L16's own already-fixed scope (a struct-typed
+  *field*, reached via `getelementptr`, converting to its own further
+  load/store): this gap is for loading/storing an entire aggregate value
+  directly, with no `getelementptr` navigation into an individual field
+  at all -- exactly `packed.test`'s own whole-struct-copy idiom. Split
+  out to new roadmap row L20; this is a real, distinct root cause in a
+  different pass (CPU resource lowering, not SPIR-V-to-LLVM conversion),
+  not a documentation gap.
+- The other 8 pre-existing `check-hlsl-vk-feature-structuredbuffer`
+  failures (`GetDimensions.test`, `dec_counter.test`,
+  `inc_counter*.test`, `layout.test`, `matrix*.test`) are unrelated to
+  this fix or L20 (confirmed unchanged before/after); not investigated
+  further, out of scope for this milestone.
+- `dEQP-VK.ssbo.layout.*` (5,275 cases) and `dEQP-VK.ssbo.*` (12,225
+  cases): both measured byte-for-byte identical totals before and after
+  this fix (260/5275 and 361/12225 respectively). Unsurprising: this
+  fix's own target shape (an intermediate struct-typed pointer from a
+  whole-struct-copy idiom) is not one this GLSL/SPIR-V-assembly-sourced
+  CTS family happens to exercise either. No regression evident.
+
+No feature-bit or extension-advertisement change (an internal
+SPIR-V-to-LLVM conversion-layer correctness fix, plus test-fixture
+corrections); confirmed, not assumed, that
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
