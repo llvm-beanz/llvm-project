@@ -37,32 +37,32 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please investigate and fix the issues tracked by milestone L15:
+Please investigate and fix the issues tracked by milestone L16:
 
-> **`SIMDize.cpp`'s L11 fix (`widenGroupSharedLoad`'s vector-row gather) is only
-> reachable through a plain, unmasked `LoadInst`/`StoreInst` -- not through the
-> `feme.cpu.masked.load/store.*.as3` *call* form `feme-cpu-linearize` produces
-> whenever the groupshared access is itself inside genuinely divergent control
-> flow** (e.g. a real `if (ThreadID.x == 0)` guard, as
-> `WaveOps/GroupSharedMatrixRowComponentDataRace.test` itself has) -- found as
-> an L14 milestone-description correction (L11's own real named test still fails
-> identically today; L11's own row had already disclosed no real end-to-end
-> rerun confirmed this, only a from-scratch IR reduction with no divergent
-> branch in it at all). `checkVectorDecompositionSupported`'s own
-> producer-recognition loop has no case at all for a `feme.cpu.masked.load.*`
-> call producing a vector result (only `matchResourceCall`/`matchImageCall`/a
-> homogeneous intrinsic/an ordinary `LoadInst` are recognized), so it hits the
-> same generic "unsupported producer" diagnostic L11 was supposed to close; even
-> if recognized, `widenMaskedLoad` itself would still need its own vector-aware
-> path, since it currently builds one illegal `<W x <4 x float>>`
-> `llvm.masked.gather` unconditionally (`FixedVectorType::get(CI.getType(),
-> WaveSize)` where `CI.getType()` is already a vector) rather than
-> `widenGroupSharedLoad`'s existing per-component decomposition. Needs its own
-> scoping pass: likely extending `checkVectorDecompositionSupported` to accept a
-> `matchMaskedLoad`/`matchMaskedStore` call over a groupshared address as a
-> supported vector producer/consumer, and giving
-> `widenMaskedLoad`/`widenMaskedStore` a groupshared-specific vector-typed
-> branch that reuses `widenGroupSharedLoad`'s own per-component gather logic
-> (mirroring how `widenGroupSharedLoad` itself already reuses
-> `widenGroupSharedGEP`'s address widening) instead of the generic single-gather
-> path
+> **`SPIRVResourceLowering.cpp`'s
+> `hasOnlySupportedUses`/`hasOnlySupportedPointerUses` never allows a
+> `getelementptr` past a `HandleKind::Uniform` (real read-only `cbuffer`)
+> resource's own `llvm.spv.resource.getpointer` result** (`AllowGEPs` is
+> hard-coded `Kind == HandleKind::Storage \|\| Kind ==
+> HandleKind::StorageStruct`, never `Uniform`) -- found as an L13a
+> milestone-description correction: `structs.test`'s own struct-typed `cbuffer`
+> member (`X x1;`, `X` an identified struct with its own field `a1`) now
+> converts cleanly at the SPIR-V-to-LLVM layer (L13a's own fix), but the CPU
+> resource-lowering pass this row names still rejects the resulting
+> `getpointer`-then-`getelementptr`-into-`x1.a1` chain outright, via
+> `UnsupportedOps.cpp`'s generic "is a register-bound resource handle the FeMe
+> CPU target cannot normalize" diagnostic (confirmed directly with
+> `FEME_VULKAN_LOG_CREATION_ERRORS=1 offloader`, since `llvm-lit`'s own
+> `lit.cfg.py` strips that env var). Distinct from, and blocking end-to-end pass
+> independently of, L13a's own scope: **any**
+> `cbuffer`/direct-field-storage-block member needing further field navigation
+> beyond a single flat scalar/vector load (i.e. any struct-typed member at all,
+> not just the newly-legalizable padded ones) has apparently never been
+> supported by this pass -- `CBuffer/vectors.test`'s own passing case has no
+> struct-typed member, so never exercised this path. Needs its own scoping pass:
+> likely enabling `AllowGEPs` for `HandleKind::Uniform` too, confirming
+> `hasResolvableGEPByteOffset`'s existing byte-offset math needs no
+> `Uniform`-specific change, and checking whatever emits the actual runtime call
+> for a GEP-resolved `Uniform` address (`createRawLoad`/`mangleResourceCallName`
+> and siblings) already handles a nonzero byte offset the same way the
+> already-supported `Storage`/`StorageStruct` GEP path does
