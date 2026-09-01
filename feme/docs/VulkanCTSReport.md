@@ -17873,3 +17873,44 @@ specifically to exercise the HLSL/DXC-authored shapes these two bugs live
 in) already measured directly; `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no changes for either fix, confirmed
 again here.
+
+## Roadmap L2/L9/L10: real `deqp-vk` compute sweep after workgroup-limit and diagnostic fixes
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.compute.pipeline.basic.max_local_size_*" --deqp-log-filename=maxlocal.qpa
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.*" --deqp-log-filename=zerowg.qpa
+```
+
+**Finding.** `dEQP-VK.compute.pipeline.basic.max_local_size_{x,y,z}` (the
+cases most directly exercising `maxComputeWorkGroupSize`) now all clear
+pipeline creation cleanly -- confirming L2's own `PhysicalDeviceInfo.cpp`
+`maxComputeWorkGroupInvocations`/`maxComputeWorkGroupSize` 128->1024 fix
+works as intended -- but each still `Fail`s downstream on an unrelated,
+already-tracked L7 gap (`spirv.SpecConstantComposite` for a
+`vector<3xi32>` workgroup-size spec constant, not yet legalized). The
+646-case `zero_initialize_workgroup_memory` group (which exercises real
+workgroup-size/workgroup-memory variation directly, including
+`max_workgroup_memory`/`max_workgroups` cases) ran to completion with no
+crash and no case rejected on a workgroup-size ceiling; its 578 failures
+and 56 `NotSupported` results are the same already-tracked feature/L7 gaps
+(`shaderInt8`/`shaderInt16`/`shaderInt64` unsupported, various type-lowering
+gaps) as before this session, not new regressions from the limit bump.
+
+Separately confirmed `dEQP-VK.compute.pipeline.basic.branch_past_barrier`'s
+own `LLVM ERROR: unsupported calling convention` process abort (which
+truncates the rest of any `dEQP-VK.compute.*` sweep run as one invocation)
+is **pre-existing and unrelated** to this session's own two fixes --
+reproduced identically with `PhysicalDeviceInfo.cpp` reverted to its
+pre-session 128-value state -- and is already tracked as roadmap H19p, so
+no new row needed for it; every sweep above was scoped with an explicit
+case list to avoid it rather than a broad `dEQP-VK.compute.*` glob.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed again:
+`maxComputeWorkGroupInvocations`/`maxComputeWorkGroupSize` are limits, not
+feature or extension bits, and neither inventory document has a
+limits-table entry for them, so no change needed in either.
