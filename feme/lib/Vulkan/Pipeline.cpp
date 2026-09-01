@@ -24,7 +24,12 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/TargetParser/Triple.h"
@@ -191,6 +196,41 @@ void fillPipelineCreationFeedback(const void *pNext, uint32_t StageCount,
 }
 
 Pipeline::~Pipeline() = default;
+
+void patchUnboundedResourceRanges(llvm::Module &M,
+                                  const PipelineLayout &Layout) {
+  llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts =
+      Layout.setLayouts();
+  for (Function &F : M) {
+    for (Instruction &I : instructions(F)) {
+      auto *CI = dyn_cast<CallInst>(&I);
+      if (!CI || !CI->getCalledFunction() ||
+          CI->getCalledFunction()->getIntrinsicID() !=
+              Intrinsic::spv_resource_handlefrombinding)
+        continue;
+
+      auto *SetC = dyn_cast<ConstantInt>(CI->getArgOperand(0));
+      auto *BindingC = dyn_cast<ConstantInt>(CI->getArgOperand(1));
+      auto *RangeSizeC = dyn_cast<ConstantInt>(CI->getArgOperand(2));
+      if (!SetC || !BindingC || !RangeSizeC ||
+          !RangeSizeC->getValue().isZero())
+        continue; // Not an unbounded-range handle: nothing to patch.
+
+      uint64_t Set = SetC->getZExtValue();
+      uint32_t Binding = static_cast<uint32_t>(BindingC->getZExtValue());
+      if (Set >= SetLayouts.size())
+        continue; // Layout does not declare this set: leave unpatched,
+                  // `validateBoundRanges` reports the real error later.
+      const DescriptorSetLayoutBinding *Decl =
+          SetLayouts[Set]->find(Binding);
+      if (!Decl || Decl->Count == 0)
+        continue; // Ditto for an undeclared/zero-length binding.
+
+      CI->setArgOperand(
+          2, ConstantInt::get(RangeSizeC->getType(), Decl->Count));
+    }
+  }
+}
 
 Expected<feme::Module> importShaderModule(feme::Context &Ctx,
                                           llvm::ArrayRef<uint32_t> Words) {
@@ -403,6 +443,8 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
                              "resolved group size exceeds "
                              "maxComputeWorkGroupSize/Invocations");
 
+  const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
+
   auto Ctx = std::make_unique<feme::Context>();
   Ctx->setDiagnosticHandler([](const feme::Diagnostic &) {});
 
@@ -411,6 +453,11 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
     return AsLLVMIR.takeError();
 
   llvm::Module &LLVMMod = AsLLVMIR->getLLVMModule();
+
+  // (roadmap L12c) Resolve any unbounded (`RuntimeDescriptorArray`) resource
+  // range against this pipeline's own layout before compiling -- see that
+  // function's comment.
+  patchUnboundedResourceRanges(LLVMMod, Layout);
 
   // Stamp the spec-resolved group size onto the entry point, overriding
   // whatever (if anything) the plain `LocalSize` execution mode already
@@ -465,7 +512,6 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   // checked per class below instead.
   const feme::cpu::ResourceInfo &Info = (*Stage)->getResourceInfo();
 
-  const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
   if (!pushConstantsCoverRootConstantSize(
           Layout, Info.RootConstantSize,
           DeviceInfo.Properties.limits.maxPushConstantsSize,

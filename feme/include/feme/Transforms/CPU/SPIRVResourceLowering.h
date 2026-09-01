@@ -105,7 +105,16 @@
 //    `handlefrombinding` index.
 //  - An unbounded range (range size 0, SPIR-V's own spelling of an
 //    unbounded descriptor array) is left un-normalized, matching the DXIL
-//    side's own rejection of an unbounded `handlefrombinding` range.
+//    side's own rejection of an unbounded `handlefrombinding` range. (roadmap
+//    L12c) This pass itself never learns to resolve one: `feme::vulkan`'s
+//    compute/graphics pipeline compilation instead rewrites an unbounded
+//    range's operand to the matching `VkPipelineLayout` binding's own
+//    declared count *before* this pass ever runs (see
+//    `patchUnboundedResourceRanges` in feme/lib/Vulkan/Pipeline.h/.cpp) --
+//    from this pass's own perspective, a shader using an unbounded array is
+//    indistinguishable from one declaring an ordinary bounded array whose
+//    size happens to come from the pipeline layout instead of the shader's
+//    own SPIR-V type.
 //  - (Roadmap R30) A bound 2D *sampled image* handle and a `spirv.Sampler`
 //    handle are normalized too, into the *image* and *sampler* heaps rather
 //    than the buffer-oriented resource heap -- the three are separate

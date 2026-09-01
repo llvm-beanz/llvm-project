@@ -23,6 +23,15 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Target/SPIRV/Serialization.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/SourceMgr.h"
 
 #include "gtest/gtest.h"
 
@@ -804,6 +813,110 @@ TEST(ShaderModuleTest, RejectsMisalignedCodeSize) {
   VkShaderModule Module = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreateShaderModule(VK_NULL_HANDLE, &CreateInfo, nullptr, &Module),
             VK_ERROR_INITIALIZATION_FAILED);
+}
+
+/// (roadmap L12c) `patchUnboundedResourceRanges` is exercised directly on
+/// raw LLVM IR, mirroring `SPIRVResourceLoweringTest.cpp`'s own
+/// `LeavesUnboundedArrayUnchanged` case that this milestone's own gap
+/// analysis started from: same `handlefrombinding` shape, `RangeSize`
+/// operand 0 (the unbounded/`RuntimeDescriptorArray` sentinel -- see
+/// `getArrayedResourceCount` in SPIRVToLLVMPatterns.cpp), (set, binding) =
+/// (0, 1). A `PipelineLayout` whose one descriptor set declares that
+/// binding with `Count = 3` (mirroring `overflow-unbounded-array.test`'s own
+/// `ArraySize: 3`) should see that operand rewritten to the constant `3`,
+/// leaving every other operand (including the unrelated (set 0, binding 0)
+/// call, whose own `RangeSize` is already the non-zero constant `1`, i.e.
+/// bounded) untouched.
+TEST(PatchUnboundedResourceRangesTest, RewritesUnboundedRangeToLayoutCount) {
+  llvm::LLVMContext Ctx;
+  llvm::SMDiagnostic Err;
+  std::unique_ptr<llvm::Module> M = llvm::parseAssemblyString(R"(
+    define void @main(i32 %idx) {
+      %h0 = call target("spirv.VulkanBuffer", [0 x i32], 12, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0,
+                                               ptr null)
+      %h1 = call target("spirv.VulkanBuffer", [0 x i32], 12, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 0, i32 %idx,
+                                               ptr null)
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x i32], 12, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+  )",
+                                                              Err, Ctx);
+  ASSERT_TRUE(M) << Err.getMessage().str();
+
+  DescriptorSetLayout SetLayout({
+      DescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+      DescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3},
+  });
+  PipelineLayout Layout({&SetLayout}, {});
+
+  patchUnboundedResourceRanges(*M, Layout);
+
+  llvm::Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool SawBoundedCall = false, SawUnboundedCall = false;
+  for (llvm::Instruction &I : llvm::instructions(F)) {
+    auto *CI = llvm::dyn_cast<llvm::CallInst>(&I);
+    if (!CI || !CI->getCalledFunction() ||
+        CI->getCalledFunction()->getIntrinsicID() !=
+            llvm::Intrinsic::spv_resource_handlefrombinding)
+      continue;
+    auto *BindingC = llvm::cast<llvm::ConstantInt>(CI->getArgOperand(1));
+    auto *RangeSizeC = llvm::cast<llvm::ConstantInt>(CI->getArgOperand(2));
+    if (BindingC->getZExtValue() == 0) {
+      SawBoundedCall = true;
+      EXPECT_EQ(RangeSizeC->getZExtValue(), 1u); // Unchanged.
+    } else {
+      SawUnboundedCall = true;
+      EXPECT_EQ(RangeSizeC->getZExtValue(), 3u); // Patched to Count.
+    }
+  }
+  EXPECT_TRUE(SawBoundedCall);
+  EXPECT_TRUE(SawUnboundedCall);
+}
+
+/// A `handlefrombinding` whose (set, binding) is not declared by the
+/// `PipelineLayout` at all is left with `RangeSize` unpatched (still `0`) --
+/// `validateBoundRanges` (Pipeline.cpp) reports that as a real "shader's
+/// (set, binding) requirement is not satisfied" pipeline-creation error
+/// later, which is more informative than this rewrite silently guessing a
+/// count.
+TEST(PatchUnboundedResourceRangesTest, LeavesUndeclaredBindingUnpatched) {
+  llvm::LLVMContext Ctx;
+  llvm::SMDiagnostic Err;
+  std::unique_ptr<llvm::Module> M = llvm::parseAssemblyString(R"(
+    define void @main(i32 %idx) {
+      %h = call target("spirv.VulkanBuffer", [0 x i32], 12, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 9, i32 0, i32 %idx,
+                                               ptr null)
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x i32], 12, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+  )",
+                                                              Err, Ctx);
+  ASSERT_TRUE(M) << Err.getMessage().str();
+
+  DescriptorSetLayout SetLayout(
+      {DescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}});
+  PipelineLayout Layout({&SetLayout}, {});
+
+  patchUnboundedResourceRanges(*M, Layout);
+
+  llvm::Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  for (llvm::Instruction &I : llvm::instructions(F)) {
+    auto *CI = llvm::dyn_cast<llvm::CallInst>(&I);
+    if (!CI || !CI->getCalledFunction() ||
+        CI->getCalledFunction()->getIntrinsicID() !=
+            llvm::Intrinsic::spv_resource_handlefrombinding)
+      continue;
+    EXPECT_EQ(llvm::cast<llvm::ConstantInt>(CI->getArgOperand(2))
+                  ->getZExtValue(),
+              0u);
+  }
 }
 
 } // namespace

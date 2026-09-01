@@ -30,6 +30,10 @@
 #include <memory>
 #include <vector>
 
+namespace llvm {
+class Module;
+} // namespace llvm
+
 namespace feme {
 class Context;
 class Module;
@@ -200,6 +204,27 @@ private:
 /// feme/docs/FeMeVulkanDesign.md).
 llvm::Expected<feme::Module> importShaderModule(feme::Context &Ctx,
                                                 llvm::ArrayRef<uint32_t> Words);
+
+/// (roadmap L12c) Resolves every unbounded (SPIR-V `RuntimeDescriptorArray`,
+/// i.e. `spirv.rtarray`-shaped) resource-handle declaration in \p M against
+/// \p Layout before compilation, so `feme::cpu::SPIRVResourceLoweringPass`
+/// -- which requires a resource range's element count to already be a
+/// compile-time constant, see that pass's own `collectHandles` comment --
+/// never has to special-case one. An `llvm.spv.resource.handlefrombinding`
+/// call's range-size operand (its 3rd) is `0` exactly when the shader's own
+/// SPIR-V type left the array length unbounded (see
+/// `getArrayedResourceCount` in SPIRVToLLVMPatterns.cpp); this rewrites that
+/// operand in place to the matching (descriptor set, binding)'s declared
+/// `DescriptorSetLayoutBinding::Count` in \p Layout -- the array's real
+/// maximum length, chosen by the application when it built the pipeline
+/// layout -- if \p Layout declares one. A `handlefrombinding` call whose
+/// (set, binding) is not declared by \p Layout at all is left unpatched
+/// (still `0`), so `feme::cpu` still rejects it exactly as it does today:
+/// the shader references a binding this pipeline's layout does not provide,
+/// which is a real, reportable pipeline-creation error, not something this
+/// rewrite can silently resolve. Shared by the compute and graphics pipeline
+/// compilation paths.
+void patchUnboundedResourceRanges(llvm::Module &M, const PipelineLayout &Layout);
 
 /// Whether \p Layout's push-constant ranges visible to \p StageFlags fully
 /// cover `[0, RootConstantSize)` with no gap -- see "Descriptor Model":

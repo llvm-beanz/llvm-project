@@ -450,7 +450,8 @@ Error validateMeshOrTaskGroupSize(
 /// them here needs no cooperation from that pass either way.
 Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
     feme::Context &Ctx, const VkPipelineShaderStageCreateInfo &StageInfo,
-    feme::ShaderStage Stage, llvm::StringRef EntryPointOverride = {},
+    feme::ShaderStage Stage, const PipelineLayout &Layout,
+    llvm::StringRef EntryPointOverride = {},
     std::optional<feme::graphics::TessellationState> *OutState = nullptr,
     std::optional<feme::graphics::GeometryState> *OutGeometryState = nullptr,
     std::optional<feme::graphics::MeshState> *OutMeshState = nullptr) {
@@ -477,6 +478,11 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
   Expected<feme::Module> AsLLVMIR = importShaderModule(Ctx, Module->words());
   if (!AsLLVMIR)
     return AsLLVMIR.takeError();
+
+  // (roadmap L12c) Resolve any unbounded (`RuntimeDescriptorArray`) resource
+  // range against this pipeline's own layout before compiling -- see that
+  // function's comment (Pipeline.h/.cpp; shared with the compute path).
+  patchUnboundedResourceRanges(AsLLVMIR->getLLVMModule(), Layout);
 
   ModuleAnalysisManager MAM;
   feme::graphics::CanonicalizeStagePass().run(AsLLVMIR->getLLVMModule(), MAM);
@@ -1892,7 +1898,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   std::shared_ptr<feme::cpu::CompiledStage> VertexStageCompiled;
   if (VertexInfo) {
     Expected<std::shared_ptr<feme::cpu::CompiledStage>> Compiled =
-        compileGraphicsStage(*Ctx, *VertexInfo, feme::ShaderStage::Vertex);
+        compileGraphicsStage(*Ctx, *VertexInfo, feme::ShaderStage::Vertex,
+                             Layout);
     if (!Compiled)
       return Compiled.takeError();
     VertexStageCompiled = std::move(*Compiled);
@@ -1900,7 +1907,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   std::shared_ptr<feme::cpu::CompiledStage> FragmentStage;
   if (FragmentInfo) {
     Expected<std::shared_ptr<feme::cpu::CompiledStage>> Compiled =
-        compileGraphicsStage(*Ctx, *FragmentInfo, feme::ShaderStage::Fragment);
+        compileGraphicsStage(*Ctx, *FragmentInfo, feme::ShaderStage::Fragment,
+                             Layout);
     if (!Compiled)
       return Compiled.takeError();
     FragmentStage = std::move(*Compiled);
@@ -1917,22 +1925,22 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     std::optional<feme::graphics::TessellationState> ControlPointState;
     Expected<std::shared_ptr<feme::cpu::CompiledStage>> HullCompiled =
         compileGraphicsStage(*Ctx, *TessControlInfo, feme::ShaderStage::Hull,
-                             ControlEntry, &ControlPointState);
+                             Layout, ControlEntry, &ControlPointState);
     if (!HullCompiled)
       return HullCompiled.takeError();
     HullStage = std::move(*HullCompiled);
 
     Expected<std::shared_ptr<feme::cpu::CompiledStage>> PatchConstantCompiled =
         compileGraphicsStage(*Ctx, *TessControlInfo, feme::ShaderStage::Hull,
-                             PatchConstantEntry);
+                             Layout, PatchConstantEntry);
     if (!PatchConstantCompiled)
       return PatchConstantCompiled.takeError();
     PatchConstantStage = std::move(*PatchConstantCompiled);
 
     std::optional<feme::graphics::TessellationState> DomainState;
     Expected<std::shared_ptr<feme::cpu::CompiledStage>> DomainCompiled =
-        compileGraphicsStage(*Ctx, *TessEvalInfo, feme::ShaderStage::Domain, {},
-                             &DomainState);
+        compileGraphicsStage(*Ctx, *TessEvalInfo, feme::ShaderStage::Domain,
+                             Layout, {}, &DomainState);
     if (!DomainCompiled)
       return DomainCompiled.takeError();
     DomainStage = std::move(*DomainCompiled);
@@ -1975,7 +1983,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     std::optional<feme::graphics::GeometryState> GeomState;
     Expected<std::shared_ptr<feme::cpu::CompiledStage>> Compiled =
         compileGraphicsStage(*Ctx, *GeometryInfo, feme::ShaderStage::Geometry,
-                             {}, nullptr, &GeomState);
+                             Layout, {}, nullptr, &GeomState);
     if (!Compiled)
       return Compiled.takeError();
     GeometryStageCompiled = std::move(*Compiled);
@@ -2023,8 +2031,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   if (MeshInfo) {
     std::optional<feme::graphics::MeshState> MeshShapeState;
     Expected<std::shared_ptr<feme::cpu::CompiledStage>> Compiled =
-        compileGraphicsStage(*Ctx, *MeshInfo, feme::ShaderStage::Mesh, {},
-                             nullptr, nullptr, &MeshShapeState);
+        compileGraphicsStage(*Ctx, *MeshInfo, feme::ShaderStage::Mesh,
+                             Layout, {}, nullptr, nullptr, &MeshShapeState);
     if (!Compiled)
       return Compiled.takeError();
     MeshStageCompiled = std::move(*Compiled);
@@ -2065,7 +2073,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     if (TaskInfo) {
       Expected<std::shared_ptr<feme::cpu::CompiledStage>> TaskCompiled =
           compileGraphicsStage(*Ctx, *TaskInfo,
-                               feme::ShaderStage::Amplification);
+                               feme::ShaderStage::Amplification, Layout);
       if (!TaskCompiled)
         return TaskCompiled.takeError();
       TaskStageCompiled = std::move(*TaskCompiled);
