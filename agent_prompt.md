@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 resume: 50bf9c01-6e85-44df-8b7a-5c13ed0b05e1
 ---
 # Initial Guidelines
@@ -37,53 +37,16 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-I have one remaining test failure under macOS, can you please diagnose and fix.
-The error I'm seeing is:
+Please work on H7l or any prerequisite work to continue making progress on the
+H-series milestones.
 
-```
-FAIL: FEME :: Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll (24 of 1006)
-******************** TEST 'FEME :: Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll' FAILED ********************
-Exit Code: 1
-
-Command Output (stdout):
---
-# RUN: at line 2
-/Users/cbieneman/dev/llvm-project/build-rel/bin/llc /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll --filetype=obj -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.dxcontainer
-# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/llc /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll --filetype=obj -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.dxcontainer
-# RUN: at line 24
-not /Users/cbieneman/dev/llvm-project/build-rel/bin/feme --target=arm64-apple-darwin25.5.0 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.dxcontainer -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.o 2>&1 | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll
-# executed command: not /Users/cbieneman/dev/llvm-project/build-rel/bin/feme --target=arm64-apple-darwin25.5.0 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.dxcontainer -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-reject-unwidened-loop-divergent-branch.ll.tmp.o
-# note: command had no output on stdout or stderr
-# error: command failed with exit status: 1
-# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll
-# .---command stderr------------
-# | /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll:26:10: error: CHECK: expected string not found in input
-# | ; CHECK: feme-cpu-linearize: function 'main': loop at 'loop' has an internal branch in
-# |          ^
-# | <stdin>:1:1: note: scanning from here
-# | unexpected wave-body parameter for EntryWrapperPass
-# | ^
-# |
-# | Input file: <stdin>
-# | Check file: /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll
-# |
-# | -dump-input=help explains the following input dump.
-# |
-# | Input was:
-# | <<<<<<
-# |             1: unexpected wave-body parameter for EntryWrapperPass
-# | check:26'0    {                                                      search range start (exclusive)
-# | check:26'1                                                           error: no match found in search range
-# |             2: UNREACHABLE executed at /Users/cbieneman/dev/llvm-project/feme/lib/Transforms/CPU/EntryWrapper.cpp:443!
-# | check:26'2                                                                                                             } search range end (exclusive)
-# | >>>>>>
-# `-----------------------------
-# error: command failed with exit status: 1
-
---
-
-********************
-********************
-Failed Tests (1):
-  FEME :: Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll
-```
+> **`*_with_adjacency` topologies fail pipeline creation for a depth/clip-volume
+> draw.** Found via the same H7d
+> `deqp-vk.clipping.clip_volume.depth_clamp.{triangle,line}_*_with_adjacency`
+> reproduction: `vkCreateGraphicsPipelines` returns
+> `VK_ERROR_INITIALIZATION_FAILED` for these 4 cases specifically, distinct from
+> and unrelated to the depth-clamp/bias/bounds logic itself (the equivalent
+> non-adjacency topologies in the same test group pass). Likely a
+> geometry-shader-adjacent gap in adjacency-topology pipeline construction
+> rather than anything in the depth-clamp path; needs its own root-cause
+> investigation before it can be scoped as a fix
