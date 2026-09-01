@@ -1303,8 +1303,20 @@ SPIRVElementInfo classifySPIRVElement(ShaderStage Stage,
       Phase == SPIRVCanonicalPhase::HullPatchConstant) {
     if (AddrSpace == 7) {
       Info.Direction = SignatureDirection::Input;
-      Info.FromInputPatch = Sys == SignatureSystemValue::None ||
-                            Sys == SignatureSystemValue::PatchVertices;
+      // (roadmap H13b) Every genuine per-control-point-addressable input
+      // read here -- an ordinary varying (`Sys == None`), or a builtin
+      // that is itself an array indexed by control point (`Position`,
+      // `ClipDistance`, `CullDistance`; unlike `Location`-linked ordinary
+      // varyings, these carry no `Location` of their own, but are read
+      // from `gl_in[]`/`InputPatch` the same way) -- is `FromInputPatch`,
+      // addressed by `PatchConstantWrapper.cpp`'s `lowerPatchConstantInput
+      // Load` the same way regardless of `Location` vs. `SystemValue`
+      // linkage. `OutputControlPointID` is the only system value this
+      // phase reads that is *not* addressable this way: it is the
+      // single, current-invocation-implicit scalar `lowerPatchConstant
+      // SystemValue` special-cases (always `0`), never one this phase
+      // could read a *different* control point's own copy of.
+      Info.FromInputPatch = Sys != SignatureSystemValue::OutputControlPointID;
       if (Sys == SignatureSystemValue::PatchVertices)
         Info.Frequency = SignatureFrequency::PerPatch;
       return Info;

@@ -1521,6 +1521,76 @@ TEST(CanonicalizeStageTest, SplitsHullEntryAtMangledSPIRVControlBarrierCall) {
             SignatureSystemValue::TessFactorEdge);
 }
 
+/// (Roadmap H13b) A patch-constant phase reading a per-control-point
+/// builtin -- `gl_in[i].gl_Position`/`gl_ClipDistance`/`gl_CullDistance`,
+/// each a real array indexed by control point, not the single, current-
+/// invocation-implicit scalar `OutputControlPointID` is -- must classify
+/// that read as `FromInputPatch` (routed through `PatchConstantWrapper
+/// .cpp`'s generic `lowerPatchConstantInputLoad`, not the narrow, two-case
+/// `lowerPatchConstantSystemValue`) exactly like an ordinary varying,
+/// despite carrying a `SystemValue` of its own (these builtins have no
+/// `Location`). `OutputControlPointID` remains the one system value this
+/// phase reads that is *not* `FromInputPatch` -- verified alongside, to
+/// pin the boundary this fix drew precisely.
+TEST(CanonicalizeStageTest,
+    PatchConstantPhaseMarksPositionAndClipDistanceFromInputPatch) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_in_pos = external addrspace(7) constant <4 x float>, !spirv.Decorations !0
+    @gl_in_clip = external addrspace(7) constant [1 x float], !spirv.Decorations !1
+    @gl_InvocationID = external addrspace(7) constant i32, !spirv.Decorations !2
+    @gl_TessLevelOuter = external addrspace(8) global [4 x float], !spirv.Decorations !3
+    define void @main() #0 {
+      call void @llvm.spv.group.memory.barrier.with.group.sync()
+      %pos = load <4 x float>, ptr addrspace(7) @gl_in_pos
+      %clip = load [1 x float], ptr addrspace(7) @gl_in_clip
+      %id = load i32, ptr addrspace(7) @gl_InvocationID
+      %x = extractelement <4 x float> %pos, i32 0
+      %c = extractvalue [1 x float] %clip, 0
+      %sum = fadd float %x, %c
+      %idf = uitofp i32 %id to float
+      %total = fadd float %sum, %idf
+      store float %total, ptr addrspace(8) @gl_TessLevelOuter
+      ret void
+    }
+    declare void @llvm.spv.group.memory.barrier.with.group.sync()
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!4}
+    !1 = !{!5}
+    !2 = !{!6}
+    !3 = !{!7}
+    !4 = !{i32 11, i32 0}
+    !5 = !{i32 11, i32 3}
+    !6 = !{i32 11, i32 8}
+    !7 = !{i32 11, i32 11}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(PatchConstant);
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(Sig.has_value());
+
+  const SignatureElement *PositionElt = nullptr;
+  const SignatureElement *ClipDistanceElt = nullptr;
+  const SignatureElement *InvocationIDElt = nullptr;
+  for (const SignatureElement &Elt : Sig->Elements) {
+    if (Elt.SystemValue == SignatureSystemValue::Position)
+      PositionElt = &Elt;
+    else if (Elt.SystemValue == SignatureSystemValue::ClipDistance)
+      ClipDistanceElt = &Elt;
+    else if (Elt.SystemValue == SignatureSystemValue::OutputControlPointID)
+      InvocationIDElt = &Elt;
+  }
+  ASSERT_TRUE(PositionElt);
+  ASSERT_TRUE(ClipDistanceElt);
+  ASSERT_TRUE(InvocationIDElt);
+  EXPECT_TRUE(PositionElt->FromInputPatch);
+  EXPECT_TRUE(ClipDistanceElt->FromInputPatch);
+  EXPECT_FALSE(InvocationIDElt->FromInputPatch);
+}
+
 /// (Roadmap H4c) The common, real GLSL-compiled shape
 /// `SplitsHullEntryAtGroupSyncBarrier` above does not cover: a per-patch
 /// tessellation factor computed from an SSA value derived from the
