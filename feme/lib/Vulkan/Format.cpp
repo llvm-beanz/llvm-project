@@ -288,6 +288,28 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::BC7_UNORM;
   case VK_FORMAT_BC7_SRGB_BLOCK:
     return ResourceFormat::BC7_SRGB;
+  // (Roadmap H8j) The 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` block
+  // footprints.
+  case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+    return ResourceFormat::ETC2_RGB8_UNORM;
+  case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
+    return ResourceFormat::ETC2_RGB8_SRGB;
+  case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
+    return ResourceFormat::ETC2_RGB8A1_UNORM;
+  case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
+    return ResourceFormat::ETC2_RGB8A1_SRGB;
+  case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+    return ResourceFormat::ETC2_RGBA8_UNORM;
+  case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
+    return ResourceFormat::ETC2_RGBA8_SRGB;
+  case VK_FORMAT_EAC_R11_UNORM_BLOCK:
+    return ResourceFormat::EAC_R11_UNORM;
+  case VK_FORMAT_EAC_R11_SNORM_BLOCK:
+    return ResourceFormat::EAC_R11_SNORM;
+  case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
+    return ResourceFormat::EAC_R11G11_UNORM;
+  case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
+    return ResourceFormat::EAC_R11G11_SNORM;
   default:
     return std::nullopt;
   }
@@ -455,6 +477,20 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::BC7_UNORM:
   case ResourceFormat::BC7_SRGB:
     return 0;
+  // (Roadmap H8j) The 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` block
+  // footprints: no single-texel size either, for the same reason as
+  // ASTC/BC above.
+  case ResourceFormat::ETC2_RGB8_UNORM:
+  case ResourceFormat::ETC2_RGB8_SRGB:
+  case ResourceFormat::ETC2_RGB8A1_UNORM:
+  case ResourceFormat::ETC2_RGB8A1_SRGB:
+  case ResourceFormat::ETC2_RGBA8_UNORM:
+  case ResourceFormat::ETC2_RGBA8_SRGB:
+  case ResourceFormat::EAC_R11_UNORM:
+  case ResourceFormat::EAC_R11_SNORM:
+  case ResourceFormat::EAC_R11G11_UNORM:
+  case ResourceFormat::EAC_R11G11_SNORM:
+    return 0;
   }
   llvm_unreachable("unhandled ResourceFormat");
 }
@@ -566,6 +602,20 @@ BlockShape blockShape(ResourceFormat Format) {
   case ResourceFormat::BC7_UNORM:
   case ResourceFormat::BC7_SRGB:
     return {4, 4};
+  // (Roadmap H8j) All 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` formats
+  // also share the same 4x4 texel footprint -- only their per-block byte
+  // count differs (`bytesPerBlock` below).
+  case ResourceFormat::ETC2_RGB8_UNORM:
+  case ResourceFormat::ETC2_RGB8_SRGB:
+  case ResourceFormat::ETC2_RGB8A1_UNORM:
+  case ResourceFormat::ETC2_RGB8A1_SRGB:
+  case ResourceFormat::ETC2_RGBA8_UNORM:
+  case ResourceFormat::ETC2_RGBA8_SRGB:
+  case ResourceFormat::EAC_R11_UNORM:
+  case ResourceFormat::EAC_R11_SNORM:
+  case ResourceFormat::EAC_R11G11_UNORM:
+  case ResourceFormat::EAC_R11G11_SNORM:
+    return {4, 4};
   default:
     return {1, 1};
   }
@@ -592,7 +642,17 @@ uint32_t feme::vulkan::bytesPerBlock(ResourceFormat Format) {
   // channel only) -- while BC2/BC3/BC5/BC6H/BC7 each add a second 64-bit
   // plane (explicit or interpolated alpha, a second interpolated
   // channel, or extra endpoint/partition bits), doubling their footprint
-  // to 128 bits.
+  // to 128 bits. (Roadmap H8j) Likewise, ETC2's opaque and
+  // punchthrough-alpha RGB formats and EAC's single-channel format each
+  // pack into a single 64-bit block (`ETC2Decode.h`'s own
+  // `decodeETC2Block`/`decodeETC2PunchthroughAlphaBlock`/`decodeEACBlock`
+  // each take exactly one 8-byte block), while ETC2's explicit-alpha
+  // RGBA format and EAC's dual-channel format each compose two 64-bit
+  // blocks (one `decodeEACBlock` call for alpha plus one
+  // `decodeETC2Block` call for RGB, or two `decodeEACBlock` calls, one
+  // per channel), doubling their footprint to 128 bits -- the same
+  // "single-plane formats are half the size of dual-plane ones" pattern
+  // BC1/BC4 vs. everything else already established.
   switch (Format) {
   case ResourceFormat::BC1_RGB_UNORM:
   case ResourceFormat::BC1_RGB_SRGB:
@@ -600,6 +660,12 @@ uint32_t feme::vulkan::bytesPerBlock(ResourceFormat Format) {
   case ResourceFormat::BC1_RGBA_SRGB:
   case ResourceFormat::BC4_UNORM:
   case ResourceFormat::BC4_SNORM:
+  case ResourceFormat::ETC2_RGB8_UNORM:
+  case ResourceFormat::ETC2_RGB8_SRGB:
+  case ResourceFormat::ETC2_RGB8A1_UNORM:
+  case ResourceFormat::ETC2_RGB8A1_SRGB:
+  case ResourceFormat::EAC_R11_UNORM:
+  case ResourceFormat::EAC_R11_SNORM:
     return 8;
   case ResourceFormat::BC2_UNORM:
   case ResourceFormat::BC2_SRGB:
@@ -611,6 +677,10 @@ uint32_t feme::vulkan::bytesPerBlock(ResourceFormat Format) {
   case ResourceFormat::BC6H_SFLOAT:
   case ResourceFormat::BC7_UNORM:
   case ResourceFormat::BC7_SRGB:
+  case ResourceFormat::ETC2_RGBA8_UNORM:
+  case ResourceFormat::ETC2_RGBA8_SRGB:
+  case ResourceFormat::EAC_R11G11_UNORM:
+  case ResourceFormat::EAC_R11G11_SNORM:
     return 16;
   default:
     break;
@@ -751,7 +821,7 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // and an HDR ASTC *source* (`decodeASTCBlockHDR` produces floats through
   // a different interface than the UNORM8 one this pipeline shares), but
   // accepts every other combination either way.
-  if (!BlockCompressed || ASTCLdr || isBCFormat(Format))
+  if (!BlockCompressed || ASTCLdr || isBCFormat(Format) || isETC2Format(Format))
     Flags |= VK_FORMAT_FEATURE_BLIT_SRC_BIT;
   if (!BlockCompressed)
     Flags |= VK_FORMAT_FEATURE_BLIT_DST_BIT;
@@ -859,6 +929,13 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
     // sees it, exactly mirroring the ASTC LDR bridge above (see that
     // function's own comment for the per-format target list).
     else if (isBCFormat(Format))
+      Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+               VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    // (Roadmap H8j) Every one of the 10 `VK_FORMAT_ETC2_*`/
+    // `VK_FORMAT_EAC_*` formats samples too, mirroring the BC bridge
+    // immediately above (`ETC2SamplingBridge.h`'s own per-format target
+    // list).
+    else if (isETC2Format(Format))
       Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
                VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     break;

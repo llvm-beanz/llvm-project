@@ -302,6 +302,26 @@ enum class ResourceFormat : uint32_t {
   BC6H_SFLOAT,
   BC7_UNORM,
   BC7_SRGB,
+
+  // (Roadmap H8j) The 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` block
+  // footprints -- `ETC2Decode.h` (roadmap H8c) decodes every one of
+  // them, wired together here (`ETC2SamplingBridge.h`/`.cpp`). Appended
+  // at the enum's own tail for the same hard-coded-switch-case reason as
+  // the BC formats immediately above. Ordered the same way
+  // `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*`'s own numbering is: opaque RGB
+  // (2: `_UNORM`/`_SRGB`), punchthrough-alpha RGB (2), explicit-alpha
+  // RGBA (2), then the two single/dual-channel EAC formats, each with an
+  // `_UNORM`/`_SNORM` pair (4).
+  ETC2_RGB8_UNORM,
+  ETC2_RGB8_SRGB,
+  ETC2_RGB8A1_UNORM,
+  ETC2_RGB8A1_SRGB,
+  ETC2_RGBA8_UNORM,
+  ETC2_RGBA8_SRGB,
+  EAC_R11_UNORM,
+  EAC_R11_SNORM,
+  EAC_R11G11_UNORM,
+  EAC_R11G11_SNORM,
 };
 
 /// Whether \p Format is one of the ASTC block-compressed formats above.
@@ -327,12 +347,20 @@ constexpr bool isBCFormat(ResourceFormat Format) {
          Format <= ResourceFormat::BC7_SRGB;
 }
 
+/// Whether \p Format is one of the 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*`
+/// formats above (roadmap H8j) -- the `ETC2Decode.h`/`ETC2SamplingBridge.h`
+/// counterpart to `isBCFormat`/`isASTCFormat` above.
+constexpr bool isETC2Format(ResourceFormat Format) {
+  return Format >= ResourceFormat::ETC2_RGB8_UNORM &&
+         Format <= ResourceFormat::EAC_R11G11_SNORM;
+}
+
 /// Whether \p Format is any block-compressed format this ICD recognizes
-/// (ASTC or BC) -- see `isASTCFormat`'s own comment for what makes a
-/// block-compressed format's layout different from an ordinary
+/// (ASTC, BC, or ETC2/EAC) -- see `isASTCFormat`'s own comment for what
+/// makes a block-compressed format's layout different from an ordinary
 /// one-texel-at-a-time format.
 constexpr bool isBlockCompressedFormat(ResourceFormat Format) {
-  return isASTCFormat(Format) || isBCFormat(Format);
+  return isASTCFormat(Format) || isBCFormat(Format) || isETC2Format(Format);
 }
 
 /// Whether \p Format is one of the 28 LDR-only ASTC formats (roadmap E20)
