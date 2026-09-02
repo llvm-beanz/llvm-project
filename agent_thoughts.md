@@ -52923,3 +52923,98 @@ this builtin's existence and where its value should come from, it's
 purely `SIMDizePass`'s own implementation that hadn't caught up yet, so
 H6o's fix (whenever it lands) should be a matter of wiring up an
 already-designed data path rather than inventing a new one.
+
+# H6o: threading a runtime dispatch-time value through the wave-body interface, and one gate too many
+
+H6o looked, at first glance, like a near carbon-copy of H6n's own
+`SubgroupId`/`NumSubgroups` fix from the immediately preceding session: same
+symptom shape (`LLVM ERROR: Cannot select: intrinsic %llvm.spv.num.workgroups`),
+same discovery mechanism (a full single-process `dEQP-VK.mesh_shader.*`
+re-run), same `SIMDizePass` component (no lowering case for a real SPIR-V
+core LLVM intrinsic). The design doc's own "Builtin and execution-shape
+mapping" table even already named `GroupCount` as `NumWorkgroups`'s intended
+source, so I expected this to be a small, almost mechanical addition.
+
+It mostly was, but there was one genuine wrinkle I want to record clearly for
+next time: `NumWorkgroups`, unlike `NumSubgroups`, cannot fold to a
+compile-time constant. `NumSubgroups` is `ceil(NumThreads.x*y*z / WaveSize)`
+-- both operands are static properties of the entry point and the pass's own
+configuration, known entirely at `SIMDizePass` time. `NumWorkgroups` is the
+dispatch's own grid size, a genuine runtime value chosen by whoever calls
+`vkCmdDrawMeshTasksEXT`/`vkCmdDispatch` -- the CTS case that found this gap is
+literally named `many_mesh_work_groups_x` precisely because it *varies* this
+value to test it. So this fix needed an actual data path, not just an
+arithmetic identity: `SIMDizePass` needed a new wave-body parameter to
+substitute the intrinsic for, and something upstream needed to actually
+compute and supply the real value into that parameter.
+
+The "something upstream" turned out to already almost exist. `FemeDispatchArgs`
+(`RuntimeABI.h`) already had a `GroupCount[3]` field sitting right next to
+`GroupID[3]`, unused by anything -- clearly added in anticipation of exactly
+this need, per the design doc's own forward-looking table entry, but never
+wired up. `EntryWrapperPass` already loads `Args->GroupID` and threads its
+X/Y/Z components into the wave-loop call under the parameter names
+`wave_group_id_x/y/z`; I mirrored this almost verbatim for `GroupCount` under
+`wave_group_count_x/y/z`. The parameter-name-based (not position-based)
+wiring throughout this whole subsystem made this refreshingly low-risk: I
+could insert three new parameters in the middle of the appended parameter
+list without needing to touch every call site that builds `CallArgs`, only
+the specific `else if` chains that needed new branches.
+
+The one thing that bit me, and is worth remembering explicitly: adding a new
+named wave-body parameter is not *one* gate, it's *two*. There's the obvious
+one (does `buildWaveLoop`'s `CallArgs`-building loop know how to supply a
+value for this name), and there's a separate, easy-to-forget one:
+`EntryWrapper.cpp` has its own `isKnownWaveBodyParameter` allow-list, used by
+`checkWaveBodyParameters` purely as a diagnostic gate ("does the wrapper pass
+recognize this parameter name at all, so it can tell the difference between
+'a real gap in my own logic' and 'a shader with a parameter I have literally
+never heard of and should reject cleanly instead of miscompiling'"). I built
+and tested the `SIMDize.cpp`/`EntryWrapper.cpp` changes, they looked correct
+in isolation and via a manual IR reduction, and then a full `check-feme` run
+turned up 141 failures, all the exact same message:
+`"has an unsupported parameter 'wave_group_count_x'"`. It took a moment to
+place -- the manual IR-reduction verification I'd done exercised the
+happy path directly through `feme-opt -passes=...`, which apparently doesn't
+hit this particular diagnostic check the same way the full pass pipeline via
+`check-feme`'s lit tests does (or more likely, my manual reduction just
+happened not to trigger whichever code path calls `checkWaveBodyParameters`).
+Either way: **when adding a new wave-body parameter name, there are two
+allow-lists, not one, and only running the full `check-feme` test suite (not
+just a hand-built repro) will reliably catch a forgotten second one.**
+
+The real-CTS payoff here was bigger than I expected. H6n's own re-run had
+only advanced the sweep from case ~1953 to case 1968 out of 28044 before
+hitting H6o's own crash -- a gain of 15 cases. This session's fix let the
+*entire* 28044-case group run to completion for the first time in this whole
+investigation chain (H6g-b through H6o), with literally zero `LLVM ERROR` or
+crash of any kind anywhere in the sweep. That's a genuinely different kind of
+milestone than the incremental "N more cases progress before the next wall"
+pattern every prior row in this chain has followed -- there is no next wall,
+compiler-crash-wise, at least not in this group. What's left (398 failing
+cases out of 28044) are all "softer" failures: pipeline creation rejections,
+unsupported render-pass formats, and pixel-comparison mismatches -- the kind
+of thing that indicates genuinely distinct, narrower gaps rather than one
+more generic "this compiler pass doesn't know about X yet" wall.
+
+I triaged (but did not fix) the single dominant remaining bucket, 216 cases
+all failing `vkCreateGraphicsPipelines` on the same
+`MeshOutputWrapper.cpp` diagnostic: `"unexpected stage op left for the mesh
+output wrapper"`. This is worth flagging precisely because it *sounds* like a
+regression of H6g-b-d (which fixed this exact same catch-all being too
+broad), but isn't -- I confirmed directly via `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+that this is hitting the catch-all's own final, deliberately-narrow branch
+(`if (!isStageOpCall(*CI)) continue;` -- i.e., this really is a genuine,
+still-unlowered `feme.stage.*` op, not the over-broad rejection H6g-b-d
+already fixed). I did not have time this session to run the minimal-IR-reduction
+technique (the same one that has scoped every fix in this whole H6g-b through
+H6o chain) to identify exactly *which* `feme.stage.*` op it is -- the test
+case that surfaces it has no task shader at all, which rules out the file's
+own documented "EmitMeshTasksEXT has no canonicalized form yet" candidate, so
+whatever it is remains an open question, filed as H6p. I deliberately did not
+also file the two smaller remaining buckets (80 `VK_ERROR_FORMAT_NOT_SUPPORTED`
+render-pass cases, ~63+ pixel-mismatch cases) as their own separate rows yet
+-- with no triage done on either, filing them prematurely risked either
+mischaracterizing them or needlessly fragmenting the roadmap before knowing
+whether they're one gap or several; H6p's own next investigation should
+re-examine whether either deserves its own row once looked at directly.
