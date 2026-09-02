@@ -513,6 +513,97 @@ TEST(ExecutorTest, FillsFullyCoveredTriangleWithSolidColor) {
   }
 }
 
+/// (Roadmap H8b) Renders the same fully-covered, solid-color triangle as
+/// `FillsFullyCoveredTriangleWithSolidColor`, but the color vertex
+/// attribute (location 1, still bound to `buildPipeline`'s own float4
+/// color input) is supplied in \p ColorFormat's raw bytes rather than
+/// `R32G32B32A32_FLOAT` -- exercises `Executor.cpp`'s
+/// `decodeAttribute`/`attributeComponentByteSize` new non-32-bit-scalar
+/// cases through a real compiled pipeline, not just their component-count/
+/// byte-size arithmetic in isolation.
+void renderSolidColorTriangleWithAttributeFormat(
+    cpu::ResourceFormat ColorFormat, ArrayRef<uint8_t> ColorBytes,
+    std::array<uint8_t, 4> ExpectedTexel) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  const uint32_t PositionBytes = 12; // R32G32B32_FLOAT, 3 x 4 bytes.
+  const uint32_t Stride =
+      PositionBytes + static_cast<uint32_t>(ColorBytes.size());
+  std::vector<uint8_t> VertexData(Stride * 3);
+  auto writeVertex = [&](uint32_t I, std::array<float, 3> Pos) {
+    memcpy(VertexData.data() + I * Stride, Pos.data(), PositionBytes);
+    memcpy(VertexData.data() + I * Stride + PositionBytes, ColorBytes.data(),
+           ColorBytes.size());
+  };
+  // A triangle covering the whole [-1, 1] NDC square (and more), CCW-wound.
+  writeVertex(0, {-1.0f, -1.0f, 0.0f});
+  writeVertex(1, {3.0f, -1.0f, 0.0f});
+  writeVertex(2, {-1.0f, 3.0f, 0.0f});
+
+  std::array<VertexAttribute, 2> Attributes = {
+      VertexAttribute{0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      VertexAttribute{1, ColorFormat, PositionBytes}};
+  std::array<uint8_t, 64> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R8G8B8A8_UNORM,
+                       4, 4};
+  std::array<AttachmentView, 1> Attachments = {Color};
+  std::array<VertexBufferBinding, 1> Bindings = {
+      VertexBufferBinding{0, Stride, ArrayRef(VertexData), Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], ExpectedTexel[0]) << "texel " << I;
+    EXPECT_EQ(Texel[1], ExpectedTexel[1]) << "texel " << I;
+    EXPECT_EQ(Texel[2], ExpectedTexel[2]) << "texel " << I;
+    EXPECT_EQ(Texel[3], ExpectedTexel[3]) << "texel " << I;
+  }
+}
+
+TEST(ExecutorTest, VertexAttributeDecodesR16G16B16A16UnormColor) {
+  // (Roadmap H8b) UNORM: 0xFFFF/0x0000 (uint16) decode to 1.0f/0.0f.
+  std::array<uint16_t, 4> Values = {65535, 0, 0, 65535};
+  std::array<uint8_t, 8> ColorBytes;
+  memcpy(ColorBytes.data(), Values.data(), ColorBytes.size());
+  renderSolidColorTriangleWithAttributeFormat(
+      cpu::ResourceFormat::R16G16B16A16_UNORM, ColorBytes, {255, 0, 0, 255});
+}
+
+TEST(ExecutorTest, VertexAttributeDecodesR16G16B16A16SnormColor) {
+  // (Roadmap H8b) SNORM: 32767/0 (int16) decode to 1.0f/0.0f.
+  std::array<int16_t, 4> Values = {32767, 0, 0, 32767};
+  std::array<uint8_t, 8> ColorBytes;
+  memcpy(ColorBytes.data(), Values.data(), ColorBytes.size());
+  renderSolidColorTriangleWithAttributeFormat(
+      cpu::ResourceFormat::R16G16B16A16_SNORM, ColorBytes, {255, 0, 0, 255});
+}
+
+TEST(ExecutorTest, VertexAttributeDecodesR16G16B16A16FloatColor) {
+  // (Roadmap H8b) SFLOAT: the binary16 bit patterns for 1.0f (0x3C00) and
+  // 0.0f (0x0000) -- exercises `decodeAttribute`'s new
+  // `halfBitsToFloat`/`llvm::APFloat`-based half->float32 conversion.
+  std::array<uint16_t, 4> Values = {0x3C00, 0x0000, 0x0000, 0x3C00};
+  std::array<uint8_t, 8> ColorBytes;
+  memcpy(ColorBytes.data(), Values.data(), ColorBytes.size());
+  renderSolidColorTriangleWithAttributeFormat(
+      cpu::ResourceFormat::R16G16B16A16_FLOAT, ColorBytes, {255, 0, 0, 255});
+}
+
 /// (roadmap H7t) The same fully-covered, solid-color triangle as
 /// `FillsFullyCoveredTriangleWithSolidColor`, but the fragment stage's own
 /// `SV_Target0` output is a 3-component `vec3` (`Vec3FragmentShaderIR`,

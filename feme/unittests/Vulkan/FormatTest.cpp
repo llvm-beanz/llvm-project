@@ -327,7 +327,7 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
 }
 
 TEST(FormatTest, VertexBufferFormatSupportMatchesDecodeAttributeScope) {
-  // (Roadmap H8) `Executor.cpp`'s `decodeAttribute` implements exactly
+  // (Roadmap H8/H8b) `Executor.cpp`'s `decodeAttribute` implements exactly
   // these formats' vertex-attribute decode -- `isVertexBufferFormatSupported`
   // must report the same set `GraphicsPipeline.cpp`'s
   // `isSupportedVertexAttributeFormat` (which now forwards here) and
@@ -354,14 +354,44 @@ TEST(FormatTest, VertexBufferFormatSupportMatchesDecodeAttributeScope) {
   EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8B8A8_SNORM));
   EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8B8A8_UINT));
   EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8B8A8_SINT));
-
-  // Formats `decodeAttribute` does not implement yet (roadmap H8's own
-  // follow-on rows track adding these): not yet a supported vertex
-  // attribute format, even though some are mandatory per the Vulkan spec.
-  EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::R8_UNORM));
-  EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::R16_UNORM));
-  EXPECT_FALSE(
+  // (Roadmap H8b) The single- and two-channel 8-bit-per-component families.
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8_UNORM));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8_SNORM));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8_UINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8_SINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8_UNORM));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8_SNORM));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8_UINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8_SINT));
+  // (Roadmap H8b) The 16-bit-per-component families, including `_FLOAT`.
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R16_UNORM));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R16_SNORM));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R16_UINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R16_SINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R16_FLOAT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R16G16_UNORM));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R16G16_SNORM));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R16G16_UINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R16G16_SINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R16G16_FLOAT));
+  EXPECT_TRUE(
+      isVertexBufferFormatSupported(ResourceFormat::R16G16B16A16_UNORM));
+  EXPECT_TRUE(
+      isVertexBufferFormatSupported(ResourceFormat::R16G16B16A16_SNORM));
+  EXPECT_TRUE(
+      isVertexBufferFormatSupported(ResourceFormat::R16G16B16A16_UINT));
+  EXPECT_TRUE(
+      isVertexBufferFormatSupported(ResourceFormat::R16G16B16A16_SINT));
+  EXPECT_TRUE(
       isVertexBufferFormatSupported(ResourceFormat::R16G16B16A16_FLOAT));
+
+  // Formats `decodeAttribute` does not implement yet (the packed
+  // `A2B10G10R10_UNORM_PACK32`, tracked as its own remaining roadmap H8
+  // follow-on row since it does not fit `decodeAttribute`'s "N bytes per
+  // component" convention mechanically): not yet a supported vertex
+  // attribute format, even though it is mandatory per the Vulkan spec.
+  EXPECT_FALSE(
+      isVertexBufferFormatSupported(ResourceFormat::R10G10B10A2_UNORM));
   EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::B8G8R8A8_UNORM));
   EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::Unknown));
   EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::ASTC_4x4_UNORM));
