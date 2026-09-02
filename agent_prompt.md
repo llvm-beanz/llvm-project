@@ -37,21 +37,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8l or other prerequisites blocking the H-series milestones?
+Can you work on H8m or other prerequisites blocking the H-series milestones?
 
-> **BC7 compressed-format sampling** (split from H8k's own scoping pass; attempt
-> before H8m/BC6H since it needs no half-float unquantization). Needs a new
-> `BC7Decode.h`/`.cpp` (or an extension of `BCDecode.h`/`.cpp`, whichever proves
-> cleaner once the per-mode bit-layout tables are drafted) implementing all 8
-> BC7 modes per the Khronos `bptc.txt` specification: per-mode
-> partition-selection bits (64 3-subset / 64 2-subset partition patterns, each a
-> `4x4` texel-to-subset-index lookup table), rotation bits (modes 4/5 only,
-> swaps a channel with alpha per-block), index-selection bit (modes 4/5 only,
-> swaps which index field drives color vs. alpha), per-endpoint or shared P-bits
-> (reconstructing the low bit of each endpoint channel before 8-bit
-> replication-extension), and the anchor-index convention (the first index of
-> any subset after subset 0 has one fewer bit, always implicitly 0, to break an
-> encoding symmetry) -- mirroring how this project's own `ASTCDecode.cpp`
-> already handles a comparable partition-table-driven decode. Standalone,
-> directly-unit-tested, initially unwired, matching every decoder in this file
-> family's own precedent
+> **BC6H compressed-format sampling** (split from H8k's own scoping pass;
+> attempt after H8l/BC7, reusing its partition-table and per-subset
+> index-assignment machinery -- now available in
+> `feme/lib/Vulkan/BC7Decode.cpp`'s `kPartitions2`/`kPartitions3`/anchor tables
+> following H8l's own closure). Needs a new `BC6HDecode.h`/`.cpp` implementing
+> BC6H's 14 mode shapes per `bptc.txt`: like BC7, 1-2 subsets with
+> partition-selection bits and an anchor-index convention, but replacing BC7's
+> 8-bit fixed-point RGBA endpoints with signed-or-unsigned (per
+> `VK_FORMAT_BC6H_{S,U}FLOAT_BLOCK`) 10-16-bit quantized endpoints needing
+> per-mode unquantization and either a "direct" (both endpoints stored in full)
+> or "delta" (second endpoint stored as a small signed offset from the first,
+> per-mode bit width) transform before RGB->half-float reconstruction -- the
+> extra step beyond BC7 that makes this row strictly more work and worth
+> attempting second
