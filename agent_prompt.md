@@ -37,13 +37,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8d or other prerequisites blocking the H-series milestones?
+Can you work on H8e or other prerequisites blocking the H-series milestones?
 
-> **Texel-buffer (`UNIFORM_TEXEL_BUFFER_BIT`/`STORAGE_TEXEL_BUFFER_BIT`)
-> format-table breadth.** `isTexelBufferFormatSupported` covers only 8 formats;
-> a real `dEQP-VK.api.info.format_properties.*` re-run under H8a shows several
-> mandatory texel-buffer formats (e.g. `a2b10g10r10_unorm_pack32`,
-> `b8g8r8a8_unorm`, `b10g11r11_ufloat_pack32`) still missing
-> `VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT` specifically -- a distinct,
-> CPU-runtime-typed-load/store-helper-breadth gap from H8a/H8b's own
-> vertex-fetch scope
+> **`COLOR_ATTACHMENT_BIT`/`SAMPLED_IMAGE_BIT`/`SAMPLED_IMAGE_FILTER_LINEAR_BIT`
+> gaps for packed and 16-bit integer formats.** The same `format_properties`
+> re-run shows several formats (`r16_{sint,uint}`, `r16g16_{sint,uint}`,
+> `a2b10g10r10_uint_pack32`, `a8b8g8r8_{uint,sint}_pack32`, `d16_unorm`'s own
+> depth-sampling case, and the packed sub-byte families
+> `a1r5g5b5_unorm_pack16`/`b4g4r4a4_unorm_pack16`/`e5b9g9r9_ufloat_pack32`)
+> still missing one or more of these three bits -- not yet triaged for whether
+> each is a genuine rendering-capability gap or a reporting-only one (i.e. the
+> underlying sample/attachment path may already work for a format that just is
+> not yet advertised)
