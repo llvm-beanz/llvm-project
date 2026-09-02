@@ -8,6 +8,7 @@
 
 #include "ImageOps.h"
 #include "ASTCDecode.h"
+#include "BCSamplingBridge.h"
 #include "Buffer.h"
 #include "Format.h"
 #include "Image.h"
@@ -608,21 +609,34 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
   // Roadmap E22: a block-compressed *destination* is rejected outright --
   // this ICD's ASTC support is decode-only (ASTCDecode.h), and a blit's
   // own resample-then-repack pipeline has no encoder to repack into one.
-  // A block-compressed *source* is supported, but only the LDR half:
-  // `decodeASTCBlock` is LDR-only (its HDR counterpart,
+  // (Roadmap H8n: the same holds for every `VK_FORMAT_BC*` destination --
+  // `isBlockCompressedFormat` already covers both families.)
+  // A block-compressed *source* is supported, but only the halves whose
+  // decode produces an RGBA8 texel this pipeline's own
+  // `feme::graphics::unpackColor`/`packClearColor` tables can already
+  // read: ASTC's LDR half (`decodeASTCBlock`; its HDR counterpart,
   // `decodeASTCBlockHDR`, produces floats through a different interface
   // than the UNORM8 one every other format's unpack/pack path here
-  // shares), so an HDR ASTC source is rejected the same "not implemented"
-  // way.
+  // shares) and BC's own RGBA8-shaped half (BC1/BC2/BC3/BC7,
+  // `isBCRGBA8Format`; BC4/BC5/BC6H decode to a shape
+  // (single/dual-channel, or half-float) `unpackColor` has no case for --
+  // see `isBCRGBA8Format`'s own comment in RuntimeABI.h). Both excluded
+  // halves are rejected the same "not implemented" way.
   if (feme::cpu::isBlockCompressedFormat(Dst->format()))
     return createStringError(inconvertibleErrorCode(),
                              "blitting to a block-compressed destination is "
-                             "not implemented (no ASTC encoder exists)");
+                             "not implemented (no ASTC/BC encoder exists)");
   bool SrcCompressed = feme::cpu::isBlockCompressedFormat(Src->format());
-  if (SrcCompressed && !feme::cpu::isASTCLdrFormat(Src->format()))
+  bool SrcIsBC = feme::cpu::isBCFormat(Src->format());
+  if (SrcCompressed && !SrcIsBC && !feme::cpu::isASTCLdrFormat(Src->format()))
     return createStringError(inconvertibleErrorCode(),
                              "blitting an HDR ASTC source is not "
                              "implemented (decodeASTCBlock is LDR-only)");
+  if (SrcIsBC && !feme::cpu::isBCRGBA8Format(Src->format()))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "blitting a BC4/BC5/BC6H source is not implemented (their decoded "
+        "shape does not fit this pipeline's RGBA8 unpack table)");
   uint32_t SrcTexelSize = SrcCompressed ? 0 : formatElementSize(Src->format());
   uint32_t DstTexelSize = formatElementSize(Dst->format());
   uint32_t SrcBlockW = blockWidth(Src->format());
@@ -743,7 +757,15 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
             const auto *Block = static_cast<const uint8_t *>(
                 Src->blockPointer(SrcLevel, SrcLayer, BlockX, BlockY,
                                   uint32_t(Region.srcOffsets[0].z)));
-            decodeASTCBlock(Block, SrcBlockW, SrcBlockH, DecodeBuf.data());
+            // (Roadmap H8n) A BC source (always one of the 10 RGBA8-shaped
+            // BC1/BC2/BC3/BC7 formats here -- BC4/BC5/BC6H are rejected
+            // above) decodes through `decodeBCBlock` instead of
+            // `decodeASTCBlock`; both produce the identical RGBA8 texel
+            // shape `DecodeBuf` holds either way.
+            if (SrcIsBC)
+              decodeBCBlock(Src->format(), Block, DecodeBuf.data());
+            else
+              decodeASTCBlock(Block, SrcBlockW, SrcBlockH, DecodeBuf.data());
             uint32_t InBlockX = TX % SrcBlockW, InBlockY = TY % SrcBlockH;
             const uint8_t *Texel =
                 &DecodeBuf[(size_t(InBlockY) * SrcBlockW + InBlockX) * 4];
