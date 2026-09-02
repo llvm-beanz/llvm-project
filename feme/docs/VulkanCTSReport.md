@@ -20269,3 +20269,82 @@ fix -- `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` is a per-format
 `VkFormatFeatureFlags` bit, not a feature/extension advertisement;
 confirmed, not assumed, that `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update for H8a specifically.
+
+## Roadmap H8b: measured impact
+
+**Scope.** H8a scoped `isVertexBufferFormatSupported` to exactly the 17
+formats `Executor.cpp`'s `decodeAttribute` already implemented (the
+32-bit-per-component family and `R8G8B8A8_*`). H8b expands
+`decodeAttribute`/`attributeComponentByteSize` to also cover the
+mandatory 8-bit `R8_*`/`R8G8_*` family (8 formats) and 16-bit
+`R16_*`/`R16G16_*`/`R16G16B16A16_*` family (15 formats, including
+`_FLOAT`), 23 new formats total. `A2B10G10R10_UNORM_PACK32` -- the one
+remaining mandatory vertex-buffer format -- is deliberately deferred (its
+packed, sub-byte-per-field bit layout does not fit `decodeAttribute`'s
+"N bytes per component" convention mechanically); filed as a new roadmap
+H8h row.
+
+**Implementation notes.** The 8-bit family's conversion logic (UNORM:
+`byte / 255.0f`; SNORM: `int8 / 127.0f` clamped; UINT/SINT: direct/
+sign-extended widen) is byte-for-byte identical to the existing
+`R8G8B8A8_*` cases, just fewer channels -- merged into the same case
+bodies rather than duplicating the logic. The 16-bit family needed a new
+`halfBitsToFloat` helper (`Executor.cpp`) for the `_FLOAT` variants:
+since this file runs on the host as compiled C++, not inside a compiled
+shader, it uses `llvm::APFloat`'s own binary16->binary32 conversion
+rather than duplicating the CPU runtime's bitcode-side
+`femeRTHalfToFloat` (`FeMeRuntimeCPU.c`), which is not callable from host
+code.
+
+**New unit tests.** `FormatTest.cpp`'s
+`VertexBufferFormatSupportMatchesDecodeAttributeScope` extended to cover
+all 23 new formats plus the still-deferred `R10G10B10A2_UNORM`.
+`ExecutorTest.cpp` gained three new tests --
+`VertexAttributeDecodesR16G16B16A16UnormColor`,
+`...SnormColor`, and `...FloatColor` -- each rendering a real solid-red
+triangle end-to-end through a compiled vertex/fragment pipeline pair with
+the color vertex attribute bound in the new format's raw bytes, checking
+the resulting attachment texels match exactly. The `_FLOAT` test
+specifically encodes the binary16 bit patterns for `1.0f`/`0.0f`
+(`0x3C00`/`0x0000`) to exercise the new `halfBitsToFloat` conversion path
+end-to-end, not just as an isolated helper-function unit test. (The
+8-bit family's UINT/SINT/16-bit UINT/SINT paths reuse the exact same
+widen/sign-extend code shape already exercised by the pre-existing
+`R32_UINT`/`R32_SINT`/`R8G8B8A8_UINT`/`R8G8B8A8_SINT` tests, so were not
+given their own dedicated render tests -- a deliberate scope decision to
+avoid redundant coverage of the same arithmetic pattern.)
+
+**`ninja check-feme`** (assertions-enabled, ccache build, correct target
+dependencies): 2331/2358 tests pass (27 unsupported, 0 failed) -- up from
+2328/2355 before this change (the 3 new `ExecutorTest` cases, all
+passing).
+
+**Real `deqp-vk` re-run, correct ICD confirmed via `vulkaninfo
+--summary`:**
+- `dEQP-VK.api.info.format_properties.*` (225 cases): 180/225 -> 186/225
+  Pass. Exactly the 6 expected new passes (`r16_unorm`, `r16_snorm`,
+  `r16g16_unorm`, `r16g16_snorm`, `r16g16b16a16_unorm`,
+  `r16g16b16a16_snorm` -- the "pure vertex-buffer-only-missing" 16-bit
+  cases identified in H8a's own investigation). Confirmed, via a full
+  missing-feature-bit scan of every failing case's `<Result>` text (not
+  just the aggregate pass/fail counts), that **no** case regressed and
+  that the only two cases still missing `VK_FORMAT_FEATURE_
+  VERTEX_BUFFER_BIT` specifically are `a2b10g10r10_unorm_pack32`
+  (deliberately deferred to H8h) and `b8g8r8a8_unorm` (not one of
+  `decodeAttribute`'s supported formats at all, out of this row's
+  scope -- `B8G8R8A8_UNORM` byte-swaps R/B relative to `R8G8B8A8_UNORM`,
+  a distinct decode case). The remaining 16-bit UINT/SINT/SFLOAT cases
+  (e.g. `r16_uint`, `r16_sfloat`) and 8-bit family cases (e.g.
+  `r8_unorm`) still fail, but now purely on unrelated,
+  already-separately-tracked bits (`COLOR_ATTACHMENT_BIT`,
+  `SAMPLED_IMAGE_BIT`, roadmap H8e's own scope) -- `VERTEX_BUFFER_BIT`
+  itself is present for every one of them.
+- `dEQP-VK.pipeline.monolithic.vertex_input.srgb_vertex_formats.*` (34
+  cases): unchanged (1 Pass, 0 Fail, 30 `NotSupported`,
+  3 Warnings), confirming 0 regressions from the broader `decodeAttribute`
+  expansion.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed -- same reasoning as H8a: `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` is
+a per-format bit, not a `VkPhysicalDeviceFeatures`/`VkExtension` entry
+either document tracks.
