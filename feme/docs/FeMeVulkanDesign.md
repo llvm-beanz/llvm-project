@@ -1964,6 +1964,21 @@ output content of its own yet -- the same "advertise the wiring, not
 unimplemented content" precedent `tessellationShader`/`geometryShader`
 already established for their own still-partial stages.
 
+Roadmap H6p (closed): `gl_DrawID` (SPIR-V's `DrawIndex` builtin) does
+**not** get a row in the "Builtin and execution-shape mapping" table
+above, deliberately -- unlike that table's entries, a draw's own index
+within a multi-draw indirect batch is genuine host-supplied, per-draw
+state, not a value any real GPU driver would expose as a free-standing
+intrinsic (the same treatment `VertexID`/`InstanceID`/`BaseVertex`/
+`BaseInstance` already receive on the vertex-stage side). It flows
+through the ordinary stage-IO-global canonicalization path instead, and
+a mesh entry's own per-draw value is sourced from a new
+`MeshDrawCommand::DrawID` field (`PreparedDraw.h`, set from an indirect
+multi-draw's own loop index by `CommandBuffer.cpp`'s
+`readIndirectMeshDraws`), threaded to the compiled entry through a
+repurposed `FemeMeshArgs::Reserved32` field -- same size and struct
+position, zero ABI impact.
+
 Ray tracing (`VK_KHR_ray_query`, `VK_KHR_ray_tracing_pipeline`,
 `VK_KHR_acceleration_structure`) remains inside this document's declared
 conformance scope (see "Conformance Target"), so "not advertised" is a

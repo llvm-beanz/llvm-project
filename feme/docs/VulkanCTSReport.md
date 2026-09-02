@@ -13354,6 +13354,165 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-caselist-file=<VK-GL-CTS>/external/vulkancts/mustpass/main/vk-default/mesh-shader.txt
 ```
 
+## Roadmap H6p: measured impact (`gl_DrawID` stage-IO input)
+
+With H6o closed, this session picked up its own newly-discovered
+mesh-output-wrapper gap directly:
+
+```
+Test case 'dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.no_task_shader'..
+vkCreateGraphicsPipelines: VK_ERROR_INITIALIZATION_FAILED
+feme-cpu-wrap-mesh-output: unexpected stage op left for the mesh output wrapper
+```
+
+**Root cause.** Extracting the failing case's shader source/SPIR-V
+straight from its own qpa log (rather than a synthetic IR reduction,
+since the embedded shader was already small and self-explanatory)
+showed a `GL_EXT_mesh_shader` shader reading `gl_DrawID` to compute its
+own output row. `SPIRVToLLVMPatterns.cpp`'s `BuiltInMappings` allowlist
+(the table of SPIR-V builtins that bypass ordinary stage-IO-global
+handling and convert directly to `llvm.spv.*` core intrinsics --
+`WorkgroupId`, `NumWorkgroups`, etc.) does **not** include `DrawIndex`
+(SPIR-V's own name for `gl_DrawID`), correctly so: unlike those, a
+draw's own index within a multi-draw indirect batch is genuine
+host-supplied, per-draw-command state, not something a real GPU driver
+would ever expose as a free-standing intrinsic (mirroring how
+`VertexID`/`InstanceID`/`BaseVertex`/`BaseInstance` already flow through
+the ordinary vertex-stage path instead). So `gl_DrawID`'s read
+canonicalizes into an ordinary `feme.stage.input.load`/
+`SignatureSystemValue::DrawID` call, exactly like any other stage-IO
+input -- `CanonicalizeStage.cpp`'s `canonicalizeSPIRVStage` is
+stage-agnostic and has no `ShaderStage::Mesh` exclusion. The bug was
+entirely downstream: `MeshOutputWrapper.cpp`'s own file comment ("a mesh
+entry point has no ordinary stage-IO input to read") was simply wrong
+for this one legitimate case, and its `lowerMeshStageOps` catch-all
+rejected *any* `InputLoad` reaching a mesh entry outright.
+
+**The fix.** Chose the full, general version (also correctly handling
+an indirect multi-draw's own per-draw, non-constant `DrawID`) over a
+narrower "always 0" shortcut, since `FemeMeshArgs` already had a
+same-sized `Reserved32` alignment-padding field free to repurpose at no
+ABI cost. End-to-end, one field at a time, host to compiled entry:
+`feme::graphics::MeshDrawCommand` (`PreparedDraw.h`) gained a `DrawID`
+field (default 0, a direct `vkCmdDrawMeshTasksEXT` draw's own spec
+meaning); `CommandBuffer.cpp`'s `readIndirectMeshDraws` sets it to each
+indirect multi-draw command's own zero-based loop index;
+`Executor.cpp`'s `runMeshWorkgroup` lambda gained a `DrawID` parameter
+(threaded from the enclosing `MeshDrawCommand::DrawID` at both its call
+sites, direct and task-stage-driven) and sets the new
+`MeshResources::DrawID` (`ResourceHeap.h`) from it, threaded through
+`PreparedMeshBatch`'s constructor/`create`/`args()` (`ResourceHeap.cpp`)
+exactly like `GroupCount`. `FemeMeshArgs::Reserved32` (`RuntimeABI.h`)
+was renamed to `DrawID` -- same size, same struct position, zero ABI
+impact -- and `StageArgsLayout.h`'s matching `MeshArgsFieldReserved32`
+enumerator renamed to `MeshArgsFieldDrawID`. `EntryWrapper.cpp`'s
+`buildWrapperEnv` (`IsMesh` block) now loads `Args->DrawID`, threaded by
+`buildWaveLoop` into a new `mesh_draw_id` wave-body parameter (and, per
+H6o's own regression lesson, added to `isKnownWaveBodyParameter`'s
+allow-list up front this time). `MeshOutputWrapper.cpp`'s
+`appendMeshOutputParams`/`MeshOutputStageEnv`/`getMeshOutputStageEnv`
+gained a matching `mesh_draw_id` field, and `lowerMeshStageOps`'s
+catch-all gained a new `StageOpKind::InputLoad` case: an
+`Elt->SystemValue == SignatureSystemValue::DrawID` lowers via a new
+`lowerMeshInputLoad` helper (a per-lane masked-select broadcast of the
+workgroup-uniform `mesh_draw_id` value onto every active lane, mirroring
+`FragmentWrapper.cpp`'s `lowerFragmentInputLoad` shape but simpler, with
+no varying storage of its own to read), while every other input system
+value now gets a narrower "unsupported mesh stage input system value"
+diagnostic rather than silently falling through to the generic
+"unexpected stage op" catch-all.
+
+**New tests.** Two new `MeshOutputWrapperTest.cpp` unit tests
+(`LowersDrawIDInputLoad`, confirming the broadcast lowering and that no
+stage op survives; `RejectsUnsupportedInputSystemValue`, confirming the
+narrower diagnostic for every other system value) cover the compiler-pass
+phase, and two new `ResourceHeapTest.cpp` unit tests
+(`ArgsCarriesTheRequestedDrawID`, `ArgsDefaultsDrawIDToZero`) cover the
+host-side ABI/resource-materialization phase.
+
+```
+$ ninja -C <feme-build> check-feme
+...
+Total Discovered Tests: 2339
+  Unsupported:   27 (1.15%)
+  Passed     : 2312 (98.85%)
+```
+
+Up from H6o's own 2308/2335 by exactly the 4 new tests this row adds (0
+pre-existing tests newly failed).
+
+**A real ICD re-run confirms the fix.** Re-running the originally
+failing case:
+
+```
+Test case 'dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.no_task_shader'..
+  Pass (Pass)
+```
+
+Re-running the whole `dEQP-VK.mesh_shader.ext.api.*` group (540 cases,
+the group H6p's own row was filed against):
+
+```
+Test run totals:
+  Passed:        14/540 (2.6%)
+  Failed:        102/540 (18.9%)
+  Not supported: 424/540 (78.5%)
+```
+
+Zero `unexpected stage op` errors and zero crashes anywhere in the
+group (the 424 `NotSupported` cases are the pre-existing, unrelated
+`VK_KHR_draw_indirect_count` gap; `check-feme`'s own 0 pre-existing
+regressions already established no unrelated breakage). The 102 `Fail`s
+split cleanly into two new, distinct, already-anticipated-shaped
+blockers surfacing in the newly-unblocked cases' place: 58 cases (every
+`with_task_shader`/`with_task_shader_secondary_cmd` variant) now fail
+`vkCreateGraphicsPipelines` with a *different* error -- an upstream MLIR
+SPIR-V-dialect `PushConstant`-decorated `spirv.GlobalVariable`
+legalization failure, filed as H6q; 44 cases (every
+`no_task_shader`/`no_task_shader_secondary_cmd` direct-draw variant with
+`draw_count > 0`) now reach rendering and fail a pixel comparison, filed
+as H6r. Neither the original row's own untriaged 80-case
+`VK_ERROR_FORMAT_NOT_SUPPORTED` bucket nor its "~63+" pixel-comparison
+estimate materialized in this narrower group -- both were speculative
+guesses from the full-group sweep's own aggregate `Fail` count, not
+specific to this group, and remain unfiled pending their own triage in a
+future row.
+
+A full single-process re-run of the entire `dEQP-VK.mesh_shader.*`
+mustpass list (28044 cases) confirms the same shape at the full-group
+scale, with zero crashes and zero regressions:
+
+```
+Test run totals:
+  Passed:        17/28044 (0.1%)
+  Failed:        384/28044 (1.4%)
+  Not supported: 27643/28044 (98.6%)
+```
+
+`Pass` moves from H6o's own baseline of 3 to 17 (+14, matching the
+`api.*` group's own 14 newly-passing `draw_count_0` cases exactly),
+`Fail` moves from 398 to 384 (-14), and `NotSupported` is unchanged at
+27643 -- a clean, net-positive move with no new crash of any kind
+anywhere in the full sweep.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure CPU-lowering-completeness fix, touching no feature
+bit or extension.
+
+**Roadmap H6p closes.** The mesh-output-wrapper `gl_DrawID` gap is fixed
+and verified, with zero regressions in `check-feme` and a real full-group
+CTS re-run showing a clean, net-positive move (+14 `Pass`, -14 `Fail`,
+zero new crashes). **Milestone H6 does not close**: two new, distinct
+blockers (H6q, H6r) surfaced in the newly-unblocked cases' place.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.api.*'
+```
+
 ## Roadmap H6c-a: closed by its own split
 
 Re-checking H6c-a's own literal ask now that its three named

@@ -320,6 +320,26 @@ inline where it's discussed, and summarized here:
   never read before this fix) -- the same "uniform value threaded through
   the wave-body interface, not widened" treatment as `GroupID` itself,
   just sourced from a different `FemeDispatchArgs` field.
+- Roadmap H6p: `gl_DrawID` (SPIR-V's `DrawIndex` builtin) is *not* one of
+  these uniform-builtin-substitution cases at all -- unlike `GroupID`/
+  `NumWorkgroups`/`SubgroupId` above, it is not in
+  `SPIRVToLLVMPatterns.cpp`'s `BuiltInMappings` allowlist, so it never
+  reaches `SIMDizePass` as a bespoke `llvm.{dx,spv}.*` intrinsic at all: it
+  flows through the ordinary stage-IO-global path and canonicalizes into a
+  perfectly ordinary `feme.stage.input.load`/`SignatureSystemValue::DrawID`
+  call, exactly like any other stage input. A mesh entry's own wave-body
+  interface still needed a new uniform parameter for it, though
+  (`mesh_draw_id`, sourced from a repurposed `FemeMeshArgs::Reserved32`
+  field, threaded by `EntryWrapper.cpp` the same way `GroupCount` is) --
+  but the substitution site is `MeshOutputWrapper.cpp`'s
+  `lowerMeshStageOps`, not `SIMDizePass`, since the value already reaches
+  that pass as an ordinary stage op rather than a bespoke intrinsic. This
+  is the same "uniform value threaded through the wave-body interface, not
+  widened" treatment as `GroupID`/`NumWorkgroups`, just substituted at the
+  mesh-output-wrapper boundary instead of inside `SIMDizePass` itself,
+  because the value's *source* representation differs (ordinary stage-IO
+  input vs. bespoke intrinsic), not because the value itself is any less
+  uniform.
 - `feme::cpu::WaveLoweringPass` implements only the builtin half (thread
   and group id arithmetic); the remaining wave intrinsics (`WaveActiveSum`,
   `WaveReadLaneAt`, ...) are milestone 8, matching the design's own "two
