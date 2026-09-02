@@ -3284,6 +3284,27 @@ rows H8l (BC7, attempt first) and H8m (BC6H, attempt second, reusing
 H8l's own partition-table/anchor-index machinery) rather than
 attempting either here.
 
+**Update (roadmap H8l, closed):** a complete BC7 block decoder
+(`feme::vulkan::decodeBC7Block`, `BC7Decode.h`) now exists, covering all
+8 BC7 modes' own algorithm (1-3 subsets, partition selection, rotation,
+index selection, per-endpoint or shared P-bits, the anchor-index
+bit-saving convention), mirroring `BCDecode.h`'s own H8i precedent
+(decoder first, no wiring yet). Unlike H8i, the partition/anchor-index
+lookup tables (`kPartitions2`/`kPartitions3`, 64x16 entries each, plus
+three 64-entry anchor tables) were copied verbatim from `VK-GL-CTS`'s
+own `tcuCompressedTexture.cpp` reference decoder rather than
+hand-transcribed from `bptc.txt`'s own spec prose, since these are pure
+lookup tables (no formula to derive/verify) and CTS is the actual
+conformance ground truth this project is scored against; understanding
+was still cross-checked against the spec's own worked numeric example.
+Also unlike H8i, no CTS-vs-spec discrepancy needed documenting: BC7's
+own interpolation formula (a single shared weighted-rounding formula,
+`((64-w)*a + w*b + 32) >> 6`) is identical in both sources for every
+mode and channel. BC6H remains fully unimplemented, tracked as roadmap
+H8m, which can now reuse this row's own partition-table and
+per-subset/anchor-index code directly; wiring the now-complete BC7
+decoder into a real consumer is deferred to a future row alongside
+H8j's own ETC2/EAC wiring and H8i's own BC1-5 wiring.
 
 **Update (roadmap E22, closed):** `vkCreateImage` no longer rejects a
 block-compressed `VkFormat`. `Image::blockPointer` addresses one a whole

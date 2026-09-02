@@ -20479,3 +20479,53 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`/
 `VkExtension`, or design deviation is introduced by a pure roadmap
 scoping/split -- confirmed, not assumed, by grepping all three documents
 for any stale reference this row might need to touch.
+
+## Roadmap H8l: measured impact (no CTS delta expected -- decoder-only, unwired)
+
+**Scope.** Mirrors H8i's own shape exactly, this time for BC7: a new
+`BC7Decode.h`/`.cpp` -- a complete decoder for all 8 BC7 modes (1-3
+subsets, partition selection, rotation, index selection, per-endpoint or
+shared P-bits, the anchor-index bit-saving convention) -- lands as a
+standalone file with **zero** call sites anywhere in `libfeme_vulkan`.
+`Format.cpp` gained no new `ResourceFormat` enumerators or `mapVkFormat`
+cases, and `PhysicalDeviceInfo.cpp`'s `textureCompressionBC` stays
+`VK_FALSE` (unchanged: no consumer exists yet, and BC6H/H8m is still
+outstanding besides). Two targeted spot checks were run to confirm that
+expectation rather than assume it:
+
+**Real `deqp-vk` re-run, correct ICD confirmed via `vulkaninfo
+--summary` (`deviceName = FeMe CPU Vulkan Device`):**
+- `dEQP-VK.api.info.*` (10,484 cases): 5,367 passed / 584 failed / 4,533
+  not supported -- no regression versus this report's own prior H8k-era
+  numbers (this row touches no code path this subtree exercises).
+- `dEQP-VK.texture.*bc7*` (48 cases, the exact BC7 slice of
+  `vktTextureCompressedFormatTests.cpp`'s own whole-family
+  `textureCompressionBC` gate H8c's own investigation identified): every
+  case still `NotSupported` (`Format not supported:
+  VK_FORMAT_BC7_UNORM_BLOCK`), gated on `textureCompressionBC` staying
+  `VK_FALSE` -- the honest, expected result: this row's decoder has no
+  consumer yet, and even a hypothetical wiring row would still need
+  BC6H (H8m) complete too, since this test group gates on the whole
+  16-format BC family.
+
+**`ninja check-feme`** (assertions-enabled, ccache build, correct target
+dependencies so `FeMeVulkanTests` rebuilds before the regression suite
+runs): 2358/2385 tests pass (27 pre-existing `Unsupported`, 0 `Failed`),
+up 5 tests (this row's own new `BC7DecodeTest.cpp` coverage) from
+H8k's own 2353/2380 baseline, 0 regressions.
+
+`Vulkan14FeatureInventory.md`'s `textureCompressionBC` row gained an
+annotation noting BC7 now also decoded (only BC6H/H8m remains), mirroring
+the `textureCompressionETC2`/H8c and BC1-5/H8i rows' own annotations. No
+`VulkanExtensionInventory.md` update needed: grepped for any stale BC7
+reference, found none, since no extension is touched by this row either.
+
+`BC7Decode.h`'s own file comment documents the partition/anchor-index
+lookup tables' provenance (copied verbatim from `VK-GL-CTS`'s own
+`tcuCompressedTexture.cpp` reference decoder rather than hand-transcribed
+from the Khronos `bptc.txt` spec prose, since these are pure lookup
+tables with no formula to derive/verify and CTS is the actual
+conformance ground truth) and explicitly notes -- unlike H8i's BC1-5 row
+-- that no CTS-vs-spec discrepancy exists for BC7's own interpolation
+formula: a single shared weighted-rounding formula applies identically
+to every mode and channel in both sources.
