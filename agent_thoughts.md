@@ -54030,3 +54030,124 @@ unchanged (0 regressions).
 
 Closed H8b. Filed H8h for the deferred `A2B10G10R10_UNORM_PACK32` case,
 one lowercase letter deep as required.
+
+# H8c: ETC2/EAC compressed-format sampling (partial close)
+
+## Task
+
+The user asked to work on H8c: "BC1-7/ETC2/EAC compressed-format
+sampling," explicitly flagged in the roadmap as needing "its own scoping
+pass (which of the ~22 BC + ~10 ETC2/EAC formats are load-bearing for a
+real CTS group before committing to a decoder for all of them) before
+any code lands." So the first job this session was investigation, not
+code.
+
+## Scoping investigation
+
+I read the real VK-GL-CTS checkout's own
+`vktTextureCompressedFormatTests.cpp` rather than assume format counts
+from memory (the roadmap's own "~22 BC" figure turned out to be an
+overestimate -- the real count is exactly 16 BC formats: BC1 RGB/RGBA
+UNORM/SRGB, BC2, BC3, BC4, BC5, BC6H, BC7, two variants each). More
+importantly, I traced `checkSupport` for this test group and found both
+family gates are **whole-family** `VkPhysicalDeviceFeatures` bits
+(`textureCompressionETC2`, `textureCompressionBC`) -- meaning a partial
+decoder (say, just BC1, or just 3 of ETC2's 10 formats) unlocks *nothing*
+in this specific CTS group; only complete family coverage does. This
+mirrors ASTC's own precedent exactly (`textureCompressionASTC_LDR`
+needed all 14 LDR footprints before E24 could flip it), so I trusted
+that precedent rather than re-litigating it.
+
+That finding forced a scope decision I don't think the original roadmap
+row anticipated: BC and ETC2/EAC are not remotely comparable in
+implementation cost. BC6H is HDR with half-float endpoint interpolation;
+BC7 has 8 modes with a large partition/rotation/index-selection space.
+ETC2/EAC, by contrast, is a bounded, well-specified algorithm (5 color
+modes plus EAC, all with fixed bit layouts and small lookup tables) --
+comparable in complexity to what ASTC's own LDR decoder already required.
+Given both families gate on separate, independent feature bits (no case
+in this CTS group needs *both* flipped), I chose to implement ETC2/EAC
+**completely** this session and defer all of BC to a follow-on row,
+rather than attempt a shallow slice of both.
+
+## Why fetch the spec instead of relying on memory
+
+ETC1/ETC2's bitstream format has several details that are easy to get
+subtly wrong from memory: the pixel-index-to-modifier-table-row mapping
+is a `[2,3,1,0]` permutation, not the identity a naive reading assumes;
+T/H/planar mode's own header fields are scattered across non-contiguous
+bit ranges that double as other modes' delta fields (an intentional
+spec-level bit-reuse convention); and EAC's signed vs. unsigned 11-to-16-
+bit extension uses *different* shift amounts (`>>5` vs `>>6`) for
+reasons that are not obvious without reading the spec's own worked
+numeric examples. Given how easy any one of these is to invert or
+transpose silently, I used `web_fetch` against the authoritative Khronos
+`KhronosGroup/DataFormat` repository's `etc1.txt`/`etc2.txt` raw files
+directly, and cross-checked every bit position and formula against that
+text (and, for T mode specifically, against the spec's own fully worked
+numeric example) rather than trust recall. This is the same discipline
+the prior ASTC decoder sessions describe using, and I think it's the
+right default for any bit-exact format-decode task: memory is a
+plausible starting point, but the spec itself is the only real source of
+truth, and fetching it costs little relative to the cost of a silent,
+hard-to-detect bit-transposition bug.
+
+## Design choice: decoder-only, unwired, mirroring ASTC's E20
+
+I followed `ASTCDecode.h`'s own precedent deliberately: `ETC2Decode.h`/
+`.cpp` is a standalone file with three public functions
+(`decodeETC2Block`, `decodeETC2PunchthroughAlphaBlock`, `decodeEACBlock`)
+and *zero* call sites anywhere else in `libfeme_vulkan` -- no
+`Format.cpp` `ResourceFormat` entries, no `mapVkFormat` cases, no
+`PhysicalDeviceInfo.cpp` feature-bit flip. I considered wiring it in the
+same session, but concluded (as ASTC's own E20-then-E22 split already
+established) that the wiring itself -- block-aligned image layout,
+per-block sample/copy paths, and the feature-bit flip gated on a real
+passing CTS case -- is substantial, separable work that deserves its own
+roadmap row and its own CTS verification pass, not something to rush
+alongside getting the algorithm itself right. Filed as H8j.
+
+## A debugging note worth recording: mode-selection bit 33
+
+While writing `ETC2DecodeTest.cpp`'s planar-mode test, I hit a confusing
+failure where several texels decoded to values matching neither my
+hand-calculated planar-mode expectation nor any obviously-broken pattern
+-- they looked suspiciously like *individual*-mode output using
+different bit positions than I'd set. I initially suspected a bug in the
+implementation's `decodePlanar`/`planarTexel` arithmetic and spent time
+re-deriving the interpolation formula by hand and cross-checking with a
+small standalone Python bit-layout simulation (matching the real
+production code's bit math exactly) before finding the actual bug: my
+*test* forgot to set bit 33 (the differential/individual mode-select
+bit) at all, so `selectMode`'s own "diff bit unset -> always individual
+mode" shortcut fired before ever reaching the overflow-based T/H/planar
+mode test, and the decoder was correctly decoding my planar-encoded bits
+*as if* they were individual mode's own (different) field layout. This
+was a test bug, not a production bug -- but it's exactly the kind of
+mistake the "verify each hand-constructed test block against a bit-exact
+simulation before trusting a mismatch as a production bug" discipline is
+meant to catch, and I think it's worth recording here as a reminder that
+a failing test in a hand-constructed-block suite like this one should
+always be triaged by re-deriving the test's own intended bit pattern
+independently before assuming the implementation is wrong.
+
+## Verification
+
+`ninja check-feme` (assertions-enabled, ccache build, correct target
+deps so `FeMeVulkanTests` rebuilds first): 2343/2370 pass, 27
+pre-existing `Unsupported`, 0 `Failed` -- up exactly 12 tests (the new
+`ETC2DecodeTest.cpp` coverage) from H8b's own 2328/2355 baseline, 0
+regressions. Since the decoder is deliberately unwired, I ran two
+targeted `deqp-vk` spot checks (matching E20's own "confirm the
+no-change expectation, don't just assume it" discipline) rather than a
+full 3-million-case re-run: `dEQP-VK.api.info.*` (no regression) and
+`dEQP-VK.texture.compressed_format.*` (still entirely `NotSupported`,
+the honest and expected result given `textureCompressionETC2` correctly
+stays `VK_FALSE`).
+
+## Roadmap
+
+Partially closed H8c (ETC2/EAC decoder complete and tested; BC1-7 and
+the ETC2/EAC wiring itself both deferred). Filed H8i (BC1-7, one
+lowercase letter deep under H8) and H8j (ETC2/EAC wiring, also one
+lowercase letter deep under H8) as its two follow-on rows.
