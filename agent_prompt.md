@@ -37,34 +37,26 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H6p or other prerequisites blocking the H-series milestones?
+Can you work on H6q or other prerequisites blocking the H-series milestones?
 
-> **With H6o closed, the full `dEQP-VK.mesh_shader.*` group now runs to
-> completion for the first time (no crash), surfacing its own new dominant
-> `Fail` bucket: all 216 `dEQP-VK.mesh_shader.ext.api.draw.*` cases fail
-> `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`**, root
-> cause confirmed directly via `FEME_VULKAN_LOG_CREATION_ERRORS=1 deqp-vk`:
-> `feme-cpu-wrap-mesh-output: unexpected stage op left for the mesh output
-> wrapper` (`MeshOutputWrapper.cpp`'s `lowerMeshStageOps`, the same catch-all
-> H6g-b-d already narrowed to only genuinely-unlowered `feme.stage.*` calls) --
-> confirmed on
-> `dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.no_task_shader`
-> (a mesh-only entry, no task shader), meaning this is a *real*, still-unlowered
-> `feme.stage.*` op reaching this pass, not a recurrence of H6g-b-d's own
-> already-fixed over-broad rejection. Not yet triaged for which specific op
-> (needs its own IR reduction, mirroring the H6g-b/H6j/H6k/H6l/H6n/H6o
-> technique, to isolate exactly which `feme.stage.*` call the
-> `dEQP-VK.mesh_shader.ext.api.draw` group's own shaders emit that neither
-> `OutputStore` nor `SetMeshOutputs` covers -- `EmitMeshTasksEXT`'s own
-> still-uncanonicalized form, per `MeshOutputWrapper.cpp`'s file comment, is a
-> candidate but this specific case has no task shader at all, so it is likely a
-> different, not-yet-identified op). Two smaller, separate, and likely unrelated
-> buckets the same re-run also surfaced (left untriaged and unfiled pending H6p,
-> to avoid over-fragmenting the roadmap before either is confirmed distinct from
-> the other): 80 cases failing `vkCreateRenderPass` with
-> `VK_ERROR_FORMAT_NOT_SUPPORTED` (likely a `PhysicalDeviceInfo.cpp`
-> format-support-reporting gap, not a compiler bug), and roughly 63+ cases with
-> a clean but incorrect pixel-comparison `Fail` (likely several distinct
-> rendering-correctness gaps in this milestone's own existing "bounded
-> payload/output limits reported truthfully" scope, mirroring H6m/H6n/H6o's own
-> precedent of leaving in-scope rendering `Fail`s untracked as separate rows)
+> **`dEQP-VK.mesh_shader.ext.api.draw.*`/`draw_indirect*`'s own
+> `with_task_shader`/`with_task_shader_secondary_cmd` variants (58 of the
+> 540-case `dEQP-VK.mesh_shader.ext.api.*` group, found re-running H6p's own
+> fix) fail `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`**,
+> root cause confirmed directly via `FEME_VULKAN_LOG_CREATION_ERRORS=1 deqp-vk`:
+> `error: failed to legalize operation 'spirv.GlobalVariable' that was
+> explicitly marked illegal` against a `PushConstant`-storage-class SPIR-V
+> global variable (`!spirv.ptr<!spirv.struct<(i32 [12], i32 [16]), Block>,
+> PushConstant>`) -- an upstream MLIR SPIR-V-dialect-to-LLVM conversion gap in
+> `ConvertSPIRVToLLVMPass`, distinct from H6p's own `feme`-local
+> `MeshOutputWrapper.cpp` scope. Confirmed present only in a `with_task_shader`
+> variant's *task* stage module (the task/amplification entry that dispatches
+> the mesh stage, not the mesh stage itself), and not yet triaged for whether
+> the gap is task-stage-specific, push-constant-specific, or a generic "this
+> particular struct layout/size" gap -- needs its own IR reduction, mirroring
+> the H6g-b/H6j/H6k/H6l/H6n/H6o/H6p technique, to isolate exactly what about
+> this push constant block (`i32 [12], i32 [16]`, an 8-byte struct at two large
+> byte offsets) the existing `ConvertSPIRVToLLVMPass` `spirv.GlobalVariable`
+> lowering pattern does not already handle for other, already-passing
+> push-constant-using stages (e.g. the vertex/fragment paths, which do not hit
+> this)
