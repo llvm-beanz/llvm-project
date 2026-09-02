@@ -3340,6 +3340,31 @@ BC7/H8l, BC6H/this row); only the shared wiring step remains, newly
 tracked as roadmap H8n since no BC wiring row existed yet (H8j only
 covers ETC2/EAC's own wiring).
 
+**Update (roadmap H8j, closed):** H8c's own complete ETC2/EAC decoder
+(`ETC2Decode.h`) is now wired into a real consumer, mirroring the exact
+shape E22/E23 gave ASTC and (later) H8n/H8o gave BC: 10 new
+`ResourceFormat` enumerators plus `Format.cpp`'s `mapVkFormat`/
+`formatFeatureFlags` entries (`BLIT_SRC_BIT` granted directly, in the
+same commit as the mapping -- unlike BC, ETC2/EAC has no half-float
+sampling-bridge-target bug to necessitate deferring it), a new
+`ETC2SamplingBridge.h`/`.cpp` (`etc2SamplingTarget`/
+`decodeETC2FormatBlock`, mirroring `BCSamplingBridge.h`), and a new
+`isETC2Format` branch in both `CommandBuffer.cpp`'s
+`materializeImageDescriptor` (shader sampling) and `ImageOps.cpp`'s
+`runBlitImage` (blit source). One real pre-existing gap surfaced while
+choosing `EAC_R11`/`EAC_R11G11`'s own sampling-bridge targets:
+`ImageFixture.cpp`'s `packClearColor`/`unpackColor` had no case at all
+for `R16_UNORM`/`R16_SNORM`/`R16G16_UNORM`/`R16G16_SNORM` -- the 16-bit
+analogue of H8o's own R8/R8G8 fix -- closed the same way, with a
+dedicated case per format anchored at logical red. A real `deqp-vk` run
+confirms the mandatory `dEQP-VK.api.info.format_properties.
+compressed_formats` format-table check now `Pass`es (previously a
+`QualityWarning`), so `PhysicalDeviceInfo.cpp`'s `textureCompressionETC2`
+flips to `VK_TRUE` for real; all 10 real
+`dEQP-VK.texture.compressed.{etc2,eac}*_pot` cases `Pass` end to end.
+This closes the entire ETC2/EAC wiring row; BC1-7's own equivalent
+wiring stays open as roadmap H8n.
+
 **Update (roadmap E22, closed):** `vkCreateImage` no longer rejects a
 block-compressed `VkFormat`. `Image::blockPointer` addresses one a whole
 block at a time (`texelPointer`, meaningless for one, still asserts

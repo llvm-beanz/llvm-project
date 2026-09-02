@@ -20769,3 +20769,101 @@ passed.
 `Vulkan14FeatureInventory.md`'s `textureCompressionBC` row updated to
 `Yes`, describing the closure. No `VulkanExtensionInventory.md` update
 needed: BC formats are core Vulkan 1.0, not extension-gated.
+
+## Roadmap H8j: measured impact
+
+H8c landed a complete, directly-unit-tested ETC2/EAC decoder
+(`ETC2Decode.h`) but nothing called it -- `Format.cpp` had no
+`ResourceFormat` enumerators for any of the 10
+`VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` formats, and `vkCreateImage`
+rejected every one outright. This row wires it into a real consumer,
+mirroring the exact shape H8n/H8o gave BC:
+
+- Appended 10 new `ResourceFormat` enumerators (`ETC2_RGB8_UNORM`/
+  `_SRGB`, `ETC2_RGB8A1_UNORM`/`_SRGB`, `ETC2_RGBA8_UNORM`/`_SRGB`,
+  `EAC_R11_UNORM`/`_SNORM`, `EAC_R11G11_UNORM`/`_SNORM`) and a new
+  `isETC2Format` predicate to `RuntimeABI.h`; wired all 10 into
+  `Format.cpp`'s `mapVkFormat`/`formatElementSize`/`blockShape`/
+  `bytesPerBlock`/`formatFeatureFlags` (granting `BLIT_SRC_BIT`/
+  `SAMPLED_IMAGE_BIT`/`FILTER_LINEAR_BIT` to every `isETC2Format`
+  format in the same commit as the mapping, rather than H8n/H8o's own
+  two-row split -- ETC2/EAC has no equivalent of BC6H's half-float bug
+  to necessitate deferring the feature-flag widening).
+- Found a real gap while wiring the sampling-bridge targets: `getFormatInfo`
+  (`ImageFixture.cpp`) had no case at all for `R16_UNORM`/`R16_SNORM`/
+  `R16G16_UNORM`/`R16G16_SNORM` -- `EAC_R11`/`EAC_R11G11`'s own
+  sampling-bridge targets -- the 16-bit analogue of H8o's own R8/R8G8
+  fix. Added dedicated `packClearColor`/`unpackColor` cases for all
+  four, mirroring the "4-logical-component clear color, other channels
+  read as identity value, anchored at logical red" convention
+  (`PacksAndUnpacksR16Unorm`/`PacksAndUnpacksR16SnormNegative`/
+  `PacksAndUnpacksR16G16Unorm`/`PacksAndUnpacksR16G16SnormNegative`).
+- Added a new `ETC2SamplingBridge.h`/`.cpp` (mirroring
+  `BCSamplingBridge.h`): `etc2SamplingTarget()` maps each of the 10
+  formats to its own already-runtime-supported target
+  (`ETC2_RGB8_*`/`ETC2_RGB8A1_*`/`ETC2_RGBA8_*` ->
+  `R8G8B8A8_UNORM`(`_SRGB`); `EAC_R11_*` -> `R16_UNORM`/`_SNORM`;
+  `EAC_R11G11_*` -> `R16G16_UNORM`/`_SNORM`), and
+  `decodeETC2FormatBlock()` dispatches to `ETC2Decode.h`'s three
+  decode functions -- correctly composing `ETC2_RGBA8_*`'s own two
+  64-bit halves (EAC alpha first, ETC2 RGB second, confirmed via two
+  independent web searches citing the Khronos/Vulkan spec's own byte
+  order) and `EAC_R11G11_*`'s own two independent per-channel halves
+  (R first, G second).
+- Wired a new `isETC2Format` branch into `CommandBuffer.cpp`'s
+  `materializeImageDescriptor` (a `decodeETC2ImageForSampling` helper,
+  identical shape to `decodeBCImageForSampling`) and widened
+  `ImageOps.cpp`'s `runBlitImage` to accept an ETC2/EAC blit source
+  alongside BC (`SrcIsETC2`/`SrcETC2Target`, decode buffer sized for
+  the larger of every compressed family's own per-texel target).
+- Found and fixed a `-Wswitch` gap in `feme-run.cpp`'s
+  `imageFormatElementSize` (the same category of gap H8o found in
+  `ImageFixture.cpp`'s `formatFixtureName`): added the 10 new
+  enumerators alongside ASTC/BC in the existing "block-compressed
+  formats have no per-texel size" case group.
+- Added unit test coverage across every phase this wiring touches:
+  `FormatTest.cpp` (`MapsETC2Formats`, `BlockDimensionsMatch
+  ETC2Footprint`, `IsBlockCompressedFormatDistinguishesETC2`, blit
+  feature-flag coverage), `CommandBufferTest.cpp`
+  (`ETC2RGB8SampledImageDispatchTest`, a real dispatch sampling a
+  single-block `ETC2_RGB8_UNORM` image through the new decode branch),
+  and `ImageOpsTest.cpp` (four new `BlitDecodes*` tests covering every
+  distinct decode shape: `ETC2_RGB8` direct, `EAC_R11` single-channel,
+  `EAC_R11G11` dual-independent-channel, and `ETC2_RGBA8` composed --
+  every EAC-derived expected value cross-checked against a standalone
+  `decodeEACBlock` invocation before landing, not hand-derived
+  arithmetic alone).
+
+A real `deqp-vk` run of `dEQP-VK.api.info.format_properties.
+compressed_formats` -- the mandatory format-table check
+`textureCompressionETC2 == VK_TRUE` is validated against -- flips
+from a `QualityWarning` ("Found inconsistencies in compressed format
+support") to `Pass` ("Compressed texture format support is valid")
+once the bit is set. A full `dEQP-VK.api.info.*` re-run with the bit
+flipped: 5,211 passed/740 failed/4,533 not-supported/0 warnings,
+versus the flag-off baseline of 5,210 passed/740 failed/4,533
+not-supported/1 warning -- zero new fails, only the
+`compressed_formats` case itself moving from `Warning` to `Pass`.
+
+Real `dEQP-VK.texture.compressed.{etc2,eac}*_pot` cases (the 10
+non-sparse, non-compute cases covering every one of the 10
+formats) all `Pass` end to end:
+`etc2_r8g8b8_unorm_block_2d_pot`, `etc2_r8g8b8_srgb_block_2d_pot`,
+`etc2_r8g8b8a1_unorm_block_2d_pot`, `etc2_r8g8b8a1_srgb_block_2d_pot`,
+`etc2_r8g8b8a8_unorm_block_2d_pot`, `etc2_r8g8b8a8_srgb_block_2d_pot`,
+`eac_r11_unorm_block_2d_pot`, `eac_r11_snorm_block_2d_pot`,
+`eac_r11g11_unorm_block_2d_pot`, `eac_r11g11_snorm_block_2d_pot`.
+
+`PhysicalDeviceInfo.cpp`'s `textureCompressionETC2` flips to
+`VK_TRUE` for real; `PhysicalDeviceInfoTest.cpp`'s aggregate feature
+assertion and a new dedicated `TextureCompressionETC2IsAdvertised`
+regression test both updated.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+2,392/2,419 (27 pre-existing `Unsupported`, 0 `Failed`, up from
+H8o's 2,379/2,406).
+
+`Vulkan14FeatureInventory.md`'s `textureCompressionETC2` row updated
+to `Yes`, describing the closure. No `VulkanExtensionInventory.md`
+update needed: ETC2/EAC formats are core Vulkan 1.0, not
+extension-gated.
