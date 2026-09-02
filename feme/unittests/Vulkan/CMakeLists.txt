@@ -5,6 +5,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_feme_unittest(FeMeVulkanTests
   ASTCDecodeTest.cpp
+  BC7DecodeTest.cpp
   BCDecodeTest.cpp
   BufferTest.cpp
   CommandBufferTest.cpp
