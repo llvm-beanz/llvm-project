@@ -493,6 +493,24 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // H8o: measured impact" in VulkanCTSReport.md for the full
   // reproduction.
   Info.Features.textureCompressionBC = VK_TRUE;
+  // Roadmap H8j: `textureCompressionETC2` now flips to `VK_TRUE` --
+  // mirroring H8o's own BC precedent exactly. `ETC2Decode.h` (roadmap
+  // H8c) landed a complete, directly-unit-tested decoder for all 10
+  // `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` formats; this row wired it into
+  // a real consumer (`ETC2SamplingBridge.h`, `CommandBuffer.cpp`'s
+  // `materializeImageDescriptor`, `ImageOps.cpp`'s `runBlitImage`) and
+  // widened `Format.cpp`'s `formatFeatureFlags` to grant `BLIT_SRC_BIT`
+  // on every one of the 10 formats. A real `deqp-vk` run of
+  // `dEQP-VK.api.info.format_properties.compressed_formats` -- the same
+  // mandatory format-table check H8o's own BC flip was validated
+  // against -- now `Pass`es (previously a `QualityWarning`,
+  // "inconsistencies in compressed format support"); the broader
+  // `dEQP-VK.api.info.*` sweep shows the identical Pass count otherwise
+  // (5211 vs. 5210, zero new `Fail`s), and real `dEQP-VK.texture.
+  // compressed.{etc2,eac}*_pot` cases (10 of 10) all `Pass` end to end.
+  // See "Roadmap H8j: measured impact" in VulkanCTSReport.md for the
+  // full reproduction.
+  Info.Features.textureCompressionETC2 = VK_TRUE;
   // Roadmap H3: `multiViewport` gates whether an application may even
   // request more than one viewport/scissor at all -- a real CTS
   // `checkSupport` (e.g. `dEQP-VK.draw.*.shader_viewport_index`) rejects its

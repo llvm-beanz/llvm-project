@@ -170,6 +170,13 @@ TEST(PhysicalDeviceInfo,
   // every one of the 16 `VK_FORMAT_BC*` formats' own sampling-bridge
   // targets (see PhysicalDeviceInfo.cpp's own comment).
   EXPECT_EQ(Info.Features.textureCompressionBC, VK_TRUE);
+  // (Roadmap H8j) `textureCompressionETC2`: flips to `VK_TRUE` alongside
+  // `textureCompressionBC` above once `ETC2SamplingBridge.h`/
+  // `CommandBuffer.cpp`/`ImageOps.cpp` wire `ETC2Decode.h`'s own decoder
+  // into a real consumer for every one of the 10
+  // `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` formats (see
+  // PhysicalDeviceInfo.cpp's own comment).
+  EXPECT_EQ(Info.Features.textureCompressionETC2, VK_TRUE);
   EXPECT_EQ(Info.Features.multiViewport, VK_TRUE);
   EXPECT_EQ(Info.Features.tessellationShader, VK_TRUE);
   EXPECT_EQ(Info.Features.geometryShader, VK_TRUE);
@@ -210,6 +217,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.dualSrcBlend = VK_FALSE;
   Cleared.textureCompressionASTC_LDR = VK_FALSE;
   Cleared.textureCompressionBC = VK_FALSE;
+  Cleared.textureCompressionETC2 = VK_FALSE;
   Cleared.multiViewport = VK_FALSE;
   Cleared.tessellationShader = VK_FALSE;
   Cleared.geometryShader = VK_FALSE;
@@ -346,6 +354,21 @@ TEST(PhysicalDeviceInfo, TextureCompressionBCIsAdvertised) {
   // established.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.textureCompressionBC, VK_TRUE);
+}
+
+TEST(PhysicalDeviceInfo, TextureCompressionETC2IsAdvertised) {
+  // Roadmap H8j: all 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` formats now
+  // sample (`materializeImageDescriptor`'s new `isETC2Format` branch) and
+  // blit-source (`runBlitImage`'s own `etc2SamplingTarget`/
+  // `decodeETC2FormatBlock` dispatch) correctly, and a real `deqp-vk` run
+  // confirms the mandatory `dEQP-VK.api.info.format_properties.
+  // compressed_formats` check -- which requires
+  // `VK_FORMAT_FEATURE_BLIT_SRC_BIT` on every ETC2/EAC format once this
+  // bit reads `VK_TRUE` -- now passes, the same "advertise once the
+  // pipeline actually works, not before" gate `TextureCompressionBC
+  // IsAdvertised` above already established.
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  EXPECT_EQ(Info.Features.textureCompressionETC2, VK_TRUE);
 }
 
 TEST(PhysicalDeviceInfo, DeviceAndPipelineCacheUUIDsDiffer) {
