@@ -54866,3 +54866,87 @@ This closes H8j. The only BC-family/ETC2-family loose end left open in the
 H8 roadmap subtree is BC1-7's own wiring (H8n, closed) and its own blit-
 source widening (H8o, closed) -- both formats' decoders are now fully
 wired, tested, and their feature bits flipped for real.
+
+# H8d: widening isTexelBufferFormatSupported's format-table breadth
+
+The roadmap row's own text was written before roadmap L9 landed (which
+widened `isTexelBufferFormatSupported` from 8 to 10 formats by adding
+`R32_FLOAT`/`_UINT`/`_SINT`), so the very first thing to do was re-verify
+the row's premise against the current code rather than trust the roadmap
+prose literally -- it would have been easy to "fix" a gap that had already
+half-closed itself. Grepping `Format.cpp` directly settled this in under a
+minute: 10 formats, not 8, confirming the row's own point still stood (a
+real gap remained) while correcting its stale specifics.
+
+The next step was to actually run the CTS rather than guess from spec
+prose which formats needed which bit. This mattered a lot here: the real
+Vulkan mandatory table is genuinely asymmetric between
+`UNIFORM_TEXEL_BUFFER_BIT` and `STORAGE_TEXEL_BUFFER_BIT` -- most of the 21
+newly-needed formats only need the uniform (read-only) bit, and only 6 also
+need storage. Had I designed the fix from memory/spec-prose alone, I likely
+would have granted both bits together for every format, matching the *old*
+code's own (already-known-wrong-in-spirit, since it happened to work for
+the original 10) pattern of always pairing the two bits -- and shipped a
+new, more subtle nonconformance for `B8G8R8A8_UNORM` and friends
+(advertising a storage capability with no runtime backing at all). The CTS
+log parsing itself had a sharp edge worth remembering for next time: a
+naive single-`grep -A6` pass silently drops a second independent `ERROR:`
+line when a case fails on two unrelated things at once (e.g.
+`r16g16b16a16_uint` failing on both `COLOR_ATTACHMENT_BIT` and the
+texel-buffer bits) -- had to specifically grep for `bufferFeatures.*missing`
+to get the complete, correct per-case picture rather than the first
+"missing:" line only.
+
+Investigating the CPU runtime side surfaced a genuinely pleasant discovery:
+almost every per-format pack/unpack helper this fix needed already existed,
+just not reused by the 4-wide (`<4 x float>`/`<4 x i32>`) typed-buffer
+intrinsics -- those four functions had each independently hard-coded their
+own narrower special-cased format list, duplicating (and lagging behind)
+work the storage/sampled-image path and the scalar typed-buffer intrinsics
+(roadmap L9) had already generalized into shared
+`femeRTImageFormatElementSize`/`UnpackImageTexel(I32)`/`PackImageTexel(I32)`
+tables. Refactoring the 4-wide functions to reuse those tables directly
+(rather than writing a third independent format switch) turned what could
+have been a large mechanical PR (21 new cases x 4 functions) into a small,
+principled one: one shared dispatch point, extended "for free" to every
+format the tables already cover. The only genuinely new runtime code needed
+was a single missing `femeRTPackImageTexel` case (`R32G32_FLOAT`) -- but the
+refactor's own correctness testing (building immediately after each partial
+edit, not batching all four functions' changes before the first build)
+caught two *more* missing cases the refactor itself would have silently
+regressed: `femeRTPackImageTexel`/`PackImageTexelI32` had never needed an
+`R8G8B8A8_UNORM`/`_UINT` case before, since the old hard-coded store paths
+handled those formats directly without ever calling into the shared pack
+tables at all. Building incrementally (one function refactored, then
+immediately `ninja`, before moving to the next) turned what could have been
+a confusing "half my new tests silently write garbage" debugging session
+into two fast, obvious `-Werror=unused-function`/wrong-output catches.
+
+One implementation slip worth recording for its own sake: my first attempt
+at a new `RuntimeCPUTest.cpp` round-trip test for `R16G16B16A16_UINT` used
+the convenience `getStoreWrapper`/`getLoadWrapper` helpers sequentially
+(add-and-resolve-immediately, twice) rather than the safer
+`addStoreWrapper`+`addLoadWrapper`-then-resolve-both pattern an existing
+neighboring test already demonstrated in its own comment ("Both wrappers
+must be added before either address is resolved... MCJIT compiles the
+whole module on the first address resolution"). I had read that comment
+during investigation but didn't fully internalize *why* it mattered until
+the test hit `MCJIT failed to resolve a runtime function address` --
+resolving the store address first apparently finalizes the JIT module
+before the load function even exists in it. A good reminder that a
+"this looks like the same shape as an existing passing test" instinct
+still needs the actual invariant re-checked, not just pattern-matched
+by surface shape.
+
+Finally, the CTS re-run's net pass-count delta (186->190, not 186->207)
+was a useful sanity check on my own expectations rather than a red flag:
+most of the 21 targeted formats were *also* failing on an independent,
+unrelated bit (`COLOR_ATTACHMENT_BIT`, `STORAGE_IMAGE_BIT`, and even a
+newly-surfaced `VERTEX_BUFFER_BIT` gap for `B8G8R8A8_UNORM`, out of this
+row's own scope) that keeps the overall per-case CTS verdict `Fail`
+regardless of this row's own fix. Grepping the full post-fix log
+specifically for any remaining `bufferFeatures`-related failure (rather
+than eyeballing the raw pass-count delta) was the right way to confirm
+the actual claim this row makes -- "every texel-buffer gap is closed" --
+independent of how many *other*, out-of-scope gaps happen to keep a given
+case's overall verdict `Fail`.
