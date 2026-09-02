@@ -53890,3 +53890,143 @@ formats, also surfaced by the same re-run), H8f (multisample capability
 per format, not yet investigated), and H8g (mandatory blit/filter bits
 audit, not yet investigated) -- all one lowercase letter deep, per this
 session's standing instruction to stop nesting further.
+
+# Session: H8b (8-bit/16-bit vertex attribute format families)
+
+Assigned task: "work on H8b or other prerequisites blocking the H-series
+milestones." H8a (the previous session) scoped `isVertexBufferFormatSupported`
+to exactly the 17 formats `Executor.cpp`'s `decodeAttribute` already
+implemented. H8b's job was to close the gap for the remaining mandatory
+vertex-buffer format families the roadmap row identified: the 8-bit
+`R8_*`/`R8G8_*` family (8 formats) and the 16-bit
+`R16_*`/`R16G16_*`/`R16G16B16A16_*` family (15 formats), plus
+`A2B10G10R10_UNORM_PACK32` (1 format).
+
+## Scoping decision: defer the packed format
+
+Before writing any code, I checked how `A2B10G10R10_UNORM_PACK32`
+(`ResourceFormat::R10G10B10A2_UNORM`) is unpacked elsewhere in the
+codebase (`femeRTUnpackR10G10B10A2Unorm` in `FeMeRuntimeCPU.c`) and
+confirmed it is a single packed 32-bit word (2 bits A, 10 bits each of
+B/G/R, MSB-down), fundamentally different from every other format
+`decodeAttribute`/`attributeComponentByteSize` already handles, all of
+which assume "N bytes per component, read one component at a time."
+Worse, `Executor.cpp`'s own vertex-fetch bounds-check arithmetic (the
+`AvailableBytes / *CompByteSize` calculation right before calling
+`decodeAttribute`) is built around that same one-component-per-fetch
+assumption -- accommodating a packed format cleanly would need touching
+that shared calling code too, not just adding a `decodeAttribute` case.
+Given the roadmap description explicitly separated this out as needing
+"a real IR reduction"-style dedicated design (well, actually re-reading
+it, it just called it a mechanical addition alongside the others -- but
+I disagreed with that characterization once I looked at the actual code
+shape), I decided to defer it rather than force an awkward fit, and filed
+it as its own H8h row with a comment explaining exactly why. This felt
+like the right call: the 8-bit and 16-bit families really are mechanical
+(same "N bytes per component" shape as the R32/R8G8B8A8 families
+already implemented), so bundling in the one genuinely-different format
+would have either delayed this session's real progress or produced a
+rushed, awkward fit for A2B10G10R10 that I wasn't confident in.
+
+## Implementation
+
+Added the 8-bit family by merging new `case` labels directly into the
+existing `R8G8B8A8_*` case bodies in `decodeAttribute` --
+`R8_UNORM`/`R8G8_UNORM` alongside `R8G8B8A8_UNORM`, etc. -- since the
+per-byte conversion formula (`byte / 255.0f` for UNORM, etc.) is
+identical regardless of channel count; the existing `WantComponents`
+loop already handles "fewer channels" correctly with no extra logic
+needed. This felt cleaner than writing near-duplicate new case bodies.
+
+The 16-bit family needed real new logic: `uint16`/`int16` reads (2 bytes
+per component instead of 1 or 4), and a new `halfBitsToFloat` helper for
+the `_FLOAT` variants. I looked for an existing half-float conversion
+utility to reuse first (found `femeRTHalfToFloat`/`femeRTFloatToHalf` in
+`FeMeRuntimeCPU.c`, and confirmed no host-side equivalent exists in
+`feme/lib`), but that runtime file compiles to bitcode consumed by
+compiled shader IR, not linkable from `Executor.cpp`'s host C++ code. Used
+`llvm::APFloat`'s own `IEEEhalf()`/`IEEEsingle()` conversion instead --
+simpler and more obviously correct than hand-rolling the bit-manipulation
+this project's own runtime-side conversion does, and this file already
+depends on LLVM's ADT/Support libraries so no new dependency was
+introduced.
+
+Updated `Executor.cpp`'s own file-comment "Vertex attribute and
+color-output formats are the subset..." scope note and
+`isVertexBufferFormatSupported`'s (`Format.h`) doc comment to describe
+the new, larger supported set and point at H8h for the one remaining
+gap, rather than leaving either stale.
+
+## Testing
+
+`FormatTest.cpp`: extended the existing
+`VertexBufferFormatSupportMatchesDecodeAttributeScope` test to assert
+all 23 new formats now return true, and that `R10G10B10A2_UNORM` still
+correctly returns false (confirming the deliberate scope boundary, not
+an oversight).
+
+`ExecutorTest.cpp`: `decodeAttribute` is a static, anonymous-namespace
+function -- not directly unit-testable in isolation from another
+translation unit. Rather than change its visibility just to ease
+testing (which felt like over-engineering the surface area for testing's
+sake), I wrote a small reusable helper,
+`renderSolidColorTriangleWithAttributeFormat`, that renders a real
+solid-red triangle end-to-end through a compiled vertex/fragment
+pipeline -- mirroring the existing `FillsFullyCoveredTriangleWithSolidColor`
+test's own shape, generalized to accept an arbitrary vertex attribute
+format and raw byte payload for the color location -- and used it for
+three new tests covering `R16G16B16A16_UNORM`/`_SNORM`/`_FLOAT`. The
+`_FLOAT` test's chosen bit patterns (`0x3C00`/`0x0000` for 1.0f/0.0f)
+directly exercise the new `halfBitsToFloat` path, not just its surrounding
+plumbing.
+
+I deliberately did *not* write dedicated render tests for the 16-bit
+UINT/SINT paths or for `R8_*`/`R8G8_*` specifically: their conversion
+logic is the exact same widen/sign-extend/byte-scale shape already
+exercised end-to-end by the pre-existing `R32_UINT`/`R32_SINT`/
+`R8G8B8A8_UINT`/`R8G8B8A8_SINT`-adjacent tests (color output tests use
+`R8G8B8A8_UNORM` throughout, and the underlying arithmetic pattern for
+UINT/SINT decode is identical across every bit width in this codebase),
+so a dedicated test for each would mostly duplicate existing coverage of
+the same code shape rather than catching a genuinely different failure
+mode. I also considered a test exercising `decodeAttribute`'s
+out-of-bounds/partial-component robustness path (roadmap F10) with one of
+the new narrower formats, but realized partway through writing it that
+the existing bounds-check arithmetic
+(`AvailableBytes = Binding->Data.size() - SrcOff`) is computed against
+the *whole* vertex buffer's remaining bytes, not the specific attribute's
+own declared size -- so a synthetic test buffer with only 2 bytes of
+"real" data for an `R8G8_UNORM` attribute would actually read into the
+next vertex's own bytes rather than cleanly returning zero, an unrelated
+pre-existing behavior this row isn't about. Dropped that test rather than
+accidentally test-and-lock-in a behavior I hadn't set out to verify.
+
+## Verification
+
+`ninja check-feme` (assertions-enabled, ccache build): 2331/2358 pass (27
+unsupported, 0 failed) -- up from 2328/2355, the 3 new `ExecutorTest`
+cases all passing, everything else unchanged.
+
+Real `deqp-vk` re-run, correct ICD confirmed via `vulkaninfo --summary`
+before trusting any result (kept applying last session's corrected
+methodology throughout): `dEQP-VK.api.info.format_properties.*` moved
+180/225 -> 186/225 Pass, exactly the 6 "pure vertex-buffer-only-missing"
+16-bit UNORM/SNORM cases H8a's own investigation had already identified
+as the next-expected wins. Wrote a small Python script to scan every
+failing case's own `<Result>` "missing:" text directly (not just trust
+the aggregate counts) to confirm two things precisely: (1) zero cases
+regressed, and (2) of the 39 remaining failures, only
+`a2b10g10r10_unorm_pack32` (deliberately deferred to H8h) and
+`b8g8r8a8_unorm` (not part of `decodeAttribute`'s scope at all -- a
+distinct R/B-swapped format) still cite `VERTEX_BUFFER_BIT` in their own
+missing-bits list; every other remaining failure is now purely on an
+unrelated, already-separately-tracked bit (`COLOR_ATTACHMENT_BIT`,
+`SAMPLED_IMAGE_BIT`, roadmap H8e's own scope), confirming this row's own
+fix is complete for its stated scope.
+`dEQP-VK.pipeline.monolithic.vertex_input.srgb_vertex_formats.*`:
+unchanged (0 regressions).
+
+## Roadmap
+
+Closed H8b. Filed H8h for the deferred `A2B10G10R10_UNORM_PACK32` case,
+one lowercase letter deep as required.
