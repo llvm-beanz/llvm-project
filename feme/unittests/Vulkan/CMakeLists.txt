@@ -11,6 +11,7 @@ add_feme_unittest(FeMeVulkanTests
   DiagnosticsTest.cpp
   DrawTest.cpp
   EntryPointsTest.cpp
+  ETC2DecodeTest.cpp
   FormatTest.cpp
   GraphicsPipelineTest.cpp
   GroupSizeTest.cpp
