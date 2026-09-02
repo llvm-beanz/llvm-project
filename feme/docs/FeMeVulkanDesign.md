@@ -850,11 +850,16 @@ sources, are:
 | `LocalInvocationIndex` | Linearized local id |
 | `GlobalInvocationId` | `GroupID * WorkgroupSize + LocalInvocationId` |
 | `SubgroupSize` / `SubgroupLocalInvocationId` | Pinned wave size and lane index |
+| `SubgroupId` | Wave loop's own `w` (wave-body `WaveIndex` parameter) |
+| `NumSubgroups` | Compile-time `ceil(WorkgroupSize / SubgroupSize)` |
 
 `NumWorkgroups` must report the full dispatch dimensions even when workgroups
 are distributed across the worker pool, and must remain correct under
 `vkCmdDispatchBase`, where the reported value is the original dispatch size
-rather than the base-offset range.
+rather than the base-offset range. Roadmap H6o: `feme::cpu::SIMDizePass`
+does not yet lower `llvm.spv.num.workgroups` to this `GroupCount` source at
+all (unlike `WorkgroupId`, already substituted for the wave-body's own
+`GroupID` parameter) -- open, tracked in `Roadmap.md`.
 
 ### Required SPIR-V resource work
 

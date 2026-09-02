@@ -295,6 +295,18 @@ inline where it's discussed, and summarized here:
   call kinds), but keeps Phase 4's "everything is `<W x T>`" postcondition
   true without Phase 4 having to know the group/wave-index arithmetic
   Phase 5 owns.
+- Roadmap H6n: `llvm.spv.subgroup.id` is likewise uniform and is replaced
+  directly by the wave-body's own `WaveIndex` parameter in `SIMDizePass`,
+  mirroring `llvm.{dx,spv}.group.id`'s treatment immediately above --
+  "which subgroup this is" is exactly "which wave-loop iteration `w` this
+  is" (see `group = ceil(GroupSize / W) waves` below), so no new call kind
+  or `WaveLoweringPass` support is needed. `llvm.spv.num.subgroups` folds
+  to a compile-time `ConstantInt`, `ceil(NumThreads.x*y*z / WaveSize)`,
+  computed directly from the entry's own `hlsl.numthreads` attribute and
+  the pass's own `WaveSize` parameter -- both known at `SIMDizePass` time,
+  so, like a fully-unrolled wave loop's own group/wave-index arithmetic
+  above, it constant-folds outright rather than needing any runtime value
+  at all.
 - `feme::cpu::WaveLoweringPass` implements only the builtin half (thread
   and group id arithmetic); the remaining wave intrinsics (`WaveActiveSum`,
   `WaveReadLaneAt`, ...) are milestone 8, matching the design's own "two

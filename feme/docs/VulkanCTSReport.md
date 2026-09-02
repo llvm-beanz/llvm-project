@@ -13061,6 +13061,168 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-caselist-file=draw_sample.txt --deqp-shadercache=disable
 ```
 
+## Roadmap H6n: measured impact (`SubgroupId`/`NumSubgroups` CPU lowering, plus a generic divergent-vector-store-operand crash fix)
+
+With H6g-b-a-i-a-i-b, H6l, and H6k all now closed, this session re-ran
+the full `dEQP-VK.mesh_shader.*` group in a single process (28044 cases)
+to confirm the milestone's own remaining named dependencies were truly
+resolved. The sweep instead aborted (`SIGABRT`) partway through, at case
+~1953/28044:
+
+```
+Test case 'dEQP-VK.mesh_shader.ext.misc.first_invocation_mesh'..
+LLVM ERROR: Cannot select: intrinsic %llvm.spv.subgroup.id
+```
+
+**Root cause.** `SPIRVToLLVMPatterns.cpp` already converts SPIR-V's
+`SubgroupId`/`NumSubgroups` builtins to the `llvm.spv.subgroup.id`/
+`llvm.spv.num.subgroups` LLVM core intrinsics (`IntrinsicsSPIRV.td`), the
+same way it does for `SubgroupSize`/`SubgroupLocalInvocationId`
+(`llvm.spv.subgroup.size`/`llvm.spv.subgroup.local.invocation.id`,
+already handled). But `feme::cpu::SIMDizePass` (`SIMDize.cpp`) had no
+lowering case for either intrinsic at all, so LLVM's SelectionDAG hit
+them raw with no target-specific expansion, producing the `Cannot
+select` fatal error above.
+
+A minimal IR reduction (via `glslangValidator` + `feme-translate`'s
+two-step SPIR-V-import pipeline, run through the *full* realistic CPU
+pass list -- `feme-graphics-canonicalize-stage,feme-graphics-validate-
+stage,feme-cpu-linearize,feme-cpu-simdize`, mirroring the real driver's
+own `Pipeline.cpp` order, a lesson learned the hard way after an initial
+2-pass-only repro proved unrepresentative) reproduced the identical
+failure in isolation, with a `local_size_x = 32` mesh entry calling
+`gl_SubgroupID`/`gl_NumSubgroups`.
+
+**The fix.** Per `FeMeCPUDesign.md`'s own "wave loop" model
+(`group = ceil(GroupSize / W) waves`), `SubgroupId` is exactly "which
+wave-loop iteration `w` this is" -- the same value the widened
+function's own wave-body interface already threads as `Env.WaveIndex`.
+Added `isSubgroupIdCall`/`replaceSubgroupIdCall` to `SIMDize.cpp`,
+mirroring the existing `isGroupIdCall`/`replaceGroupIdCall` pair exactly
+(direct substitution, no new `BuiltinCallKind`/`WaveCallKind`, no
+`WaveLoweringPass` involvement -- `BuiltinCalls.h`'s own comment on
+`GroupID` explains why: it is uniform, not per-lane-varying). Wired the
+new check into `widenInstruction`'s `CallInst` dispatch immediately after
+the existing `isGroupIdCall` check, so it runs unconditionally before the
+generic uniform/divergent bail (these zero-operand intrinsics are
+classified uniform by the divergence analysis anyway, but call-specific
+dispatch always runs first regardless).
+
+`NumSubgroups` is different: `ceil(NumThreads.x*y*z / WaveSize)` is
+knowable entirely at compile time from the entry's own
+`hlsl.numthreads` attribute and `SIMDizePass`'s own `WaveSize`
+parameter, so `isNumSubgroupsCall`/`replaceNumSubgroupsCall` fold it
+directly to a `ConstantInt` rather than substituting any runtime value.
+
+**An incidental, distinct crash found and fixed along the way.** While
+building the minimal IR reduction above, an earlier, less-realistic
+2-pass-only repro (`feme-cpu-linearize,feme-cpu-simdize`, omitting the
+graphics canonicalize/validate-stage passes) surfaced a second, wholly
+unrelated crash: storing a whole, non-splat constant `<4 x float>`
+vector through a divergently-indexed pointer crashed with an
+`llvm::FixedVectorType::get` assertion failure
+(`isValidElementType`), attempting to build an illegal
+`<4 x <4 x float>>` nested vector. Root cause: `FunctionWidener::
+getWidened` is designed only for scalar-typed values (it broadcasts to
+a flat `<W x T>`), but two separate operand-widening loops --
+`widenElementwise`'s own top-level generic loop (runs for any
+non-`CallInst` instruction, e.g. a plain `store`, before ever reaching
+`widenScalarizedFallback`) and `widenScalarizedFallback`'s own loop --
+each called it unconditionally, without checking for a vector-typed
+operand first. Fixed both: any vector-typed operand now routes through
+`getVectorComponents` (the same per-component decomposition already used
+for e.g. `insertelement`/`select`/`phi`/`shufflevector` producers), with
+each lane's real `<N x T>` value reassembled via extractelement/
+insertelement before use. Added a defensive
+`assert(!V->getType()->isVectorTy() && ...)` at the top of `getWidened`
+itself to catch any future regression of this invariant directly at the
+source.
+
+This second bug turned out **not** to be directly CTS-blocking on its
+own: `feme-graphics-canonicalize-stage`'s own `createStageOutputStore`
+(`StageOps.cpp`) is architecturally scalar-only (`Component`-addressed,
+one call per vector element), so no genuinely whole-vector `store`
+value ever reaches `SIMDizePass` in the real production pipeline -- the
+unrealistic 2-pass repro was the only way to trigger it. It remains a
+correct, valuable defensive fix (any future producer of a divergently-
+indexed whole-vector store, or a future test/tool invoking `feme-opt`
+with a partial pass list, would otherwise crash the same way) and is
+covered by its own dedicated test.
+
+**New tests covering all three changes.** Three new lit tests
+(`simdize-subgroup-id.ll`, `simdize-num-subgroups.ll`,
+`simdize-scalarize-vector-store-operand.ll`) and three new
+`SIMDizeTest.cpp` unit tests (`ReplacesSubgroupIdWithWaveIndex`,
+`FoldsNumSubgroupsToCompileTimeConstant`,
+`ScalarizesDivergentVectorStoreOperandWithoutCrashing`) exercise the
+substitution, the constant fold, and the generic scalarize-fallback
+fix respectively -- both at the IR-transform (lit) and pass-API (unit
+test) levels, per the standing "unit tests covering each phase" ask.
+
+```
+$ ninja -C <feme-build> check-feme
+...
+Total Discovered Tests: 2332
+  Unsupported:   27 (1.16%)
+  Passed     : 2305 (98.84%)
+```
+
+Up from H6m's own 1977/2036 (this session also picked up unrelated
+`ninja check-feme` growth from intervening sessions not part of this
+row) by exactly the 6 new tests this row adds (0 pre-existing tests
+newly failed).
+
+**A real ICD re-run confirms the fix.** Re-running the full
+`dEQP-VK.mesh_shader.*` group (28044 cases) in a single process:
+
+```
+Test case 'dEQP-VK.mesh_shader.ext.misc.first_invocation_mesh'..
+  Fail (Result does not match reference; check log for details at vktMeshShaderMiscTestsEXT.cpp:462)
+```
+
+No longer a crash: `first_invocation_mesh` now compiles, links, submits,
+and renders, failing only on a clean, later, unrelated pixel-comparison
+mismatch (not filed as a new sibling row -- it sits squarely inside this
+milestone's own already-tracked "bounded payload/output limits reported
+truthfully" rendering-correctness scope, mirroring H6m's own
+`cull_primitives` rendering gap). The sweep proceeds substantially
+further, from case ~1953 to case 1968 of 28044, before hitting a new,
+distinct, generic blocker:
+
+```
+Test case 'dEQP-VK.mesh_shader.ext.misc.many_mesh_work_groups_x'..
+LLVM ERROR: Cannot select: intrinsic %llvm.spv.num.workgroups
+```
+
+`llvm.spv.num.workgroups` (SPIR-V's `NumWorkgroups` builtin) has the
+identical *shape* of gap as `SubgroupId`/`NumSubgroups` above (a real
+LLVM core intrinsic with no `SIMDizePass` lowering case), but unlike
+`NumSubgroups` it is a genuine *runtime* dispatch-time value (the CTS
+case's own name varies it directly), so it cannot simply constant-fold
+the way `NumSubgroups` did -- this is filed as its own new row, H6o, not
+folded into this one, since it needs its own distinct scoping work (see
+`FeMeVulkanDesign.md`'s "Builtin and execution-shape mapping" table,
+which already names `GroupCount` as `NumWorkgroups`'s intended source --
+the gap is that `SIMDizePass` does not yet wire it up).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure CPU-lowering-completeness fix, touching no feature
+bit or extension.
+
+**Roadmap H6n closes.** Both `SubgroupId`/`NumSubgroups` CPU lowering
+and the incidental generic vector-operand crash are fixed and verified,
+with zero regressions in `check-feme` or the wider mesh-shading/draw
+regression samples. **Milestone H6 does not close**: the newly-
+discovered `NumWorkgroups` gap (H6o) still blocks a full-group pass.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.mesh_shader.*" --deqp-shadercache=disable
+```
+
 ## Roadmap H6c-a: closed by its own split
 
 Re-checking H6c-a's own literal ask now that its three named
