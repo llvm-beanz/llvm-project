@@ -13648,6 +13648,169 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader'
 ```
 
+## Roadmap H6s: measured impact (`EmitMeshTasksEXT` conversion pattern)
+
+H6q's own fix cleared the `spirv.GlobalVariable`/`PushConstant`
+legalization error but surfaced `OpEmitMeshTasksEXT` (a task entry's own
+mesh-dispatch call) as having no `ConvertSPIRVToLLVMPass` conversion
+pattern at all. Closed by adding a full pipeline: a new, non-overloaded
+`StageOpKind::EmitMeshTasks` (`feme.stage.emit_mesh_tasks`), a new
+`EmitMeshTasksEXTConversionPattern` handling the op's own terminator role
+correctly (replacing it with both the new call and a real `llvm.return`,
+dropping the optional payload operand since a separate, earlier
+`TaskPayloadStore` call already moved that data), matching masking/
+widening/uniformity plumbing across `StageMaskCalls.h/.cpp`,
+`Linearize.cpp`, `SIMDize.cpp`, `ValidateStage.cpp`, and
+`WaveUniformity.cpp`, and a CPU lowering
+(`TaskPayloadWrapperPass::lowerEmitMeshTasks`) writing the group-count
+triple into the already-scaffolded `FemeTaskArgs::MeshGroupCount` host-ABI
+field.
+
+**New tests.** Lit test `spirv-to-llvm-emit-mesh-tasks.mlir` (both the
+no-payload and with-payload shapes) confirms the conversion pattern
+directly. Unit tests `StageOpsTest.cpp`'s
+`EmitMeshTasksIsVoidAndNotOverloaded` and `TaskPayloadWrapperTest.cpp`'s
+`ChainsIntoEntryWrapperPass`/`LowersEmitMeshTasks`/
+`LowersPayloadStoreAndEmitMeshTasksTogether` cover the op's own shape and
+its CPU lowering.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+2318/2345 (27 pre-existing unrelated `Unsupported`, 0 `Failed`).
+
+**Real ICD re-run.** Re-running the originally-failing
+`with_task_shader` case:
+
+```
+vkCreateGraphicsPipelines: error: failed to legalize operation
+'spirv.EXT.EmitMeshTasks' that was explicitly marked illegal
+```
+
+is gone. The pipeline creation instead failed with a new,
+`feme`-local error, `feme-cpu-wrap-task-payload: unexpected stage op
+left for the task payload wrapper`, root-caused and fixed within the
+same session and tracked as its own row, H6t (see below), rather than
+being folded silently into this row's own scope.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure compiler-internal lowering-completeness fix,
+touching no feature bit or extension.
+
+**Roadmap H6s closes.** The `EmitMeshTasksEXT` conversion-pattern gap is
+fixed and verified (new lit and unit tests, plus a real ICD re-run
+confirming the reported error no longer occurs), with zero regressions
+in `check-feme`. **Milestone H6 does not close**: verifying this fix
+found two further bugs of its own (H6t, closed in the same session) and
+a third, distinct, unrelated gap (H6u, left open), alongside the
+still-open H6r.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader'
+```
+
+## Roadmap H6t: measured impact (task-payload catch-all and `gl_DrawID`)
+
+Verifying H6s's own fix via the real ICD re-run above found two further,
+distinct bugs in the same case, both closed within this same session.
+
+**Bug 1: over-broad catch-all.** `TaskPayloadWrapper.cpp`'s own
+diagnostic-emitting catch-all fired on *any* remaining `CallInst` left
+after its known lowering cases ran, not only a genuinely-unlowered
+`feme.stage.*` call -- the exact same over-broad-catch-all class of bug
+an earlier milestone (H6g-b-d) previously fixed in
+`MeshOutputWrapper.cpp`. This wrongly rejected H6s's own newly-legalized
+`feme.stage.emit_mesh_tasks` call itself, among any other ordinary call
+a task entry legitimately still makes. Fixed by gating the diagnostic
+with `if (!isStageOpCall(*CI)) continue;`, mirroring H6g-b-d's own fix
+exactly.
+
+**Bug 2: `gl_DrawID` task-stage input load.** Once Bug 1 was fixed, a
+debug print identified the true offending call: a genuine
+`feme.stage.input.load.v4i32` load of `gl_DrawID` (SPIR-V's `DrawIndex`
+builtin) in the *task* stage, confirmed via VK-GL-CTS source
+(`vktMeshShaderApiTestsEXT.cpp`) to be read by both the task and mesh
+stage in a real `with_task_shader` case. H6p (an earlier milestone) only
+fixed the *mesh*-stage side of this identical builtin; its own re-run
+never exercised a `with_task_shader` case where the task stage also
+reads it, so this task-stage gap went undiscovered until now. Fixed by
+mirroring H6p's own mesh-stage fix for the task stage:
+`FemeTaskArgs::Reserved32` (an existing, same-sized alignment-padding
+field, exactly like the mesh-side field H6p repurposed) renamed to
+`DrawID`, with a matching `StageArgsLayout.h` enumerator rename;
+`ResourceHeap.h`/`.cpp`'s `TaskResources`/`PreparedTaskBatch` thread a
+new `DrawID` field; `Executor.cpp`'s task-stage dispatch path sets
+`TRes.DrawID = MDC.DrawID`; `EntryWrapper.cpp` loads it as a new
+`Env.TaskDrawID` wave-body value via a new `task_draw_id` known
+parameter name (added directly to `isKnownWaveBodyParameter`'s
+allow-list up front this time, learning H6o's own regression lesson);
+and `TaskPayloadWrapper.cpp` gained a matching `lowerTaskInputLoad`
+helper (mirroring `lowerMeshInputLoad`) dispatched for
+`SignatureSystemValue::DrawID`. `TaskPayloadWrapperPass::run` also
+needed a fix to re-derive its `WaveBodyEnv` against the freshly-spliced
+function *after* `appendTaskPayloadParams` runs, since splicing
+invalidates any previously-captured `Argument*` pointers, mirroring
+`MeshOutputWrapperPass::run`'s own precedent for the identical hazard.
+
+**New tests.** `ResourceHeapTest.cpp`'s
+`PreparedTaskBatchTest.ArgsCarriesTheMeshGroupCountPointer`/
+`ArgsCarriesTheRequestedDrawID`/`ArgsDefaultsDrawIDToZero`;
+`TaskPayloadWrapperTest.cpp`'s `LowersDrawIDInputLoad`/
+`RejectsUnsupportedInputSystemValue` (mirroring the mesh-stage
+equivalents directly), plus updated existing tests to also check the
+new `task_mesh_group_count`/`task_draw_id` parameters.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+2323/2350 (27 pre-existing unrelated `Unsupported`, 0 `Failed`).
+
+**Real ICD re-run.** Re-running the originally-failing case confirms
+both the `feme-cpu-wrap-task-payload` error and the DrawID gap are gone.
+Pipeline creation still fails, but now on an entirely distinct,
+unrelated error: `"a stage's root-constant span is not fully covered by
+a VkPushConstantRange visible to it in its VkPipelineLayout"`,
+confirmed via `grep` to originate in `feme/lib/Vulkan/GraphicsPipeline.cpp`,
+a completely different subsystem than any compiler pass touched by
+H6s/H6t -- filed as a new, open row, H6u, left untriaged/unfixed this
+session given scope.
+
+A re-run of the full 540-case `dEQP-VK.mesh_shader.ext.api.*` group
+confirms no regression and no new crash class:
+
+```
+Test run totals:
+  Passed:        14/540 (2.6%)
+  Failed:        102/540 (18.9%)
+  Not supported: 424/540 (78.5%)
+```
+
+Identical totals to H6q's own post-fix measurement -- expected, since
+H6u still fully blocks every `with_task_shader` case from actually
+passing, so H6s+H6t together unlock no new `Pass` by themselves yet.
+Both fixes are nonetheless necessary, independently-verified-correct
+steps confirmed by new tests and a real ICD re-run showing each of
+their own originally-reported errors is gone.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure compiler-internal/host-ABI fix, touching no
+feature bit or extension.
+
+**Roadmap H6t closes.** Both the task-payload catch-all bug and the
+task-stage `gl_DrawID` lowering gap are fixed and verified, with zero
+regressions in `check-feme`. **Milestone H6 does not close**: the new
+push-constant-range pipeline-layout gap (H6u) remains open, alongside
+the still-open H6r.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+FEME_VULKAN_LOG_CREATION_ERRORS=1 \
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader'
+```
+
 ## Roadmap H6c-a: closed by its own split
 
 Re-checking H6c-a's own literal ask now that its three named

@@ -1196,6 +1196,58 @@ laid out this way, so every downstream consumer (including
 `SPIRVPushConstantLoweringPass` above, unmodified) still sees the correct
 absolute byte offset.
 
+Roadmap H6s: `OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task
+entry's own mesh-dispatch call, had no `ConvertSPIRVToLLVMPass` conversion
+pattern at all before this milestone -- unlike `spirv.EXT.SetMeshOutputs`,
+which `SetMeshOutputsEXTConversionPattern` already converted, nothing
+handled this op, so every real `with_task_shader` case failed to legalize.
+Closed by mirroring `SetMeshOutputs`'s own precedent through the whole
+pipeline: a new, non-overloaded `StageOpKind::EmitMeshTasks`
+(`feme.stage.emit_mesh_tasks`, `StageOps.h`/`.cpp`), a new
+`EmitMeshTasksEXTConversionPattern` (`SPIRVToLLVMPatterns.cpp`) that -- since
+`spirv::EXTEmitMeshTasksOp` is itself a SPIR-V *terminator*, unlike
+`SetMeshOutputsEXT` -- replaces the op with both the new call *and* a real
+`llvm.return`, deliberately dropping the op's optional payload-identifying
+pointer operand (its bytes were already written by a separate, earlier
+`feme.stage.task.payload.store` call), the matching masking/widening/
+uniformity-classification plumbing (`StageMaskCalls`, `Linearize`,
+`SIMDize`, `WaveUniformity`), and a CPU lowering
+(`TaskPayloadWrapperPass::lowerEmitMeshTasks`) writing the group-count
+triple through a new trailing `task_mesh_group_count` wave-body parameter
+into `FemeTaskArgs::MeshGroupCount` -- a field (and `EntryWrapper.cpp`'s own
+load of it into `Env.TaskMeshGroupCount`, and `Executor::executeDraws`'s own
+read-back into `AmplificationDispatchQueue::create`) all already scaffolded
+by an earlier milestone, so this closed the very last unwired link in a
+chain that was otherwise already complete.
+
+Roadmap H6t: verifying H6s's own fix via a real `deqp-vk` re-run of a
+`with_task_shader` case found two further bugs of its own, both closed in
+the same milestone. First, `TaskPayloadWrapper.cpp`'s catch-all diagnostic
+(the "unexpected stage op left for the task payload wrapper" error) fired
+on *any* leftover `CallInst`, not only a genuinely-unlowered `feme.stage.*`
+call -- the exact same over-broad-catch-all class of bug `MeshOutputWrapper.cpp`
+had before an earlier milestone's own fix -- wrongly rejecting H6s's own
+newly-legalized `feme.stage.emit_mesh_tasks` call itself. Closed by gating
+the diagnostic on `isStageOpCall(*CI)`, mirroring that earlier fix exactly.
+Second, once that was fixed, a real, previously-undiscovered gap surfaced:
+the task stage's own `gl_DrawID` (SPIR-V `DrawIndex`) input load has no
+lowering case in `TaskPayloadWrapperPass` at all -- an earlier milestone
+only fixed the *mesh*-stage side of this identical builtin, since its own
+CTS re-run never exercised a `with_task_shader` case where the task stage
+also reads it. Closed by mirroring that mesh-stage fix for the task stage:
+`FemeTaskArgs::Reserved32` (an existing, same-sized alignment-padding
+field) renamed to `DrawID`; `TaskResources`/`PreparedTaskBatch` thread it
+through `ResourceHeap.h`/`.cpp`; `Executor.cpp`'s task-stage dispatch path
+sets it from `MeshDrawCommand::DrawID`; `EntryWrapper.cpp` loads it as a
+new `Env.TaskDrawID` wave-body value via a new `task_draw_id` known
+parameter name; and `TaskPayloadWrapper.cpp` gained a matching
+`lowerTaskInputLoad` helper (mirroring `lowerMeshInputLoad`) dispatched for
+`SignatureSystemValue::DrawID`. `TaskPayloadWrapperPass::run` also needed a
+fix to re-derive its `WaveBodyEnv` against the freshly-spliced function
+*after* `appendTaskPayloadParams` runs, since splicing invalidates any
+previously-captured `Argument*` pointers -- mirroring
+`MeshOutputWrapperPass::run`'s own precedent for the identical hazard.
+
 ## Command Buffers
 
 Command buffers record a compact typed stream in command-pool-owned storage.
