@@ -247,6 +247,18 @@ struct WrapperEnv {
   /// above exactly.
   Value *TaskPayload = nullptr;
   Value *TaskMaxPayloadBytes = nullptr;
+  /// (Roadmap H6s) `FemeTaskArgs::MeshGroupCount`, the `uint32_t*` pointer
+  /// a compiled task entry's lowered `feme.stage.emit_mesh_tasks` call
+  /// writes the requested mesh dispatch's 3D group count through --
+  /// threaded exactly like `TaskPayload`/`TaskMaxPayloadBytes` above, and
+  /// like `MeshActualVertexCount`/`ActualPrimitiveCount`, an output
+  /// pointer rather than an input value.
+  Value *TaskMeshGroupCount = nullptr;
+  /// (Roadmap H6t) `FemeTaskArgs::DrawID`, SPIR-V's `DrawIndex` builtin
+  /// (`gl_DrawID`): workgroup-uniform, mirroring `MeshDrawID` above
+  /// exactly -- a task stage entry can read this builtin too, not only a
+  /// mesh stage entry.
+  Value *TaskDrawID = nullptr;
 };
 
 /// Builds the `FemeDispatchArgs`-derived values every region's wave loop
@@ -259,8 +271,10 @@ struct WrapperEnv {
 /// et al.'s own comment), and this also loads its mesh-only fields; if
 /// \p IsTask, \p ArgsTy is `getTaskArgsType`'s longer struct instead, and
 /// this loads its own task-only fields (`WrapperEnv::TaskPayload`/
-/// `TaskMaxPayloadBytes`) the same way. \p IsMesh and \p IsTask are never
-/// both true (a function is tagged with exactly one `ShaderStage`).
+/// `TaskMaxPayloadBytes`/`TaskMeshGroupCount`/`TaskDrawID`) the same way.
+/// \p IsMesh and
+/// \p IsTask are never both true (a function is tagged with exactly one
+/// `ShaderStage`).
 WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
                            const GroupSharedLayout &GSLayout,
                            StructType *SpillTy, uint32_t WavesPerGroup,
@@ -355,6 +369,10 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
         loadArgsField(Entry, ArgsTy, Args, TaskArgsFieldPayload, PtrTy);
     Env.TaskMaxPayloadBytes =
         loadArgsField(Entry, ArgsTy, Args, TaskArgsFieldMaxPayloadBytes, I32Ty);
+    Env.TaskMeshGroupCount =
+        loadArgsField(Entry, ArgsTy, Args, TaskArgsFieldMeshGroupCount, PtrTy);
+    Env.TaskDrawID =
+        loadArgsField(Entry, ArgsTy, Args, TaskArgsFieldDrawID, I32Ty);
   }
   return Env;
 }
@@ -406,6 +424,8 @@ bool isKnownWaveBodyParameter(StringRef Name) {
       "mesh_draw_id",
       "task_payload",
       "task_max_payload_bytes",
+      "task_mesh_group_count",
+      "task_draw_id",
   };
   if (Name.starts_with("loopvar"))
     return true;
@@ -522,6 +542,10 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       CallArgs.push_back(Env.TaskPayload);
     else if (Arg.getName() == "task_max_payload_bytes")
       CallArgs.push_back(Env.TaskMaxPayloadBytes);
+    else if (Arg.getName() == "task_mesh_group_count")
+      CallArgs.push_back(Env.TaskMeshGroupCount);
+    else if (Arg.getName() == "task_draw_id")
+      CallArgs.push_back(Env.TaskDrawID);
     else if (Arg.getName().starts_with("loopvar")) {
       unsigned N;
       bool Failed =

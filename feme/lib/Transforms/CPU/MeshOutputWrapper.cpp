@@ -349,11 +349,12 @@ Value *lowerMeshInputLoad(CallInst &CI, const WaveBodyEnv &WEnv,
 /// Lowers every masked mesh output store and `set_mesh_outputs` call in
 /// \p F, or diagnoses and returns false if \p F uses a `feme.stage.*` op
 /// this pass does not support (anything other than `OutputStore`/
-/// `SetMeshOutputs`/an `InputLoad` of `gl_DrawID` -- `EmitMeshTasksEXT` has
-/// no canonicalized form yet, see the file comment; roadmap H6p found that
-/// a mesh entry point *does* have one legitimate ordinary stage-IO input
-/// to read after all, `gl_DrawID`, correcting this comment's original
-/// assumption).
+/// `SetMeshOutputs`/an `InputLoad` of `gl_DrawID` -- `EmitMeshTasksEXT`
+/// (canonicalized as of roadmap H6s) belongs to the *task* stage, not the
+/// mesh stage, so `TaskPayloadWrapperPass` lowers it instead, never this
+/// pass; roadmap H6p found that a mesh entry point *does* have one
+/// legitimate ordinary stage-IO input to read after all, `gl_DrawID`,
+/// correcting this comment's original assumption).
 bool lowerMeshStageOps(Function &F, const WaveBodyEnv &WEnv) {
   bool UsesStageOps = false;
   for (Instruction &I : instructions(F))

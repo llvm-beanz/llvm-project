@@ -602,6 +602,9 @@ struct TaskResources {
   llvm::ArrayRef<uint8_t> RootConstants;
   std::array<uint32_t, 3> GroupID{};
   std::array<uint32_t, 3> GroupCount{};
+  /// SPIR-V's `DrawIndex` builtin (roadmap H6t); see
+  /// `feme::graphics::MeshDrawCommand::DrawID`'s own comment.
+  uint32_t DrawID = 0;
   llvm::MutableArrayRef<uint8_t> GroupShared;
   llvm::MutableArrayRef<uint8_t> Payload;
   uint32_t *MeshGroupCount = nullptr;
@@ -624,6 +627,7 @@ private:
                     llvm::ArrayRef<uint8_t> RootConstants,
                     std::array<uint32_t, 3> GroupID,
                     std::array<uint32_t, 3> GroupCount,
+                    uint32_t DrawID,
                     llvm::MutableArrayRef<uint8_t> GroupShared,
                     llvm::MutableArrayRef<uint8_t> Payload,
                     uint32_t *MeshGroupCount);
@@ -635,6 +639,7 @@ private:
   FemeShaderResources ShaderResources{};
   std::array<uint32_t, 3> GroupID{};
   std::array<uint32_t, 3> GroupCount{};
+  uint32_t DrawID = 0;
   llvm::MutableArrayRef<uint8_t> GroupShared;
   llvm::MutableArrayRef<uint8_t> Payload;
   uint32_t *MeshGroupCount = nullptr;

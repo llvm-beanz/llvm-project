@@ -3180,6 +3180,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           TRes.RootConstants = Draw.Resources.RootConstants;
           TRes.GroupID = GroupID;
           TRes.GroupCount = MDC.GroupCount;
+          // (roadmap H6t) SPIR-V's `DrawIndex` builtin (`gl_DrawID`),
+          // mirroring the direct mesh-only path's own `MDC.DrawID`
+          // threading below exactly -- a `with_task_shader` case's task
+          // stage entry can read `gl_DrawID` too, not only its mesh stage.
+          TRes.DrawID = MDC.DrawID;
           TRes.GroupShared = GroupShared;
           TRes.Payload = Payload.getMutableBytes();
           // `MeshGroupCount` addresses one contiguous 3-uint32 block;

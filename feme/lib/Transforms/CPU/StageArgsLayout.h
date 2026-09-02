@@ -370,7 +370,9 @@ enum TaskArgsField : unsigned {
   TaskArgsFieldGroupCount = 2,
   TaskArgsFieldGroupShared = 3,
   TaskArgsFieldMaxPayloadBytes = 4,
-  TaskArgsFieldReserved32 = 5,
+  /// (Roadmap H6t) SPIR-V's `DrawIndex` builtin (`gl_DrawID`); mirrors
+  /// `MeshArgsFieldDrawID`'s own precedent (roadmap H6p) exactly.
+  TaskArgsFieldDrawID = 5,
   TaskArgsFieldPayload = 6,
   TaskArgsFieldMeshGroupCount = 7,
   TaskArgsFieldReserved = 8,

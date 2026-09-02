@@ -16,8 +16,10 @@
 #include "StageArgsLayout.h"
 #include "StageMaskCalls.h"
 #include "feme/Core/ShaderStage.h"
+#include "feme/Core/Signature.h"
 #include "feme/Core/StageOps.h"
 #include "feme/Transforms/CPU/SIMDize.h"
+#include "feme/Transforms/DXIL/SignatureImport.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -37,12 +39,39 @@ namespace {
 
 constexpr StringLiteral PayloadParamName = "task_payload";
 constexpr StringLiteral MaxPayloadBytesParamName = "task_max_payload_bytes";
+/// (Roadmap H6s) `FemeTaskArgs::MeshGroupCount`, the trailing parameter
+/// this pass appends alongside `Payload`/`MaxPayloadBytes` for a
+/// canonicalized `feme.stage.emit_mesh_tasks` call to write through.
+constexpr StringLiteral MeshGroupCountParamName = "task_mesh_group_count";
+/// (Roadmap H6t) `FemeTaskArgs::DrawID`, SPIR-V's `DrawIndex` builtin
+/// (`gl_DrawID`): a task entry's one legitimate ordinary stage-IO input,
+/// mirroring `MeshOutputWrapper.cpp`'s own `DrawIDParamName` (roadmap
+/// H6p) exactly -- see that file's own comment for why this builtin is
+/// workgroup-uniform rather than per-lane.
+constexpr StringLiteral DrawIDParamName = "task_draw_id";
+
+const SignatureElement *findElement(const EntrySignature &Sig,
+                                    uint32_t ElementID,
+                                    SignatureDirection Dir) {
+  for (const SignatureElement &Elt : Sig.Elements)
+    if (Elt.ElementID == ElementID && Elt.Direction == Dir)
+      return &Elt;
+  return nullptr;
+}
 
 /// This pass's own trailing wave-body parameters (see the file comment):
 /// the payload's base pointer and its runtime-bound byte count.
 struct TaskPayloadStageEnv {
   Value *Payload = nullptr;
   Value *MaxPayloadBytes = nullptr;
+  /// (Roadmap H6s) `FemeTaskArgs::MeshGroupCount`: the `uint32_t*` this
+  /// pass's `lowerEmitMeshTasks` writes the requested mesh dispatch's 3D
+  /// group count through, addressing one contiguous 3-element block (see
+  /// `RuntimeABI.h`'s own comment on the field).
+  Value *MeshGroupCount = nullptr;
+  /// (Roadmap H6t) `FemeTaskArgs::DrawID`, workgroup-uniform, threaded
+  /// through unchanged from `EntryWrapper.cpp`'s own `Env.TaskDrawID`.
+  Value *DrawID = nullptr;
 };
 
 std::optional<TaskPayloadStageEnv> getTaskPayloadStageEnv(Function &F) {
@@ -53,6 +82,10 @@ std::optional<TaskPayloadStageEnv> getTaskPayloadStageEnv(Function &F) {
       Env.Payload = &Arg, Found = true;
     else if (Arg.getName() == MaxPayloadBytesParamName)
       Env.MaxPayloadBytes = &Arg, Found = true;
+    else if (Arg.getName() == MeshGroupCountParamName)
+      Env.MeshGroupCount = &Arg, Found = true;
+    else if (Arg.getName() == DrawIDParamName)
+      Env.DrawID = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -69,7 +102,7 @@ Function *appendTaskPayloadParams(Function &F) {
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 8> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, I32Ty});
+  ParamTypes.append({PtrTy, I32Ty, PtrTy, I32Ty});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -91,6 +124,8 @@ Function *appendTaskPayloadParams(Function &F) {
   auto ArgIt = NewF->arg_begin() + F.arg_size();
   (&*ArgIt++)->setName(PayloadParamName);
   (&*ArgIt++)->setName(MaxPayloadBytesParamName);
+  (&*ArgIt++)->setName(MeshGroupCountParamName);
+  (&*ArgIt++)->setName(DrawIDParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -159,22 +194,96 @@ void lowerTaskPayloadStore(CallInst &CI, const TaskPayloadStageEnv &Env,
   }
 }
 
-/// Lowers every masked task payload store in \p F, or diagnoses and
-/// returns false if \p F uses a `feme.stage.*` op this pass does not
-/// support (any op other than `TaskPayloadStore` -- a task entry point has
-/// no ordinary stage-IO input to read, and `EmitMeshTasksEXT` has no
-/// canonicalized form yet, roadmap H6d's own scope note).
-bool lowerTaskPayloadStageOps(Function &F, const DataLayout &DL) {
+/// Lowers one `feme.cpu.masked.emit_mesh_tasks` call (roadmap H6s): every
+/// active lane writes its own `(groupCountX, groupCountY, groupCountZ)` to
+/// `Env.MeshGroupCount`'s three contiguous slots, the same
+/// "every lane may write, the mask decides whose value survives, repeated
+/// writes of a spec-identical value are idempotent" shape
+/// `MeshOutputWrapper.cpp`'s `lowerSetMeshOutputs` already uses for its own
+/// workgroup-uniform pair -- just three slots instead of two, and no
+/// per-slot addressing since there is only ever one dispatch request per
+/// workgroup.
+void lowerEmitMeshTasks(CallInst &CI, const TaskPayloadStageEnv &Env) {
+  IRBuilder<> Builder(&CI);
+  Value *GroupCountXArg = CI.getArgOperand(0);
+  auto *WideTy = dyn_cast<FixedVectorType>(GroupCountXArg->getType());
+  unsigned WaveSize = WideTy ? WideTy->getNumElements() : 1;
+  Type *ScalarTy = WideTy ? WideTy->getElementType() : GroupCountXArg->getType();
+
+  Value *Addrs[3];
+  for (unsigned Dim = 0; Dim != 3; ++Dim)
+    Addrs[Dim] = Builder.CreateInBoundsGEP(
+        ScalarTy, Env.MeshGroupCount, Builder.getInt32(Dim),
+        "mesh.group.count.addr");
+
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Mask = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
+    auto *MaskConst = dyn_cast<ConstantInt>(Mask);
+    if (MaskConst && MaskConst->isZero())
+      continue;
+
+    Value *LaneCounts[3];
+    for (unsigned Dim = 0; Dim != 3; ++Dim)
+      LaneCounts[Dim] =
+          extractLaneOrScalar(Builder, CI.getArgOperand(Dim), Lane);
+    if (!(MaskConst && MaskConst->isOne())) {
+      for (unsigned Dim = 0; Dim != 3; ++Dim) {
+        Value *OldCount = Builder.CreateLoad(ScalarTy, Addrs[Dim]);
+        LaneCounts[Dim] =
+            Builder.CreateSelect(Mask, LaneCounts[Dim], OldCount);
+      }
+    }
+    for (unsigned Dim = 0; Dim != 3; ++Dim)
+      Builder.CreateStore(LaneCounts[Dim], Addrs[Dim]);
+  }
+}
+
+/// Lowers `feme.stage.input.load` for a task entry's one legitimate
+/// stage-IO input, SPIR-V's `DrawIndex` builtin (`gl_DrawID`,
+/// `SignatureSystemValue::DrawID`, roadmap H6t): workgroup-uniform,
+/// mirroring `MeshOutputWrapper.cpp`'s own `lowerMeshInputLoad` (roadmap
+/// H6p) exactly, including that `Row`/`Component`/`Vertex` (`CI`'s other
+/// operands) carry no meaning for a whole-builtin scalar like this one and
+/// are intentionally left unread.
+Value *lowerTaskInputLoad(CallInst &CI, const WaveBodyEnv &WEnv,
+                          const TaskPayloadStageEnv &Env) {
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
+  IRBuilder<> Builder(&CI);
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *LaneResult =
+        Builder.CreateSelect(Active, Env.DrawID, Constant::getNullValue(ScalarTy));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
+/// Lowers every masked task payload store, `emit_mesh_tasks` call, and
+/// `gl_DrawID` input load in \p F, or diagnoses and returns false if \p F
+/// uses a `feme.stage.*` op this pass does not support (any op other than
+/// `TaskPayloadStore`/`EmitMeshTasks`/an `InputLoad` of `gl_DrawID` --
+/// roadmap H6t found that, mirroring `MeshOutputWrapper.cpp`'s own H6p
+/// finding, a task entry point *does* have one legitimate ordinary
+/// stage-IO input to read after all).
+bool lowerTaskPayloadStageOps(Function &F, const WaveBodyEnv &WEnv,
+                              const DataLayout &DL) {
   bool UsesStageOps = false;
   for (Instruction &I : instructions(F))
     if (auto *CI = dyn_cast<CallInst>(&I))
-      UsesStageOps |= isStageOpCall(*CI) || isMaskedTaskPayloadStoreCall(*CI);
+      UsesStageOps |= isStageOpCall(*CI) || isMaskedTaskPayloadStoreCall(*CI) ||
+                      isMaskedEmitMeshTasksCall(*CI);
   if (!UsesStageOps)
     return true;
 
   std::optional<TaskPayloadStageEnv> Env = getTaskPayloadStageEnv(F);
   if (!Env)
     return false;
+
+  std::optional<EntrySignature> Sig = feme::dxil::getEntrySignature(F);
 
   for (Instruction &I : make_early_inc_range(instructions(F))) {
     auto *CI = dyn_cast<CallInst>(&I);
@@ -185,6 +294,54 @@ bool lowerTaskPayloadStageOps(Function &F, const DataLayout &DL) {
       CI->eraseFromParent();
       continue;
     }
+    if (isMaskedEmitMeshTasksCall(*CI)) {
+      lowerEmitMeshTasks(*CI, *Env);
+      CI->eraseFromParent();
+      continue;
+    }
+    StageOpKind Kind;
+    if (isStageOpCall(*CI, &Kind) && Kind == StageOpKind::InputLoad) {
+      if (!Sig) {
+        F.getContext().emitError(
+            "feme-cpu-wrap-task-payload: task payload wrapper requires "
+            "attached feme.signature metadata to lower an input load");
+        return false;
+      }
+      auto *EltID = dyn_cast<ConstantInt>(CI->getArgOperand(0));
+      const SignatureElement *Elt =
+          EltID
+              ? findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
+                            SignatureDirection::Input)
+              : nullptr;
+      if (!Elt) {
+        F.getContext().emitError(
+            CI, "feme-cpu-wrap-task-payload: input load references an "
+                "unknown signature element");
+        return false;
+      }
+      if (Elt->SystemValue != SignatureSystemValue::DrawID) {
+        F.getContext().emitError(
+            CI, "feme-cpu-wrap-task-payload: unsupported task stage input "
+                "system value");
+        return false;
+      }
+      Value *Result = lowerTaskInputLoad(*CI, WEnv, *Env);
+      CI->replaceAllUsesWith(Result);
+      CI->eraseFromParent();
+      continue;
+    }
+    // Only a genuinely unlowered `feme.stage.*` call is this pass's own
+    // problem to diagnose (see the function comment) -- everything else
+    // still calling through `F` at this point (resource loads/stores,
+    // ordinary masked memory ops, arithmetic feeding a payload store's or
+    // `EmitMeshTasksEXT`'s own operands, etc.) is unrelated to task
+    // payload/mesh-dispatch lowering and must be left alone rather than
+    // rejected outright (roadmap H6s, mirroring `MeshOutputWrapperPass`'s
+    // own H6g-b-d precedent exactly): the `UsesStageOps` gate above only
+    // established that *some* call in `F` needs this pass's attention, not
+    // that *every* call does.
+    if (!isStageOpCall(*CI))
+      continue;
     F.getContext().emitError(
         CI, "feme-cpu-wrap-task-payload: unexpected stage op left for the "
             "task payload wrapper");
@@ -209,7 +366,16 @@ PreservedAnalyses TaskPayloadWrapperPass::run(Module &M,
       continue;
     const DataLayout &DL = F->getDataLayout();
     Function *Body = appendTaskPayloadParams(*F);
-    if (lowerTaskPayloadStageOps(*Body, DL))
+    // `appendTaskPayloadParams` splices `F`'s body into a brand-new
+    // function and erases `F`, so any `WaveBodyEnv` captured against the
+    // old function's now-destroyed `Argument`s would dangle -- re-derive
+    // it against `Body`, whose spliced-in parameters keep every original
+    // `WaveBodyEnv`-recognized name (`wave_entry_mask` et al.) intact
+    // (mirroring `MeshOutputWrapperPass::run`'s own precedent exactly).
+    std::optional<WaveBodyEnv> WEnv = getWaveBodyEnv(*Body);
+    assert(WEnv && "getWaveBodyEnv succeeded before appendTaskPayloadParams "
+                   "but failed after");
+    if (lowerTaskPayloadStageOps(*Body, *WEnv, DL))
       Changed = true;
   }
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

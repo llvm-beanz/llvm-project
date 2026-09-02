@@ -587,12 +587,14 @@ PreparedTaskBatch::PreparedTaskBatch(
     std::vector<FemeImageDescriptor> ImageHeap,
     std::vector<FemeSamplerDescriptor> SamplerHeap,
     ArrayRef<uint8_t> RootConstants, std::array<uint32_t, 3> GroupID,
-    std::array<uint32_t, 3> GroupCount, MutableArrayRef<uint8_t> GroupShared,
-    MutableArrayRef<uint8_t> Payload, uint32_t *MeshGroupCount)
+    std::array<uint32_t, 3> GroupCount, uint32_t DrawID,
+    MutableArrayRef<uint8_t> GroupShared, MutableArrayRef<uint8_t> Payload,
+    uint32_t *MeshGroupCount)
     : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
       SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
-      GroupID(GroupID), GroupCount(GroupCount), GroupShared(GroupShared),
-      Payload(Payload), MeshGroupCount(MeshGroupCount) {
+      GroupID(GroupID), GroupCount(GroupCount), DrawID(DrawID),
+      GroupShared(GroupShared), Payload(Payload),
+      MeshGroupCount(MeshGroupCount) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
   ShaderResources.ResourceHeapCount =
       static_cast<uint32_t>(this->ResourceHeap.size());
@@ -616,7 +618,8 @@ PreparedTaskBatch PreparedTaskBatch::create(const ResourceInfo &Info,
       materializeSamplerHeap(Info, Resources.BoundSamplers,
                              Resources.SamplerHeap),
       Resources.RootConstants, Resources.GroupID, Resources.GroupCount,
-      Resources.GroupShared, Resources.Payload, Resources.MeshGroupCount);
+      Resources.DrawID, Resources.GroupShared, Resources.Payload,
+      Resources.MeshGroupCount);
 }
 
 FemeTaskArgs PreparedTaskBatch::args() const {
@@ -628,6 +631,7 @@ FemeTaskArgs PreparedTaskBatch::args() const {
   Args.GroupCount[0] = GroupCount[0];
   Args.GroupCount[1] = GroupCount[1];
   Args.GroupCount[2] = GroupCount[2];
+  Args.DrawID = DrawID;
   Args.GroupShared = GroupShared.data();
   Args.MaxPayloadBytes = static_cast<uint32_t>(Payload.size());
   Args.Payload = Payload.data();

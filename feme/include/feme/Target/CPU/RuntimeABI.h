@@ -1318,15 +1318,15 @@ struct FemeMeshArgs {
 /// groupshared allocation and barrier splitting unchanged" reason
 /// `FemeMeshArgs`'s own comment gives.
 ///
-/// **Left open by roadmap H6c**, mirroring `FemeMeshArgs`'s own note:
-/// nothing yet writes to `MeshGroupCount` (`EmitMeshTasksEXT` has no
-/// canonicalized `feme.stage.*` form yet -- left to a future roadmap row).
+/// **Left open by roadmap H6c** (now closed by roadmap H6s, see below):
 /// `Payload` is wired as of roadmap H6c-a-b: `feme::cpu::
 /// TaskPayloadWrapperPass` lowers a canonicalized `feme.stage.task.
 /// payload.store` (H6i) into a real store here, and
 /// `feme::graphics::Executor::executeDraws` backs this field with a live
 /// `feme::graphics::TaskPayloadBuilder` before invoking a compiled task
-/// stage.
+/// stage. `MeshGroupCount` is wired as of roadmap H6s: the same
+/// `TaskPayloadWrapperPass` lowers a canonicalized
+/// `feme.stage.emit_mesh_tasks` call into a real store here too.
 struct FemeTaskArgs {
   /// Identical in position and meaning to `FemeDispatchArgs::Resources`.
   FemeShaderResources Resources;
@@ -1342,18 +1342,25 @@ struct FemeTaskArgs {
   /// (`feme::graphics::TaskPayloadBuilder::getMaxPayloadBytes`'s host-side
   /// mirror).
   uint32_t MaxPayloadBytes;
-  /// Reserved 32-bit field to keep pointer fields naturally aligned.
-  uint32_t Reserved32;
+  /// SPIR-V's `DrawIndex` builtin (`gl_DrawID`), roadmap H6t: workgroup-
+  /// uniform, mirroring `FemeMeshArgs::DrawID`'s own precedent (roadmap
+  /// H6p) exactly -- see `feme::graphics::MeshDrawCommand::DrawID`'s own
+  /// comment for what value a task entry's own enclosing draw sets this
+  /// to.
+  uint32_t DrawID;
   /// This workgroup's payload storage, `MaxPayloadBytes` bytes, written by
   /// a canonicalized `TaskPayloadWorkgroupEXT` store
   /// (`feme::cpu::TaskPayloadWrapperPass`, roadmap H6c-a-b) and read back
-  /// by every mesh workgroup `EmitMeshTasksEXT` dispatches (once that
-  /// dispatch itself is canonicalized -- see the struct's own comment).
+  /// by every mesh workgroup `EmitMeshTasksEXT` dispatches (roadmap H6s,
+  /// see `feme::graphics::Executor::executeDraws`'s own task-stage
+  /// dispatch loop).
   void *Payload;
-  /// Written once by this workgroup's own `EmitMeshTasksEXT` call: the mesh
-  /// workgroup group count it requests. Zero-initialized by the caller;
-  /// still unwritten by any compiled shape this milestone supports (see
-  /// the struct's own comment).
+  /// Written once by this workgroup's own `EmitMeshTasksEXT` call
+  /// (roadmap H6s, `feme::cpu::TaskPayloadWrapperPass`'s
+  /// `lowerEmitMeshTasks`): the mesh workgroup group count it requests.
+  /// Zero-initialized by the caller; `Executor::executeDraws` reads this
+  /// back after invoking the task stage to build the mesh dispatch queue
+  /// it then runs.
   uint32_t *MeshGroupCount;
   /// ABI headroom for later task-batch metadata.
   void *Reserved[2];
