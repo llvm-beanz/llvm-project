@@ -88,6 +88,7 @@ add_feme_library(FeMeVulkanCore STATIC
   Diagnostics.cpp
   EntryPoints.cpp
   ETC2Decode.cpp
+  ETC2SamplingBridge.cpp
   Format.cpp
   GraphicsPipeline.cpp
   GroupSize.cpp
