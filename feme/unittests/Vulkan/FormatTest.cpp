@@ -143,7 +143,7 @@ TEST(FormatTest, MapsSignedPacked32BitFormats) {
 }
 
 TEST(FormatTest, RejectsUnsupportedFormat) {
-  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGB_UNORM_BLOCK), std::nullopt);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_PVRTC1_2BPP_UNORM_BLOCK_IMG), std::nullopt);
   EXPECT_EQ(mapVkFormat(VK_FORMAT_UNDEFINED), std::nullopt);
 }
 
@@ -240,6 +240,32 @@ TEST(FormatTest, MapsASTCLDRFormats) {
             ResourceFormat::ASTC_12x12_SFLOAT);
 }
 
+TEST(FormatTest, MapsBCFormats) {
+  // Roadmap H8n: all 16 `VK_FORMAT_BC*` block footprints.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGB_UNORM_BLOCK),
+            ResourceFormat::BC1_RGB_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGB_SRGB_BLOCK),
+            ResourceFormat::BC1_RGB_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGBA_UNORM_BLOCK),
+            ResourceFormat::BC1_RGBA_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGBA_SRGB_BLOCK),
+            ResourceFormat::BC1_RGBA_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC2_UNORM_BLOCK), ResourceFormat::BC2_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC2_SRGB_BLOCK), ResourceFormat::BC2_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC3_UNORM_BLOCK), ResourceFormat::BC3_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC3_SRGB_BLOCK), ResourceFormat::BC3_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC4_UNORM_BLOCK), ResourceFormat::BC4_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC4_SNORM_BLOCK), ResourceFormat::BC4_SNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC5_UNORM_BLOCK), ResourceFormat::BC5_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC5_SNORM_BLOCK), ResourceFormat::BC5_SNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC6H_UFLOAT_BLOCK),
+            ResourceFormat::BC6H_UFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC6H_SFLOAT_BLOCK),
+            ResourceFormat::BC6H_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC7_UNORM_BLOCK), ResourceFormat::BC7_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_BC7_SRGB_BLOCK), ResourceFormat::BC7_SRGB);
+}
+
 TEST(FormatTest, ElementSizeMatchesFormatWidth) {
   EXPECT_EQ(formatElementSize(ResourceFormat::R32_FLOAT), 4u);
   EXPECT_EQ(formatElementSize(ResourceFormat::R32G32_FLOAT), 8u);
@@ -257,6 +283,9 @@ TEST(FormatTest, ElementSizeMatchesFormatWidth) {
   EXPECT_EQ(formatElementSize(ResourceFormat::ASTC_4x4_UNORM), 0u);
   // Roadmap E21: same for the HDR-only variants.
   EXPECT_EQ(formatElementSize(ResourceFormat::ASTC_4x4_SFLOAT), 0u);
+  // Roadmap H8n: same for every BC format.
+  EXPECT_EQ(formatElementSize(ResourceFormat::BC1_RGB_UNORM), 0u);
+  EXPECT_EQ(formatElementSize(ResourceFormat::BC7_SRGB), 0u);
 }
 
 TEST(FormatTest, BlockDimensionsMatchASTCFootprint) {
@@ -292,6 +321,34 @@ TEST(FormatTest, BlockDimensionsMatchASTCFootprint) {
   EXPECT_EQ(bytesPerBlock(ResourceFormat::Unknown), 0u);
 }
 
+TEST(FormatTest, BlockDimensionsMatchBCFootprint) {
+  // Roadmap H8n: every BC format shares the same 4x4 texel footprint, but
+  // BC1/BC4 pack into an 8-byte (64-bit) block while every other BC
+  // format packs into a 16-byte (128-bit) block.
+  for (ResourceFormat Format :
+       {ResourceFormat::BC1_RGB_UNORM, ResourceFormat::BC1_RGB_SRGB,
+        ResourceFormat::BC1_RGBA_UNORM, ResourceFormat::BC1_RGBA_SRGB,
+        ResourceFormat::BC2_UNORM, ResourceFormat::BC2_SRGB,
+        ResourceFormat::BC3_UNORM, ResourceFormat::BC3_SRGB,
+        ResourceFormat::BC4_UNORM, ResourceFormat::BC4_SNORM,
+        ResourceFormat::BC5_UNORM, ResourceFormat::BC5_SNORM,
+        ResourceFormat::BC6H_UFLOAT, ResourceFormat::BC6H_SFLOAT,
+        ResourceFormat::BC7_UNORM, ResourceFormat::BC7_SRGB}) {
+    EXPECT_EQ(blockWidth(Format), 4u);
+    EXPECT_EQ(blockHeight(Format), 4u);
+  }
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::BC1_RGB_UNORM), 8u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::BC1_RGBA_SRGB), 8u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::BC4_UNORM), 8u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::BC4_SNORM), 8u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::BC2_UNORM), 16u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::BC3_SRGB), 16u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::BC5_UNORM), 16u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::BC6H_UFLOAT), 16u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::BC6H_SFLOAT), 16u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::BC7_UNORM), 16u);
+}
+
 TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   // The CPU runtime's typed-load/store helpers implement a conversion for
   // exactly these formats (see femeCpuResourceLoadTypedV4F32/V4I32 in
@@ -324,6 +381,9 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::ASTC_4x4_UNORM));
   // Roadmap E21: neither can an HDR-only variant.
   EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::ASTC_4x4_SFLOAT));
+  // Roadmap H8n: nor can a BC format.
+  EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::BC1_RGB_UNORM));
+  EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::BC7_SRGB));
 }
 
 TEST(FormatTest, VertexBufferFormatSupportMatchesDecodeAttributeScope) {
@@ -395,6 +455,8 @@ TEST(FormatTest, VertexBufferFormatSupportMatchesDecodeAttributeScope) {
   EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::B8G8R8A8_UNORM));
   EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::Unknown));
   EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::ASTC_4x4_UNORM));
+  // Roadmap H8n: nor can a BC format.
+  EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::BC1_RGB_UNORM));
 }
 
 TEST(FormatTest, MapsA8B8G8R8Pack32FormatsOntoR8G8B8A8) {
@@ -428,6 +490,28 @@ TEST(FormatTest, IsBlockCompressedFormatDistinguishesASTC) {
   EXPECT_FALSE(
       feme::cpu::isBlockCompressedFormat(ResourceFormat::R8G8B8A8_UNORM));
   EXPECT_FALSE(feme::cpu::isBlockCompressedFormat(ResourceFormat::Unknown));
+}
+
+TEST(FormatTest, IsBlockCompressedFormatDistinguishesBC) {
+  // Roadmap H8n: every one of the 16 `VK_FORMAT_BC*` formats is block-
+  // compressed too, and `isBCFormat`/`isASTCFormat` partition that same
+  // predicate into its two disjoint families.
+  EXPECT_TRUE(
+      feme::cpu::isBlockCompressedFormat(ResourceFormat::BC1_RGB_UNORM));
+  EXPECT_TRUE(feme::cpu::isBlockCompressedFormat(ResourceFormat::BC7_SRGB));
+  EXPECT_TRUE(feme::cpu::isBCFormat(ResourceFormat::BC1_RGB_UNORM));
+  EXPECT_TRUE(feme::cpu::isBCFormat(ResourceFormat::BC7_SRGB));
+  EXPECT_FALSE(feme::cpu::isBCFormat(ResourceFormat::ASTC_4x4_UNORM));
+  EXPECT_FALSE(feme::cpu::isASTCFormat(ResourceFormat::BC1_RGB_UNORM));
+  EXPECT_FALSE(feme::cpu::isBCFormat(ResourceFormat::R8G8B8A8_UNORM));
+  EXPECT_FALSE(feme::cpu::isBCFormat(ResourceFormat::Unknown));
+  // BC1/BC2/BC3/BC7 decode to RGBA8; BC4/BC5/BC6H do not.
+  EXPECT_TRUE(feme::cpu::isBCRGBA8Format(ResourceFormat::BC1_RGB_UNORM));
+  EXPECT_TRUE(feme::cpu::isBCRGBA8Format(ResourceFormat::BC3_SRGB));
+  EXPECT_TRUE(feme::cpu::isBCRGBA8Format(ResourceFormat::BC7_UNORM));
+  EXPECT_FALSE(feme::cpu::isBCRGBA8Format(ResourceFormat::BC4_UNORM));
+  EXPECT_FALSE(feme::cpu::isBCRGBA8Format(ResourceFormat::BC5_SNORM));
+  EXPECT_FALSE(feme::cpu::isBCRGBA8Format(ResourceFormat::BC6H_UFLOAT));
 }
 
 TEST(FormatTest, FormatFeatureFlagsRejectsUnknownFormat) {
@@ -483,7 +567,16 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         ResourceFormat::R16G16_FLOAT, ResourceFormat::R16G16_UNORM,
         ResourceFormat::R16G16_SNORM,
         // Roadmap H19o: `R10G10B10A2_SNORM`.
-        ResourceFormat::R10G10B10A2_SNORM}) {
+        ResourceFormat::R10G10B10A2_SNORM,
+        // Roadmap H8n: every one of the 16 `VK_FORMAT_BC*` formats
+        // samples too, via `materializeImageDescriptor`'s own BC decode
+        // bridge (mirroring the ASTC LDR bridge above).
+        ResourceFormat::BC1_RGB_UNORM, ResourceFormat::BC1_RGBA_SRGB,
+        ResourceFormat::BC2_UNORM, ResourceFormat::BC3_SRGB,
+        ResourceFormat::BC4_UNORM, ResourceFormat::BC4_SNORM,
+        ResourceFormat::BC5_UNORM, ResourceFormat::BC5_SNORM,
+        ResourceFormat::BC6H_UFLOAT, ResourceFormat::BC6H_SFLOAT,
+        ResourceFormat::BC7_UNORM, ResourceFormat::BC7_SRGB}) {
     VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
@@ -696,6 +789,22 @@ TEST(FormatTest, FormatFeatureFlagsBlitBitsMatchImageOpsRejections) {
                VK_FORMAT_FEATURE_BLIT_SRC_BIT);
   EXPECT_FALSE(formatFeatureFlags(ResourceFormat::ASTC_4x4_SFLOAT) &
                VK_FORMAT_FEATURE_BLIT_DST_BIT);
+  // Roadmap H8n: the same holds for BC -- every BC destination is
+  // rejected, but an RGBA8-shaped BC source (BC1/BC2/BC3/BC7) is a legal
+  // blit source while a BC4/BC5/BC6H source (whose decoded shape does not
+  // fit `runBlitImage`'s own RGBA8-only pipeline) is not.
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::BC1_RGBA_UNORM) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::BC1_RGBA_UNORM) &
+               VK_FORMAT_FEATURE_BLIT_DST_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::BC7_SRGB) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::BC4_UNORM) &
+               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::BC5_SNORM) &
+               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::BC6H_SFLOAT) &
+               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
 }
 
 } // namespace

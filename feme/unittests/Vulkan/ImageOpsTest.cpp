@@ -553,4 +553,70 @@ TEST_F(ImageOpsTest, RejectsBlitOfHDRASTCSource) {
   vkDestroyImage(Device, Dst, nullptr);
 }
 
+/// Roadmap H8n: a nearest blit from a BC1 source decodes each fetched
+/// texel through `feme::vulkan::decodeBCBlock` (`runBlitImage`'s own
+/// `srcColor`, via `BCSamplingBridge.h`) -- BC1 is the RGBA8-shaped half
+/// of the BC family (`isBCRGBA8Format`), mirroring `BlitDecodesASTCSource`
+/// above. `color0 == color1` (both opaque red in RGB565) forces BC1's own
+/// four-color (opaque) mode regardless of the 2-bit index field, so every
+/// texel decodes to opaque red no matter which index each texel encodes.
+TEST_F(ImageOpsTest, BlitDecodesBC1Source) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  uint8_t Block[8] = {};
+  // color0 = color1 = RGB565 opaque red (R=31, G=0, B=0) => 0xF800,
+  // little-endian bytes 0x00, 0xF8; leave the two 4-byte index fields
+  // implicit-zero.
+  Block[0] = 0x00;
+  Block[1] = 0xF8;
+  Block[2] = 0x00;
+  Block[3] = 0xF8;
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 0, 0, 0), Block,
+              sizeof(Block));
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  for (uint32_t Y = 0; Y != 4; ++Y)
+    for (uint32_t X = 0; X != 4; ++X) {
+      EXPECT_EQ(texel(Dst, X, Y)[0], 255);
+      EXPECT_EQ(texel(Dst, X, Y)[1], 0);
+      EXPECT_EQ(texel(Dst, X, Y)[2], 0);
+      EXPECT_EQ(texel(Dst, X, Y)[3], 255);
+    }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// Roadmap H8n: BC4/BC5/BC6H are rejected as a blit source -- their own
+/// sampling-bridge targets (`R8_UNORM`/`R8G8_UNORM`/`R16G16B16A16_FLOAT`)
+/// do not fit `runBlitImage`'s own RGBA8-only
+/// `unpackColor`/`packClearColor` pipeline, mirroring
+/// `RejectsBlitOfHDRASTCSource` above.
+TEST_F(ImageOpsTest, RejectsBlitOfBC4Source) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_BC4_UNORM_BLOCK);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  llvm::Error E = runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                               Region, VK_FILTER_NEAREST);
+  EXPECT_TRUE(static_cast<bool>(E));
+  llvm::consumeError(std::move(E));
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
 } // namespace
+

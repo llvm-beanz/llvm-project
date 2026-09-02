@@ -43,8 +43,8 @@ protected:
 
 TEST_F(EntryPointsTest, FormatPropertiesRejectsUnrecognizedFormat) {
   VkFormatProperties Props{};
-  vkGetPhysicalDeviceFormatProperties(Physical, VK_FORMAT_BC1_RGB_UNORM_BLOCK,
-                                      &Props);
+  vkGetPhysicalDeviceFormatProperties(
+      Physical, VK_FORMAT_PVRTC1_2BPP_UNORM_BLOCK_IMG, &Props);
   EXPECT_EQ(Props.linearTilingFeatures, VkFormatFeatureFlags(0));
   EXPECT_EQ(Props.optimalTilingFeatures, VkFormatFeatureFlags(0));
   EXPECT_EQ(Props.bufferFeatures, VkFormatFeatureFlags(0));
@@ -118,8 +118,9 @@ TEST_F(EntryPointsTest, FormatProperties2MatchesFormatProperties) {
 TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsUnrecognizedFormat) {
   VkImageFormatProperties Props{};
   EXPECT_EQ(vkGetPhysicalDeviceImageFormatProperties(
-                Physical, VK_FORMAT_BC1_RGB_UNORM_BLOCK, VK_IMAGE_TYPE_2D,
-                VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
+                Physical, VK_FORMAT_PVRTC1_2BPP_UNORM_BLOCK_IMG,
+                VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+                VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
             VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
 

@@ -3500,6 +3500,82 @@ TEST_F(ASTCSampledImageDispatchTest,
 
 namespace {
 
+/// (Roadmap H8n) The same scenario as `ASTCSampledImageDispatchTest`, but
+/// for a single-block `VK_FORMAT_BC1_RGBA_UNORM_BLOCK` image, verifying
+/// `materializeImageDescriptor`'s new BC decode branch (`BCSamplingBridge.h`)
+/// actually reaches a shader.
+class BC1SampledImageDispatchTest : public SampledImageDispatchTest {
+protected:
+  void createImage() override {
+    VkImageCreateInfo ImageInfo{};
+    ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+    ImageInfo.format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    ImageInfo.extent = {4, 4, 1};
+    ImageInfo.mipLevels = 1;
+    ImageInfo.arrayLayers = 1;
+    ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = 8; // One 4x4 BC1 block, 64 bits.
+    AllocInfo.memoryTypeIndex = 0;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &ImageMemory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindImageMemory(Device, Img, ImageMemory, 0), VK_SUCCESS);
+    ASSERT_EQ(vkMapMemory(Device, ImageMemory, 0, VK_WHOLE_SIZE, 0, &Texels),
+              VK_SUCCESS);
+
+    // `color0 == color1` (both opaque red in RGB565) forces BC1's own
+    // four-color (opaque) mode regardless of the index field, so every
+    // texel in the block decodes to opaque red (R=255, G=0, B=0, A=255).
+    auto *Bytes = static_cast<uint8_t *>(Texels);
+    std::memset(Bytes, 0, 8);
+    Bytes[0] = 0x00;
+    Bytes[1] = 0xF8;
+    Bytes[2] = 0x00;
+    Bytes[3] = 0xF8;
+
+    VkImageViewCreateInfo ViewInfo{};
+    ViewInfo.image = Img;
+    ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ViewInfo.format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ViewInfo.subresourceRange.levelCount = 1;
+    ViewInfo.subresourceRange.layerCount = 1;
+    ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+  }
+};
+
+} // namespace
+
+TEST_F(BC1SampledImageDispatchTest,
+       SamplesARealDecodedTexelRatherThanAllZero) {
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  writeDescriptorSet();
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_FLOAT_EQ(Result[0], 1.0f);
+  EXPECT_FLOAT_EQ(Result[1], 0.0f);
+  EXPECT_FLOAT_EQ(Result[2], 0.0f);
+  EXPECT_FLOAT_EQ(Result[3], 1.0f);
+}
+
+namespace {
+
 /// (Roadmap H7b) The same scenario `SampledImageDispatchTest` exercises,
 /// but over a two-layer image whose bound view selects layer 1 via a
 /// nonzero `baseArrayLayer` -- `materializeImageDescriptor` used to
