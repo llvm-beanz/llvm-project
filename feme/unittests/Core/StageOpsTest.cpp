@@ -206,6 +206,26 @@ TEST_F(StageOpsTest, SetMeshOutputsIsVoidAndNotOverloaded) {
   EXPECT_EQ(Kind, StageOpKind::SetMeshOutputs);
 }
 
+/// (Roadmap H6s) `EmitMeshTasks` mirrors `SetMeshOutputs` exactly: all
+/// three operands are always `i32`, so its callee name likewise carries no
+/// type-mangling suffix.
+TEST_F(StageOpsTest, EmitMeshTasksIsVoidAndNotOverloaded) {
+  Value *GroupCountX = ConstantInt::get(B.getInt32Ty(), 4);
+  Value *GroupCountY = ConstantInt::get(B.getInt32Ty(), 5);
+  Value *GroupCountZ = ConstantInt::get(B.getInt32Ty(), 6);
+  CallInst *CI =
+      createStageEmitMeshTasks(B, GroupCountX, GroupCountY, GroupCountZ);
+  EXPECT_TRUE(CI->getType()->isVoidTy());
+  EXPECT_EQ(CI->getCalledFunction()->getName(), "feme.stage.emit_mesh_tasks");
+  EXPECT_EQ(CI->getArgOperand(0), GroupCountX);
+  EXPECT_EQ(CI->getArgOperand(1), GroupCountY);
+  EXPECT_EQ(CI->getArgOperand(2), GroupCountZ);
+
+  StageOpKind Kind;
+  ASSERT_TRUE(isStageOpCall(*CI, &Kind));
+  EXPECT_EQ(Kind, StageOpKind::EmitMeshTasks);
+}
+
 TEST_F(StageOpsTest, NonStageOpCallIsRejected) {
   FunctionCallee Callee =
       M->getOrInsertFunction("not.a.stage.op", B.getVoidTy());

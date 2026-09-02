@@ -460,4 +460,56 @@ TEST(PreparedMeshBatchTest, ArgsDefaultsDrawIDToZero) {
   EXPECT_EQ(Args.DrawID, 0u);
 }
 
+// (Roadmap H6s) `TaskResources::MeshGroupCount` (the address a task
+// entry's own compiled `EmitMeshTasksEXT` call writes its requested mesh
+// dispatch's 3D group count through, see `RuntimeABI.h`'s own comment on
+// `FemeTaskArgs::MeshGroupCount`) threads through `PreparedTaskBatch::args`
+// unchanged -- this is the host-ABI half of the wiring
+// `TaskPayloadWrapperTest.LowersEmitMeshTasks` covers at the CPU-lowering
+// phase, and `Executor::executeDraws`'s own read-back relies on this
+// pointer being the exact address it originally passed in.
+TEST(PreparedTaskBatchTest, ArgsCarriesTheMeshGroupCountPointer) {
+  ResourceInfo Info;
+  uint32_t MeshGroupCount[3] = {0, 0, 0};
+  TaskResources Resources;
+  Resources.GroupCount = {2, 1, 1};
+  Resources.MeshGroupCount = MeshGroupCount;
+  PreparedTaskBatch Prepared = PreparedTaskBatch::create(Info, Resources);
+
+  FemeTaskArgs Args = Prepared.args();
+  EXPECT_EQ(Args.GroupCount[0], 2u);
+  EXPECT_EQ(Args.MeshGroupCount, MeshGroupCount);
+}
+
+// (Roadmap H6t) `TaskResources::DrawID` (SPIR-V's `DrawIndex` builtin,
+// `gl_DrawID`) threads through `PreparedTaskBatch::args` unchanged --
+// mirrors `PreparedMeshBatchTest.ArgsCarriesTheRequestedDrawID`'s own
+// coverage of the same builtin on the mesh-stage side exactly.
+TEST(PreparedTaskBatchTest, ArgsCarriesTheRequestedDrawID) {
+  ResourceInfo Info;
+  TaskResources Resources;
+  Resources.GroupCount = {4, 1, 1};
+  Resources.DrawID = 7;
+  PreparedTaskBatch Prepared = PreparedTaskBatch::create(Info, Resources);
+
+  FemeTaskArgs Args = Prepared.args();
+  EXPECT_EQ(Args.GroupCount[0], 4u);
+  EXPECT_EQ(Args.DrawID, 7u);
+}
+
+// A `TaskResources` left default-initialized (mirroring a direct
+// `vkCmdDrawMeshTasksEXT` draw with no task shader at all, which never
+// sets `MeshDrawCommand::DrawID` explicitly) reports `gl_DrawID == 0`,
+// matching the spec's own "0 for a direct, non-multi-draw-indirect draw
+// command" meaning -- mirrors `PreparedMeshBatchTest.
+// ArgsDefaultsDrawIDToZero`'s own coverage exactly.
+TEST(PreparedTaskBatchTest, ArgsDefaultsDrawIDToZero) {
+  ResourceInfo Info;
+  TaskResources Resources;
+  PreparedTaskBatch Prepared = PreparedTaskBatch::create(Info, Resources);
+
+  FemeTaskArgs Args = Prepared.args();
+  EXPECT_EQ(Args.DrawID, 0u);
+}
+
 } // namespace
