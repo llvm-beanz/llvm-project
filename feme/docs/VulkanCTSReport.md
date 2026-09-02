@@ -20994,3 +20994,91 @@ row -- confirmed, not assumed: this row only widens
 `VkFormatFeatureFlags` for 3 already-recognized formats.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap H8p: measured impact
+
+H8e split this row off as the genuine (not reporting-only) gap behind
+7 of its own 9 named formats' missing `COLOR_ATTACHMENT_BIT`:
+`r16_{sint,uint}`, `r16g16_{sint,uint}`, `a2b10g10r10_uint_pack32`,
+`a8b8g8r8_{uint,sint}_pack32`. The blocker was not the advertised bit
+itself but `Executor.cpp`'s `executeDraws`, which hard-rejected any
+fragment output whose `ComponentType != Float` outright regardless of
+the target attachment's own format -- no `ivec4`/`uvec4` fragment
+output could be created or drawn at all before this row.
+
+Fixed this row: widened `executeDraws`'s `FSColors` validation to a
+new `expectedColorComponentType` helper (`UInt`/`SInt` for one of the
+7 integer formats, `Float` otherwise); added a new
+`readFragmentColorInt` counterpart to `readFragmentColor` (reads
+`StageStorage::readRaw`'s raw bits directly rather than `readFloat`'s
+IEEE-754 interpretation, since GLSL `int`/`uint` outputs are already
+32-bit -- no `StageStorage` layout widening was needed, unlike H6m's
+distinct `bool`/`i1` scope-limit problem); added `isIntegerColor
+AttachmentFormat`/`isUnsignedIntegerColorAttachmentFormat` predicates
+to `RuntimeABI.h`; added dedicated raw-integer (not normalized
+fraction, mirroring `S8_UINT`'s own documented precedent)
+`packClearColor`/`unpackColor` cases for all 7 formats to
+`ImageFixture.cpp`, plus 4 new `FormatInfo` entries for
+`R16_{UINT,SINT}`/`R16G16_{UINT,SINT}` that `getFixtureFormatElement
+Size` needs (a real gap this row found: unlike `R8G8B8A8_UINT`/
+`_SINT`/`R10G10B10A2_UINT`, these 4 formats had no `FormatInfo` entry
+at all before this row, since nothing had made them reachable as a
+real color attachment yet); added the 7 new `true` cases to
+`RenderPass.cpp`'s `isSupportedColorAttachmentFormat`; widened
+`Format.cpp`'s `formatFeatureFlags` to grant `COLOR_ATTACHMENT_BIT`
+unconditionally once `isSupportedColorAttachmentFormat` is true, but
+gate `COLOR_ATTACHMENT_BLEND_BIT` off specifically for
+`isIntegerColorAttachmentFormat` formats (confirmed via the real CTS
+log that none of the 7 ever need `BLEND_BIT`, matching spec: blending
+is undefined for an integer format); added a defensive `mergeColor`
+guard rejecting `Blend.BlendEnable` combined with an integer format
+(newly reachable now, previously impossible), mirroring the existing
+logic-op format restriction.
+
+Incidentally fixed a pre-existing latent bug this row's own
+investigation found: `mergeColor`'s logic-op code path already
+referenced `R8G8B8A8_UINT`/`_SINT` support in its own error message,
+but no real `packClearColor`/`unpackColor` case existed for either
+format before this row -- unreachable before H8p (no integer fragment
+output could be drawn at all), so silently broken and untested.
+
+12 new unit tests: `ImageFixtureTest.cpp` (6 pack/unpack round-trips
+covering all 7 formats and both signedness cases, including the
+packed `R10G10B10A2_UINT` bitfield layout); `ExecutorTest.cpp` (a real
+end-to-end `uvec2`-to-`R16G16_UINT` draw confirming the correct raw
+integer values land in the attachment; a rejection test for a
+mismatched `Float` output against an integer attachment; a rejection
+test for `Blend.BlendEnable` against an integer attachment);
+`FormatTest.cpp`/`RenderPassTest.cpp` (feature-flag-gating coverage
+confirming `BLEND_BIT` stays excluded, and real `vkCreateRenderPass`
+coverage for all 7 formats).
+
+A real `dEQP-VK.api.info.format_properties.*` re-run (225 cases)
+confirms all 7 target formats now report `COLOR_ATTACHMENT_BIT`
+correctly: 199/225 pass overall, up from 193/225. The 2 formats still
+failing overall (`r16g16_{uint,sint}`) now fail for an entirely
+different, already-tracked reason (`UNIFORM_TEXEL_BUFFER_BIT`,
+roadmap H8d's own scope -- confirmed unrelated to this row's own
+`COLOR_ATTACHMENT_BIT` fix by inspecting the exact missing-bit
+message), and `r8g8b8a8_uint` still fails overall too (`STORAGE_IMAGE
+_BIT`, a separate pre-existing gap for a different `VkFormat` sharing
+the same underlying `ResourceFormat` as `a8b8g8r8_uint_pack32`, also
+already out of this row's own scope per H8e's own investigation).
+
+A broader `dEQP-VK.api.info.*` sweep (10,484 cases) shows no new
+failures introduced by this row's own changes. A stashed-vs-unstashed
+`dEQP-VK.pipeline.monolithic.blend.format.r8g8b8a8_unorm.*` comparison
+(6/100 both before and after this row's changes) confirms this row's
+`mergeColor` guard introduces no regression to the existing (already
+low, pre-existing, unrelated) float-format blend-equation coverage.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full:
+2,409/2,436 Total Discovered Tests (27 pre-existing `Unsupported`,
+0 `Failed`, up 12 tests from this row's own new coverage).
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+row -- confirmed, not assumed: this row only widens
+`VkFormatFeatureFlags` for 7 already-recognized formats and adds real
+rendering-path support for them.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
