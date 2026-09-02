@@ -79,6 +79,7 @@ add_feme_library(FeMeVulkanCore STATIC
   ASTCDecode.cpp
   BC7Decode.cpp
   BCDecode.cpp
+  BCPartitionTables.cpp
   Buffer.cpp
   CommandBuffer.cpp
   Descriptor.cpp
