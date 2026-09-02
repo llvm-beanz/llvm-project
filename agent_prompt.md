@@ -37,17 +37,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8k or other prerequisites blocking the H-series milestones?
+Can you work on H8l or other prerequisites blocking the H-series milestones?
 
-> **BC6H/BC7 compressed-format sampling** (deferred from H8i's own BC1-5 slice).
-> BC6H (`VK_FORMAT_BC6H_*`, HDR half-float endpoint interpolation across 14
-> partition/mode shapes) and BC7 (`VK_FORMAT_BC7_*`, 8 modes, variable partition
-> counts, rotation, index selection) are both dramatically more complex than
-> BC1-5 or ETC2/EAC's own bounded algorithms -- needs its own scoping pass
-> (likely splitting BC6H and BC7 into their own further sub-rows once the
-> per-mode complexity is better understood) before any code lands. Like H8i's
-> own BC1-5 slice, `vktTextureCompressedFormatTests.cpp`'s whole-family
-> `textureCompressionBC` gate means no CTS case passes until all 16 BC formats
-> (BC1-5 plus these remaining 4) are complete, so this row alone still will not
-> move any CTS case even once landed -- only wiring row H8j's own BC counterpart
-> (not yet filed) will
+> **BC7 compressed-format sampling** (split from H8k's own scoping pass; attempt
+> before H8m/BC6H since it needs no half-float unquantization). Needs a new
+> `BC7Decode.h`/`.cpp` (or an extension of `BCDecode.h`/`.cpp`, whichever proves
+> cleaner once the per-mode bit-layout tables are drafted) implementing all 8
+> BC7 modes per the Khronos `bptc.txt` specification: per-mode
+> partition-selection bits (64 3-subset / 64 2-subset partition patterns, each a
+> `4x4` texel-to-subset-index lookup table), rotation bits (modes 4/5 only,
+> swaps a channel with alpha per-block), index-selection bit (modes 4/5 only,
+> swaps which index field drives color vs. alpha), per-endpoint or shared P-bits
+> (reconstructing the low bit of each endpoint channel before 8-bit
+> replication-extension), and the anchor-index convention (the first index of
+> any subset after subset 0 has one fewer bit, always implicitly 0, to break an
+> encoding symmetry) -- mirroring how this project's own `ASTCDecode.cpp`
+> already handles a comparable partition-table-driven decode. Standalone,
+> directly-unit-tested, initially unwired, matching every decoder in this file
+> family's own precedent
