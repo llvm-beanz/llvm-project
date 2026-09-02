@@ -55,6 +55,23 @@ bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format) {
     // case each, unlike their `A4R4G4B4_UNORM`/`A4B4G4R4_UNORM` (E19)
     // neighbors, which recognize the `VkFormat` but implement neither.
     return true;
+  case feme::cpu::ResourceFormat::R8G8B8A8_UINT:
+  case feme::cpu::ResourceFormat::R8G8B8A8_SINT:
+  case feme::cpu::ResourceFormat::R10G10B10A2_UINT:
+  case feme::cpu::ResourceFormat::R16_UINT:
+  case feme::cpu::ResourceFormat::R16_SINT:
+  case feme::cpu::ResourceFormat::R16G16_UINT:
+  case feme::cpu::ResourceFormat::R16G16_SINT:
+    // (Roadmap H8p) The 7 real integer color-attachment formats: a real
+    // `UInt`/`SInt` fragment output can now be validated
+    // (`Executor.cpp`'s `executeDraws`) and written
+    // (`readFragmentColorInt`/`packClearColor`/`unpackColor`) to one of
+    // these, unlike every other still-`false` integer format below --
+    // but note these are `COLOR_ATTACHMENT_BIT`-only, never
+    // `COLOR_ATTACHMENT_BLEND_BIT` (`Format.cpp`'s `formatFeatureFlags`
+    // gates that bit off separately for `isIntegerColorAttachmentFormat`),
+    // since blending is undefined for an integer format per spec.
+    return true;
   default:
     // Every other format is either unknown to the executor's own
     // pack/unpack table (`feme::graphics::packClearColor`) or an integer

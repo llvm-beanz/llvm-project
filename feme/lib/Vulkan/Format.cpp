@@ -1133,9 +1133,17 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
     break;
   }
 
-  if (isSupportedColorAttachmentFormat(Format))
-    Flags |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-             VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+  if (isSupportedColorAttachmentFormat(Format)) {
+    Flags |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    // (Roadmap H8p) Blending is undefined for an integer color format per
+    // spec -- confirmed by the real CTS run this row's own investigation
+    // used, which shows all 7 integer color-attachment formats
+    // (`isIntegerColorAttachmentFormat`, `RuntimeABI.h`) never advertise
+    // `COLOR_ATTACHMENT_BLEND_BIT` -- so only the non-integer formats
+    // `isSupportedColorAttachmentFormat` also recognizes get it.
+    if (!isIntegerColorAttachmentFormat(Format))
+      Flags |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+  }
   if (isSupportedDepthAttachmentFormat(Format) ||
       isSupportedStencilAttachmentFormat(Format))
     Flags |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;

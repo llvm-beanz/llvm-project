@@ -935,6 +935,26 @@ TEST(FormatTest, FormatFeatureFlagsAttachmentBitsMatchRenderPassSupport) {
                VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
 }
 
+// (Roadmap H8p) The 7 real integer color-attachment formats get
+// `COLOR_ATTACHMENT_BIT` (a real `UInt`/`SInt` fragment output can now be
+// drawn to one, `Executor.cpp`'s `executeDraws`/`readFragmentColorInt`),
+// but never `COLOR_ATTACHMENT_BLEND_BIT` -- blending is undefined for an
+// integer format per spec, confirmed by the real CTS run this row's own
+// investigation used.
+TEST(FormatTest, IntegerColorAttachmentFormatsGetOnlyColorAttachmentBit) {
+  for (ResourceFormat Format :
+       {ResourceFormat::R8G8B8A8_UINT, ResourceFormat::R8G8B8A8_SINT,
+        ResourceFormat::R10G10B10A2_UINT, ResourceFormat::R16_UINT,
+        ResourceFormat::R16_SINT, ResourceFormat::R16G16_UINT,
+        ResourceFormat::R16G16_SINT}) {
+    VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+        << "format " << static_cast<int>(Format);
+    EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)
+        << "format " << static_cast<int>(Format);
+  }
+}
+
 TEST(FormatTest, FormatFeatureFlagsBlitBitsMatchImageOpsRejections) {
   // Roadmap E24: `ImageOps.cpp`'s `runBlitImage` rejects a
   // block-compressed *destination* outright and an HDR ASTC *source*, but
