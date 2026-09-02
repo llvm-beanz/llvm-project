@@ -8,6 +8,7 @@
 
 #include "CommandBuffer.h"
 #include "ASTCDecode.h"
+#include "BCSamplingBridge.h"
 #include "Buffer.h"
 #include "Descriptor.h"
 #include "Format.h"
@@ -321,6 +322,69 @@ DecodedASTCImage decodeASTCImageForSampling(const Image *Img, uint32_t BaseMip,
   return Result;
 }
 
+/// (Roadmap H8n) The BC analogue of `decodeASTCImageForSampling` above:
+/// decodes mip levels `[BaseMip, BaseMip + LevelCount)`, array layer 0
+/// only (same Texture2D-only, layer-0-only scope as the ASTC bridge), of
+/// a `VK_FORMAT_BC*`-format image into a per-texel buffer of
+/// \p BytesPerTexel bytes each (1, 2, 4, or 8, per `bcSamplingTarget`),
+/// one block at a time via `decodeBCBlock`. Reuses `DecodedASTCImage`'s
+/// own two-field shape (decoded texel bytes plus a per-texel
+/// `FemeImageSubresourceLayout` table) since nothing about it is
+/// ASTC-specific.
+DecodedASTCImage decodeBCImageForSampling(const Image *Img, uint32_t BaseMip,
+                                          uint32_t LevelCount,
+                                          uint32_t BytesPerTexel) {
+  DecodedASTCImage Result;
+  uint32_t BlockW = blockWidth(Img->format());
+  uint32_t BlockH = blockHeight(Img->format());
+
+  std::vector<std::pair<uint32_t, uint32_t>> LevelExtents(LevelCount);
+  Result.MipLayouts.resize(LevelCount);
+  uint64_t Offset = 0;
+  for (uint32_t L = 0; L != LevelCount; ++L) {
+    uint32_t Level = BaseMip + L;
+    uint32_t W = std::max(1u, Img->width() >> Level);
+    uint32_t H = std::max(1u, Img->height() >> Level);
+    LevelExtents[L] = {W, H};
+    uint64_t RowPitch = uint64_t(W) * BytesPerTexel;
+    uint64_t SlicePitch = RowPitch * H;
+    Result.MipLayouts[L] = {Offset, RowPitch, SlicePitch, 0};
+    Offset += SlicePitch;
+  }
+  Result.Texels.resize(Offset);
+
+  std::vector<uint8_t> BlockBuf(size_t(BlockW) * BlockH * BytesPerTexel);
+  for (uint32_t L = 0; L != LevelCount; ++L) {
+    auto [W, H] = LevelExtents[L];
+    uint32_t BlocksX = (W + BlockW - 1) / BlockW;
+    uint32_t BlocksY = (H + BlockH - 1) / BlockH;
+    uint8_t *LevelBase = Result.Texels.data() + Result.MipLayouts[L].Offset;
+    uint64_t RowPitch = Result.MipLayouts[L].RowPitch;
+    for (uint32_t BY = 0; BY != BlocksY; ++BY) {
+      for (uint32_t BX = 0; BX != BlocksX; ++BX) {
+        const auto *Block = static_cast<const uint8_t *>(
+            Img->blockPointer(BaseMip + L, /*ArrayLayer=*/0, BX, BY, /*Z=*/0));
+        decodeBCBlock(Img->format(), Block, BlockBuf.data());
+        // A non-integer-multiple mip extent's rightmost/bottommost block
+        // only partially covers the image -- copy just the in-bounds
+        // rows/columns of it, mirroring `decodeASTCImageForSampling`'s
+        // own handling of the same case.
+        uint32_t CopyW = std::min(BlockW, W - BX * BlockW);
+        uint32_t CopyH = std::min(BlockH, H - BY * BlockH);
+        for (uint32_t Y = 0; Y != CopyH; ++Y) {
+          uint8_t *DstRow = LevelBase +
+                            uint64_t(BY * BlockH + Y) * RowPitch +
+                            uint64_t(BX) * BlockW * BytesPerTexel;
+          const uint8_t *SrcRow =
+              &BlockBuf[size_t(Y) * BlockW * BytesPerTexel];
+          std::memcpy(DstRow, SrcRow, size_t(CopyW) * BytesPerTexel);
+        }
+      }
+    }
+  }
+  return Result;
+}
+
 /// Resolves one `VkImageView` binding into the `feme::cpu::
 /// FemeImageDescriptor` a compiled stage's image heap holds (V5's remaining
 /// deviation, now closed by roadmap R30's SPIR-V image lowering), or leaves
@@ -449,6 +513,26 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
         isASTCSRGBFormat(Img->format())
             ? feme::cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB
             : feme::cpu::ResourceFormat::R8G8B8A8_UNORM);
+    Dst.MipLayouts = Result.DecodedImageLayoutStorage.back().data();
+    Dst.MipLayoutCount = LevelCount;
+    return;
+  }
+
+  if (feme::cpu::isBCFormat(Img->format())) {
+    // (Roadmap H8n scope, mirroring E23/H7b) BC decode, like ASTC decode
+    // above, only ever produces layer 0's texels -- a nonzero base layer
+    // or a multi-layer range on a BC image reads as all-zero rather than
+    // silently decoding the wrong layer's blocks.
+    if (Range.baseArrayLayer != 0 || LayerCount != 1)
+      return;
+    BCSamplingTarget Target = bcSamplingTarget(Img->format());
+    DecodedASTCImage Decoded = decodeBCImageForSampling(
+        Img, Range.baseMipLevel, LevelCount, Target.BytesPerTexel);
+    Result.DecodedImageStorage.push_back(std::move(Decoded.Texels));
+    Result.DecodedImageLayoutStorage.push_back(std::move(Decoded.MipLayouts));
+    Dst.Data = Result.DecodedImageStorage.back().data();
+    Dst.SizeInBytes = Result.DecodedImageStorage.back().size();
+    Dst.Format = static_cast<uint32_t>(Target.Format);
     Dst.MipLayouts = Result.DecodedImageLayoutStorage.back().data();
     Dst.MipLayoutCount = LevelCount;
     return;
