@@ -702,6 +702,10 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         ResourceFormat::R16G16B16A16_SNORM, ResourceFormat::R11G11B10_FLOAT,
         ResourceFormat::R10G10B10A2_UNORM, ResourceFormat::B8G8R8A8_UNORM,
         ResourceFormat::A8_UNORM, ResourceFormat::A1B5G5R5_UNORM,
+        // Roadmap H8e: `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM`, a CTS-confirmed
+        // genuine `SAMPLED_IMAGE_BIT` gap rather than a reporting-only
+        // one, now decoded by `femeRTUnpackImageTexel`'s own cases.
+        ResourceFormat::B4G4R4A4_UNORM, ResourceFormat::A1R5G5B5_UNORM,
         ResourceFormat::ASTC_4x4_UNORM, ResourceFormat::ASTC_12x12_SRGB,
         // Roadmap H19j: `R8_UNORM`/`_SNORM`.
         ResourceFormat::R8_UNORM, ResourceFormat::R8_SNORM,
@@ -763,6 +767,18 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         ResourceFormat::D32_FLOAT, ResourceFormat::ASTC_4x4_SFLOAT}) {
     EXPECT_FALSE(formatFeatureFlags(Format) &
                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+  }
+  // Roadmap H8e: `D16_UNORM`'s own missing `SAMPLED_IMAGE_BIT` is a
+  // genuine gap, not a reporting-only one -- unlike `D32_FLOAT` above,
+  // the real mandatory-format-table `deqp-vk` run this row's own
+  // investigation used does require it, and `femeRTFetchTexel2D` already
+  // decodes `D16_UNORM` (roadmap F8b), so this is just the missing
+  // advertisement. No `_FILTER_LINEAR_BIT`: that same CTS run does not
+  // require it for `d16_unorm`.
+  {
+    VkFormatFeatureFlags Flags = formatFeatureFlags(ResourceFormat::D16_UNORM);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
   }
 }
 

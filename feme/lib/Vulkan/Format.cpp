@@ -921,6 +921,13 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::B8G8R8A8_UNORM:
   case ResourceFormat::A8_UNORM:
   case ResourceFormat::A1B5G5R5_UNORM:
+  // (Roadmap H8e) `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM`: two more of roadmap
+  // H7r's own packed 16-bit formats, decoded by
+  // `femeRTUnpackImageTexel`'s own `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM`
+  // cases, a CTS-confirmed genuine `SAMPLED_IMAGE_BIT` gap rather than a
+  // reporting-only one.
+  case ResourceFormat::B4G4R4A4_UNORM:
+  case ResourceFormat::A1R5G5B5_UNORM:
   // (Roadmap H19j) `R8_UNORM`/`_SNORM`: the single-channel analogues of
   // `R8G8B8A8_UNORM`/`_SNORM` above, both now decoded by
   // `femeRTUnpackImageTexel`'s own `R8_UNORM`/`_SNORM` cases.
@@ -982,6 +989,16 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `R16_UINT`/`_SINT` above.
   case ResourceFormat::R16G16_UINT:
   case ResourceFormat::R16G16_SINT:
+    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    break;
+  // (Roadmap H8e) `D16_UNORM`: a CTS-confirmed genuine `SAMPLED_IMAGE_BIT`
+  // gap, not a rendering-capability one -- `femeRTFetchTexel2D` already
+  // decodes it via `femeRTUnpackImageTexel`'s own `D16_UNORM` case
+  // (roadmap F8b), this switch just never advertised it. No
+  // `_FILTER_LINEAR_BIT`: the real mandatory-format-table `deqp-vk` run
+  // this row's own investigation used does not require it for
+  // `d16_unorm`, unlike the packed-16-bit formats above.
+  case ResourceFormat::D16_UNORM:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     break;
   default:
