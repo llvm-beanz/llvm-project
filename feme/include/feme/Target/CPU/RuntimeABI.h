@@ -187,11 +187,17 @@ enum class ResourceFormat : uint32_t {
   // switches on this enum's raw ordinal value via hard-coded integer case
   // labels (see that file's own comment) -- inserting anywhere before the
   // existing tail would silently renumber, and so break, every one of
-  // those hard-coded cases. None of these seven are backed by a runtime
-  // sampling case (like `A4R4G4B4_UNORM`/`A4B4G4R4_UNORM` above, they are
-  // real, `packClearColor`/`unpackColor`-backed color-attachment formats,
-  // but not yet sampled formats); `R5G6B5_UNORM`/`B5G6R5_UNORM` have no
-  // alpha component at all, unpacking as an implicit, unwritable `1.0`.
+  // those hard-coded cases. Five of these seven (`R4G4B4A4_UNORM`,
+  // `R5G6B5_UNORM`/`B5G6R5_UNORM`, `R5G5B5A1_UNORM`/`B5G5R5A1_UNORM`) are
+  // not backed by a runtime sampling case (like `A4R4G4B4_UNORM`/
+  // `A4B4G4R4_UNORM` above, they are real, `packClearColor`/
+  // `unpackColor`-backed color-attachment formats, but not yet sampled
+  // formats); `R5G6B5_UNORM`/`B5G6R5_UNORM` have no alpha component at
+  // all, unpacking as an implicit, unwritable `1.0`. The remaining two,
+  // `B4G4R4A4_UNORM` and `A1R5G5B5_UNORM`, gained a real runtime sampling
+  // case (roadmap H8e, CTS-confirmed genuine `SAMPLED_IMAGE_BIT` gaps
+  // for `b4g4r4a4_unorm_pack16`/`a1r5g5b5_unorm_pack16`) mirroring
+  // `A1B5G5R5_UNORM`'s own precedent above.
   R4G4B4A4_UNORM,
   B4G4R4A4_UNORM,
   R5G6B5_UNORM,

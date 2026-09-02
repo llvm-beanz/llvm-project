@@ -1700,6 +1700,46 @@ TEST_F(ImageSamplingTest, LoadFetchesA1B5G5R5Unorm) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f);
 }
 
+// Roadmap H8e: `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM`, a CTS-confirmed genuine
+// `SAMPLED_IMAGE_BIT` gap (rather than a reporting-only one) for two more
+// of roadmap H7r's own packed 16-bit formats.
+
+TEST_F(ImageSamplingTest, LoadFetchesB4G4R4A4Unorm) {
+  // From the MSB down: 4 bits B, 4 bits G, 4 bits R, 4 bits A. Set R=15
+  // (max), G=0, B=0, A=15 (max) so each field is unambiguous.
+  uint16_t Storage[1][1] = {{(uint16_t)((15u << 4) | 15u)}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::B4G4R4A4_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesA1R5G5B5Unorm) {
+  // From the MSB down: 1 bit A, 5 bits R, 5 bits G, 5 bits B. Set R=31
+  // (max), G=0, B=0, A=1 (set) so each field is unambiguous.
+  uint16_t Storage[1][1] = {{(uint16_t)((1u << 15) | (31u << 10))}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::A1R5G5B5_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
 // Roadmap F8b: the single-component depth/stencil formats
 // `feme::vulkan::buildSubpassInputHeap` feeds a depth/stencil subpass
 // input attachment through -- these were the format-decode gap that left

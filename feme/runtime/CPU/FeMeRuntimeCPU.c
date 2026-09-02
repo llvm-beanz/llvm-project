@@ -1504,6 +1504,14 @@ femeRTImageFormatElementSize(uint32_t Format) {
     return 1;
   case 28: // A1B5G5R5_UNORM (packed into a single 2-byte word)
     return 2;
+  // (Roadmap H8e) `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM`: two more of roadmap
+  // H7r's own packed 16-bit formats, now also sampled (like
+  // `A1B5G5R5_UNORM` above) rather than only `packClearColor`/
+  // `unpackColor`-backed.
+  case 79: // B4G4R4A4_UNORM (packed into a single 2-byte word)
+    return 2;
+  case 84: // A1R5G5B5_UNORM (packed into a single 2-byte word)
+    return 2;
   // (Roadmap F8b) Single-component depth/stencil formats, as
   // `feme::vulkan::buildSubpassInputHeap` feeds them: a pure depth or
   // pure stencil attachment is one of these, never a combined format (see
@@ -1808,6 +1816,34 @@ femeRTUnpackA1B5G5R5Unorm(uint16_t Raw) {
   return V;
 }
 
+// (Roadmap H8e) Unpacks a `B4G4R4A4_UNORM` value
+// (`VK_FORMAT_B4G4R4A4_UNORM_PACK16`: from the MSB down, 4 bits of B, 4
+// bits of G, 4 bits of R, 4 bits of A) into a `<4 x float>` in
+// `[0.0, 1.0]`.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackB4G4R4A4Unorm(uint16_t Raw) {
+  FemeRTv4f32 V;
+  V[3] = (float)(Raw & 0xFu) / 15.0f;
+  V[0] = (float)((Raw >> 4) & 0xFu) / 15.0f;
+  V[1] = (float)((Raw >> 8) & 0xFu) / 15.0f;
+  V[2] = (float)((Raw >> 12) & 0xFu) / 15.0f;
+  return V;
+}
+
+// (Roadmap H8e) Unpacks an `A1R5G5B5_UNORM` value
+// (`VK_FORMAT_A1R5G5B5_UNORM_PACK16`: from the MSB down, 1 bit of A, 5
+// bits of R, 5 bits of G, 5 bits of B) into a `<4 x float>` in
+// `[0.0, 1.0]`.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackA1R5G5B5Unorm(uint16_t Raw) {
+  FemeRTv4f32 V;
+  V[2] = (float)(Raw & 0x1Fu) / 31.0f;
+  V[1] = (float)((Raw >> 5) & 0x1Fu) / 31.0f;
+  V[0] = (float)((Raw >> 10) & 0x1Fu) / 31.0f;
+  V[3] = (float)((Raw >> 15) & 0x1u);
+  return V;
+}
+
 // Unpacks one texel of `Format` at `Ptr` into a linear-light `<4 x float>`,
 // or all-zero for a format `femeRTImageFormatElementSize` doesn't know
 // (guarded by that function's 0 return at every call site below, so this
@@ -1908,6 +1944,16 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     uint16_t Raw;
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackA1B5G5R5Unorm(Raw);
+  }
+  case 79: { // B4G4R4A4_UNORM (roadmap H8e)
+    uint16_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackB4G4R4A4Unorm(Raw);
+  }
+  case 84: { // A1R5G5B5_UNORM (roadmap H8e)
+    uint16_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackA1R5G5B5Unorm(Raw);
   }
   case 31: { // D16_UNORM (roadmap F8b)
     uint16_t Raw;
