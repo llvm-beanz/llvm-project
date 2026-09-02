@@ -53486,3 +53486,217 @@ the same one-line gate (`if (!isStageOpCall(*CI)) continue;`), and the
 underlying reason (`UsesStageOps` only guarantees *some* call needs
 attention, not *every* call) is a genuine, easy-to-miss invariant this
 whole family of passes shares.
+
+# Session: H6u (push-constant `RootConstantMinOffset` pipeline-layout fix)
+
+## Starting point
+
+The user asked me to work on H6u, quoting its full, previously-filed
+description: a real `deqp-vk` re-run of a `with_task_shader`
+`dEQP-VK.mesh_shader.ext.api.draw.*` case, once H6s and H6t had each
+progressively unblocked it one layer deeper, now fails
+`vkCreateGraphicsPipelines` with `"a stage's root-constant span is not
+fully covered by a VkPushConstantRange visible to it in its
+VkPipelineLayout"` -- a completely different subsystem
+(`GraphicsPipeline.cpp`/`Pipeline.cpp`'s own pipeline-layout validation)
+than any of H6s/H6t's compiler-pass changes, filed as fully untriaged.
+
+## Triage and root cause
+
+First step, as always: re-read `feme/.instructions.md`, then reproduce
+the failure directly with `FEME_VULKAN_LOG_CREATION_ERRORS=1 deqp-vk`
+against the exact case named in the roadmap row. Confirmed the exact
+error text and its two call sites (`GraphicsPipeline.cpp`, once per
+stage, and a compute-pipeline equivalent in `Pipeline.cpp`).
+
+The interesting question was always going to be: is this a real CTS-side
+gap (the test genuinely provides an under-covering pipeline layout,
+which would mean this project's own rejection is *correct* and the CTS
+case itself needs a workaround or is simply not passable as-is), or is
+this project's own coverage check itself too strict? I went straight to
+the CTS's own source rather than guessing:
+`VK-GL-CTS/external/vulkancts/modules/vulkan/mesh_shader/vktMeshShaderApiTestsEXT.cpp`,
+`PushConstantData::getRanges`. This settled it immediately: the test
+declares two ranges over one shared 20-byte struct, a mesh range
+`[0,12)` and a task range `[12,20)`, and the task shader's own GLSL
+declares its two push-constant members with explicit
+`layout(offset=12)`/`layout(offset=16)`. So the task stage's SPIR-V
+module never touches bytes `[0,12)` at all -- the CTS's own layout is
+completely correct and sufficient for what the shader actually needs.
+That meant the bug had to be on this project's own side.
+
+Traced `RootConstantSize`'s own computation back to
+`SPIRVPushConstantLowering.cpp`'s `lowerSPIRVPushConstantAccess`: it
+computes `MaxAccessedByte` (the highest byte any load touches) but never
+tracked the *lowest*. So a shader accessing only `[12,20)` reports
+`RootConstantSize == 20`, exactly the same as one accessing the whole
+`[0,20)` -- the two are indistinguishable at reflection time. Then
+`Pipeline.cpp`'s `pushConstantsCoverRootConstantSize` (the function both
+`GraphicsPipeline.cpp` and `Pipeline.cpp` call) always demands the
+*entire* `[0, RootConstantSize)` be covered by a stage-visible range,
+with no way to know that this particular stage's own accessed span
+starts higher than 0. That's the whole bug, and it's real and generic --
+not task-stage-specific, not mesh-shader-specific, not CTS-specific. It
+is the exact same *family* of bug as H6q (an SPIR-V-to-LLVM struct-layout
+pass wrongly assuming a struct's own layout always starts at byte 0),
+just one layer up, at the push-constant-size-*reflection* layer instead
+of the struct-*conversion* layer. Nice bit of pattern-recognition
+carryover from earlier in this same milestone chain.
+
+One thing I wanted to nail down before touching any code: does the
+*runtime* GEP/load-rewriting logic need to change too, or is this purely
+a compile-time reflection/validation problem? Checked
+`CommandBuffer.cpp` and confirmed: `Resources.RootConstants =
+PushConstants;` -- the runtime pointer handed to every stage always
+points at the push-constant buffer's own absolute byte 0, snapshotted
+fresh at each dispatch/draw, regardless of which stage is executing.
+So the existing per-load `getelementptr`-with-absolute-byte-offset
+rewriting in `lowerSPIRVPushConstantAccess` was already completely
+correct and needed zero changes -- only the *reflected metadata* used
+purely by the Vulkan-side pipeline-layout coverage check needed the new
+field. This distinction mattered a lot for scoping the fix tightly:
+I did not want to touch the hot-path runtime code at all if I didn't
+have to, and it turned out I didn't.
+
+## Design
+
+Added a new `RootConstantMinOffset` field, threaded everywhere
+`RootConstantSize` already goes:
+
+- `lowerSPIRVPushConstantAccess`'s return type changed from a bare
+  `uint32_t` to a new `PushConstantAccessSpan{MinOffset, MaxOffset}`
+  struct -- explicit and self-documenting rather than an
+  easily-confused pair of out-parameters.
+- `ResourceInfo`/`StageArtifactInfo` gained the field, with
+  `ArtifactAbiVersion` bumped 5->6 (this is a real, versioned,
+  serialized artifact ABI used for AOT-cached compiled shaders, distinct
+  from the LLVM IR `!feme.cpu.resources` metadata node the JIT path
+  reads -- both needed updating in lockstep since
+  `StageArtifactInfo::fromResourceInfo` bridges one into the other).
+- All **three** producers of the shared `!feme.cpu.resources` metadata
+  node needed updating, not just one -- I nearly missed the third. I
+  started from `SPIRVPushConstantLowering.cpp`'s own `run()` (obviously
+  needed it) and `SPIRVResourceLowering.cpp`'s combined
+  bound-resource-plus-push-constant case (also obviously needed it,
+  since it calls the same `lowerSPIRVPushConstantAccess`). But there's a
+  *third* writer, in `ResourceLowering.cpp` (the DXIL bindless-resource
+  path's own `attachResourceMetadata`, a completely different function
+  with the same name in a different namespace/file than
+  `SPIRVResourceLowering.cpp`'s), and a *fourth*, in
+  `RootConstantLowering.cpp` (the DXIL root-constant-only path's
+  `attachRootConstantMetadata`). I found these by grepping for every
+  caller of the function names before touching the reader
+  (`ResourceInfo::fromModule`), rather than assuming I already knew the
+  full set from memory -- a good habit this session reinforced, since
+  the fully-metadata-consistent invariant across all four writers is
+  exactly the kind of thing that's easy to violate silently (nothing
+  would have caught a 5-operand vs 6-operand mismatch at compile time;
+  only a real lit-test run against the actual reader would, and did,
+  catch it). Both DXIL paths always emit `0` for the new field, since a
+  register-bound root constant's own view always starts at byte 0 --
+  documented explicitly in both places, matching `Pipeline.cpp`'s own
+  existing doc comment about DXIL's `RootConstantSize` always starting
+  at byte 0 (a comment now updated since it's no longer universally true
+  -- it's only true for DXIL).
+- `pushConstantsCoverRootConstantSize` gained a
+  `RootConstantMinOffset` parameter and now sizes/clamps its
+  byte-coverage bitmap against `[RootConstantMinOffset,
+  RootConstantSize)` instead of unconditionally `[0, RootConstantSize)`,
+  with an `assert(RootConstantMinOffset <= RootConstantSize)` guard
+  (this data always comes from this project's own reflection, so a
+  violation would be an internal bug, not user input -- an assert is the
+  right tool here, not a runtime error return).
+
+## Implementation notes
+
+Built this incrementally: header first, then each `.cpp` file in the
+same dependency order the summary from a compacted context handed off
+with (I picked up mid-edit, with `SPIRVPushConstantLowering.cpp`'s own
+`lowerSPIRVPushConstantAccess` implementation already updated but its
+own `run()` caller not yet fixed -- a genuinely broken intermediate
+state). Fixed that caller, then worked outward: `SPIRVResourceLowering.cpp`'s
+combined-case caller and its own `attachResourceMetadata`, then found
+(via a fresh grep rather than assuming the summary's list was complete)
+the two DXIL writers I hadn't touched yet, then `Pipeline.h`/`.cpp`'s
+actual validation-logic fix, then all 7 `GraphicsPipeline.cpp` call
+sites plus `Pipeline.cpp`'s one compute-pipeline call site.
+
+First full `ninja check-feme` run surfaced exactly the class of failure
+I expected: 10 failures, all either lit tests with hand-written
+`MDNode` literal strings assuming the old 5-fixed-operand metadata
+shape, or one `ResourceLoweringTest.cpp` unit test asserting
+`NumOperands() == 6u` where it now needs `7u`. Fixed each mechanically
+by adding the new operand in the right position -- except for
+`spirv-push-constant-lowering-padded-tail.ll`, where my first blind pass
+assumed every existing test's `MinOffset` should be `0`, but this
+particular test's own shader accesses only offset 24 onward (its own
+file comment explains why: a struct's trailing member gets padded past
+its own real accessed bytes) -- so its correct new expectation was
+`i32 24`, not `i32 0`. Good reminder to actually read what each existing
+test's shader accesses rather than pattern-matching blindly across all
+of them; I caught this one because the test failed with a very
+legible diff (expected 0, got 24) rather than silently passing with
+wrong coverage.
+
+Also hit a genuine `FileCheck` ordering puzzle adding my own new test
+case to `spirv-push-constant-lowering.ll`: `!feme.cpu.resources`'s
+named-metadata operands print in the order functions were *lowered* in
+(function-definition order in the module), but I'd placed my new
+function's own `CHECK` for its metadata entry textually *after* an
+existing `CHECK` for a different function's metadata entry that
+actually appears *later* in the real output. `FileCheck` requires
+non-DAG `CHECK` matches to advance monotonically through the input, so
+this failed with "no match found in search range" pointing at text that
+was very obviously present, just earlier than the search cursor had
+already advanced to. Fixed by using `CHECK-DAG` for my own new
+assertion and placing it so the group's own final position still lands
+before the next real, in-order `CHECK`. This is a good reminder that
+`!feme.cpu.resources`'s own operand ordering is a real, load-bearing
+detail worth being careful about when writing tests against it, not an
+incidental print-order accident.
+
+## Verification
+
+Full real `deqp-vk` re-run confirmed the originally-failing case now
+passes outright, not just clears the pipeline-creation step. Ran three
+progressively broader real CTS sweeps to build confidence rather than
+trusting the single-case fix in isolation: the 298-case
+`with_task_shader`/`with_task_shader_secondary_cmd` subset (218
+Pass/0 Fail/80 NotSupported, the NotSupported all
+`VK_KHR_device_address_commands`, unrelated), the full 540-case
+`dEQP-VK.mesh_shader.ext.api.*` group (436 Pass/0 Fail/104 NotSupported,
+up from H6t's own recorded 14 Pass/102 Fail), and a broader
+`dEQP-VK.mesh_shader.*` sweep (2003 cases processed within a bounded
+time budget) to specifically look for any new crash class this change
+might have introduced elsewhere -- found none, just one pre-existing,
+clearly-unrelated single-pixel `Fail` in a deliberately-malformed
+`emit_in_control_flow_bad_emit_last` edge case, which I left untracked
+as its own row rather than filing a new roadmap entry for it, following
+the precedent H6m/H6n/H6o/H6p all established of not chasing every
+in-scope rendering-correctness `Fail` individually.
+
+## Roadmap outcome
+
+H6u closes (struck through with a detailed closing note mirroring the
+style of H6q/H6s/H6t's own closing notes). Updated the H6 parent row's
+own aggregate summary line to reflect H6u's closure and narrow its
+remaining dependency down to just H6r (the still-open
+rendering-correctness gap for direct multi-draw mesh dispatches) --
+milestone H6 itself still does not close, since H6r remains open and
+untouched this session.
+
+## Reflections on process
+
+The biggest time-saver this session was going straight to the CTS's own
+source before writing a single line of fix code. It would have been
+easy to assume "the CTS must be providing an insufficient pipeline
+layout" or "this must be some task-stage-specific special case" and
+start building unnecessary special-casing -- instead, five minutes of
+reading `PushConstantData::getRanges` immediately proved the CTS's own
+layout is completely correct and sufficient, which pointed straight at
+this project's own reflection/validation code as the only place the bug
+could be. Confirming the runtime GEP/bounds-check logic needed *zero*
+changes (via `CommandBuffer.cpp`) before writing any fix code was
+similarly valuable -- it let me scope the whole change to a
+compile-time-only, low-risk metadata addition, rather than touching any
+hot-path runtime code at all.
