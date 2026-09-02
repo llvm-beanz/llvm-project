@@ -62,4 +62,40 @@ Can you work on H6s or other prerequisites blocking the H-series milestones?
 > and whatever CPU-side execution-chaining the task stage's own dispatch of its
 > mesh workgroups still needs beyond what already exists for a task-less mesh
 > entry. Not yet triaged for how much of the task-stage-to-mesh-stage chaining
-> machinery already exists elsewhere versus needs building from scratch
+> machinery already exists elsewhere versus needs building from scratch~~ (done:
+> designed and implemented the full pipeline, mirroring `SetMeshOutputs`'s own
+> precedent throughout -- a new, non-overloaded, workgroup-uniform
+> `StageOpKind::EmitMeshTasks` (`feme.stage.emit_mesh_tasks`) canonical op; a
+> new `EmitMeshTasksEXTConversionPattern` in `SPIRVToLLVMPatterns.cpp`
+> converting `spirv.EXT.EmitMeshTasks` into a call to it (correctly handling the
+> op's own terminator role: the call is followed by an `llvm.return`, and the
+> optional `TaskPayloadWorkgroupEXT` payload operand is dropped since a
+> separate, already-existing `TaskPayloadStore` call already moves that data);
+> matching masking/widening/validation/uniformity plumbing added across
+> `StageMaskCalls.h/.cpp`, `Linearize.cpp`, `SIMDize.cpp`, `ValidateStage.cpp`,
+> and `WaveUniformity.cpp` (one small case added to each, mirroring
+> `SetMeshOutputs`'s own existing case at each site); `EntryWrapper.cpp` threads
+> the already-existing (but previously unused) `FemeTaskArgs::MeshGroupCount`
+> host-ABI field as a new `Env.TaskMeshGroupCount` wave-body value; and a new
+> `TaskPayloadWrapper.cpp` `lowerEmitMeshTasks` helper writes the op's own 3D
+> group-count triple through 3 GEPs into that field, so the already-existing (if
+> previously unreachable) `Executor.cpp`/`AmplificationDispatchQueue` host-side
+> dispatch machinery this row's own investigation found already scaffolded
+> finally has a real producer. New lit test `spirv-to-llvm-emit-mesh-tasks.mlir`
+> (both the no-payload and with-payload shapes) and new unit tests
+> (`StageOpsTest.cpp`'s `EmitMeshTasksIsVoidAndNotOverloaded`;
+> `TaskPayloadWrapperTest.cpp`'s `ChainsIntoEntryWrapperPass`,
+> `LowersEmitMeshTasks`, `LowersPayloadStoreAndEmitMeshTasksTogether`) cover the
+> new op and its lowering directly. `ninja check-feme` (assertions-enabled,
+> ccache build) passes in full. A real `deqp-vk` re-run of the
+> originally-failing `with_task_shader` case confirms the
+> `spirv.EXT.EmitMeshTasks` legalization error is gone -- but the same re-run
+> surfaced two further, distinct bugs while verifying this fix, filed as their
+> own new sibling row, H6t (closed), and a third, unrelated, unfixed gap, filed
+> as H6u (open). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+> confirmed no change needed: a pure compiler-internal lowering-completeness
+> fix, touching no feature bit or extension. `Design.md`'s stale
+> conversion-gap-table row for `spirv.EXT.EmitMeshTasks` is removed, and
+> `FeMeVulkanDesign.md` gains a new "Roadmap H6s" design note describing the
+> fix. See "Roadmap H6s: measured impact" in VulkanCTSReport.md for the full
+> reproduction)
