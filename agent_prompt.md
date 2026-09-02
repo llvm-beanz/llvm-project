@@ -37,21 +37,24 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8n or other prerequisites blocking the H-series milestones?
+Can you work on H8o or other prerequisites blocking the H-series milestones?
 
-> **Wire the now-complete BC1-7 decoders (`BCDecode.h`, `BC7Decode.h`,
-> `BC6HDecode.h`) into a real consumer and flip `textureCompressionBC`.**
-> H8i/H8l/H8m together landed complete, directly-unit-tested decoders for all 16
-> `VK_FORMAT_BC*` formats, but nothing calls any of them yet -- `Format.cpp` has
-> no `ResourceFormat` enumerators for any BC format, `mapVkFormat` has no cases
-> for them, and `vkCreateImage` still rejects every one outright. Needs the same
-> wiring shape roadmap E22 gave `ASTCDecode.h` and H8j is expected to give
-> `ETC2Decode.h`: `Format.{h,cpp}` block-aware layout entries,
-> `CommandBuffer.cpp`/`ImageOps.cpp` decode-on-sample-or-copy plumbing, and
-> `PhysicalDeviceInfo.cpp`'s `textureCompressionBC` bit, only flipped once a
-> real `dEQP-VK.texture.compressed_format.*` BC1/BC7/BC6H case is confirmed
-> passing end to end (`vktTextureCompressedFormatTests.cpp`'s own whole-family
-> gate means partial wiring of just one BC sub-family will not move any CTS case
-> by itself -- all three decoders' own wiring needs to land together, or at
-> least BC1-5's own wiring alone needs to be enough to flip the bit before
-> BC7/BC6H's own wiring follows)
+> **Widen `ImageOps.cpp`'s blit-source support to BC4/BC5/BC6H, then flip
+> `textureCompressionBC`.** H8n's own investigation found the mandatory format
+> table backing `textureCompressionBC == VK_TRUE` requires `BLIT_SRC_BIT` on all
+> 16 BC formats, but `runBlitImage`'s decode-then-resample pipeline is built on
+> `feme::graphics::unpackColor`/`packClearColor`, which have no case for
+> BC4/BC5/BC6H's own sampling-bridge targets
+> (`R8_UNORM`/`R8G8_UNORM`/`R16G16B16A16_FLOAT`) -- `unpackColor`'s generic
+> per-component path also requires its output array size to exactly match the
+> format's own component count (so a 1-component `R8_UNORM`/2-component
+> `R8G8_UNORM` cannot fill a 4-component RGBA blit buffer without a dedicated
+> case, mirroring `A8_UNORM`'s own "missing channel reads as its identity value"
+> precedent), and its generic float path additionally still truncate-copies a
+> 2-byte half float into a 4-byte `float` variable rather than converting it --
+> a separate, pre-existing bug this row's own investigation surfaced (affecting
+> `R16G16B16A16_FLOAT`, and so BC6H once wired) that needs fixing before BC6H's
+> own blit source can be trusted. Once all three gaps close, re-run the real
+> `dEQP-VK.api.info.format_properties.compressed_formats`/`image_format_properties.*.bc*`
+> groups to confirm the mandatory-format-table check actually passes before
+> flipping `PhysicalDeviceInfo.cpp`'s `textureCompressionBC` to `VK_TRUE`
