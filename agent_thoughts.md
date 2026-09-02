@@ -54800,3 +54800,69 @@ Three small commits this session: (1) the half-float fix + R8/R8G8
 clear-color cases + fixture-name switch fix, (2) the `ImageOps.cpp`/
 `Format.cpp` blit-source widening, (3) the `textureCompressionBC` flip
 itself -- plus this docs bundle and this thoughts entry.
+
+# H8j: wiring ETC2Decode.h into a real consumer and flipping textureCompressionETC2
+
+Same wiring shape as H8n/H8o gave BC, applied to H8c's own already-complete
+ETC2/EAC decoder. Went in five small commits: (1) enum + `Format.cpp`
+mapping, (2) `ImageFixture.cpp` fixture names/clear-color cases, (3) the
+`ETC2SamplingBridge.h`/`.cpp` decode-dispatch bridge, (4)
+`CommandBuffer.cpp`/`ImageOps.cpp` wiring, (5) unit tests + a `-Wswitch`
+fix, (6) the `textureCompressionETC2` flip itself, (7) this docs bundle,
+(8) this thoughts entry.
+
+Three things worth recording:
+
+1. **A missing `#include` from a prior (pre-compaction) session bit me
+   immediately.** The summary I resumed from claimed `CommandBuffer.cpp`
+   already had `#include "ETC2SamplingBridge.h"` added, but a build failure
+   showed it hadn't actually been saved -- likely the edit was made but the
+   session was compacted before it landed on disk, or I mis-recorded it in
+   the summary. Lesson: after resuming from a compacted summary, always
+   verify claimed-but-uncommitted edits are actually present in the working
+   tree before building on top of them, rather than trusting the summary at
+   face value. A quick `git diff`/`grep` sanity check right after resuming
+   would have caught this before wasting a build cycle.
+
+2. **The real CTS group name did not match the task description.** The
+   prompt said `dEQP-VK.texture.compressed_format.*`; the actual group is
+   `dEQP-VK.texture.compressed.{etc2,eac}*` (no `_format` in the name, and
+   split by codec rather than one flat group). Found this by dumping the
+   full case list via `--deqp-runmode=stdout-caselist` (7.7M lines, ~90s)
+   and grepping, since none of the `mustpass/main/*.txt` files reference
+   these optional-feature-gated tests at all. This is now the third time a
+   task description's stated CTS case name has turned out to be
+   approximate/aspirational rather than the literal real name -- worth
+   always verifying against the real case list rather than trusting the
+   prompt text verbatim, especially for less-common feature-gated groups.
+
+3. **A hand-derivation mistake in EAC arithmetic, caught before it landed.**
+   My first attempt at computing expected test values for the
+   `BlitDecodesEACR11Source` test hand-derived the unsigned-EAC formula
+   without the formula's own `+4` constant term, producing an expected
+   value of 98 where the real decoder produces 91. Rather than trust my own
+   arithmetic a second time, I compiled a small standalone C++ program
+   linking directly against `ETC2Decode.cpp` (plus `libLLVMSupport.a`, since
+   the decoder calls `llvm_unreachable`) to get a ground-truth decoded value,
+   confirmed the `+4` term I'd missed, and used the same throwaway-program
+   technique to verify every other EAC-derived test value (R11G11, the
+   composed RGBA8 alpha channel) before writing final assertions. This
+   mirrors H8o's own BC6H verification technique (a `numpy.float16`
+   ground-truth script) -- for any format whose bit-packing/arithmetic is
+   nontrivial enough that a hand-derivation could plausibly be wrong,
+   computing a real ground truth via the actual decoder (or an independent
+   reference implementation) before hardcoding a test's expected value is
+   cheaper than debugging a wrong assertion after the fact.
+
+`ninja check-feme` ends this row at 2392/2419 (up from H8o's 2379/2406),
+`FeMeVulkanTests` at 558 (up from 550-ish before this row -- 8 new tests:
+3 `FormatTest`, 1 `CommandBufferTest`, 4 `ImageOpsTest`), and both the real
+`compressed_formats` format-table check and all 10 real
+`dEQP-VK.texture.compressed.{etc2,eac}*_pot` cases confirmed passing before
+the flip, the same "measure, then flip" discipline every prior H8-series
+feature-bit row in this chain has followed.
+
+This closes H8j. The only BC-family/ETC2-family loose end left open in the
+H8 roadmap subtree is BC1-7's own wiring (H8n, closed) and its own blit-
+source widening (H8o, closed) -- both formats' decoders are now fully
+wired, tested, and their feature bits flipped for real.
