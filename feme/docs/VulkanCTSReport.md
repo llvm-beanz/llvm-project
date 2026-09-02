@@ -20867,3 +20867,82 @@ H8o's 2,379/2,406).
 to `Yes`, describing the closure. No `VulkanExtensionInventory.md`
 update needed: ETC2/EAC formats are core Vulkan 1.0, not
 extension-gated.
+
+## Roadmap H8d: measured impact
+
+`isTexelBufferFormatSupported` (`Format.cpp`) covered exactly 10
+formats before this row; a real `dEQP-VK.api.info.format_properties.*`
+re-run confirmed 21 further mandatory formats were still missing
+`VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT` specifically, and 6 of
+those 21 were additionally missing `VK_FORMAT_FEATURE_STORAGE_
+TEXEL_BUFFER_BIT`.
+
+- Split the single predicate into two: `isTexelBufferFormatSupported`
+  now widens to all 31 formats and gates only the read-only
+  `UNIFORM_TEXEL_BUFFER_BIT`; a new `isStorageTexelBufferFormatSupported`
+  (`Format.h`/`.cpp`) gates `STORAGE_TEXEL_BUFFER_BIT` with a narrower
+  16-format subset (the original 10 plus `R16G16B16A16_{FLOAT,UINT,
+  SINT}`/`R32G32_{FLOAT,UINT,SINT}`), matching a real device's mandatory
+  table not requiring every uniform-capable format to also support a
+  read+write (storage) texel buffer view.
+- `EntryPoints.cpp`'s `vkGetPhysicalDeviceFormatProperties` now ORs the
+  two bits from their own independent predicates; `vkGetPhysicalDevice
+  FormatProperties2`'s `StorageWithoutFormatBuffer` (roadmap H19i) now
+  gates on the narrower `isStorageTexelBufferFormatSupported`.
+- Refactored `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32`/
+  `LoadTypedV4I32`/`StoreTypedV4I32` (`FeMeRuntimeCPU.c`) to dispatch
+  through the same `femeRTImageFormatElementSize`/`UnpackImageTexel
+  (I32)`/`PackImageTexel(I32)` tables the storage/sampled-image path
+  and the scalar typed-buffer intrinsics (roadmap L9) already share,
+  instead of each independently hard-coding a narrower special-cased
+  format list -- this extends support to every new format with no
+  per-format runtime code duplication. Found and closed the one
+  genuine pack-side gap this surfaced: `femeRTPackImageTexel` had no
+  `R32G32_FLOAT` case, and neither `femeRTPackImageTexel` nor
+  `femeRTPackImageTexelI32` had an `R8G8B8A8_UNORM`/`_UINT` case
+  (previously only reachable through the old hard-coded store paths
+  the refactor removed).
+- `B8G8R8A8_UNORM` is deliberately excluded from
+  `isStorageTexelBufferFormatSupported`'s scope: it has no write/pack
+  support anywhere in this project (not even for storage images),
+  a pre-existing scope limit this row does not expand.
+- Test coverage: `FormatTest.cpp` extends
+  `TexelBufferFormatSupportMatchesRuntimeConversionScope` with all 21
+  new formats and adds a new
+  `StorageTexelBufferFormatSupportIsNarrowerThanReadOnlyScope` test;
+  `EntryPointsTest.cpp` swaps its "storage-image-capable but not
+  texel-buffer-capable" example from `R16G16B16A16_UINT` (now
+  storage-texel-buffer capable) to `R10G10B10A2_SNORM` (still
+  storage-image-capable, deliberately excluded from the new texel-
+  buffer scope); `BufferTest.cpp`'s `RejectsFormatWithNoRuntimeConversion`
+  swaps its negative example from `R16G16B16A16_SFLOAT` (now in scope)
+  to `R32G32B32_SFLOAT` (a 3-component format, never a legal texel-
+  buffer shape); `RuntimeCPUTest.cpp` adds round-trip coverage for
+  `R32G32_FLOAT` (`V4F32`) and `R16G16B16A16_UINT` (`V4I32`) through
+  the new generic-table dispatch.
+
+A real `dEQP-VK.api.info.format_properties.*` re-run (225 cases):
+before this row, 186/225 passed with 39 real `bufferFeatures`-related
+gaps recorded across the 21 formats (some cases additionally failing
+on an unrelated `optimalTilingFeatures` bit simultaneously); after,
+190/225 pass and grepping the full log for any remaining
+`bufferFeatures.*missing` entry naming a texel-buffer bit returns
+none -- every `UNIFORM_TEXEL_BUFFER_BIT`/`STORAGE_TEXEL_BUFFER_BIT`
+gap this row targeted is closed. The net pass-count delta (4, not 21)
+is expected: most of the 21 cases were also failing on an independent,
+unrelated bit (`COLOR_ATTACHMENT_BIT`, `STORAGE_IMAGE_BIT`,
+`VERTEX_BUFFER_BIT`, etc., out of this row's scope) that keeps the
+overall per-case verdict `Fail` even with its texel-buffer gap now
+closed -- e.g. `b8g8r8a8_unorm` now correctly reports
+`UNIFORM_TEXEL_BUFFER_BIT` but still fails on a separate, pre-existing
+`VERTEX_BUFFER_BIT` gap (roadmap H8b's own scope, not this row's).
+Zero regressions confirmed across the full 225-case run.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full:
+2,395/2,422 Total Discovered Tests (27 pre-existing `Unsupported`,
+0 `Failed`).
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+row -- confirmed, not assumed: this row only widens two per-format
+`VkFormatFeatureFlags` predicates. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update.
