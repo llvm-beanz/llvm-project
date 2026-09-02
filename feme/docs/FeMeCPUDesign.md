@@ -307,6 +307,19 @@ inline where it's discussed, and summarized here:
   so, like a fully-unrolled wave loop's own group/wave-index arithmetic
   above, it constant-folds outright rather than needing any runtime value
   at all.
+- Roadmap H6o: `llvm.spv.num.workgroups` is uniform per widened-function
+  call the same way `llvm.{dx,spv}.group.id` is, but unlike `NumSubgroups`
+  immediately above it is a genuine *runtime* dispatch-time value (the
+  dispatch's own grid size, `vkCmdDrawMeshTasksEXT`'s `groupCountX/Y/Z`),
+  not derivable at compile time from `hlsl.numthreads` -- so it cannot
+  constant-fold. `SIMDizePass` instead substitutes it directly for three
+  new wave-body parameters (`wave_group_count_x/y/z`, alongside `WaveBodyEnv`'s
+  existing `GroupIDX/Y/Z`), and `feme::cpu::EntryWrapperPass` threads the
+  actual per-dispatch value into them from `FemeDispatchArgs::GroupCount`
+  (a struct field that already existed, parallel to `GroupID`, but was
+  never read before this fix) -- the same "uniform value threaded through
+  the wave-body interface, not widened" treatment as `GroupID` itself,
+  just sourced from a different `FemeDispatchArgs` field.
 - `feme::cpu::WaveLoweringPass` implements only the builtin half (thread
   and group id arithmetic); the remaining wave intrinsics (`WaveActiveSum`,
   `WaveReadLaneAt`, ...) are milestone 8, matching the design's own "two

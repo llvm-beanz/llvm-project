@@ -856,10 +856,14 @@ sources, are:
 `NumWorkgroups` must report the full dispatch dimensions even when workgroups
 are distributed across the worker pool, and must remain correct under
 `vkCmdDispatchBase`, where the reported value is the original dispatch size
-rather than the base-offset range. Roadmap H6o: `feme::cpu::SIMDizePass`
-does not yet lower `llvm.spv.num.workgroups` to this `GroupCount` source at
-all (unlike `WorkgroupId`, already substituted for the wave-body's own
-`GroupID` parameter) -- open, tracked in `Roadmap.md`.
+rather than the base-offset range. Roadmap H6o (closed): `feme::cpu::
+SIMDizePass` now substitutes `llvm.spv.num.workgroups` directly for the
+wave-body's own `wave_group_count_x/y/z` parameters, exactly the way
+`WorkgroupId` already substitutes for `GroupID`'s own wave-body parameters;
+`feme::cpu::EntryWrapperPass` loads the actual per-dispatch value from
+`Args->GroupCount` and threads it through to the wave-loop call, since
+(unlike `NumSubgroups`) it is a genuine runtime dispatch-time value, not
+foldable to a compile-time constant.
 
 ### Required SPIR-V resource work
 

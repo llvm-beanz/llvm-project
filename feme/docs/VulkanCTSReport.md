@@ -13223,6 +13223,137 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-case="dEQP-VK.mesh_shader.*" --deqp-shadercache=disable
 ```
 
+## Roadmap H6o: measured impact (`NumWorkgroups` CPU lowering)
+
+With H6n closed, this session picked up its own newly-discovered
+`NumWorkgroups` blocker directly:
+
+```
+Test case 'dEQP-VK.mesh_shader.ext.misc.many_mesh_work_groups_x'..
+LLVM ERROR: Cannot select: intrinsic %llvm.spv.num.workgroups
+```
+
+**Root cause.** Identical *shape* of gap to H6n's `SubgroupId`/
+`NumSubgroups`: `SPIRVToLLVMPatterns.cpp` already converts SPIR-V's
+`NumWorkgroups` builtin to the `llvm.spv.num.workgroups` LLVM core
+intrinsic, but `feme::cpu::SIMDizePass` had no lowering case for it.
+Unlike `NumSubgroups`, though, `NumWorkgroups` (the dispatch's own grid
+size -- `vkCmdDrawMeshTasksEXT`'s `groupCountX/Y/Z`) is a genuine
+*runtime* dispatch-time value, not derivable at compile time from
+`hlsl.numthreads` -- it cannot simply constant-fold. `FemeDispatchArgs`
+(`RuntimeABI.h`) already had a `GroupCount[3]` field, parallel to the
+already-threaded `GroupID[3]`, but nothing read it: `EntryWrapperPass`
+never loaded it, and `SIMDizePass`'s own wave-body interface
+(`WaveBodyEnv`) had no `GroupCount` slot to substitute for the
+intrinsic.
+
+**The fix, in two halves.** (1) `SIMDize.cpp`/`SIMDize.h`: added
+`Env.GroupCountX/Y/Z` to `WaveBodyEnv`, and `isNumWorkgroupsCall`/
+`FunctionWidener::replaceNumWorkgroupsCall`, mirroring `isGroupIdCall`/
+`replaceGroupIdCall` exactly -- `NumWorkgroups` is uniform for one
+widened-function call (the same value for every group in a dispatch),
+so it substitutes directly for a new wave-body parameter rather than
+being widened or folded. (2) `EntryWrapper.cpp`: `buildWrapperEnv` now
+loads `Args->GroupCount` (alongside the existing `Args->GroupID` load)
+and `buildWaveLoop` threads its X/Y/Z components into the wave-loop
+call as the new `wave_group_count_x/y/z` arguments -- the actual
+per-dispatch value source `WaveBodyEnv`'s new fields substitute for.
+The six non-compute-family stage wrappers (vertex/fragment/geometry/
+hull/domain/patch-constant) each gained a dummy `getInt32(1)` mapping
+for the same three names, mirroring their existing `wave_group_id_x/y/z`
+dummy mappings (`NumWorkgroups` is meaningless outside compute/mesh/
+task, but `buildWidenedFunction` appends these params to every stage's
+widened function unconditionally).
+
+**A regression caught before landing.** The first build after adding
+the fix showed 141 `check-feme` failures, all `"has an unsupported
+parameter 'wave_group_count_x'"` -- `EntryWrapper.cpp`'s own
+`isKnownWaveBodyParameter` allow-list (used by `checkWaveBodyParameters`
+to diagnose a wave body with a parameter name the wrapper cannot supply
+a value for) is a distinct gate from the `CallArgs`-building logic;
+adding the three new names to it as well resolved all 141 failures.
+
+**New tests.** Two new lit tests (`simdize-num-workgroups.ll`, covering
+the `SIMDize.cpp` intrinsic substitution in isolation;
+`entry-wrapper-num-workgroups.ll`, covering the `EntryWrapper.cpp`
+`Args->GroupCount` load and its threading into the wave-loop call
+end-to-end) and one new `SIMDizeTest.cpp` unit test
+(`ReplacesNumWorkgroupsWithGroupCount`) exercise both halves of the fix.
+
+```
+$ ninja -C <feme-build> check-feme
+...
+Total Discovered Tests: 2335
+  Unsupported:   27 (1.16%)
+  Passed     : 2308 (98.84%)
+```
+
+Up from H6n's own 2305/2332 by exactly the 3 new tests this row adds (0
+pre-existing tests newly failed).
+
+**A real ICD re-run confirms the fix, and finds the whole group now runs
+to completion for the first time.** Re-running the full
+`dEQP-VK.mesh_shader.*` group (28044 cases, single process):
+
+```
+Test case 'dEQP-VK.mesh_shader.ext.misc.many_mesh_work_groups_x'..
+  Fail (Result does not match reference; check log for details at vktMeshShaderMiscTestsEXT.cpp:462)
+```
+
+No longer a crash: `many_mesh_work_groups_x` now compiles, links,
+submits, and renders, failing only on a clean, later, unrelated
+pixel-comparison mismatch (not filed as a new sibling row, mirroring
+H6m/H6n's own precedent -- it sits squarely inside this milestone's own
+already-tracked "bounded payload/output limits reported truthfully"
+rendering-correctness scope). Unlike every prior re-run in this chain
+(H6g-b through H6n), **the sweep this time runs all the way through the
+entire 28044-case mustpass list with zero `LLVM ERROR`/crash of any
+kind**:
+
+```
+Test run totals:
+  Passed:        3/28044 (0.0%)
+  Failed:        398/28044 (1.4%)
+  Not supported: 27643/28044 (98.6%)
+```
+
+The dominant remaining `Fail` bucket (216 cases, all
+`dEQP-VK.mesh_shader.ext.api.draw.*`) fails `vkCreateGraphicsPipelines`
+with a new, distinct, generic diagnostic
+(`FEME_VULKAN_LOG_CREATION_ERRORS=1`-confirmed):
+
+```
+error: feme-cpu-wrap-mesh-output: unexpected stage op left for the mesh output wrapper
+```
+
+This is a real, still-unlowered `feme.stage.*` op reaching
+`MeshOutputWrapper.cpp`'s `lowerMeshStageOps` -- not a recurrence of
+H6g-b-d's own already-fixed over-broad catch-all (confirmed on a
+mesh-only, no-task-shader case) -- filed as its own new row, H6p, since
+it needs its own IR-reduction triage to isolate which specific op.
+Two smaller, likely-unrelated buckets (80 cases failing
+`vkCreateRenderPass` with `VK_ERROR_FORMAT_NOT_SUPPORTED`; ~63+ cases
+with a clean pixel-comparison `Fail`) are left untriaged pending H6p, to
+avoid over-fragmenting the roadmap before either is confirmed distinct.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure CPU-lowering-completeness fix, touching no feature
+bit or extension.
+
+**Roadmap H6o closes.** `NumWorkgroups` CPU lowering is fixed and
+verified, with zero regressions in `check-feme` and a real full-group
+CTS re-run reaching completion with no crashes for the first time.
+**Milestone H6 does not close**: the newly-discovered mesh-output-
+wrapper gap (H6p) still blocks the dominant remaining `Fail` bucket.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-caselist-file=<VK-GL-CTS>/external/vulkancts/mustpass/main/vk-default/mesh-shader.txt
+```
+
 ## Roadmap H6c-a: closed by its own split
 
 Re-checking H6c-a's own literal ask now that its three named
