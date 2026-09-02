@@ -2096,15 +2096,22 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties(
       Format ? formatFeatureFlags(*Format) : VkFormatFeatureFlags(0);
   pFormatProperties->linearTilingFeatures = ImageFeatures;
   pFormatProperties->optimalTilingFeatures = ImageFeatures;
-  // `isTexelBufferFormatSupported` (Format.h) gates `vkCreateBufferView`
-  // (Descriptor.h's file comment): the CPU runtime's typed load *and*
-  // store helpers exist for exactly that same format set, so both texel
-  // buffer feature bits apply together.
+  // (Roadmap H8d) `isTexelBufferFormatSupported` (Format.h) gates
+  // `vkCreateBufferView` (Descriptor.h's file comment) and the read-only
+  // `UNIFORM_TEXEL_BUFFER_BIT`; the narrower
+  // `isStorageTexelBufferFormatSupported` gates `STORAGE_TEXEL_BUFFER_BIT`
+  // specifically, since a real device's mandatory format table does not
+  // require every uniform-texel-buffer-capable format to also support a
+  // read+write (storage) texel buffer view (e.g. `B8G8R8A8_UNORM`, whose
+  // CPU runtime pack/write side is not implemented at all -- see
+  // `isStorageTexelBufferFormatSupported`'s own doc comment).
   pFormatProperties->bufferFeatures =
-      Format && isTexelBufferFormatSupported(*Format)
-          ? (VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT |
-             VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT)
-          : VkFormatFeatureFlags(0);
+      (Format && isTexelBufferFormatSupported(*Format)
+           ? VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT
+           : VkFormatFeatureFlags(0)) |
+      (Format && isStorageTexelBufferFormatSupported(*Format)
+           ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT
+           : VkFormatFeatureFlags(0));
   // (Roadmap H8) `isVertexBufferFormatSupported` (Format.h) gates
   // `vkCreateGraphicsPipelines`'s own vertex-attribute-format validation
   // (`GraphicsPipeline.cpp`'s `isSupportedVertexAttributeFormat`, which now
@@ -2174,8 +2181,13 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
           ? (VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)
           : VkFormatFeatureFlags2(0);
+  // (Roadmap H8d) Narrowed to `isStorageTexelBufferFormatSupported`: this
+  // bit is specifically about *storage* (read+write) texel-buffer
+  // capability, which `isTexelBufferFormatSupported` alone (the broader,
+  // read-only-gating predicate `vkCreateBufferView` uses for view
+  // creation) no longer implies for every format it covers.
   VkFormatFeatureFlags2 StorageWithoutFormatBuffer =
-      (Format && isTexelBufferFormatSupported(*Format))
+      (Format && isStorageTexelBufferFormatSupported(*Format))
           ? (VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)
           : VkFormatFeatureFlags2(0);

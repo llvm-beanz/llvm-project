@@ -83,12 +83,55 @@ uint32_t bytesPerBlock(feme::cpu::ResourceFormat Format);
 
 /// Returns whether \p Format is one of the formats the CPU runtime's
 /// typed-load/store helpers (feme/runtime/CPU/FeMeRuntimeCPU.c) actually
-/// implement a conversion for, and so may legally back a texel buffer's
-/// `VkBufferView` (see Descriptor.h's file comment). `vkCreateBufferView`
-/// rejects every other format -- including one `mapVkFormat` itself maps
-/// successfully -- with `VK_ERROR_FORMAT_NOT_SUPPORTED` rather than silently
-/// misconverting it.
+/// implement a *read* conversion for, and so may legally back a texel
+/// buffer's `VkBufferView` (see Descriptor.h's file comment).
+/// `vkCreateBufferView` rejects every other format -- including one
+/// `mapVkFormat` itself maps successfully -- with
+/// `VK_ERROR_FORMAT_NOT_SUPPORTED` rather than silently misconverting it.
+/// Gates `VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT`
+/// (`vkGetPhysicalDeviceFormatProperties`), the read-only texel-buffer
+/// bit -- see `isStorageTexelBufferFormatSupported` immediately below for
+/// the (smaller) read-*and*-write subset that gates
+/// `VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT`.
+///
+/// (Roadmap H8d) Originally scoped to exactly the 10 formats
+/// `femeCpuResourceLoadTypedV4F32`/`V4I32` special-cased directly
+/// (`R32G32B32A32_{FLOAT,UINT,SINT}`, `R8G8B8A8_{UNORM,SNORM,UINT,SINT}`,
+/// `R32_{FLOAT,UINT,SINT}`); a real `dEQP-VK.api.info.format_properties.*`
+/// re-run found several real mandatory-texel-buffer `VkFormat`s still
+/// missing this bit specifically. Both typed-buffer load intrinsics now
+/// reuse the same `femeRTImageFormatElementSize`/`femeRTUnpackImageTexel`/
+/// `femeRTUnpackImageTexelI32` tables the storage/sampled-image path
+/// already relies on (FeMeRuntimeCPU.c) rather than special-casing each
+/// format a second time, so this predicate's scope was widened to match
+/// that table's own read-side breadth exactly: the packed 32-bit formats
+/// `R10G10B10A2_{UNORM,UINT}`/`R11G11B10_FLOAT`, `B8G8R8A8_UNORM`, the
+/// 8-bit `R8_*`/`R8G8_*` family, the 16-bit `R16_{FLOAT,UINT,SINT}` and
+/// `R16G16B16A16_{FLOAT,UINT,SINT}` families (not `R16_{UNORM,SNORM}`:
+/// the real Vulkan mandatory list, confirmed by this row's own CTS
+/// re-run, never requires a texel-buffer bit for those two), and
+/// `R32G32_{FLOAT,UINT,SINT}`.
 bool isTexelBufferFormatSupported(feme::cpu::ResourceFormat Format);
+
+/// Returns whether \p Format is one of the (smaller) subset of
+/// `isTexelBufferFormatSupported` formats the CPU runtime's typed-store
+/// helpers (`femeCpuResourceStoreTypedV4F32`/`V4I32`,
+/// feme/runtime/CPU/FeMeRuntimeCPU.c) actually implement a *write*
+/// conversion for -- gates `VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT`
+/// specifically (`vkGetPhysicalDeviceFormatProperties`), distinct from
+/// the read-only bit `isTexelBufferFormatSupported` gates.
+///
+/// (Roadmap H8d) A `VkBufferView` itself does not distinguish "uniform"
+/// from "storage" use (`vkCreateBufferView` gates on
+/// `isTexelBufferFormatSupported` alone, per Descriptor.h's own file
+/// comment), so a format lacking a real `femeRTPackImageTexel`/
+/// `femeRTPackImageTexelI32` case (most notably `B8G8R8A8_UNORM`, which
+/// has never had real write support anywhere in this project -- not even
+/// as a storage *image*, see `Format.cpp`'s own `VK_FORMAT_FEATURE_
+/// STORAGE_IMAGE_BIT` switch) can still legally back a *read-only*
+/// texel-buffer view (`isTexelBufferFormatSupported` above stays `true`
+/// for it), just never a storage one.
+bool isStorageTexelBufferFormatSupported(feme::cpu::ResourceFormat Format);
 
 /// Returns whether \p Format may be fetched as a vertex attribute --
 /// `GraphicsPipeline.cpp`'s `vkCreateGraphicsPipelines` validation

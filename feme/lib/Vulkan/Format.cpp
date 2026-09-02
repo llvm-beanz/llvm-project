@@ -722,11 +722,77 @@ bool feme::vulkan::isTexelBufferFormatSupported(ResourceFormat Format) {
   case ResourceFormat::R32_FLOAT:
   case ResourceFormat::R32_UINT:
   case ResourceFormat::R32_SINT:
+  // (Roadmap H8d) A real `dEQP-VK.api.info.format_properties.*` re-run
+  // found 21 further mandatory texel-buffer formats this project's own
+  // `femeCpuResourceLoadTypedV4F32`/`V4I32` (roadmap H8d refactor: both
+  // now dispatch through the same `femeRTImageFormatElementSize`/
+  // `UnpackImageTexel(I32)`/`PackImageTexel(I32)` tables the storage/
+  // sampled-image path already shares) can already read losslessly, but
+  // this predicate had never been widened to cover. Two-component and
+  // packed formats below only ever need read support here --
+  // `isStorageTexelBufferFormatSupported` immediately below narrows to
+  // the read+write-capable subset for `VK_FORMAT_FEATURE_STORAGE_
+  // TEXEL_BUFFER_BIT` specifically.
+  case ResourceFormat::R10G10B10A2_UNORM:
+  case ResourceFormat::R10G10B10A2_UINT:
+  case ResourceFormat::R11G11B10_FLOAT:
+  case ResourceFormat::B8G8R8A8_UNORM:
+  case ResourceFormat::R16_FLOAT:
+  case ResourceFormat::R16_UINT:
+  case ResourceFormat::R16_SINT:
+  case ResourceFormat::R16G16B16A16_FLOAT:
+  case ResourceFormat::R16G16B16A16_UINT:
+  case ResourceFormat::R16G16B16A16_SINT:
+  case ResourceFormat::R32G32_FLOAT:
+  case ResourceFormat::R32G32_UINT:
+  case ResourceFormat::R32G32_SINT:
+  case ResourceFormat::R8_UNORM:
+  case ResourceFormat::R8_SNORM:
+  case ResourceFormat::R8_UINT:
+  case ResourceFormat::R8_SINT:
+  case ResourceFormat::R8G8_UNORM:
+  case ResourceFormat::R8G8_SNORM:
+  case ResourceFormat::R8G8_UINT:
+  case ResourceFormat::R8G8_SINT:
     return true;
   default:
     return false;
   }
 }
+
+bool feme::vulkan::isStorageTexelBufferFormatSupported(ResourceFormat Format) {
+  switch (Format) {
+  // The original 10-format scope: already read+write-capable (see
+  // `isTexelBufferFormatSupported` above for why).
+  case ResourceFormat::R32G32B32A32_FLOAT:
+  case ResourceFormat::R32G32B32A32_UINT:
+  case ResourceFormat::R32G32B32A32_SINT:
+  case ResourceFormat::R8G8B8A8_UNORM:
+  case ResourceFormat::R8G8B8A8_SNORM:
+  case ResourceFormat::R8G8B8A8_UINT:
+  case ResourceFormat::R8G8B8A8_SINT:
+  case ResourceFormat::R32_FLOAT:
+  case ResourceFormat::R32_UINT:
+  case ResourceFormat::R32_SINT:
+  // (Roadmap H8d) Of the 21 new read-only formats
+  // `isTexelBufferFormatSupported` above gained, only these 6 are also
+  // real mandatory `STORAGE_TEXEL_BUFFER_BIT` entries per a real
+  // `dEQP-VK.api.info.format_properties.*` re-run -- the rest (e.g.
+  // `R8_UNORM`, `B8G8R8A8_UNORM`) only ever need the uniform (read-only)
+  // bit. `femeRTPackImageTexel`/`PackImageTexelI32` (the write-side
+  // tables) already implement all six losslessly.
+  case ResourceFormat::R16G16B16A16_FLOAT:
+  case ResourceFormat::R16G16B16A16_UINT:
+  case ResourceFormat::R16G16B16A16_SINT:
+  case ResourceFormat::R32G32_FLOAT:
+  case ResourceFormat::R32G32_UINT:
+  case ResourceFormat::R32G32_SINT:
+    return true;
+  default:
+    return false;
+  }
+}
+
 
 bool feme::vulkan::isVertexBufferFormatSupported(ResourceFormat Format) {
   switch (Format) {
