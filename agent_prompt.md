@@ -37,17 +37,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8j or other prerequisites blocking the H-series milestones?
+Can you work on H8d or other prerequisites blocking the H-series milestones?
 
-> **Wire the now-complete `ETC2Decode.h` decoder into a real consumer and flip
-> `textureCompressionETC2`.** H8c landed a complete, directly-unit-tested
-> ETC2/EAC decoder, but nothing calls it yet -- `Format.cpp` has no
-> `ResourceFormat` enumerators for any of the 10
-> `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` formats, `mapVkFormat` has no cases for
-> them, and `vkCreateImage` still rejects every one outright. Needs the same
-> wiring shape roadmap E22 gave `ASTCDecode.h`: `Format.{h,cpp}` block-aware
-> layout entries, `CommandBuffer.cpp`/`ImageOps.cpp` decode-on-sample-or-copy
-> plumbing, and `PhysicalDeviceInfo.cpp`'s `textureCompressionETC2` bit, only
-> flipped once a real `dEQP-VK.texture.compressed_format.*` ETC2/EAC case is
-> confirmed passing end to end
-
+> **Texel-buffer (`UNIFORM_TEXEL_BUFFER_BIT`/`STORAGE_TEXEL_BUFFER_BIT`)
+> format-table breadth.** `isTexelBufferFormatSupported` covers only 8 formats;
+> a real `dEQP-VK.api.info.format_properties.*` re-run under H8a shows several
+> mandatory texel-buffer formats (e.g. `a2b10g10r10_unorm_pack32`,
+> `b8g8r8a8_unorm`, `b10g11r11_ufloat_pack32`) still missing
+> `VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT` specifically -- a distinct,
+> CPU-runtime-typed-load/store-helper-breadth gap from H8a/H8b's own
+> vertex-fetch scope
