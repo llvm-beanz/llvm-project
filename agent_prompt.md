@@ -37,11 +37,17 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8c or other prerequisites blocking the H-series milestones?
+Can you work on H8i or other prerequisites blocking the H-series milestones?
 
-> **BC1-7/ETC2/EAC compressed-format sampling.** The largest single H8 bullet:
-> no `BCDecode.h`/`ETC2Decode.h` exists yet (only `ASTCDecode.{h,cpp}`, roadmap
-> E20-E23's own precedent for a block-compressed decoder). Needs its own scoping
-> pass (which of the ~22 BC + ~10 ETC2/EAC formats are load-bearing for a real
-> CTS group before committing to a decoder for all of them) before any code
-> lands
+> **BC1-7 compressed-format sampling** (deferred from H8c's own scoping pass).
+> Needs its own `BCDecode.h`/`.cpp`, mirroring `ETC2Decode.h`'s own precedent (a
+> standalone, directly-unit-tested, initially-unwired decoder) -- but BC1-5
+> (comparable in complexity to ETC2's individual/differential modes) should
+> likely be scoped and landed as their own slice before attempting BC6H (HDR,
+> half-float endpoint interpolation) or BC7 (8 modes, variable partition counts,
+> rotation, index selection), both dramatically more complex than anything
+> ETC2/EAC or BC1-5 needed. `vktTextureCompressedFormatTests.cpp`'s own
+> whole-family `textureCompressionBC` gate (confirmed by H8c's own
+> investigation) means no CTS case in that specific group passes until all 16 BC
+> formats this test group exercises are complete, so a BC1-5-only slice should
+> expect the same "no CTS delta yet" story H8c's own ETC2/EAC slice had
