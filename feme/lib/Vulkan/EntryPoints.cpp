@@ -2105,6 +2105,14 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties(
           ? (VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT |
              VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT)
           : VkFormatFeatureFlags(0);
+  // (Roadmap H8) `isVertexBufferFormatSupported` (Format.h) gates
+  // `vkCreateGraphicsPipelines`'s own vertex-attribute-format validation
+  // (`GraphicsPipeline.cpp`'s `isSupportedVertexAttributeFormat`, which now
+  // just forwards to it): the same format set is genuinely fetchable as a
+  // vertex attribute, so advertise the bit here too rather than leaving
+  // every one of these formats' `bufferFeatures` silently short of it.
+  if (Format && isVertexBufferFormatSupported(*Format))
+    pFormatProperties->bufferFeatures |= VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
 }
 
 VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(

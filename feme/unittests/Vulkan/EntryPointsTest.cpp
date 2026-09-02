@@ -70,6 +70,29 @@ TEST_F(EntryPointsTest, FormatPropertiesReportsSampledAndAttachmentFormat) {
               VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT);
 }
 
+TEST_F(EntryPointsTest, FormatPropertiesReportsVertexBufferBit) {
+  // (Roadmap H8) `R32_SFLOAT`/`R8G8B8A8_UNORM` are both formats
+  // `isVertexBufferFormatSupported` (Format.h) reports supported --
+  // `bufferFeatures` must carry `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` for
+  // each, matching `GraphicsPipeline.cpp`'s own
+  // `isSupportedVertexAttributeFormat` acceptance.
+  VkFormatProperties Props{};
+  vkGetPhysicalDeviceFormatProperties(Physical, VK_FORMAT_R32_SFLOAT, &Props);
+  EXPECT_TRUE(Props.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
+
+  VkFormatProperties Props2{};
+  vkGetPhysicalDeviceFormatProperties(Physical, VK_FORMAT_R8G8B8A8_UNORM,
+                                      &Props2);
+  EXPECT_TRUE(Props2.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
+
+  // `B8G8R8A8_UNORM` is not one of `decodeAttribute`'s supported vertex
+  // attribute formats (see Executor.cpp) -- must not claim the bit.
+  VkFormatProperties Props3{};
+  vkGetPhysicalDeviceFormatProperties(Physical, VK_FORMAT_B8G8R8A8_UNORM,
+                                      &Props3);
+  EXPECT_FALSE(Props3.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
+}
+
 TEST_F(EntryPointsTest, FormatPropertiesNeverReportsStorageImage) {
   // No format has a shader-writable storage image path yet (see "V5:
   // Images and sampling" in FeMeVulkanDesign.md).
