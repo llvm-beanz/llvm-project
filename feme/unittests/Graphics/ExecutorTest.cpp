@@ -4808,4 +4808,253 @@ TEST(
   EXPECT_EQ(Untouched[3], 0);
 }
 
+// (Roadmap H8p) A fragment shader with a real `uvec2` output (`UInt`,
+// `ComponentCount == 2`) drawn to a real `R16G16_UINT` color attachment --
+// exercises `executeDraws`'s widened `FSColors` validation (accepting a
+// non-`Float` output for an integer-format attachment, rather than the
+// hard rejection every fragment output faced before this row) and
+// `readFragmentColorInt`/`packClearColor`'s new raw-integer write path
+// end to end, not just `ImageFixtureTest.cpp`'s own pack/unpack-in-
+// isolation coverage.
+constexpr char PositionOnlyVertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+constexpr char UInt2ConstantFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    call void @feme.stage.output.store.i32(i32 0, i32 0, i32 0, i32 12345, i32 0)
+    call void @feme.stage.output.store.i32(i32 0, i32 0, i32 1, i32 6789, i32 0)
+    ret void
+  }
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+TEST(ExecutorTest, RendersAUvec2FragmentOutputToAnIntegerColorAttachment) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, PositionOnlyVertexShaderIR, "vs_main", VSSig,
+                  ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement UOut = makeElement(
+      0, SignatureDirection::Output, 2, /*Location=*/0);
+  UOut.ComponentType = SignatureComponentType::UInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {UOut};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, UInt2ConstantFragmentShaderIR, "fs_main", FSSig,
+                  ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R16G16_UINT, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+
+  std::array<float, 9> VertexData = {
+      -1.0f, -1.0f, 0.0f, // v0
+      3.0f,  -1.0f, 0.0f, // v1
+      -1.0f, 3.0f,  0.0f, // v2
+  };
+  std::vector<VertexAttribute> Attrs = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 12,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attrs}};
+
+  std::array<uint8_t, 16 * 4> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R16G16_UINT, 4,
+                       4};
+  std::array<AttachmentView, 1> Attach = {Color};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attach;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    uint16_t R, G;
+    memcpy(&R, AttachmentStorage.data() + I * 4, 2);
+    memcpy(&G, AttachmentStorage.data() + I * 4 + 2, 2);
+    EXPECT_EQ(R, 12345u) << "texel " << I;
+    EXPECT_EQ(G, 6789u) << "texel " << I;
+  }
+}
+
+// (Roadmap H8p) A `Float`-typed fragment output is still rejected for an
+// integer-format attachment (mirroring the original hard-rejection this
+// row widened, not removed): the expected type is now format-dependent
+// (`expectedColorComponentType`), not unconditionally `Float`.
+TEST(ExecutorTest, RejectsAFloatFragmentOutputForAnIntegerColorAttachment) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, PositionOnlyVertexShaderIR, "vs_main", VSSig,
+                  ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  // A plain constant float4 output, avoiding the need to also wire up a
+  // matching fragment input (this test only cares about the output's own
+  // `ComponentType`, not any interpolated value).
+  constexpr char ConstantFloat4FragmentShaderIR[] = R"(
+    define void @fs_main() #0 {
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )";
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, ConstantFloat4FragmentShaderIR, "fs_main", FSSig,
+      ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R16G16_UINT, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+
+  std::array<uint8_t, 16 * 4> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R16G16_UINT, 4,
+                       4};
+  std::array<AttachmentView, 1> Attach = {Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attach;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  DrawCommand Cmd;
+  Cmd.VertexCount = 0;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  EXPECT_THAT_ERROR(executeDraws(Pipeline, Draw), Failed());
+}
+
+// (Roadmap H8p) `Blend.BlendEnable` combined with an integer color-
+// attachment format is rejected (`mergeColor`'s own new defensive guard):
+// this combination was unreachable before this row (no integer fragment
+// output could be drawn at all), but is newly reachable now that a real
+// `uvec2` output can target `R16G16_UINT`, so it needs its own explicit
+// rejection since blending is undefined for an integer format per spec.
+TEST(ExecutorTest, RejectsBlendEnableForAnIntegerColorAttachment) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, PositionOnlyVertexShaderIR, "vs_main", VSSig,
+                  ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement UOut = makeElement(
+      0, SignatureDirection::Output, 2, /*Location=*/0);
+  UOut.ComponentType = SignatureComponentType::UInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {UOut};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, UInt2ConstantFragmentShaderIR, "fs_main", FSSig,
+                  ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  BlendState Blend;
+  Blend.BlendEnable = true;
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R16G16_UINT, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{Blend}, /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+
+  std::array<float, 9> VertexData = {
+      -1.0f, -1.0f, 0.0f, // v0
+      3.0f,  -1.0f, 0.0f, // v1
+      -1.0f, 3.0f,  0.0f, // v2
+  };
+  std::vector<VertexAttribute> Attrs = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 12,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attrs}};
+
+  std::array<uint8_t, 16 * 4> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R16G16_UINT, 4,
+                       4};
+  std::array<AttachmentView, 1> Attach = {Color};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attach;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  EXPECT_THAT_ERROR(executeDraws(Pipeline, Draw), Failed());
+}
+
 } // namespace

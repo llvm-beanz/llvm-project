@@ -1221,6 +1221,47 @@ void readFragmentColor(const StageStorage &FSOutput,
                   : (C == 3 ? 1.0 : 0.0);
 }
 
+/// (Roadmap H8p) The integer counterpart of `readFragmentColor` above,
+/// for one of `isIntegerColorAttachmentFormat`'s (RuntimeABI.h) 7 real
+/// integer color-attachment formats -- reads \p Elem's raw `UInt`/`SInt`
+/// value directly (via `readRaw`, reinterpreting its bit pattern per
+/// \p Elem's own `ComponentType` rather than `readFloat`'s IEEE-754
+/// interpretation), matching `ImageFixture.cpp`'s own "an integer
+/// attachment value is a raw reference value, not a normalized fraction"
+/// convention (`S8_UINT`'s clear-color precedent). \p Elem must already
+/// be known to be a `UInt`- or `SInt`-typed output matching its own
+/// attachment's signedness (checked once by `executeDraws`' own
+/// `expectedColorComponentType`-based validation below).
+void readFragmentColorInt(const StageStorage &FSOutput,
+                          const SignatureElement &Elem, uint32_t Invocation,
+                          std::array<double, 4> &RGBA) {
+  bool Signed = Elem.ComponentType == SignatureComponentType::SInt;
+  for (unsigned C = 0; C != 4; ++C) {
+    if (C >= Elem.ComponentCount) {
+      RGBA[C] = C == 3 ? 1.0 : 0.0;
+      continue;
+    }
+    uint32_t Raw = FSOutput.readRaw(Elem.ElementID, C, Invocation);
+    RGBA[C] = Signed ? static_cast<double>(static_cast<int32_t>(Raw))
+                     : static_cast<double>(Raw);
+  }
+}
+
+/// The fragment output `SignatureComponentType` \p Format's color
+/// attachment expects for a real, non-dishonest `COLOR_ATTACHMENT_BIT`
+/// (roadmap H8p): `UInt`/`SInt` (matching the format's own signedness) for
+/// one of `isIntegerColorAttachmentFormat`'s 7 integer formats, `Float`
+/// for every other (normalized or floating-point) color-attachment format
+/// this executor already wrote to before this row.
+static SignatureComponentType
+expectedColorComponentType(cpu::ResourceFormat Format) {
+  if (!cpu::isIntegerColorAttachmentFormat(Format))
+    return SignatureComponentType::Float;
+  return cpu::isUnsignedIntegerColorAttachmentFormat(Format)
+            ? SignatureComponentType::UInt
+            : SignatureComponentType::SInt;
+}
+
 /// Merges a fragment's new color \p Src into \p Texel (the attachment's
 /// existing texel, read and overwritten in place) per \p Pipeline's blend/
 /// logic-op/write-mask state (roadmap R33). A logic op, when enabled,
@@ -1255,6 +1296,18 @@ Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
 
   std::array<double, 4> Final = Src;
   if (Blend.BlendEnable) {
+    // (Roadmap H8p) Blending is only defined for a floating-point/
+    // normalized color format per spec (an integer format's own
+    // `VkFormatFeatureFlags` never advertises `COLOR_ATTACHMENT_BLEND_
+    // BIT`, confirmed by the real CTS run this row's own investigation
+    // used, `Format.cpp`'s `formatFeatureFlags`) -- this combination was
+    // unreachable before this row (no integer fragment output could be
+    // drawn at all), but is newly reachable now, so it needs its own
+    // explicit rejection rather than silently blending nonsensical bits.
+    if (cpu::isIntegerColorAttachmentFormat(Format))
+      return createStringError(inconvertibleErrorCode(),
+                               "blending is not defined for an integer "
+                               "color attachment format");
     std::array<double, 4> Dst{};
     if (Error E = unpackColor(Format, Texel, Dst))
       return E;
@@ -1692,13 +1745,25 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "fragment stage has no output at location %u "
                                "(mapped to color attachment %u)",
                                *Loc, I);
+    // (Roadmap H8p) An integer color attachment (one of
+    // `isIntegerColorAttachmentFormat`'s 7 formats, RuntimeABI.h) expects
+    // a matching `UInt`/`SInt` fragment output instead of `Float` --
+    // `expectedColorComponentType` (above) resolves which, so a real
+    // `ivec4`/`uvec4` fragment output can now be drawn to a real integer
+    // attachment rather than being hard-rejected outright regardless of
+    // the attachment's own format.
+    SignatureComponentType Want =
+        expectedColorComponentType(Draw.Attachments[I].Format);
     if (FSColor->ComponentCount == 0 || FSColor->ComponentCount > 4 ||
-        FSColor->ComponentType != SignatureComponentType::Float)
-      return createStringError(inconvertibleErrorCode(),
-                               "the fragment output at location %u mapped "
-                               "to color attachment %u must be a "
-                               "floating-point output of 1-4 components",
-                               *Loc, I);
+        FSColor->ComponentType != Want)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "the fragment output at location %u mapped to color attachment "
+          "%u must be a%s output of 1-4 components",
+          *Loc, I,
+          Want == SignatureComponentType::Float  ? " floating-point"
+          : Want == SignatureComponentType::UInt ? "n unsigned-integer"
+                                                  : " signed-integer");
     FSColors.push_back(FSColor);
   }
 
@@ -3019,24 +3084,39 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                 // as an unused slot above.
                 continue;
               std::array<double, 4> RGBA;
-              readFragmentColor(*FSOutput, *FSColors[AttIdx], Q * 4 + Lane,
-                                RGBA);
-              // (roadmap F5) `RectangularSmooth`'s antialiasing coverage
-              // (`Quad.LineCoverage`, `1.0` for every non-line/non-smooth
-              // triangle) multiplies into the written alpha so a partially-
-              // covered edge fragment blends proportionally rather than
-              // writing fully opaque or not at all.
-              RGBA[3] *= Quad.LineCoverage[Lane];
-              // (roadmap H7f) `alphaToOneEnable` forces every color
-              // attachment's own output alpha to the maximum representable
-              // value -- always `1.0` here, since `RGBA` is this pipeline's
-              // uniform float `[0, 1]` representation regardless of
-              // `Att.Format`'s own bit layout (packed to that format's
-              // representation later, in `mergeColor`). Applied after the
-              // line-coverage multiply above, matching the real spec's own
-              // "Multisample Coverage" ordering (`fragops.adoc`).
-              if (Pipeline.getAlphaToOneEnable())
-                RGBA[3] = 1.0;
+              // (Roadmap H8p) An integer color attachment reads its
+              // fragment output's raw `UInt`/`SInt` value (`FSColors[
+              // AttIdx]->ComponentType`, validated to match the
+              // attachment's own format above) rather than `readFloat`'s
+              // IEEE-754 interpretation, and skips every one of the
+              // float-only adjustments below (antialiasing coverage,
+              // `alphaToOneEnable`): neither is defined for an integer
+              // numeric format per spec, matching why blending and a
+              // logic op are restricted the same way elsewhere.
+              if (FSColors[AttIdx]->ComponentType != SignatureComponentType::Float) {
+                readFragmentColorInt(*FSOutput, *FSColors[AttIdx],
+                                     Q * 4 + Lane, RGBA);
+              } else {
+                readFragmentColor(*FSOutput, *FSColors[AttIdx], Q * 4 + Lane,
+                                  RGBA);
+                // (roadmap F5) `RectangularSmooth`'s antialiasing coverage
+                // (`Quad.LineCoverage`, `1.0` for every non-line/non-smooth
+                // triangle) multiplies into the written alpha so a
+                // partially-covered edge fragment blends proportionally
+                // rather than writing fully opaque or not at all.
+                RGBA[3] *= Quad.LineCoverage[Lane];
+                // (roadmap H7f) `alphaToOneEnable` forces every color
+                // attachment's own output alpha to the maximum
+                // representable value -- always `1.0` here, since `RGBA`
+                // is this pipeline's uniform float `[0, 1]` representation
+                // regardless of `Att.Format`'s own bit layout (packed to
+                // that format's representation later, in `mergeColor`).
+                // Applied after the line-coverage multiply above, matching
+                // the real spec's own "Multisample Coverage" ordering
+                // (`fragops.adoc`).
+                if (Pipeline.getAlphaToOneEnable())
+                  RGBA[3] = 1.0;
+              }
               // Only attachment 0 ever has a second source color to read:
               // Vulkan requires exactly one color attachment for a pipeline
               // using a dual-source blend factor (see `FSColor1`'s own
