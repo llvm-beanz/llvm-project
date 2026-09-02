@@ -54439,3 +54439,153 @@ uses the same partition/subset/anchor-index machinery, just with
 half-float-adjacent endpoints instead of BC7's 8-bit fixed-point ones).
 Wiring both BC1-5 and BC7 into a real `Format.cpp`/`textureCompressionBC`
 consumer remains an entirely separate, not-yet-filed future row.
+
+# Agent thoughts: roadmap H8m (BC6H compressed-format sampling)
+
+## Task
+
+Complete roadmap H8m: implement a BC6H (`VK_FORMAT_BC6H_{U,S}FLOAT_BLOCK`,
+"BPTC HDR") block decoder, split from H8k's scoping pass and attempted
+after H8l's BC7 decoder per that row's own stated ordering (BC7 first
+since it needs no half-float unquantization, BC6H strictly more work on
+top).
+
+## Preparatory refactor before writing any new code
+
+Reading VK-GL-CTS's own `decompressBc6H` alongside the just-finished
+`decompressBc7` confirmed something worth acting on before writing a
+single line of BC6H-specific code: BC6H's 2-subset partition-selection
+table (`partitions2`) and its matching anchor-index table
+(`anchorIndicesSecondSubset2`) are byte-for-byte identical to what
+`BC7Decode.cpp` already has as private `kPartitions2`/
+`kAnchorSecondSubset2` tables. BC6H has no 3-subset modes at all, so it
+never needs BC7's own `kPartitions3` (and its two 3-subset anchor
+tables). Rather than duplicate a 1024+64-entry table a second time (or
+worse, silently risk two out-of-sync copies drifting over time), I
+factored the 2-subset tables into a new shared
+`feme::vulkan::bcpartitions` namespace (`BCPartitionTables.h`/`.cpp`),
+leaving BC7's 3-subset-only tables private where they already were.
+This is exactly the kind of "single source of truth once genuine reuse
+is confirmed" refactor the project has done elsewhere (e.g. BC2/BC3
+reusing BC1's color-block decode in H8i), and per the standing "small
+separate commits" instruction I made it its own commit, verified purely
+behavior-preserving by re-running `BC7DecodeTest` (5/5, unchanged)
+before touching anything BC6H-specific.
+
+## Writing the decoder
+
+BC6H's own per-mode bit-layout table is considerably more irregular
+than BC7's: 14 modes instead of 8, and several modes each have 15-20+
+individual bit-field extractions OR'd together into their R/G/B raw
+endpoint arrays (compare BC7's comparatively tidy per-mode field
+layout). Given this, and mirroring H8l's own precedent of treating
+CTS's reference decoder as ground truth for enumerated, no-formula-to-
+verify data, I made a deliberate choice up front: port the entire
+per-mode switch statement directly from CTS's `decompressBc6H`,
+line-for-line, rather than attempt to re-derive it independently from
+`bptc.txt`'s own prose. This extends H8l's "copy the lookup tables
+verbatim" reasoning one level further, to the per-mode bit-position
+logic itself -- a bigger leap of faith, but the right one given CTS is
+the actual thing a real `dEQP-VK.texture.compressed_format.*` BC6H case
+scores against, and hand-deriving 14 modes' worth of irregular bit
+layouts independently would multiply the risk of a transcription
+mismatch, not reduce it.
+
+While transcribing, I found a genuinely new wrinkle that BC7 never
+needed: two of BC6H's 14 modes (12 and 13) store a couple of "extra
+precision" endpoint bits in a deliberately bit-reversed field --
+signaled in CTS's own `getBits128` by passing `first > last` (the
+function detects this, swaps the range, extracts normally, then
+bit-reverses the result before returning). BC7's own `getBits128` never
+needed this since no BC7 field is ever stored reversed, so I had to add
+a whole second code path to my own `getBits128` that BC7Decode.cpp's
+version simply doesn't have. This is a real, if obscure, quirk of the
+actual BC6H bitstream format -- not a bug in CTS or an artifact of its
+own implementation -- and is now the single most novel code path in
+this entire BC decoder family.
+
+The decoder compiled cleanly on the first try (a genuinely pleasant
+surprise given the size of the 14-case switch statement), but "compiles
+cleanly" and "is correct" are very different bars, especially for code
+transcribed by hand from viewing a ~400-line reference function across
+a couple of tool calls.
+
+## Verification strategy: independent Python cross-check instead of hand-built vectors
+
+For BC7 (H8l), I hand-constructed 4 bit-exact 16-byte test blocks and
+computed their expected output via a small Python simulation, then
+hardcoded both into `BC7DecodeTest.cpp`. That approach doesn't scale
+well to BC6H: with 14 modes each having their own irregular bit layout
+(rather than BC7's comparatively regular per-mode field packing), hand-
+constructing even one bit-exact block per mode reliably, let alone
+catching subtle off-by-one bit-position mistakes in the process, would
+have been extremely labor-intensive and error-prone in exactly the way
+that would undermine the verification's own value.
+
+Instead, I wrote a second, independent, separately-typed Python
+transcription of the same CTS algorithm (`/tmp/bc6hsim.py`, deliberately
+not derived by copying the C++ I'd just written, to avoid correlating
+transcription mistakes across both). I then generated random 16-byte
+blocks with the first byte's mode-selecting bits forced to each of the
+14 modes (plus the 4 reserved/invalid patterns), decoded each with both
+the compiled C++ decoder (via a small throwaway fuzz harness linking
+directly against `BC6HDecode.cpp`) and the Python oracle, and diffed.
+
+This immediately paid off: the first full sweep (14 modes x 2 sign
+conventions x 8 trials = 224 blocks) turned up 104 mismatches, every
+single one confined to the `Signed=true` cases. Bisecting by adding
+temporary debug prints into a scratch copy of the decoder (never the
+real file) to dump intermediate endpoint values pixel-by-pixel showed
+the sign-extension and unquantization pipeline was numerically correct
+right up through `unquantize` -- the manually-traced arithmetic matched
+the C++ debug output exactly at every step. The actual bug was one
+level further down, in `interpolate`: its weight variable `W` was
+declared `unsigned`, and BC6H's endpoints (unlike BC7's always-
+nonnegative 8-bit fixed-point endpoints) can legitimately be negative
+after sign extension and unquantization. `(64 - W) * A` where `A` is a
+negative `int` and `W` is `unsigned` triggers C++'s usual arithmetic
+conversions, silently promoting `A` to a huge unsigned value before the
+multiply -- a classic signed/unsigned mixing bug, and exactly the kind
+of thing this cross-check exists to catch. Declaring `W` as `int`
+instead fixed every mismatch: a full re-run (14 x 2 x 30 = 840 trials,
+plus all 4 reserved patterns) came back with zero disagreements.
+
+This is worth calling out explicitly: the independent-oracle strategy
+is more expensive up front than hand-building a handful of test vectors,
+but it found a real bug that a handful of hand-picked test vectors could
+very plausibly have missed (my originally-planned "one representative
+vector per mode" set happened to include only unsigned-format examples
+for several of the modes I would have picked first, purely because
+those were the ones easiest to reason through by hand). The fuzz
+approach's breadth is exactly what makes it worth the extra setup cost
+whenever a decoder's per-case logic is irregular enough that "does it
+work on this one example" isn't strong evidence that "it works in
+general."
+
+Once the fix landed and the full 840-trial sweep passed cleanly, I
+picked a representative 7-vector subset from the confirmed-correct fuzz
+corpus (one 2-subset delta mode, the one 2-subset direct mode, the one
+1-subset direct mode, a normal 1-subset delta mode, both reversed-bit
+modes, and the reserved/invalid-mode case) and hardcoded those as the
+literal `BC6HDecodeTest.cpp` test vectors -- the same "simulate, verify,
+then commit only the confirmed vectors" shape the BC7/H8l session used,
+just with a fuzz-based confirmation step in place of hand-derivation.
+
+## Closing out the BC1-7 family
+
+`ninja check-feme` (assertions-enabled, ccache build) passed in full at
+2365/2392 (0 regressions, +7 tests from this row's own coverage) after
+the fix. A real `deqp-vk` run confirmed `dEQP-VK.texture.*bc6h*` stays
+48/48 `NotSupported` (decoder is still unwired, exactly as expected) and
+`dEQP-VK.api.info.*` stays byte-for-byte identical to H8l's own
+baseline (5,367 passed / 584 failed / 4,533 not supported) -- no
+regression anywhere.
+
+With BC6H done, every one of the 16 `VK_FORMAT_BC*` formats now has a
+complete, directly-unit-tested decoder (BC1-5 via H8i, BC7 via H8l,
+BC6H via this row) -- the entire BC1-7 decoder family H8c's own
+scoping pass first identified is closed out. Nothing wires any of them
+into a real consumer yet, and no such wiring row existed in the roadmap
+before this session (H8j only covers ETC2/EAC's own wiring), so I filed
+a new H8n row for it -- one lowercase letter under H8, matching the
+"no nesting deeper than one lowercase letter" convention going forward.
