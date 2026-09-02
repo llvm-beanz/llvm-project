@@ -37,17 +37,17 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8i or other prerequisites blocking the H-series milestones?
+Can you work on H8k or other prerequisites blocking the H-series milestones?
 
-> **BC1-7 compressed-format sampling** (deferred from H8c's own scoping pass).
-> Needs its own `BCDecode.h`/`.cpp`, mirroring `ETC2Decode.h`'s own precedent (a
-> standalone, directly-unit-tested, initially-unwired decoder) -- but BC1-5
-> (comparable in complexity to ETC2's individual/differential modes) should
-> likely be scoped and landed as their own slice before attempting BC6H (HDR,
-> half-float endpoint interpolation) or BC7 (8 modes, variable partition counts,
-> rotation, index selection), both dramatically more complex than anything
-> ETC2/EAC or BC1-5 needed. `vktTextureCompressedFormatTests.cpp`'s own
-> whole-family `textureCompressionBC` gate (confirmed by H8c's own
-> investigation) means no CTS case in that specific group passes until all 16 BC
-> formats this test group exercises are complete, so a BC1-5-only slice should
-> expect the same "no CTS delta yet" story H8c's own ETC2/EAC slice had
+> **BC6H/BC7 compressed-format sampling** (deferred from H8i's own BC1-5 slice).
+> BC6H (`VK_FORMAT_BC6H_*`, HDR half-float endpoint interpolation across 14
+> partition/mode shapes) and BC7 (`VK_FORMAT_BC7_*`, 8 modes, variable partition
+> counts, rotation, index selection) are both dramatically more complex than
+> BC1-5 or ETC2/EAC's own bounded algorithms -- needs its own scoping pass
+> (likely splitting BC6H and BC7 into their own further sub-rows once the
+> per-mode complexity is better understood) before any code lands. Like H8i's
+> own BC1-5 slice, `vktTextureCompressedFormatTests.cpp`'s whole-family
+> `textureCompressionBC` gate means no CTS case passes until all 16 BC formats
+> (BC1-5 plus these remaining 4) are complete, so this row alone still will not
+> move any CTS case even once landed -- only wiring row H8j's own BC counterpart
+> (not yet filed) will
