@@ -3252,6 +3252,28 @@ per-block copy/sampling path `ImageOps.cpp`/`CommandBuffer.cpp` already
 grew for ASTC, tracked as roadmap H8j. BC1-7 (the other half of H8c's
 original scope) remains fully unimplemented, tracked as roadmap H8i.
 
+**Update (roadmap H8i, partially closed):** a complete BC1-5 block
+decoder (`feme::vulkan::decodeBC1Block`/`decodeBC2Block`/
+`decodeBC3Block`/`decodeBC4Block`/`decodeBC5Block`, `BCDecode.h`) now
+exists, covering 12 of the 16 `VK_FORMAT_BC*` formats' own algorithm,
+mirroring `ETC2Decode.h`'s own H8c precedent (decoder first, no wiring
+yet, no block-aligned-layout prerequisite left to build since E20/E22's
+generalization already covers any block width/height/bytes-per-block
+triple). Two deliberate deviations from a literal reading of the
+Khronos S3TC/RGTC specification prose are documented directly in
+`BCDecode.h`'s own file comment, both resolved in favor of matching
+`VK-GL-CTS`'s own `tcuCompressedTexture.cpp` reference decoder (the
+actual ground truth for CTS pass/fail) rather than the spec text: BC1's
+`color0 == color1` four-color/three-color mode-selection edge case, and
+BC4/BC5's index-table arithmetic (this implementation stays truncating
+integer, matching the spec table's own formula shape and BC3's alpha
+channel exactly, while CTS's own BC4/BC5 reference decoder computes in
+`float` -- a difference not expected to matter until a future wiring row
+does a real numeric comparison). BC6H/BC7 remain fully unimplemented,
+deferred to new roadmap row H8k; wiring the now-complete BC1-5 decoder
+into a real consumer is deferred to a future row alongside H8j's own
+ETC2/EAC wiring.
+
 
 **Update (roadmap E22, closed):** `vkCreateImage` no longer rejects a
 block-compressed `VkFormat`. `Image::blockPointer` addresses one a whole

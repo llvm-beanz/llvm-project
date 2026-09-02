@@ -20393,3 +20393,54 @@ needed: no `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by
 this row (`textureCompressionETC2` stays `VK_FALSE`, matching its actual,
 still-unwired state) -- confirmed, not assumed, by grepping both
 documents for any stale reference this row might need to update.
+
+## Roadmap H8i: measured impact (no CTS delta expected -- decoder-only, unwired)
+
+**Scope.** Mirrors H8c's own shape exactly, this time for BC1-5: a new
+`BCDecode.h`/`.cpp` -- a complete decoder for BC1 (4-color and
+3-color(+alpha) modes), BC2 (explicit alpha), BC3 (interpolated alpha),
+and BC4/BC5 (one/two-channel interpolated, unsigned and signed) -- lands
+as a standalone file with **zero** call sites anywhere in
+`libfeme_vulkan`. `Format.cpp` gained no new `ResourceFormat`
+enumerators or `mapVkFormat` cases, and `PhysicalDeviceInfo.cpp`'s
+`textureCompressionBC` stays `VK_FALSE` (unchanged: no consumer exists
+yet). Two targeted spot checks were run to confirm that expectation
+rather than assume it:
+
+**Real `deqp-vk` re-run, correct ICD confirmed via `vulkaninfo
+--summary` (`deviceName = FeMe CPU Vulkan Device`):**
+- `dEQP-VK.api.info.*` (10,484 cases): 5,367 passed / 584 failed / 4,533
+  not supported -- no regression versus this report's own prior H8c-era
+  numbers (this row touches no code path this subtree exercises).
+- `dEQP-VK.texture.*bc1*` (96 cases, the exact BC1 slice of
+  `vktTextureCompressedFormatTests.cpp`'s own whole-family
+  `textureCompressionBC` gate H8c's own investigation identified): every
+  case still `NotSupported` (`Format not supported:
+  VK_FORMAT_BC1_RGBA_UNORM_BLOCK`), gated on `textureCompressionBC`
+  staying `VK_FALSE` -- the honest, expected result: this row's decoder
+  has no consumer yet, so this group's own pass/fail story does not
+  change until a future wiring row (a BC counterpart to H8j) lands.
+
+**`ninja check-feme`** (assertions-enabled, ccache build, correct target
+dependencies so `FeMeVulkanTests` rebuilds before the regression suite
+runs): 2353/2380 tests pass (27 pre-existing `Unsupported`, 0 `Failed`),
+up 10 tests (this row's own new `BCDecodeTest.cpp` coverage) from
+H8c's own 2343/2370 baseline, 0 regressions.
+
+`Vulkan14FeatureInventory.md`'s `textureCompressionBC` row gained an
+annotation noting the decoder now exists but stays unwired (bit
+correctly stays `no`), mirroring the `textureCompressionETC2` row's own
+H8c annotation. No `VulkanExtensionInventory.md` update needed: grepped
+for any stale BC reference, found none, since no extension is touched by
+this row either.
+
+`BCDecode.h`'s own file comment documents two discrepancies deliberately
+accepted (not yet reconciled, since no real numeric CTS comparison
+happens while the decoder stays unwired): BC1's `color0 == color1`
+mode-selection edge case, where this implementation follows
+`VK-GL-CTS`'s own `tcuCompressedTexture.cpp` reference-decoder
+convention rather than the Khronos spec prose's literal reading (the
+former is the actual ground truth for CTS pass/fail); and BC4/BC5's
+index-table arithmetic, where CTS's own reference decoder computes in
+`float` while this implementation uses truncating integer arithmetic
+matching the spec table's own formula shape.
