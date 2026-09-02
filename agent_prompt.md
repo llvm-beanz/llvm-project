@@ -37,16 +37,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8b or other prerequisites blocking the H-series milestones?
+Can you work on H8c or other prerequisites blocking the H-series milestones?
 
-> **Remaining mandatory `VERTEX_BUFFER_BIT` format families.** H8a scoped
-> `isVertexBufferFormatSupported` to exactly the 17 formats `Executor.cpp`'s
-> `decodeAttribute` already implements -- the Vulkan spec's full 45-format
-> mandatory vertex-buffer list also requires the 8-bit `R8_*`/`R8G8_*` family (8
-> formats), the 16-bit `R16_*`/`R16G16_*`/`R16G16B16A16_*` family (15 formats),
-> and `A2B10G10R10_UNORM_PACK32` (1 format) -- all confirmed still genuinely
-> failing `dEQP-VK.api.info.format_properties.*` after H8a (6 of the 16-bit
-> cases seen directly: `r16_{unorm,snorm}`, `r16g16_{unorm,snorm}`,
-> `r16g16b16a16_{unorm,snorm}`). Needs
-> `decodeAttribute`/`attributeComponentByteSize` (Executor.cpp) expansion for
-> each new scalar type, mirroring the existing `R8G8B8A8_*` cases mechanically
+> **BC1-7/ETC2/EAC compressed-format sampling.** The largest single H8 bullet:
+> no `BCDecode.h`/`ETC2Decode.h` exists yet (only `ASTCDecode.{h,cpp}`, roadmap
+> E20-E23's own precedent for a block-compressed decoder). Needs its own scoping
+> pass (which of the ~22 BC + ~10 ETC2/EAC formats are load-bearing for a real
+> CTS group before committing to a decoder for all of them) before any code
+> lands
