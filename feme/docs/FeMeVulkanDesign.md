@@ -1180,6 +1180,22 @@ own combined-case handling) now lowers a load through the push-constant
 global -- directly, or through a constant-index `getelementptr` into it --
 into a bounds-checked `RootConstants` read.
 
+Roadmap H6q: a real task-stage shader's own push-constant block can have a
+nonzero *first*-member offset -- glslang/`spirv-opt` sometimes drop one or
+more members from the *front* of an interface block (fields this
+particular entry point never reads) while every surviving member keeps its
+original byte offset relative to the whole block's own start. `feme::spirv::
+layOutStructIfOffsetsMatch` (`SPIRVToLLVMPatterns.cpp`) previously always
+started its own layout cursor at 0, which can never match a nonzero first
+declared offset, so the whole `spirv.GlobalVariable` failed to legalize;
+fixed by inserting a synthetic leading byte-array padding member sized to
+the gap (mirroring the file's own existing trailing-gap padding, just at
+the front instead) and a matching `OffsetStructLeadingPadAccessChainPattern`
+that adds one to the first index of any `spirv.AccessChain` into a struct
+laid out this way, so every downstream consumer (including
+`SPIRVPushConstantLoweringPass` above, unmodified) still sees the correct
+absolute byte offset.
+
 ## Command Buffers
 
 Command buffers record a compact typed stream in command-pool-owned storage.
