@@ -3274,6 +3274,16 @@ deferred to new roadmap row H8k; wiring the now-complete BC1-5 decoder
 into a real consumer is deferred to a future row alongside H8j's own
 ETC2/EAC wiring.
 
+**Update (roadmap H8k, closed):** a pure scoping pass, no code change.
+Read `bptc.txt` (the Khronos `DataFormat` specification file covering
+both BC6H and BC7) directly, confirming BC7's own 8-mode,
+partition/subset/rotation/index-selection/P-bit bit-packing complexity
+and BC6H's own further half-float-endpoint-unquantization complexity on
+top of a comparable partition/subset foundation. Split into new sibling
+rows H8l (BC7, attempt first) and H8m (BC6H, attempt second, reusing
+H8l's own partition-table/anchor-index machinery) rather than
+attempting either here.
+
 
 **Update (roadmap E22, closed):** `vkCreateImage` no longer rejects a
 block-compressed `VkFormat`. `Image::blockPointer` addresses one a whole

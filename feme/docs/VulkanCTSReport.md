@@ -20444,3 +20444,38 @@ former is the actual ground truth for CTS pass/fail); and BC4/BC5's
 index-table arithmetic, where CTS's own reference decoder computes in
 `float` while this implementation uses truncating integer arithmetic
 matching the spec table's own formula shape.
+
+## Roadmap H8k: measured impact (scoping-only, no code change)
+
+**Scope.** Unlike every other H8 row so far, H8k landed **no source code
+change** at all -- H8i's own row explicitly deferred BC6H/BC7 to a new
+row "needs its own scoping pass ... before any code lands", and this
+row *is* that scoping pass. Read the Khronos `DataFormat` repository's
+own `bptc.txt` specification (the single file covering both BC6H and
+BC7) directly to confirm the roadmap's own prior estimate of the
+complexity gap versus BC1-5/ETC2-EAC, then split the remaining work
+into two new sibling rows (H8l: BC7, H8m: BC6H) rather than attempting
+either in this row. Since no `libfeme_vulkan` source changed, `Format.cpp`
+gained no new entries and no `VkPhysicalDeviceFeatures`/`VkExtension`
+bit changed -- so, per the standing instruction to run the real CTS
+after each change, a single targeted spot check was still run to
+confirm that expectation (a docs-only change should reproduce this
+report's existing numbers verbatim) rather than assume it:
+
+**Real `deqp-vk` re-run, correct ICD confirmed via `vulkaninfo
+--summary` (`deviceName = FeMe CPU Vulkan Device`):**
+- `dEQP-VK.api.info.*` (10,484 cases): 5,367 passed / 584 failed / 4,533
+  not supported -- byte-for-byte identical to H8i's own prior numbers,
+  confirming this row's docs-only nature introduced no regression.
+
+**`ninja check-feme`** (assertions-enabled, ccache build): re-run to
+confirm the null hypothesis explicitly rather than assume it from "no
+source files changed" alone -- 2353/2380 tests pass (27 pre-existing
+`Unsupported`, 0 `Failed`), identical to H8i's own baseline, 0
+regressions, 0 new tests (none expected, since no new code landed).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`/
+`FeMeVulkanDesign.md` update needed: no `VkPhysicalDeviceFeatures` bit,
+`VkExtension`, or design deviation is introduced by a pure roadmap
+scoping/split -- confirmed, not assumed, by grepping all three documents
+for any stale reference this row might need to touch.
