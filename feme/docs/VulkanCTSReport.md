@@ -8986,6 +8986,120 @@ advertised and already partly working, e.g. `render_to_default_layer`'s
 clear-only path and true multiview both already had working, if
 incomplete, support before this row).
 
+## Roadmap H5h: measured impact (geometry `gl_in[]` system-value input storage)
+
+**Change.** Three files in `feme/lib/Graphics`/`feme/include/feme/Graphics`:
+
+1. `StageStorage.h`/`.cpp`: a new `bool
+   AllInputSystemValuesAreStorageBacked = false` parameter on
+   `buildStageStorage`, gating a new `IsGeometryInputVertexArrayMember`
+   carve-out (alongside the existing H7x `IsInterpolatedFragmentInput`
+   one) in the "skip storage for a system-value input" check. When set,
+   every `SystemValue`-tagged Input element except `PrimitiveID`/
+   `InvocationID` now gets real storage allocated.
+2. `StageStorage.h`: new bounds-check `assert`s in `readRaw`/`writeRaw`,
+   added while diagnosing this row and kept permanently -- zero runtime
+   cost outside an assertions build, and would have surfaced this bug as
+   a clear, immediate assertion failure instead of a silent heap
+   overflow.
+3. `Executor.cpp`: the one call site building a geometry entry's own
+   `GSInput` storage (inside `executeDraws`) now passes `true` for the
+   new parameter; every other `buildStageStorage` call site keeps the
+   default `false` and is unaffected.
+
+**Discovery.** Not found by any of H5a-H5e-e's own narrower CTS samples
+-- each of those rows' own re-runs happened not to reach the crashing
+shape. Found only by actually re-running the *full* `dEQP-VK.geometry.*`
+mustpass sweep (200 cases) to confirm H5's own stated closing condition
+("H5a-H5e all close"): a real `vkQueueSubmit` heap-buffer overflow crashed
+partway through, at `dEQP-VK.geometry.basic.output_vary_by_texture_instancing`.
+
+**Root cause.** `StageStorage.cpp`'s `buildStageStorage` has a
+long-standing rule: an Input-direction element tagged with a
+`SystemValue` gets no real storage (the compiled wrapper is assumed to
+source it from a fixed per-invocation record field instead, e.g.
+`SV_VertexID`/`gl_FragCoord`). This rule already had one documented
+exception (H7x, fragment `ClipDistance`/`CullDistance` inputs, threaded
+through real storage via the ordinary `Varyings` linking mechanism). The
+bug: the same blanket rule also silently starved storage for a
+**geometry stage's own** `gl_in[]`-shaped input system values
+(`gl_Position`, `gl_PointSize`, etc.), which `GeometryWrapper.cpp`'s
+`lowerGeometryInputLoad` (unlike every other stage's wrapper) always
+reads through real, **dynamically-indexed** storage
+(`computeStageStorageAddress`) for every input member except
+`PrimitiveID`/`InvocationID` (genuinely sourced from a
+`FemeGeometryInvocation` record). Since `linkStageElements`'s own
+consumer filter (building `GeomInputLinks` in `Executor.cpp`) only
+excludes `PrimitiveID`/`InvocationID` from being linked, `StageLink.cpp`'s
+`copyLinkedElements` genuinely tried to copy a value into the
+un-allocated (zero-size `Data`) storage element, writing past the end of
+the empty heap buffer.
+
+Confirmed via `gdb -batch` (a crash inside `copyLinkedElements`, called
+from `executeDraws`), then via temporary bounds-check `assert`s in
+`readRaw`/`writeRaw` (confirmed a `writeRaw`/destination-side overflow),
+then via temporary `fprintf` instrumentation in `copyLinkedElements`
+(captured `To.Data.size()=0` for the destination `GSInput` storage while
+writing a 4-component element matching `gl_Position`'s shape).
+
+**Why Hull/Domain never hit this.** `PatchPipeline.cpp` always calls
+`buildStageStorage` with `SignatureDirection::PatchInput`/`PatchOutput`
+(never plain `Input`/`Output`), and the buggy skip-check's guard is
+`Direction == SignatureDirection::Input` specifically -- control-point
+data, which may also carry `SystemValue::Position` etc., was never
+affected. Geometry is the first and only stage using plain `Input`/
+`Output` direction where a per-element-array-indexed system-value input
+matters.
+
+**Why not a blanket "`Position` needs storage" fix.** Fragment's own
+`gl_FragCoord` shares the exact same `SignatureSystemValue::Position`
+enumerant as geometry's `gl_in[].gl_Position`, but Fragment's really is
+invocation-record-sourced (never linked/copied via `copyLinkedElements`).
+A `SystemValue`-only condition, with no stage context, would be
+ambiguous between the two. `EntrySignature` itself carries no `Stage`
+field, so the fix threads an explicit new boolean parameter from the one
+call site that actually knows it is building a geometry stage's own
+input, rather than inferring stage identity from ambiguous per-element
+data.
+
+**Verification.** New `StageLinkTest.cpp` cases:
+`BuildStageStorageSkipsSystemValueInputStorageByDefault`,
+`BuildStageStorageAllocatesGeometryInputSystemValueStorageWhenRequested`,
+`BuildStageStorageStillSkipsGeometryInvocationRecordSystemValues`, and an
+end-to-end `CopiesLinkedGeometryInputSystemValue` regression test
+reproducing the exact crashing shape (a vertex-stage `Position` output
+linked into a geometry-shaped `Position` input, verified to read back
+correctly through `copyLinkedElements` rather than write past an
+unallocated buffer). `ninja check-feme` (assertions-enabled, ccache
+build) passes in full, 2299/2326 (27 pre-existing, unrelated
+`Unsupported`, 0 `Failed`).
+
+A real Vulkan CTS re-run confirms both the fix and 0 regressions. Because
+a single-process `deqp-vk --deqp-case="dEQP-VK.geometry.*"` sweep dies
+outright on a real segfault (silently truncating every case after the
+first crash, making a naive full-sweep total unreliable in the presence
+of a real crash), this row's own before/after comparison instead ran each
+of the 200 `dEQP-VK.geometry.*` mustpass cases in its own isolated
+`deqp-vk` subprocess:
+
+| | Pass | Fail | NotSupported | CRASH |
+|---|---|---|---|---|
+| Before this fix | 72 | 93 | 11 | 24 |
+| After this fix | 85 | 104 | 11 | 0 |
+
+0 regressions (every case passing before the fix still passes after,
+confirmed via a `join`-based diff of the two per-case result files): 13
+of the 24 former crashes are now new passes, the other 11 become
+ordinary `Fail`s -- real, separate, pre-existing rendering-correctness
+bugs unrelated to this row's own storage-allocation scope, left for a
+future row.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this is a pure internal bug fix in the executor's own
+stage-storage allocation, touching no feature bit or extension (geometry
+shading itself was already advertised and already partly working before
+this row).
+
 ## Roadmap H6a: measured impact (SPIR-V mesh entry-point execution-mode reflection)
 
 **Still 0/0/28044, and that is the correct, expected result** -- the same

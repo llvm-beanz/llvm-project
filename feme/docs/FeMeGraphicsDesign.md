@@ -1396,6 +1396,22 @@ reclassified into the pre-existing `Rendered images are incorrect`
 bucket roadmap H5e-e already tracks -- a real rendering-correctness gap,
 left to that row.
 
+Roadmap H5h fixed a latent bug in exactly the "gathers a geometry stage's
+per-primitive input vertex attributes with `linkStageElements`/
+`copyLinkedElements`" step described above: `buildStageStorage` (this
+model's own storage layer, `StageStorage.h`/`.cpp`) had always skipped
+allocating real storage for any `SystemValue`-tagged Input element,
+correctly for a vertex/fragment stage's own fixed-per-invocation-record
+system values but incorrectly for a geometry entry's own `gl_in[]`-shaped
+ones (`gl_Position`/`gl_PointSize`/etc.), which `GeometryWrapperPass`
+always addresses with a genuinely dynamic per-vertex-in-primitive index
+-- causing `copyLinkedElements` to write past an unallocated buffer and
+crash a real `dEQP-VK.geometry.basic.*` case. Fixed with a new
+`AllInputSystemValuesAreStorageBacked` parameter on `buildStageStorage`,
+set only by the geometry-input call site in `executeDraws`; see
+`VulkanCTSReport.md`'s "Roadmap H5h: measured impact" for the full
+reproduction and before/after CTS numbers.
+
 ### Amplification/task and mesh stage model
 
 Amplification (Direct3D) and task (SPIR-V) stages are normalized as workgroups
