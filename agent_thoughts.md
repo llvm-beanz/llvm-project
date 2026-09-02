@@ -54254,3 +54254,77 @@ same way `textureCompressionETC2`'s was in H8c. `VulkanExtensionInventory.md`
 needed no change (grepped fresh, confirmed no BC-related extension
 reference exists). `FeMeVulkanDesign.md` gained a new "Update (roadmap
 H8i, partially closed)" note alongside the existing H8c one.
+
+# H8k: BC6H/BC7 scoping pass (closed, split into H8l/H8m)
+
+H8i's own row had already flagged BC6H/BC7 as "dramatically more
+complex than anything ETC2/EAC or BC1-5 needed" and deferred them to a
+new row, H8k, whose own text explicitly asked for "its own scoping
+pass ... before any code lands." Taking that literally: this session's
+deliverable is the scoping pass itself, not a decoder implementation.
+
+**What I actually read.** The Khronos `DataFormat` repository does not
+have separate `bc6h.txt`/`bc7.txt` files (unlike BC1-5's `s3tc.txt`/
+`rgtc.txt` split) -- both formats share a single `bptc.txt` file ("BPTC"
+is the umbrella name Khronos/OpenGL use for both). Reading it directly
+confirmed the roadmap's own prior estimate was not exaggerated: BC7 has
+8 distinct modes, each with its own bit-packing order for partition
+selection (up to 3 subsets, each needing a 64-entry lookup table mapping
+each of the 16 texel positions to a subset index), rotation (modes 4/5
+only), index selection (modes 4/5 only, swaps which index stream drives
+color vs. alpha), per-endpoint or shared P-bits (an extra low bit
+folded into color/alpha channel reconstruction before 8-bit
+replication-extension), and an anchor-index convention (the first
+texel index in any subset after subset 0 has one fewer stored bit,
+implicitly 0, to remove a redundant symmetry in the encoding) -- and
+every one of those fields has a different bit position and width per
+mode, so there is essentially no code-sharing across modes without a
+fairly elaborate per-mode table-driven abstraction. BC6H reuses BC7's
+own partition/subset/anchor-index scaffolding almost entirely, but
+replaces BC7's simple 8-bit fixed-point endpoints with signed-or-
+unsigned quantized values needing their own per-mode
+unquantization and a choice between "direct" (both endpoints stored in
+full) and "delta" (the second endpoint stored as a small signed offset
+from the first) transforms before reconstructing a value suitable for
+half-float output -- strictly more work than BC7, not a different kind
+of work.
+
+**Why I didn't just write the decoder anyway.** Two reasons. First, the
+row's own text asked for the scoping pass specifically, and a project
+convention I should respect (matching H8c's own precedent of doing a
+scoping-only pass before BC1-7/ETC2/EAC work, and H8i's own precedent of
+explicitly deferring the harder half of its own scope rather than
+rushing it) is to size work honestly before committing code, rather
+than have a "scoping" row silently balloon into a rushed, undertested
+implementation of the single hardest decoder in this whole file family.
+Second, I wanted to cross-check the *complexity* claim empirically
+rather than just trust prose: I looked at this project's own existing
+`ASTCDecode.cpp` (1641 lines) as the closest existing precedent for a
+large, partition/lookup-table-driven decoder already successfully
+landed here. BC7 is comparable in shape and magnitude to that -- a big,
+tractable, table-driven state machine, not a new category of problem --
+which is reassuring context for whoever picks up H8l next, but it is
+still clearly a multi-hour undertaking of its own, not something to
+bolt onto a scoping-pass row as an afterthought.
+
+**The split itself.** Grepped `Roadmap.md` fresh for the current H8
+letter set (H8a through H8k already existed) before filing anything, to
+avoid reusing a letter by mistake -- confirmed H8l and H8m were both
+free. Filed H8l (BC7) and H8m (BC6H), both one lowercase letter deep
+under H8 (respecting this project's own "no deeper than one lowercase
+letter" nesting rule), in that priority order, with H8m's own row text
+explicitly noting it should reuse H8l's own partition-table/anchor-index
+code rather than reimplementing it from scratch -- mirroring how BC2/BC3
+reused BC1's own color-block decode within H8i itself.
+
+**Verification.** Since this row landed no source code, `ninja
+check-feme` was still re-run to confirm the expected null result rather
+than assume it from "no files changed" alone: 2353/2380, byte-for-byte
+identical to H8i's own baseline, 0 regressions. Likewise `dEQP-VK.api.info.*`
+was re-run and reproduced the exact same pass/fail/not-supported counts
+as before. `Vulkan14FeatureInventory.md`'s `textureCompressionBC`
+annotation was updated to reference the new H8l/H8m split instead of
+the now-superseded "deferred to H8k" wording (a small but real
+staleness that would otherwise have lingered). `VulkanExtensionInventory.md`
+needed no change (grepped fresh, no BC6H/BC7-related extension
+reference exists anywhere in it).
