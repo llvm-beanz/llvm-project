@@ -54328,3 +54328,114 @@ the now-superseded "deferred to H8k" wording (a small but real
 staleness that would otherwise have lingered). `VulkanExtensionInventory.md`
 needed no change (grepped fresh, no BC6H/BC7-related extension
 reference exists anywhere in it).
+
+# H8l: BC7 compressed-format sampling (standalone decoder)
+
+**Starting point.** H8k's own scoping pass split BC6H/BC7 into new
+sibling rows H8l (BC7) and H8m (BC6H), in that priority order, since BC7
+needs no half-float unquantization. This session picked up H8l.
+
+**Spec source.** Confirmed (again, since H8k's scoping pass already
+found this) that BC6H and BC7 share a single Khronos `DataFormat`
+specification file, `bptc.txt` (~74KB) -- unlike BC1-5, which had
+separate `s3tc.txt`/`rgtc.txt` files. Fetched it in several chunks via
+`web_fetch`'s `start_index` pagination to read the 8-mode table (subset
+count, partition-selection/rotation/index-selection/P-bit bit widths
+per mode), the per-mode bit-packing order, the per-mode endpoint-bit
+sources, and the prose explaining the anchor-index bit-saving
+convention and index-selection/rotation semantics -- including a worked
+numeric example (mode 2, partition 6, texel (1,2)) used as a sanity
+check on my own understanding of the index-bit math.
+
+**Decision to copy CTS's own tables verbatim, not hand-transcribe from
+spec prose.** BC7's partition-selection uses two 64-entry tables of 16
+texel-to-subset assignments each (`kPartitions2`, `kPartitions3`), plus
+three 64-entry anchor-index tables. That's over 1,100 individual
+values. Hand-transcribing that volume from spec prose (even spec prose
+that includes the tables as text, which `bptc.txt` does) is an
+extremely high-risk-of-silent-error activity for essentially zero
+benefit versus just reading them out of `VK-GL-CTS`'s own reference
+decoder (`framework/common/tcuCompressedTexture.cpp`'s
+`BcDecompressInternal::partitions2`/`partitions3`/anchor-index arrays) --
+which is the actual ground truth this project's CTS run is scored
+against anyway. This is a break from the BC1-5/H8i session's own
+practice of preferring spec-derived formulas over CTS-copied ones, but
+that precedent was about *formulas* (where a discrepancy between spec
+and CTS is meaningful information worth documenting, as BC1's
+`color0==color1` edge case and BC4/5's float-vs-int arithmetic turned
+out to be) -- these BC7 tables are pure enumerated lookup data with no
+formula to derive or verify, so there's no "spec vs. CTS" question to
+even ask; copying CTS's own tables directly is simply the correct
+sourcing choice, not a shortcut. I did still cross-check my own
+understanding of the *algorithm* (not the tables) against the spec's
+own worked example before writing any code, to make sure I wasn't just
+blindly pasting tables into a wrong bit-extraction shape around them.
+
+**Mode 1's shared-P-bit quirk.** Most BC7 P-bit modes (0, 3, 6, 7) store
+one P-bit per endpoint; mode 1 instead stores exactly one *pair* of
+shared P-bits across its two subsets (i.e. 2 total P-bits cover all 4
+endpoints, not 4). CTS's own reference decoder implements this with a
+`continue` inside the endpoint-bit-extraction loop that skips *both* the
+read *and* the bit-offset advance for the endpoints that don't get their
+own P-bit -- I copied this structure directly (`if (Mode == 1 && Cpnt ==
+4 && Ep > 1) continue;`) rather than re-deriving an equivalent from
+scratch, since getting the "skip advance too, not just skip the read"
+detail wrong would silently misalign every subsequent bit-field read in
+the block, and that's exactly the kind of bug that's invisible until you
+try to decode a real block and get garbage.
+
+**BC7's interpolation formula: no discrepancy to document, for once.**
+BC1-5 (H8i) each had their own distinct per-mode truncating-arithmetic
+interpolation formula, and cross-checking CTS surfaced two genuine
+formula-level discrepancies worth documenting (BC1's mode-selection edge
+case, BC4/5's float-vs-integer arithmetic). BC7 turned out to have
+exactly one formula, shared by every mode and every channel (color and
+alpha alike): a fixed weighted-rounding formula, `((64-w)*a + w*b + 32)
+>> 6`, with `w` from one of three small lookup tables keyed only by the
+index's own bit width (2/3/4 bits). This formula is identical between
+the spec prose and CTS's own reference decoder -- so `BC7Decode.h`'s own
+doc comment explicitly says so, mostly so a future reader doesn't waste
+time looking for a discrepancy that isn't there (given that finding one
+was very much the norm for this file family so far).
+
+**Testing strategy.** Given BC7's much higher per-mode structural
+complexity than BC1-5, I did not try to hand-derive expected pixel
+values bit-by-bit the way earlier, simpler decoders' tests were
+authored. Instead I wrote a small, disposable Python simulation
+(`/tmp/bc7sim.py`, not committed -- purely a scratch tool) that mirrors
+this file's own bit-packing/decode algorithm, including copying the
+same partition/anchor tables out of the freshly-written C++ source (so
+the simulation and the implementation share the exact same table
+values, eliminating one whole class of "did I transcribe the table
+right, twice, differently" risk), then used it to construct four test
+blocks (mode 6: 1-subset with alpha; mode 1: 2-subset with the
+shared-P-bit quirk; mode 0: 3-subset, exercising all three
+partition/anchor tables; mode 4: rotation + index-selection) and compute
+their expected decoded pixel colors independently of the C++
+implementation. All four (plus a fifth all-zero-block/invalid-mode
+edge case) passed against the real `decodeBC7Block` on the first
+build/run with no debugging needed -- a good sign, though the Python
+simulation and the C++ implementation share enough algorithmic DNA
+(both derived from the same CTS reference, both encoding the same
+table-copy) that this isn't as strong an independence guarantee as an
+entirely separate, from-scratch derivation would have been; it's the
+same trade-off the BC1-5/H8i session made and found effective there.
+
+**Build/test/CTS verification.** `#include <utility>` was needed for
+`std::swap` in the rotation-handling logic (the one gap the initial
+implementation had, found on the very first build attempt, not by
+inspection beforehand). `ninja check-feme` (assertions-enabled, ccache
+build): 2358/2385, up exactly 5 from H8k's 2353/2380 baseline (this
+row's own 5 new `BC7DecodeTest.cpp` cases), 0 regressions. Real
+`deqp-vk`: `dEQP-VK.api.info.*` unchanged (5367/584/4533), `dEQP-VK.texture.*bc7*`
+0/48 passed, 48/48 `NotSupported` -- exactly the expected "no CTS delta"
+story, since the decoder stays deliberately unwired (matching H8i's/H8c's
+own precedent) and `textureCompressionBC` stays `VK_FALSE`.
+
+**What's left.** H8m (BC6H) is now the only remaining BC gap, and its
+own roadmap row text was updated to point at this row's own
+`kPartitions2`/`kPartitions3`/anchor tables as directly reusable (BC6H
+uses the same partition/subset/anchor-index machinery, just with
+half-float-adjacent endpoints instead of BC7's 8-bit fixed-point ones).
+Wiring both BC1-5 and BC7 into a real `Format.cpp`/`textureCompressionBC`
+consumer remains an entirely separate, not-yet-filed future row.
