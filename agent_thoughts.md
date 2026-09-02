@@ -53018,3 +53018,102 @@ render-pass cases, ~63+ pixel-mismatch cases) as their own separate rows yet
 mischaracterizing them or needlessly fragmenting the roadmap before knowing
 whether they're one gap or several; H6p's own next investigation should
 re-examine whether either deserves its own row once looked at directly.
+
+# H6p: gl_DrawID reaching the mesh output wrapper
+
+Picked up H6p directly, as the prior session's own thoughts entry ended on.
+First step, per the standing "IR reduction" technique this whole H6g-b/H6j/
+H6k/H6l/H6n/H6o chain has used: extracted the actual failing shader straight
+out of the qpa log for
+`dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.no_task_shader`,
+which turned out to already be small and self-explanatory (no synthetic
+reduction needed) -- a `GL_EXT_mesh_shader` shader reading `gl_DrawID` and
+using it to compute its own output row index. That ruled in the file's
+*second*-listed candidate ("a genuinely different, not-yet-identified op")
+over its first ("EmitMeshTasksEXT's own uncanonicalized form"), exactly as
+the prior session's own thoughts predicted from the case having no task
+shader at all.
+
+Once I had the shader in hand the root cause fell out immediately by reading
+`SPIRVToLLVMPatterns.cpp`'s `BuiltInMappings` table: `DrawIndex` (SPIR-V's
+name for `gl_DrawID`) simply isn't in it. That's *correct* upstream behavior,
+not a bug to fix there -- a draw's own index within a multi-draw indirect
+batch is genuine host-supplied, per-draw-command state, not something any
+real GPU driver would expose as a free-standing intrinsic the way
+`WorkgroupId`/`NumWorkgroups` are (I checked: `VertexID`/`InstanceID`/
+`BaseVertex`/`BaseInstance` already get the same "ordinary stage-IO input"
+treatment on the vertex-stage side, so this isn't even a new pattern for this
+project, just a new *stage* hitting an existing pattern for the first time).
+So the bug really was exactly where `MeshOutputWrapper.cpp`'s own file
+comment claimed there wasn't one: "a mesh entry point has no ordinary
+stage-IO input to read" is simply false for this one case.
+
+Design choice worth recording: I considered a narrower "always fold
+`gl_DrawID` to 0" fix (since `dEQP-VK.mesh_shader.ext.api.draw.draw_count_0`'s
+own group name suggested many callers might not even care about the
+non-indirect case), but rejected it -- the whole point of `gl_DrawID` is to
+distinguish draws within an indirect multi-draw batch, and folding it to a
+constant would silently miscompile any shader that actually uses it for
+anything, which is exactly the kind of "looks like it passes but is
+semantically wrong" bug this project's own instructions ask me to avoid
+introducing. Threading the real per-draw value all the way from
+`CommandBuffer.cpp`'s indirect-draw-reading loop through to the compiled
+entry was more code but was the only actually-correct option, and reused
+`FemeMeshArgs::Reserved32` (an existing same-sized alignment-padding field)
+so it cost zero ABI change.
+
+The other design decision worth recording: where to put the substitution.
+`GroupID`/`GroupCount`/`SubgroupId` all substitute inside `SIMDizePass`
+itself, because they arrive there as bespoke `llvm.{dx,spv}.*` intrinsics.
+`gl_DrawID` never becomes a bespoke intrinsic at all -- it arrives at
+`MeshOutputWrapperPass` as an ordinary `feme.stage.input.load` call, the
+exact same call shape `FragmentWrapper.cpp` already knows how to lower for
+fragment-stage inputs. So I mirrored `lowerFragmentInputLoad`'s shape (a
+per-lane masked-select) rather than `SIMDizePass`'s intrinsic-substitution
+shape, even though the *semantics* (a uniform value threaded through the
+wave-body interface) are identical to `GroupID`/`NumWorkgroups`. This is a
+good illustration of why H6o's own design-doc note ("uniform value threaded
+through the wave-body interface, not widened") needed a second bullet in
+`FeMeCPUDesign.md` rather than folding into the existing one -- the
+*treatment* is the same but the *substitution site* differs because the
+value's upstream representation differs, and future readers will want to
+know both facts, not just the first.
+
+One nice byproduct: narrowing `lowerMeshStageOps`'s `InputLoad` handling to
+recognize `SignatureSystemValue::DrawID` specifically (rather than accepting
+any input load) means any *other* mesh-stage input that reaches this pass in
+the future gets its own dedicated "unsupported mesh stage input system
+value" diagnostic instead of silently being swallowed by the generic
+catch-all -- a small diagnostics-quality improvement alongside the fix
+itself, following the same discipline H6g-b-d already established for this
+same catch-all.
+
+After the fix landed, I ran three CTS scopes to build confidence
+incrementally before committing anything: the single originally-failing
+case (Pass), the 540-case `dEQP-VK.mesh_shader.ext.api.*` group (14 Pass/102
+Fail/424 NotSupported, zero crashes, zero "unexpected stage op" anywhere),
+and a full single-process 28044-case mustpass sweep of the whole
+`dEQP-VK.mesh_shader.*` group (17 Pass/384 Fail/27643 NotSupported, versus
+H6o's own 3/398/27643 baseline -- a clean +14/-14 shift with the
+`NotSupported` count exactly unchanged, which is the cleanest possible
+confirmation that this fix is additive and introduces no new gap anywhere in
+the full suite). The 102 `api.*`-group Fails split cleanly along a line I
+did not have to search for -- `with_task_shader` vs. `no_task_shader` in the
+case name -- into two new, clearly-distinct blockers, filed as H6q (an
+upstream MLIR SPIR-V-dialect `PushConstant` legalization gap, task-stage
+only) and H6r (a rendering-correctness gap, no-task-shader multi-draw only).
+I did not investigate either further this session, in the same spirit as
+leaving H6p's own two speculative sub-buckets untriaged last session: better
+to file a confirmed, narrowly-scoped row than to guess at scope before
+looking.
+
+Also worth noting for whoever picks up H6q/H6r next: the roadmap's own
+"216 cases" figure for `dEQP-VK.mesh_shader.ext.api.draw.*` from an earlier
+session turned out to be inaccurate against the real mustpass list (only 20
+cases match that literal prefix; 540 match the broader `ext.api.*` group
+that includes `draw_indirect`/`draw_indirect_count` siblings). I did not
+correct that stale figure in the H6p row's own original text (it's now
+struck through and superseded by this session's own closing note with the
+real, re-measured numbers), but future sessions should treat any
+in-progress row's own case-count figures as provisional until re-verified
+against the actual mustpass list, not as ground truth.
