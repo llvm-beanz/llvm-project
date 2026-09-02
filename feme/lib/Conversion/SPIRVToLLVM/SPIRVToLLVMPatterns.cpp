@@ -3210,6 +3210,71 @@ public:
   }
 };
 
+/// Declares (or finds) the `feme.stage.emit_mesh_tasks` function: `(i32
+/// group_count_x, i32 group_count_y, i32 group_count_z) -> void`, matching
+/// `feme::StageOpKind::EmitMeshTasks`'s shape (StageOps.h), the same
+/// unmangled single-declaration convention `getOrInsertSetMeshOutputsFunc`
+/// above already uses.
+mlir::LLVM::LLVMFuncOp
+getOrInsertEmitMeshTasksFunc(mlir::ConversionPatternRewriter &Rewriter,
+                             mlir::ModuleOp Module) {
+  constexpr llvm::StringLiteral Name = "feme.stage.emit_mesh_tasks";
+  if (auto Existing = Module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
+    return Existing;
+  mlir::OpBuilder::InsertionGuard Guard(Rewriter);
+  Rewriter.setInsertionPointToStart(Module.getBody());
+  auto FuncTy = mlir::LLVM::LLVMFunctionType::get(
+      mlir::LLVM::LLVMVoidType::get(Rewriter.getContext()),
+      {Rewriter.getI32Type(), Rewriter.getI32Type(), Rewriter.getI32Type()});
+  return mlir::LLVM::LLVMFuncOp::create(Rewriter, Module.getLoc(), Name, FuncTy,
+                                        mlir::LLVM::Linkage::External);
+}
+
+/// Converts `spirv.EXT.EmitMeshTasks` (roadmap H6s) into a call to
+/// `feme.stage.emit_mesh_tasks(groupCountX, groupCountY, groupCountZ)`
+/// followed by an `llvm.return`, the same "route straight into a
+/// `feme.stage.*` intrinsic" treatment `SetMeshOutputsEXTConversionPattern`
+/// above already gives the mesh stage's own no-signature-element op --
+/// except, unlike that op, `spirv.EXT.EmitMeshTasks` **is** a terminator
+/// (the SPIR-V spec requires it be the last instruction in its block, and
+/// says it "ceases all further processing"), so simply erasing it in place
+/// like `SetMeshOutputsEXTConversionPattern` does would leave its block
+/// with no terminator at all. `feme::cpu::TaskPayloadWrapperPass`
+/// (TaskPayloadWrapper.cpp) is what actually lowers the resulting call,
+/// writing the requested group count into `FemeTaskArgs::MeshGroupCount`.
+///
+/// The op's own optional `Payload` operand (a pointer to whichever
+/// `TaskPayloadWorkgroupEXT`-storage-class global variable this task
+/// workgroup wrote) is intentionally never read here: it carries no value
+/// of its own to forward, only identifying *which* global was written, and
+/// every write to that global already converted to a
+/// `feme.stage.task.payload.store` call earlier in this same block (via
+/// this file's `TaskPayloadWorkgroupEXT` global-variable/store handling) --
+/// by the time this op converts, the payload's real bytes are already
+/// sitting in `FemeTaskArgs::Payload`, verbatim, with nothing left for this
+/// op to do with the pointer itself.
+class EmitMeshTasksEXTConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::EXTEmitMeshTasksOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::EXTEmitMeshTasksOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::EXTEmitMeshTasksOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Location Loc = Op.getLoc();
+    mlir::LLVM::LLVMFuncOp Callee = getOrInsertEmitMeshTasksFunc(
+        Rewriter, Op->getParentOfType<mlir::ModuleOp>());
+    mlir::LLVM::CallOp::create(
+        Rewriter, Loc, Callee,
+        mlir::ValueRange{Adaptor.getGroupCountX(), Adaptor.getGroupCountY(),
+                         Adaptor.getGroupCountZ()});
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(Op,
+                                                      mlir::ValueRange{});
+    return mlir::success();
+  }
+};
+
 /// Converts a `spirv.ImageFetch` with the `Lod` image operand (optionally
 /// combined with the discarded `Nontemporal` bit, see `hasImageOperands`
 /// above) into the `llvm.spv.resource.load.level` intrinsic call, mirroring
@@ -4825,6 +4890,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       UDotConversionPattern, SUDotConversionPattern,
       SDotAccSatConversionPattern, UDotAccSatConversionPattern,
       SUDotAccSatConversionPattern, SetMeshOutputsEXTConversionPattern,
+      EmitMeshTasksEXTConversionPattern,
       SpecConstantErasurePattern, StageIOGlobalVariablePattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern>(

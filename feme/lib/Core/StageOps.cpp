@@ -50,6 +50,7 @@ constexpr StageOpInfo StageOpTable[] = {
     {StageOpKind::SubpassLoad, "feme.stage.subpass.load", true},
     {StageOpKind::TaskPayloadStore, "feme.stage.task.payload.store", true},
     {StageOpKind::SetMeshOutputs, "feme.stage.set_mesh_outputs", false},
+    {StageOpKind::EmitMeshTasks, "feme.stage.emit_mesh_tasks", false},
 };
 // clang-format on
 
@@ -258,6 +259,13 @@ CallInst *feme::createStageSetMeshOutputs(IRBuilderBase &B, Value *VertexCount,
                                           Value *PrimitiveCount) {
   return createCall(B, StageOpKind::SetMeshOutputs, B.getVoidTy(),
                     {VertexCount, PrimitiveCount});
+}
+
+CallInst *feme::createStageEmitMeshTasks(IRBuilderBase &B, Value *GroupCountX,
+                                         Value *GroupCountY,
+                                         Value *GroupCountZ) {
+  return createCall(B, StageOpKind::EmitMeshTasks, B.getVoidTy(),
+                    {GroupCountX, GroupCountY, GroupCountZ});
 }
 
 std::optional<uint64_t> feme::getStageOpConstantOperand(const CallInst &CI,

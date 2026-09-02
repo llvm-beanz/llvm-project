@@ -200,3 +200,31 @@ bool feme::cpu::isMaskedSetMeshOutputsCall(const CallInst &CI) {
   const Function *Callee = CI.getCalledFunction();
   return Callee && Callee->getName().starts_with(MaskedSetMeshOutputsPrefix);
 }
+
+FunctionCallee feme::cpu::getOrInsertMaskedEmitMeshTasks(Module &M,
+                                                         Type *CountTy,
+                                                         Type *MaskTy) {
+  SmallString<64> Name(MaskedEmitMeshTasksPrefix);
+  Name.push_back('.');
+  appendTypeSuffix(Name, MaskTy);
+  FunctionType *FTy =
+      FunctionType::get(Type::getVoidTy(M.getContext()),
+                        {CountTy, CountTy, CountTy, MaskTy}, /*isVarArg=*/false);
+  return M.getOrInsertFunction(Name, FTy);
+}
+
+CallInst *feme::cpu::createMaskedEmitMeshTasks(IRBuilderBase &B,
+                                               Value *GroupCountX,
+                                               Value *GroupCountY,
+                                               Value *GroupCountZ,
+                                               Value *Mask) {
+  Module *M = B.GetInsertBlock()->getModule();
+  FunctionCallee Callee = getOrInsertMaskedEmitMeshTasks(
+      *M, GroupCountX->getType(), Mask->getType());
+  return B.CreateCall(Callee, {GroupCountX, GroupCountY, GroupCountZ, Mask});
+}
+
+bool feme::cpu::isMaskedEmitMeshTasksCall(const CallInst &CI) {
+  const Function *Callee = CI.getCalledFunction();
+  return Callee && Callee->getName().starts_with(MaskedEmitMeshTasksPrefix);
+}

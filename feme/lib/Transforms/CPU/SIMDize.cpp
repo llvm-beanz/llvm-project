@@ -685,6 +685,7 @@ private:
   void widenMaskedStreamCut(CallInst &CI, IRBuilder<> &Builder);
   void widenMaskedTaskPayloadStore(CallInst &CI, IRBuilder<> &Builder);
   void widenMaskedSetMeshOutputs(CallInst &CI, IRBuilder<> &Builder);
+  void widenMaskedEmitMeshTasks(CallInst &CI, IRBuilder<> &Builder);
   void widenReturnMasks(CallInst &CI, IRBuilder<> &Builder);
   void replaceGroupIdCall(CallInst &CI);
   void replaceNumWorkgroupsCall(CallInst &CI);
@@ -1578,6 +1579,26 @@ void FunctionWidener::widenMaskedSetMeshOutputs(CallInst &CI,
   FunctionCallee Callee = getOrInsertMaskedSetMeshOutputs(
       *M, VertexCount->getType(), Mask->getType());
   Builder.CreateCall(Callee, {VertexCount, PrimitiveCount, Mask});
+  ToErase.push_back(&CI);
+}
+
+// (Roadmap H6s) Mirrors `widenMaskedSetMeshOutputs` immediately above
+// exactly, just for three genuine per-lane operands (`group_count_x/y/z`)
+// instead of two -- they share `getOrInsertMaskedEmitMeshTasks`'s single
+// `CountTy` parameter since `StageOpKind::EmitMeshTasks` is likewise not
+// overloaded (all three operands are always `i32`).
+void FunctionWidener::widenMaskedEmitMeshTasks(CallInst &CI,
+                                               IRBuilder<> &Builder) {
+  Module *M = NewF->getParent();
+  Value *GroupCountX = getWidened(CI.getArgOperand(0), Builder);
+  Value *GroupCountY = getWidened(CI.getArgOperand(1), Builder);
+  Value *GroupCountZ = getWidened(CI.getArgOperand(2), Builder);
+  Value *Mask = Builder.CreateAnd(Env.SideEffectMask,
+                                  getWidened(CI.getArgOperand(3), Builder),
+                                  "emit.mesh.tasks.mask");
+  FunctionCallee Callee = getOrInsertMaskedEmitMeshTasks(
+      *M, GroupCountX->getType(), Mask->getType());
+  Builder.CreateCall(Callee, {GroupCountX, GroupCountY, GroupCountZ, Mask});
   ToErase.push_back(&CI);
 }
 
@@ -2964,6 +2985,10 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       widenMaskedSetMeshOutputs(*CI, Builder);
       return true;
     }
+    if (isMaskedEmitMeshTasksCall(*CI)) {
+      widenMaskedEmitMeshTasks(*CI, Builder);
+      return true;
+    }
     if (isReturnMasksCall(*CI)) {
       widenReturnMasks(*CI, Builder);
       return true;
@@ -2991,6 +3016,7 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       case feme::StageOpKind::StreamCut:
       case feme::StageOpKind::TaskPayloadStore:
       case feme::StageOpKind::SetMeshOutputs:
+      case feme::StageOpKind::EmitMeshTasks:
       case feme::StageOpKind::NumStageOpKinds:
         break;
       }

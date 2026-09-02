@@ -78,6 +78,11 @@ bool isStageOpLegalForStage(StageOpKind Kind, ShaderStage Stage) {
     // (Roadmap H6c-a-a-i) Reachable since roadmap H6g-b-c's own fix wired
     // `ShaderStage::Mesh` into `ValidateStagePass::run` below.
     return Stage == ShaderStage::Mesh;
+  case StageOpKind::EmitMeshTasks:
+    // (Roadmap H6s) Not yet reachable, mirroring `TaskPayloadStore` above:
+    // `ValidateStagePass` does not validate the amplification (task)
+    // stage yet.
+    return Stage == ShaderStage::Amplification;
   case StageOpKind::NumStageOpKinds:
     break;
   }
@@ -280,11 +285,15 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
   case StageOpKind::SubpassLoad:
   case StageOpKind::TaskPayloadStore:
   case StageOpKind::SetMeshOutputs:
+  case StageOpKind::EmitMeshTasks:
     // No element/row/component operands to validate: a task payload
     // write (roadmap H6i) addresses raw memory by byte offset, not a
     // `SignatureElement`, so it has nothing to look up here either; a
     // mesh entry's `SetMeshOutputsEXT` (roadmap H6c-a-a-i) is likewise a
-    // workgroup-uniform count pair, not a signature element access.
+    // workgroup-uniform count pair, not a signature element access, and
+    // neither is a task entry's `EmitMeshTasksEXT` (roadmap H6s) --
+    // workgroup-uniform group-count triple, no signature element of its
+    // own either.
     break;
   case StageOpKind::NumStageOpKinds:
     llvm_unreachable("not a real StageOpKind");

@@ -392,15 +392,18 @@ Expected<PipelineResult> runPipeline(Module &M,
     // `getDispatchArgsType`'s (see `feme::cpu::buildWrapperEnv`'s own
     // `IsMesh` handling, EntryWrapper.cpp).
     //
-    // What is *not* yet wired here (left to a future roadmap row, see
-    // agent_thoughts.md's H6c-a-a-i entry): `EmitMeshTasksEXT` -- it has no
-    // `feme.stage.*` op reaching this pipeline yet. `SetMeshOutputsEXT`
-    // itself, however, now does: it converts directly into a
+    // What was *not* wired here until roadmap H6s: `EmitMeshTasksEXT`.
+    // `SetMeshOutputsEXT` itself converts directly into a
     // `feme.stage.set_mesh_outputs` call at the MLIR SPIR-V-to-LLVM
     // conversion level (`SetMeshOutputsEXTConversionPattern`,
     // SPIRVToLLVMPatterns.cpp), and `MeshOutputWrapperPass` lowers it
     // alongside the output stores above, writing `FemeMeshArgs::
     // ActualVertexCount`/`ActualPrimitiveCount` (roadmap H6c-a-a-i).
+    // `EmitMeshTasksEXT` now likewise converts directly into a
+    // `feme.stage.emit_mesh_tasks` call (`EmitMeshTasksEXTConversionPattern`,
+    // SPIRVToLLVMPatterns.cpp) -- see `TaskPayloadWrapperPass`'s own
+    // handling of it below, since it belongs to the task (amplification)
+    // stage, not the mesh stage.
     //
     // Roadmap H6c-a-b: an amplification (task) entry's own bounded
     // payload write (`feme.stage.task.payload.store`, canonicalized with a
@@ -409,7 +412,11 @@ Expected<PipelineResult> runPipeline(Module &M,
     // first here too, appending `FemeTaskArgs::Payload`/`MaxPayloadBytes`
     // to the wave body by name and lowering every masked payload store
     // into a store at `task_payload + offset` -- see
-    // TaskPayloadWrapper.h. `EntryWrapperPass` then builds the group-loop
+    // TaskPayloadWrapper.h. Roadmap H6s extends this same pass to also
+    // lower a canonicalized `feme.stage.emit_mesh_tasks` call, writing the
+    // requested mesh dispatch's 3D group count through
+    // `FemeTaskArgs::MeshGroupCount` (`task_mesh_group_count`).
+    // `EntryWrapperPass` then builds the group-loop
     // wrapper around the result exactly as before, just against
     // `getTaskArgsType`'s longer struct instead of `getDispatchArgsType`'s
     // (see `feme::cpu::buildWrapperEnv`'s own `IsTask` handling,

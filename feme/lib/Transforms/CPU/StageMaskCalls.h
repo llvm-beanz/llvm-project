@@ -59,6 +59,12 @@ inline constexpr llvm::StringLiteral MaskedTaskPayloadStorePrefix =
 /// the same per-lane side-effect mask onto a masked variant of it too.
 inline constexpr llvm::StringLiteral MaskedSetMeshOutputsPrefix =
     "feme.cpu.masked.set_mesh_outputs";
+/// Roadmap H6s: `feme.stage.emit_mesh_tasks` is side-effecting the same way
+/// `feme.stage.set_mesh_outputs` is (a task workgroup's once-per-workgroup
+/// requested mesh-dispatch group count), so `LinearizePass` threads the
+/// same per-lane side-effect mask onto a masked variant of it too.
+inline constexpr llvm::StringLiteral MaskedEmitMeshTasksPrefix =
+    "feme.cpu.masked.emit_mesh_tasks";
 
 inline llvm::StringRef getMaskedOutputStoreName() {
   return MaskedOutputStorePrefix;
@@ -126,12 +132,28 @@ llvm::CallInst *createMaskedSetMeshOutputs(llvm::IRBuilderBase &B,
                                            llvm::Value *PrimitiveCount,
                                            llvm::Value *Mask);
 
+/// `feme.cpu.masked.emit_mesh_tasks(group_count_x, group_count_y,
+/// group_count_z, mask)`: all three counts are carried through per-lane
+/// (mangled by \p MaskTy, mirroring `getOrInsertMaskedSetMeshOutputs`'s own
+/// convention) so `feme::cpu::TaskPayloadWrapperPass` can pick any one
+/// active lane's (spec-identical) value once lowered.
+llvm::FunctionCallee getOrInsertMaskedEmitMeshTasks(llvm::Module &M,
+                                                    llvm::Type *CountTy,
+                                                    llvm::Type *MaskTy);
+
+llvm::CallInst *createMaskedEmitMeshTasks(llvm::IRBuilderBase &B,
+                                          llvm::Value *GroupCountX,
+                                          llvm::Value *GroupCountY,
+                                          llvm::Value *GroupCountZ,
+                                          llvm::Value *Mask);
+
 bool isMaskedOutputStoreCall(const llvm::CallInst &CI);
 bool isMaskedStreamEmitCall(const llvm::CallInst &CI);
 bool isMaskedStreamCutCall(const llvm::CallInst &CI);
 bool isReturnMasksCall(const llvm::CallInst &CI);
 bool isMaskedTaskPayloadStoreCall(const llvm::CallInst &CI);
 bool isMaskedSetMeshOutputsCall(const llvm::CallInst &CI);
+bool isMaskedEmitMeshTasksCall(const llvm::CallInst &CI);
 
 } // namespace feme::cpu
 

@@ -154,6 +154,22 @@ enum class StageOpKind : uint8_t {
   /// per-invocation `Vertex`/`Row`/`Component` addressing of its own --
   /// both operands are workgroup-uniform, not per-lane data.
   SetMeshOutputs,
+  /// `feme.stage.emit_mesh_tasks(group_count_x, group_count_y,
+  /// group_count_z)`: a task entry's `EmitMeshTasksEXT` call (roadmap H6s),
+  /// requesting the grid of mesh workgroups to dispatch once this task
+  /// workgroup finishes. Per the SPIR-V/GLSL spec this must be called
+  /// exactly once by every invocation of the workgroup with identical
+  /// arguments, and ceases all further processing -- mirroring
+  /// `SetMeshOutputs`'s own "workgroup-uniform, not per-lane addressing"
+  /// shape exactly, just for the task stage instead of the mesh stage. The
+  /// SPIR-V op's own optional payload operand (a pointer to the
+  /// `TaskPayloadWorkgroupEXT`-storage-class variable this workgroup wrote)
+  /// carries no data of its own here: the payload write already happened
+  /// through a separate `TaskPayloadStore` call before this one runs, so
+  /// there is nothing left for this op to thread through -- see
+  /// `feme::spirv::EmitMeshTasksEXTConversionPattern`'s own comment
+  /// (SPIRVToLLVMPatterns.cpp).
+  EmitMeshTasks,
   // Keep last: the number of stage op kinds, for range checks.
   NumStageOpKinds,
 };
@@ -267,6 +283,13 @@ llvm::CallInst *createStageTaskPayloadStore(llvm::IRBuilderBase &B,
 llvm::CallInst *createStageSetMeshOutputs(llvm::IRBuilderBase &B,
                                           llvm::Value *VertexCount,
                                           llvm::Value *PrimitiveCount);
+
+/// `feme.stage.emit_mesh_tasks(group_count_x, group_count_y,
+/// group_count_z)` (see `StageOpKind::EmitMeshTasks`'s comment).
+llvm::CallInst *createStageEmitMeshTasks(llvm::IRBuilderBase &B,
+                                         llvm::Value *GroupCountX,
+                                         llvm::Value *GroupCountY,
+                                         llvm::Value *GroupCountZ);
 ///@}
 
 /// Reads back \p CI's operand \p Idx as a constant `i32`/`i8`/`i1`, or
