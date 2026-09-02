@@ -53700,3 +53700,56 @@ changes (via `CommandBuffer.cpp`) before writing any fix code was
 similarly valuable -- it let me scope the whole change to a
 compile-time-only, low-risk metadata addition, rather than touching any
 hot-path runtime code at all.
+
+# Correction: H6r's "closure" this session was invalid (wrong Vulkan ICD)
+
+While starting H8's own investigation this session, I noticed
+`vulkaninfo --summary` reported `deviceName = llvmpipe (LLVM ...)` /
+Mesa's own `lavapipe` -- not `FeMe CPU Vulkan Device` -- for a `deqp-vk`
+command I ran without first exporting `VK_ICD_FILENAMES` to point at
+this project's own build output. `feme/.instructions.md` says exactly
+this out loud: the container's system-wide `VK_ICD_FILENAMES` defaults
+to Mesa's `lvp_icd.json`, and every `deqp-vk` invocation must
+explicitly override it to this project's own `feme_icd.json` or it
+silently runs against `lavapipe` instead, "producing a plausible-
+looking but entirely wrong pass/fail count that never reflects this
+project's own source changes at all." I had read that warning earlier
+this session (it's part of my own standard `.instructions.md` review
+step) but did not actually apply it to any of the `deqp-vk` invocations
+in my *prior* turn's H6r investigation -- every one of those eight
+"real CTS sweep" commands I ran and cited as evidence that H6r's bug
+"no longer reproduces" was run with the ambient, un-overridden
+`VK_ICD_FILENAMES`, i.e. against Lavapipe, a real, independent, and
+(for `VK_EXT_mesh_shader`) already fully conformant Vulkan
+implementation -- not against this project's own `feme` ICD at all.
+Lavapipe naturally passes real `dEQP-VK.mesh_shader.*` cases regardless
+of anything in this repository's own source tree, which is exactly
+the false-positive signal I mistook for "H6r's bug was incidentally
+fixed by H6q."
+
+I re-ran H6r's own first originally-failing case
+(`dEQP-VK.mesh_shader.ext.api.draw.draw_count_1...no_task_shader`) with
+`VK_ICD_FILENAMES` correctly exported to
+`build/tools/feme/tools/feme-vulkan/feme_icd.json` this time (confirmed
+via `vulkaninfo --summary` showing `FeMe CPU Vulkan Device`), and it
+**does still fail** ("Image comparison failed"), exactly as H6r's own
+roadmap text originally reported. My prior session's conclusion was
+wrong, and everything built on it (the `Roadmap.md` strikethrough for
+both H6r and the entire H6 parent milestone, and the
+"Roadmap H6r: measured impact" section in `VulkanCTSReport.md`) was
+false. I have reverted both of those commits
+(`git revert e89c5b28f994 f82fd65e6cf8`, restoring the original open
+H6r/H6 rows verbatim) rather than trying to hand-patch them, since a
+plain revert is the safest way to guarantee the restored text exactly
+matches what a correct investigation would have left in place.
+
+H6r itself remains open and unfixed; I have not re-investigated its
+real root cause in this correction, since this session's actual
+assigned task is H8, not H6r. Leaving H6r exactly as it was before my
+mistaken session (rather than leaving my false "closed" state in
+place, or trying to actually fix it as a distraction from this
+session's real task) is the honest thing to do here. Every `deqp-vk`
+command for the rest of *this* session explicitly exports
+`VK_ICD_FILENAMES` to this project's own `feme_icd.json` first, and I
+will keep double-checking with `vulkaninfo --summary` before trusting
+any run's results.
