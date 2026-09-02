@@ -53287,3 +53287,202 @@ scope. Updated the H6 parent row's own summary line to reflect both
 H6q's closure and H6s's new tracking, consistent with how prior
 sessions have kept that same summary current after each child
 milestone's closure.
+
+# Session: H6s (`OpEmitMeshTasksEXT` conversion) + H6t (discovered while verifying it)
+
+## Task
+
+"Work on H6s" -- H6s was the row H6q's own closing note filed: `spirv.EXT
+.EmitMeshTasks` (`OpEmitMeshTasksEXT`), a task entry's own mesh-dispatch
+call (a group-count triple plus its `TaskPayloadWorkgroupEXT` payload
+operand), had no `ConvertSPIRVToLLVMPass` conversion pattern at all,
+blocking every real `with_task_shader`/`with_task_shader_secondary_cmd`
+CTS case (58 of the 540-case `dEQP-VK.mesh_shader.ext.api.*` group) from
+legalizing at all.
+
+## Investigation and design
+
+Before writing any code, surveyed how much of the "task stage dispatches
+its own mesh workgroups" machinery already existed versus needed
+building from scratch, since the row's own text explicitly flagged this
+as untriaged. Found the CPU-side host machinery was already fully
+scaffolded and simply unreachable: `FemeTaskArgs::MeshGroupCount` (a
+`uint32_t*` field), a matching `TaskArgsFieldMeshGroupCount` layout
+enumerator, and `Executor.cpp`'s own `executeDraws` already read
+`TRes.MeshGroupCount` back after invoking a task stage and dispatched
+via `AmplificationDispatchQueue::create` -- all dead code paths, since
+nothing ever *wrote* to that pointer. This meant the actual gap was
+narrower than the row's own text worried it might be: just the SPIR-V
+conversion pattern, a canonical `feme.stage.*` op to carry the group
+count through the compiler's own pass pipeline, and one CPU-lowering
+pass to write through the pointer -- not any new host-side
+execution-chaining machinery at all.
+
+Designed the fix mirroring `SetMeshOutputs`'s own precedent throughout,
+since it is the closest existing analog (another mesh/task-adjacent
+op with no direct LLVM-IR equivalent that needs its own canonical
+`feme.stage.*` form): a new, non-overloaded `StageOpKind::EmitMeshTasks`
+(`feme.stage.emit_mesh_tasks`), workgroup-uniform (every invocation in a
+task workgroup calls it with the same group-count triple, per the
+`VK_EXT_mesh_shader` spec). The one wrinkle `SetMeshOutputsEXT` doesn't
+have: `spirv::EXTEmitMeshTasksOp` is itself a SPIR-V *terminator* (the
+task shader's own execution ends at this call), so the conversion
+pattern has to replace it with both the new call *and* a real
+`llvm.return`, not just the call alone. Deliberately dropped the op's
+optional payload-identifying pointer operand entirely -- the payload's
+actual bytes are already written by a separate, earlier
+`feme.stage.task.payload.store` call (an existing canonical op from an
+earlier milestone), so by the time `EmitMeshTasks` runs, the payload
+data is already where it needs to be; the operand exists in SPIR-V only
+to identify *which* workgroup-shared variable is the payload, which the
+compiler already knows structurally.
+
+Threaded the masking/widening/validation/uniformity plumbing through
+`StageMaskCalls.h/.cpp`, `Linearize.cpp`, `SIMDize.cpp`,
+`ValidateStage.cpp`, and `WaveUniformity.cpp` -- one small case added to
+each, in each case mirroring `SetMeshOutputs`'s own existing case at
+that exact site (same function, same shape of check, just for the new
+op). This pattern-match approach kept each individual site's change
+small and low-risk, since each one is a narrow, well-precedented
+addition rather than new machinery.
+
+## Implementation, in order
+
+1. `StageOps.h`/`.cpp`: new `StageOpKind::EmitMeshTasks` enumerator plus
+   its name/void-return/non-overloaded/uniform classification.
+2. `SPIRVToLLVMPatterns.cpp`: new `EmitMeshTasksEXTConversionPattern`,
+   registered alongside `SetMeshOutputsEXTConversionPattern`.
+3. `StageMaskCalls.h/.cpp`, `Linearize.cpp`, `SIMDize.cpp`,
+   `ValidateStage.cpp`, `WaveUniformity.cpp`: one small matching case
+   each.
+4. `EntryWrapper.cpp`: `Env.TaskMeshGroupCount`, loaded from the
+   already-scaffolded `FemeTaskArgs::MeshGroupCount` host-ABI field.
+5. `TaskPayloadWrapper.cpp`/`.h`: new `lowerEmitMeshTasks`, writing the
+   3D group-count triple through 3 GEPs into `MeshGroupCount`.
+6. Doc-comment cleanups: removed a stale `Design.md` table row claiming
+   no conversion pattern exists; updated `RuntimeABI.h`'s own
+   `FemeTaskArgs`/`FemeMeshArgs`-adjacent comments describing
+   `MeshGroupCount` as now wired instead of "left open"; updated
+   `Pipeline.cpp`/`MeshOutputWrapper.cpp`'s own file comments similarly.
+7. New lit test `spirv-to-llvm-emit-mesh-tasks.mlir` covering both the
+   no-payload and with-payload shapes, manually verified against a
+   standalone `feme-opt` build before wiring up gtest coverage.
+8. Unit tests: `StageOpsTest.cpp`'s `EmitMeshTasksIsVoidAndNotOverloaded`;
+   `TaskPayloadWrapperTest.cpp`'s `ChainsIntoEntryWrapperPass`,
+   `LowersEmitMeshTasks`, `LowersPayloadStoreAndEmitMeshTasksTogether`.
+   Checked `LinearizeTest.cpp`/`SIMDizeTest.cpp` for whether
+   `SetMeshOutputs` had dedicated tests at those sites before adding any
+   -- it did not, so skipped adding new tests there too, to match
+   established precedent rather than introduce an inconsistent standard.
+
+`ninja check-feme` passed in full at this point (2318/2345, 0 Failed),
+so moved on to the mandatory real-ICD verification step before
+considering H6s itself done.
+
+## Real ICD verification surfaces H6t
+
+Ran the originally-failing case
+(`dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader`)
+against the freshly rebuilt `feme_vulkan`. The `spirv.EXT.EmitMeshTasks`
+legalization error was gone, as expected -- but pipeline creation still
+failed, now with `feme-cpu-wrap-task-payload: unexpected stage op left
+for the task payload wrapper`. This is the exact same *class* of bug an
+earlier milestone (H6g-b-d) found and fixed in `MeshOutputWrapper.cpp`:
+a catch-all diagnostic gated only on "does this function use any stage
+op at all" firing on *every* remaining call, not just genuinely
+unlowered ones. Confirmed by inspection that `TaskPayloadWrapper.cpp`
+had the identical flaw and had simply never been audited/fixed
+alongside its sibling. Fixed the same way: gate the diagnostic on
+`isStageOpCall(*CI)`.
+
+Rebuilt and re-ran -- same error, unchanged. Added a temporary
+`errs()` debug print directly in the catch-all to print the actual
+offending `CallInst`, rebuilt just `feme_vulkan` (faster than a full
+`check-feme` for this kind of single-case iteration), and re-ran. The
+debug output identified a genuine, legitimate
+`feme.stage.input.load.v4i32` call reading `gl_DrawID` in the *task*
+stage -- confirmed via the real VK-GL-CTS source
+(`vktMeshShaderApiTestsEXT.cpp`) that both the task and mesh stage
+shaders in a `with_task_shader` case read this builtin. An earlier
+milestone (H6p) had already fixed the identical gap for the *mesh*
+stage, but its own CTS re-run never exercised a `with_task_shader` case,
+so the task-stage half of the same builtin went undiscovered until now.
+
+Designed and implemented the fix by mirroring H6p's own mesh-stage
+precedent as closely as possible, since the shapes are genuinely
+parallel (a workgroup-uniform system-value input, read once, broadcast
+per-lane): renamed the existing, unused `FemeTaskArgs::Reserved32`
+alignment-padding field to `DrawID` (exactly the same repurposing H6p
+did on the mesh side), threaded it through `ResourceHeap`'s
+`TaskResources`/`PreparedTaskBatch`, set it in `Executor.cpp`'s
+task-stage dispatch path, loaded it in `EntryWrapper.cpp` as
+`Env.TaskDrawID` via a new `task_draw_id` known parameter name (added
+directly to the allow-list up front this time, having been burned by
+the exact opposite ordering mistake once before in H6o), and added a
+`lowerTaskInputLoad` helper in `TaskPayloadWrapper.cpp` mirroring
+`lowerMeshInputLoad` closely enough that the two could plausibly be
+unified later, though I left them separate for now since the two
+wrapper passes don't otherwise share code.
+
+One additional wrinkle the mesh-side precedent didn't have to teach: I
+initially forgot that `appendTaskPayloadParams` splices the function's
+body into a brand-new `Function` object, which invalidates any
+previously-captured `Argument*` pointers -- including a `WaveBodyEnv`
+computed before the splice. Hit a build error (`findElement`
+undeclared) while wiring this up, traced it back to this, and fixed
+`TaskPayloadWrapperPass::run` to re-derive its `WaveBodyEnv` against the
+freshly spliced function afterward, mirroring
+`MeshOutputWrapperPass::run`'s own already-correct handling of the
+identical hazard.
+
+## Verification
+
+- `ninja check-feme`: 2323/2350 passed (27 pre-existing unrelated
+  `Unsupported`, 0 `Failed`), up from H6s's own pre-H6t 2318/2345 by
+  exactly the 5 new tests both fixes add together.
+- Real ICD re-run of the originally-failing case: both the
+  `spirv.EXT.EmitMeshTasks` error (H6s) and the
+  `feme-cpu-wrap-task-payload`/`gl_DrawID` errors (H6t) are gone.
+  Pipeline creation now fails on a new, later, and entirely unrelated
+  error instead: `"a stage's root-constant span is not fully covered by
+  a VkPushConstantRange visible to it in its VkPipelineLayout"`.
+- Grepped for the message's origin: it's in
+  `feme/lib/Vulkan/GraphicsPipeline.cpp` (with a second occurrence in
+  `Pipeline.cpp`) -- a Vulkan-API/pipeline-layout-validation concern,
+  architecturally unrelated to either H6s's SPIR-V-to-LLVM conversion
+  work or H6t's CPU-ABI wiring work. Decided against scope-creeping
+  further into a third subsystem in the same session; filed it as a
+  new, open roadmap row (H6u) instead, deliberately left untriaged.
+- Re-ran the full 540-case `dEQP-VK.mesh_shader.ext.api.*` group (and
+  its 109-case `with_task_shader` subset) to confirm no regression:
+  totals are byte-identical to H6q's own recorded post-fix split (14
+  Pass/102 Fail/424 NotSupported) -- expected, since H6u still fully
+  blocks every `with_task_shader` case from actually reaching `Pass`,
+  so H6s+H6t together don't move the aggregate numbers yet, only the
+  *reason* those cases fail (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+  spot checks, not just the aggregate count, to make sure I wasn't
+  papering over a difference).
+
+## Roadmap outcome
+
+H6s closes (struck through with a detailed closing note). A new sibling
+row H6t (also closed, one level of nesting under H6, per the standing
+no-deeper-nesting instruction) documents both bugs found and fixed while
+verifying H6s. A new sibling row H6u (open, same nesting level) files
+the push-constant-range pipeline-layout gap, left untriaged and unfixed
+this session. Updated the H6 parent row's own summary line to reflect
+H6s's and H6t's closure and thread the dependency chain through to H6u,
+consistent with how prior sessions have kept that same summary current.
+
+## Reflections on process
+
+This is now the third time in this milestone's history (after H6g-b-d
+and, within this same session, H6t itself) that the identical
+over-broad-catch-all bug shape has been found in a different wrapper
+pass each time. If a fourth stage-wrapper pass gets added later, it
+would be worth proactively auditing it for this exact pattern rather
+than waiting for a real CTS case to find it again -- the fix is always
+the same one-line gate (`if (!isStageOpCall(*CI)) continue;`), and the
+underlying reason (`UsesStageOps` only guarantees *some* call needs
+attention, not *every* call) is a genuine, easy-to-miss invariant this
+whole family of passes shares.
