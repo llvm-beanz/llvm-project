@@ -328,7 +328,7 @@ enum MeshArgsField : unsigned {
   MeshArgsFieldMaxOutputVertices = 4,
   MeshArgsFieldMaxOutputPrimitives = 5,
   MeshArgsFieldOutputTopology = 6,
-  MeshArgsFieldReserved32 = 7,
+  MeshArgsFieldDrawID = 7,
   MeshArgsFieldVertexOutputLayout = 8,
   MeshArgsFieldVertexOutputs = 9,
   MeshArgsFieldPrimitiveOutputLayout = 10,

@@ -1975,6 +1975,13 @@ readIndirectMeshDraws(Buffer *Buf, uint64_t Offset, uint32_t DrawCount,
     std::memcpy(&Args, Src, sizeof(Args));
     feme::graphics::MeshDrawCommand Draw;
     Draw.GroupCount = {Args.groupCountX, Args.groupCountY, Args.groupCountZ};
+    // (Roadmap H6p) `gl_DrawID`'s own zero-based index within this
+    // multi-draw indirect command -- always `0` for the single-draw
+    // `DrawMeshTasksIndirect` path via `runMeshDraw` below, but this
+    // shared reader is also used by `DrawMeshTasksIndirectCount`, whose
+    // `DrawCount` (and therefore how many of these indices are ever
+    // dispatched) is itself read from a device-side buffer.
+    Draw.DrawID = I;
     Draws.push_back(Draw);
   }
   return Draws;

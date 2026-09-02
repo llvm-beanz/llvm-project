@@ -501,7 +501,8 @@ PreparedMeshBatch::PreparedMeshBatch(
     std::vector<FemeImageDescriptor> ImageHeap,
     std::vector<FemeSamplerDescriptor> SamplerHeap,
     ArrayRef<uint8_t> RootConstants, std::array<uint32_t, 3> GroupID,
-    std::array<uint32_t, 3> GroupCount, MutableArrayRef<uint8_t> GroupShared,
+    std::array<uint32_t, 3> GroupCount, uint32_t DrawID,
+    MutableArrayRef<uint8_t> GroupShared,
     uint32_t MaxOutputVertices, uint32_t MaxOutputPrimitives,
     uint32_t OutputTopology, const FemeStageLayout *VertexOutputLayout,
     MutableArrayRef<uint8_t> VertexOutputs,
@@ -512,7 +513,8 @@ PreparedMeshBatch::PreparedMeshBatch(
     ArrayRef<uint8_t> Payload)
     : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
       SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
-      GroupID(GroupID), GroupCount(GroupCount), GroupShared(GroupShared),
+      GroupID(GroupID), GroupCount(GroupCount), DrawID(DrawID),
+      GroupShared(GroupShared),
       MaxOutputVertices(MaxOutputVertices),
       MaxOutputPrimitives(MaxOutputPrimitives), OutputTopology(OutputTopology),
       VertexOutputLayout(VertexOutputLayout), VertexOutputs(VertexOutputs),
@@ -544,6 +546,7 @@ PreparedMeshBatch PreparedMeshBatch::create(const ResourceInfo &Info,
       materializeSamplerHeap(Info, Resources.BoundSamplers,
                              Resources.SamplerHeap),
       Resources.RootConstants, Resources.GroupID, Resources.GroupCount,
+      Resources.DrawID,
       Resources.GroupShared, Resources.MaxOutputVertices,
       Resources.MaxOutputPrimitives, Resources.OutputTopology,
       Resources.VertexOutputLayout, Resources.VertexOutputs,
@@ -562,6 +565,7 @@ FemeMeshArgs PreparedMeshBatch::args() const {
   Args.GroupCount[0] = GroupCount[0];
   Args.GroupCount[1] = GroupCount[1];
   Args.GroupCount[2] = GroupCount[2];
+  Args.DrawID = DrawID;
   Args.GroupShared = GroupShared.data();
   Args.MaxOutputVertices = MaxOutputVertices;
   Args.MaxOutputPrimitives = MaxOutputPrimitives;

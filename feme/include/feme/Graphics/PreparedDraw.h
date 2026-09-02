@@ -175,6 +175,13 @@ struct DrawCommand {
 /// workgroups it drives (`feme::graphics::AmplificationDispatchQueue`).
 struct MeshDrawCommand {
   std::array<uint32_t, 3> GroupCount{1, 1, 1};
+  /// SPIR-V's `DrawIndex` builtin (`gl_DrawID`), the zero-based index of
+  /// this draw within its own multi-draw indirect command (roadmap H6p):
+  /// zero for a direct (`vkCmdDrawMeshTasksEXT`) draw, or the draw's own
+  /// position for `vkCmdDrawMeshTasksIndirectEXT`/
+  /// `vkCmdDrawMeshTasksIndirectCountEXT` -- mirrors
+  /// `FemeVertexInvocation::DrawID`'s own meaning for the vertex pipeline.
+  uint32_t DrawID = 0;
 };
 
 /// A snapshot of one draw's dynamic state: color attachments, viewport and

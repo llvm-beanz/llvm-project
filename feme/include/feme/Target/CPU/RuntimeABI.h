@@ -1263,8 +1263,12 @@ struct FemeMeshArgs {
   /// enumerator value), fixing how many vertex indices one row of
   /// `PrimitiveIndices` holds (`feme::graphics::getVerticesPerPrimitive`).
   uint32_t OutputTopology;
-  /// Reserved 32-bit field to keep pointer fields naturally aligned.
-  uint32_t Reserved32;
+  /// SPIR-V's `DrawIndex` builtin (`gl_DrawID`, roadmap H6p): zero for a
+  /// direct `vkCmdDrawMeshTasksEXT` draw, or a multi-draw indirect
+  /// command's own zero-based index within its batch. Same size/position
+  /// as the alignment-padding field this replaces, so no ABI layout
+  /// change.
+  uint32_t DrawID;
   /// Layout describing `VertexOutputs`.
   const FemeStageLayout *VertexOutputLayout;
   /// Structure-of-arrays storage for this workgroup's per-vertex outputs,

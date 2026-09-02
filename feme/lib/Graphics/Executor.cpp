@@ -3022,11 +3022,15 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     // Runs one mesh workgroup at \p GroupID (of a dispatch whose full
     // extent is \p DispatchGroupCount, `FemeMeshArgs::GroupCount`'s own
     // meaning), with \p Payload bound if a task stage requested it, and
-    // returns its assembled meshlet.
+    // returns its assembled meshlet. \p DrawID (roadmap H6p) is this
+    // workgroup's own enclosing `MeshDrawCommand::DrawID`, the source of
+    // SPIR-V's `DrawIndex` builtin -- the same value for every workgroup
+    // one `MeshDrawCommand` dispatches, exactly like `DispatchGroupCount`.
     auto runMeshWorkgroup =
         [&](std::array<uint32_t, 3> GroupID,
             std::array<uint32_t, 3> DispatchGroupCount,
-            llvm::ArrayRef<uint8_t> Payload) -> Expected<Meshlet> {
+            llvm::ArrayRef<uint8_t> Payload,
+            uint32_t DrawID) -> Expected<Meshlet> {
       Expected<StageStorage> VertexOut = buildStageStorage(
           *MeshSig, SignatureDirection::Output, Mesh.MaxOutputVertices);
       if (!VertexOut)
@@ -3064,6 +3068,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       MRes.RootConstants = Draw.Resources.RootConstants;
       MRes.GroupID = GroupID;
       MRes.GroupCount = DispatchGroupCount;
+      MRes.DrawID = DrawID;
       MRes.GroupShared = GroupShared;
       MRes.MaxOutputVertices = Mesh.MaxOutputVertices;
       MRes.MaxOutputPrimitives = Mesh.MaxOutputPrimitives;
@@ -3195,7 +3200,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           for (uint64_t I = 0; I != Queue->size(); ++I) {
             Expected<Meshlet> MeshletOut =
                 runMeshWorkgroup(Queue->getGroupID(I), Queue->getGroupCount(),
-                                 Payload.getBytes());
+                                 Payload.getBytes(), MDC.DrawID);
             if (!MeshletOut)
               return MeshletOut.takeError();
             Meshlets.push_back(std::move(*MeshletOut));
@@ -3207,8 +3212,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         if (!Queue)
           return Queue.takeError();
         for (uint64_t I = 0; I != Queue->size(); ++I) {
-          Expected<Meshlet> MeshletOut = runMeshWorkgroup(
-              Queue->getGroupID(I), Queue->getGroupCount(), /*Payload=*/{});
+          Expected<Meshlet> MeshletOut =
+              runMeshWorkgroup(Queue->getGroupID(I), Queue->getGroupCount(),
+                               /*Payload=*/{}, MDC.DrawID);
           if (!MeshletOut)
             return MeshletOut.takeError();
           Meshlets.push_back(std::move(*MeshletOut));
