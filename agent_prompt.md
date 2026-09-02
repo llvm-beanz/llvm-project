@@ -37,24 +37,16 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8o or other prerequisites blocking the H-series milestones?
+Can you work on H8j or other prerequisites blocking the H-series milestones?
 
-> **Widen `ImageOps.cpp`'s blit-source support to BC4/BC5/BC6H, then flip
-> `textureCompressionBC`.** H8n's own investigation found the mandatory format
-> table backing `textureCompressionBC == VK_TRUE` requires `BLIT_SRC_BIT` on all
-> 16 BC formats, but `runBlitImage`'s decode-then-resample pipeline is built on
-> `feme::graphics::unpackColor`/`packClearColor`, which have no case for
-> BC4/BC5/BC6H's own sampling-bridge targets
-> (`R8_UNORM`/`R8G8_UNORM`/`R16G16B16A16_FLOAT`) -- `unpackColor`'s generic
-> per-component path also requires its output array size to exactly match the
-> format's own component count (so a 1-component `R8_UNORM`/2-component
-> `R8G8_UNORM` cannot fill a 4-component RGBA blit buffer without a dedicated
-> case, mirroring `A8_UNORM`'s own "missing channel reads as its identity value"
-> precedent), and its generic float path additionally still truncate-copies a
-> 2-byte half float into a 4-byte `float` variable rather than converting it --
-> a separate, pre-existing bug this row's own investigation surfaced (affecting
-> `R16G16B16A16_FLOAT`, and so BC6H once wired) that needs fixing before BC6H's
-> own blit source can be trusted. Once all three gaps close, re-run the real
-> `dEQP-VK.api.info.format_properties.compressed_formats`/`image_format_properties.*.bc*`
-> groups to confirm the mandatory-format-table check actually passes before
-> flipping `PhysicalDeviceInfo.cpp`'s `textureCompressionBC` to `VK_TRUE`
+> **Wire the now-complete `ETC2Decode.h` decoder into a real consumer and flip
+> `textureCompressionETC2`.** H8c landed a complete, directly-unit-tested
+> ETC2/EAC decoder, but nothing calls it yet -- `Format.cpp` has no
+> `ResourceFormat` enumerators for any of the 10
+> `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` formats, `mapVkFormat` has no cases for
+> them, and `vkCreateImage` still rejects every one outright. Needs the same
+> wiring shape roadmap E22 gave `ASTCDecode.h`: `Format.{h,cpp}` block-aware
+> layout entries, `CommandBuffer.cpp`/`ImageOps.cpp` decode-on-sample-or-copy
+> plumbing, and `PhysicalDeviceInfo.cpp`'s `textureCompressionETC2` bit, only
+> flipped once a real `dEQP-VK.texture.compressed_format.*` ETC2/EAC case is
+> confirmed passing end to end
