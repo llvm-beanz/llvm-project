@@ -598,6 +598,24 @@ uint32_t imageFormatElementSize(ResourceFormat Format) {
   case ResourceFormat::ASTC_10x10_SFLOAT:
   case ResourceFormat::ASTC_12x10_SFLOAT:
   case ResourceFormat::ASTC_12x12_SFLOAT:
+  // (Roadmap H8n) BC1-7 block-compressed formats: same "no per-texel
+  // size" status as ASTC above.
+  case ResourceFormat::BC1_RGB_UNORM:
+  case ResourceFormat::BC1_RGB_SRGB:
+  case ResourceFormat::BC1_RGBA_UNORM:
+  case ResourceFormat::BC1_RGBA_SRGB:
+  case ResourceFormat::BC2_UNORM:
+  case ResourceFormat::BC2_SRGB:
+  case ResourceFormat::BC3_UNORM:
+  case ResourceFormat::BC3_SRGB:
+  case ResourceFormat::BC4_UNORM:
+  case ResourceFormat::BC4_SNORM:
+  case ResourceFormat::BC5_UNORM:
+  case ResourceFormat::BC5_SNORM:
+  case ResourceFormat::BC6H_UFLOAT:
+  case ResourceFormat::BC6H_SFLOAT:
+  case ResourceFormat::BC7_UNORM:
+  case ResourceFormat::BC7_SRGB:
     return 0;
   }
   llvm_unreachable("unhandled ResourceFormat");

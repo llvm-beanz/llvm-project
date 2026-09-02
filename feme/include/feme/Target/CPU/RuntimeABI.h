@@ -269,6 +269,39 @@ enum class ResourceFormat : uint32_t {
   // prior `_UINT`/`_SINT` pair in this project).
   R10G10B10A2_SNORM,
   R10G10B10A2_SINT,
+
+  // (Roadmap H8n) The 16 `VK_FORMAT_BC*` ("BC1-7"/S3TC+RGTC+BPTC) block
+  // footprints -- `BCDecode.h`/`BC7Decode.h`/`BC6HDecode.h` (roadmap
+  // H8i/H8l/H8m) each decode one sub-family's own blocks, wired together
+  // here. Appended at the enum's own tail for the same hard-coded-
+  // switch-case reason as every prior slice above (`FeMeRuntimeCPU.c`'s
+  // sampling table switches on this enum's raw ordinal value); unlike
+  // the ASTC block footprints above (which sit in their own contiguous
+  // range earlier in the enum, added before that hard-coded-switch
+  // constraint existed), these cannot be grouped next to them without
+  // renumbering every format appended since. Ordered the same way
+  // `VK_FORMAT_BC*`'s own numbering is: BC1 (4 formats: opaque/
+  // punch-through-alpha RGB, each with a `_UNORM`/`_SRGB` pair), BC2 (2:
+  // explicit alpha), BC3 (2: interpolated alpha), BC4 (2: one
+  // interpolated channel, `_UNORM`/`_SNORM`), BC5 (2: two interpolated
+  // channels), BC6H (2: HDR half-float, `_UFLOAT`/`_SFLOAT`), BC7 (2:
+  // the most general 8-bit RGBA mode set).
+  BC1_RGB_UNORM,
+  BC1_RGB_SRGB,
+  BC1_RGBA_UNORM,
+  BC1_RGBA_SRGB,
+  BC2_UNORM,
+  BC2_SRGB,
+  BC3_UNORM,
+  BC3_SRGB,
+  BC4_UNORM,
+  BC4_SNORM,
+  BC5_UNORM,
+  BC5_SNORM,
+  BC6H_UFLOAT,
+  BC6H_SFLOAT,
+  BC7_UNORM,
+  BC7_SRGB,
 };
 
 /// Whether \p Format is one of the ASTC block-compressed formats above.
@@ -279,9 +312,27 @@ enum class ResourceFormat : uint32_t {
 /// `formatElementSize` (a *texel*'s size) is meaningless for it -- see
 /// "Block-compressed formats" in feme/lib/Vulkan/Format.h for the
 /// block-aware layout math this distinction feeds.
-constexpr bool isBlockCompressedFormat(ResourceFormat Format) {
+constexpr bool isASTCFormat(ResourceFormat Format) {
   return Format >= ResourceFormat::ASTC_4x4_UNORM &&
          Format <= ResourceFormat::ASTC_12x12_SFLOAT;
+}
+
+/// Whether \p Format is one of the 16 `VK_FORMAT_BC*` formats above
+/// (roadmap H8n) -- the `BCDecode.h`/`BC7Decode.h`/`BC6HDecode.h`
+/// counterpart to `isASTCFormat` above, split out into its own
+/// non-contiguous range (see the enum's own comment for why it cannot
+/// share `isASTCFormat`'s single contiguous check).
+constexpr bool isBCFormat(ResourceFormat Format) {
+  return Format >= ResourceFormat::BC1_RGB_UNORM &&
+         Format <= ResourceFormat::BC7_SRGB;
+}
+
+/// Whether \p Format is any block-compressed format this ICD recognizes
+/// (ASTC or BC) -- see `isASTCFormat`'s own comment for what makes a
+/// block-compressed format's layout different from an ordinary
+/// one-texel-at-a-time format.
+constexpr bool isBlockCompressedFormat(ResourceFormat Format) {
+  return isASTCFormat(Format) || isBCFormat(Format);
 }
 
 /// Whether \p Format is one of the 28 LDR-only ASTC formats (roadmap E20)
@@ -293,6 +344,29 @@ constexpr bool isASTCLdrFormat(ResourceFormat Format) {
   return Format >= ResourceFormat::ASTC_4x4_UNORM &&
          Format <= ResourceFormat::ASTC_12x12_SRGB;
 }
+
+/// Whether \p Format is one of the 10 `VK_FORMAT_BC*` formats (roadmap
+/// H8n) whose decoded output is 8-bit RGBA (BC1/BC2/BC3/BC7) -- the BC
+/// analogue of `isASTCLdrFormat`'s "which half of this block-compressed
+/// family fits the RGBA8 sampling/blit bridge" distinction.
+/// `materializeImageDescriptor` (CommandBuffer.cpp) decodes every one of
+/// the 16 BC formats for *sampling* (each into whichever already-
+/// runtime-supported `ResourceFormat` matches its own channel count and
+/// precision -- see that function's own comment), but `ImageOps.cpp`'s
+/// `runBlitImage` only decodes this RGBA8-shaped half: its own
+/// decode-then-resample pipeline is built on `feme::graphics::
+/// unpackColor`/`packClearColor`, which do not have a case for
+/// `R8_UNORM`/`R8G8_UNORM`/`R16G16B16A16_FLOAT` (BC4/BC5/BC6H's own
+/// sampling-bridge targets) -- narrower than the sampling bridge on
+/// purpose, mirroring how an HDR ASTC source is similarly excluded from
+/// blitting above despite being sampled just fine.
+constexpr bool isBCRGBA8Format(ResourceFormat Format) {
+  return (Format >= ResourceFormat::BC1_RGB_UNORM &&
+          Format <= ResourceFormat::BC3_SRGB) ||
+         (Format >= ResourceFormat::BC7_UNORM &&
+          Format <= ResourceFormat::BC7_SRGB);
+}
+
 
 /// Bits of `FemeDescriptor::Flags`.
 enum FemeDescriptorFlagBits : uint32_t {

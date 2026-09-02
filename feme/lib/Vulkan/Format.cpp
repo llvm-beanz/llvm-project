@@ -255,6 +255,39 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::ASTC_12x10_SFLOAT;
   case VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK_EXT:
     return ResourceFormat::ASTC_12x12_SFLOAT;
+  // (Roadmap H8n) The 16 `VK_FORMAT_BC*` block footprints.
+  case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+    return ResourceFormat::BC1_RGB_UNORM;
+  case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+    return ResourceFormat::BC1_RGB_SRGB;
+  case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+    return ResourceFormat::BC1_RGBA_UNORM;
+  case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+    return ResourceFormat::BC1_RGBA_SRGB;
+  case VK_FORMAT_BC2_UNORM_BLOCK:
+    return ResourceFormat::BC2_UNORM;
+  case VK_FORMAT_BC2_SRGB_BLOCK:
+    return ResourceFormat::BC2_SRGB;
+  case VK_FORMAT_BC3_UNORM_BLOCK:
+    return ResourceFormat::BC3_UNORM;
+  case VK_FORMAT_BC3_SRGB_BLOCK:
+    return ResourceFormat::BC3_SRGB;
+  case VK_FORMAT_BC4_UNORM_BLOCK:
+    return ResourceFormat::BC4_UNORM;
+  case VK_FORMAT_BC4_SNORM_BLOCK:
+    return ResourceFormat::BC4_SNORM;
+  case VK_FORMAT_BC5_UNORM_BLOCK:
+    return ResourceFormat::BC5_UNORM;
+  case VK_FORMAT_BC5_SNORM_BLOCK:
+    return ResourceFormat::BC5_SNORM;
+  case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+    return ResourceFormat::BC6H_UFLOAT;
+  case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+    return ResourceFormat::BC6H_SFLOAT;
+  case VK_FORMAT_BC7_UNORM_BLOCK:
+    return ResourceFormat::BC7_UNORM;
+  case VK_FORMAT_BC7_SRGB_BLOCK:
+    return ResourceFormat::BC7_SRGB;
   default:
     return std::nullopt;
   }
@@ -403,6 +436,25 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::ASTC_12x10_SFLOAT:
   case ResourceFormat::ASTC_12x12_SFLOAT:
     return 0;
+  // (Roadmap H8n) The 16 `VK_FORMAT_BC*` block footprints: no
+  // single-texel size either, for the same reason as ASTC above.
+  case ResourceFormat::BC1_RGB_UNORM:
+  case ResourceFormat::BC1_RGB_SRGB:
+  case ResourceFormat::BC1_RGBA_UNORM:
+  case ResourceFormat::BC1_RGBA_SRGB:
+  case ResourceFormat::BC2_UNORM:
+  case ResourceFormat::BC2_SRGB:
+  case ResourceFormat::BC3_UNORM:
+  case ResourceFormat::BC3_SRGB:
+  case ResourceFormat::BC4_UNORM:
+  case ResourceFormat::BC4_SNORM:
+  case ResourceFormat::BC5_UNORM:
+  case ResourceFormat::BC5_SNORM:
+  case ResourceFormat::BC6H_UFLOAT:
+  case ResourceFormat::BC6H_SFLOAT:
+  case ResourceFormat::BC7_UNORM:
+  case ResourceFormat::BC7_SRGB:
+    return 0;
   }
   llvm_unreachable("unhandled ResourceFormat");
 }
@@ -494,6 +546,26 @@ BlockShape blockShape(ResourceFormat Format) {
     return {12, 10};
   case ResourceFormat::ASTC_12x12_SFLOAT:
     return {12, 12};
+  // (Roadmap H8n) All 16 `VK_FORMAT_BC*` formats share the same 4x4
+  // texel footprint (unlike ASTC's own per-format footprint) -- only
+  // their per-block byte count differs (`bytesPerBlock` below).
+  case ResourceFormat::BC1_RGB_UNORM:
+  case ResourceFormat::BC1_RGB_SRGB:
+  case ResourceFormat::BC1_RGBA_UNORM:
+  case ResourceFormat::BC1_RGBA_SRGB:
+  case ResourceFormat::BC2_UNORM:
+  case ResourceFormat::BC2_SRGB:
+  case ResourceFormat::BC3_UNORM:
+  case ResourceFormat::BC3_SRGB:
+  case ResourceFormat::BC4_UNORM:
+  case ResourceFormat::BC4_SNORM:
+  case ResourceFormat::BC5_UNORM:
+  case ResourceFormat::BC5_SNORM:
+  case ResourceFormat::BC6H_UFLOAT:
+  case ResourceFormat::BC6H_SFLOAT:
+  case ResourceFormat::BC7_UNORM:
+  case ResourceFormat::BC7_SRGB:
+    return {4, 4};
   default:
     return {1, 1};
   }
@@ -510,6 +582,39 @@ uint32_t feme::vulkan::blockHeight(ResourceFormat Format) {
 }
 
 uint32_t feme::vulkan::bytesPerBlock(ResourceFormat Format) {
+  // (Roadmap H8n) Unlike every ASTC footprint (always a 128-bit block
+  // regardless of width/height), BC1 and BC4 each pack into a 64-bit (8
+  // byte) block -- half the size of every other BC format's 128-bit (16
+  // byte) block -- per the real `S3TC`/`RGTC` bit layout `BCDecode.h`
+  // decodes: BC1 stores two 16-bit endpoint colors plus a 2-bit-per-texel
+  // index (64 bits total, no separate alpha plane), and BC4 stores two
+  // 8-bit endpoints plus a 3-bit-per-texel index (also 64 bits, one
+  // channel only) -- while BC2/BC3/BC5/BC6H/BC7 each add a second 64-bit
+  // plane (explicit or interpolated alpha, a second interpolated
+  // channel, or extra endpoint/partition bits), doubling their footprint
+  // to 128 bits.
+  switch (Format) {
+  case ResourceFormat::BC1_RGB_UNORM:
+  case ResourceFormat::BC1_RGB_SRGB:
+  case ResourceFormat::BC1_RGBA_UNORM:
+  case ResourceFormat::BC1_RGBA_SRGB:
+  case ResourceFormat::BC4_UNORM:
+  case ResourceFormat::BC4_SNORM:
+    return 8;
+  case ResourceFormat::BC2_UNORM:
+  case ResourceFormat::BC2_SRGB:
+  case ResourceFormat::BC3_UNORM:
+  case ResourceFormat::BC3_SRGB:
+  case ResourceFormat::BC5_UNORM:
+  case ResourceFormat::BC5_SNORM:
+  case ResourceFormat::BC6H_UFLOAT:
+  case ResourceFormat::BC6H_SFLOAT:
+  case ResourceFormat::BC7_UNORM:
+  case ResourceFormat::BC7_SRGB:
+    return 16;
+  default:
+    break;
+  }
   if (isBlockCompressedFormat(Format))
     // Every ASTC footprint packs into the same 128-bit (16-byte) block
     // regardless of its width/height -- a wider/taller block just means
@@ -631,11 +736,21 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
 
   bool BlockCompressed = isBlockCompressedFormat(Format);
   bool ASTCLdr = isASTCLdrFormat(Format);
+  // (Roadmap H8n) Of the 16 `VK_FORMAT_BC*` formats, only the 10
+  // RGBA8-shaped ones (BC1/BC2/BC3/BC7) are a legal blit *source*:
+  // `runBlitImage`'s own decode-then-resample pipeline is built on
+  // `feme::graphics::unpackColor`, which has no case for BC4/BC5/BC6H's
+  // own sampling-bridge targets (`R8_UNORM`/`R8G8_UNORM`/
+  // `R16G16B16A16_FLOAT`) -- narrower than what `materializeImageDescriptor`
+  // supports for sampling, mirroring how an HDR ASTC source is similarly
+  // excluded below despite being sampled just fine.
+  bool BCRGBA8 = isBCFormat(Format) && isBCRGBA8Format(Format);
   // `ImageOps.cpp`'s `runBlitImage` rejects a block-compressed
-  // *destination* outright (no ASTC encoder exists to repack into one) and
-  // an HDR ASTC *source* (`decodeASTCBlock` is LDR-only), but accepts every
-  // other combination either way.
-  if (!BlockCompressed || ASTCLdr)
+  // *destination* outright (no ASTC/BC encoder exists to repack into one)
+  // and an HDR ASTC *source*/non-RGBA8-shaped BC *source* (its own
+  // decode-then-resample pipeline cannot represent either), but accepts
+  // every other combination either way.
+  if (!BlockCompressed || ASTCLdr || BCRGBA8)
     Flags |= VK_FORMAT_FEATURE_BLIT_SRC_BIT;
   if (!BlockCompressed)
     Flags |= VK_FORMAT_FEATURE_BLIT_DST_BIT;
@@ -734,6 +849,15 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
     break;
   default:
     if (ASTCLdr)
+      Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+               VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    // (Roadmap H8n) Every one of the 16 `VK_FORMAT_BC*` formats samples
+    // too -- `materializeImageDescriptor` (CommandBuffer.cpp) decodes
+    // each into whichever already-runtime-supported `ResourceFormat`
+    // matches its own channel count/precision before the runtime ever
+    // sees it, exactly mirroring the ASTC LDR bridge above (see that
+    // function's own comment for the per-format target list).
+    else if (isBCFormat(Format))
       Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
                VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     break;
