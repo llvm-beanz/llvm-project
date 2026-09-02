@@ -54589,3 +54589,87 @@ into a real consumer yet, and no such wiring row existed in the roadmap
 before this session (H8j only covers ETC2/EAC's own wiring), so I filed
 a new H8n row for it -- one lowercase letter under H8, matching the
 "no nesting deeper than one lowercase letter" convention going forward.
+
+# H8n: wiring BC1-7 into a real consumer
+
+H8i/H8l/H8m left me with three complete, unit-tested-but-unwired BC
+decoders (`BCDecode.h`, `BC7Decode.h`, `BC6HDecode.h`). This session's
+job was the wiring row: `ResourceFormat` enumerators, `Format.cpp`
+plumbing, a real sampling/blit consumer, and (conditionally)
+`textureCompressionBC` itself.
+
+The mechanical wiring followed ASTC's own precedent closely: append 16
+new `ResourceFormat` values at the enum's tail (never insert --
+`FeMeRuntimeCPU.c` switches on raw ordinals, a constraint I keep
+re-discovering and keep respecting), add `mapVkFormat`/
+`formatElementSize`/`blockShape`/`bytesPerBlock`/`formatFeatureFlags`
+cases, and decode each format into whichever *already-runtime-supported*
+`ResourceFormat` matches its own shape, exactly like the ASTC LDR bridge
+does for `materializeImageDescriptor`. The one wrinkle: BC's 16 formats
+split into four different decode-target shapes (BC1/2/3/7 -> RGBA8,
+BC4 -> R8, BC5 -> R8G8, BC6H -> R16G16B16A16_FLOAT), unlike ASTC's
+single uniform LDR-RGBA8 target -- so I factored the per-format dispatch
+into a new shared `BCSamplingBridge.h`/`.cpp` rather than duplicating it
+between `CommandBuffer.cpp` and `ImageOps.cpp`.
+
+I made one real mistake worth recording: my first draft of
+`isBCRGBA8Format` used a single contiguous enum range
+(`BC1_RGB_UNORM`..`BC3_SRGB`), forgetting that BC7 (the other
+RGBA8-shaped sub-family) sits *after* BC4/BC5/BC6H in the enum, not
+adjacent to BC1-3. My own new `IsBlockCompressedFormatDistinguishesBC`
+test caught this immediately (I'd written `EXPECT_TRUE(isBCRGBA8Format
+(BC7_UNORM))` and it failed) -- a good reminder that testing the
+predicate itself, not just its call sites, pays for itself fast.
+
+The bigger judgment call was whether to flip `textureCompressionBC`
+itself. My original plan (informed only by memory of the spec's prose,
+not by directly reading it or running anything) was that the mandatory
+format table for this feature only requires `SAMPLED_IMAGE_BIT`, not
+blit bits -- so I built `ImageOps.cpp`'s blit-source support narrowly,
+covering only the RGBA8-shaped BC1/BC2/BC3/BC7 subset, on the theory
+that BC4/BC5/BC6H's own sampling-bridge targets don't fit
+`unpackColor`'s RGBA8-only pipeline anyway and that would be fine to
+leave for later.
+
+That assumption was wrong, and I only found out because I actually
+tried the flip and measured it rather than reasoning from memory. I
+temporarily set `textureCompressionBC = VK_TRUE`, rebuilt, and ran a
+real `dEQP-VK.api.info.*` sweep specifically because the standing
+instructions require running the real CTS after each change -- and
+`dEQP-VK.api.info.format_properties.compressed_formats`
+(`vktApiFeatureInfo.cpp`'s `testCompressedFormatsSupported`) failed,
+because its own mandatory-format-table check requires `BLIT_SRC_BIT` on
+*every* format in the BC set once the feature bit is `VK_TRUE`, not
+just a sampled-image-capable subset. Flipping the bit traded 96
+`NotSupported` results for 96 new real `Fail`s across
+`image_format_properties.*.bc*` plus the `compressed_formats` test
+itself -- a clear net regression I would have shipped had I trusted my
+own prior assumption instead of re-verifying it against the actual CTS.
+I reverted the flip, kept the sampling/blit wiring itself (which is a
+real, unconditional improvement -- `dEQP-VK.texture.compressed.bc*`
+gained 96 real passes regardless of the feature bit, since that specific
+CTS group's own 2D test instance has no feature-bit gate at all), and
+filed the blit-scope gap as new roadmap row H8o rather than pretend the
+mandatory-table check doesn't exist.
+
+Two smaller findings from the same investigation, both recorded so I
+don't have to rediscover them in H8o: `feme::graphics::unpackColor`'s
+generic per-component path requires its output array size to exactly
+equal the format's own component count, so BC4's 1-component `R8_UNORM`
+and BC5's 2-component `R8G8_UNORM` targets can't fill a 4-component RGBA
+blit buffer without a dedicated case (mirroring `A8_UNORM`'s existing
+"missing channel reads as its identity value" pattern) -- and
+`unpackColor`'s generic float path truncate-copies a 2-byte half float
+into a 4-byte `float` variable rather than converting it, a
+pre-existing, unrelated bug that would silently corrupt a BC6H blit
+source's colors even after the component-count gap above is fixed.
+Both are now H8o's own explicit scope.
+
+I also found and fixed a `-Wswitch` warning in `feme-run.cpp` this
+session's own enum growth exposed (`imageFormatElementSize`'s switch
+needed the same "block-compressed formats report 0 texel size" case the
+16 new BC values needed, mirroring ASTC's own existing cases there) --
+a good example of why building the whole tree (not just the touched
+library) before calling a change done matters; `ninja check-feme`'s own
+targeted test run wouldn't have caught a warning in an untested tool
+binary on its own.
