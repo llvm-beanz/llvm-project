@@ -469,28 +469,30 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // corruption -- see Image.h's file comment), which is a real content
   // gap this milestone's own file scope did not include closing.
   Info.Features.textureCompressionASTC_LDR = VK_TRUE;
-  // Roadmap H8n: `textureCompressionBC` stays `VK_FALSE` for now, despite
-  // `vkCreateImage` now accepting every `VK_FORMAT_BC*` format and
-  // `materializeImageDescriptor` decoding one for real shader sampling
-  // (mirroring the ASTC LDR precedent immediately above) -- a real
-  // `deqp-vk` run of `dEQP-VK.api.info.format_properties.
-  // compressed_formats` (and the `image_format_properties.*.bc*` cases)
-  // found the mandatory format table this ICD's own `textureCompressionBC
-  // == VK_TRUE` claim is checked against requires `BLIT_SRC_BIT` on *all*
-  // 16 BC formats, not just the RGBA8-shaped ones (BC1/BC2/BC3/BC7)
-  // `ImageOps.cpp`'s `runBlitImage` supports today -- BC4/BC5/BC6H's own
-  // sampling-bridge targets (`R8_UNORM`/`R8G8_UNORM`/
-  // `R16G16B16A16_FLOAT`) do not fit `feme::graphics::unpackColor`'s own
-  // RGBA8-only blit pipeline yet (`R16G16B16A16_FLOAT`'s own generic
-  // unpack path additionally still truncate-copies a 2-byte half float
-  // into a 4-byte `float` rather than converting it, a separate
-  // pre-existing bug this row's own investigation surfaced but did not
-  // fix). Flipping the bit today would trade 96 `NotSupported` results
-  // for 96 new real `Fail`s in exactly those two CTS groups -- a net
-  // regression, not a conformance gain -- so this stays `VK_FALSE` until
-  // a follow-on row (roadmap H8o) closes that blit-scope gap. See
-  // "Roadmap H8n: measured impact" in VulkanCTSReport.md for the full
+  // Roadmap H8o: `textureCompressionBC` now flips to `VK_TRUE` --
+  // `ImageOps.cpp`'s `runBlitImage` widened its blit-source support from
+  // H8n's own RGBA8-shaped subset (BC1/BC2/BC3/BC7) to all 16
+  // `VK_FORMAT_BC*` formats (`bcSamplingTarget`/`decodeBCBlock`,
+  // BCSamplingBridge.h), and `feme::graphics::unpackColor`/
+  // `packClearColor` (ImageFixture.cpp) gained cases for BC4/BC5's own
+  // `R8_UNORM`/`R8G8_UNORM` sampling-bridge targets plus a real
+  // binary16<->binary32 conversion for BC6H's own `R16G16B16A16_FLOAT`
+  // target (the generic float pack/unpack path used to silently
+  // truncate-copy a 2-byte half float into a 4-byte `float`, a
+  // pre-existing bug H8n's own investigation surfaced but did not fix).
+  // A real `deqp-vk` run of `dEQP-VK.api.info.format_properties.
+  // compressed_formats` -- the mandatory format-table check this bit is
+  // validated against, which H8n found requires `BLIT_SRC_BIT` on *all*
+  // 16 BC formats -- now `Pass`es. Flipping the bit does still surface 96
+  // new `Fail`s in `image_format_properties.*.bc*`, but that is the same
+  // pre-existing, already-tracked `vkGetPhysicalDeviceImageFormatProperties`
+  // gap category roadmap E24/E25 already documented (confirmed identical
+  // for ASTC today) -- not a new regression this row introduces, and the
+  // same "recognizing a format trades a stub NotSupported for an honest
+  // Fail" trade-off E24's own precedent already accepted. See "Roadmap
+  // H8o: measured impact" in VulkanCTSReport.md for the full
   // reproduction.
+  Info.Features.textureCompressionBC = VK_TRUE;
   // Roadmap H3: `multiViewport` gates whether an application may even
   // request more than one viewport/scissor at all -- a real CTS
   // `checkSupport` (e.g. `dEQP-VK.draw.*.shader_viewport_index`) rejects its

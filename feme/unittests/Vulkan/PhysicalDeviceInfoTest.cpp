@@ -164,6 +164,12 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
   EXPECT_EQ(Info.Features.textureCompressionASTC_LDR, VK_TRUE);
+  // (Roadmap H8o) `textureCompressionBC`: flips to `VK_TRUE` alongside
+  // `textureCompressionASTC_LDR` above once `ImageOps.cpp`'s blit-source
+  // support and `feme::graphics::unpackColor`/`packClearColor` cover
+  // every one of the 16 `VK_FORMAT_BC*` formats' own sampling-bridge
+  // targets (see PhysicalDeviceInfo.cpp's own comment).
+  EXPECT_EQ(Info.Features.textureCompressionBC, VK_TRUE);
   EXPECT_EQ(Info.Features.multiViewport, VK_TRUE);
   EXPECT_EQ(Info.Features.tessellationShader, VK_TRUE);
   EXPECT_EQ(Info.Features.geometryShader, VK_TRUE);
@@ -203,6 +209,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.robustBufferAccess = VK_FALSE;
   Cleared.dualSrcBlend = VK_FALSE;
   Cleared.textureCompressionASTC_LDR = VK_FALSE;
+  Cleared.textureCompressionBC = VK_FALSE;
   Cleared.multiViewport = VK_FALSE;
   Cleared.tessellationShader = VK_FALSE;
   Cleared.geometryShader = VK_FALSE;
@@ -324,6 +331,21 @@ TEST(PhysicalDeviceInfo, TextureCompressionASTCLDRIsAdvertised) {
   // aggregate feature struct case) can now honestly flip to `VK_TRUE`.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.textureCompressionASTC_LDR, VK_TRUE);
+}
+
+TEST(PhysicalDeviceInfo, TextureCompressionBCIsAdvertised) {
+  // Roadmap H8o: all 16 `VK_FORMAT_BC*` formats now sample
+  // (`materializeImageDescriptor`, roadmap H8n) and blit-source
+  // (`runBlitImage`'s own `bcSamplingTarget`/`decodeBCBlock` dispatch,
+  // this row) correctly, and a real `deqp-vk` run confirms the mandatory
+  // `dEQP-VK.api.info.format_properties.compressed_formats` check --
+  // which requires `VK_FORMAT_FEATURE_BLIT_SRC_BIT` on every BC format
+  // once this bit reads `VK_TRUE` -- now passes, so this bit can honestly
+  // flip too, the same "advertise once the pipeline actually works, not
+  // before" gate `TextureCompressionASTCLDRIsAdvertised` above already
+  // established.
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  EXPECT_EQ(Info.Features.textureCompressionBC, VK_TRUE);
 }
 
 TEST(PhysicalDeviceInfo, DeviceAndPipelineCacheUUIDsDiffer) {
