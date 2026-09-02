@@ -54950,3 +54950,125 @@ than eyeballing the raw pass-count delta) was the right way to confirm
 the actual claim this row makes -- "every texel-buffer gap is closed" --
 independent of how many *other*, out-of-scope gaps happen to keep a given
 case's overall verdict `Fail`.
+
+# Agent thoughts: roadmap H8e (packed/16-bit-integer format-feature gaps)
+
+## Starting point
+
+H8e's roadmap text bundled 9 named `VkFormat`s (`r16_{sint,uint}`,
+`r16g16_{sint,uint}`, `a2b10g10r10_uint_pack32`, `a8b8g8r8_{uint,sint}_pack32`,
+`d16_unorm`, `a1r5g5b5_unorm_pack16`, `b4g4r4a4_unorm_pack16`,
+`e5b9g9r9_ufloat_pack32`) under one row, all missing some combination of
+`COLOR_ATTACHMENT_BIT`/`SAMPLED_IMAGE_BIT`/`SAMPLED_IMAGE_FILTER_LINEAR_BIT`,
+explicitly flagged as "not yet triaged for whether each is a genuine
+rendering-capability gap or a reporting-only one." That triage was the entire
+first half of this session's work, and it's the part I want to record most
+carefully, because the answer differed per format in a way that materially
+changed scope.
+
+## Triage methodology
+
+Rather than reasoning from the Vulkan spec's mandatory-format-support tables
+from memory (which I don't fully trust for edge cases like depth formats or
+CTS-specific interpretations), I ran the real `dEQP-VK.api.info.format_
+properties.*` suite against the built ICD and grepped the saved stdout for
+each named format's exact `required: ... missing: ...` line. This is the same
+methodology H8d used, and it paid off again here: it immediately told me
+`e5b9g9r9_ufloat_pack32` was missing *every* bit, not just the ones the
+roadmap text called out, which is the unmistakable signature of an entirely
+unrecognized `VkFormat` (`mapVkFormat` returns `nullopt`) rather than an
+under-advertised one. I confirmed this directly against the `ResourceFormat`
+enum and `mapVkFormat`'s switch -- no case, no enumerator, nothing. That's a
+much bigger lift (a brand-new shared-exponent RGB9E5 pack/unpack
+implementation) than any of the other 8 formats, so I split it off
+immediately rather than trying to cram it in.
+
+For the remaining 8, the CTS log told me exactly one bit was missing each
+time (never more), which let me categorize them into two buckets before
+writing a line of code:
+
+1. **`r16_{sint,uint}`, `r16g16_{sint,uint}`, `a2b10g10r10_uint_pack32`,
+   `a8b8g8r8_{uint,sint}_pack32`**: all missing only `COLOR_ATTACHMENT_BIT`.
+2. **`d16_unorm`, `a1r5g5b5_unorm_pack16`, `b4g4r4a4_unorm_pack16`**: missing
+   only `SAMPLED_IMAGE_BIT` (the latter two also missing
+   `FILTER_LINEAR_BIT`).
+
+For bucket 1, I traced the real fragment-color-write path
+(`Executor.cpp`'s `mergeColor`/`readFragmentColor`, called from
+`executeDraws`) instead of just looking at `RenderPass.cpp`'s
+`isSupportedColorAttachmentFormat` (the thing that directly gates the format-
+feature bit). This is the step I think mattered most: it would have been easy
+to just flip `isSupportedColorAttachmentFormat` to `true` for these formats
+and declare victory on the CTS's own `format_properties` test, but that would
+have been dishonest -- I found `executeDraws` has a hard, unconditional
+rejection of any fragment-shader output whose `ComponentType != Float`,
+regardless of the target attachment's own format. That means no
+`ivec4`/`uvec4` fragment shader output can be drawn *at all* today, so
+advertising `COLOR_ATTACHMENT_BIT` for an integer format without first fixing
+that check (and the integer read/pack path underneath it) would let a real
+CTS conformance case create a pipeline the format-properties query claims is
+legal, then silently misbehave (or hit an assertion/rejection) at draw time --
+a worse outcome than just leaving the bit honestly unset. This is a
+substantially bigger feature (new fragment-output-type-check branch, a new
+integer-reading counterpart to `readFragmentColor`, and confirming/extending
+`packClearColor`/`unpackColor`'s own coverage for these 4 distinct
+`ResourceFormat`s) than a quick format-table entry, so I split it into its own
+new row (H8p) rather than trying to land it in the same commit chain as the
+genuinely simple fixes.
+
+For bucket 2, the deciding factor was whether `femeRTImageFormatElementSize`/
+`femeRTUnpackImageTexel` (`FeMeRuntimeCPU.c`) -- the shared decode table both
+`femeRTFetchTexel2D` (real sampling) and the storage-image/typed-buffer paths
+use -- already had a case for each format's `ResourceFormat` ordinal:
+
+- `D16_UNORM` (ordinal 31) already had a decode case, added by roadmap F8b for
+  subpass-input-attachment reads. Since `femeRTFetchTexel2D` calls the exact
+  same table, this meant real texture sampling of a depth image *already
+  worked end to end* -- the CTS gap was purely that `Format.cpp` never
+  advertised the bit. A one-line fix (well, one `case` block).
+- `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM` (ordinals 79/84) had *no* decode case, and
+  `RuntimeABI.h`'s own comment on roadmap H7r's packed-16-bit format survey
+  already stated outright that none of its 7 formats "are backed by a runtime
+  sampling case" -- they're real `packClearColor`/`unpackColor`-backed
+  color-attachment formats, but nothing more. This was already a documented,
+  known gap, not something I had to discover from scratch; I just had to
+  confirm it was genuinely still true (it was) and then close it.
+
+## The fix
+
+For the two packed formats, I mirrored `A1B5G5R5_UNORM`'s existing pattern
+exactly: a new `femeRTUnpackXxxUnorm` helper function (bit-shift/mask logic
+matching the same layout `packClearColor`'s existing clear-color case already
+uses, so the sampled and cleared/attachment paths agree on interpretation),
+wired into both the element-size switch (both return 2, a single packed
+16-bit word) and the unpack-texel switch. Then `Format.cpp`'s
+`formatFeatureFlags` gets a new case granting `SAMPLED_IMAGE_BIT |
+FILTER_LINEAR_BIT` for both (filtering is legal for a normalized format, and
+the CTS run confirmed it's required). For `D16_UNORM`, just the
+`SAMPLED_IMAGE_BIT` case, no filter bit (the CTS run's own requirement did not
+ask for it, unlike the two packed formats -- worth noting this differs from
+`D32_FLOAT`, which apparently has a narrower mandatory-bit requirement in this
+same CTS suite and needed no change).
+
+## Splitting the roadmap
+
+Per the standing instruction to keep H8-series milestones at most one
+lowercase letter deep, and since H8a-H8o were all already claimed, the two
+deferred sub-scopes became new *top-level* rows H8p (integer
+`COLOR_ATTACHMENT_BIT`) and H8q (`e5b9g9r9_ufloat_pack32`), each pointing back
+to H8e as a "depends on triage from" predecessor rather than nesting under it.
+
+## Verification
+
+Rebuilt and ran `ninja -C build check-feme` (assertions-enabled, ccache) after
+each logical change; final state 2397/2424 (27 pre-existing `Unsupported`, 0
+`Failed`, +2 from the two new `ImageSamplingTest.cpp` cases,
+`LoadFetchesB4G4R4A4Unorm`/`LoadFetchesA1R5G5B5Unorm`). Then re-ran the real
+`dEQP-VK.api.info.format_properties.*` CTS suite from `/home/dev/dev/VK-GL-CTS/`:
+193/225 passing, up from the H8d-era 190/225 baseline -- exactly the 3
+targeted formats, confirmed individually by name in the log, with zero
+regressions elsewhere in that suite. A broader `dEQP-VK.api.info.*` sweep
+(10,484 cases) showed no new failures attributable to this row's changes.
+Neither `Vulkan14FeatureInventory.md` nor `VulkanExtensionInventory.md`
+needed updates: this row only widens per-format `VkFormatFeatureFlags`,
+touching no `VkPhysicalDeviceFeatures` bit or extension.
