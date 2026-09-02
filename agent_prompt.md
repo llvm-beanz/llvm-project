@@ -37,26 +37,29 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H6q or other prerequisites blocking the H-series milestones?
+Can you work on H6s or other prerequisites blocking the H-series milestones?
 
-> **`dEQP-VK.mesh_shader.ext.api.draw.*`/`draw_indirect*`'s own
-> `with_task_shader`/`with_task_shader_secondary_cmd` variants (58 of the
-> 540-case `dEQP-VK.mesh_shader.ext.api.*` group, found re-running H6p's own
-> fix) fail `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`**,
-> root cause confirmed directly via `FEME_VULKAN_LOG_CREATION_ERRORS=1 deqp-vk`:
-> `error: failed to legalize operation 'spirv.GlobalVariable' that was
-> explicitly marked illegal` against a `PushConstant`-storage-class SPIR-V
-> global variable (`!spirv.ptr<!spirv.struct<(i32 [12], i32 [16]), Block>,
-> PushConstant>`) -- an upstream MLIR SPIR-V-dialect-to-LLVM conversion gap in
-> `ConvertSPIRVToLLVMPass`, distinct from H6p's own `feme`-local
-> `MeshOutputWrapper.cpp` scope. Confirmed present only in a `with_task_shader`
-> variant's *task* stage module (the task/amplification entry that dispatches
-> the mesh stage, not the mesh stage itself), and not yet triaged for whether
-> the gap is task-stage-specific, push-constant-specific, or a generic "this
-> particular struct layout/size" gap -- needs its own IR reduction, mirroring
-> the H6g-b/H6j/H6k/H6l/H6n/H6o/H6p technique, to isolate exactly what about
-> this push constant block (`i32 [12], i32 [16]`, an 8-byte struct at two large
-> byte offsets) the existing `ConvertSPIRVToLLVMPass` `spirv.GlobalVariable`
-> lowering pattern does not already handle for other, already-passing
-> push-constant-using stages (e.g. the vertex/fragment paths, which do not hit
-> this)
+> **`OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task entry's own
+> mesh-dispatch call (group-count triple plus its `TaskPayloadWorkgroupEXT`
+> payload operand), has no `ConvertSPIRVToLLVMPass` conversion pattern at all
+> yet** -- found confirming H6q's own fix: `error: failed to legalize operation
+> 'spirv.EXT.EmitMeshTasks' that was explicitly marked illegal`, on every
+> `with_task_shader`/`with_task_shader_secondary_cmd` variant in the 540-case
+> `dEQP-VK.mesh_shader.ext.api.*` group (58 cases) once H6q's own push-constant
+> legalization gap no longer blocks them first. Unlike
+> `spirv.EXT.SetMeshOutputs` (the mesh stage's own bounded-output-count
+> declaration, `SetMeshOutputsEXTConversionPattern`), nothing in
+> `SPIRVToLLVMPatterns.cpp` handles this op at all -- `MeshOutputWrapper.cpp`'s
+> own file comment already anticipated "`EmitMeshTasksEXT`'s own
+> still-uncanonicalized form" as a candidate gap (H6p's own investigation ruled
+> it out for that row's specific case, since that case had no task shader at
+> all, but it is exactly what every `with_task_shader` case needs). Needs its
+> own design: likely a new canonical `feme.stage.*` op (mirroring
+> `SetMeshOutputs`'s own precedent) capturing the group-count triple and payload
+> pointer, a new `ConvertSPIRVToLLVMPass` pattern converting
+> `spirv.EXT.EmitMeshTasks` into it, a `MeshOutputWrapper.cpp` (or a
+> task-stage-specific sibling) lowering case for the task stage's own wrapper,
+> and whatever CPU-side execution-chaining the task stage's own dispatch of its
+> mesh workgroups still needs beyond what already exists for a task-less mesh
+> entry. Not yet triaged for how much of the task-stage-to-mesh-stage chaining
+> machinery already exists elsewhere versus needs building from scratch
