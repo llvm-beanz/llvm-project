@@ -3576,6 +3576,95 @@ TEST_F(BC1SampledImageDispatchTest,
 
 namespace {
 
+/// (Roadmap H8j) The same scenario as `BC1SampledImageDispatchTest`
+/// above, but for a single-block `VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK`
+/// image, verifying `materializeImageDescriptor`'s new ETC2 decode branch
+/// (`ETC2SamplingBridge.h`) actually reaches a shader.
+class ETC2RGB8SampledImageDispatchTest : public SampledImageDispatchTest {
+protected:
+  void createImage() override {
+    VkImageCreateInfo ImageInfo{};
+    ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+    ImageInfo.format = VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+    ImageInfo.extent = {4, 4, 1};
+    ImageInfo.mipLevels = 1;
+    ImageInfo.arrayLayers = 1;
+    ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = 8; // One 4x4 ETC2 block, 64 bits.
+    AllocInfo.memoryTypeIndex = 0;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &ImageMemory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindImageMemory(Device, Img, ImageMemory, 0), VK_SUCCESS);
+    ASSERT_EQ(vkMapMemory(Device, ImageMemory, 0, VK_WHOLE_SIZE, 0, &Texels),
+              VK_SUCCESS);
+
+    // Differential mode (diff = 1), flip = 0, base (10, 5, 2), delta
+    // (0, 0, 0) (so both subblocks share the same base color), table
+    // index 0 for both subblocks, every pixel's raw index set to 1
+    // (remaps to modifier-table row 3, "+b" = +8 for table 0) --
+    // ETC2DecodeTest.cpp's own `DifferentialMode` test verifies this
+    // exact bit layout/modifier-table arithmetic; setting delta to 0
+    // here (rather than that test's +1) makes every one of the block's
+    // 16 texels the same flat color, so the exact (u, v) this fixture's
+    // shader samples at does not matter.
+    auto *Bytes = static_cast<uint8_t *>(Texels);
+    Bytes[0] = 0x50;
+    Bytes[1] = 0x28;
+    Bytes[2] = 0x10;
+    Bytes[3] = 0x02;
+    Bytes[4] = 0x00;
+    Bytes[5] = 0x00;
+    Bytes[6] = 0xFF;
+    Bytes[7] = 0xFF;
+
+    VkImageViewCreateInfo ViewInfo{};
+    ViewInfo.image = Img;
+    ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ViewInfo.format = VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+    ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ViewInfo.subresourceRange.levelCount = 1;
+    ViewInfo.subresourceRange.layerCount = 1;
+    ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+  }
+};
+
+} // namespace
+
+TEST_F(ETC2RGB8SampledImageDispatchTest,
+       SamplesARealDecodedTexelRatherThanAllZero) {
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  writeDescriptorSet();
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  // extend5to8(10)=82, extend5to8(5)=41, extend5to8(2)=16, each +8 (see
+  // ETC2DecodeTest.cpp's own `DifferentialMode` test for the identical
+  // arithmetic): R=90, G=49, B=24, A=255 (ETC2_RGB8 has no alpha, always
+  // opaque).
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_FLOAT_EQ(Result[0], 90.0f / 255.0f);
+  EXPECT_FLOAT_EQ(Result[1], 49.0f / 255.0f);
+  EXPECT_FLOAT_EQ(Result[2], 24.0f / 255.0f);
+  EXPECT_FLOAT_EQ(Result[3], 1.0f);
+}
+
+namespace {
+
 /// (Roadmap H7b) The same scenario `SampledImageDispatchTest` exercises,
 /// but over a two-layer image whose bound view selects layer 1 via a
 /// nonzero `baseArrayLayer` -- `materializeImageDescriptor` used to

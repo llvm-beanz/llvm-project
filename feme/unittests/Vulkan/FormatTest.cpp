@@ -266,6 +266,30 @@ TEST(FormatTest, MapsBCFormats) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_BC7_SRGB_BLOCK), ResourceFormat::BC7_SRGB);
 }
 
+TEST(FormatTest, MapsETC2Formats) {
+  // Roadmap H8j: all 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` formats.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK),
+            ResourceFormat::ETC2_RGB8_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK),
+            ResourceFormat::ETC2_RGB8_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK),
+            ResourceFormat::ETC2_RGB8A1_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK),
+            ResourceFormat::ETC2_RGB8A1_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK),
+            ResourceFormat::ETC2_RGBA8_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK),
+            ResourceFormat::ETC2_RGBA8_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_EAC_R11_UNORM_BLOCK),
+            ResourceFormat::EAC_R11_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_EAC_R11_SNORM_BLOCK),
+            ResourceFormat::EAC_R11_SNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_EAC_R11G11_UNORM_BLOCK),
+            ResourceFormat::EAC_R11G11_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_EAC_R11G11_SNORM_BLOCK),
+            ResourceFormat::EAC_R11G11_SNORM);
+}
+
 TEST(FormatTest, ElementSizeMatchesFormatWidth) {
   EXPECT_EQ(formatElementSize(ResourceFormat::R32_FLOAT), 4u);
   EXPECT_EQ(formatElementSize(ResourceFormat::R32G32_FLOAT), 8u);
@@ -347,6 +371,32 @@ TEST(FormatTest, BlockDimensionsMatchBCFootprint) {
   EXPECT_EQ(bytesPerBlock(ResourceFormat::BC6H_UFLOAT), 16u);
   EXPECT_EQ(bytesPerBlock(ResourceFormat::BC6H_SFLOAT), 16u);
   EXPECT_EQ(bytesPerBlock(ResourceFormat::BC7_UNORM), 16u);
+}
+
+TEST(FormatTest, BlockDimensionsMatchETC2Footprint) {
+  // Roadmap H8j: every ETC2/EAC format shares the same 4x4 texel
+  // footprint as BC, but only the single-64-bit-plane formats
+  // (ETC2_RGB8_*, ETC2_RGB8A1_*, EAC_R11_*) pack into an 8-byte block --
+  // the dual-64-bit-plane formats (ETC2_RGBA8_*, EAC_R11G11_*, each
+  // storing two independent halves) pack into a 16-byte block.
+  for (ResourceFormat Format :
+       {ResourceFormat::ETC2_RGB8_UNORM, ResourceFormat::ETC2_RGB8_SRGB,
+        ResourceFormat::ETC2_RGB8A1_UNORM,
+        ResourceFormat::ETC2_RGB8A1_SRGB, ResourceFormat::ETC2_RGBA8_UNORM,
+        ResourceFormat::ETC2_RGBA8_SRGB, ResourceFormat::EAC_R11_UNORM,
+        ResourceFormat::EAC_R11_SNORM, ResourceFormat::EAC_R11G11_UNORM,
+        ResourceFormat::EAC_R11G11_SNORM}) {
+    EXPECT_EQ(blockWidth(Format), 4u);
+    EXPECT_EQ(blockHeight(Format), 4u);
+  }
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::ETC2_RGB8_UNORM), 8u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::ETC2_RGB8A1_SRGB), 8u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::EAC_R11_UNORM), 8u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::EAC_R11_SNORM), 8u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::ETC2_RGBA8_UNORM), 16u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::ETC2_RGBA8_SRGB), 16u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::EAC_R11G11_UNORM), 16u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::EAC_R11G11_SNORM), 16u);
 }
 
 TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
@@ -512,6 +562,24 @@ TEST(FormatTest, IsBlockCompressedFormatDistinguishesBC) {
   EXPECT_FALSE(feme::cpu::isBCRGBA8Format(ResourceFormat::BC4_UNORM));
   EXPECT_FALSE(feme::cpu::isBCRGBA8Format(ResourceFormat::BC5_SNORM));
   EXPECT_FALSE(feme::cpu::isBCRGBA8Format(ResourceFormat::BC6H_UFLOAT));
+}
+
+TEST(FormatTest, IsBlockCompressedFormatDistinguishesETC2) {
+  // Roadmap H8j: every one of the 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*`
+  // formats is block-compressed too, and `isETC2Format` partitions that
+  // same predicate into a third disjoint family alongside ASTC and BC.
+  EXPECT_TRUE(
+      feme::cpu::isBlockCompressedFormat(ResourceFormat::ETC2_RGB8_UNORM));
+  EXPECT_TRUE(
+      feme::cpu::isBlockCompressedFormat(ResourceFormat::EAC_R11G11_SNORM));
+  EXPECT_TRUE(feme::cpu::isETC2Format(ResourceFormat::ETC2_RGB8_UNORM));
+  EXPECT_TRUE(feme::cpu::isETC2Format(ResourceFormat::EAC_R11G11_SNORM));
+  EXPECT_FALSE(feme::cpu::isETC2Format(ResourceFormat::BC1_RGB_UNORM));
+  EXPECT_FALSE(feme::cpu::isETC2Format(ResourceFormat::ASTC_4x4_UNORM));
+  EXPECT_FALSE(feme::cpu::isETC2Format(ResourceFormat::R8G8B8A8_UNORM));
+  EXPECT_FALSE(feme::cpu::isETC2Format(ResourceFormat::Unknown));
+  EXPECT_FALSE(feme::cpu::isBCFormat(ResourceFormat::ETC2_RGB8_UNORM));
+  EXPECT_FALSE(feme::cpu::isASTCFormat(ResourceFormat::EAC_R11_UNORM));
 }
 
 TEST(FormatTest, FormatFeatureFlagsRejectsUnknownFormat) {
@@ -807,6 +875,27 @@ TEST(FormatTest, FormatFeatureFlagsBlitBitsMatchImageOpsRejections) {
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::BC5_SNORM) &
               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::BC6H_SFLOAT) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  // Roadmap H8j: the same holds for ETC2/EAC -- every ETC2/EAC
+  // destination is rejected (`isBlockCompressedFormat` already covers
+  // it), but every one of the 10 formats is now a legal blit source:
+  // `etc2SamplingTarget`/`decodeETC2FormatBlock` (ETC2SamplingBridge.h)
+  // decode each sub-family into whichever already-runtime-supported
+  // `ResourceFormat` matches its own shape, and `feme::graphics::
+  // unpackColor`/`packClearColor` (ImageFixture.cpp) now have a case for
+  // every one of those targets (including the new R16/R16G16 UNORM/SNORM
+  // cases roadmap H8j itself added for EAC_R11/EAC_R11G11).
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::ETC2_RGB8_UNORM) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::ETC2_RGB8_UNORM) &
+               VK_FORMAT_FEATURE_BLIT_DST_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::ETC2_RGB8A1_SRGB) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::ETC2_RGBA8_SRGB) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::EAC_R11_SNORM) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::EAC_R11G11_UNORM) &
               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
 }
 

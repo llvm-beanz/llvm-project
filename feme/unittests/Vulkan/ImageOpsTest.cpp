@@ -709,5 +709,173 @@ TEST_F(ImageOpsTest, BlitDecodesBC6HSource) {
   vkDestroyImage(Device, Dst, nullptr);
 }
 
+/// Roadmap H8j: the ETC2/EAC analogue of `BlitDecodesBC1Source` above --
+/// a nearest blit from an `ETC2_RGB8_UNORM`-format source decodes through
+/// `feme::vulkan::decodeETC2FormatBlock`/`etc2SamplingTarget`. Reuses the
+/// exact block bytes `ETC2RGB8SampledImageDispatchTest`
+/// (`CommandBufferTest.cpp`) constructs -- differential mode, base
+/// (10, 5, 2), delta (0, 0, 0), every pixel's raw index 1 (modifier-table
+/// row 3, "+b" = +8 for table 0) -- so every one of the block's 16 texels
+/// decodes to the same flat color: R=90, G=49, B=24 (see that test's own
+/// comment for the extend5to8 arithmetic), A=255 (ETC2_RGB8 has no
+/// alpha, always opaque).
+TEST_F(ImageOpsTest, BlitDecodesETC2RGB8Source) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  const uint8_t Block[8] = {0x50, 0x28, 0x10, 0x02, 0x00, 0x00, 0xFF, 0xFF};
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 0, 0, 0), Block,
+              sizeof(Block));
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  for (uint32_t Y = 0; Y != 4; ++Y)
+    for (uint32_t X = 0; X != 4; ++X) {
+      EXPECT_EQ(texel(Dst, X, Y)[0], 90);
+      EXPECT_EQ(texel(Dst, X, Y)[1], 49);
+      EXPECT_EQ(texel(Dst, X, Y)[2], 24);
+      EXPECT_EQ(texel(Dst, X, Y)[3], 255);
+    }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// Roadmap H8j: `EAC_R11_UNORM`'s own single-channel sampling-bridge
+/// target, `R16_UNORM` -- the two-byte-per-texel analogue of
+/// `BlitDecodesBC4Source`. Base codeword 100, multiplier 3, table index
+/// 0, every pixel's index code left implicit-zero
+/// (`EACModifierTable[0][0] == -3`, `ETC2DecodeTest.cpp`'s own
+/// `EACUnsigned`-family tests verify the identical arithmetic): value11 =
+/// clamp(100*8 + 4 + (-3*3*8), 0, 2047) = 732, result16 =
+/// (732 << 5) + (732 >> 6) = 23435 -- `unpackColor`'s own `R16_UNORM`
+/// case (roadmap H8j) then normalizes 23435 / 65535 into the blit's
+/// destination.
+TEST_F(ImageOpsTest, BlitDecodesEACR11Source) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_EAC_R11_UNORM_BLOCK);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  const uint8_t Block[8] = {0x64, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 0, 0, 0), Block,
+              sizeof(Block));
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  // 23435 / 65535 * 255 = 91.16 -> rounds to 91; green/blue read back at
+  // their identity value (0), alpha fully opaque, per `unpackColor`'s
+  // own `R16_UNORM` case (single-channel, like `R8_UNORM`'s own
+  // precedent).
+  for (uint32_t Y = 0; Y != 4; ++Y)
+    for (uint32_t X = 0; X != 4; ++X) {
+      EXPECT_EQ(texel(Dst, X, Y)[0], 91);
+      EXPECT_EQ(texel(Dst, X, Y)[1], 0);
+      EXPECT_EQ(texel(Dst, X, Y)[2], 0);
+      EXPECT_EQ(texel(Dst, X, Y)[3], 255);
+    }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// Roadmap H8j: `EAC_R11G11_UNORM`'s own two-channel sampling-bridge
+/// target, `R16G16_UNORM` -- the dual-64-bit-plane analogue of
+/// `BlitDecodesBC5Source`, exercising `decodeETC2FormatBlock`'s own
+/// R-then-G composition of two independent `decodeEACBlock` calls. R
+/// half reuses `BlitDecodesEACR11Source`'s own block (base 100,
+/// multiplier 3, table index 0 -> 23435); G half reuses
+/// `ETC2DecodeTest.cpp`'s own `EACUnsignedMultiplierZero` block (base
+/// 50, multiplier 0, table index 2 -> 12870).
+TEST_F(ImageOpsTest, BlitDecodesEACR11G11Source) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_EAC_R11G11_UNORM_BLOCK);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  uint8_t Block[16] = {};
+  Block[0] = 0x64;
+  Block[1] = 0x30; // R half: base=100, multiplier=3, table index=0.
+  Block[8] = 0x32;
+  Block[9] = 0x02; // G half: base=50, multiplier=0, table index=2.
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 0, 0, 0), Block,
+              sizeof(Block));
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  // 23435 / 65535 * 255 = 91.16 -> rounds to 91; 12870 / 65535 * 255 =
+  // 50.08 -> rounds to 50. Blue reads back at its identity value (0),
+  // alpha fully opaque, per `unpackColor`'s own `R16G16_UNORM` case.
+  for (uint32_t Y = 0; Y != 4; ++Y)
+    for (uint32_t X = 0; X != 4; ++X) {
+      EXPECT_EQ(texel(Dst, X, Y)[0], 91);
+      EXPECT_EQ(texel(Dst, X, Y)[1], 50);
+      EXPECT_EQ(texel(Dst, X, Y)[2], 0);
+      EXPECT_EQ(texel(Dst, X, Y)[3], 255);
+    }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// Roadmap H8j: `ETC2_RGBA8_UNORM`'s own composed decode -- the alpha
+/// (EAC) half stored first in memory (bytes 0-7), the RGB (ETC2) half
+/// second (bytes 8-15), per the specification -- exercising
+/// `decodeETC2FormatBlock`'s own alpha-then-RGB composition and its own
+/// 16-bit-to-8-bit alpha scale-down (`>> 8`). RGB half reuses
+/// `BlitDecodesETC2RGB8Source`'s own block (uniform R=90, G=49, B=24);
+/// alpha half reuses `BlitDecodesEACR11Source`'s own block (23435 >> 8 =
+/// 91).
+TEST_F(ImageOpsTest, BlitDecodesETC2RGBA8Source) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  uint8_t Block[16] = {};
+  // Alpha (EAC) half: base=100, multiplier=3, table index=0.
+  Block[0] = 0x64;
+  Block[1] = 0x30;
+  // RGB (ETC2) half: differential mode, base (10, 5, 2), delta (0, 0, 0),
+  // every pixel raw index 1.
+  Block[8] = 0x50;
+  Block[9] = 0x28;
+  Block[10] = 0x10;
+  Block[11] = 0x02;
+  Block[12] = 0x00;
+  Block[13] = 0x00;
+  Block[14] = 0xFF;
+  Block[15] = 0xFF;
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 0, 0, 0), Block,
+              sizeof(Block));
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  for (uint32_t Y = 0; Y != 4; ++Y)
+    for (uint32_t X = 0; X != 4; ++X) {
+      EXPECT_EQ(texel(Dst, X, Y)[0], 90);
+      EXPECT_EQ(texel(Dst, X, Y)[1], 49);
+      EXPECT_EQ(texel(Dst, X, Y)[2], 24);
+      EXPECT_EQ(texel(Dst, X, Y)[3], 91);
+    }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
 } // namespace
 
