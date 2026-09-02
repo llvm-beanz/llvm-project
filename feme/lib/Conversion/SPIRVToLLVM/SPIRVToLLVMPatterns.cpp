@@ -2137,12 +2137,45 @@ bool padUndersizedMembersIfNeeded(mlir::spirv::StructType Type,
   return ChangedAny;
 }
 
+/// Whether \p Type is an offset-decorated struct whose first member's own
+/// declared offset is nonzero -- the shape `layOutStructIfOffsetsMatch`
+/// fills with a leading, synthetic byte-array padding member (see its own
+/// comment) to preserve LLVM's own struct-layout invariant that member 0
+/// always sits at byte offset 0 within the struct. Real (`dxc`/glslang
+/// -compiled, or binary-round-tripped) SPIR-V produces this whenever the
+/// compiler or an optimization pass (e.g. `spirv-opt`'s own dead-code
+/// elimination) drops one or more members from the *front* of an interface
+/// block -- a push-constant block's own leading fields a particular entry
+/// point never reads -- while every surviving member keeps its original
+/// byte offset relative to the whole block's own start (roadmap H6q,
+/// `dEQP-VK.mesh_shader.ext.api.draw.*with_task_shader*`'s own task-stage
+/// entry). `OffsetStructLeadingPadAccessChainPattern` reproduces this exact
+/// decision to add a matching `+1` to the first index of any
+/// `spirv.AccessChain` into a struct laid out this way, since MLIR's own
+/// generic `AccessChainPattern` forwards every index straight through
+/// unmodified and would otherwise silently select the wrong member.
+bool structHasLeadingOffsetPad(mlir::spirv::StructType Type) {
+  return Type.hasOffset() && Type.getNumElements() != 0 &&
+         Type.getMemberOffset(0) != 0;
+}
+
 /// Builds the candidate LLVM struct for
 /// convertOffsetStructTypeIgnoringDecorations below out of an
 /// already-computed \p Members list, validating (when \p Type has explicit
 /// offsets) that LLVM's own natural ABI-alignment-driven layout for those
 /// exact member types reproduces every declared offset. Returns null if it
 /// doesn't.
+///
+/// If \p Type's own first member has a nonzero declared offset (see
+/// structHasLeadingOffsetPad), prepends a synthetic `[Gap x i8]` member
+/// consuming exactly that leading gap before checking the rest -- an
+/// ordinary LLVM struct's member 0 always starts at byte offset 0, so
+/// without this, a struct like this one (a real, if unusual, shape: see
+/// structHasLeadingOffsetPad's own comment) could never lay its first real
+/// member out at its true declared offset at all. The resulting LLVM
+/// struct's own member N (N > 0) is \p Members[N - 1] -- every consumer
+/// that builds a GEP into a struct converted this way must account for
+/// that shift (see OffsetStructLeadingPadAccessChainPattern).
 mlir::Type layOutStructIfOffsetsMatch(mlir::spirv::StructType Type,
                                       llvm::ArrayRef<mlir::Type> Members) {
   if (!Type.hasOffset())
@@ -2151,13 +2184,22 @@ mlir::Type layOutStructIfOffsetsMatch(mlir::spirv::StructType Type,
 
   mlir::DataLayout DL;
   uint64_t Cursor = 0;
+  llvm::SmallVector<mlir::Type, 9> Laid;
+  if (structHasLeadingOffsetPad(Type)) {
+    uint64_t Gap = Type.getMemberOffset(0);
+    Laid.push_back(mlir::LLVM::LLVMArrayType::get(
+        mlir::IntegerType::get(Type.getContext(), 8), Gap));
+    Cursor = Gap;
+  }
+  llvm::append_range(Laid, Members);
+
   for (unsigned I = 0, E = Members.size(); I != E; ++I) {
     Cursor = llvm::alignTo(Cursor, DL.getTypeABIAlignment(Members[I]));
     if (Cursor != Type.getMemberOffset(I))
       return nullptr; // Declared offset doesn't match the natural layout.
     Cursor += DL.getTypeSize(Members[I]);
   }
-  return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Members,
+  return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Laid,
                                                 /*isPacked=*/false);
 }
 
@@ -2494,6 +2536,92 @@ public:
         Op, DstType, /*isConstant=*/true, mlir::LLVM::Linkage::External,
         Op.getSymName(), mlir::Attribute(), /*alignment=*/0,
         /*addrSpace=*/13);
+    return mlir::success();
+  }
+};
+
+/// Converts a `spirv.AccessChain` whose base pointer's pointee is a
+/// `spirv::StructType` requiring a leading offset pad (roadmap H6q, see
+/// structHasLeadingOffsetPad/layOutStructIfOffsetsMatch's own comments).
+/// MLIR's own generic `AccessChainPattern` forwards every index straight
+/// through to the converted LLVM struct unmodified -- exactly wrong once
+/// `layOutStructIfOffsetsMatch`'s own synthetic pad member has shifted
+/// every real member up by one LLVM struct index. This pattern is
+/// otherwise identical to the generic one (same result-type/leading-zero
+/// handling), it just adds `1` to \p Op's own first index -- the one that
+/// selects a member of the leading-pad struct itself -- before forwarding
+/// every subsequent index (navigating whatever that first index selected,
+/// a type this pattern's own leading pad never touches) unchanged.
+///
+/// Scoped to only the outermost struct a `spirv.AccessChain`'s own base
+/// pointer directly points to, matching every real case in this project's
+/// own test corpus today (a flat push-constant block); a struct member
+/// that is itself a struct independently requiring its own leading pad
+/// would need a similar adjustment at that deeper level too, which this
+/// does not yet attempt (mirroring this file's own precedent elsewhere,
+/// e.g. convertUndersizedScalarArrayMemberIgnoringDecorations's "matching
+/// every real case" scoping, of not generalizing past what is actually
+/// observed).
+///
+/// A struct without this shape is left to the generic pattern
+/// (`notifyMatchFailure`), so no already-working access chain changes.
+/// Likewise if the first index is not a compile-time constant (always
+/// true for a real struct-member selector per the SPIR-V spec, but
+/// declined rather than miscompiled if a malformed module ever violates
+/// that).
+class OffsetStructLeadingPadAccessChainPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto PointerType =
+        mlir::cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
+    auto StructTy =
+        mlir::dyn_cast<mlir::spirv::StructType>(PointerType.getPointeeType());
+    if (!StructTy || !structHasLeadingOffsetPad(StructTy))
+      return Rewriter.notifyMatchFailure(Op, "no leading offset pad");
+
+    std::optional<uint64_t> MemberIndex =
+        getConstantMemberIndex(Op.getIndices().front());
+    if (!MemberIndex)
+      return Rewriter.notifyMatchFailure(
+          Op, "leading struct member selector is not a constant");
+
+    mlir::Type DstType =
+        getTypeConverter()->convertType(Op.getComponentPtr().getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Type ElementType = getTypeConverter()->convertType(StructTy);
+    if (!ElementType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Type IndexType = Op.getIndices().front().getType();
+    mlir::Type LLVMIndexType = getTypeConverter()->convertType(IndexType);
+    if (!LLVMIndexType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Zero = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, LLVMIndexType, Rewriter.getIntegerAttr(IndexType, 0));
+    // The synthetic pad occupies LLVM struct index 0, shifting every real
+    // member up by one -- see structHasLeadingOffsetPad/
+    // layOutStructIfOffsetsMatch's own comment.
+    mlir::Value AdjustedFirst = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, LLVMIndexType,
+        Rewriter.getIntegerAttr(IndexType, *MemberIndex + 1));
+
+    llvm::SmallVector<mlir::Value, 4> Indices;
+    Indices.push_back(Zero);
+    Indices.push_back(AdjustedFirst);
+    llvm::append_range(Indices, Adaptor.getIndices().drop_front());
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::GEPOp>(
+        Op, DstType, ElementType, Adaptor.getBasePtr(), Indices);
     return mlir::success();
   }
 };
@@ -4691,7 +4819,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       IntegerGroupNonUniformReducePattern<
           mlir::spirv::GroupNonUniformBitwiseXorOp>,
       LoadValuePattern, MatrixCompositeExtractPattern,
-      MatrixCompositeInsertPattern, PushConstantGlobalVariablePattern,
+      MatrixCompositeInsertPattern,
+      OffsetStructLeadingPadAccessChainPattern, PushConstantGlobalVariablePattern,
       RotateConversionPattern, SampledImagePattern, SDotConversionPattern,
       UDotConversionPattern, SUDotConversionPattern,
       SDotAccSatConversionPattern, UDotAccSatConversionPattern,
