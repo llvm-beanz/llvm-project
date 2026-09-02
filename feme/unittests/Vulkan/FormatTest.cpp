@@ -789,22 +789,25 @@ TEST(FormatTest, FormatFeatureFlagsBlitBitsMatchImageOpsRejections) {
                VK_FORMAT_FEATURE_BLIT_SRC_BIT);
   EXPECT_FALSE(formatFeatureFlags(ResourceFormat::ASTC_4x4_SFLOAT) &
                VK_FORMAT_FEATURE_BLIT_DST_BIT);
-  // Roadmap H8n: the same holds for BC -- every BC destination is
-  // rejected, but an RGBA8-shaped BC source (BC1/BC2/BC3/BC7) is a legal
-  // blit source while a BC4/BC5/BC6H source (whose decoded shape does not
-  // fit `runBlitImage`'s own RGBA8-only pipeline) is not.
+  // Roadmap H8o: the same holds for BC -- every BC destination is
+  // rejected, but every one of the 16 BC formats (BC1-7) is now a legal
+  // blit source: `bcSamplingTarget`/`decodeBCBlock` (BCSamplingBridge.h)
+  // decode each BC sub-family into whichever already-runtime-supported
+  // `ResourceFormat` matches its own shape, and `feme::graphics::
+  // unpackColor`/`packClearColor` (ImageFixture.cpp) now have a case for
+  // every one of those targets.
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::BC1_RGBA_UNORM) &
               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
   EXPECT_FALSE(formatFeatureFlags(ResourceFormat::BC1_RGBA_UNORM) &
                VK_FORMAT_FEATURE_BLIT_DST_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::BC7_SRGB) &
               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
-  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::BC4_UNORM) &
-               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
-  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::BC5_SNORM) &
-               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
-  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::BC6H_SFLOAT) &
-               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::BC4_UNORM) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::BC5_SNORM) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::BC6H_SFLOAT) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
 }
 
 } // namespace

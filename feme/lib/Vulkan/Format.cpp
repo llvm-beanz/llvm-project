@@ -736,21 +736,22 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
 
   bool BlockCompressed = isBlockCompressedFormat(Format);
   bool ASTCLdr = isASTCLdrFormat(Format);
-  // (Roadmap H8n) Of the 16 `VK_FORMAT_BC*` formats, only the 10
-  // RGBA8-shaped ones (BC1/BC2/BC3/BC7) are a legal blit *source*:
-  // `runBlitImage`'s own decode-then-resample pipeline is built on
-  // `feme::graphics::unpackColor`, which has no case for BC4/BC5/BC6H's
-  // own sampling-bridge targets (`R8_UNORM`/`R8G8_UNORM`/
-  // `R16G16B16A16_FLOAT`) -- narrower than what `materializeImageDescriptor`
-  // supports for sampling, mirroring how an HDR ASTC source is similarly
-  // excluded below despite being sampled just fine.
-  bool BCRGBA8 = isBCFormat(Format) && isBCRGBA8Format(Format);
+  // (Roadmap H8o) All 16 `VK_FORMAT_BC*` formats are now a legal blit
+  // *source*: `runBlitImage`'s own decode-then-resample pipeline decodes
+  // every BC sub-family through `bcSamplingTarget`/`decodeBCBlock`
+  // (BCSamplingBridge.h) into whichever already-runtime-supported
+  // `ResourceFormat` matches its own shape, and `feme::graphics::
+  // unpackColor`/`packClearColor` (ImageFixture.cpp) now have a case for
+  // every one of those targets (`R8_UNORM`(`_SNORM`)/`R8G8_UNORM`
+  // (`_SNORM`)/`R16G16B16A16_FLOAT`, alongside the RGBA8-shaped targets
+  // already supported since H8n) -- this used to be narrower than what
+  // `materializeImageDescriptor` supports for sampling; it no longer is.
   // `ImageOps.cpp`'s `runBlitImage` rejects a block-compressed
   // *destination* outright (no ASTC/BC encoder exists to repack into one)
-  // and an HDR ASTC *source*/non-RGBA8-shaped BC *source* (its own
-  // decode-then-resample pipeline cannot represent either), but accepts
-  // every other combination either way.
-  if (!BlockCompressed || ASTCLdr || BCRGBA8)
+  // and an HDR ASTC *source* (`decodeASTCBlockHDR` produces floats through
+  // a different interface than the UNORM8 one this pipeline shares), but
+  // accepts every other combination either way.
+  if (!BlockCompressed || ASTCLdr || isBCFormat(Format))
     Flags |= VK_FORMAT_FEATURE_BLIT_SRC_BIT;
   if (!BlockCompressed)
     Flags |= VK_FORMAT_FEATURE_BLIT_DST_BIT;

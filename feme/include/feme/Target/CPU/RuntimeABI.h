@@ -345,21 +345,19 @@ constexpr bool isASTCLdrFormat(ResourceFormat Format) {
          Format <= ResourceFormat::ASTC_12x12_SRGB;
 }
 
-/// Whether \p Format is one of the 10 `VK_FORMAT_BC*` formats (roadmap
-/// H8n) whose decoded output is 8-bit RGBA (BC1/BC2/BC3/BC7) -- the BC
-/// analogue of `isASTCLdrFormat`'s "which half of this block-compressed
-/// family fits the RGBA8 sampling/blit bridge" distinction.
-/// `materializeImageDescriptor` (CommandBuffer.cpp) decodes every one of
-/// the 16 BC formats for *sampling* (each into whichever already-
-/// runtime-supported `ResourceFormat` matches its own channel count and
-/// precision -- see that function's own comment), but `ImageOps.cpp`'s
-/// `runBlitImage` only decodes this RGBA8-shaped half: its own
-/// decode-then-resample pipeline is built on `feme::graphics::
-/// unpackColor`/`packClearColor`, which do not have a case for
-/// `R8_UNORM`/`R8G8_UNORM`/`R16G16B16A16_FLOAT` (BC4/BC5/BC6H's own
-/// sampling-bridge targets) -- narrower than the sampling bridge on
-/// purpose, mirroring how an HDR ASTC source is similarly excluded from
-/// blitting above despite being sampled just fine.
+/// Whether \p Format is one of the 10 `VK_FORMAT_BC*` formats whose
+/// decoded output is 8-bit RGBA (BC1/BC2/BC3/BC7) -- the BC analogue of
+/// `isASTCLdrFormat`'s "which half of this block-compressed family
+/// decodes to plain RGBA8" distinction. `bcSamplingTarget`
+/// (BCSamplingBridge.h) is the general form of this same distinction:
+/// every one of the 16 BC formats (not just this RGBA8-shaped half) now
+/// decodes into some already-runtime-supported `ResourceFormat` for both
+/// sampling (`materializeImageDescriptor`, CommandBuffer.cpp) and
+/// blitting (roadmap H8o, `runBlitImage`, ImageOps.cpp) -- this predicate
+/// is kept as the general-purpose "is this specific RGBA8-shaped subset"
+/// query it always was, directly unit-tested in `FormatTest.cpp`, even
+/// though no production call site still gates on it specifically now
+/// that H8o widened blit-source support to every BC format.
 constexpr bool isBCRGBA8Format(ResourceFormat Format) {
   return (Format >= ResourceFormat::BC1_RGB_UNORM &&
           Format <= ResourceFormat::BC3_SRGB) ||

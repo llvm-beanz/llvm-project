@@ -594,14 +594,24 @@ TEST_F(ImageOpsTest, BlitDecodesBC1Source) {
   vkDestroyImage(Device, Dst, nullptr);
 }
 
-/// Roadmap H8n: BC4/BC5/BC6H are rejected as a blit source -- their own
-/// sampling-bridge targets (`R8_UNORM`/`R8G8_UNORM`/`R16G16B16A16_FLOAT`)
-/// do not fit `runBlitImage`'s own RGBA8-only
-/// `unpackColor`/`packClearColor` pipeline, mirroring
-/// `RejectsBlitOfHDRASTCSource` above.
-TEST_F(ImageOpsTest, RejectsBlitOfBC4Source) {
+/// Roadmap H8o: a nearest blit from a BC4 source (`BC4Decode`'s own
+/// single-channel sampling-bridge target, `R8_UNORM`) decodes through
+/// `feme::vulkan::decodeBCBlock`/`bcSamplingTarget` exactly like the
+/// RGBA8-shaped BC1 test above, widening `runBlitImage`'s own blit-source
+/// support beyond the RGBA8-shaped half H8n originally landed. All 16
+/// index bits left implicit-zero select each sub-block's own endpoint0
+/// (`BCDecodeTest.BC4Unsigned`'s own table entry 0), so every texel
+/// decodes to the same single red value; green/blue read back at their
+/// identity value (`0`), alpha fully opaque, per `unpackColor`'s own
+/// `R8_UNORM` case.
+TEST_F(ImageOpsTest, BlitDecodesBC4Source) {
   VkImage Src = createImage(4, 4, VK_FORMAT_BC4_UNORM_BLOCK);
   VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  uint8_t Block[8] = {};
+  Block[0] = 200;
+  Block[1] = 50;
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 0, 0, 0), Block,
+              sizeof(Block));
 
   VkImageBlit Region{};
   Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -609,10 +619,91 @@ TEST_F(ImageOpsTest, RejectsBlitOfBC4Source) {
   Region.srcOffsets[1] = {4, 4, 1};
   Region.dstOffsets[1] = {4, 4, 1};
 
-  llvm::Error E = runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
-                               Region, VK_FILTER_NEAREST);
-  EXPECT_TRUE(static_cast<bool>(E));
-  llvm::consumeError(std::move(E));
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  for (uint32_t Y = 0; Y != 4; ++Y)
+    for (uint32_t X = 0; X != 4; ++X) {
+      EXPECT_EQ(texel(Dst, X, Y)[0], 200);
+      EXPECT_EQ(texel(Dst, X, Y)[1], 0);
+      EXPECT_EQ(texel(Dst, X, Y)[2], 0);
+      EXPECT_EQ(texel(Dst, X, Y)[3], 255);
+    }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// Roadmap H8o: the two-channel analogue of `BlitDecodesBC4Source` above
+/// -- `BC5Decode`'s own two-channel sampling-bridge target, `R8G8_UNORM`.
+TEST_F(ImageOpsTest, BlitDecodesBC5Source) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_BC5_UNORM_BLOCK);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  uint8_t Block[16] = {};
+  Block[0] = 200; // red endpoint0
+  Block[1] = 50;  // red endpoint1
+  Block[8] = 100; // green endpoint0
+  Block[9] = 30;  // green endpoint1
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 0, 0, 0), Block,
+              sizeof(Block));
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  for (uint32_t Y = 0; Y != 4; ++Y)
+    for (uint32_t X = 0; X != 4; ++X) {
+      EXPECT_EQ(texel(Dst, X, Y)[0], 200);
+      EXPECT_EQ(texel(Dst, X, Y)[1], 100);
+      EXPECT_EQ(texel(Dst, X, Y)[2], 0);
+      EXPECT_EQ(texel(Dst, X, Y)[3], 255);
+    }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// Roadmap H8o: BC6H (`BC6HDecode`'s own `R16G16B16A16_FLOAT`
+/// sampling-bridge target, the format whose generic-float pack/unpack
+/// path this same row's `ImageFixture.cpp` fix made trustworthy) decodes
+/// through the identical `decodeBCBlock`/`bcSamplingTarget` path -- reuses
+/// `BC6HDecodeTest.Mode10OneSubsetDirectUnsigned`'s own real block (this
+/// project's only source of a known-correct BC6H bit pattern) and blits
+/// into `R8G8B8A8_UNORM`, so the HDR result is deliberately clamped into
+/// `[0, 1]` by the destination format itself -- confirming the whole
+/// decode-through-blit path runs end to end, not a lossless HDR transfer
+/// (an `R16G16B16A16_FLOAT` destination would be lossless, but this
+/// suite's own `texel` helper only reads 4 bytes per texel).
+TEST_F(ImageOpsTest, BlitDecodesBC6HSource) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_BC6H_UFLOAT_BLOCK);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  const uint8_t Block[16] = {0x83, 0x82, 0xd3, 0xdf, 0x0a, 0x81, 0x80, 0xa7,
+                             0xf4, 0xdb, 0xf9, 0xf4, 0x5c, 0x82, 0x5e, 0xd7};
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 0, 0, 0), Block,
+              sizeof(Block));
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  // texel(0,0): decoded half-float RGB (0x02b4, 0x616d, 0x2bf5) ==
+  // (~4.1e-5, 694.5, ~0.0622) -- clamped into [0, 1] by R8G8B8A8_UNORM.
+  EXPECT_EQ(texel(Dst, 0, 0)[0], 0);
+  EXPECT_EQ(texel(Dst, 0, 0)[1], 255);
+  EXPECT_EQ(texel(Dst, 0, 0)[2], 16);
+  EXPECT_EQ(texel(Dst, 0, 0)[3], 255);
+  // texel(1,0): (0x040e, 0x008b, 0x28a0) == (~6.2e-5, ~8.3e-6, ~0.0361).
+  EXPECT_EQ(texel(Dst, 1, 0)[0], 0);
+  EXPECT_EQ(texel(Dst, 1, 0)[1], 0);
+  EXPECT_EQ(texel(Dst, 1, 0)[2], 9);
+  EXPECT_EQ(texel(Dst, 1, 0)[3], 255);
 
   vkDestroyImage(Device, Src, nullptr);
   vkDestroyImage(Device, Dst, nullptr);
