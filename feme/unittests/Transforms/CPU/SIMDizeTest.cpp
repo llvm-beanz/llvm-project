@@ -18,6 +18,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -1411,6 +1412,143 @@ TEST(SIMDizeTest, DecomposesInsertElementChainIntoImageStore2DMS) {
     }
   }
   EXPECT_EQ(StoreCallCount, 4u);
+}
+
+// Roadmap H6n: `llvm.spv.subgroup.id` is uniform for one widened-function
+// call -- "which subgroup/wave this is" is exactly "which wave-loop
+// iteration this is", the same value `Env.WaveIndex` already threads
+// through the wave-body interface for `WorkgroupId` (see
+// `FunctionWidener::replaceGroupIdCall`) -- so it substitutes directly for
+// the wave-body's own `WaveIndex` parameter rather than ever being widened.
+TEST(SIMDizeTest, ReplacesSubgroupIdWithWaveIndex) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %sg = call i32 @llvm.spv.subgroup.id()
+      %tid = call i32 @llvm.spv.flattened.thread.id.in.group()
+      %sum = add i32 %tid, %sg
+      ret void
+    }
+    declare i32 @llvm.spv.subgroup.id()
+    declare i32 @llvm.spv.flattened.thread.id.in.group()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  std::optional<WaveBodyEnv> Env = getWaveBodyEnv(*F);
+  ASSERT_TRUE(Env);
+  bool FoundSubgroupIdCall = false;
+  bool FoundWideAddUsingWaveIndex = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getIntrinsicID() == Intrinsic::spv_subgroup_id)
+          FoundSubgroupIdCall = true;
+    if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
+      if (BO->getOpcode() == Instruction::Add && BO->getType()->isVectorTy()) {
+        for (Value *Op : BO->operands())
+          if (auto *SV = dyn_cast<ShuffleVectorInst>(Op))
+            if (auto *IE = dyn_cast<InsertElementInst>(SV->getOperand(0)))
+              if (IE->getOperand(1) == Env->WaveIndex)
+                FoundWideAddUsingWaveIndex = true;
+      }
+    }
+  }
+  EXPECT_FALSE(FoundSubgroupIdCall);
+  EXPECT_TRUE(FoundWideAddUsingWaveIndex);
+}
+
+// Roadmap H6n: `llvm.spv.num.subgroups` folds directly to a compile-time
+// constant -- `ceil(NumThreadsX * NumThreadsY * NumThreadsZ / WaveSize)`,
+// mirroring feme/docs/FeMeCPUDesign.md's own `group = ceil(GroupSize / W)
+// waves` formula -- rather than being widened or threaded through the
+// wave-body interface. `hlsl.numthreads` is "10,1,1" and the wave size
+// below is 4, so `ceil(10 / 4) == 3`.
+TEST(SIMDizeTest, FoldsNumSubgroupsToCompileTimeConstant) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %ns = call i32 @llvm.spv.num.subgroups()
+      %tid = call i32 @llvm.spv.flattened.thread.id.in.group()
+      %sum = add i32 %tid, %ns
+      ret void
+    }
+    declare i32 @llvm.spv.num.subgroups()
+    declare i32 @llvm.spv.flattened.thread.id.in.group()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="10,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundNumSubgroupsCall = false;
+  bool FoundWideAddUsingConstantThree = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getIntrinsicID() == Intrinsic::spv_num_subgroups)
+          FoundNumSubgroupsCall = true;
+    if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
+      if (BO->getOpcode() == Instruction::Add && BO->getType()->isVectorTy()) {
+        for (Value *Op : BO->operands())
+          if (auto *CV = dyn_cast<ConstantDataVector>(Op))
+            if (CV->getSplatValue() &&
+                cast<ConstantInt>(CV->getSplatValue())->equalsInt(3))
+              FoundWideAddUsingConstantThree = true;
+      }
+    }
+  }
+  EXPECT_FALSE(FoundNumSubgroupsCall);
+  EXPECT_TRUE(FoundWideAddUsingConstantThree);
+}
+
+// Roadmap H6n: a divergently-indexed `store` of a whole *vector*-typed
+// value previously crashed (an `llvm::FixedVectorType::get` assertion
+// failure trying to build an illegal `<4 x <4 x float>>` nested vector)
+// inside the fully-generic scalarization fallback -- the only widening
+// rule that applies to an ordinary `store` through an ordinary (neither
+// groupshared nor `feme.cpu.masked.*`) address. This regression-tests
+// that it instead clones the store once per lane, each with its own
+// reassembled `<4 x float>` operand.
+TEST(SIMDizeTest, ScalarizesDivergentVectorStoreOperandWithoutCrashing) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @arr = external global [4 x <4 x float>]
+
+    define void @main() #0 {
+      %tid = call i32 @llvm.spv.flattened.thread.id.in.group()
+      %ptr = getelementptr [4 x <4 x float>], ptr @arr, i32 0, i32 %tid
+      store <4 x float> <float 1.0, float 2.0, float 3.0, float 4.0>, ptr %ptr, align 16
+      ret void
+    }
+    declare i32 @llvm.spv.flattened.thread.id.in.group()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned StoreCount = 0;
+  for (Instruction &I : instructions(F))
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      ++StoreCount;
+      EXPECT_TRUE(SI->getValueOperand()->getType()->isVectorTy());
+      EXPECT_FALSE(cast<VectorType>(SI->getValueOperand()->getType())
+                       ->getElementType()
+                       ->isVectorTy());
+    }
+  EXPECT_EQ(StoreCount, 4u);
 }
 
 } // namespace

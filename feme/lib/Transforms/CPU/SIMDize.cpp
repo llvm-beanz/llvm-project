@@ -82,6 +82,7 @@
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "feme/Transforms/CPU/WaveCalls.h"
 
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
@@ -294,6 +295,44 @@ std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
 
 bool isGroupIdCall(Intrinsic::ID ID) {
   return ID == Intrinsic::dx_group_id || ID == Intrinsic::spv_group_id;
+}
+
+/// `SubgroupId` (`llvm.spv.subgroup.id`, "which subgroup [wave] this
+/// invocation belongs to within its workgroup") -- roadmap H6n. Uniform,
+/// exactly like `WorkgroupId`/`isGroupIdCall` above, not per-lane-varying:
+/// `feme/docs/FeMeCPUDesign.md`'s "wave loop" (`group = ceil(GroupSize / W)
+/// waves`) already models a workgroup as a sequence of `W`-wide waves, one
+/// `feme::cpu::SIMDizePass`-widened function call per wave, so "which
+/// subgroup" *is* "which wave-loop iteration" -- exactly the `WaveIndex`
+/// wave-body parameter every widened function already receives (see
+/// `Env.WaveIndex`, threaded for `WorkgroupId`'s own sibling substitution
+/// just above). Neither a `BuiltinCallKind` (reserved for a genuinely
+/// per-lane-varying builtin `feme::cpu::WaveLoweringPass` still has to
+/// decompose out of the group/wave-index parameters, see
+/// `feme::cpu::BuiltinCallKind`'s own header comment) nor a `WaveCallKind`
+/// (reserved for an actual wave-wide reduction/query over the mask of
+/// currently-active lanes) fits this shape: it is a simple, direct,
+/// uniform substitution, so it is handled inline exactly like
+/// `isGroupIdCall`/`replaceGroupIdCall`, not deferred to either of those.
+bool isSubgroupIdCall(Intrinsic::ID ID) {
+  return ID == Intrinsic::spv_subgroup_id;
+}
+
+/// `NumSubgroups` (`llvm.spv.num.subgroups`, "how many subgroups [waves]
+/// this workgroup dispatches as") -- roadmap H6n, the sibling gap
+/// `isSubgroupIdCall` closes. Also uniform, but unlike `SubgroupId` it is
+/// not merely a wave-body parameter already being threaded through: it is
+/// a compile-time constant derivable the same way `feme/docs/
+/// FeMeVulkanDesign.md`'s "Builtin and execution-shape mapping" table
+/// already documents `WorkgroupSize` as one (`hlsl.numthreads`'s
+/// `NumThreadsX/Y/Z`, known statically), matching `feme/docs/
+/// FeMeCPUDesign.md`'s own `group = ceil(GroupSize / W) waves` formula --
+/// so this call folds directly to a `ConstantInt`, computed once here from
+/// this function's own `NumThreads`/`WaveSize` members, rather than
+/// threading any new runtime value through the wave-body interface at
+/// all.
+bool isNumSubgroupsCall(Intrinsic::ID ID) {
+  return ID == Intrinsic::spv_num_subgroups;
 }
 
 /// Whether \p ID is trivially widenable to a vector-typed overload with the
@@ -621,6 +660,8 @@ private:
   void widenMaskedSetMeshOutputs(CallInst &CI, IRBuilder<> &Builder);
   void widenReturnMasks(CallInst &CI, IRBuilder<> &Builder);
   void replaceGroupIdCall(CallInst &CI);
+  void replaceSubgroupIdCall(CallInst &CI);
+  void replaceNumSubgroupsCall(CallInst &CI);
   void widenResourceCall(CallInst &CI, const MatchedResourceCall &Matched,
                          IRBuilder<> &Builder);
   void widenImageCall(CallInst &CI, const MatchedImageCall &Matched,
@@ -1135,6 +1176,16 @@ Function *FunctionWidener::buildWidenedFunction() {
 }
 
 Value *FunctionWidener::getWidened(Value *V, IRBuilderBase &Builder) {
+  // `getWidened` only ever produces a flat `<W x T>` for a *scalar*-typed
+  // `V` (`T` itself must be a valid vector element type). A vector-typed
+  // `V` (e.g. a whole `<4 x float>` being stored through a divergent
+  // per-lane pointer -- roadmap H6n) has its own decomposed, per-component
+  // widened form instead; route it through `getVectorComponents`, never
+  // here (a caller reaching this assert has skipped that routing and would
+  // otherwise build an illegal `<W x <N x T>>` nested vector).
+  assert(!V->getType()->isVectorTy() &&
+        "getWidened does not support a vector-typed value; use "
+        "getVectorComponents instead");
   if (auto It = Widened.find(V); It != Widened.end())
     return It->second;
   if (auto It = Broadcasts.find(V); It != Broadcasts.end())
@@ -1515,6 +1566,29 @@ void FunctionWidener::replaceGroupIdCall(CallInst &CI) {
   Value *Replacement = Component == 0   ? Env.GroupIDX
                        : Component == 1 ? Env.GroupIDY
                                         : Env.GroupIDZ;
+  CI.replaceAllUsesWith(Replacement);
+  ToErase.push_back(&CI);
+}
+
+// Roadmap H6n: `SubgroupId` is uniform for this widened, one-wave-loop-
+// iteration-per-call function -- see `isSubgroupIdCall`'s comment -- so it
+// substitutes directly for `Env.WaveIndex`, exactly like `WorkgroupId`
+// substitutes for `Env.GroupIDX/Y/Z` in `replaceGroupIdCall` just above.
+void FunctionWidener::replaceSubgroupIdCall(CallInst &CI) {
+  CI.replaceAllUsesWith(Env.WaveIndex);
+  ToErase.push_back(&CI);
+}
+
+// Roadmap H6n: `NumSubgroups` folds to a compile-time constant --
+// `ceil(NumThreads.x * NumThreads.y * NumThreads.z / WaveSize)`, mirroring
+// `feme/docs/FeMeCPUDesign.md`'s own `group = ceil(GroupSize / W) waves`
+// formula for the wave loop's own trip count -- see `isNumSubgroupsCall`'s
+// comment.
+void FunctionWidener::replaceNumSubgroupsCall(CallInst &CI) {
+  uint64_t GroupSize = uint64_t{NumThreads[0]} * NumThreads[1] * NumThreads[2];
+  uint64_t WavesPerGroup = (GroupSize + WaveSize - 1) / WaveSize;
+  Value *Replacement =
+      ConstantInt::get(CI.getType(), WavesPerGroup, /*IsSigned=*/false);
   CI.replaceAllUsesWith(Replacement);
   ToErase.push_back(&CI);
 }
@@ -1990,9 +2064,34 @@ void FunctionWidener::widenScalarizedFallback(Instruction &I,
   // `WidenedVectorComponents`, exactly like every other vector-typed
   // producer `checkVectorDecompositionSupported` accepts -- rather than
   // building one illegal `<W x <N x T>>` `Result`.
+  //
+  // An *operand* can itself be vector-typed too (e.g. a divergently
+  // per-lane-indexed `store <4 x float> ...` writing a whole vector, not
+  // just a scalar or fixed-vector *result* -- roadmap H6n): `getWidened`
+  // alone cannot widen such an operand, since it always broadcasts/gathers
+  // into a flat `<W x T>` and a vector-typed `T` is not a valid vector
+  // element type (`getWidened(<4 x float> value)` would build an illegal
+  // `<W x <4 x float>>`). Route any vector-typed operand through
+  // `getVectorComponents` instead -- the same per-component decomposition
+  // every other vector-typed consumer already uses -- and reassemble each
+  // lane's own real `<4 x float>` value (one `extractelement` +
+  // `insertelement` chain per component) right before that lane's clone,
+  // rather than ever materializing a nested wide vector.
   SmallVector<Value *, 4> WideOps;
-  for (Value *Op : I.operands())
-    WideOps.push_back(getWidened(Op, Builder));
+  SmallVector<SmallVector<Value *, 4>, 4> WideVectorOps;
+  BitVector IsVectorOp(I.getNumOperands());
+  unsigned OpIdx = 0;
+  for (Value *Op : I.operands()) {
+    if (Op->getType()->isVectorTy()) {
+      IsVectorOp.set(OpIdx);
+      WideVectorOps.push_back(getVectorComponents(Op, Builder));
+      WideOps.push_back(nullptr);
+    } else {
+      WideVectorOps.push_back({});
+      WideOps.push_back(getWidened(Op, Builder));
+    }
+    ++OpIdx;
+  }
 
   bool HasResult = !I.getType()->isVoidTy();
   auto *ResultVecTy =
@@ -2008,10 +2107,28 @@ void FunctionWidener::widenScalarizedFallback(Instruction &I,
 
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Instruction *Clone = I.clone();
-    for (unsigned OpIdx = 0, E = WideOps.size(); OpIdx != E; ++OpIdx)
-      Clone->setOperand(OpIdx,
-                        Builder.CreateExtractElement(
-                            WideOps[OpIdx], Builder.getInt32(Lane), "lane.op"));
+    for (unsigned OpIdx = 0, E = WideOps.size(); OpIdx != E; ++OpIdx) {
+      if (IsVectorOp.test(OpIdx)) {
+        // Reassemble this lane's own real vector value, one component at
+        // a time, from its decomposed `<W x componentT>` widened form --
+        // see the comment above this fallback's operand-widening loop.
+        const SmallVector<Value *, 4> &Comps = WideVectorOps[OpIdx];
+        auto *VecTy = cast<FixedVectorType>(I.getOperand(OpIdx)->getType());
+        Value *LaneVector = PoisonValue::get(VecTy);
+        for (unsigned Component = 0, NumComponents = Comps.size();
+             Component != NumComponents; ++Component) {
+          Value *LaneScalar = Builder.CreateExtractElement(
+              Comps[Component], Builder.getInt32(Lane), "lane.op.elt");
+          LaneVector = Builder.CreateInsertElement(
+              LaneVector, LaneScalar, Builder.getInt32(Component));
+        }
+        Clone->setOperand(OpIdx, LaneVector);
+      } else {
+        Clone->setOperand(OpIdx,
+                          Builder.CreateExtractElement(
+                              WideOps[OpIdx], Builder.getInt32(Lane), "lane.op"));
+      }
+    }
     // A void-typed `I` (e.g. a masked output store with no widened handler
     // of its own) clones to a void `Clone`: naming it would assert (`Value::
     // setNameImpl`'s "Cannot assign a name to void values!"), so only a
@@ -2645,9 +2762,28 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
     return;
   }
 
+  // Only compute an eager, flat `<W x T>` widening for a *scalar*-typed
+  // operand here: the `BinaryOperator`/`CmpInst`/`CastInst`/`SelectInst`/
+  // `UnaryOperator` cases just below are the only ones that consume
+  // `WideOps` directly, and every one of them keeps a scalar-typed operand
+  // scalar-typed except a same-width vector<->scalar `bitcast` (rare, and
+  // still handled correctly since only *its* operand would ever be
+  // vector-typed while its own result stays scalar here -- see
+  // `widenInstruction`'s `isVectorTy()` gate routing every vector-*result*
+  // case to `widenVectorElementwise` before this function ever runs).
+  // A vector-typed operand (e.g. a whole `<4 x float>` value operand of a
+  // divergently-indexed `store` -- roadmap H6n) is left unwidened here:
+  // `getWidened` cannot widen it (a vector is not a valid vector element
+  // type, so `getWidened(<4 x float> value)` would build an illegal
+  // `<W x <4 x float>>`), and no branch below actually needs it --
+  // anything reaching the final `widenScalarizedFallback` call widens its
+  // own operands afresh, correctly routing a vector-typed one through
+  // `getVectorComponents` instead.
   SmallVector<Value *, 4> WideOps;
-  for (Value *Op : I.operands())
-    WideOps.push_back(getWidened(Op, Builder));
+  for (Value *Op : I.operands()) {
+    WideOps.push_back(Op->getType()->isVectorTy() ? nullptr
+                                                   : getWidened(Op, Builder));
+  }
 
   Value *NewI = nullptr;
   if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
@@ -2736,6 +2872,14 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
                            : Intrinsic::not_intrinsic;
     if (isGroupIdCall(ID)) {
       replaceGroupIdCall(*CI);
+      return true;
+    }
+    if (isSubgroupIdCall(ID)) {
+      replaceSubgroupIdCall(*CI);
+      return true;
+    }
+    if (isNumSubgroupsCall(ID)) {
+      replaceNumSubgroupsCall(*CI);
       return true;
     }
     if (std::optional<BuiltinCallKind> Kind = classifyBuiltin(ID)) {
