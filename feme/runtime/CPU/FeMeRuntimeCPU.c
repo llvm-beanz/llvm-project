@@ -581,27 +581,39 @@ femeRTPackR16G16B16A16Snorm(FemeRTv4f32 Value, uint16_t Out[4]) {
 
 //--- Typed-buffer `<4 x float>` view ------------------------------------------
 
+// Forward declarations: `femeRTImageFormatElementSize`/
+// `femeRTUnpackImageTexel`/`femeRTPackImageTexel` (roadmap E25/E26/H19a)
+// are defined later in this file (alongside the storage/sampled-image
+// path that originated them), but roadmap H8d's typed-buffer `<4 x
+// float>` load/store below reuse them directly rather than special-casing
+// each format a second time -- see those functions' own doc comments for
+// the full per-format scope this reuse inherits.
+__attribute__((always_inline)) static uint64_t
+femeRTImageFormatElementSize(uint32_t Format);
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr);
+__attribute__((always_inline)) static void
+femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel);
+
 // `feme.cpu.resource.load.typed.v4f32` (see `feme::cpu::ResourceCalls`):
-// reads a `<4 x float>` element through a bindless typed-buffer descriptor,
-// switching on `Format` between the `R32G32B32A32_FLOAT` identity format
-// (`== 4`) and the packed `R8G8B8A8_UNORM`/`_SNORM` formats (`== 13`/`14`)
-// -- see `feme::cpu::ResourceFormat` in RuntimeABI.h for those numeric
-// values, and "Descriptor formats" for why the conversion has to be a
+// reads a `<4 x float>` element through a bindless typed-buffer
+// descriptor, switching on `Format` (see `feme::cpu::ResourceFormat` in
+// RuntimeABI.h) via the shared `femeRTImageFormatElementSize`/
+// `femeRTUnpackImageTexel` tables the storage/sampled-image path already
+// uses -- see "Descriptor formats" for why the conversion has to be a
 // runtime switch rather than something the compiler can select at compile
 // time. `ResourceKind::Typed == 1`. An inactive lane (`Mask == false`) or a
 // failing bounds/kind check reads as zero, never touching `Heap`'s memory
 // (see "Bounds checking").
 //
-// (Roadmap L9) `R32_FLOAT` (`== 1`) is also accepted here: `OpImageFetch`/
-// `OpImageRead` always return a full `<4 x T>` per SPIR-V's own spec
-// regardless of the underlying format's real channel count, so a
-// single-channel-format texel buffer's *read* side still goes through this
-// 4-wide load, not the scalar `feme.cpu.resource.load.typed.f32` roadmap L9
-// itself added (that one is only reached by a scalar-typed *store*, whose
-// Texel operand SPIR-V shapes to match the shader's own declared element
-// type). The unread G/B lanes pad `0`, alpha pads `1`, matching
-// `femeRTUnpackImageTexel`'s own partial-component convention for the same
-// format.
+// `OpImageFetch`/`OpImageRead` always return a full `<4 x T>` per SPIR-V's
+// own spec regardless of the underlying format's real channel count, so a
+// narrower-than-4-component format's *read* side still goes through this
+// 4-wide load, not the scalar `feme.cpu.resource.load.typed.f32` (roadmap
+// L9, only reached by a scalar-typed *store*, whose Texel operand SPIR-V
+// shapes to match the shader's own declared element type). The unread
+// G/B lanes pad `0`, alpha pads `1`, matching `femeRTUnpackImageTexel`'s
+// own partial-component convention for the same format.
 FemeRTv4f32 femeCpuResourceLoadTypedV4F32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex,
@@ -611,11 +623,19 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuResourceLoadTypedV4F32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex, _Bool Mask) {
   FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
-  _Bool IsUnorm = Desc.Format == 13; // ResourceFormat::R8G8B8A8_UNORM.
-  _Bool IsSnorm = Desc.Format == 14; // ResourceFormat::R8G8B8A8_SNORM.
-  _Bool IsPacked = IsUnorm || IsSnorm;
-  _Bool IsScalar = Desc.Format == 1; // (L9) ResourceFormat::R32_FLOAT.
-  uint64_t ElemSize = (IsPacked || IsScalar) ? 4 : 16;
+  // (Roadmap H8d) Reuses `femeRTImageFormatElementSize`/
+  // `femeRTUnpackImageTexel` -- the same per-format conversion tables the
+  // storage/sampled-image path and the scalar `feme.cpu.resource.load.
+  // typed.f32` intrinsic (roadmap L9) already share -- rather than
+  // special-casing each format a second time here. `Format.cpp`'s
+  // `isTexelBufferFormatSupported` only ever admits a format this table
+  // itself recognizes into a typed-buffer descriptor, so the `ElemSize ==
+  // 0` fallback below is unreachable in practice; kept only so an
+  // unrecognized format still reads a well-defined 16-byte-stride zero
+  // rather than dividing by a zero stride.
+  uint64_t ElemSize = femeRTImageFormatElementSize(Desc.Format);
+  if (ElemSize == 0)
+    ElemSize = 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
       femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
@@ -625,30 +645,26 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuResourceLoadTypedV4F32(
     return Zero;
   }
   const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
-  if (IsPacked) {
-    uint32_t Raw;
-    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
-    return IsSnorm ? femeRTUnpackR8G8B8A8Snorm(Raw)
-                   : femeRTUnpackR8G8B8A8Unorm(Raw);
-  }
-  if (IsScalar) {
-    float R;
-    __builtin_memcpy(&R, Ptr, sizeof(R));
-    FemeRTv4f32 V = {R, 0.0f, 0.0f, 1.0f};
-    return V;
-  }
-  return (FemeRTv4f32) * (const FemeRTv4f32Unaligned *)Ptr;
+  return femeRTUnpackImageTexel(Desc.Format, Ptr);
 }
 
 // `feme.cpu.resource.store.typed.v4f32`: the store counterpart of
 // `feme.cpu.resource.load.typed.v4f32` above -- same descriptor lookup,
-// bounds/kind check and format switch, plus the UAV check "Descriptor
+// bounds/kind check and `femeRTImageFormatElementSize`/
+// `femeRTPackImageTexel` format dispatch, plus the UAV check "Descriptor
 // heaps" requires for any write (`FEME_DESCRIPTOR_UAV == 1 << 0`; a
 // constant buffer or other read-only view's `Flags` never sets it, so a
 // store through one is silently dropped rather than corrupting it). An
 // out-of-bounds or inactive-lane write is dropped, never touching `Heap`'s
 // memory, matching the load's "reads zero" rule with "writes ignored" (see
-// "Bounds checking").
+// "Bounds checking"). `Format.cpp`'s `isStorageTexelBufferFormatSupported`
+// (narrower than `isTexelBufferFormatSupported`, roadmap H8d) is what
+// keeps a real driver from ever exposing
+// `VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT` for a format
+// `femeRTPackImageTexel` cannot actually pack (most notably
+// `B8G8R8A8_UNORM`) -- this function itself stays total (silently drops
+// an unpackable format's write) rather than additionally guarding against
+// that here.
 void femeCpuResourceStoreTypedV4F32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex, FemeRTv4f32 Value,
@@ -659,11 +675,9 @@ femeCpuResourceStoreTypedV4F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
                                uint32_t DescriptorIndex, uint64_t ElementIndex,
                                FemeRTv4f32 Value, _Bool Mask) {
   FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
-  _Bool IsUnorm = Desc.Format == 13; // ResourceFormat::R8G8B8A8_UNORM.
-  _Bool IsSnorm = Desc.Format == 14; // ResourceFormat::R8G8B8A8_SNORM.
-  _Bool IsPacked = IsUnorm || IsSnorm;
-  _Bool IsScalar = Desc.Format == 1; // (L9) ResourceFormat::R32_FLOAT.
-  uint64_t ElemSize = (IsPacked || IsScalar) ? 4 : 16;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Desc.Format);
+  if (ElemSize == 0)
+    ElemSize = 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
       femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
@@ -672,18 +686,7 @@ femeCpuResourceStoreTypedV4F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   if (!(AccessOK && Mask && IsUAV))
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
-  if (IsPacked) {
-    uint32_t Raw = IsSnorm ? femeRTPackR8G8B8A8Snorm(Value)
-                           : femeRTPackR8G8B8A8Unorm(Value);
-    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
-    return;
-  }
-  if (IsScalar) {
-    float R = Value[0];
-    __builtin_memcpy(Ptr, &R, sizeof(R));
-    return;
-  }
-  *(FemeRTv4f32Unaligned *)Ptr = (FemeRTv4f32Unaligned)Value;
+  femeRTPackImageTexel(Desc.Format, Ptr, Value);
 }
 
 //--- Typed-buffer `<4 x i32>` view
@@ -899,24 +902,32 @@ femeRTPackR16G16Sint(FemeRTv4i32 Value, uint16_t Out[2]) {
   femeRTPackR16G16Uint(Value, Out);
 }
 
+// Forward declarations: `femeRTUnpackImageTexelI32`/`femeRTPackImageTexelI32`
+// (roadmap E26/H19a) are defined later in this file, but roadmap H8d's
+// typed-buffer `<4 x i32>` load/store below reuse them directly, the
+// same way the `<4 x float>` view above reuses `femeRTUnpackImageTexel`/
+// `femeRTPackImageTexel`.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr);
+__attribute__((always_inline)) static void
+femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
+                        FemeRTv4i32 Texel);
+
 // `feme.cpu.resource.load.typed.v4i32` (V4, see `feme::cpu::ResourceCalls`):
-// reads a `<4 x i32>` element through a bindless typed-buffer descriptor.
-// The `R32G32B32A32_UINT`/`_SINT` identity formats need no scalar
-// conversion switch: the four 32-bit lanes are reinterpreted directly,
-// matching the signed/unsigned distinction entirely by the shader's own
-// choice of `<4 x i32>` load/store type (SPIR-V's `OpTypeInt`'s signedness
-// bit plays no role in the raw bytes). The packed `R8G8B8A8_UINT`/`_SINT`
-// formats (`== 15`/`16` -- see `feme::cpu::ResourceFormat` in RuntimeABI.h)
-// do need one, analogous to the `<4 x float>` view's `R8G8B8A8_UNORM`/
-// `_SNORM` handling above. `ResourceKind::Typed == 1`. An inactive lane or
-// a failing bounds/kind check reads as zero, never touching `Heap`'s
+// reads a `<4 x i32>` element through a bindless typed-buffer descriptor,
+// via the shared `femeRTImageFormatElementSize`/`femeRTUnpackImageTexelI32`
+// tables the storage/sampled-image path already uses (roadmap H8d) --
+// see `feme::cpu::ResourceFormat` in RuntimeABI.h for this project's own
+// format numbering. `ResourceKind::Typed == 1`. An inactive lane or a
+// failing bounds/kind check reads as zero, never touching `Heap`'s
 // memory, exactly like the `<4 x float>` load above (see "Bounds
 // checking").
 //
-// (Roadmap L9) `R32_UINT`/`R32_SINT` (`== 5`/`9`) are also accepted here,
-// for the same "`OpImageFetch`/`OpImageRead` always return a full `<4 x
-// T>`" reason `femeCpuResourceLoadTypedV4F32`'s own comment explains for
-// `R32_FLOAT`. The unread G/B lanes pad `0`, alpha pads `1`.
+// `OpImageFetch`/`OpImageRead` always return a full `<4 x T>` per
+// SPIR-V's own spec regardless of the underlying format's real channel
+// count, the same "`femeCpuResourceLoadTypedV4F32`'s own comment
+// explains for `R32_FLOAT`" reason applying here too. The unread G/B
+// lanes pad `0`, alpha pads `1`.
 FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex,
@@ -926,12 +937,9 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex, _Bool Mask) {
   FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
-  _Bool IsUint = Desc.Format == 15; // ResourceFormat::R8G8B8A8_UINT.
-  _Bool IsSint = Desc.Format == 16; // ResourceFormat::R8G8B8A8_SINT.
-  _Bool IsPacked = IsUint || IsSint;
-  // (L9) ResourceFormat::R32_UINT/R32_SINT.
-  _Bool IsScalar = Desc.Format == 5 || Desc.Format == 9;
-  uint64_t ElemSize = (IsPacked || IsScalar) ? 4 : 16;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Desc.Format);
+  if (ElemSize == 0)
+    ElemSize = 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
       femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
@@ -941,24 +949,15 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
     return Zero;
   }
   const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
-  if (IsPacked) {
-    uint32_t Raw;
-    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
-    return IsSint ? femeRTUnpackR8G8B8A8Sint(Raw)
-                  : femeRTUnpackR8G8B8A8Uint(Raw);
-  }
-  if (IsScalar) {
-    int32_t R;
-    __builtin_memcpy(&R, Ptr, sizeof(R));
-    FemeRTv4i32 V = {R, 0, 0, 1};
-    return V;
-  }
-  return (FemeRTv4i32) * (const FemeRTv4i32Unaligned *)Ptr;
+  return femeRTUnpackImageTexelI32(Desc.Format, Ptr);
 }
 
 // `feme.cpu.resource.store.typed.v4i32`: the store counterpart of
 // `feme.cpu.resource.load.typed.v4i32` above, with the same UAV check every
 // typed-buffer store requires (see `femeCpuResourceStoreTypedV4F32`).
+// `Format.cpp`'s `isStorageTexelBufferFormatSupported` (roadmap H8d) is
+// what keeps a real driver from ever exposing this format-agnostic
+// dispatch for a format `femeRTPackImageTexelI32` cannot actually pack.
 void femeCpuResourceStoreTypedV4I32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex, FemeRTv4i32 Value,
@@ -969,12 +968,9 @@ femeCpuResourceStoreTypedV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
                                uint32_t DescriptorIndex, uint64_t ElementIndex,
                                FemeRTv4i32 Value, _Bool Mask) {
   FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
-  _Bool IsUint = Desc.Format == 15; // ResourceFormat::R8G8B8A8_UINT.
-  _Bool IsSint = Desc.Format == 16; // ResourceFormat::R8G8B8A8_SINT.
-  _Bool IsPacked = IsUint || IsSint;
-  // (L9) ResourceFormat::R32_UINT/R32_SINT.
-  _Bool IsScalar = Desc.Format == 5 || Desc.Format == 9;
-  uint64_t ElemSize = (IsPacked || IsScalar) ? 4 : 16;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Desc.Format);
+  if (ElemSize == 0)
+    ElemSize = 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
       femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
@@ -983,18 +979,7 @@ femeCpuResourceStoreTypedV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   if (!(AccessOK && Mask && IsUAV))
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
-  if (IsPacked) {
-    uint32_t Raw =
-        IsSint ? femeRTPackR8G8B8A8Sint(Value) : femeRTPackR8G8B8A8Uint(Value);
-    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
-    return;
-  }
-  if (IsScalar) {
-    int32_t R = Value[0];
-    __builtin_memcpy(Ptr, &R, sizeof(R));
-    return;
-  }
-  *(FemeRTv4i32Unaligned *)Ptr = (FemeRTv4i32Unaligned)Value;
+  femeRTPackImageTexelI32(Desc.Format, Ptr, Value);
 }
 
 //--- Raw/structured-buffer views ----------------------------------------------
@@ -2222,6 +2207,17 @@ femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
   case 4: // R32G32B32A32_FLOAT: identity format, no conversion.
     *(FemeRTv4f32Unaligned *)Ptr = (FemeRTv4f32Unaligned)Texel;
     return;
+  case 2: { // R32G32_FLOAT (roadmap H8d): the two-component identity
+            // sibling of `R32G32B32A32_FLOAT` above, only the first two
+            // components are stored -- newly needed so a
+            // `VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT` texel-buffer
+            // write through this format (Format.cpp's
+            // `isStorageTexelBufferFormatSupported`) is real, not
+            // silently dropped.
+    float RG[2] = {Texel[0], Texel[1]};
+    __builtin_memcpy(Ptr, RG, sizeof(RG));
+    return;
+  }
   case 18: { // R16G16B16A16_FLOAT (roadmap H19f).
     uint16_t Raw[4] = {femeRTFloatToHalf(Texel[0]), femeRTFloatToHalf(Texel[1]),
                        femeRTFloatToHalf(Texel[2]), femeRTFloatToHalf(Texel[3])};
@@ -2311,6 +2307,15 @@ femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
              // path -- reuses `femeRTPackR8G8B8A8Snorm` (already defined
              // for that other path).
     uint32_t Raw = femeRTPackR8G8B8A8Snorm(Texel);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
+  case 13: { // R8G8B8A8_UNORM (roadmap H8d): needed so
+             // `femeCpuResourceStoreTypedV4F32`'s new generic-table
+             // dispatch keeps writing this format identically to its old
+             // hard-coded special case -- reuses `femeRTPackR8G8B8A8Unorm`
+             // (already defined for the texel-buffer path).
+    uint32_t Raw = femeRTPackR8G8B8A8Unorm(Texel);
     __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
     return;
   }
@@ -2417,6 +2422,15 @@ femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
              // `femeRTPackR8G8B8A8Sint` (already defined for the
              // texel-buffer conversion path).
     uint32_t Raw = femeRTPackR8G8B8A8Sint(Texel);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
+  case 15: { // R8G8B8A8_UINT (roadmap H8d): needed so
+             // `femeCpuResourceStoreTypedV4I32`'s new generic-table
+             // dispatch keeps writing this format identically to its old
+             // hard-coded special case -- reuses `femeRTPackR8G8B8A8Uint`
+             // (already defined for the texel-buffer path).
+    uint32_t Raw = femeRTPackR8G8B8A8Uint(Texel);
     __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
     return;
   }
