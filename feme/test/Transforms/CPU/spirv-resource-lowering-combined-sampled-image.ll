@@ -49,5 +49,5 @@ declare %sampled_image
 ; `RangeKey`'s new `Class` field kept the two from being flagged a
 ; conflicting re-declaration of the same identity.
 
-; CHECK: !{!"sample", i32 0, i1 true, i32 0, i32 0}
+; CHECK: !{!"sample", i32 0, i1 true, i32 0, i32 0, i32 0}
 ; CHECK: !{!"sample", i32 0, i32 1, i32 1, i32 0, i32 0, i32 1, i32 0, i32 1, i32 0, i32 0, i32 1, i32 0, i32 2}

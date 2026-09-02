@@ -150,9 +150,9 @@ declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer
 ; `(space0, b1)`, `array_binding` at `(space0, b2)` with its full
 ; advertised 64-byte span, `dynamic_row` at `(space0, b0)` with its full
 ; 32-byte span, and `main` at the default `(space0, b0)`.
-; CHECK: !0 = !{!"other_binding", i32 16, i1 false, i32 0, i32 1}
-; CHECK: !1 = !{!"array_binding", i32 64, i1 false, i32 0, i32 2}
-; CHECK: !2 = !{!"dynamic_row", i32 32, i1 false, i32 0, i32 0}
-; CHECK: !3 = !{!"main", i32 32, i1 false, i32 0, i32 0}
-; CHECK: !4 = !{!"keeps_metadata", i32 16, i1 false, i32 0, i32 3}
+; CHECK: !0 = !{!"other_binding", i32 16, i1 false, i32 0, i32 1, i32 0}
+; CHECK: !1 = !{!"array_binding", i32 64, i1 false, i32 0, i32 2, i32 0}
+; CHECK: !2 = !{!"dynamic_row", i32 32, i1 false, i32 0, i32 0, i32 0}
+; CHECK: !3 = !{!"main", i32 32, i1 false, i32 0, i32 0, i32 0}
+; CHECK: !4 = !{!"keeps_metadata", i32 16, i1 false, i32 0, i32 3, i32 0}
 ; CHECK: ![[FAKE_MD]] = !{!"keeps_metadata_marker"}

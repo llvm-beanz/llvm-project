@@ -37,4 +37,4 @@ define void @main() {
 }
 
 ; CHECK: !feme.cpu.resources = !{![[RMD:[0-9]+]]}
-; CHECK: ![[RMD]] = !{!"main", i32 4, i1 false, i32 0, i32 0}
+; CHECK: ![[RMD]] = !{!"main", i32 4, i1 false, i32 0, i32 0, i32 0}

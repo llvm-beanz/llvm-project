@@ -32,4 +32,4 @@ define i32 @reads_last_real_byte() {
 }
 
 ; CHECK: !feme.cpu.resources = !{![[MD:[0-9]+]]}
-; CHECK: ![[MD]] = !{!"reads_last_real_byte", i32 28, i1 false, i32 0, i32 0}
+; CHECK: ![[MD]] = !{!"reads_last_real_byte", i32 28, i1 false, i32 0, i32 0, i32 24}

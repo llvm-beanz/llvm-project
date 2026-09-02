@@ -636,9 +636,14 @@ Function *lowerFunctionResources(Function &F,
 /// `lowerFunctionResources`), whether the sampler heap is used (always
 /// false -- `feme::dxil::OpRaisingPass` does not yet reconstruct a sampler
 /// handle from the heap, see `raiseResourceHandleFromHeap`'s comment), \p
-/// RootConstant's binding (space/register, both 0 if \p F has none), and
-/// the sorted, deduplicated statically-known heap indices the shader reads
-/// through a constant descriptor index.
+/// RootConstant's binding (space/register, both 0 if \p F has none), a
+/// root-constant min offset (always 0: a DXIL root constant's own
+/// register-bound view always starts its own span at byte 0, unlike a
+/// SPIR-V push-constant block's own reflected struct, which may declare a
+/// nonzero leading `layout(offset=N)` -- see
+/// `feme::cpu::ResourceInfo::RootConstantMinOffset`'s own comment, roadmap
+/// H6u), and the sorted, deduplicated statically-known heap indices the
+/// shader reads through a constant descriptor index.
 void attachResourceMetadata(Function &F,
                             SmallVectorImpl<uint32_t> &StaticHeapIndices,
                             const RootConstantMetadata &RootConstant) {
@@ -657,6 +662,7 @@ void attachResourceMetadata(Function &F,
       ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstant.Space)));
   Ops.push_back(
       ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstant.Register)));
+  Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)));
   for (uint32_t Idx : StaticHeapIndices)
     Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, Idx)));
 

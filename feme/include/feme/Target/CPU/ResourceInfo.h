@@ -131,6 +131,22 @@ struct ResourceInfo {
   /// `(b0, space0)`), meaningful only when `RootConstantSize != 0`.
   uint32_t RootConstantSpace = 0;
   uint32_t RootConstantRegister = 0;
+  /// (Roadmap H6u) The lowest byte any of this shader's recognized push-
+  /// constant accesses actually reads -- 0 for a DXIL root constant (whose
+  /// register-bound view always starts its own span at byte 0) and for a
+  /// SPIR-V push-constant block with no declared leading `layout(offset=N)`
+  /// gap, but nonzero whenever a SPIR-V push-constant block's own reflected
+  /// struct declares one (e.g. one shader stage's own share of a larger
+  /// block several stages share, each reading only its own portion, at
+  /// increasing offsets -- exactly `VK_EXT_mesh_shader`'s own task/mesh
+  /// pipeline stage split). `RootConstantSize` alone cannot express this:
+  /// it is always the highest accessed byte, so a shader accessing only
+  /// `[12, 20)` reports `RootConstantSize == 20` the same as one accessing
+  /// `[0, 20)` would -- `pushConstantsCoverRootConstantSize` needs both
+  /// ends to check only the byte range a shader can actually reach, not the
+  /// wider, unconditionally-from-0 span an earlier version of that check
+  /// assumed every shader's own root-constant access always started at.
+  uint32_t RootConstantMinOffset = 0;
   /// Whether the shader reads the sampler heap: set when the shader samples
   /// through a bound (`BoundResourceClass::Sampler`) or heap-indexed
   /// sampler descriptor.
@@ -196,7 +212,16 @@ struct ResourceInfo {
 /// sampler is assigned a slot in the image or sampler heap, not the
 /// buffer-oriented resource heap, so a host cannot place either from the
 /// version 4 layout's fields alone.
-constexpr uint32_t ArtifactAbiVersion = 5;
+///
+/// Version 6 (roadmap H6u) added `RootConstantMinOffset`: a pipeline-layout
+/// push-constant-coverage check reading only `RootConstantSize` cannot tell
+/// a shader that accesses `[0, RootConstantSize)` apart from one that
+/// accesses only `[RootConstantMinOffset, RootConstantSize)`, wrongly
+/// requiring a stage-visible `VkPushConstantRange` to cover bytes the
+/// shader never actually reads whenever a SPIR-V push-constant block
+/// declares a nonzero leading `layout(offset=N)` (see `ResourceInfo::
+/// RootConstantMinOffset`'s own comment).
+constexpr uint32_t ArtifactAbiVersion = 6;
 
 /// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
 /// layout.
@@ -244,6 +269,8 @@ struct StageArtifactInfo {
   /// See `ResourceInfo::RootConstantSpace`/`RootConstantRegister`.
   uint32_t RootConstantSpace = 0;
   uint32_t RootConstantRegister = 0;
+  /// See `ResourceInfo::RootConstantMinOffset`.
+  uint32_t RootConstantMinOffset = 0;
   uint32_t Flags = 0;
   std::vector<uint32_t> StaticHeapIndices;
   /// See `ResourceInfo::ReservedResourceHeapSize`/`ReservedImageHeapSize`/

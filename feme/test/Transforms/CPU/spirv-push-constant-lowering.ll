@@ -75,6 +75,24 @@ define float @reads_member_via_constant_expr_gep() {
   ret float %v
 }
 
+; Roadmap H6u: a function whose own push-constant accesses never touch
+; the leading bytes of the shared block (the real shape a SPIR-V
+; push-constant block declared with a nonzero leading `layout(offset=N)`
+; produces -- e.g. `VK_EXT_mesh_shader`'s task stage reading only its own,
+; higher-offset portion of a block a mesh stage's own lower-offset portion
+; shares) must report a `RootConstantMinOffset` above 0 in its own
+; `!feme.cpu.resources` entry, not silently assume every function's own
+; accessed span starts at byte 0 -- see `pushConstantsCoverRootConstantSize`
+; in Pipeline.cpp, which uses this to scope its own coverage check to only
+; the bytes this function's own reflected access span actually reaches.
+; CHECK-LABEL: define float @reads_only_second_member(
+; CHECK-SAME: ptr %root_constants, i32 %root_constant_size)
+define float @reads_only_second_member() {
+  %p = getelementptr inbounds %PushConstants, ptr addrspace(13) @pc, i32 0, i32 1
+  %v = load float, ptr addrspace(13) %p
+  ret float %v
+}
+
 ; Roadmap H7o: the metadata attached to the original function (here a
 ; stand-in for `!feme.signature`, which a later pass like
 ; `FragmentWrapperPass` requires to resolve stage-IO element IDs) must
@@ -97,4 +115,5 @@ define i32 @keeps_metadata() !feme.fake_signature !10 {
   ret i32 %v
 }
 !10 = !{!"keeps_metadata_marker"}
+; CHECK-DAG: = !{!"reads_only_second_member", i32 8, i1 false, i32 0, i32 0, i32 4}
 ; CHECK: ![[FAKE_MD]] = !{!"keeps_metadata_marker"}

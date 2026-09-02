@@ -22,6 +22,8 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
+#include <limits>
+
 using namespace llvm;
 using namespace feme::cpu;
 
@@ -141,9 +143,9 @@ matchSPIRVPushConstantAccess(Function &F) {
   return Access;
 }
 
-uint32_t lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
-                                      Value *RootConstants,
-                                      Value *RootConstantSize) {
+PushConstantAccessSpan
+lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
+                             Value *RootConstants, Value *RootConstantSize) {
   LLVMContext &Ctx = RootConstants->getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
   Type *I64Ty = Type::getInt64Ty(Ctx);
@@ -165,7 +167,17 @@ uint32_t lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
   // dynamic row/array index means there is no longer a fixed set of bytes
   // to inspect statically -- there is no dynamic access this tighter span
   // could ever fail to cover.
+  //
+  // (Roadmap H6u) `MinAccessedByte` is the same idea applied to the low
+  // end: the lowest byte any recognized load actually reads, nonzero
+  // whenever this block's own reflected struct declares a nonzero leading
+  // `layout(offset=N)` gap (e.g. one shader stage's own share of a larger
+  // block several stages share, each reading only its own portion).
+  // `Access.Loads` is guaranteed nonempty (see `matchSPIRVPushConstantAccess`),
+  // so the loop below always runs at least once and this initial sentinel
+  // is always overwritten.
   uint32_t MaxAccessedByte = 0;
+  uint32_t MinAccessedByte = std::numeric_limits<uint32_t>::max();
 
   for (Instruction *LoadI : Access.Loads) {
     auto *Load = cast<LoadInst>(LoadI);
@@ -187,6 +199,8 @@ uint32_t lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
     uint64_t LoadSize = DL.getTypeStoreSize(LoadedTy).getFixedValue();
     MaxAccessedByte =
         std::max<uint64_t>(MaxAccessedByte, ByteOffset + LoadSize);
+    MinAccessedByte =
+        std::min<uint64_t>(MinAccessedByte, ByteOffset);
 
     IRBuilder<> Builder(Load);
     Value *InBounds = Builder.CreateICmpULE(
@@ -220,7 +234,7 @@ uint32_t lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
     if (auto *GEP = dyn_cast<GetElementPtrInst>(U); GEP && GEP->use_empty())
       GEP->eraseFromParent();
 
-  return MaxAccessedByte;
+  return PushConstantAccessSpan{MinAccessedByte, MaxAccessedByte};
 }
 
 PreservedAnalyses SPIRVPushConstantLoweringPass::run(Module &M,
@@ -282,17 +296,18 @@ PreservedAnalyses SPIRVPushConstantLoweringPass::run(Module &M,
     // does not clone them), so `Access.Loads`' pointers stay valid; only
     // `Access.Global` may need nothing further, since it is a module-level
     // `GlobalVariable`, not per-function.
-    uint32_t RootConstantSizeNeeded =
+    PushConstantAccessSpan Span =
         lowerSPIRVPushConstantAccess(*Access, RootConstants, RootConstantSize);
 
     Type *I32Ty = Type::getInt32Ty(Ctx);
     MDNode *Node = MDNode::get(
         Ctx,
         {MDString::get(Ctx, NewF->getName()),
-         ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstantSizeNeeded)),
+         ConstantAsMetadata::get(ConstantInt::get(I32Ty, Span.MaxOffset)),
          ConstantAsMetadata::get(ConstantInt::getFalse(Ctx)),
          ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)),
-         ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0))});
+         ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)),
+         ConstantAsMetadata::get(ConstantInt::get(I32Ty, Span.MinOffset))});
     NewF->getParent()
         ->getOrInsertNamedMetadata("feme.cpu.resources")
         ->addOperand(Node);

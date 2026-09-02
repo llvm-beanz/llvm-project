@@ -32,7 +32,7 @@ TEST(ResourceInfoTest, FromModuleReadsMetadata) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     !feme.cpu.resources = !{!0}
-    !0 = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 3, i32 5}
+    !0 = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 0, i32 3, i32 5}
   )");
   ASSERT_TRUE(M);
 
@@ -43,6 +43,7 @@ TEST(ResourceInfoTest, FromModuleReadsMetadata) {
   EXPECT_FALSE(Info->UsesSamplerHeap);
   EXPECT_EQ(Info->RootConstantSpace, 0u);
   EXPECT_EQ(Info->RootConstantRegister, 0u);
+  EXPECT_EQ(Info->RootConstantMinOffset, 0u);
   EXPECT_EQ(Info->StaticHeapIndices, (std::vector<uint32_t>{3, 5}));
 }
 
@@ -50,7 +51,7 @@ TEST(ResourceInfoTest, FromModuleReadsRootConstantBinding) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     !feme.cpu.resources = !{!0}
-    !0 = !{!"main", i32 32, i1 false, i32 1, i32 2}
+    !0 = !{!"main", i32 32, i1 false, i32 1, i32 2, i32 0}
   )");
   ASSERT_TRUE(M);
 
@@ -59,6 +60,24 @@ TEST(ResourceInfoTest, FromModuleReadsRootConstantBinding) {
   EXPECT_EQ(Info->RootConstantSize, 32u);
   EXPECT_EQ(Info->RootConstantSpace, 1u);
   EXPECT_EQ(Info->RootConstantRegister, 2u);
+}
+
+TEST(ResourceInfoTest, FromModuleReadsRootConstantMinOffset) {
+  // Roadmap H6u: a SPIR-V push-constant block shared by multiple stages,
+  // each declaring a nonzero leading `layout(offset=N)`, reflects a
+  // `RootConstantMinOffset` above 0 -- see
+  // `feme::cpu::ResourceInfo::RootConstantMinOffset`'s own comment.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    !feme.cpu.resources = !{!0}
+    !0 = !{!"main", i32 20, i1 false, i32 0, i32 0, i32 12}
+  )");
+  ASSERT_TRUE(M);
+
+  std::optional<ResourceInfo> Info = ResourceInfo::fromModule(*M, "main");
+  ASSERT_TRUE(Info);
+  EXPECT_EQ(Info->RootConstantSize, 20u);
+  EXPECT_EQ(Info->RootConstantMinOffset, 12u);
 }
 
 TEST(ResourceInfoTest, FromModuleMissingEntryIsNullopt) {
@@ -123,6 +142,7 @@ TEST(ResourceInfoTest, SerializeParseRoundTrips) {
   Info.RootConstantSize = 16;
   Info.RootConstantSpace = 1;
   Info.RootConstantRegister = 3;
+  Info.RootConstantMinOffset = 4;
   Info.Flags = FEME_CPU_ARTIFACT_USES_SAMPLER_HEAP;
   Info.StaticHeapIndices = {2, 7, 9};
 
@@ -136,6 +156,7 @@ TEST(ResourceInfoTest, SerializeParseRoundTrips) {
   EXPECT_EQ(Parsed->RootConstantSize, 16u);
   EXPECT_EQ(Parsed->RootConstantSpace, 1u);
   EXPECT_EQ(Parsed->RootConstantRegister, 3u);
+  EXPECT_EQ(Parsed->RootConstantMinOffset, 4u);
   EXPECT_EQ(Parsed->Flags,
             static_cast<uint32_t>(FEME_CPU_ARTIFACT_USES_SAMPLER_HEAP));
   EXPECT_EQ(Parsed->StaticHeapIndices, (std::vector<uint32_t>{2, 7, 9}));
@@ -202,6 +223,7 @@ TEST(ResourceInfoTest, FromResourceInfoCarriesFieldsOver) {
   RI.RootConstantSize = 32;
   RI.RootConstantSpace = 2;
   RI.RootConstantRegister = 5;
+  RI.RootConstantMinOffset = 8;
   RI.UsesSamplerHeap = true;
   RI.StaticHeapIndices = {4};
 
@@ -209,6 +231,7 @@ TEST(ResourceInfoTest, FromResourceInfoCarriesFieldsOver) {
   EXPECT_EQ(Artifact.RootConstantSize, 32u);
   EXPECT_EQ(Artifact.RootConstantSpace, 2u);
   EXPECT_EQ(Artifact.RootConstantRegister, 5u);
+  EXPECT_EQ(Artifact.RootConstantMinOffset, 8u);
   EXPECT_EQ(Artifact.Flags,
             static_cast<uint32_t>(FEME_CPU_ARTIFACT_USES_SAMPLER_HEAP));
   EXPECT_EQ(Artifact.StaticHeapIndices, (std::vector<uint32_t>{4}));
@@ -221,7 +244,7 @@ TEST(ResourceInfoTest, FromModuleMergesBoundResourceMetadata) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     !feme.cpu.resources = !{!0}
     !feme.cpu.bound_resources = !{!1}
-    !0 = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 3, i32 5}
+    !0 = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 0, i32 3, i32 5}
     !1 = !{!"main", i32 8, i32 0, i32 0, i32 0, i32 0, i32 8, i32 0, i32 0}
   )");
   ASSERT_TRUE(M);
@@ -240,7 +263,7 @@ TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     !feme.cpu.resources = !{!0}
-    !0 = !{!"main", i32 0, i1 false, i32 0, i32 0}
+    !0 = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 0}
   )");
   ASSERT_TRUE(M);
 
@@ -250,8 +273,8 @@ TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   EXPECT_TRUE(Info->BoundRanges.empty());
 }
 
-TEST(ResourceInfoTest, ArtifactAbiVersionIsFive) {
-  EXPECT_EQ(ArtifactAbiVersion, 5u);
+TEST(ResourceInfoTest, ArtifactAbiVersionIsSix) {
+  EXPECT_EQ(ArtifactAbiVersion, 6u);
 }
 
 TEST(ResourceInfoTest, FromModuleReadsImageAndSamplerHeapPrefixes) {
@@ -263,7 +286,7 @@ TEST(ResourceInfoTest, FromModuleReadsImageAndSamplerHeapPrefixes) {
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     !feme.cpu.resources = !{!0}
     !feme.cpu.bound_resources = !{!1}
-    !0 = !{!"main", i32 0, i1 true, i32 0, i32 0}
+    !0 = !{!"main", i32 0, i1 true, i32 0, i32 0, i32 0}
     !1 = !{!"main", i32 0, i32 1, i32 1,
            i32 0, i32 0, i32 1, i32 0, i32 1,
            i32 0, i32 1, i32 1, i32 0, i32 2}

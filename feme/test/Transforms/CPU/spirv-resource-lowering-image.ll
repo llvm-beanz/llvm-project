@@ -79,7 +79,7 @@ declare ptr @llvm.spv.resource.getpointer.timg(
 ; base indexes (0 = buffer, 1 = image, 2 = sampler). `UsesSamplerHeap` (the
 ; `i1` in the resource node) is per function: `@fetch` needs no sampler.
 
-; CHECK: ![[RMD:[0-9]+]] = !{!"sample", i32 0, i1 true, i32 0, i32 0}
-; CHECK: !{!"sample_level", i32 0, i1 true, i32 0, i32 0}
-; CHECK: !{!"fetch", i32 0, i1 false, i32 0, i32 0}
+; CHECK: ![[RMD:[0-9]+]] = !{!"sample", i32 0, i1 true, i32 0, i32 0, i32 0}
+; CHECK: !{!"sample_level", i32 0, i1 true, i32 0, i32 0, i32 0}
+; CHECK: !{!"fetch", i32 0, i1 false, i32 0, i32 0, i32 0}
 ; CHECK: ![[BMD:[0-9]+]] = !{!"sample", i32 0, i32 2, i32 1, i32 0, i32 0, i32 1, i32 0, i32 1, i32 0, i32 1, i32 1, i32 0, i32 2, i32 0, i32 2, i32 1, i32 1, i32 1}

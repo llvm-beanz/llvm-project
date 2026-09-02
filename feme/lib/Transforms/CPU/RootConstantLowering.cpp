@@ -184,7 +184,10 @@ Function *addRootConstantParams(Function &F, Value *&RootConstants,
 /// function uses neither the sampler heap nor any statically-known dynamic
 /// heap index), the binding's source register space and base register
 /// (roadmap R25: any single binding is recognized now, so a host needs to
-/// be told which one this is), and no trailing indices.
+/// be told which one this is), a root-constant min offset (always 0: a
+/// DXIL root constant's own register-bound view always starts its own span
+/// at byte 0 -- see `feme::cpu::ResourceInfo::RootConstantMinOffset`'s own
+/// comment, roadmap H6u), and no trailing indices.
 void attachRootConstantMetadata(Function &F, uint32_t RootConstantSize,
                                 uint32_t Space, uint32_t Register) {
   LLVMContext &Ctx = F.getContext();
@@ -194,7 +197,8 @@ void attachRootConstantMetadata(Function &F, uint32_t RootConstantSize,
             ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstantSize)),
             ConstantAsMetadata::get(ConstantInt::getFalse(Ctx)),
             ConstantAsMetadata::get(ConstantInt::get(I32Ty, Space)),
-            ConstantAsMetadata::get(ConstantInt::get(I32Ty, Register))});
+            ConstantAsMetadata::get(ConstantInt::get(I32Ty, Register)),
+            ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0))});
   F.getParent()
       ->getOrInsertNamedMetadata("feme.cpu.resources")
       ->addOperand(Node);

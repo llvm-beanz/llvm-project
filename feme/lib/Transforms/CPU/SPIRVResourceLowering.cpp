@@ -1924,16 +1924,21 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
 /// `spirv.Sampler` handle), a root-constant binding (always
 /// `(space0, register0)`: a SPIR-V
 /// push-constant block has no register identity of its own, unlike DXIL's
-/// register-bound root constant, so there is nothing else to report), and
-/// an empty statically-known-heap-index tail. That tail always stays empty
-/// here regardless of whether a given access went through a compile-time-
+/// register-bound root constant, so there is nothing else to report),
+/// \p RootConstantMinOffset (roadmap H6u: see
+/// `feme::cpu::ResourceInfo::RootConstantMinOffset`'s own comment; 0 if
+/// this function has no push-constant access of its own, matching
+/// `RootConstantSize`'s own "0 if it has none" default), and an empty
+/// statically-known-heap-index tail. That tail always stays empty here
+/// regardless of whether a given access went through a compile-time-
 /// constant or (roadmap R26) dynamic array index -- it is
 /// `feme::cpu::ResourceLoweringPass`'s own dynamic-heap discovery
 /// mechanism, unrelated to the bound-range assignment
 /// `attachBoundResourceMetadata` below records unconditionally (see "Heap
 /// usage discovery" in feme/docs/FeMeCPUDesign.md).
 void attachResourceMetadata(Function &F, uint32_t RootConstantSize,
-                            bool UsesSamplerHeap) {
+                            bool UsesSamplerHeap,
+                            uint32_t RootConstantMinOffset) {
   LLVMContext &Ctx = F.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
   Metadata *Ops[] = {
@@ -1941,7 +1946,8 @@ void attachResourceMetadata(Function &F, uint32_t RootConstantSize,
       ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstantSize)),
       ConstantAsMetadata::get(ConstantInt::getBool(Ctx, UsesSamplerHeap)),
       ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)),
-      ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0))};
+      ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)),
+      ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstantMinOffset))};
   F.getParent()
       ->getOrInsertNamedMetadata("feme.cpu.resources")
       ->addOperand(MDNode::get(Ctx, Ops));
@@ -2083,12 +2089,17 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     // to add a second, colliding pair (see that pass's header comment's
     // "combined case").
     uint32_t RootConstantSize = 0;
+    uint32_t RootConstantMinOffset = 0;
     if (std::optional<SPIRVPushConstantAccess> PCAccess =
-            matchSPIRVPushConstantAccess(*NewF))
-      RootConstantSize = lowerSPIRVPushConstantAccess(
+            matchSPIRVPushConstantAccess(*NewF)) {
+      PushConstantAccessSpan Span = lowerSPIRVPushConstantAccess(
           *PCAccess, Env.RootConstants, Env.RootConstantSize);
+      RootConstantSize = Span.MaxOffset;
+      RootConstantMinOffset = Span.MinOffset;
+    }
 
-    attachResourceMetadata(*NewF, RootConstantSize, UsesSamplerHeap);
+    attachResourceMetadata(*NewF, RootConstantSize, UsesSamplerHeap,
+                           RootConstantMinOffset);
     attachBoundResourceMetadata(*NewF, PrefixSizes, Ranges);
   }
 

@@ -127,9 +127,10 @@ std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
 
   // See `attachResourceMetadata` in ResourceLowering.cpp for the node shape
   // this reads: {name, root-constant-size, uses-sampler-heap,
-  // root-constant-space, root-constant-register, indices...}.
+  // root-constant-space, root-constant-register, root-constant-min-offset,
+  // indices...}.
   for (const MDNode *Entry : MD->operands()) {
-    if (Entry->getNumOperands() < 5)
+    if (Entry->getNumOperands() < 6)
       continue;
     const auto *Name = dyn_cast<MDString>(Entry->getOperand(0));
     if (!Name || Name->getString() != EntryName)
@@ -146,7 +147,9 @@ std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
         mdconst::extract<ConstantInt>(Entry->getOperand(3))->getZExtValue());
     Info.RootConstantRegister = static_cast<uint32_t>(
         mdconst::extract<ConstantInt>(Entry->getOperand(4))->getZExtValue());
-    for (unsigned I = 5, E = Entry->getNumOperands(); I != E; ++I)
+    Info.RootConstantMinOffset = static_cast<uint32_t>(
+        mdconst::extract<ConstantInt>(Entry->getOperand(5))->getZExtValue());
+    for (unsigned I = 6, E = Entry->getNumOperands(); I != E; ++I)
       Info.StaticHeapIndices.push_back(static_cast<uint32_t>(
           mdconst::extract<ConstantInt>(Entry->getOperand(I))->getZExtValue()));
 
@@ -167,6 +170,7 @@ StageArtifactInfo::fromResourceInfo(const ResourceInfo &Info) {
   Artifact.RootConstantSize = Info.RootConstantSize;
   Artifact.RootConstantSpace = Info.RootConstantSpace;
   Artifact.RootConstantRegister = Info.RootConstantRegister;
+  Artifact.RootConstantMinOffset = Info.RootConstantMinOffset;
   Artifact.Flags =
       Info.UsesSamplerHeap ? FEME_CPU_ARTIFACT_USES_SAMPLER_HEAP : 0u;
   Artifact.StaticHeapIndices = Info.StaticHeapIndices;
@@ -184,11 +188,11 @@ std::string feme::cpu::getArtifactSymbolName(StringRef EntryName) {
 /// The number of fixed (non-tail) `uint32_t` fields the layout has, ahead of
 /// the three counted tails: version, stage, wave size, 3 group-size
 /// dimensions, groupshared size/align, root constant size, root constant
-/// space/register, flags, the `StaticHeapIndices` tail's own count, the
-/// reserved resource-, image- and sampler-heap prefix sizes, the
-/// `BoundRanges` tail's own count, and the `Signature` tail's own byte
-/// length.
-constexpr size_t NumFixedFields = 18;
+/// space/register, root constant min offset, flags, the
+/// `StaticHeapIndices` tail's own count, the reserved resource-, image- and
+/// sampler-heap prefix sizes, the `BoundRanges` tail's own count, and the
+/// `Signature` tail's own byte length.
+constexpr size_t NumFixedFields = 19;
 
 /// The number of `uint32_t` fields one `BoundResourceRange` serializes to
 /// (its five fields, in declaration order).
@@ -217,6 +221,7 @@ feme::cpu::serializeArtifact(const StageArtifactInfo &Info) {
   WriteNext(Info.RootConstantSize);
   WriteNext(Info.RootConstantSpace);
   WriteNext(Info.RootConstantRegister);
+  WriteNext(Info.RootConstantMinOffset);
   WriteNext(Info.Flags);
   WriteNext(static_cast<uint32_t>(Info.StaticHeapIndices.size()));
   for (uint32_t Idx : Info.StaticHeapIndices)
@@ -277,6 +282,7 @@ Expected<StageArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
   Info.RootConstantSize = ReadNext();
   Info.RootConstantSpace = ReadNext();
   Info.RootConstantRegister = ReadNext();
+  Info.RootConstantMinOffset = ReadNext();
   Info.Flags = ReadNext();
   uint32_t NumIndices = ReadNext();
 

@@ -78,28 +78,47 @@ struct SPIRVPushConstantAccess {
 std::optional<SPIRVPushConstantAccess>
 matchSPIRVPushConstantAccess(llvm::Function &F);
 
+/// One function's push-constant access span, as `lowerSPIRVPushConstantAccess`
+/// computes it: the lowest and highest byte any recognized load actually
+/// reads. `MaxOffset` alone (the historical, pre-roadmap-H6u return value)
+/// cannot distinguish a shader that accesses `[0, MaxOffset)` from one that
+/// accesses only `[MinOffset, MaxOffset)` -- exactly the shape a SPIR-V
+/// push-constant block's own nonzero leading `layout(offset=N)` produces
+/// (see `feme::cpu::ResourceInfo::RootConstantMinOffset`'s own comment for
+/// why a pipeline-layout coverage check needs both ends, not just one).
+struct PushConstantAccessSpan {
+  uint32_t MinOffset = 0;
+  uint32_t MaxOffset = 0;
+};
+
 /// Rewrites every load in \p Access into a bounds-checked load from \p
 /// RootConstants (zero for any byte range outside \p RootConstantSize's
 /// declared span), and erases every instruction \p Access recognized once
-/// unused. Returns the highest byte any recognized load actually reads --
-/// unlike `feme::cpu::lowerRootConstantAccess`'s own DXIL root constant,
-/// which must report its full declared binding size because a dynamic
-/// row/array index means there is no fixed set of bytes to inspect
-/// statically, every access this pass recognizes has a compile-time-
-/// constant byte offset (see the file comment's scope note), so the
-/// tighter "bytes actually touched" span is always safe to report instead
-/// -- and, on a CPU target whose data layout does not mark vectors as
-/// element-aligned, is frequently *narrower* than the push-constant
-/// block's own declared-type `DataLayout` store size (e.g. a trailing
-/// `int3`/`float3` member's vector alignment rounds its store size up to
-/// the next power of two, inflating the whole struct's reported size well
-/// past the last byte any such member's own load actually reaches).
-/// Reporting the wider, padding-inflated size here would spuriously
-/// require a `VkPushConstantRange` to cover bytes no real access ever
-/// touches (roadmap L10).
-uint32_t lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
-                                      llvm::Value *RootConstants,
-                                      llvm::Value *RootConstantSize);
+/// unused. Returns the byte span [MinOffset, MaxOffset) any recognized load
+/// actually reads -- unlike `feme::cpu::lowerRootConstantAccess`'s own DXIL
+/// root constant, which must report its full declared binding size (always
+/// starting at byte 0) because a dynamic row/array index means there is no
+/// fixed set of bytes to inspect statically, every access this pass
+/// recognizes has a compile-time-constant byte offset (see the file
+/// comment's scope note), so the tighter "bytes actually touched" span is
+/// always safe to report instead -- and, on a CPU target whose data layout
+/// does not mark vectors as element-aligned, `MaxOffset` is frequently
+/// *narrower* than the push-constant block's own declared-type
+/// `DataLayout` store size (e.g. a trailing `int3`/`float3` member's vector
+/// alignment rounds its store size up to the next power of two, inflating
+/// the whole struct's reported size well past the last byte any such
+/// member's own load actually reaches). Reporting the wider, padding-
+/// inflated size here would spuriously require a `VkPushConstantRange` to
+/// cover bytes no real access ever touches (roadmap L10). Likewise,
+/// `MinOffset` is nonzero exactly when the block's own reflected struct
+/// declares a nonzero leading `layout(offset=N)` gap (roadmap H6u) --
+/// reporting `0` unconditionally would spuriously require a
+/// `VkPushConstantRange` to cover bytes *before* the first one any real
+/// access ever touches.
+PushConstantAccessSpan
+lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
+                             llvm::Value *RootConstants,
+                             llvm::Value *RootConstantSize);
 
 /// Lowers a SPIR-V push-constant block access into loads from the CPU ABI's
 /// root-constant block, for a function with no bound (`spirv.VulkanBuffer`)
