@@ -51,6 +51,16 @@ SignatureElement makeOutputElement(uint32_t ElementID,
   return Elt;
 }
 
+SignatureElement makeInputElement(uint32_t ElementID,
+                                  SignatureSystemValue SystemValue) {
+  SignatureElement Elt;
+  Elt.ElementID = ElementID;
+  Elt.Direction = SignatureDirection::Input;
+  Elt.ComponentType = SignatureComponentType::UInt;
+  Elt.SystemValue = SystemValue;
+  return Elt;
+}
+
 // A mesh entry's per-vertex output store (roadmap H6b's canonicalized
 // shape, dynamic `Vertex` operand) lowers into a store addressed off
 // `mesh_vertex_outputs`, and the wave body gains this pass's own trailing
@@ -346,6 +356,110 @@ TEST(MeshOutputWrapperTest, LowersSetMeshOutputsCall) {
       EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
 
   EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// (Roadmap H6p) A mesh entry's `gl_DrawID` read (SPIR-V's `DrawIndex`
+// builtin, canonicalized into an ordinary `feme.stage.input.load` by
+// `CanonicalizeStage.cpp` since it has no dedicated `llvm.spv.*`
+// intrinsic) lowers into a broadcast of this pass's new `mesh_draw_id`
+// trailing param to every active lane, rather than being rejected by the
+// generic "unexpected stage op" catch-all -- confirms the specific gap
+// found reproducing `dEQP-VK.mesh_shader.ext.api.draw.*` is now handled.
+TEST(MeshOutputWrapperTest, LowersDrawIDInputLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ms_main() #0 {
+      %draw_id = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %draw_idf = uitofp i32 %draw_id to float
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %draw_idf, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="mesh" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  Sig.Elements = {
+      makeInputElement(0, SignatureSystemValue::DrawID),
+      makeOutputElement(1, SignatureFrequency::PerVertex),
+  };
+  dxil::setEntrySignature(*M->getFunction("ms_main"), Sig);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  MeshOutputWrapperPass().run(*M, MAM);
+  EXPECT_FALSE(SawError);
+
+  Function *Body = M->getFunction("ms_main");
+  ASSERT_TRUE(Body);
+  Argument *DrawIDArg = nullptr;
+  for (Argument &Arg : Body->args())
+    if (Arg.getName() == "mesh_draw_id")
+      DrawIDArg = &Arg;
+  ASSERT_TRUE(DrawIDArg);
+  EXPECT_FALSE(DrawIDArg->use_empty());
+
+  for (const Instruction &I : instructions(*Body))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Every other `feme.stage.input.load` system value reaching a mesh entry
+// (i.e. anything but `gl_DrawID`) still gets a diagnostic -- a narrower one
+// than the pass's generic "unexpected stage op" catch-all, distinguishing
+// "recognized as an input load, but an unsupported system value" from
+// "some entirely different, unlowered stage op" (roadmap H6p).
+TEST(MeshOutputWrapperTest, RejectsUnsupportedInputSystemValue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ms_main() #0 {
+      %v = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %vf = uitofp i32 %v to float
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %vf, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="mesh" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  Sig.Elements = {
+      makeInputElement(0, SignatureSystemValue::VertexID),
+      makeOutputElement(1, SignatureFrequency::PerVertex),
+  };
+  dxil::setEntrySignature(*M->getFunction("ms_main"), Sig);
+
+  std::string LastError;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() != DS_Error)
+          return;
+        *reinterpret_cast<std::string *>(Handle) = "error";
+      },
+      &LastError);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  MeshOutputWrapperPass().run(*M, MAM);
+  EXPECT_EQ(LastError, "error");
 }
 
 } // namespace

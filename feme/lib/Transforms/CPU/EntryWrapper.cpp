@@ -234,6 +234,11 @@ struct WrapperEnv {
   /// threaded by name exactly like `MeshVertexOutputLayout` et al. above.
   Value *MeshActualVertexCount = nullptr;
   Value *MeshActualPrimitiveCount = nullptr;
+  /// (Roadmap H6p) `FemeMeshArgs::DrawID`, SPIR-V's `DrawIndex` builtin
+  /// (`gl_DrawID`): workgroup-uniform (unlike a vertex entry's own
+  /// per-invocation `VertexID`/`InstanceID`), so threaded exactly like
+  /// `MeshMaxOutputVertices` et al. above rather than per-lane.
+  Value *MeshDrawID = nullptr;
 
   /// The `FemeTaskArgs`-only fields `feme::cpu::TaskPayloadWrapperPass`
   /// (roadmap H6c-a-b) appends to a task entry's wave body before this
@@ -342,6 +347,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
         Entry, ArgsTy, Args, MeshArgsFieldActualVertexCount, PtrTy);
     Env.MeshActualPrimitiveCount = loadArgsField(
         Entry, ArgsTy, Args, MeshArgsFieldActualPrimitiveCount, PtrTy);
+    Env.MeshDrawID =
+        loadArgsField(Entry, ArgsTy, Args, MeshArgsFieldDrawID, I32Ty);
   }
   if (IsTask) {
     Env.TaskPayload =
@@ -396,6 +403,7 @@ bool isKnownWaveBodyParameter(StringRef Name) {
       "mesh_max_output_primitives",
       "mesh_actual_vertex_count",
       "mesh_actual_primitive_count",
+      "mesh_draw_id",
       "task_payload",
       "task_max_payload_bytes",
   };
@@ -508,6 +516,8 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       CallArgs.push_back(Env.MeshActualVertexCount);
     else if (Arg.getName() == "mesh_actual_primitive_count")
       CallArgs.push_back(Env.MeshActualPrimitiveCount);
+    else if (Arg.getName() == "mesh_draw_id")
+      CallArgs.push_back(Env.MeshDrawID);
     else if (Arg.getName() == "task_payload")
       CallArgs.push_back(Env.TaskPayload);
     else if (Arg.getName() == "task_max_payload_bytes")

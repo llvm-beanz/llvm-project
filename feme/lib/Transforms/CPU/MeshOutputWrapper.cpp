@@ -49,6 +49,11 @@ constexpr StringLiteral MaxOutputPrimitivesParamName =
 constexpr StringLiteral ActualVertexCountParamName = "mesh_actual_vertex_count";
 constexpr StringLiteral ActualPrimitiveCountParamName =
     "mesh_actual_primitive_count";
+/// (Roadmap H6p) `FemeMeshArgs::DrawID`, SPIR-V's `DrawIndex` builtin
+/// (`gl_DrawID`) -- the one legitimate stage-IO *input* a mesh entry point
+/// actually has, unlike this pass's file comment's original "a mesh entry
+/// point has no ordinary stage-IO input to read" assumption.
+constexpr StringLiteral DrawIDParamName = "mesh_draw_id";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -76,6 +81,9 @@ struct MeshOutputStageEnv {
   /// comment.
   Value *ActualVertexCount = nullptr;
   Value *ActualPrimitiveCount = nullptr;
+  /// (Roadmap H6p) `FemeMeshArgs::DrawID`, workgroup-uniform, threaded
+  /// through unchanged from `EntryWrapper.cpp`'s own `MeshDrawID`.
+  Value *DrawID = nullptr;
 };
 
 std::optional<MeshOutputStageEnv> getMeshOutputStageEnv(Function &F) {
@@ -98,6 +106,8 @@ std::optional<MeshOutputStageEnv> getMeshOutputStageEnv(Function &F) {
       Env.ActualVertexCount = &Arg, Found = true;
     else if (Arg.getName() == ActualPrimitiveCountParamName)
       Env.ActualPrimitiveCount = &Arg, Found = true;
+    else if (Arg.getName() == DrawIDParamName)
+      Env.DrawID = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -113,7 +123,7 @@ Function *appendMeshOutputParams(Function &F) {
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 8> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, PtrTy, PtrTy});
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, PtrTy, PtrTy, I32Ty});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -141,6 +151,7 @@ Function *appendMeshOutputParams(Function &F) {
   (&*ArgIt++)->setName(MaxOutputPrimitivesParamName);
   (&*ArgIt++)->setName(ActualVertexCountParamName);
   (&*ArgIt++)->setName(ActualPrimitiveCountParamName);
+  (&*ArgIt++)->setName(DrawIDParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -307,13 +318,43 @@ void lowerSetMeshOutputs(CallInst &CI, const MeshOutputStageEnv &MEnv) {
   }
 }
 
+/// Lowers `feme.stage.input.load` for a mesh entry's one legitimate
+/// stage-IO input, SPIR-V's `DrawIndex` builtin (`gl_DrawID`,
+/// `SignatureSystemValue::DrawID`, roadmap H6p): unlike a vertex entry's
+/// own per-invocation `VertexID`/`InstanceID`, a mesh workgroup's `DrawID`
+/// is workgroup-uniform (`FemeMeshArgs::DrawID`, the same value for every
+/// invocation in the workgroup), so this simply broadcasts `MEnv.DrawID`
+/// to every active lane -- mirroring `FragmentWrapper.cpp`'s
+/// `lowerFragmentInputLoad`'s own per-lane masked-select-and-insert shape,
+/// but with no varying storage of its own to read: `Row`/`Component`/
+/// `Vertex` (`CI`'s other operands) carry no meaning for a whole-builtin
+/// scalar like this one, so they are intentionally left unread.
+Value *lowerMeshInputLoad(CallInst &CI, const WaveBodyEnv &WEnv,
+                          const MeshOutputStageEnv &MEnv) {
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
+  IRBuilder<> Builder(&CI);
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *LaneResult =
+        Builder.CreateSelect(Active, MEnv.DrawID, Constant::getNullValue(ScalarTy));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
 /// Lowers every masked mesh output store and `set_mesh_outputs` call in
 /// \p F, or diagnoses and returns false if \p F uses a `feme.stage.*` op
-/// this pass does not support (any op other than `OutputStore`/
-/// `SetMeshOutputs` -- a mesh entry point has no ordinary stage-IO input to
-/// read, and `EmitMeshTasksEXT` has no canonicalized form yet, see the file
-/// comment).
-bool lowerMeshStageOps(Function &F) {
+/// this pass does not support (anything other than `OutputStore`/
+/// `SetMeshOutputs`/an `InputLoad` of `gl_DrawID` -- `EmitMeshTasksEXT` has
+/// no canonicalized form yet, see the file comment; roadmap H6p found that
+/// a mesh entry point *does* have one legitimate ordinary stage-IO input
+/// to read after all, `gl_DrawID`, correcting this comment's original
+/// assumption).
+bool lowerMeshStageOps(Function &F, const WaveBodyEnv &WEnv) {
   bool UsesStageOps = false;
   for (Instruction &I : instructions(F))
     if (auto *CI = dyn_cast<CallInst>(&I))
@@ -360,6 +401,31 @@ bool lowerMeshStageOps(Function &F) {
       CI->eraseFromParent();
       continue;
     }
+    StageOpKind Kind;
+    if (isStageOpCall(*CI, &Kind) && Kind == StageOpKind::InputLoad) {
+      auto *EltID = dyn_cast<ConstantInt>(CI->getArgOperand(0));
+      const SignatureElement *Elt =
+          EltID
+              ? findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
+                            SignatureDirection::Input)
+              : nullptr;
+      if (!Elt) {
+        F.getContext().emitError(
+            CI, "feme-cpu-wrap-mesh-output: input load references an "
+                "unknown signature element");
+        return false;
+      }
+      if (Elt->SystemValue != SignatureSystemValue::DrawID) {
+        F.getContext().emitError(
+            CI, "feme-cpu-wrap-mesh-output: unsupported mesh stage input "
+                "system value");
+        return false;
+      }
+      Value *Result = lowerMeshInputLoad(*CI, WEnv, *MEnv);
+      CI->replaceAllUsesWith(Result);
+      CI->eraseFromParent();
+      continue;
+    }
     // Only a genuinely unlowered `feme.stage.*` call is this pass's own
     // problem to diagnose (see the function comment) -- everything else
     // still calling through `F` at this point (resource loads/stores,
@@ -392,7 +458,15 @@ PreservedAnalyses MeshOutputWrapperPass::run(Module &M,
     if (!getWaveBodyEnv(*F))
       continue;
     Function *Body = appendMeshOutputParams(*F);
-    if (lowerMeshStageOps(*Body))
+    // `appendMeshOutputParams` splices `F`'s body into a brand-new
+    // function and erases `F`, so any `WaveBodyEnv` captured against the
+    // old function's now-destroyed `Argument`s would dangle -- re-derive
+    // it against `Body`, whose spliced-in parameters keep every original
+    // `WaveBodyEnv`-recognized name (`wave_entry_mask` et al.) intact.
+    std::optional<WaveBodyEnv> WEnv = getWaveBodyEnv(*Body);
+    assert(WEnv && "getWaveBodyEnv succeeded before appendMeshOutputParams "
+                   "but failed after");
+    if (lowerMeshStageOps(*Body, *WEnv))
       Changed = true;
   }
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

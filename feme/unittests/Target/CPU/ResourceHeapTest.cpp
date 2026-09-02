@@ -430,4 +430,34 @@ TEST(PreparedFragmentBatchTest, ArgsExposeCallerOwnedStageStorage) {
   EXPECT_EQ(Args.Results, &Result);
 }
 
+// (Roadmap H6p) `MeshResources::DrawID` (SPIR-V's `DrawIndex` builtin,
+// `gl_DrawID`) threads through `PreparedMeshBatch::create`/`args()`
+// exactly like every other plain scalar field (`GroupCount`,
+// `MaxOutputVertices`, ...) -- confirms the host-side half of the
+// `FemeMeshArgs::Reserved32` -> `DrawID` repurposing.
+TEST(PreparedMeshBatchTest, ArgsCarriesTheRequestedDrawID) {
+  ResourceInfo Info;
+  MeshResources Resources;
+  Resources.GroupCount = {4, 1, 1};
+  Resources.DrawID = 7;
+  PreparedMeshBatch Prepared = PreparedMeshBatch::create(Info, Resources);
+
+  FemeMeshArgs Args = Prepared.args();
+  EXPECT_EQ(Args.GroupCount[0], 4u);
+  EXPECT_EQ(Args.DrawID, 7u);
+}
+
+// A `MeshResources` left default-initialized (mirroring a direct
+// `vkCmdDrawMeshTasksEXT` draw, which never sets `MeshDrawCommand::DrawID`
+// explicitly) reports `gl_DrawID == 0`, matching the spec's own "0 for a
+// direct, non-multi-draw-indirect draw command" meaning.
+TEST(PreparedMeshBatchTest, ArgsDefaultsDrawIDToZero) {
+  ResourceInfo Info;
+  MeshResources Resources;
+  PreparedMeshBatch Prepared = PreparedMeshBatch::create(Info, Resources);
+
+  FemeMeshArgs Args = Prepared.args();
+  EXPECT_EQ(Args.DrawID, 0u);
+}
+
 } // namespace

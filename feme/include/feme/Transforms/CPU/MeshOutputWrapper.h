@@ -57,6 +57,14 @@
 // misreading it as per-vertex; `PrimitiveIndices` itself remains a
 // separate, still-open gap for a future row).
 //
+// (Roadmap H6p) A mesh entry point *does* have one legitimate ordinary
+// stage-IO input to read after all: SPIR-V's `DrawIndex` builtin
+// (`gl_DrawID`), workgroup-uniform (`FemeMeshArgs::DrawID`, appended here
+// as `mesh_draw_id`, threaded from `EntryWrapperPass`'s own `MeshDrawID`).
+// Every other `feme.stage.input.load`/system-value combination reaching a
+// mesh entry is still rejected with a narrower diagnostic than this pass's
+// generic catch-all.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_MESHOUTPUTWRAPPER_H
