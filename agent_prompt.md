@@ -37,15 +37,28 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8e or other prerequisites blocking the H-series milestones?
+Can you work on H8p or other prerequisites blocking the H-series milestones?
 
-> **`COLOR_ATTACHMENT_BIT`/`SAMPLED_IMAGE_BIT`/`SAMPLED_IMAGE_FILTER_LINEAR_BIT`
-> gaps for packed and 16-bit integer formats.** The same `format_properties`
-> re-run shows several formats (`r16_{sint,uint}`, `r16g16_{sint,uint}`,
-> `a2b10g10r10_uint_pack32`, `a8b8g8r8_{uint,sint}_pack32`, `d16_unorm`'s own
-> depth-sampling case, and the packed sub-byte families
-> `a1r5g5b5_unorm_pack16`/`b4g4r4a4_unorm_pack16`/`e5b9g9r9_ufloat_pack32`)
-> still missing one or more of these three bits -- not yet triaged for whether
-> each is a genuine rendering-capability gap or a reporting-only one (i.e. the
-> underlying sample/attachment path may already work for a format that just is
-> not yet advertised)
+> **The genuine integer-format `COLOR_ATTACHMENT_BIT` gap H8e split off.**
+> `r16_{sint,uint}`, `r16g16_{sint,uint}`, `a2b10g10r10_uint_pack32`,
+> `a8b8g8r8_{uint,sint}_pack32` (7 `VkFormat`s across 4 distinct
+> `ResourceFormat` gaps once `A8B8G8R8_*_PACK32`'s existing `R8G8B8A8_*`
+> aliasing is accounted for) are each missing only
+> `VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT`, confirmed by a real `deqp-vk` run --
+> but H8e's own investigation found this is not a simple advertisement fix:
+> `Executor.cpp`'s `executeDraws` hard-rejects any pipeline whose fragment
+> output `ComponentType != SignatureComponentType::Float` outright (regardless
+> of the target attachment's own format), so no `ivec4`/`uvec4` fragment-shader
+> output can be created or drawn today. A real fix needs, at minimum: (1)
+> widening that `executeDraws` check to accept an integer-typed fragment output
+> when the bound attachment format is itself an integer format; (2) a new
+> integer-reading counterpart to `readFragmentColor` (which today
+> unconditionally calls `FSOutput.readFloat`); (3) confirming/extending
+> `packClearColor`/`unpackColor` (`ImageFixture.cpp`) to actually pack/unpack
+> these four `ResourceFormat`s (not yet checked); (4) a new `true` case in
+> `RenderPass.cpp`'s `isSupportedColorAttachmentFormat` (today explicitly
+> `false` for every integer format, per its own "an integer format no fragment
+> output writes yet" comment) once (1)-(3) land, so the advertised bit is never
+> dishonest. Needs its own scoping pass splitting this into sub-rows once the
+> size of (1)-(3) is better understood, mirroring H8k's own precedent for
+> BC6H/BC7
