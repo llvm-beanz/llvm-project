@@ -51,8 +51,12 @@
 //    feme/docs/FeMeGraphicsDesign.md notes is not modelled yet.
 //  - Vertex attribute and color-output formats are the subset "Texture
 //    layout and formats" in feme/docs/FeMeGraphicsDesign.md already
-//    implements (the 32-bit-per-component family and `R8G8B8A8_*`); other
-//    formats are a mechanical, on-demand addition to `decodeAttribute`.
+//    implements: the 32-bit-per-component family, the 8-bit-per-component
+//    `R8_*`/`R8G8_*`/`R8G8B8A8_*` families, and the 16-bit-per-component
+//    `R16_*`/`R16G16_*`/`R16G16B16A16_*` families (roadmap H8b) -- other
+//    formats (a packed/sub-byte format like `A2B10G10R10_UNORM_PACK32`, or
+//    a block-compressed format) are a mechanical, on-demand addition to
+//    `decodeAttribute`.
 //
 //===----------------------------------------------------------------------===//
 
@@ -78,6 +82,8 @@
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/RuntimeABI.h"
 
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -138,6 +144,20 @@ uint32_t getDrawLayerCount(const PreparedDraw &Draw) {
 // Vertex attribute fetch
 //===----------------------------------------------------------------------===//
 
+/// Converts one IEEE-754 binary16 ("half float") bit pattern -- the
+/// in-memory representation of a `*_SFLOAT` 16-bit vertex attribute
+/// component -- to a `float`. Uses `llvm::APFloat` rather than the CPU
+/// runtime's own bitcode-side `femeRTHalfToFloat` (FeMeRuntimeCPU.c): this
+/// file runs on the host, not compiled shader IR, so it reuses LLVM's own
+/// software conversion instead of duplicating one.
+float halfBitsToFloat(uint16_t Bits) {
+  APFloat Half(APFloat::IEEEhalf(), APInt(16, Bits));
+  bool LosesInfo;
+  Half.convert(APFloat::IEEEsingle(), APFloat::rmNearestTiesToEven,
+               &LosesInfo);
+  return Half.convertToFloat();
+}
+
 /// Decodes up to 4 components of \p Format from \p Src into \p Out as
 /// 32-bit words matching \p WantType's storage convention (an IEEE-754 bit
 /// pattern for `Float`, a sign/zero-extended 32-bit integer otherwise). See
@@ -186,43 +206,124 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
       memcpy(&Out[I], Src + I * 4, 4);
     return Error::success();
   }
+  case cpu::ResourceFormat::R8_UNORM:
+  case cpu::ResourceFormat::R8G8_UNORM:
   case cpu::ResourceFormat::R8G8B8A8_UNORM:
   case cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB: {
     if (WantType != SignatureComponentType::Float)
       return createStringError(inconvertibleErrorCode(),
-                               "R8G8B8A8_UNORM vertex attribute requires a "
+                               "*_UNORM vertex attribute requires a "
                                "floating-point shader input");
     for (uint32_t I = 0; I != WantComponents; ++I)
       putFloat(I, Src[I] / 255.0f);
     return Error::success();
   }
+  case cpu::ResourceFormat::R8_SNORM:
+  case cpu::ResourceFormat::R8G8_SNORM:
   case cpu::ResourceFormat::R8G8B8A8_SNORM: {
     if (WantType != SignatureComponentType::Float)
       return createStringError(inconvertibleErrorCode(),
-                               "R8G8B8A8_SNORM vertex attribute requires a "
+                               "*_SNORM vertex attribute requires a "
                                "floating-point shader input");
     for (uint32_t I = 0; I != WantComponents; ++I)
       putFloat(I,
                std::clamp(static_cast<int8_t>(Src[I]) / 127.0f, -1.0f, 1.0f));
     return Error::success();
   }
+  case cpu::ResourceFormat::R8_UINT:
+  case cpu::ResourceFormat::R8G8_UINT:
   case cpu::ResourceFormat::R8G8B8A8_UINT: {
     if (WantType != SignatureComponentType::UInt)
       return createStringError(inconvertibleErrorCode(),
-                               "R8G8B8A8_UINT vertex attribute requires a "
-                               "UInt shader input");
+                               "*_UINT vertex attribute requires a UInt "
+                               "shader input");
     for (uint32_t I = 0; I != WantComponents; ++I)
       Out[I] = Src[I];
     return Error::success();
   }
+  case cpu::ResourceFormat::R8_SINT:
+  case cpu::ResourceFormat::R8G8_SINT:
   case cpu::ResourceFormat::R8G8B8A8_SINT: {
     if (WantType != SignatureComponentType::SInt)
       return createStringError(inconvertibleErrorCode(),
-                               "R8G8B8A8_SINT vertex attribute requires a "
-                               "SInt shader input");
+                               "*_SINT vertex attribute requires a SInt "
+                               "shader input");
     for (uint32_t I = 0; I != WantComponents; ++I)
       Out[I] = static_cast<uint32_t>(
           static_cast<int32_t>(static_cast<int8_t>(Src[I])));
+    return Error::success();
+  }
+  // (Roadmap H8b) The 16-bit-per-component families: `R16_*`, `R16G16_*`,
+  // and `R16G16B16A16_*` decode identically to their `R8*`/`R32*`
+  // counterparts above, just 2 bytes per component instead of 1 or 4.
+  case cpu::ResourceFormat::R16_UNORM:
+  case cpu::ResourceFormat::R16G16_UNORM:
+  case cpu::ResourceFormat::R16G16B16A16_UNORM: {
+    if (WantType != SignatureComponentType::Float)
+      return createStringError(inconvertibleErrorCode(),
+                               "*_UNORM vertex attribute requires a "
+                               "floating-point shader input");
+    for (uint32_t I = 0; I != WantComponents; ++I) {
+      uint16_t V;
+      memcpy(&V, Src + I * 2, 2);
+      putFloat(I, V / 65535.0f);
+    }
+    return Error::success();
+  }
+  case cpu::ResourceFormat::R16_SNORM:
+  case cpu::ResourceFormat::R16G16_SNORM:
+  case cpu::ResourceFormat::R16G16B16A16_SNORM: {
+    if (WantType != SignatureComponentType::Float)
+      return createStringError(inconvertibleErrorCode(),
+                               "*_SNORM vertex attribute requires a "
+                               "floating-point shader input");
+    for (uint32_t I = 0; I != WantComponents; ++I) {
+      int16_t V;
+      memcpy(&V, Src + I * 2, 2);
+      putFloat(I, std::clamp(V / 32767.0f, -1.0f, 1.0f));
+    }
+    return Error::success();
+  }
+  case cpu::ResourceFormat::R16_UINT:
+  case cpu::ResourceFormat::R16G16_UINT:
+  case cpu::ResourceFormat::R16G16B16A16_UINT: {
+    if (WantType != SignatureComponentType::UInt)
+      return createStringError(inconvertibleErrorCode(),
+                               "*_UINT vertex attribute requires a UInt "
+                               "shader input");
+    for (uint32_t I = 0; I != WantComponents; ++I) {
+      uint16_t V;
+      memcpy(&V, Src + I * 2, 2);
+      Out[I] = V;
+    }
+    return Error::success();
+  }
+  case cpu::ResourceFormat::R16_SINT:
+  case cpu::ResourceFormat::R16G16_SINT:
+  case cpu::ResourceFormat::R16G16B16A16_SINT: {
+    if (WantType != SignatureComponentType::SInt)
+      return createStringError(inconvertibleErrorCode(),
+                               "*_SINT vertex attribute requires a SInt "
+                               "shader input");
+    for (uint32_t I = 0; I != WantComponents; ++I) {
+      int16_t V;
+      memcpy(&V, Src + I * 2, 2);
+      Out[I] = static_cast<uint32_t>(static_cast<int32_t>(V));
+    }
+    return Error::success();
+  }
+  case cpu::ResourceFormat::R16_FLOAT:
+  case cpu::ResourceFormat::R16G16_FLOAT:
+  case cpu::ResourceFormat::R16G16B16A16_FLOAT: {
+    if (WantType != SignatureComponentType::Float)
+      return createStringError(inconvertibleErrorCode(),
+                               "*_SFLOAT vertex attribute requires a "
+                               "floating-point shader input");
+    for (uint32_t I = 0; I != WantComponents; ++I) {
+      uint16_t Bits;
+      memcpy(&Bits, Src + I * 2, 2);
+      putFloat(I, halfBitsToFloat(Bits));
+    }
     return Error::success();
   }
   default:
@@ -251,12 +352,37 @@ Expected<uint32_t> attributeComponentByteSize(cpu::ResourceFormat Format) {
   case cpu::ResourceFormat::R32G32B32_SINT:
   case cpu::ResourceFormat::R32G32B32A32_SINT:
     return 4;
+  case cpu::ResourceFormat::R8_UNORM:
+  case cpu::ResourceFormat::R8_SNORM:
+  case cpu::ResourceFormat::R8_UINT:
+  case cpu::ResourceFormat::R8_SINT:
+  case cpu::ResourceFormat::R8G8_UNORM:
+  case cpu::ResourceFormat::R8G8_SNORM:
+  case cpu::ResourceFormat::R8G8_UINT:
+  case cpu::ResourceFormat::R8G8_SINT:
   case cpu::ResourceFormat::R8G8B8A8_UNORM:
   case cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB:
   case cpu::ResourceFormat::R8G8B8A8_SNORM:
   case cpu::ResourceFormat::R8G8B8A8_UINT:
   case cpu::ResourceFormat::R8G8B8A8_SINT:
     return 1;
+  // (Roadmap H8b) The 16-bit-per-component families.
+  case cpu::ResourceFormat::R16_UNORM:
+  case cpu::ResourceFormat::R16_SNORM:
+  case cpu::ResourceFormat::R16_UINT:
+  case cpu::ResourceFormat::R16_SINT:
+  case cpu::ResourceFormat::R16_FLOAT:
+  case cpu::ResourceFormat::R16G16_UNORM:
+  case cpu::ResourceFormat::R16G16_SNORM:
+  case cpu::ResourceFormat::R16G16_UINT:
+  case cpu::ResourceFormat::R16G16_SINT:
+  case cpu::ResourceFormat::R16G16_FLOAT:
+  case cpu::ResourceFormat::R16G16B16A16_UNORM:
+  case cpu::ResourceFormat::R16G16B16A16_SNORM:
+  case cpu::ResourceFormat::R16G16B16A16_UINT:
+  case cpu::ResourceFormat::R16G16B16A16_SINT:
+  case cpu::ResourceFormat::R16G16B16A16_FLOAT:
+    return 2;
   default:
     return createStringError(inconvertibleErrorCode(),
                              "vertex attribute format is not yet supported "

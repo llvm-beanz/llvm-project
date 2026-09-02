@@ -99,11 +99,13 @@ bool isTexelBufferFormatSupported(feme::cpu::ResourceFormat Format);
 /// attribute is never simultaneously advertised as able to. Mirrors
 /// `isTexelBufferFormatSupported` immediately above: the set of formats
 /// `feme::graphics::decodeAttribute` (Executor.cpp) actually implements a
-/// decode for, not the Vulkan spec's own full mandatory list (see
-/// `Executor.cpp`'s file comment for the additional formats -- the 16-bit
-/// and packed-10-bit families among them -- still needing their own decode
-/// case, a mechanical, on-demand addition roadmap H8's own follow-on rows
-/// track).
+/// decode for, not the Vulkan spec's own full mandatory list (roadmap H8b
+/// added the 8-bit `R8_*`/`R8G8_*` and 16-bit `R16_*`/`R16G16_*`/
+/// `R16G16B16A16_*` families to that set; see `Executor.cpp`'s file
+/// comment for the one still-missing mandatory format,
+/// `A2B10G10R10_UNORM_PACK32` -- a packed, sub-byte-per-field layout
+/// `decodeAttribute`'s "N bytes per component" convention does not fit
+/// mechanically, tracked as its own roadmap H8 follow-on row).
 bool isVertexBufferFormatSupported(feme::cpu::ResourceFormat Format);
 
 /// The `VkFormatFeatureFlags` this ICD actually supports for \p Format --

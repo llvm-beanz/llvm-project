@@ -580,6 +580,37 @@ bool feme::vulkan::isVertexBufferFormatSupported(ResourceFormat Format) {
   case ResourceFormat::R8G8B8A8_SNORM:
   case ResourceFormat::R8G8B8A8_UINT:
   case ResourceFormat::R8G8B8A8_SINT:
+  // (Roadmap H8b) The single- and two-channel 8-bit-per-component
+  // families -- same conversion rules as `R8G8B8A8_*` above, just fewer
+  // channels.
+  case ResourceFormat::R8_UNORM:
+  case ResourceFormat::R8_SNORM:
+  case ResourceFormat::R8_UINT:
+  case ResourceFormat::R8_SINT:
+  case ResourceFormat::R8G8_UNORM:
+  case ResourceFormat::R8G8_SNORM:
+  case ResourceFormat::R8G8_UINT:
+  case ResourceFormat::R8G8_SINT:
+  // (Roadmap H8b) The 16-bit-per-component families: `R16_*`, `R16G16_*`,
+  // and `R16G16B16A16_*`, including the `_FLOAT` (binary16) variant --
+  // `decodeAttribute` implements a scalar UNORM/SNORM conversion, a direct
+  // widen for UINT/SINT, and a half->float32 conversion (via
+  // `llvm::APFloat`) for `_FLOAT`.
+  case ResourceFormat::R16_UNORM:
+  case ResourceFormat::R16_SNORM:
+  case ResourceFormat::R16_UINT:
+  case ResourceFormat::R16_SINT:
+  case ResourceFormat::R16_FLOAT:
+  case ResourceFormat::R16G16_UNORM:
+  case ResourceFormat::R16G16_SNORM:
+  case ResourceFormat::R16G16_UINT:
+  case ResourceFormat::R16G16_SINT:
+  case ResourceFormat::R16G16_FLOAT:
+  case ResourceFormat::R16G16B16A16_UNORM:
+  case ResourceFormat::R16G16B16A16_SNORM:
+  case ResourceFormat::R16G16B16A16_UINT:
+  case ResourceFormat::R16G16B16A16_SINT:
+  case ResourceFormat::R16G16B16A16_FLOAT:
     return true;
   default:
     return false;
