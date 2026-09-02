@@ -20529,3 +20529,87 @@ conformance ground truth) and explicitly notes -- unlike H8i's BC1-5 row
 -- that no CTS-vs-spec discrepancy exists for BC7's own interpolation
 formula: a single shared weighted-rounding formula applies identically
 to every mode and channel in both sources.
+
+## Roadmap H8m: measured impact (no CTS delta expected -- decoder-only, unwired)
+
+Implemented `BC6HDecode.h`/`.cpp`, the last of the 16 `VK_FORMAT_BC*`
+formats (BC1-5 landed in H8i, BC7 in H8l), covering all 14 BC6H modes and
+both `VK_FORMAT_BC6H_{U,S}FLOAT_BLOCK` sign conventions. As with H8i/H8l,
+nothing calls the new decoder yet -- `Format.cpp` still has no
+`ResourceFormat` enumerators for either BC6H format, `vkCreateImage`
+still rejects both outright, and `textureCompressionBC` stays
+`VK_FALSE` (unchanged: no consumer exists yet). Two targeted spot checks
+were run to confirm that expectation rather than assume it:
+
+**Real `deqp-vk` re-run, correct ICD confirmed via `vulkaninfo
+--summary` (`deviceName = FeMe CPU Vulkan Device`):**
+- `dEQP-VK.api.info.*` (10,484 cases): 5,367 passed / 584 failed / 4,533
+  not supported -- byte-for-byte identical to H8l's own prior numbers
+  (this row touches no code path this subtree exercises).
+- `dEQP-VK.texture.*bc6h*` (48 cases, the exact BC6H slice of
+  `vktTextureCompressedFormatTests.cpp`'s own whole-family
+  `textureCompressionBC` gate): every case still `NotSupported` (`Format
+  not supported: VK_FORMAT_BC6H_UFLOAT_BLOCK`), gated on
+  `textureCompressionBC` staying `VK_FALSE` -- the honest, expected
+  result: this row's decoder has no consumer yet, and this test group
+  gates on the whole 16-format BC family (now fully decoded across
+  H8i/H8l/this row, but still entirely unwired).
+
+**`ninja check-feme`** (assertions-enabled, ccache build, correct target
+dependencies so `FeMeVulkanTests` rebuilds before the regression suite
+runs): 2365/2392 tests pass (27 pre-existing `Unsupported`, 0 `Failed`),
+up 7 tests (this row's own new `BC6HDecodeTest.cpp` coverage) from
+H8l's own 2358/2385 baseline, 0 regressions.
+
+Unlike BC7, BC6H needed no hand-constructed bit-exact test vectors:
+given the much higher per-mode bit-layout irregularity across BC6H's 14
+modes (several with 15-20+ individual OR'd sub-field extractions each),
+verification instead used an independent, separately-typed Python
+re-transcription of the same `VK-GL-CTS` `decompressBc6H` algorithm,
+fuzz-compared against the compiled C++ decoder over 840 randomly
+generated blocks (all 14 modes x signed/unsigned x 30 trials each) plus
+all 4 reserved/invalid mode-encoding patterns. This cross-check caught a
+genuine bug before any test vector was ever hardcoded: `interpolate`'s
+weight variable was declared `unsigned`, and BC6H's endpoints (unlike
+BC7's always-nonnegative 8-bit fixed-point ones) can be negative --
+mixing the unsigned weight with a signed endpoint in the same expression
+silently promoted the endpoint to a huge unsigned value before the
+multiply, corrupting the interpolated result for every negative
+endpoint. Fixing the weight's declared type to `int` brought all 840
+fuzz trials into exact agreement with the Python oracle. A representative
+7-vector subset of the confirmed-correct fuzz corpus (covering a
+2-subset delta mode, the one 2-subset direct mode, the one 1-subset
+direct mode, a normal 1-subset delta mode, both reversed-bit-field
+modes, and the reserved/invalid-mode case) was then hardcoded as
+`BC6HDecodeTest.cpp`'s own literal test vectors.
+
+`Vulkan14FeatureInventory.md`'s `textureCompressionBC` row gained an
+annotation noting all 16 BC formats are now decoded (BC1-5/H8i,
+BC7/H8l, BC6H/this row) -- the first time the BC family's decoder-side
+work is fully complete, only wiring (new roadmap row H8n) remains. No
+`VulkanExtensionInventory.md` update needed: grepped for any stale BC6H
+reference, found none, since no extension is touched by this row either.
+
+`BC6HDecode.h`'s own file comment documents this decoder's provenance
+(ported directly from `VK-GL-CTS`'s own `tcuCompressedTexture.cpp`
+reference decoder's `decompressBc6H`, both its lookup tables and its
+per-mode bit-layout logic, mirroring H8l's own reasoning for BC7's
+lookup tables but extended here to the per-mode field-extraction code
+itself given BC6H's much higher irregularity) and the one genuinely
+novel bitstream quirk this format's decoder needed that no other
+decoder in this file family has needed before: two modes (12 and 13)
+store a couple of "extra precision" endpoint bits in a deliberately
+bit-reversed field, requiring `getBits128` to grow a second,
+reversed-range extraction mode (BC7's own `getBits128` only ever needed
+the forward-range case).
+
+A small preparatory refactor commit, made before any BC6H-specific code
+was written, factored BC7's own 2-subset-only partition/anchor-index
+tables (`kPartitions2`/`kAnchorSecondSubset2`) out of `BC7Decode.cpp`
+into a new shared `feme::vulkan::bcpartitions` namespace
+(`BCPartitionTables.h`/`.cpp`), since BC6H needs the identical tables
+and has no 3-subset modes of its own (so BC7's own `kPartitions3` and
+its two 3-subset anchor tables correctly stay private to
+`BC7Decode.cpp`). This refactor was verified behavior-preserving by
+rebuilding and re-running `BC7DecodeTest` (5/5 pass, unchanged) before
+any BC6H code was added on top of it.

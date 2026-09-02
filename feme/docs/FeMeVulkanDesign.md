@@ -3306,6 +3306,40 @@ per-subset/anchor-index code directly; wiring the now-complete BC7
 decoder into a real consumer is deferred to a future row alongside
 H8j's own ETC2/EAC wiring and H8i's own BC1-5 wiring.
 
+**Update (roadmap H8m, closed):** a complete BC6H block decoder
+(`feme::vulkan::decodeBC6HBlock`, `BC6HDecode.h`) now exists, covering
+all 14 BC6H modes (2-subset "partitioned" and 1-subset "direct"
+endpoint layouts, per-mode delta-encoded or full-precision endpoints)
+and both `VK_FORMAT_BC6H_{U,S}FLOAT_BLOCK` sign conventions, ported
+directly from `VK-GL-CTS`'s own `decompressBc6H` reference decoder --
+this time both its lookup tables *and* its per-mode bit-layout logic,
+extending H8l's own "CTS is the ground truth for enumerated data"
+reasoning to the per-mode field-extraction code itself, given the size
+and irregularity of BC6H's own 14-mode table versus BC7's 8. A small
+preparatory refactor factored BC7's own 2-subset-only partition/anchor
+tables out of `BC7Decode.cpp` into a new shared
+`bcpartitions::Partitions2`/`AnchorSecondSubset2` (`BCPartitionTables.h`/
+`.cpp`), since BC6H needs the identical tables verbatim and has no
+3-subset modes of its own (BC7's own `kPartitions3` stays private).
+BC6H also needed one genuinely new capability no other decoder in this
+file's own family has needed: two modes (12, 13) store a couple of
+"extra precision" endpoint bits in a deliberately bit-reversed field,
+requiring `getBits128` to grow a reversed-range extraction mode
+alongside its existing forward-range one. Given BC6H's much higher
+per-mode irregularity, verification did not hand-construct bit-exact
+test vectors (as H8l did for BC7) but instead cross-checked an
+independent, separately-typed Python re-transcription of the same CTS
+algorithm against the compiled decoder over 840 randomly generated
+blocks (all 14 modes x signed/unsigned x 30 trials) plus all 4
+reserved/invalid mode patterns -- this caught a genuine
+unsigned/signed-promotion bug in `interpolate` (BC6H's endpoints, unlike
+BC7's, can be negative) before any test vector was hardcoded. **This
+closes the entire BC1-7 decoder family**: all 16 `VK_FORMAT_BC*`
+formats now have a complete, directly-unit-tested decoder (BC1-5/H8i,
+BC7/H8l, BC6H/this row); only the shared wiring step remains, newly
+tracked as roadmap H8n since no BC wiring row existed yet (H8j only
+covers ETC2/EAC's own wiring).
+
 **Update (roadmap E22, closed):** `vkCreateImage` no longer rejects a
 block-compressed `VkFormat`. `Image::blockPointer` addresses one a whole
 block at a time (`texelPointer`, meaningless for one, still asserts
