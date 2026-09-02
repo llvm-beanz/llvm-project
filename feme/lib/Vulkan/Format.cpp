@@ -49,6 +49,21 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::R8G8B8A8_SINT;
   case VK_FORMAT_R8G8B8A8_SRGB:
     return ResourceFormat::R8G8B8A8_UNORM_SRGB;
+  // (Roadmap H8) `VK_FORMAT_A8B8G8R8_*_PACK32`'s own spec definition lays
+  // R in bits 0-7, G in 8-15, B in 16-23, A in 24-31 -- byte-for-byte
+  // identical in linear memory to `R8G8B8A8_*`'s own R/G/B/A byte order
+  // above, so these four packed `VkFormat` enum values map onto the exact
+  // same `ResourceFormat` values with no new decode/pack logic needed.
+  case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+    return ResourceFormat::R8G8B8A8_UNORM;
+  case VK_FORMAT_A8B8G8R8_SNORM_PACK32:
+    return ResourceFormat::R8G8B8A8_SNORM;
+  case VK_FORMAT_A8B8G8R8_UINT_PACK32:
+    return ResourceFormat::R8G8B8A8_UINT;
+  case VK_FORMAT_A8B8G8R8_SINT_PACK32:
+    return ResourceFormat::R8G8B8A8_SINT;
+  case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+    return ResourceFormat::R8G8B8A8_UNORM_SRGB;
   // (Roadmap H19j) The single-channel `R8` mandatory
   // `shaderStorageImageExtendedFormats` formats.
   case VK_FORMAT_R8_UNORM:
@@ -532,6 +547,39 @@ bool feme::vulkan::isTexelBufferFormatSupported(ResourceFormat Format) {
   case ResourceFormat::R32_FLOAT:
   case ResourceFormat::R32_UINT:
   case ResourceFormat::R32_SINT:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool feme::vulkan::isVertexBufferFormatSupported(ResourceFormat Format) {
+  switch (Format) {
+  // (Roadmap H8) The 32-bit-per-component identity formats: `Executor.cpp`'s
+  // `decodeAttribute` reinterprets each component's bytes directly, no
+  // scalar conversion needed.
+  case ResourceFormat::R32_FLOAT:
+  case ResourceFormat::R32G32_FLOAT:
+  case ResourceFormat::R32G32B32_FLOAT:
+  case ResourceFormat::R32G32B32A32_FLOAT:
+  case ResourceFormat::R32_UINT:
+  case ResourceFormat::R32G32_UINT:
+  case ResourceFormat::R32G32B32_UINT:
+  case ResourceFormat::R32G32B32A32_UINT:
+  case ResourceFormat::R32_SINT:
+  case ResourceFormat::R32G32_SINT:
+  case ResourceFormat::R32G32B32_SINT:
+  case ResourceFormat::R32G32B32A32_SINT:
+  // The packed 8-bit-per-component `R8G8B8A8_*` formats `decodeAttribute`
+  // implements a scalar conversion (UNORM/SNORM) or direct widen (UINT/SINT)
+  // for. `_UNORM_SRGB` decodes bit-for-bit like `_UNORM` (vertex fetch never
+  // applies an sRGB->linear conversion, unlike texture sampling), so it is
+  // just as legitimate a vertex attribute format.
+  case ResourceFormat::R8G8B8A8_UNORM:
+  case ResourceFormat::R8G8B8A8_UNORM_SRGB:
+  case ResourceFormat::R8G8B8A8_SNORM:
+  case ResourceFormat::R8G8B8A8_UINT:
+  case ResourceFormat::R8G8B8A8_SINT:
     return true;
   default:
     return false;

@@ -326,6 +326,64 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::ASTC_4x4_SFLOAT));
 }
 
+TEST(FormatTest, VertexBufferFormatSupportMatchesDecodeAttributeScope) {
+  // (Roadmap H8) `Executor.cpp`'s `decodeAttribute` implements exactly
+  // these formats' vertex-attribute decode -- `isVertexBufferFormatSupported`
+  // must report the same set `GraphicsPipeline.cpp`'s
+  // `isSupportedVertexAttributeFormat` (which now forwards here) and
+  // `vkGetPhysicalDeviceFormatProperties`'s own `bufferFeatures` both rely
+  // on.
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R32_FLOAT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R32G32_FLOAT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R32G32B32_FLOAT));
+  EXPECT_TRUE(
+      isVertexBufferFormatSupported(ResourceFormat::R32G32B32A32_FLOAT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R32_UINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R32G32_UINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R32G32B32_UINT));
+  EXPECT_TRUE(
+      isVertexBufferFormatSupported(ResourceFormat::R32G32B32A32_UINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R32_SINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R32G32_SINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R32G32B32_SINT));
+  EXPECT_TRUE(
+      isVertexBufferFormatSupported(ResourceFormat::R32G32B32A32_SINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM));
+  EXPECT_TRUE(
+      isVertexBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM_SRGB));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8B8A8_SNORM));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8B8A8_UINT));
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::R8G8B8A8_SINT));
+
+  // Formats `decodeAttribute` does not implement yet (roadmap H8's own
+  // follow-on rows track adding these): not yet a supported vertex
+  // attribute format, even though some are mandatory per the Vulkan spec.
+  EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::R8_UNORM));
+  EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::R16_UNORM));
+  EXPECT_FALSE(
+      isVertexBufferFormatSupported(ResourceFormat::R16G16B16A16_FLOAT));
+  EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::B8G8R8A8_UNORM));
+  EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::Unknown));
+  EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::ASTC_4x4_UNORM));
+}
+
+TEST(FormatTest, MapsA8B8G8R8Pack32FormatsOntoR8G8B8A8) {
+  // (Roadmap H8) `VK_FORMAT_A8B8G8R8_*_PACK32` is byte-for-byte identical
+  // in memory to `R8G8B8A8_*` (R in byte 0 .. A in byte 3 for both), so
+  // these four packed `VkFormat` enum values -- previously entirely
+  // unmapped -- reuse the exact same `ResourceFormat` value.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A8B8G8R8_UNORM_PACK32),
+            ResourceFormat::R8G8B8A8_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A8B8G8R8_SNORM_PACK32),
+            ResourceFormat::R8G8B8A8_SNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A8B8G8R8_UINT_PACK32),
+            ResourceFormat::R8G8B8A8_UINT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A8B8G8R8_SINT_PACK32),
+            ResourceFormat::R8G8B8A8_SINT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A8B8G8R8_SRGB_PACK32),
+            ResourceFormat::R8G8B8A8_UNORM_SRGB);
+}
+
 TEST(FormatTest, IsBlockCompressedFormatDistinguishesASTC) {
   // Roadmap E20.
   EXPECT_TRUE(

@@ -90,6 +90,22 @@ uint32_t bytesPerBlock(feme::cpu::ResourceFormat Format);
 /// misconverting it.
 bool isTexelBufferFormatSupported(feme::cpu::ResourceFormat Format);
 
+/// Returns whether \p Format may be fetched as a vertex attribute --
+/// `GraphicsPipeline.cpp`'s `vkCreateGraphicsPipelines` validation
+/// (`isSupportedVertexAttributeFormat`, which now just forwards here) and
+/// `vkGetPhysicalDeviceFormatProperties`'s own `bufferFeatures`
+/// (`VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT`, roadmap H8) both gate on this
+/// single answer, so a format this ICD honestly cannot decode as a vertex
+/// attribute is never simultaneously advertised as able to. Mirrors
+/// `isTexelBufferFormatSupported` immediately above: the set of formats
+/// `feme::graphics::decodeAttribute` (Executor.cpp) actually implements a
+/// decode for, not the Vulkan spec's own full mandatory list (see
+/// `Executor.cpp`'s file comment for the additional formats -- the 16-bit
+/// and packed-10-bit families among them -- still needing their own decode
+/// case, a mechanical, on-demand addition roadmap H8's own follow-on rows
+/// track).
+bool isVertexBufferFormatSupported(feme::cpu::ResourceFormat Format);
+
 /// The `VkFormatFeatureFlags` this ICD actually supports for \p Format --
 /// backs `vkGetPhysicalDeviceFormatProperties`/
 /// `vkGetPhysicalDeviceImageFormatProperties` (EntryPoints.cpp, roadmap
