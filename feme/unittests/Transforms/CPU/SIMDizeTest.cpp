@@ -1510,6 +1510,59 @@ TEST(SIMDizeTest, FoldsNumSubgroupsToCompileTimeConstant) {
   EXPECT_TRUE(FoundWideAddUsingConstantThree);
 }
 
+// Roadmap H6o: `llvm.spv.num.workgroups` (SPIR-V's `NumWorkgroups`
+// builtin, the dispatch's own grid size) is uniform for one
+// widened-function call, exactly like `WorkgroupId`/`llvm.spv.group.id` --
+// but, unlike `NumSubgroups` (roadmap H6n), it is a genuine *runtime*
+// dispatch-time value, not a compile-time constant derivable from
+// `hlsl.numthreads`. It therefore substitutes directly for the new
+// `Env.GroupCountX/Y/Z` wave-body parameters (threaded through by
+// `feme::cpu::EntryWrapperPass` from `FemeDispatchArgs::GroupCount`)
+// rather than being widened or folded to a constant, mirroring how
+// `WorkgroupId` substitutes for `Env.GroupIDX/Y/Z`.
+TEST(SIMDizeTest, ReplacesNumWorkgroupsWithGroupCount) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %nwx = call i32 @llvm.spv.num.workgroups(i32 0)
+      %tid = call i32 @llvm.spv.flattened.thread.id.in.group()
+      %sum = add i32 %tid, %nwx
+      ret void
+    }
+    declare i32 @llvm.spv.num.workgroups(i32)
+    declare i32 @llvm.spv.flattened.thread.id.in.group()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  std::optional<WaveBodyEnv> Env = getWaveBodyEnv(*F);
+  ASSERT_TRUE(Env);
+  bool FoundNumWorkgroupsCall = false;
+  bool FoundWideAddUsingGroupCountX = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getIntrinsicID() == Intrinsic::spv_num_workgroups)
+          FoundNumWorkgroupsCall = true;
+    if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
+      if (BO->getOpcode() == Instruction::Add && BO->getType()->isVectorTy()) {
+        for (Value *Op : BO->operands())
+          if (auto *SV = dyn_cast<ShuffleVectorInst>(Op))
+            if (auto *IE = dyn_cast<InsertElementInst>(SV->getOperand(0)))
+              if (IE->getOperand(1) == Env->GroupCountX)
+                FoundWideAddUsingGroupCountX = true;
+      }
+    }
+  }
+  EXPECT_FALSE(FoundNumWorkgroupsCall);
+  EXPECT_TRUE(FoundWideAddUsingGroupCountX);
+}
+
 // Roadmap H6n: a divergently-indexed `store` of a whole *vector*-typed
 // value previously crashed (an `llvm::FixedVectorType::get` assertion
 // failure trying to build an illegal `<4 x <4 x float>>` nested vector)

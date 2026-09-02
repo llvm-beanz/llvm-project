@@ -124,6 +124,12 @@ std::optional<WaveBodyEnv> getWaveBodyEnv(Function &F) {
       Env.GroupIDY = &Arg, Found = true;
     else if (Arg.getName() == "wave_group_id_z")
       Env.GroupIDZ = &Arg, Found = true;
+    else if (Arg.getName() == "wave_group_count_x")
+      Env.GroupCountX = &Arg, Found = true;
+    else if (Arg.getName() == "wave_group_count_y")
+      Env.GroupCountY = &Arg, Found = true;
+    else if (Arg.getName() == "wave_group_count_z")
+      Env.GroupCountZ = &Arg, Found = true;
     else if (Arg.getName() == "wave_index")
       Env.WaveIndex = &Arg, Found = true;
     else if (Arg.getName() == "wave_entry_mask")
@@ -295,6 +301,27 @@ std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
 
 bool isGroupIdCall(Intrinsic::ID ID) {
   return ID == Intrinsic::dx_group_id || ID == Intrinsic::spv_group_id;
+}
+
+/// `NumWorkgroups` (`llvm.spv.num.workgroups`, the dispatch's own grid
+/// size -- `vkCmdDrawMeshTasksEXT`'s `groupCountX/Y/Z`, or `vkCmdDispatch`'s
+/// own dimensions) -- roadmap H6o, found by the same full CTS re-run that
+/// found H6n's `SubgroupId`/`NumSubgroups` gap. Uniform for this widened
+/// function, exactly like `WorkgroupId`/`isGroupIdCall` above (the *same*
+/// value for every group in the dispatch) -- but, unlike `NumSubgroups`
+/// (H6n), it is a genuine *runtime* dispatch-time value, not a compile-time
+/// constant derivable from `hlsl.numthreads`: a mesh dispatch's own group
+/// count is supplied by the caller's `vkCmdDrawMeshTasksEXT` arguments (see
+/// the CTS case name this gap was found in, `many_mesh_work_groups_x`,
+/// which varies it directly), not fixed by the shader's own execution mode.
+/// So, like `GroupIDX/Y/Z`, it must be threaded through the wave-body
+/// interface as a genuine parameter (`Env.GroupCountX/Y/Z`, sourced from
+/// `FemeDispatchArgs::GroupCount` by `feme::cpu::EntryWrapperPass`) rather
+/// than folded away, and is handled inline exactly like `isGroupIdCall`/
+/// `replaceGroupIdCall`, not deferred to a `BuiltinCallKind`/`WaveCallKind`
+/// for the same reason `SubgroupId` was not.
+bool isNumWorkgroupsCall(Intrinsic::ID ID) {
+  return ID == Intrinsic::spv_num_workgroups;
 }
 
 /// `SubgroupId` (`llvm.spv.subgroup.id`, "which subgroup [wave] this
@@ -660,6 +687,7 @@ private:
   void widenMaskedSetMeshOutputs(CallInst &CI, IRBuilder<> &Builder);
   void widenReturnMasks(CallInst &CI, IRBuilder<> &Builder);
   void replaceGroupIdCall(CallInst &CI);
+  void replaceNumWorkgroupsCall(CallInst &CI);
   void replaceSubgroupIdCall(CallInst &CI);
   void replaceNumSubgroupsCall(CallInst &CI);
   void widenResourceCall(CallInst &CI, const MatchedResourceCall &Matched,
@@ -1132,7 +1160,8 @@ Function *FunctionWidener::buildWidenedFunction() {
   Type *MaskTy = FixedVectorType::get(Type::getInt1Ty(Ctx), WaveSize);
 
   SmallVector<Type *, 8> ParamTypes(OldF->getFunctionType()->params());
-  ParamTypes.append({I32Ty, I32Ty, I32Ty, I32Ty, MaskTy, MaskTy, PtrTy});
+  ParamTypes.append(
+      {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, MaskTy, MaskTy, PtrTy});
 
   FunctionType *NewTy = FunctionType::get(OldF->getReturnType(), ParamTypes,
                                           OldF->getFunctionType()->isVarArg());
@@ -1159,6 +1188,12 @@ Function *FunctionWidener::buildWidenedFunction() {
   Env.GroupIDY->setName("wave_group_id_y");
   Env.GroupIDZ = &*ArgIt++;
   Env.GroupIDZ->setName("wave_group_id_z");
+  Env.GroupCountX = &*ArgIt++;
+  Env.GroupCountX->setName("wave_group_count_x");
+  Env.GroupCountY = &*ArgIt++;
+  Env.GroupCountY->setName("wave_group_count_y");
+  Env.GroupCountZ = &*ArgIt++;
+  Env.GroupCountZ->setName("wave_group_count_z");
   Env.WaveIndex = &*ArgIt++;
   Env.WaveIndex->setName("wave_index");
   Env.EntryMask = &*ArgIt++;
@@ -1566,6 +1601,21 @@ void FunctionWidener::replaceGroupIdCall(CallInst &CI) {
   Value *Replacement = Component == 0   ? Env.GroupIDX
                        : Component == 1 ? Env.GroupIDY
                                         : Env.GroupIDZ;
+  CI.replaceAllUsesWith(Replacement);
+  ToErase.push_back(&CI);
+}
+
+// Roadmap H6o: `NumWorkgroups` is uniform for this widened function, like
+// `WorkgroupId`, but a genuine runtime dispatch-time value rather than a
+// compile-time constant -- see `isNumWorkgroupsCall`'s comment -- so it
+// substitutes directly for `Env.GroupCountX/Y/Z`, threaded through the
+// wave-body interface exactly like `Env.GroupIDX/Y/Z` above.
+void FunctionWidener::replaceNumWorkgroupsCall(CallInst &CI) {
+  unsigned Component = static_cast<unsigned>(
+      cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue());
+  Value *Replacement = Component == 0   ? Env.GroupCountX
+                       : Component == 1 ? Env.GroupCountY
+                                        : Env.GroupCountZ;
   CI.replaceAllUsesWith(Replacement);
   ToErase.push_back(&CI);
 }
@@ -2872,6 +2922,10 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
                            : Intrinsic::not_intrinsic;
     if (isGroupIdCall(ID)) {
       replaceGroupIdCall(*CI);
+      return true;
+    }
+    if (isNumWorkgroupsCall(ID)) {
+      replaceNumWorkgroupsCall(*CI);
       return true;
     }
     if (isSubgroupIdCall(ID)) {

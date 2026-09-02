@@ -46,6 +46,17 @@ struct WaveBodyEnv {
   llvm::Value *GroupIDX = nullptr;
   llvm::Value *GroupIDY = nullptr;
   llvm::Value *GroupIDZ = nullptr;
+  /// This dispatch's own group-count triple (`FemeDispatchArgs::GroupCount`,
+  /// `vkCmdDrawMeshTasksEXT`'s `groupCountX/Y/Z` or `vkCmdDispatch`'s own
+  /// dimensions) -- unlike `GroupIDX/Y/Z`, the *same* value for every group
+  /// in the dispatch, but, unlike `WorkgroupSize`/`hlsl.numthreads`, only
+  /// known at dispatch time, not compile time, so it must be threaded
+  /// through as a runtime value rather than folded to a constant (roadmap
+  /// H6o; source of SPIR-V's `NumWorkgroups` builtin, see `isNumWorkgroups
+  /// Call`).
+  llvm::Value *GroupCountX = nullptr;
+  llvm::Value *GroupCountY = nullptr;
+  llvm::Value *GroupCountZ = nullptr;
   llvm::Value *WaveIndex = nullptr;
   /// `<W x i1>`: which lanes of this wave are active/live (see "Mask
   /// representation between phases" in feme/docs/FeMeCPUDesign.md).
