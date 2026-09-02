@@ -37,23 +37,17 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H6r or other prerequisites blocking the H-series milestones?
+Can you work on H8 or other prerequisites blocking the H-series milestones?
 
-> **`dEQP-VK.mesh_shader.ext.api.draw.*`'s own
-> `no_task_shader`/`no_task_shader_secondary_cmd` direct-draw variants with
-> `draw_count > 0` (44 of the 540-case `dEQP-VK.mesh_shader.ext.api.*` group,
-> found re-running H6p's own fix) now reach rendering (no crash, no
-> pipeline-creation failure) but fail a pixel comparison** -- `draw_count_0`
-> (nothing drawn) already `Pass`es, and the *task*-stage-driven equivalents
-> already fail earlier at H6q's own `vkCreateGraphicsPipelines` gap rather than
-> reaching rendering at all, so this is specifically the "one or more direct
-> `vkCmdDrawMeshTasksEXT` calls, no task shader" shape's own
-> rendering-correctness gap -- not yet triaged for root cause (could be
-> `gl_DrawID`-adjacent, since these are exactly the cases this milestone's row's
-> own fix newly unblocked, or could be a preexisting, unrelated "multiple direct
-> mesh draws in one render pass" gap this group is simply the first to exercise;
-> needs its own reduction to tell which). Squarely inside this milestone's own
-> existing "bounded payload/output limits reported truthfully"
-> rendering-correctness scope, mirroring H6m/H6n/H6o/H6p's own precedent of
-> tracking an in-scope rendering `Fail` as its own row rather than silently
-> absorbing it into a CPU-lowering fix's own row
+> **Format table completeness for the graphics profile.** Roadmap C1/E24/E25
+> grew `vkGetPhysicalDeviceFormatProperties`/`ImageFormatProperties` from a stub
+> to real per-format support, but the advertised set is still far short of
+> Vulkan's mandatory format table for a graphics-capable device (BC/ETC2
+> compressed sampling, the full vertex-buffer format list, the mandatory
+> blit/filter bits, multisample capability per format). This is the graphics
+> analogue of C1 and, like C1, it unblocks whole Amber-based groups rather than
+> single cases. Confirmed by roadmap H6g-a's own triage to also own the 68
+> `vkCreateRenderPass`/1 `vkGetPhysicalDeviceImageFormatProperties` ->
+> `VK_ERROR_FORMAT_NOT_SUPPORTED` failures `dEQP-VK.mesh_shader.*` measures --
+> nothing mesh-shading-specific about them, just this row's own already-tracked
+> format-table gap reached by a new CTS group
