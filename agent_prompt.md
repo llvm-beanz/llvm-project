@@ -37,19 +37,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8m or other prerequisites blocking the H-series milestones?
+Can you work on H8n or other prerequisites blocking the H-series milestones?
 
-> **BC6H compressed-format sampling** (split from H8k's own scoping pass;
-> attempt after H8l/BC7, reusing its partition-table and per-subset
-> index-assignment machinery -- now available in
-> `feme/lib/Vulkan/BC7Decode.cpp`'s `kPartitions2`/`kPartitions3`/anchor tables
-> following H8l's own closure). Needs a new `BC6HDecode.h`/`.cpp` implementing
-> BC6H's 14 mode shapes per `bptc.txt`: like BC7, 1-2 subsets with
-> partition-selection bits and an anchor-index convention, but replacing BC7's
-> 8-bit fixed-point RGBA endpoints with signed-or-unsigned (per
-> `VK_FORMAT_BC6H_{S,U}FLOAT_BLOCK`) 10-16-bit quantized endpoints needing
-> per-mode unquantization and either a "direct" (both endpoints stored in full)
-> or "delta" (second endpoint stored as a small signed offset from the first,
-> per-mode bit width) transform before RGB->half-float reconstruction -- the
-> extra step beyond BC7 that makes this row strictly more work and worth
-> attempting second
+> **Wire the now-complete BC1-7 decoders (`BCDecode.h`, `BC7Decode.h`,
+> `BC6HDecode.h`) into a real consumer and flip `textureCompressionBC`.**
+> H8i/H8l/H8m together landed complete, directly-unit-tested decoders for all 16
+> `VK_FORMAT_BC*` formats, but nothing calls any of them yet -- `Format.cpp` has
+> no `ResourceFormat` enumerators for any BC format, `mapVkFormat` has no cases
+> for them, and `vkCreateImage` still rejects every one outright. Needs the same
+> wiring shape roadmap E22 gave `ASTCDecode.h` and H8j is expected to give
+> `ETC2Decode.h`: `Format.{h,cpp}` block-aware layout entries,
+> `CommandBuffer.cpp`/`ImageOps.cpp` decode-on-sample-or-copy plumbing, and
+> `PhysicalDeviceInfo.cpp`'s `textureCompressionBC` bit, only flipped once a
+> real `dEQP-VK.texture.compressed_format.*` BC1/BC7/BC6H case is confirmed
+> passing end to end (`vktTextureCompressedFormatTests.cpp`'s own whole-family
+> gate means partial wiring of just one BC sub-family will not move any CTS case
+> by itself -- all three decoders' own wiring needs to land together, or at
+> least BC1-5's own wiring alone needs to be enough to flip the bit before
+> BC7/BC6H's own wiring follows)
