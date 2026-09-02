@@ -351,30 +351,15 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
 }
 
 /// Whether \p Format may be fetched as a vertex attribute: the subset
-/// `feme::graphics`' own `decodeAttribute` (Executor.cpp) implements.
+/// `feme::graphics`' own `decodeAttribute` (Executor.cpp) implements. Just
+/// forwards to `Format.h`'s `isVertexBufferFormatSupported` (roadmap H8),
+/// which is the single source of truth this same format set now also backs
+/// `vkGetPhysicalDeviceFormatProperties`'s own
+/// `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` advertisement with -- previously
+/// this function duplicated that list on its own, with nothing keeping the
+/// two in sync.
 bool isSupportedVertexAttributeFormat(feme::cpu::ResourceFormat Format) {
-  switch (Format) {
-  case feme::cpu::ResourceFormat::R32_FLOAT:
-  case feme::cpu::ResourceFormat::R32G32_FLOAT:
-  case feme::cpu::ResourceFormat::R32G32B32_FLOAT:
-  case feme::cpu::ResourceFormat::R32G32B32A32_FLOAT:
-  case feme::cpu::ResourceFormat::R32_UINT:
-  case feme::cpu::ResourceFormat::R32G32_UINT:
-  case feme::cpu::ResourceFormat::R32G32B32_UINT:
-  case feme::cpu::ResourceFormat::R32G32B32A32_UINT:
-  case feme::cpu::ResourceFormat::R32_SINT:
-  case feme::cpu::ResourceFormat::R32G32_SINT:
-  case feme::cpu::ResourceFormat::R32G32B32_SINT:
-  case feme::cpu::ResourceFormat::R32G32B32A32_SINT:
-  case feme::cpu::ResourceFormat::R8G8B8A8_UNORM:
-  case feme::cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB:
-  case feme::cpu::ResourceFormat::R8G8B8A8_SNORM:
-  case feme::cpu::ResourceFormat::R8G8B8A8_UINT:
-  case feme::cpu::ResourceFormat::R8G8B8A8_SINT:
-    return true;
-  default:
-    return false;
-  }
+  return isVertexBufferFormatSupported(Format);
 }
 
 /// (roadmap H6f) Validates \p StageInfo's own declared group size (its
