@@ -20946,3 +20946,51 @@ No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
 row -- confirmed, not assumed: this row only widens two per-format
 `VkFormatFeatureFlags` predicates. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update.
+
+## Roadmap H8e: measured impact
+
+A real `dEQP-VK.api.info.format_properties.*` re-run (225 cases)
+under H8d's own post-fix baseline (190/225) triaged the 9 named
+formats down to their exact missing bits:
+
+- `r16_{sint,uint}`, `r16g16_{sint,uint}`, `a2b10g10r10_uint_pack32`,
+  `a8b8g8r8_{uint,sint}_pack32`: each missing only
+  `COLOR_ATTACHMENT_BIT`. Genuine gap, not reporting-only --
+  `Executor.cpp`'s `executeDraws` hard-rejects any fragment output
+  whose `ComponentType != Float` outright, regardless of the
+  attachment's own format, so no integer-typed fragment output can be
+  drawn at all today. Split off to new row H8p; not touched this row.
+- `e5b9g9r9_ufloat_pack32`: missing *every* required bit -- confirmed
+  via `mapVkFormat`/the `ResourceFormat` enum that this `VkFormat` is
+  entirely unrecognized, not merely under-advertised. Split off to new
+  row H8q; not touched this row.
+- `d16_unorm`: missing only `SAMPLED_IMAGE_BIT`. Reporting-only --
+  `femeRTFetchTexel2D` already decodes `D16_UNORM` via roadmap F8b's
+  own case, `formatFeatureFlags` just never advertised it. **Fixed
+  this row.**
+- `a1r5g5b5_unorm_pack16`, `b4g4r4a4_unorm_pack16`: each missing
+  `SAMPLED_IMAGE_BIT | SAMPLED_IMAGE_FILTER_LINEAR_BIT`. Genuine gap
+  -- roadmap H7r's own comment already documented both as real,
+  `packClearColor`/`unpackColor`-backed color-attachment formats not
+  yet backed by a runtime sampling case. **Fixed this row**: added
+  `femeRTUnpackB4G4R4A4Unorm`/`femeRTUnpackA1R5G5B5Unorm`
+  (`FeMeRuntimeCPU.c`, mirroring `femeRTUnpackA1B5G5R5Unorm`'s
+  existing precedent) and wired both into the element-size/unpack-
+  texel switches, then advertised the two bits in `Format.cpp`.
+
+A real `dEQP-VK.api.info.format_properties.*` re-run after the fix:
+193/225 pass, up from 190/225 -- exactly the 3 targeted formats
+(`d16_unorm`, `a1r5g5b5_unorm_pack16`, `b4g4r4a4_unorm_pack16`), zero
+regressions. A broader `dEQP-VK.api.info.*` sweep (10,484 cases) shows
+no new failures introduced by this row's own changes.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full:
+2,397/2,424 Total Discovered Tests (27 pre-existing `Unsupported`,
+0 `Failed`, up 2 tests from this row's own new
+`LoadFetchesB4G4R4A4Unorm`/`LoadFetchesA1R5G5B5Unorm` coverage).
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+row -- confirmed, not assumed: this row only widens
+`VkFormatFeatureFlags` for 3 already-recognized formats.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
