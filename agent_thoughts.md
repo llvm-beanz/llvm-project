@@ -54673,3 +54673,130 @@ a good example of why building the whole tree (not just the touched
 library) before calling a change done matters; `ninja check-feme`'s own
 targeted test run wouldn't have caught a warning in an untested tool
 binary on its own.
+
+# H8o: widening ImageOps.cpp's blit-source support to BC4/BC5/BC6H, then flipping textureCompressionBC
+
+H8n left `textureCompressionBC` at `VK_FALSE` despite having wired all
+16 BC formats for sampling: a real `deqp-vk` trial found the mandatory
+`dEQP-VK.api.info.format_properties.compressed_formats` check requires
+`VK_FORMAT_FEATURE_BLIT_SRC_BIT` on *all* 16 BC formats once the bit
+reads `VK_TRUE`, but `ImageOps.cpp`'s `runBlitImage` only supported the
+RGBA8-shaped BC1/BC2/BC3/BC7 subset. My job this session was to close
+that specific gap.
+
+## Scoping the actual blockers
+
+I started by re-reading `runBlitImage` and `feme::graphics::unpackColor`/
+`packClearColor` (`ImageFixture.cpp`) rather than assuming the fix was
+"just add BC4/BC5/BC6H cases somewhere." Three distinct problems
+turned out to be tangled together:
+
+1. `unpackColor`'s generic per-component fallback path requires its
+   output array size to exactly equal the format's declared component
+   count. BC4's sampling-bridge target is `R8_UNORM` (1 component) and
+   BC5's is `R8G8_UNORM` (2 components), but the blit pipeline always
+   works with a 4-component RGBA buffer. This needed dedicated cases,
+   not a generic-path fix -- I mirrored `A8_UNORM`'s existing
+   "missing channel reads as its identity value" precedent, just
+   anchored at logical red (index 0) instead of alpha (index 3), since
+   R8/R8G8 are colour channels, not an alpha channel.
+
+2. While reading the generic float path to understand how a 4-byte
+   `float` component would be produced for a 2-byte target, I found a
+   real, unrelated, pre-existing bug: it did
+   `memcpy(dst, &F, ComponentBytes)` where `F` is a full 4-byte
+   `float` and `ComponentBytes` is 2 for a half float. That's not a
+   conversion, it's a truncation -- it copies the first 2 bytes of the
+   float's *own* bit pattern, which bears no resemblance to a real
+   half-float encoding of the same value. This must have been silently
+   wrong for `R16G16B16A16_FLOAT` (BC6H's own sampling-bridge target)
+   the whole time nothing exercised it end-to-end. I fixed this with a
+   real `llvm::APFloat`-based `IEEEhalf()`/`IEEEsingle()` conversion,
+   reimplementing the same technique `Executor.cpp`'s private
+   `halfBitsToFloat` already uses (that copy is file-local, so I
+   didn't try to share it across files -- consistent with this
+   project's existing pattern of small, independently-testable
+   per-file helpers rather than premature cross-file abstraction).
+   I added a dedicated regression test for this
+   (`RoundTripsR16G16B16A16FloatThroughPackUnpack`) covering both a
+   non-exactly-representable fraction and the format's max finite
+   magnitude, specifically so a future refactor can't silently
+   reintroduce the truncation bug.
+
+3. `runBlitImage` itself hard-coded a 4-byte decode-buffer stride and
+   always routed the decoded texel through `unpackColor` targeting
+   `R8G8B8A8_UNORM`. Once (1) and (2) were fixed, this became a
+   mechanical widening: compute `bcSamplingTarget(Src->format())`,
+   size the decode buffer by that target's own byte width instead of a
+   hard-coded 4, and pass that target (not always RGBA8) into
+   `unpackColor`.
+
+I also widened `Format.cpp`'s `formatFeatureFlags` so `BLIT_SRC_BIT`
+is granted based on `isBCFormat()` (all 16) rather than
+`isBCRGBA8Format()` (the RGBA8-shaped subset) -- this is the actual
+bit CTS's mandatory-format-table check reads, so the code-level fix
+and the advertised capability needed to move together.
+
+## A nice-to-have discovered along the way
+
+While in `ImageFixture.cpp` I noticed `formatFixtureName`'s
+diagnostic-name switch had never been updated when H8n appended 16 new
+BC `ResourceFormat` enumerators -- a `-Wswitch` warning I'd have missed
+if I'd only rebuilt the specific library I was touching rather than the
+whole tree. Fixed it as part of the same commit since it's tightly
+coupled (same enum, same file) rather than spinning it out separately.
+
+## Testing strategy for the new blit paths
+
+For BC4/BC5, I deliberately built test blocks with all index bits left
+at their default zero value -- per `BCDecodeTest.cpp`'s own documented
+tables, this makes every texel in a sub-block decode to that
+sub-block's own `endpoint0`, which meant I didn't need to hand-pack
+3-bit index fields to get a predictable, easily-verified uniform
+output. For BC6H, hand-constructing a *new* valid bit pattern felt like
+overkill given how mode-dependent BC6H's encoding is -- instead I
+reused `BC6HDecodeTest.Mode10OneSubsetDirectUnsigned`'s exact 16-byte
+block (the project's only known-good BC6H pattern) and computed the
+expected clamped RGBA8 output with a one-off Python/`numpy.float16`
+script, then verified the computed values matched the actual test
+output before trusting them.
+
+## Verifying the flip and deciding to keep it
+
+Before touching `PhysicalDeviceInfo.cpp` for real, I did a *temporary*
+experimental flip (clearly marked, backed up, never committed) purely
+to re-run the CTS mandatory-format-table check and confirm the fix
+actually worked before committing to the flip. `compressed_formats`
+went from `Fail` to `Pass`. I then ran the full
+`dEQP-VK.api.info.*` sweep with the flag on: 5,271 passed/680
+failed/4,533 not-supported, versus H8n's own flag-off baseline of
+5,367/584/4,533 -- a net +96 fail / -96 not-supported, and I confirmed
+those 96 are *all* the same pre-existing `image_format_properties.*.bc*`
+gap category already documented and accepted for ASTC (roadmap
+E24/E25's precedent: recognizing a format trades a stub
+`NotSupported` for an honest `Fail`, this is a genuine improvement in
+accuracy even though it moves a case out of the "green" bucket). No
+*new* kind of failure appeared. That was the signal to make the flip
+permanent rather than revert it: I replaced the temporary edit with a
+real one (new explanatory comment, no more "TEMP TEST"), updated
+`PhysicalDeviceInfoTest.cpp`'s aggregate advertisement test plus added
+a dedicated `TextureCompressionBCIsAdvertised` regression test
+mirroring the existing ASTC LDR one, rebuilt, and reran both
+`FeMeVulkanTests` (549/549 passed) and the full `check-feme` suite
+(2,379/2,406, 27 pre-existing `Unsupported`, 0 `Failed`).
+
+## Documentation
+
+Struck through H8o on the roadmap (fully closed -- no follow-on row
+needed), appended a new "Roadmap H8o: measured impact" section to
+`VulkanCTSReport.md` mirroring H8n's own section style, and flipped
+`Vulkan14FeatureInventory.md`'s `textureCompressionBC` row to `yes`.
+Confirmed no `VulkanExtensionInventory.md` or `FeMeVulkanDesign.md`
+update was needed -- BC formats are core Vulkan 1.0, and nothing in
+this row's own implementation deviated from the design document's
+existing description of the blit/sampling pipeline.
+
+Three small commits this session: (1) the half-float fix + R8/R8G8
+clear-color cases + fixture-name switch fix, (2) the `ImageOps.cpp`/
+`Format.cpp` blit-source widening, (3) the `textureCompressionBC` flip
+itself -- plus this docs bundle and this thoughts entry.
