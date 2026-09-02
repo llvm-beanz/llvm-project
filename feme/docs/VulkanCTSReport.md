@@ -13811,6 +13811,149 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader'
 ```
 
+## Roadmap H6u: measured impact (push-constant `RootConstantMinOffset`)
+
+**Root cause.** The CTS's own `vktMeshShaderApiTestsEXT.cpp`
+(`PushConstantData::getRanges`) shares one 20-byte push-constant struct
+across the mesh and task stages of a `with_task_shader` variant: a
+mesh-visible range `[0,12)` and a task-visible range `[12,20)`
+(`offsetTask = offsetof(PushConstantData, one) = 12`), with the task
+stage's own GLSL push-constant block declared using explicit
+`layout(offset=12)`/`layout(offset=16)` annotations for its two
+members. This means the task stage's own SPIR-V module only ever
+accesses bytes `[12,20)` of the shared struct -- never `[0,12)`, the
+mesh-only portion.
+
+`feme/lib/Transforms/CPU/SPIRVPushConstantLowering.cpp`'s
+`lowerSPIRVPushConstantAccess` tracked only the *highest* byte any
+load reads (`MaxAccessedByte`, reported as `RootConstantSize`), never
+the *lowest* -- so a stage accessing only `[12,20)` was indistinguishable
+from one accessing `[0,20)`. `feme/lib/Vulkan/Pipeline.cpp`'s
+`pushConstantsCoverRootConstantSize` (used by `GraphicsPipeline.cpp`'s
+per-stage checks) always validated that a stage-visible
+`VkPushConstantRange` covers the *entire* `[0, RootConstantSize)` span
+-- for the task stage this wrongly demanded `[0,20)` be TASK-visible,
+but the pipeline layout's own task range only covers `[12,20)`, so the
+check failed even though the task shader never reads bytes `[0,12)` at
+all. This is a genuine "check too strict" bug in this project's own
+reflection/validation layer, not a CTS-side gap and not a compiler-IR
+bug -- the same architectural family as H6q's earlier "assumes a
+struct's own layout always starts at byte 0" bug, but at the
+push-constant-*size-reflection* layer rather than the
+SPIR-V-to-LLVM struct-conversion layer.
+
+**The fix.** A new `RootConstantMinOffset` field is threaded alongside
+the existing `RootConstantSize` through the entire push-constant
+reflection pipeline:
+
+- `lowerSPIRVPushConstantAccess` now returns a
+  `PushConstantAccessSpan{MinOffset, MaxOffset}` instead of a bare
+  `uint32_t`, tracking both ends of the accessed byte range.
+- `ResourceInfo`/`StageArtifactInfo` gain a `RootConstantMinOffset`
+  field (`ArtifactAbiVersion` bumped 5->6), and all three producers of
+  the shared `!feme.cpu.resources` metadata node
+  (`SPIRVPushConstantLowering.cpp`'s own `run()`,
+  `SPIRVResourceLowering.cpp`'s combined bound-resource-plus-push-constant
+  case, and `ResourceLowering.cpp`/`RootConstantLowering.cpp`'s DXIL
+  root-constant paths) now emit it -- always `0` for DXIL, since a
+  register-bound root constant's own view always starts at byte 0.
+- `pushConstantsCoverRootConstantSize` (`Pipeline.h`/`.cpp`) takes a
+  new `RootConstantMinOffset` parameter and checks coverage only over
+  `[RootConstantMinOffset, RootConstantSize)`; all 7 per-stage call
+  sites in `GraphicsPipeline.cpp` and the one compute-pipeline call
+  site in `Pipeline.cpp` pass each stage's own
+  `ResourceInfo::RootConstantMinOffset`.
+
+The runtime `RootConstants` GEP/bounds-check logic needed **no
+change**: `CommandBuffer.cpp` confirms the runtime pointer always
+points at the push-constant buffer's absolute byte 0 regardless of
+stage, snapshotted fresh at each dispatch/draw -- so this is a pure
+reflection/validation-time fix, with zero runtime-correctness risk.
+
+**Testing.** `ResourceInfoTest.cpp` gains
+`FromModuleReadsRootConstantMinOffset` (plus updated existing
+metadata-literal/round-trip/`ArtifactAbiVersionIsSix` tests for the new
+6-operand metadata shape and ABI version); `ResourceLoweringTest.cpp`'s
+`RecordsStaticHeapIndexMetadata` is updated for the new operand; a new
+lit `CHECK` in `spirv-push-constant-lowering.ll`
+(`reads_only_second_member`) and an updated expectation in
+`spirv-push-constant-lowering-padded-tail.ll` cover the compiler-pass
+level directly; and a new `PipelineTest.cpp` unit test,
+`PushConstantsCoverRootConstantSizeHonorsMinOffset`, directly exercises
+the fixed coverage logic against the CTS's own shared-block shape (a
+range covering only `[12,20)` is rejected against `RootConstantMinOffset
+== 0` but accepted against `RootConstantMinOffset == 12`, and a
+range missing even one byte of `[RootConstantMinOffset,
+RootConstantSize)` is still correctly rejected -- the fix narrows
+*which* bytes must be covered, it does not weaken the byte-exact
+coverage check itself).
+
+```
+$ ninja check-feme
+...
+Total Discovered Tests: 2352
+  Unsupported:   27 (1.15%)
+  Passed     : 2325 (98.85%)
+  Failed     :    0 (0.00%)
+```
+
+A real `deqp-vk` re-run of the originally-failing case:
+
+```
+Test case 'dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader'..
+  Pass (Pass)
+```
+
+The full 298-case `with_task_shader`/`with_task_shader_secondary_cmd`
+subset of `dEQP-VK.mesh_shader.ext.api.*`:
+
+```
+Test run totals:
+  Passed:        218/298 (73.2%)
+  Failed:        0/298 (0.0%)
+  Not supported: 80/298 (26.8%)
+```
+
+(The 80 `NotSupported` are all `VK_KHR_device_address_commands`, an
+unrelated, not-yet-implemented extension -- not a H6u regression.)
+
+The full 540-case `dEQP-VK.mesh_shader.ext.api.*` group:
+
+```
+Test run totals:
+  Passed:        436/540 (80.7%)
+  Failed:        0/540 (0.0%)
+  Not supported: 104/540 (19.3%)
+```
+
+Up from H6t's own recorded 14/540 `Pass`, 102/540 `Fail` -- every
+`with_task_shader` case that was blocked purely on this pipeline-layout
+gap now passes. A broader `dEQP-VK.mesh_shader.*` re-run (2003 cases)
+shows no new crash or regression: one pre-existing, unrelated
+single-pixel-comparison `Fail` in a deliberately-malformed
+`dEQP-VK.mesh_shader.ext.misc.emit_in_control_flow_bad_emit_last` edge
+case, left untracked as its own row per H6m/H6n/H6o/H6p's own
+established precedent of not chasing every in-scope rendering `Fail`
+individually.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure compiler-internal/validation-level reflection
+fix, touching no feature bit or extension.
+
+**Roadmap H6u closes.** The push-constant-range pipeline-layout
+coverage check now correctly honors a stage's own reflected minimum
+accessed byte offset. **Milestone H6 does not yet close**: the
+still-open H6r (a rendering-correctness gap for direct multi-draw mesh
+dispatches) remains.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader'
+```
+
 ## Roadmap H6c-a: closed by its own split
 
 Re-checking H6c-a's own literal ask now that its three named

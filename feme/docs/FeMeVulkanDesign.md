@@ -1248,6 +1248,54 @@ fix to re-derive its `WaveBodyEnv` against the freshly-spliced function
 previously-captured `Argument*` pointers -- mirroring
 `MeshOutputWrapperPass::run`'s own precedent for the identical hazard.
 
+Roadmap H6u: a real `deqp-vk` re-run of a `with_task_shader` case, once
+H6s/H6t no longer blocked it, surfaced a `vkCreateGraphicsPipelines`
+rejection ("a stage's root-constant span is not fully covered by a
+`VkPushConstantRange` visible to it in its `VkPipelineLayout`") in a
+completely different subsystem: `GraphicsPipeline.cpp`/`Pipeline.cpp`'s
+own push-constant-range pipeline-layout coverage check. Root-caused via
+the CTS's own source: a `with_task_shader` case shares one push-constant
+struct across the mesh and task stages, with the task stage's own GLSL
+block declared using a nonzero leading `layout(offset=N)` -- a real,
+legal SPIR-V shape whenever multiple stages share one push-constant
+block, each reading only its own, increasing-offset portion. This
+project's own push-constant reflection tracked only the *highest*
+accessed byte (`RootConstantSize`), never the *lowest* -- so a stage
+accessing only bytes `[12,20)` of a shared 20-byte block was
+indistinguishable, at reflection time, from one accessing all of
+`[0,20)` -- and the pipeline-layout coverage check always demanded the
+*entire* `[0, RootConstantSize)` span be covered by a stage-visible
+range, rejecting the task stage's own perfectly correct
+`[12,20)`-only-covering range for leaving mesh-only bytes `[0,12)`
+"uncovered", even though the task shader never reads them. This is the
+same architectural family of bug as H6q's earlier "assumes a struct's
+own layout always starts at byte 0" gap, but at the
+push-constant-*size-reflection* layer rather than the
+SPIR-V-to-LLVM struct-conversion layer -- and, unlike H6q, a pure
+validation-time fix with zero runtime-correctness implications (the
+runtime `RootConstants` pointer, per `CommandBuffer.cpp`, always points
+at the push-constant buffer's own absolute byte 0 regardless of stage,
+so the existing GEP-with-absolute-offset load-rewriting logic needed no
+change at all). Closed by threading a new `RootConstantMinOffset` field
+alongside the existing `RootConstantSize` through the entire reflection
+pipeline: `lowerSPIRVPushConstantAccess` (`SPIRVPushConstantLowering.h`/
+`.cpp`) now returns a `PushConstantAccessSpan{MinOffset, MaxOffset}`
+instead of a bare size; `ResourceInfo`/`StageArtifactInfo`
+(`ResourceInfo.h`/`.cpp`, `ArtifactAbiVersion` bumped 5->6) gain the new
+field, threaded through all three producers of the shared
+`!feme.cpu.resources` metadata node (`SPIRVPushConstantLowering.cpp`'s
+own `run()`, `SPIRVResourceLowering.cpp`'s combined
+bound-resource-plus-push-constant case, and
+`ResourceLowering.cpp`/`RootConstantLowering.cpp`'s DXIL root-constant
+paths -- the latter two always emitting `0`, since a register-bound
+root constant's own view always starts at byte 0); and
+`pushConstantsCoverRootConstantSize` (`Pipeline.h`/`.cpp`) now takes a
+`RootConstantMinOffset` parameter and checks coverage only over
+`[RootConstantMinOffset, RootConstantSize)`, with every per-stage call
+site in `GraphicsPipeline.cpp` (and the one compute-pipeline call site
+in `Pipeline.cpp`) passing each stage's own reflected
+`ResourceInfo::RootConstantMinOffset`.
+
 ## Command Buffers
 
 Command buffers record a compact typed stream in command-pool-owned storage.
