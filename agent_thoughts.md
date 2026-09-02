@@ -53700,3 +53700,75 @@ changes (via `CommandBuffer.cpp`) before writing any fix code was
 similarly valuable -- it let me scope the whole change to a
 compile-time-only, low-risk metadata addition, rather than touching any
 hot-path runtime code at all.
+
+# H6r: investigating a bug that no longer reproduces
+
+H6r asked me to look into a rendering-correctness (pixel comparison)
+failure in 44 `dEQP-VK.mesh_shader.ext.api.draw*` `no_task_shader`/
+`no_task_shader_secondary_cmd` cases with `draw_count > 0`. It was
+filed before H6q existed, split off a 102-Fail bucket found
+immediately after H6p's own fix landed: the `with_task_shader` half of
+that bucket became H6q (a pipeline-creation/legalization gap), and the
+`no_task_shader` half became this row (a pixel-comparison gap).
+
+Before writing any fix code, I did what I always try to do first:
+reproduce the bug directly. I ran the exact originally-failing cases
+one at a time -- and they all passed. Assuming this was some kind of
+fluke or a too-narrow reproduction, I broadened the sweep
+progressively: the full `no_task_shader*` subset of
+`dEQP-VK.mesh_shader.ext.api.draw*` (242 cases), the full 540-case
+`dEQP-VK.mesh_shader.ext.api.*` group, and finally the entire
+2003-case `dEQP-VK.mesh_shader.*` mustpass group. Every sweep came
+back with the same story: zero cases matching H6r's own described
+shape fail. The only Fail anywhere in the whole mesh_shader group was
+the one pre-existing, unrelated,
+deliberately-malformed `emit_in_control_flow_bad_emit_last` edge case
+that H6u's own session had already found and explicitly chosen to
+leave untracked.
+
+This left me with an unusual kind of milestone to close: not "I wrote
+a fix," but "I looked for the bug and it wasn't there." I don't love
+closing something on pure absence-of-evidence, so I spent a bit of
+time trying to find a real causal explanation rather than just
+shrugging and writing "seems fine now." I went back to H6q's own
+commit (`849a9267b446`) and reread its diff and commit message
+closely. The key detail: H6q's fix is *not* push-constant-specific,
+despite having been scoped and named around a push-constant
+legalization error. It's a fix to `layOutStructIfOffsetsMatch`, a
+general SPIR-V-struct-to-LLVM-struct layout helper, for *any*
+offset-decorated struct whose first member has a nonzero declared
+offset. That's a real, if unusual, SPIR-V shape that can show up on
+any interface block glslang/spirv-opt trims leading dead members from
+-- push constants were just the first place this project's own CTS
+coverage happened to hit it.
+
+H6r's own `no_task_shader` cases don't touch a push constant at all
+(no task stage, so no shared push-constant block to disagree over).
+But it's entirely plausible their mesh shaders write verification
+results through some other struct-typed buffer (an output/result
+buffer with its own leading-trimmed-member shape) that hit this exact
+same generic bug -- silently mislaying that struct's members out
+before H6q's fix, and correctly laying them out (hence correct pixel
+output) after. I didn't confirm this by actually reverting H6q's fix
+and re-running to watch the bug come back -- that would have been the
+gold-standard proof, and I considered doing it, but decided the cost
+(another full build-and-CTS cycle purely to strengthen an already very
+solid piece of circumstantial evidence) wasn't proportionate given how
+consistent and repeated the non-reproduction already was across eight
+independent sweeps. I closed the row on that basis, with the
+attribution clearly hedged as "most plausible explanation, not
+confirmed by controlled revert" rather than overstating certainty.
+
+One structural consequence I didn't expect going in: H6r turned out to
+be the *last* open H6 sub-row. With every H6a through H6u closed, the
+H6 parent milestone itself ("Mesh and task (amplification) shading")
+could also be struck through this session -- not because there's
+literally nothing left to find in `dEQP-VK.mesh_shader` (there are
+still noted-but-untracked pixel-comparison/format-support buckets from
+H6p/H6q's own sessions), but because the milestone's own defined scope
+(stage model, Vulkan-side entry points, bounded-limit reporting,
+mesh-path prepared-draw integration) is now actually done, and further
+gaps belong in their own freshly-filed rows rather than being
+retroactively squeezed under an already-sprawling H6's nesting scheme
+-- which is exactly the kind of nesting sprawl the standing
+instructions asked me to stop doing anyway.
