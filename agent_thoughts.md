@@ -53753,3 +53753,140 @@ command for the rest of *this* session explicitly exports
 `VK_ICD_FILENAMES` to this project's own `feme_icd.json` first, and I
 will keep double-checking with `vulkaninfo --summary` before trusting
 any run's results.
+
+# Session: H8a (`VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` wiring)
+
+Assigned task this session: "work on H8 or other prerequisites blocking
+the H-series milestones." H8 ("Format table completeness for the graphics
+profile") was a large, previously-unbroken-down roadmap row -- BC/ETC2
+compressed sampling, the full vertex-buffer format list, mandatory
+blit/filter bits, and multisample capability per format, all in one row.
+
+## Picking up from a mid-session correction
+
+Before touching H8's own code at all, I discovered (via `vulkaninfo
+--summary` showing `lavapipe`, not `FeMe CPU Vulkan Device`) that every
+`deqp-vk` command I had run so far this session -- and, worse,
+retroactively, every command the *prior* session's H6r investigation had
+run too -- had been executed against the container's default Mesa
+lavapipe ICD rather than this project's own `feme_icd.json`. This falsely
+made H6r's bug look fixed (lavapipe has its own working mesh-shader
+implementation, unrelated to this project's source) and produced
+nonsensical H8 probe numbers (e.g. `format_properties.*` appearing to
+pass 225/225 despite `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` never being
+set anywhere in this codebase). I reverted both incorrect H6r commits
+from that prior turn, re-confirmed H6r's bug still genuinely reproduces
+under the correct ICD, and documented the mistake in a "Correction: H6r's
+'closure'..." entry above this one, before resuming H8 work with
+`VK_ICD_FILENAMES` explicitly exported (and `vulkaninfo --summary`
+double-checked) in every subsequent CTS command.
+
+## Scoping H8's first slice
+
+Rather than try to tackle all of H8 in one session -- clearly too large,
+spanning several independent format-table subsystems -- I picked the
+single most concretely-scoped, quickly-verifiable bullet: "the full
+vertex-buffer format list." Investigation found:
+
+- `formatFeatureFlags`/`vkGetPhysicalDeviceFormatProperties` never set
+  `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` for *any* format, despite
+  `GraphicsPipeline.cpp`'s `isSupportedVertexAttributeFormat` and
+  `Executor.cpp`'s `decodeAttribute` already implementing real vertex
+  fetch for 17 formats (all of R32/R32G32/R32G32B32/R32G32B32A32 x
+  {FLOAT,UINT,SINT}, plus R8G8B8A8 x {UNORM,UNORM_SRGB,SNORM,UINT,SINT}).
+- 4 `VkFormat` enum values, `VK_FORMAT_A8B8G8R8_{UNORM,SNORM,UINT,SINT}
+  _PACK32`, were entirely unmapped in `mapVkFormat`, despite being
+  byte-for-byte identical in memory layout to the already-mapped
+  `R8G8B8A8_*` formats (both lay R in byte 0, G in byte 1, B in byte 2, A
+  in byte 3) -- confirmed directly against both formats' Vulkan spec
+  definitions. A trivial, zero-risk mapping addition (found a 5th,
+  equally byte-identical case, `_SRGB_PACK32`, along the way, and added
+  it too).
+- Cross-checked the Vulkan spec's own full 45-format mandatory
+  vertex-buffer list (both the raw `Vulkan-Docs` AsciiDoc source and
+  VK-GL-CTS's own canonical `s_requiredVertexBufferFormats` array in
+  `vktApiFeatureInfo.cpp`) to understand how much of the full mandatory
+  list the existing 17-format `decodeAttribute` support covers (well
+  under half -- the 8-bit `R8_*`/`R8G8_*` family, the 16-bit
+  `R16_*`/`R16G16_*`/`R16G16B16A16_*` family, and `A2B10G10R10_UNORM_
+  PACK32` are all still unimplemented).
+
+Deliberately scoped this slice (H8a) to *only* wire up the bit for the
+17 formats already genuinely decodable, rather than also expanding
+`decodeAttribute` to add new format families in the same commit --
+kept the change small, safe, and immediately CTS-verifiable, and left
+the format-family expansion as its own roadmap row (H8b) for a future
+session, per the standing "small, separately-committed changes"
+instruction.
+
+## Implementation
+
+Added `isVertexBufferFormatSupported(ResourceFormat)` to `Format.h`/
+`.cpp`, mirroring `isTexelBufferFormatSupported`'s existing style and
+doc-comment precedent exactly (same file, same "single source of truth"
+pattern). Refactored `GraphicsPipeline.cpp`'s
+`isSupportedVertexAttributeFormat` to forward to it instead of
+independently duplicating the same 17-format switch statement it had
+before -- previously nothing kept the two lists in sync, an accident
+waiting to happen the moment either one changed. Wired
+`VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` into `EntryPoints.cpp`'s
+`bufferFeatures` computation, right alongside the existing
+`isTexelBufferFormatSupported`-gated bits. Added the 4 (plus 1) new
+`mapVkFormat` cases.
+
+New unit tests: `FormatTest.cpp`'s
+`VertexBufferFormatSupportMatchesDecodeAttributeScope` (asserts the new
+helper's true/false set matches `decodeAttribute`'s scope exactly, both
+directions) and `MapsA8B8G8R8Pack32FormatsOntoR8G8B8A8`; `EntryPointsTest
+.cpp`'s `FormatPropertiesReportsVertexBufferBit` (asserts the bit shows
+up for a supported format and is absent for an unsupported one, through
+the real `vkGetPhysicalDeviceFormatProperties` entry point rather than
+just the helper directly).
+
+## Verification
+
+`ninja check-feme` (assertions-enabled, ccache build, `check-feme`'s own
+target dependencies confirmed to rebuild `FeMeVulkanTests` before running
+the regression suite): 2328/2355 pass, unchanged from before this change.
+
+Real `deqp-vk` re-run, correct ICD confirmed via `vulkaninfo --summary`
+each time:
+- `dEQP-VK.api.info.format_properties.*` (225 cases): 171/225 -> 180/225
+  Pass. Wrote a small Python diff script comparing every case's
+  `StatusCode` before vs. after by parsing both `.qpa` logs, to get an
+  exact, trustworthy before/after delta rather than eyeballing aggregate
+  counts (aggregate pass/fail counts alone can't distinguish "9 new
+  passes, 0 regressions" from "9 new passes, 9 different new
+  regressions" if the totals happen to net out -- they didn't here, but
+  I wanted the delta confirmed either way). Exactly the 9 formats
+  expected flipped to Pass; the other 3 "pure vertex-buffer-only-missing"
+  formats I'd expected to flip from the earlier categorization pass
+  (`r16_snorm`, `r16_unorm`, and 4 more 16-bit-family cases) correctly
+  remained Fail, since I deliberately did not expand `decodeAttribute`'s
+  16-bit support this session -- consistent with the intentionally
+  narrow H8a scope.
+- `dEQP-VK.pipeline.monolithic.vertex_input.*` (13296 cases) and its
+  `srgb_vertex_formats` subset: 0 new failures, confirming the earlier
+  code-reading finding that this test group's own `checkSupport` never
+  reads `bufferFeatures` at all (it only checks
+  `maxVertexInputAttributes` and float16-related feature bits), so it
+  was never going to regress from this change regardless.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed -- confirmed via grep that neither document tracks
+`VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` or any per-format bit at all (they
+track `VkPhysicalDeviceFeatures` bits and `VkExtension`s respectively,
+not per-format `VkFormatFeatureFlags`).
+
+## Roadmap breakdown
+
+Closed H8a. Broke the remaining H8 scope into H8b (remaining
+vertex-buffer format families), H8c (BC/ETC2 compressed sampling -- the
+largest remaining bullet, not yet scoped at all), H8d (texel-buffer
+format-table breadth, a related but distinct gap the same
+`format_properties` re-run surfaced), H8e (color-attachment/
+sampled-image/filter-linear bit gaps for packed and 16-bit integer
+formats, also surfaced by the same re-run), H8f (multisample capability
+per format, not yet investigated), and H8g (mandatory blit/filter bits
+audit, not yet investigated) -- all one lowercase letter deep, per this
+session's standing instruction to stop nesting further.
