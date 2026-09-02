@@ -53117,3 +53117,173 @@ struck through and superseded by this session's own closing note with the
 real, re-measured numbers), but future sessions should treat any
 in-progress row's own case-count figures as provisional until re-verified
 against the actual mustpass list, not as ground truth.
+
+# Session: H6q (offset-struct leading-gap fix in SPIRVToLLVMPatterns.cpp)
+
+## Task
+
+The request was "work on H6q or other prerequisites blocking the H-series
+milestones". H6q's own roadmap description characterized the bug as "an
+upstream MLIR SPIR-V-dialect-to-LLVM conversion gap in
+`ConvertSPIRVToLLVMPass`" against a `PushConstant`-storage-class global
+variable with an `(i32 [12], i32 [16])` struct shape, discovered by H6p's
+own CTS re-run on the `with_task_shader`/`with_task_shader_secondary_cmd`
+variants of `dEQP-VK.mesh_shader.ext.api.*`.
+
+## First correction: this is not actually upstream MLIR
+
+My first move was to go read `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`'s
+own `GlobalVariablePattern`, since the roadmap text explicitly named
+`ConvertSPIRVToLLVMPass` as the culprit. But feme has its own,
+self-contained SPIR-V-to-LLVM conversion file,
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` (~4800 lines),
+that registers its own, higher-`FeMeBenefit` patterns ahead of most of
+MLIR's own generic ones -- particularly for every storage class feme
+cares about specially (PushConstant, TaskPayloadWorkgroupEXT, Workgroup,
+resource handles). Falling through to MLIR's own generic pattern only
+happens when a feme pattern's own `matchAndRewrite` calls
+`notifyMatchFailure`. This meant the roadmap's own characterization was
+imprecise -- the real bug is fully feme-local, not upstream. I've updated
+my own instinct here: when the roadmap says "upstream MLIR", still check
+whether feme has its own competing/overriding pattern registered for
+that op before assuming the fix belongs in `mlir/`.
+
+## Root cause: a shared struct-type converter with a hard-coded start-at-0 cursor
+
+The real path is: `PushConstantGlobalVariablePattern` calls
+`getTypeConverter()->convertType(...)` on the pointee struct type, which
+routes to a single, shared `spirv::StructType` conversion callback (used
+for *every* storage class with an offset-decorated struct, not just
+PushConstant) -- `convertOffsetStructTypeIgnoringDecorations`, which
+calls `layOutStructIfOffsetsMatch`. That function always starts its own
+layout cursor at byte 0 and walks each member's declared offset against
+it, failing (`return std::nullopt`, per the file's usual `notifyMatchFailure`
+convention feeding back) if any doesn't match. A struct whose *first*
+member's own declared offset is nonzero can never satisfy this: the
+cursor starts at 0, but the field starts later.
+
+I verified this was really the root cause -- and that it is fully
+generic, not push-constant- or task-stage-specific, and not tied to
+having a second member -- via a minimal IR reduction: hand-writing a
+`spirv.GlobalVariable @pc : !spirv.ptr<!spirv.struct<(i32 [12], i32
+[16]), Block>, PushConstant>` and running `feme-opt
+--feme-convert-spirv-to-llvm` on it directly reproduced the identical
+error. Then reducing further to a *single*-member `(i32 [12])` struct
+reproduced the exact same failure, proving the second member plays no
+role -- it's purely "does the first member start at byte 0 or not".
+
+This is a real SPIR-V shape, not a hypothetical: glslang/spirv-opt's own
+dead-code elimination can drop one or more members from the *front* of
+an interface block (fields a particular shader entry never actually
+reads) while every surviving member retains its original byte offset
+relative to the *whole block's own start* -- not relative to the first
+surviving member. None of this file's existing gap-handling retries
+(internal-gap padding, trailing-array-gap handling) touch the *first*
+member's own position; they all implicitly assume the first member
+starts at 0.
+
+## Why the fix needs two coordinated pieces, not one
+
+LLVM struct layout always places member 0 at byte offset 0 -- there's no
+way to give an LLVM struct an "implicit leading offset" the way you
+might annotate a byte alignment. So representing a nonzero first-member
+offset genuinely requires a synthetic member: a `[Gap x i8]` byte array
+prepended, sized to exactly consume the leading gap. This is a
+completely mechanical, low-risk change to `layOutStructIfOffsetsMatch`.
+
+But it has a real consequence I had to trace carefully: every real
+member's own LLVM struct index shifts up by one now. This file's own
+doc comment on `convertOffsetStructTypeIgnoringDecorations` explicitly
+documents an invariant that "member index N still means the same thing"
+across all of its existing gap-handling retries -- and this new leading-pad
+case is the first one that actually breaks that invariant. Since MLIR's
+own generic `AccessChainPattern` (upstream) just forwards SPIR-V's own
+constant member-select indices straight through to the LLVM GEP with no
+adjustment, it would now silently select the *wrong* field (the padding
+byte array, or an adjacent real field) for any struct converted this
+way. This was the part of the fix I spent the most time double-checking:
+it would have been very easy to ship the type-layout half alone, see the
+lit test I wrote for "does the type convert" pass, and miss that the
+*data-flow* half (accessing a member of that type) was now silently
+wrong.
+
+Fixed by adding a new, higher-benefit pattern,
+`OffsetStructLeadingPadAccessChainPattern`, placed right after
+`PushConstantGlobalVariablePattern` in the file and registered in
+`populateSPIRVToLLVMTargetPatterns`'s pattern list. It reuses the
+existing `getConstantMemberIndex` helper (SPIR-V struct member-select
+indices are always compile-time constants per spec, unlike array/vector
+indices, which may be dynamic -- so no runtime arithmetic is needed) to
+read the access chain's own first index, and if the base struct type has
+the leading-pad shape, rewrites that first index to `+1` before letting
+the rest of the chain proceed unchanged. A struct without this shape
+falls through (`notifyMatchFailure`) to the generic pattern exactly as
+before, so no regression on any already-working access chain.
+
+## Confirming downstream needed zero changes
+
+I read both `llvm/lib/Target/SPIRV/SPIRVPushConstantAccess.cpp` (the
+LLVM backend pass that retargets the push-constant global to a
+target-ext type, preserving all existing GEP/load/store instructions
+unchanged) and feme's own
+`feme/lib/Transforms/CPU/SPIRVPushConstantLowering.cpp` (which computes
+each access's byte offset via `GEPOperator::accumulateConstantOffset`
+against the LLVM struct's own real `DataLayout`, not by any
+member-index assumption). Both are fully offset-based, not
+index-based, so as long as the LLVM struct type itself now correctly
+represents the true byte layout (which the fix ensures), both continue
+to work with zero changes. I verified this by reading the logic
+carefully rather than just asserting it, since it would have been easy
+to assume "obviously fine" and be wrong about a hidden index dependency.
+
+## Verification
+
+- Hand-verified 3 repro cases (single-member leading gap; two-member
+  reading member 0; two-member reading member 1) all produce correct
+  LLVM IR with the pad member present and GEP indices adjusted, landing
+  at the correct byte offsets (12 and 16 respectively).
+- Existing `spirv-to-llvm-push-constant.mlir` lit test (offset-0-first-member
+  cases) still passes unchanged -- no regression on the common case.
+- New lit test `spirv-to-llvm-push-constant-leading-gap.mlir` (two
+  `--split-input-file` cases) passes.
+- Full `ninja check-feme` (ccache, assertions-enabled build): 2313/2340
+  passed, 0 failed, 27 pre-existing unrelated `Unsupported` -- up by
+  exactly the 1 new test file, no regressions.
+- Real CTS: re-ran the originally-failing `with_task_shader` case
+  directly via the built ICD. The `spirv.GlobalVariable`/`PushConstant`
+  error is confirmed gone. But the case now fails at a new, later,
+  distinct legalization gap: `spirv.EXT.EmitMeshTasks` has no conversion
+  pattern of its own at all in `SPIRVToLLVMPatterns.cpp`. Re-ran the full
+  540-case `dEQP-VK.mesh_shader.ext.api.*` group and confirmed (by
+  searching each `Fail` case's own qpa-embedded SPIR-V disassembly for
+  `OpEmitMeshTasksEXT`, since qpa's own `<Result>` text only carries the
+  Vulkan API-level error, not the compiler's own stderr diagnostic) that
+  all 58 `with_task_shader`/`with_task_shader_secondary_cmd` cases hit
+  exactly this new error, with zero remaining occurrences of the
+  original push-constant error anywhere. Totals are identical to H6p's
+  own post-fix measurement (14 Pass/102 Fail/424 NotSupported) --
+  expected, since every case that used to hit the push-constant bug
+  still needs `EmitMeshTasksEXT` conversion immediately afterward to
+  fully pass, so this fix alone unlocks no new `Pass` by itself, but is
+  independently verified correct via the new lit tests and the
+  confirmed disappearance of the original error.
+- Confirmed via grep that `Vulkan14FeatureInventory.md`/
+  `VulkanExtensionInventory.md` need no changes: this is a pure
+  compiler-internal struct-layout-completeness fix with no
+  feature-bit or extension-exposure implications.
+
+## Roadmap outcome
+
+H6q closes (struck through with a detailed closing note). Filed a new
+H6s row (parent H6q, one level of nesting, per the standing
+no-deeper-nesting instruction) for the newly-discovered
+`spirv.EXT.EmitMeshTasks` conversion-pattern gap -- deliberately left
+unfixed this session, since it's a substantially larger, separate task
+(a new canonical `feme.stage.*` op, its own `MeshOutputWrapper.cpp`
+lowering, and whatever CPU-side execution-chaining a task stage's own
+dispatch of its mesh workgroups needs beyond what a task-less mesh entry
+already has), not a narrow follow-on to this row's own struct-layout
+scope. Updated the H6 parent row's own summary line to reflect both
+H6q's closure and H6s's new tracking, consistent with how prior
+sessions have kept that same summary current after each child
+milestone's closure.
