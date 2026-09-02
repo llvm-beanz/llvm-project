@@ -20613,3 +20613,75 @@ its two 3-subset anchor tables correctly stay private to
 `BC7Decode.cpp`). This refactor was verified behavior-preserving by
 rebuilding and re-running `BC7DecodeTest` (5/5 pass, unchanged) before
 any BC6H code was added on top of it.
+
+## Roadmap H8n: measured impact
+
+H8i/H8l/H8m together landed complete, directly-unit-tested decoders for
+all 16 `VK_FORMAT_BC*` formats, but nothing called any of them yet.
+This row wires them into real consumers: 16 new `ResourceFormat`
+enumerators (appended at the enum's tail, `RuntimeABI.h`'s own
+append-only constraint), `mapVkFormat`/`formatElementSize`/
+`blockShape`/`bytesPerBlock`/`formatFeatureFlags` cases (`Format.cpp`),
+a new shared `BCSamplingBridge.h`/`.cpp` decoding any BC format into
+whichever already-runtime-supported `ResourceFormat` matches its own
+channel count/precision (BC1/BC2/BC3/BC7 -> `R8G8B8A8_UNORM`(`_SRGB`),
+BC4 -> `R8_UNORM`/`_SNORM`, BC5 -> `R8G8_UNORM`/`_SNORM`, BC6H ->
+`R16G16B16A16_FLOAT`), a new BC branch in `CommandBuffer.cpp`'s
+`materializeImageDescriptor` (shader sampling, mirroring the existing
+ASTC branch), and a new BC-source path in `ImageOps.cpp`'s
+`runBlitImage` (only the RGBA8-shaped BC1/BC2/BC3/BC7 subset,
+`isBCRGBA8Format` -- BC4/BC5/BC6H's own sampling-bridge targets do not
+fit `feme::graphics::unpackColor`'s RGBA8-only blit pipeline, discovered
+during this row's own investigation, mirroring how an HDR ASTC source
+is already excluded from blitting despite sampling fine).
+
+A real `deqp-vk` run of the 192 non-3D `dEQP-VK.texture.compressed.bc*`
+cases confirms 96/96 non-sparse cases now genuinely `Pass` (up from
+96/96 `NotSupported`), 0 `Fail`, the other 96 `NotSupported` for an
+unrelated, pre-existing reason (sparse-binding images are a separate,
+already-tracked gap, roadmap R33). This CTS group's own `Compressed2DTestInstance`
+constructor (`vktTextureCompressedFormatTests.cpp`) has no
+`textureCompressionBC` feature-bit gate at all (unlike its 3D sibling
+`Compressed3DTestInstance`), so these 96 passes are real regardless of
+whether the feature bit itself is flipped.
+
+`textureCompressionBC` itself, however, **stays `VK_FALSE`**: a real
+`deqp-vk` run of `dEQP-VK.api.info.format_properties.compressed_formats`
+found the mandatory format-table check this bit is validated against
+(`vktApiFeatureInfo.cpp`'s `testCompressedFormatsSupported`) requires
+`VK_FORMAT_FEATURE_BLIT_SRC_BIT` (among others) on *all 16* BC formats
+once the bit reads `VK_TRUE` -- not just the RGBA8-shaped subset this
+row's own blit wiring covers. Flipping it was tried directly (temporarily,
+to measure): a full `dEQP-VK.api.info.*` re-run went from 5,367
+passed/584 failed/4,533 not-supported (H8m's own baseline) to 5,270
+passed/681 failed/4,533 not-supported -- exactly 97 new failures (96 from
+`image_format_properties.*.bc*`'s own `BLIT_SRC_BIT` gap plus 1 from
+`format_properties.compressed_formats` itself), a net regression, not a
+conformance gain. The flip was reverted; the gap is tracked as new
+roadmap row H8o (widen `ImageOps.cpp`'s blit-source support to
+BC4/BC5/BC6H, then flip the bit).
+
+Wiring BC formats into `mapVkFormat` (independent of the feature-bit
+question) also newly exposes those 16 formats to a separate, already-
+tracked, pre-existing `vkGetPhysicalDeviceImageFormatProperties` gap
+category (roadmap E24/E25's own "real headline movement trades
+`NotSupported` for an honest `Fail`" precedent): 96 new
+`image_format_properties.{1d,2d,3d}.{linear,optimal}.bc*` cases now
+`Fail` with the same three format-generic bugs ASTC already has today
+(`"Invalid dimensions for 1D image"`, `"sampleCounts !=
+VK_SAMPLE_COUNT_1_BIT"`, `"maxResourceSize smaller than minimum
+required size"` -- confirmed identical for `astc_4x4_unorm_block` in a
+direct side-by-side re-run), not a new BC-specific bug this row
+introduced. `ninja check-feme` (assertions-enabled, ccache build)
+passes in full, 2371/2398 (27 pre-existing `Unsupported`, 0 `Failed`,
+up 8 tests from this row's own new coverage: `MapsBCFormats`,
+`BlockDimensionsMatchBCFootprint`,
+`IsBlockCompressedFormatDistinguishesBC`, BC additions to five
+existing `FormatTest` cases, `BC1SampledImageDispatchTest`,
+`BlitDecodesBC1Source`, `RejectsBlitOfBC4Source`).
+
+`Vulkan14FeatureInventory.md`'s `textureCompressionBC` row updated to
+describe the real sampling/blit wiring now in place and the specific
+`BLIT_SRC_BIT`-on-all-16-formats gap blocking the feature-bit flip
+itself. No `VulkanExtensionInventory.md` update needed: BC formats are
+core Vulkan 1.0, not extension-gated.
