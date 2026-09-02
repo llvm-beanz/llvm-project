@@ -398,6 +398,136 @@ TEST(ImageFixtureTest, PacksAndUnpacksR16G16SnormNegative) {
   EXPECT_EQ(Unpacked[3], 1.0);
 }
 
+// (Roadmap H8p) The 7 real integer color-attachment formats:
+// `R16_{UINT,SINT}`, `R16G16_{UINT,SINT}`, `R8G8B8A8_{UINT,SINT}`, and
+// `R10G10B10A2_UINT` -- each stores/reads a raw integer reference value
+// directly (not a normalized fraction), mirroring `S8_UINT`'s own
+// documented "stencil clear values are an integer reference value"
+// precedent below.
+TEST(ImageFixtureTest, PacksAndUnpacksR16Uint) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R16_UINT, {65535.0, 0.0, 0.0, 1.0},
+                     Texel),
+      Succeeded());
+  uint16_t V;
+  memcpy(&V, Texel.data(), 2);
+  EXPECT_EQ(V, 65535u);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R16_UINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], 65535.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+
+  // Out-of-range values clamp rather than wrap or truncate.
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R16_UINT, {70000.0, 0.0, 0.0, 1.0},
+                     Texel),
+      Succeeded());
+  memcpy(&V, Texel.data(), 2);
+  EXPECT_EQ(V, 65535u);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR16SintNegative) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R16_SINT, {-100.0, 0.0, 0.0, 1.0},
+                     Texel),
+      Succeeded());
+  int16_t V;
+  memcpy(&V, Texel.data(), 2);
+  EXPECT_EQ(V, -100);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R16_SINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], -100.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR16G16Uint) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16G16_UINT,
+                                   {12345.0, 6789.0, 0.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R16G16_UINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], 12345.0);
+  EXPECT_EQ(Unpacked[1], 6789.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR16G16SintNegative) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16G16_SINT,
+                                   {-1.0, -32768.0, 0.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R16G16_SINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], -1.0);
+  EXPECT_EQ(Unpacked[1], -32768.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR8G8B8A8Uint) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8G8B8A8_UINT,
+                                   {255.0, 0.0, 128.0, 1.0}, Texel),
+                    Succeeded());
+  EXPECT_EQ(Texel[0], 255);
+  EXPECT_EQ(Texel[1], 0);
+  EXPECT_EQ(Texel[2], 128);
+  EXPECT_EQ(Texel[3], 1);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8G8B8A8_UINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], 255.0);
+  EXPECT_EQ(Unpacked[2], 128.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR8G8B8A8SintNegative) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8G8B8A8_SINT,
+                                   {-128.0, 127.0, -1.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8G8B8A8_SINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], -128.0);
+  EXPECT_EQ(Unpacked[1], 127.0);
+  EXPECT_EQ(Unpacked[2], -1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR10G10B10A2Uint) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R10G10B10A2_UINT,
+                                   {1023.0, 0.0, 512.0, 3.0}, Texel),
+                    Succeeded());
+  uint32_t Word;
+  memcpy(&Word, Texel.data(), 4);
+  EXPECT_EQ(Word & 0x3FF, 1023u);
+  EXPECT_EQ((Word >> 10) & 0x3FF, 0u);
+  EXPECT_EQ((Word >> 20) & 0x3FF, 512u);
+  EXPECT_EQ((Word >> 30) & 0x3, 3u);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R10G10B10A2_UINT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_EQ(Unpacked[0], 1023.0);
+  EXPECT_EQ(Unpacked[2], 512.0);
+  EXPECT_EQ(Unpacked[3], 3.0);
+}
+
 
 // packed into one 16-bit word, 1 bit of alpha at the top down to 5 bits of
 // red at the bottom -- the same packing `R10G10B10A2_UNORM` above uses,

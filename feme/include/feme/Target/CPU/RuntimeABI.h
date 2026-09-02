@@ -399,6 +399,52 @@ constexpr bool isBCRGBA8Format(ResourceFormat Format) {
           Format <= ResourceFormat::BC7_SRGB);
 }
 
+/// Whether \p Format is one of the 7 unsigned- or signed-integer color-
+/// attachment formats roadmap H8p adds real fragment-output write support
+/// for (`R8G8B8A8_{UINT,SINT}`, `R10G10B10A2_UINT`, `R16_{UINT,SINT}`,
+/// `R16G16_{UINT,SINT}`), a real `deqp-vk`-confirmed `COLOR_ATTACHMENT_BIT`
+/// gap H8e found but did not fix (`Executor.cpp`'s `executeDraws` used to
+/// hard-reject any non-`Float` fragment output outright, regardless of
+/// the target attachment's own format). Not a contiguous enum range (see
+/// `isBCFormat`'s own comment on why some predicates cannot be), so this
+/// is an explicit switch like `feme::vulkan::isVertexBufferFormatSupported`
+/// (Format.cpp). None of these 7 formats supports
+/// `VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT` -- blending is only
+/// defined for a non-integer numeric format, matching every other
+/// `isSupportedColorAttachmentFormat` (RenderPass.cpp) format's own
+/// implicit blend eligibility today.
+constexpr bool isIntegerColorAttachmentFormat(ResourceFormat Format) {
+  switch (Format) {
+  case ResourceFormat::R8G8B8A8_UINT:
+  case ResourceFormat::R8G8B8A8_SINT:
+  case ResourceFormat::R10G10B10A2_UINT:
+  case ResourceFormat::R16_UINT:
+  case ResourceFormat::R16_SINT:
+  case ResourceFormat::R16G16_UINT:
+  case ResourceFormat::R16G16_SINT:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/// The unsigned-integer half of `isIntegerColorAttachmentFormat`'s own 7
+/// formats above -- `false` for both the signed-integer half and every
+/// non-integer format, distinguishing which of `SignatureComponentType::
+/// UInt`/`SInt` a real fragment output must use for a given integer color
+/// attachment (`Executor.cpp`'s own `expectedColorComponentType`).
+constexpr bool isUnsignedIntegerColorAttachmentFormat(ResourceFormat Format) {
+  switch (Format) {
+  case ResourceFormat::R8G8B8A8_UINT:
+  case ResourceFormat::R10G10B10A2_UINT:
+  case ResourceFormat::R16_UINT:
+  case ResourceFormat::R16G16_UINT:
+    return true;
+  default:
+    return false;
+  }
+}
+
 
 /// Bits of `FemeDescriptor::Flags`.
 enum FemeDescriptorFlagBits : uint32_t {

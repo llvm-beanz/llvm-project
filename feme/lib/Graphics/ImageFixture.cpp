@@ -168,6 +168,21 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     // single opaque 2-byte word each, the same convention as
     // `A1B5G5R5_UNORM` immediately above.
     return FormatInfo{1, 2, false};
+  case ResourceFormat::R16_UINT:
+  case ResourceFormat::R16_SINT:
+    // (Roadmap H8p) A real integer color-attachment format, unlike its
+    // `R16_UNORM`/`_SNORM` (H8j) neighbors above (an `EAC_R11` sampling-
+    // bridge target only, never a color attachment) -- needs a real
+    // `FormatInfo` entry here since `getFixtureFormatElementSize` (used
+    // by `executeDraws`'s own attachment-extent validation) reaches this
+    // table, unlike `packClearColor`/`unpackColor`'s own dedicated
+    // `if`-block for this format, which returns before ever reaching it.
+    return FormatInfo{1, 2, false};
+  case ResourceFormat::R16G16_UINT:
+  case ResourceFormat::R16G16_SINT:
+    // (Roadmap H8p) The two-channel sibling of `R16_UINT`/`_SINT` above,
+    // same rationale.
+    return FormatInfo{2, 2, false};
   default:
     return createStringError(inconvertibleErrorCode(),
                              "image fixture format is not yet supported "
@@ -499,6 +514,88 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  // (Roadmap H8p) `R16_UINT`/`R16_SINT`: a genuine, real integer color-
+  // attachment write (unlike `R16_UNORM`/`_SNORM` above, whose stored
+  // value is a normalized fraction) -- `Clear` holds the raw integer
+  // reference value directly, the same "not a normalized fraction"
+  // convention `S8_UINT` below already established for a clear-color
+  // integer component.
+  if (Format == ResourceFormat::R16_UINT ||
+      Format == ResourceFormat::R16_SINT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    if (Format == ResourceFormat::R16_SINT) {
+      int16_t V = static_cast<int16_t>(std::clamp(Clear[0], -32768.0, 32767.0));
+      memcpy(Texel.data(), &V, 2);
+    } else {
+      uint16_t V = static_cast<uint16_t>(std::clamp(Clear[0], 0.0, 65535.0));
+      memcpy(Texel.data(), &V, 2);
+    }
+    return Error::success();
+  }
+
+  // (Roadmap H8p) `R16G16_UINT`/`R16G16_SINT`: the two-channel sibling of
+  // `R16_UINT`/`_SINT` above, same raw-integer convention.
+  if (Format == ResourceFormat::R16G16_UINT ||
+      Format == ResourceFormat::R16G16_SINT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    bool Signed = Format == ResourceFormat::R16G16_SINT;
+    for (unsigned I = 0; I != 2; ++I) {
+      if (Signed) {
+        int16_t V =
+            static_cast<int16_t>(std::clamp(Clear[I], -32768.0, 32767.0));
+        memcpy(Texel.data() + I * 2, &V, 2);
+      } else {
+        uint16_t V = static_cast<uint16_t>(std::clamp(Clear[I], 0.0, 65535.0));
+        memcpy(Texel.data() + I * 2, &V, 2);
+      }
+    }
+    return Error::success();
+  }
+
+  // (Roadmap H8p) `R8G8B8A8_UINT`/`R8G8B8A8_SINT`: same raw-integer
+  // convention as `R16_UINT`/`_SINT` above, one byte per component.
+  if (Format == ResourceFormat::R8G8B8A8_UINT ||
+      Format == ResourceFormat::R8G8B8A8_SINT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    bool Signed = Format == ResourceFormat::R8G8B8A8_SINT;
+    for (unsigned I = 0; I != 4; ++I) {
+      if (Signed)
+        Texel[I] = static_cast<uint8_t>(
+            static_cast<int8_t>(std::clamp(Clear[I], -128.0, 127.0)));
+      else
+        Texel[I] = static_cast<uint8_t>(std::clamp(Clear[I], 0.0, 255.0));
+    }
+    return Error::success();
+  }
+
+  // (Roadmap H8p) `R10G10B10A2_UINT`: the integer sibling of
+  // `R10G10B10A2_UNORM`'s own special case above -- same packed-word
+  // layout, but each field holds its raw integer reference value (R/G/B
+  // in `[0, 1023]`, A in `[0, 3]`) rather than a normalized fraction.
+  if (Format == ResourceFormat::R10G10B10A2_UINT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    auto Comp10 = [](double V) -> uint32_t {
+      return static_cast<uint32_t>(std::clamp(V, 0.0, 1023.0));
+    };
+    uint32_t Word =
+        (static_cast<uint32_t>(std::clamp(Clear[3], 0.0, 3.0)) << 30) |
+        (Comp10(Clear[2]) << 20) | (Comp10(Clear[1]) << 10) | Comp10(Clear[0]);
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+
   Expected<FormatInfo> Info = getFormatInfo(Format);
   if (!Info)
     return Info.takeError();
@@ -800,6 +897,91 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     }
     Out[2] = 0.0;
     Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H8p) `R16_UINT`/`R16_SINT`: the inverse of `packClearColor`'s
+  // own raw-integer special case above -- `Out` holds the raw integer
+  // value directly, not a normalized fraction (unlike `R16_UNORM`/
+  // `_SNORM` above).
+  if (Format == ResourceFormat::R16_UINT ||
+      Format == ResourceFormat::R16_SINT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    if (Format == ResourceFormat::R16_SINT) {
+      int16_t V;
+      memcpy(&V, Texel.data(), 2);
+      Out[0] = V;
+    } else {
+      uint16_t V;
+      memcpy(&V, Texel.data(), 2);
+      Out[0] = V;
+    }
+    Out[1] = Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H8p) `R16G16_UINT`/`R16G16_SINT`: the two-channel sibling of
+  // `R16_UINT`/`_SINT` above, same raw-integer convention.
+  if (Format == ResourceFormat::R16G16_UINT ||
+      Format == ResourceFormat::R16G16_SINT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    bool Signed = Format == ResourceFormat::R16G16_SINT;
+    for (unsigned I = 0; I != 2; ++I) {
+      if (Signed) {
+        int16_t V;
+        memcpy(&V, Texel.data() + I * 2, 2);
+        Out[I] = V;
+      } else {
+        uint16_t V;
+        memcpy(&V, Texel.data() + I * 2, 2);
+        Out[I] = V;
+      }
+    }
+    Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H8p) `R8G8B8A8_UINT`/`R8G8B8A8_SINT`: same raw-integer
+  // convention as `R16_UINT`/`_SINT` above, one byte per component.
+  if (Format == ResourceFormat::R8G8B8A8_UINT ||
+      Format == ResourceFormat::R8G8B8A8_SINT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    bool Signed = Format == ResourceFormat::R8G8B8A8_SINT;
+    for (unsigned I = 0; I != 4; ++I)
+      Out[I] = Signed ? static_cast<double>(static_cast<int8_t>(Texel[I]))
+                      : static_cast<double>(Texel[I]);
+    return Error::success();
+  }
+
+  // (Roadmap H8p) `R10G10B10A2_UINT`: the inverse of `packClearColor`'s
+  // own raw-integer special case above -- each field's raw integer value
+  // (R/G/B in `[0, 1023]`, A in `[0, 3]`), not a normalized fraction.
+  if (Format == ResourceFormat::R10G10B10A2_UINT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint32_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    Out[0] = Word & 0x3FF;
+    Out[1] = (Word >> 10) & 0x3FF;
+    Out[2] = (Word >> 20) & 0x3FF;
+    Out[3] = (Word >> 30) & 0x3u;
     return Error::success();
   }
 
