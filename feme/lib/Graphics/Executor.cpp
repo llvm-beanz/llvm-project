@@ -3892,9 +3892,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       GeometryStreamBuilder Combined(/*StreamCount=*/1,
                                      RowCount * GState.MaxOutputVertices);
       if (RowCount != 0) {
-        Expected<StageStorage> GSInput =
-            buildStageStorage(*GSSig, SignatureDirection::Input,
-                              RowCount * GeomVerticesPerPrimitive);
+        // (roadmap H5h) Every system-value member of a geometry entry's
+        // own `gl_in[]`-shaped input (except `PrimitiveID`/`InvocationID`,
+        // still sourced from `FemeGeometryInvocation`) is addressed with a
+        // genuinely dynamic per-vertex-in-primitive index by
+        // `GeometryWrapper.cpp`'s `lowerGeometryInputLoad`, so it needs
+        // real storage the same way an ordinary varying does.
+        Expected<StageStorage> GSInput = buildStageStorage(
+            *GSSig, SignatureDirection::Input,
+            RowCount * GeomVerticesPerPrimitive,
+            /*AllInputSystemValuesAreStorageBacked=*/true);
         if (!GSInput)
           return GSInput.takeError();
         SmallVector<uint32_t, 32> SourceInvocations;

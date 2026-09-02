@@ -49,7 +49,8 @@ Expected<EntrySignature> getStageSignature(const cpu::CompiledStage &Stage) {
 
 Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
                                          SignatureDirection Direction,
-                                         uint32_t InvocationCount) {
+                                         uint32_t InvocationCount,
+                                         bool AllInputSystemValuesAreStorageBacked) {
   StageStorage Storage;
   Storage.InvocationCount = InvocationCount;
   uint32_t MaxID = 0;
@@ -88,20 +89,49 @@ Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
     // `lowerVertexOutputStore`), so only skip allocating storage for an
     // input.
     //
-    // (roadmap H7x) `gl_ClipDistance`/`gl_CullDistance` fragment *inputs*
-    // are the one exception: `Executor.cpp` links them into the ordinary
-    // `Varyings` list by `SystemValue` (they carry no `Location` of their
-    // own) the same way any other varying is, writing/reading them
-    // through this same stage storage rather than a per-invocation
-    // record field -- so, unlike every other fragment system-value
-    // input, they still need real storage allocated here.
+    // (roadmap H7x) `gl_ClipDistance`/`gl_CullDistance` fragment *inputs*,
+    // and (roadmap H5h) any geometry-stage `gl_in[]` system-value input
+    // when \p AllInputSystemValuesAreStorageBacked is set, are the two
+    // exceptions: both are read/written through this same `StageStorage`
+    // rather than a per-invocation record field, so both still need real
+    // storage allocated here.
+    //
+    // (roadmap H7x) `Executor.cpp` links `ClipDistance`/`CullDistance`
+    // fragment inputs into the ordinary `Varyings` list by `SystemValue`
+    // (they carry no `Location` of their own) the same way any other
+    // varying is.
+    //
+    // (roadmap H5h) The one geometry-stage caller (`Executor.cpp`'s
+    // `executeDraws`, building a geometry entry's own `gl_in[]`-shaped
+    // input signature) sets \p AllInputSystemValuesAreStorageBacked for
+    // every system value except `PrimitiveID`/`InvocationID` (still
+    // sourced from `FemeGeometryInvocation`, never from this storage) --
+    // since `GeometryWrapper.cpp`'s `lowerGeometryInputLoad` always
+    // addresses *every* geometry input it handles through
+    // `computeStageStorageAddress` with a genuinely dynamic
+    // per-vertex-in-primitive index, unlike a vertex/fragment stage's own
+    // fixed-field system values (e.g. fragment's own `gl_FragCoord`,
+    // which shares the same `SystemValue::Position` enumerant but is
+    // always read from its invocation record, never storage, so it never
+    // needs an arbitrary runtime index). Without this,
+    // `buildStageStorage` silently left `gl_in[].gl_Position`'s own
+    // `FemeStageElement` at its zero-initialized default (no storage
+    // allocated at all), and `StageLink.cpp`'s `copyLinkedElements` --
+    // which does try to copy it, since `linkStageElements`'s own consumer
+    // filter only excludes `PrimitiveID`/`InvocationID` -- wrote straight
+    // past the (empty) `Data` buffer.
     bool IsInterpolatedFragmentInput =
         Direction == SignatureDirection::Input &&
         (Elt.SystemValue == SignatureSystemValue::ClipDistance ||
          Elt.SystemValue == SignatureSystemValue::CullDistance);
+    bool IsGeometryInputVertexArrayMember =
+        AllInputSystemValuesAreStorageBacked &&
+        Direction == SignatureDirection::Input &&
+        Elt.SystemValue != SignatureSystemValue::PrimitiveID &&
+        Elt.SystemValue != SignatureSystemValue::InvocationID;
     if (Elt.SystemValue != SignatureSystemValue::None &&
         Direction == SignatureDirection::Input &&
-        !IsInterpolatedFragmentInput)
+        !IsInterpolatedFragmentInput && !IsGeometryInputVertexArrayMember)
       continue;
     if (Elt.BitWidth != 32)
       return createStringError(inconvertibleErrorCode(),

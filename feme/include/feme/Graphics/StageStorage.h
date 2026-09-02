@@ -30,6 +30,7 @@
 
 #include "llvm/Support/Error.h"
 
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -71,6 +72,11 @@ struct StageStorage {
         E.DataOffset + (uint64_t)Row * E.RowStride +
         (uint64_t)(Component - E.FirstComponent) * E.ComponentStride +
         (uint64_t)Invocation * E.InvocationStride;
+    assert(Off + sizeof(uint32_t) <= Data.size() &&
+           "StageStorage::readRaw: computed offset is out of bounds -- a "
+           "stale ElementID/Component/Invocation/Row, or a producer/"
+           "consumer signature mismatch, would read past the storage "
+           "buildStageStorage sized for this element");
     uint32_t V;
     std::memcpy(&V, Data.data() + Off, sizeof(uint32_t));
     return V;
@@ -83,6 +89,11 @@ struct StageStorage {
         E.DataOffset + (uint64_t)Row * E.RowStride +
         (uint64_t)(Component - E.FirstComponent) * E.ComponentStride +
         (uint64_t)Invocation * E.InvocationStride;
+    assert(Off + sizeof(uint32_t) <= Data.size() &&
+           "StageStorage::writeRaw: computed offset is out of bounds -- a "
+           "stale ElementID/Component/Invocation/Row, or a producer/"
+           "consumer signature mismatch, would write past the storage "
+           "buildStageStorage sized for this element");
     std::memcpy(Data.data() + Off, &Value, sizeof(uint32_t));
   }
 
@@ -112,14 +123,24 @@ getStageSignature(const cpu::CompiledStage &Stage);
 /// \p Sig, sized for \p InvocationCount invocations. A system-value
 /// *input* element gets a dense `FemeStageElement` entry (so the layout
 /// stays dense by `ElementID`) but no storage, since the compiled wrapper
-/// sources it from its invocation record rather than from `DataOffset`.
+/// sources it from its invocation record rather than from `DataOffset` --
+/// *unless* \p AllInputSystemValuesAreStorageBacked (roadmap H5h), for a
+/// geometry stage's own `gl_in[]`-shaped input signature: every one of its
+/// system-value members (`gl_in[].gl_Position`/`gl_PointSize`/
+/// `gl_ClipDistance`/`gl_CullDistance`, but not `PrimitiveID`/
+/// `InvocationID`, which the wrapper still sources from
+/// `FemeGeometryInvocation` regardless) is addressed with a genuinely
+/// dynamic per-vertex-in-primitive index (`GeometryWrapper.cpp`'s
+/// `lowerGeometryInputLoad`), unlike every other stage's own fixed-field
+/// system values, so it always needs real storage.
 ///
 /// A per-patch direction (`PatchInput`/`PatchOutput`) is exactly the
 /// \p InvocationCount == 1 case: one patch's worth of storage, addressed by
 /// row/component alone.
-llvm::Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
-                                               SignatureDirection Direction,
-                                               uint32_t InvocationCount);
+llvm::Expected<StageStorage>
+buildStageStorage(const EntrySignature &Sig, SignatureDirection Direction,
+                  uint32_t InvocationCount,
+                  bool AllInputSystemValuesAreStorageBacked = false);
 
 /// Copies every element of \p From's invocations `[0, From.InvocationCount)`
 /// into \p To's invocations starting at \p DestBase. Both blocks must have

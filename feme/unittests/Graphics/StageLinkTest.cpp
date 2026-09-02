@@ -162,4 +162,110 @@ TEST(StageLinkTest, CopiesLinkedElementsRemappingInvocations) {
   EXPECT_FLOAT_EQ(To->readFloat(0, 0, 1), 3.5f);
 }
 
+// (roadmap H5h) `buildStageStorage` skips allocating storage for any
+// system-value *input* by default (it assumes the compiled wrapper always
+// sources it from a fixed invocation-record field instead), which is wrong
+// for a geometry entry's own `gl_in[]`-shaped input: `gl_in[].gl_Position`
+// is read through a genuinely dynamic per-vertex-in-primitive index
+// (`GeometryWrapper.cpp`'s `lowerGeometryInputLoad`), so it needs the same
+// real storage an ordinary varying gets. Without
+// `AllInputSystemValuesAreStorageBacked`, the `Position` input element
+// below gets no storage at all (`Data.size() == 0`), and
+// `copyLinkedElements` writes straight past the empty buffer -- this is
+// the exact shape that crashed a real `dEQP-VK.geometry.basic.*` case
+// (`vkQueueSubmit` heap corruption via `StageStorage::writeRaw`) until
+// this row's fix.
+TEST(StageLinkTest, BuildStageStorageSkipsSystemValueInputStorageByDefault) {
+  EntrySignature Sig;
+  SignatureElement PositionIn = makeElement(
+      0, SignatureDirection::Input, std::nullopt, /*ComponentCount=*/4);
+  PositionIn.SystemValue = SignatureSystemValue::Position;
+  Sig.Elements = {PositionIn};
+
+  Expected<StageStorage> Storage =
+      buildStageStorage(Sig, SignatureDirection::Input, /*InvocationCount=*/4);
+  ASSERT_THAT_EXPECTED(Storage, Succeeded());
+  EXPECT_EQ(Storage->Data.size(), 0u);
+}
+
+TEST(StageLinkTest,
+    BuildStageStorageAllocatesGeometryInputSystemValueStorageWhenRequested) {
+  EntrySignature Sig;
+  SignatureElement PositionIn = makeElement(
+      0, SignatureDirection::Input, std::nullopt, /*ComponentCount=*/4);
+  PositionIn.SystemValue = SignatureSystemValue::Position;
+  Sig.Elements = {PositionIn};
+
+  Expected<StageStorage> Storage = buildStageStorage(
+      Sig, SignatureDirection::Input, /*InvocationCount=*/4,
+      /*AllInputSystemValuesAreStorageBacked=*/true);
+  ASSERT_THAT_EXPECTED(Storage, Succeeded());
+  EXPECT_GT(Storage->Data.size(), 0u);
+}
+
+TEST(StageLinkTest,
+    BuildStageStorageStillSkipsGeometryInvocationRecordSystemValues) {
+  // `PrimitiveID`/`InvocationID` remain sourced from
+  // `FemeGeometryInvocation` even for a geometry entry's own input
+  // signature, so they must still get no storage regardless of the new
+  // flag.
+  EntrySignature Sig;
+  SignatureElement PrimitiveIDIn =
+      makeElement(0, SignatureDirection::Input, std::nullopt);
+  PrimitiveIDIn.SystemValue = SignatureSystemValue::PrimitiveID;
+  SignatureElement InvocationIDIn =
+      makeElement(1, SignatureDirection::Input, std::nullopt);
+  InvocationIDIn.SystemValue = SignatureSystemValue::InvocationID;
+  Sig.Elements = {PrimitiveIDIn, InvocationIDIn};
+
+  Expected<StageStorage> Storage = buildStageStorage(
+      Sig, SignatureDirection::Input, /*InvocationCount=*/4,
+      /*AllInputSystemValuesAreStorageBacked=*/true);
+  ASSERT_THAT_EXPECTED(Storage, Succeeded());
+  EXPECT_EQ(Storage->Data.size(), 0u);
+}
+
+// End-to-end regression test for the crash itself: links a vertex-stage
+// `Position` output into a geometry-stage-shaped `gl_in[]` `Position` input
+// (`AllInputSystemValuesAreStorageBacked=true`) and confirms
+// `copyLinkedElements` writes/reads it correctly rather than writing past
+// an unallocated (zero-size) `Data` buffer.
+TEST(StageLinkTest, CopiesLinkedGeometryInputSystemValue) {
+  EntrySignature Producer;
+  SignatureElement PositionOut = makeElement(
+      0, SignatureDirection::Output, std::nullopt, /*ComponentCount=*/4);
+  PositionOut.SystemValue = SignatureSystemValue::Position;
+  Producer.Elements = {PositionOut};
+
+  EntrySignature Consumer;
+  SignatureElement PositionIn = makeElement(
+      0, SignatureDirection::Input, std::nullopt, /*ComponentCount=*/4);
+  PositionIn.SystemValue = SignatureSystemValue::Position;
+  Consumer.Elements = {PositionIn};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "vertex stage output -> geometry stage input");
+  ASSERT_THAT_EXPECTED(Links, Succeeded());
+  ASSERT_EQ(Links->size(), 1u);
+
+  Expected<StageStorage> From = buildStageStorage(
+      Producer, SignatureDirection::Output, /*InvocationCount=*/3);
+  ASSERT_THAT_EXPECTED(From, Succeeded());
+  Expected<StageStorage> To = buildStageStorage(
+      Consumer, SignatureDirection::Input, /*InvocationCount=*/3,
+      /*AllInputSystemValuesAreStorageBacked=*/true);
+  ASSERT_THAT_EXPECTED(To, Succeeded());
+  ASSERT_GT(To->Data.size(), 0u);
+
+  for (uint32_t I = 0; I != 3; ++I)
+    for (uint32_t C = 0; C != 4; ++C)
+      From->writeFloat(0, C, I, static_cast<float>(I * 4 + C));
+
+  copyLinkedElements(*From, *To, *Links, /*InvocationCount=*/3, {});
+  for (uint32_t I = 0; I != 3; ++I)
+    for (uint32_t C = 0; C != 4; ++C)
+      EXPECT_FLOAT_EQ(To->readFloat(0, C, I), static_cast<float>(I * 4 + C));
+}
+
 } // namespace
