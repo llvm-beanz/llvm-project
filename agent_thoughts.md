@@ -55072,3 +55072,92 @@ regressions elsewhere in that suite. A broader `dEQP-VK.api.info.*` sweep
 Neither `Vulkan14FeatureInventory.md` nor `VulkanExtensionInventory.md`
 needed updates: this row only widens per-format `VkFormatFeatureFlags`,
 touching no `VkPhysicalDeviceFeatures` bit or extension.
+
+# H8p: real integer color-attachment rendering
+
+## The request and its shape
+
+H8e's own investigation split off two sub-scopes it found too large to fold
+into its own row: H8p (the genuine 7-format `COLOR_ATTACHMENT_BIT` gap for
+integer formats) and H8q (`e5b9g9r9_ufloat_pack32`, an entirely unrecognized
+format). This session's task was H8p specifically. The user's own roadmap
+text already did most of the scoping work for me: it named the exact 4
+required pieces (widen `executeDraws`'s type check, add an integer read path,
+confirm/extend pack/unpack, add the render-pass gate) and the key subtlety
+(the fix must not accidentally grant `COLOR_ATTACHMENT_BLEND_BIT`, since the
+CTS log never asked for it and blending is undefined for integer formats by
+spec). I did not need to do much independent scoping beyond confirming each
+of those 4 pieces' exact starting state before touching code.
+
+## Why this was smaller than it looked
+
+The scariest-sounding part of the roadmap text was `Executor.cpp`'s hard
+`ComponentType != Float` rejection -- but once I looked at `StageStorage`, the
+actual gap was much narrower than H6m's `bool`/`i1` problem from earlier in
+this session's own history. GLSL `int`/`uint` fragment outputs are *already*
+32-bit, and `StageStorage::readRaw` already returns a raw `uint32_t`
+regardless of how the caller interprets it -- so no storage-layout widening
+was needed at all, only a second *interpretation* function
+(`readFragmentColorInt`) alongside the existing `readFragmentColor`. This is
+the opposite lesson from H6m: there, the underlying storage genuinely could
+not represent the bit width in question; here, it already could, and the gap
+was purely in the validation/interpretation layer above it.
+
+## A gap inside the gap
+
+While extending `packClearColor`/`unpackColor`, I found two things the
+roadmap text hadn't called out:
+
+1. `mergeColor`'s own logic-op code path already *referenced*
+   `R8G8B8A8_UINT`/`_SINT` in its own error message text, implying pack/unpack
+   support existed for them -- but it didn't. That code path was simply
+   unreachable before this row (no integer fragment output could ever be
+   created), so it had silently rotted into a latent bug nobody could trip
+   over. Adding the real pack/unpack cases this row needed anyway happened to
+   fix it as a side effect.
+2. `getFixtureFormatElementSize` (used by `executeDraws`'s own attachment-
+   extent validation, a *different* function from `packClearColor`/
+   `unpackColor`) reaches `getFormatInfo`, which had no entry at all for
+   `R16_UINT`/`_SINT`/`R16G16_UINT`/`_SINT` -- unlike `R16_UNORM`/`_SNORM`,
+   which are also missing an entry but never needed one because they're only
+   ever used as `EAC_R11`'s own sampling-bridge target, never a real color
+   attachment. I found this the hard way: my first build of the new
+   end-to-end `ExecutorTest.cpp` case failed with "image fixture format is
+   not yet supported" even though `packClearColor` demonstrably had a case
+   for the format -- a reminder that this codebase has (at least) two
+   separate per-format capability tables that don't automatically stay in
+   sync with each other.
+
+## The blend-format exclusion
+
+The one piece of design judgment beyond mechanically following the roadmap
+text was deciding whether to add a defensive rejection for `BlendEnable`
+combined with an integer format. Nothing enforced this before my change
+(it was simply unreachable), and the spec doesn't allow it, so I added a
+small guard in `mergeColor` mirroring the existing logic-op restriction's own
+style and error-message shape, rather than leaving a newly-reachable invalid
+state silently doing something undefined.
+
+## Verification
+
+Ran `ninja -C build check-feme` (assertions-enabled, ccache) after each
+logical change; final state 2409/2436 (27 pre-existing `Unsupported`, 0
+`Failed`, +12 from this row's own new tests). Re-ran the real
+`dEQP-VK.api.info.format_properties.*` CTS suite from
+`/home/dev/dev/VK-GL-CTS/`: 199/225, up from the H8e-era 193/225 baseline.
+Individually confirmed all 7 target formats now report `COLOR_ATTACHMENT_BIT`
+correctly; the 2 that still fail overall (`r16g16_{uint,sint}`) do so for an
+unrelated, already-tracked reason (missing `UNIFORM_TEXEL_BUFFER_BIT`,
+roadmap H8d's own scope), and `r8g8b8a8_uint` likewise fails overall for a
+separate pre-existing `STORAGE_IMAGE_BIT` gap on a different `VkFormat`
+sharing the same `ResourceFormat`. A broader `dEQP-VK.api.info.*` sweep showed
+no new failures. To specifically rule out a blend regression, I stashed my
+changes, rebuilt, and reran `dEQP-VK.pipeline.monolithic.blend.format.
+r8g8b8a8_unorm.*` (a complex blend-equation suite that was already only
+6/100 passing) -- identical 6/100 both before and after, confirming the
+`mergeColor` guard I added does not touch the existing float-format blend
+path at all. Neither `Vulkan14FeatureInventory.md` nor
+`VulkanExtensionInventory.md` needed updates: this row only widens
+per-format `VkFormatFeatureFlags` and adds real rendering-path support for
+7 already-recognized formats, touching no `VkPhysicalDeviceFeatures` bit or
+extension.
