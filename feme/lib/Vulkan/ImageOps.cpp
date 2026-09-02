@@ -10,6 +10,7 @@
 #include "ASTCDecode.h"
 #include "BCSamplingBridge.h"
 #include "Buffer.h"
+#include "ETC2SamplingBridge.h"
 #include "Format.h"
 #include "Image.h"
 
@@ -610,7 +611,7 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
   // this ICD's ASTC support is decode-only (ASTCDecode.h), and a blit's
   // own resample-then-repack pipeline has no encoder to repack into one.
   // (Roadmap H8n: the same holds for every `VK_FORMAT_BC*` destination --
-  // `isBlockCompressedFormat` already covers both families.)
+  // isBlockCompressedFormat already covers both families.)
   // A block-compressed *source* is supported for every recognized format
   // except HDR ASTC: `decodeASTCBlockHDR` produces floats through a
   // different interface than the UNORM8 one every other format's
@@ -621,13 +622,20 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
   // (`R8G8B8A8_UNORM`(`_SRGB`)/`R8_UNORM`(`_SNORM`)/
   // `R8G8_UNORM`(`_SNORM`)/`R16G16B16A16_FLOAT`), all of which
   // `feme::graphics::unpackColor`/`packClearColor` now have a case for.
+  // (Roadmap H8j) Every one of the 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*`
+  // formats decodes the same way, through `etc2SamplingTarget`/
+  // `decodeETC2FormatBlock`, into `R8G8B8A8_UNORM`(`_SRGB`)/
+  // `R16_UNORM`(`_SNORM`)/`R16G16_UNORM`(`_SNORM`) -- all also already
+  // covered by `unpackColor`/`packClearColor`.
   if (feme::cpu::isBlockCompressedFormat(Dst->format()))
     return createStringError(inconvertibleErrorCode(),
                              "blitting to a block-compressed destination is "
                              "not implemented (no ASTC/BC encoder exists)");
   bool SrcCompressed = feme::cpu::isBlockCompressedFormat(Src->format());
   bool SrcIsBC = feme::cpu::isBCFormat(Src->format());
-  if (SrcCompressed && !SrcIsBC && !feme::cpu::isASTCLdrFormat(Src->format()))
+  bool SrcIsETC2 = feme::cpu::isETC2Format(Src->format());
+  if (SrcCompressed && !SrcIsBC && !SrcIsETC2 &&
+      !feme::cpu::isASTCLdrFormat(Src->format()))
     return createStringError(inconvertibleErrorCode(),
                              "blitting an HDR ASTC source is not "
                              "implemented (decodeASTCBlock is LDR-only)");
@@ -637,6 +645,10 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
   BCSamplingTarget SrcBCTarget{};
   if (SrcIsBC)
     SrcBCTarget = bcSamplingTarget(Src->format());
+  // (Roadmap H8j) Likewise for an ETC2/EAC source.
+  ETC2SamplingTarget SrcETC2Target{};
+  if (SrcIsETC2)
+    SrcETC2Target = etc2SamplingTarget(Src->format());
   uint32_t SrcTexelSize = SrcCompressed ? 0 : formatElementSize(Src->format());
   uint32_t DstTexelSize = formatElementSize(Dst->format());
   uint32_t SrcBlockW = blockWidth(Src->format());
@@ -644,9 +656,13 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
   // Reused across every decoded source texel a compressed blit's own
   // region loop below fetches, rather than reallocated per texel. Sized
   // for the larger of an ASTC block's own always-RGBA8 decode (4 bytes/
-  // texel) or a BC source's own per-format target (`SrcBCTarget`, up to
-  // `R16G16B16A16_FLOAT`'s 8 bytes/texel for BC6H).
-  uint32_t DecodeBytesPerTexel = SrcIsBC ? SrcBCTarget.BytesPerTexel : 4;
+  // texel), a BC source's own per-format target (`SrcBCTarget`, up to
+  // `R16G16B16A16_FLOAT`'s 8 bytes/texel for BC6H), or an ETC2/EAC
+  // source's own per-format target (`SrcETC2Target`, up to
+  // `R16G16_UNORM`/`_SNORM`'s 4 bytes/texel for `EAC_R11G11_*`).
+  uint32_t DecodeBytesPerTexel =
+      SrcIsBC ? SrcBCTarget.BytesPerTexel
+              : SrcIsETC2 ? SrcETC2Target.BytesPerTexel : 4;
   std::vector<uint8_t> DecodeBuf(size_t(SrcBlockW) * SrcBlockH *
                                  DecodeBytesPerTexel);
   // A same-format nearest blit copies raw bytes verbatim (no unpack/repack
@@ -764,8 +780,10 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
                                   uint32_t(Region.srcOffsets[0].z)));
             // (Roadmap H8o) A BC source decodes through `decodeBCBlock`
             // into whichever already-runtime-supported `ResourceFormat`
-            // its own sub-family maps to (`SrcBCTarget`); an ASTC source
-            // always decodes through `decodeASTCBlock` into RGBA8.
+            // its own sub-family maps to (`SrcBCTarget`); (roadmap H8j)
+            // an ETC2/EAC source likewise through `decodeETC2FormatBlock`
+            // (`SrcETC2Target`); an ASTC source always decodes through
+            // `decodeASTCBlock` into RGBA8.
             feme::cpu::ResourceFormat DecodedFormat =
                 feme::cpu::ResourceFormat::R8G8B8A8_UNORM;
             uint32_t DecodedBytesPerTexel = 4;
@@ -773,6 +791,10 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
               decodeBCBlock(Src->format(), Block, DecodeBuf.data());
               DecodedFormat = SrcBCTarget.Format;
               DecodedBytesPerTexel = SrcBCTarget.BytesPerTexel;
+            } else if (SrcIsETC2) {
+              decodeETC2FormatBlock(Src->format(), Block, DecodeBuf.data());
+              DecodedFormat = SrcETC2Target.Format;
+              DecodedBytesPerTexel = SrcETC2Target.BytesPerTexel;
             } else {
               decodeASTCBlock(Block, SrcBlockW, SrcBlockH, DecodeBuf.data());
             }
