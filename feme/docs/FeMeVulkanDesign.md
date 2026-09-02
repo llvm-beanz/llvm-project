@@ -3238,6 +3238,21 @@ above: `vkCreateImage` rejects an HDR ASTC `VkFormat` for the identical
 one, so E22 covers both dynamic ranges' pipeline wiring together rather
 than needing its own HDR-specific follow-up.
 
+**Update (roadmap H8c, partially closed):** a complete ETC2/EAC block
+decoder (`feme::vulkan::decodeETC2Block`/
+`decodeETC2PunchthroughAlphaBlock`/`decodeEACBlock`, `ETC2Decode.h`) now
+exists, covering all 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` formats'
+own algorithm, following the same "decoder first, wiring later" shape
+E20 established. Unlike E20 at the time it landed, this decoder has no
+block-aligned-layout prerequisite left to build (E20/E22's own rework
+already generalized `computeSubresourceLayouts` to any block
+width/height/bytes-per-block triple) -- the remaining wiring is purely
+`Format.h`'s `ResourceFormat`/`mapVkFormat` entries plus the same
+per-block copy/sampling path `ImageOps.cpp`/`CommandBuffer.cpp` already
+grew for ASTC, tracked as roadmap H8j. BC1-7 (the other half of H8c's
+original scope) remains fully unimplemented, tracked as roadmap H8i.
+
+
 **Update (roadmap E22, closed):** `vkCreateImage` no longer rejects a
 block-compressed `VkFormat`. `Image::blockPointer` addresses one a whole
 block at a time (`texelPointer`, meaningless for one, still asserts

@@ -20348,3 +20348,48 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
 needed -- same reasoning as H8a: `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` is
 a per-format bit, not a `VkPhysicalDeviceFeatures`/`VkExtension` entry
 either document tracks.
+
+## Roadmap H8c: measured impact (no CTS delta expected -- decoder-only, unwired)
+
+**Scope.** Unlike H8a/H8b (which changed real `VkFormatFeatureFlags`
+answers `Format.cpp`/`Executor.cpp` already gave), this pass lands a new
+`ETC2Decode.h`/`.cpp` -- a complete decoder for all five ETC2 color
+modes, the RGB8A1 punchthrough-alpha variant, and EAC unsigned/signed --
+as a standalone file with **zero** call sites anywhere in `libfeme_vulkan`,
+following `ASTCDecode.h`'s own E20 precedent exactly. `Format.cpp` gained
+no new `ResourceFormat` enumerators or `mapVkFormat` cases, `Image.cpp`'s
+per-format layout math is untouched, and `PhysicalDeviceInfo.cpp`'s
+`textureCompressionETC2` stays `VK_FALSE` (unchanged from before this
+row, honestly: no consumer exists yet for a decoder nothing calls). So,
+exactly like E20's own "measured impact" section reasoned, a full
+3-million-case re-run would only be expected to reproduce this report's
+existing headline numbers verbatim -- two targeted spot checks were run
+instead to confirm that expectation rather than assume it, matching the
+standing instruction to run the real CTS after each change:
+
+**Real `deqp-vk` re-run, correct ICD confirmed via `vulkaninfo
+--summary` (`deviceName = FeMe CPU Vulkan Device`):**
+- `dEQP-VK.api.info.*` (10,484 cases): 5,367 passed / 584 failed / 4,533
+  not supported -- no regression versus this report's own prior H8b-era
+  numbers (small case-count/pass-count drift versus even-older entries
+  in this report reflects the many unrelated H7/H8 rows landed in
+  between, not this row's own change, which touches none of this
+  subtree's own code paths).
+- `dEQP-VK.texture.compressed_format.*` (the exact CTS group H8c's own
+  scoping investigation targeted): every case still `NotSupported`,
+  gated on `textureCompressionETC2`/`textureCompressionBC` staying
+  `VK_FALSE` -- the honest, expected result: this row's decoder has no
+  consumer yet, so this group's own pass/fail story does not change
+  until roadmap H8j (ETC2/EAC wiring) or H8i (BC1-7) lands.
+
+**`ninja check-feme`** (assertions-enabled, ccache build, correct target
+dependencies so `FeMeVulkanTests` rebuilds before the regression suite
+runs): 2343/2370 tests pass (27 pre-existing `Unsupported`, 0 `Failed`),
+up 12 tests (this row's own new `ETC2DecodeTest.cpp` coverage) from
+H8b's own 2328/2355 baseline, 0 regressions.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed: no `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by
+this row (`textureCompressionETC2` stays `VK_FALSE`, matching its actual,
+still-unwired state) -- confirmed, not assumed, by grepping both
+documents for any stale reference this row might need to update.
