@@ -52839,3 +52839,87 @@ rather than accept a diff dominated by whitespace churn on lines I never
 touched. Formatting only the touched hunks (or just matching the
 file's existing, if imperfect, style by hand) is the safer default in a
 codebase like this one that isn't uniformly clang-format-enforced.
+
+# H6: two more generic CPU-lowering gaps found by a real full-group re-run, and a lesson in unrepresentative repros
+
+With H6a-H6m all struck through and the parent H6 row's own three named
+blockers (H6g-b-a-i-a-i-b, H6l, H6k) all independently verified closed
+via `grep`, the honest next step was not to trust the paperwork but to
+actually re-run the real CTS group end-to-end, exactly as the H5 session
+before this one did for geometry shading. That instinct paid off
+immediately: a full single-process `dEQP-VK.mesh_shader.*` sweep (28044
+cases) aborted with `LLVM ERROR: Cannot select: intrinsic
+%llvm.spv.subgroup.id` at case ~1953, a genuinely new, previously
+undiscovered fatal compiler error nobody had hit before because nothing
+in the prior H6-chain's own CTS triage had reached a case exercising
+`gl_SubgroupID`/`gl_NumSubgroups` in a mesh shader specifically.
+
+Root-causing this was straightforward once I found the pattern: SPIR-V's
+`SubgroupId`/`NumSubgroups` builtins already convert cleanly to real LLVM
+core intrinsics at the SPIR-V-to-LLVM layer (`llvm.spv.subgroup.id`/
+`llvm.spv.num.subgroups`), but `SIMDizePass` -- the pass responsible for
+lowering every per-lane-varying or wave-shape-dependent builtin before
+codegen -- had simply never been taught about these two, unlike their
+already-handled siblings `SubgroupSize`/`SubgroupLocalInvocationId`. The
+fix followed an existing, well-established pattern almost exactly:
+`SubgroupId` is uniform (one value per widened-function call, exactly the
+wave loop's own iteration index `w`), so it substitutes directly for the
+already-threaded `Env.WaveIndex` wave-body parameter, mirroring
+`isGroupIdCall`/`replaceGroupIdCall`'s existing treatment of
+`WorkgroupId` -- no new `BuiltinCallKind`, no `WaveLoweringPass`
+involvement, nothing structurally new. `NumSubgroups` folds to a
+compile-time constant derived from the entry's own `hlsl.numthreads`
+attribute and the pass's `WaveSize` parameter.
+
+The more interesting lesson of this session was methodological, not
+technical: building a minimal IR reduction to debug the crash, I first
+ran it through only `feme-cpu-linearize,feme-cpu-simdize` -- the two
+passes that seemed obviously relevant -- and in the process tripped over
+a second, completely different crash (`FunctionWidener::getWidened`
+asserting on a vector-typed operand, trying to build an illegal
+`<W x <4 x float>>` nested vector). I chased this down and fixed it
+properly (both `widenElementwise`'s and `widenScalarizedFallback`'s own
+operand-widening loops needed independent fixes, since the former
+crashes first and never even reaches the latter), only to later realize,
+by actually reading `Pipeline.cpp`'s real pass order, that my reduction
+had silently skipped `feme-graphics-canonicalize-stage`/
+`-validate-stage` -- the passes that convert raw builtin-variable stores
+into the `feme.stage.output.store` call abstraction, which is
+architecturally *always* scalar (per-component, `Component`-addressed).
+Once I added those passes back to match the real pipeline, the "crash"
+I'd fixed turned out to never actually occur in production at all: no
+real stage-IO path ever produces a whole-vector store reaching
+`SIMDizePass`. The fix is still correct and worth keeping -- it's a real
+latent crash for any future producer of such a shape, and a defensive
+`assert` now documents the invariant `getWidened` was silently relying
+on -- but it was not the CTS-blocking bug I initially thought I'd found.
+The lesson: when a minimal repro produces a crash that "feels right" but
+doesn't match a specific reported diagnostic, double- and triple-check
+the repro's own pass list against the *actual* production pipeline
+before concluding the bug is real-world-reachable. A repro that's easy
+to build is not automatically representative.
+
+After landing both fixes, a real ICD re-run confirmed genuine forward
+progress: the originally-crashing case now compiles, links, submits, and
+renders (failing only on a later, unrelated pixel-comparison mismatch,
+which is out of scope for this row and mirrors H6m's own analogous
+`cull_primitives` rendering gap), and the sweep advanced substantially
+further, from case ~1953 to case 1968 of 28044, before hitting a third,
+distinct blocker: `llvm.spv.num.workgroups` has the identical *shape* of
+gap (a real intrinsic, no `SIMDizePass` lowering case) but is a genuine
+runtime dispatch-time value, unlike `NumSubgroups`'s compile-time-
+foldable one, so it needs its own scoping work rather than a copy-paste
+fix. I filed this as a new row, H6o, rather than trying to squeeze a
+third, more involved fix into the same session under time pressure --
+better to land two well-tested, well-verified fixes now and hand off a
+clearly-scoped next blocker than to rush a third fix without adequate
+verification. Milestone H6 itself remains open, now depending on H6o
+alone.
+
+One incidental confirmation worth recording: `FeMeVulkanDesign.md`'s own
+"Builtin and execution-shape mapping" table already named `GroupCount`
+as `NumWorkgroups`'s intended source -- the design already anticipated
+this builtin's existence and where its value should come from, it's
+purely `SIMDizePass`'s own implementation that hadn't caught up yet, so
+H6o's fix (whenever it lands) should be a matter of wiring up an
+already-designed data path rather than inventing a new one.
