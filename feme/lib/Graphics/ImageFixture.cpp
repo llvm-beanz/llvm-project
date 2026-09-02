@@ -24,6 +24,8 @@
 
 #include "feme/Graphics/ImageFixture.h"
 
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -42,6 +44,31 @@ using namespace feme::cpu;
 namespace feme::graphics {
 
 namespace {
+
+/// Converts one IEEE-754 binary16 ("half float") bit pattern to a `float`.
+/// (Roadmap H8o) Used by the generic float pack/unpack path below for any
+/// 2-byte-per-component float format (`R16G16B16A16_FLOAT`, and so
+/// `BC6HDecode.h`'s own decoded shape once blitted) -- mirrors
+/// `Executor.cpp`'s own private `halfBitsToFloat`, reimplemented here
+/// rather than shared since that copy is local to vertex-attribute fetch
+/// and this file has no dependency on `Executor.cpp`.
+float halfBitsToFloat(uint16_t Bits) {
+  APFloat Half(APFloat::IEEEhalf(), APInt(16, Bits));
+  bool LosesInfo;
+  Half.convert(APFloat::IEEEsingle(), APFloat::rmNearestTiesToEven,
+               &LosesInfo);
+  return Half.convertToFloat();
+}
+
+/// The inverse of `halfBitsToFloat`: rounds \p F to the nearest binary16
+/// value and returns its bit pattern.
+uint16_t floatToHalfBits(float F) {
+  bool LosesInfo;
+  APFloat Value(F);
+  Value.convert(APFloat::IEEEhalf(), APFloat::rmNearestTiesToEven,
+                &LosesInfo);
+  return static_cast<uint16_t>(Value.bitcastToAPInt().getZExtValue());
+}
 
 /// The component count/width and encoding (hex vs. decimal) one
 /// `ResourceFormat` uses in a fixture. Only the formats
@@ -383,6 +410,46 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  // (Roadmap H8o) `R8_UNORM`/`R8_SNORM`: `BC4Decode`'s own single-channel
+  // sampling-bridge target (`bcSamplingTarget`, BCSamplingBridge.h) --
+  // like `A8_UNORM` above, a 1-component format still represented as a
+  // 4-logical-component clear color here, with the other three (unused)
+  // components simply ignored.
+  if (Format == ResourceFormat::R8_UNORM ||
+      Format == ResourceFormat::R8_SNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    bool Signed = Format == ResourceFormat::R8_SNORM;
+    double Clamped =
+        Signed ? std::clamp(Clear[0], -1.0, 1.0) : std::clamp(Clear[0], 0.0, 1.0);
+    Texel[0] = Signed ? static_cast<uint8_t>(static_cast<int8_t>(
+                            std::lround(Clamped * 127.0)))
+                      : static_cast<uint8_t>(std::lround(Clamped * 255.0));
+    return Error::success();
+  }
+
+  // (Roadmap H8o) `R8G8_UNORM`/`R8G8_SNORM`: `BC5Decode`'s own two-channel
+  // sampling-bridge target, the same convention as `R8_UNORM`/`_SNORM`
+  // above with a second stored channel.
+  if (Format == ResourceFormat::R8G8_UNORM ||
+      Format == ResourceFormat::R8G8_SNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    bool Signed = Format == ResourceFormat::R8G8_SNORM;
+    for (unsigned I = 0; I != 2; ++I) {
+      double Clamped =
+          Signed ? std::clamp(Clear[I], -1.0, 1.0) : std::clamp(Clear[I], 0.0, 1.0);
+      Texel[I] = Signed ? static_cast<uint8_t>(static_cast<int8_t>(
+                              std::lround(Clamped * 127.0)))
+                        : static_cast<uint8_t>(std::lround(Clamped * 255.0));
+    }
+    return Error::success();
+  }
+
   Expected<FormatInfo> Info = getFormatInfo(Format);
   if (!Info)
     return Info.takeError();
@@ -393,6 +460,18 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
 
   if (Info->IsFloat) {
     for (unsigned I = 0; I != Info->Components; ++I) {
+      if (Info->ComponentBytes == 2) {
+        // (Roadmap H8o) A 2-byte float component (`R16G16B16A16_FLOAT`,
+        // and so `BC6HDecode.h`'s own decoded shape once blitted) is a
+        // binary16 value, not a truncated binary32 one -- round-convert
+        // through `llvm::APFloat` rather than `memcpy`-ing only half of a
+        // `float`'s own bytes (that silently corrupted every value this
+        // path had never actually been exercised with before this row).
+        uint16_t Bits = floatToHalfBits(static_cast<float>(Clear[I]));
+        memcpy(Texel.data() + I * Info->ComponentBytes, &Bits,
+              Info->ComponentBytes);
+        continue;
+      }
       float F = static_cast<float>(Clear[I]);
       memcpy(Texel.data() + I * Info->ComponentBytes, &F, Info->ComponentBytes);
     }
@@ -577,6 +656,48 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     return Error::success();
   }
 
+  // (Roadmap H8o) `R8_UNORM`/`R8_SNORM`: the inverse of `packClearColor`'s
+  // special case above -- `BC4Decode`'s own sampling-bridge target
+  // (BCSamplingBridge.h), read back into logical red with green/blue at
+  // their identity value (`0`) and alpha fully opaque, the same
+  // "missing channel reads as its identity value" precedent
+  // `R5G6B5_UNORM` above already established for a missing alpha.
+  if (Format == ResourceFormat::R8_UNORM ||
+      Format == ResourceFormat::R8_SNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    bool Signed = Format == ResourceFormat::R8_SNORM;
+    Out[0] = Signed ? std::clamp(static_cast<int8_t>(Texel[0]) / 127.0, -1.0, 1.0)
+                    : Texel[0] / 255.0;
+    Out[1] = Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H8o) `R8G8_UNORM`/`R8G8_SNORM`: the inverse of
+  // `packClearColor`'s special case above -- `BC5Decode`'s own
+  // sampling-bridge target, the same convention as `R8_UNORM`/`_SNORM`
+  // above with a second stored channel.
+  if (Format == ResourceFormat::R8G8_UNORM ||
+      Format == ResourceFormat::R8G8_SNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    bool Signed = Format == ResourceFormat::R8G8_SNORM;
+    for (unsigned I = 0; I != 2; ++I)
+      Out[I] = Signed
+                  ? std::clamp(static_cast<int8_t>(Texel[I]) / 127.0, -1.0, 1.0)
+                  : Texel[I] / 255.0;
+    Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
   Expected<FormatInfo> Info = getFormatInfo(Format);
   if (!Info)
     return Info.takeError();
@@ -588,6 +709,17 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
 
   if (Info->IsFloat) {
     for (unsigned I = 0; I != Info->Components; ++I) {
+      if (Info->ComponentBytes == 2) {
+        // (Roadmap H8o) See `packClearColor`'s identical comment above:
+        // a 2-byte float component is a binary16 value, converted
+        // through `llvm::APFloat` rather than `memcpy`-ed into a `float`
+        // directly.
+        uint16_t Bits;
+        memcpy(&Bits, Texel.data() + I * Info->ComponentBytes,
+              Info->ComponentBytes);
+        Out[I] = halfBitsToFloat(Bits);
+        continue;
+      }
       float F;
       memcpy(&F, Texel.data() + I * Info->ComponentBytes, Info->ComponentBytes);
       Out[I] = F;
@@ -1149,6 +1281,41 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "astc-12x10-sfloat";
   case ResourceFormat::ASTC_12x12_SFLOAT:
     return "astc-12x12-sfloat";
+  // (Roadmap H8n) BC1-7 block-compressed formats: the same "no fixture
+  // support yet, but still needs a name for diagnostics" rationale as the
+  // ASTC formats immediately above.
+  case ResourceFormat::BC1_RGB_UNORM:
+    return "bc1-rgb-unorm";
+  case ResourceFormat::BC1_RGB_SRGB:
+    return "bc1-rgb-srgb";
+  case ResourceFormat::BC1_RGBA_UNORM:
+    return "bc1-rgba-unorm";
+  case ResourceFormat::BC1_RGBA_SRGB:
+    return "bc1-rgba-srgb";
+  case ResourceFormat::BC2_UNORM:
+    return "bc2-unorm";
+  case ResourceFormat::BC2_SRGB:
+    return "bc2-srgb";
+  case ResourceFormat::BC3_UNORM:
+    return "bc3-unorm";
+  case ResourceFormat::BC3_SRGB:
+    return "bc3-srgb";
+  case ResourceFormat::BC4_UNORM:
+    return "bc4-unorm";
+  case ResourceFormat::BC4_SNORM:
+    return "bc4-snorm";
+  case ResourceFormat::BC5_UNORM:
+    return "bc5-unorm";
+  case ResourceFormat::BC5_SNORM:
+    return "bc5-snorm";
+  case ResourceFormat::BC6H_UFLOAT:
+    return "bc6h-ufloat";
+  case ResourceFormat::BC6H_SFLOAT:
+    return "bc6h-sfloat";
+  case ResourceFormat::BC7_UNORM:
+    return "bc7-unorm";
+  case ResourceFormat::BC7_SRGB:
+    return "bc7-srgb";
   }
   llvm_unreachable("unhandled ResourceFormat");
 }

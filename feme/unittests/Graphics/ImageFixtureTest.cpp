@@ -231,7 +231,106 @@ TEST(ImageFixtureTest, PacksAndUnpacksA8Unorm) {
   EXPECT_NEAR(Unpacked[3], 0.5, 0.01);
 }
 
-// Roadmap E5's `VK_FORMAT_A1B5G5R5_UNORM_PACK16`: all four components
+// (Roadmap H8o) `VK_FORMAT_R16G16B16A16_SFLOAT`'s generic float pack/unpack
+// path stores a binary16 ("half float") value per component, not a
+// truncated binary32 one -- this round-trips a handful of representative
+// values (including a fraction with no exact binary16 representation,
+// exercising the round-to-nearest conversion) through `packClearColor`/
+// `unpackColor` and checks the result survives within binary16's own
+// precision. Before this row, the generic float path's `memcpy` corrupted
+// every 2-byte-per-component value it ever touched (no prior test had
+// exercised it) -- this is the regression test for that fix.
+TEST(ImageFixtureTest, RoundTripsR16G16B16A16FloatThroughPackUnpack) {
+  std::array<uint8_t, 8> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16G16B16A16_FLOAT,
+                                   {1.0, -2.5, 0.1, 65504.0}, Texel),
+                    Succeeded());
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R16G16B16A16_FLOAT, Texel,
+                                Unpacked),
+                    Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.001);
+  EXPECT_NEAR(Unpacked[1], -2.5, 0.001);
+  // binary16 has ~3 decimal digits of precision; 0.1 is not exactly
+  // representable in either binary16 or binary32.
+  EXPECT_NEAR(Unpacked[2], 0.1, 0.001);
+  // The largest finite binary16 magnitude -- confirms the conversion
+  // doesn't clamp/overflow at the format's own limit.
+  EXPECT_NEAR(Unpacked[3], 65504.0, 1.0);
+}
+
+// (Roadmap H8o) `R8_UNORM`/`R8_SNORM`: `BC4Decode`'s own single-channel
+// sampling-bridge target (BCSamplingBridge.h) -- a 1-component format
+// still represented as a 4-logical-component clear color, mirroring
+// `A8_UNORM`'s own precedent immediately above but with the stored channel
+// at logical red (index 0) rather than alpha, and green/blue/alpha reading
+// back as their own identity values (`0`/`0`/`1.0`) rather than being
+// genuinely stored.
+TEST(ImageFixtureTest, PacksAndUnpacksR8Unorm) {
+  std::array<uint8_t, 1> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8_UNORM,
+                                   {0.5, 1.0, 1.0, 1.0}, Texel),
+                    Succeeded());
+  EXPECT_NEAR(Texel[0], 128, 2);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R8_UNORM, Texel, Unpacked),
+                    Succeeded());
+  EXPECT_NEAR(Unpacked[0], 0.5, 0.01);
+  EXPECT_EQ(Unpacked[1], 0.0);
+  EXPECT_EQ(Unpacked[2], 0.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR8SnormNegative) {
+  std::array<uint8_t, 1> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8_SNORM,
+                                   {-1.0, 0.0, 0.0, 0.0}, Texel),
+                    Succeeded());
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R8_SNORM, Texel, Unpacked),
+                    Succeeded());
+  EXPECT_NEAR(Unpacked[0], -1.0, 0.02);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+// (Roadmap H8o) `R8G8_UNORM`/`R8G8_SNORM`: `BC5Decode`'s own two-channel
+// sampling-bridge target, the same convention as `R8_UNORM` above with a
+// second stored channel at logical green.
+TEST(ImageFixtureTest, PacksAndUnpacksR8G8Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8G8_UNORM,
+                                   {0.25, 0.75, 1.0, 1.0}, Texel),
+                    Succeeded());
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8G8_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 0.25, 0.01);
+  EXPECT_NEAR(Unpacked[1], 0.75, 0.01);
+  EXPECT_EQ(Unpacked[2], 0.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR8G8SnormNegative) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8G8_SNORM,
+                                   {-0.5, 1.0, 0.0, 0.0}, Texel),
+                    Succeeded());
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8G8_SNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], -0.5, 0.02);
+  EXPECT_NEAR(Unpacked[1], 1.0, 0.02);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+
 // packed into one 16-bit word, 1 bit of alpha at the top down to 5 bits of
 // red at the bottom -- the same packing `R10G10B10A2_UNORM` above uses,
 // just half the width and with alpha moved to the MSB.
