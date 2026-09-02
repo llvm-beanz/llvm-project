@@ -54151,3 +54151,106 @@ Partially closed H8c (ETC2/EAC decoder complete and tested; BC1-7 and
 the ETC2/EAC wiring itself both deferred). Filed H8i (BC1-7, one
 lowercase letter deep under H8) and H8j (ETC2/EAC wiring, also one
 lowercase letter deep under H8) as its two follow-on rows.
+
+# H8i: BC1-5 compressed-format sampling (partial close)
+
+Continuing the H8c precedent one letter further: H8c's own scoping pass
+found ETC2/EAC and BC compressed-format sampling gated on two separate
+whole-family CTS feature bits (`textureCompressionETC2`,
+`textureCompressionBC`) and, given BC's much larger and more complex
+16-format surface (BC1-7, including BC6H's HDR half-float endpoints and
+BC7's 8-mode/variable-partition complexity), deferred all of BC to a
+new row, H8i. This session picks up H8i, and -- following the row's own
+suggestion -- further narrows scope to BC1-5 only (12 of the 16
+formats), deferring BC6H/BC7 to a new sibling row, H8k, one lowercase
+letter deep under H8 (matching this project's own "no deeper than one
+lowercase letter" nesting rule). BC1-5 is comparable in complexity to
+ETC2's individual/differential color modes -- well-bounded, table-driven
+interpolation with no partition/rotation/mode-selection search space --
+so it made sense as its own slice the same way ETC2/EAC did.
+
+**Verification approach.** Same discipline as H8c: pulled the actual
+Khronos `DataFormat` repository's `s3tc.txt` (BC1/2/3) and `rgtc.txt`
+(BC4/5) specification text directly rather than relying on memory for
+bit layouts and interpolation formulas. But this session went one step
+further and *also* read the real ground truth for what makes
+`dEQP-VK.texture.compressed_format.*` actually pass: VK-GL-CTS's own
+reference decoder, `/home/dev/dev/VK-GL-CTS/framework/common/
+tcuCompressedTexture.cpp`'s `BcDecompressInternal` namespace. This
+cross-check was valuable specifically because it surfaced two places
+where the spec prose is ambiguous or where CTS's own implementation
+choice differs from a literal spec reading:
+
+1. BC1's four-color/three-color mode selection at exactly
+   `color0 == color1`. The spec prose reads `color0 > color1` selects
+   four-color mode; CTS's own `decompressBc1` instead computes
+   `alphaMode = color1 > color0` and treats `!alphaMode` as four-color.
+   These agree everywhere except the boundary itself, where CTS's
+   convention picks four-color (opaque) and the spec's literal words
+   would pick three-color. Since CTS is what a real conformance run
+   scores against, this implementation follows CTS's own convention,
+   documented explicitly in code with the reasoning spelled out so a
+   future reader does not "fix" it back to the spec's literal prose and
+   silently regress CTS conformance once the decoder is wired.
+
+2. BC4/BC5's per-texel interpolated-value arithmetic. Both the spec
+   table and CTS's own BC3-alpha-channel implementation agree exactly
+   on plain truncating integer division. But CTS's own BC4/BC5
+   reference decoder specifically converts to `float` first
+   (`int8ToFloat(x) = x / 128.0f` -- notably `/128`, not `/127` as the
+   spec prose states) and interpolates there. This implementation stays
+   integer throughout for consistency with BC1-3's own arithmetic and
+   because the decoder is unwired this session (no real numeric
+   comparison happens yet) -- documented as a known, accepted gap for a
+   future wiring row to double-check bit-for-bit against CTS.
+
+Both discrepancies are the kind of thing that would be very easy to get
+wrong silently if only the spec prose were consulted -- exactly the
+justification for reading the real reference implementation directly,
+the same lesson this project's ASTC/ETC2 rows already learned.
+
+**Structural reuse:** signed `-128` endpoint clamping (BC4/5's own
+signed-SNORM domain) reuses the identical clamp-to-`-127` pattern EAC's
+signed base codeword needed in H8c, for the same underlying reason (the
+spec defines the extreme negative byte value as a redundant encoding of
+one less magnitude, and a decoder must not misbehave on it even though
+no compliant encoder should produce it).
+
+**Test-authoring bug found and fixed:** while validating the new
+`BCDecodeTest.cpp` blocks, an initial round of hand-computed expected
+values used Python's own floor (`//`) division for negative BC4/BC5
+signed-endpoint table entries, while the actual C++ implementation uses
+plain truncating-toward-zero integer division (matching the spec
+formula's own literal shape, which is `int`, not `float`). These
+differ for negative results not evenly divisible by the denominator.
+Caught immediately once the actual test run disagreed with my
+hand-calculated expectations by exactly one in the last digit on
+several signed-table entries -- recomputed with a proper
+truncating-division helper and confirmed all 10 tests pass. A second,
+unrelated test-authoring bug (BC2's forced-four-color code2/code3
+color values transposed in my own hand-worked example) was caught the
+same way. Both were test-file bugs, not implementation bugs -- the
+implementation was correct throughout; this is the same "verify the
+test's own intended values independently, do not just trust a first
+hand-calculation" discipline the H8c session's planar-mode bug already
+established as worth following every time.
+
+**Build/test results:** `ninja check-feme` (assertions-enabled, ccache
+build) passes in full, 2353/2380 (27 pre-existing `Unsupported`, 0
+`Failed`), up exactly 10 tests (this row's own new coverage) from
+H8c's own 2343/2370 baseline -- 0 regressions. Real `deqp-vk` spot
+checks (`dEQP-VK.api.info.*`, `dEQP-VK.texture.*bc1*`) confirm no CTS
+delta, exactly as expected for a still-unwired decoder: BC1 cases stay
+96/96 `NotSupported`, gated on `textureCompressionBC` staying
+`VK_FALSE`.
+
+**Docs:** `Roadmap.md` H8i row struck through (partially closed) with a
+new H8k row filed for BC6H/BC7 (one lowercase letter deep under H8, the
+next free letter after grepping the current H8a-H8j set fresh rather
+than assuming from memory). `VulkanCTSReport.md` gained a new "Roadmap
+H8i: measured impact" section mirroring H8c's own structure.
+`Vulkan14FeatureInventory.md`'s `textureCompressionBC` row annotated the
+same way `textureCompressionETC2`'s was in H8c. `VulkanExtensionInventory.md`
+needed no change (grepped fresh, confirmed no BC-related extension
+reference exists). `FeMeVulkanDesign.md` gained a new "Update (roadmap
+H8i, partially closed)" note alongside the existing H8c one.
