@@ -197,6 +197,12 @@ struct WrapperEnv {
   Value *GroupIDX;
   Value *GroupIDY;
   Value *GroupIDZ;
+  /// This dispatch's own group-count triple (`FemeDispatchArgs::GroupCount`,
+  /// roadmap H6o -- source of SPIR-V's `NumWorkgroups` builtin), the same
+  /// value for every group in the dispatch, unlike `GroupIDX/Y/Z`.
+  Value *GroupCountX;
+  Value *GroupCountY;
+  Value *GroupCountZ;
   /// This group's flat groupshared buffer -- either a stack `alloca` this
   /// pass created or `Args->GroupShared`, depending on
   /// `GroupSharedStackLimit` (see the file comment above).
@@ -280,6 +286,11 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
   Env.GroupIDX = Entry.CreateExtractValue(GroupIDVec, 0);
   Env.GroupIDY = Entry.CreateExtractValue(GroupIDVec, 1);
   Env.GroupIDZ = Entry.CreateExtractValue(GroupIDVec, 2);
+  Value *GroupCountVec = loadArgsField(Entry, ArgsTy, Args,
+                                       DispatchArgsField::GroupCount, I32x3);
+  Env.GroupCountX = Entry.CreateExtractValue(GroupCountVec, 0);
+  Env.GroupCountY = Entry.CreateExtractValue(GroupCountVec, 1);
+  Env.GroupCountZ = Entry.CreateExtractValue(GroupCountVec, 2);
 
   if (GSLayout.TotalSize == 0 || GSLayout.TotalSize > GroupSharedStackLimit) {
     Env.GroupShared = loadArgsField(Entry, ArgsTy, Args,
@@ -369,6 +380,9 @@ bool isKnownWaveBodyParameter(StringRef Name) {
       "wave_group_id_x",
       "wave_group_id_y",
       "wave_group_id_z",
+      "wave_group_count_x",
+      "wave_group_count_y",
+      "wave_group_count_z",
       "wave_index",
       "wave_entry_mask",
       "wave_sideeffect_mask",
@@ -462,6 +476,12 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       CallArgs.push_back(Env.GroupIDY);
     else if (Arg.getName() == "wave_group_id_z")
       CallArgs.push_back(Env.GroupIDZ);
+    else if (Arg.getName() == "wave_group_count_x")
+      CallArgs.push_back(Env.GroupCountX);
+    else if (Arg.getName() == "wave_group_count_y")
+      CallArgs.push_back(Env.GroupCountY);
+    else if (Arg.getName() == "wave_group_count_z")
+      CallArgs.push_back(Env.GroupCountZ);
     else if (Arg.getName() == "wave_index")
       CallArgs.push_back(W);
     else if (Arg.getName() == "wave_entry_mask")
@@ -1004,7 +1024,8 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
 /// One of `feme::cpu::WaveBodyEnv`'s (or `SIMDizePass`'s trailing
 /// resource/root-constant parameters') own parameters that is the *same*
 /// value for every wave of a group, not just every lane of one wave --
-/// group id, the resource/sampler heap, and root constants -- as opposed
+/// group id, group count (roadmap H6o), the resource/sampler heap, and
+/// root constants -- as opposed
 /// to a genuinely per-wave one (`wave_index`, `wave_entry_mask`,
 /// `wave_groupshared`, `barrier_spill`, any `loopvarN`). A `BranchShape`
 /// header condition referencing only these (see `matchBranchShape`) is
@@ -1022,7 +1043,8 @@ bool isUniformWaveBodyArgument(Argument &Arg) {
          Name == "root_constants" || Name == "root_constant_size" ||
          Name == "image_heap" || Name == "image_heap_count" ||
          Name == "wave_group_id_x" || Name == "wave_group_id_y" ||
-         Name == "wave_group_id_z";
+         Name == "wave_group_id_z" || Name == "wave_group_count_x" ||
+         Name == "wave_group_count_y" || Name == "wave_group_count_z";
 }
 
 /// The shape "Barrier inside a surviving branch" (see the file comment
@@ -1623,6 +1645,12 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
       EnvVal = WEnv.GroupIDY;
     else if (Name == "wave_group_id_z")
       EnvVal = WEnv.GroupIDZ;
+    else if (Name == "wave_group_count_x")
+      EnvVal = WEnv.GroupCountX;
+    else if (Name == "wave_group_count_y")
+      EnvVal = WEnv.GroupCountY;
+    else if (Name == "wave_group_count_z")
+      EnvVal = WEnv.GroupCountZ;
     if (EnvVal)
       HeaderMap[&Arg] = EnvVal;
   }

@@ -628,6 +628,16 @@ Function *buildWrapper(Function &Body) {
              Arg.getName() == "wave_group_id_y" ||
              Arg.getName() == "wave_group_id_z")
       CallArgs.push_back(BodyIR.getInt32(0));
+    // Roadmap H6o: NumWorkgroups is meaningless for a non-compute-
+    // family stage (SPIR-V does not permit this builtin outside
+    // compute/mesh/task), so this widened function's own
+    // wave_group_count_x/y/z parameters are dead here -- 1 rather
+    // than 0 avoids encoding a nonsensical "0 workgroups" default,
+    // mirroring this same file's own wave_group_id_x/y/z dummy above.
+    else if (Arg.getName() == "wave_group_count_x" ||
+             Arg.getName() == "wave_group_count_y" ||
+             Arg.getName() == "wave_group_count_z")
+      CallArgs.push_back(BodyIR.getInt32(1));
     else if (Arg.getName() == "wave_index")
       CallArgs.push_back(W);
     else if (Arg.getName() == "wave_entry_mask" ||
