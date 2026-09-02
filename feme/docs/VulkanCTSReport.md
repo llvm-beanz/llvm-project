@@ -20685,3 +20685,87 @@ describe the real sampling/blit wiring now in place and the specific
 `BLIT_SRC_BIT`-on-all-16-formats gap blocking the feature-bit flip
 itself. No `VulkanExtensionInventory.md` update needed: BC formats are
 core Vulkan 1.0, not extension-gated.
+
+## Roadmap H8o: measured impact
+
+H8n's own investigation found `textureCompressionBC == VK_TRUE`'s
+mandatory format-table check (`vktApiFeatureInfo.cpp`'s
+`testCompressedFormatsSupported`) requires `VK_FORMAT_FEATURE_
+BLIT_SRC_BIT` on all 16 BC formats, but `ImageOps.cpp`'s `runBlitImage`
+only supported the RGBA8-shaped BC1/BC2/BC3/BC7 subset
+(`isBCRGBA8Format`) -- BC4/BC5/BC6H's own sampling-bridge targets
+(`R8_UNORM`/`R8G8_UNORM`/`R16G16B16A16_FLOAT`) did not fit
+`feme::graphics::unpackColor`/`packClearColor`'s own RGBA8-only blit
+pipeline. This row closes that gap:
+
+- Fixed a real pre-existing bug in `ImageFixture.cpp`'s generic float
+  pack/unpack path: it used to `memcpy` only `ComponentBytes` (2, for a
+  half float) into/out of a full 4-byte `float` variable, silently
+  corrupting rather than converting `R16G16B16A16_FLOAT` values (BC6H's
+  own sampling-bridge target). Fixed by routing 2-byte components
+  through a real `llvm::APFloat`-based binary16<->binary32 conversion,
+  mirroring `Executor.cpp`'s own private `halfBitsToFloat`. A new
+  `RoundTripsR16G16B16A16FloatThroughPackUnpack` regression test
+  (`ImageFixtureTest.cpp`) covers a non-exactly-representable fraction
+  and the format's max finite magnitude.
+- Added dedicated `packClearColor`/`unpackColor` cases for
+  `R8_UNORM`/`R8_SNORM` (BC4's own target) and `R8G8_UNORM`/
+  `R8G8_SNORM` (BC5's own target), mirroring `A8_UNORM`'s existing
+  "missing channel reads as its identity value" precedent, anchored at
+  logical red instead of alpha (`PacksAndUnpacksR8Unorm`/
+  `PacksAndUnpacksR8SnormNegative`/`PacksAndUnpacksR8G8Unorm`/
+  `PacksAndUnpacksR8G8SnormNegative`).
+- Widened `ImageOps.cpp`'s `runBlitImage` from the RGBA8-shaped subset
+  to all 16 BC formats: a new `SrcBCTarget` (computed via
+  `bcSamplingTarget`) sizes the decode buffer per-format
+  (`DecodeBytesPerTexel` instead of a hard-coded 4) and routes the
+  decoded texel through `unpackColor` with the correct target
+  `ResourceFormat`, not always `R8G8B8A8_UNORM`.
+- Widened `Format.cpp`'s `formatFeatureFlags`: `BLIT_SRC_BIT` now
+  granted to every `isBCFormat()` format, not just the RGBA8-shaped
+  `isBCRGBA8Format` subset (which keeps its own, now purely
+  descriptive, role, still directly tested by
+  `IsBlockCompressedFormatDistinguishesBC`).
+- `ImageOpsTest.cpp`'s old `RejectsBlitOfBC4Source` replaced with three
+  new real-decode tests: `BlitDecodesBC4Source`, `BlitDecodesBC5Source`
+  (both using default-zero index bits so every texel decodes to that
+  sub-block's own `endpoint0`, verified against `BCDecodeTest.cpp`'s
+  known-good constants), and `BlitDecodesBC6HSource` (reusing
+  `BC6HDecodeTest.Mode10OneSubsetDirectUnsigned`'s exact 16-byte block,
+  expected RGBA8-clamped output hand-computed via a one-off
+  `numpy.float16` script).
+
+A real `deqp-vk` re-run of `dEQP-VK.api.info.format_properties.
+compressed_formats` now `Pass`es ("Compressed texture format support
+is valid"), confirming the mandatory `BLIT_SRC_BIT`-on-all-16-formats
+gate is closed. `PhysicalDeviceInfo.cpp`'s `textureCompressionBC` flips
+to `VK_TRUE` for real (not just the temporary experiment used to
+measure it); `PhysicalDeviceInfoTest.cpp`'s aggregate feature
+assertion and a new dedicated `TextureCompressionBCIsAdvertised`
+regression test both updated.
+
+A full `dEQP-VK.api.info.*` re-run with the bit flipped: 5,271
+passed/680 failed/4,533 not-supported, versus H8n's own flag-off
+baseline of 5,367 passed/584 failed/4,533 not-supported -- a net
+delta of +96 fails / -96 not-supported, all from
+`image_format_properties.*.bc*` (the same pre-existing, already-
+tracked `vkGetPhysicalDeviceImageFormatProperties` gap category
+confirmed identical for ASTC, roadmap E24/E25's own precedent, not a
+new regression this row introduces), plus the `compressed_formats`
+case itself moving from `Fail` to `Pass` (accounting for the exact
+680 = 584 + 96 arithmetic, versus H8n's own trial's 681 = 584 + 96 + 1
+when `compressed_formats` was still failing).
+
+`dEQP-VK.texture.compressed.bc*` (192 non-3D cases) remains 96/192
+`Pass`/96 `NotSupported` (sparse-binding variants, unrelated pre-
+existing gap), 0 `Fail` -- unchanged from H8n, confirming this row's
+blit-widening introduced no regression in the group that already
+passed.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+2,379/2,406 (27 pre-existing `Unsupported`, 0 `Failed`, up from H8n's
+2,371/2,398).
+
+`Vulkan14FeatureInventory.md`'s `textureCompressionBC` row updated to
+`Yes`, describing the closure. No `VulkanExtensionInventory.md` update
+needed: BC formats are core Vulkan 1.0, not extension-gated.
