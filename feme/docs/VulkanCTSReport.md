@@ -20205,3 +20205,67 @@ No feature-bit or extension-advertisement change (an internal CPU
 wave-widening-pass correctness fix); confirmed, not assumed, that
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap H8a: measured impact
+
+**Scope.** Roadmap H8 ("Format table completeness for the graphics
+profile") is a large milestone; H8a is its first slice, "wire up
+`VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT`". `formatFeatureFlags`/
+`vkGetPhysicalDeviceFormatProperties` never set this bit for any
+format, despite `GraphicsPipeline.cpp`'s `isSupportedVertexAttributeFormat`
+and `Executor.cpp`'s `decodeAttribute` already implementing real vertex
+fetch for 17 formats. Fixed via a new `isVertexBufferFormatSupported`
+(Format.h/.cpp), reused by both `GraphicsPipeline.cpp` (removing a
+previously independent, now-redundant format list) and
+`EntryPoints.cpp`. Also mapped the 4 previously-unmapped
+`VK_FORMAT_A8B8G8R8_*_PACK32` `VkFormat` values (plus `_SRGB_PACK32`)
+onto their byte-identical `R8G8B8A8_*` `ResourceFormat` counterparts.
+
+**Methodology correction found and applied first.** Before any H8 code
+change, discovered that every `deqp-vk` invocation this session (and,
+retroactively, every one in the *prior* H6r session) had been run
+against the container's default `VK_ICD_FILENAMES`
+(`/usr/share/vulkan/icd.d/lvp_icd.json`, Mesa lavapipe) rather than
+feme's own ICD (`build/tools/feme/tools/feme-vulkan/feme_icd.json`) --
+`vulkaninfo --summary` reported `lavapipe`/`llvmpipe`, not `FeMe CPU
+Vulkan Device`. Lavapipe is itself a real, independently
+Vulkan-conformant software implementation (including its own
+`VK_EXT_mesh_shader` support), so every CTS number gathered this way
+was measuring Mesa's own driver, not this project's source -- including
+falsely appearing to confirm the prior session's "H6r closed"
+conclusion. Reverted both incorrect H6r commits
+(`e89c5b28f994`/`f82fd65e6cf8`, reverted as `147a3387a242`/
+`c43d31198e20`), leaving H6r genuinely open, and re-verified every H8
+number below with `VK_ICD_FILENAMES` correctly exported and
+`vulkaninfo --summary` confirmed to report `FeMe CPU Vulkan Device`
+before trusting any result.
+
+**Real `deqp-vk` re-run, correct ICD confirmed:**
+- `dEQP-VK.api.info.format_properties.*` (225 cases): 171/225 -> 180/225
+  Pass. 9 new passes: `r32_sfloat`, `r32g32b32_sfloat`,
+  `r32g32b32_sint`, `r32g32b32_uint`, `r32g32b32a32_sfloat`,
+  `r8g8b8a8_snorm`, `a8b8g8r8_unorm_pack32`, `a8b8g8r8_snorm_pack32`,
+  `a8b8g8r8_srgb_pack32`. 0 regressions (byte-for-byte diff of every
+  case's before/after `StatusCode` confirms no case moved from Pass to
+  Fail). The remaining 45 failures span several distinct, not-yet-fixed
+  format-table gaps (16-bit/8-bit vertex-buffer families, texel-buffer
+  breadth, color-attachment/sampled-image bits for packed and integer
+  formats) -- broken out as roadmap H8b-H8e.
+- `dEQP-VK.pipeline.monolithic.vertex_input.*` (13296 cases) and its
+  `srgb_vertex_formats` subset (34 cases): 0 Fail attributable to this
+  change (301 pre-existing failures in the full group are gated by
+  `maxVertexInputAttributes`/float16 checks this fix does not touch,
+  confirmed by this group's own `checkSupport` never reading
+  `bufferFeatures` at all; the vast majority of the group is
+  `NotSupported` on an unrelated, unimplemented `VK_KHR_maintenance10`).
+
+**`ninja check-feme`** (assertions-enabled, ccache build, correct target
+dependencies so `FeMeVulkanTests` rebuilds before the regression suite
+runs): 2328/2355 tests pass (27 unsupported, 0 failed), unchanged from
+before this change.
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+fix -- `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` is a per-format
+`VkFormatFeatureFlags` bit, not a feature/extension advertisement;
+confirmed, not assumed, that `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update for H8a specifically.
