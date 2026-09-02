@@ -37,17 +37,16 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8 or other prerequisites blocking the H-series milestones?
+Can you work on H8b or other prerequisites blocking the H-series milestones?
 
-> **Format table completeness for the graphics profile.** Roadmap C1/E24/E25
-> grew `vkGetPhysicalDeviceFormatProperties`/`ImageFormatProperties` from a stub
-> to real per-format support, but the advertised set is still far short of
-> Vulkan's mandatory format table for a graphics-capable device (BC/ETC2
-> compressed sampling, the full vertex-buffer format list, the mandatory
-> blit/filter bits, multisample capability per format). This is the graphics
-> analogue of C1 and, like C1, it unblocks whole Amber-based groups rather than
-> single cases. Confirmed by roadmap H6g-a's own triage to also own the 68
-> `vkCreateRenderPass`/1 `vkGetPhysicalDeviceImageFormatProperties` ->
-> `VK_ERROR_FORMAT_NOT_SUPPORTED` failures `dEQP-VK.mesh_shader.*` measures --
-> nothing mesh-shading-specific about them, just this row's own already-tracked
-> format-table gap reached by a new CTS group
+> **Remaining mandatory `VERTEX_BUFFER_BIT` format families.** H8a scoped
+> `isVertexBufferFormatSupported` to exactly the 17 formats `Executor.cpp`'s
+> `decodeAttribute` already implements -- the Vulkan spec's full 45-format
+> mandatory vertex-buffer list also requires the 8-bit `R8_*`/`R8G8_*` family (8
+> formats), the 16-bit `R16_*`/`R16G16_*`/`R16G16B16A16_*` family (15 formats),
+> and `A2B10G10R10_UNORM_PACK32` (1 format) -- all confirmed still genuinely
+> failing `dEQP-VK.api.info.format_properties.*` after H8a (6 of the 16-bit
+> cases seen directly: `r16_{unorm,snorm}`, `r16g16_{unorm,snorm}`,
+> `r16g16b16a16_{unorm,snorm}`). Needs
+> `decodeAttribute`/`attributeComponentByteSize` (Executor.cpp) expansion for
+> each new scalar type, mirroring the existing `R8G8B8A8_*` cases mechanically
