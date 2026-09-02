@@ -52756,3 +52756,86 @@ narrower than the design" deviation note, which already had a
 forward-looking widening-table row anticipating almost exactly this
 fix -- a good sign the original design's shape was sound, it just hadn't
 been implemented yet.
+
+# H5: closing a milestone by actually re-running its own CTS group, and finding a latent crash
+
+Asked to "work on H5 or other prerequisites blocking the H-series
+milestones." My first pass through `Roadmap.md` found every H5 sub-row
+(H5a, H5b, H5f, H5g, H5c, H5d, H5d-a, H5e, H5e-a through H5e-e) already
+struck through -- only the parent H5 row itself was still open, and its
+own closing condition ("This row stays open until H5a-H5e all close") is
+purely structural/textual, not tied to a CTS pass rate. The tempting
+shortcut was to just strike through H5 right there: every named
+precondition really was met, and `VulkanCTSReport.md` had a matching
+"Roadmap H5*" section for every one of those rows, so the paper trail
+was internally consistent.
+
+I didn't take that shortcut, for one reason: the standing instructions
+say to run the real Vulkan CTS "after each change," and closing a
+milestone is a change to this project's own claimed state even when no
+code moves. A purely paperwork-driven closure felt like exactly the kind
+of place a stale or incomplete measurement could hide -- and it did.
+Running the full `dEQP-VK.geometry.*` mustpass sweep (200 cases) turned
+up a real, reproducible `vkQueueSubmit` segfault partway through, at
+`dEQP-VK.geometry.basic.output_vary_by_texture_instancing`. None of
+H5a-H5e-e's own historical CTS samples had apparently ever run this far
+cleanly -- each of those rows' own targeted re-runs happened to sample a
+narrower slice of the group that didn't include the crashing shape, and
+(as I only worked out afterward) a single-process sweep silently
+truncates at the first real crash rather than reporting the remainder,
+so even a full sweep's own totals from an earlier row could look
+complete without actually being so.
+
+Root-causing a segfault in a Release build (no debug info, so `gdb`
+gives you function names but no locals) took two escalating techniques:
+first, temporary bounds-check `assert`s in `StageStorage::readRaw`/
+`writeRaw` to at least convert "silent heap corruption" into "an
+assertion fires, and it's the write side, not the read side"; then,
+since that still didn't reveal *which* element or *why* the destination
+storage was empty, temporary `fprintf` dumps of the actual `Link`/
+storage state directly inside `copyLinkedElements`. That second step is
+what actually cracked it: `To.Data.size()=0` for the destination
+`GSInput` storage, while trying to write a 4-component element shaped
+exactly like `gl_Position`.
+
+The actual bug, once visible, was satisfying in how narrowly it had
+escaped detection until now: `buildStageStorage`'s "don't allocate
+storage for a system-value input, the wrapper reads it from an
+invocation record instead" rule is correct for every stage that has
+shipped so far -- vertex, fragment, and (critically) hull/domain, which
+use a different `SignatureDirection` enum value (`PatchInput`/
+`PatchOutput`) that the rule's guard never matches. Geometry is the
+first stage to use plain `Input` direction where a system value's own
+per-element storage genuinely matters, because `gl_in[]` is read with a
+real, dynamically-indexed address, not a fixed record field the way
+every other stage's own per-invocation system values are. Fragment's
+`gl_FragCoord` shares the identical `SystemValue::Position` enum value
+with geometry's `gl_in[].gl_Position`, which ruled out the tempting
+blanket fix ("just always allocate storage for `Position`") -- the
+distinguishing fact is stage identity, not system-value identity, and
+`EntrySignature` carries no stage field at all. Threading one new
+explicit boolean parameter from the single call site that actually knows
+it's building a geometry entry's own input turned out to be the cleanest
+way to encode that distinction without inventing a new signature field
+just for this.
+
+The other useful lesson from this row: my first attempt at an isolated
+per-case CTS harness mis-detected "success" as "crash," because
+`deqp-vk` always ends its own process with an uncaught
+`tcu::NotSupportedError` after printing the real totals -- a known quirk
+from earlier sessions that I'd forgotten applies to single-case runs
+too, not just full sweeps. Checking the `.qpa` log's own `StatusCode`
+attribute first, and only falling back to a crash classification when no
+`StatusCode` is present at all, fixed the false-positive classification
+and let the before/after comparison (72/93/11/24 crashes before, to
+85/104/11/0 crashes after, 0 regressions) actually be trusted.
+
+Also (separately from clang-format-related friction below) worth noting
+for next time: running `clang-format -i` on a whole file that was never
+previously kept clang-format-clean produces a huge, unrelated reformatting
+diff that swamps the real change -- I did this once on `Executor.cpp` and
+had to `git checkout --` the file and manually redo the actual edits
+rather than accept a diff dominated by whitespace churn on lines I never
+touched. Formatting only the touched hunks (or just matching the
+file's existing, if imperfect, style by hand) is the safer default in a
+codebase like this one that isn't uniformly clang-format-enforced.
