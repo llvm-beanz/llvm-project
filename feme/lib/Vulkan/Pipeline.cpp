@@ -35,6 +35,7 @@
 #include "llvm/TargetParser/Triple.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 
 using namespace feme::vulkan;
@@ -315,32 +316,44 @@ vkDestroyPipelineLayout(VkDevice, VkPipelineLayout pipelineLayout,
   Alloc.destroy(fromHandle<PipelineLayout>(pipelineLayout));
 }
 
-/// Whether \p Layout's \p StageFlags-visible push-constant ranges fully cover
-/// `[0, RootConstantSize)` with no gap -- see "Descriptor Model": "reject a
-/// shader whose accessed range is not fully covered by a range declared in
-/// the layout with the compute stage bit set". `RootConstantSize` is
-/// always a shader's *full* advertised root-constant span (roadmap R25 for
-/// DXIL; `feme::cpu::SPIRVPushConstantLoweringPass` for SPIR-V, both
-/// starting at byte 0), so coverage is checked byte-by-byte rather than
-/// merely comparing against a single range's own offset/size -- multiple
-/// declared ranges (e.g. one per shader stage in a shared layout) may
-/// jointly cover it with gaps only a full walk catches.
+/// Whether \p Layout's \p StageFlags-visible push-constant ranges fully
+/// cover `[RootConstantMinOffset, RootConstantSize)` with no gap -- see
+/// "Descriptor Model": "reject a shader whose accessed range is not fully
+/// covered by a range declared in the layout with the compute stage bit
+/// set". `RootConstantSize` is always a shader's *full* advertised
+/// root-constant span (roadmap R25 for DXIL;
+/// `feme::cpu::SPIRVPushConstantLoweringPass` for SPIR-V), but its span
+/// does not always *start* at byte 0: \p RootConstantMinOffset (roadmap
+/// H6u) is the lowest byte the shader's own reflected access actually
+/// reaches, nonzero exactly when a SPIR-V push-constant block declares a
+/// nonzero leading `layout(offset=N)` (a real, legal shape whenever
+/// multiple stages share one push-constant block, each reading only its
+/// own, increasing-offset portion) -- always 0 for a DXIL root constant,
+/// whose register-bound view always starts at byte 0. Coverage is checked
+/// byte-by-byte rather than merely comparing against a single range's own
+/// offset/size -- multiple declared ranges (e.g. one per shader stage in a
+/// shared layout) may jointly cover it with gaps only a full walk catches.
 bool pushConstantsCoverRootConstantSize(const PipelineLayout &Layout,
                                         uint32_t RootConstantSize,
+                                        uint32_t RootConstantMinOffset,
                                         uint32_t MaxPushConstantsSize,
                                         VkShaderStageFlags StageFlags) {
+  assert(RootConstantMinOffset <= RootConstantSize &&
+         "a shader's own accessed span cannot start after it ends");
   if (RootConstantSize == 0)
     return true;
   if (RootConstantSize > MaxPushConstantsSize)
     return false;
-  std::vector<bool> Covered(RootConstantSize, false);
+  std::vector<bool> Covered(RootConstantSize - RootConstantMinOffset, false);
   for (const VkPushConstantRange &Range : Layout.pushConstantRanges()) {
     if ((Range.stageFlags & StageFlags) == 0)
       continue;
-    uint32_t Begin = std::min(Range.offset, RootConstantSize);
-    uint32_t End = std::min(Range.offset + Range.size, RootConstantSize);
+    uint32_t Begin =
+        std::clamp(Range.offset, RootConstantMinOffset, RootConstantSize);
+    uint32_t End = std::clamp(Range.offset + Range.size, RootConstantMinOffset,
+                              RootConstantSize);
     for (uint32_t I = Begin; I != End; ++I)
-      Covered[I] = true;
+      Covered[I - RootConstantMinOffset] = true;
   }
   return llvm::all_of(Covered, [](bool B) { return B; });
 }
@@ -513,7 +526,7 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   const feme::cpu::ResourceInfo &Info = (*Stage)->getResourceInfo();
 
   if (!pushConstantsCoverRootConstantSize(
-          Layout, Info.RootConstantSize,
+          Layout, Info.RootConstantSize, Info.RootConstantMinOffset,
           DeviceInfo.Properties.limits.maxPushConstantsSize,
           VK_SHADER_STAGE_COMPUTE_BIT))
     return createStringError(

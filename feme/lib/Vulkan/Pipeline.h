@@ -227,11 +227,20 @@ llvm::Expected<feme::Module> importShaderModule(feme::Context &Ctx,
 void patchUnboundedResourceRanges(llvm::Module &M, const PipelineLayout &Layout);
 
 /// Whether \p Layout's push-constant ranges visible to \p StageFlags fully
-/// cover `[0, RootConstantSize)` with no gap -- see "Descriptor Model":
-/// "reject a shader whose accessed range is not fully covered by a range
-/// declared in the layout with the [shader] stage bit set".
+/// cover `[RootConstantMinOffset, RootConstantSize)` with no gap -- see
+/// "Descriptor Model": "reject a shader whose accessed range is not fully
+/// covered by a range declared in the layout with the [shader] stage bit
+/// set". \p RootConstantMinOffset (roadmap H6u) is the lowest byte the
+/// shader's own reflected access actually reaches -- nonzero exactly when a
+/// SPIR-V push-constant block declares a nonzero leading
+/// `layout(offset=N)` (a real, legal shape whenever multiple stages share
+/// one push-constant block, each stage reading only its own, increasing-
+/// offset portion) -- so bytes below it, which the shader never reads, do
+/// not need to be covered by any range visible to \p StageFlags at all; see
+/// `feme::cpu::ResourceInfo::RootConstantMinOffset`'s own comment.
 bool pushConstantsCoverRootConstantSize(const PipelineLayout &Layout,
                                         uint32_t RootConstantSize,
+                                        uint32_t RootConstantMinOffset,
                                         uint32_t MaxPushConstantsSize,
                                         VkShaderStageFlags StageFlags);
 

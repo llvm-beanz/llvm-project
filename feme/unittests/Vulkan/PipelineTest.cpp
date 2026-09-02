@@ -705,6 +705,55 @@ TEST_F(PipelineTest, RejectsNonComputeVisiblePushConstantRange) {
   vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
 }
 
+// Roadmap H6u: `pushConstantsCoverRootConstantSize`'s own coverage check
+// must be scoped to `[RootConstantMinOffset, RootConstantSize)`, not
+// unconditionally `[0, RootConstantSize)` -- a real, legal SPIR-V shape
+// (multiple stages sharing one push-constant block, each declaring a
+// nonzero leading `layout(offset=N)`) genuinely never accesses the bytes
+// below its own `RootConstantMinOffset`, so a `VkPushConstantRange` that
+// only covers its own accessed span (and not the whole struct) must still
+// be accepted. These call the function directly (rather than through a
+// full pipeline-creation round trip) since constructing a real SPIR-V
+// shader with a nonzero push-constant `layout(offset=N)` needs more
+// machinery than this unit warrants -- the end-to-end shape is already
+// covered by the two tests above for the always-zero-offset case, and by
+// `dEQP-VK.mesh_shader.ext.api.draw.*with_task_shader*` in the real
+// Vulkan CTS for the nonzero case this fixes.
+TEST_F(PipelineTest, PushConstantsCoverRootConstantSizeHonorsMinOffset) {
+  PipelineLayout EmptyLayout({}, {});
+
+  // A layout with no ranges at all still trivially "covers" an empty span
+  // once `RootConstantMinOffset == RootConstantSize` (nothing is ever
+  // accessed): not a real shape any lowering pass produces, but a
+  // defensive edge the byte-walk must not stumble on.
+  EXPECT_TRUE(pushConstantsCoverRootConstantSize(
+      EmptyLayout, /*RootConstantSize=*/20, /*RootConstantMinOffset=*/20,
+      /*MaxPushConstantsSize=*/128, VK_SHADER_STAGE_TASK_BIT_EXT));
+
+  // A range covering only `[12, 20)` (the task stage's own accessed
+  // portion of a shared 20-byte push-constant block) does not cover
+  // `[0, 20)` -- but does cover `[12, 20)`, the actual reflected span once
+  // `RootConstantMinOffset == 12` is honored instead of assuming 0.
+  VkPushConstantRange TaskRange{VK_SHADER_STAGE_TASK_BIT_EXT, 12, 8};
+  PipelineLayout TaskOnlyLayout({}, {TaskRange});
+  EXPECT_FALSE(pushConstantsCoverRootConstantSize(
+      TaskOnlyLayout, /*RootConstantSize=*/20, /*RootConstantMinOffset=*/0,
+      /*MaxPushConstantsSize=*/128, VK_SHADER_STAGE_TASK_BIT_EXT));
+  EXPECT_TRUE(pushConstantsCoverRootConstantSize(
+      TaskOnlyLayout, /*RootConstantSize=*/20, /*RootConstantMinOffset=*/12,
+      /*MaxPushConstantsSize=*/128, VK_SHADER_STAGE_TASK_BIT_EXT));
+
+  // A range that only partially covers `[RootConstantMinOffset,
+  // RootConstantSize)` (missing its last byte) is still rejected -- the
+  // fix narrows which bytes must be covered, it does not weaken the
+  // byte-exact coverage check itself.
+  VkPushConstantRange PartialTaskRange{VK_SHADER_STAGE_TASK_BIT_EXT, 12, 7};
+  PipelineLayout PartialTaskLayout({}, {PartialTaskRange});
+  EXPECT_FALSE(pushConstantsCoverRootConstantSize(
+      PartialTaskLayout, /*RootConstantSize=*/20, /*RootConstantMinOffset=*/12,
+      /*MaxPushConstantsSize=*/128, VK_SHADER_STAGE_TASK_BIT_EXT));
+}
+
 /// Roadmap E19 (`VK_EXT_pipeline_creation_feedback`): a chained
 /// `VkPipelineCreationFeedbackCreateInfo` with one stage-feedback slot (a
 /// compute pipeline has exactly one stage) gets a `VALID_BIT`-only overall

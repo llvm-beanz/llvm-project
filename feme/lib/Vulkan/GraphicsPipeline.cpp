@@ -2091,6 +2091,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   if (VertexStage) {
     const feme::cpu::ResourceInfo &VSInfo = VertexStage->getResourceInfo();
     if (!pushConstantsCoverRootConstantSize(Layout, VSInfo.RootConstantSize,
+                                            VSInfo.RootConstantMinOffset,
                                             Limits.maxPushConstantsSize,
                                             VK_SHADER_STAGE_VERTEX_BIT))
       return createStringError(
@@ -2103,6 +2104,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   if (FragmentStage) {
     const feme::cpu::ResourceInfo &FSInfo = FragmentStage->getResourceInfo();
     if (!pushConstantsCoverRootConstantSize(Layout, FSInfo.RootConstantSize,
+                                            FSInfo.RootConstantMinOffset,
                                             Limits.maxPushConstantsSize,
                                             VK_SHADER_STAGE_FRAGMENT_BIT))
       return createStringError(
@@ -2115,7 +2117,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   if (HullStage) {
     const feme::cpu::ResourceInfo &HSInfo = HullStage->getResourceInfo();
     if (!pushConstantsCoverRootConstantSize(
-            Layout, HSInfo.RootConstantSize, Limits.maxPushConstantsSize,
+            Layout, HSInfo.RootConstantSize, HSInfo.RootConstantMinOffset,
+            Limits.maxPushConstantsSize,
             VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT))
       return createStringError(
           inconvertibleErrorCode(),
@@ -2125,7 +2128,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
       return std::move(E);
     const feme::cpu::ResourceInfo &DSInfo = DomainStage->getResourceInfo();
     if (!pushConstantsCoverRootConstantSize(
-            Layout, DSInfo.RootConstantSize, Limits.maxPushConstantsSize,
+            Layout, DSInfo.RootConstantSize, DSInfo.RootConstantMinOffset,
+            Limits.maxPushConstantsSize,
             VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT))
       return createStringError(
           inconvertibleErrorCode(),
@@ -2138,6 +2142,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     const feme::cpu::ResourceInfo &GSInfo =
         GeometryStageCompiled->getResourceInfo();
     if (!pushConstantsCoverRootConstantSize(Layout, GSInfo.RootConstantSize,
+                                            GSInfo.RootConstantMinOffset,
                                             Limits.maxPushConstantsSize,
                                             VK_SHADER_STAGE_GEOMETRY_BIT))
       return createStringError(
@@ -2151,6 +2156,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     const feme::cpu::ResourceInfo &MSInfo =
         MeshStageCompiled->getResourceInfo();
     if (!pushConstantsCoverRootConstantSize(Layout, MSInfo.RootConstantSize,
+                                            MSInfo.RootConstantMinOffset,
                                             Limits.maxPushConstantsSize,
                                             VK_SHADER_STAGE_MESH_BIT_EXT))
       return createStringError(
@@ -2164,6 +2170,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     const feme::cpu::ResourceInfo &TSInfo =
         TaskStageCompiled->getResourceInfo();
     if (!pushConstantsCoverRootConstantSize(Layout, TSInfo.RootConstantSize,
+                                            TSInfo.RootConstantMinOffset,
                                             Limits.maxPushConstantsSize,
                                             VK_SHADER_STAGE_TASK_BIT_EXT))
       return createStringError(
