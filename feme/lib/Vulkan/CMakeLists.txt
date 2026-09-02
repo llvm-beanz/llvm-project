@@ -77,6 +77,7 @@ add_custom_target(FeMeVulkanEntrypointsGen DEPENDS ${feme_vulkan_entrypoints_inc
 # matter what FeMeTargetCPU or anything else in a given link needs.
 add_feme_library(FeMeVulkanCore STATIC
   ASTCDecode.cpp
+  BC6HDecode.cpp
   BC7Decode.cpp
   BCDecode.cpp
   BCPartitionTables.cpp
