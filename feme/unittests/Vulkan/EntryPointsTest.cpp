@@ -344,21 +344,22 @@ TEST_F(EntryPointsTest,
   // classification never inspects a handle's compile-time SPIR-V `Format`
   // operand, so a `Format == Unknown` handle for any already-storage-
   // capable format lowers identically to a declared-format one.
-  // `R16G16B16A16_UINT` is part of roadmap H19f's storage-image format
-  // floor but is not one of the identity 4-component formats (or,
-  // post-roadmap-L9, single-channel 32-bit identity formats)
-  // `isTexelBufferFormatSupported` recognizes, so `bufferFeatures` must
-  // *not* pick up either bit. (Unlike `R32_UINT`, which roadmap L9 moved
-  // into `isTexelBufferFormatSupported`'s own scope -- see the sibling
-  // `FormatProperties3ReportsStorageWithoutFormatForTexelBufferFormat`
+  // `R10G10B10A2_SNORM` (roadmap H19o's storage-image format floor) is
+  // deliberately excluded from `isStorageTexelBufferFormatSupported`'s own
+  // scope (roadmap H8d) even though it is `isTexelBufferFormatSupported`
+  // (read-only) capable -- `femeRTPackImageTexel`'s write-side dispatch
+  // has no `R10G10B10A2_SNORM` case at all -- so `bufferFeatures` must
+  // *not* pick up either bit here. (Unlike `R32_UINT`, which is both
+  // storage-image *and* storage-texel-buffer capable -- see the sibling
+  // `FormatProperties3ReportsStorageWithoutFormatForScalarTexelBufferFormat`
   // test below, which now covers that shape too.)
   VkFormatProperties3 Props3{};
   Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
   VkFormatProperties2 Props2{};
   Props2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
   Props2.pNext = &Props3;
-  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R16G16B16A16_UINT,
-                                       &Props2);
+  vkGetPhysicalDeviceFormatProperties2(
+      Physical, VK_FORMAT_A2B10G10R10_SNORM_PACK32, &Props2);
   EXPECT_TRUE(Props3.linearTilingFeatures &
               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
   EXPECT_TRUE(Props3.linearTilingFeatures &
@@ -404,9 +405,10 @@ TEST_F(EntryPointsTest,
 
 TEST_F(EntryPointsTest,
        FormatProperties3ReportsStorageWithoutFormatForTexelBufferFormat) {
-  // (Roadmap H19i) `R8G8B8A8_UINT` is one of the identity 4-component
-  // formats `isTexelBufferFormatSupported` recognizes (`Format.cpp`), so
-  // it must gain both `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_
+  // (Roadmap H19i/H8d) `R8G8B8A8_UINT` is one of the identity 4-component
+  // formats both `isTexelBufferFormatSupported` and
+  // `isStorageTexelBufferFormatSupported` recognize (`Format.cpp`), so it
+  // must gain both `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_
   // FORMAT_BIT` on `bufferFeatures` -- but it is *not* one of the formats
   // the storage-image pack/unpack switch in `Format.cpp` recognizes
   // (unlike its `_SNORM`/`_SINT` siblings, added by roadmap H19n), so its
@@ -434,9 +436,12 @@ TEST_F(EntryPointsTest,
 
 TEST_F(EntryPointsTest,
        FormatProperties3OmitsStorageWithoutFormatForNonStorageFormat) {
-  // `B8G8R8A8_UNORM` is sampled- and attachment-capable only -- neither a
-  // storage-image-capable format nor an `isTexelBufferFormatSupported`
-  // one -- so none of the three feature fields should pick up either
+  // `B8G8R8A8_UNORM` is sampled- and attachment-capable, and (roadmap H8d)
+  // now `isTexelBufferFormatSupported` (read-only) capable too -- but it
+  // is neither a storage-image-capable format nor an
+  // `isStorageTexelBufferFormatSupported` one (`femeRTPackImageTexel` has
+  // no write-side case for it at all), so none of the three feature
+  // fields should pick up either
   // `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT`.
   VkFormatProperties3 Props3{};
   Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;

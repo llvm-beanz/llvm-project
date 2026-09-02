@@ -216,7 +216,13 @@ TEST_F(BufferViewTest, AcceptsRuntimeSupportedFormats) {
 TEST_F(BufferViewTest, RejectsFormatWithNoRuntimeConversion) {
   VkBufferViewCreateInfo ViewInfo{};
   ViewInfo.buffer = Buf;
-  ViewInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+  // (Roadmap H8d) `R16G16B16A16_SFLOAT` moved into
+  // `isTexelBufferFormatSupported`'s scope this row -- `R32G32B32_SFLOAT`
+  // (a 3-component format, never a legal texel-buffer shape since no
+  // SPIR-V/GLSL image type returns a `<3 x T>`) stays outside every
+  // format-table scope this project defines, so it remains a reliable
+  // "no runtime conversion" negative case.
+  ViewInfo.format = VK_FORMAT_R32G32B32_SFLOAT;
   ViewInfo.range = VK_WHOLE_SIZE;
   VkBufferView View = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreateBufferView(Device, &ViewInfo, nullptr, &View),

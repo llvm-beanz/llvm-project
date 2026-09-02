@@ -453,6 +453,91 @@ TEST_F(RuntimeCPUTest, TypedStoreV4I32DroppedWithoutUavFlag) {
   EXPECT_EQ(Storage[0], 3);
 }
 
+// (Roadmap H8d) `R32G32_FLOAT` is one of the 21 formats newly widened
+// into `isTexelBufferFormatSupported`'s scope this row, reached through
+// `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32`'s new generic-table
+// dispatch (`femeRTImageFormatElementSize`/`UnpackImageTexel`/
+// `PackImageTexel`) rather than any hard-coded special case -- this is
+// also the one genuine `femeRTPackImageTexel` gap this row closed (no
+// `case 2` existed before).
+TEST_F(RuntimeCPUTest, TypedStoreLoadV4F32R32G32FloatRoundTrips) {
+  float Storage[2] = {0.0f, 0.0f};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32_FLOAT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper = addStoreWrapper(
+      "test_typed_store_r32g32_float", "feme.cpu.resource.store.typed.v4f32",
+      FixedVectorType::get(Type::getFloatTy(Ctx), 4));
+  Function *LoadWrapper = addLoadWrapper("test_typed_load_r32g32_float",
+                                         "feme.cpu.resource.load.typed.v4f32");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  float ToStore[4] = {1.5f, -2.5f, 999.0f, 999.0f};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_FLOAT_EQ(Storage[0], 1.5f);
+  EXPECT_FLOAT_EQ(Storage[1], -2.5f);
+
+  float Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_FLOAT_EQ(Result[0], 1.5f);
+  EXPECT_FLOAT_EQ(Result[1], -2.5f);
+  EXPECT_FLOAT_EQ(Result[2], 0.0f);
+  EXPECT_FLOAT_EQ(Result[3], 1.0f);
+}
+
+// (Roadmap H8d) `R16G16B16A16_UINT` is both one of the 21 newly widened
+// `isTexelBufferFormatSupported` formats *and* one of the 6 that also
+// gained `isStorageTexelBufferFormatSupported` (real read+write texel-
+// buffer capability) -- exercised here through
+// `femeCpuResourceLoadTypedV4I32`/`StoreTypedV4I32`'s new generic-table
+// dispatch.
+TEST_F(RuntimeCPUTest, TypedStoreLoadV4I32R16G16B16A16UintRoundTrips) {
+  uint16_t Storage[4] = {0, 0, 0, 0};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format =
+      static_cast<uint32_t>(ResourceFormat::R16G16B16A16_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  StoreFn Store;
+  LoadFn Load;
+  {
+    Function *StoreWrapper = addStoreWrapper(
+        "test_typed_store_r16g16b16a16_uint",
+        "feme.cpu.resource.store.typed.v4i32",
+        FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
+    Function *LoadWrapper = addLoadWrapper("test_typed_load_r16g16b16a16_uint",
+                                           "feme.cpu.resource.load.typed.v4i32");
+    Store = resolve<StoreFn>(StoreWrapper);
+    Load = resolve<LoadFn>(LoadWrapper);
+  }
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  int32_t ToStore[4] = {1, 2, 3, 65535};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_EQ(Storage[0], 1);
+  EXPECT_EQ(Storage[1], 2);
+  EXPECT_EQ(Storage[2], 3);
+  EXPECT_EQ(Storage[3], 65535);
+
+  int32_t Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], 1);
+  EXPECT_EQ(Result[1], 2);
+  EXPECT_EQ(Result[2], 3);
+  EXPECT_EQ(Result[3], 65535);
+}
+
 TEST_F(RuntimeCPUTest, TypedLoadPackedR8G8B8A8Uint) {
   // R=255, G=128, B=64, A=0, little-endian, zero-extended to i32.
   uint32_t Storage = 0x00u << 24 | 0x40u << 16 | 0x80u << 8 | 0xFFu;

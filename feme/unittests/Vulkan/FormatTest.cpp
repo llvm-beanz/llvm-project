@@ -418,11 +418,38 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32_FLOAT));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32_UINT));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32_SINT));
-
-  EXPECT_FALSE(
-      isTexelBufferFormatSupported(ResourceFormat::R32G32_FLOAT));
-  EXPECT_FALSE(
+  // (Roadmap H8d) A real `dEQP-VK.api.info.format_properties.*` re-run
+  // found 21 further mandatory `UNIFORM_TEXEL_BUFFER_BIT` formats, all
+  // now reachable through the generic-table-based
+  // `femeCpuResourceLoadTypedV4F32`/`V4I32` refactor (see
+  // `femeRTImageFormatElementSize`/`UnpackImageTexel(I32)` in
+  // FeMeRuntimeCPU.c).
+  EXPECT_TRUE(
+      isTexelBufferFormatSupported(ResourceFormat::R10G10B10A2_UNORM));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R10G10B10A2_UINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R11G11B10_FLOAT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::B8G8R8A8_UNORM));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R16_FLOAT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R16_UINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R16_SINT));
+  EXPECT_TRUE(
       isTexelBufferFormatSupported(ResourceFormat::R16G16B16A16_FLOAT));
+  EXPECT_TRUE(
+      isTexelBufferFormatSupported(ResourceFormat::R16G16B16A16_UINT));
+  EXPECT_TRUE(
+      isTexelBufferFormatSupported(ResourceFormat::R16G16B16A16_SINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32G32_FLOAT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32G32_UINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32G32_SINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8_UNORM));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8_SNORM));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8_UINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8_SINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8_UNORM));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8_SNORM));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8_UINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8_SINT));
+
   EXPECT_FALSE(
       isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM_SRGB));
   EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::Unknown));
@@ -435,6 +462,58 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::BC1_RGB_UNORM));
   EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::BC7_SRGB));
 }
+
+TEST(FormatTest, StorageTexelBufferFormatSupportIsNarrowerThanReadOnlyScope) {
+  // (Roadmap H8d) The original 10-format scope is read+write-capable, so
+  // `isStorageTexelBufferFormatSupported` still reports every one of them.
+  EXPECT_TRUE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_FLOAT));
+  EXPECT_TRUE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_UINT));
+  EXPECT_TRUE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_SINT));
+  EXPECT_TRUE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM));
+  EXPECT_TRUE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_SNORM));
+  EXPECT_TRUE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UINT));
+  EXPECT_TRUE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_SINT));
+  EXPECT_TRUE(isStorageTexelBufferFormatSupported(ResourceFormat::R32_FLOAT));
+  EXPECT_TRUE(isStorageTexelBufferFormatSupported(ResourceFormat::R32_UINT));
+  EXPECT_TRUE(isStorageTexelBufferFormatSupported(ResourceFormat::R32_SINT));
+
+  // Of the 21 new `isTexelBufferFormatSupported` formats, only these 6
+  // are also real mandatory `STORAGE_TEXEL_BUFFER_BIT` entries (a real
+  // CTS re-run confirms this, not spec prose alone).
+  EXPECT_TRUE(isStorageTexelBufferFormatSupported(
+      ResourceFormat::R16G16B16A16_FLOAT));
+  EXPECT_TRUE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R16G16B16A16_UINT));
+  EXPECT_TRUE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R16G16B16A16_SINT));
+  EXPECT_TRUE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R32G32_FLOAT));
+  EXPECT_TRUE(isStorageTexelBufferFormatSupported(ResourceFormat::R32G32_UINT));
+  EXPECT_TRUE(isStorageTexelBufferFormatSupported(ResourceFormat::R32G32_SINT));
+
+  // The rest of the 21 stay uniform-only: no `femeRTPackImageTexel(I32)`
+  // write support exists for them (or, for `B8G8R8A8_UNORM`, deliberately
+  // never has -- see its own doc comment in Format.h).
+  EXPECT_FALSE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R10G10B10A2_UNORM));
+  EXPECT_FALSE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R11G11B10_FLOAT));
+  EXPECT_FALSE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::B8G8R8A8_UNORM));
+  EXPECT_FALSE(isStorageTexelBufferFormatSupported(ResourceFormat::R16_FLOAT));
+  EXPECT_FALSE(isStorageTexelBufferFormatSupported(ResourceFormat::R8_UNORM));
+  EXPECT_FALSE(
+      isStorageTexelBufferFormatSupported(ResourceFormat::R8G8_UNORM));
+  EXPECT_FALSE(isStorageTexelBufferFormatSupported(ResourceFormat::Unknown));
+}
+
 
 TEST(FormatTest, VertexBufferFormatSupportMatchesDecodeAttributeScope) {
   // (Roadmap H8/H8b) `Executor.cpp`'s `decodeAttribute` implements exactly
