@@ -13513,6 +13513,141 @@ VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.api.*'
 ```
 
+## Roadmap H6q: measured impact (offset-struct leading-gap fix)
+
+With H6p closed, this session picked up its own newly-discovered
+push-constant legalization gap directly:
+
+```
+Test case 'dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader'..
+error: failed to legalize operation 'spirv.GlobalVariable' that was explicitly marked illegal
+vkCreateGraphicsPipelines: VK_ERROR_INITIALIZATION_FAILED
+```
+
+**Root cause.** A minimal IR reduction (`feme-opt
+--feme-convert-spirv-to-llvm` on a hand-written `spirv.GlobalVariable`
+with an explicit-offset push-constant struct, mirroring the technique
+every row in this H6g-b/H6j/H6k/H6l/H6n/H6o/H6p/H6q chain has used)
+reproduced the exact failure with a two-member `(i32 [12], i32 [16])`
+struct, then again with a single-member `(i32 [12])` struct -- the
+second member is not the trigger at all. `layOutStructIfOffsetsMatch`
+(`SPIRVToLLVMPatterns.cpp`) -- shared by *every* offset-decorated struct
+conversion in this pass, regardless of storage class, not just
+push-constant blocks -- unconditionally starts its own byte-offset
+cursor at 0 and rejects any struct whose declared member offsets do not
+match that cursor exactly. A struct whose *first* member has a nonzero
+declared offset can never satisfy this, since the cursor starts at 0
+unconditionally. This is a real, if unusual, shape: glslang/`spirv-opt`
+sometimes drop one or more members from the *front* of an interface
+block (fields a particular entry point never reads) while every
+surviving member keeps its original byte offset relative to the whole
+block's own start -- confirmed present in the real
+`with_task_shader` case's own task-stage push-constant block.
+
+**The fix.** `layOutStructIfOffsetsMatch` now detects a nonzero
+first-member offset (`structHasLeadingOffsetPad`, a new helper) and
+inserts a synthetic `[Gap x i8]` leading padding member consuming
+exactly that leading gap before checking the rest -- mirroring this
+same file's own existing trailing-gap padding (`padStructToSize`),
+just at the front instead of between two members. This makes the real
+first member land at LLVM struct index 1, its own true declared byte
+offset, satisfying every subsequent member's own offset check exactly
+as before. Since MLIR's own generic `AccessChainPattern` forwards every
+SPIR-V struct-member index straight through to the LLVM GEP unmodified,
+it would silently select the wrong member (the pad, not the real
+field) once this synthetic member shifts every real member's own LLVM
+struct index up by one -- fixed by a new, higher-benefit
+`OffsetStructLeadingPadAccessChainPattern` that recognizes this exact
+shape and adds `+1` to the chain's own first index before forwarding
+every subsequent index (navigating whatever that first index selected)
+unchanged. A struct without this shape is left to the generic pattern,
+so no already-working access chain changes. Every downstream consumer
+needed zero changes: `feme::cpu::SPIRVPushConstantLoweringPass` already
+computes each load's real byte offset via `GEPOperator::
+accumulateConstantOffset` against the LLVM struct's own `DataLayout`,
+not by assuming any particular member index, so it transparently sees
+the correct absolute offset regardless of the synthetic pad.
+
+**New tests.** A new lit test file
+(`spirv-to-llvm-push-constant-leading-gap.mlir`) covers both the
+two-member (`(i32 [12], i32 [16])`, matching the real CTS case) and
+single-member (`(i32 [12])`, isolating the leading-gap shape from any
+second-member concern) reductions, checking both the synthetic pad's
+own presence in the converted LLVM struct type and that both
+`spirv.AccessChain`s (selecting SPIR-V member 0 and member 1
+respectively) produce the correctly `+1`-adjusted GEP index.
+
+```
+$ ninja -C <feme-build> check-feme
+...
+Total Discovered Tests: 2340
+  Unsupported:   27 (1.15%)
+  Passed     : 2313 (98.85%)
+```
+
+Up from H6p's own 2312/2339 by exactly the 1 new test file this row
+adds (0 pre-existing tests newly failed).
+
+**A real ICD re-run confirms the specific error is gone, and surfaces a
+new, later, distinct blocker in its place.** Re-running the originally
+failing `with_task_shader` case:
+
+```
+Test case 'dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader'..
+error: failed to legalize operation 'spirv.EXT.EmitMeshTasks' that was explicitly marked illegal
+vkCreateGraphicsPipelines: VK_ERROR_INITIALIZATION_FAILED
+```
+
+The `spirv.GlobalVariable`/`PushConstant` legalization error is
+confirmed gone -- but `OpEmitMeshTasksEXT` (the task entry's own
+mesh-dispatch call) has no `ConvertSPIRVToLLVMPass` conversion pattern
+of its own at all, so the pipeline still fails to create, just later
+and for an entirely distinct reason. Categorizing the full
+`dEQP-VK.mesh_shader.ext.api.*` group (540 cases) confirms this
+generalizes: all 58 `with_task_shader`/`with_task_shader_secondary_cmd`
+cases now hit exactly this `EmitMeshTasks` error, with zero occurrences
+of the original `spirv.GlobalVariable` error anywhere:
+
+```
+Test run totals:
+  Passed:        14/540 (2.6%)
+  Failed:        102/540 (18.9%)
+  Not supported: 424/540 (78.5%)
+```
+
+Identical totals to H6p's own post-fix measurement -- expected, since
+every case that used to reach the push-constant bug also needs
+`EmitMeshTasksEXT` conversion immediately afterward to fully pass, so
+this fix alone unlocks no new `Pass` by itself. It is nonetheless a
+necessary, independently-verified-correct step: the new lit tests
+confirm the struct-layout/index-adjustment logic itself is right, and
+the real ICD re-run confirms the originally-reported error genuinely no
+longer occurs anywhere in the group. The new `EmitMeshTasksEXT` gap is
+filed as H6s, since implementing it (a new canonical `feme.stage.*` op,
+a new `ConvertSPIRVToLLVMPass` pattern, `MeshOutputWrapper.cpp` lowering,
+and whatever CPU-side execution-chaining the task stage's own dispatch
+of its mesh workgroups still needs) is a substantially larger, separate
+task, not a narrow follow-on to this row's own struct-layout scope.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure SPIR-V-to-LLVM struct-layout-completeness fix,
+touching no feature bit or extension.
+
+**Roadmap H6q closes.** The offset-struct leading-gap conversion bug is
+fixed and verified (both by new lit tests and a real ICD re-run
+confirming the reported error no longer occurs), with zero regressions
+in `check-feme`. **Milestone H6 does not close**: a new, distinct, and
+substantially larger blocker (H6s) surfaced in the same cases' place,
+alongside the still-open H6r.
+
+**Reproducing this row.**
+
+```shell
+cd /path/to/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_ICD_FILENAMES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case='dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader'
+```
+
 ## Roadmap H6c-a: closed by its own split
 
 Re-checking H6c-a's own literal ask now that its three named
