@@ -37,65 +37,27 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H6s or other prerequisites blocking the H-series milestones?
+Can you work on H6u or other prerequisites blocking the H-series milestones?
 
-> **`OpEmitMeshTasksEXT` (`spirv.EXT.EmitMeshTasks`), a task entry's own
-> mesh-dispatch call (group-count triple plus its `TaskPayloadWorkgroupEXT`
-> payload operand), has no `ConvertSPIRVToLLVMPass` conversion pattern at all
-> yet** -- found confirming H6q's own fix: `error: failed to legalize operation
-> 'spirv.EXT.EmitMeshTasks' that was explicitly marked illegal`, on every
-> `with_task_shader`/`with_task_shader_secondary_cmd` variant in the 540-case
-> `dEQP-VK.mesh_shader.ext.api.*` group (58 cases) once H6q's own push-constant
-> legalization gap no longer blocks them first. Unlike
-> `spirv.EXT.SetMeshOutputs` (the mesh stage's own bounded-output-count
-> declaration, `SetMeshOutputsEXTConversionPattern`), nothing in
-> `SPIRVToLLVMPatterns.cpp` handles this op at all -- `MeshOutputWrapper.cpp`'s
-> own file comment already anticipated "`EmitMeshTasksEXT`'s own
-> still-uncanonicalized form" as a candidate gap (H6p's own investigation ruled
-> it out for that row's specific case, since that case had no task shader at
-> all, but it is exactly what every `with_task_shader` case needs). Needs its
-> own design: likely a new canonical `feme.stage.*` op (mirroring
-> `SetMeshOutputs`'s own precedent) capturing the group-count triple and payload
-> pointer, a new `ConvertSPIRVToLLVMPass` pattern converting
-> `spirv.EXT.EmitMeshTasks` into it, a `MeshOutputWrapper.cpp` (or a
-> task-stage-specific sibling) lowering case for the task stage's own wrapper,
-> and whatever CPU-side execution-chaining the task stage's own dispatch of its
-> mesh workgroups still needs beyond what already exists for a task-less mesh
-> entry. Not yet triaged for how much of the task-stage-to-mesh-stage chaining
-> machinery already exists elsewhere versus needs building from scratch~~ (done:
-> designed and implemented the full pipeline, mirroring `SetMeshOutputs`'s own
-> precedent throughout -- a new, non-overloaded, workgroup-uniform
-> `StageOpKind::EmitMeshTasks` (`feme.stage.emit_mesh_tasks`) canonical op; a
-> new `EmitMeshTasksEXTConversionPattern` in `SPIRVToLLVMPatterns.cpp`
-> converting `spirv.EXT.EmitMeshTasks` into a call to it (correctly handling the
-> op's own terminator role: the call is followed by an `llvm.return`, and the
-> optional `TaskPayloadWorkgroupEXT` payload operand is dropped since a
-> separate, already-existing `TaskPayloadStore` call already moves that data);
-> matching masking/widening/validation/uniformity plumbing added across
-> `StageMaskCalls.h/.cpp`, `Linearize.cpp`, `SIMDize.cpp`, `ValidateStage.cpp`,
-> and `WaveUniformity.cpp` (one small case added to each, mirroring
-> `SetMeshOutputs`'s own existing case at each site); `EntryWrapper.cpp` threads
-> the already-existing (but previously unused) `FemeTaskArgs::MeshGroupCount`
-> host-ABI field as a new `Env.TaskMeshGroupCount` wave-body value; and a new
-> `TaskPayloadWrapper.cpp` `lowerEmitMeshTasks` helper writes the op's own 3D
-> group-count triple through 3 GEPs into that field, so the already-existing (if
-> previously unreachable) `Executor.cpp`/`AmplificationDispatchQueue` host-side
-> dispatch machinery this row's own investigation found already scaffolded
-> finally has a real producer. New lit test `spirv-to-llvm-emit-mesh-tasks.mlir`
-> (both the no-payload and with-payload shapes) and new unit tests
-> (`StageOpsTest.cpp`'s `EmitMeshTasksIsVoidAndNotOverloaded`;
-> `TaskPayloadWrapperTest.cpp`'s `ChainsIntoEntryWrapperPass`,
-> `LowersEmitMeshTasks`, `LowersPayloadStoreAndEmitMeshTasksTogether`) cover the
-> new op and its lowering directly. `ninja check-feme` (assertions-enabled,
-> ccache build) passes in full. A real `deqp-vk` re-run of the
-> originally-failing `with_task_shader` case confirms the
-> `spirv.EXT.EmitMeshTasks` legalization error is gone -- but the same re-run
-> surfaced two further, distinct bugs while verifying this fix, filed as their
-> own new sibling row, H6t (closed), and a third, unrelated, unfixed gap, filed
-> as H6u (open). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
-> confirmed no change needed: a pure compiler-internal lowering-completeness
-> fix, touching no feature bit or extension. `Design.md`'s stale
-> conversion-gap-table row for `spirv.EXT.EmitMeshTasks` is removed, and
-> `FeMeVulkanDesign.md` gains a new "Roadmap H6s" design note describing the
-> fix. See "Roadmap H6s: measured impact" in VulkanCTSReport.md for the full
-> reproduction)
+> **With H6s and H6t both closed, a real `deqp-vk` re-run of
+> `dEQP-VK.mesh_shader.ext.api.draw.draw_count_0.no_indirect_args.no_count_limit.no_count_offset.with_task_shader`
+> still fails `vkCreateGraphicsPipelines`, now with a new, distinct, and
+> unrelated error**: `"a stage's root-constant span is not fully covered by a
+> VkPushConstantRange visible to it in its VkPipelineLayout"` -- confirmed (via
+> `grep`) to originate in `feme/lib/Vulkan/GraphicsPipeline.cpp`'s own
+> push-constant-range pipeline-layout validation
+> (`validateStageInterfaces`-adjacent code, with a second occurrence in
+> `feme/lib/Vulkan/Pipeline.cpp`), a completely different subsystem than any of
+> H6s/H6t's own compiler-pass changes -- a
+> Vulkan-API/pipeline-layout-validation-level gap, not a compiler bug. Not yet
+> triaged at all: needs to confirm whether the CTS-supplied `VkPipelineLayout`'s
+> own `pPushConstantRanges` genuinely does not cover the task stage's own
+> root-constant span (a real CTS-side or spec-reading gap on this project's own
+> part), or whether `GraphicsPipeline.cpp`'s own coverage check is itself too
+> strict (e.g. failing to account for a task stage's own
+> `VkShaderStageFlagBits::VK_SHADER_STAGE_TASK_BIT_EXT` specifically, or
+> mis-computing the task stage's own root-constant span now that H6t's `DrawID`
+> field occupies what was previously reserved/unused padding). Confirmed present
+> across all 58 `with_task_shader`/`with_task_shader_secondary_cmd` cases in the
+> 540-case `dEQP-VK.mesh_shader.ext.api.*` group (the same bucket H6q/H6s/H6t
+> have each progressively unblocked one layer deeper)
