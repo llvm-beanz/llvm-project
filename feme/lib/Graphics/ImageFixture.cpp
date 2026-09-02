@@ -450,6 +450,55 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  // (Roadmap H8j) `R16_UNORM`/`R16_SNORM`: `EAC_R11_{UNORM,SNORM}`'s own
+  // single-channel sampling-bridge target (`etc2SamplingTarget`,
+  // ETC2SamplingBridge.h) -- the 16-bit analogue of `R8_UNORM`/`_SNORM`
+  // above, same "4-logical-component clear color, others ignored"
+  // convention.
+  if (Format == ResourceFormat::R16_UNORM ||
+      Format == ResourceFormat::R16_SNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    bool Signed = Format == ResourceFormat::R16_SNORM;
+    double Clamped =
+        Signed ? std::clamp(Clear[0], -1.0, 1.0) : std::clamp(Clear[0], 0.0, 1.0);
+    if (Signed) {
+      int16_t V = static_cast<int16_t>(std::lround(Clamped * 32767.0));
+      memcpy(Texel.data(), &V, 2);
+    } else {
+      uint16_t V = static_cast<uint16_t>(std::lround(Clamped * 65535.0));
+      memcpy(Texel.data(), &V, 2);
+    }
+    return Error::success();
+  }
+
+  // (Roadmap H8j) `R16G16_UNORM`/`R16G16_SNORM`: `EAC_R11G11_
+  // {UNORM,SNORM}`'s own two-channel sampling-bridge target, the same
+  // convention as `R16_UNORM`/`_SNORM` above with a second stored
+  // channel.
+  if (Format == ResourceFormat::R16G16_UNORM ||
+      Format == ResourceFormat::R16G16_SNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    bool Signed = Format == ResourceFormat::R16G16_SNORM;
+    for (unsigned I = 0; I != 2; ++I) {
+      double Clamped =
+          Signed ? std::clamp(Clear[I], -1.0, 1.0) : std::clamp(Clear[I], 0.0, 1.0);
+      if (Signed) {
+        int16_t V = static_cast<int16_t>(std::lround(Clamped * 32767.0));
+        memcpy(Texel.data() + I * 2, &V, 2);
+      } else {
+        uint16_t V = static_cast<uint16_t>(std::lround(Clamped * 65535.0));
+        memcpy(Texel.data() + I * 2, &V, 2);
+      }
+    }
+    return Error::success();
+  }
+
   Expected<FormatInfo> Info = getFormatInfo(Format);
   if (!Info)
     return Info.takeError();
@@ -693,6 +742,62 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
       Out[I] = Signed
                   ? std::clamp(static_cast<int8_t>(Texel[I]) / 127.0, -1.0, 1.0)
                   : Texel[I] / 255.0;
+    Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H8j) `R16_UNORM`/`R16_SNORM`: the inverse of
+  // `packClearColor`'s special case above -- `EAC_R11_{UNORM,SNORM}`'s
+  // own sampling-bridge target (ETC2SamplingBridge.h), read back into
+  // logical red with green/blue at their identity value and alpha fully
+  // opaque, the same convention `R8_UNORM`/`_SNORM` above already
+  // established.
+  if (Format == ResourceFormat::R16_UNORM ||
+      Format == ResourceFormat::R16_SNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    bool Signed = Format == ResourceFormat::R16_SNORM;
+    if (Signed) {
+      int16_t V;
+      memcpy(&V, Texel.data(), 2);
+      Out[0] = std::clamp(V / 32767.0, -1.0, 1.0);
+    } else {
+      uint16_t V;
+      memcpy(&V, Texel.data(), 2);
+      Out[0] = V / 65535.0;
+    }
+    Out[1] = Out[2] = 0.0;
+    Out[3] = 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap H8j) `R16G16_UNORM`/`R16G16_SNORM`: the inverse of
+  // `packClearColor`'s special case above -- `EAC_R11G11_
+  // {UNORM,SNORM}`'s own sampling-bridge target, the same convention as
+  // `R16_UNORM`/`_SNORM` above with a second stored channel.
+  if (Format == ResourceFormat::R16G16_UNORM ||
+      Format == ResourceFormat::R16G16_SNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    bool Signed = Format == ResourceFormat::R16G16_SNORM;
+    for (unsigned I = 0; I != 2; ++I) {
+      if (Signed) {
+        int16_t V;
+        memcpy(&V, Texel.data() + I * 2, 2);
+        Out[I] = std::clamp(V / 32767.0, -1.0, 1.0);
+      } else {
+        uint16_t V;
+        memcpy(&V, Texel.data() + I * 2, 2);
+        Out[I] = V / 65535.0;
+      }
+    }
     Out[2] = 0.0;
     Out[3] = 1.0;
     return Error::success();
@@ -1316,6 +1421,35 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "bc7-unorm";
   case ResourceFormat::BC7_SRGB:
     return "bc7-srgb";
+  // (Roadmap H8j) The 10 `VK_FORMAT_ETC2_*`/`VK_FORMAT_EAC_*` formats:
+  // same "no clear-color/texel fixture support for the RGB-only/1A1
+  // shapes yet, but still need a name for diagnostics" rationale as the
+  // BC formats above (`ETC2_RGB8_UNORM`/`_SRGB`/`ETC2_RGB8A1_UNORM`/
+  // `_SRGB`/`ETC2_RGBA8_UNORM`/`_SRGB` have no dedicated
+  // `packClearColor`/`unpackColor` case since their sampling-bridge
+  // target, `R8G8B8A8_UNORM`(`_SRGB`), already had one since H8n; only
+  // `EAC_R11`/`EAC_R11G11`'s own `R16_*`/`R16G16_*` targets needed new
+  // cases, added above).
+  case ResourceFormat::ETC2_RGB8_UNORM:
+    return "etc2-rgb8-unorm";
+  case ResourceFormat::ETC2_RGB8_SRGB:
+    return "etc2-rgb8-srgb";
+  case ResourceFormat::ETC2_RGB8A1_UNORM:
+    return "etc2-rgb8a1-unorm";
+  case ResourceFormat::ETC2_RGB8A1_SRGB:
+    return "etc2-rgb8a1-srgb";
+  case ResourceFormat::ETC2_RGBA8_UNORM:
+    return "etc2-rgba8-unorm";
+  case ResourceFormat::ETC2_RGBA8_SRGB:
+    return "etc2-rgba8-srgb";
+  case ResourceFormat::EAC_R11_UNORM:
+    return "eac-r11-unorm";
+  case ResourceFormat::EAC_R11_SNORM:
+    return "eac-r11-snorm";
+  case ResourceFormat::EAC_R11G11_UNORM:
+    return "eac-r11g11-unorm";
+  case ResourceFormat::EAC_R11G11_SNORM:
+    return "eac-r11g11-snorm";
   }
   llvm_unreachable("unhandled ResourceFormat");
 }

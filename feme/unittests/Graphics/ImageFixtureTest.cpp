@@ -330,6 +330,74 @@ TEST(ImageFixtureTest, PacksAndUnpacksR8G8SnormNegative) {
   EXPECT_EQ(Unpacked[3], 1.0);
 }
 
+// (Roadmap H8j) `R16_UNORM`/`R16_SNORM`: `EAC_R11_{UNORM,SNORM}`'s own
+// single-channel sampling-bridge target, the 16-bit analogue of
+// `R8_UNORM`/`_SNORM` above.
+TEST(ImageFixtureTest, PacksAndUnpacksR16Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16_UNORM,
+                                   {0.5, 1.0, 1.0, 1.0}, Texel),
+                    Succeeded());
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R16_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 0.5, 0.001);
+  EXPECT_EQ(Unpacked[1], 0.0);
+  EXPECT_EQ(Unpacked[2], 0.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR16SnormNegative) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16_SNORM,
+                                   {-1.0, 0.0, 0.0, 0.0}, Texel),
+                    Succeeded());
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R16_SNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], -1.0, 0.001);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+// (Roadmap H8j) `R16G16_UNORM`/`R16G16_SNORM`: `EAC_R11G11_
+// {UNORM,SNORM}`'s own two-channel sampling-bridge target, the same
+// convention as `R16_UNORM` above with a second stored channel at
+// logical green.
+TEST(ImageFixtureTest, PacksAndUnpacksR16G16Unorm) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16G16_UNORM,
+                                   {0.25, 0.75, 1.0, 1.0}, Texel),
+                    Succeeded());
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R16G16_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 0.25, 0.001);
+  EXPECT_NEAR(Unpacked[1], 0.75, 0.001);
+  EXPECT_EQ(Unpacked[2], 0.0);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksR16G16SnormNegative) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R16G16_SNORM,
+                                   {-0.5, 1.0, 0.0, 0.0}, Texel),
+                    Succeeded());
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R16G16_SNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], -0.5, 0.001);
+  EXPECT_NEAR(Unpacked[1], 1.0, 0.001);
+  EXPECT_EQ(Unpacked[3], 1.0);
+}
+
 
 // packed into one 16-bit word, 1 bit of alpha at the top down to 5 bits of
 // red at the bottom -- the same packing `R10G10B10A2_UNORM` above uses,
