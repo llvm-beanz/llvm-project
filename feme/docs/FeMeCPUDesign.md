@@ -2376,6 +2376,20 @@ regardless of host object format.
 It deliberately does **not** contain a math library: `llvm.sin` and friends
 lower through the host's normal vector-math handling.
 
+Roadmap H8v added the first genuine multi-threaded read-modify-write
+helpers (`feme.cpu.image.atomic.*.2d.i32`, backing a storage-image atomic;
+`Executor.cpp` dispatches shader invocations across real host threads, so
+these use real `__atomic_fetch_*`/`__atomic_compare_exchange_n` builtins
+with `__ATOMIC_SEQ_CST` ordering, not a plain load-modify-store). On an
+AArch64 host, an unqualified `__atomic_fetch_add`/etc. compiles by default
+to a call to an out-of-line `__aarch64_ldadd4_acq_rel`-style libgcc/
+compiler-rt helper (resolved via IFUNC at ordinary static-link time) rather
+than an inline LDADD/CAS instruction -- unresolvable by this bitcode's own
+ORC JIT, which links against no such runtime library. `FeMeRuntimeCPU.c`'s
+own bitcode-compile step (`feme/runtime/CPU/CMakeLists.txt`) now passes
+`-mno-outline-atomics` when the host is AArch64 to force inline atomic
+instructions instead.
+
 ## Accounting for Graphics
 
 Compute was this document's own v1 scope, and graphics stages were designed

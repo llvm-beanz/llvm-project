@@ -21683,3 +21683,84 @@ on), and no `feme.cpu.image.atomic.*` runtime entry points exist yet.
 -- no `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
 row either way, so `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update.
+
+## Roadmap H8v: measured impact
+
+CPU-runtime lowering for storage-image atomics, closing the last gap the
+R39/H8u entry above split off. `SPIRVResourceLowering.cpp`'s
+`hasOnlySupportedStorageImageUses`/`lowerImageAccesses` now accept a
+scalar-`i32` `AtomicRMWInst`/`AtomicCmpXchgInst` user of a storage-image
+`getpointer` call (`Plain2D` shape, integer format only -- the shape both
+mandatory `R32_{SINT,UINT}` CTS cases actually exercise; SPIR-V disallows
+an atomic against a float-channel image outright), rewriting each into one
+of 11 new `feme.cpu.image.atomic.*.2d.i32` runtime entry points
+(`FeMeRuntimeCPU.c`): `add`/`sub`/`and`/`or`/`xor`/`smax`/`smin`/`umax`/
+`umin`/`exchange`/`compare_exchange`. Each is built on a real
+`__atomic_fetch_*`/`__atomic_exchange_n`/`__atomic_compare_exchange_n`
+builtin with `__ATOMIC_SEQ_CST` ordering -- not a plain load-modify-store,
+since `Executor.cpp` dispatches shader invocations across real host
+threads and two lanes in different waves can race on the same texel.
+
+On this session's AArch64 host, an unqualified `__atomic_fetch_add`
+compiled to a call to an out-of-line `__aarch64_ldadd4_acq_rel`-style
+libgcc/compiler-rt helper (normally resolved via IFUNC at ordinary
+static-link time) rather than an inline LDADD/CAS instruction --
+unresolvable by `FeMeRuntimeCPU`'s own ORC JIT, which links against no
+such runtime library, surfacing as `JIT session error: Symbols not found:
+[ __aarch64_ldadd4_acq_rel ]` the first time a real CTS case actually
+exercised this path. Fixed by passing `-mno-outline-atomics` in
+`feme/runtime/CPU/CMakeLists.txt`'s bitcode-compile step, gated to an
+AArch64 host (the flag errors under `-Werror` on every other
+architecture).
+
+A real CTS run then reached a second, unrelated gap: the target case uses
+a *divergent* atomic (each invocation's own x-coordinate and add operand
+come from its own thread id), and `feme::cpu::SIMDizePass::matchImageCall`
+didn't recognize any of the 11 new call kinds yet, so `feme-cpu-simdize`
+hit its generic `unsupported divergent call to
+'feme.cpu.image.atomic.add.2d.i32'` hard error. Fixed by adding the new
+kinds to `matchImageCall`'s `AllKinds` lookup table and operand-extraction
+switch (new `AtomicValue`/`Comparator` fields on `MatchedImageCall`), and
+by teaching `widenImageCall`'s `LaneMaskBase` selection that an atomic's
+value operand is exactly as side-effecting as a store's `Texel` --
+`widenImageCall` itself needed no other change, having already been fully
+generic over any `feme.cpu.image.*` call.
+
+New coverage at every phase this row touched: `ImageCallsTest.cpp` (C++
+unit tests for the new `createAtomic*`/`matchImageCall` round-trip, RMW
+and compare-exchange), `spirv-resource-lowering-image-atomic.ll`
+(FileCheck: `OpImageTexelPointer` + atomic lowering to the new runtime
+calls under uniform control flow), `simdize-image-atomic-scalarize.ll`
+(FileCheck: the same lowering under *divergent* control flow -- the exact
+gap the real CTS run found, confirmed to fail without the `SIMDize.cpp`
+fix and pass with it).
+
+`ninja check-feme` (assertions-enabled, ccache build) passed in full:
+**2436/2463 (27 unsupported), 0 regressions.**
+
+Real `dEQP-VK.image.atomic_operations.*` runs against feme's own ICD
+(`VK_ICD_FILENAMES` correctly set, confirmed via `vulkaninfo --summary`
+reporting `FeMe CPU Vulkan Device`): all 8 RMW/compare-exchange kinds
+(`add`/`and`/`compare_exchange`/`exchange`/`max`/`min`/`or`/`xor`) for
+both `r32i`/`r32ui` end-result cases now **Pass: 16/16 (100%)**.
+
+A real `dEQP-VK.api.info.format_properties.*` re-run moves **222/225 ->
+223/225 Pass**: `r32_sint`/`r32_uint` now report `STORAGE_IMAGE_ATOMIC_BIT`
+correctly and drop out of the failure list. The 3 remaining failures are
+unrelated to this row's own scope: `a2b10g10r10_unorm_pack32`'s
+`VERTEX_BUFFER_BIT` gap (already tracked, H8h), plus two newly-visible
+`bufferFeatures` gaps for `r32_{sint,uint}` missing
+`VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT` -- a *texel buffer*
+atomic (a distinct SPIR-V/Vulkan feature from the *storage image* atomic
+this row closed; no `OpImageTexelPointer` involved at all, an ordinary
+`OpAccessChain`-derived pointer into an `OpTypeImage` with `Buffer` dim
+instead) not yet scoped by any roadmap row -- added as H8w below.
+
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT` is honestly `VK_TRUE` for
+`R32_{SINT,UINT}` as of this commit; see `Vulkan14FeatureInventory.md`
+(no `VkPhysicalDeviceFeatures` bit is touched by this row -- image
+atomics are a format-feature, not a device feature) and
+`VulkanExtensionInventory.md` (no extension gates this bit either; it is
+part of core 1.0 `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT`, unlocked
+purely by mandatory-format-support rules once the two mandatory formats
+support it).

@@ -868,7 +868,7 @@ approaches and closing R14's own remaining round-trip gap. Until R38
 lands, only a SPIR-V binary produced by MLIR's own serializer (i.e. never
 one that has been through `feme --target=spirv`) is guaranteed importable.
 
-#### Known gap (partially closed): storage-image atomics still need CPU-runtime lowering
+#### Known gap (closed): storage-image atomics needed CPU-runtime lowering
 
 Found by roadmap step H8u while scoping `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT`
 for `R32_{SINT,UINT}` (the two formats the real Vulkan spec mandates it
@@ -916,29 +916,36 @@ into an ordinary `llvm.atomicrmw`/`llvm.cmpxchg` against whatever pointer
 it is given (a storage-image texel pointer or an ordinary
 `OpAccessChain`-derived one, with no distinction needed at this level).
 
-What is **still** missing, and is what actually gates
-`STORAGE_IMAGE_ATOMIC_BIT`: `SPIRVResourceLowering.cpp`'s
-`lowerImageAccesses` today only recognizes a `LoadInst`/`StoreInst` user of
-a storage-image `getpointer` call (rewriting each into a
-`feme.cpu.image.{load,store}.*` runtime call carrying a whole `<4 x i32>`/
-`<4 x float>` texel) -- it has no case yet for an `AtomicRMWInst`/
-`AtomicCmpXchgInst` user, which operates on a single *scalar* 32-bit
-component rather than a 4-wide texel vector (an image atomic's own SPIR-V
-result type is always a scalar, per `OpImageTexelPointer`'s spec-mandated
-`Image`-storage-class pointer type). Closing this needs, at minimum: a new
-`hasOnlySupportedStorageImageUses` branch accepting a scalar-`i32`
-`AtomicRMWInst`/`AtomicCmpXchgInst` pointer use (alongside its existing
-vector `Load`/`Store` branches) plus new `feme.cpu.image.atomic.*` runtime
-entry points (`FeMeRuntimeCPU.c`) -- one per RMW kind, times each storage-
-image shape (`Plain1D`/`Array1D`/`Plain2D`/`Array2D`/`Plain3D`/
-`Plain2DMS`/`Array2DMS`) `lowerImageAccesses` already threads through for
-`Load`/`Store` -- mirroring `feme.cpu.image.store.2d.v4i32`'s own
-precedent, a real but substantially larger combinatorial expansion than
-any single prior `feme.cpu.image.*` addition (roadmap H8v). Only once
-that CPU-side lowering exists, and a real `dEQP-VK.image.atomic_operations.*`
-case is confirmed passing end to end, would flipping
-`VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT` for `R32_{SINT,UINT}`
-(`Format.cpp`) be honest.
+What was still missing, and is what actually gated
+`STORAGE_IMAGE_ATOMIC_BIT` -- **now also closed, by roadmap H8v**:
+`SPIRVResourceLowering.cpp`'s `lowerImageAccesses` previously only
+recognized a `LoadInst`/`StoreInst` user of a storage-image `getpointer`
+call (rewriting each into a `feme.cpu.image.{load,store}.*` runtime call
+carrying a whole `<4 x i32>`/`<4 x float>` texel). `hasOnlySupportedStorageImageUses`/
+`lowerImageAccesses` now also accept a scalar-`i32` `AtomicRMWInst`/
+`AtomicCmpXchgInst` pointer use (an image atomic's own SPIR-V result type
+is always a scalar, per `OpImageTexelPointer`'s spec-mandated
+`Image`-storage-class pointer type), rewriting each into one of 11 new
+`feme.cpu.image.atomic.*.2d.i32` runtime entry points (`FeMeRuntimeCPU.c`,
+one per RMW kind plus compare-exchange) built on real
+`__atomic_fetch_*`/`__atomic_compare_exchange_n` builtins with
+`__ATOMIC_SEQ_CST` ordering (`Executor.cpp` dispatches shader invocations
+across real host threads, so a plain non-atomic read-modify-write would be
+a real data race). Scoped, as the roadmap row anticipated, to the
+`Plain2D` shape only -- the shape both mandatory `R32_{SINT,UINT}` CTS
+cases (`dEQP-VK.image.atomic_operations.*.2d.*`) actually exercise; wider
+shapes (`Plain1D`/`Array1D`/`Array2D`/`Plain3D`/`Plain2DMS`/`Array2DMS`)
+remain unimplemented and would need their own `feme.cpu.image.atomic.*`
+entry points, following this same pattern, if a future CTS case exercises
+them. `feme::cpu::SIMDizePass::matchImageCall` also needed to learn the 11
+new call kinds (its per-lane scalarization logic, `widenImageCall`, was
+already fully generic and needed no changes beyond treating an atomic's
+value operand as side-effecting, the same as a store's texel) -- found by
+a real CTS case reaching a *divergent* atomic, not by unit testing alone
+(see roadmap H8v's own commit history). `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT`
+is now set for `R32_{SINT,UINT}` (`Format.cpp`), confirmed against feme's
+own ICD by all 8 `dEQP-VK.image.atomic_operations.*` RMW/compare-exchange
+kinds passing for both formats (16/16).
 
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 
