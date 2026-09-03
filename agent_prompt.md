@@ -37,6 +37,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
+The previous agent invocation ended without actually doing anyting.
+
 Can you work on H8x or other prerequisites blocking the H-series milestones?
 
 > **Ordinary SSBO (`HandleKind::Storage`)/shared-memory atomics also fail
