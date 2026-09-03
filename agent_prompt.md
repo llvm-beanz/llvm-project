@@ -42,35 +42,32 @@ Can you work on H8u or other prerequisites blocking the H-series milestones?
 > **`STORAGE_IMAGE_ATOMIC_BIT` for `r32_{sint,uint}`, split off from H8s.** A
 > real CTS re-run found `R32_SINT`/`R32_UINT` still missing this bit, confirmed
 > genuinely mandatory via CTS's own `s_required*` tables
-> (`vktApiFeatureInfo.cpp`). Investigated this session and found the real
-> blocker: a storage-image atomic needs SPIR-V's `OpImageTexelPointer` (opcode
-> 60) to first materialize an addressable pointer from the image handle before a
-> following `OpAtomicIAdd`/`OpAtomicExchange`/etc. can operate on it (unlike an
-> ordinary buffer/shared-memory atomic, which already deserializes and converts
-> fine today, needing no `feme`-side change at all -- MLIR's own `spirv` dialect
-> already models every `Atomic*` op generically over any pointer).
-> `OpImageTexelPointer` itself has **zero** representation anywhere in MLIR's
-> own `spirv` dialect -- no op definition (unlike `OpImageRead`/`OpImageWrite`,
-> which both have one) and no named opcode-enum case at all in `SPIRVBase.td`
-> (confirmed by grep) -- so a real driver-side SPIR-V binary using it (exactly
-> what `dEQP-VK`'s own image-atomics conformance tests compile to) cannot even
-> be deserialized by `feme::SPIRVImporter`, the same "unhandled opcode" shape as
-> the pre-existing
-> `feme::SPIRVImporter`-cannot-deserialize-LLVM-SPIR-V-backend-output known gap
-> (Design.md, found by roadmap R14). Documented as its own new "Known gap" in
-> Design.md, alongside the concrete shape closing it would need (a new
-> `spirv.ImageTexelPointer` op in MLIR's own `SPIRVImageOps.td` plus its own
-> opcode-enum entry -- real, scoped, tractable work in `mlir/`, this same tree
-> -- see roadmap R39, which now tracks doing it directly rather than only
-> documenting it, matching F8c's own precedent for landing a real
-> upstream-shaped MLIR SPIR-V fix in this project) and the further `feme`-side
-> work still needed after that (a `SPIRVToLLVMPatterns.cpp` conversion pattern
-> lowering the new op into the existing `createResourcePointer` intrinsic so a
-> following `Atomic*` op becomes an ordinary LLVM `atomicrmw`/`cmpxchg`, and
-> `SPIRVResourceLowering.cpp`'s `lowerImageAccesses` learning to rewrite an
+> (`vktApiFeatureInfo.cpp`). The real blocker this row found was that a
+> storage-image atomic needs SPIR-V's `OpImageTexelPointer` (opcode 60) to first
+> materialize an addressable pointer from the image handle before a following
+> `OpAtomicIAdd`/`OpAtomicExchange`/etc. can operate on it, and that instruction
+> had zero representation anywhere in MLIR's own `spirv` dialect (no op
+> definition, no opcode-enum case) -- see roadmap R39, now done:
+> `spirv.ImageTexelPointer` is added to MLIR (`SPIRVImageOps.td`/`SPIRVBase.td`,
+> its own commit) and the `feme`-side `SPIRVToLLVMPatterns.cpp` conversion work
+> is also done (`ImageTexelPointerPattern` plus, discovered along the way, a
+> full set of `AtomicRMWPattern`/`AtomicCompareExchangePattern` instantiations
+> -- MLIR's upstream `spirv` -> `llvm` conversion turned out to have *no*
+> lowering pattern for any `Atomic*` op at all, contrary to this row's own prior
+> framing; `feme` now supplies its own). A real SPIR-V module using
+> `OpImageTexelPointer` + `OpAtomicIAdd` against a storage image now imports,
+> converts, and produces an ordinary `llvm.atomicrmw`/`llvm.cmpxchg` --
+> confirmed by a new `spirv-to-llvm-image-atomic.mlir` FileCheck test (`ninja
+> check-feme` passes in full, 2431/2458, 0 regressions). What is **not** yet
+> done, and is what actually gates the format-feature bit:
+> `SPIRVResourceLowering.cpp`'s CPU-side lowering has no case for an
 > `AtomicRMWInst`/`AtomicCmpXchgInst` user of a storage-image `getpointer` call
-> into a new `feme.cpu.image.atomic.*` runtime entry point mirroring
-> `feme.cpu.image.store.2d.v4i32`'s own precedent). None of that feme-side work
-> is even testable until the upstream gap closes, since no such SPIR-V module
-> can be imported today -- `STORAGE_IMAGE_ATOMIC_BIT` stays honestly unset for
-> `R32_{SINT,UINT}` until it does
+> (only `LoadInst`/`StoreInst`, which carry a whole `<4 x i32>` texel rather
+> than the scalar 32-bit component an image atomic operates on), and no
+> `feme.cpu.image.atomic.*` runtime entry points exist yet -- split off as its
+> own row, H8v, since it is a real, substantially larger combinatorial expansion
+> (one runtime entry point per atomic kind, times every storage-image shape)
+> than the IR-level work this row itself needed.
+> `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT` stays honestly unset for
+> `R32_{SINT,UINT}` until H8v lands and a real
+> `dEQP-VK.image.atomic_operations.*` case passes end to end
