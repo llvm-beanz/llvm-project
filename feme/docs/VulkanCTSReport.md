@@ -21449,3 +21449,78 @@ row -- confirmed, not assumed: this is a `VkFormatFeatureFlags`
 reporting/sampling-capability fix for one specific `VkFormat` only.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap H8s: measured impact
+
+H8g had fixed the CTS-runner's own environment-variable bug (the
+Vulkan loader silently ignores singular `VK_ICD_FILENAME`, only
+`VK_ICD_FILENAMES` plural), which meant every prior `deqp-vk` "N/N
+Pass" number this document records for H8a-H8q had actually validated
+Mesa's own lavapipe ICD (globally exported in this environment), not
+feme's, and was therefore unverified for feme specifically.
+
+A real re-run of `dEQP-VK.api.info.format_properties.*` against
+feme's own ICD (`VK_ICD_FILENAMES=.../feme_icd.json`, spelled
+correctly) found the true starting baseline: **202/225 Pass, 23
+Fail**. Grouping the QPA log's `missing:` fields by exact bit
+signature gave 7 clusters. 5 of the 7 turned out to be plain
+`formatFeatureFlags`/`isSupportedColorAttachmentFormat`/
+`isTexelBufferFormatSupported` switch-case omissions -- the CPU
+runtime (`femeRTUnpackImageTexel(I32)`/`PackImageTexel(I32)`,
+`FeMeRuntimeCPU.c`) and `packClearColor`/`unpackColor`
+(`ImageFixture.cpp`) already fully supported every format involved via
+some other resource-binding path (storage image, texel buffer, vertex
+fetch) -- so each was fixed directly, one small commit per cluster:
+
+- `R16G16_{UINT,SINT,FLOAT}` gained `UNIFORM_TEXEL_BUFFER_BIT`
+  (`Format.cpp`'s `isTexelBufferFormatSupported`; `_FLOAT` was found
+  in a *second* re-run after the first fix landed, one CTS run alone
+  did not surface the whole cluster).
+- `R32_{UINT,SINT}`/`R32G32_{UINT,SINT}` gained `SAMPLED_IMAGE_BIT`;
+  `R32G32_FLOAT`/`R8G8B8A8_{UINT,UNORM}` gained `STORAGE_IMAGE_BIT`
+  (`Format.cpp`'s `formatFeatureFlags`).
+- `R8_UNORM`/`R8G8_UNORM`/`R16_SFLOAT`/`R16G16_SFLOAT` gained
+  `COLOR_ATTACHMENT_BIT`/`_BLEND_BIT` (`RenderPass.cpp`'s
+  `isSupportedColorAttachmentFormat`) -- a genuine, non-integer
+  breadth gap distinct from H8p's integer-only framing.
+- 12 more integer formats (`R8_{UINT,SINT}`, `R8G8_{UINT,SINT}`,
+  `R16G16B16A16_{UINT,SINT}`, `R32G32B32A32_{UINT,SINT}`,
+  `R32_{UINT,SINT}`, `R32G32_{UINT,SINT}`) gained
+  `COLOR_ATTACHMENT_BIT`, extending H8p's own 7-format
+  `isIntegerColorAttachmentFormat` (`RuntimeABI.h`) to 19.
+
+Each fix shipped with its own unit tests (`FormatTest.cpp`/
+`RenderPassTest.cpp`). Widening these predicates broke several
+pre-existing tests that had assumed the old, incomplete feature set as
+a "known unsupported" example (5 in `EntryPointsTest.cpp`, 1 in
+`FormatTest.cpp`) -- each was swapped to a format that genuinely still
+lacks the capability (e.g. an `_SRGB` variant for storage-image tests,
+since sRGB formats never support storage-image usage per spec) rather
+than silently loosened.
+
+The remaining 2 clusters are real, unimplemented capability gaps, not
+label fixes, and are split off into their own new sibling roadmap rows
+rather than fixed this session:
+
+- `b8g8r8a8_unorm`'s `VERTEX_BUFFER_BIT` gap -> **H8t**
+  (`a2b10g10r10_unorm_pack32`'s identical-shaped gap remains tracked
+  by the pre-existing, still-open **H8h**; no new row needed for it).
+- `r32_{sint,uint}`'s `STORAGE_IMAGE_ATOMIC_BIT` gap -> **H8u** (no
+  `OpAtomic*`-on-image support exists anywhere in this project yet --
+  confirmed via `grep -rln "OpAtomic\|ImageAtomic\|imageAtomic"`
+  returning nothing under `feme/lib`, `feme/runtime`, `feme/include`).
+
+`ninja check-feme` (assertions-enabled, ccache build) passed in full
+after every commit throughout (2429/2456 passed, 27 unsupported, 0
+regressions, growing by the new/widened assertions added alongside
+each fix).
+
+A final re-run of `dEQP-VK.api.info.format_properties.*` after all 5
+fixes landed measured **202/225 -> 221/225 Pass**, with exactly the 4
+expected remaining failures (H8h + H8t's `VERTEX_BUFFER_BIT` gaps,
+H8u's 2 `STORAGE_IMAGE_ATOMIC_BIT` gaps) and 0 regressions.
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by any
+H8s fix -- confirmed, not assumed: this entire row is pure
+`VkFormatFeatureFlags` breadth work. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update.
