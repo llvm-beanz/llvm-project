@@ -56673,3 +56673,149 @@ row's own commits touched. Leaving H9 unstruck because *other*,
 unrelated rows (H9a/H9b) haven't landed yet would misrepresent what's
 actually done, and doesn't match how the project's own history has
 handled this same situation every previous time it's come up.
+
+# H9a: fragment-less pipeline with a color attachment, and a related color-blend-state relaxation
+
+Picked up H9a, the largest of H9's own two split-off failure buckets
+(4,157 `vkCreateGraphicsPipelines` fails, the bigger of the two by a
+wide margin over H9b's 4,752 `vkQueueSubmit` fails -- similar order of
+magnitude but a different phase of the pipeline lifecycle entirely, so
+no reason to expect fixing one would touch the other).
+
+## Confirming the rejection was actually over-strict, not under-strict
+
+The roadmap row's own text already named the exact diagnostic
+(`"a graphics pipeline with color attachments needs a fragment stage"`)
+and the exact CTS shape (`VertexShaderTestInstance::createPipeline`'s
+`vertexOnlyPipe`), so the investigation here was less about finding the
+bug and more about confirming the fix direction: is `feme`'s check
+too strict (spec allows this, `feme` wrongly rejects it), or is CTS
+doing something `feme` is right to reject, and the actual bug is
+elsewhere?
+
+Reading the local Vulkan spec checkout's own `pipelines.adoc` settled
+this quickly: "Valid Combinations of Stages for Graphics Pipelines"
+states "If a fragment shader is omitted, fragment color outputs have
+undefined values" -- flatly unconditional on color-attachment count.
+There's no VUID anywhere requiring a fragment stage merely because
+color attachments exist; a color attachment without a fragment shader
+just keeps whatever value it already had (a perfectly implementable,
+if slightly unusual, "undefined value" semantics). So the fix direction
+was clear: remove the rejection.
+
+One thing worth noting: the roadmap row's own text described the CTS
+shape as having "a default (zero) `colorWriteMask`", implying the
+color attachment is inert because nothing is configured to write to
+it. Reading the actual CTS source (`vktQueryPoolStatisticsTests.cpp`)
+showed this was subtly wrong -- `PipelineCreateInfo::ColorBlendState::
+Attachment`'s default constructor actually sets `colorWriteMask` to all
+four channels (0xF), not zero. The real reason nothing is written isn't
+a zero write mask; it's that there's no fragment shader stage at all,
+so there's no fragment output to write in the first place. This distinction
+mattered for deciding where to fix things -- the fix needed to be "no
+fragment stage means no fragment output, so the color-write-mask
+question never even arises", not "a zero write mask makes the
+attachment inert regardless of stage presence" (the latter framing
+would have led to a fix that special-cased on `colorWriteMask == 0`,
+which would still incorrectly reject `vertexOnlyPipe`'s actual shape).
+
+## Two related, but genuinely distinct, over-strict checks
+
+Removing the primary rejection and its two direct fallout bugs (a
+stale `validateStageInterfaces` assertion encoding the same old
+invariant, and an `Executor.cpp` bug in a per-location fragment-output
+lookup loop that assumed a fragment stage always exists whenever color
+attachments are present -- only caught by writing a real end-to-end
+`DrawTest`, not by the creation-time unit tests alone) got the first
+CTS re-run to +769 passes with the named diagnostic message fully gone.
+But 3,388 `vkCreateGraphicsPipelines` failures still remained (down
+from 4,157, but not zero), so a second re-run with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` was needed to characterize what was
+left.
+
+This turned out to be a second, related-but-distinct over-strict check:
+`translateColorBlendState`'s `attachmentCount`-mismatch validation
+firing even when the render target has zero color attachments. Reading
+the spec's own VUID for this
+(`VUID-VkGraphicsPipelineCreateInfo-renderPass-07609`) showed it has an
+explicit "and the subpass uses color attachments" qualifier -- the
+whole check simply doesn't apply once there are no color attachments to
+match against, independent of whether a fragment stage exists at all.
+`feme`'s code already had this right for the *fragment-less* case
+(roadmap H2j had established that precedent), but the *fragment-stage-
+present-but-zero-color-attachments* case (exactly what
+`GeometryShaderTestInstance`/`TessellationShaderTestInstance`'s own
+`noColorAttachments` variants do -- they keep a real fragment shader,
+but still hardcode a mismatched `ColorBlendState(1, &attachmentState)`
+regardless) hit the same rejection H2j never touched. The fix was a
+one-line widening of the existing early-return guard
+(`Targets.Colors.empty()` added alongside the existing
+`!HasFragmentStage` condition) -- small once the VUID's precise wording
+was actually read, but easy to miss without reading it, since "the
+fragment stage exists and configured a color blend state that doesn't
+match the render target" sounds, at a skim, like exactly the kind of
+mismatch a robust implementation *should* reject.
+
+## Splitting the two fixes into separate commits after they were both already applied
+
+Both fixes ended up in the same working tree before I'd thought about
+commit boundaries (the second was discovered mid-CTS-analysis of the
+first), so splitting them into two clean, separate commits after the
+fact required identifying which of `git diff`'s own hunks belonged to
+which fix, reverse-applying just the second fix's hunks with `git apply
+-R` (verified via `--check` first that the hunk's own context matched
+unambiguously), committing the first fix alone, then re-applying the
+reversed hunks and committing the second fix separately. This is a
+useful technique worth remembering: `git apply -R --check` against a
+hand-extracted hunk (copied verbatim from `git diff`'s own output, with
+a synthesized three-line file header) is a reliable way to retroactively
+split an already-made, interleaved set of edits into separate commits
+without redoing the edits from scratch, as long as each fix's own hunks
+don't overlap line ranges with the other's (they didn't here -- one was
+in `validateStageInterfaces`/`translateFixedFunctionState`, the other in
+`translateColorBlendState`, function bodies far enough apart in the file
+that git's own context-matching had no ambiguity).
+
+## The remaining failure buckets after both fixes: one closed, one new, one pre-existing
+
+The second full CTS re-run (after both fixes) landed at 8,966 Passed
+(+2,089 from H9's own 6,877), 6,820 Failed (-2,089 from 8,909),
+2,593 NotSupported (unchanged) -- confirming via `grep -c` that both of
+this row's own diagnostic messages are now fully gone from the log.
+
+Splitting the remaining 6,820 failures by phase:
+
+- **1,276 `vkCreateGraphicsPipelines` failures**, all a single new
+  diagnostic never seen before this row's own re-run:
+  `"feme-cpu-wrap-patch-constant: masked output store references an
+  unknown patch-output signature element"`. A spot-check confirmed this
+  is a genuine, distinct tessellation-control-shader
+  patch-constant-function gap, only newly reachable because more
+  pipelines now clear the checks this row loosened (specifically, more
+  `_tessellation`-suffixed pipeline shapes that also happen to have a
+  mismatched or absent color-attachment/fragment-stage combination this
+  row's own two fixes unblocked). Filed as its own new row, H9c, per
+  the H9->H9a/H9b splitting precedent -- this is unambiguously out of
+  scope for a row about fragment-stage/color-attachment interactions.
+- **5,544 `vkQueueSubmit` failures**, all the exact same
+  vertex-to-geometry stage-IO diagnostic H9b already names. A spot-check
+  confirmed this is the same pre-existing gap, not a regression this
+  row introduced -- its count simply rose (from H9's own 4,752) because
+  more pipelines now successfully clear pipeline creation and reach
+  `vkQueueSubmit` for the first time, exposing H9b's own gap to more
+  cases than before. This is exactly the kind of "fixing one blocker
+  reveals more of a different, already-known blocker" dynamic this
+  project's own H-series/H8-series chains have run into repeatedly
+  (H8u->H8v->H8w->H8x is the most recent precedent) -- worth remembering
+  that a failure-count *increase* in an already-filed, unrelated bucket
+  is not itself a red flag once spot-checked and confirmed to be the
+  same root cause as before.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+was needed for this row -- it's a pure correctness fix (two over-strict
+validation checks loosened to match the spec precisely), not a feature
+bit or extension change. This is worth calling out explicitly each time
+a row doesn't touch either inventory, since the standing instructions
+ask for both to be kept up to date "with each change" -- confirming and
+noting the absence of a needed change is itself part of satisfying that
+instruction, not something to skip silently.
