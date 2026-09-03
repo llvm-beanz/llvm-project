@@ -760,6 +760,12 @@ What is still missing is breadth rather than a structural gap:
   ...) and `OpImageGather`/`OpImageDrefGather` each still need their own
   pattern supplying the additional operand(s)
   `llvm.spv.resource.samplebias`/`samplegrad`/`samplecmp*`/`gather*` expect.
+  Every one of MLIR's own `spirv` dialect ops for these variants already
+  exists (`ImageSampleImplicitLod`/`ImageDrefGather`/etc. are all already
+  defined in upstream `SPIRVImageOps.td`); this bullet is purely a missing
+  `feme`-side `SPIRVToLLVMPatterns.cpp` conversion pattern, not an upstream
+  MLIR gap at all. Tracked as part of roadmap L7's own untriaged list
+  (`spirv.ImageDrefGather` is named there explicitly).
 
 Roadmap step V3 closed what used to be a second bullet here,
 **`Uniform`-storage-class buffer blocks** (`cbuffer`/`ConstantBuffer<T>`):
@@ -815,8 +821,11 @@ in the same shape `buildOpSpirvDecorations`
 see "Signature reflection" in feme/docs/FeMeGraphicsDesign.md for what is
 still deferred (feeding these variables into the `feme::EntrySignature`
 model itself, and MLIR's own SPIR-V *deserializer* not yet parsing
-`Component`/`Centroid`/`Sample`/`PerPrimitiveEXT` from a real binary, which
-is an upstream MLIR limitation rather than one FeMe's own conversion adds).
+`Component`/`Centroid`/`Sample`/`PerPrimitiveEXT` from a real binary. This
+is an upstream MLIR limitation, but this project's own tree *is* the
+`mlir/` this limitation lives in -- see roadmap R40, which tracks fixing
+the deserializer directly rather than treating it as someone else's
+problem).
 A builtin interface block (`gl_PerVertex`) is a distinct case from either
 of the two above: it converts through this same non-builtin path (its
 storage class check finds nothing whole-variable to reject it on), but its
@@ -848,13 +857,16 @@ fails with `error: unhandled opcode 83` (`OpAccessChain`) -- despite the
 *original*, non-round-tripped binary executing through `feme-run` without
 issue. Closing this gap would mean either extending MLIR's SPIR-V
 deserializer to accept whatever shape LLVM's SPIR-V backend emits for an
-access chain (upstream MLIR work, outside this repository), or giving
-`feme::SPIRVExporter` its own MLIR-`spirv`-dialect-based serialization path
-instead of going through `TargetMachineBackend` (a much larger change than
-this roadmap step's own testing-focused scope) -- both out of scope here.
-Until one of those happens, only a SPIR-V binary produced by MLIR's own
-serializer (i.e. never one that has been through `feme --target=spirv`) is
-guaranteed importable.
+access chain, or giving `feme::SPIRVExporter` its own MLIR-`spirv`-dialect-based
+serialization path instead of going through `TargetMachineBackend` (a much
+larger change than roadmap step R14's own testing-focused scope). Both are
+real, tractable changes to files already inside this tree (`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`
+is the same file this project's own `processSpecConstantComposite` fix
+already landed a real upstream-shaped bugfix in, see roadmap's §1.9 Vulkan
+runtime gap table) -- see roadmap R38, which tracks picking one of the two
+approaches and closing R14's own remaining round-trip gap. Until R38
+lands, only a SPIR-V binary produced by MLIR's own serializer (i.e. never
+one that has been through `feme --target=spirv`) is guaranteed importable.
 
 #### Known gap: no way to deserialize `OpImageTexelPointer`, blocking storage-image atomics
 
@@ -911,10 +923,15 @@ pointer type. Given MLIR's deserializer's autogen infrastructure
 `OpImageWrite` with zero hand-written deserializer code -- their 1:1
 tablegen operand shape is enough -- a correctly-shaped
 `ImageTexelPointerOp` should need none either. This is real, scoped,
-genuinely tractable work, but it is squarely outside this repository's
-own `feme/` tree (upstream MLIR), the same "found, scoped, and
-documented rather than attempted here" shape as the round-trip gap above
-and roadmap R14's own precedent for it.
+genuinely tractable work in `mlir/lib/Dialect/SPIRV/IR/SPIRVImageOps.td`/
+`SPIRVBase.td` -- files in this same tree, not a separate project: F8c's
+own roadmap row already landed a real upstream-shaped fix in
+`mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp` (a `Sample` image-operand
+validation case MLIR's own generic verifier previously rejected
+unconditionally), so adding one more op definition here follows established,
+already-successful precedent rather than being out of bounds. See roadmap
+R39, which tracks adding the op and the remaining `feme`-side conversion
+work below in one coherent step.
 
 Once (and only once) that upstream gap closes, the remaining `feme`-side
 work to actually honor `STORAGE_IMAGE_ATOMIC_BIT` would still need: a
