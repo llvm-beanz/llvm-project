@@ -56819,3 +56819,179 @@ a row doesn't touch either inventory, since the standing instructions
 ask for both to be kept up to date "with each change" -- confirming and
 noting the absence of a needed change is itself part of satisfying that
 instruction, not something to skip silently.
+
+# H9c: masked patch-constant output store, and the general mixed-frequency split H4f deferred
+
+## Starting point: two prior repro attempts had already failed
+
+The session picked up with H9c's own described error --
+`"feme-cpu-wrap-patch-constant: masked output store references an
+unknown patch-output signature element"` -- already investigated twice
+by hand-written IR and once via a full Vulkan-pipeline end-to-end test,
+all three attempts using an `if (gl_InvocationID==0)`-guarded tess-factor
+store *with* a real `barrier()` call, and all three passed cleanly. This
+was the first sign something about the assumed repro shape was wrong:
+H9c's own roadmap text doesn't actually say the real CTS shaders use a
+barrier at all, that was an assumption carried in from H4f's own
+"legally barrierless only when `OutputVertices == 1`" framing, applied
+a little too eagerly to "so a real shader must therefore use a barrier
+whenever `OutputVertices > 1`" -- which doesn't follow at all; a shader
+can perfectly legally guard just the tess-factor write by invocation ID
+and skip the barrier entirely, since neither phase's data ever depends
+on the other's without one.
+
+## Going to the actual CTS source instead of guessing shapes
+
+Rather than trying a fourth hand-guessed shape, I went straight to
+`/home/dev/dev/VK-GL-CTS/external/vulkancts/modules/vulkan/query_pool/vktQueryPoolStatisticsTests.cpp`
+-- the exact file generating the 1,276 failing
+`clipping_invocations.*_tessellation*` cases H9c's own roadmap text
+names -- and read its tessellation-control shader source directly. This
+confirmed the real shape: **no barrier at all**, an
+`if (gl_InvocationID == 0)`-guarded `gl_TessLevelOuter[...]` write, and
+unconditional, *dynamically-indexed* per-vertex writes
+(`out_color[gl_InvocationID] = ...`, `gl_out[gl_InvocationID].gl_Position
+= ...`). This is the single most useful move of the whole session --
+every other attempt to guess the shape by reasoning from the roadmap
+text alone missed the dynamic-indexing detail, which turned out to be
+exactly the thing the actual bug hinged on. The standing instruction to
+do a "real IR reduction" of one of these exact cases, rather than
+theorizing, paid for itself directly here: CTS's own source is not just
+a test oracle, it's also documentation of exactly what shapes a real
+implementation has to handle, and reading it beats guessing every time
+this project's roadmap has needed a repro.
+
+## Two distinct bugs stacked on top of each other
+
+Writing a `GraphicsPipelineTest` case matching this exact shape (with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` to surface the swallowed diagnostic
+-- `feme::vulkan::logCreationFailure` silently drops error text unless
+that env var is set, discovered by grepping `Diagnostics.cpp`, and worth
+remembering for any future `GraphicsPipelineTest` debugging session)
+reproduced H9c's own exact error message end to end. Tracing back from
+there found the real root cause: `isPatchConstantOnlyEntry`
+(`CanonicalizeStage.cpp`) resolved each store's target via
+`getStageIOBaseAndOffset` alone, which only understands a
+*constant*-offset access -- so the dynamically-indexed per-vertex store
+was completely invisible to its scan. It saw only the guarded
+`TessLevelOuter` write, concluded (wrongly) that the whole entry was
+patch-constant-only, and cloned the *entire* function body -- unpruned
+per-vertex store included -- into a new `.patchconstant` sibling.
+`classifySPIRVElement`'s `HullPatchConstant`-phase branch then
+misclassified that leftover, non-`Patch`-decorated store as a captured
+cross-barrier value's read-back (`Direction::Input`) rather than a real
+store, so it never became a `PatchOutput` signature element -- and
+`PatchConstantWrapper.cpp`'s masked-store lowering, looking for exactly
+that element, found nothing and emitted H9c's own error text. The fix
+itself was small and mechanical once found: use the same
+`getStageIOGlobal` helper every *other* stage-IO-discovery scan in this
+file already uses (it already handles constant-offset,
+dynamic-vertex-indexed, and dynamic-row-indexed shapes uniformly)
+instead of `getStageIOBaseAndOffset` alone. This is a good example of a
+bug that's trivial to fix once correctly diagnosed, but essentially
+unfindable by code review alone without a concrete repro in hand -- the
+three helper functions' own names don't make the constant-offset-only
+limitation of one of them obvious at the call site.
+
+Fixing this first bug, though, didn't make the original
+`GraphicsPipelineTest` case pass -- it just traded H9c's own described
+error for a *different* one ("no hull entry point named
+'main.patchconstant'"). This was expected once I checked: correctly
+recognizing the mixed shape as genuinely mixed (not patch-constant-only)
+routes it into H4f's own explicitly-deferred "leave unsplit" behavior,
+and `compileAndValidateStages` unconditionally requires a
+`.patchconstant` sibling to exist regardless. H4f's own roadmap text
+had already reasoned about exactly this case and rejected a naive fix
+("cloning the whole function unconditionally... not sound... would
+misclassify an ordinary per-vertex output store"), so this wasn't a
+surprise, but it did mean H9c's fix couldn't stop at the classification
+bug alone if the goal was to actually unblock real CTS-shaped shaders
+end to end (as opposed to merely fixing the literal error string H9c
+names) -- since essentially every real GLSL tessellation-control shader
+takes this exact mixed/barrierless shape.
+
+## Reconsidering H4f's "not sound" analysis: pruning instead of cloning-unpruned
+
+H4f's own analysis only considered one general-split design -- clone the
+whole function unconditionally as `.patchconstant`, leave the original
+untouched -- and correctly rejected it, since the unpruned clone (and,
+symmetrically, the unpruned original) would each still contain the
+*other* phase's stores, which `classifySPIRVElement` cannot tell apart
+from a captured-value read-back once cloned into the wrong phase context.
+But there's a second design H4f didn't consider: clone the whole
+function, then *prune* each clone down to only the stores that belong to
+its own phase, using the same per-store frequency classification the
+existing `isPatchConstantOnlyEntry` scan already computed. Once pruned,
+neither clone's own signature-discovery pass (`canonicalizeSPIRVStage`)
+ever sees the wrong-frequency store at all -- it's not merely
+misclassified, it's been deleted before `classifySPIRVElement` runs, so
+the misclassification hazard cannot occur structurally, not just by
+carefully getting the classification right. Soundness rests on the same
+fact that makes the barrierless case legal to split at all in the first
+place: no barrier means neither invocation's write ever depends on the
+other's data in either direction, so both phases can redundantly
+recompute from scratch whatever they individually need, and pruning one
+phase's stores away from the other's clone loses nothing the other phase
+was ever allowed to depend on.
+
+Implementing this meant refactoring `isPatchConstantOnlyEntry`'s
+per-store scan into a shared, reusable piece
+(`classifyTessControlOutputStoreFrequency` per-store,
+`classifyTessControlOutputs`/`TessControlOutputFrequencies` per-function)
+so both "should we split at all" and "is it patch-constant-only or
+genuinely mixed" could share one scan, adding
+`pruneStageIOStoresByFrequency(Function&, bool KeepPatch)` to do the
+actual erasure, and rewriting `splitBarrierlessTessellationControlEntry`
+to branch on the mixed case and prune both clones instead of leaving the
+entry unsplit. `isPatchConstantOnlyEntry` itself became dead code once
+its only caller was rewritten in terms of the new struct directly, so it
+was deleted rather than left around unused (confirmed via a clean
+`-Wunused-function` build warning that flagged this immediately).
+
+## Verifying the fix actually closes the real-shape gap, not just the literal test cases
+
+The real proof this fix works isn't the hand-written IR unit test alone
+(useful for pinning down the exact classification/pruning behavior, but
+narrow) -- it's the two `GraphicsPipelineTest` cases built directly from
+CTS's own shader shape, which both failed before this session's fixes
+(one with H9c's own exact error text, confirming the reproduction was
+faithful) and both pass after. Restoring these tests (they'd been
+temporarily backed out of the working tree while isolating the first,
+narrower classification-bug fix into its own separate commit) and
+re-running `FeMeVulkanTests` confirmed both now succeed end to end, and
+a full `ninja check-feme` run confirms nothing else regressed (2426
+passed, the same 59 pre-existing `Unsupported` as before, 0 `Failed`).
+
+## Splitting into two commits, and what stayed one row in the roadmap
+
+Even though the general split fix (commit 2) is the one that actually
+matters for real CTS shaders, the underlying classification bug (commit
+1) is a complete, independently-correct, independently-tested fix in its
+own right -- it changes `isPatchConstantOnlyEntry`'s answer from "wrong"
+to "right" regardless of what happens afterward, and has its own
+regression test proving exactly that. Splitting these into two commits,
+each independently buildable and testable, felt like the right level of
+granularity per the standing "small, separately committed changes"
+instruction, even though both live under the same single H9c roadmap
+row -- the roadmap tracks *user-visible* milestones/bugs, not commit
+boundaries, and H9c as originally filed is genuinely one bug from the
+user's perspective (one error message, one root symptom), even though
+fully resolving it end-to-end needed two separate code changes.
+
+## What was and wasn't feasible to verify against the real CTS
+
+No prebuilt `deqp-vk` binary exists under
+`/home/dev/dev/VK-GL-CTS/`, and this session didn't attempt to build the
+full CTS framework from source (a large, multi-dependency native build
+outside this session's practical scope, and unlikely to be worth the
+time against a single already-well-isolated bug). This is the same
+"real CTS run assessed as likely infeasible" conclusion prior context
+for this session had already reached, and I didn't find new information
+this session that changes that assessment. What *is* feasible, and what
+this session leaned on instead, is using CTS's own shader-generating
+source as ground truth for the exact shape to reproduce -- which turned
+out to be sufficient to find, fix, and confirm both bugs with real
+confidence, even without a literal `deqp-vk` binary run producing a
+pass/fail tally. `VulkanCTSReport.md`'s own new H9c section says this
+plainly rather than fabricating a CTS re-run tally that wasn't actually
+produced.
