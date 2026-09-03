@@ -11,6 +11,7 @@
 #include "EntryPoints.h"
 #include "Icd.h"
 #include "Objects.h"
+#include "Surface.h"
 
 #include "gtest/gtest.h"
 
@@ -143,6 +144,40 @@ TEST_F(SurfaceTest, PresentModesIncludeFifo) {
             VK_SUCCESS);
   EXPECT_NE(std::find(Modes.begin(), Modes.end(), VK_PRESENT_MODE_FIFO_KHR),
             Modes.end());
+}
+
+// Roadmap H10a's own `Surface` object-model coverage that doesn't need a
+// real xcb connection (XcbSurface.cpp's real `presentToSurface`/
+// `currentSurfaceExtent` bodies, which do, are only exercised end-to-end
+// by feme-vulkan-xcb-smoke.cpp / xcb-surface-smoke.test since they need a
+// live X server).
+TEST(SurfaceObjectModel, DefaultConstructedSurfaceIsHeadless) {
+  Surface Surf;
+  EXPECT_EQ(Surf.kind(), SurfaceKind::Headless);
+  EXPECT_EQ(Surf.xcbConnection(), nullptr);
+  EXPECT_EQ(Surf.xcbWindow(), 0u);
+}
+
+TEST(SurfaceObjectModel, XcbConstructedSurfaceStoresOpaqueState) {
+  // A fabricated (never dereferenced) connection pointer/window ID:
+  // `kind()`/the accessors are plain getters, so this doesn't need a real
+  // `xcb_connection_t *`.
+  int FakeConnection = 0;
+  Surface Surf(&FakeConnection, 42);
+  EXPECT_EQ(Surf.kind(), SurfaceKind::Xcb);
+  EXPECT_EQ(Surf.xcbConnection(), &FakeConnection);
+  EXPECT_EQ(Surf.xcbWindow(), 42u);
+}
+
+TEST(SurfaceObjectModel, PresentToHeadlessSurfaceIsNoop) {
+  Surface Surf;
+  uint8_t Pixels[4] = {0, 0, 0, 0};
+  EXPECT_TRUE(presentToSurface(&Surf, Pixels, 1, 1, /*SwapRedBlue=*/true));
+}
+
+TEST(SurfaceObjectModel, CurrentExtentOfHeadlessSurfaceIsNullopt) {
+  Surface Surf;
+  EXPECT_EQ(currentSurfaceExtent(&Surf), std::nullopt);
 }
 
 } // namespace
