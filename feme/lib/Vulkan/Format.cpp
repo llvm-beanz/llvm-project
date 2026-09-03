@@ -310,6 +310,8 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::EAC_R11G11_UNORM;
   case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
     return ResourceFormat::EAC_R11G11_SNORM;
+  case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
+    return ResourceFormat::E5B9G9R9_UFLOAT;
   default:
     return std::nullopt;
   }
@@ -335,6 +337,9 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   // single 4-byte word as their unsigned siblings above.
   case ResourceFormat::R10G10B10A2_SNORM:
   case ResourceFormat::R10G10B10A2_SINT:
+  // (Roadmap H8q) `E5B9G9R9_UFLOAT`: also packed into a single 4-byte
+  // word, like `R11G11B10_FLOAT` above.
+  case ResourceFormat::E5B9G9R9_UFLOAT:
   case ResourceFormat::D32_FLOAT:
   case ResourceFormat::D24_UNORM_S8_UINT:
     return 4;
@@ -942,6 +947,13 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::R16_FLOAT:
   case ResourceFormat::R16_UNORM:
   case ResourceFormat::R16_SNORM:
+    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+             VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    break;
+  // (Roadmap H8q) `E5B9G9R9_UFLOAT`: decoded by
+  // `femeRTUnpackImageTexel`'s own `E5B9G9R9_UFLOAT` case
+  // (`femeRTUnpackRGB9E5`).
+  case ResourceFormat::E5B9G9R9_UFLOAT:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     break;
