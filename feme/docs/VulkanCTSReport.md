@@ -21626,3 +21626,60 @@ this row's own stated purpose once its real blocker was found).
 -- no `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by
 this row either way. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update.
+
+## Roadmap R39/H8u (continued): closing the `OpImageTexelPointer` MLIR gap
+
+This session closed the upstream MLIR gap the previous entry above found
+and scoped. Added `spirv.ImageTexelPointer` (opcode 60) to MLIR's own
+`spirv` dialect (`SPIRVImageOps.td`/`SPIRVBase.td`/`ImageOps.cpp::verify()`),
+confirmed via a new serialize/deserialize round-trip test
+(`mlir/test/Target/SPIRV/image-ops.mlir`) that the deserializer's autogen
+infrastructure needs no hand-written code for the new op, exactly as
+`OpImageRead`/`OpImageWrite` needed none. `check-mlir-dialect-spirv-ir`/
+`check-mlir-target-spirv`/`check-mlir-conversion-spirvtollvm` passed in
+full (117/117, 0 regressions).
+
+Then added the `feme`-side conversion work: a new `ImageTexelPointerPattern`
+(`SPIRVToLLVMPatterns.cpp`) lowering the new op into the existing
+`createResourcePointer` (`llvm.spv.resource.getpointer`) intrinsic call,
+reusing H19g/H19m's own `Sample`-widening machinery for a multisampled
+storage image. This surfaced a real, previously-undiscovered gap: MLIR's
+own upstream `spirv` -> `llvm` conversion has **no** lowering pattern at
+all for any `spirv.Atomic*` op (confirmed by a real legalization failure
+converting this session's own test, then by grep over
+`mlir/lib/Conversion/SPIRVToLLVM/`) -- the prior entry's framing ("MLIR's
+own `spirv` dialect already models every `Atomic*` op generically over
+any pointer") was true of the op *definitions*, not their *lowering*, and
+was simply wrong about the latter. `feme` now supplies its own
+`AtomicRMWPattern`/`AtomicCompareExchangePattern`, covering every SPIR-V
+RMW/compare-exchange atomic kind (`IAdd`/`ISub`/`And`/`Or`/`Xor`/`SMax`/
+`SMin`/`UMax`/`UMin`/`Exchange`/`CompareExchange`), each converting into an
+ordinary `llvm.atomicrmw`/`llvm.cmpxchg`.
+
+A real SPIR-V module using `OpImageTexelPointer` followed by
+`OpAtomicIAdd`/`OpAtomicCompareExchange` (both plain and multisampled 2D
+storage-image shapes) now imports, converts, and legalizes cleanly end to
+end through this converter -- confirmed by a new
+`spirv-to-llvm-image-atomic.mlir` FileCheck test.
+
+`ninja check-feme` (assertions-enabled, ccache build) passed in full:
+**2431/2458 (27 unsupported), 0 regressions.** A real
+`dEQP-VK.api.info.format_properties.*` re-run against feme's own ICD
+(`VK_ICD_FILENAMES` correctly set, confirmed via `vulkaninfo --summary`
+reporting `FeMe CPU Vulkan Device`) confirms no change from the prior
+entry: still **222/225 Pass**, the same 3 remaining failures
+(`a2b10g10r10_unorm_pack32`'s `VERTEX_BUFFER_BIT` gap, H8h;
+`r32_{sint,uint}`'s `STORAGE_IMAGE_ATOMIC_BIT` gap, still open).
+
+What remains, split off as its own row (H8v): `SPIRVResourceLowering.cpp`'s
+CPU-side lowering still has no case for an `AtomicRMWInst`/
+`AtomicCmpXchgInst` user of a storage-image `getpointer` call (only
+`LoadInst`/`StoreInst`, which carry a whole `<4 x i32>`/`<4 x float>`
+texel rather than the scalar 32-bit component an image atomic operates
+on), and no `feme.cpu.image.atomic.*` runtime entry points exist yet.
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT` stays honestly unset for
+`R32_{SINT,UINT}` until that CPU-runtime work lands and a real
+`dEQP-VK.image.atomic_operations.*` case is confirmed passing end to end
+-- no `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+row either way, so `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update.

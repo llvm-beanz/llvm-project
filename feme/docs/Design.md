@@ -868,18 +868,17 @@ approaches and closing R14's own remaining round-trip gap. Until R38
 lands, only a SPIR-V binary produced by MLIR's own serializer (i.e. never
 one that has been through `feme --target=spirv`) is guaranteed importable.
 
-#### Known gap: no way to deserialize `OpImageTexelPointer`, blocking storage-image atomics
+#### Known gap (partially closed): storage-image atomics still need CPU-runtime lowering
 
 Found by roadmap step H8u while scoping `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT`
 for `R32_{SINT,UINT}` (the two formats the real Vulkan spec mandates it
 for, confirmed via CTS's own `vktApiFeatureInfo.cpp`). An ordinary
 buffer/shared-memory atomic (`OpAtomicIAdd`, `OpAtomicExchange`, etc.,
 directly against an `OpAccessChain`-derived pointer) already deserializes
-and converts today with no changes needed: MLIR's own `spirv` dialect
-already models every `Atomic*` instruction generically over any
-`SPIRV_AnyPtr` (`SPIRVAtomicOps.td`'s `SPIRV_AtomicUpdateOp`/
-`SPIRV_AtomicUpdateWithValueOp` base classes), and its opcode enum already
-names `OpAtomicIAdd` (`SPIRV_OC_OpAtomicIAdd`, value 234, `SPIRVBase.td`).
+today with no changes needed, since MLIR's own `spirv` dialect already
+models every `Atomic*` instruction generically over any `SPIRV_AnyPtr`
+(`SPIRVAtomicOps.td`'s `SPIRV_AtomicUpdateOp`/`SPIRV_AtomicUpdateWithValueOp`
+base classes).
 
 A *storage-image* atomic is different: the SPIR-V spec requires the
 address operated on to first be materialized via a dedicated
@@ -887,71 +886,59 @@ address operated on to first be materialized via a dedicated
 image (not a loaded image value, unlike `OpImageRead`/`OpImageWrite`'s own
 `$image` operand) plus a coordinate and sample index, and produces an
 `Image`-storage-class pointer suitable for a following `Atomic*`
-instruction's own `$pointer` operand. This instruction has **zero**
-representation anywhere in MLIR's own `spirv` dialect today: no op
-definition in `SPIRVAtomicOps.td`/`SPIRVImageOps.td` (unlike
-`OpImageRead`/`OpImageWrite`, which both have one, `SPIRV_ImageReadOp`/
-`SPIRV_ImageWriteOp`), and, more fundamentally, no named case in
-`SPIRVBase.td`'s own generated `Opcode` enum at all (confirmed by grepping
-`SPIRVBase.td` for `ImageTexelPointer` -- no hit, versus `OpImageRead`'s
-own `SPIRV_OC_OpImageRead` entry at value 98). A real SPIR-V binary using
-`OpImageTexelPointer` (which is exactly what `dEQP-VK`'s own image-atomics
-conformance tests compile down to) cannot be deserialized by
-`feme::SPIRVImporter` at all, the same "unhandled opcode" failure shape as
-the round-trip gap immediately above.
+instruction's own `$pointer` operand. This instruction had **zero**
+representation anywhere in MLIR's own `spirv` dialect (roadmap R39): no op
+definition and no named opcode-enum case in `SPIRVBase.td` at all -- **now
+closed**, adding `spirv.ImageTexelPointer` (`SPIRVImageOps.td`) and its
+`SPIRV_OC_OpImageTexelPointer` opcode entry (value 60), mirroring
+`ImageReadOp`'s shape but with `$image` typed as a pointer-to-image per
+this one instruction's own operand layout. As expected, MLIR's
+deserializer autogen infrastructure needed no hand-written code at all for
+the new op -- confirmed by a real serialize/deserialize round-trip test
+(`mlir/test/Target/SPIRV/image-ops.mlir`) exercising `ImageTexelPointer`
+followed by `AtomicIAdd`.
 
-Interestingly, LLVM's own in-tree SPIR-V *target* backend already knows
-how to *emit* this instruction (`llvm/lib/Target/SPIRV/SPIRVInstrInfo.td:259`,
-`OpImageTexelPointer`, opcode 60) -- used when `feme::SPIRVExporter`
-retargets FeMe's own compiled IR *to* SPIR-V (e.g. for an HLSL `RWTexture`
-atomic). That is the opposite direction from what `feme::SPIRVImporter`
-needs (deserializing a real driver-side `vkCreateShaderModule` binary,
-which this project does not control the producer of), so it does not
-help close this gap.
+The `feme`-side conversion work R39 also scoped is likewise now done: a
+`SPIRVToLLVMPatterns.cpp` `ImageTexelPointerPattern` lowers the new op into
+the same `createResourcePointer` (`llvm.spv.resource.getpointer`)
+intrinsic call `ImageReadPattern`/`ImageWritePattern` already emit,
+reusing the existing `Sample`-operand coordinate widening
+(`isMultisampled2DImage`/`appendVectorLane`, roadmap H19g/H19m) for a
+multisampled storage image. Along the way, this session discovered R39's
+own framing of the *next* step was wrong: MLIR's upstream `spirv` -> `llvm`
+conversion has **no pattern at all** for any `Atomic*` op (confirmed by
+grep over `mlir/lib/Conversion/SPIRVToLLVM/`, and by a real legalization
+failure hitting this while testing) -- "the op is generic over any
+pointer" describes the dialect's op *definitions*, not its *lowering*.
+`feme` now supplies its own `AtomicRMWPattern`/`AtomicCompareExchangePattern`
+covering every SPIR-V RMW/compare-exchange atomic kind, converting each
+into an ordinary `llvm.atomicrmw`/`llvm.cmpxchg` against whatever pointer
+it is given (a storage-image texel pointer or an ordinary
+`OpAccessChain`-derived one, with no distinction needed at this level).
 
-Closing this would need, at minimum: a new `spirv.ImageTexelPointer` op
-added to MLIR's own `SPIRVImageOps.td` (mirroring `ImageReadOp`'s/
-`ImageWriteOp`'s existing `$image`/`$coordinate` operand shape, but with
-`$image` typed as a pointer-to-image per the SPIR-V spec's own operand
-layout for this one instruction, and a `$sample` operand, result type
-`SPIRV_AnyPtr`) plus its own opcode-enum entry in `SPIRVBase.td`. The
-existing `SPIRV_AtomicUpdateOp`/`SPIRV_AtomicUpdateWithValueOp` base
-classes need no changes at all, since they are already generic over any
-pointer type. Given MLIR's deserializer's autogen infrastructure
-(`mlir/lib/Target/SPIRV/Deserialization/DeserializeOps.cpp`'s
-`dispatchToAutogenDeserialization`) already handles `OpImageRead`/
-`OpImageWrite` with zero hand-written deserializer code -- their 1:1
-tablegen operand shape is enough -- a correctly-shaped
-`ImageTexelPointerOp` should need none either. This is real, scoped,
-genuinely tractable work in `mlir/lib/Dialect/SPIRV/IR/SPIRVImageOps.td`/
-`SPIRVBase.td` -- files in this same tree, not a separate project: F8c's
-own roadmap row already landed a real upstream-shaped fix in
-`mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp` (a `Sample` image-operand
-validation case MLIR's own generic verifier previously rejected
-unconditionally), so adding one more op definition here follows established,
-already-successful precedent rather than being out of bounds. See roadmap
-R39, which tracks adding the op and the remaining `feme`-side conversion
-work below in one coherent step.
-
-Once (and only once) that upstream gap closes, the remaining `feme`-side
-work to actually honor `STORAGE_IMAGE_ATOMIC_BIT` would still need: a
-`SPIRVToLLVMPatterns.cpp` conversion pattern lowering the new
-`spirv.ImageTexelPointer` op into the same `createResourcePointer`
-(`llvm.spv.resource.getpointer`) intrinsic call `ImageReadPattern`/
-`ImageWritePattern` already emit, so a following `spirv.AtomicIAdd`/
-`AtomicExchange`/etc. converts to an ordinary LLVM `atomicrmw`/`cmpxchg`
-against that same pointer with no new intrinsic needed; and
-`SPIRVResourceLowering.cpp`'s `lowerImageAccesses` learning to recognize
-an `AtomicRMWInst`/`AtomicCmpXchgInst` user of a storage-image `getpointer`
-call (alongside its existing `LoadInst`/`StoreInst` handling) and rewrite
-each into a new `feme.cpu.image.atomic.*` runtime entry point mirroring
-`feme.cpu.image.store.2d.v4i32`'s own precedent (`FeMeRuntimeCPU.c`) --
-only then would flipping `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT` for
-`R32_{SINT,UINT}` (`Format.cpp`) be honest, once a real
-`dEQP-VK.image.atomic_operations.*` case is confirmed passing end to end.
-Until the upstream gap above closes, none of this feme-side work is even
-testable, since there is no way to get such a SPIR-V module through
-import at all today.
+What is **still** missing, and is what actually gates
+`STORAGE_IMAGE_ATOMIC_BIT`: `SPIRVResourceLowering.cpp`'s
+`lowerImageAccesses` today only recognizes a `LoadInst`/`StoreInst` user of
+a storage-image `getpointer` call (rewriting each into a
+`feme.cpu.image.{load,store}.*` runtime call carrying a whole `<4 x i32>`/
+`<4 x float>` texel) -- it has no case yet for an `AtomicRMWInst`/
+`AtomicCmpXchgInst` user, which operates on a single *scalar* 32-bit
+component rather than a 4-wide texel vector (an image atomic's own SPIR-V
+result type is always a scalar, per `OpImageTexelPointer`'s spec-mandated
+`Image`-storage-class pointer type). Closing this needs, at minimum: a new
+`hasOnlySupportedStorageImageUses` branch accepting a scalar-`i32`
+`AtomicRMWInst`/`AtomicCmpXchgInst` pointer use (alongside its existing
+vector `Load`/`Store` branches) plus new `feme.cpu.image.atomic.*` runtime
+entry points (`FeMeRuntimeCPU.c`) -- one per RMW kind, times each storage-
+image shape (`Plain1D`/`Array1D`/`Plain2D`/`Array2D`/`Plain3D`/
+`Plain2DMS`/`Array2DMS`) `lowerImageAccesses` already threads through for
+`Load`/`Store` -- mirroring `feme.cpu.image.store.2d.v4i32`'s own
+precedent, a real but substantially larger combinatorial expansion than
+any single prior `feme.cpu.image.*` addition (roadmap H8v). Only once
+that CPU-side lowering exists, and a real `dEQP-VK.image.atomic_operations.*`
+case is confirmed passing end to end, would flipping
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT` for `R32_{SINT,UINT}`
+(`Format.cpp`) be honest.
 
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 
