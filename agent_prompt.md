@@ -37,38 +37,28 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8u or other prerequisites blocking the H-series milestones?
+Can you work on H8x or other prerequisites blocking the H-series milestones?
 
-> **`STORAGE_IMAGE_ATOMIC_BIT` for `r32_{sint,uint}`, split off from H8s.** A
-> real CTS re-run found `R32_SINT`/`R32_UINT` still missing this bit, confirmed
-> genuinely mandatory via CTS's own `s_required*` tables
-> (`vktApiFeatureInfo.cpp`). The real blocker this row found was that a
-> storage-image atomic needs SPIR-V's `OpImageTexelPointer` (opcode 60) to first
-> materialize an addressable pointer from the image handle before a following
-> `OpAtomicIAdd`/`OpAtomicExchange`/etc. can operate on it, and that instruction
-> had zero representation anywhere in MLIR's own `spirv` dialect (no op
-> definition, no opcode-enum case) -- see roadmap R39, now done:
-> `spirv.ImageTexelPointer` is added to MLIR (`SPIRVImageOps.td`/`SPIRVBase.td`,
-> its own commit) and the `feme`-side `SPIRVToLLVMPatterns.cpp` conversion work
-> is also done (`ImageTexelPointerPattern` plus, discovered along the way, a
-> full set of `AtomicRMWPattern`/`AtomicCompareExchangePattern` instantiations
-> -- MLIR's upstream `spirv` -> `llvm` conversion turned out to have *no*
-> lowering pattern for any `Atomic*` op at all, contrary to this row's own prior
-> framing; `feme` now supplies its own). A real SPIR-V module using
-> `OpImageTexelPointer` + `OpAtomicIAdd` against a storage image now imports,
-> converts, and produces an ordinary `llvm.atomicrmw`/`llvm.cmpxchg` --
-> confirmed by a new `spirv-to-llvm-image-atomic.mlir` FileCheck test (`ninja
-> check-feme` passes in full, 2431/2458, 0 regressions). What is **not** yet
-> done, and is what actually gates the format-feature bit:
-> `SPIRVResourceLowering.cpp`'s CPU-side lowering has no case for an
-> `AtomicRMWInst`/`AtomicCmpXchgInst` user of a storage-image `getpointer` call
-> (only `LoadInst`/`StoreInst`, which carry a whole `<4 x i32>` texel rather
-> than the scalar 32-bit component an image atomic operates on), and no
-> `feme.cpu.image.atomic.*` runtime entry points exist yet -- split off as its
-> own row, H8v, since it is a real, substantially larger combinatorial expansion
-> (one runtime entry point per atomic kind, times every storage-image shape)
-> than the IR-level work this row itself needed.
-> `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT` stays honestly unset for
-> `R32_{SINT,UINT}` until H8v lands and a real
-> `dEQP-VK.image.atomic_operations.*` case passes end to end
-
+> **Ordinary SSBO (`HandleKind::Storage`)/shared-memory atomics also fail
+> `SPIRVResourceLowering.cpp`'s `hasOnlySupportedPointerUses`, discovered while
+> scoping H8w.** H8w deliberately gated its new atomic branch on `Writable &&
+> IsTexel`, true only for `HandleKind::TexelStorage` -- `IsTexel` is false for a
+> plain `Storage`/`StorageStruct` handle (an `SSBO`/`buffer` block, not a texel
+> buffer), so an ordinary storage-buffer atomic (`atomicAdd` on an SSBO member
+> in GLSL, common and unremarkable shader code, not a texel-buffer- or
+> image-specific feature) still hits the same generic "unsupported pointer use"
+> rejection today. No CTS case has surfaced this gap yet only because no prior
+> H-series row happened to exercise an SSBO atomic against `feme`'s own ICD, not
+> because the gap doesn't exist -- a real
+> `dEQP-VK.ssbo.atomic_operations.*`-shaped (or similarly named) case should be
+> expected to fail identically to how H8u's real case failed before H8v/H8w. The
+> fix shape is expected to be small and almost entirely reuse H8w's own new
+> `createAtomic*Typed`/`feme.cpu.resource.atomic.*.typed.i32` machinery
+> (`ResourceCalls.h/.cpp`, `FeMeRuntimeCPU.c`) -- likely only
+> `hasOnlySupportedPointerUses`'s own gating condition needs to widen (e.g.
+> `Writable \&\& (IsTexel \|\| Kind == HandleKind::Storage \|\| Kind ==
+> HandleKind::StorageStruct)`) and `lowerAccesses`'s non-`IsTexel` branch needs
+> the same atomic-rewrite block `IsTexel`'s branch just gained -- but this needs
+> its own real IR reduction of an actual SSBO-atomic CTS case (mirroring the
+> H6g-b/H6j/H6k/H6l/H8u-w chain's own technique throughout) to confirm before
+> landing, not assumed from source inspection alone
