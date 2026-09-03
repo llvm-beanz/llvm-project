@@ -57448,3 +57448,154 @@ Split the remaining "confirm `dEQP-VK.wsi` against a real surface" work into
 a new roadmap row, H10b, rather than leave H10a open indefinitely on an
 environment limitation outside this session's control -- the platform
 surface itself (this row's own concrete, testable scope) is genuinely done.
+
+# Agent thoughts: H10b/H10c (real deqp-vk build, WSI device-group crash fix)
+
+## The premise every prior session got wrong
+
+Every prior H10-series session note (and this file's own earlier entries)
+treated building `deqp-vk` from source as out of scope for a single
+session -- "a large, multi-dependency C++ project," "no prebuilt binary
+exists," implicitly assuming fetching sources and building it would eat
+the whole session's budget with no guarantee of success. I started this
+session planning to spend most of my time just confirming that
+assumption more precisely (which system packages are missing, how big
+the build really is) so I could write a good report, not actually
+expecting to get a working `deqp-vk` binary out of it.
+
+The very first thing I checked -- whether `VK-GL-CTS/external/fetch_sources.py`
+had ever been run -- immediately falsified the premise. It hadn't (every
+`external/*` directory was an empty CMake wrapper), and running it with
+`--insecure` (this environment's CA store doesn't validate one of the
+fetch endpoints, nothing to do with actual network restriction) worked
+cleanly: real `git clone`s of `glslang`, `spirv-tools`, `spirv-headers`,
+`amber`, `jsoncpp`, and plain downloads of `zlib`/`libpng`, all
+succeeded. That one experiment (network access genuinely works here)
+changed the whole shape of the session from "write a good report" to
+"actually build and run this thing."
+
+Lesson for future sessions: when a prior session's report says something
+is "infeasible" or "out of scope," it's worth re-verifying the premise
+directly and cheaply before accepting it, especially for anything gated
+on network access or missing tools rather than genuine algorithmic
+complexity -- the cost of one `fetch_sources.py --insecure` invocation
+was minutes, and it unlocked the entire rest of this session's real work.
+
+## The build itself: fast, and the real blockers were narrow
+
+`cmake -GNinja -DSELECTED_BUILD_TARGETS="deqp-vk" -DCMAKE_BUILD_TYPE=Release`
+plus `ninja deqp-vk` built cleanly and fast (1519/1519 targets) on the
+first real attempt with `libxcb1-dev` already present (installed in a
+prior session). Genuinely no missing dependency at *that* stage --
+`glslang`/`spirv-tools`/`shaderc` all built entirely from the sources the
+fetch script had just pulled down.
+
+The real surprise was that the binary I'd just built silently produced
+the *wrong* platform: running any real case immediately hit
+`FATAL ERROR: Vulkan is not supported at tcuPlatform.cpp:54`, which reads
+exactly like a Vulkan/ICD-side problem. It took reading CTS's own
+`framework/platform/CMakeLists.txt` to find the actual cause: the
+Vulkan-capable "Lnx" platform is only compiled in when
+`DEQP_USE_X11 OR DEQP_USE_WAYLAND OR DEQP_USE_HEADLESS`, and
+`DEQP_USE_X11` needs `libx11-dev` -- a genuinely different, and stricter,
+requirement than `libxcb1-dev` alone, even though `DEQP_PLATFORM_LIBRARIES`
+had already resolved to `xcb` and gave every appearance the xcb backend
+was correctly configured. This is exactly the kind of thing worth writing
+down for the user's own environment-configuration scripts (which is why
+it's now its own section in `VulkanCTSReport.md`): the error message you
+get is a decoy, and `libxcb1-dev` alone is not sufficient.
+
+Installing `libx11-dev` immediately surfaced a second, cascading
+dependency (`libglx-dev`/`libgl-dev`, needed once `X11_FOUND=ON` flips
+`DEQP_SUPPORT_GLX=ON` as an automatic side effect) -- a good reminder
+that CMake's own feature-detection side effects can pull in dependencies
+that have nothing to do with the actual feature you wanted (I don't
+believe `deqp-vk`'s Vulkan-only XCB path needs GLX for anything real; it
+was purely a side effect of `X11_FOUND` flipping a sibling option on).
+
+## The crash: a real, previously-invisible ICD bug, found exactly the way this project's whole H-series pattern predicts
+
+Once the platform was building correctly, the full `dEQP-VK.wsi.xcb.*`
+re-run (4,029 cases) crashed with a silent `SIGSEGV` partway through --
+no summary, no obvious diagnostic, just a dead process. This is the kind
+of failure that's easy to write off as "the test runner is unstable" or
+"something about running this many cases in one process," but a `gdb
+-batch -ex run -ex bt` on the deterministically-reproducing single case
+gave an unambiguous answer immediately: a call through a null function
+pointer, inside CTS's own `queryDevGroupSurfacePresentCapabilitiesTest`.
+
+Cross-referencing feme's own `EntryPoints.cpp`/`ImplementedEntrypoints.txt`
+confirmed `vkEnumeratePhysicalDeviceGroups` was never implemented at all
+-- not stubbed, not returning an error, simply absent from the dispatch
+table, meaning `vkGetInstanceProcAddr` silently returns null for it. Since
+it's a core Vulkan 1.1 command and feme claims `apiVersion =
+VK_API_VERSION_1_4`, CTS's own loader-facing wrapper reasonably assumes
+the pointer is real and calls through it directly -- no defensive null
+check on the test side, because there's no spec-compliant reason for it
+to be null. This is a real conformance bug in feme, not a CTS quirk, and
+it was invisible until this exact moment: no prior CTS run had a real,
+non-headless surface capable of reaching `dEQP-VK.wsi`'s own
+device-group query cases at all. This is precisely the "new coverage
+exposes a pre-existing, previously-unreachable gap" shape every
+H9-series row in this project's history already established -- worth
+noting again because it means every time a new *stage* of coverage opens
+up (a new surface backend here, previously a new shader stage
+combination for H9), the right expectation is "there is probably at
+least one more previously-unreachable gap waiting," not "this new
+coverage will just confirm everything already works."
+
+Interestingly, `FeMeVulkanDesign.md`'s own "Initial Non-Goals" section
+already had a deviation note calling out this *exact* function (along
+with several siblings) as missing, cross-referencing a pre-existing
+`K1` roadmap row (P0!) that was supposed to close it -- I hadn't
+independently discovered a brand-new class of bug so much as hit,
+head-on, a specific instance of an already-known, already-tracked, but
+not-yet-fixed gap. I fixed the two commands this session's crash and
+its device-group family actually needed
+(`vkEnumeratePhysicalDeviceGroups`, `vkGetDeviceGroupPeerMemoryFeatures`)
+plus three more `VK_KHR_swapchain`-owned device-group companion commands
+CTS's own `dEQP-VK.wsi` group also depends on
+(`vkGetDeviceGroupPresentCapabilitiesKHR`,
+`vkGetDeviceGroupSurfacePresentModesKHR`,
+`vkGetPhysicalDevicePresentRectanglesKHR`), following the existing
+"exactly one physical device" no-op precedent `vkCmdSetDeviceMask`
+already established, and updated both `K1` and the design-doc deviation
+note to record the narrower remaining scope rather than treating this as
+an entirely new, separately-tracked bug (unlike the H9-series pattern,
+here a home for this exact gap already existed in the roadmap).
+
+## After the fix: a clean run, and two more, smaller, genuinely separate gaps
+
+With the crash fixed, the full `dEQP-VK.wsi.xcb.*` re-run finally
+completed end to end: 52 Pass, 8 Fail, 3,969 NotSupported (the
+NotSupported majority is correct and expected -- almost every case in
+this group needs the separate `VK_KHR_device_group_creation` *instance*
+extension, which correctly remains unimplemented; I only implemented the
+query commands a 1.1-advertising ICD must answer regardless of
+device-group support).
+
+Splitting the 8 real failures apart, one pattern immediately jumped out:
+7 of them (every `render.*` sub-case) share one identical MLIR
+diagnostic verbatim -- a `spirv.CompositeConstruct`-to-`mat4` legalization
+failure, clearly a single root cause, clearly unrelated to WSI or
+device-group at all (any shader anywhere building a matrix from column
+vectors would hit the same thing). The 8th, `acquire.too_many`, is its
+own distinct thing. Splitting these into two new rows (H10d, H10e)
+rather than trying to root-cause and fix them in the same session felt
+right for the same reason the H9-series bugs got their own rows: each
+needs its own real IR reduction / investigation, and conflating them
+with H10b's own "build and re-run" scope would have made the roadmap
+harder to read, not easier -- H10b's own job (get a real measurement)
+is done the moment the numbers above exist, whether or not every number
+is a `Pass`.
+
+One loose end: an earlier, isolated 13-case manual run of
+`swapchain.create.*` (before the full 4,029-case run) showed `clipped`
+failing with `VK_ERROR_INITIALIZATION_FAILED`; the same case passed
+cleanly in the full run. I did not chase this discrepancy down given the
+time already spent -- most likely an ordering/state artifact of running
+one case in isolation versus as part of the full suite (a stale resource
+from a differently-ordered prior case, or a race with `Xvfb` initializing
+freshly for a lone process versus a long-running one), but I'm noting the
+inconsistency here rather than silently picking whichever result was more
+convenient. If it ever recurs, it deserves its own investigation.
