@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5
+resume: ec2f5570-263a-4b95-917f-6c2230e594cf
 ---
 # Initial Guidelines
 
@@ -36,21 +37,27 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H9c or other prerequisites blocking the H-series milestones?
+Can you work on H9b or other prerequisites blocking the H-series milestones?
 
-> **`vkCreateGraphicsPipelines` fails a tessellation-control-shader pipeline
-> with `"feme-cpu-wrap-patch-constant: masked output store references an unknown
-> patch-output signature element"`**, discovered by H9a's own CTS re-run once
-> more pipelines began clearing pipeline creation and reaching this
-> stage-wrapping code for the first time. Hit by 1,276 real
-> `dEQP-VK.query_pool.statistics_query.clipping_invocations.*_tessellation*`-shaped
-> cases (and likely every other CTS group exercising a tessellation-control
-> shader's patch-constant function against this ICD). Entirely unrelated to
-> H9a's own fragment-stage/color-attachment scope -- a distinct gap in
-> `feme-cpu-wrap-patch-constant`'s own handling of a masked (partially-written,
-> e.g. only some patch-output locations actually stored to by the patch-constant
-> function) output store, needing its own real IR reduction of one of these
-> exact cases (the same technique this project's H6-series/H8-series/H9-series
-> chains have used throughout) to isolate whether the patch-output signature
-> itself is being built incorrectly, or the masked-store lowering simply doesn't
-> know how to look up an element that a real signature does contain
+> **A pipeline with both a vertex and a geometry stage fails at `vkQueueSubmit`
+> with `"vertex/domain stage output -> geometry stage input: element 0 and its
+> producer element 6 disagree on component/row count or type"`**, discovered by
+> the same H9 re-run once the pipeline-statistics suite's own dedicated
+> geometry-shader-shaped cases
+> (`geometry_shader_invocations`/`geometry_shader_primitives`, plus the
+> `_geometry`-suffixed variants of `clipping_invocations`/`clipping_primitives`)
+> could run for the first time (previously the entire suite was `NotSupported`,
+> per H9's own closure note above, so this stage-IO interface-matching gap was
+> never reached by any prior CTS coverage). A real per-case tally attributes
+> 4,752 `vkQueueSubmit` `Fail`s to this one diagnostic across every
+> geometry-shaped sub-group this suite has
+> (`host_query_reset`/`reset_before_copy`/`reset_after_copy`'s own replicated
+> copies of the same groups included) -- nothing pipeline-statistics-specific
+> about the gap itself, since it fires purely from the vertex-to-geometry
+> stage-IO signature comparison, before any query or counter code ever runs; any
+> other real CTS case exercising this exact vertex+geometry pipeline shape would
+> be expected to hit the same wall. Needs its own real IR reduction of one of
+> these exact cases to isolate whether the mismatch is a genuine
+> vertex-output/geometry-input signature bug in this suite's own shaders, or a
+> `feme`-side element-numbering gap (`element 0` vs. `element 6` suggests an
+> indexing/ordering mismatch rather than a type/width one)
