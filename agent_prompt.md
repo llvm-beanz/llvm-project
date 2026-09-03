@@ -37,19 +37,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8u or other prerequisites blocking the H-series milestones?
+The design document marked a "known gap" for the MLIR SPIRV dialect's
+limitations. That was fine in the initial states, but it is time to start
+closing those gaps.
 
-> **`STORAGE_IMAGE_ATOMIC_BIT` for `r32_{sint,uint}`, split off from H8s.** A
-> real CTS re-run found `R32_SINT`/`R32_UINT` still missing this bit -- unlike
-> every other H8s gap, this is not a `formatFeatureFlags` label fix: no
-> `OpAtomic*` (SPIR-V's `OpAtomicIAdd`/`OpAtomicExchange`/etc.) support against
-> a storage image exists anywhere in this project yet (confirmed by grep: no
-> `OpAtomic`/`ImageAtomic`/`imageAtomic` hit in `feme/lib`, `feme/runtime`, or
-> `feme/include`). A real fix needs, at minimum: SPIR-V-to-LLVM lowering for the
-> mandatory single-component-32-bit-only subset of `OpAtomic*` instructions
-> against an `OpTypeImage` operand (`ConvertSPIRVToLLVMPass.cpp`), new
-> `feme.cpu.image.atomic.*` runtime entry points mirroring
-> `feme.cpu.image.store.2d.v4i32`'s own precedent (`FeMeRuntimeCPU.c`), and the
-> matching `SPIRVResourceLoweringPass::classifyStorageImage2DHandle`-adjacent
-> legalization/handle-classification work -- a substantially bigger lift than
-> every other H8s row, scoped here but not started
+Can you update the desgin documentation and roadmaps to make it clear that those
+gaps are on the table for future work? Please update the roadmap to reflect
+any known concrete issues that should be addressed.
