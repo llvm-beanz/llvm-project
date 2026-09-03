@@ -328,6 +328,17 @@ enum class ResourceFormat : uint32_t {
   EAC_R11_SNORM,
   EAC_R11G11_UNORM,
   EAC_R11G11_SNORM,
+
+  // (Roadmap H8q) `VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`: a per-texel (not
+  // block-compressed) shared-exponent packed format -- from the LSB up,
+  // three independent 9-bit unsigned mantissas (R, G, B) share one 5-bit
+  // exponent field at the top of the same 4-byte word, each channel's
+  // real value equal to `mantissa * 2^(exponent - 15 - 9)`. Appended at
+  // the enum's own tail for the same hard-coded-switch-case reason as the
+  // block-compressed formats immediately above (`FeMeRuntimeCPU.c`
+  // switches on this enum's raw ordinal value, so a new entry may only
+  // ever be appended, never inserted or reordered).
+  E5B9G9R9_UFLOAT,
 };
 
 /// Whether \p Format is one of the ASTC block-compressed formats above.
