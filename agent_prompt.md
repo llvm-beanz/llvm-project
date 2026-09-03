@@ -37,30 +37,25 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-The previous agent invocation ended without actually doing anyting.
+Can you work on H8h or other prerequisites blocking the H-series milestones?
 
-Can you work on H8x or other prerequisites blocking the H-series milestones?
-
-> **Ordinary SSBO (`HandleKind::Storage`)/shared-memory atomics also fail
-> `SPIRVResourceLowering.cpp`'s `hasOnlySupportedPointerUses`, discovered while
-> scoping H8w.** H8w deliberately gated its new atomic branch on `Writable &&
-> IsTexel`, true only for `HandleKind::TexelStorage` -- `IsTexel` is false for a
-> plain `Storage`/`StorageStruct` handle (an `SSBO`/`buffer` block, not a texel
-> buffer), so an ordinary storage-buffer atomic (`atomicAdd` on an SSBO member
-> in GLSL, common and unremarkable shader code, not a texel-buffer- or
-> image-specific feature) still hits the same generic "unsupported pointer use"
-> rejection today. No CTS case has surfaced this gap yet only because no prior
-> H-series row happened to exercise an SSBO atomic against `feme`'s own ICD, not
-> because the gap doesn't exist -- a real
-> `dEQP-VK.ssbo.atomic_operations.*`-shaped (or similarly named) case should be
-> expected to fail identically to how H8u's real case failed before H8v/H8w. The
-> fix shape is expected to be small and almost entirely reuse H8w's own new
-> `createAtomic*Typed`/`feme.cpu.resource.atomic.*.typed.i32` machinery
-> (`ResourceCalls.h/.cpp`, `FeMeRuntimeCPU.c`) -- likely only
-> `hasOnlySupportedPointerUses`'s own gating condition needs to widen (e.g.
-> `Writable \&\& (IsTexel \|\| Kind == HandleKind::Storage \|\| Kind ==
-> HandleKind::StorageStruct)`) and `lowerAccesses`'s non-`IsTexel` branch needs
-> the same atomic-rewrite block `IsTexel`'s branch just gained -- but this needs
-> its own real IR reduction of an actual SSBO-atomic CTS case (mirroring the
-> H6g-b/H6j/H6k/H6l/H8u-w chain's own technique throughout) to confirm before
-> landing, not assumed from source inspection alone
+> **`A2B10G10R10_UNORM_PACK32` (`R10G10B10A2_UNORM`) as a vertex attribute.**
+> H8b deliberately deferred this one remaining mandatory `VERTEX_BUFFER_BIT`
+> format: it is a single packed 32-bit word (2 bits A, 10 bits each of B/G/R,
+> MSB-down), not a "N bytes per component" layout `decodeAttribute`'s existing
+> convention fits mechanically -- needs its own dedicated decode case mirroring
+> `femeRTUnpackR10G10B10A2Unorm`'s (`FeMeRuntimeCPU.c`) existing bit-unpacking
+> convention, plus a `attributeComponentByteSize`-adjacent way to describe "one
+> 4-byte fetch produces all 4 components" to the caller's own bounds-check
+> arithmetic (`Executor.cpp`'s draw loop), which currently assumes one fetch per
+> component | H8b | `feme/lib/Graphics/Executor.cpp`,
+> `feme/lib/Vulkan/Format.cpp` | P2 | (`R10G10B10A2_UNORM`) as a vertex
+> attribute.** H8b deliberately deferred this one remaining mandatory
+> `VERTEX_BUFFER_BIT` format: it is a single packed 32-bit word (2 bits A, 10
+> bits each of B/G/R, MSB-down), not a "N bytes per component" layout
+> `decodeAttribute`'s existing convention fits mechanically -- needs its own
+> dedicated decode case mirroring `femeRTUnpackR10G10B10A2Unorm`'s
+> (`FeMeRuntimeCPU.c`) existing bit-unpacking convention, plus a
+> `attributeComponentByteSize`-adjacent way to describe "one 4-byte fetch
+> produces all 4 components" to the caller's own bounds-check arithmetic
+> (`Executor.cpp`'s draw loop), which currently assumes one fetch per component
