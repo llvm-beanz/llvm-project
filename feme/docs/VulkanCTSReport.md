@@ -21575,3 +21575,54 @@ row -- confirmed, not assumed: this is a vertex-attribute-decode and
 `VkFormatFeatureFlags` fix for one specific `VkFormat` only.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap H8u: measured impact (investigation only, no functional change)
+
+H8s's own re-audit split this row off: a real CTS re-run found
+`R32_SINT`/`R32_UINT` still missing `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT`,
+confirmed genuinely mandatory via the CTS's own `s_required*` tables
+(`vktApiFeatureInfo.cpp`).
+
+Investigation found the real blocker is not merely "no atomic codegen
+exists yet" (as originally framed) but a genuine, real upstream MLIR
+gap: a storage-image atomic requires SPIR-V's `OpImageTexelPointer`
+instruction to first materialize an addressable pointer from the image
+handle, and that instruction has zero representation anywhere in
+MLIR's own `spirv` dialect -- no op definition and no named
+opcode-enum case at all (confirmed by grep of `SPIRVBase.td`). An
+ordinary buffer/shared-memory atomic (`OpAtomicIAdd` etc. directly
+against an `OpAccessChain`-derived pointer) already deserializes and
+converts fine today with zero `feme`-side change needed; only the
+image-specific address-computation instruction is missing. This means
+a real driver-side SPIR-V binary using an image atomic -- exactly what
+`dEQP-VK`'s own image-atomics conformance tests compile to -- cannot
+even be deserialized by `feme::SPIRVImporter`, let alone converted or
+executed.
+
+This is documented as a new "Known gap" in `Design.md`, the same shape
+as the pre-existing `feme::SPIRVImporter`-cannot-deserialize-LLVM-SPIR-V-
+backend-output gap (found by roadmap R14): real, scoped, tractable
+work, but squarely upstream MLIR (a new `spirv.ImageTexelPointer` op in
+`SPIRVImageOps.td` plus its own opcode-enum entry), outside this
+repository's own `feme/` tree. `H8u`'s own roadmap text was rewritten
+to capture this precise finding, including the further `feme`-side
+work (a `SPIRVToLLVMPatterns.cpp` conversion pattern, and
+`SPIRVResourceLowering.cpp`'s `lowerImageAccesses` learning to rewrite
+an `atomicrmw`/`cmpxchg` user of a storage-image `getpointer` call into
+a new `feme.cpu.image.atomic.*` runtime entry point) that would still
+be needed once the upstream gap closes -- none of which is even
+testable until it does.
+
+No code change was made this session (investigation/scoping only, per
+this row's own stated purpose once its real blocker was found).
+`ninja check-feme` (assertions-enabled, ccache build) passed in full:
+2430/2457 (27 unsupported), 0 regressions. A real
+`dEQP-VK.api.info.format_properties.*` re-run confirms no change: still
+**222/225 Pass**, the same 3 remaining failures (`a2b10g10r10_unorm_pack32`'s
+`VERTEX_BUFFER_BIT` gap, tracked by H8h; `r32_{sint,uint}`'s
+`STORAGE_IMAGE_ATOMIC_BIT` gap, tracked here).
+
+`STORAGE_IMAGE_ATOMIC_BIT` stays honestly unset for `R32_{SINT,UINT}`
+-- no `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by
+this row either way. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update.
