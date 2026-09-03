@@ -98,17 +98,75 @@ enum class ResourceCallKind : uint8_t {
   /// always the pre-op value either way, matching
   /// `OpAtomicCompareExchange`'s own result semantics.
   AtomicCompareExchangeTyped,
+  /// `feme.cpu.resource.atomic.add.raw.i32` (roadmap H8x): an ordinary
+  /// storage-buffer/direct-field-storage-block RMW atomic (`OpAtomicIAdd`
+  /// against a plain `OpAccessChain`-derived pointer into a
+  /// `HandleKind::Storage`/`StorageStruct` handle, *not* an
+  /// `OpImageTexelPointer` -- see `AtomicAddTyped`'s own doc for that,
+  /// distinct, shape). Addressed by descriptor index and *byte offset*,
+  /// exactly like `LoadRaw`/`StoreRaw`, since an ordinary storage buffer has
+  /// no per-format element-size table the way a typed/texel buffer does --
+  /// the offset is already `element_index * Stride` (a `Storage` handle) or
+  /// the field's own declared struct offset (a `StorageStruct` handle),
+  /// computed the identical way `lowerRawPointerUses` already computes it
+  /// for a plain load/store. Returns the value that was in memory
+  /// immediately before the add, matching `OpAtomicIAdd`'s own result
+  /// semantics.
+  AtomicAddRaw,
+  /// `feme.cpu.resource.atomic.sub.raw.i32` (roadmap H8x): `OpAtomicISub`'s
+  /// counterpart to `AtomicAddRaw`.
+  AtomicSubRaw,
+  /// `feme.cpu.resource.atomic.and.raw.i32` (roadmap H8x): `OpAtomicAnd`'s
+  /// counterpart to `AtomicAddRaw`.
+  AtomicAndRaw,
+  /// `feme.cpu.resource.atomic.or.raw.i32` (roadmap H8x): `OpAtomicOr`'s
+  /// counterpart to `AtomicAddRaw`.
+  AtomicOrRaw,
+  /// `feme.cpu.resource.atomic.xor.raw.i32` (roadmap H8x): `OpAtomicXor`'s
+  /// counterpart to `AtomicAddRaw`.
+  AtomicXorRaw,
+  /// `feme.cpu.resource.atomic.smax.raw.i32` (roadmap H8x): `OpAtomicSMax`'s
+  /// counterpart to `AtomicAddRaw` -- a signed maximum.
+  AtomicSMaxRaw,
+  /// `feme.cpu.resource.atomic.smin.raw.i32` (roadmap H8x): `OpAtomicSMin`'s
+  /// counterpart to `AtomicAddRaw` -- a signed minimum.
+  AtomicSMinRaw,
+  /// `feme.cpu.resource.atomic.umax.raw.i32` (roadmap H8x): `OpAtomicUMax`'s
+  /// counterpart to `AtomicAddRaw` -- an unsigned maximum.
+  AtomicUMaxRaw,
+  /// `feme.cpu.resource.atomic.umin.raw.i32` (roadmap H8x): `OpAtomicUMin`'s
+  /// counterpart to `AtomicAddRaw` -- an unsigned minimum.
+  AtomicUMinRaw,
+  /// `feme.cpu.resource.atomic.exchange.raw.i32` (roadmap H8x):
+  /// `OpAtomicExchange`'s counterpart to `AtomicAddRaw` -- an unconditional
+  /// swap.
+  AtomicExchangeRaw,
+  /// `feme.cpu.resource.atomic.compare_exchange.raw.i32` (roadmap H8x):
+  /// `OpAtomicCompareExchange`'s counterpart to `AtomicAddRaw`, taking an
+  /// extra comparator operand (see `MatchedResourceCall::Comparator`)
+  /// before the value -- the memory word is only replaced with the value
+  /// when it currently equals the comparator, but the value returned is
+  /// always the pre-op value either way, matching
+  /// `OpAtomicCompareExchange`'s own result semantics.
+  AtomicCompareExchangeRaw,
 };
 
 /// Returns whether \p Kind reads or writes through the resource.
 bool isLoad(ResourceCallKind Kind);
 
-/// Returns whether \p Kind is one of the `Atomic*Typed` kinds above: reads
-/// *and* writes through the resource in a single call, unlike every
-/// `Load*`/`Store*` kind (see `MemoryEffects::argMemOnly(ModRefInfo::ModRef)`
-/// in `getOrInsertResourceCall`'s own comment for why this needs its own
+/// Returns whether \p Kind is one of the `Atomic*Typed`/`Atomic*Raw` kinds
+/// above: reads *and* writes through the resource in a single call, unlike
+/// every `Load*`/`Store*` kind (see
+/// `MemoryEffects::argMemOnly(ModRefInfo::ModRef)` in
+/// `getOrInsertResourceCall`'s own comment for why this needs its own
 /// category rather than reusing `isLoad`).
 bool isAtomic(ResourceCallKind Kind);
+
+/// Returns whether \p Kind is `AtomicCompareExchangeTyped` or
+/// `AtomicCompareExchangeRaw` (roadmap H8x): the only two kinds taking an
+/// extra leading comparator operand ahead of the value, unlike every other
+/// `Atomic*` kind (see `MatchedResourceCall::Comparator`'s own doc).
+bool isCompareExchange(ResourceCallKind Kind);
 
 /// The heap/root-constant operands every `feme.cpu.resource.*` call carries
 /// alongside its access-specific operands (see "Lowering": "The heap
@@ -304,6 +362,108 @@ llvm::CallInst *createAtomicExchangeTyped(llvm::IRBuilderBase &Builder,
 llvm::CallInst *createAtomicCompareExchangeTyped(
     llvm::IRBuilderBase &Builder, const ResourceCallEnv &Env,
     llvm::Value *DescriptorIndex, llvm::Value *ElementIndex,
+    llvm::Value *Comparator, llvm::Value *Val, llvm::Value *Mask,
+    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.add.raw.i32` call (roadmap H8x):
+/// performs `*byte_offset += Value` at \p ByteOffset through descriptor
+/// \p DescriptorIndex, returning the pre-op value. See `createAtomicAddTyped`
+/// for the analogous typed-buffer builder this mirrors.
+llvm::CallInst *createAtomicAddRaw(llvm::IRBuilderBase &Builder,
+                                   const ResourceCallEnv &Env,
+                                   llvm::Value *DescriptorIndex,
+                                   llvm::Value *ByteOffset, llvm::Value *Val,
+                                   llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.sub.raw.i32` call (roadmap H8x). See
+/// `createAtomicAddRaw`'s own doc.
+llvm::CallInst *createAtomicSubRaw(llvm::IRBuilderBase &Builder,
+                                   const ResourceCallEnv &Env,
+                                   llvm::Value *DescriptorIndex,
+                                   llvm::Value *ByteOffset, llvm::Value *Val,
+                                   llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.and.raw.i32` call (roadmap H8x). See
+/// `createAtomicAddRaw`'s own doc.
+llvm::CallInst *createAtomicAndRaw(llvm::IRBuilderBase &Builder,
+                                   const ResourceCallEnv &Env,
+                                   llvm::Value *DescriptorIndex,
+                                   llvm::Value *ByteOffset, llvm::Value *Val,
+                                   llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.or.raw.i32` call (roadmap H8x). See
+/// `createAtomicAddRaw`'s own doc.
+llvm::CallInst *createAtomicOrRaw(llvm::IRBuilderBase &Builder,
+                                  const ResourceCallEnv &Env,
+                                  llvm::Value *DescriptorIndex,
+                                  llvm::Value *ByteOffset, llvm::Value *Val,
+                                  llvm::Value *Mask,
+                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.xor.raw.i32` call (roadmap H8x). See
+/// `createAtomicAddRaw`'s own doc.
+llvm::CallInst *createAtomicXorRaw(llvm::IRBuilderBase &Builder,
+                                   const ResourceCallEnv &Env,
+                                   llvm::Value *DescriptorIndex,
+                                   llvm::Value *ByteOffset, llvm::Value *Val,
+                                   llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.smax.raw.i32` call (roadmap H8x). See
+/// `createAtomicAddRaw`'s own doc.
+llvm::CallInst *createAtomicSMaxRaw(llvm::IRBuilderBase &Builder,
+                                    const ResourceCallEnv &Env,
+                                    llvm::Value *DescriptorIndex,
+                                    llvm::Value *ByteOffset, llvm::Value *Val,
+                                    llvm::Value *Mask,
+                                    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.smin.raw.i32` call (roadmap H8x). See
+/// `createAtomicAddRaw`'s own doc.
+llvm::CallInst *createAtomicSMinRaw(llvm::IRBuilderBase &Builder,
+                                    const ResourceCallEnv &Env,
+                                    llvm::Value *DescriptorIndex,
+                                    llvm::Value *ByteOffset, llvm::Value *Val,
+                                    llvm::Value *Mask,
+                                    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.umax.raw.i32` call (roadmap H8x). See
+/// `createAtomicAddRaw`'s own doc.
+llvm::CallInst *createAtomicUMaxRaw(llvm::IRBuilderBase &Builder,
+                                    const ResourceCallEnv &Env,
+                                    llvm::Value *DescriptorIndex,
+                                    llvm::Value *ByteOffset, llvm::Value *Val,
+                                    llvm::Value *Mask,
+                                    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.umin.raw.i32` call (roadmap H8x). See
+/// `createAtomicAddRaw`'s own doc.
+llvm::CallInst *createAtomicUMinRaw(llvm::IRBuilderBase &Builder,
+                                    const ResourceCallEnv &Env,
+                                    llvm::Value *DescriptorIndex,
+                                    llvm::Value *ByteOffset, llvm::Value *Val,
+                                    llvm::Value *Mask,
+                                    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.exchange.raw.i32` call (roadmap H8x).
+/// See `createAtomicAddRaw`'s own doc.
+llvm::CallInst *createAtomicExchangeRaw(llvm::IRBuilderBase &Builder,
+                                        const ResourceCallEnv &Env,
+                                        llvm::Value *DescriptorIndex,
+                                        llvm::Value *ByteOffset,
+                                        llvm::Value *Val, llvm::Value *Mask,
+                                        const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.compare_exchange.raw.i32` call
+/// (roadmap H8x): like `createAtomicAddRaw`, but only replaces
+/// `*byte_offset` with \p Value when it currently equals \p Comparator --
+/// either way, returns the pre-op value.
+llvm::CallInst *createAtomicCompareExchangeRaw(
+    llvm::IRBuilderBase &Builder, const ResourceCallEnv &Env,
+    llvm::Value *DescriptorIndex, llvm::Value *ByteOffset,
     llvm::Value *Comparator, llvm::Value *Val, llvm::Value *Mask,
     const llvm::Twine &Name = "");
 

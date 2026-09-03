@@ -55,6 +55,28 @@ StringRef getNamePrefix(ResourceCallKind Kind) {
     return "feme.cpu.resource.atomic.exchange.typed.";
   case ResourceCallKind::AtomicCompareExchangeTyped:
     return "feme.cpu.resource.atomic.compare_exchange.typed.";
+  case ResourceCallKind::AtomicAddRaw:
+    return "feme.cpu.resource.atomic.add.raw.";
+  case ResourceCallKind::AtomicSubRaw:
+    return "feme.cpu.resource.atomic.sub.raw.";
+  case ResourceCallKind::AtomicAndRaw:
+    return "feme.cpu.resource.atomic.and.raw.";
+  case ResourceCallKind::AtomicOrRaw:
+    return "feme.cpu.resource.atomic.or.raw.";
+  case ResourceCallKind::AtomicXorRaw:
+    return "feme.cpu.resource.atomic.xor.raw.";
+  case ResourceCallKind::AtomicSMaxRaw:
+    return "feme.cpu.resource.atomic.smax.raw.";
+  case ResourceCallKind::AtomicSMinRaw:
+    return "feme.cpu.resource.atomic.smin.raw.";
+  case ResourceCallKind::AtomicUMaxRaw:
+    return "feme.cpu.resource.atomic.umax.raw.";
+  case ResourceCallKind::AtomicUMinRaw:
+    return "feme.cpu.resource.atomic.umin.raw.";
+  case ResourceCallKind::AtomicExchangeRaw:
+    return "feme.cpu.resource.atomic.exchange.raw.";
+  case ResourceCallKind::AtomicCompareExchangeRaw:
+    return "feme.cpu.resource.atomic.compare_exchange.raw.";
   }
   llvm_unreachable("unhandled ResourceCallKind");
 }
@@ -98,6 +120,17 @@ bool feme::cpu::isAtomic(ResourceCallKind Kind) {
   case ResourceCallKind::AtomicUMinTyped:
   case ResourceCallKind::AtomicExchangeTyped:
   case ResourceCallKind::AtomicCompareExchangeTyped:
+  case ResourceCallKind::AtomicAddRaw:
+  case ResourceCallKind::AtomicSubRaw:
+  case ResourceCallKind::AtomicAndRaw:
+  case ResourceCallKind::AtomicOrRaw:
+  case ResourceCallKind::AtomicXorRaw:
+  case ResourceCallKind::AtomicSMaxRaw:
+  case ResourceCallKind::AtomicSMinRaw:
+  case ResourceCallKind::AtomicUMaxRaw:
+  case ResourceCallKind::AtomicUMinRaw:
+  case ResourceCallKind::AtomicExchangeRaw:
+  case ResourceCallKind::AtomicCompareExchangeRaw:
     return true;
   case ResourceCallKind::LoadTyped:
   case ResourceCallKind::StoreTyped:
@@ -106,6 +139,11 @@ bool feme::cpu::isAtomic(ResourceCallKind Kind) {
     return false;
   }
   llvm_unreachable("unhandled ResourceCallKind");
+}
+
+bool feme::cpu::isCompareExchange(ResourceCallKind Kind) {
+  return Kind == ResourceCallKind::AtomicCompareExchangeTyped ||
+         Kind == ResourceCallKind::AtomicCompareExchangeRaw;
 }
 
 std::string feme::cpu::mangleResourceCallName(ResourceCallKind Kind,
@@ -133,16 +171,16 @@ Function *feme::cpu::getOrInsertResourceCall(Module &M, ResourceCallKind Kind,
   // Every call shares the leading (heap, heap_count, descriptor_index,
   // offset) operands; loads return `ElementType` with no trailing value
   // operand, an ordinary store instead takes it as a trailing value operand
-  // ahead of the mask (see "Lowering"), and an atomic (roadmap H8w) takes
-  // it too but *also* returns `ElementType` (the pre-op value) --
-  // `AtomicCompareExchangeTyped` alone takes a second, leading comparator
+  // ahead of the mask (see "Lowering"), and an atomic (roadmap H8w/H8x)
+  // takes it too but *also* returns `ElementType` (the pre-op value) --
+  // `isCompareExchange(Kind)` alone takes a second, leading comparator
   // operand ahead of the value.
   SmallVector<Type *, 6> Params = {PtrTy, I32Ty, I32Ty, I64Ty};
   Type *RetTy = Type::getVoidTy(Ctx);
   if (isLoad(Kind)) {
     RetTy = ElementType;
   } else {
-    if (Kind == ResourceCallKind::AtomicCompareExchangeTyped)
+    if (isCompareExchange(Kind))
       Params.push_back(ElementType);
     Params.push_back(ElementType);
     if (isAtomic(Kind))
@@ -157,7 +195,7 @@ Function *feme::cpu::getOrInsertResourceCall(Module &M, ResourceCallKind Kind,
   // These are ordinary declarations with attributes describing their memory
   // effects (see "Lowering"): a load only reads through the heap pointer
   // argument, an ordinary store only writes through it, an atomic
-  // (roadmap H8w) does both in one call (it reads the pre-op value *and*
+  // (roadmap H8w/H8x) does both in one call (it reads the pre-op value *and*
   // writes the new one), and neither has any other observable side effect,
   // so the ordinary optimizer can reason about them (CSE a repeated load,
   // sink/hoist across unrelated code, ...) once the helper implementation
@@ -187,7 +225,7 @@ static CallInst *createCall(IRBuilderBase &Builder, ResourceCallKind Kind,
   Function *F = getOrInsertResourceCall(*M, Kind, ElementType);
   SmallVector<Value *, 7> Args = {Env.ResourceHeap, Env.ResourceHeapCount,
                                   DescriptorIndex, Offset};
-  if (Kind == ResourceCallKind::AtomicCompareExchangeTyped)
+  if (isCompareExchange(Kind))
     Args.push_back(Comparator);
   if (!isLoad(Kind))
     Args.push_back(StoredValue);
@@ -347,6 +385,115 @@ CallInst *feme::cpu::createAtomicCompareExchangeTyped(
                     Val->getType(), Name);
 }
 
+/// Shared body for every `createAtomic*Raw` builder (roadmap H8x): they
+/// differ only in `Kind`. See `createAtomicTyped`'s own doc.
+static CallInst *createAtomicRaw(IRBuilderBase &Builder, ResourceCallKind Kind,
+                                 const ResourceCallEnv &Env,
+                                 Value *DescriptorIndex, Value *ByteOffset,
+                                 Value *Val, Value *Mask, const Twine &Name) {
+  return createCall(Builder, Kind, Env, DescriptorIndex, ByteOffset,
+                    /*Comparator=*/nullptr, Val, Mask, Val->getType(), Name);
+}
+
+CallInst *feme::cpu::createAtomicAddRaw(IRBuilderBase &Builder,
+                                        const ResourceCallEnv &Env,
+                                        Value *DescriptorIndex,
+                                        Value *ByteOffset, Value *Val,
+                                        Value *Mask, const Twine &Name) {
+  return createAtomicRaw(Builder, ResourceCallKind::AtomicAddRaw, Env,
+                         DescriptorIndex, ByteOffset, Val, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicSubRaw(IRBuilderBase &Builder,
+                                        const ResourceCallEnv &Env,
+                                        Value *DescriptorIndex,
+                                        Value *ByteOffset, Value *Val,
+                                        Value *Mask, const Twine &Name) {
+  return createAtomicRaw(Builder, ResourceCallKind::AtomicSubRaw, Env,
+                         DescriptorIndex, ByteOffset, Val, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicAndRaw(IRBuilderBase &Builder,
+                                        const ResourceCallEnv &Env,
+                                        Value *DescriptorIndex,
+                                        Value *ByteOffset, Value *Val,
+                                        Value *Mask, const Twine &Name) {
+  return createAtomicRaw(Builder, ResourceCallKind::AtomicAndRaw, Env,
+                         DescriptorIndex, ByteOffset, Val, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicOrRaw(IRBuilderBase &Builder,
+                                       const ResourceCallEnv &Env,
+                                       Value *DescriptorIndex,
+                                       Value *ByteOffset, Value *Val,
+                                       Value *Mask, const Twine &Name) {
+  return createAtomicRaw(Builder, ResourceCallKind::AtomicOrRaw, Env,
+                         DescriptorIndex, ByteOffset, Val, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicXorRaw(IRBuilderBase &Builder,
+                                        const ResourceCallEnv &Env,
+                                        Value *DescriptorIndex,
+                                        Value *ByteOffset, Value *Val,
+                                        Value *Mask, const Twine &Name) {
+  return createAtomicRaw(Builder, ResourceCallKind::AtomicXorRaw, Env,
+                         DescriptorIndex, ByteOffset, Val, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicSMaxRaw(IRBuilderBase &Builder,
+                                         const ResourceCallEnv &Env,
+                                         Value *DescriptorIndex,
+                                         Value *ByteOffset, Value *Val,
+                                         Value *Mask, const Twine &Name) {
+  return createAtomicRaw(Builder, ResourceCallKind::AtomicSMaxRaw, Env,
+                         DescriptorIndex, ByteOffset, Val, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicSMinRaw(IRBuilderBase &Builder,
+                                         const ResourceCallEnv &Env,
+                                         Value *DescriptorIndex,
+                                         Value *ByteOffset, Value *Val,
+                                         Value *Mask, const Twine &Name) {
+  return createAtomicRaw(Builder, ResourceCallKind::AtomicSMinRaw, Env,
+                         DescriptorIndex, ByteOffset, Val, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicUMaxRaw(IRBuilderBase &Builder,
+                                         const ResourceCallEnv &Env,
+                                         Value *DescriptorIndex,
+                                         Value *ByteOffset, Value *Val,
+                                         Value *Mask, const Twine &Name) {
+  return createAtomicRaw(Builder, ResourceCallKind::AtomicUMaxRaw, Env,
+                         DescriptorIndex, ByteOffset, Val, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicUMinRaw(IRBuilderBase &Builder,
+                                         const ResourceCallEnv &Env,
+                                         Value *DescriptorIndex,
+                                         Value *ByteOffset, Value *Val,
+                                         Value *Mask, const Twine &Name) {
+  return createAtomicRaw(Builder, ResourceCallKind::AtomicUMinRaw, Env,
+                         DescriptorIndex, ByteOffset, Val, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicExchangeRaw(IRBuilderBase &Builder,
+                                             const ResourceCallEnv &Env,
+                                             Value *DescriptorIndex,
+                                             Value *ByteOffset, Value *Val,
+                                             Value *Mask, const Twine &Name) {
+  return createAtomicRaw(Builder, ResourceCallKind::AtomicExchangeRaw, Env,
+                         DescriptorIndex, ByteOffset, Val, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicCompareExchangeRaw(
+    IRBuilderBase &Builder, const ResourceCallEnv &Env,
+    Value *DescriptorIndex, Value *ByteOffset, Value *Comparator, Value *Val,
+    Value *Mask, const Twine &Name) {
+  return createCall(Builder, ResourceCallKind::AtomicCompareExchangeRaw, Env,
+                    DescriptorIndex, ByteOffset, Comparator, Val, Mask,
+                    Val->getType(), Name);
+}
+
 std::optional<MatchedResourceCall>
 feme::cpu::matchResourceCall(const CallInst &CI) {
   const Function *Callee = CI.getCalledFunction();
@@ -369,6 +516,17 @@ feme::cpu::matchResourceCall(const CallInst &CI) {
       ResourceCallKind::AtomicUMinTyped,
       ResourceCallKind::AtomicExchangeTyped,
       ResourceCallKind::AtomicCompareExchangeTyped,
+      ResourceCallKind::AtomicAddRaw,
+      ResourceCallKind::AtomicSubRaw,
+      ResourceCallKind::AtomicAndRaw,
+      ResourceCallKind::AtomicOrRaw,
+      ResourceCallKind::AtomicXorRaw,
+      ResourceCallKind::AtomicSMaxRaw,
+      ResourceCallKind::AtomicSMinRaw,
+      ResourceCallKind::AtomicUMaxRaw,
+      ResourceCallKind::AtomicUMinRaw,
+      ResourceCallKind::AtomicExchangeRaw,
+      ResourceCallKind::AtomicCompareExchangeRaw,
   };
 
   ResourceCallKind Kind;
@@ -386,13 +544,13 @@ feme::cpu::matchResourceCall(const CallInst &CI) {
   // A same-named-but-different-shape function is not one this module
   // produced; matching the operand count guards against that (e.g. some
   // unrelated call that merely starts with the same prefix). A load takes
-  // no value operand, an ordinary store or simple atomic (roadmap H8w)
-  // takes one, and `AtomicCompareExchangeTyped` alone takes two (comparator
+  // no value operand, an ordinary store or simple atomic (roadmap H8w/H8x)
+  // takes one, and `isCompareExchange(Kind)` alone takes two (comparator
   // then value).
   unsigned ExpectedArgs = 6;
   if (isLoad(Kind))
     ExpectedArgs = 5;
-  else if (Kind == ResourceCallKind::AtomicCompareExchangeTyped)
+  else if (isCompareExchange(Kind))
     ExpectedArgs = 7;
   if (CI.arg_size() != ExpectedArgs)
     return std::nullopt;
@@ -407,7 +565,7 @@ feme::cpu::matchResourceCall(const CallInst &CI) {
   if (isLoad(Kind)) {
     Result.Mask = CI.getArgOperand(4);
     Result.ElementType = CI.getType();
-  } else if (Kind == ResourceCallKind::AtomicCompareExchangeTyped) {
+  } else if (isCompareExchange(Kind)) {
     Result.Comparator = CI.getArgOperand(4);
     Result.StoredValue = CI.getArgOperand(5);
     Result.Mask = CI.getArgOperand(6);
