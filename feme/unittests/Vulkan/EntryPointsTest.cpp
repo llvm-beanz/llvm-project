@@ -522,4 +522,53 @@ TEST_F(EntryPointsTest, ToolPropertiesReportsNoTools) {
   EXPECT_EQ(Count, 0u);
 }
 
+/// Roadmap H10c: `vkEnumeratePhysicalDeviceGroups` (core Vulkan 1.1) was
+/// never implemented, leaving `vkGetInstanceProcAddr` return null for it
+/// despite this ICD advertising `apiVersion = VK_API_VERSION_1_4` -- a
+/// real CTS-facing ICD conformance bug (see EntryPoints.h's own comment),
+/// only discovered once H10a's real xcb surface let
+/// `dEQP-VK.wsi.xcb.surface.query_devgroup_present_capabilities` reach it
+/// for the first time and crash on the resulting null-pointer call. This
+/// ICD has exactly one physical device, so the correct answer is always
+/// exactly one group of size one.
+TEST_F(EntryPointsTest, EnumeratePhysicalDeviceGroupsReportsOneGroup) {
+  uint32_t Count = 1234;
+  EXPECT_EQ(vkEnumeratePhysicalDeviceGroups(Instance, &Count, nullptr),
+            VK_SUCCESS);
+  EXPECT_EQ(Count, 1u);
+
+  Count = 1;
+  VkPhysicalDeviceGroupProperties Group{};
+  EXPECT_EQ(vkEnumeratePhysicalDeviceGroups(Instance, &Count, &Group),
+            VK_SUCCESS);
+  EXPECT_EQ(Count, 1u);
+  EXPECT_EQ(Group.physicalDeviceCount, 1u);
+  EXPECT_EQ(Group.physicalDevices[0], Physical);
+  EXPECT_EQ(Group.subsetAllocation, VK_FALSE);
+}
+
+/// Every legal call has `localDeviceIndex != remoteDeviceIndex`, which a
+/// single-physical-device group (confirmed above) can never satisfy --
+/// there is no remote device to report a peer-memory capability toward.
+TEST_F(EntryPointsTest, GetDeviceGroupPeerMemoryFeaturesReportsNone) {
+  float Priority = 1.0f;
+  VkDeviceQueueCreateInfo QueueInfo{};
+  QueueInfo.queueFamilyIndex = 0;
+  QueueInfo.queueCount = 1;
+  QueueInfo.pQueuePriorities = &Priority;
+  VkDeviceCreateInfo DevInfo{};
+  DevInfo.queueCreateInfoCount = 1;
+  DevInfo.pQueueCreateInfos = &QueueInfo;
+  VkDevice Device = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+
+  VkPeerMemoryFeatureFlags Features = 0xFFFFFFFFu;
+  vkGetDeviceGroupPeerMemoryFeatures(Device, /*heapIndex=*/0,
+                                     /*localDeviceIndex=*/0,
+                                     /*remoteDeviceIndex=*/1, &Features);
+  EXPECT_EQ(Features, VkPeerMemoryFeatureFlags(0));
+
+  vkDestroyDevice(Device, nullptr);
+}
+
 } // namespace

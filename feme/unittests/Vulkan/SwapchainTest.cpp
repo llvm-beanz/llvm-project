@@ -207,4 +207,57 @@ TEST_F(SwapchainTest, RejectsExtentBeyondDeviceLimits) {
             VK_ERROR_INITIALIZATION_FAILED);
 }
 
+/// Roadmap H10c: `VK_KHR_swapchain`'s own device-group companion commands
+/// (see EntryPoints.h's own comment) -- this ICD's single-physical-device
+/// group means `VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR` is the only
+/// mode/capability bit that can ever be set, and device 0 is the only
+/// legal present-mask bit.
+TEST_F(SwapchainTest, DeviceGroupPresentCapabilitiesReportsLocalDeviceOnly) {
+  VkDeviceGroupPresentCapabilitiesKHR Caps{};
+  // Poison every mask entry to confirm the implementation actually zeroes
+  // the ones beyond device 0, rather than happening to leave them zero.
+  for (uint32_t &Mask : Caps.presentMask)
+    Mask = 0xFFFFFFFFu;
+  EXPECT_EQ(vkGetDeviceGroupPresentCapabilitiesKHR(Device, &Caps),
+            VK_SUCCESS);
+  EXPECT_EQ(Caps.presentMask[0], 1u);
+  for (uint32_t I = 1; I < VK_MAX_DEVICE_GROUP_SIZE; ++I)
+    EXPECT_EQ(Caps.presentMask[I], 0u) << "device index " << I;
+  EXPECT_EQ(Caps.modes, VkDeviceGroupPresentModeFlagsKHR(
+                            VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR));
+}
+
+TEST_F(SwapchainTest, DeviceGroupSurfacePresentModesReportsLocalOnly) {
+  VkDeviceGroupPresentModeFlagsKHR Modes = 0xFFFFFFFFu;
+  EXPECT_EQ(
+      vkGetDeviceGroupSurfacePresentModesKHR(Device, Surface, &Modes),
+      VK_SUCCESS);
+  EXPECT_EQ(Modes, VkDeviceGroupPresentModeFlagsKHR(
+                        VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR));
+}
+
+TEST_F(SwapchainTest, PhysicalDevicePresentRectanglesReportsOneFullRect) {
+  uint32_t Count = 1234;
+  EXPECT_EQ(vkGetPhysicalDevicePresentRectanglesKHR(Physical, Surface,
+                                                     &Count, nullptr),
+            VK_SUCCESS);
+  EXPECT_EQ(Count, 1u);
+
+  VkSurfaceCapabilitiesKHR SurfCaps{};
+  ASSERT_EQ(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(Physical, Surface,
+                                                       &SurfCaps),
+            VK_SUCCESS);
+
+  Count = 1;
+  VkRect2D Rect{};
+  EXPECT_EQ(vkGetPhysicalDevicePresentRectanglesKHR(Physical, Surface,
+                                                     &Count, &Rect),
+            VK_SUCCESS);
+  EXPECT_EQ(Count, 1u);
+  EXPECT_EQ(Rect.offset.x, 0);
+  EXPECT_EQ(Rect.offset.y, 0);
+  EXPECT_EQ(Rect.extent.width, SurfCaps.currentExtent.width);
+  EXPECT_EQ(Rect.extent.height, SurfCaps.currentExtent.height);
+}
+
 } // namespace
