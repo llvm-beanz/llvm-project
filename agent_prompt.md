@@ -37,10 +37,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8g or other prerequisites blocking the H-series milestones?
+Can you work on H8r or other prerequisites blocking the H-series milestones?
 
-> **Mandatory blit/filter bits audit.** Not yet investigated at all this session
-> -- needs a systematic pass confirming
-> `VK_FORMAT_FEATURE_BLIT_SRC_BIT`/`_DST_BIT`/`SAMPLED_IMAGE_FILTER_LINEAR_BIT`
-> are reported for every format the spec mandates them for, beyond the specific
-> cases H8e already found missing them
+> **`b8g8r8a8_srgb` (`VK_FORMAT_B8G8R8A8_SRGB`) is an entirely unmapped format,
+> split off from H8g.** A real `deqp-vk` run (against feme's own ICD, see H8g's
+> closure note) found this format missing every mandated bit -- `mapVkFormat`
+> has no case for it, so `formatFeatureFlags` never even runs for it (the
+> `Format ? formatFeatureFlags(*Format) : VkFormatFeatureFlags(0)` fallback in
+> `EntryPoints.cpp` returns zero features for any unrecognized `VkFormat`). A
+> real fix needs a new `ResourceFormat::B8G8R8A8_UNORM_SRGB` enumerator
+> (appended at `RuntimeABI.h`'s own tail) mirroring `B8G8R8A8_UNORM`'s existing
+> byte-swap-of-`R8G8B8A8_UNORM_SRGB` relationship, then wiring it through every
+> file that already special-cases `R8G8B8A8_UNORM_SRGB`/`B8G8R8A8_UNORM`
+> (`ImageFixture.cpp`, `Executor.cpp`, `RenderPass.cpp`, `CommandBuffer.cpp`,
+> `BCSamplingBridge.cpp`/`ETC2SamplingBridge.cpp` if their own sRGB-decode paths
+> apply, `Format.cpp`) before `formatFeatureFlags` can honestly grant it
+> `BLIT_SRC/DST_BIT`/`SAMPLED_IMAGE_BIT`/`SIFL`/`COLOR_ATTACHMENT_BIT`
