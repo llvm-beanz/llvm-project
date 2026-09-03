@@ -37,27 +37,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H9a or other prerequisites blocking the H-series milestones?
+Can you work on H9c or other prerequisites blocking the H-series milestones?
 
-> **`vkCreateGraphicsPipelines` rejects a fragment-shader-less pipeline that
-> still declares a color attachment, even when nothing ever writes to it** --
-> `"a graphics pipeline with color attachments needs a fragment stage"`,
-> `GraphicsPipeline.cpp`. Discovered by H9's own real
-> `dEQP-VK.query_pool.statistics_query.*` re-run: the suite's `vertex_only`
-> pipeline shape (see `VertexShaderTestInstance::createPipeline` in CTS's own
-> `vktQueryPoolStatisticsTests.cpp`) legitimately omits the fragment stage while
-> still declaring one color attachment with a default (zero) `colorWriteMask`/no
-> blend -- spec-legal (no fragment output ever occurs, so nothing is ever
-> written), and CTS's own `with_no_color_attachments` sibling variant of the
-> exact same pipeline shape already passes, confirming this rejection is
-> specific to "has a declared-but-unwritten color attachment", not to "has no
-> fragment shader" in general. By far the largest single blocker this row's own
-> re-run found (a real per-case tally attributes 4,157
-> `vkCreateGraphicsPipelines` `Fail`s, plus a further ~4,752 cascading
-> `vkQueueSubmit` failures against pipelines whose creation this same rejection
-> silently downgraded to a different, unrelated error path -- see H9b below for
-> that second, distinct root cause) -- needs its own real IR reduction of one of
-> these exact pipeline-creation calls (the same technique this project's
-> H6-series/H8-series chains have used throughout) to confirm precisely which
-> spec clause `GraphicsPipeline.cpp`'s own check is over-applying before
-> loosening it
+> **`vkCreateGraphicsPipelines` fails a tessellation-control-shader pipeline
+> with `"feme-cpu-wrap-patch-constant: masked output store references an unknown
+> patch-output signature element"`**, discovered by H9a's own CTS re-run once
+> more pipelines began clearing pipeline creation and reaching this
+> stage-wrapping code for the first time. Hit by 1,276 real
+> `dEQP-VK.query_pool.statistics_query.clipping_invocations.*_tessellation*`-shaped
+> cases (and likely every other CTS group exercising a tessellation-control
+> shader's patch-constant function against this ICD). Entirely unrelated to
+> H9a's own fragment-stage/color-attachment scope -- a distinct gap in
+> `feme-cpu-wrap-patch-constant`'s own handling of a masked (partially-written,
+> e.g. only some patch-output locations actually stored to by the patch-constant
+> function) output store, needing its own real IR reduction of one of these
+> exact cases (the same technique this project's H6-series/H8-series/H9-series
+> chains have used throughout) to isolate whether the patch-output signature
+> itself is being built incorrectly, or the masked-store lowering simply doesn't
+> know how to look up an element that a real signature does contain
