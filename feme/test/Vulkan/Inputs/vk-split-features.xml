@@ -11,9 +11,10 @@
      `VK_EXT_extended_dynamic_state`, `VK_KHR_maintenance5`,
      `VK_KHR_line_rasterization`, `VK_KHR_dynamic_rendering_local_read`,
      `VK_KHR_map_memory2`, `VK_EXT_mesh_shader`, and
-     `VK_KHR_push_descriptor`, the eight extensions `SUPPORTED_EXTENSIONS`
-     lists, whose commands must be read out of `<extensions>` rather than
-     out of any core feature. -->
+     `VK_KHR_push_descriptor`, plus roadmap H10's `VK_KHR_surface`,
+     `VK_EXT_headless_surface`, and `VK_KHR_swapchain`: the eleven
+     extensions `SUPPORTED_EXTENSIONS` lists, whose commands must be read
+     out of `<extensions>` rather than out of any core feature. -->
 <registry>
   <commands>
     <command>
@@ -76,6 +77,18 @@
     <command>
       <proto><type>void</type><name>vkCmdPushDescriptorSetKHR</name></proto>
       <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkGetPhysicalDeviceSurfaceSupportKHR</name></proto>
+      <param><type>VkPhysicalDevice</type><name>physicalDevice</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkCreateHeadlessSurfaceEXT</name></proto>
+      <param><type>VkInstance</type><name>instance</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkCreateSwapchainKHR</name></proto>
+      <param><type>VkDevice</type><name>device</name></param>
     </command>
   </commands>
   <feature api="vulkan" name="VK_BASE_VERSION_1_0" number="1.0">
@@ -161,6 +174,24 @@
                supported="vulkan">
       <require>
         <command name="vkCmdPushDescriptorSetKHR"/>
+      </require>
+    </extension>
+    <extension name="VK_KHR_surface" number="1" type="instance"
+               supported="vulkan">
+      <require>
+        <command name="vkGetPhysicalDeviceSurfaceSupportKHR"/>
+      </require>
+    </extension>
+    <extension name="VK_EXT_headless_surface" number="207" type="instance"
+               supported="vulkan">
+      <require>
+        <command name="vkCreateHeadlessSurfaceEXT"/>
+      </require>
+    </extension>
+    <extension name="VK_KHR_swapchain" number="2" type="device"
+               supported="vulkan">
+      <require>
+        <command name="vkCreateSwapchainKHR"/>
       </require>
     </extension>
   </extensions>

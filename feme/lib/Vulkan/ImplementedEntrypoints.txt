@@ -357,3 +357,19 @@ vkCmdSetLineStippleKHR
 # apiVersion (CommandBuffer.cpp).
 vkCmdSetRenderingAttachmentLocations
 vkCmdSetRenderingInputAttachmentIndices
+
+# Roadmap H10: VK_KHR_surface + VK_EXT_headless_surface (Surface.cpp) and
+# VK_KHR_swapchain (Swapchain.cpp) -- see FeMeVulkanDesign.md's
+# "Window-system integration".
+vkCreateHeadlessSurfaceEXT
+vkDestroySurfaceKHR
+vkGetPhysicalDeviceSurfaceSupportKHR
+vkGetPhysicalDeviceSurfaceCapabilitiesKHR
+vkGetPhysicalDeviceSurfaceFormatsKHR
+vkGetPhysicalDeviceSurfacePresentModesKHR
+vkCreateSwapchainKHR
+vkDestroySwapchainKHR
+vkGetSwapchainImagesKHR
+vkAcquireNextImageKHR
+vkQueuePresentKHR
+

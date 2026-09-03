@@ -103,6 +103,8 @@ add_feme_library(FeMeVulkanCore STATIC
   ProcAddr.cpp
   QueryPool.cpp
   RenderPass.cpp
+  Surface.cpp
+  Swapchain.cpp
   Sync.cpp
 
   DISABLE_INSTALL

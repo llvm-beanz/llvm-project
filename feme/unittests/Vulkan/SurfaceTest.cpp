@@ -1,0 +1,148 @@
+//===- SurfaceTest.cpp - VkSurfaceKHR tests ---------------------*- C++
+//-*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#define VK_NO_PROTOTYPES
+#include "EntryPoints.h"
+#include "Icd.h"
+#include "Objects.h"
+
+#include "gtest/gtest.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
+using namespace feme::vulkan;
+
+namespace {
+
+class SurfaceTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    VkInstanceCreateInfo InstInfo{};
+    ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+    uint32_t Count = 1;
+    ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+              VK_SUCCESS);
+
+    VkHeadlessSurfaceCreateInfoEXT SurfaceInfo{};
+    SurfaceInfo.sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT;
+    ASSERT_EQ(
+        vkCreateHeadlessSurfaceEXT(Instance, &SurfaceInfo, nullptr, &Surface),
+        VK_SUCCESS);
+    ASSERT_NE(Surface, VK_NULL_HANDLE);
+  }
+  void TearDown() override {
+    vkDestroySurfaceKHR(Instance, Surface, nullptr);
+    vkDestroyInstance(Instance, nullptr);
+  }
+
+  VkInstance Instance = VK_NULL_HANDLE;
+  VkPhysicalDevice Physical = VK_NULL_HANDLE;
+  VkSurfaceKHR Surface = VK_NULL_HANDLE;
+};
+
+TEST(SurfaceInstance, EnumerateInstanceExtensionsReportsSurfaceExtensions) {
+  uint32_t Count = 0;
+  ASSERT_EQ(vkEnumerateInstanceExtensionProperties(nullptr, &Count, nullptr),
+            VK_SUCCESS);
+  ASSERT_GE(Count, 2u);
+  std::vector<VkExtensionProperties> Extensions(Count);
+  ASSERT_EQ(vkEnumerateInstanceExtensionProperties(nullptr, &Count,
+                                                   Extensions.data()),
+            VK_SUCCESS);
+
+  bool HasSurface = false, HasHeadless = false;
+  for (const VkExtensionProperties &Ext : Extensions) {
+    HasSurface |= std::strcmp(Ext.extensionName, "VK_KHR_surface") == 0;
+    HasHeadless |=
+        std::strcmp(Ext.extensionName, "VK_EXT_headless_surface") == 0;
+    // (roadmap H10) `VK_KHR_swapchain` is `type="device"`, so it must
+    // *not* appear in the instance-level list -- the whole point of this
+    // milestone's own instance/device extension split.
+    EXPECT_STRNE(Ext.extensionName, "VK_KHR_swapchain");
+  }
+  EXPECT_TRUE(HasSurface);
+  EXPECT_TRUE(HasHeadless);
+}
+
+TEST(SurfaceInstance, CreateInstanceAcceptsSurfaceExtensions) {
+  const char *Exts[] = {"VK_KHR_surface", "VK_EXT_headless_surface"};
+  VkInstanceCreateInfo CreateInfo{};
+  CreateInfo.enabledExtensionCount = 2;
+  CreateInfo.ppEnabledExtensionNames = Exts;
+  VkInstance Instance = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateInstance(&CreateInfo, nullptr, &Instance), VK_SUCCESS);
+  vkDestroyInstance(Instance, nullptr);
+}
+
+TEST(SurfaceInstance, CreateInstanceRejectsDeviceOnlyExtensionByName) {
+  // `VK_KHR_swapchain` is a real, implemented extension name (Swapchain.h)
+  // -- just not one this ICD ever accepts at the *instance* level.
+  const char *Ext = "VK_KHR_swapchain";
+  VkInstanceCreateInfo CreateInfo{};
+  CreateInfo.enabledExtensionCount = 1;
+  CreateInfo.ppEnabledExtensionNames = &Ext;
+  VkInstance Instance = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateInstance(&CreateInfo, nullptr, &Instance),
+            VK_ERROR_EXTENSION_NOT_PRESENT);
+}
+
+TEST_F(SurfaceTest, SurfaceSupportIsAlwaysTrue) {
+  VkBool32 Supported = VK_FALSE;
+  EXPECT_EQ(
+      vkGetPhysicalDeviceSurfaceSupportKHR(Physical, 0, Surface, &Supported),
+      VK_SUCCESS);
+  EXPECT_EQ(Supported, VK_TRUE);
+}
+
+TEST_F(SurfaceTest, CapabilitiesReportHeadlessSentinelExtent) {
+  VkSurfaceCapabilitiesKHR Caps{};
+  ASSERT_EQ(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(Physical, Surface, &Caps),
+            VK_SUCCESS);
+  EXPECT_EQ(Caps.minImageCount, 1u);
+  EXPECT_EQ(Caps.currentExtent.width, UINT32_MAX);
+  EXPECT_EQ(Caps.currentExtent.height, UINT32_MAX);
+  EXPECT_GE(Caps.maxImageExtent.width, Caps.minImageExtent.width);
+  EXPECT_NE(Caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0u);
+}
+
+TEST_F(SurfaceTest, FormatsIncludeMandatoryPair) {
+  uint32_t Count = 0;
+  ASSERT_EQ(
+      vkGetPhysicalDeviceSurfaceFormatsKHR(Physical, Surface, &Count, nullptr),
+      VK_SUCCESS);
+  ASSERT_GT(Count, 0u);
+  std::vector<VkSurfaceFormatKHR> Formats(Count);
+  ASSERT_EQ(vkGetPhysicalDeviceSurfaceFormatsKHR(Physical, Surface, &Count,
+                                                 Formats.data()),
+            VK_SUCCESS);
+  bool HasBGRA = false;
+  for (const VkSurfaceFormatKHR &Fmt : Formats)
+    HasBGRA |= Fmt.format == VK_FORMAT_B8G8R8A8_UNORM &&
+               Fmt.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+  EXPECT_TRUE(HasBGRA);
+}
+
+TEST_F(SurfaceTest, PresentModesIncludeFifo) {
+  uint32_t Count = 0;
+  ASSERT_EQ(vkGetPhysicalDeviceSurfacePresentModesKHR(Physical, Surface, &Count,
+                                                      nullptr),
+            VK_SUCCESS);
+  ASSERT_GT(Count, 0u);
+  std::vector<VkPresentModeKHR> Modes(Count);
+  ASSERT_EQ(vkGetPhysicalDeviceSurfacePresentModesKHR(Physical, Surface, &Count,
+                                                      Modes.data()),
+            VK_SUCCESS);
+  EXPECT_NE(std::find(Modes.begin(), Modes.end(), VK_PRESENT_MODE_FIFO_KHR),
+            Modes.end());
+}
+
+} // namespace

@@ -14,6 +14,7 @@
 #include "Image.h"
 #include "Objects.h"
 #include "ProcAddr.h"
+#include "Surface.h"
 
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
@@ -48,11 +49,21 @@ VkResult enumerate(uint32_t TrueCount, const T *Source, uint32_t *pCount,
 VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkCreateInstance(
     const VkInstanceCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkInstance *pInstance) {
-  // V0 implements no instance extension (see "Loader Integration": "The
-  // driver reports no device extension merely because Vulkan-Headers
-  // declares it" -- the same rule applies at the instance level).
-  if (pCreateInfo->enabledExtensionCount > 0)
-    return VK_ERROR_EXTENSION_NOT_PRESENT;
+  // (roadmap H10) Only an extension this driver actually implements at the
+  // instance level (`getSupportedInstanceExtensions`, Surface.h) may be
+  // enabled -- mirroring `vkCreateDevice`'s own per-name validation loop
+  // below for device-level extensions -- rather than V0's original blanket
+  // "any nonzero count is refused" rule, now that a genuine instance
+  // extension exists to validate against.
+  for (uint32_t I = 0; I != pCreateInfo->enabledExtensionCount; ++I) {
+    bool Supported = false;
+    for (const VkExtensionProperties &Extension :
+         getSupportedInstanceExtensions())
+      Supported |= std::strcmp(Extension.extensionName,
+                               pCreateInfo->ppEnabledExtensionNames[I]) == 0;
+    if (!Supported)
+      return VK_ERROR_EXTENSION_NOT_PRESENT;
+  }
 
   Allocator Alloc(pAllocator);
   Instance *Obj =
@@ -92,8 +103,13 @@ feme::vulkan::vkEnumerateInstanceExtensionProperties(
     VkExtensionProperties *pProperties) {
   if (pLayerName)
     return VK_ERROR_LAYER_NOT_PRESENT;
+  // (roadmap H10) Was `getSupportedDeviceExtensions()` -- every extension
+  // that function lists is `type="device"` in `vk.xml` and belongs only in
+  // `vkEnumerateDeviceExtensionProperties`'s answer; `VK_KHR_surface`/
+  // `VK_EXT_headless_surface` (Surface.h) are this ICD's first
+  // `type="instance"` extensions, so the two lists must finally differ.
   llvm::ArrayRef<VkExtensionProperties> Extensions =
-      getSupportedDeviceExtensions();
+      getSupportedInstanceExtensions();
   return enumerate<VkExtensionProperties>(
       static_cast<uint32_t>(Extensions.size()), Extensions.data(),
       pPropertyCount, pProperties);

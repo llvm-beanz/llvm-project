@@ -1239,6 +1239,14 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // extension by name regardless of the advertised `apiVersion`, so it
       // must be listed here too.
       {VK_EXT_MESH_SHADER_EXTENSION_NAME, VK_EXT_MESH_SHADER_SPEC_VERSION},
+      // (roadmap H10) `vkCreateSwapchainKHR`/`vkDestroySwapchainKHR`/
+      // `vkGetSwapchainImagesKHR`/`vkAcquireNextImageKHR`/
+      // `vkQueuePresentKHR` (Swapchain.{h,cpp}) are implemented against
+      // `VK_KHR_surface`/`VK_EXT_headless_surface` (Surface.{h,cpp}). Unlike
+      // those two, `VK_KHR_swapchain` is `type="device"` in `vk.xml`
+      // (`depends="VK_KHR_surface"`), so it belongs in this device-level
+      // list, not `getSupportedInstanceExtensions` (Surface.h).
+      {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_SPEC_VERSION},
   };
   return Extensions;
 }

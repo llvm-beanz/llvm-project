@@ -129,6 +129,19 @@ SUPPORTED_EXTENSIONS = (
     # only once roadmap H7g's own feature-bit flip let this case clear an
     # earlier gate for the first time.
     "VK_KHR_push_descriptor",
+    # (roadmap H10) `VK_KHR_surface`/`VK_EXT_headless_surface`'s object/
+    # query/creation commands (Surface.{h,cpp}) and `VK_KHR_swapchain`'s
+    # own commands (Swapchain.{h,cpp}) -- see FeMeVulkanDesign.md's
+    # "Window-system integration". Unlike every extension above,
+    # `VK_KHR_surface`/`VK_EXT_headless_surface` are `type="instance"` in
+    # `vk.xml`, not `type="device"`; this tuple does not distinguish
+    # instance- from device-level extensions itself (dispatch level is
+    # inferred per-command from `INSTANCE_HANDLE_TYPES`/
+    # `DEVICE_HANDLE_TYPES` below instead), so listing all three together
+    # here is correct.
+    "VK_KHR_surface",
+    "VK_EXT_headless_surface",
+    "VK_KHR_swapchain",
 )
 
 # First-parameter handle types that make a command dispatched at the

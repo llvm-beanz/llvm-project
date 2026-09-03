@@ -3189,7 +3189,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 32u);
+  ASSERT_EQ(Count, 33u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -3258,6 +3258,8 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   EXPECT_TRUE(HasExtension(VK_KHR_MAP_MEMORY_2_EXTENSION_NAME));
   // Roadmap H2.
   EXPECT_TRUE(HasExtension(VK_KHR_MULTIVIEW_EXTENSION_NAME));
+  // Roadmap H10.
+  EXPECT_TRUE(HasExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
@@ -3289,7 +3291,9 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Second), VK_SUCCESS);
   vkDestroyDevice(Second, nullptr);
 
-  const char *Unsupported = "VK_KHR_swapchain";
+  // (roadmap H10 implemented `VK_KHR_swapchain` for real, so this can no
+  // longer use that name as its "known unsupported" example.)
+  const char *Unsupported = "VK_KHR_not_implemented";
   DevInfo.ppEnabledExtensionNames = &Unsupported;
   EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Second),
             VK_ERROR_EXTENSION_NOT_PRESENT);

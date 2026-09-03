@@ -29,6 +29,8 @@ add_feme_unittest(FeMeVulkanTests
   PrivateDataTest.cpp
   ProcAddrTest.cpp
   RenderPassTest.cpp
+  SurfaceTest.cpp
+  SwapchainTest.cpp
   SyncTest.cpp
   )
 target_link_libraries(FeMeVulkanTests

@@ -883,6 +883,43 @@ vkGetPrivateData(VkDevice device, VkObjectType objectType,
                  uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
                  uint64_t *pData);
 
+// Roadmap H10: `VK_KHR_surface` + `VK_EXT_headless_surface` (Surface.h) and
+// `VK_KHR_swapchain` (Swapchain.h) -- see FeMeVulkanDesign.md's
+// "Window-system integration".
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateHeadlessSurfaceEXT(
+    VkInstance instance, const VkHeadlessSurfaceCreateInfoEXT *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surface,
+                    const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
+    VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex,
+    VkSurfaceKHR surface, VkBool32 *pSupported);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+    VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
+    VkSurfaceCapabilitiesKHR *pSurfaceCapabilities);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(
+    VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
+    uint32_t *pSurfaceFormatCount, VkSurfaceFormatKHR *pSurfaceFormats);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
+    VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
+    uint32_t *pPresentModeCount, VkPresentModeKHR *pPresentModes);
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
+    VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkSwapchainKHR *pSwapchain);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain,
+                     const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainImagesKHR(
+    VkDevice device, VkSwapchainKHR swapchain, uint32_t *pSwapchainImageCount,
+    VkImage *pSwapchainImages);
+VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
+    VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout,
+    VkSemaphore semaphore, VkFence fence, uint32_t *pImageIndex);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_ENTRYPOINTS_H
