@@ -1686,10 +1686,15 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
   // even if every lane that's still active would compute the same address
   // and value (as in a resource write inside a masked loop whose address
   // does not itself depend on the lane), a deactivated lane must still be
-  // prevented from touching memory at all.
+  // prevented from touching memory at all. `Matched.Comparator`
+  // (`AtomicCompareExchangeTyped` only, roadmap H8w) is an ordinary scalar
+  // `i32` operand exactly like `StoredValue`, just never vector-typed
+  // (SPIR-V's own comparator is always a scalar), so it needs no
+  // `StoredValueIsVector`-style decomposition of its own.
   bool AnyDivergent = Widened.count(Matched.DescriptorIndex) ||
                       Widened.count(Matched.Offset) || StoredValueDivergent ||
-                      Widened.count(Matched.Mask);
+                      Widened.count(Matched.Mask) ||
+                      (Matched.Comparator && Widened.count(Matched.Comparator));
   if (!AnyDivergent)
     return; // Every operand is uniform: leave the scalar call as-is.
 
@@ -1703,6 +1708,8 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
   Function *Callee = CI.getCalledFunction();
   Value *WideDescriptorIndex = getWidened(Matched.DescriptorIndex, Builder);
   Value *WideOffset = getWidened(Matched.Offset, Builder);
+  Value *WideComparator =
+      Matched.Comparator ? getWidened(Matched.Comparator, Builder) : nullptr;
 
   Value *WideStoredValue = nullptr;
   SmallVector<Value *, 4> WideStoredComponents;
@@ -1720,8 +1727,16 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
 
   Value *Result = nullptr;
   SmallVector<Value *, 4> LoadComponents;
-  bool ResultIsVector = !Matched.StoredValue && CI.getType()->isVectorTy();
-  if (!Matched.StoredValue) {
+  // A plain store's call type is void (no result); a load's or, since
+  // roadmap H8w, an `Atomic*Typed` call's is not -- the latter carries a
+  // `StoredValue` operand too (the RMW/xchg value), so `CI.getType()`
+  // itself, not `!Matched.StoredValue`, is what actually distinguishes
+  // "produces a result to reassemble" from "a pure side effect" (mirroring
+  // `widenImageCall`'s own identical `ResultIsVoid`/`ResultIsVector` split
+  // for the same reason, roadmap H8v).
+  bool ResultIsVoid = CI.getType()->isVoidTy();
+  bool ResultIsVector = !ResultIsVoid && CI.getType()->isVectorTy();
+  if (!ResultIsVoid) {
     if (ResultIsVector) {
       // "Vectors become components, not nested vectors": a vector-typed
       // load (e.g. a typed-buffer element) is decomposed into one `<W x
@@ -1750,6 +1765,14 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
     CallArgs.push_back(CI.getArgOperand(1)); // ResourceHeapCount
     CallArgs.push_back(LaneDescriptorIndex);
     CallArgs.push_back(LaneOffset);
+    if (Matched.Comparator) {
+      // `AtomicCompareExchangeTyped` only (roadmap H8w): the comparator
+      // operand comes ahead of the value operand (see
+      // `feme::cpu::createAtomicCompareExchangeTyped`'s own argument
+      // order).
+      CallArgs.push_back(Builder.CreateExtractElement(
+          WideComparator, Builder.getInt32(Lane), "lane.comparator"));
+    }
     if (Matched.StoredValue) {
       if (StoredValueIsVector) {
         if (StoredValueDivergent) {
