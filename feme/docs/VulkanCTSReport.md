@@ -22187,3 +22187,80 @@ Characterizing the remaining 6,820 `Failed`:
 No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
 needed: this row is a pure correctness fix (an over-strict validation
 check loosened to match the spec), touching no feature bit or extension.
+
+## Roadmap H9c: measured impact
+
+Fixes the 1,276 `vkCreateGraphicsPipelines` failures H9a's own re-run
+above characterized (all `"feme-cpu-wrap-patch-constant: masked output
+store references an unknown patch-output signature element"`), via two
+distinct fixes, both isolated with a real IR reduction built directly
+from the shape CTS's own `vktQueryPoolStatisticsTests.cpp`
+tessellation-control shader generator emits: an unconditional,
+dynamically-indexed per-vertex write (`out_color[gl_InvocationID] =
+...`) alongside an `if (gl_InvocationID == 0)`-guarded `TessLevelOuter`
+write, with no group-sync barrier at all. This shape is not specific to
+`query_pool.statistics_query` -- it is the shape essentially every real
+GLSL `layout(vertices = N) out;` tessellation-control shader takes when
+it guards its tess-factor write by invocation ID rather than using a
+barrier -- so this row's own fix is expected to unblock every other CTS
+group exercising a tessellation-control shader's patch-constant function
+against this ICD, not only the 1,276 cases H9a's own re-run counted.
+
+1. **Root cause of this row's own described error**:
+   `isPatchConstantOnlyEntry` (`CanonicalizeStage.cpp`) resolved each
+   store's target via `getStageIOBaseAndOffset` alone (constant-offset
+   access only), so the dynamically-vertex-indexed per-vertex store
+   above was invisible to it; it saw only the guarded `TessLevelOuter`
+   write, wrongly concluded the whole entry was patch-constant-only, and
+   cloned the entire body -- per-vertex store included -- into a new
+   `.patchconstant` function, where `classifySPIRVElement`'s
+   `HullPatchConstant`-phase branch misclassifies that non-`Patch`-
+   decorated store as a captured-value read-back rather than a
+   `PatchOutput` signature element. Fixed by resolving each store via
+   the general `getStageIOGlobal` helper instead (already used
+   elsewhere in this file for the same three shapes).
+2. **A second, newly-exposed blocker**: fixing (1) correctly
+   re-classified this shape as genuinely mixed (not patch-constant-only),
+   which roadmap H4f had explicitly left unsplit -- so
+   `compileAndValidateStages`'s own unconditional "a `.patchconstant`
+   sibling must exist" expectation failed instead ("no hull entry point
+   named 'main.patchconstant'"), still blocking every real CTS-shaped
+   tessellation-control shader. Implemented the general, prune-based
+   split H4f deferred: clone the whole function, then erase whichever
+   frequency's stores don't belong in each copy
+   (`pruneStageIOStoresByFrequency`) -- sound because no barrier means
+   neither invocation ever depends on the other's data in either phase.
+
+New/updated unit tests:
+`CanonicalizeStageTest.NoBarrierMixedFrequencyEntryWithDynamicVertexIndexedStoreIsSplitAndPruned`,
+`GraphicsPipelineTest.AcceptsTessellationControlMaskedPatchConstantStore`,
+`AcceptsTessellationControlBarrierlessMixedStore`, and
+`AcceptsTessellationControlBarrierlessDynamicVertexIndexedMixedStore`
+(the last matching the real CTS shape exactly, and the case that failed
+with this row's own exact error message before either fix landed). The
+pre-existing `HullStageWithNoBarrierIsNotSplit`/
+`NoBarrierPatchConstantOnlyEntryIsSplitWhole` tests continue to pass
+unmodified, confirming neither of H4f's own two cases regressed. `ninja
+check-feme` (assertions-enabled, ccache build) passes in full,
+2426/2485 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`).
+
+**A full `deqp-vk` re-run was assessed and not performed**: no
+prebuilt `deqp-vk` binary exists under the `/home/dev/dev/VK-GL-CTS/`
+checkout, and building the full CTS framework (and its own dependency
+chain) from source was judged infeasible within this session's scope.
+In its place, the exact real shader shape was extracted directly from
+CTS's own source and reproduced end to end via `GraphicsPipelineTest`
+(`FEME_VULKAN_LOG_CREATION_ERRORS=1` confirmed the identical diagnostic
+message before the fix, and its absence after), the same standard of
+evidence prior rows' own single-case spot-checks (e.g. H9a's own
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` re-run above) used in place of a
+full re-run. Since no full re-run was performed, the exact post-fix
+`Passed`/`Failed`/`NotSupported` tallies for
+`dEQP-VK.query_pool.statistics_query.*` cannot be updated here; the
+1,276-case `vkCreateGraphicsPipelines` failure count above is expected
+to move to `Passed` (pending a real re-run to confirm), and no new
+regression is expected given `check-feme`'s own full pass.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed: this row is a pure correctness fix in stage-splitting/
+classification logic, touching no feature bit or extension.

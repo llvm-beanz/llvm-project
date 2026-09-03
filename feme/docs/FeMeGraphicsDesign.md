@@ -777,11 +777,31 @@ address-space-8 store the entry makes is patch-frequency --
 `splitBarrierlessTessellationControlEntry` clones the *whole* entry as
 `<name>.patchconstant`, replacing the original with a trivial
 `ret void` control-point stub, rather than treating the absence of a
-barrier as an error; an entry with no barrier that still writes an
-ordinary (non-patch-frequency) per-vertex output is left unsplit exactly
-as before (diagnosed downstream instead, since that shape cannot
-legally arise for `OutputVertices == 1` and is not yet otherwise
-supported). Roadmap H4c closed this
+barrier as an error; an entry with no barrier that writes no
+patch-frequency output at all is left unsplit exactly as before
+(diagnosed downstream instead). Roadmap H9c extended this to a third,
+genuinely-mixed shape: a no-barrier entry writing *both* a patch-frequency
+tess-factor and an ordinary per-vertex output -- the shape essentially
+every real GLSL tessellation-control shader takes, since a
+`layout(vertices = N) out;` shader legally omits the barrier only by
+guarding its tess-factor write with `if (gl_InvocationID == 0)` and
+writing its own per-vertex output(s) unconditionally, with no
+synchronization needed between the two in either direction. Unlike
+`isPatchConstantOnlyEntry`'s whole-function clone above,
+`splitBarrierlessTessellationControlEntry` prunes *both* clones down to
+their own frequency's stores (`pruneStageIOStoresByFrequency`) rather than
+leaving either unpruned: this is sound for the same "no barrier means no
+cross-invocation dependency" reason the zero-barrier case is sound at
+all, and avoids the misclassification hazard an earlier, rejected
+whole-function-clone design (considered at H4f but not implemented) would
+have hit -- `classifySPIRVElement`'s `HullPatchConstant`-phase branch
+treats any non-`Patch`-decorated address-space-8 write as a captured
+cross-barrier value's read-back (`Direction::Input`, never a store), so
+an unpruned per-vertex store surviving into the patch-constant clone
+would have been misclassified, which is exactly the defect roadmap H9c
+found and fixed.
+
+Roadmap H4c closed this
 row's original remaining gap -- an SSA value defined before the barrier and
 read back after it, the common real shape a per-patch tessellation factor
 computed from control-point-body data takes -- by threading each such
