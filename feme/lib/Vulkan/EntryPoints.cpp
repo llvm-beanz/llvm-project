@@ -130,6 +130,31 @@ VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkEnumeratePhysicalDevices(
                                      pPhysicalDevices);
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkEnumeratePhysicalDeviceGroups(
+    VkInstance instance, uint32_t *pPhysicalDeviceGroupCount,
+    VkPhysicalDeviceGroupProperties *pPhysicalDeviceGroupProperties) {
+  Instance *Obj = fromHandle<Instance>(instance);
+  VkPhysicalDeviceGroupProperties Group{};
+  Group.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES;
+  Group.physicalDeviceCount = 1;
+  Group.physicalDevices[0] =
+      toHandle<VkPhysicalDevice>(&Obj->getPhysicalDevice());
+  Group.subsetAllocation = VK_FALSE;
+  return enumerate<VkPhysicalDeviceGroupProperties>(
+      1, &Group, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
+}
+
+VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetDeviceGroupPeerMemoryFeatures(
+    VkDevice, uint32_t, uint32_t, uint32_t,
+    VkPeerMemoryFeatureFlags *pPeerMemoryFeatures) {
+  // Every legal call has `localDeviceIndex != remoteDeviceIndex` (a Vulkan
+  // valid-usage requirement), which this ICD's single-physical-device
+  // group (`vkEnumeratePhysicalDeviceGroups` above) can never actually
+  // satisfy -- there is no second, remote device to report a peer-memory
+  // capability toward, so the correct answer is always "none".
+  *pPeerMemoryFeatures = 0;
+}
+
 VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceProperties(
     VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties *pProperties) {
   *pProperties =

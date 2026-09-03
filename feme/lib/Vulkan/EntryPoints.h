@@ -50,6 +50,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(
 VKAPI_ATTR VkResult VKAPI_CALL
 vkEnumeratePhysicalDevices(VkInstance instance, uint32_t *pPhysicalDeviceCount,
                            VkPhysicalDevice *pPhysicalDevices);
+// Roadmap H10c: a real Vulkan 1.4-advertising ICD must implement every
+// core-promoted Vulkan 1.1 command, not just the ones an existing CTS run
+// happened to reach -- `vkEnumeratePhysicalDeviceGroups` was missing
+// entirely, discovered by H10b's own real `dEQP-VK.wsi` re-run once a real
+// (non-headless) surface let the loader's `vki` wrapper resolve and call
+// it for the first time. Reports exactly one, single-device group, since
+// this ICD implements exactly one physical device (`vkEnumeratePhysicalDevices`
+// above).
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumeratePhysicalDeviceGroups(
+    VkInstance instance, uint32_t *pPhysicalDeviceGroupCount,
+    VkPhysicalDeviceGroupProperties *pPhysicalDeviceGroupProperties);
+// The device-group companion of `vkCmdSetDeviceMask` (CommandBuffer.cpp):
+// exactly one physical device in exactly one heap means every peer-memory
+// feature bit that requires a *second* device is meaningless, but the
+// local-device bits themselves must still be reported since an application
+// may legally query them even in a single-device group.
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceGroupPeerMemoryFeatures(
+    VkDevice device, uint32_t heapIndex, uint32_t localDeviceIndex,
+    uint32_t remoteDeviceIndex, VkPeerMemoryFeatureFlags *pPeerMemoryFeatures);
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties(
     VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties *pProperties);
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2(
@@ -951,6 +970,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     VkSemaphore semaphore, VkFence fence, uint32_t *pImageIndex);
 VKAPI_ATTR VkResult VKAPI_CALL
 vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo);
+
+// Roadmap H10c: `VK_KHR_swapchain`'s own device-group companion commands
+// (`vk.xml` gates these on VK_KHR_swapchain + VK_VERSION_1_1, both of
+// which this ICD already advertises) -- discovered missing entirely by
+// H10b's own real `dEQP-VK.wsi` re-run alongside
+// `vkEnumeratePhysicalDeviceGroups` above, for the same reason: no prior
+// CTS run had a real surface to reach them through. Every mode this ICD
+// can ever report is `VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR`, since
+// it implements exactly one physical device -- there is no second, remote
+// device to sum/broadcast a present to.
+VKAPI_ATTR VkResult VKAPI_CALL vkGetDeviceGroupPresentCapabilitiesKHR(
+    VkDevice device,
+    VkDeviceGroupPresentCapabilitiesKHR *pDeviceGroupPresentCapabilities);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetDeviceGroupSurfacePresentModesKHR(
+    VkDevice device, VkSurfaceKHR surface,
+    VkDeviceGroupPresentModeFlagsKHR *pModes);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDevicePresentRectanglesKHR(
+    VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
+    uint32_t *pRectCount, VkRect2D *pRects);
 
 } // namespace feme::vulkan
 

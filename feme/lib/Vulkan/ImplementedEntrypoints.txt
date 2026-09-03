@@ -14,6 +14,9 @@ vkEnumerateInstanceLayerProperties
 vkGetInstanceProcAddr
 
 vkEnumeratePhysicalDevices
+# Roadmap H10c: core Vulkan 1.1 (see EntryPoints.h's own comment).
+vkEnumeratePhysicalDeviceGroups
+vkGetDeviceGroupPeerMemoryFeatures
 vkGetPhysicalDeviceProperties
 vkGetPhysicalDeviceProperties2
 vkGetPhysicalDeviceFeatures
@@ -372,4 +375,9 @@ vkDestroySwapchainKHR
 vkGetSwapchainImagesKHR
 vkAcquireNextImageKHR
 vkQueuePresentKHR
+# Roadmap H10c: VK_KHR_swapchain's own device-group companion commands
+# (see EntryPoints.h's own comment).
+vkGetDeviceGroupPresentCapabilitiesKHR
+vkGetDeviceGroupSurfacePresentModesKHR
+vkGetPhysicalDevicePresentRectanglesKHR
 
