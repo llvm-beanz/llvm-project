@@ -228,7 +228,6 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EX
 }
 )mlir";
 
-
 /// Roadmap H3a: reads `gl_ViewportIndex` back as a *fragment*-shader
 /// `Input`-storage-class builtin (the other half of
 /// `GL_ARB_shader_viewport_layer_array`'s support, `dEQP-VK.draw.*.
@@ -257,7 +256,6 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ShaderViewportIn
   spirv.ExecutionMode @main "OriginUpperLeft"
 }
 )mlir";
-
 
 /// A 2-vertex horizontal line at NDC y = -0.25 (screen row 1's pixel
 /// center on a 4x4 target -- real Vulkan clip-space Y-down convention,
@@ -1192,8 +1190,9 @@ TEST_F(DrawTest, VertexStageWritesStorageBuffer) {
   LayoutInfo.setLayoutCount = 1;
   LayoutInfo.pSetLayouts = &SetLayout;
   VkPipelineLayout StorageLayout = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &StorageLayout),
-            VK_SUCCESS);
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &StorageLayout),
+      VK_SUCCESS);
 
   VkDeviceMemory BufMemory = VK_NULL_HANDLE;
   VkBuffer Buf = createBuffer(3 * sizeof(uint32_t), BufMemory,
@@ -1280,12 +1279,13 @@ TEST_F(DrawTest, FragmentStageWritesStorageBuffer) {
   LayoutInfo.setLayoutCount = 1;
   LayoutInfo.pSetLayouts = &SetLayout;
   VkPipelineLayout StorageLayout = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &StorageLayout),
-            VK_SUCCESS);
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &StorageLayout),
+      VK_SUCCESS);
 
   VkDeviceMemory BufMemory = VK_NULL_HANDLE;
-  VkBuffer Buf =
-      createBuffer(sizeof(uint32_t), BufMemory, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  VkBuffer Buf = createBuffer(sizeof(uint32_t), BufMemory,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   void *Mapped = nullptr;
   ASSERT_EQ(vkMapMemory(Device, BufMemory, 0, VK_WHOLE_SIZE, 0, &Mapped),
             VK_SUCCESS);
@@ -2742,16 +2742,15 @@ TEST_F(DrawTest, DrawMeshTasksIndirectReadsBuffer) {
   VkPipeline Pipe = createMeshPipeline(Mesh, Fragment);
 
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  VkBuffer Indirect =
-      createBuffer(sizeof(VkDrawMeshTasksIndirectCommandEXT), Memory,
-                  VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkBuffer Indirect = createBuffer(sizeof(VkDrawMeshTasksIndirectCommandEXT),
+                                   Memory, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
   VkDrawMeshTasksIndirectCommandEXT Args{1, 1, 1};
   std::memcpy(fromHandle<Buffer>(Indirect)->data(), &Args, sizeof(Args));
 
   beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
   vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
   vkCmdDrawMeshTasksIndirectEXT(Cmd, Indirect, 0, 1,
-                               sizeof(VkDrawMeshTasksIndirectCommandEXT));
+                                sizeof(VkDrawMeshTasksIndirectCommandEXT));
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
   ASSERT_EQ(submit(), VK_SUCCESS);
@@ -2772,15 +2771,14 @@ TEST_F(DrawTest, RejectsOutOfBoundsIndirectMeshTasksDraw) {
   VkPipeline Pipe = createMeshPipeline(Mesh, Fragment);
 
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  VkBuffer Indirect =
-      createBuffer(sizeof(VkDrawMeshTasksIndirectCommandEXT), Memory,
-                  VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkBuffer Indirect = createBuffer(sizeof(VkDrawMeshTasksIndirectCommandEXT),
+                                   Memory, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
 
   beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
   vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
   // Two commands in a one-command buffer.
   vkCmdDrawMeshTasksIndirectEXT(Cmd, Indirect, 0, 2,
-                               sizeof(VkDrawMeshTasksIndirectCommandEXT));
+                                sizeof(VkDrawMeshTasksIndirectCommandEXT));
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
   EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
@@ -2803,14 +2801,13 @@ TEST_F(DrawTest, DrawMeshTasksIndirectCountClampsToCountBuffer) {
   VkDeviceMemory IndirectMemory = VK_NULL_HANDLE;
   VkBuffer Indirect =
       createBuffer(2 * sizeof(VkDrawMeshTasksIndirectCommandEXT),
-                  IndirectMemory, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+                   IndirectMemory, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
   VkDrawMeshTasksIndirectCommandEXT Args[2] = {{1, 1, 1}, {1, 1, 1}};
   std::memcpy(fromHandle<Buffer>(Indirect)->data(), Args, sizeof(Args));
 
   VkDeviceMemory CountMemory = VK_NULL_HANDLE;
-  VkBuffer CountBuffer =
-      createBuffer(sizeof(uint32_t), CountMemory,
-                  VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkBuffer CountBuffer = createBuffer(sizeof(uint32_t), CountMemory,
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
   // The count buffer names only one draw, even though `maxDrawCount` (2)
   // and the indirect buffer itself both have room for two.
   uint32_t Count = 1;
@@ -2818,9 +2815,8 @@ TEST_F(DrawTest, DrawMeshTasksIndirectCountClampsToCountBuffer) {
 
   beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
   vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
-  vkCmdDrawMeshTasksIndirectCountEXT(
-      Cmd, Indirect, 0, CountBuffer, 0, 2,
-      sizeof(VkDrawMeshTasksIndirectCommandEXT));
+  vkCmdDrawMeshTasksIndirectCountEXT(Cmd, Indirect, 0, CountBuffer, 0, 2,
+                                     sizeof(VkDrawMeshTasksIndirectCommandEXT));
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
   ASSERT_EQ(submit(), VK_SUCCESS);
@@ -3790,8 +3786,8 @@ TEST_F(DrawTest, DepthClampAppliesAfterInterpolationNotBeforeIt) {
   Info.layout = Layout;
   Info.renderPass = LocalPass;
   VkPipeline Pipe = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
-                                      nullptr, &Pipe),
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
             VK_SUCCESS);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
@@ -4096,8 +4092,8 @@ TEST_F(DrawTest, DepthBoundsTestRejectsOutOfRangeFragments) {
   Info.layout = Layout;
   Info.renderPass = LocalPass;
   VkPipeline Pipe = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
-                                      nullptr, &Pipe),
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
             VK_SUCCESS);
 
   VkCommandBufferBeginInfo BeginInfo{};
@@ -5461,17 +5457,17 @@ TEST_F(DrawTest, PipelineStatisticsQueryCountsAllElevenCounters) {
                                   VK_QUERY_RESULT_64_BIT |
                                       VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
             VK_SUCCESS);
-  EXPECT_EQ(Results[0], 3u);  // InputAssemblyVertices: one triangle's 3.
-  EXPECT_EQ(Results[1], 1u);  // InputAssemblyPrimitives: one triangle.
-  EXPECT_EQ(Results[2], 3u);  // VertexShaderInvocations: 3 vertices.
-  EXPECT_EQ(Results[3], 0u);  // GeometryShaderInvocations: no geometry stage.
-  EXPECT_EQ(Results[4], 0u);  // GeometryShaderPrimitives: no geometry stage.
-  EXPECT_EQ(Results[5], 1u);  // ClippingInvocations: one triangle clipped.
-  EXPECT_GE(Results[6], 1u);  // ClippingPrimitives: at least the 1 clipped.
+  EXPECT_EQ(Results[0], 3u); // InputAssemblyVertices: one triangle's 3.
+  EXPECT_EQ(Results[1], 1u); // InputAssemblyPrimitives: one triangle.
+  EXPECT_EQ(Results[2], 3u); // VertexShaderInvocations: 3 vertices.
+  EXPECT_EQ(Results[3], 0u); // GeometryShaderInvocations: no geometry stage.
+  EXPECT_EQ(Results[4], 0u); // GeometryShaderPrimitives: no geometry stage.
+  EXPECT_EQ(Results[5], 1u); // ClippingInvocations: one triangle clipped.
+  EXPECT_GE(Results[6], 1u); // ClippingPrimitives: at least the 1 clipped.
   EXPECT_GE(Results[7],
-            uint64_t(Extent * Extent));  // FragmentShaderInvocations.
+            uint64_t(Extent * Extent)); // FragmentShaderInvocations.
   EXPECT_EQ(Results[8], 0u);  // TessControlShaderPatches: no tessellation.
-  EXPECT_EQ(Results[9], 0u); // TessEvalShaderInvocations: no tessellation.
+  EXPECT_EQ(Results[9], 0u);  // TessEvalShaderInvocations: no tessellation.
   EXPECT_EQ(Results[10], 0u); // ComputeShaderInvocations: this is a draw.
   EXPECT_EQ(Results[11], 1u); // Availability.
 
@@ -6392,8 +6388,9 @@ TEST_F(DrawTest,
 /// `gl_FragCoord` alone. Before the fix, this test's own read-back below
 /// would not reliably show sample 2's own seeded red value (128); after
 /// it, it does.
-TEST_F(DrawTest,
-       SubpassLoadReadsAnEarlierSubpassMultisampledColorOutputWithADifferentPipelineSampleCount) {
+TEST_F(
+    DrawTest,
+    SubpassLoadReadsAnEarlierSubpassMultisampledColorOutputWithADifferentPipelineSampleCount) {
   constexpr uint32_t MSSampleCount = 4;
 
   VkImage MSImage = VK_NULL_HANDLE, OutputImage = VK_NULL_HANDLE;
@@ -6628,7 +6625,6 @@ TEST_F(DrawTest,
   vkDestroyImage(Device, MSImage, nullptr);
   vkFreeMemory(Device, MSMemory, nullptr);
 }
-
 
 /// ViewIndex`) writes a different color per multiview view, into a
 /// two-layer framebuffer bound by a two-view (`viewMask == 0b11`) render
@@ -7091,6 +7087,186 @@ TEST_F(DrawTest, GeometryStageLayerOutputRoutesToANonMultiviewLayer) {
   vkDestroyImageView(Device, LayeredView, nullptr);
   vkDestroyImage(Device, LayeredImage, nullptr);
   vkFreeMemory(Device, LayeredMemory, nullptr);
+}
+
+/// (Roadmap H9b) A vertex stage with a plain (non-arrayed) `vec4` output
+/// varying at location 0 -- exactly `vktQueryPoolStatisticsTests.cpp`'s
+/// own `out vec4 out_color` -- paired with `ForwardsPerVertexColorInput
+/// GeometrySource` below (an `in vec4 in_color[]`-shaped, per-vertex-array
+/// geometry input at that same location) reproduces the exact "vertex/
+/// domain stage output -> geometry stage input: element N and its
+/// producer element M disagree on component/row count or type" shape:
+/// `CanonicalizeStage.cpp`'s `addElements` folds the geometry input's own
+/// `RowCount` up to its per-vertex array extent (3, one per triangle
+/// vertex) while the vertex output's own `RowCount` stays 1, and before
+/// this row's `StageLink.cpp` fix `linkStageElements` compared those two
+/// raw values directly -- an unconditional mismatch for any real
+/// vertex+geometry pipeline sharing a varying this way.
+constexpr llvm::StringLiteral SolidRedColorVaryingVertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @out_color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %c = spirv.Constant dense<[1.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %colorp = spirv.mlir.addressof @out_color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %colorp, %c : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @out_color
+}
+)mlir";
+
+/// (Roadmap H9b) Reads its own per-vertex-array `in_color[]` varying
+/// input (one element per assembled triangle vertex, linked against
+/// `SolidRedColorVaryingVertexSource`'s plain `vec4` output above) via an
+/// `spirv.AccessChain` per vertex -- mirroring `TessControlBarrierless
+/// DynamicVertexIndexedMixedStoreSource`'s own `!spirv.array<3xvector<
+/// 4xf32>>`-typed global, but as an `Input` read here instead of an
+/// `Output` store -- and forwards each one straight through to its own
+/// `out_color` before emitting that vertex, at the same fixed,
+/// oversized-triangle positions `LayerOneLayeredGeometrySource` above
+/// uses. Never reads `gl_in[].gl_Position` (a structurally different,
+/// builtin-interface-block code path -- roadmap H13a's own scope, not
+/// this row's), keeping this test isolated to the plain-varying gap H9b
+/// actually fixes.
+constexpr llvm::StringLiteral ForwardsPerVertexColorInputGeometrySource =
+    R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Geometry], []> {
+  spirv.GlobalVariable @in_color {location = 0 : i32} : !spirv.ptr<!spirv.array<3xvector<4xf32>>, Input>
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @out_color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %colorp = spirv.mlir.addressof @in_color : !spirv.ptr<!spirv.array<3xvector<4xf32>>, Input>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    %ocp = spirv.mlir.addressof @out_color : !spirv.ptr<vector<4xf32>, Output>
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %c2 = spirv.Constant 2 : i32
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+
+    %ce0 = spirv.AccessChain %colorp[%c0] : !spirv.ptr<!spirv.array<3xvector<4xf32>>, Input>, i32 -> !spirv.ptr<vector<4xf32>, Input>
+    %col0 = spirv.Load "Input" %ce0 : vector<4xf32>
+    %p0 = spirv.CompositeConstruct %neg1, %neg1, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    spirv.Store "Output" %posp, %p0 : vector<4xf32>
+    spirv.Store "Output" %ocp, %col0 : vector<4xf32>
+    spirv.EmitVertex
+
+    %ce1 = spirv.AccessChain %colorp[%c1] : !spirv.ptr<!spirv.array<3xvector<4xf32>>, Input>, i32 -> !spirv.ptr<vector<4xf32>, Input>
+    %col1 = spirv.Load "Input" %ce1 : vector<4xf32>
+    %p1 = spirv.CompositeConstruct %three, %neg1, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    spirv.Store "Output" %posp, %p1 : vector<4xf32>
+    spirv.Store "Output" %ocp, %col1 : vector<4xf32>
+    spirv.EmitVertex
+
+    %ce2 = spirv.AccessChain %colorp[%c2] : !spirv.ptr<!spirv.array<3xvector<4xf32>>, Input>, i32 -> !spirv.ptr<vector<4xf32>, Input>
+    %col2 = spirv.Load "Input" %ce2 : vector<4xf32>
+    %p2 = spirv.CompositeConstruct %neg1, %three, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    spirv.Store "Output" %posp, %p2 : vector<4xf32>
+    spirv.Store "Output" %ocp, %col2 : vector<4xf32>
+    spirv.EmitVertex
+    spirv.EndPrimitive
+    spirv.Return
+  }
+  spirv.EntryPoint "Geometry" @main, @in_color, @out_pos, @out_color
+  spirv.ExecutionMode @main "Triangles"
+  spirv.ExecutionMode @main "OutputTriangleStrip"
+  spirv.ExecutionMode @main "OutputVertices", 3
+}
+)mlir";
+
+/// (Roadmap H9b) End-to-end regression: before this row's `StageLink.cpp`
+/// fix, this pipeline's own `vkQueueSubmit` failed outright with "vertex/
+/// domain stage output -> geometry stage input: element 0 and its
+/// producer element 0 disagree on component/row count or type" (the
+/// vertex stage's own `out_color`, `RowCount == 1`, versus the geometry
+/// stage's own per-vertex-array `in_color[]`, folded to `RowCount == 3`)
+/// -- exactly the diagnostic and shape 1,276 real
+/// `dEQP-VK.query_pool.statistics_query.*_tessellation*`-adjacent (and
+/// every other real geometry-varying-consuming) CTS case hit. After the
+/// fix, the geometry stage successfully forwards the vertex stage's solid
+/// red varying through to the fragment stage, which renders it straight
+/// through: the whole render target reads back solid opaque red.
+TEST_F(DrawTest, GeometryStageForwardsAPerVertexColorVaryingFromVertexStage) {
+  VkShaderModule Vertex = createModule(SolidRedColorVaryingVertexSource);
+  VkShaderModule Geometry =
+      createModule(ForwardsPerVertexColorInputGeometrySource);
+  VkShaderModule Fragment = createModule(PassthroughColorFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[3]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+  Stages[1].module = Geometry;
+  Stages[1].pName = "main";
+  Stages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[2].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[2].module = Fragment;
+  Stages[2].pName = "main";
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo PipeInfo{};
+  PipeInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  PipeInfo.stageCount = 3;
+  PipeInfo.pStages = Stages;
+  PipeInfo.pVertexInputState = &VertexInput;
+  PipeInfo.pInputAssemblyState = &InputAssembly;
+  PipeInfo.pViewportState = &ViewportState;
+  PipeInfo.pRasterizationState = &Raster;
+  PipeInfo.pMultisampleState = &Multisample;
+  PipeInfo.pColorBlendState = &Blend;
+  PipeInfo.layout = Layout;
+  PipeInfo.renderPass = Pass;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &PipeInfo,
+                                      nullptr, &Pipe),
+            VK_SUCCESS);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texel(X, Y);
+      EXPECT_EQ(Texel[0], 0xFF) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[2], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[3], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Geometry, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
 /// (Roadmap H2h) A classic `VkRenderPass`'s later subpass reading an
