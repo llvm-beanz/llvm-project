@@ -21947,3 +21947,68 @@ atomics are a format-feature, not a device feature) and
 part of core 1.0 `VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT`,
 unlocked purely by mandatory-format-support rules once the two mandatory
 formats support it).
+
+## Roadmap H8h: measured impact
+
+Closes the one remaining mandatory `VERTEX_BUFFER_BIT` format H8b
+deliberately deferred: `A2B10G10R10_UNORM_PACK32`
+(`ResourceFormat::R10G10B10A2_UNORM`), a single packed 32-bit word (from
+the MSB down: 2 bits A, 10 bits each of B/G/R), unlike every format
+`Executor.cpp`'s `decodeAttribute` already implemented, which each read
+one memory span per component ("N bytes per component").
+
+Added a new `decodeAttribute` case reading the packed word once and
+unpacking all requested components from it, mirroring
+`FeMeRuntimeCPU.c`'s `femeRTUnpackR10G10B10A2Unorm` bit layout
+(reimplemented rather than called directly, since this is host C++ code,
+not compiled shader IR, matching `halfBitsToFloat`'s own precedent).
+`isVertexBufferFormatSupported` (Format.cpp) extended to match.
+
+The real remaining problem this row's own text called out was the
+caller's own bounds-check arithmetic (`Executor.cpp`'s draw loop), which
+assumed one fetch per component -- renamed `attributeComponentByteSize`
+to `attributeFetchLayout`, returning a small `{FetchByteSize,
+ComponentsPerFetch}` pair instead of a bare per-component byte size.
+Every pre-H8h format keeps `ComponentsPerFetch == 1` (a `PerComponent`
+helper preserves the exact old one-component-per-fetch arithmetic
+unchanged), while the new packed case sets `{4, 4}`: one 4-byte fetch is
+available in full or not at all, producing all 4 components together --
+matching `VkPipelineRobustnessCreateInfo::vertexInputs`'s existing
+"per-component zero on out-of-bounds" convention (roadmap F10) exactly,
+since `AvailableFetches * ComponentsPerFetch` naturally degrades to 0
+(not a partial component count) whenever fewer than 4 bytes remain.
+
+New unit tests: `ExecutorTest.cpp`'s
+`VertexAttributeDecodesR10G10B10A2UnormColor` (rendering a real
+solid-color triangle through the full compiled pipeline with a packed
+`R10G10B10A2_UNORM` color vertex attribute, confirming the bit-unpacking
+decode -- not just the bounds arithmetic in isolation); `FormatTest.cpp`'s
+updated `VertexBufferFormatSupportMatchesDecodeAttributeScope`;
+`EntryPointsTest.cpp`'s updated `FormatPropertiesReportsVertexBufferBit`.
+`ninja check-feme` (assertions-enabled, ccache build) passes in full
+(2448/2475, +1 from the new test, 0 regressions).
+
+A real `dEQP-VK.api.info.format_properties.*` re-run moves **224/225 ->
+225/225 Pass (100%)**: `a2b10g10r10_unorm_pack32` was the single
+remaining failure in that suite (every earlier H8-series row's own
+"measured impact" section already whittled the rest down) and now
+reports `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` correctly.
+
+A real `dEQP-VK.pipeline.monolithic.vertex_input.*a2b10g10r10*` re-run
+(104 cases) shows mostly `NotSupported` (100/104, gated by
+`VK_EXT_vertex_input_dynamic_state` or the still-unmapped `_SNORM_PACK32`
+sibling, both out of this row's own scope) and 4 real `Fail`s
+(`single_attribute.{mat4,vec4}.as_a2b10g10r10_unorm_pack32_rate_
+{instance,vertex}`, `VK_ERROR_INITIALIZATION_FAILED`). Confirmed **not**
+attributable to this row: re-running the same 4 cases' own
+`r8g8b8a8_unorm`-formatted sibling (`single_attribute.vec4.as_r8g8b8a8_
+unorm_rate_vertex`, a format supported since H8a) hits the exact same
+`VK_ERROR_INITIALIZATION_FAILED` failure -- a pre-existing gap in this
+whole `single_attribute.*` pipeline-construction-utility test family
+unrelated to vertex attribute format decoding at all, left for a future
+roadmap row to scope and fix.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+needed: `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` is a format-feature bit
+gated purely by mandatory-format-support rules, not a
+`VkPhysicalDeviceFeatures` bit or an extension.
