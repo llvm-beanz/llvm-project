@@ -10,6 +10,7 @@
 #include "Format.h"
 #include "Icd.h"
 #include "Objects.h"
+#include "RenderPass.h"
 
 #include "llvm/Support/ErrorHandling.h"
 
@@ -339,10 +340,14 @@ Sampler::Sampler(const VkSamplerCreateInfo &CreateInfo) : Descriptor{} {
 namespace feme::vulkan {
 
 /// The `VkSampleCountFlags` mask `pCreateInfo->samples` must intersect for
-/// \p Usage, mirroring how real Vulkan intersects the per-usage sample-count
-/// limits (`VkPhysicalDeviceLimits`' `sampledImageColorSampleCounts`/
-/// `storageImageSampleCounts`/`framebufferColorSampleCounts`/
-/// `framebufferDepthSampleCounts`). An image whose usage names none of
+/// \p Usage and (if known) \p Format, mirroring how real Vulkan intersects
+/// the per-usage sample-count limits (`VkPhysicalDeviceLimits`'
+/// `sampledImageColorSampleCounts`/`sampledImageDepthSampleCounts`/
+/// `sampledImageStencilSampleCounts`/`storageImageSampleCounts`/
+/// `framebufferColorSampleCounts`/`framebufferDepthSampleCounts`/
+/// `framebufferStencilSampleCounts`) -- see `vktApiFeatureInfo.cpp`'s own
+/// `getRequiredOptimalTilingSampleCounts`, whose per-usage/per-format-class
+/// branching this mirrors exactly. An image whose usage names none of
 /// these (e.g. transfer-only) is conservatively restricted to
 /// `VK_SAMPLE_COUNT_1_BIT`: nothing downstream (copy, shader, render target)
 /// needs more than one sample for such an image, so there is no limit field
@@ -350,13 +355,40 @@ namespace feme::vulkan {
 /// `vkGetPhysicalDeviceImageFormatProperties` (EntryPoints.cpp) reports the
 /// same `sampleCounts` mask `vkCreateImage` itself actually honors, rather
 /// than a second, independently-maintained guess.
-VkSampleCountFlags supportedSampleCounts(const PhysicalDeviceInfo &Info,
-                                         VkImageUsageFlags Usage) {
+///
+/// (Roadmap H8f) \p Format used to be ignored entirely here, so a
+/// depth/stencil format's `SAMPLED_BIT`/`DEPTH_STENCIL_ATTACHMENT_BIT`
+/// usage was always intersected against the *color* limits above --
+/// over-reporting up to 8 samples for a sampled-only depth/stencil image
+/// (`sampledImageDepthSampleCounts`/`sampledImageStencilSampleCounts` are
+/// each `VK_SAMPLE_COUNT_1_BIT` below, honestly reflecting that no
+/// per-sample depth/stencil texel fetch exists yet, per this file's own
+/// design-intent comment on `PhysicalDeviceInfo.cpp`'s sample-count
+/// fields) rather than the correct, tighter mask. A combined
+/// depth+stencil format (`D24_UNORM_S8_UINT`) narrows by *both* limits,
+/// matching the CTS reference algorithm's own `hasDepthComp`/
+/// `hasStencilComp` (not mutually exclusive). `sampledImageIntegerSampleCounts`/
+/// `framebufferIntegerColorSampleCounts` are deliberately not distinguished
+/// from their non-integer counterparts here: this device's own
+/// `PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` set every one of those four
+/// fields to the identical `1|2|4|8` mask (no format-specific hardware
+/// limitation exists), so branching on `isIntegerColorAttachmentFormat`
+/// here could not change any reported result.
+VkSampleCountFlags
+supportedSampleCounts(const PhysicalDeviceInfo &Info, VkImageUsageFlags Usage,
+                      std::optional<feme::cpu::ResourceFormat> Format) {
   const VkPhysicalDeviceLimits &Limits = Info.Properties.limits;
+  bool HasDepth = Format && isSupportedDepthAttachmentFormat(*Format);
+  bool HasStencil = Format && isSupportedStencilAttachmentFormat(*Format);
   VkSampleCountFlags Mask = ~VkSampleCountFlags(0);
   bool Constrained = false;
   if (Usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
-    Mask &= Limits.sampledImageColorSampleCounts;
+    if (HasDepth)
+      Mask &= Limits.sampledImageDepthSampleCounts;
+    if (HasStencil)
+      Mask &= Limits.sampledImageStencilSampleCounts;
+    if (!HasDepth && !HasStencil)
+      Mask &= Limits.sampledImageColorSampleCounts;
     Constrained = true;
   }
   if (Usage & VK_IMAGE_USAGE_STORAGE_BIT) {
@@ -368,18 +400,23 @@ VkSampleCountFlags supportedSampleCounts(const PhysicalDeviceInfo &Info,
     Constrained = true;
   }
   if (Usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
-    Mask &= Limits.framebufferDepthSampleCounts &
-            Limits.framebufferStencilSampleCounts;
+    if (HasDepth)
+      Mask &= Limits.framebufferDepthSampleCounts;
+    if (HasStencil)
+      Mask &= Limits.framebufferStencilSampleCounts;
+    if (!HasDepth && !HasStencil)
+      Mask &= Limits.framebufferDepthSampleCounts &
+              Limits.framebufferStencilSampleCounts;
     Constrained = true;
   }
   return Constrained ? Mask : VkSampleCountFlags(VK_SAMPLE_COUNT_1_BIT);
 }
 
 /// Returns whether \p CreateInfo's shape (flags/samples/mips/array layers)
-/// is one this ICD can create, *not counting* its `format` -- split out
-/// from the format check so `vkCreateImage` can keep reporting the more
-/// specific `VK_ERROR_FORMAT_NOT_SUPPORTED` for an unmapped format while
-/// still sharing this validation with roadmap E4's `VK_KHR_maintenance4`
+/// is one this ICD can create -- split out from the rest of the format
+/// check so `vkCreateImage` can keep reporting the more specific
+/// `VK_ERROR_FORMAT_NOT_SUPPORTED` for an unmapped format while still
+/// sharing this validation with roadmap E4's `VK_KHR_maintenance4`
 /// `vkGetDeviceImageMemoryRequirements`/
 /// `vkGetDeviceImageSparseMemoryRequirements`, which report their result
 /// through a `void`-returning entrypoint with no error code of their own,
@@ -388,16 +425,19 @@ VkSampleCountFlags supportedSampleCounts(const PhysicalDeviceInfo &Info,
 /// `format`/`type`/`tiling`/`usage`/`flags` combination is supported at all.
 /// A multisample `samples` is accepted at the object-model level -- see
 /// Image.h's file comment -- as long as it is one this device's limits
-/// actually advertise for the image's usage (`supportedSampleCounts`);
-/// every other image continues to require exactly one sample, same as
-/// before multisample support existed.
+/// actually advertise for the image's usage and (roadmap H8f) \p Format's
+/// depth/stencil-ness (`supportedSampleCounts`); every other image
+/// continues to require exactly one sample, same as before multisample
+/// support existed.
 bool isValidImageShape(const VkImageCreateInfo &CreateInfo,
-                       const PhysicalDeviceInfo &Info) {
+                       const PhysicalDeviceInfo &Info,
+                       std::optional<feme::cpu::ResourceFormat> Format) {
   // No sparse binding (see "V5: Images and sampling"'s scope).
   if (CreateInfo.flags &
       ~VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT))
     return false;
-  if (!(CreateInfo.samples & supportedSampleCounts(Info, CreateInfo.usage)))
+  if (!(CreateInfo.samples &
+        supportedSampleCounts(Info, CreateInfo.usage, Format)))
     return false;
   if (CreateInfo.mipLevels == 0 || CreateInfo.arrayLayers == 0)
     return false;
@@ -417,11 +457,16 @@ vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo,
               const VkAllocationCallbacks *pAllocator, VkImage *pImage) {
   const PhysicalDeviceInfo &Info =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
-  if (!isValidImageShape(*pCreateInfo, Info))
-    return VK_ERROR_INITIALIZATION_FAILED;
-
+  // (Roadmap H8f) Mapped before the shape check now, purely so
+  // `isValidImageShape`'s own sample-count narrowing knows this format's
+  // depth/stencil-ness -- an unmapped format still fails with the more
+  // specific `VK_ERROR_FORMAT_NOT_SUPPORTED` below, not
+  // `VK_ERROR_INITIALIZATION_FAILED`, matching the exact precedence this
+  // function had before this row.
   std::optional<feme::cpu::ResourceFormat> Format =
       mapVkFormat(pCreateInfo->format);
+  if (!isValidImageShape(*pCreateInfo, Info, Format))
+    return VK_ERROR_INITIALIZATION_FAILED;
   if (!Format)
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
   // Roadmap E22: a block-compressed `*Format` is no longer rejected here --
@@ -542,7 +587,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageMemoryRequirements(
   const VkImageCreateInfo &CreateInfo = *pInfo->pCreateInfo;
   std::optional<feme::cpu::ResourceFormat> Format =
       mapVkFormat(CreateInfo.format);
-  if (!isValidImageShape(CreateInfo, Info) || !Format) {
+  if (!isValidImageShape(CreateInfo, Info, Format) || !Format) {
     pMemoryRequirements->memoryRequirements = VkMemoryRequirements{};
   } else {
     fillImageMemoryRequirements(computeImageCreateInfoSize(CreateInfo, *Format),

@@ -2272,7 +2272,7 @@ feme::vulkan::vkGetPhysicalDeviceImageFormatProperties(
   ShapeProbe.samples = VK_SAMPLE_COUNT_1_BIT;
   ShapeProbe.mipLevels = 1;
   ShapeProbe.arrayLayers = 1;
-  if (!isValidImageShape(ShapeProbe, Info))
+  if (!isValidImageShape(ShapeProbe, Info, Format))
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
   const VkPhysicalDeviceLimits &Limits = Info.Properties.limits;
@@ -2300,7 +2300,7 @@ feme::vulkan::vkGetPhysicalDeviceImageFormatProperties(
   MaxProbe.mipLevels = llvm::Log2_32(std::max(MaxExtentXY, MaxDepth)) + 1;
   MaxProbe.arrayLayers =
       type == VK_IMAGE_TYPE_3D ? 1 : Limits.maxImageArrayLayers;
-  VkSampleCountFlags SampleCounts = supportedSampleCounts(Info, usage);
+  VkSampleCountFlags SampleCounts = supportedSampleCounts(Info, usage, Format);
   // A multisample image is only ever a single-mip 2D one
   // (`isValidImageShape`'s own `VUID-VkImageCreateInfo-samples-02257` check
   // above), but that is a property of *a* multisample image's own shape

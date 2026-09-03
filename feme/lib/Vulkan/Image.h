@@ -81,20 +81,30 @@
 #include <vulkan/vulkan_core.h>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace feme::vulkan {
 
 /// The `VkSampleCountFlags` mask a `VkImageCreateInfo::samples` naming
-/// \p Usage must intersect to be creatable -- see Image.cpp's own comment.
-VkSampleCountFlags supportedSampleCounts(const PhysicalDeviceInfo &Info,
-                                         VkImageUsageFlags Usage);
+/// \p Usage and (if known) \p Format must intersect to be creatable -- see
+/// Image.cpp's own comment. \p Format is `std::nullopt` only for the
+/// generic, format-independent shape probe
+/// `vkGetPhysicalDeviceImageFormatProperties` (EntryPoints.cpp) runs before
+/// it has mapped a `VkFormat` to a `ResourceFormat` at all; every other
+/// caller has one by the time it needs a sample-count mask.
+VkSampleCountFlags
+supportedSampleCounts(const PhysicalDeviceInfo &Info, VkImageUsageFlags Usage,
+                      std::optional<feme::cpu::ResourceFormat> Format);
 
-/// Whether \p CreateInfo's shape (flags/samples/mips/array layers), *not
-/// counting* its `format`, is one this ICD can create -- see Image.cpp's
-/// own comment.
+/// Whether \p CreateInfo's shape (flags/samples/mips/array layers) is one
+/// this ICD can create -- see Image.cpp's own comment. \p Format only
+/// narrows the `samples` check (`supportedSampleCounts` above); every other
+/// part of the shape check still does not depend on it, so `std::nullopt`
+/// remains a legal way to validate a `format`-independent probe.
 bool isValidImageShape(const VkImageCreateInfo &CreateInfo,
-                       const PhysicalDeviceInfo &Info);
+                       const PhysicalDeviceInfo &Info,
+                       std::optional<feme::cpu::ResourceFormat> Format);
 
 /// \p CreateInfo's total packed byte size for \p Format, without
 /// constructing an `Image` -- see Image.cpp's own comment.
