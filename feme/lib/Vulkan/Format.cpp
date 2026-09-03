@@ -829,10 +829,33 @@ bool feme::vulkan::isStorageTexelBufferFormatSupported(ResourceFormat Format) {
   }
 }
 
+bool feme::vulkan::isStorageTexelBufferAtomicFormatSupported(
+    ResourceFormat Format) {
+  // (Roadmap H8w) `R32_{UINT,SINT}`: the only two formats Vulkan's own
+  // mandatory-format table requires `STORAGE_TEXEL_BUFFER_ATOMIC_BIT` for
+  // that this project can actually honor a texel-buffer atomic against
+  // today -- `SPIRVResourceLowering.cpp`'s `hasOnlySupportedPointerUses`
+  // only accepts an `AtomicRMWInst`/`AtomicCmpXchgInst` `getpointer` user
+  // for a `HandleKind::TexelStorage` handle whose RMW/xchg value is a
+  // scalar `i32` (SPIR-V itself disallows an atomic against a
+  // float-channel texel buffer outright, so `R32_FLOAT` never qualifies
+  // regardless of this project's own coverage), lowered to a real
+  // hardware atomic (`feme.cpu.resource.atomic.*.typed.i32`,
+  // FeMeRuntimeCPU.c) rather than a plain load-modify-store -- mirroring
+  // `formatFeatureFlags`'s own identical `R32_{UINT,SINT}`-only
+  // `STORAGE_IMAGE_ATOMIC_BIT` scope (roadmap H8v).
+  switch (Format) {
+  case ResourceFormat::R32_UINT:
+  case ResourceFormat::R32_SINT:
+    return true;
+  default:
+    return false;
+  }
+}
+
 
 bool feme::vulkan::isVertexBufferFormatSupported(ResourceFormat Format) {
   switch (Format) {
-  // (Roadmap H8) The 32-bit-per-component identity formats: `Executor.cpp`'s
   // `decodeAttribute` reinterprets each component's bytes directly, no
   // scalar conversion needed.
   case ResourceFormat::R32_FLOAT:

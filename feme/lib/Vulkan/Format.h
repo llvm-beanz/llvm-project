@@ -133,6 +133,27 @@ bool isTexelBufferFormatSupported(feme::cpu::ResourceFormat Format);
 /// for it), just never a storage one.
 bool isStorageTexelBufferFormatSupported(feme::cpu::ResourceFormat Format);
 
+/// Returns whether \p Format is one of the (further) subset of
+/// `isStorageTexelBufferFormatSupported` formats
+/// `SPIRVResourceLowering.cpp`'s `hasOnlySupportedPointerUses` actually
+/// accepts an `AtomicRMWInst`/`AtomicCmpXchgInst` `getpointer` user for
+/// against a `HandleKind::TexelStorage` handle, lowered to a real
+/// hardware atomic (`feme.cpu.resource.atomic.*.typed.i32`,
+/// FeMeRuntimeCPU.c) -- gates
+/// `VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT` specifically
+/// (`vkGetPhysicalDeviceFormatProperties`), distinct from the plain
+/// read/write bit `isStorageTexelBufferFormatSupported` gates.
+///
+/// (Roadmap H8w) SPIR-V disallows an atomic against a float-channel
+/// image/texel-buffer format outright, and this project's own
+/// `hasOnlySupportedPointerUses` only accepts a scalar-`i32` RMW/xchg
+/// value -- so, mirroring `formatFeatureFlags`'s own `R32_{UINT,SINT}`-
+/// only `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT` scope (Format.cpp,
+/// roadmap H8v), these are the only two formats that qualify -- also the
+/// only two Vulkan's own mandatory-format table requires this bit for at
+/// all.
+bool isStorageTexelBufferAtomicFormatSupported(feme::cpu::ResourceFormat Format);
+
 /// Returns whether \p Format may be fetched as a vertex attribute --
 /// `GraphicsPipeline.cpp`'s `vkCreateGraphicsPipelines` validation
 /// (`isSupportedVertexAttributeFormat`, which now just forwards here) and

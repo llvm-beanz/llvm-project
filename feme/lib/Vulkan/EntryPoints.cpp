@@ -2119,6 +2119,16 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties(
            : VkFormatFeatureFlags(0)) |
       (Format && isStorageTexelBufferFormatSupported(*Format)
            ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT
+           : VkFormatFeatureFlags(0)) |
+      // (Roadmap H8w) `isStorageTexelBufferAtomicFormatSupported`
+      // (Format.h) gates `STORAGE_TEXEL_BUFFER_ATOMIC_BIT` specifically,
+      // the texel-buffer counterpart of `formatFeatureFlags`'s own
+      // `STORAGE_IMAGE_ATOMIC_BIT` scope (roadmap H8v) -- a real
+      // `SPIRVResourceLowering.cpp` atomic lowering for a
+      // `HandleKind::TexelStorage` handle now backs it, verified end to
+      // end by `dEQP-VK.texel_buffer.atomic_operations.*`.
+      (Format && isStorageTexelBufferAtomicFormatSupported(*Format)
+           ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT
            : VkFormatFeatureFlags(0));
   // (Roadmap H8) `isVertexBufferFormatSupported` (Format.h) gates
   // `vkCreateGraphicsPipelines`'s own vertex-attribute-format validation
