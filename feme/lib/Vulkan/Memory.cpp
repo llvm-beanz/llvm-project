@@ -15,25 +15,16 @@
 
 using namespace feme::vulkan;
 
-namespace {
+namespace feme::vulkan {
 
-/// Allocates \p Size bytes aligned to \p Alignment, the device's own
-/// backing-store allocation for a `VkDeviceMemory` (distinct from the ICD
-/// object's own `VkAllocationCallbacks`-governed allocation -- see "Memory
-/// and Buffers": device memory is host RAM the driver owns directly).
-/// Returns null on failure, matching every other allocation path here.
-void *allocateAligned(size_t Size, size_t Alignment) {
+void *allocateDeviceMemory(size_t Size, size_t Alignment) {
   void *Ptr = nullptr;
   if (posix_memalign(&Ptr,
-                     Alignment < sizeof(void *) ? sizeof(void *) : Alignment,
-                     Size) != 0)
+                      Alignment < sizeof(void *) ? sizeof(void *) : Alignment,
+                      Size) != 0)
     return nullptr;
   return Ptr;
 }
-
-} // namespace
-
-namespace feme::vulkan {
 
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
     VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
@@ -47,7 +38,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
     return VK_ERROR_INITIALIZATION_FAILED;
 
   size_t Alignment = Info.Properties.limits.minMemoryMapAlignment;
-  void *Data = allocateAligned(
+  void *Data = allocateDeviceMemory(
       static_cast<size_t>(pAllocateInfo->allocationSize), Alignment);
   if (!Data)
     return VK_ERROR_OUT_OF_DEVICE_MEMORY;

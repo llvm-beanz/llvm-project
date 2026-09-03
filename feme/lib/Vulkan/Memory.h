@@ -40,6 +40,19 @@ private:
   VkDeviceSize Size;
 };
 
+/// Allocates \p Size bytes aligned to \p Alignment, the same host
+/// allocation `vkAllocateMemory` itself performs for a `VkDeviceMemory`'s
+/// backing store (distinct from an ICD object's own
+/// `VkAllocationCallbacks`-governed allocation -- see "Memory and Buffers":
+/// device memory is host RAM the driver owns directly). Returns null on
+/// failure, matching every other allocation path here. Exposed (rather than
+/// kept `static` inside Memory.cpp) so Swapchain.cpp's swapchain-image
+/// backing store -- memory a real application never separately allocates
+/// or binds itself, unlike an application-created `VkImage` -- can reuse
+/// the identical alignment logic instead of a second, independently
+/// maintained copy.
+void *allocateDeviceMemory(size_t Size, size_t Alignment);
+
 /// Walks a `VkMemoryRequirements2`-family `pNext` chain (also chained by
 /// `VkDeviceBufferMemoryRequirements`/`VkDeviceImageMemoryRequirements`'
 /// own `VkMemoryRequirements2` output), filling every recognized extension
