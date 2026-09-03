@@ -37,19 +37,23 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H10b or other prerequisites blocking the H-series milestones?
+Can you work on H10d or other prerequisites blocking the H-series milestones?
 
-> **A real `deqp-vk` build and a real `dEQP-VK.wsi` group re-run** against
-> H10a's new `VK_KHR_xcb_surface` backend, split off from H10a once its own
-> platform-surface scope closed. No prebuilt `deqp-vk` binary exists under
-> `/home/dev/dev/VK-GL-CTS/` in this environment, and building the full CTS
-> framework from source (a large, multi-dependency C++ project with its own
-> build system) was judged out of scope for a single session -- needs its own
-> feasibility check (build-time budget, missing system dependencies) before a
-> real pass-rate measurement of `dEQP-VK.wsi` against a genuine platform surface
-> can happen for the first time
-
-If there are missing system dependencies to build and run the CTS, can you
-please add a section to the Vulkan CTS report document detailing the missing
-dependencies and install them. The documentation will allow me to update the
-configuration scripts for the environment in the future.
+> **`dEQP-VK.wsi.xcb.swapchain.render.*` fails `vkCreateGraphicsPipelines` with
+> `VK_ERROR_INITIALIZATION_FAILED`**, discovered by H10b's own real,
+> now-non-crashing `dEQP-VK.wsi.xcb.*` re-run (7 of its 8 real failures, every
+> `render.*` sub-case:
+> `basic`/`basic2`/`2swapchains`/`2swapchains2`/`10swapchains`/`10swapchains2`).
+> The real diagnostic (`FEME_VULKAN_LOG_CREATION_ERRORS`-visible) is an MLIR
+> legalization failure: `"failed to legalize operation
+> 'spirv.CompositeConstruct' that was explicitly marked illegal"`, building a
+> `!spirv.matrix<4 x vector<4xf32>>` from four `vector<4xf32>` column operands
+> -- a SPIR-V-to-LLVM lowering gap for matrix-typed `OpCompositeConstruct`,
+> entirely unrelated to WSI/swapchain/device-group; any other real CTS case
+> whose shader constructs a matrix from column vectors (a common GLSL pattern,
+> e.g. `mat4(c0, c1, c2, c3)`) would be expected to hit the same wall. Needs its
+> own real IR reduction of one of these exact cases to confirm whether
+> `SPIRVToLLVMPatterns.cpp` is simply missing a matrix-result
+> `CompositeConstruct` pattern entirely (most likely, given the "explicitly
+> marked illegal" framing) or has one that only handles a subset of operand
+> shapes
