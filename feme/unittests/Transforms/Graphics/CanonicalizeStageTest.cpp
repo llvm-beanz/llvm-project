@@ -1398,6 +1398,61 @@ TEST(CanonicalizeStageTest, HullStageWithNoBarrierIsNotSplit) {
   EXPECT_EQ(Sig->Elements.size(), 2u);
 }
 
+/// (Roadmap H9c) `isPatchConstantOnlyEntry`'s own scan (used by
+/// `splitBarrierlessTessellationControlEntry` above) must not miss a
+/// genuine per-vertex output written through a *dynamic* vertex index --
+/// `out_color[gl_InvocationID] = ...`, the shape
+/// `ThreadsDynamicVertexIndexIntoOutputStore` above already covers for
+/// `resolveStageIOAccess`'s own store-rewriting, and every real GLSL
+/// tessellation-control shader's own `out_color[]`/`gl_out[]` write --
+/// alongside a `Patch`-decorated tessellation-factor write, with no
+/// group-sync barrier separating them (legal: neither invocation's write
+/// here ever depends on another's). Before this fix,
+/// `isPatchConstantOnlyEntry` resolved a store's target purely via
+/// `getStageIOBaseAndOffset` (constant-offset only), so this dynamically-
+/// indexed store was invisible to it: the scan only ever saw the
+/// `TessLevelOuter` write, wrongly concluded the whole entry was patch-
+/// constant-only, and cloned the *entire* body -- dynamically-indexed
+/// per-vertex store included -- into a new `.patchconstant` function,
+/// where `classifySPIRVElement`'s `HullPatchConstant`-phase branch
+/// misclassifies that non-`patch`-decorated store as a captured-value
+/// read-back (`Direction::Input`, never a store): the exact gap
+/// `GraphicsPipelineTest.AcceptsTessellationControlBarrierlessDynamic
+/// VertexIndexedMixedStoreSource` reproduces end to end via
+/// `PatchConstantWrapper.cpp`'s own "masked output store references an
+/// unknown patch-output signature element" error. Now that
+/// `isPatchConstantOnlyEntry` also resolves a dynamically-indexed store
+/// via `getStageIOGlobal`, it correctly sees both the patch- and
+/// non-patch-frequency writes and does not misclassify this mixed entry
+/// as patch-constant-only -- matching `HullStageWithNoBarrierIsNotSplit`
+/// above, no `.patchconstant` function is created (a general split for
+/// this mixed, no-barrier shape remains unimplemented, tracked as its own
+/// roadmap follow-up).
+TEST(CanonicalizeStageTest,
+     NoBarrierMixedFrequencyEntryWithDynamicVertexIndexedStoreIsNotSplit) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_color = external addrspace(8) global [3 x <4 x float>], !spirv.Decorations !0
+    @tess_outer = external addrspace(8) global [4 x float], !spirv.Decorations !1
+    define void @main(i32 %i, <4 x float> %v) #0 {
+      %tp = getelementptr inbounds [4 x float], ptr addrspace(8) @tess_outer, i32 0, i32 0
+      store float 4.000000e+00, ptr addrspace(8) %tp
+      %cp = getelementptr inbounds [3 x <4 x float>], ptr addrspace(8) @out_color, i32 0, i32 %i
+      store <4 x float> %v, ptr addrspace(8) %cp
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 30, i32 0}
+    !3 = !{i32 11, i32 11}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_TRUE(M->getFunction("main"));
+  EXPECT_FALSE(M->getFunction("main.patchconstant"));
+}
+
 /// (Roadmap H4a) The real shape a GLSL tessellation-control shader's
 /// SPIR-V compiles to: one entry point writing its per-vertex outputs,
 /// then an `OpControlBarrier`, then the `Patch`-decorated tessellation-

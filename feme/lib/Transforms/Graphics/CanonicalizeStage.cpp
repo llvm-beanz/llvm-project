@@ -1432,10 +1432,37 @@ bool isPatchConstantOnlyEntry(Function &F) {
     auto *SI = dyn_cast<StoreInst>(&I);
     if (!SI)
       continue;
-    auto BaseAndOffset = getStageIOBaseAndOffset(SI->getPointerOperand(), DL);
-    if (!BaseAndOffset)
+    // (Roadmap H9c) `getStageIOBaseAndOffset` alone only resolves a
+    // *constant*-offset access -- a genuine per-vertex output written
+    // through a dynamic index (`out_color[gl_InvocationID] = ...`,
+    // `gl_out[gl_InvocationID].gl_Position = ...`; every real GLSL
+    // tessellation-control shader's own shape, since every invocation
+    // writes only its own slot) is invisible to it, exactly the shape
+    // `getStageIOGlobal` also resolves via `getDynamicVertexIndexedAccess`/
+    // `getDynamicRowIndexedAccess`. Using `getStageIOBaseAndOffset` alone
+    // let such a store slip past this scan unseen, so a genuinely-mixed
+    // entry (patch-frequency tessellation-factor writes *and* an ordinary,
+    // dynamically-vertex-indexed per-vertex write) was wrongly classified
+    // as patch-constant-only -- its whole body then cloned as
+    // `<entry>.patchconstant` with that per-vertex store still inside,
+    // where `classifySPIRVElement`'s `HullPatchConstant`-phase branch
+    // misclassifies it (an ordinary, non-`patch`-decorated write is
+    // treated as a captured-value *read-back*, `Direction::Input`, never
+    // a store), so it never becomes a `PatchOutput` signature element:
+    // `PatchConstantWrapper.cpp`'s masked-output-store lowering then finds
+    // no such element for it and errors ("feme-cpu-wrap-patch-constant:
+    // masked output store references an unknown patch-output signature
+    // element"), the exact defect
+    // `GraphicsPipelineTest.AcceptsTessellationControlBarrierlessDynamic
+    // VertexIndexedMixedStoreSource` reproduces end to end. Using the same
+    // `getStageIOGlobal` every other stage-IO-global-discovery scan in
+    // this file already uses closes that gap: any store this scan cannot
+    // otherwise resolve is conservatively still not seen, but every store
+    // `canonicalizeSPIRVStage`'s own discovery loop resolves is now seen
+    // here too, keeping the two consistent.
+    GlobalVariable *GV = getStageIOGlobal(SI->getPointerOperand(), DL);
+    if (!GV)
       continue;
-    GlobalVariable *GV = BaseAndOffset->first;
     unsigned AddrSpace = 0;
     if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 8)
       continue;
