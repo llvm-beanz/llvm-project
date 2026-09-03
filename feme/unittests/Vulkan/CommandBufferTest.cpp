@@ -2982,6 +2982,61 @@ TEST_F(CommandBufferTest, QueryPoolWriteTimestampThenGetResults) {
   vkDestroyQueryPool(Device, QPool, nullptr);
 }
 
+/// (Roadmap H9) A `VK_QUERY_TYPE_PIPELINE_STATISTICS` pool scoped around a
+/// dispatch (rather than a draw): `COMPUTE_SHADER_INVOCATIONS_BIT` is the
+/// one counter that only makes sense across a dispatch (see `runDispatch`'s
+/// own comment on why its accumulation is separate from every draw-path
+/// counter). `kEmptyComputeShader`'s `LocalSize 1, 1, 1` means each of the
+/// dispatch's `2*3*1 = 6` groups launches exactly one invocation.
+TEST_F(CommandBufferTest, PipelineStatisticsQueryCountsComputeInvocations) {
+  VkQueryPoolCreateInfo PoolInfo{};
+  PoolInfo.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
+  PoolInfo.queryCount = 1;
+  PoolInfo.pipelineStatistics =
+      VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT;
+  VkQueryPool QPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &PoolInfo, nullptr, &QPool), VK_SUCCESS);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdResetQueryPool(CmdBuf, QPool, 0, 1);
+  vkCmdBeginQuery(CmdBuf, QPool, 0, 0);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdDispatch(CmdBuf, 2, 3, 1);
+  vkCmdEndQuery(CmdBuf, QPool, 0);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint64_t Results[2] = {0, 0};
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 1, sizeof(Results),
+                                  Results, 2 * sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT |
+                                      VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+            VK_SUCCESS);
+  EXPECT_EQ(Results[0], 6u); // ComputeShaderInvocations: 2*3*1 groups * 1.
+  EXPECT_EQ(Results[1], 1u); // Availability.
+
+  vkDestroyQueryPool(Device, QPool, nullptr);
+}
+
+/// (Roadmap H9) `vkCreateQueryPool` rejects a `pipelineStatistics` mask with
+/// any bit set outside the 11 core `VkQueryPipelineStatisticFlagBits` --
+/// mirrors the same "trust the loader/validation layer for legality, but
+/// still reject a value with no defined meaning" precedent every other
+/// flags-mask-accepting entry point in this ICD already follows.
+TEST_F(CommandBufferTest, QueryPoolRejectsUnknownPipelineStatisticsBit) {
+  VkQueryPoolCreateInfo PoolInfo{};
+  PoolInfo.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
+  PoolInfo.queryCount = 1;
+  PoolInfo.pipelineStatistics = 0x80000000u;
+  VkQueryPool QPool = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateQueryPool(Device, &PoolInfo, nullptr, &QPool),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
 // Roadmap E3: `vkCmdWriteTimestamp2`'s 2-stage-mask `stage` argument
 // mirrors `QueryPoolWriteTimestampThenGetResults` above.
 TEST_F(CommandBufferTest, QueryPoolWriteTimestamp2ThenGetResults) {

@@ -5345,6 +5345,77 @@ TEST_F(DrawTest, OcclusionQueryCountsPassedSamples) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (Roadmap H9) A `VK_QUERY_TYPE_PIPELINE_STATISTICS` pool with all 11
+/// `VkQueryPipelineStatisticFlagBits` enabled, wrapped around one ordinary
+/// (non-tessellated, non-geometry, non-mesh) triangle draw: every counter
+/// this pipeline shape can possibly touch (input-assembly, vertex shader,
+/// clipping, fragment shader) reports its honest, real count, while every
+/// counter this shape has no stage for (geometry, tessellation, compute)
+/// reports zero, mirroring `OcclusionQueryCountsPassedSamples` above but
+/// for the wider 11-value result layout `vkGetQueryPoolResults` writes one
+/// entry per set bit, in bit order, LSB first (`QueryPool.h`'s file
+/// comment).
+TEST_F(DrawTest, PipelineStatisticsQueryCountsAllElevenCounters) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkQueryPoolCreateInfo QueryInfo{};
+  QueryInfo.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
+  QueryInfo.queryCount = 1;
+  QueryInfo.pipelineStatistics =
+      VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_INVOCATIONS_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_PRIMITIVES_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_EVALUATION_SHADER_INVOCATIONS_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT;
+  VkQueryPool QueryPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &QueryInfo, nullptr, &QueryPool),
+            VK_SUCCESS);
+
+  beginRenderPass({{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdResetQueryPool(Cmd, QueryPool, 0, 1);
+  vkCmdBeginQuery(Cmd, QueryPool, 0, 0);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndQuery(Cmd, QueryPool, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // 11 counters plus one trailing availability value.
+  uint64_t Results[12] = {};
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QueryPool, 0, 1, sizeof(Results),
+                                  Results, 12 * sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT |
+                                      VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+            VK_SUCCESS);
+  EXPECT_EQ(Results[0], 3u);  // InputAssemblyVertices: one triangle's 3.
+  EXPECT_EQ(Results[1], 1u);  // InputAssemblyPrimitives: one triangle.
+  EXPECT_EQ(Results[2], 3u);  // VertexShaderInvocations: 3 vertices.
+  EXPECT_EQ(Results[3], 0u);  // GeometryShaderInvocations: no geometry stage.
+  EXPECT_EQ(Results[4], 0u);  // GeometryShaderPrimitives: no geometry stage.
+  EXPECT_EQ(Results[5], 1u);  // ClippingInvocations: one triangle clipped.
+  EXPECT_GE(Results[6], 1u);  // ClippingPrimitives: at least the 1 clipped.
+  EXPECT_GE(Results[7],
+            uint64_t(Extent * Extent));  // FragmentShaderInvocations.
+  EXPECT_EQ(Results[8], 0u);  // TessControlShaderPatches: no tessellation.
+  EXPECT_EQ(Results[9], 0u); // TessEvalShaderInvocations: no tessellation.
+  EXPECT_EQ(Results[10], 0u); // ComputeShaderInvocations: this is a draw.
+  EXPECT_EQ(Results[11], 1u); // Availability.
+
+  vkDestroyQueryPool(Device, QueryPool, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// A multisample color attachment with a resolve attachment: a draw fully
 /// covering the render area resolves to a uniform color in the
 /// single-sample target -- the completion scenario's own "multisample
