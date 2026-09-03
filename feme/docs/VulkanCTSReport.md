@@ -21082,3 +21082,104 @@ row -- confirmed, not assumed: this row only widens
 rendering-path support for them.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap H8q: measured impact
+
+H8e split this row off as `e5b9g9r9_ufloat_pack32`'s own unique gap
+among its 9 named formats: unlike every other format in that row's own
+list, `VK_FORMAT_E5B9G9R9_UFLOAT_PACK32` was missing *every* feature
+bit (`BLIT_SRC_BIT`/`SAMPLED_IMAGE_BIT`/`FILTER_LINEAR_BIT`/
+`TRANSFER_DST_BIT`/`TRANSFER_SRC_BIT`) because `mapVkFormat` had no
+case for it at all -- there was no `ResourceFormat` enumerator, no
+pack/unpack support, nothing recognizing this format as anything but
+`Unknown`.
+
+Fixed this row: appended `ResourceFormat::E5B9G9R9_UFLOAT` at
+`RuntimeABI.h`'s own tail (ordinal 131, confirmed via a full
+programmatic enum recount, matching the file's own append-only
+hard-coded-switch-case constraint); added the `mapVkFormat` case and
+joined the existing packed-4-byte-word `formatElementSize` group
+(alongside `R11G11B10_FLOAT`) in `Format.cpp`. Implemented the real
+Khronos `EXT_texture_shared_exponent` reference encode/decode
+algorithm -- clamp each channel to `[0, MAX_RGB9E5]`, choose the
+smallest shared 5-bit exponent that can represent the single largest
+channel without overflowing its own 9-bit mantissa, round each channel
+to that exponent's mantissa, then bump the exponent once more and
+re-round if rounding itself overflowed the mantissa field -- twice:
+once as `encodeRGB9E5`/`decodeRGB9E5` in `ImageFixture.cpp` (via
+`std::frexp`/`std::ldexp`, backing `packClearColor`/`unpackColor` and
+so `vkCmdClearColorImage`/blit-decode, a piece the roadmap's own
+"mirror `R11G11B10_FLOAT`" framing does not actually cover -- that
+format has no `packClearColor`/`unpackColor` case at all, only a
+sampling/storage one), and once as `femeRTPackRGB9E5`/
+`femeRTUnpackRGB9E5` in `FeMeRuntimeCPU.c` (via hand-rolled IEEE-754
+bit construction rather than `libm`, since that file is compiled
+freestanding for whatever host runs the JIT/AOT backend). Chose to
+also close the sampling gap (rather than leave it optional, as the
+roadmap's own text allowed) for full milestone closure: added `case
+131` to `FeMeRuntimeCPU.c`'s `femeRTImageFormatElementSize`/
+`femeRTUnpackImageTexel`/`femeRTPackImageTexel`, and a matching
+`SAMPLED_IMAGE_BIT | SAMPLED_IMAGE_FILTER_LINEAR_BIT` case in
+`Format.cpp`. `TRANSFER_SRC_BIT`/`TRANSFER_DST_BIT`/`BLIT_SRC_BIT`/
+`BLIT_DST_BIT` needed no new code at all: `formatFeatureFlags` already
+grants the first two unconditionally to any recognized format and the
+latter two to any non-block-compressed recognized format, so all four
+became correct the moment `mapVkFormat` recognized the format.
+
+Also added a `getFormatInfo` entry (a single opaque 4-byte word, the
+same convention `R10G10B10A2_UNORM` uses) and an `e5b9g9r9-ufloat`
+fixture-format keyword (plus its stringification counterpart) to
+`ImageFixture.cpp` for testability, and an `e5b9g9r9_ufloat`
+underscore-separated heap-format keyword to `feme-run.cpp` (closing a
+`-Wswitch` warning the new enumerator introduced in that file's own
+exhaustive `imageFormatElementSize` switch).
+
+Deliberately left `STORAGE_IMAGE_BIT`/`COLOR_ATTACHMENT_BIT` unset:
+neither bit is in the CTS-confirmed missing-bits list this row's own
+investigation found for this format, consistent with real hardware,
+which typically supports neither rendering to nor storing into
+RGB9E5.
+
+10 new unit tests: `FormatTest.cpp`'s `MapsE5B9G9R9UfloatFormat`
+(`mapVkFormat`/`formatElementSize`/`formatFeatureFlags` coverage,
+including confirming the four automatically-granted bits above);
+`ImageFixtureTest.cpp`'s 4 pack/unpack round-trip tests (a mid-range
+value where no channel's own rounding should visibly lose bits; an
+all-zero value exercising the shared exponent's own
+`MaxRGB <= 0.0` branch; a very small and a very large value near this
+format's own `MAX_RGB9E5` clamp, exercising both ends of the 5-bit
+exponent field; and equal channels near the mantissa-rounding overflow
+boundary, a regression guard the mixed-magnitude cases above cannot
+reach) plus a fixture-text round trip; `ImageSamplingTest.cpp`'s 2
+`LoadFetchesE5B9G9R9Ufloat{,NonZeroValues}` tests exercising the new
+runtime case through actual JIT-compiled
+`feme.cpu.image.load.2d.v4f32` bitcode (mirroring
+`LoadFetchesR11G11B10Float{,NonZeroValues}`'s own precedent -- an
+all-zero-bits case alone cannot distinguish a correct decode from one
+broken in a way that only manifests for a non-zero input).
+
+A real `dEQP-VK.api.info.format_properties.*` re-run (225 cases)
+confirms `e5b9g9r9_ufloat_pack32` itself now individually `Pass`es,
+and the group as a whole is now 225/225 (100%), up from 199/225 at
+H8p's own close (other H8-series rows landed in the interim). A
+targeted `dEQP-VK.api.image_clearing.*e5b9g9r9*` re-run (294 cases)
+confirms the real `vkCmdClearColorImage` pack/unpack path itself works
+end to end: 200/294 `Pass` (every `clear_color_image`/
+`clear_color_image_multiple_subresourcerange` case), 94 correctly
+`NotSupported` (`Format not renderable`, the
+`partial_clear_color_attachment` cases this row deliberately left
+unadvertised since they need `COLOR_ATTACHMENT_BIT`), 0 `Failed`. A
+targeted `dEQP-VK.api.format_features.*e5b9g9r9*` re-run (2 cases)
+shows 0 failures (1 `Pass`, 1 correctly `NotSupported` for an
+unrelated, unimplemented extension).
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full:
+2,417/2,444 Total Discovered Tests (27 pre-existing `Unsupported`,
+0 `Failed`, up 10 tests from this row's own new coverage).
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+row -- confirmed, not assumed: this row only makes one previously
+entirely-unrecognized `VkFormat` recognized, and widens its own
+`VkFormatFeatureFlags` from nothing to a real, CTS-confirmed subset.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
