@@ -90,6 +90,31 @@ if(FEME_ENABLE_VULKAN)
   endif()
 endif()
 
+# The one real, CI-exercisable platform surface roadmap H10a's own
+# "chosen by CI, not by preference" feasibility check landed on (see
+# FeMeVulkanDesign.md's "Window-system integration", Open Question 13):
+# `VK_KHR_xcb_surface`, since a plain X11/xcb connection to a virtual
+# framebuffer X server (Xvfb) needs no real display hardware and genuinely
+# works end to end wherever `libxcb`'s headers/library are available --
+# unlike Wayland (no compositor available at all in this project's own CI
+# image, headless or otherwise) or `VK_KHR_display` (out of scope per
+# "Initial Non-Goals"). Optional, the same way the Vulkan SDK itself is
+# above: when `libxcb` is not found, `VK_KHR_xcb_surface` is simply left
+# out of the build (see `feme/lib/Vulkan/CMakeLists.txt`'s `FEME_HAVE_XCB`),
+# not a hard configuration failure.
+set(FEME_HAVE_XCB OFF)
+if(FEME_HAVE_VULKAN_HEADERS)
+  find_path(FEME_XCB_INCLUDE_DIR NAMES xcb/xcb.h)
+  find_library(FEME_XCB_LIBRARY NAMES xcb)
+  if(FEME_XCB_INCLUDE_DIR AND FEME_XCB_LIBRARY)
+    set(FEME_HAVE_XCB ON)
+    message(STATUS "feme: found libxcb; building VK_KHR_xcb_surface support")
+  else()
+    message(STATUS "feme: libxcb not found; VK_KHR_xcb_surface will not be "
+      "built (see FEME_HAVE_XCB)")
+  endif()
+endif()
+
 # `vkCreatePipelineCache`'s initial data is fully attacker-controlled input
 # (see "Pipeline Cache" in feme/docs/FeMeVulkanDesign.md); this option
 # removes it from the trust boundary entirely for embedders who do not want

@@ -175,9 +175,18 @@ def resolve_dependent_features(name, features_by_name, resolved=None):
     return resolved
 
 
-def parse_commands(vk_xml_path):
+def parse_commands(vk_xml_path, extra_extensions=()):
     """Returns {command_name: dispatch_level} for every core 1.0/1.1 command,
-    resolving `alias` commands to their target's dispatch level."""
+    resolving `alias` commands to their target's dispatch level.
+
+    \\p extra_extensions names additional extensions to read commands from,
+    beyond `SUPPORTED_EXTENSIONS` itself -- used for an extension this ICD
+    only genuinely implements in some build configurations (e.g.
+    `VK_KHR_xcb_surface`, gated on `libxcb` actually being found; see
+    feme/lib/Vulkan/CMakeLists.txt's `FEME_HAVE_XCB` and roadmap H10a),
+    where hardcoding it into `SUPPORTED_EXTENSIONS` unconditionally would
+    violate that tuple's own "genuinely implements and advertises it"
+    invariant for a build where it is not actually compiled in."""
     tree = ET.parse(vk_xml_path)
     root = tree.getroot()
 
@@ -223,7 +232,7 @@ def parse_commands(vk_xml_path):
     }
 
     commands = {}
-    for extension_name in SUPPORTED_EXTENSIONS:
+    for extension_name in SUPPORTED_EXTENSIONS + tuple(extra_extensions):
         extension = extensions_by_name.get(extension_name)
         if extension is None:
             raise ValueError(f"{extension_name} is not declared in vk.xml")
@@ -250,15 +259,16 @@ def parse_commands(vk_xml_path):
     return commands
 
 
-def read_implemented(path):
-    if not path:
-        return set()
+def read_implemented(paths):
+    """Merges one or more `--implemented` files (one command name per line,
+    '#' comments allowed) into a single set."""
     names = set()
-    with open(path) as f:
-        for line in f:
-            line = line.split("#", 1)[0].strip()
-            if line:
-                names.add(line)
+    for path in paths or ():
+        with open(path) as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    names.add(line)
     return names
 
 
@@ -268,11 +278,28 @@ def main():
     parser.add_argument("output", help="Path to the generated .inc file")
     parser.add_argument(
         "--implemented",
-        help="Path to a file listing implemented command names, one per line",
+        action="append",
+        help="Path to a file listing implemented command names, one per "
+        "line; may be given more than once (e.g. one file for always-"
+        "implemented commands plus another for a conditionally-compiled "
+        "extension's own commands)",
+    )
+    parser.add_argument(
+        "--extra-extension",
+        action="append",
+        dest="extra_extensions",
+        default=[],
+        help="An additional extension name to read commands from, beyond "
+        "SUPPORTED_EXTENSIONS itself; may be given more than once. Use "
+        "this (rather than editing SUPPORTED_EXTENSIONS directly) for an "
+        "extension only genuinely implemented in some build "
+        "configurations, so an --implemented file matching the build's "
+        "own configuration is the only thing that decides whether its "
+        "commands are FEME_VK_COMMAND_IMPL",
     )
     args = parser.parse_args()
 
-    commands = parse_commands(args.vk_xml)
+    commands = parse_commands(args.vk_xml, args.extra_extensions)
     implemented = read_implemented(args.implemented)
     unknown_implemented = implemented - set(commands)
     if unknown_implemented:
