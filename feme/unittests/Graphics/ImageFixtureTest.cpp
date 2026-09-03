@@ -187,6 +187,33 @@ TEST(ImageFixtureTest, PacksAndUnpacksB8G8R8A8Unorm) {
   EXPECT_NEAR(Unpacked[3], 0.25, 0.01);
 }
 
+// (Roadmap H8r) `B8G8R8A8_UNORM_SRGB`, an entirely unmapped format H8g's
+// own audit split off. `packClearColor`/`unpackColor` treat it exactly
+// like `B8G8R8A8_UNORM` above -- no gamma curve is applied here, mirroring
+// `R8G8B8A8_UNORM_SRGB`'s own precedent (the sRGB decode only happens on
+// the real sampling path, `femeRTUnpackImageTexel`).
+TEST(ImageFixtureTest, PacksAndUnpacksB8G8R8A8UnormSrgb) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::B8G8R8A8_UNORM_SRGB,
+                     {1.0, 0.5, 0.0, 0.25}, Texel),
+      Succeeded());
+  // Memory order is B, G, R, A: B=0x00, G=~0x80, R=0xff, A=~0x40.
+  EXPECT_EQ(Texel[0], 0);
+  EXPECT_NEAR(Texel[1], 128, 2);
+  EXPECT_EQ(Texel[2], 255);
+  EXPECT_NEAR(Texel[3], 64, 2);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::B8G8R8A8_UNORM_SRGB,
+                                Texel, Unpacked),
+                    Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], 0.5, 0.01);
+  EXPECT_NEAR(Unpacked[2], 0.0, 0.01);
+  EXPECT_NEAR(Unpacked[3], 0.25, 0.01);
+}
+
 // `R10G10B10A2_UNORM` (`VK_FORMAT_A2B10G10R10_UNORM_PACK32`), the other
 // mandatory format roadmap C1 adds: all four components packed into one
 // 32-bit word, 2 bits of alpha at the top down to 10 bits of red at the

@@ -1339,6 +1339,33 @@ TEST_F(ImageSamplingTest, LoadFetchesB8G8R8A8Unorm) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f); // A
 }
 
+// (Roadmap H8r) `B8G8R8A8_UNORM_SRGB`, an entirely unmapped format H8g's
+// own audit split off. Combines the `SRGBDecodeOnSample` sRGB-decode
+// behavior above with `LoadFetchesB8G8R8A8Unorm`'s own B/G/R/A memory
+// swizzle: a single texel with R=G=B=188/255 (~0.7372549, the sRGB
+// encoding of linear 0.5) and A=255 (1.0, never sRGB-decoded). Since
+// R=G=B here, the same little-endian word works for both memory orders.
+TEST_F(ImageSamplingTest, SRGBDecodeOnSampleBGRA8) {
+  uint32_t Storage[1][1] = {{0xFFBCBCBCu}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::B8G8R8A8_UNORM_SRGB, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, true, Out);
+  EXPECT_NEAR(Out[0], 0.5f, 0.01f);
+  EXPECT_NEAR(Out[1], 0.5f, 0.01f);
+  EXPECT_NEAR(Out[2], 0.5f, 0.01f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f); // Alpha is never sRGB-decoded.
+}
+
 TEST_F(ImageSamplingTest, LoadFetchesR10G10B10A2Unorm) {
   // From the MSB down: 2 bits A, 10 bits B, 10 bits G, 10 bits R. Set
   // R=1023 (max), G=0, B=0, A=3 (max) so each field is unambiguous.

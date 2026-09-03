@@ -339,6 +339,18 @@ enum class ResourceFormat : uint32_t {
   // switches on this enum's raw ordinal value, so a new entry may only
   // ever be appended, never inserted or reordered).
   E5B9G9R9_UFLOAT,
+
+  // (Roadmap H8r) `VK_FORMAT_B8G8R8A8_SRGB`: the sRGB-encoded sibling of
+  // `B8G8R8A8_UNORM` above, an entirely unmapped format H8g's own audit
+  // found reporting zero `VkFormatFeatureFlags` outright (no
+  // `mapVkFormat` case existed for it at all). Byte-for-byte the same
+  // B/G/R/A memory order `R8G8B8A8_UNORM_SRGB` has with R and B swapped,
+  // needing its own `ResourceFormat` (rather than reusing
+  // `R8G8B8A8_UNORM_SRGB`) since the runtime's sRGB decode/encode helpers
+  // also swap channel order -- appended at the enum's own tail for the
+  // same hard-coded-switch-case reason as `E5B9G9R9_UFLOAT` immediately
+  // above.
+  B8G8R8A8_UNORM_SRGB,
 };
 
 /// Whether \p Format is one of the ASTC block-compressed formats above.

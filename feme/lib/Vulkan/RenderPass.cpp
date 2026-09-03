@@ -27,6 +27,10 @@ bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format) {
   case feme::cpu::ResourceFormat::R8G8B8A8_UNORM:
   case feme::cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB:
   case feme::cpu::ResourceFormat::B8G8R8A8_UNORM:
+  // (Roadmap H8r) `B8G8R8A8_UNORM_SRGB`: the sRGB sibling of
+  // `B8G8R8A8_UNORM` above, also backed by a real `packClearColor`/
+  // `unpackColor` case (ImageFixture.cpp).
+  case feme::cpu::ResourceFormat::B8G8R8A8_UNORM_SRGB:
   case feme::cpu::ResourceFormat::R10G10B10A2_UNORM:
   case feme::cpu::ResourceFormat::R16G16B16A16_FLOAT:
   case feme::cpu::ResourceFormat::R16G16B16A16_UNORM:

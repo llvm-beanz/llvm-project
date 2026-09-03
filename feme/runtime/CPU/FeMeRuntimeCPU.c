@@ -1567,6 +1567,10 @@ femeRTImageFormatElementSize(uint32_t Format) {
   // word like `R11G11B10_FLOAT` (case 23) above.
   case 131: // E5B9G9R9_UFLOAT
     return 4;
+  // (Roadmap H8r) `B8G8R8A8_UNORM_SRGB`: the sRGB sibling of
+  // `B8G8R8A8_UNORM` (case 26) above, same 4-byte-per-texel layout.
+  case 132: // B8G8R8A8_UNORM_SRGB
+    return 4;
   default:
     return 0;
   }
@@ -2079,6 +2083,15 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     uint32_t Raw;
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackB8G8R8A8Unorm(Raw);
+  }
+  case 132: { // B8G8R8A8_UNORM_SRGB (roadmap H8r)
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    FemeRTv4f32 V = femeRTUnpackB8G8R8A8Unorm(Raw);
+    V[0] = femeRTSRGBToLinear(V[0]);
+    V[1] = femeRTSRGBToLinear(V[1]);
+    V[2] = femeRTSRGBToLinear(V[2]);
+    return V;
   }
   case 27: { // A8_UNORM
     return femeRTUnpackA8Unorm(*Ptr);

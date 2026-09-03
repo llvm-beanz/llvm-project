@@ -349,6 +349,7 @@ Expected<ResourceFormat> parseResourceFormat(StringRef Format) {
           .Case("r8g8b8a8_sint", ResourceFormat::R8G8B8A8_SINT)
           .Case("r8g8b8a8_unorm_srgb", ResourceFormat::R8G8B8A8_UNORM_SRGB)
           .Case("b8g8r8a8_unorm", ResourceFormat::B8G8R8A8_UNORM)
+          .Case("b8g8r8a8_unorm_srgb", ResourceFormat::B8G8R8A8_UNORM_SRGB)
           .Case("r16g16b16a16_float", ResourceFormat::R16G16B16A16_FLOAT)
           .Case("r16g16b16a16_unorm", ResourceFormat::R16G16B16A16_UNORM)
           .Case("r16g16b16a16_snorm", ResourceFormat::R16G16B16A16_SNORM)
@@ -470,6 +471,9 @@ uint32_t imageFormatElementSize(ResourceFormat Format) {
   case ResourceFormat::R8G8B8A8_SINT:
   case ResourceFormat::R8G8B8A8_UNORM_SRGB:
   case ResourceFormat::B8G8R8A8_UNORM:
+  // (Roadmap H8r) `B8G8R8A8_UNORM_SRGB`: same 4-byte layout as
+  // `B8G8R8A8_UNORM` above.
+  case ResourceFormat::B8G8R8A8_UNORM_SRGB:
   case ResourceFormat::R11G11B10_FLOAT:
   case ResourceFormat::R10G10B10A2_UNORM:
   case ResourceFormat::R10G10B10A2_UINT:

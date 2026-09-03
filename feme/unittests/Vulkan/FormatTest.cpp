@@ -27,6 +27,33 @@ TEST(FormatTest, MapsPackedFormat) {
             ResourceFormat::R8G8B8A8_UNORM);
 }
 
+// (Roadmap H8r) `VK_FORMAT_B8G8R8A8_SRGB`, split off from H8g's own
+// mandatory blit/filter bits audit as an entirely unmapped format (unlike
+// H8g's own genuine scope, which found only under-reported bits, this one
+// had no `mapVkFormat` case at all).
+TEST(FormatTest, MapsBGRA8SRGBFormat) {
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_B8G8R8A8_SRGB),
+            ResourceFormat::B8G8R8A8_UNORM_SRGB);
+  EXPECT_EQ(formatElementSize(ResourceFormat::B8G8R8A8_UNORM_SRGB), 4u);
+}
+
+// (Roadmap H8r) `B8G8R8A8_UNORM_SRGB` needs every one of the CTS's own
+// mandatory `format_properties` bits for `b8g8r8a8_srgb`, since it was
+// previously reporting *none* of them (an entirely unmapped format, not a
+// merely-under-reported one).
+TEST(FormatTest, FormatFeatureFlagsBGRA8SRGBMatchesCTSMandatoryBits) {
+  VkFormatFeatureFlags Flags =
+      formatFeatureFlags(ResourceFormat::B8G8R8A8_UNORM_SRGB);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_TRANSFER_DST_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_BLIT_DST_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT);
+}
+
 TEST(FormatTest, MapsDepthStencilFormats) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_D32_SFLOAT), ResourceFormat::D32_FLOAT);
   EXPECT_EQ(mapVkFormat(VK_FORMAT_D24_UNORM_S8_UINT),
@@ -730,6 +757,13 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         ResourceFormat::R16G16B16A16_UNORM,
         ResourceFormat::R16G16B16A16_SNORM, ResourceFormat::R11G11B10_FLOAT,
         ResourceFormat::R10G10B10A2_UNORM, ResourceFormat::B8G8R8A8_UNORM,
+        // Roadmap H8r: `B8G8R8A8_UNORM_SRGB`, an entirely unmapped
+        // format H8g's own audit split off (not merely under-reported --
+        // `mapVkFormat` had no case at all), now decoded by
+        // `femeRTUnpackImageTexel`'s own case (sRGB-decoded like
+        // `R8G8B8A8_UNORM_SRGB` above, byte-swapped like
+        // `B8G8R8A8_UNORM`).
+        ResourceFormat::B8G8R8A8_UNORM_SRGB,
         ResourceFormat::A8_UNORM, ResourceFormat::A1B5G5R5_UNORM,
         // Roadmap H8e: `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM`, a CTS-confirmed
         // genuine `SAMPLED_IMAGE_BIT` gap rather than a reporting-only

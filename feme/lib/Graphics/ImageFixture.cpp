@@ -189,6 +189,10 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     // `R8G8B8A8_UNORM`, just with the red and blue components swapped in
     // memory (`packClearColor`/`unpackColor` handle the swap; roadmap C1).
     return FormatInfo{4, 1, false};
+  // (Roadmap H8r) `B8G8R8A8_UNORM_SRGB`: the sRGB sibling of
+  // `B8G8R8A8_UNORM` above, same shape.
+  case ResourceFormat::B8G8R8A8_UNORM_SRGB:
+    return FormatInfo{4, 1, false};
   case ResourceFormat::R16G16B16A16_FLOAT:
     return FormatInfo{4, 2, true};
   case ResourceFormat::R16G16B16A16_UNORM:
@@ -297,6 +301,7 @@ Expected<ResourceFormat> parseFixtureFormat(StringRef Format) {
           .Case("r8g8b8a8-sint", ResourceFormat::R8G8B8A8_SINT)
           .Case("r8g8b8a8-unorm-srgb", ResourceFormat::R8G8B8A8_UNORM_SRGB)
           .Case("b8g8r8a8-unorm", ResourceFormat::B8G8R8A8_UNORM)
+          .Case("b8g8r8a8-unorm-srgb", ResourceFormat::B8G8R8A8_UNORM_SRGB)
           .Case("r16g16b16a16-float", ResourceFormat::R16G16B16A16_FLOAT)
           .Case("r16g16b16a16-unorm", ResourceFormat::R16G16B16A16_UNORM)
           .Case("r16g16b16a16-snorm", ResourceFormat::R16G16B16A16_SNORM)
@@ -730,7 +735,8 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
-  if (Format == ResourceFormat::B8G8R8A8_UNORM) {
+  if (Format == ResourceFormat::B8G8R8A8_UNORM ||
+      Format == ResourceFormat::B8G8R8A8_UNORM_SRGB) {
     // Same encoding as `R8G8B8A8_UNORM`, but memory order is B, G, R, A:
     // `Clear` is always logical [R, G, B, A] (matching
     // `VkClearColorValue::float32`).
@@ -1136,7 +1142,8 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     return Error::success();
   }
 
-  if (Format == ResourceFormat::B8G8R8A8_UNORM) {
+  if (Format == ResourceFormat::B8G8R8A8_UNORM ||
+      Format == ResourceFormat::B8G8R8A8_UNORM_SRGB) {
     static const unsigned Swizzle[4] = {2, 1, 0, 3};
     for (unsigned I = 0; I != Info->Components; ++I)
       Out[Swizzle[I]] = Texel[I] / 255.0;
@@ -1489,6 +1496,8 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "r8g8b8a8-unorm-srgb";
   case ResourceFormat::B8G8R8A8_UNORM:
     return "b8g8r8a8-unorm";
+  case ResourceFormat::B8G8R8A8_UNORM_SRGB:
+    return "b8g8r8a8-unorm-srgb";
   case ResourceFormat::R16G16B16A16_FLOAT:
     return "r16g16b16a16-float";
   case ResourceFormat::R16G16B16A16_UNORM:

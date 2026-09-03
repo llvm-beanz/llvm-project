@@ -110,6 +110,18 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::R16G16_SINT;
   case VK_FORMAT_B8G8R8A8_UNORM:
     return ResourceFormat::B8G8R8A8_UNORM;
+  // (Roadmap H8r) `VK_FORMAT_B8G8R8A8_SRGB`: the sRGB-encoded sibling of
+  // `B8G8R8A8_UNORM` above, byte-for-byte the same B/G/R/A memory order
+  // as `R8G8B8A8_UNORM_SRGB` with R and B swapped -- a CTS-confirmed
+  // genuine gap (the entirely unmapped format H8g's own audit split
+  // off), not merely a reporting one: unlike H8's other packed-format
+  // aliases, this needs its own `ResourceFormat` (not a byte-identical
+  // reuse of `R8G8B8A8_UNORM_SRGB`) since the runtime's sRGB decode/encode
+  // helpers also swap the R/B channel order, mirroring how
+  // `B8G8R8A8_UNORM` already gets its own `ResourceFormat` distinct from
+  // `R8G8B8A8_UNORM` for the same reason.
+  case VK_FORMAT_B8G8R8A8_SRGB:
+    return ResourceFormat::B8G8R8A8_UNORM_SRGB;
   case VK_FORMAT_R16G16B16A16_SFLOAT:
     return ResourceFormat::R16G16B16A16_FLOAT;
   case VK_FORMAT_R16G16B16A16_UNORM:
@@ -330,6 +342,9 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::R8G8B8A8_SINT:
   case ResourceFormat::R8G8B8A8_UNORM_SRGB:
   case ResourceFormat::B8G8R8A8_UNORM:
+  // (Roadmap H8r) `B8G8R8A8_UNORM_SRGB`: the sRGB sibling of
+  // `B8G8R8A8_UNORM` above, packed the same 4-byte way.
+  case ResourceFormat::B8G8R8A8_UNORM_SRGB:
   case ResourceFormat::R11G11B10_FLOAT:
   case ResourceFormat::R10G10B10A2_UNORM:
   case ResourceFormat::R10G10B10A2_UINT:
@@ -924,6 +939,13 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `R10G10B10A2_SNORM` case.
   case ResourceFormat::R10G10B10A2_SNORM:
   case ResourceFormat::B8G8R8A8_UNORM:
+  // (Roadmap H8r) `B8G8R8A8_UNORM_SRGB`: the sRGB sibling of
+  // `B8G8R8A8_UNORM` above, decoded (with the sRGB gamma curve applied)
+  // by `femeRTUnpackImageTexel`'s own `B8G8R8A8_UNORM_SRGB` case, a
+  // CTS-confirmed genuine `SAMPLED_IMAGE_BIT`/`BLIT_*` gap: unlike every
+  // other H8 packed-format gap, this format wasn't merely under-reported
+  // -- `mapVkFormat` had no case for it at all before this row.
+  case ResourceFormat::B8G8R8A8_UNORM_SRGB:
   case ResourceFormat::A8_UNORM:
   case ResourceFormat::A1B5G5R5_UNORM:
   // (Roadmap H8e) `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM`: two more of roadmap
