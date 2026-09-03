@@ -21764,3 +21764,80 @@ atomics are a format-feature, not a device feature) and
 part of core 1.0 `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT`, unlocked
 purely by mandatory-format-support rules once the two mandatory formats
 support it).
+
+## Roadmap H8w: measured impact
+
+CPU-runtime lowering for storage-*texel-buffer* atomics, closing the gap
+H8v's own final re-run discovered. Unlike H8u/H8v's own storage-*image*
+atomic (which needed a new MLIR op, `spirv.ImageTexelPointer`, plus new
+`feme`-side conversion patterns), this row's own real finding was that
+**no MLIR/SPIR-V-conversion-layer work was needed at all**:
+`SPIRV_ImageTexelPointerOp`'s own `$image` operand (`SPIRVImageOps.td`)
+has no `Dim` restriction, so a storage texel buffer's own
+`OpImageTexelPointer` usage is identical to a storage image's, and
+`feme`'s own `ImageTexelPointerPattern`/`AtomicRMWPattern`/
+`AtomicCompareExchangePattern` (`SPIRVToLLVMPatterns.cpp`, added closing
+H8u/R39) are already fully `Dim`-agnostic. This overturns the row's own
+original premise (written when it was split off from H8v), which
+speculated the opposite.
+
+The real, narrower remaining gap was purely CPU-side:
+`SPIRVResourceLowering.cpp`'s generic (non-image) resource-pointer
+validator/lowering (`hasOnlySupportedPointerUses`/`lowerAccesses`) had no
+atomic case at all, only `Load`/`Store`. Added a new `Writable && IsTexel`
+atomic branch to `hasOnlySupportedPointerUses` (true only for
+`HandleKind::TexelStorage`, deliberately not the broader `Storage`/
+`StorageStruct` SSBO gap -- split off as roadmap H8x instead), and a
+matching atomic-rewrite block to `lowerAccesses`'s `IsTexel` branch
+dispatching to 11 new `createAtomic*Typed` builders (`ResourceCalls.h/
+.cpp`) backed by 11 new `feme.cpu.resource.atomic.*.typed.i32` runtime
+entry points (`FeMeRuntimeCPU.c`), mirroring H8v's own
+`feme.cpu.image.atomic.*.2d.i32` precedent (same `__atomic_fetch_*`/
+`__atomic_exchange_n`/`__atomic_compare_exchange_n` builtins,
+`__ATOMIC_SEQ_CST` ordering, and the same `uint32_t`-reinterpret-cast
+trick for `UMax`/`UMin`'s unsigned comparison semantics).
+
+Along the way, found and fixed a real, pre-existing bug in
+`feme::cpu::SIMDizePass::widenResourceCall` (`SIMDize.cpp`): it used
+`!Matched.StoredValue` to decide whether a call's result is widenable,
+correct for the pre-existing Load/Store-only `ResourceCallKind`s (a
+`Store`'s `StoredValue` was always paired with a `void` return) but wrong
+for the new atomic kinds, which carry both a `StoredValue` (the RMW/xchg
+operand) *and* a non-`void` result. Fixed to check
+`CI.getType()->isVoidTy()` directly, mirroring `widenImageCall`'s own
+already-correct approach, and extended to widen the new `Comparator`
+operand (compare-exchange's own 7-argument call shape, one more than any
+previously-widened kind).
+
+New coverage at every phase this row touched: `ResourceCallsTest.cpp`
+(`CreateAtomicAddTypedRoundTrips`, `CreateAtomicUMaxTypedRoundTrips`,
+`CreateAtomicCompareExchangeTypedRoundTrips`,
+`AtomicMemoryEffectsAreArgMemOnlyModRef`), and
+`spirv-resource-lowering-texel-buffer-atomic.ll` (FileCheck: an
+`OpImageTexelPointer` + atomic against a scalar `Dim == Buffer` storage
+image lowers to the new `feme.cpu.resource.atomic.*.typed.i32` calls).
+
+`ninja check-feme` (assertions-enabled, ccache build) passed in full:
+**2441/2468 (27 unsupported), 0 regressions.**
+
+Real `dEQP-VK.image.atomic_operations.*.buffer.*` runs against feme's own
+ICD (`VK_ICD_FILENAMES` correctly set, confirmed via prior sessions'
+`vulkaninfo --summary` check): all 9 RMW/compare-exchange kinds
+(`add`/`and`/`compare_exchange`/`exchange`/`max`/`min`/`or`/`sub`/`xor`)
+for both `r32i`/`r32ui` end-result cases now **Pass: 18/18 (100%)**.
+
+A real `dEQP-VK.api.info.format_properties.*` re-run moves **223/225 ->
+224/225 Pass**: `r32_sint`/`r32_uint` now report
+`VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT` on `bufferFeatures`
+correctly and drop out of the failure list. The 1 remaining failure is
+unrelated to this row's own scope: `a2b10g10r10_unorm_pack32`'s
+`VERTEX_BUFFER_BIT` gap (already tracked, H8h).
+
+`VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT` is honestly `VK_TRUE`
+for `R32_{SINT,UINT}` as of this commit; see `Vulkan14FeatureInventory.md`
+(no `VkPhysicalDeviceFeatures` bit is touched by this row -- texel-buffer
+atomics are a format-feature, not a device feature) and
+`VulkanExtensionInventory.md` (no extension gates this bit either; it is
+part of core 1.0 `VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT`,
+unlocked purely by mandatory-format-support rules once the two mandatory
+formats support it).

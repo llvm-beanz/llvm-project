@@ -947,6 +947,35 @@ is now set for `R32_{SINT,UINT}` (`Format.cpp`), confirmed against feme's
 own ICD by all 8 `dEQP-VK.image.atomic_operations.*` RMW/compare-exchange
 kinds passing for both formats (16/16).
 
+**Roadmap H8w** then found the mirror-image gap for a storage *texel
+buffer* (`VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT`), and closed
+it with **no MLIR/SPIR-V-conversion-layer work at all** -- a real
+deviation from that row's own original premise (which speculated the
+opposite, that a texel buffer's atomic might reach an ordinary
+`OpAccessChain` pointer never needing `OpImageTexelPointer`). Inspecting
+`SPIRV_ImageTexelPointerOp`'s own `$image` operand (`SPIRVImageOps.td`)
+found it has no `Dim` restriction at all: a storage texel buffer's
+`OpImageTexelPointer` usage is identical to a storage image's, and
+`feme`'s own `ImageTexelPointerPattern`/`AtomicRMWPattern`/
+`AtomicCompareExchangePattern` (`SPIRVToLLVMPatterns.cpp`, added closing
+H8u/R39) are already fully `Dim`-agnostic -- so a texel buffer's atomic
+reaches the same `llvm.spv.resource.getpointer` intrinsic a storage
+image's atomic already did, with zero new conversion-layer code needed.
+The real remaining gap was purely CPU-side: `SPIRVResourceLowering.cpp`'s
+generic (non-image) resource-pointer path (`hasOnlySupportedPointerUses`/
+`lowerAccesses`) had no atomic case at all, only `Load`/`Store` -- now
+added, scoped to `HandleKind::TexelStorage` only (`Writable && IsTexel`),
+dispatching to 11 new `feme.cpu.resource.atomic.*.typed.i32` runtime entry
+points (`ResourceCalls.h/.cpp`, `FeMeRuntimeCPU.c`) mirroring H8v's own
+`feme.cpu.image.atomic.*` precedent. `VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT`
+is now set for `R32_{SINT,UINT}` (`Format.cpp`), confirmed against feme's
+own ICD by all 9 `dEQP-VK.image.atomic_operations.*.buffer.*` RMW/
+compare-exchange kinds passing for both formats (18/18). The
+deliberately-still-open, broader gap that ordinary SSBO
+(`HandleKind::Storage`/`StorageStruct`) atomics are *also* rejected by
+`hasOnlySupportedPointerUses` today (untouched by H8w's own narrow
+`IsTexel` gating) is tracked as roadmap H8x, not fixed here.
+
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 
 DXIL *is* LLVM IR: it's serialized as LLVM bitcode (frozen at an old LLVM IR
