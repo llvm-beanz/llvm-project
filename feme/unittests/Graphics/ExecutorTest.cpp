@@ -604,6 +604,18 @@ TEST(ExecutorTest, VertexAttributeDecodesR16G16B16A16FloatColor) {
       cpu::ResourceFormat::R16G16B16A16_FLOAT, ColorBytes, {255, 0, 0, 255});
 }
 
+TEST(ExecutorTest, VertexAttributeDecodesB8G8R8A8UnormColor) {
+  // (Roadmap H8t) `B8G8R8A8_UNORM`'s memory order is B, G, R, A (unlike
+  // `R8G8B8A8_UNORM`'s R, G, B, A) -- feed the raw memory bytes for
+  // logical solid red (R=255,G=0,B=0,A=255) as {B=0, G=0, R=255, A=255}
+  // and confirm `decodeAttribute`'s swizzle recovers logical red, not
+  // blue, in the rendered attachment (which is itself `R8G8B8A8_UNORM`,
+  // so a byte-for-byte swizzle bug would show up as a blue triangle).
+  std::array<uint8_t, 4> ColorBytes = {0, 0, 255, 255}; // B, G, R, A memory.
+  renderSolidColorTriangleWithAttributeFormat(
+      cpu::ResourceFormat::B8G8R8A8_UNORM, ColorBytes, {255, 0, 0, 255});
+}
+
 /// (roadmap H7t) The same fully-covered, solid-color triangle as
 /// `FillsFullyCoveredTriangleWithSolidColor`, but the fragment stage's own
 /// `SV_Target0` output is a 3-component `vec3` (`Vec3FragmentShaderIR`,

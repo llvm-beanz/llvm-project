@@ -637,6 +637,10 @@ TEST(FormatTest, VertexBufferFormatSupportMatchesDecodeAttributeScope) {
       isVertexBufferFormatSupported(ResourceFormat::R16G16B16A16_SINT));
   EXPECT_TRUE(
       isVertexBufferFormatSupported(ResourceFormat::R16G16B16A16_FLOAT));
+  // (Roadmap H8t) `B8G8R8A8_UNORM`: a plain 4-byte-per-texel format
+  // `decodeAttribute` now implements (reordering B/G/R/A memory bytes to
+  // logical R/G/B/A), unlike `A2B10G10R10_UNORM_PACK32` below.
+  EXPECT_TRUE(isVertexBufferFormatSupported(ResourceFormat::B8G8R8A8_UNORM));
 
   // Formats `decodeAttribute` does not implement yet (the packed
   // `A2B10G10R10_UNORM_PACK32`, tracked as its own remaining roadmap H8
@@ -645,7 +649,6 @@ TEST(FormatTest, VertexBufferFormatSupportMatchesDecodeAttributeScope) {
   // attribute format, even though it is mandatory per the Vulkan spec.
   EXPECT_FALSE(
       isVertexBufferFormatSupported(ResourceFormat::R10G10B10A2_UNORM));
-  EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::B8G8R8A8_UNORM));
   EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::Unknown));
   EXPECT_FALSE(isVertexBufferFormatSupported(ResourceFormat::ASTC_4x4_UNORM));
   // Roadmap H8n: nor can a BC format.

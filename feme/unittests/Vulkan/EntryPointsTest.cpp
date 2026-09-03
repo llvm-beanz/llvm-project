@@ -85,12 +85,13 @@ TEST_F(EntryPointsTest, FormatPropertiesReportsVertexBufferBit) {
                                       &Props2);
   EXPECT_TRUE(Props2.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
 
-  // `B8G8R8A8_UNORM` is not one of `decodeAttribute`'s supported vertex
-  // attribute formats (see Executor.cpp) -- must not claim the bit.
+  // (Roadmap H8t) `B8G8R8A8_UNORM` now decodes as a vertex attribute too
+  // (see Executor.cpp's `decodeAttribute`, which reorders the B/G/R/A
+  // memory bytes to logical R/G/B/A) -- must claim the bit.
   VkFormatProperties Props3{};
   vkGetPhysicalDeviceFormatProperties(Physical, VK_FORMAT_B8G8R8A8_UNORM,
                                       &Props3);
-  EXPECT_FALSE(Props3.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
+  EXPECT_TRUE(Props3.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
 }
 
 TEST_F(EntryPointsTest, FormatPropertiesNeverReportsStorageImage) {

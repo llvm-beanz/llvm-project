@@ -857,6 +857,10 @@ bool feme::vulkan::isVertexBufferFormatSupported(ResourceFormat Format) {
   case ResourceFormat::R8G8B8A8_SNORM:
   case ResourceFormat::R8G8B8A8_UINT:
   case ResourceFormat::R8G8B8A8_SINT:
+  // (Roadmap H8t) `B8G8R8A8_UNORM`: same 1-byte-per-component UNORM
+  // conversion as `R8G8B8A8_UNORM` above, `decodeAttribute` (Executor.cpp)
+  // just reorders the B/G/R/A memory bytes back to logical R/G/B/A order.
+  case ResourceFormat::B8G8R8A8_UNORM:
   // (Roadmap H8b) The single- and two-channel 8-bit-per-component
   // families -- same conversion rules as `R8G8B8A8_*` above, just fewer
   // channels.

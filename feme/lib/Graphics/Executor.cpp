@@ -218,6 +218,21 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
       putFloat(I, Src[I] / 255.0f);
     return Error::success();
   }
+  // (Roadmap H8t) `B8G8R8A8_UNORM`: the same 1-byte-per-component UNORM
+  // conversion as `R8G8B8A8_UNORM` above, but the memory order is B, G,
+  // R, A (mirroring `ImageFixture.cpp`'s own `packClearColor`/
+  // `unpackColor` swizzle for this format) while the decoded, logical
+  // component order handed to the shader is still R, G, B, A.
+  case cpu::ResourceFormat::B8G8R8A8_UNORM: {
+    if (WantType != SignatureComponentType::Float)
+      return createStringError(inconvertibleErrorCode(),
+                               "*_UNORM vertex attribute requires a "
+                               "floating-point shader input");
+    static const uint32_t Swizzle[4] = {2, 1, 0, 3};
+    for (uint32_t I = 0; I != WantComponents; ++I)
+      putFloat(I, Src[Swizzle[I]] / 255.0f);
+    return Error::success();
+  }
   case cpu::ResourceFormat::R8_SNORM:
   case cpu::ResourceFormat::R8G8_SNORM:
   case cpu::ResourceFormat::R8G8B8A8_SNORM: {
@@ -365,6 +380,9 @@ Expected<uint32_t> attributeComponentByteSize(cpu::ResourceFormat Format) {
   case cpu::ResourceFormat::R8G8B8A8_SNORM:
   case cpu::ResourceFormat::R8G8B8A8_UINT:
   case cpu::ResourceFormat::R8G8B8A8_SINT:
+  // (Roadmap H8t) `B8G8R8A8_UNORM`: same 1-byte-per-component layout as
+  // `R8G8B8A8_UNORM` above, just reordered in memory.
+  case cpu::ResourceFormat::B8G8R8A8_UNORM:
     return 1;
   // (Roadmap H8b) The 16-bit-per-component families.
   case cpu::ResourceFormat::R16_UNORM:
