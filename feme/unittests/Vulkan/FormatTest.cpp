@@ -290,6 +290,35 @@ TEST(FormatTest, MapsETC2Formats) {
             ResourceFormat::EAC_R11G11_SNORM);
 }
 
+// (Roadmap H8q) `VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`: an entirely new
+// shared-exponent packed format, unlike every other recognized format
+// above -- a real `deqp-vk` run found it missing every feature bit
+// (`BLIT_SRC_BIT`/`SAMPLED_IMAGE_BIT`/`FILTER_LINEAR_BIT`/
+// `TRANSFER_DST_BIT`/`TRANSFER_SRC_BIT`) since `mapVkFormat` had no case
+// for it at all.
+TEST(FormatTest, MapsE5B9G9R9UfloatFormat) {
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_E5B9G9R9_UFLOAT_PACK32),
+            ResourceFormat::E5B9G9R9_UFLOAT);
+  // Packed into a single 4-byte word, the same as `R11G11B10_FLOAT`.
+  EXPECT_EQ(formatElementSize(ResourceFormat::E5B9G9R9_UFLOAT), 4u);
+  // `TRANSFER_SRC_BIT`/`TRANSFER_DST_BIT` are granted unconditionally to
+  // any recognized, non-block-compressed format; `BLIT_SRC_BIT`/
+  // `BLIT_DST_BIT` likewise for any non-block-compressed format --
+  // automatic once `mapVkFormat` recognizes the format, no dedicated
+  // case needed for any of these four.
+  VkFormatFeatureFlags Flags =
+      formatFeatureFlags(ResourceFormat::E5B9G9R9_UFLOAT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_TRANSFER_DST_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_BLIT_DST_BIT);
+  // `SAMPLED_IMAGE_BIT`/`FILTER_LINEAR_BIT` need the new dedicated
+  // `femeRTUnpackImageTexel` case (`femeRTUnpackRGB9E5`,
+  // FeMeRuntimeCPU.c) this row adds.
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+  EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+}
+
 TEST(FormatTest, ElementSizeMatchesFormatWidth) {
   EXPECT_EQ(formatElementSize(ResourceFormat::R32_FLOAT), 4u);
   EXPECT_EQ(formatElementSize(ResourceFormat::R32G32_FLOAT), 8u);

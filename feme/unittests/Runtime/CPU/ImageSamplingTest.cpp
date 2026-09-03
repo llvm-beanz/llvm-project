@@ -1430,6 +1430,52 @@ TEST_F(ImageSamplingTest, LoadFetchesR11G11B10FloatNonZeroValues) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f);
 }
 
+TEST_F(ImageSamplingTest, LoadFetchesE5B9G9R9Ufloat) {
+  // (Roadmap H8q) An all-zero-bits texel decodes to (0, 0, 0, 1.0): a
+  // zero shared exponent and zero mantissas both decode to zero for
+  // every channel, and this format carries no alpha channel (always
+  // reads 1.0).
+  uint32_t Storage[1][1] = {{0}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::E5B9G9R9_UFLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesE5B9G9R9UfloatNonZeroValues) {
+  // A non-zero-bits regression case, the same rationale
+  // `LoadFetchesR11G11B10FloatNonZeroValues` above documents (an
+  // all-zero-bits texel alone cannot distinguish a correct decode from a
+  // decode that is broken in a way that only manifests for a non-zero
+  // input). Each channel's value is `mantissa * 2^(exponent - 15 - 9)`;
+  // with a shared exponent of 24 (so `exponent - 24 == 0`), R = mantissa
+  // 256 = 256.0, G = mantissa 128 = 128.0, B = mantissa 64 = 64.0.
+  // Packed from the LSB up: R (bits 0-8), G (bits 9-17), B (bits 18-26),
+  // exponent (bits 27-31).
+  uint32_t Word = 256u | (128u << 9) | (64u << 18) | (24u << 27);
+  uint32_t Storage[1][1] = {{Word}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::E5B9G9R9_UFLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 256.0f);
+  EXPECT_FLOAT_EQ(Out[1], 128.0f);
+  EXPECT_FLOAT_EQ(Out[2], 64.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
 TEST_F(ImageSamplingTest, LoadFetchesR16G16B16A16Float) {
   // binary16 1.0 is 0x3C00; -2.0 is 0xC000.
   uint16_t Storage[1][1][4] = {{{0x3C00, 0x0000, 0xC000, 0x3C00}}};

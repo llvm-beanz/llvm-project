@@ -15,6 +15,7 @@
 
 #include "feme/Graphics/ImageFixture.h"
 
+#include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
@@ -889,6 +890,126 @@ TEST(ImageFixtureTest, RoundTripsCombinedDepthStencilFormat) {
   const ImageFixture &Img = (*Images)[0];
   EXPECT_EQ(Img.Format, cpu::ResourceFormat::D24_UNORM_S8_UINT);
   ASSERT_EQ(Img.Data.size(), 4u);
+
+  std::string Printed;
+  raw_string_ostream OS(Printed);
+  ASSERT_THAT_ERROR(printImageFixture(OS, Img), Succeeded());
+  EXPECT_EQ(Printed, Text);
+}
+
+// (Roadmap H8q) `E5B9G9R9_UFLOAT` (`VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`): a
+// shared-exponent packed format, unlike every other packed format above
+// -- covers a mid-range value (all three channels within a factor of 2 of
+// each other, so no channel's own rounding should visibly lose bits at
+// this magnitude), alpha (`Clear[3]`) simply ignored since this format
+// has no alpha channel.
+TEST(ImageFixtureTest, PacksAndUnpacksE5B9G9R9UfloatMidRange) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT,
+                                   {1.0, 0.5, 0.25, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], 0.5, 0.01);
+  EXPECT_NEAR(Unpacked[2], 0.25, 0.01);
+  EXPECT_DOUBLE_EQ(Unpacked[3], 1.0); // No alpha channel -- always 1.0.
+}
+
+// All-zero input should round-trip to all-zero (the shared exponent's
+// own "MaxRGB <= 0.0" branch above).
+TEST(ImageFixtureTest, PacksAndUnpacksE5B9G9R9UfloatZero) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT,
+                                   {0.0, 0.0, 0.0, 0.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 0.0);
+  EXPECT_DOUBLE_EQ(Unpacked[1], 0.0);
+  EXPECT_DOUBLE_EQ(Unpacked[2], 0.0);
+}
+
+// A very small, sub-1.0 value exercises a negative shared exponent (far
+// below the encode's own zero-point), and a very large value close to
+// this format's own `MAX_RGB9E5` clamp exercises the opposite end of the
+// same 5-bit exponent field.
+TEST(ImageFixtureTest, PacksAndUnpacksE5B9G9R9UfloatWideRange) {
+  std::array<uint8_t, 4> SmallTexel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT,
+                                   {0.0001, 0.00005, 0.00002, 1.0},
+                                   SmallTexel),
+                    Succeeded());
+  std::array<double, 4> SmallUnpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT,
+                               SmallTexel, SmallUnpacked),
+                    Succeeded());
+  EXPECT_NEAR(SmallUnpacked[0], 0.0001, 0.00001);
+  EXPECT_NEAR(SmallUnpacked[1], 0.00005, 0.00001);
+  EXPECT_NEAR(SmallUnpacked[2], 0.00002, 0.00001);
+
+  std::array<uint8_t, 4> LargeTexel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT,
+                                   {50000.0, 30000.0, 10000.0, 1.0},
+                                   LargeTexel),
+                    Succeeded());
+  std::array<double, 4> LargeUnpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT,
+                               LargeTexel, LargeUnpacked),
+                    Succeeded());
+  EXPECT_NEAR(LargeUnpacked[0], 50000.0, 100.0);
+  EXPECT_NEAR(LargeUnpacked[1], 30000.0, 100.0);
+  EXPECT_NEAR(LargeUnpacked[2], 10000.0, 100.0);
+}
+
+// Every channel equal to exactly `1.0` (the shared exponent's own
+// mantissa-rounding "just below the overflow boundary" case, since `1.0`
+// maps to `mantissa == 256` at `ExpShared == 16`, comfortably below the
+// 512 overflow threshold) -- a regression guard distinct from the mixed-
+// magnitude cases above, which never drive every channel's own rounded
+// mantissa this close together.
+TEST(ImageFixtureTest, PacksAndUnpacksE5B9G9R9UfloatEqualChannels) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT,
+                                   {1.0, 1.0, 1.0, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[2], 1.0, 0.01);
+}
+
+// The fixture text format also round-trips `E5B9G9R9_UFLOAT`, the same
+// opaque hex-word encoding `R11G11B10_FLOAT`/`R10G10B10A2_UNORM` already
+// established for a packed format.
+TEST(ImageFixtureTest, RoundTripsE5B9G9R9UfloatFixtureFormat) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::E5B9G9R9_UFLOAT,
+                                   {1.0, 0.5, 0.25, 1.0}, Texel),
+                    Succeeded());
+  uint32_t Word;
+  memcpy(&Word, Texel.data(), 4);
+  std::string HexWord;
+  raw_string_ostream HexOS(HexWord);
+  HexOS << format_hex_no_prefix(Word, 8);
+  std::string Text = "image i0 1x1 e5b9g9r9-ufloat\n  y=0: " + HexWord + "\n";
+
+  Expected<std::vector<ImageFixture>> Images = parseImageFixtures(Text);
+  ASSERT_THAT_EXPECTED(Images, Succeeded());
+  ASSERT_EQ(Images->size(), 1u);
+  const ImageFixture &Img = (*Images)[0];
+  EXPECT_EQ(Img.Format, cpu::ResourceFormat::E5B9G9R9_UFLOAT);
+  ASSERT_EQ(Img.Data.size(), 4u);
+  uint32_t RoundTripped;
+  memcpy(&RoundTripped, Img.Data.data(), 4);
+  EXPECT_EQ(RoundTripped, Word);
 
   std::string Printed;
   raw_string_ostream OS(Printed);
