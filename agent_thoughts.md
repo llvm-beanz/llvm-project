@@ -56456,3 +56456,79 @@ real CTS numbers above. Confirmed (matching H8v's own precedent) that
 neither `Vulkan14FeatureInventory.md` nor `VulkanExtensionInventory.md`
 needed any change -- texel-buffer atomics are a format-feature bit, not a
 device feature or an extension.
+
+# H8x: SSBO/StorageStruct atomics
+
+H8w deliberately narrowed its new atomic-lowering support in
+`SPIRVResourceLowering.cpp` to `Writable && IsTexel`, correctly scoping it
+to `HandleKind::TexelStorage` for that row, but leaving ordinary SSBO
+(`HandleKind::Storage`/`StorageStruct`) atomics untouched -- split off as
+H8x. This session picked up mid-implementation from a prior session's
+investigation (already-decided direction: widen the gate to `Writable`
+alone, add a new byte-offset-addressed `Atomic*Raw` call family). My own
+work this session was almost entirely: (a) execute the real IR reduction
+the roadmap's row insists on before landing any fix, (b) run the real
+Vulkan CTS to confirm the fix end-to-end, (c) write up the docs, and
+(d) commit everything in small, separately-reviewable pieces.
+
+The IR reduction technique (documented at length in prior H-series rows,
+and reused verbatim here) is worth restating since it keeps paying off:
+a hand-written `.ll` repro is a fine first sanity check, but the real
+GLSL->SPIR-V->MLIR->LLVM pipeline sometimes surfaces details a
+hand-written repro wouldn't naturally include (this time: `addrspace(12)`
+on the `getpointer` result). Running the *unmodified* pass against the
+real repro first, before touching any code, is the only way to honestly
+confirm the "before" failure mode rather than assume it from source
+reading alone -- in this case, the pre-fix pass didn't error at all, it
+silently left the whole module untouched, which is a much easier failure
+mode to miss than a hard compile error.
+
+The fix itself ended up almost exactly as small as the roadmap row's own
+speculative sketch predicted: `hasOnlySupportedPointerUses`'s `Writable`
+boolean already computed to precisely the three `HandleKind`s an atomic
+is semantically valid against, so simplifying `Writable && IsTexel` to
+`Writable` was correct with no further conditions needed. The one
+genuinely new design decision was *where* to put the new atomic-dispatch
+block: rather than duplicating H8w's own `lowerAccesses`-level dispatch,
+I placed it inside `lowerRawPointerUses`, which already threads a
+cumulative byte offset through recursive GEP calls for the pre-existing
+Load/Store case. This meant a `HandleKind::StorageStruct` member atomic
+(reached through a GEP navigating to that field) came along "for free" --
+worth confirming with its own dedicated test rather than assuming, since
+"for free" claims in this codebase have been wrong before (H8w's own
+row's initial premise about `OpImageTexelPointer` being needed for texel
+buffers turned out backwards, for instance).
+
+One new gotcha discovered and worked around this session: LLVM's textual
+IR parser cannot disambiguate two different `target(...)` type-overloads
+of the same intrinsic name (e.g.
+`@llvm.spv.resource.handlefrombinding`) both declared unmangled in one
+`.ll` file -- it treats the second as an illegal redefinition. Splitting
+the `HandleKind::StorageStruct` test into its own file was the simplest
+fix; noted in both the test file and this log in case a future row hits
+the same wall.
+
+The real CTS run (`dEQP-VK.glsl.atomic_operations.*_compute`, 44 cases)
+gave a clean, easily-explained result: all 16 real int32 RMW/
+compare-exchange cases pass, and the other 28 are honestly
+`NotSupported` for entirely unrelated reasons (float atomics need
+`VK_EXT_shader_atomic_float`/`float2`, which `feme` doesn't advertise;
+64-bit shader atomics aren't implemented at all) -- neither blocks this
+row's own closure. I also opportunistically probed two nearby
+`dEQP-VK.compute.pipeline.basic.*` cases out of due diligence; both fail,
+but on the already-tracked, unrelated H19p "unsupported calling
+convention" abort, not on anything this row's fix touches, so I left
+them for whichever future row picks up H19p rather than scope-creeping
+this one.
+
+Also used this session to correct a small but real bookkeeping error in
+H8x's own original title: "shared-memory atomics" was named alongside
+SSBO atomics as part of the gap, but groupshared/`Workgroup`-storage
+atomics never go through `SPIRVResourceLowering.cpp` at all -- they're
+handled entirely separately as ordinary alloca/global atomics in
+`SIMDize.cpp`, and the existing
+`simdize-groupshared-atomic-{array,scalar}.ll` tests already confirm
+that path works today. Worth flagging explicitly in the closure text
+rather than silently dropping the discrepancy, since a future reader
+might otherwise wonder whether shared-memory atomics were ever actually
+fixed.
