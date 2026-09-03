@@ -70,6 +70,78 @@ uint16_t floatToHalfBits(float F) {
   return static_cast<uint16_t>(Value.bitcastToAPInt().getZExtValue());
 }
 
+/// (Roadmap H8q) Returns `floor(log2(X))` for a finite, positive `double`
+/// `X`, via `std::frexp` (which returns a mantissa in `[0.5, 1.0)` and an
+/// exponent `E` such that `X == mantissa * 2^E`, so `E - 1` is the floor)
+/// rather than `std::log2`, matching the Khronos
+/// `EXT_texture_shared_exponent` spec's own reference "FloorLog2" helper
+/// exactly (that helper is itself defined in terms of an IEEE-754
+/// exponent-field extraction, which `std::frexp` computes portably here).
+int32_t floorLog2(double X) {
+  int Exp;
+  std::frexp(X, &Exp);
+  return Exp - 1;
+}
+
+/// (Roadmap H8q) Encodes an RGB triple (`Clear[0..2]`, each expected
+/// non-negative -- `packClearColor`'s caller clamps below) into
+/// `VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`'s shared-exponent word: three
+/// independent 9-bit unsigned mantissas (R, G, B, packed LSB-up) sharing
+/// one 5-bit exponent field (bias 15) at the top. Mirrors the Khronos
+/// `EXT_texture_shared_exponent` spec's own reference `FloatsToRGB9E5`
+/// algorithm: clamp each channel to `[0, MAX_RGB9E5]`, choose the
+/// smallest shared exponent `ExpShared` that can represent the single
+/// largest channel without mantissa overflow, round each channel to that
+/// exponent's own 9-bit mantissa, then bump `ExpShared` once more and
+/// re-round if rounding overflowed the mantissa field.
+uint32_t encodeRGB9E5(double R, double G, double B) {
+  constexpr int32_t Bias = 15;
+  constexpr int32_t MantissaBits = 9;
+  constexpr int32_t MaxExp = 31; // 5-bit field, max biased exponent.
+  const double MaxValue = (511.0 / 512.0) * std::ldexp(1.0, MaxExp - Bias);
+  R = std::clamp(R, 0.0, MaxValue);
+  G = std::clamp(G, 0.0, MaxValue);
+  B = std::clamp(B, 0.0, MaxValue);
+  double MaxRGB = std::max({R, G, B});
+  int32_t ExpShared;
+  if (MaxRGB <= 0.0) {
+    ExpShared = 0;
+  } else {
+    int32_t Floor = std::max(floorLog2(MaxRGB), -Bias - 1);
+    ExpShared = std::min(Floor + 1 + Bias, MaxExp);
+  }
+  double Denom = std::ldexp(1.0, ExpShared - Bias - MantissaBits);
+  auto Round = [](double V, double D) -> uint32_t {
+    return static_cast<uint32_t>(std::lround(V / D));
+  };
+  uint32_t Rm = Round(R, Denom), Gm = Round(G, Denom), Bm = Round(B, Denom);
+  uint32_t MaxM = std::max({Rm, Gm, Bm});
+  if (MaxM > 511u && ExpShared < MaxExp) {
+    // Rounding pushed the mantissa one bit too wide for this exponent --
+    // bump the shared exponent once more and re-round every channel, per
+    // the reference algorithm's own overflow handling.
+    ++ExpShared;
+    Denom = std::ldexp(1.0, ExpShared - Bias - MantissaBits);
+    Rm = Round(R, Denom), Gm = Round(G, Denom), Bm = Round(B, Denom);
+  }
+  Rm = std::min(Rm, 511u);
+  Gm = std::min(Gm, 511u);
+  Bm = std::min(Bm, 511u);
+  return (Rm & 0x1FFu) | ((Gm & 0x1FFu) << 9) | ((Bm & 0x1FFu) << 18) |
+         (static_cast<uint32_t>(ExpShared) << 27);
+}
+
+/// (Roadmap H8q) The inverse of `encodeRGB9E5` above: decodes
+/// `VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`'s shared-exponent word into an RGB
+/// triple, each channel equal to `mantissa * 2^(exponent - 15 - 9)`.
+void decodeRGB9E5(uint32_t Word, double &R, double &G, double &B) {
+  uint32_t ExpBits = (Word >> 27) & 0x1Fu;
+  double Scale = std::ldexp(1.0, static_cast<int32_t>(ExpBits) - 15 - 9);
+  R = static_cast<double>(Word & 0x1FFu) * Scale;
+  G = static_cast<double>((Word >> 9) & 0x1FFu) * Scale;
+  B = static_cast<double>((Word >> 18) & 0x1FFu) * Scale;
+}
+
 /// The component count/width and encoding (hex vs. decimal) one
 /// `ResourceFormat` uses in a fixture. Only the formats
 /// `runtime/CPU/FeMeRuntimeCPU.c`'s image helpers and feme-run's own
@@ -132,6 +204,12 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     return FormatInfo{1, 4, false};
   case ResourceFormat::R10G10B10A2_UNORM:
   case ResourceFormat::R10G10B10A2_UINT:
+    return FormatInfo{1, 4, false};
+  case ResourceFormat::E5B9G9R9_UFLOAT:
+    // (Roadmap H8q) Also packed into a single opaque 4-byte word, the
+    // same convention `R11G11B10_FLOAT` above uses -- see
+    // `packClearColor`/`unpackColor`'s own dedicated shared-exponent
+    // packing code for this format.
     return FormatInfo{1, 4, false};
   case ResourceFormat::D16_UNORM:
     return FormatInfo{1, 2, false};
@@ -227,6 +305,7 @@ Expected<ResourceFormat> parseFixtureFormat(StringRef Format) {
           .Case("r11g11b10-float", ResourceFormat::R11G11B10_FLOAT)
           .Case("r10g10b10a2-unorm", ResourceFormat::R10G10B10A2_UNORM)
           .Case("r10g10b10a2-uint", ResourceFormat::R10G10B10A2_UINT)
+          .Case("e5b9g9r9-ufloat", ResourceFormat::E5B9G9R9_UFLOAT)
           .Case("d16-unorm", ResourceFormat::D16_UNORM)
           .Case("d32-float", ResourceFormat::D32_FLOAT)
           .Case("d24-unorm-s8-uint", ResourceFormat::D24_UNORM_S8_UINT)
@@ -592,6 +671,24 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     uint32_t Word =
         (static_cast<uint32_t>(std::clamp(Clear[3], 0.0, 3.0)) << 30) |
         (Comp10(Clear[2]) << 20) | (Comp10(Clear[1]) << 10) | Comp10(Clear[0]);
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+
+  // (Roadmap H8q) `E5B9G9R9_UFLOAT`: a single packed 32-bit word, the
+  // same "one opaque word, still a 4-logical-component clear color"
+  // convention `R10G10B10A2_UNORM`'s own special case above uses, but
+  // with a real shared-exponent encode (`encodeRGB9E5` above) rather
+  // than an independent per-channel bitfield -- alpha (`Clear[3]`) is
+  // simply ignored, this format has no alpha channel to store it in.
+  if (Format == ResourceFormat::E5B9G9R9_UFLOAT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    uint32_t Word = encodeRGB9E5(std::max(Clear[0], 0.0),
+                                 std::max(Clear[1], 0.0),
+                                 std::max(Clear[2], 0.0));
     memcpy(Texel.data(), &Word, sizeof(Word));
     return Error::success();
   }
@@ -982,6 +1079,24 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     Out[1] = (Word >> 10) & 0x3FF;
     Out[2] = (Word >> 20) & 0x3FF;
     Out[3] = (Word >> 30) & 0x3u;
+    return Error::success();
+  }
+
+  // (Roadmap H8q) `E5B9G9R9_UFLOAT`: the inverse of `packClearColor`'s
+  // own `encodeRGB9E5` special case above, via `decodeRGB9E5`. Alpha
+  // always reads `1.0` (this format carries no alpha channel), the same
+  // convention `R11G11B10_FLOAT` would use if it had an `unpackColor`
+  // case (it does not -- only sampling/storage, not clear-color/blit).
+  if (Format == ResourceFormat::E5B9G9R9_UFLOAT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint32_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    decodeRGB9E5(Word, Out[0], Out[1], Out[2]);
+    Out[3] = 1.0;
     return Error::success();
   }
 
@@ -1390,6 +1505,8 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "r10g10b10a2-unorm";
   case ResourceFormat::R10G10B10A2_UINT:
     return "r10g10b10a2-uint";
+  case ResourceFormat::E5B9G9R9_UFLOAT:
+    return "e5b9g9r9-ufloat";
   // (Roadmap H19o) `R10G10B10A2_{SNORM,SINT}`: same rationale as
   // `R8_{SNORM,SINT}` above -- no clear-color/texel fixture support
   // exists for them yet, but they still need a name for diagnostics.
