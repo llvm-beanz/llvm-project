@@ -21,6 +21,22 @@ set(feme_runtime_cpu_bc ${CMAKE_CURRENT_BINARY_DIR}/FeMeRuntimeCPU.bc)
 set(feme_runtime_cpu_embed_cpp
   ${CMAKE_CURRENT_BINARY_DIR}/FeMeRuntimeCPUBitcode.cpp)
 
+# (Roadmap H8v) An image atomic (`__atomic_fetch_add`/etc., compiled for
+# this bitcode's own host architecture -- it is never cross-compiled, see
+# `get_host_tool_path` below) would otherwise codegen, on an AArch64 host,
+# as a call to an out-of-line `__aarch64_ldadd4_acq_rel`-style helper (part
+# of libgcc/compiler-rt, normally resolved via IFUNC at ordinary
+# static-link time) rather than an inline LDADD/CAS instruction --
+# unresolvable by this bitcode's own ORC JIT, which has no such runtime
+# library to link against. `-mno-outline-atomics` avoids that, but is an
+# AArch64-only driver flag clang rejects under `-Werror` on every other
+# host architecture (`-Werror,-Woption-ignored`), so it is only added when
+# actually targeting AArch64.
+set(feme_runtime_cpu_extra_flags)
+if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  list(APPEND feme_runtime_cpu_extra_flags -mno-outline-atomics)
+endif()
+
 get_host_tool_path(clang CLANG clang_exe clang_target)
 
 # FeMeRuntimeCPU.c is compiled by the custom command above, not by
@@ -35,6 +51,7 @@ add_custom_command(
   OUTPUT ${feme_runtime_cpu_bc}
   COMMAND ${clang_exe}
           -c -emit-llvm -O2 -ffreestanding -fno-builtin
+          ${feme_runtime_cpu_extra_flags}
           -Wall -Wextra -Werror
           ${feme_runtime_cpu_c} -o ${feme_runtime_cpu_bc}
   DEPENDS ${feme_runtime_cpu_c} ${clang_target}

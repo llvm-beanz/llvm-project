@@ -2981,6 +2981,44 @@ femeRTStoreTexel2DI32(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
   femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
 }
 
+// Bounds-checked address helper for `feme.cpu.image.atomic.*.2d.i32`
+// (roadmap H8v): shares `femeRTStoreTexel2DI32`'s own layer-0/mip-0/
+// sample-0 addressing, but returns a raw `int32_t *` into the image's own
+// backing store rather than packing a texel value through it, since a real
+// atomic (`__atomic_fetch_add`/etc.) needs a genuine pointer to operate on
+// directly -- unlike an ordinary store, which only ever needs to write
+// through the address once. Additionally rejects any format whose element
+// size isn't exactly 4 bytes: SPIR-V (and this project's own
+// `hasOnlySupportedStorageImageUses`, `SPIRVResourceLowering.cpp`) only
+// ever allows an image atomic against a single-32-bit-scalar storage
+// image format (`R32_SINT`/`R32_UINT`), so every other format is
+// unreachable here in practice, but the check is kept as defense in depth
+// (mirroring every other `femeRT*` helper's own habit of failing safe on
+// an unexpected shape rather than assuming the caller validated it).
+// Returns `NULL` on any failure, exactly like every other `femeRT*` helper
+// that can fail (see `femeRTFetchTexel2DI32`'s own `NULL`-descriptor
+// check).
+__attribute__((always_inline)) static int32_t *
+femeRTAtomicTexelAddress2D(const FemeRTImageDescriptor *Img, int32_t X,
+                          int32_t Y) {
+  if (!Img->Data || Img->MipLayoutCount == 0 || Img->ArrayLayers == 0)
+    return (int32_t *)0;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img->Width || (uint32_t)Y >= Img->Height)
+    return (int32_t *)0;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize != sizeof(int32_t))
+    return (int32_t *)0;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t Offset =
+      Layout->Offset + (uint64_t)Y * Layout->RowPitch + (uint64_t)X * TexelStride;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return (int32_t *)0;
+  return (int32_t *)((unsigned char *)Img->Data + Offset);
+}
+
 // The arrayed counterpart of `femeRTStoreTexel2D` above, for
 // `feme.cpu.image.store.2darray.v4f32` (roadmap H19b): writes \p Texel to
 // the texel at integer coordinates `(X, Y)`, array layer \p Layer, mip
@@ -3946,6 +3984,265 @@ __attribute__((always_inline)) void femeCpuImageStore2DV4I32(
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
   femeRTStoreTexel2DI32(&Img, X, Y, Texel);
+}
+
+// `feme.cpu.image.atomic.add.2d.i32` (roadmap H8v): `OpAtomicIAdd` against
+// a plain, non-arrayed, single-32-bit-scalar storage image (`R32_SINT`/
+// `R32_UINT`) -- adds \p Value to the texel at `(X, Y)`, mip level 0,
+// array layer 0, returning the pre-op value. Uses a real hardware atomic
+// (`__atomic_fetch_add`, sequentially consistent) rather than a plain
+// load-modify-store, since `Executor.cpp`'s own tiled dispatch (roadmap
+// R33) runs separate shader invocations on separate host threads, exactly
+// like a real GPU's own concurrent invocations. An unbound image or an
+// out-of-bounds/masked-off access returns 0, mirroring
+// `femeCpuImageLoad2DV4I32`'s own unbound-read-as-zero treatment (there is
+// no well-defined "old value" to return in either case).
+int32_t femeCpuImageAtomicAdd2D(const FemeRTImageDescriptor *ImageHeap,
+                                uint32_t ImageHeapCount, uint32_t ImageIndex,
+                                int32_t X, int32_t Y, int32_t Value,
+                                _Bool Mask) asm("feme.cpu.image.atomic.add.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicAdd2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_add(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.sub.2d.i32` (roadmap H8v): `OpAtomicISub`'s
+// counterpart to `feme.cpu.image.atomic.add.2d.i32` above. See its doc for
+// the shared bounds/threading rationale.
+int32_t femeCpuImageAtomicSub2D(const FemeRTImageDescriptor *ImageHeap,
+                                uint32_t ImageHeapCount, uint32_t ImageIndex,
+                                int32_t X, int32_t Y, int32_t Value,
+                                _Bool Mask) asm("feme.cpu.image.atomic.sub.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicSub2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_sub(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.and.2d.i32` (roadmap H8v): `OpAtomicAnd`'s
+// counterpart to `feme.cpu.image.atomic.add.2d.i32` above.
+int32_t femeCpuImageAtomicAnd2D(const FemeRTImageDescriptor *ImageHeap,
+                                uint32_t ImageHeapCount, uint32_t ImageIndex,
+                                int32_t X, int32_t Y, int32_t Value,
+                                _Bool Mask) asm("feme.cpu.image.atomic.and.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicAnd2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_and(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.or.2d.i32` (roadmap H8v): `OpAtomicOr`'s
+// counterpart to `feme.cpu.image.atomic.add.2d.i32` above.
+int32_t femeCpuImageAtomicOr2D(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.or.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicOr2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_or(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.xor.2d.i32` (roadmap H8v): `OpAtomicXor`'s
+// counterpart to `feme.cpu.image.atomic.add.2d.i32` above.
+int32_t femeCpuImageAtomicXor2D(const FemeRTImageDescriptor *ImageHeap,
+                                uint32_t ImageHeapCount, uint32_t ImageIndex,
+                                int32_t X, int32_t Y, int32_t Value,
+                                _Bool Mask) asm("feme.cpu.image.atomic.xor.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicXor2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_xor(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.smax.2d.i32` (roadmap H8v): `OpAtomicSMax`'s
+// counterpart to `feme.cpu.image.atomic.add.2d.i32` above -- a signed
+// maximum, operating on the texel address's own `int32_t *` type directly.
+int32_t
+femeCpuImageAtomicSMax2D(const FemeRTImageDescriptor *ImageHeap,
+                         uint32_t ImageHeapCount, uint32_t ImageIndex,
+                         int32_t X, int32_t Y, int32_t Value,
+                         _Bool Mask) asm("feme.cpu.image.atomic.smax.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicSMax2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_max(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.smin.2d.i32` (roadmap H8v): `OpAtomicSMin`'s
+// counterpart to `feme.cpu.image.atomic.add.2d.i32` above -- a signed
+// minimum, mirroring `femeCpuImageAtomicSMax2D`'s own signed-comparison
+// treatment.
+int32_t
+femeCpuImageAtomicSMin2D(const FemeRTImageDescriptor *ImageHeap,
+                         uint32_t ImageHeapCount, uint32_t ImageIndex,
+                         int32_t X, int32_t Y, int32_t Value,
+                         _Bool Mask) asm("feme.cpu.image.atomic.smin.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicSMin2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_min(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.umax.2d.i32` (roadmap H8v): `OpAtomicUMax`'s
+// counterpart to `feme.cpu.image.atomic.add.2d.i32` above -- an *unsigned*
+// maximum, requiring a cast to `uint32_t *` so `__atomic_fetch_max`
+// compares \p Value bitwise-reinterpreted as unsigned rather than signed
+// (mirroring the signed/unsigned split every other `femeRT*` integer
+// helper already makes at the `_SINT`/`_UINT` format boundary).
+int32_t
+femeCpuImageAtomicUMax2D(const FemeRTImageDescriptor *ImageHeap,
+                         uint32_t ImageHeapCount, uint32_t ImageIndex,
+                         int32_t X, int32_t Y, int32_t Value,
+                         _Bool Mask) asm("feme.cpu.image.atomic.umax.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicUMax2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  uint32_t UValue = (uint32_t)Value;
+  return (int32_t)__atomic_fetch_max((uint32_t *)Addr, UValue,
+                                     __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.umin.2d.i32` (roadmap H8v): `OpAtomicUMin`'s
+// counterpart to `feme.cpu.image.atomic.add.2d.i32` above -- an unsigned
+// minimum, mirroring `femeCpuImageAtomicUMax2D`'s own unsigned-comparison
+// treatment.
+int32_t
+femeCpuImageAtomicUMin2D(const FemeRTImageDescriptor *ImageHeap,
+                         uint32_t ImageHeapCount, uint32_t ImageIndex,
+                         int32_t X, int32_t Y, int32_t Value,
+                         _Bool Mask) asm("feme.cpu.image.atomic.umin.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicUMin2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  uint32_t UValue = (uint32_t)Value;
+  return (int32_t)__atomic_fetch_min((uint32_t *)Addr, UValue,
+                                     __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.exchange.2d.i32` (roadmap H8v):
+// `OpAtomicExchange`'s counterpart to `feme.cpu.image.atomic.add.2d.i32`
+// above -- an unconditional swap, returning the pre-op value.
+int32_t femeCpuImageAtomicExchange2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value,
+    _Bool Mask) asm("feme.cpu.image.atomic.exchange.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicExchange2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  return __atomic_exchange_n(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.compare_exchange.2d.i32` (roadmap H8v):
+// `OpAtomicCompareExchange`'s counterpart to
+// `feme.cpu.image.atomic.add.2d.i32` above -- the texel is only replaced
+// with \p Value when it currently equals \p Comparator, but the value
+// returned is always the pre-op value in memory either way, matching
+// `OpAtomicCompareExchange`'s own result semantics (see
+// `__atomic_compare_exchange_n`'s own identical "expected updated in
+// place on failure" behavior, which is exactly what this needs).
+int32_t femeCpuImageAtomicCompareExchange2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Comparator,
+    int32_t Value,
+    _Bool Mask) asm("feme.cpu.image.atomic.compare_exchange.2d.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicCompareExchange2D(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, int32_t Comparator,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2D(&Img, X, Y);
+  if (!Addr)
+    return 0;
+  int32_t Expected = Comparator;
+  __atomic_compare_exchange_n(Addr, &Expected, Value, /*weak=*/0,
+                              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  return Expected;
 }
 
 // `feme.cpu.image.store.2darray.v4f32` (roadmap H19b): the arrayed
