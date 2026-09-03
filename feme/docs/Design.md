@@ -974,7 +974,51 @@ compare-exchange kinds passing for both formats (18/18). The
 deliberately-still-open, broader gap that ordinary SSBO
 (`HandleKind::Storage`/`StorageStruct`) atomics are *also* rejected by
 `hasOnlySupportedPointerUses` today (untouched by H8w's own narrow
-`IsTexel` gating) is tracked as roadmap H8x, not fixed here.
+`IsTexel` gating) was tracked as roadmap H8x -- **now also closed**: a
+real IR reduction of a genuine GLSL `atomicAdd(ssbo.data[idx], 1)` SSBO
+compute shader (`glslangValidator` → `feme::SPIRVImporter` →
+`feme-convert-spirv-to-llvm`) confirmed the exact same
+`llvm.spv.resource.getpointer`-then-`atomicrmw`/`cmpxchg` shape H8w's own
+texel-buffer atomic already used, reached through a plain
+`OpAccessChain`-derived pointer rather than an `OpImageTexelPointer` --
+again, zero new MLIR/SPIR-V-conversion-layer work needed, since `feme`'s
+own `AtomicRMWPattern`/`AtomicCompareExchangePattern` are already generic
+over any pointer type, not texel-specific. The fix confirmed
+`hasOnlySupportedPointerUses`'s `Writable` boolean was already exactly the
+`{Storage, StorageStruct, TexelStorage}` set an atomic is semantically
+valid against (an atomic against a uniform/read-only buffer is never
+valid), so its gate simply widened from `Writable && IsTexel` to
+`Writable` alone -- no other gating logic needed to change. A parallel
+`Raw`-addressed atomic family (`feme.cpu.resource.atomic.*.raw.i32`, 11
+new `ResourceCallKind::Atomic*Raw` values in `ResourceCalls.h/.cpp`,
+addressed by descriptor index + *byte offset* rather than element index,
+since an ordinary storage buffer has no per-format size table the way a
+typed/texel buffer does) was added alongside H8w's own `Atomic*Typed`
+family, dispatched from a new atomic case inside
+`SPIRVResourceLowering.cpp`'s `lowerRawPointerUses` (rather than only at
+the top-level `getpointer` call site), which meant a `StorageStruct`
+direct-field member's own atomic -- reached through a `getelementptr`
+navigating to that field -- was handled "for free" by
+`lowerRawPointerUses`'s pre-existing cumulative-byte-offset GEP threading,
+confirmed by its own dedicated FileCheck test
+(`spirv-resource-lowering-ssbo-atomic-struct-field.ll`) rather than
+assumed. A new `feme::cpu::isCompareExchange` helper replaced the prior
+literal `Kind == ResourceCallKind::AtomicCompareExchangeTyped` checks
+scattered across `getOrInsertResourceCall`/`createCall`/
+`matchResourceCall`, so both the `Typed` and new `Raw` compare-exchange
+kinds share the same code paths. `feme::cpu::SIMDizePass::widenResourceCall`
+needed no changes at all, confirmed by running the new `Raw` atomic path
+through `feme-cpu-simdize` directly -- it was already fully generic over
+any `isAtomic(Kind)` match, not hardcoded to the `Typed` family. Confirmed
+against feme's own ICD: all 16 real (non-float, non-64-bit)
+`dEQP-VK.glsl.atomic_operations.*_compute` SSBO-atomic cases pass (16/16,
+the other 28 in that suite `NotSupported` for unrelated unimplemented
+features -- `VK_EXT_shader_atomic_float`/`float2`, 64-bit shader atomics),
+with a `dEQP-VK.api.info.format_properties.*` re-run showing 0
+regressions (224/225, the same single pre-existing unrelated H8h gap).
+Unlike H8v/H8w, no `VkFormatFeatureFlagBits` bit is gated by this fix --
+an ordinary SSBO atomic is core Vulkan 1.0 functionality, not tied to any
+format's own feature flags.
 
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 

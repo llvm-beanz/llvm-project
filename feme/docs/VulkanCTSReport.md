@@ -21833,6 +21833,112 @@ correctly and drop out of the failure list. The 1 remaining failure is
 unrelated to this row's own scope: `a2b10g10r10_unorm_pack32`'s
 `VERTEX_BUFFER_BIT` gap (already tracked, H8h).
 
+## Roadmap H8x: measured impact
+
+Closes the mirror-image gap H8w's own row deliberately split off:
+ordinary SSBO (`HandleKind::Storage`/`StorageStruct`) atomics
+(`atomicAdd` etc. against a plain `buffer`-block member in GLSL, not a
+texel buffer or image) were still rejected by
+`SPIRVResourceLowering.cpp`'s `hasOnlySupportedPointerUses`, since H8w's
+own new atomic branch was deliberately gated on `Writable && IsTexel`
+(true only for `HandleKind::TexelStorage`).
+
+A real IR reduction (per this row's own "confirm before landing, don't
+assume" instruction) took a genuine GLSL `atomicAdd(ssbo.data[idx], 1)`
+SSBO compute shader end to end through `glslangValidator` ->
+`feme::SPIRVImporter` -> `feme-convert-spirv-to-llvm` -> real LLVM IR,
+and confirmed: (a) the real shape is an ordinary `OpAccessChain`-derived
+pointer, not `OpImageTexelPointer` -- again **zero** new
+MLIR/SPIR-V-conversion-layer work needed, since `feme`'s own
+`AtomicRMWPattern`/`AtomicCompareExchangePattern` are already fully
+generic over any pointer type; (b) running this real IR through the
+unmodified pass left the module completely untouched (a silent failure,
+the `getpointer`/`handlefrombinding` intrinsics never lowered) --
+confirming the pre-fix "before" state exactly as the roadmap row
+predicted.
+
+`hasOnlySupportedPointerUses`'s own `Writable` boolean turned out to
+already be exactly the `{Storage, StorageStruct, TexelStorage}` set an
+atomic is semantically valid against (an atomic against a
+uniform/read-only buffer is never valid), so the fix was a one-line gate
+simplification: `Writable && IsTexel` -> `Writable` alone, confirming the
+row's own guessed fix shape. A parallel `Raw`-addressed atomic family
+(`feme.cpu.resource.atomic.*.raw.i32`, 11 new
+`ResourceCallKind::Atomic*Raw` values in `ResourceCalls.h/.cpp`,
+addressed by descriptor index + byte offset rather than element index,
+since an ordinary storage buffer has no per-format size table the way a
+typed/texel buffer does) was added alongside H8w's own `Atomic*Typed`
+family, backed by 11 new `femeCpuResourceAtomic*Raw` runtime entry points
+(`FeMeRuntimeCPU.c`). The new atomic dispatch was placed inside
+`SPIRVResourceLowering.cpp`'s `lowerRawPointerUses` (rather than only at
+the top-level `getpointer` call site in `lowerAccesses`), which meant a
+`StorageStruct` direct-field member's own atomic (reached through a
+`getelementptr` navigating to that field) was handled "for free" by
+`lowerRawPointerUses`'s pre-existing cumulative-byte-offset GEP threading
+-- confirmed by its own dedicated FileCheck test, not assumed. A new
+`feme::cpu::isCompareExchange` helper replaced the prior literal
+`Kind == ResourceCallKind::AtomicCompareExchangeTyped` checks scattered
+across `getOrInsertResourceCall`/`createCall`/`matchResourceCall`, so both
+the `Typed` and new `Raw` compare-exchange kinds share the same code
+paths, per `.instructions.md`'s "encapsulate predicate logic into
+helpers" rule.
+
+`feme::cpu::SIMDizePass::widenResourceCall` needed no changes at all,
+confirmed (not assumed) by running the new `Raw` atomic path through
+`feme-cpu-simdize` directly -- it was already fully generic over any
+`isAtomic(Kind)` match. The "shared-memory atomics" phrase in this row's
+own original title was a false lead investigated and ruled out this
+session: `groupshared`/`Workgroup`-storage atomics never go through
+`SPIRVResourceLowering.cpp` at all (they lower as ordinary
+`alloca`/global atomics `feme-cpu-simdize` already handles directly,
+confirmed still passing via the pre-existing
+`simdize-groupshared-atomic-{array,scalar}.ll` tests), so no separate fix
+was needed for that part -- only the SSBO/`Storage`/`StorageStruct` gap
+was real.
+
+New coverage at every phase this row touched: `ResourceCallsTest.cpp`
+(`CreateAtomicAddRawRoundTrips`, `CreateAtomicUMaxRawRoundTrips`,
+`CreateAtomicCompareExchangeRawRoundTrips`,
+`AtomicRawMemoryEffectsAreArgMemOnlyModRef`),
+`spirv-resource-lowering-ssbo-atomic.ll` (FileCheck: flat
+`HandleKind::Storage` runtime-array SSBO atomic add/umax/
+compare-exchange), and `spirv-resource-lowering-ssbo-atomic-struct-field.ll`
+(FileCheck: `HandleKind::StorageStruct` member-offset atomic add, split
+into its own file due to an LLVM IR textual-intrinsic-overload
+declaration limitation -- two different `target(...)` type-overloads of
+the same intrinsic name cannot both be `declare`d unmangled in one `.ll`
+file).
+
+`ninja check-feme` (assertions-enabled, ccache build) passed in full:
+**2447/2474 (27 unsupported), 0 regressions.**
+
+Real CTS run against feme's own ICD (`VK_ICD_FILENAMES` correctly set,
+confirmed via `vulkaninfo --summary` showing `FeMe CPU Vulkan Device`):
+all 16 real (non-float, non-64-bit) `dEQP-VK.glsl.atomic_operations.*_compute`
+SSBO-atomic cases (`{add,and,or,xor,max,min,exchange,comp_swap}_
+{signed,unsigned}_compute`) now **Pass: 16/16 (100%)**. The other 28 of
+the full 44-case `dEQP-VK.glsl.atomic_operations.*_compute` family remain
+`NotSupported` for unrelated, not-yet-implemented features
+(`VK_EXT_shader_atomic_float`/`float2` for the `*_float{16,32,64}_compute`
+variants, 64-bit shader-buffer atomics for the `*_{signed,unsigned}64bit_compute`
+variants) -- neither gated by this row's own fix.
+
+A real `dEQP-VK.api.info.format_properties.*` re-run shows **0
+regressions: 224/225 Pass**, the same single pre-existing unrelated H8h
+gap as before. Unlike H8v/H8w, this row's own fix gates no
+`VkFormatFeatureFlagBits` bit at all -- an ordinary SSBO atomic is core
+Vulkan 1.0 functionality, not tied to any format's own feature flags, so
+neither `Vulkan14FeatureInventory.md` nor `VulkanExtensionInventory.md`
+needed any change.
+
+Two unrelated, out-of-scope failures were also observed and are *not*
+attributed to this row: `dEQP-VK.compute.pipeline.basic.atomic_barrier_sum_small`
+(`LLVM ERROR: unsupported calling convention`) and
+`dEQP-VK.compute.pipeline.basic.shared_atomic_op_single_group` (Fail) --
+both exercise a different compute-pipeline code path unrelated to the
+`HandleKind::Storage`/`StorageStruct` resource-lowering shape this row
+targeted, and are left for a future roadmap row to investigate.
+
 `VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT` is honestly `VK_TRUE`
 for `R32_{SINT,UINT}` as of this commit; see `Vulkan14FeatureInventory.md`
 (no `VkPhysicalDeviceFeatures` bit is touched by this row -- texel-buffer
