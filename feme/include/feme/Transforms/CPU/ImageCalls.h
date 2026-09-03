@@ -245,6 +245,50 @@ enum class ImageCallKind : uint8_t {
   /// integer-format counterpart of `Store2DArrayMS`, mirroring
   /// `Store2DMSI32`'s relationship to `Store2DMS`.
   Store2DArrayMSI32,
+  /// `feme.cpu.image.atomic.add.2d.i32` (roadmap H8v): a plain, non-arrayed
+  /// storage-image RMW atomic (`OpAtomicIAdd` against an
+  /// `OpImageTexelPointer`), scoped -- unlike every `Load*`/`Store*` kind
+  /// above -- to a single 32-bit *scalar* component rather than a
+  /// `<4 x i32>`/`<4 x float>` texel: SPIR-V only permits an image atomic
+  /// against a single-component `R32i`/`R32ui` image format. Returns the
+  /// value that was in memory immediately before the add, matching
+  /// `OpAtomicIAdd`'s own result semantics.
+  AtomicAdd2D,
+  /// `feme.cpu.image.atomic.sub.2d.i32` (roadmap H8v): `OpAtomicISub`'s
+  /// counterpart to `AtomicAdd2D`.
+  AtomicSub2D,
+  /// `feme.cpu.image.atomic.and.2d.i32` (roadmap H8v): `OpAtomicAnd`'s
+  /// counterpart to `AtomicAdd2D`.
+  AtomicAnd2D,
+  /// `feme.cpu.image.atomic.or.2d.i32` (roadmap H8v): `OpAtomicOr`'s
+  /// counterpart to `AtomicAdd2D`.
+  AtomicOr2D,
+  /// `feme.cpu.image.atomic.xor.2d.i32` (roadmap H8v): `OpAtomicXor`'s
+  /// counterpart to `AtomicAdd2D`.
+  AtomicXor2D,
+  /// `feme.cpu.image.atomic.smax.2d.i32` (roadmap H8v): `OpAtomicSMax`'s
+  /// counterpart to `AtomicAdd2D` -- a signed maximum.
+  AtomicSMax2D,
+  /// `feme.cpu.image.atomic.smin.2d.i32` (roadmap H8v): `OpAtomicSMin`'s
+  /// counterpart to `AtomicAdd2D` -- a signed minimum.
+  AtomicSMin2D,
+  /// `feme.cpu.image.atomic.umax.2d.i32` (roadmap H8v): `OpAtomicUMax`'s
+  /// counterpart to `AtomicAdd2D` -- an unsigned maximum.
+  AtomicUMax2D,
+  /// `feme.cpu.image.atomic.umin.2d.i32` (roadmap H8v): `OpAtomicUMin`'s
+  /// counterpart to `AtomicAdd2D` -- an unsigned minimum.
+  AtomicUMin2D,
+  /// `feme.cpu.image.atomic.exchange.2d.i32` (roadmap H8v):
+  /// `OpAtomicExchange`'s counterpart to `AtomicAdd2D` -- an unconditional
+  /// swap.
+  AtomicExchange2D,
+  /// `feme.cpu.image.atomic.compare_exchange.2d.i32` (roadmap H8v):
+  /// `OpAtomicCompareExchange`'s counterpart to `AtomicAdd2D`, taking an
+  /// extra `Comparator` operand before `Value` -- the memory word is only
+  /// replaced with `Value` when it currently equals `Comparator`, but the
+  /// value returned is always the pre-op value either way, matching
+  /// `OpAtomicCompareExchange`'s own result semantics.
+  AtomicCompareExchange2D,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -337,6 +381,21 @@ struct MatchedImageCall {
   /// for every read-only kind.
   llvm::Value *Texel = nullptr;
   llvm::Value *Mask = nullptr;
+  /// `AtomicAdd2D`/`AtomicSub2D`/`AtomicAnd2D`/`AtomicOr2D`/`AtomicXor2D`/
+  /// `AtomicSMax2D`/`AtomicSMin2D`/`AtomicUMax2D`/`AtomicUMin2D`/
+  /// `AtomicExchange2D`/`AtomicCompareExchange2D` (roadmap H8v) only: the
+  /// scalar `i32` value operand every atomic call carries (the value
+  /// added/compared-against and, for every kind but a failed
+  /// compare-exchange, written); null for every other kind. Unlike
+  /// `Texel`, this is always scalar, never vector -- but non-null exactly
+  /// when this call has the same real, must-be-mask-gated memory side
+  /// effect `Texel`'s own non-null-ness signals for a store (see
+  /// `FunctionWidener::widenImageCall`'s own `LaneMaskBase` choice).
+  llvm::Value *AtomicValue = nullptr;
+  /// `AtomicCompareExchange2D` (roadmap H8v) only: the scalar `i32`
+  /// comparator operand; null for every other kind, including every other
+  /// atomic kind.
+  llvm::Value *Comparator = nullptr;
 };
 
 /// Returns the canonical `feme.cpu.image.*` name for \p Kind, e.g.
@@ -617,6 +676,108 @@ llvm::CallInst *createStore1DArrayI32(llvm::IRBuilderBase &Builder,
                                       llvm::Value *X, llvm::Value *Layer,
                                       llvm::Value *Texel, llvm::Value *Mask,
                                       const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.add.2d.i32` call (roadmap H8v): performs
+/// `*texel += Value` at integer coordinates (\p X, \p Y), mip level 0, of a
+/// plain, non-arrayed, single-32-bit-scalar-format storage image, returning
+/// the pre-op value.
+llvm::CallInst *createAtomicAdd2D(llvm::IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env,
+                                  llvm::Value *ImageIndex, llvm::Value *X,
+                                  llvm::Value *Y, llvm::Value *Value,
+                                  llvm::Value *Mask,
+                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.sub.2d.i32` call (roadmap H8v). See
+/// `createAtomicAdd2D`'s own doc.
+llvm::CallInst *createAtomicSub2D(llvm::IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env,
+                                  llvm::Value *ImageIndex, llvm::Value *X,
+                                  llvm::Value *Y, llvm::Value *Value,
+                                  llvm::Value *Mask,
+                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.and.2d.i32` call (roadmap H8v). See
+/// `createAtomicAdd2D`'s own doc.
+llvm::CallInst *createAtomicAnd2D(llvm::IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env,
+                                  llvm::Value *ImageIndex, llvm::Value *X,
+                                  llvm::Value *Y, llvm::Value *Value,
+                                  llvm::Value *Mask,
+                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.or.2d.i32` call (roadmap H8v). See
+/// `createAtomicAdd2D`'s own doc.
+llvm::CallInst *createAtomicOr2D(llvm::IRBuilderBase &Builder,
+                                 const ImageCallEnv &Env,
+                                 llvm::Value *ImageIndex, llvm::Value *X,
+                                 llvm::Value *Y, llvm::Value *Value,
+                                 llvm::Value *Mask,
+                                 const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.xor.2d.i32` call (roadmap H8v). See
+/// `createAtomicAdd2D`'s own doc.
+llvm::CallInst *createAtomicXor2D(llvm::IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env,
+                                  llvm::Value *ImageIndex, llvm::Value *X,
+                                  llvm::Value *Y, llvm::Value *Value,
+                                  llvm::Value *Mask,
+                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smax.2d.i32` call (roadmap H8v). See
+/// `createAtomicAdd2D`'s own doc.
+llvm::CallInst *createAtomicSMax2D(llvm::IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env,
+                                   llvm::Value *ImageIndex, llvm::Value *X,
+                                   llvm::Value *Y, llvm::Value *Value,
+                                   llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smin.2d.i32` call (roadmap H8v). See
+/// `createAtomicAdd2D`'s own doc.
+llvm::CallInst *createAtomicSMin2D(llvm::IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env,
+                                   llvm::Value *ImageIndex, llvm::Value *X,
+                                   llvm::Value *Y, llvm::Value *Value,
+                                   llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umax.2d.i32` call (roadmap H8v). See
+/// `createAtomicAdd2D`'s own doc.
+llvm::CallInst *createAtomicUMax2D(llvm::IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env,
+                                   llvm::Value *ImageIndex, llvm::Value *X,
+                                   llvm::Value *Y, llvm::Value *Value,
+                                   llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umin.2d.i32` call (roadmap H8v). See
+/// `createAtomicAdd2D`'s own doc.
+llvm::CallInst *createAtomicUMin2D(llvm::IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env,
+                                   llvm::Value *ImageIndex, llvm::Value *X,
+                                   llvm::Value *Y, llvm::Value *Value,
+                                   llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.exchange.2d.i32` call (roadmap H8v). See
+/// `createAtomicAdd2D`'s own doc.
+llvm::CallInst *createAtomicExchange2D(llvm::IRBuilderBase &Builder,
+                                       const ImageCallEnv &Env,
+                                       llvm::Value *ImageIndex,
+                                       llvm::Value *X, llvm::Value *Y,
+                                       llvm::Value *Value, llvm::Value *Mask,
+                                       const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.compare_exchange.2d.i32` call (roadmap
+/// H8v): like `createAtomicAdd2D`, but only replaces `*texel` with \p Value
+/// when it currently equals \p Comparator -- either way, returns the
+/// pre-op value.
+llvm::CallInst *createAtomicCompareExchange2D(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y,
+    llvm::Value *Comparator, llvm::Value *Value, llvm::Value *Mask,
+    const llvm::Twine &Name = "");
 
 /// Recognizes \p CI as one of the canonical `feme.cpu.image.*` calls,
 /// returning its decoded operands, or `std::nullopt` if \p CI's callee isn't

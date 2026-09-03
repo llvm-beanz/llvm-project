@@ -181,4 +181,75 @@ TEST_F(ImageCallsTest, MatchesLoad2DArrayI32CallWithRealSample) {
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 
+// Roadmap H8v: `createAtomicAdd2D`/`matchImageCall` round-trip a plain RMW
+// atomic's `(image_heap, image_heap_count, image_index, x, y, value, mask)`
+// scalar-shaped call correctly, including `AtomicValue` -- the field
+// distinguishing an atomic from every ordinary Load*/Store* kind above
+// (which use `Texel` instead, and never a bare scalar `Value`).
+TEST_F(ImageCallsTest, MatchesAtomicAdd2DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createAtomicAdd2D(Builder, Env, Builder.getInt32(3), Builder.getInt32(1),
+                        Builder.getInt32(2), Builder.getInt32(7),
+                        Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicAdd2D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(7));
+  EXPECT_EQ(Matched->Comparator, nullptr);
+  EXPECT_EQ(Matched->Texel, nullptr);
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// Every other RMW kind (`AtomicUMax2D` picked arbitrarily) shares
+// `AtomicAdd2D`'s own shape -- confirm the callee name alone is what
+// `matchImageCall` uses to distinguish the RMW operation actually
+// performed (`AtomicRMWInst::getOperation()` is already resolved by the
+// time `SPIRVResourceLowering.cpp` picks a `createAtomic*2D` wrapper, so
+// `matchImageCall`'s own job here is only to recognize the resulting
+// callee, not to reinterpret the operation).
+TEST_F(ImageCallsTest, MatchesAtomicUMax2DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicUMax2D(
+      Builder, Env, Builder.getInt32(0), Builder.getInt32(4),
+      Builder.getInt32(5), Builder.getInt32(9), Builder.getInt1(false));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicUMax2D);
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(9));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(false));
+}
+
+// Roadmap H8v: `createAtomicCompareExchange2D`/`matchImageCall` round-trip
+// the one atomic kind with an extra `Comparator` operand before `Value`.
+TEST_F(ImageCallsTest, MatchesAtomicCompareExchange2DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicCompareExchange2D(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(0), Builder.getInt32(42),
+      Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicCompareExchange2D);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(2));
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Comparator, Builder.getInt32(0));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(42));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
 } // namespace
