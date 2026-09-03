@@ -55291,3 +55291,131 @@ row, confirmed via a targeted grep of both inventory documents rather
 than assumed from the change's own shape -- so neither
 `Vulkan14FeatureInventory.md` nor `VulkanExtensionInventory.md` needed
 updates.
+
+# H8f: multisample capability per format -- scoping a "not yet investigated" row
+
+H8f's own roadmap text was explicitly unscoped: "not yet investigated at
+all this session -- needs its own scoping pass of what
+`VkImageFormatProperties::sampleCounts` currently reports per format
+versus the mandatory `VK_SAMPLE_COUNT_1_BIT`/`_4_BIT` minimums for
+color/depth/stencil formats." So the first job was reading, not writing:
+find `supportedSampleCounts` (`Image.cpp`) and the CTS check it needs to
+satisfy, before assuming there was even a bug to fix.
+
+## The scoping pass, and a surprising negative result
+
+I ran the exact CTS group this row's own text names,
+`dEQP-VK.api.info.image_format_properties*`, before touching any code:
+**1,186/1,186 passing already**. That could have meant "nothing to do
+here", but I did not stop there -- I went and read
+`vktApiFeatureInfo.cpp`'s own `getRequiredOptimalTilingSampleCounts`
+reference algorithm line by line against our `supportedSampleCounts`,
+rather than trusting the green CTS run to mean the two implementations
+actually agree. That comparison is what found the real gap: the CTS's
+own check (`(properties.sampleCounts & requiredSampleCounts) ==
+requiredSampleCounts`) is a "must include at least this minimum" check,
+not an equality one -- so a device that *over-reports* a wider mask than
+strictly required still passes it. Our `supportedSampleCounts` was doing
+exactly that: it never looked at the image's own format at all, so a
+depth or stencil format's `VK_IMAGE_USAGE_SAMPLED_BIT` usage was always
+intersected against the *color* sample-count limit
+(`sampledImageColorSampleCounts`, `1|2|4|8` on this device) instead of
+`sampledImageDepthSampleCounts`/`sampledImageStencilSampleCounts` (each
+`VK_SAMPLE_COUNT_1_BIT` only). This is a genuine correctness bug -- it
+directly contradicts this same file's own pre-existing design-intent
+comment that a sampled depth/stencil image should stay single-sample,
+since no per-sample depth/stencil texel fetch exists in this ICD yet --
+but one the CTS's own minimum-inclusion check structurally cannot catch,
+since over-reporting a wider mask than required still satisfies "must
+include the minimum".
+
+This taught me something worth remembering for future "scope this out"
+rows: a fully-green CTS re-run of the exact group a roadmap row names is
+necessary but not sufficient evidence that nothing is wrong -- it only
+proves nothing is *under*-reported. Comparing our own implementation
+against the CTS's own reference algorithm, statement by statement, is
+what actually found this row's real content.
+
+## The fix, and what I deliberately left alone
+
+The fix threads an optional `ResourceFormat` through
+`supportedSampleCounts`/`isValidImageShape` and branches using
+`RenderPass.h`'s pre-existing `isSupportedDepthAttachmentFormat`/
+`isSupportedStencilAttachmentFormat` predicates -- deliberately mirroring
+the CTS's own `hasDepthComp`/`hasStencilComp` branching shape exactly,
+including that the two are not mutually exclusive (a combined
+`D24_UNORM_S8_UINT` format narrows by *both* limits, not just one, the
+same way the CTS's own reference algorithm does). I checked every real
+call site before assuming the signature change was safe: `vkCreateImage`,
+`vkGetDeviceImageMemoryRequirements`, and
+`vkGetPhysicalDeviceImageFormatProperties`'s own shape probe all already
+have a mapped format by the point they need a sample-count mask, so
+`std::nullopt` ended up being a purely theoretical option for callers
+that predate a format lookup, not something any call site actually
+exercises today -- worth documenting honestly in the header comment
+rather than implying it is load-bearing.
+
+While reading the surrounding sample-count code for other staleness (not
+strictly required by the roadmap text, but the kind of adjacent-code
+check the standing instructions ask for), I found a second, related bug:
+`EntryPoints.cpp`'s `framebufferIntegerColorSampleCounts` was still
+hard-coded to `VK_SAMPLE_COUNT_1_BIT`, with a comment claiming no
+integer color-attachment format existed yet -- stale since roadmap H8p
+added real fragment-output write support for 7 of them. I confirmed (by
+reading `Executor.cpp`'s multisample render path, which never branches
+on a format's integer-ness for its per-sample writes) that this field
+should simply match `framebufferColorSampleCounts`, and fixed it as a
+small, separate, clearly-labeled companion change rather than folding it
+silently into the main fix's own commit.
+
+I deliberately did *not* add a corresponding format-specific branch
+distinguishing `sampledImageIntegerSampleCounts` from
+`sampledImageColorSampleCounts` inside `supportedSampleCounts` itself,
+even though the CTS's own reference algorithm does make that
+distinction: on this device, both fields are hard-coded to the identical
+`1|2|4|8` mask (`PhysicalDeviceInfo.cpp`), so no reachable input could
+make that branch produce a different answer than the code already gives
+without it. Adding dead-in-practice branching for its own sake would
+have been scope creep against the "small, surgical changes" instruction,
+so I documented the decision in `supportedSampleCounts`'s own comment
+instead of silently adding or silently skipping it.
+
+## Verification
+
+4 new unit tests exercise the fix at both layers it touches:
+`ImageTest.cpp`'s `RejectsMultisampleSampledDepthImage`/
+`RejectsMultisampleSampledStencilImage` (confirming `vkCreateImage` now
+rejects a 4-sample sampled-only depth/stencil image it used to wrongly
+accept) and `AcceptsSingleSampleSampledDepthImage` (confirming the
+always-legal single-sample case is not collaterally broken);
+`EntryPointsTest.cpp`'s
+`ImageFormatPropertiesReportsSingleSampleForSampledDepth` (confirming
+`vkGetPhysicalDeviceImageFormatProperties` itself now reports the
+tightened mask for `D16_UNORM`, the one depth format with a real
+`SAMPLED_IMAGE_BIT` and so the only one this query does not already
+reject before ever computing `sampleCounts`).
+
+`ninja check-feme` (assertions-enabled, ccache build) passed in full
+throughout: 2,421/2,448 (27 pre-existing `Unsupported`, 0 `Failed`, up 4
+tests). Ran three real `deqp-vk` sweeps rather than assuming the fix was
+CTS-neutral: the exact group the roadmap named
+(`dEQP-VK.api.info.image_format_properties*`, 2,372/2,372 Pass, 0
+regressions -- confirming the tightened mask does not newly reject any
+format this query previously, correctly, accepted), the full
+`dEQP-VK.api.info.*` sweep (10,484 cases, byte-for-byte unchanged at
+6,326 Pass/0 Fail/4,158 `NotSupported`), and a search for any
+`dEQP-VK` case exercising multisample rendering to an integer color
+attachment specifically to validate the `framebufferIntegerColorSampleCounts`
+change against (found none in this checkout's own case list, so the new
+unit test is this piece's real verification instead). Recording the
+"searched for a CTS case and found none" result explicitly here, rather
+than silently omitting it, since a future session revisiting this area
+should know that check was made and came up empty rather than wondering
+whether it was skipped.
+
+Confirmed (via grep, not assumption) that neither
+`Vulkan14FeatureInventory.md` nor `VulkanExtensionInventory.md` needed
+updates: this row corrects two `VkPhysicalDeviceLimits`/
+`VkPhysicalDeviceVulkan12Properties` sample-count fields and an internal
+helper's format-awareness, touching no `VkPhysicalDeviceFeatures` bit or
+`VkExtension`.
