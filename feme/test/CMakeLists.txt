@@ -53,6 +53,12 @@ if(FEME_HAVE_VULKAN_LOADER)
   list(APPEND FEME_TEST_DEPENDS feme_vulkan feme-vulkan-loader-smoke
     feme-vulkan-storage-buffer-diff feme-vulkan-image-loader-smoke
     feme-vulkan-sampled-image-smoke feme-vulkan-graphics-smoke)
+  if(FEME_HAVE_XCB)
+    # Roadmap H10a's xcb-backed smoke test only builds (and its lit test
+    # only runs, gated by `system-xcb` -- see lit.cfg.py) in a build that
+    # found `libxcb`; see lib/Vulkan/CMakeLists.txt's `FEME_HAVE_XCB`.
+    list(APPEND FEME_TEST_DEPENDS feme-vulkan-xcb-smoke)
+  endif()
 endif()
 
 add_custom_target(feme-test-depends DEPENDS ${FEME_TEST_DEPENDS})

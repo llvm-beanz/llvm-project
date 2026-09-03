@@ -196,3 +196,18 @@ if config.feme_have_vulkan_loader == "ON":
     if _deqp_vk:
         config.available_features.add("system-vulkan-cts")
         config.substitutions.append(("%deqp_vk", _deqp_vk))
+
+    # Roadmap H10a ("A real CI-exercisable platform surface" --
+    # FeMeVulkanDesign.md's "Window-system integration"): `VK_KHR_xcb_surface`
+    # needs two independent runtime dependencies to actually exercise --
+    # `libxcb` found at *build* time (`FEME_HAVE_XCB`, gating whether
+    # `vkCreateXcbSurfaceKHR` is genuinely implemented at all, see
+    # lib/Vulkan/CMakeLists.txt) and a real `Xvfb` binary present on the
+    # *test* host at *run* time (a build could have found `libxcb` yet run
+    # its tests on a machine without `Xvfb` installed) -- so both are
+    # checked independently before `system-xcb` is offered, the same
+    # two-independent-dependencies pattern `system-vulkan-loader`+
+    # `system-vulkan-cts` already are to each other above.
+    if config.feme_have_xcb == "ON" and shutil.which("Xvfb"):
+        config.available_features.add("system-xcb")
+        llvm_config.add_tool_substitutions(["feme-vulkan-xcb-smoke"], tool_dirs)

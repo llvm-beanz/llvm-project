@@ -12,6 +12,7 @@ config.host_triple = "@LLVM_HOST_TRIPLE@"
 config.target_triple = "@LLVM_TARGET_TRIPLE@"
 config.feme_have_vulkan_loader = "@FEME_HAVE_VULKAN_LOADER@"
 config.feme_vulkan_icd_manifest = r"@FEME_VULKAN_ICD_MANIFEST@"
+config.feme_have_xcb = "@FEME_HAVE_XCB@"
 
 import lit.llvm
 

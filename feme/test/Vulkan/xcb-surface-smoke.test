@@ -1,0 +1,26 @@
+// Roadmap H10a's own end-to-end verification (see "Window-system
+// integration" in feme/docs/FeMeVulkanDesign.md): a real xcb window,
+// backed by a private Xvfb instance this test starts and tears down
+// itself (`-displayfd` finds an unused display number automatically, so
+// concurrent test runs on the same host never collide -- see this
+// project's own "dynamic display number" H10a design note), a real
+// `VkSurfaceKHR`/`VkSwapchainKHR` against it, a real clear + present, and
+// a real `xcb_get_image` readback confirming the actual presented color
+// (feme-vulkan-xcb-smoke.cpp's own comment explains why pure red is
+// chosen specifically to catch a broken R/B channel swap).
+//
+// Note: the whole Xvfb-spawn/trap/present sequence is wrapped in a single
+// `bash -c '...'` invocation (rather than spread across multiple RUN:
+// lines joined with a bare `&` backgrounding operator) because lit's own
+// internal shell interpreter does not support `&` async job control --
+// wrapping it hands that parsing off to a real bash instead.
+//
+// REQUIRES: system-xcb
+// RUN: bash -c 'Xvfb -displayfd 1 -screen 0 128x128x24 >%t.display 2>%t.xvfb.log & \
+// RUN:   XVFB_PID=$!; trap "kill $XVFB_PID 2>/dev/null" EXIT; sleep 1; \
+// RUN:   env VK_DRIVER_FILES=%feme_vulkan_icd_manifest \
+// RUN:     DISPLAY=:$(cat %t.display) feme-vulkan-xcb-smoke' | FileCheck %s
+
+// CHECK: currentExtent: 64x64
+// CHECK: presented pixel: R=ff G=00 B=00
+// CHECK: PASS
