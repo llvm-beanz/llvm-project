@@ -37,10 +37,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8f or other prerequisites blocking the H-series milestones?
+Can you work on H8g or other prerequisites blocking the H-series milestones?
 
-> **Multisample capability per format.** Not yet investigated at all this
-> session -- needs its own scoping pass of what
-> `VkImageFormatProperties::sampleCounts` currently reports per format versus
-> the mandatory `VK_SAMPLE_COUNT_1_BIT`/`_4_BIT` minimums for
-> color/depth/stencil formats
+> **Mandatory blit/filter bits audit.** Not yet investigated at all this session
+> -- needs a systematic pass confirming
+> `VK_FORMAT_FEATURE_BLIT_SRC_BIT`/`_DST_BIT`/`SAMPLED_IMAGE_FILTER_LINEAR_BIT`
+> are reported for every format the spec mandates them for, beyond the specific
+> cases H8e already found missing them
