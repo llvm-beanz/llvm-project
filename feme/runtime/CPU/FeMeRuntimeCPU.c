@@ -2785,6 +2785,278 @@ femeCpuResourceStoreTypedI32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   femeRTPackImageTexelI32(Desc.Format, Ptr, Texel);
 }
 
+// Bounds-checked address helper for `feme.cpu.resource.atomic.*.typed.i32`
+// (roadmap H8w): the storage-texel-buffer counterpart of
+// `femeRTAtomicTexelAddress2D` above (`feme.cpu.image.atomic.*.2d.i32`,
+// roadmap H8v) -- same real-hardware-atomic rationale (a real atomic
+// needs a genuine pointer to operate on directly, unlike an ordinary
+// store), same single-32-bit-scalar-format restriction (SPIR-V only ever
+// allows a texel-buffer atomic against `R32_SINT`/`R32_UINT`, enforced
+// upstream by `hasOnlySupportedPointerUses`, `SPIRVResourceLowering.cpp`),
+// but addressed by descriptor index + element index like every other
+// typed-buffer access (`femeCpuResourceLoadTypedI32`) rather than an
+// image's own `(X, Y)` coordinate. Returns `NULL` on any failure
+// (unbound/wrong-kind descriptor, non-UAV, out-of-bounds element, or an
+// unexpected format), mirroring `femeRTAtomicTexelAddress2D`'s own
+// fail-safe convention.
+__attribute__((always_inline)) static int32_t *
+femeRTAtomicResourceAddress(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                           uint32_t DescriptorIndex, uint64_t ElementIndex) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  uint64_t ElemSize = femeRTImageFormatElementSize(Desc.Format);
+  if (ElemSize != sizeof(int32_t))
+    return (int32_t *)0;
+  uint64_t ByteOffset = ElementIndex * ElemSize;
+  _Bool AccessOK =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
+                        Desc.Flags, ByteOffset, ElemSize);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!(AccessOK && IsUAV))
+    return (int32_t *)0;
+  return (int32_t *)((unsigned char *)Desc.Data + ByteOffset);
+}
+
+// `feme.cpu.resource.atomic.add.typed.i32` (roadmap H8w): `OpAtomicIAdd`
+// against a storage texel buffer (`R32_SINT`/`R32_UINT`) -- adds \p Value
+// to the element at \p ElementIndex through descriptor \p DescriptorIndex,
+// returning the pre-op value. See `femeCpuImageAtomicAdd2D`'s own doc
+// (roadmap H8v) for the shared real-hardware-atomic/threading rationale;
+// an unbound resource or an out-of-bounds/masked-off access returns 0,
+// mirroring every other typed-buffer access's own "reads/no-ops as zero"
+// rule.
+int32_t femeCpuResourceAtomicAddTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.add.typed.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicAddTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_add(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.resource.atomic.sub.typed.i32` (roadmap H8w): `OpAtomicISub`'s
+// counterpart to `feme.cpu.resource.atomic.add.typed.i32` above.
+int32_t femeCpuResourceAtomicSubTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.sub.typed.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicSubTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_sub(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.resource.atomic.and.typed.i32` (roadmap H8w): `OpAtomicAnd`'s
+// counterpart to `feme.cpu.resource.atomic.add.typed.i32` above.
+int32_t femeCpuResourceAtomicAndTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.and.typed.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicAndTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_and(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.resource.atomic.or.typed.i32` (roadmap H8w): `OpAtomicOr`'s
+// counterpart to `feme.cpu.resource.atomic.add.typed.i32` above.
+int32_t femeCpuResourceAtomicOrTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.or.typed.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicOrTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_or(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.resource.atomic.xor.typed.i32` (roadmap H8w): `OpAtomicXor`'s
+// counterpart to `feme.cpu.resource.atomic.add.typed.i32` above.
+int32_t femeCpuResourceAtomicXorTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.xor.typed.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicXorTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_xor(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.resource.atomic.smax.typed.i32` (roadmap H8w): `OpAtomicSMax`'s
+// counterpart to `feme.cpu.resource.atomic.add.typed.i32` above -- a
+// signed maximum, using GCC/Clang's `__atomic_fetch_max` builtin on a
+// signed `int32_t` operand (matching how `femeCpuImageAtomicSMax2D`,
+// roadmap H8v, gets a signed max from the identical builtin).
+int32_t femeCpuResourceAtomicSMaxTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.smax.typed.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicSMaxTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_max(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.resource.atomic.smin.typed.i32` (roadmap H8w): `OpAtomicSMin`'s
+// counterpart to `feme.cpu.resource.atomic.add.typed.i32` above -- a
+// signed minimum, using `__atomic_fetch_min` on a signed `int32_t`
+// operand.
+int32_t femeCpuResourceAtomicSMinTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.smin.typed.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicSMinTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_min(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.resource.atomic.umax.typed.i32` (roadmap H8w): `OpAtomicUMax`'s
+// counterpart to `feme.cpu.resource.atomic.add.typed.i32` above -- an
+// unsigned maximum, reinterpreting the same `int32_t` storage as
+// `uint32_t` for the comparison (mirroring
+// `femeCpuImageAtomicUMax2D`'s own identical reinterpretation, roadmap
+// H8v).
+int32_t femeCpuResourceAtomicUMaxTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.umax.typed.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicUMaxTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  uint32_t *UAddr = (uint32_t *)Addr;
+  return (int32_t)__atomic_fetch_max(UAddr, (uint32_t)Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.resource.atomic.umin.typed.i32` (roadmap H8w): `OpAtomicUMin`'s
+// counterpart to `feme.cpu.resource.atomic.add.typed.i32` above -- an
+// unsigned minimum, see `femeCpuResourceAtomicUMaxTyped`'s own
+// reinterpretation doc.
+int32_t femeCpuResourceAtomicUMinTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.umin.typed.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicUMinTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  uint32_t *UAddr = (uint32_t *)Addr;
+  return (int32_t)__atomic_fetch_min(UAddr, (uint32_t)Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.resource.atomic.exchange.typed.i32` (roadmap H8w):
+// `OpAtomicExchange`'s counterpart to
+// `feme.cpu.resource.atomic.add.typed.i32` above -- an unconditional
+// swap.
+int32_t femeCpuResourceAtomicExchangeTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.exchange.typed.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicExchangeTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  return __atomic_exchange_n(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.resource.atomic.compare_exchange.typed.i32` (roadmap H8w):
+// `OpAtomicCompareExchange`'s counterpart to
+// `feme.cpu.resource.atomic.add.typed.i32` above -- replaces the element
+// at \p ElementIndex with \p Value only if it currently equals
+// \p Comparator, always returning the pre-op value either way (matching
+// `femeCpuImageAtomicCompareExchange2D`'s own identical semantics,
+// roadmap H8v).
+int32_t femeCpuResourceAtomicCompareExchangeTyped(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, int32_t Comparator, int32_t Value,
+    _Bool Mask) asm("feme.cpu.resource.atomic.compare_exchange.typed.i32");
+
+__attribute__((always_inline)) int32_t
+femeCpuResourceAtomicCompareExchangeTyped(const FemeRTDescriptor *Heap,
+                                         uint32_t HeapCount,
+                                         uint32_t DescriptorIndex,
+                                         uint64_t ElementIndex,
+                                         int32_t Comparator, int32_t Value,
+                                         _Bool Mask) {
+  if (!Mask)
+    return 0;
+  int32_t *Addr =
+      femeRTAtomicResourceAddress(Heap, HeapCount, DescriptorIndex, ElementIndex);
+  if (!Addr)
+    return 0;
+  int32_t Expected = Comparator;
+  __atomic_compare_exchange_n(Addr, &Expected, Value, /*weak=*/0,
+                              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  return Expected;
+}
 
 // integer texel index, possibly outside `[0, Size)`) against axis extent
 // `Size`. Sets `*UseBorder` if the result should be replaced by the
