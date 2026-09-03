@@ -57197,3 +57197,123 @@ strongest evidence available in this environment, and I think it holds
 up: it's not a guess about what CTS would do, it's the literal shader
 shapes CTS uses, run through the literal same code path CTS's own
 `vkQueueSubmit` calls would go through.
+
+# H10: WSI -- headless surface object model + full swapchain state machine
+
+Picked up H10 from the roadmap since it was the next open H-series item not
+already blocked on another in-flight row (H9b/H9c both closed by other
+sessions working this same tree between my own turns -- confirmed via `git
+log` before starting, rather than duplicating work already committed).
+
+## Scoping the ask down to something real and testable
+
+The roadmap row as filed bundles three genuinely different things: (1) the
+instance/device extension list split this ICD has never had (`vkEnumerate
+InstanceExtensionProperties` returning the device list verbatim is a real,
+observable bug independent of WSI -- any instance-level extension query was
+already wrong before today), (2) `VK_EXT_headless_surface`'s object model,
+and (3) the full `VK_KHR_swapchain` state machine. All three are concretely
+buildable and unit-testable without any real display, window system, or
+compositor. The fourth thing the row also asks for -- "then exactly one
+CI-exercisable platform surface" and a full `dEQP-VK.wsi` CTS group pass --
+is not: it needs a real windowing backend (`VK_KHR_xcb_surface`/`VK_KHR_
+wayland_surface`, per FeMeVulkanDesign.md's own "chosen by CI, not by
+preference" decision) whose actual availability in this project's CI is
+outside what I can determine or build from inside this session, and a real
+`deqp-vk` binary this environment has never had (confirmed again this
+session: no build artifact under `/home/dev/dev/VK-GL-CTS/`, matching every
+prior row's own note). Rather than block the whole row on that unknown, I
+scoped H10 itself down to (1)-(3), and split the platform-surface/CTS-group
+work into a new row H10a -- a decision I documented in both Roadmap.md and
+FeMeVulkanDesign.md's "Window-system integration" section rather than
+silently narrowing the row's own definition of done.
+
+## Design choices worth recording
+
+- **Synchronous execution model reuse.** `Sync.h`'s own comment establishes
+  that `vkQueueSubmit` runs every command buffer to completion in-line, so
+  no fence/semaphore this ICD ever hands out is genuinely unresolved by the
+  time anything observes it -- an unresolved wait is a real application
+  ordering bug, reported as `VK_ERROR_INITIALIZATION_FAILED` rather than an
+  actual block. I reused this precedent directly for `vkAcquireNextImageKHR`
+  (immediate signal, `VK_TIMEOUT` only when every image is genuinely still
+  acquired) and `vkQueuePresentKHR` (same wait-semaphore consumption
+  semantics, same error code for a detected ordering bug like presenting an
+  unacquired image). This kept the whole swapchain state machine small and
+  consistent with existing driver behavior instead of inventing a second,
+  parallel synchronization model just for WSI.
+- **Headless capability values.** Rather than advertise the widest legal
+  range the spec would technically allow, I chose values that reflect only
+  what this ICD's headless/synchronous model genuinely, distinctly
+  implements: FIFO-only present modes (no real display means no actual
+  difference between FIFO/MAILBOX/IMMEDIATE timing), OPAQUE-only composite
+  alpha and IDENTITY-only transform (no compositor to blend against or
+  rotate for), and a sentinel `currentExtent` of `{UINT32_MAX, UINT32_MAX}`
+  (the spec's own "the surface has no fixed size" value, since headless
+  genuinely has none). Documented inline in Surface.cpp rather than left
+  implicit, so a future session extending this to a real platform surface
+  (H10a) has a clear record of which values were headless-specific
+  defaults versus genuine spec requirements.
+- **Swapchain images need real backing memory.** A real application never
+  calls `vkAllocateMemory`/`vkBindImageMemory` for a swapchain image itself
+  -- the ICD has to do the equivalent internally. I exposed Memory.cpp's
+  previously-`static` `allocateAligned` as a new public `allocateDeviceMemory`
+  (Memory.h) so Swapchain.cpp could reuse the exact same alignment logic
+  rather than a second, independently-maintained copy -- a small,
+  self-contained refactor I committed separately from the swapchain feature
+  itself, since it stands on its own and made the actual feature commit's
+  diff easier to read.
+- **`enumerate<T>` duplication.** `EntryPoints.cpp` already has a small
+  generic helper for the common `count`-then-`fill` two-call Vulkan
+  enumeration pattern, but it has internal linkage and isn't reusable
+  across translation units, and there's no existing shared-header
+  precedent for utilities like this in the codebase. I duplicated a copy
+  in Surface.cpp's own anonymous namespace rather than introduce a new
+  shared header for a single reused helper -- the smaller, more
+  consistent-with-existing-style change, even though it's not perfectly
+  DRY.
+
+## A process mistake worth recording so it doesn't happen again
+
+I ran the system `clang-format -i` across all six pre-existing files this
+session touched (EntryPoints.h/.cpp, Memory.h/.cpp, PhysicalDeviceInfo.cpp,
+DrawTest.cpp) in one batch, expecting a purely cosmetic pass. Instead it
+produced a 173+ line diff in EntryPoints.h alone -- the system's installed
+clang-format resolves to a different style/version than whatever originally
+formatted this repository, so a whole-file `-i` run reformats large amounts
+of unrelated pre-existing code. I tried to undo this with `git checkout --
+<files>`, which (correctly, in retrospect -- this is exactly what the
+command does) reverted *every* uncommitted change to those files, including
+all of this session's genuine feature work that hadn't been committed yet.
+I had to manually redo every lost edit from memory/context rather than from
+a clean diff, which cost real time and was a completely avoidable
+self-inflicted problem.
+
+Two lessons for future sessions: (1) commit real logic changes *before*
+attempting any repo-wide formatting pass, so a bad formatting attempt can be
+undone with a targeted revert instead of a blanket `git checkout` that also
+destroys uncommitted work; (2) don't run a whole-file `clang-format -i` on
+pre-existing files at all unless the installed tool's resolved style is
+first confirmed to match the repo's own -- for net-new files it's safe
+(nothing pre-existing to disturb), but for files with real history, prefer
+`git clang-format` against a diff, or just match the surrounding style by
+hand for the newly-added lines.
+
+## Verification
+
+`FeMeVulkanTests` (unit tests): 594/594 passing, including 14 new tests
+(`SurfaceTest.cpp`, `SwapchainTest.cpp`) and the `DrawTest.cpp` fixes this
+row's own extension-count/placeholder-name changes needed. `ninja
+check-feme` (ccache + assertions build, all target dependencies rebuilt
+automatically by the target itself): 2444 passed, 59 pre-existing baseline
+`Unsupported`, 0 failed -- including the `vk-gen-entrypoints-split-features`
+regression test I had to update (its fake `vk.xml` fixture needed matching
+fake `<extension>` declarations for the three newly-supported extensions,
+or `vk_gen_entrypoints.py` itself raises on the real fixture referencing an
+undeclared extension).
+
+A real Vulkan CTS run remains infeasible this session, same as every prior
+row: no prebuilt `deqp-vk` binary exists under the `/home/dev/dev/VK-GL-CTS/`
+checkout, and this row's own `dEQP-VK.wsi` target group specifically needs a
+real (non-headless) platform surface to even reach `checkSupport`, which is
+H10a's own open work, not this row's.
