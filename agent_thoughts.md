@@ -55161,3 +55161,133 @@ path at all. Neither `Vulkan14FeatureInventory.md` nor
 per-format `VkFormatFeatureFlags` and adds real rendering-path support for
 7 already-recognized formats, touching no `VkPhysicalDeviceFeatures` bit or
 extension.
+
+# H8q: E5B9G9R9_UFLOAT, a brand-new shared-exponent packed format
+
+H8e's own per-format triage split this row off as the one entirely
+unrecognized `VkFormat` among its 9 named gaps: `VK_FORMAT_
+E5B9G9R9_UFLOAT_PACK32` had no `ResourceFormat` enumerator, no
+`mapVkFormat` case, and no pack/unpack support at all -- unlike every
+other format in that row's list, which was each missing only one or two
+specific feature bits on top of an otherwise-working format. This meant
+starting from zero rather than triaging an existing partial
+implementation.
+
+## Investigation before writing any code
+
+Before touching anything I mapped out every function that would need a
+new case: `RuntimeABI.h`'s `ResourceFormat` enum (append-only, since
+`FeMeRuntimeCPU.c` switches on its raw ordinal value -- I wrote a small
+Python script to programmatically recount the enum after each edit
+rather than trust manual counting, which caught that the enum starts at
+`Unknown = 0` and my first naive regex undercounted by one), `Format.cpp`'s
+`mapVkFormat`/`formatElementSize`/`formatFeatureFlags`, and
+`ImageFixture.cpp`'s `packClearColor`/`unpackColor`/`getFormatInfo`.
+
+The most useful discovery was that `R11G11B10_FLOAT` -- the format the
+roadmap's own text explicitly said to mirror -- is *not* a full
+precedent. Grepping for it in `ImageFixture.cpp` turned up only a
+`getFormatInfo` entry and a fixture-name mapping, never a
+`packClearColor`/`unpackColor` case. That format was wired only into the
+CPU runtime's sampling/storage path, never made a legal clear-color or
+blit target. But H8q's own roadmap text explicitly requires
+`packClearColor`/`unpackColor` support (`vkCmdClearColorImage` and
+`ImageOps.cpp`'s blit-decode path call these for any recognized format),
+so I had to write that piece from scratch rather than copy an existing
+pattern -- a place where "mirror the closest precedent" and "the roadmap's
+own explicit requirement" pointed in different directions, and I followed
+the roadmap text since it's the more specific instruction.
+
+Also useful: confirming that `formatFeatureFlags`'s `TRANSFER_SRC_BIT`/
+`TRANSFER_DST_BIT` are granted unconditionally to any recognized format,
+and `BLIT_SRC_BIT`/`BLIT_DST_BIT` to any non-block-compressed recognized
+format. This meant 4 of the 5 CTS-confirmed-missing bits would become
+correct the instant `mapVkFormat` recognized the format, with zero
+further code -- only `SAMPLED_IMAGE_BIT`/`FILTER_LINEAR_BIT` genuinely
+needed new work, and only if I chose to add sampling support at all
+(the roadmap framed it as optional).
+
+## The RGB9E5 algorithm, implemented twice
+
+The format's own defining characteristic -- a shared 5-bit exponent
+across three independent 9-bit mantissas -- needs real range-reduction
+math on the encode side (choosing the smallest exponent that fits the
+single largest channel, with a carry-correction step if rounding
+overflows the mantissa), not just a bitfield shift like every other
+packed format already in this codebase. I worked out the canonical
+algorithm from the Khronos `EXT_texture_shared_exponent` reference
+implementation's own description (I don't have that file locally, but
+the algorithm is a well-known, unambiguous one: clamp to `MAX_RGB9E5`,
+`exp_shared = max(-bias-1, FloorLog2(maxrgb)) + 1 + bias`, round each
+channel to that exponent's mantissa, bump-and-reround on overflow).
+
+I ended up implementing this same algorithm twice, in two different
+styles, because the two call sites have genuinely different constraints:
+
+- `ImageFixture.cpp` (`encodeRGB9E5`/`decodeRGB9E5`) operates on
+  `double` and already depends on `<cmath>`, so `std::frexp`/`std::ldexp`
+  are the natural, readable choice for the floor-log2/power-of-two
+  pieces.
+- `FeMeRuntimeCPU.c` (`femeRTPackRGB9E5`/`femeRTUnpackRGB9E5`) is
+  compiled freestanding for whatever host runs the JIT/AOT backend (per
+  this file's own header comment) and has no guaranteed libm, so I built
+  the same power-of-two/floor-log2 primitives (`femeRTExp2`/
+  `femeRTFloorLog2`) by hand via direct IEEE-754 bit construction,
+  matching the file's own existing style (`femeRTHalfToFloat` already
+  does the same kind of bit-manipulation for a different reason). Having
+  the CTS test suite exercise the *runtime* path specifically (via
+  `ImageSamplingTest.cpp`'s JIT-compiled `feme.cpu.image.load.2d.v4f32`
+  bitcode, not just the fixture-side helpers) was important to catch any
+  divergence between the two independent implementations -- and it
+  passed cleanly on the first attempt, which I verified rather than
+  assumed by actually running the new tests before moving on.
+
+## Scoping: sampling support and STORAGE_IMAGE_BIT/COLOR_ATTACHMENT_BIT
+
+The roadmap text framed the sampling piece (`SAMPLED_IMAGE_BIT`/
+`FILTER_LINEAR_BIT`, needing a new `FeMeRuntimeCPU.c` runtime case) as
+optional -- "if sampling is also wanted". I chose to implement it anyway,
+for full milestone closure rather than leaving a partially-done row that
+would need its own follow-up. This was a deliberate deviation-in-scope
+from the letter of the roadmap text (which allowed stopping earlier), but
+not a deviation from its intent, and I documented the choice explicitly
+in both the roadmap's own closing note and the CTS report rather than
+silently doing more or less than asked.
+
+I did *not* add `STORAGE_IMAGE_BIT` or `COLOR_ATTACHMENT_BIT` support,
+because neither bit appears in the CTS log's own missing-bits list for
+this format (only `BLIT_SRC_BIT`/`SAMPLED_IMAGE_BIT`/`FILTER_LINEAR_BIT`/
+`TRANSFER_DST_BIT`/`TRANSFER_SRC_BIT` were named) -- and this matches real
+GPU behavior, where RGB9E5 is typically a sample-only format on real
+hardware too, never a storage or render target. A real
+`dEQP-VK.api.image_clearing.*e5b9g9r9*` CTS re-run confirmed this choice
+was correct: the `partial_clear_color_attachment` cases correctly report
+`NotSupported ("Format not renderable")` rather than failing, while every
+`clear_color_image` case (which only needs `TRANSFER_DST_BIT`, already
+granted) passes for real.
+
+## Verification
+
+Ran `ninja check-feme` (assertions-enabled, ccache build) after each
+logical change to catch compile errors early rather than batching
+everything into one build-and-test pass at the end; it stayed green
+throughout (2,417/2,444, 27 pre-existing `Unsupported`, 0 `Failed`, up 10
+tests from this row's own new coverage). Then ran three separate real
+`deqp-vk` sweeps from the `/home/dev/dev/VK-GL-CTS/` checkout rather than
+just the one the roadmap explicitly named: the full
+`dEQP-VK.api.info.format_properties.*` group (225/225, up from 199/225 at
+H8p's own close), a targeted `dEQP-VK.api.image_clearing.*e5b9g9r9*`
+sweep to directly validate the new `packClearColor`/`unpackColor` code
+against a real `vkCmdClearColorImage` call (200/294 `Pass`, 94 correctly
+`NotSupported`, 0 `Failed`), and a targeted
+`dEQP-VK.api.format_features.*e5b9g9r9*` sweep. All three showed zero
+failures, and I checked the specific `e5b9g9r9_ufloat_pack32` format-
+properties case individually as well as the broader group, rather than
+trusting the aggregate pass count alone to mean this format specifically
+was fixed.
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+row, confirmed via a targeted grep of both inventory documents rather
+than assumed from the change's own shape -- so neither
+`Vulkan14FeatureInventory.md` nor `VulkanExtensionInventory.md` needed
+updates.
