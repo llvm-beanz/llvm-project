@@ -1038,6 +1038,23 @@ TEST(FormatTest, IntegerColorAttachmentFormatsGetOnlyColorAttachmentBit) {
   }
 }
 
+// (Roadmap H8s) A real CTS re-run found these four non-integer formats
+// still missing `COLOR_ATTACHMENT_BIT`/`_BLEND_BIT` -- unlike the integer
+// cluster above, blending *is* defined for these (all `Float`-typed), so
+// both bits are expected, mirroring every other non-integer
+// `isSupportedColorAttachmentFormat` (RenderPass.cpp) format.
+TEST(FormatTest, NonIntegerColorAttachmentBreadthGetsBothBits) {
+  for (ResourceFormat Format :
+       {ResourceFormat::R8_UNORM, ResourceFormat::R8G8_UNORM,
+        ResourceFormat::R16_FLOAT, ResourceFormat::R16G16_FLOAT}) {
+    VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+        << "format " << static_cast<int>(Format);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)
+        << "format " << static_cast<int>(Format);
+  }
+}
+
 TEST(FormatTest, FormatFeatureFlagsBlitBitsMatchImageOpsRejections) {
   // Roadmap E24: `ImageOps.cpp`'s `runBlitImage` rejects a
   // block-compressed *destination* outright and an HDR ASTC *source*, but

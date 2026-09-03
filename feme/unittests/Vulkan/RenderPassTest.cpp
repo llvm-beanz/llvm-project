@@ -222,6 +222,20 @@ TEST_F(RenderPassTest, CompilesIntegerColorAttachments) {
   }
 }
 
+// (Roadmap H8s) A real CTS re-run found these four non-integer formats
+// still missing `COLOR_ATTACHMENT_BIT` -- a real `RenderPass`/
+// `Framebuffer` combination can now be created against one, mirroring
+// `CompilesRemainingPackedSixteenBitColorAttachments` above.
+TEST_F(RenderPassTest, CompilesNonIntegerColorAttachmentBreadth) {
+  for (VkFormat Format :
+       {VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R16_SFLOAT,
+        VK_FORMAT_R16G16_SFLOAT}) {
+    VkRenderPass Pass = VK_NULL_HANDLE;
+    EXPECT_EQ(createSimpleRenderPass(Format, Pass), VK_SUCCESS) << Format;
+    vkDestroyRenderPass(Device, Pass, nullptr);
+  }
+}
+
 TEST_F(RenderPassTest, RejectsUnsupportedSampleCount) {
   VkRenderPass Pass = VK_NULL_HANDLE;
   EXPECT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass,

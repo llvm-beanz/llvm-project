@@ -42,6 +42,19 @@ bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format) {
     // every conformant implementation must support (roadmap C1) --
     // backed by real pack/unpack paths in `feme::graphics`.
     return true;
+  case feme::cpu::ResourceFormat::R8_UNORM:
+  case feme::cpu::ResourceFormat::R8G8_UNORM:
+  case feme::cpu::ResourceFormat::R16_FLOAT:
+  case feme::cpu::ResourceFormat::R16G16_FLOAT:
+    // (Roadmap H8s) A real CTS re-run found these four non-integer
+    // formats still missing `COLOR_ATTACHMENT_BIT`/`_BLEND_BIT`, a gap
+    // H8e/H8p's own integer-only framing never covered -- but each
+    // already has a real `feme::graphics::packClearColor`/`unpackColor`
+    // case (used already by the vertex-fetch/texel-buffer/sampled-image
+    // paths), and `readFragmentColor` (`Executor.cpp`) is generic over
+    // any `Float`-typed output width, so no new pack/unpack or
+    // executor code is needed here, unlike the integer cluster below.
+    return true;
   case feme::cpu::ResourceFormat::A8_UNORM:
   case feme::cpu::ResourceFormat::A1B5G5R5_UNORM:
     // (Roadmap E5) `VK_KHR_maintenance5`'s two new formats are both
