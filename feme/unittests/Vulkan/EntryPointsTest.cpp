@@ -204,6 +204,22 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesReportsMultisampleFor2DSampled) {
   EXPECT_TRUE(Props.sampleCounts & VK_SAMPLE_COUNT_4_BIT);
 }
 
+// (Roadmap H8f) A sampled depth format used to intersect the *color*
+// sample-count limit here too (`sampledImageColorSampleCounts`, 1|2|4|8),
+// same over-report bug `ImageTest.cpp`'s
+// `RejectsMultisampleSampledDepthImage` exercises at the `vkCreateImage`
+// layer -- `D16_UNORM` is the one depth format with a real
+// `SAMPLED_IMAGE_BIT` (roadmap H8e), so it is the only one this query
+// itself does not already reject before ever computing `sampleCounts`.
+TEST_F(EntryPointsTest, ImageFormatPropertiesReportsSingleSampleForSampledDepth) {
+  VkImageFormatProperties Props{};
+  ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_D16_UNORM, VK_IMAGE_TYPE_2D,
+                VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
+            VK_SUCCESS);
+  EXPECT_EQ(Props.sampleCounts, VkSampleCountFlags(VK_SAMPLE_COUNT_1_BIT));
+}
+
 // A 1D/3D image can never be multisampled in real Vulkan
 // (`VUID-VkImageCreateInfo-samples-02257`, `isValidImageShape`'s own
 // check), unlike 2D above.

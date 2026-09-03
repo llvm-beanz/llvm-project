@@ -408,6 +408,56 @@ TEST_F(ImageTest, AcceptsMultisampleForSampledOrStorageUsage) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+// (Roadmap H8f) A sampled-only depth image used to be able to request up
+// to 8 samples: `Image.cpp`'s `supportedSampleCounts` intersected every
+// `VK_IMAGE_USAGE_SAMPLED_BIT` image against
+// `sampledImageColorSampleCounts` (1|2|4|8) regardless of the image's own
+// format, never `sampledImageDepthSampleCounts` (`VK_SAMPLE_COUNT_1_BIT`
+// only, PhysicalDeviceInfo.cpp) -- over-reporting a capability nothing
+// downstream (no per-sample depth texel fetch exists yet) can honor.
+TEST_F(ImageTest, RejectsMultisampleSampledDepthImage) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_D32_SFLOAT;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_4_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
+// The stencil-only counterpart of `RejectsMultisampleSampledDepthImage`:
+// `sampledImageStencilSampleCounts` is likewise `VK_SAMPLE_COUNT_1_BIT`
+// only.
+TEST_F(ImageTest, RejectsMultisampleSampledStencilImage) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_S8_UINT;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_4_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
+// A single-sample sampled depth/stencil image is unaffected by H8f's own
+// fix -- `VK_SAMPLE_COUNT_1_BIT` is always in every one of this device's
+// per-usage sample-count masks, color or not.
+TEST_F(ImageTest, AcceptsSingleSampleSampledDepthImage) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2DWithFormat(
+      VK_FORMAT_D32_SFLOAT, 4, 4, VK_IMAGE_USAGE_SAMPLED_BIT, Memory);
+  EXPECT_NE(Img, VK_NULL_HANDLE);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 TEST_F(ImageTest, MultisampleImageRejectsBufferCopy) {
   VkDeviceMemory Memory = VK_NULL_HANDLE;
   VkImage Img = createBoundImage2D(
