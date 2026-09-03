@@ -55976,3 +55976,152 @@ construction and there is nothing new to re-run through the Vulkan CTS;
 `VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 are left unchanged since no `VkPhysicalDeviceFeatures`/extension bit or CTS
 pass/fail count moved.
+
+## Session: completing R39 / making progress on H8u (storage-image atomics)
+
+**Goal**: complete roadmap item H8u (`VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT`
+for `R32_{SINT,UINT}`), which a prior session had scoped down to a concrete
+blocker documented as roadmap R39: MLIR's own `spirv` dialect has zero
+representation for `OpImageTexelPointer` (opcode 60), the SPIR-V
+instruction that materializes an addressable pointer from a storage-image
+handle before a following `Atomic*` op can operate on it.
+
+**Part 1: adding `spirv.ImageTexelPointer` to MLIR.** Modeled the new op on
+`ImageReadOp`/`ImageWriteOp`'s existing shape, but with `$image` typed as
+`SPIRV_AnyPtr` (a pointer-to-image) rather than `SPIRV_AnyImage` (a loaded
+image value) — this is the one structural way `OpImageTexelPointer`
+actually differs from every other image op in the dialect, and is exactly
+why it couldn't just reuse an existing op's pattern. Wrote a custom
+verifier checking the image-pointer/result-pointer/pointee-type shape, but
+deliberately did *not* statically enforce the spec's "Sample must be 0 for
+a non-multisampled image" rule via `matchPattern`/`m_Zero()` — that's a
+dynamic SSA value in the general case, and a real binary could legally
+pass a non-constant-folded value that merely evaluates to 0 at runtime;
+statically rejecting it would be a false-positive verifier failure on
+legitimate input. Left as a `TODO` comment instead — a deliberate, narrow,
+documented scope gap rather than either over-claiming coverage or silently
+skipping the concern.
+
+Hit one avoidable mistake writing the IR-level tests: I initially wrote a
+"the image operand must be a pointer" negative test expecting my
+hand-written verifier to reject it, forgetting that `$image`'s own
+`SPIRV_AnyPtr` ODS constraint already rejects a non-pointer operand
+*structurally*, before my custom verifier code ever runs. That test case
+was dead/unreachable and I removed it in favor of a "non-image pointee"
+test that actually does exercise the custom verifier's own logic. Lesson:
+when adding a hand-written `verify()` alongside ODS-level type constraints,
+double-check which failure mode each layer is actually responsible for
+before writing a test that assumes the wrong one.
+
+A second avoidable mistake writing the *serialization* round-trip test: I
+first wrote `spirv.AtomicIAdd <Image> <None> ...`, confusing SPIR-V's
+memory-*scope* operand (`Device`/`Workgroup`/`Subgroup`/etc. — how far the
+atomic's visibility extends) with a *storage class* (`Image`, `Workgroup`,
+etc. — where a pointer lives). `Image` is not a valid `Scope` enumerant at
+all, so this was a parse error, not a semantic one — caught immediately
+by the round-trip test actually running. Fixed to `<Device>`, matching
+existing atomic test conventions elsewhere in the dialect's own test
+suite.
+
+The round-trip test's real payoff: it empirically confirmed, with zero
+hand-written serializer/deserializer code, that MLIR's autogen
+infrastructure (`dispatchToAutogenDeserialization`/
+`dispatchToAutogenSerialization`) handles a correctly-shaped tablegen op
+automatically — exactly what the prior session's Design.md writeup
+*claimed* would happen (by analogy to `OpImageRead`/`OpImageWrite`), now
+actually verified rather than merely asserted.
+
+Ran the full `check-mlir-dialect-spirv-ir`/`check-mlir-target-spirv`/
+`check-mlir-conversion-spirvtollvm` lit suites (117 tests) before
+committing — all passed, confirming no regression to any other SPIR-V
+dialect op from adding this one. Committed the MLIR-level change on its
+own, since it's a distinct, self-contained, independently-testable unit
+of work from anything `feme`-side.
+
+**Part 2: the `feme`-side conversion pattern, and a wrong assumption
+surfacing itself.** Wrote `ImageTexelPointerPattern`
+(`SPIRVToLLVMPatterns.cpp`), converting the new op into the same
+`createResourcePointer` intrinsic call `ImageReadPattern`/
+`ImageWritePattern` already emit, reusing the existing
+`isMultisampled2DImage`/`appendVectorLane` (H19g/H19m) coordinate-widening
+machinery for the `Sample` operand. Before writing this I spent real time
+investigating whether `populateSPIRVToLLVMTargetTypeConversions` needed a
+new case for `Image`-storage-class pointers (the op's own result type) —
+traced through to upstream's `convertPointerType`/
+`storageClassToAddressSpace`, confirmed the generic fallback (used for any
+storage class this converter's own custom lambdas don't specially handle)
+already produces the same opaque `!llvm.ptr` shape `createResourcePointer`
+returns, so no new type-conversion case was needed at all. Good — one
+fewer thing to get wrong.
+
+Then, testing the whole thing end to end with a real
+`ImageTexelPointer` + `AtomicIAdd` example through `feme-opt`, hit a
+"failed to legalize operation 'spirv.AtomicIAdd'" error. This directly
+contradicted both my own prior session's summary and Design.md's own
+prior "Known gap" writeup, both of which asserted "MLIR's own `spirv`
+dialect already models every `Atomic*` op generically over any pointer" —
+true of the op *definitions*, but I had conflated that with "and therefore
+already has a lowering pattern for them", which a `grep -rn "Atomic"
+mlir/lib/Conversion/SPIRVToLLVM/*.cpp` immediately disproved: zero hits,
+zero patterns, for any of the ~15 SPIR-V atomic op variants. This was a
+real, consequential wrong assumption carried across two sessions'
+documentation, only caught because I insisted on a real end-to-end
+compile-and-run test rather than trusting the prior write-up's claim at
+face value — a good reminder that "the op exists in the dialect" and "the
+op has a conversion pattern" are different claims, and design docs
+asserting the latter need to have actually verified it, not inferred it
+from the former.
+
+Given that, I added `feme`'s own atomic lowering: a templated
+`AtomicRMWPattern<SPIRVOpTy, BinOp>` (instantiated for all 10 RMW-shaped
+ops — `IAdd`/`ISub`/`And`/`Or`/`Xor`/`SMax`/`SMin`/`UMax`/`UMin`/
+`Exchange` — since they all share the same `pointer`/`memory_scope`/
+`semantics`/`value` operand shape) plus a separate
+`AtomicCompareExchangePattern` (needs its own pattern since it has two
+memory-semantics operands and its result comes from an `llvm.cmpxchg`'s
+struct via `extractvalue`, not a bare `atomicrmw` result). Added a small
+`convertAtomicOrdering` helper mapping SPIR-V `MemorySemantics` bits onto
+the closest LLVM `AtomicOrdering`, defaulting to `seq_cst` when neither
+`Acquire` nor `Release` is set — a deliberately conservative default that
+is always correct (if not maximally optimized) for a single-CPU-device,
+single-coherent-address-space target like this one.
+
+Verified the whole thing manually with `feme-opt` on three hand-written
+examples (plain add, compare-exchange, multisampled add) before writing
+the permanent FileCheck test file, confirming the exact intrinsic/pointer/
+atomicrmw shape each produces. Wrote
+`spirv-to-llvm-image-atomic.mlir` covering all of these plus every other
+RMW kind on one shared texel pointer. `ninja check-feme` passed in full
+(2431/2458, 0 regressions) — confirmed with ccache and assertions enabled,
+as instructed.
+
+**Where I stopped, and why H8u itself is still open.** The remaining scope
+— `SPIRVResourceLowering.cpp`'s CPU-side lowering learning to recognize an
+`AtomicRMWInst`/`AtomicCmpXchgInst` user of a storage-image `getpointer`
+call, and new `feme.cpu.image.atomic.*` runtime entry points — turned out
+to be substantially bigger than the IR-level work above once I actually
+read `lowerImageAccesses`'s existing `Load`/`Store` handling: it's a
+large per-shape (`Plain1D`/`Array1D`/`Plain2D`/`Array2D`/`Plain3D`/
+`Plain2DMS`/`Array2DMS`) case analysis today, and an image atomic's SPIR-V
+result is always a *scalar* rather than the `<4 x i32>`/`<4 x float>`
+vector texel every existing `Load`/`Store` branch assumes — a real,
+distinct piece of new plumbing, not a small follow-on. Rather than rush a
+partial/untested version of that under time pressure, I stopped at a
+clean, fully-tested boundary (SPIR-V binary imports, converts, and
+legalizes correctly end to end; only the CPU-runtime execution side is
+still missing) and split the remaining work into its own roadmap row,
+H8v — one letter under H8, matching this milestone's own established
+sibling-splitting convention (H8g → H8r/H8s → H8t/H8u), rather than
+nesting a second letter under H8u itself, per this session's standing
+instruction to avoid deeper nesting.
+
+Updated Design.md's "Known gap" section to reflect exactly this: retitled
+from "no way to deserialize `OpImageTexelPointer`" (now false — it
+deserializes and converts fine) to describe the real remaining gap (CPU
+lowering), rather than leaving a stale, now-incorrect description in
+place. Updated Roadmap.md's R39 row to done, and H8u's own row to
+describe what's now closed versus what moved to H8v. Ran a real
+`dEQP-VK.api.info.format_properties.*` re-run against feme's own ICD
+(confirmed via `vulkaninfo --summary`) to verify no regression — still
+222/225 Pass, exactly as before this session, since no format-feature bit
+was touched. Appended a VulkanCTSReport.md section recording this.
