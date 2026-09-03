@@ -37,16 +37,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8t or other prerequisites blocking the H-series milestones?
+Can you work on H8u or other prerequisites blocking the H-series milestones?
 
-> **`b8g8r8a8_unorm` (`VK_FORMAT_B8G8R8A8_UNORM`) as a vertex attribute, split
-> off from H8s.** A real CTS re-run found this format still missing
-> `VERTEX_BUFFER_BIT`; unlike `a2b10g10r10_unorm_pack32`'s already-tracked H8h
-> gap (a packed sub-byte layout `decodeAttribute` cannot fit mechanically),
-> `B8G8R8A8_UNORM` is a plain 4-byte-per-texel format `decodeAttribute`
-> (Executor.cpp) simply has no case for at all today (H8b's own closure note
-> called it "out of scope", not deferred) -- needs a new `decodeAttribute` case
-> reading the same 4 bytes as the existing `R8G8B8A8_UNORM` case but in reversed
-> (B,G,R,A) channel order, mirroring `ImageFixture.cpp`'s own `B8G8R8A8_UNORM`
-> swizzle convention, plus the matching `isVertexBufferFormatSupported`
-> (Format.cpp) addition
+> **`STORAGE_IMAGE_ATOMIC_BIT` for `r32_{sint,uint}`, split off from H8s.** A
+> real CTS re-run found `R32_SINT`/`R32_UINT` still missing this bit -- unlike
+> every other H8s gap, this is not a `formatFeatureFlags` label fix: no
+> `OpAtomic*` (SPIR-V's `OpAtomicIAdd`/`OpAtomicExchange`/etc.) support against
+> a storage image exists anywhere in this project yet (confirmed by grep: no
+> `OpAtomic`/`ImageAtomic`/`imageAtomic` hit in `feme/lib`, `feme/runtime`, or
+> `feme/include`). A real fix needs, at minimum: SPIR-V-to-LLVM lowering for the
+> mandatory single-component-32-bit-only subset of `OpAtomic*` instructions
+> against an `OpTypeImage` operand (`ConvertSPIRVToLLVMPass.cpp`), new
+> `feme.cpu.image.atomic.*` runtime entry points mirroring
+> `feme.cpu.image.store.2d.v4i32`'s own precedent (`FeMeRuntimeCPU.c`), and the
+> matching `SPIRVResourceLoweringPass::classifyStorageImage2DHandle`-adjacent
+> legalization/handle-classification work -- a substantially bigger lift than
+> every other H8s row, scoped here but not started
