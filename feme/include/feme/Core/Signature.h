@@ -221,12 +221,18 @@ struct SignatureElement {
   /// wrapping the per-row/per-vertex value -- and `RowCount` alone cannot
   /// tell them apart; a consumer that must (e.g. canonicalizing a
   /// geometry entry's own per-vertex addressing, as opposed to widening a
-  /// real matrix one row at a time) needs this flag instead. False for
-  /// every element that is not this shape, including a builtin interface
-  /// block's own per-member elements (e.g. `gl_in[].gl_Position`), whose
-  /// `RowCount` already reflects only that member's own shape -- the
-  /// outer per-vertex array dimension is peeled off before those are
-  /// built and never folds into any member's `RowCount` to begin with.
+  /// real matrix one row at a time) needs this flag instead. (Roadmap H9b)
+  /// `feme/lib/Graphics/StageLink.cpp`'s `linkStageElements` is exactly
+  /// such a consumer: it folds this flag down to an effective `RowCount`
+  /// of 1 (the real, single-vertex shape a per-vertex-arrayed `Input`'s
+  /// producer always has) before comparing shapes or building a
+  /// `LinkedStageElement`, rather than comparing the raw, folded value.
+  /// False for every element that is not this shape, including a builtin
+  /// interface block's own per-member elements (e.g. `gl_in[].gl_
+  /// Position`), whose `RowCount` already reflects only that member's own
+  /// shape -- the outer per-vertex array dimension is peeled off before
+  /// those are built and never folds into any member's `RowCount` to
+  /// begin with.
   /// (Roadmap H6j) Also false for a mesh entry's own plain per-vertex/
   /// per-primitive `Output` array (e.g. a user-defined `PerVertexEXT`/
   /// `PerPrimitiveEXT` varying): unlike `Input`, that element's `RowCount`

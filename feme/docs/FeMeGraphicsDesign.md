@@ -1957,6 +1957,15 @@ that same `Vertex` operand too (not the older `Row`-based path), and
 per-vertex-arrayed `Input` global's own signature element, that its
 `RowCount` is that array's own extent rather than a real matrix's row
 count -- the two are otherwise indistinguishable in the signature.
+(Roadmap H9b has since wired up the consumer this flag was always meant
+for: `feme/lib/Graphics/StageLink.cpp`'s `linkStageElements` now folds a
+`RowCountIsVertexArray`-flagged element's `RowCount` down to its real,
+single-vertex shape (1) before comparing producer/consumer shapes or
+building a `LinkedStageElement`, rather than comparing the raw, folded
+extent -- previously nothing read this flag at all, so any real
+vertex+geometry pipeline sharing a plain per-vertex-arrayed varying
+failed at `vkQueueSubmit` with a spurious "disagree on component/row
+count or type".)
 Roadmap H5g has since closed the last gap between all of the above and a
 real `gl_in[]` builtin block: `StageIOGlobalVariablePattern` in
 `SPIRVToLLVMPatterns.cpp` now recognizes an `Input` global whose pointee is

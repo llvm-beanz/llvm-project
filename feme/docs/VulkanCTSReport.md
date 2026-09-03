@@ -22264,3 +22264,95 @@ regression is expected given `check-feme`'s own full pass.
 No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
 needed: this row is a pure correctness fix in stage-splitting/
 classification logic, touching no feature bit or extension.
+
+## Roadmap H9b: measured impact
+
+Fixes the 5,544 `vkQueueSubmit` failures H9a's own re-run above
+attributed to this row (all `"vertex/domain stage output -> geometry
+stage input: element N and its producer element M disagree on
+component/row count or type"`), isolated with a real end-to-end
+`vkCmdDraw`+`vkQueueSubmit` reduction (`DrawTest.
+GeometryStageForwardsAPerVertexColorVaryingFromVertexStage`) built
+directly from the shape CTS's own `vktQueryPoolStatisticsTests.cpp`
+vertex+geometry shaders use: a vertex stage with a plain, non-arrayed
+`layout(location=0) out vec4 out_color;`, paired with a geometry stage
+reading it back per-primitive-vertex via `layout(location=0) in vec4
+in_color[];`. This shape is not specific to `query_pool.statistics_
+query` -- it is the shape essentially every real GLSL geometry shader
+takes when it reads any vertex-stage varying at all -- so this row's
+own fix is expected to unblock every other CTS group exercising a
+vertex+geometry pipeline against this ICD, not only the 4,752-5,544
+cases H9/H9a's own re-runs counted.
+
+**Root cause**: `CanonicalizeStage.cpp`'s `addElements` folds a plain
+(non-block) per-vertex-arrayed `Input` global's outer array dimension
+into that element's own `RowCount` (e.g. 3, one per triangle vertex),
+flagging it via `SignatureElement::RowCountIsVertexArray` (added by
+roadmap H5f specifically so a linking consumer could tell this folded
+shape apart from a genuine matrix's own row count) -- but no consumer
+anywhere actually read that flag until this row. `StageLink.cpp`'s
+`linkStageElements` compared raw `Producer->RowCount`/`Consumer.
+RowCount` directly, so a geometry stage's own per-vertex-array input
+(`RowCount == 3`) always disagreed with its vertex-stage producer's
+plain, unarrayed output (`RowCount == 1`), even though the two describe
+the same single-vertex attribute: the real per-vertex-in-primitive
+addressing is already handled entirely by an invocation-expansion
+scheme (`Executor.cpp`'s `GSInput` storage sizing and `SourceInvocations`
+remapping, `GeometryWrapper.cpp`'s `lowerGeometryInputLoad`), not by the
+`SignatureElement`/`LinkedStageElement` `RowCount` dimension, which is
+reserved for a real matrix's own rows. Fixed by adding a small
+`effectiveRowCount` helper (`RowCountIsVertexArray ? 1 : RowCount`)
+used consistently for both the producer/consumer equality check and the
+resulting `LinkedStageElement::RowCount` (so `copyLinkedElements`'s own
+Row-iteration loop doesn't walk out-of-bounds rows in the producer's
+always-1-row storage either).
+
+New unit tests: `StageLinkTest.
+RejectsARowCountMismatchWhenNeitherSideIsAVertexArray` (a genuine,
+non-vertex-array `RowCount` mismatch must still be rejected),
+`LinksAGeometryPerVertexArrayInputAgainstAnUnarrayedProducer` (H9b's
+exact shape links successfully post-fix, with `LinkedStageElement::
+RowCount == 1`), and `CopiesLinkedGeometryPerVertexArrayInput` (confirms
+`copyLinkedElements` copies the right per-vertex scalars via
+`SourceInvocations`), plus the real end-to-end `DrawTest.
+GeometryStageForwardsAPerVertexColorVaryingFromVertexStage` above.
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+2430/2489 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`).
+
+**A full `deqp-vk` re-run was assessed and not performed**, for the
+same reason as every prior row in this chain: no prebuilt `deqp-vk`
+binary exists under the `/home/dev/dev/VK-GL-CTS/` checkout, and
+building the full CTS framework from source was judged infeasible
+within this session's scope. In its place, the exact real shader shapes
+were extracted directly from CTS's own source and reproduced end to
+end via a real `vkCmdDraw`+`vkQueueSubmit` (`DrawTest`, not merely
+`GraphicsPipelineTest`'s own pipeline-creation-only acceptance, since
+this row's own bug only manifests at `vkQueueSubmit` time): confirmed,
+by temporarily reverting the `StageLink.cpp` fix and rebuilding, that
+the identical diagnostic ("vertex/domain stage output -> geometry stage
+input: element 0 and its producer element 0 disagree on component/row
+count or type") reproduces exactly, and that it is gone (with correct
+solid-red pixel output) once the fix is restored. Since no full re-run
+was performed, the exact post-fix `Passed`/`Failed`/`NotSupported`
+tallies for `dEQP-VK.query_pool.statistics_query.*` cannot be updated
+here; the 5,544-case `vkQueueSubmit` failure count above is expected to
+move to `Passed` (pending a real re-run to confirm), and no new
+regression is expected given `check-feme`'s own full pass.
+
+Note: roadmap H13a (still open) describes a superficially identical
+diagnostic, but for a geometry stage's `gl_ClipDistance`/`gl_
+CullDistance` *builtin* input rather than a plain user-defined varying.
+Re-examined `CanonicalizeStage.cpp`'s `addElements` while fixing this
+row: a builtin interface block's members (which is the code path `gl_
+in[].gl_ClipDistance`/`gl_CullDistance` take, being members of the
+`gl_PerVertex`-shaped input block) are decomposed and have their outer
+per-vertex array dimension peeled off entirely before `RowCount` is
+ever computed -- a structurally different branch from the plain-global
+one this row fixes, which never sets `RowCountIsVertexArray` in the
+first place. This row's fix is therefore confirmed **not** to resolve
+H13a; H13a remains open and correctly scoped as its own, separate
+investigation.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed: this row is a pure correctness fix in stage-linking logic,
+touching no feature bit or extension.
