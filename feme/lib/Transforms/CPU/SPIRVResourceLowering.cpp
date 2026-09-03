@@ -917,7 +917,27 @@ bool hasResolvableGEPByteOffset(const GetElementPtrInst &GEP,
 }
 
 /// Checks that every use of \p Ptr is one of the load/store or, when
-/// \p AllowGEPs, `getelementptr` shapes this pass can lower.
+/// \p AllowGEPs, `getelementptr` shapes this pass can lower. When
+/// \p Writable and \p IsTexel are both set (`HandleKind::TexelStorage`
+/// only -- a texel-uniform buffer's own `Writable == false` already
+/// excludes it, matching Vulkan's read-only restriction on
+/// `VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER`, and every non-texel kind
+/// keeps its own atomic gap open, see roadmap H8x), a scalar-`i32`
+/// `AtomicRMWInst`/`AtomicCmpXchgInst` direct user of \p Ptr is also
+/// accepted (roadmap H8w): a storage-texel-buffer atomic
+/// (`OpAtomicIAdd`/`OpAtomicExchange`/etc. against an
+/// `OpImageTexelPointer` whose own image operand has `Dim == Buffer`) is
+/// the identical SPIR-V/LLVM shape roadmap H8v's storage-*image* atomics
+/// already use -- `ImageTexelPointerPattern`
+/// (`SPIRVToLLVMPatterns.cpp`) materializes the same
+/// `llvm.spv.resource.getpointer` call regardless of the underlying
+/// image's `Dim`, so the same `getpointer` result this function already
+/// walks is exactly what an `AtomicRMWInst`/`AtomicCmpXchgInst` here
+/// operates on too, with no further conversion-layer work needed. SPIR-V
+/// disallows an atomic against a float-channel texel buffer outright
+/// (only `R32_SINT`/`R32_UINT` are mandatory formats for
+/// `STORAGE_TEXEL_BUFFER_ATOMIC_BIT`), hence the scalar-`i32` restriction
+/// rather than reusing `isSupportedTexelElementType`'s broader shape.
 bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
                                  bool AllowGEPs, const DataLayout &DL) {
   for (const User *U : Ptr.users()) {
@@ -937,6 +957,45 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
           return false;
         continue;
       }
+    if (Writable && IsTexel) {
+      if (const auto *RMW = dyn_cast<AtomicRMWInst>(U)) {
+        if (RMW->getPointerOperand() != &Ptr ||
+            !RMW->getValOperand()->getType()->isIntegerTy(32))
+          return false;
+        switch (RMW->getOperation()) {
+        case AtomicRMWInst::Add:
+        case AtomicRMWInst::Sub:
+        case AtomicRMWInst::And:
+        case AtomicRMWInst::Or:
+        case AtomicRMWInst::Xor:
+        case AtomicRMWInst::Max:
+        case AtomicRMWInst::Min:
+        case AtomicRMWInst::UMax:
+        case AtomicRMWInst::UMin:
+        case AtomicRMWInst::Xchg:
+          continue;
+        default:
+          return false;
+        }
+      }
+      if (const auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(U)) {
+        if (CmpXchg->getPointerOperand() != &Ptr ||
+            !CmpXchg->getCompareOperand()->getType()->isIntegerTy(32))
+          return false;
+        // `AtomicCompareExchangePattern` (`SPIRVToLLVMPatterns.cpp`)
+        // always follows an `llvm.cmpxchg` with exactly one
+        // `extractvalue ..., 0` picking out the old value (SPIR-V's own
+        // result); reject anything else so `lowerAccesses` below can
+        // assume that shape unconditionally (mirroring
+        // `hasOnlySupportedStorageImageUses`'s own identical check).
+        for (const User *CU : CmpXchg->users()) {
+          const auto *EV = dyn_cast<ExtractValueInst>(CU);
+          if (!EV || EV->getIndices() != ArrayRef<unsigned>{0})
+            return false;
+        }
+        continue;
+      }
+    }
     if (AllowGEPs)
       if (const auto *GEP = dyn_cast<GetElementPtrInst>(U)) {
         if (GEP->getPointerOperand() != &Ptr ||
@@ -1578,12 +1637,96 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
           LI->eraseFromParent();
           continue;
         }
-        // Only reachable for HandleKind::TexelStorage.
-        auto *SI = cast<StoreInst>(PU);
-        IRBuilder<> Builder(SI);
-        createTypedStore(Builder, Env, DescriptorIndex, ElementIndex,
-                         SI->getValueOperand(), Mask);
-        SI->eraseFromParent();
+        if (auto *SI = dyn_cast<StoreInst>(PU)) {
+          // Only reachable for HandleKind::TexelStorage.
+          IRBuilder<> Builder(SI);
+          createTypedStore(Builder, Env, DescriptorIndex, ElementIndex,
+                           SI->getValueOperand(), Mask);
+          SI->eraseFromParent();
+          continue;
+        }
+        // `AtomicRMWInst`/`AtomicCmpXchgInst` (roadmap H8w): only
+        // reachable for `HandleKind::TexelStorage`, mirroring
+        // `lowerImageAccesses`'s own identical `Plain2D`-storage-image
+        // atomic handling (roadmap H8v) -- see
+        // `hasOnlySupportedPointerUses`'s own comment for why a texel
+        // buffer's atomic reaches this exact `getpointer` result too.
+        if (auto *RMW = dyn_cast<AtomicRMWInst>(PU)) {
+          IRBuilder<> AtomicBuilder(RMW);
+          Value *Val = RMW->getValOperand();
+          CallInst *Old;
+          switch (RMW->getOperation()) {
+          case AtomicRMWInst::Add:
+            Old = createAtomicAddTyped(AtomicBuilder, Env, DescriptorIndex,
+                                      ElementIndex, Val, Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::Sub:
+            Old = createAtomicSubTyped(AtomicBuilder, Env, DescriptorIndex,
+                                       ElementIndex, Val, Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::And:
+            Old = createAtomicAndTyped(AtomicBuilder, Env, DescriptorIndex,
+                                       ElementIndex, Val, Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::Or:
+            Old = createAtomicOrTyped(AtomicBuilder, Env, DescriptorIndex,
+                                      ElementIndex, Val, Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::Xor:
+            Old = createAtomicXorTyped(AtomicBuilder, Env, DescriptorIndex,
+                                       ElementIndex, Val, Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::Max:
+            Old = createAtomicSMaxTyped(AtomicBuilder, Env, DescriptorIndex,
+                                        ElementIndex, Val, Mask,
+                                        RMW->getName());
+            break;
+          case AtomicRMWInst::Min:
+            Old = createAtomicSMinTyped(AtomicBuilder, Env, DescriptorIndex,
+                                        ElementIndex, Val, Mask,
+                                        RMW->getName());
+            break;
+          case AtomicRMWInst::UMax:
+            Old = createAtomicUMaxTyped(AtomicBuilder, Env, DescriptorIndex,
+                                        ElementIndex, Val, Mask,
+                                        RMW->getName());
+            break;
+          case AtomicRMWInst::UMin:
+            Old = createAtomicUMinTyped(AtomicBuilder, Env, DescriptorIndex,
+                                        ElementIndex, Val, Mask,
+                                        RMW->getName());
+            break;
+          case AtomicRMWInst::Xchg:
+            Old = createAtomicExchangeTyped(AtomicBuilder, Env, DescriptorIndex,
+                                            ElementIndex, Val, Mask,
+                                            RMW->getName());
+            break;
+          default:
+            llvm_unreachable(
+                "hasOnlySupportedPointerUses only accepts the RMW kinds "
+                "handled above");
+          }
+          RMW->replaceAllUsesWith(Old);
+          RMW->eraseFromParent();
+          continue;
+        }
+        auto *CmpXchg = cast<AtomicCmpXchgInst>(PU);
+        IRBuilder<> AtomicBuilder(CmpXchg);
+        CallInst *Old = createAtomicCompareExchangeTyped(
+            AtomicBuilder, Env, DescriptorIndex, ElementIndex,
+            CmpXchg->getCompareOperand(), CmpXchg->getNewValOperand(), Mask,
+            CmpXchg->getName());
+        // `hasOnlySupportedPointerUses` already guaranteed every user of
+        // `CmpXchg` is an `extractvalue ..., 0` picking out the old value
+        // (SPIR-V's own result) -- replace each with the new call
+        // directly, since the call's own result *is* that old value
+        // (unlike `llvm.cmpxchg`, no `{i32, i1}` struct to extract from).
+        for (User *EU : llvm::make_early_inc_range(CmpXchg->users())) {
+          auto *EV = cast<ExtractValueInst>(EU);
+          EV->replaceAllUsesWith(Old);
+          EV->eraseFromParent();
+        }
+        CmpXchg->eraseFromParent();
       }
     } else {
       lowerRawPointerUses(GetPtr, Env, DescriptorIndex, Offset, DL);
