@@ -359,6 +359,7 @@ Expected<ResourceFormat> parseResourceFormat(StringRef Format) {
           .Case("r10g10b10a2_uint", ResourceFormat::R10G10B10A2_UINT)
           .Case("r10g10b10a2_snorm", ResourceFormat::R10G10B10A2_SNORM)
           .Case("r10g10b10a2_sint", ResourceFormat::R10G10B10A2_SINT)
+          .Case("e5b9g9r9_ufloat", ResourceFormat::E5B9G9R9_UFLOAT)
           .Default(ResourceFormat::Unknown);
   if (Result == ResourceFormat::Unknown && !Format.empty() &&
       Format != "unknown")
@@ -476,6 +477,9 @@ uint32_t imageFormatElementSize(ResourceFormat Format) {
   // single 4-byte word as their unsigned siblings above.
   case ResourceFormat::R10G10B10A2_SNORM:
   case ResourceFormat::R10G10B10A2_SINT:
+  // (Roadmap H8q) `E5B9G9R9_UFLOAT`: also packed into a single 4-byte
+  // word, like `R11G11B10_FLOAT` above.
+  case ResourceFormat::E5B9G9R9_UFLOAT:
     return 4;
   case ResourceFormat::R32G32_FLOAT:
   case ResourceFormat::R32G32_UINT:
