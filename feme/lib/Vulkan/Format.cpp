@@ -915,6 +915,10 @@ bool feme::vulkan::isVertexBufferFormatSupported(ResourceFormat Format) {
   case ResourceFormat::R16G16B16A16_UINT:
   case ResourceFormat::R16G16B16A16_SINT:
   case ResourceFormat::R16G16B16A16_FLOAT:
+  // (Roadmap H8h) `R10G10B10A2_UNORM`: `decodeAttribute` now implements a
+  // dedicated packed-word decode case for this, the one remaining
+  // mandatory `VERTEX_BUFFER_BIT` format H8b deferred.
+  case ResourceFormat::R10G10B10A2_UNORM:
     return true;
   default:
     return false;
