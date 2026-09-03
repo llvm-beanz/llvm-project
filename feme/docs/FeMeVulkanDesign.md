@@ -2064,6 +2064,34 @@ unadvertised surface extension's `vkCreate*SurfaceKHR` is simply not exposed,
 and `vkCreateSwapchainKHR` fails cleanly until implemented rather than
 returning a half-initialized object.
 
+**Status (roadmap H10):** step 1 above is implemented. `Surface.{h,cpp}`
+implements `VK_KHR_surface` + `VK_EXT_headless_surface` (`Surface` is an
+empty marker object for now -- headless has no platform state to hold), and
+`Swapchain.{h,cpp}` implements the full `VK_KHR_swapchain` state machine.
+This required actually building out the "instance-level extension list
+distinct from the device-level one" this section's decision already implies
+but the ICD did not yet honor: `vkEnumerateInstanceExtensionProperties`/
+`vkCreateInstance` now validate against a new `getSupportedInstanceExtensions()`
+(`Surface.cpp`) rather than reusing or unconditionally rejecting against
+`PhysicalDeviceInfo.cpp`'s device-extension list. Advertised headless
+capabilities were chosen to reflect only what this ICD's synchronous
+execution model genuinely, distinctly implements, not the widest legal
+range: `minImageCount=1`/`maxImageCount=0` (unlimited), a sentinel
+`currentExtent` of `{UINT32_MAX, UINT32_MAX}` (spec's own "no fixed size"
+value), `maxImageArrayLayers=1`, FIFO-only present modes, OPAQUE-only
+composite alpha, and IDENTITY-only transform -- there is no compositor or
+real display latency in this model to distinguish any richer set of values
+by. Acquire/present reuse `vkQueueSubmit`'s existing synchronous-execution
+precedent (Sync.h): every command buffer already runs to completion
+in-line, so `vkAcquireNextImageKHR` signals its semaphore/fence immediately
+(returning `VK_TIMEOUT` only when every swapchain image is genuinely still
+acquired) and `vkQueuePresentKHR` consumes its wait semaphores the same way
+`vkQueueSubmit` already does, using the same `VK_ERROR_INITIALIZATION_FAILED`
+code for a detected application ordering error (e.g. presenting an image
+never acquired) as `vkQueueSubmit` already uses for an unresolved wait.
+Step 2 (one real CI-exercisable platform surface) and confirming the whole
+`dEQP-VK.wsi` CTS group against it are still open, tracked as roadmap H10a.
+
 ### Mesh shading and ray tracing exposure
 
 Mesh shading (`VK_EXT_mesh_shader`) and ray tracing (`VK_KHR_ray_query`,

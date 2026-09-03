@@ -1,12 +1,15 @@
 # Extension name strings PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions
-# literally lists (and vkEnumerateInstanceExtensionProperties, EntryPoints.cpp,
-# reuses the same list for instance-level enumeration -- this ICD advertises
-# one identical set at both scopes, having no surface/swapchain support to
-# distinguish them). Kept in sync by hand; a stale entry here would only ever
-# make feme/utils/vk_gen_extension_inventory.py's own consistency check fail
-# (it cross-checks every name here is a real, non-disabled vk.xml extension),
-# not silently drift, since PhysicalDeviceInfo.cpp is the actual source of
-# truth this file transcribes.
+# literally lists, plus VK_KHR_surface/VK_EXT_headless_surface which
+# EntryPoints.cpp/Surface.cpp's own getSupportedInstanceExtensions()
+# advertises at the instance level instead (roadmap H10 split the
+# instance-level extension list from the device-level one for the first
+# time -- these two are the only entries in this file advertised at that
+# scope, not the device one). Kept in sync by hand; a stale entry here
+# would only ever make feme/utils/vk_gen_extension_inventory.py's own
+# consistency check fail (it cross-checks every name here is a real,
+# non-disabled vk.xml extension), not silently drift, since
+# PhysicalDeviceInfo.cpp/Surface.cpp are the actual source of truth this
+# file transcribes.
 VK_KHR_dynamic_rendering
 VK_EXT_extended_dynamic_state
 VK_KHR_synchronization2
@@ -43,3 +46,9 @@ VK_KHR_load_store_op_none
 VK_KHR_map_memory2
 VK_KHR_multiview
 VK_EXT_mesh_shader
+
+# Roadmap H10 (V8, partially closed): instance-level surface object model.
+VK_KHR_surface = roadmap H10 (V8): headless surface first (Surface.cpp)
+VK_EXT_headless_surface = roadmap H10 (V8): the first surface this ICD implements, per FeMeVulkanDesign.md's WSI decision (Surface.cpp)
+# Roadmap H10 (V8, partially closed): device-level swapchain state machine.
+VK_KHR_swapchain = roadmap H10 (V8): full create/destroy/get-images/acquire/present state machine (Swapchain.cpp)

@@ -62,12 +62,12 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 
 | Status | Count |
 |---|---:|
-| Advertised | 32 |
+| Advertised | 35 |
 | Implemented (core, not advertised by name) | 18 |
-| Planned (in scope, not implemented) | 48 |
+| Planned (in scope, not implemented) | 45 |
 | Not implemented (out of scope) | 202 |
 
-- **The 32 advertised** are the ones a `deqp-vk` case enables by name
+- **The 35 advertised** are the ones a `deqp-vk` case enables by name
   regardless of the advertised `apiVersion`, plus the three that predate
   that discipline: `VK_KHR_dynamic_rendering`,
   `VK_EXT_extended_dynamic_state`, `VK_KHR_shader_integer_dot_product`,
@@ -87,16 +87,21 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_EXT_pipeline_protected_access` (F9), `VK_EXT_pipeline_robustness`
   (F10), `VK_EXT_host_image_copy` (F11), `VK_KHR_push_descriptor` (F12),
   and `VK_KHR_load_store_op_none` (F13), `VK_KHR_map_memory2` (F14),
-  `VK_KHR_multiview` (H2), and `VK_EXT_mesh_shader` (H6f). This edition's
-  own addition, `VK_EXT_mesh_shader`, moves from "Planned" to "Advertised"
-  now that `vkCreateGraphicsPipelines` accepts a mesh pipeline
-  (GraphicsPipeline.cpp), `vkCmdDrawMeshTasksEXT`/
-  `vkCmdDrawMeshTasksIndirectEXT`/`vkCmdDrawMeshTasksIndirectCountEXT`
-  (CommandBuffer.cpp) route through the same prepared-draw code
-  `vkCmdDraw*` already uses, and `taskShader`/`meshShader` plus every
-  `VkPhysicalDeviceMeshShaderPropertiesEXT` limit are advertised at this
-  implementation's own honest, bounded ceilings (EntryPoints.cpp,
-  PhysicalDeviceInfo.cpp) -- see Roadmap.md's H6f entry.
+  `VK_KHR_multiview` (H2), and `VK_EXT_mesh_shader` (H6f). `VK_EXT_mesh_shader`
+  moved from "Planned" to "Advertised" in an earlier edition now that
+  `vkCreateGraphicsPipelines` accepts a mesh pipeline (GraphicsPipeline.cpp),
+  `vkCmdDrawMeshTasksEXT`/`vkCmdDrawMeshTasksIndirectEXT`/
+  `vkCmdDrawMeshTasksIndirectCountEXT` (CommandBuffer.cpp) route through the
+  same prepared-draw code `vkCmdDraw*` already uses, and `taskShader`/
+  `meshShader` plus every `VkPhysicalDeviceMeshShaderPropertiesEXT` limit are
+  advertised at this implementation's own honest, bounded ceilings
+  (EntryPoints.cpp, PhysicalDeviceInfo.cpp) -- see Roadmap.md's H6f entry.
+  This edition's own additions, `VK_KHR_surface`/`VK_EXT_headless_surface`
+  (advertised at the instance level, the first two extensions in this file
+  distinguished from the device-level list) and `VK_KHR_swapchain` (H10,
+  partially closed), move from "Planned" to "Advertised" now that
+  `Surface.cpp`/`Swapchain.cpp` implement the headless surface object model
+  and the full swapchain state machine -- see Roadmap.md's H10 entry.
 - **The 17 core-but-unadvertised** were 3 until roadmap E-series' own
   audit. A full audit of every core-promoted extension against this ICD's
   own sources (rather than only the ones a roadmap row happened to name)
@@ -127,11 +132,14 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_KHR_ray_tracing_pipeline`, `VK_KHR_deferred_host_operations`,
   `VK_KHR_pipeline_library`, `VK_KHR_buffer_device_address`,
   `VK_KHR_ray_tracing_maintenance1`,
-  `VK_KHR_ray_tracing_position_fetch`, roadmap &sect;1.9.8); and the
-  graphics/WSI set (`VK_KHR_surface`, `VK_KHR_swapchain`,
+  `VK_KHR_ray_tracing_position_fetch`, roadmap &sect;1.9.8); and, until
+  this edition, the graphics/WSI set (`VK_KHR_surface`, `VK_KHR_swapchain`,
   `VK_EXT_headless_surface`, `VK_KHR_get_surface_capabilities2`, roadmap
-  &sect;1.9.7). `VK_EXT_mesh_shader` leaves this group in this edition,
-  moving to "Advertised" above.
+  &sect;1.9.7). `VK_EXT_mesh_shader` leaves this group in an earlier
+  edition, moving to "Advertised" above; roadmap H10 (partially closed)
+  now moves `VK_KHR_surface`/`VK_EXT_headless_surface`/`VK_KHR_swapchain`
+  the same way, leaving only `VK_KHR_get_surface_capabilities2` (still
+  unimplemented) in this group.
 - **The 202 out of scope** are what remains after that rule: every
   vendor-neutral extension for a capability class this ICD does not intend
   to provide -- video decode/encode, sparse residency, protected memory,
@@ -213,7 +221,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_EXT_global_priority_query` | Not implemented |  |
 | `VK_EXT_graphics_pipeline_library` | Not implemented |  |
 | `VK_EXT_hdr_metadata` | Not implemented |  |
-| `VK_EXT_headless_surface` | Planned (in scope, not implemented) | roadmap H10 (V8): the first surface this ICD implements, per FeMeVulkanDesign.md's WSI decision |
+| `VK_EXT_headless_surface` | Advertised | roadmap H10 (V8, partially closed): the first surface this ICD implements, per FeMeVulkanDesign.md's WSI decision (`Surface.cpp`) |
 | `VK_EXT_host_image_copy` | Advertised |  |
 | `VK_EXT_host_query_reset` | Implemented (core, not advertised by name) | roadmap C6: vkResetQueryPool implemented and hostQueryReset reported true (QueryPool.cpp, EntryPoints.cpp) |
 | `VK_EXT_image_2d_view_of_3d` | Not implemented |  |
@@ -423,10 +431,10 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_shared_presentable_image` | Not implemented |  |
 | `VK_KHR_spirv_1_4` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_storage_buffer_storage_class` | Implemented (core, not advertised by name) | the StorageBuffer storage class is accepted directly (SPIRVToLLVMPatterns.cpp's isBufferBlockStorage) |
-| `VK_KHR_surface` | Planned (in scope, not implemented) | roadmap H10 (V8): headless surface first |
+| `VK_KHR_surface` | Advertised | roadmap H10 (V8, partially closed): headless surface first (`Surface.cpp`) |
 | `VK_KHR_surface_maintenance1` | Not implemented |  |
 | `VK_KHR_surface_protected_capabilities` | Not implemented |  |
-| `VK_KHR_swapchain` | Planned (in scope, not implemented) | roadmap H10 (V8) |
+| `VK_KHR_swapchain` | Advertised | roadmap H10 (V8, partially closed): full create/destroy/get-images/acquire/present state machine (`Swapchain.cpp`) |
 | `VK_KHR_swapchain_maintenance1` | Not implemented |  |
 | `VK_KHR_swapchain_mutable_format` | Not implemented |  |
 | `VK_KHR_synchronization2` | Advertised |  |

@@ -22356,3 +22356,39 @@ investigation.
 No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
 needed: this row is a pure correctness fix in stage-linking logic,
 touching no feature bit or extension.
+
+## Roadmap H10: measured impact
+
+Scoped H10 slice: the instance/device extension list split,
+`VK_KHR_surface` + `VK_EXT_headless_surface`'s object model, and the full
+`VK_KHR_swapchain` state machine (create/destroy/get-images/acquire/
+present). A real platform surface (beyond headless) and confirming the
+`dEQP-VK.wsi` CTS group against one are explicitly deferred to new
+roadmap row H10a.
+
+**A full `deqp-vk` re-run was assessed and not performed**, for the same
+reason as every prior row in this chain: no prebuilt `deqp-vk` binary
+exists under the `/home/dev/dev/VK-GL-CTS/` checkout, and building the
+full CTS framework from source was judged infeasible within this
+session's scope. `dEQP-VK.wsi`'s own `checkSupport` gates every case on
+a real, CI-selectable platform surface being advertised (headless does
+not satisfy it, being explicitly excluded from real windowing-system
+presentation) -- so even a from-source CTS build would not move this
+group's pass rate with only this row's headless-only scope; a
+measurable `dEQP-VK.wsi` re-run needs H10a's own platform-surface work
+first. In place of a CTS re-run, this row's correctness is instead
+covered by 14 new direct unit tests (`SurfaceTest.cpp`/`SwapchainTest.cpp`)
+exercising every new entry point end to end (instance extension
+enumeration/validation, surface support/capabilities/formats/present-mode
+queries, and a real create-swapchain -> get-images -> acquire -> present
+-> destroy round trip, plus timeout-on-exhaustion, present-without-acquire
+failure, `oldSwapchain` retirement, and extent-limit-rejection cases), and
+by `DrawTest.cpp`'s existing extension-advertisement coverage, updated for
+`VK_KHR_swapchain` now being genuinely supported.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+2444/2503 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`).
+
+See `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` for the
+new `VK_KHR_surface`/`VK_EXT_headless_surface`/`VK_KHR_swapchain` entries
+this row adds.
