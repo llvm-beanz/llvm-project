@@ -183,6 +183,9 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.independentBlend, VK_TRUE);
   EXPECT_EQ(Info.Features.logicOp, VK_TRUE);
   EXPECT_EQ(Info.Features.occlusionQueryPrecise, VK_TRUE);
+  // Roadmap H9: all 11 `VkQueryPipelineStatisticFlagBits` counters are now
+  // honestly accumulated (see PhysicalDeviceInfo.cpp's own comment).
+  EXPECT_EQ(Info.Features.pipelineStatisticsQuery, VK_TRUE);
   EXPECT_EQ(Info.Features.multiDrawIndirect, VK_TRUE);
   EXPECT_EQ(Info.Features.drawIndirectFirstInstance, VK_TRUE);
   EXPECT_EQ(Info.Features.imageCubeArray, VK_TRUE);
@@ -198,7 +201,6 @@ TEST(PhysicalDeviceInfo,
   EXPECT_EQ(Info.Features.fragmentStoresAndAtomics, VK_TRUE);
   EXPECT_EQ(Info.Features.samplerAnisotropy, VK_TRUE);
   EXPECT_EQ(Info.Features.shaderStorageImageMultisample, VK_TRUE);
-  // (Roadmap H19o) The real Vulkan spec's own mandatory
   // `shaderStorageImageExtendedFormats` list is now materially complete
   // (see PhysicalDeviceInfo.cpp's own comment for the full H19a-H19o
   // chain).
@@ -224,6 +226,7 @@ TEST(PhysicalDeviceInfo,
   Cleared.independentBlend = VK_FALSE;
   Cleared.logicOp = VK_FALSE;
   Cleared.occlusionQueryPrecise = VK_FALSE;
+  Cleared.pipelineStatisticsQuery = VK_FALSE;
   Cleared.multiDrawIndirect = VK_FALSE;
   Cleared.drawIndirectFirstInstance = VK_FALSE;
   Cleared.imageCubeArray = VK_FALSE;

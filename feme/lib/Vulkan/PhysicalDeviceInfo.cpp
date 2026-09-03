@@ -582,6 +582,15 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // between `vkCmdBeginQuery`/`vkCmdEndQuery`, which is precisely what
   // this feature promises over the non-precise form.
   Info.Features.occlusionQueryPrecise = VK_TRUE;
+  // Roadmap H9: `pipelineStatisticsQuery` now flips to `VK_TRUE` --
+  // `QueryPool`/`CommandBuffer.cpp` now accumulate all 11
+  // `VkQueryPipelineStatisticFlagBits` counters (input-assembly,
+  // vertex/geometry/tessellation/fragment shader invocations, clipping,
+  // and compute-shader invocations) via the same "thread an active-query
+  // accumulator through the rasterizer/dispatch path" pattern
+  // `occlusionQueryPrecise` above already established for
+  // `PassedSampleCounter`.
+  Info.Features.pipelineStatisticsQuery = VK_TRUE;
   // `multiDrawIndirect`: `CommandBuffer.cpp`'s `readIndirectDraws`/
   // `readIndirectMeshDraws` already loop over an arbitrary `DrawCount`
   // read from the indirect buffer (see `maxDrawIndirectCount` above,
