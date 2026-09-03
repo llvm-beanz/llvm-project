@@ -56995,3 +56995,205 @@ confidence, even without a literal `deqp-vk` binary run producing a
 pass/fail tally. `VulkanCTSReport.md`'s own new H9c section says this
 plainly rather than fabricating a CTS re-run tally that wasn't actually
 produced.
+
+# H9b: vertex/geometry stage-IO RowCount mismatch on a per-vertex-array varying
+
+## Starting point
+
+The roadmap filed H9b clearly: a real vertex+geometry pipeline fails at
+`vkQueueSubmit` (not pipeline creation) with `"vertex/domain stage output
+-> geometry stage input: element 0 and its producer element 6 disagree
+on component/row count or type"`. The row's own file-reference column
+already pointed at `feme/lib/Graphics/StageLink.cpp`, and grepping for
+the exact error string confirmed it -- `linkStageElements`'s equality
+check. Unlike H9c's session (where the roadmap's own file reference
+turned out to be stale), this one was already right, which saved a step.
+
+## Finding the actual root cause, not just the error site
+
+Knowing *where* the error fires isn't the same as knowing *why* it's
+wrong. I pulled the real CTS shader source
+(`vktQueryPoolStatisticsTests.cpp`'s `QueryPoolGraphicStatisticsTest`)
+to get the exact real shapes: a vertex stage with a plain, non-arrayed
+`vec4 out_color` at location 0, and a geometry stage reading it back as
+`in vec4 in_color[]` -- a per-vertex array, since a geometry entry point
+sees one copy of every input per vertex in the primitive it's currently
+assembling. That's the shape that would trip a naive `RowCount`
+equality check: the vertex stage's own `RowCount` is 1 (a single vec4),
+but the geometry stage's per-vertex-array input folds its 3-per-triangle
+extent into the same field.
+
+Grepping `CanonicalizeStage.cpp` turned up exactly the mechanism: a flag
+called `SignatureElement::RowCountIsVertexArray`, added by a past
+roadmap milestone (H5f) with a doc comment that reads almost like a
+message in a bottle -- it says explicitly that "a consumer that must
+[tell a per-vertex-array-folded RowCount apart from a real matrix one]
+needs this flag instead." So H5f built the mechanism and even wrote down
+who it was for, but (per a full-codebase grep) nobody ever actually
+consumed it. It's been sitting there, correctly computed, silently
+ignored, since whenever H5f landed. That's about as clean a "wire it up"
+bug as this project produces -- no design flaw, no genuinely hard
+question, just a consumer that was never finished.
+
+Before writing the one-line fix, I wanted to be sure I understood *why*
+the effective row count should be 1 and not something else, and why it's
+safe to just fold `RowCountIsVertexArray` elements down rather than,
+say, changing how `RowCount` is computed at the source. So I traced the
+actual runtime addressing model: `Executor.cpp`'s geometry-input storage
+build already treats "vertex within primitive" as an expanded
+*invocation* dimension (`InvocationCount = RowCount * VerticesPerPrimitive`,
+with a `SourceInvocations` remapping array feeding `copyLinkedElements`),
+not a `Row` dimension at all. `GeometryWrapper.cpp`'s own lowering
+confirms this too -- the per-vertex index becomes part of the storage
+address's *invocation* index, never its *row* index. So the "real" row
+count for linking purposes, for a per-vertex-array element, genuinely is
+1 -- the per-vertex dimension already has its own, working, separate
+mechanism elsewhere. This also told me the fix has to touch *two*
+places, not one: both the comparison (to stop rejecting the link) and
+the resulting `LinkedStageElement::RowCount` that `copyLinkedElements`
+actually walks (otherwise, even with the comparison relaxed, the copy
+would try to read 3 rows out of a producer that genuinely only has 1,
+which would be a silent out-of-bounds read rather than a fixed bug).
+
+## Scoping decision: geometry only, not hull/domain
+
+While tracing this I noticed `isPerVertexArrayInputGlobal` (the function
+that sets the flag) isn't scoped to geometry specifically -- it applies
+to any stage's per-vertex-array `Input`, which in principle means a
+tessellation-control shader with a real per-vertex color input would hit
+the same bug. `StageLink.h`'s own comment about patch draws ("input
+control point i of patch p is vertex-stage invocation p *
+ControlPointCount + i") describes the identical expand-as-invocations
+design, so the same `StageLink.cpp` fix should transparently help that
+case too, for free, once it lands.
+
+But I checked: no existing test (unit or end-to-end) actually exercises
+a real hull/domain per-vertex-array *input* -- the existing tessellation
+tests from the H9c session only ever declare per-vertex *outputs*, never
+a matching input consuming them. Since H9b is filed specifically against
+geometry, and I have no real repro or CTS evidence that the hull/domain
+path is actually broken today (only that it plausibly *could* be, by the
+same mechanism), I decided not to chase it further this session. The fix
+is written at the shared `StageLink.cpp` level, so if hull/domain was
+silently broken the same way, it's fixed as a side effect -- but I'm not
+claiming credit for a fix I didn't test, and I'm not adding a new test
+for a bug I don't have positive evidence exists. If it turns out this
+path is still broken, that's a fresh, separately-filed row for a future
+session, backed by its own real repro, not an assumption bundled into
+this one.
+
+## The fix itself
+
+One helper, `effectiveRowCount(const SignatureElement&)`, returning
+`RowCountIsVertexArray ? 1 : RowCount`, used in both the
+producer/consumer equality check in `linkStageElements` and the
+`LinkedStageElement::RowCount` it builds. Small, surgical, and it leaves
+every other comparison (component count, component type) untouched --
+this bug was specifically about the row dimension conflating two
+different things, so the fix only touches that one field.
+
+## Proving it actually fixes the bug, not just "compiles and passes"
+
+I added three unit tests directly against `linkStageElements`/
+`copyLinkedElements` in `StageLinkTest.cpp` -- these are cheap, precise,
+and don't need a compiled shader at all:
+
+- One confirming a genuine (non-vertex-array) `RowCount` mismatch is
+  *still* rejected -- I wanted to be certain the fix doesn't
+  accidentally turn off a real, legitimate check just because it
+  happens to share a field name with the bogus one.
+- One reproducing H9b's exact shape (producer RowCount=1, consumer
+  RowCountIsVertexArray=true/RowCount=3) and confirming it now links,
+  with `LinkedStageElement::RowCount == 1` (not 3) -- the exact "don't
+  just relax the check, fix the copy-side value too" concern from the
+  addressing-model trace above.
+- One confirming `copyLinkedElements` actually copies the right
+  per-vertex values through the `SourceInvocations` expansion mechanism
+  with this fixed `RowCount`.
+
+Then, per the standing instruction to do a real IR reduction rather than
+guessing, I wrote a genuine end-to-end `DrawTest` --
+`GeometryStageForwardsAPerVertexColorVaryingFromVertexStage` -- with a
+real `vkCmdDraw`+`vkQueueSubmit`, modeled structurally on the existing
+`GeometryStageLayerOutputRoutesToANonMultiviewLayer` test (same
+scaffolding: image/view/render-pass/framebuffer/pipeline/command-buffer),
+but with real shaders built from the exact CTS shapes: a vertex stage
+outputting a plain, constant solid-red `vec4` varying, and a geometry
+stage reading it back per-vertex via `AccessChain` into an
+`!spirv.array<3xvector<4xf32>>`-typed input, forwarding each of the
+three values to its own emitted vertex at a fixed, viewport-covering
+triangle position (borrowed the same three hardcoded positions the
+layered test already uses, so I wasn't inventing new geometry math), and
+a fragment stage passing the color straight through
+(`PassthroughColorFragmentSource`, which already existed).
+
+To be genuinely sure this test *is* a real repro and not just a test
+that happens to pass, I did the extra step of temporarily reverting only
+`StageLink.cpp` back to its pre-fix state (via `git show HEAD~1:...`),
+rebuilding, and re-running just this one test with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` set (confirmed this env var also
+gates `vkQueueSubmit`-time diagnostics via `Sync.cpp`'s own
+`logCreationFailure` call, not just pipeline-creation-time ones). It
+failed with the *exact* diagnostic string from the roadmap's own filing
+("vertex/domain stage output -> geometry stage input: element 0 and its
+producer element 0 disagree on component/row count or type") -- as
+close to ground truth as this session gets without a real `deqp-vk`
+binary. Then I restored the fix, confirmed a clean diff against the
+already-committed version, rebuilt, and re-ran -- passes, with the
+correct solid-red pixel readback.
+
+## H13a: a look-alike, but not the same bug
+
+While researching this, I kept H13a in view -- it's a still-open roadmap
+row describing what reads, at a glance, like the identical bug: a
+geometry stage's `gl_ClipDistance`/`gl_CullDistance` input disagreeing
+with its vertex-stage producer, same diagnostic string. It would have
+been tempting to just declare it fixed by this same change and strike
+it through too. I made myself actually check instead of assuming.
+
+`gl_ClipDistance`/`gl_CullDistance` on a geometry stage's input side are
+members of `gl_in[]`'s own `gl_PerVertex`-shaped interface block, not a
+plain global. `CanonicalizeStage.cpp`'s `addElements` has a completely
+separate branch for builtin interface blocks (triggered by the presence
+of `feme.spirv.MemberDecorations` metadata) that decomposes the block
+into one `SignatureElement` per member and peels the per-vertex array
+dimension off *before* computing any member's own `RowCount` -- so
+`RowCountIsVertexArray` is never set for these elements at all; it's
+already `false` by construction, not by oversight. That means whatever
+is wrong in H13a's case has nothing to do with the flag this row wired
+up -- it must be some other mismatch in how that peeled member's own
+shape (perhaps `ClipDistance`'s/`CullDistance`'s own float-array-count
+dimension, which is itself dynamic based on how many planes the
+application declared) gets computed or compared. I documented this
+explicitly in both the roadmap and the CTS report rather than silently
+leaving it ambiguous, and corrected H13a's own stale file-reference
+column while I was in the area (it pointed at `GraphicsPipeline.cpp`,
+but the actual comparison is `StageLink.cpp`, same as H9b) -- a small,
+free cleanup, but I kept it in the same commit as the doc updates rather
+than pretending it was part of the code fix itself.
+
+## Build/test/documentation loop
+
+`ninja FeMeGraphicsTests` and `ninja FeMeVulkanTests` (ccache,
+assertions-enabled `build2/`) both built clean after each change. Full
+`ninja check-feme` afterward: 2430/2489 passed, 59 pre-existing
+`Unsupported`, 0 `Failed` -- same baseline as prior sessions, no new
+regressions. Split the work into two code commits (the `StageLink.cpp`
+fix + its `StageLinkTest.cpp` unit tests as one commit; the new
+`DrawTest.cpp` end-to-end regression test as a second, since it's
+logically a separate, independently-valuable piece of evidence and I'd
+already validated the code commit stood on its own via the isolated unit
+tests before writing the end-to-end test) plus a third commit for the
+Roadmap/CTS-report/design-doc updates, following the same granularity
+precedent established in the H9c session.
+
+As with every prior row in this chain, no prebuilt `deqp-vk` binary
+exists under `/home/dev/dev/VK-GL-CTS/`, and I didn't attempt to build
+the full CTS framework from source this session either -- same
+conclusion as before, documented plainly in `VulkanCTSReport.md` rather
+than fabricated. The real end-to-end `DrawTest`, backed by the
+before/after diagnostic-reproduction check described above, is the
+strongest evidence available in this environment, and I think it holds
+up: it's not a guess about what CTS would do, it's the literal shader
+shapes CTS uses, run through the literal same code path CTS's own
+`vkQueueSubmit` calls would go through.
