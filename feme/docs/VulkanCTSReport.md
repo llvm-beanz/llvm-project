@@ -22012,3 +22012,101 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
 needed: `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT` is a format-feature bit
 gated purely by mandatory-format-support rules, not a
 `VkPhysicalDeviceFeatures` bit or an extension.
+
+## Roadmap H9: measured impact
+
+Implements all 11 `VkQueryPipelineStatisticFlagBits` counters
+(`INPUT_ASSEMBLY_VERTICES`/`_PRIMITIVES`, `VERTEX_SHADER_INVOCATIONS`,
+`GEOMETRY_SHADER_INVOCATIONS`/`_PRIMITIVES`, `CLIPPING_INVOCATIONS`/
+`_PRIMITIVES`, `FRAGMENT_SHADER_INVOCATIONS`,
+`TESSELLATION_CONTROL_SHADER_PATCHES`,
+`TESSELLATION_EVALUATION_SHADER_INVOCATIONS`,
+`COMPUTE_SHADER_INVOCATIONS`), previously all `VK_QUERY_TYPE_PIPELINE_STATISTICS`
+queries were declined outright (roadmap C5) since no real counter existed
+anywhere in the raster/dispatch pipeline. Instrumented the actual
+per-draw/per-dispatch hook points that already own the relevant counts
+(`Executor.cpp`'s shared `RasterizePrimitives` lambda used by every
+draw-shaped entry point, `runDispatch`'s workgroup-count loop), added a
+`QueryPool` multi-value-per-query storage model
+(`PipelineStatisticIndex`, `accumulatePipelineStatistics`), and a new
+`ActivePipelineStatsQuery` scope (`CommandBuffer.cpp`) spanning both draws
+and dispatches within a `vkCmdBeginQuery`/`vkCmdEndQuery` pair.
+`pipelineStatisticsQuery` now reports `VK_TRUE`.
+
+New unit tests: `DrawTest.PipelineStatisticsQueryCountsAllElevenCounters`
+(one ordinary triangle draw, all 11 counters enabled, checking honest
+counts for every stage the draw actually exercises and zero for the rest),
+`CommandBufferTest.PipelineStatisticsQueryCountsComputeInvocations` (a
+2x3x1-workgroup dispatch scoped to only `COMPUTE_SHADER_INVOCATIONS_BIT`,
+expecting 6), `CommandBufferTest.QueryPoolRejectsUnknownPipelineStatisticsBit`
+(an out-of-range `pipelineStatistics` bitmask is rejected at
+`vkCreateQueryPool`). `ninja check-feme` (assertions-enabled, ccache
+build) passes in full (2452/2479, 27 pre-existing `Unsupported`, 0
+`Failed`).
+
+A real `dEQP-VK.query_pool.statistics_query.*` re-run (18,379 cases,
+entirely `NotSupported` before this row since the whole group is gated on
+`pipelineStatisticsQuery`) moves **0 -> 6,709/18,379 Passed (36.5%)** on
+the first pass. Analyzing the remaining 9,077 `Fail`s by their own
+diagnostic message found three buckets:
+
+1. **168 `QueryPoolResults incorrect [reset]` failures, all under
+   `host_query_reset`** -- a real, pre-existing (not introduced by this
+   row, confirmed via `git log -L` against `QueryPool.cpp`'s prior
+   revision) `vkGetQueryPoolResults` bug, newly exercised by this suite's
+   own `ComputeInvocationsTestInstance::executeTest` `RESET_TYPE_HOST`
+   path for the first time: it reads a query, host-resets it
+   (`vkResetQueryPool`), then re-reads *without* `VK_QUERY_RESULT_WAIT_BIT`,
+   expecting `VK_NOT_READY` and the *previously read value left
+   untouched* -- per spec, omitting both `WAIT_BIT` and `PARTIAL_BIT`
+   means no result value is written for an unavailable query, only its
+   availability state (if `WITH_AVAILABILITY_BIT` is set). `QueryPool.cpp`
+   instead wrote the value unconditionally whenever `WAIT_BIT` was unset,
+   regardless of availability. Fixed by splitting `writeQueryResult`
+   (`QueryPool.h`) into independently gated "write the value"
+   (`WriteValues = Available || PARTIAL_BIT`) and "write the availability
+   flag" (always, when requested) paths; `vkCmdCopyQueryPoolResults`
+   (`CommandBuffer.cpp`) keeps the unconditional default, since it has no
+   "don't touch `pData`" case. New regression test:
+   `CommandBufferTest.GetQueryPoolResultsLeavesUnavailableValueUntouched`.
+   A follow-up re-run of the same 18,379-case group confirms the fix's
+   precision exactly: **6,709 -> 6,877 Passed (+168), 9,077 -> 8,909
+   Failed (-168)**, `NotSupported` unchanged (2,593), and `grep -c
+   "QueryPoolResults incorrect"` on the new log returns **0** (down from
+   168) with zero new failures introduced anywhere else in the group.
+
+2. **4,157 `vkCreateGraphicsPipelines` failures**, all
+   `"a graphics pipeline with color attachments needs a fragment stage"`
+   -- this suite's own `vertex_only` pipeline shape
+   (`VertexShaderTestInstance::createPipeline`,
+   `vktQueryPoolStatisticsTests.cpp`) legitimately omits the fragment
+   stage while still declaring one (unwritten, default `colorWriteMask`)
+   color attachment, which is spec-legal but rejected outright by
+   `GraphicsPipeline.cpp` today. Pre-existing, unrelated to pipeline
+   statistics themselves, newly reachable only because this row's own
+   feature flip lets the whole suite run for the first time (mirrors the
+   established H6l -> H6m pattern). Filed as roadmap H9a rather than fixed
+   here.
+
+3. **4,752 `vkQueueSubmit` failures**, all
+   `"vertex/domain stage output -> geometry stage input: element 0 and its
+   producer element 6 disagree on component/row count or type"`
+   (`StageLink.cpp`) -- confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+   single-case re-run to be a genuine vertex-to-geometry stage-IO
+   interface-matching gap, restricted to every geometry-shader-shaped
+   pipeline this suite exercises
+   (`geometry_shader_invocations`/`_primitives`, the `_geometry`-suffixed
+   `clipping_invocations`/`_primitives` variants, and their
+   `host_query_reset`/`reset_before_copy`/`reset_after_copy` replicas).
+   Also pre-existing and unrelated to pipeline statistics; newly reachable
+   for the same reason as (2). Filed as roadmap H9b.
+
+Net result after the value-write fix: **6,877 Passed (37.4%), 8,909
+Failed (48.5%), 2,593 NotSupported (14.1%)**. The counters themselves are
+confirmed correct wherever a case actually reaches them; the remaining
+failures are entirely attributable to the two unrelated, pre-existing
+gaps above (H9a, H9b), not to anything this row's own scope touches.
+
+`Vulkan14FeatureInventory.md` updated: `pipelineStatisticsQuery` moves
+from `VK_FALSE` to `VK_TRUE`. No `VulkanExtensionInventory.md` change
+needed (a core 1.0 feature bit, not an extension).
