@@ -1853,7 +1853,12 @@ void FunctionWidener::widenImageCall(CallInst &CI,
   // A store's governing mask must gate the real memory side effect it
   // causes (matching `widenResourceCall`'s own `Env.SideEffectMask` choice
   // for its `StoredValue` case); a read only needs the wave's entry mask.
-  Value *LaneMaskBase = Matched.Texel ? Env.SideEffectMask : Env.EntryMask;
+  // (Roadmap H8v) An atomic (`AtomicValue` non-null) is likewise a real
+  // memory side effect -- an inactive/helper lane must never perform one
+  // -- so it needs `SideEffectMask` too, exactly like a store's `Texel`.
+  Value *LaneMaskBase = (Matched.Texel || Matched.AtomicValue)
+                           ? Env.SideEffectMask
+                           : Env.EntryMask;
   if (!isa<Constant>(Matched.Mask))
     LaneMaskBase = Builder.CreateAnd(
         LaneMaskBase, getWidened(Matched.Mask, Builder), "image.mask");
