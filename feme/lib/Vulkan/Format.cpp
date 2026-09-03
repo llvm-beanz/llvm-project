@@ -1221,6 +1221,29 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
     break;
   }
 
+  // (Roadmap H8v) `R32_{UINT,SINT}`: the only two formats Vulkan's own
+  // mandatory-format table requires `STORAGE_IMAGE_ATOMIC_BIT` for that
+  // this project can actually honor an image atomic against today --
+  // `SPIRVResourceLowering.cpp`'s `hasOnlySupportedStorageImageUses` only
+  // accepts an `AtomicRMWInst`/`AtomicCmpXchgInst` `getpointer` user for a
+  // `Plain2D`, single-32-bit-scalar-*integer* storage image (SPIR-V
+  // itself disallows an atomic against a float-channel image outright, so
+  // `R32_FLOAT` never qualifies regardless of this project's own
+  // coverage), lowered to a real hardware atomic
+  // (`feme.cpu.image.atomic.*.2d.i32`, FeMeRuntimeCPU.c) rather than a
+  // plain load-modify-store. Every other shape (arrayed/cube/
+  // multisampled/1D/3D) is not yet lowered, but this bit is honestly
+  // per-format, not per-view-shape, mirroring `STORAGE_IMAGE_BIT`'s own
+  // "Plain2D-only for now" comment above.
+  switch (Format) {
+  case ResourceFormat::R32_UINT:
+  case ResourceFormat::R32_SINT:
+    Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT;
+    break;
+  default:
+    break;
+  }
+
   if (isSupportedColorAttachmentFormat(Format)) {
     Flags |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
     // (Roadmap H8p) Blending is undefined for an integer color format per
