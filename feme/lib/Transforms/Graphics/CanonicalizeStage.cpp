@@ -670,8 +670,8 @@ class ShadowValueMap {
 public:
   ShadowValueMap(Function &F, const EntrySignature &Sig) : F(F), Sig(Sig) {}
 
-  Value *getOrCreate(uint32_t ElementID, Value *Row, Value *Component,
-                     Type *Ty, IRBuilderBase &B) {
+  Value *getOrCreate(uint32_t ElementID, Value *Row, Value *Component, Type *Ty,
+                     IRBuilderBase &B) {
     uint64_t ComponentVal = cast<ConstantInt>(Component)->getZExtValue();
     if (auto *RowC = dyn_cast<ConstantInt>(Row)) {
       Key K{ElementID, RowC->getZExtValue(), ComponentVal};
@@ -688,8 +688,9 @@ public:
     DynamicKey DK{ElementID, ComponentVal};
     AllocaInst *&Slot = DynamicAllocas[DK];
     if (!Slot) {
-      uint32_t RowCount =
-          ElementID < Sig.Elements.size() ? Sig.Elements[ElementID].RowCount : 1;
+      uint32_t RowCount = ElementID < Sig.Elements.size()
+                              ? Sig.Elements[ElementID].RowCount
+                              : 1;
       IRBuilder<> EntryBuilder(&F.getEntryBlock(),
                                F.getEntryBlock().getFirstInsertionPt());
       Slot = EntryBuilder.CreateAlloca(ArrayType::get(Ty, RowCount), nullptr,
@@ -997,8 +998,7 @@ bool isPerVertexArrayInputGlobal(const GlobalVariable *GV,
 /// store (this row's own crash). Sets \p AddrSpace to \p GV's address
 /// space when true.
 bool isPerVertexArrayMeshOutputGlobal(const GlobalVariable *GV,
-                                     unsigned &AddrSpace,
-                                     ShaderStage Stage) {
+                                      unsigned &AddrSpace, ShaderStage Stage) {
   if (Stage != ShaderStage::Mesh || !isSPIRVStageIOGlobal(GV, AddrSpace) ||
       AddrSpace != 8)
     return false;
@@ -1414,95 +1414,131 @@ MDNode *createLocationDecoration(LLVMContext &Ctx, uint32_t Location) {
   return MDNode::get(Ctx, {MDNode::get(Ctx, Entry)});
 }
 
-/// (Roadmap H4f) Whether every `Output`-direction (address-space-8)
-/// stage-IO global \p F stores to is patch-frequency (`Patch`-decorated
-/// or a tess-factor `BuiltIn`), and it stores to at least one -- the
-/// shape a no-barrier tessellation-control entry point legally takes
-/// whenever `OutputVertices == 1` (a single control-point invocation
-/// needs no cross-invocation synchronization, so nothing meaningfully
-/// distinguishes "per control point" from "per patch" here).
-/// `dEQP-VK.tessellation.winding.*`'s own `layout(vertices = 1) out;`
-/// tessellation-control shader, which writes only
-/// `gl_TessLevelInner`/`gl_TessLevelOuter` and never touches `gl_out[]`
-/// at all, is exactly this shape.
-bool isPatchConstantOnlyEntry(Function &F) {
-  const DataLayout &DL = F.getParent()->getDataLayout();
+/// One address-space-8 stage-IO store's own patch-vs-vertex frequency, or
+/// `std::nullopt` if \p SI's target cannot be resolved as a stage-IO
+/// global store at all (see `getStageIOGlobal`'s own comment on the three
+/// shapes it resolves). A builtin interface block (e.g. `gl_PerVertex`)
+/// is always an ordinary per-vertex output in practice --
+/// `gl_TessLevelInner`/`gl_TessLevelOuter` are plain globals, never
+/// interface-block members -- so conservatively treated as not
+/// patch-frequency rather than teaching this check the per-member
+/// decoration lookup `canonicalizeSPIRVStage`'s own `addElements` lambda
+/// already has.
+std::optional<bool>
+classifyTessControlOutputStoreFrequency(StoreInst &SI, const DataLayout &DL) {
+  GlobalVariable *GV = getStageIOGlobal(SI.getPointerOperand(), DL);
+  if (!GV)
+    return std::nullopt;
+  unsigned AddrSpace = 0;
+  if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 8)
+    return std::nullopt;
+  if (GV->getMetadata("feme.spirv.MemberDecorations"))
+    return false;
+  ParsedSPIRVDecorations D =
+      parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+  return isPatchOutputDecoration(D);
+}
+
+/// Whether \p F's own address-space-8 stage-IO stores are patch-frequency
+/// (`Patch`-decorated or a tess-factor `BuiltIn`), vertex-frequency
+/// (everything else), or both -- the classification
+/// `splitBarrierlessTessellationControlEntry` needs to decide both
+/// *whether* a no-barrier entry needs splitting at all (`SawPatchOutput`)
+/// and *how* (`SawNonPatchOutput`, whether it is purely patch-constant or
+/// a mix of the two). (Roadmap H9c) Resolves each store's target via
+/// `getStageIOGlobal` -- not `getStageIOBaseAndOffset` alone, which only
+/// resolves a *constant*-offset access and so misses a genuine per-vertex
+/// output written through a dynamic index
+/// (`out_color[gl_InvocationID] = ...`,
+/// `gl_out[gl_InvocationID].gl_Position = ...`; every real GLSL
+/// tessellation-control shader's own per-vertex write takes this shape) --
+/// matching every other stage-IO-global-discovery scan in this file.
+struct TessControlOutputFrequencies {
   bool SawPatchOutput = false;
+  bool SawNonPatchOutput = false;
+};
+
+TessControlOutputFrequencies classifyTessControlOutputs(Function &F) {
+  TessControlOutputFrequencies Result;
+  const DataLayout &DL = F.getParent()->getDataLayout();
   for (Instruction &I : instructions(F)) {
     auto *SI = dyn_cast<StoreInst>(&I);
     if (!SI)
       continue;
-    // (Roadmap H9c) `getStageIOBaseAndOffset` alone only resolves a
-    // *constant*-offset access -- a genuine per-vertex output written
-    // through a dynamic index (`out_color[gl_InvocationID] = ...`,
-    // `gl_out[gl_InvocationID].gl_Position = ...`; every real GLSL
-    // tessellation-control shader's own shape, since every invocation
-    // writes only its own slot) is invisible to it, exactly the shape
-    // `getStageIOGlobal` also resolves via `getDynamicVertexIndexedAccess`/
-    // `getDynamicRowIndexedAccess`. Using `getStageIOBaseAndOffset` alone
-    // let such a store slip past this scan unseen, so a genuinely-mixed
-    // entry (patch-frequency tessellation-factor writes *and* an ordinary,
-    // dynamically-vertex-indexed per-vertex write) was wrongly classified
-    // as patch-constant-only -- its whole body then cloned as
-    // `<entry>.patchconstant` with that per-vertex store still inside,
-    // where `classifySPIRVElement`'s `HullPatchConstant`-phase branch
-    // misclassifies it (an ordinary, non-`patch`-decorated write is
-    // treated as a captured-value *read-back*, `Direction::Input`, never
-    // a store), so it never becomes a `PatchOutput` signature element:
-    // `PatchConstantWrapper.cpp`'s masked-output-store lowering then finds
-    // no such element for it and errors ("feme-cpu-wrap-patch-constant:
-    // masked output store references an unknown patch-output signature
-    // element"), the exact defect
-    // `GraphicsPipelineTest.AcceptsTessellationControlBarrierlessDynamic
-    // VertexIndexedMixedStoreSource` reproduces end to end. Using the same
-    // `getStageIOGlobal` every other stage-IO-global-discovery scan in
-    // this file already uses closes that gap: any store this scan cannot
-    // otherwise resolve is conservatively still not seen, but every store
-    // `canonicalizeSPIRVStage`'s own discovery loop resolves is now seen
-    // here too, keeping the two consistent.
-    GlobalVariable *GV = getStageIOGlobal(SI->getPointerOperand(), DL);
-    if (!GV)
+    std::optional<bool> IsPatch =
+        classifyTessControlOutputStoreFrequency(*SI, DL);
+    if (!IsPatch)
       continue;
-    unsigned AddrSpace = 0;
-    if (!isSPIRVStageIOGlobal(GV, AddrSpace) || AddrSpace != 8)
-      continue;
-    // A builtin interface block (e.g. `gl_PerVertex`) is always an
-    // ordinary per-vertex output in practice -- `gl_TessLevelInner`/
-    // `gl_TessLevelOuter` are plain globals, never interface-block
-    // members -- so conservatively treat one as not patch-frequency
-    // rather than teach this check the per-member decoration lookup
-    // `canonicalizeSPIRVStage`'s own `addElements` lambda already has.
-    if (GV->getMetadata("feme.spirv.MemberDecorations"))
-      return false;
-    ParsedSPIRVDecorations D =
-        parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
-    if (!isPatchOutputDecoration(D))
-      return false;
-    SawPatchOutput = true;
+    (*IsPatch ? Result.SawPatchOutput : Result.SawNonPatchOutput) = true;
   }
-  return SawPatchOutput;
+  return Result;
 }
 
-/// (Roadmap H4f) `splitTessellationControlEntry`'s own barrier-based split
-/// has nothing to split when \p F has no group-sync barrier at all, but
-/// `compileAndValidateStages` (GraphicsPipeline.cpp) unconditionally
-/// expects a `<entry>.patchconstant` sibling to exist regardless. When
-/// `isPatchConstantOnlyEntry` holds, \p F is semantically already "the
-/// patch-constant phase", so its whole body is moved into a new
-/// `<entry>.patchconstant` clone, and \p F itself is replaced with a
-/// trivial, empty control-point phase -- having no per-vertex output of
-/// its own to produce. Any other no-barrier shape (a mix of patch- and
-/// vertex-frequency writes, only legal for `OutputVertices == 1` too, but
-/// not sound to auto-split the same way: with more than one output
-/// control point and no barrier there is no legal way for one invocation
-/// to see another's data either, so nothing but the current invocation's
-/// own writes could safely be duplicated this way, which this simpler
-/// check does not attempt to reason about) is left with no
-/// patch-constant phase at all, matching this function's previous,
-/// barrier-only behavior.
+/// (Roadmap H9c) Erases every address-space-8 stage-IO store in \p Fn
+/// whose own patch-vs-vertex frequency (`classifyTessControlOutputStore
+/// Frequency`) does not match \p KeepPatch, so \p Fn -- one of the two
+/// per-frequency-pruned clones `splitBarrierlessTessellationControlEntry`
+/// produces for a mixed-frequency, no-barrier entry -- ends up producing
+/// only the stage-IO writes that belong to its own phase. A store this
+/// cannot resolve as a stage-IO global at all is conservatively left
+/// alone. The erased store's own address/value computation is left in
+/// place as dead code rather than swept up here too: it has no other
+/// side effect, and every downstream pass in this pipeline already
+/// tolerates ordinary dead code same as any other LLVM IR.
+void pruneStageIOStoresByFrequency(Function &Fn, bool KeepPatch) {
+  const DataLayout &DL = Fn.getParent()->getDataLayout();
+  SmallVector<StoreInst *, 8> ToErase;
+  for (Instruction &I : instructions(Fn)) {
+    auto *SI = dyn_cast<StoreInst>(&I);
+    if (!SI)
+      continue;
+    std::optional<bool> IsPatch =
+        classifyTessControlOutputStoreFrequency(*SI, DL);
+    if (IsPatch && *IsPatch != KeepPatch)
+      ToErase.push_back(SI);
+  }
+  for (StoreInst *SI : ToErase)
+    SI->eraseFromParent();
+}
+
+/// (Roadmap H4f/H9c) `splitTessellationControlEntry`'s own barrier-based
+/// split has nothing to split when \p F has no group-sync barrier at all,
+/// but `compileAndValidateStages` (GraphicsPipeline.cpp) unconditionally
+/// expects a `<entry>.patchconstant` sibling to exist regardless.
+/// `classifyTessControlOutputs` distinguishes three shapes: (1) no
+/// patch-frequency write at all -- nothing to split out, \p F is left
+/// untouched (`HullStageWithNoBarrierIsNotSplit`); (2) every stage-IO
+/// write is patch-frequency (`isPatchConstantOnlyEntry`) -- \p F is
+/// semantically already "the patch-constant phase", so its whole body is
+/// moved into a new `<entry>.patchconstant` clone, and \p F itself is
+/// replaced with a trivial, empty control-point phase, having no
+/// per-vertex output of its own to produce (roadmap H4f,
+/// `NoBarrierPatchConstantOnlyEntryIsSplitWhole`); (3) a genuine mix of
+/// patch- and vertex-frequency writes -- only legal (as shapes (1)/(2)
+/// above already are too) when no invocation's own patch- or
+/// vertex-frequency write ever depends on another's, the only
+/// synchronization a group-sync barrier could otherwise provide, which by
+/// definition cannot happen here since there is none. Unlike shape (2),
+/// simply cloning \p F's whole body into the patch-constant phase and
+/// leaving \p F otherwise unpruned is *not* sound for this shape (see the
+/// roadmap's own H4f history): `classifySPIRVElement`'s
+/// `HullPatchConstant`-phase branch treats any non-`patch`-decorated
+/// address-space-8 write as a captured cross-barrier value's read-back
+/// (`Direction::Input`, never a store), so an unpruned vertex-frequency
+/// store surviving into the clone is misclassified -- exactly roadmap
+/// H9c's own defect. Instead, both clones are pruned by
+/// `pruneStageIOStoresByFrequency` to keep only the stage-IO writes that
+/// belong to their own phase: \p F keeps only its vertex-frequency
+/// writes (becoming the real control-point phase, still executed once
+/// per control point), and the new clone keeps only the patch-frequency
+/// ones (becoming the real patch-constant phase, conceptually executed
+/// once per patch -- redundantly recomputing whatever inputs it needs
+/// from scratch, same as \p F does for its own, since neither can read
+/// the other's own values without a barrier anyway).
 bool splitBarrierlessTessellationControlEntry(Function &F,
                                               Function *&PatchConstantPhase) {
-  if (!isPatchConstantOnlyEntry(F))
+  TessControlOutputFrequencies Freq = classifyTessControlOutputs(F);
+  if (!Freq.SawPatchOutput)
     return true;
 
   PatchConstantPhase =
@@ -1519,14 +1555,23 @@ bool splitBarrierlessTessellationControlEntry(Function &F,
   CloneFunctionInto(PatchConstantPhase, &F, VMap,
                     CloneFunctionChangeType::LocalChangesOnly, Returns);
 
-  // `F` itself becomes the trivial control-point phase: with
-  // `OutputVertices == 1` and every one of its stage-IO writes already
-  // moved to the patch-constant clone above, it has nothing left to
-  // produce. It is left with no `!feme.signature` metadata of its own --
+  if (Freq.SawNonPatchOutput) {
+    // A genuine mix (shape (3) above): prune each clone down to its own
+    // phase's own writes.
+    pruneStageIOStoresByFrequency(F, /*KeepPatch=*/false);
+    pruneStageIOStoresByFrequency(*PatchConstantPhase, /*KeepPatch=*/true);
+    return true;
+  }
+
+  // Purely patch-constant (shape (2) above, roadmap H4f): `F` itself
+  // becomes the trivial control-point phase, with every one of its
+  // stage-IO writes already moved to the patch-constant clone above. It
+  // is left with no `!feme.signature` metadata of its own --
   // `feme::cpu::CompiledStage::create` already treats an entirely absent
   // signature identically to an explicitly empty one (roadmap H4g).
   F.deleteBody();
-  ReturnInst::Create(F.getContext(), BasicBlock::Create(F.getContext(), "", &F));
+  ReturnInst::Create(F.getContext(),
+                     BasicBlock::Create(F.getContext(), "", &F));
   return true;
 }
 
@@ -1639,8 +1684,8 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
   // value defined *before* the one barrier this pass splits at can only
   // ever depend on this invocation's own state.
   if (!Captured.empty()) {
-    BasicBlock *CaptureEntry =
-        BasicBlock::Create(F.getContext(), "patchconst.captures", PatchConstantPhase);
+    BasicBlock *CaptureEntry = BasicBlock::Create(
+        F.getContext(), "patchconst.captures", PatchConstantPhase);
     IRBuilder<> CaptureBuilder(CaptureEntry);
     unsigned NextLocation = computeNextSyntheticLocation(*F.getParent());
     for (Instruction *V : Captured) {
@@ -1648,8 +1693,8 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
       unsigned Location = NextLocation++;
       MDNode *Decoration = createLocationDecoration(F.getContext(), Location);
       auto *GV = new GlobalVariable(
-          *F.getParent(), Ty, /*isConstant=*/false,
-          GlobalValue::PrivateLinkage, UndefValue::get(Ty),
+          *F.getParent(), Ty, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+          UndefValue::get(Ty),
           F.getName() + ".patchconst.capture." + Twine(Location),
           /*InsertBefore=*/nullptr, GlobalValue::NotThreadLocal,
           /*AddressSpace=*/8);

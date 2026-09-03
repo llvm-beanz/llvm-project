@@ -969,12 +969,13 @@ TEST(CanonicalizeStageTest,
 /// *constant* `Output`-array index (see `isPerVertexArrayInputGlobal`'s
 /// own comment: a constant index into an `Output` array already has a
 /// real, different meaning in production use, an ordinary matrix
-/// output's own per-row store -- `RewritesSPIRVArrayOutputStorePerElementByteOffset`
-/// above), so `RowCountIsVertexArray` stays `false` here even though this
-/// global is structurally identical to `ThreadsDynamicVertexIndexIntoInputLoad`'s
-/// own `Input` one; only the *access itself* routes through `Vertex`, not
-/// (yet) the signature's own description of the element. See "Roadmap H6:
-/// what H6b found, and why it stops here" in VulkanCTSReport.md.
+/// output's own per-row store --
+/// `RewritesSPIRVArrayOutputStorePerElementByteOffset` above), so
+/// `RowCountIsVertexArray` stays `false` here even though this global is
+/// structurally identical to `ThreadsDynamicVertexIndexIntoInputLoad`'s own
+/// `Input` one; only the *access itself* routes through `Vertex`, not (yet) the
+/// signature's own description of the element. See "Roadmap H6: what H6b found,
+/// and why it stops here" in VulkanCTSReport.md.
 TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoOutputStore) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -1150,7 +1151,7 @@ TEST(CanonicalizeStageTest, ThreadsDynamicRowIndexIntoClipDistanceOutputStore) {
   // `StoreInst` left is the shadow alloca's own write-through (roadmap
   // H2e/H7w), an ordinary local, not the original stage-IO global.
   for (Instruction &I : instructions(F))
-        if (auto *SI = dyn_cast<StoreInst>(&I))
+    if (auto *SI = dyn_cast<StoreInst>(&I))
       EXPECT_FALSE(isa<GlobalVariable>(SI->getPointerOperand()));
 }
 
@@ -1398,7 +1399,7 @@ TEST(CanonicalizeStageTest, HullStageWithNoBarrierIsNotSplit) {
   EXPECT_EQ(Sig->Elements.size(), 2u);
 }
 
-/// (Roadmap H9c) `isPatchConstantOnlyEntry`'s own scan (used by
+/// (Roadmap H9c) `classifyTessControlOutputs`'s own scan (used by
 /// `splitBarrierlessTessellationControlEntry` above) must not miss a
 /// genuine per-vertex output written through a *dynamic* vertex index --
 /// `out_color[gl_InvocationID] = ...`, the shape
@@ -1407,29 +1408,33 @@ TEST(CanonicalizeStageTest, HullStageWithNoBarrierIsNotSplit) {
 /// tessellation-control shader's own `out_color[]`/`gl_out[]` write --
 /// alongside a `Patch`-decorated tessellation-factor write, with no
 /// group-sync barrier separating them (legal: neither invocation's write
-/// here ever depends on another's). Before this fix,
-/// `isPatchConstantOnlyEntry` resolved a store's target purely via
-/// `getStageIOBaseAndOffset` (constant-offset only), so this dynamically-
-/// indexed store was invisible to it: the scan only ever saw the
-/// `TessLevelOuter` write, wrongly concluded the whole entry was patch-
-/// constant-only, and cloned the *entire* body -- dynamically-indexed
-/// per-vertex store included -- into a new `.patchconstant` function,
-/// where `classifySPIRVElement`'s `HullPatchConstant`-phase branch
-/// misclassifies that non-`patch`-decorated store as a captured-value
-/// read-back (`Direction::Input`, never a store): the exact gap
+/// here ever depends on another's). Before this row's own fix,
+/// `isPatchConstantOnlyEntry` (this scan's own predecessor) resolved a
+/// store's target purely via `getStageIOBaseAndOffset` (constant-offset
+/// only), so this dynamically-indexed store was invisible to it: the scan
+/// only ever saw the `TessLevelOuter` write, wrongly concluded the whole
+/// entry was patch-constant-only, and cloned the *entire* body --
+/// dynamically-indexed per-vertex store included -- into a new
+/// `.patchconstant` function, where `classifySPIRVElement`'s
+/// `HullPatchConstant`-phase branch misclassifies that non-`patch`-
+/// decorated store as a captured-value read-back (`Direction::Input`,
+/// never a store): the exact gap
 /// `GraphicsPipelineTest.AcceptsTessellationControlBarrierlessDynamic
 /// VertexIndexedMixedStoreSource` reproduces end to end via
 /// `PatchConstantWrapper.cpp`'s own "masked output store references an
 /// unknown patch-output signature element" error. Now that
-/// `isPatchConstantOnlyEntry` also resolves a dynamically-indexed store
+/// `classifyTessControlOutputs` also resolves a dynamically-indexed store
 /// via `getStageIOGlobal`, it correctly sees both the patch- and
-/// non-patch-frequency writes and does not misclassify this mixed entry
-/// as patch-constant-only -- matching `HullStageWithNoBarrierIsNotSplit`
-/// above, no `.patchconstant` function is created (a general split for
-/// this mixed, no-barrier shape remains unimplemented, tracked as its own
-/// roadmap follow-up).
-TEST(CanonicalizeStageTest,
-     NoBarrierMixedFrequencyEntryWithDynamicVertexIndexedStoreIsNotSplit) {
+/// non-patch-frequency writes: `splitBarrierlessTessellationControlEntry`
+/// recognizes this as a genuine mix and splits it via
+/// `pruneStageIOStoresByFrequency`, producing a real, correctly-pruned
+/// `.patchconstant` sibling (only the `TessLevelOuter` write survives in
+/// it, as a `PatchOutput` signature element) with the original `main`
+/// pruned down to only its own `out_color` write (an ordinary `Output`
+/// element, its `TessLevelOuter` write removed).
+TEST(
+    CanonicalizeStageTest,
+    NoBarrierMixedFrequencyEntryWithDynamicVertexIndexedStoreIsSplitAndPruned) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     @out_color = external addrspace(8) global [3 x <4 x float>], !spirv.Decorations !0
@@ -1449,8 +1454,29 @@ TEST(CanonicalizeStageTest,
   )");
   ASSERT_TRUE(M);
   EXPECT_TRUE(run(*M));
-  EXPECT_TRUE(M->getFunction("main"));
-  EXPECT_FALSE(M->getFunction("main.patchconstant"));
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // The control-point phase keeps only its own `out_color` write --
+  // its own `TessLevelOuter` store is pruned away.
+  std::optional<EntrySignature> CPSig = dxil::getEntrySignature(*ControlPoint);
+  ASSERT_TRUE(CPSig.has_value());
+  ASSERT_EQ(CPSig->Elements.size(), 1u);
+  EXPECT_EQ(CPSig->Elements[0].Direction, SignatureDirection::Output);
+  EXPECT_EQ(CPSig->Elements[0].Location, 0u);
+
+  // The patch-constant phase keeps only its own `TessLevelOuter` write --
+  // its own (dynamically-vertex-indexed) `out_color` store is pruned
+  // away.
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 1u);
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
+  EXPECT_EQ(PCSig->Elements[0].SystemValue,
+            SignatureSystemValue::TessFactorEdge);
 }
 
 /// (Roadmap H4a) The real shape a GLSL tessellation-control shader's
@@ -1588,7 +1614,7 @@ TEST(CanonicalizeStageTest, SplitsHullEntryAtMangledSPIRVControlBarrierCall) {
 /// phase reads that is *not* `FromInputPatch` -- verified alongside, to
 /// pin the boundary this fix drew precisely.
 TEST(CanonicalizeStageTest,
-    PatchConstantPhaseMarksPositionAndClipDistanceFromInputPatch) {
+     PatchConstantPhaseMarksPositionAndClipDistanceFromInputPatch) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     @gl_in_pos = external addrspace(7) constant <4 x float>, !spirv.Decorations !0
@@ -2398,8 +2424,8 @@ TEST(CanonicalizeStageTest,
   // element 0 has a 1-bit scalar; only 32-bit elements are implemented
   // yet" on this exact signature -- now succeeds, confirming the fix all
   // the way through the boundary this row's own scope covers.
-  Expected<StageStorage> Storage =
-      buildStageStorage(*Sig, SignatureDirection::Output, /*InvocationCount=*/4);
+  Expected<StageStorage> Storage = buildStageStorage(
+      *Sig, SignatureDirection::Output, /*InvocationCount=*/4);
   ASSERT_THAT_EXPECTED(Storage, Succeeded());
   EXPECT_EQ(Storage->Elements[0].BitWidth, 32u);
   EXPECT_EQ(Storage->Elements[0].ScalarKind,

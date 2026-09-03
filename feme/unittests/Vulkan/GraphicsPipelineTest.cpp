@@ -200,6 +200,138 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
 }
 )mlir";
 
+/// (Roadmap H9c) A tessellation-control entry point guarding its
+/// tessellation-factor write with `if (gl_InvocationID == 0)` -- the real
+/// shape `glslang`/most GLSL-to-SPIR-V compilers emit for a patch-constant
+/// function, since every one of a patch's `OutputVertices`-many
+/// invocations reaches the post-barrier code and executes it, and the
+/// source guards so only one of them actually stores the (shared, once-
+/// per-patch) result. `gl_InvocationID`'s own `feme.stage.input.load` is
+/// `WaveTTIImpl::getValueUniformity`'s `NeverUniform` case (see
+/// WaveUniformity.cpp) regardless of which phase reads it, so
+/// `feme::cpu::LinearizePass` cannot statically prove this branch uniform
+/// even though it always resolves the same way on every lane once
+/// `PatchConstantWrapper.cpp`'s `lowerPatchConstantSystemValue` lowers it
+/// -- it rewrites the guarded `feme.stage.output.store` into a masked
+/// `feme.cpu.masked.output.store` call.
+constexpr llvm::StringLiteral TessControlMaskedPatchConstantStoreSource =
+    R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @invocation_id built_in("InvocationId") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @tess_outer built_in("TessLevelOuter") {patch} : !spirv.ptr<!spirv.array<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %p = spirv.Constant dense<[0.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.ControlBarrier <Workgroup>, <Workgroup>, <AcquireRelease|WorkgroupMemory>
+    %idp = spirv.mlir.addressof @invocation_id : !spirv.ptr<i32, Input>
+    %id = spirv.Load "Input" %idp : i32
+    %c0 = spirv.Constant 0 : i32
+    %cond = spirv.IEqual %id, %c0 : i32
+    spirv.BranchConditional %cond, ^then, ^end
+  ^then:
+    %f = spirv.Constant 1.000000e+00 : f32
+    %outerp = spirv.mlir.addressof @tess_outer : !spirv.ptr<!spirv.array<4xf32>, Output>
+    %e0 = spirv.AccessChain %outerp[%c0] : !spirv.ptr<!spirv.array<4xf32>, Output>, i32 -> !spirv.ptr<f32, Output>
+    spirv.Store "Output" %e0, %f : f32
+    spirv.Branch ^end
+  ^end:
+    spirv.Return
+  }
+  spirv.EntryPoint "TessellationControl" @main, @out_pos, @invocation_id, @tess_outer
+  spirv.ExecutionMode @main "OutputVertices", 3
+}
+)mlir";
+
+/// (Roadmap H9c) The real, *barrierless* shape every genuine `dEQP-VK.
+/// tessellation.*`/pipeline-statistics tessellation-control shader
+/// actually compiles to (see e.g.
+/// `vktQueryPoolStatisticsTests.cpp`'s own tessellation-control source,
+/// which never calls `barrier()` at all): an ordinary per-control-point
+/// `Position` write is *not* separated from the `if (gl_InvocationID ==
+/// 0)`-guarded, `patch`-decorated tessellation-factor write by any
+/// `spirv.ControlBarrier` -- unlike `TessControlMaskedPatchConstantStore
+/// Source` above, whose barrier makes `splitTessellationControlEntry`
+/// split out a real `.patchconstant` clone before either store is ever
+/// classified. Legal per SPIR-V (no invocation ever reads another's own
+/// output here, so no synchronization is actually needed), this shape hits
+/// `splitBarrierlessTessellationControlEntry`'s own `isPatchConstantOnly
+/// Entry` check instead, which -- seeing this same function's own
+/// unconditional `Position` store is *not* patch-frequency -- refuses to
+/// split at all, leaving the whole, still-mixed function to be
+/// canonicalized as a single `SPIRVCanonicalPhase::HullControlPoint`
+/// phase.
+constexpr llvm::StringLiteral TessControlBarrierlessMixedStoreSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @invocation_id built_in("InvocationId") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @tess_outer built_in("TessLevelOuter") {patch} : !spirv.ptr<!spirv.array<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %idp = spirv.mlir.addressof @invocation_id : !spirv.ptr<i32, Input>
+    %id = spirv.Load "Input" %idp : i32
+    %c0 = spirv.Constant 0 : i32
+    %cond = spirv.IEqual %id, %c0 : i32
+    spirv.BranchConditional %cond, ^then, ^end
+  ^then:
+    %f = spirv.Constant 1.000000e+00 : f32
+    %outerp = spirv.mlir.addressof @tess_outer : !spirv.ptr<!spirv.array<4xf32>, Output>
+    %e0 = spirv.AccessChain %outerp[%c0] : !spirv.ptr<!spirv.array<4xf32>, Output>, i32 -> !spirv.ptr<f32, Output>
+    spirv.Store "Output" %e0, %f : f32
+    spirv.Branch ^end
+  ^end:
+    %p = spirv.Constant dense<[0.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "TessellationControl" @main, @out_pos, @invocation_id, @tess_outer
+  spirv.ExecutionMode @main "OutputVertices", 3
+}
+)mlir";
+
+/// (Roadmap H9c) The real, barrierless shape every genuine `dEQP-VK.
+/// query_pool.statistics_query.clipping_invocations.*_tessellation*`
+/// tessellation-control shader actually compiles to: a *dynamically*
+/// vertex-indexed per-vertex output store (`out_color[gl_InvocationID] =
+/// ...`, mirroring `vktQueryPoolStatisticsTests.cpp`'s own `out_color[gl_
+/// InvocationID] = in_color[gl_InvocationID];`) alongside the same `if
+/// (gl_InvocationID == 0)`-guarded, `patch`-decorated tessellation-factor
+/// write `TessControlBarrierlessMixedStoreSource` above already covers --
+/// unlike that source's own unconditional, non-array `Position` write
+/// (constant-offset, resolved by `getStageIOBaseAndOffset`), this one is
+/// exactly the shape `getDynamicVertexIndexedAccess` resolves instead,
+/// which `isPatchConstantOnlyEntry`'s own scan does not (yet) call.
+constexpr llvm::StringLiteral
+    TessControlBarrierlessDynamicVertexIndexedMixedStoreSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
+  spirv.GlobalVariable @out_color {location = 0 : i32} : !spirv.ptr<!spirv.array<3xvector<4xf32>>, Output>
+  spirv.GlobalVariable @invocation_id built_in("InvocationId") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @tess_outer built_in("TessLevelOuter") {patch} : !spirv.ptr<!spirv.array<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %idp = spirv.mlir.addressof @invocation_id : !spirv.ptr<i32, Input>
+    %id = spirv.Load "Input" %idp : i32
+    %c0 = spirv.Constant 0 : i32
+    %cond = spirv.IEqual %id, %c0 : i32
+    spirv.BranchConditional %cond, ^then, ^end
+  ^then:
+    %f = spirv.Constant 1.000000e+00 : f32
+    %outerp = spirv.mlir.addressof @tess_outer : !spirv.ptr<!spirv.array<4xf32>, Output>
+    %e0 = spirv.AccessChain %outerp[%c0] : !spirv.ptr<!spirv.array<4xf32>, Output>, i32 -> !spirv.ptr<f32, Output>
+    spirv.Store "Output" %e0, %f : f32
+    spirv.Branch ^end
+  ^end:
+    %c = spirv.Constant dense<[0.0, 0.0, 1.0, 1.0]> : vector<4xf32>
+    %colorp = spirv.mlir.addressof @out_color : !spirv.ptr<!spirv.array<3xvector<4xf32>>, Output>
+    %ce = spirv.AccessChain %colorp[%id] : !spirv.ptr<!spirv.array<3xvector<4xf32>>, Output>, i32 -> !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %ce, %c : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "TessellationControl" @main, @out_color, @invocation_id, @tess_outer
+  spirv.ExecutionMode @main "OutputVertices", 3
+}
+)mlir";
+
 /// (Roadmap H4h) A genuinely-empty vertex stage -- no stage-IO globals at
 /// all, `void main (void) {}` -- exactly `dEQP-VK.tessellation.winding.*`'s
 /// own real vertex shader, legal whenever a tessellation-evaluation stage
@@ -2368,6 +2500,83 @@ TEST_F(GraphicsPipelineTest,
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap H9c: a tessellation-control entry point whose patch-constant
+/// (post-barrier) tessellation-factor store is guarded by
+/// `if (gl_InvocationID == 0)` -- `TessControlMaskedPatchConstantStoreSource`
+/// -- must still compile: this is the real shape every genuine
+/// `dEQP-VK.tessellation.*`/pipeline-statistics tessellation-control
+/// shader's patch-constant function takes.
+TEST_F(GraphicsPipelineTest,
+       AcceptsTessellationControlMaskedPatchConstantStore) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl =
+      createModule(TessControlMaskedPatchConstantStoreSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H9c: the real, barrierless, mixed control-point/patch-constant
+/// shape (`TessControlBarrierlessMixedStoreSource`) every genuine
+/// `dEQP-VK.tessellation.*`/pipeline-statistics tessellation-control
+/// shader actually compiles to must still compile.
+TEST_F(GraphicsPipelineTest, AcceptsTessellationControlBarrierlessMixedStore) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl =
+      createModule(TessControlBarrierlessMixedStoreSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap H9c: the real, barrierless, dynamically-vertex-indexed mixed
+/// control-point/patch-constant shape (`TessControlBarrierlessDynamic
+/// VertexIndexedMixedStoreSource`) every genuine `dEQP-VK.query_pool.
+/// statistics_query.clipping_invocations.*_tessellation*` tessellation-
+/// control shader actually compiles to must still compile.
+TEST_F(GraphicsPipelineTest,
+       AcceptsTessellationControlBarrierlessDynamicVertexIndexedMixedStore) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl =
+      createModule(TessControlBarrierlessDynamicVertexIndexedMixedStoreSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// Roadmap H4h: a tessellation pipeline whose vertex stage is genuinely
 /// empty (`EmptyVertexSource`, no stage-IO globals at all) must still be
 /// accepted, since a tessellation-evaluation stage present in the pipeline
@@ -2614,8 +2823,7 @@ TEST_F(GraphicsPipelineTest, AcceptsAdjacencyTopologyWithoutGeometryStage) {
       feme::graphics::PrimitiveTopology::TriangleStripWithAdjacency,
   };
   for (size_t I = 0;
-       I != sizeof(AdjacencyTopologies) / sizeof(AdjacencyTopologies[0]);
-       ++I) {
+       I != sizeof(AdjacencyTopologies) / sizeof(AdjacencyTopologies[0]); ++I) {
     VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
     InputAssembly.topology = AdjacencyTopologies[I];
     VkPipeline Handle = VK_NULL_HANDLE;
