@@ -79,7 +79,25 @@ bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format) {
   case feme::cpu::ResourceFormat::R16_SINT:
   case feme::cpu::ResourceFormat::R16G16_UINT:
   case feme::cpu::ResourceFormat::R16G16_SINT:
-    // (Roadmap H8p) The 7 real integer color-attachment formats: a real
+  // (Roadmap H8s) The 12 further integer color-attachment formats a real
+  // CTS re-run found still missing `COLOR_ATTACHMENT_BIT`: each already
+  // has a real `packClearColor`/`unpackColor` case (`ImageFixture.cpp`)
+  // and works through the same generic `readFragmentColorInt`/
+  // `expectedColorComponentType` (`Executor.cpp`) path the original 7
+  // formats above use, so no other code change was needed.
+  case feme::cpu::ResourceFormat::R8_UINT:
+  case feme::cpu::ResourceFormat::R8_SINT:
+  case feme::cpu::ResourceFormat::R8G8_UINT:
+  case feme::cpu::ResourceFormat::R8G8_SINT:
+  case feme::cpu::ResourceFormat::R16G16B16A16_UINT:
+  case feme::cpu::ResourceFormat::R16G16B16A16_SINT:
+  case feme::cpu::ResourceFormat::R32G32B32A32_UINT:
+  case feme::cpu::ResourceFormat::R32G32B32A32_SINT:
+  case feme::cpu::ResourceFormat::R32_UINT:
+  case feme::cpu::ResourceFormat::R32_SINT:
+  case feme::cpu::ResourceFormat::R32G32_UINT:
+  case feme::cpu::ResourceFormat::R32G32_SINT:
+    // (Roadmap H8p) The integer color-attachment formats: a real
     // `UInt`/`SInt` fragment output can now be validated
     // (`Executor.cpp`'s `executeDraws`) and written
     // (`readFragmentColorInt`/`packClearColor`/`unpackColor`) to one of

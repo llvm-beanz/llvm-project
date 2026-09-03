@@ -208,14 +208,21 @@ TEST_F(RenderPassTest, CompilesRemainingPackedSixteenBitColorAttachments) {
   }
 }
 
-// (Roadmap H8p) The 7 real integer color-attachment formats: a real
+// (Roadmap H8p/H8s) The 19 real integer color-attachment formats (H8p's
+// original 7, plus H8s's 12 more found by a real CTS re-run): a real
 // `RenderPass`/`Framebuffer` combination can now be created against one,
 // unlike every other still-unsupported integer format.
 TEST_F(RenderPassTest, CompilesIntegerColorAttachments) {
   for (VkFormat Format :
        {VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_SINT,
         VK_FORMAT_A2B10G10R10_UINT_PACK32, VK_FORMAT_R16_UINT,
-        VK_FORMAT_R16_SINT, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16_SINT}) {
+        VK_FORMAT_R16_SINT, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16_SINT,
+        // (Roadmap H8s) The 12 further formats.
+        VK_FORMAT_R8_UINT, VK_FORMAT_R8_SINT, VK_FORMAT_R8G8_UINT,
+        VK_FORMAT_R8G8_SINT, VK_FORMAT_R16G16B16A16_UINT,
+        VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_R32G32B32A32_UINT,
+        VK_FORMAT_R32G32B32A32_SINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32_SINT,
+        VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_SINT}) {
     VkRenderPass Pass = VK_NULL_HANDLE;
     EXPECT_EQ(createSimpleRenderPass(Format, Pass), VK_SUCCESS) << Format;
     vkDestroyRenderPass(Device, Pass, nullptr);

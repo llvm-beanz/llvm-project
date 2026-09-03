@@ -1012,24 +1012,39 @@ TEST(FormatTest, FormatFeatureFlagsAttachmentBitsMatchRenderPassSupport) {
               VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::S8_UINT) &
               VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
-  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R32G32B32A32_UINT) &
+  // (Roadmap H8s) `R32G32B32_UINT` (a 3-component 32-bit integer format
+  // no real image hardware supports) remains the honest "integer format
+  // still unsupported" example -- `R32G32B32A32_UINT`'s own gap this
+  // test used to check was fixed by this row (see
+  // `IntegerColorAttachmentFormatsGetOnlyColorAttachmentBit` below).
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R32G32B32_UINT) &
                VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
   EXPECT_FALSE(formatFeatureFlags(ResourceFormat::D32_FLOAT) &
                VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
 }
 
-// (Roadmap H8p) The 7 real integer color-attachment formats get
-// `COLOR_ATTACHMENT_BIT` (a real `UInt`/`SInt` fragment output can now be
-// drawn to one, `Executor.cpp`'s `executeDraws`/`readFragmentColorInt`),
-// but never `COLOR_ATTACHMENT_BLEND_BIT` -- blending is undefined for an
-// integer format per spec, confirmed by the real CTS run this row's own
-// investigation used.
+// (Roadmap H8p/H8s) The 19 real integer color-attachment formats (H8p's
+// original 7, plus H8s's 12 more found by a real CTS re-run against
+// feme's own ICD) get `COLOR_ATTACHMENT_BIT` (a real `UInt`/`SInt`
+// fragment output can now be drawn to one, `Executor.cpp`'s
+// `executeDraws`/`readFragmentColorInt`), but never
+// `COLOR_ATTACHMENT_BLEND_BIT` -- blending is undefined for an integer
+// format per spec.
 TEST(FormatTest, IntegerColorAttachmentFormatsGetOnlyColorAttachmentBit) {
   for (ResourceFormat Format :
        {ResourceFormat::R8G8B8A8_UINT, ResourceFormat::R8G8B8A8_SINT,
         ResourceFormat::R10G10B10A2_UINT, ResourceFormat::R16_UINT,
         ResourceFormat::R16_SINT, ResourceFormat::R16G16_UINT,
-        ResourceFormat::R16G16_SINT}) {
+        ResourceFormat::R16G16_SINT,
+        // (Roadmap H8s) The 12 further formats.
+        ResourceFormat::R8_UINT, ResourceFormat::R8_SINT,
+        ResourceFormat::R8G8_UINT, ResourceFormat::R8G8_SINT,
+        ResourceFormat::R16G16B16A16_UINT,
+        ResourceFormat::R16G16B16A16_SINT,
+        ResourceFormat::R32G32B32A32_UINT,
+        ResourceFormat::R32G32B32A32_SINT, ResourceFormat::R32_UINT,
+        ResourceFormat::R32_SINT, ResourceFormat::R32G32_UINT,
+        ResourceFormat::R32G32_SINT}) {
     VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
         << "format " << static_cast<int>(Format);
