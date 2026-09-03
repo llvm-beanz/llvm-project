@@ -189,6 +189,42 @@ func.func @image_write_texel_type_mismatch(%arg0 : !spirv.image<f32, Dim2D, NoDe
 // -----
 
 //===----------------------------------------------------------------------===//
+// spirv.ImageTexelPointer
+//===----------------------------------------------------------------------===//
+
+func.func @image_texel_pointer(%arg0 : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, Image>, %arg1 : vector<2xsi32>, %arg2 : i32) -> () {
+  // CHECK: {{%.*}} = spirv.ImageTexelPointer {{%.*}}, {{%.*}}, {{%.*}} : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, Image>, vector<2xsi32>, i32 -> !spirv.ptr<i32, Image>
+  %0 = spirv.ImageTexelPointer %arg0, %arg1, %arg2 : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, Image>, vector<2xsi32>, i32 -> !spirv.ptr<i32, Image>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_texel_pointer_non_image_pointee(%arg0 : !spirv.ptr<i32, UniformConstant>, %arg1 : vector<2xsi32>, %arg2 : i32) -> () {
+  // expected-error @+1 {{image operand must be a pointer to an image}}
+  %0 = spirv.ImageTexelPointer %arg0, %arg1, %arg2 : !spirv.ptr<i32, UniformConstant>, vector<2xsi32>, i32 -> !spirv.ptr<i32, Image>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_texel_pointer_wrong_result_storage_class(%arg0 : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, Image>, %arg1 : vector<2xsi32>, %arg2 : i32) -> () {
+  // expected-error @+1 {{result type must be an image-storage-class pointer}}
+  %0 = spirv.ImageTexelPointer %arg0, %arg1, %arg2 : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, Image>, vector<2xsi32>, i32 -> !spirv.ptr<i32, StorageBuffer>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_texel_pointer_result_type_mismatch(%arg0 : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, Image>, %arg1 : vector<2xsi32>, %arg2 : i32) -> () {
+  // expected-error @+1 {{result pointer's pointee type must match the image's element type}}
+  %0 = spirv.ImageTexelPointer %arg0, %arg1, %arg2 : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, Image>, vector<2xsi32>, i32 -> !spirv.ptr<f32, Image>
+  spirv.Return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
 // spirv.ImageSampleExplicitLod
 //===----------------------------------------------------------------------===//
 

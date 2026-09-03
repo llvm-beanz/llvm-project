@@ -4505,6 +4505,7 @@ def SPIRV_OC_OpFunctionParameter              : I32EnumAttrCase<"OpFunctionParam
 def SPIRV_OC_OpFunctionEnd                    : I32EnumAttrCase<"OpFunctionEnd", 56>;
 def SPIRV_OC_OpFunctionCall                   : I32EnumAttrCase<"OpFunctionCall", 57>;
 def SPIRV_OC_OpVariable                       : I32EnumAttrCase<"OpVariable", 59>;
+def SPIRV_OC_OpImageTexelPointer               : I32EnumAttrCase<"OpImageTexelPointer", 60>;
 def SPIRV_OC_OpLoad                           : I32EnumAttrCase<"OpLoad", 61>;
 def SPIRV_OC_OpStore                          : I32EnumAttrCase<"OpStore", 62>;
 def SPIRV_OC_OpCopyMemory                     : I32EnumAttrCase<"OpCopyMemory", 63>;
@@ -4761,6 +4762,7 @@ def SPIRV_OpcodeAttr :
       SPIRV_OC_OpSpecConstant, SPIRV_OC_OpSpecConstantComposite,
       SPIRV_OC_OpSpecConstantOp, SPIRV_OC_OpFunction, SPIRV_OC_OpFunctionParameter,
       SPIRV_OC_OpFunctionEnd, SPIRV_OC_OpFunctionCall, SPIRV_OC_OpVariable,
+      SPIRV_OC_OpImageTexelPointer,
       SPIRV_OC_OpLoad, SPIRV_OC_OpStore, SPIRV_OC_OpCopyMemory,
       SPIRV_OC_OpAccessChain, SPIRV_OC_OpPtrAccessChain,
       SPIRV_OC_OpInBoundsPtrAccessChain, SPIRV_OC_OpDecorate,

@@ -272,6 +272,38 @@ LogicalResult spirv::ImageWriteOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.ImageTexelPointer
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::ImageTexelPointerOp::verify() {
+  auto imagePtrType = dyn_cast<spirv::PointerType>(getImage().getType());
+  if (!imagePtrType)
+    return emitError("image operand must be a pointer");
+
+  auto imageType = dyn_cast<spirv::ImageType>(imagePtrType.getPointeeType());
+  if (!imageType)
+    return emitError(
+        "image operand must be a pointer to an image, but provided ")
+           << imagePtrType.getPointeeType();
+
+  auto resultPtrType = cast<spirv::PointerType>(getPointer().getType());
+  if (resultPtrType.getStorageClass() != spirv::StorageClass::Image)
+    return emitError("result type must be an image-storage-class pointer");
+
+  Type elementType = imageType.getElementType();
+  if (!isa<NoneType>(elementType) &&
+      elementType != resultPtrType.getPointeeType())
+    return emitError("result pointer's pointee type must match the image's "
+                     "element type, but provided ")
+           << resultPtrType.getPointeeType() << " and " << elementType;
+
+  // TODO: The spec requires Sample to be 0 for a single-sampled image, but
+  // that is a dynamic value in general and not statically checkable here.
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.ImageQuerySize
 //===----------------------------------------------------------------------===//
 

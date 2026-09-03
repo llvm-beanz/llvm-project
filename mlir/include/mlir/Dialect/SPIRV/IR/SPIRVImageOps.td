@@ -344,6 +344,54 @@ def SPIRV_ImageWriteOp : SPIRV_Op<"ImageWrite",
 
 // -----
 
+def SPIRV_ImageTexelPointerOp : SPIRV_Op<"ImageTexelPointer", [Pure]> {
+  let summary = "Form a pointer to a texel of an image.";
+
+  let description = [{
+    Result Type must be an OpTypePointer whose Storage Class operand is
+    Image. Its Type operand must be a scalar numerical type or OpTypeVoid.
+
+    Image must have a type of OpTypePointer with Type OpTypeImage. The
+    Image Format must not be Unknown.
+
+    Coordinate and Sample specify which texel and sample within the image
+    to form a pointer to. Coordinate must be an integer scalar or a vector
+    of integers. It contains (u[, v] ... [, array layer]) as needed by the
+    definition of the image.
+
+    Sample must be an integer scalar. It must be 0 if the underlying
+    image's MS operand is 0.
+
+    <!-- End of AutoGen section -->
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.ImageTexelPointer %1, %2, %3 : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, Image>, vector<2xi32>, i32 -> !spirv.ptr<i32, Image>
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_AnyPtr:$image,
+    AnyTypeOf<[SPIRV_ScalarOrVectorOf<SPIRV_Integer>]>:$coordinate,
+    SPIRV_Integer:$sample
+  );
+
+  let results = (outs
+    SPIRV_AnyPtr:$pointer
+  );
+
+  let assemblyFormat = [{
+    $image `,` $coordinate `,` $sample attr-dict
+    `:` type($image) `,` type($coordinate) `,` type($sample)
+    `->` type($pointer)
+  }];
+
+  let hasVerifier = 1;
+}
+
+// -----
+
 def SPIRV_ImageOp : SPIRV_Op<"Image",
     [Pure,
      TypesMatchWith<"type of 'result' matches image type of 'sampled_image'",
