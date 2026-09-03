@@ -1824,6 +1824,21 @@ fragment stage" check still rejects -- left to roadmap H2j. See
 "Roadmap H2b: measured impact" in VulkanCTSReport.md for the full
 reproduction.
 
+**Status (roadmap H9a): a fragment-less pipeline may now also declare a
+*nonempty* set of color attachments, not only an empty one.** H2j above
+only relaxed the "needs both a vertex and a fragment stage" rejection
+for the zero-color-attachment case; a fragment-less pipeline with one or
+more color attachments (`dEQP-VK.query_pool.statistics_query`'s own
+`VertexShaderTestInstance::createPipeline` shape) was still rejected
+outright. The local Vulkan spec text ("Valid Combinations of Stages for
+Graphics Pipelines": "If a fragment shader is omitted, fragment color
+outputs have undefined values") confirms no VUID conditions a fragment
+shader's optionality on the render target's color-attachment count, so
+the rejection was simply removed, along with a stale
+`validateStageInterfaces` assertion and an `Executor.cpp` bug that
+assumed a fragment stage always exists whenever color attachments are
+present. See "Roadmap H9a: measured impact" in VulkanCTSReport.md.
+
 **Status (roadmap F13): `VK_ATTACHMENT_LOAD_OP_NONE`/`STORE_OP_NONE`
 (`VK_KHR_load_store_op_none`) needed no new behavior at all.** Every
 attachment's `LoadOp` already took the "do nothing" path for anything

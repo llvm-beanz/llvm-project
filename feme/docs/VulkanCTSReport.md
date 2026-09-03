@@ -22110,3 +22110,80 @@ gaps above (H9a, H9b), not to anything this row's own scope touches.
 `Vulkan14FeatureInventory.md` updated: `pipelineStatisticsQuery` moves
 from `VK_FALSE` to `VK_TRUE`. No `VulkanExtensionInventory.md` change
 needed (a core 1.0 feature bit, not an extension).
+
+## Roadmap H9a: measured impact
+
+Fixes two related, over-strict pipeline-creation-time checks found by
+H9's own real CTS re-run above:
+
+1. **`GraphicsPipeline.cpp` rejected any pipeline that omitted its
+   fragment stage while still declaring a nonempty color attachment**
+   (`"a graphics pipeline with color attachments needs a fragment
+   stage"`) -- confirmed via the local Vulkan spec text ("Valid
+   Combinations of Stages for Graphics Pipelines": "If a fragment shader
+   is omitted, fragment color outputs have undefined values") that no
+   VUID conditions a fragment shader's optionality on the render
+   target's color-attachment count. Removed the rejection outright, plus
+   a stale `validateStageInterfaces` assertion encoding the same
+   invariant. Fixing this also surfaced a related `Executor.cpp` bug --
+   caught only by a new end-to-end `DrawTest`, not the creation-time
+   tests alone -- where a per-location fragment-output lookup loop
+   unconditionally assumed a fragment stage existed whenever color
+   attachments were present, causing a spurious submit-time failure once
+   creation started succeeding; gated the whole loop behind
+   `Pipeline.hasFragmentStage()`.
+2. **`translateColorBlendState`'s `attachmentCount`-mismatch validation
+   applied even when the subpass has zero color attachments**, contrary
+   to `VUID-VkGraphicsPipelineCreateInfo-renderPass-07609`'s own "and the
+   subpass uses color attachments" clause. `feme` already tolerated this
+   for the fragment-less case (roadmap H2j), but not when a real
+   fragment stage is present alongside a zero-color-attachment render
+   target -- exactly `GeometryShaderTestInstance`/
+   `TessellationShaderTestInstance`-family `noColorAttachments` cases,
+   which keep a real fragment stage but still hardcode a mismatched
+   `ColorBlendState(1, ...)`. Widened the same early-return to also
+   cover `Targets.Colors.empty()` regardless of fragment-stage presence.
+
+New unit tests: `GraphicsPipelineTest.AcceptsMissingFragmentStageWithColorAttachments`
+(rewritten from a `Rejects...` test that used to assert the removed
+rejection), `GraphicsPipelineTest.AcceptsFragmentStageWithMismatchedColorBlendStateAndNoColorAttachments`,
+and `DrawTest.DrawsWithMissingFragmentStageAndColorAttachment` (an
+end-to-end draw + occlusion-query test, the one that caught the
+`Executor.cpp` bug). `ninja check-feme` (assertions-enabled, ccache
+build) passes in full (2454/2481, 27 pre-existing `Unsupported`, 0
+`Failed`).
+
+A real `dEQP-VK.query_pool.statistics_query.*` re-run (18,379 cases,
+same methodology as H9's own re-run above) confirms both fixes'
+combined impact: **Passed rose from H9's own 6,877 to 8,966/18,379
+(48.8%, +2,089)**, **Failed fell from 8,909 to 6,820/18,379 (37.1%,
+-2,089)**, **NotSupported unchanged at 2,593/18,379 (14.1%)**. Both of
+this row's own diagnostic messages ("needs a fragment stage", "color
+blend state(s) but its render target") are fully gone from the log
+(`grep -c` confirms 0 occurrences of each, down from H9's own 3,388
+combined `vkCreateGraphicsPipelines` failures attributable to them).
+
+Characterizing the remaining 6,820 `Failed`:
+
+1. **1,276 `vkCreateGraphicsPipelines` failures**, all
+   `"feme-cpu-wrap-patch-constant: masked output store references an
+   unknown patch-output signature element"` -- a new, distinct gap in
+   tessellation-control-shader patch-constant-function handling,
+   entirely unrelated to this row's own fragment-stage/color-attachment
+   scope (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1` single-case
+   re-run of a `clipping_invocations.*_tessellation*`-shaped case). Only
+   newly reachable because more pipelines now clear the checks this row
+   loosened. Filed as roadmap H9c.
+2. **5,544 `vkQueueSubmit` failures**, all the same
+   `"vertex/domain stage output -> geometry stage input: element 0 and
+   its producer element 6 disagree on component/row count or type"`
+   diagnostic as H9's own H9b -- confirmed via spot-check
+   (`FEME_VULKAN_LOG_CREATION_ERRORS=1`) to be the exact same
+   pre-existing gap, unaffected by this row. Its count rose from H9's
+   own 4,752 because more pipelines now clear pipeline creation and
+   reach `vkQueueSubmit` for the first time, not because this row
+   introduced any new submit-time regression.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed: this row is a pure correctness fix (an over-strict validation
+check loosened to match the spec), touching no feature bit or extension.
