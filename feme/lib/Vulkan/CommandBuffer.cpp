@@ -774,6 +774,64 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
   return Result;
 }
 
+/// (roadmap H9) One `VK_QUERY_TYPE_PIPELINE_STATISTICS` query currently
+/// active between `vkCmdBeginQuery`/`vkCmdEndQuery`: its pool and its one
+/// query index (unlike `ActiveOcclusionQuery`, pipeline statistics have no
+/// per-multiview-view attribution in the Vulkan spec -- every rendered
+/// view's own contribution sums into this query's single index instead of
+/// each view getting its own slot). A query's begin/end scope may span any
+/// number of draws and dispatches (occlusion queries never needed to
+/// consider a dispatch at all), each summing its own contribution here in
+/// turn via `QueryPool::accumulatePipelineStatistics`.
+struct ActivePipelineStatsQuery {
+  QueryPool *Pool = nullptr;
+  uint32_t Query = 0;
+};
+
+/// (roadmap H9) Projects `feme::graphics::PreparedDraw::
+/// PipelineStatsCounters`'s own named fields into
+/// `QueryPool::accumulatePipelineStatistics`'s flat, `PipelineStatisticIndex`
+/// -ordered shape, then sums the result into every one of \p
+/// ActivePipelineStatsQueries -- shared by every draw path
+/// (`runPreparedDraw`) since all of them fill the same counters struct.
+void accumulatePipelineStats(
+    llvm::ArrayRef<ActivePipelineStatsQuery> ActivePipelineStatsQueries,
+    const feme::graphics::PreparedDraw::PipelineStatsCounters &Stats) {
+  if (ActivePipelineStatsQueries.empty())
+    return;
+  std::array<uint64_t, static_cast<size_t>(PipelineStatisticIndex::Count)>
+      Counters{};
+  Counters[static_cast<size_t>(PipelineStatisticIndex::InputAssemblyVertices)] =
+      Stats.InputAssemblyVertices;
+  Counters[static_cast<size_t>(
+      PipelineStatisticIndex::InputAssemblyPrimitives)] =
+      Stats.InputAssemblyPrimitives;
+  Counters[static_cast<size_t>(
+      PipelineStatisticIndex::VertexShaderInvocations)] =
+      Stats.VertexShaderInvocations;
+  Counters[static_cast<size_t>(
+      PipelineStatisticIndex::GeometryShaderInvocations)] =
+      Stats.GeometryShaderInvocations;
+  Counters[static_cast<size_t>(
+      PipelineStatisticIndex::GeometryShaderPrimitives)] =
+      Stats.GeometryShaderPrimitives;
+  Counters[static_cast<size_t>(PipelineStatisticIndex::ClippingInvocations)] =
+      Stats.ClippingInvocations;
+  Counters[static_cast<size_t>(PipelineStatisticIndex::ClippingPrimitives)] =
+      Stats.ClippingPrimitives;
+  Counters[static_cast<size_t>(
+      PipelineStatisticIndex::FragmentShaderInvocations)] =
+      Stats.FragmentShaderInvocations;
+  Counters[static_cast<size_t>(
+      PipelineStatisticIndex::TessControlShaderPatches)] =
+      Stats.TessControlShaderPatches;
+  Counters[static_cast<size_t>(
+      PipelineStatisticIndex::TessEvalShaderInvocations)] =
+      Stats.TessEvalShaderInvocations;
+  for (const ActivePipelineStatsQuery &Query : ActivePipelineStatsQueries)
+    Query.Pool->accumulatePipelineStatistics(Query.Query, Counters);
+}
+
 /// Runs one dispatch: materializes the currently bound descriptor sets'
 /// physical resource heap (see "Descriptor Model"), allocates private
 /// groupshared storage per group (see "Implement ... private groupshared
@@ -786,7 +844,9 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
 Error runDispatch(ComputePipeline &Pipeline, std::array<uint32_t, 3> Base,
                   std::array<uint32_t, 3> Count,
                   llvm::ArrayRef<BoundSetState> BoundSets,
-                  llvm::ArrayRef<uint8_t> PushConstants) {
+                  llvm::ArrayRef<uint8_t> PushConstants,
+                  llvm::ArrayRef<ActivePipelineStatsQuery>
+                      ActivePipelineStatsQueries = {}) {
   feme::cpu::CompiledStage &Stage = Pipeline.getStage();
   feme::cpu::StageArtifactInfo Artifact = Stage.getArtifactInfo();
 
@@ -813,6 +873,26 @@ Error runDispatch(ComputePipeline &Pipeline, std::array<uint32_t, 3> Base,
         if (Error E = Stage.invokeGroup(Prepared, GroupID, GroupShared))
           return E;
       }
+  // (roadmap H9) `COMPUTE_SHADER_INVOCATIONS_BIT`: unlike every other
+  // statistic, this one is dispatch-scoped rather than draw-scoped (no
+  // `feme::graphics::PreparedDraw` involved at all), so it accumulates
+  // directly here rather than through
+  // `feme::graphics::PreparedDraw::PipelineStatsCounters`/
+  // `accumulatePipelineStats`. Every one of `Count`'s own workgroups runs
+  // `Artifact.GroupSize`'s own product of invocations, regardless of
+  // `Base` (a `vkCmdDispatchBase` offset shifts which groups run, not how
+  // many).
+  if (!ActivePipelineStatsQueries.empty()) {
+    uint64_t Invocations = uint64_t(Count[0]) * Count[1] * Count[2] *
+                          Artifact.GroupSize[0] * Artifact.GroupSize[1] *
+                          Artifact.GroupSize[2];
+    std::array<uint64_t, static_cast<size_t>(PipelineStatisticIndex::Count)>
+        Counters{};
+    Counters[static_cast<size_t>(
+        PipelineStatisticIndex::ComputeShaderInvocations)] = Invocations;
+    for (const ActivePipelineStatsQuery &Query : ActivePipelineStatsQueries)
+      Query.Pool->accumulatePipelineStatistics(Query.Query, Counters);
+  }
   return Error::success();
 }
 
@@ -900,31 +980,15 @@ Error runCopyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
                              "bound");
   bool Is64Bit = (Flags & VK_QUERY_RESULT_64_BIT) != 0;
   bool WithAvailability = (Flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != 0;
-  VkDeviceSize ResultWidth = Is64Bit ? sizeof(uint64_t) : sizeof(uint32_t);
+  VkDeviceSize EntrySize = queryResultEntrySize(*Pool, Is64Bit, WithAvailability);
   for (uint32_t I = 0; I != QueryCount; ++I) {
     VkDeviceSize Offset = DstOffset + Stride * I;
-    VkDeviceSize EntrySize = ResultWidth * (WithAvailability ? 2 : 1);
     if (Offset + EntrySize > Dst->size())
       return createStringError(inconvertibleErrorCode(),
                                "copy query pool results region is out of "
                                "range");
     auto *Out = static_cast<uint8_t *>(Dst->data()) + Offset;
-    uint64_t Value = Pool->value(FirstQuery + I);
-    if (Is64Bit)
-      std::memcpy(Out, &Value, sizeof(Value));
-    else {
-      uint32_t Value32 = static_cast<uint32_t>(Value);
-      std::memcpy(Out, &Value32, sizeof(Value32));
-    }
-    if (WithAvailability) {
-      uint64_t AvailFlag = Pool->isAvailable(FirstQuery + I) ? 1 : 0;
-      if (Is64Bit)
-        std::memcpy(Out + ResultWidth, &AvailFlag, sizeof(AvailFlag));
-      else {
-        uint32_t AvailFlag32 = static_cast<uint32_t>(AvailFlag);
-        std::memcpy(Out + ResultWidth, &AvailFlag32, sizeof(AvailFlag32));
-      }
-    }
+    writeQueryResult(*Pool, FirstQuery + I, Is64Bit, WithAvailability, Out);
   }
   return Error::success();
 }
@@ -1520,6 +1584,7 @@ struct ActiveOcclusionQuery {
   uint32_t ViewCount = 1;
 };
 
+
 /// The render-target attachments a draw reads/writes, resolved once from
 /// `GraphicsState::Binding`: every color attachment (and, if any resolves,
 /// every resolve target), the depth/stencil attachment, and the current
@@ -1671,6 +1736,8 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
                      llvm::ArrayRef<BoundSetState> BoundSets,
                      llvm::ArrayRef<uint8_t> PushConstants,
                      llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries,
+                     llvm::ArrayRef<ActivePipelineStatsQuery>
+                         ActivePipelineStatsQueries,
                      feme::graphics::PreparedDraw &Prepared) {
   const std::vector<feme::graphics::AttachmentView> &Attachments =
       Resolved.Attachments;
@@ -1809,6 +1876,9 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
 
     uint64_t PassedSamples = 0;
     Prepared.PassedSampleCounter = &PassedSamples;
+    feme::graphics::PreparedDraw::PipelineStatsCounters LocalStats;
+    Prepared.Stats =
+        ActivePipelineStatsQueries.empty() ? nullptr : &LocalStats;
     Prepared.Attachments = ViewAttachments;
     Prepared.ResolveAttachments = ViewResolveAttachments;
     Prepared.DepthStencil = ViewDepthStencil;
@@ -1823,6 +1893,12 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
       if (EnumeratedViewIndex < Query.ViewCount)
         Query.Pool->accumulateOcclusionSamples(
             Query.FirstQuery + EnumeratedViewIndex, PassedSamples);
+    // (roadmap H9) Every rendered multiview view's own contribution sums
+    // into the same pipeline-statistics query index (see
+    // `ActivePipelineStatsQuery`'s own comment for why this differs from
+    // occlusion queries' per-view slot attribution above).
+    if (Prepared.Stats)
+      accumulatePipelineStats(ActivePipelineStatsQueries, LocalStats);
     ++EnumeratedViewIndex;
   }
   return Error::success();
@@ -1838,7 +1914,9 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
               const feme::graphics::DrawCommand &Draw,
               llvm::ArrayRef<BoundSetState> BoundSets,
               llvm::ArrayRef<uint8_t> PushConstants,
-              llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries) {
+              llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries,
+              llvm::ArrayRef<ActivePipelineStatsQuery>
+                  ActivePipelineStatsQueries) {
   Expected<ResolvedDrawAttachments> Resolved =
       resolveDrawAttachments(Pipeline, Gfx);
   if (!Resolved)
@@ -1926,7 +2004,8 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   Prepared.IndexBuffer = IndexBinding;
   Prepared.Draws = llvm::ArrayRef<feme::graphics::DrawCommand>(Draw);
   return runPreparedDraw(Pipeline, Gfx, *Resolved, BoundSets, PushConstants,
-                        ActiveOcclusionQueries, Prepared);
+                        ActiveOcclusionQueries, ActivePipelineStatsQueries,
+                        Prepared);
 }
 
 /// (Roadmap H6f) Builds and runs a mesh-pipeline draw
@@ -1944,7 +2023,9 @@ Error runMeshDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
                   const feme::graphics::MeshDrawCommand &MeshDraw,
                   llvm::ArrayRef<BoundSetState> BoundSets,
                   llvm::ArrayRef<uint8_t> PushConstants,
-                  llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries) {
+                  llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries,
+                  llvm::ArrayRef<ActivePipelineStatsQuery>
+                      ActivePipelineStatsQueries) {
   Expected<ResolvedDrawAttachments> Resolved =
       resolveDrawAttachments(Pipeline, Gfx);
   if (!Resolved)
@@ -1954,7 +2035,8 @@ Error runMeshDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   Prepared.MeshDraws =
       llvm::ArrayRef<feme::graphics::MeshDrawCommand>(MeshDraw);
   return runPreparedDraw(Pipeline, Gfx, *Resolved, BoundSets, PushConstants,
-                        ActiveOcclusionQueries, Prepared);
+                        ActiveOcclusionQueries, ActivePipelineStatsQueries,
+                        Prepared);
 }
 
 /// Validates a draw's *index* fetch (an indexed draw's index range against
@@ -2043,13 +2125,14 @@ Error runValidatedDraw(
     const PhysicalDeviceInfo *DeviceInfo,
     llvm::ArrayRef<BoundSetState> BoundSets,
     llvm::ArrayRef<uint8_t> PushConstants,
-    llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries) {
+    llvm::ArrayRef<ActiveOcclusionQuery> ActiveOcclusionQueries,
+    llvm::ArrayRef<ActivePipelineStatsQuery> ActivePipelineStatsQueries) {
   if (Error E = validateDrawCounts(DeviceInfo, Draw))
     return E;
   if (Error E = validateDrawFetchBounds(Pipeline, Gfx, Draw))
     return E;
   return runDraw(Pipeline, Gfx, Draw, BoundSets, PushConstants,
-                 ActiveOcclusionQueries);
+                 ActiveOcclusionQueries, ActivePipelineStatsQueries);
 }
 
 /// Reads \p DrawCount `VkDrawIndirectCommand`/`VkDrawIndexedIndirectCommand`
@@ -2192,7 +2275,8 @@ Error executeCommandsInto(
     const PhysicalDeviceInfo *DeviceInfo, ComputePipeline *&BoundPipeline,
     GraphicsPipeline *&BoundGraphicsPipeline, GraphicsState &Gfx,
     std::vector<BoundSetState> &BoundSets, std::vector<uint8_t> &PushConstants,
-    std::vector<ActiveOcclusionQuery> &ActiveOcclusionQueries) {
+    std::vector<ActiveOcclusionQuery> &ActiveOcclusionQueries,
+    std::vector<ActivePipelineStatsQuery> &ActivePipelineStatsQueries) {
   for (const RecordedCommand &Cmd : Commands) {
     switch (Cmd.Op) {
     case RecordedCommand::Kind::BindPipeline:
@@ -2226,7 +2310,7 @@ Error executeCommandsInto(
       if (Error E = validateGroupCount(DeviceInfo, Cmd.Count))
         return E;
       if (Error E = runDispatch(*BoundPipeline, Cmd.Base, Cmd.Count, BoundSets,
-                                PushConstants))
+                                PushConstants, ActivePipelineStatsQueries))
         return E;
       break;
     }
@@ -2250,7 +2334,7 @@ Error executeCommandsInto(
       if (Error E = validateGroupCount(DeviceInfo, Count))
         return E;
       if (Error E = runDispatch(*BoundPipeline, {0, 0, 0}, Count, BoundSets,
-                                PushConstants))
+                                PushConstants, ActivePipelineStatsQueries))
         return E;
       break;
     }
@@ -2306,7 +2390,10 @@ Error executeCommandsInto(
       // loop reads it), an occlusion query implicitly spans one query
       // index per set view-mask bit, per the Vulkan spec's multiview
       // query rule (`QueryPool.h`'s file comment) -- not the single index
-      // a non-multiview query uses.
+      // a non-multiview query uses. (Roadmap H9) A pipeline-statistics
+      // query has no such multiview span (`ActivePipelineStatsQuery`'s
+      // own comment), so always spans its single `Cmd.FirstQuery` index
+      // regardless of `Gfx.Binding.ViewMask`.
       uint32_t ViewCount =
           Cmd.TargetQueryPool->queryType() == VK_QUERY_TYPE_OCCLUSION &&
                   Gfx.Binding.ViewMask
@@ -2316,6 +2403,10 @@ Error executeCommandsInto(
       if (Cmd.TargetQueryPool->queryType() == VK_QUERY_TYPE_OCCLUSION)
         ActiveOcclusionQueries.push_back(
             {Cmd.TargetQueryPool, Cmd.FirstQuery, ViewCount});
+      else if (Cmd.TargetQueryPool->queryType() ==
+              VK_QUERY_TYPE_PIPELINE_STATISTICS)
+        ActivePipelineStatsQueries.push_back(
+            {Cmd.TargetQueryPool, Cmd.FirstQuery});
       break;
     }
     case RecordedCommand::Kind::EndQuery: {
@@ -2332,6 +2423,15 @@ Error executeCommandsInto(
       Cmd.TargetQueryPool->markAvailable(Cmd.FirstQuery, ViewCount);
       if (It != ActiveOcclusionQueries.end())
         ActiveOcclusionQueries.erase(It);
+      auto StatsIt = llvm::find_if(
+          ActivePipelineStatsQueries,
+          [&](const ActivePipelineStatsQuery &Q) {
+            return Q.Pool == Cmd.TargetQueryPool && Q.Query == Cmd.FirstQuery;
+          });
+      if (StatsIt != ActivePipelineStatsQueries.end()) {
+        Cmd.TargetQueryPool->markAvailable(Cmd.FirstQuery);
+        ActivePipelineStatsQueries.erase(StatsIt);
+      }
       break;
     }
     case RecordedCommand::Kind::WriteTimestamp:
@@ -2348,7 +2448,8 @@ Error executeCommandsInto(
         if (Error E = executeCommandsInto(Secondary->commands(), DeviceInfo,
                                           BoundPipeline, BoundGraphicsPipeline,
                                           Gfx, BoundSets, PushConstants,
-                                          ActiveOcclusionQueries))
+                                          ActiveOcclusionQueries,
+                                          ActivePipelineStatsQueries))
           return E;
       break;
     case RecordedCommand::Kind::CopyBufferToImage:
@@ -2669,7 +2770,8 @@ Error executeCommandsInto(
       }
       if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
                                      DeviceInfo, BoundSets, PushConstants,
-                                     ActiveOcclusionQueries))
+                                     ActiveOcclusionQueries,
+                                     ActivePipelineStatsQueries))
         return E;
       break;
     }
@@ -2717,7 +2819,8 @@ Error executeCommandsInto(
       for (const feme::graphics::DrawCommand &Draw : *Draws)
         if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
                                        DeviceInfo, BoundSets, PushConstants,
-                                       ActiveOcclusionQueries))
+                                       ActiveOcclusionQueries,
+                                       ActivePipelineStatsQueries))
           return E;
       break;
     }
@@ -2733,7 +2836,8 @@ Error executeCommandsInto(
       MeshDraw.GroupCount = Cmd.Count;
       if (Error E = runMeshDraw(*BoundGraphicsPipeline, Gfx, MeshDraw,
                                BoundSets, PushConstants,
-                               ActiveOcclusionQueries))
+                               ActiveOcclusionQueries,
+                               ActivePipelineStatsQueries))
         return E;
       break;
     }
@@ -2762,7 +2866,8 @@ Error executeCommandsInto(
       for (const feme::graphics::MeshDrawCommand &MeshDraw : *MeshDraws)
         if (Error E = runMeshDraw(*BoundGraphicsPipeline, Gfx, MeshDraw,
                                  BoundSets, PushConstants,
-                                 ActiveOcclusionQueries))
+                                 ActiveOcclusionQueries,
+                                 ActivePipelineStatsQueries))
           return E;
       break;
     }
@@ -2786,9 +2891,11 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
   std::vector<uint8_t> PushConstants(
       DeviceInfo ? DeviceInfo->Properties.limits.maxPushConstantsSize : 0, 0);
   std::vector<ActiveOcclusionQuery> ActiveOcclusionQueries;
+  std::vector<ActivePipelineStatsQuery> ActivePipelineStatsQueries;
   return executeCommandsInto(CmdBuf.commands(), DeviceInfo, BoundPipeline,
                              BoundGraphicsPipeline, Gfx, BoundSets,
-                             PushConstants, ActiveOcclusionQueries);
+                             PushConstants, ActiveOcclusionQueries,
+                             ActivePipelineStatsQueries);
 }
 
 namespace feme::vulkan {
