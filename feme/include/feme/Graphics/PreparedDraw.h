@@ -233,6 +233,42 @@ struct PreparedDraw {
   /// fragments leave surviving the final depth/stencil test -- the quantity
   /// `VK_QUERY_TYPE_OCCLUSION` queries report. Null when no caller needs it.
   uint64_t *PassedSampleCounter = nullptr;
+  /// (roadmap H9) `VK_QUERY_TYPE_PIPELINE_STATISTICS`'s own ten
+  /// draw-scoped counters (`VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_
+  /// INVOCATIONS_BIT` is dispatch-scoped instead -- see
+  /// `CommandBuffer.cpp`'s `runDispatch`). Mirrors `PassedSampleCounter`'s
+  /// own pattern: null (the common case, no pipeline-statistics query
+  /// currently active) costs this draw nothing; non-null names one
+  /// caller-owned accumulator `executeDraws` adds this one draw's own
+  /// contribution into, which the caller (`CommandBuffer.cpp`'s
+  /// `runPreparedDraw`/`runMeshDraw`) then sums into every currently
+  /// active `VK_QUERY_TYPE_PIPELINE_STATISTICS` query pool slot -- exactly
+  /// as a query's begin/end scope can span multiple draws, each summing
+  /// its own contribution in turn.
+  struct PipelineStatsCounters {
+    /// Vertices read by the input-assembly stage (one per vertex-shader
+    /// invocation for a non-tessellated draw; not meaningful on its own
+    /// for a tessellated one, which counts patches instead -- see
+    /// `InputAssemblyPrimitives`).
+    uint64_t InputAssemblyVertices = 0;
+    /// Primitives assembled by input assembly: one per patch for a
+    /// tessellated draw (the patch is what IA feeds the tessellator),
+    /// one per topology-assembled triangle/line/point otherwise.
+    uint64_t InputAssemblyPrimitives = 0;
+    uint64_t VertexShaderInvocations = 0;
+    uint64_t GeometryShaderInvocations = 0;
+    uint64_t GeometryShaderPrimitives = 0;
+    /// Primitives entering/leaving the clip stage, counted the same way
+    /// for every pre-rasterization chain (vertex, tessellation, geometry,
+    /// mesh) since all four funnel through `Executor.cpp`'s own single
+    /// `RasterizePrimitives` lambda.
+    uint64_t ClippingInvocations = 0;
+    uint64_t ClippingPrimitives = 0;
+    uint64_t FragmentShaderInvocations = 0;
+    uint64_t TessControlShaderPatches = 0;
+    uint64_t TessEvalShaderInvocations = 0;
+  };
+  PipelineStatsCounters *Stats = nullptr;
   /// (roadmap F8) `vkCmdSetRenderingAttachmentLocations`'s current mapping,
   /// in the same shape `VkRenderingAttachmentLocationInfo::
   /// pColorAttachmentLocations` uses: element `Location` names the

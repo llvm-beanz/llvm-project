@@ -2062,6 +2062,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           RasterPrimitiveClass RasterClass) -> Error {
     const StageStorage *RasterOut = &RasterOutRef;
 
+    // (roadmap H9) `CLIPPING_INVOCATIONS`: one per primitive entering
+    // this shared clip/rasterize path, regardless of which
+    // pre-rasterization chain (vertex, tessellation, geometry, mesh)
+    // assembled it -- exactly why this single lambda, not a per-chain
+    // counter, is the right place for both clipping counters.
+    if (Draw.Stats)
+      Draw.Stats->ClippingInvocations +=
+          RasterClass == RasterPrimitiveClass::Point
+              ? RasterOutRef.InvocationCount
+              : AbsTriIndices.size() + AbsLineIndices.size();
+
     auto vertexAt = [&](uint32_t Flat) {
       RasterVertex V;
       for (unsigned C = 0; C != 4; ++C)
@@ -2420,6 +2431,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       std::vector<RasterVertex> Clipped = clipTriangle(
           V, Varyings, Pipeline.getRasterState().DepthClampEnable,
           ClipDistanceCount);
+      // (roadmap H9) `CLIPPING_PRIMITIVES`: the clip stage's own fan
+      // triangulation of `Clipped`'s polygon (`Clipped.size() - 2`
+      // triangles for an `N`-vertex polygon, 0 if fully clipped away) --
+      // counted here, before the backface-cull test below, since culling
+      // is Vulkan's own separate downstream stage.
+      if (Draw.Stats && Clipped.size() >= 3)
+        Draw.Stats->ClippingPrimitives += Clipped.size() - 2;
       for (size_t I = 1; I + 1 < Clipped.size(); ++I) {
         std::array<const RasterVertex *, 3> Poly = {&Clipped[0], &Clipped[I],
                                                     &Clipped[I + 1]};
@@ -2568,6 +2586,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // triangle or line -- see `pointPassesDepthClip`'s own comment).
         if (!pointPassesDepthClip(V, Pipeline.getRasterState().DepthClampEnable))
           continue;
+        if (Draw.Stats)
+          ++Draw.Stats->ClippingPrimitives;
         std::array<float, 2> P;
         float InvW, Depth;
         projectVertex(V, *Primitive->Viewport, P, InvW, Depth);
@@ -2606,6 +2626,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                               Pipeline.getRasterState().DepthClampEnable);
         if (!ClippedLine)
           continue;
+        if (Draw.Stats)
+          ++Draw.Stats->ClippingPrimitives;
         V0 = (*ClippedLine)[0];
         V1 = (*ClippedLine)[1];
         std::array<float, 2> P0, P1;
@@ -3047,6 +3069,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             cpu::PreparedFragmentBatch::create(FS.getResourceInfo(), FRes);
         if (Error E = FS.invokeFragments(PFB))
           return E;
+        // (roadmap H9) `FRAGMENT_SHADER_INVOCATIONS`: every quad launches
+        // 4 lanes regardless of exact per-lane coverage (real quad-based
+        // GPUs count helper-invocation lanes too -- the Vulkan spec
+        // explicitly permits this), once per `PassSample` when sample
+        // shading re-invokes the shader per covered sample.
+        if (Draw.Stats)
+          Draw.Stats->FragmentShaderInvocations +=
+              static_cast<uint64_t>(QuadCount) * 4;
 
         for (uint32_t Q = 0; Q != QuadCount; ++Q) {
           const cpu::FemeFragmentResult &Result = Results[Q];
@@ -3570,6 +3600,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     uint32_t PerInstance = Cmd.VertexCount;
     uint32_t Total = PerInstance * Cmd.InstanceCount;
 
+    // (roadmap H9) Every fetched invocation is exactly one input-assembly
+    // vertex and one vertex-shader invocation, tessellated or not (a
+    // tessellated draw's own patches -- not `Total` -- are its
+    // `InputAssemblyPrimitives`, added separately below once
+    // `PatchesPerInstance` is known).
+    if (Draw.Stats) {
+      Draw.Stats->InputAssemblyVertices += Total;
+      Draw.Stats->VertexShaderInvocations += Total;
+    }
+
     // Primitive restart (`primitiveRestartEnable`) only applies to an
     // indexed strip/fan draw: a special index value ends the current
     // strip/fan and starts a new one, exactly as an unindexed strip/fan
@@ -3819,6 +3859,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           Patches.push_back(std::move(*Patch));
         }
       }
+      // (roadmap H9) Every patch is one input-assembly primitive (the
+      // patch list is what IA hands the tessellator) and one
+      // tessellation-control-shader patch; `TotalPoints` (every patch's
+      // own domain-stage output point count, already summed across every
+      // instance above) is exactly the tessellation-evaluation-shader
+      // invocation count.
+      if (Draw.Stats) {
+        uint64_t TotalPatches =
+            static_cast<uint64_t>(PatchesPerInstance) * Cmd.InstanceCount;
+        Draw.Stats->InputAssemblyPrimitives += TotalPatches;
+        Draw.Stats->TessControlShaderPatches += TotalPatches;
+        Draw.Stats->TessEvalShaderInvocations += TotalPoints;
+      }
 
       Expected<StageStorage> Flat = buildStageStorage(
           TessLink->DomainSig, SignatureDirection::Output, TotalPoints);
@@ -4054,6 +4107,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         for (std::array<uint32_t, 2> L : LineIndices)
           AbsLineIndices.push_back({Base + L[0], Base + L[1]});
       }
+      // (roadmap H9) A non-tessellated draw's own input-assembly
+      // primitives are exactly its topology-assembled triangles/lines
+      // (a `PointList` draw assembles no `TriIndices`/`LineIndices` at
+      // all -- every fetched vertex is its own point primitive instead,
+      // `Total` of them).
+      if (Draw.Stats)
+        Draw.Stats->InputAssemblyPrimitives +=
+            AbsTriIndices.size() + AbsLineIndices.size() +
+            (Pipeline.getTopology() == PrimitiveTopology::PointList ? Total
+                                                                    : 0);
     }
 
     // --- Geometry stage (roadmap H5d). ---
@@ -4304,6 +4367,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                : std::array<uint32_t, 3>{I + 1, I, I + 2});
         }
         break;
+      }
+      // (roadmap H9) `RowCount` (declared above) is exactly how many
+      // times the geometry entry point ran (once per assembled input
+      // primitive per `Invocations`); its own emitted primitive count is
+      // whatever the rebuilt `AbsTriIndices`/`AbsLineIndices` (or, for a
+      // `Points`-output geometry stage, `MergedVerts` itself -- one point
+      // primitive per emitted vertex) above just produced.
+      if (Draw.Stats) {
+        Draw.Stats->GeometryShaderInvocations += RowCount;
+        Draw.Stats->GeometryShaderPrimitives +=
+            GState.OutputPrimitive == GeometryOutputPrimitive::Points
+                ? MergedVerts.size()
+                : AbsTriIndices.size() + AbsLineIndices.size();
       }
       RasterOut = &GeomStreamOutput;
     }
