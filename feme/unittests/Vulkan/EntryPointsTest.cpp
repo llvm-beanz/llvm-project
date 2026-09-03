@@ -94,10 +94,14 @@ TEST_F(EntryPointsTest, FormatPropertiesReportsVertexBufferBit) {
 }
 
 TEST_F(EntryPointsTest, FormatPropertiesNeverReportsStorageImage) {
-  // No format has a shader-writable storage image path yet (see "V5:
-  // Images and sampling" in FeMeVulkanDesign.md).
+  // (Roadmap H8s) `R8G8B8A8_UNORM` itself gained a real
+  // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` this row (a genuine CTS-mandated
+  // gap fix, `femeRTPackImageTexel` already encoding it losslessly) -- its
+  // `_SRGB` sibling is not a valid storage-image format for any Vulkan
+  // device (sRGB decode/encode is undefined for `OpImageRead`/`Write`),
+  // so it remains the honest "never storage-capable" example here.
   VkFormatProperties Props{};
-  vkGetPhysicalDeviceFormatProperties(Physical, VK_FORMAT_R8G8B8A8_UNORM,
+  vkGetPhysicalDeviceFormatProperties(Physical, VK_FORMAT_R8G8B8A8_SRGB,
                                       &Props);
   EXPECT_FALSE(Props.optimalTilingFeatures &
                VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
@@ -125,14 +129,15 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsUnrecognizedFormat) {
 }
 
 TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsUnsupportedUsage) {
-  // (Roadmap E26) `R32_UINT` is not one of the mandatory-sampled integer
-  // formats `femeRTUnpackImageTexelI32` decodes (only its four-component
-  // `R32G32B32A32_UINT`/`_SINT` sibling and the packed formats are), so
+  // (Roadmap H8s) `R32G32B32_UINT` is a 3-component 32-bit integer format
+  // `formatFeatureFlags` never grants any image-usable bit for at all (no
+  // real GPU image hardware supports a 3-component 96-bit-per-texel
+  // layout; it exists only as a vertex-buffer/storage-buffer format), so
   // requesting `SAMPLED_BIT` for it must still fail rather than silently
   // succeed with a descriptor that would sample as all-zero.
   VkImageFormatProperties Props{};
   EXPECT_EQ(vkGetPhysicalDeviceImageFormatProperties(
-                Physical, VK_FORMAT_R32_UINT, VK_IMAGE_TYPE_2D,
+                Physical, VK_FORMAT_R32G32B32_UINT, VK_IMAGE_TYPE_2D,
                 VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
             VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
@@ -149,10 +154,13 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesAcceptsMandatoryIntegerFormat) {
 }
 
 TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsStorageUsage) {
-  // No format has a shader-writable storage image path yet.
+  // (Roadmap H8s) `R8G8B8A8_UNORM` itself gained real
+  // `VK_IMAGE_USAGE_STORAGE_BIT` support this row -- its `_SRGB` sibling
+  // never supports storage-image usage on any Vulkan device, so it stays
+  // the honest "storage not supported" example here.
   VkImageFormatProperties Props{};
   EXPECT_EQ(vkGetPhysicalDeviceImageFormatProperties(
-                Physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
+                Physical, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TYPE_2D,
                 VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_STORAGE_BIT, 0, &Props),
             VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
@@ -296,18 +304,24 @@ TEST_F(EntryPointsTest, FormatProperties2FillsChainedFormatProperties3) {
   // (roadmap F11) `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT` has no
   // 32-bit `VkFormatFeatureFlags` equivalent, so `Props3` carries it in
   // addition to every bit the widened 32-bit `Props2.formatProperties`
-  // already reports, rather than being exactly equal to it. `R8G8B8A8_
-  // UNORM` is not one of the formats the storage-image pack/unpack
-  // switch in `Format.cpp` recognizes (unlike its `_SNORM`/`_SINT`
-  // siblings), so its tiling features carry no `VK_FORMAT_FEATURE_2_
-  // STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT` (roadmap H19i) either.
+  // already reports, rather than being exactly equal to it. (Roadmap H8s)
+  // `R8G8B8A8_UNORM` itself gained a real `VK_FORMAT_FEATURE_STORAGE_
+  // IMAGE_BIT` this row (the storage-image pack/unpack switch in
+  // `Format.cpp` now recognizes it, same as its `_SNORM`/`_SINT`
+  // siblings already did), so its tiling features now carry
+  // `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT`
+  // (roadmap H19i) too.
   EXPECT_EQ(Props3.linearTilingFeatures,
             (VkFormatFeatureFlags2)Props2.formatProperties.linearTilingFeatures |
-                VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
+                VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT |
+                VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+                VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
   EXPECT_EQ(
       Props3.optimalTilingFeatures,
       (VkFormatFeatureFlags2)Props2.formatProperties.optimalTilingFeatures |
-          VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
+          VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT |
+          VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+          VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
   // (Roadmap H19i) `R8G8B8A8_UNORM` *is* one of the identity 4-component
   // formats `isTexelBufferFormatSupported` recognizes, so unlike the two
   // tiling-feature fields above, `bufferFeatures` does carry both
@@ -421,32 +435,35 @@ TEST_F(EntryPointsTest,
 
 TEST_F(EntryPointsTest,
        FormatProperties3ReportsStorageWithoutFormatForTexelBufferFormat) {
-  // (Roadmap H19i/H8d) `R8G8B8A8_UINT` is one of the identity 4-component
-  // formats both `isTexelBufferFormatSupported` and
-  // `isStorageTexelBufferFormatSupported` recognize (`Format.cpp`), so it
+  // (Roadmap H8s) `R16_UNORM` is one of the formats the storage-image
+  // pack/unpack switch in `Format.cpp` recognizes (roadmap H19n), so it
   // must gain both `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_
-  // FORMAT_BIT` on `bufferFeatures` -- but it is *not* one of the formats
-  // the storage-image pack/unpack switch in `Format.cpp` recognizes
-  // (unlike its `_SNORM`/`_SINT` siblings, added by roadmap H19n), so its
-  // tiling features must not pick up either bit.
+  // FORMAT_BIT` on its tiling features -- but it is *not* one of the
+  // identity formats `isTexelBufferFormatSupported` recognizes (only its
+  // `_FLOAT`/`_UINT`/`_SINT` siblings are, `Format.cpp`), so
+  // `bufferFeatures` must not pick up either bit (this row's own fixes
+  // widened the storage-image switch until every remaining
+  // `isStorageTexelBufferFormatSupported` format was also a
+  // storage-image format, so no format now demonstrates the converse
+  // pairing this test used to use, `R8G8B8A8_UINT`).
   VkFormatProperties3 Props3{};
   Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
   VkFormatProperties2 Props2{};
   Props2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
   Props2.pNext = &Props3;
-  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R8G8B8A8_UINT,
+  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R16_UNORM,
                                        &Props2);
-  EXPECT_TRUE(Props3.bufferFeatures &
+  EXPECT_TRUE(Props3.linearTilingFeatures &
               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
-  EXPECT_TRUE(Props3.bufferFeatures &
+  EXPECT_TRUE(Props3.linearTilingFeatures &
               VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
-  EXPECT_FALSE(Props3.linearTilingFeatures &
+  EXPECT_TRUE(Props3.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+  EXPECT_TRUE(Props3.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+  EXPECT_FALSE(Props3.bufferFeatures &
                VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
-  EXPECT_FALSE(Props3.linearTilingFeatures &
-               VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
-  EXPECT_FALSE(Props3.optimalTilingFeatures &
-               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
-  EXPECT_FALSE(Props3.optimalTilingFeatures &
+  EXPECT_FALSE(Props3.bufferFeatures &
                VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
 }
 

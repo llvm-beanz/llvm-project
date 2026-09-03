@@ -823,20 +823,24 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         // Roadmap H19n: `R16G16_UINT`/`_SINT`.
         ResourceFormat::R16G16_UINT, ResourceFormat::R16G16_SINT,
         // Roadmap H19o: `R10G10B10A2_SINT`.
-        ResourceFormat::R10G10B10A2_SINT}) {
+        ResourceFormat::R10G10B10A2_SINT,
+        // (Roadmap H8s) `R32_{UINT,SINT}`/`R32G32_{UINT,SINT}`: a real
+        // CTS re-run found these still missing `SAMPLED_IMAGE_BIT`
+        // despite `femeRTUnpackImageTexelI32` already decoding all four
+        // (roadmap H19a) -- a plain omission from this switch, unlike
+        // E26's own comment above (written before that gap was found).
+        ResourceFormat::R32_UINT, ResourceFormat::R32_SINT,
+        ResourceFormat::R32G32_UINT, ResourceFormat::R32G32_SINT}) {
     VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
   }
-  // An HDR ASTC format samples as all-zero (the RGBA8 bridge is LDR-only),
-  // a depth format is never a color-sampled format at all, and
-  // `R32_UINT`/`_SINT`'s partial-component siblings are not mandatory-
-  // sampled and so remain unimplemented (roadmap E26's own scope note,
-  // FeMeRuntimeCPU.c) -- all three are honestly left unset, same as every
-  // other unimplemented sampled format.
+  // An HDR ASTC format samples as all-zero (the RGBA8 bridge is LDR-only)
+  // and a depth format is never a color-sampled format at all -- both are
+  // honestly left unset, same as every other unimplemented sampled
+  // format.
   for (ResourceFormat Format :
-       {ResourceFormat::R32_UINT, ResourceFormat::R32G32_UINT,
-        ResourceFormat::D32_FLOAT, ResourceFormat::ASTC_4x4_SFLOAT}) {
+       {ResourceFormat::D32_FLOAT, ResourceFormat::ASTC_4x4_SFLOAT}) {
     EXPECT_FALSE(formatFeatureFlags(Format) &
                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
   }
@@ -977,15 +981,22 @@ TEST(FormatTest, FormatFeatureFlagsOnlyAdvertisesStorageImageForTheMandatoryFloo
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R10G10B10A2_SINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   // (Roadmap H19n) `R8G8B8A8_SNORM`/`_SINT`: a real mandatory entry
-  // distinct from `R8G8B8A8_UNORM`/`_UINT` staying unset.
+  // distinct from `R8G8B8A8_UNORM`/`_UINT`.
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8B8A8_SNORM) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
   EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8B8A8_SINT) &
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
-  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
-              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
-  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R32G32_FLOAT) &
-              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  // (Roadmap H8s) `R8G8B8A8_{UINT,UNORM}`/`R32G32_FLOAT`: a real CTS
+  // re-run found these three still missing `STORAGE_IMAGE_BIT`, part of
+  // Vulkan's own mandatory storage-image floor -- `femeRTPackImageTexel`/
+  // `PackImageTexelI32` (FeMeRuntimeCPU.c, roadmap H8d) already have real
+  // encode cases for all three.
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UINT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R32G32_FLOAT) &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
 }
 
 TEST(FormatTest, FormatFeatureFlagsAttachmentBitsMatchRenderPassSupport) {

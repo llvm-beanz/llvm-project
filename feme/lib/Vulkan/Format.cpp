@@ -1044,6 +1044,18 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `R16_UINT`/`_SINT` above.
   case ResourceFormat::R16G16_UINT:
   case ResourceFormat::R16G16_SINT:
+  // (Roadmap H8s) `R32_{UINT,SINT}`/`R32G32_{UINT,SINT}`: a real CTS
+  // re-run against feme's own ICD found these four still missing
+  // `SAMPLED_IMAGE_BIT` -- a plain omission from this switch's own
+  // integer-format coverage above (every structurally-similar narrower
+  // integer format is already listed), not a runtime gap:
+  // `femeRTUnpackImageTexelI32` (FeMeRuntimeCPU.c, roadmap H19a) already
+  // has real decode cases for all four, reused already by the
+  // storage-image and texel-buffer read paths.
+  case ResourceFormat::R32_UINT:
+  case ResourceFormat::R32_SINT:
+  case ResourceFormat::R32G32_UINT:
+  case ResourceFormat::R32G32_SINT:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     break;
   // (Roadmap H8e) `D16_UNORM`: a CTS-confirmed genuine `SAMPLED_IMAGE_BIT`
@@ -1147,6 +1159,17 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `femeRTPackImageTexelI32` cases (FeMeRuntimeCPU.c).
   case ResourceFormat::R32G32_UINT:
   case ResourceFormat::R32G32_SINT:
+  // (Roadmap H8s) `R32G32_FLOAT`/`R8G8B8A8_{UINT,UNORM}`: a real CTS
+  // re-run found these three still missing `STORAGE_IMAGE_BIT`, part of
+  // Vulkan's own mandatory storage-image floor regardless of
+  // `shaderStorageImageExtendedFormats` -- a plain omission from this
+  // switch above, not a runtime gap: `femeRTPackImageTexel`/
+  // `PackImageTexelI32` (FeMeRuntimeCPU.c, roadmap H8d) already have real
+  // encode cases for all three, reused already by the texel-buffer
+  // write path.
+  case ResourceFormat::R32G32_FLOAT:
+  case ResourceFormat::R8G8B8A8_UINT:
+  case ResourceFormat::R8G8B8A8_UNORM:
     Flags |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     break;
   // (Roadmap H19n) The packed 32-bit formats
