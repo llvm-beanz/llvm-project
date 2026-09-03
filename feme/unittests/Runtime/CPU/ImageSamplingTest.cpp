@@ -1786,6 +1786,48 @@ TEST_F(ImageSamplingTest, LoadFetchesA1R5G5B5Unorm) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f);
 }
 
+// Roadmap H8g: `R5G6B5_UNORM`/`B5G6R5_UNORM`, another CTS-confirmed
+// genuine `SAMPLED_IMAGE_BIT` gap for the last two of roadmap H7r's own
+// packed 16-bit formats -- neither has an alpha channel, unlike every
+// format above, so alpha should read back as an implicit, unwritable
+// `1.0`.
+
+TEST_F(ImageSamplingTest, LoadFetchesR5G6B5Unorm) {
+  // From the MSB down: 5 bits R, 6 bits G, 5 bits B. Set R=31 (max), G=0,
+  // B=0 so each field is unambiguous.
+  uint16_t Storage[1][1] = {{(uint16_t)(31u << 11)}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R5G6B5_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesB5G6R5Unorm) {
+  // From the MSB down: 5 bits B, 6 bits G, 5 bits R. Set R=31 (max, the
+  // last 5 bits here), G=0, B=0 so each field is unambiguous.
+  uint16_t Storage[1][1] = {{(uint16_t)31u}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::B5G6R5_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
 // Roadmap F8b: the single-component depth/stencil formats
 // `feme::vulkan::buildSubpassInputHeap` feeds a depth/stencil subpass
 // input attachment through -- these were the format-decode gap that left

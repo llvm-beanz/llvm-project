@@ -1512,6 +1512,14 @@ femeRTImageFormatElementSize(uint32_t Format) {
     return 2;
   case 84: // A1R5G5B5_UNORM (packed into a single 2-byte word)
     return 2;
+  // (Roadmap H8g) `R5G6B5_UNORM`/`B5G6R5_UNORM`: the last two of roadmap
+  // H7r's own packed 16-bit formats without a real runtime sampling case,
+  // a CTS-confirmed genuine `SAMPLED_IMAGE_BIT` gap (mirroring H8e's own
+  // precedent for `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM` above).
+  case 80: // R5G6B5_UNORM (packed into a single 2-byte word)
+    return 2;
+  case 81: // B5G6R5_UNORM (packed into a single 2-byte word)
+    return 2;
   // (Roadmap F8b) Single-component depth/stencil formats, as
   // `feme::vulkan::buildSubpassInputHeap` feeds them: a pure depth or
   // pure stencil attachment is one of these, never a combined format (see
@@ -1954,6 +1962,26 @@ femeRTUnpackA1R5G5B5Unorm(uint16_t Raw) {
   return V;
 }
 
+// (Roadmap H8g) Unpacks an `R5G6B5_UNORM`/`B5G6R5_UNORM` value
+// (`VK_FORMAT_R5G6B5_UNORM_PACK16`/`VK_FORMAT_B5G6R5_UNORM_PACK16`: from
+// the MSB down, 5 bits of the first channel, 6 bits of G, 5 bits of the
+// third channel, no alpha) into a `<4 x float>` in `[0.0, 1.0]`, alpha
+// padding an implicit, unwritable `1.0` (this pair has no alpha channel
+// at all, unlike every other packed 16-bit format above). `FirstIsRed`
+// selects which channel order (`R5G6B5` vs `B5G6R5`) to decode into.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR5G6B5Unorm(uint16_t Raw, int FirstIsRed) {
+  FemeRTv4f32 V;
+  float First = (float)((Raw >> 11) & 0x1Fu) / 31.0f;
+  float G = (float)((Raw >> 5) & 0x3Fu) / 63.0f;
+  float Third = (float)(Raw & 0x1Fu) / 31.0f;
+  V[0] = FirstIsRed ? First : Third;
+  V[1] = G;
+  V[2] = FirstIsRed ? Third : First;
+  V[3] = 1.0f;
+  return V;
+}
+
 // Unpacks one texel of `Format` at `Ptr` into a linear-light `<4 x float>`,
 // or all-zero for a format `femeRTImageFormatElementSize` doesn't know
 // (guarded by that function's 0 return at every call site below, so this
@@ -2069,6 +2097,16 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     uint16_t Raw;
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackA1R5G5B5Unorm(Raw);
+  }
+  case 80: { // R5G6B5_UNORM (roadmap H8g)
+    uint16_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR5G6B5Unorm(Raw, /*FirstIsRed=*/1);
+  }
+  case 81: { // B5G6R5_UNORM (roadmap H8g)
+    uint16_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR5G6B5Unorm(Raw, /*FirstIsRed=*/0);
   }
   case 31: { // D16_UNORM (roadmap F8b)
     uint16_t Raw;

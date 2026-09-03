@@ -735,6 +735,10 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         // genuine `SAMPLED_IMAGE_BIT` gap rather than a reporting-only
         // one, now decoded by `femeRTUnpackImageTexel`'s own cases.
         ResourceFormat::B4G4R4A4_UNORM, ResourceFormat::A1R5G5B5_UNORM,
+        // Roadmap H8g: `R5G6B5_UNORM`/`B5G6R5_UNORM`, another
+        // CTS-confirmed genuine `SAMPLED_IMAGE_BIT` gap, now decoded by
+        // `femeRTUnpackImageTexel`'s own `femeRTUnpackR5G6B5Unorm` case.
+        ResourceFormat::R5G6B5_UNORM, ResourceFormat::B5G6R5_UNORM,
         ResourceFormat::ASTC_4x4_UNORM, ResourceFormat::ASTC_12x12_SRGB,
         // Roadmap H19j: `R8_UNORM`/`_SNORM`.
         ResourceFormat::R8_UNORM, ResourceFormat::R8_SNORM,

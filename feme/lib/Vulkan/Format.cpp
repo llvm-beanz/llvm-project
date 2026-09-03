@@ -950,6 +950,17 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     break;
+  // (Roadmap H8g) `R5G6B5_UNORM`/`B5G6R5_UNORM`: the last two of roadmap
+  // H7r's own packed 16-bit formats without a real runtime sampling case,
+  // decoded by `femeRTUnpackImageTexel`'s own `R5G6B5_UNORM`/
+  // `B5G6R5_UNORM` cases now (`femeRTUnpackR5G6B5Unorm`), a CTS-confirmed
+  // genuine `SAMPLED_IMAGE_BIT` gap mirroring H8e's own precedent for
+  // `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM` above.
+  case ResourceFormat::R5G6B5_UNORM:
+  case ResourceFormat::B5G6R5_UNORM:
+    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+             VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    break;
   // (Roadmap H8q) `E5B9G9R9_UFLOAT`: decoded by
   // `femeRTUnpackImageTexel`'s own `E5B9G9R9_UFLOAT` case
   // (`femeRTUnpackRGB9E5`).
