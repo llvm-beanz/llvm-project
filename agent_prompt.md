@@ -37,28 +37,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8p or other prerequisites blocking the H-series milestones?
+Can you work on H8q or other prerequisites blocking the H-series milestones?
 
-> **The genuine integer-format `COLOR_ATTACHMENT_BIT` gap H8e split off.**
-> `r16_{sint,uint}`, `r16g16_{sint,uint}`, `a2b10g10r10_uint_pack32`,
-> `a8b8g8r8_{uint,sint}_pack32` (7 `VkFormat`s across 4 distinct
-> `ResourceFormat` gaps once `A8B8G8R8_*_PACK32`'s existing `R8G8B8A8_*`
-> aliasing is accounted for) are each missing only
-> `VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT`, confirmed by a real `deqp-vk` run --
-> but H8e's own investigation found this is not a simple advertisement fix:
-> `Executor.cpp`'s `executeDraws` hard-rejects any pipeline whose fragment
-> output `ComponentType != SignatureComponentType::Float` outright (regardless
-> of the target attachment's own format), so no `ivec4`/`uvec4` fragment-shader
-> output can be created or drawn today. A real fix needs, at minimum: (1)
-> widening that `executeDraws` check to accept an integer-typed fragment output
-> when the bound attachment format is itself an integer format; (2) a new
-> integer-reading counterpart to `readFragmentColor` (which today
-> unconditionally calls `FSOutput.readFloat`); (3) confirming/extending
-> `packClearColor`/`unpackColor` (`ImageFixture.cpp`) to actually pack/unpack
-> these four `ResourceFormat`s (not yet checked); (4) a new `true` case in
-> `RenderPass.cpp`'s `isSupportedColorAttachmentFormat` (today explicitly
-> `false` for every integer format, per its own "an integer format no fragment
-> output writes yet" comment) once (1)-(3) land, so the advertised bit is never
-> dishonest. Needs its own scoping pass splitting this into sub-rows once the
-> size of (1)-(3) is better understood, mirroring H8k's own precedent for
-> BC6H/BC7
+> **`e5b9g9r9_ufloat_pack32` (`VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`) is an entirely
+> unimplemented format, split off from H8e.** A real `deqp-vk` run found this
+> format missing *every* required feature bit
+> (`BLIT_SRC_BIT`/`SAMPLED_IMAGE_BIT`/`FILTER_LINEAR_BIT`/`TRANSFER_DST_BIT`/`TRANSFER_SRC_BIT`),
+> the tell-tale sign `mapVkFormat` has no case for it at all (unlike H8p's own
+> formats, which are each missing only one specific bit) -- there is no
+> `ResourceFormat` enumerator, no pack/unpack support, nothing. A real fix needs
+> a brand-new shared-exponent RGB9E5 packed format: a new
+> `ResourceFormat::E5B9G9R9_UFLOAT` enumerator (appended at `RuntimeABI.h`'s own
+> tail, per that file's append-only hard-coded-switch-case constraint), a
+> `mapVkFormat` case, `packClearColor`/`unpackColor` shared-exponent
+> encode/decode logic (distinct from every existing packed-format case in
+> `ImageFixture.cpp`: a shared 5-bit exponent plus three independent 9-bit
+> mantissas, needing real floating-point range-reduction math, not just bitfield
+> extraction), and (if sampling is also wanted) a
+> `femeRTImageFormatElementSize`/`femeRTUnpackImageTexel` runtime case mirroring
+> `R11G11B10_FLOAT`'s own precedent for the closest existing packed-float format
