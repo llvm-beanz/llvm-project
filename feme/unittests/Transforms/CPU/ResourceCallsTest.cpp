@@ -246,5 +246,101 @@ TEST_F(ResourceCallsTest, AtomicMemoryEffectsAreArgMemOnlyModRef) {
   EXPECT_TRUE(isModAndRefSet(Atomic->getMemoryEffects().getModRef()));
 }
 
+// Roadmap H8x: `createAtomicAddRaw`/`matchResourceCall` round-trip the raw
+// (byte-offset-addressed) atomic family the same way
+// `CreateAtomicAddTypedRoundTrips` above confirms for the element-index-
+// addressed `Typed` family -- `Offset` here carries a byte offset rather
+// than an element index, matching `LoadRaw`/`StoreRaw`'s own convention.
+TEST_F(ResourceCallsTest, CreateAtomicAddRawRoundTrips) {
+  IRBuilder<> Builder(BB);
+  ResourceCallEnv Env = makeEnv(Builder);
+  Value *DescIdx = Builder.getInt32(3);
+  Value *ByteOffset = Builder.getInt64(16);
+  Value *Val = Builder.getInt32(7);
+  Value *Mask = Builder.getTrue();
+
+  CallInst *CI =
+      createAtomicAddRaw(Builder, Env, DescIdx, ByteOffset, Val, Mask);
+  ASSERT_TRUE(CI);
+  EXPECT_EQ(CI->getType(), Type::getInt32Ty(Ctx));
+  EXPECT_EQ(CI->getCalledFunction()->getName(),
+            "feme.cpu.resource.atomic.add.raw.i32");
+
+  std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ResourceCallKind::AtomicAddRaw);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->DescriptorIndex, DescIdx);
+  EXPECT_EQ(Matched->Offset, ByteOffset);
+  EXPECT_EQ(Matched->StoredValue, Val);
+  EXPECT_EQ(Matched->Comparator, nullptr);
+  EXPECT_EQ(Matched->Mask, Mask);
+}
+
+// Every other simple RMW raw kind (`AtomicUMaxRaw` picked arbitrarily)
+// shares `AtomicAddRaw`'s own shape -- confirm the callee name alone is
+// what `matchResourceCall` uses to distinguish the RMW operation actually
+// performed, mirroring `CreateAtomicUMaxTypedRoundTrips`'s own identical
+// rationale.
+TEST_F(ResourceCallsTest, CreateAtomicUMaxRawRoundTrips) {
+  IRBuilder<> Builder(BB);
+  ResourceCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createAtomicUMaxRaw(Builder, Env, Builder.getInt32(0),
+                         Builder.getInt64(8), Builder.getInt32(9),
+                         Builder.getFalse());
+  std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ResourceCallKind::AtomicUMaxRaw);
+  EXPECT_EQ(Matched->StoredValue, Builder.getInt32(9));
+  EXPECT_EQ(Matched->Mask, Builder.getFalse());
+}
+
+// Roadmap H8x: `createAtomicCompareExchangeRaw`/`matchResourceCall`
+// round-trip the one raw atomic kind with an extra `Comparator` operand
+// before the value, mirroring
+// `CreateAtomicCompareExchangeTypedRoundTrips`'s own identical 7-argument
+// shape check -- confirms `isCompareExchange` (rather than the prior
+// literal `AtomicCompareExchangeTyped`-only check) now also recognizes
+// this new Raw kind.
+TEST_F(ResourceCallsTest, CreateAtomicCompareExchangeRawRoundTrips) {
+  IRBuilder<> Builder(BB);
+  ResourceCallEnv Env = makeEnv(Builder);
+  Value *DescIdx = Builder.getInt32(2);
+  Value *ByteOffset = Builder.getInt64(24);
+  Value *Comparator = Builder.getInt32(0);
+  Value *Val = Builder.getInt32(42);
+  Value *Mask = Builder.getTrue();
+
+  CallInst *CI = createAtomicCompareExchangeRaw(
+      Builder, Env, DescIdx, ByteOffset, Comparator, Val, Mask);
+  ASSERT_TRUE(CI);
+  EXPECT_EQ(CI->getCalledFunction()->getName(),
+            "feme.cpu.resource.atomic.compare_exchange.raw.i32");
+  EXPECT_EQ(CI->arg_size(), 7u);
+
+  std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ResourceCallKind::AtomicCompareExchangeRaw);
+  EXPECT_EQ(Matched->DescriptorIndex, DescIdx);
+  EXPECT_EQ(Matched->Offset, ByteOffset);
+  EXPECT_EQ(Matched->Comparator, Comparator);
+  EXPECT_EQ(Matched->StoredValue, Val);
+  EXPECT_EQ(Matched->Mask, Mask);
+}
+
+// Roadmap H8x: a raw atomic reads *and* writes through the resource in one
+// call, exactly like a `Typed` atomic -- confirms `isAtomic`'s widened
+// switch still drives `getOrInsertResourceCall`'s memory-effects choice
+// correctly for the new Raw family, mirroring
+// `AtomicMemoryEffectsAreArgMemOnlyModRef`'s own identical check.
+TEST_F(ResourceCallsTest, AtomicRawMemoryEffectsAreArgMemOnlyModRef) {
+  Type *I32 = Type::getInt32Ty(Ctx);
+  Function *Atomic =
+      getOrInsertResourceCall(*M, ResourceCallKind::AtomicAddRaw, I32);
+  EXPECT_TRUE(Atomic->getMemoryEffects().onlyAccessesArgPointees());
+  EXPECT_TRUE(isModAndRefSet(Atomic->getMemoryEffects().getModRef()));
+}
+
 } // namespace
 
