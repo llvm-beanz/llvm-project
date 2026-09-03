@@ -30,6 +30,31 @@ const SignatureElement *findProducer(const EntrySignature &Sig,
                                Consumer.Index);
 }
 
+/// (Roadmap H9b) \p Elt's own real per-vertex-invocation row shape, for
+/// comparing/linking against another stage's element: `RowCount` alone
+/// conflates two structurally-identical shapes `CanonicalizeStage.cpp`'s
+/// `addElements` can produce for an `Input`-direction element (see
+/// `SignatureElement::RowCountIsVertexArray`'s own comment) -- a real
+/// matrix's row count (meaningful across a cross-stage link, e.g. an
+/// `mat3` varying), or a geometry/hull/domain entry's own per-vertex
+/// array extent (e.g. 3 for a triangle's `gl_in[]`), which is not: that
+/// dimension is a genuinely different attribute-copy semantics
+/// (`feme::graphics::executeDraws`'s own per-vertex expansion into
+/// separate producer invocations via `copyLinkedElements`'s
+/// `SourceInvocations` remapping, mirrored by `PatchPipeline.cpp`'s own
+/// per-control-point remapping -- see `copyLinkedElements`'s own file
+/// comment), not a same-invocation multi-row copy. Every producer this
+/// element could ever link against (an ordinary, unarrayed vertex/domain
+/// stage output) describes only the single vertex its own invocation
+/// produced, i.e. `RowCount == 1` in this same sense, so folding a
+/// per-vertex array's own extent into the comparison/copy below wrongly
+/// disagrees with that producer's genuine `RowCount == 1` -- exactly the
+/// `vkQueueSubmit`-time "disagree on component/row count or type"
+/// mismatch this row fixes.
+uint32_t effectiveRowCount(const SignatureElement &Elt) {
+  return Elt.RowCountIsVertexArray ? 1 : Elt.RowCount;
+}
+
 } // namespace
 
 Expected<SmallVector<LinkedStageElement, 4>>
@@ -60,7 +85,7 @@ linkStageElements(const EntrySignature &ProducerSig,
                                StageDescription.str().c_str(),
                                Consumer.ElementID);
     if (Producer->ComponentCount != Consumer.ComponentCount ||
-        Producer->RowCount != Consumer.RowCount ||
+        effectiveRowCount(*Producer) != effectiveRowCount(Consumer) ||
         Producer->ComponentType != Consumer.ComponentType)
       return createStringError(inconvertibleErrorCode(),
                                "%s: element %u and its producer element %u "
@@ -69,7 +94,7 @@ linkStageElements(const EntrySignature &ProducerSig,
                                Consumer.ElementID, Producer->ElementID);
     Links.push_back({Producer->ElementID, Consumer.ElementID,
                      Producer->FirstComponent, Consumer.FirstComponent,
-                     Consumer.ComponentCount, Consumer.RowCount});
+                     Consumer.ComponentCount, effectiveRowCount(Consumer)});
   }
   return Links;
 }

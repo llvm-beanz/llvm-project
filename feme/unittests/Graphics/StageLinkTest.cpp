@@ -114,6 +114,114 @@ TEST(StageLinkTest, RejectsAComponentCountMismatch) {
   ASSERT_THAT_ERROR(Links.takeError(), Failed());
 }
 
+// (Roadmap H9b) A genuine `RowCount` mismatch -- neither side's own
+// dimension is a per-vertex array's own extent -- must still be rejected;
+// this row's own `effectiveRowCount` fold only applies when
+// `RowCountIsVertexArray` is actually set.
+TEST(StageLinkTest, RejectsARowCountMismatchWhenNeitherSideIsAVertexArray) {
+  EntrySignature Producer;
+  SignatureElement ProducerElt =
+      makeElement(0, SignatureDirection::Output, 0, /*ComponentCount=*/4);
+  ProducerElt.RowCount = 3;
+  Producer.Elements = {ProducerElt};
+  EntrySignature Consumer;
+  SignatureElement ConsumerElt =
+      makeElement(0, SignatureDirection::Input, 0, /*ComponentCount=*/4);
+  ConsumerElt.RowCount = 2;
+  Consumer.Elements = {ConsumerElt};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "producer output -> consumer input");
+  ASSERT_THAT_ERROR(Links.takeError(), Failed());
+}
+
+// (Roadmap H9b) The real gap: a geometry (or hull/domain) entry's own
+// plain per-vertex-arrayed varying input -- `layout(location=0) in vec4
+// in_color[];`, folded by `CanonicalizeStage.cpp`'s `addElements` into
+// `RowCount == 3` (a triangle's own vertex count) with
+// `RowCountIsVertexArray` set, per roadmap H5f -- must still link
+// successfully against the vertex stage's own plain, unarrayed `vec4`
+// output at the same location (`RowCount == 1`): the two describe the
+// same single-vertex attribute, linked once per assembled primitive's own
+// vertex (`feme::graphics::executeDraws`'s own per-vertex expansion into
+// separate producer invocations, not a same-invocation multi-row copy).
+// Before this row's fix, comparing the two `RowCount`s directly (3 vs 1)
+// always disagreed for a real vertex+geometry pipeline, i.e. this exact
+// shape reproduces the `vkQueueSubmit`-time "disagree on component/row
+// count or type" diagnostic end to end.
+TEST(StageLinkTest,
+     LinksAGeometryPerVertexArrayInputAgainstAnUnarrayedProducer) {
+  EntrySignature Producer;
+  Producer.Elements = {
+      makeElement(6, SignatureDirection::Output, 0, /*ComponentCount=*/4)};
+
+  EntrySignature Consumer;
+  SignatureElement GeomInColor =
+      makeElement(0, SignatureDirection::Input, 0, /*ComponentCount=*/4);
+  GeomInColor.RowCount = 3;
+  GeomInColor.RowCountIsVertexArray = true;
+  Consumer.Elements = {GeomInColor};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "vertex/domain stage output -> geometry stage input");
+  ASSERT_THAT_EXPECTED(Links, Succeeded());
+  ASSERT_EQ(Links->size(), 1u);
+  EXPECT_EQ((*Links)[0].SourceElementID, 6u);
+  EXPECT_EQ((*Links)[0].DestElementID, 0u);
+  // The link's own `RowCount` is the real, single-vertex shape (1), not
+  // the consumer's folded per-vertex-array extent (3): `copyLinkedElements`
+  // must not walk 3 "rows" out of a producer whose own storage only ever
+  // has 1.
+  EXPECT_EQ((*Links)[0].RowCount, 1u);
+}
+
+// End-to-end companion to the above: confirms `copyLinkedElements` (given
+// the peeled `RowCount == 1` the previous test checked) actually copies
+// the right scalars for each of a triangle's 3 vertices, each sourced
+// from its own separate vertex-stage invocation via `SourceInvocations`
+// -- exactly `feme::graphics::executeDraws`'s own geometry-input
+// expansion (one storage "invocation" per (primitive, vertex-in-primitive)
+// pair, not a `Row`-indexed walk within one).
+TEST(StageLinkTest, CopiesLinkedGeometryPerVertexArrayInput) {
+  EntrySignature Producer;
+  Producer.Elements = {
+      makeElement(0, SignatureDirection::Output, 0, /*ComponentCount=*/1)};
+
+  EntrySignature Consumer;
+  SignatureElement GeomInColor =
+      makeElement(0, SignatureDirection::Input, 0, /*ComponentCount=*/1);
+  GeomInColor.RowCount = 3;
+  GeomInColor.RowCountIsVertexArray = true;
+  Consumer.Elements = {GeomInColor};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "vertex/domain stage output -> geometry stage input");
+  ASSERT_THAT_EXPECTED(Links, Succeeded());
+
+  // 3 real vertex-shader invocations (one triangle's worth).
+  Expected<StageStorage> From = buildStageStorage(
+      Producer, SignatureDirection::Output, /*InvocationCount=*/3);
+  ASSERT_THAT_EXPECTED(From, Succeeded());
+  for (uint32_t V = 0; V != 3; ++V)
+    From->writeFloat(0, 0, V, static_cast<float>(V) + 10.0f);
+
+  // 3 expanded "invocations" (one per vertex-in-primitive slot), matching
+  // `Executor.cpp`'s own `RowCount * GeomVerticesPerPrimitive`-sized
+  // `GSInput` storage for a single triangle primitive.
+  Expected<StageStorage> To = buildStageStorage(
+      Consumer, SignatureDirection::Input, /*InvocationCount=*/3);
+  ASSERT_THAT_EXPECTED(To, Succeeded());
+  std::vector<uint32_t> SourceInvocations = {0, 1, 2};
+  copyLinkedElements(*From, *To, *Links, /*InvocationCount=*/3,
+                     SourceInvocations);
+  EXPECT_FLOAT_EQ(To->readFloat(0, 0, 0), 10.0f);
+  EXPECT_FLOAT_EQ(To->readFloat(0, 0, 1), 11.0f);
+  EXPECT_FLOAT_EQ(To->readFloat(0, 0, 2), 12.0f);
+}
+
 TEST(StageLinkTest, HonorsAConsumerFilter) {
   EntrySignature Producer;
   Producer.Elements = {makeElement(0, SignatureDirection::Output, 0),
@@ -177,8 +285,8 @@ TEST(StageLinkTest, CopiesLinkedElementsRemappingInvocations) {
 // this row's fix.
 TEST(StageLinkTest, BuildStageStorageSkipsSystemValueInputStorageByDefault) {
   EntrySignature Sig;
-  SignatureElement PositionIn = makeElement(
-      0, SignatureDirection::Input, std::nullopt, /*ComponentCount=*/4);
+  SignatureElement PositionIn = makeElement(0, SignatureDirection::Input,
+                                            std::nullopt, /*ComponentCount=*/4);
   PositionIn.SystemValue = SignatureSystemValue::Position;
   Sig.Elements = {PositionIn};
 
@@ -189,22 +297,22 @@ TEST(StageLinkTest, BuildStageStorageSkipsSystemValueInputStorageByDefault) {
 }
 
 TEST(StageLinkTest,
-    BuildStageStorageAllocatesGeometryInputSystemValueStorageWhenRequested) {
+     BuildStageStorageAllocatesGeometryInputSystemValueStorageWhenRequested) {
   EntrySignature Sig;
-  SignatureElement PositionIn = makeElement(
-      0, SignatureDirection::Input, std::nullopt, /*ComponentCount=*/4);
+  SignatureElement PositionIn = makeElement(0, SignatureDirection::Input,
+                                            std::nullopt, /*ComponentCount=*/4);
   PositionIn.SystemValue = SignatureSystemValue::Position;
   Sig.Elements = {PositionIn};
 
-  Expected<StageStorage> Storage = buildStageStorage(
-      Sig, SignatureDirection::Input, /*InvocationCount=*/4,
-      /*AllInputSystemValuesAreStorageBacked=*/true);
+  Expected<StageStorage> Storage =
+      buildStageStorage(Sig, SignatureDirection::Input, /*InvocationCount=*/4,
+                        /*AllInputSystemValuesAreStorageBacked=*/true);
   ASSERT_THAT_EXPECTED(Storage, Succeeded());
   EXPECT_GT(Storage->Data.size(), 0u);
 }
 
 TEST(StageLinkTest,
-    BuildStageStorageStillSkipsGeometryInvocationRecordSystemValues) {
+     BuildStageStorageStillSkipsGeometryInvocationRecordSystemValues) {
   // `PrimitiveID`/`InvocationID` remain sourced from
   // `FemeGeometryInvocation` even for a geometry entry's own input
   // signature, so they must still get no storage regardless of the new
@@ -218,9 +326,9 @@ TEST(StageLinkTest,
   InvocationIDIn.SystemValue = SignatureSystemValue::InvocationID;
   Sig.Elements = {PrimitiveIDIn, InvocationIDIn};
 
-  Expected<StageStorage> Storage = buildStageStorage(
-      Sig, SignatureDirection::Input, /*InvocationCount=*/4,
-      /*AllInputSystemValuesAreStorageBacked=*/true);
+  Expected<StageStorage> Storage =
+      buildStageStorage(Sig, SignatureDirection::Input, /*InvocationCount=*/4,
+                        /*AllInputSystemValuesAreStorageBacked=*/true);
   ASSERT_THAT_EXPECTED(Storage, Succeeded());
   EXPECT_EQ(Storage->Data.size(), 0u);
 }
@@ -238,8 +346,8 @@ TEST(StageLinkTest, CopiesLinkedGeometryInputSystemValue) {
   Producer.Elements = {PositionOut};
 
   EntrySignature Consumer;
-  SignatureElement PositionIn = makeElement(
-      0, SignatureDirection::Input, std::nullopt, /*ComponentCount=*/4);
+  SignatureElement PositionIn = makeElement(0, SignatureDirection::Input,
+                                            std::nullopt, /*ComponentCount=*/4);
   PositionIn.SystemValue = SignatureSystemValue::Position;
   Consumer.Elements = {PositionIn};
 
