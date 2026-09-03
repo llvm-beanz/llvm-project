@@ -56313,3 +56313,146 @@ in later ones) — still appears to be flaky, pre-existing, and unrelated to
 this row's own changes (nothing in H8v touches image *sampling* at all,
 only storage-image atomics), consistent with the prior session's `git
 stash`-based confirmation. Did not investigate further, staying in scope.
+
+# H8u closure + H8w: CPU-runtime lowering for storage-texel-buffer atomics
+
+## Opening: re-confirming H8u/H8v were already closed
+
+This session opened with a re-sent H8u prompt text identical to a prior
+turn's. `git log`/`git status` confirmed H8u and H8v were both already
+fully closed (H8v's own 7 commits, all landed, CTS-verified 16/16). The
+only loose end was that H8u's own roadmap row hadn't actually been struck
+through yet (its *work* was done, redirected into H8v, but the row text
+itself was still live). Struck it through with a closure note
+cross-referencing H8v, committed on its own.
+
+## Pivoting to H8w: the natural next H8-series row
+
+With H8u/H8v both closed, H8w (`STORAGE_TEXEL_BUFFER_ATOMIC_BIT` for
+`r32_{sint,uint}`, split off from H8v's own final CTS re-run) was the
+obvious next "prerequisite blocking the H-series milestones" -- a small,
+concretely-scoped, already-investigated-adjacent row.
+
+## The investigation that overturned H8w's own premise
+
+H8w's own roadmap text, written at the end of the H8v session, posed an
+open question: does a storage *texel buffer*'s atomic reach an ordinary
+`OpAccessChain`-derived pointer (no `OpImageTexelPointer` involved,
+already handled generically by MLIR's own `spirv` dialect and by
+`feme`'s own `AtomicRMWPattern`/`AtomicCompareExchangePattern`), or does
+it also need `OpImageTexelPointer` the same way a storage image's atomic
+does?
+
+Checking `SPIRV_ImageTexelPointerOp`'s own definition
+(`SPIRVImageOps.td`) settled this immediately: its `$image` operand has
+**no `Dim` restriction at all**. A storage texel buffer
+(`OpTypeImage ... Dim=Buffer`) and a storage image (`Dim=2D` etc.) are
+both just `OpTypeImage`s as far as `OpImageTexelPointer`'s own verifier is
+concerned. And `feme`'s own `ImageTexelPointerPattern`/
+`createResourcePointer` (`SPIRVToLLVMPatterns.cpp`, added closing
+H8u/R39) are themselves fully `Dim`-agnostic -- they lower any
+`OpImageTexelPointer`, regardless of the underlying image's dimensionality,
+into the same `llvm.spv.resource.getpointer` intrinsic call.
+
+**Conclusion: a texel-buffer atomic reaches SPIR-V's `OpImageTexelPointer`
+identically to a storage-image atomic, and needs zero new MLIR/
+conversion-layer work.** This is the opposite of what H8w's own text
+speculated as the *likely* answer, and a good reminder that a roadmap
+row's own framing (written under time pressure at the end of a prior
+session) is a hypothesis, not a fact -- worth actually checking against
+the real op definitions before assuming which of two possible worlds is
+true. The real gap turned out to be exactly H8w's own *second*-named
+possibility: `SPIRVResourceLowering.cpp`'s CPU-side lowering for the
+generic (non-image) `feme.cpu.resource.*` resource-pointer family had no
+atomic case at all.
+
+## Implementing the fix
+
+Mirrored H8v's own storage-image-atomic precedent almost exactly, but
+retargeted from the image-specific `feme.cpu.image.*` call family
+(`ImageCalls.h`) to the generic `feme.cpu.resource.*` family
+(`ResourceCalls.h`) `HandleKind::TexelStorage` (and other non-image
+resource kinds) already use for ordinary load/store:
+
+- 11 new `ResourceCallKind` values (`AtomicAddTyped` through
+  `AtomicCompareExchangeTyped`), a new `isAtomic()` helper, and a new
+  `Comparator` field on `MatchedResourceCall` (`ResourceCalls.h/.cpp`).
+  Deliberately reused the pre-existing `StoredValue` field generically as
+  "the RMW/xchg value operand" rather than adding a separate field --
+  a clean, minimal extension of the existing shape.
+- A new `Writable && IsTexel`-gated atomic branch in
+  `hasOnlySupportedPointerUses`, and a matching atomic-rewrite block in
+  `lowerAccesses`'s `IsTexel` branch (`SPIRVResourceLowering.cpp`).
+  Deliberately scoped to `TexelStorage` only (`Writable` excludes
+  read-only `TexelUniform`; `IsTexel` excludes ordinary `Storage`/
+  `StorageStruct` SSBOs) -- this leaves a real, broader gap untouched
+  (see below).
+- `femeRTAtomicResourceAddress` + 11 new
+  `femeCpuResourceAtomic*Typed`/`feme.cpu.resource.atomic.*.typed.i32`
+  runtime entry points (`FeMeRuntimeCPU.c`), built on the same
+  `__atomic_fetch_*`/`__atomic_exchange_n`/`__atomic_compare_exchange_n`
+  builtins as H8v's own `feme.cpu.image.atomic.*.2d.i32` precedent,
+  including the same `uint32_t`-reinterpret-cast trick `UMax`/`UMin` need.
+
+## A real bug found in `SIMDize.cpp`, not in a new feature but in old code
+
+While testing the new atomic path through `feme-cpu-simdize`, found that
+`widenResourceCall` used `!Matched.StoredValue` to decide whether a call's
+result is widenable -- correct for the pre-existing Load/Store-only kinds
+(a `Store`'s `StoredValue` was always paired with a `void` return) but
+wrong for the new atomic kinds, which have *both* a `StoredValue` (the RMW
+operand) *and* a non-`void` result. This is exactly the kind of bug that
+only surfaces when a new call shape violates an implicit assumption baked
+into old code by testing that new shape through the old path, not by
+reading the old code in isolation. Fixed by switching to
+`CI.getType()->isVoidTy()`-based detection, mirroring `widenImageCall`'s
+own already-correct approach (which never made this assumption in the
+first place, since image atomics were added later and its author had
+H8v's own atomic result-shape already in mind). Also had to add
+`Comparator` widening/divergence-tracking, since compare-exchange's own
+7-argument call shape is one argument longer than anything `SIMDize.cpp`
+had previously widened.
+
+## Testing and verification
+
+- New unit tests (`ResourceCallsTest.cpp`): round-trip tests for
+  `AtomicAddTyped`, `AtomicUMaxTyped` (confirming name-based dispatch
+  generalizes across RMW kinds), `AtomicCompareExchangeTyped` (confirming
+  the `Comparator` field is extracted distinct from `StoredValue`), and a
+  memory-effects test confirming atomics get `ModRefInfo::ModRef` (not a
+  one-sided `Mod`/`Ref`). All pass.
+- New FileCheck IR test
+  (`spirv-resource-lowering-texel-buffer-atomic.ll`): confirms an
+  `OpImageTexelPointer` + atomic against a scalar `Dim=Buffer` storage
+  image lowers to the new `feme.cpu.resource.atomic.*.typed.i32` calls,
+  mirroring `spirv-resource-lowering-image-atomic.ll`'s own H8v structure.
+- `ninja check-feme` (assertions-enabled, ccache build): **2441/2468
+  passed, 27 unsupported, 0 regressions.**
+- Real Vulkan CTS against feme's own ICD (`VK_ICD_FILENAMES`, plural,
+  correctly set -- learned the hard way in H8g/H8s): all 18
+  `dEQP-VK.image.atomic_operations.*.buffer.*` RMW/compare-exchange cases
+  for both `r32i`/`r32ui` **Pass (18/18)**.
+- Re-ran `dEQP-VK.api.info.format_properties.*`: **224/225 Pass**, moving
+  up from H8v's own 223/225 exactly as expected (`r32_sint`/`r32_uint`
+  drop out of the failure list; the one remaining failure is the
+  already-tracked, unrelated H8h `a2b10g10r10_unorm_pack32`
+  `VERTEX_BUFFER_BIT` gap).
+
+## Roadmap/docs updates
+
+Struck through H8w with a closure note correcting its own premise (no
+MLIR work needed) and documenting the real fix. Added new row **H8x**
+(one lowercase letter under H8, not nested further) tracking the
+deliberately out-of-scope, broader gap: ordinary SSBO
+(`HandleKind::Storage`/`StorageStruct`) atomics are *also* rejected by
+`hasOnlySupportedPointerUses` today, since H8w's own `IsTexel` gating
+excludes them by design. No CTS case has surfaced this yet only because
+no prior row happened to exercise an SSBO atomic against feme's own ICD --
+worth flagging explicitly rather than letting it stay invisible. Updated
+`Design.md`'s existing H8u/H8v/R39 SPIR-V-atomics section with a new
+paragraph documenting H8w's own `Dim`-agnostic finding. Added a new
+"Roadmap H8w: measured impact" section to `VulkanCTSReport.md` with the
+real CTS numbers above. Confirmed (matching H8v's own precedent) that
+neither `Vulkan14FeatureInventory.md` nor `VulkanExtensionInventory.md`
+needed any change -- texel-buffer atomics are a format-feature bit, not a
+device feature or an extension.
