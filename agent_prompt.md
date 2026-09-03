@@ -37,22 +37,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H10a or other prerequisites blocking the H-series milestones?
+Can you work on H10b or other prerequisites blocking the H-series milestones?
 
-> **A real CI-exercisable platform surface** (H10's own headless surface is not
-> one -- it never actually presents anywhere a CI run could observe) and a real
-> `deqp-vk` re-run of the whole `dEQP-VK.wsi` group, split off from H10 once its
-> own headless/swapchain scope closed. Needs, at minimum: (1) picking exactly
-> one platform backend genuinely exercisable in this project's own CI, per
-> FeMeVulkanDesign.md's own "chosen by CI, not by preference" decision
-> (`VK_KHR_xcb_surface` or `VK_KHR_wayland_surface` are the two candidates that
-> decision already names; `VK_KHR_display` is explicitly out of scope, "Initial
-> Non-Goals" already excluding the external-memory/modifier negotiation a
-> direct-mode/cross-driver-sharing backend would need) -- needs its own
-> feasibility check against whatever this environment's CI actually runs on; (2)
-> building that backend's own `Surface` variant reusing H10's existing
-> `Swapchain` state machine (which does not assume headless specifically) and
-> its "presenting a host-memory image is a blit reusing `vkCmdCopyImage`'s own
-> copy path" design; (3) a real `deqp-vk` build (none exists in this environment
-> yet, per every prior CTS-run note in this file) to actually measure
-> `dEQP-VK.wsi`'s pass rate against a real surface for the first time
+> **A real `deqp-vk` build and a real `dEQP-VK.wsi` group re-run** against
+> H10a's new `VK_KHR_xcb_surface` backend, split off from H10a once its own
+> platform-surface scope closed. No prebuilt `deqp-vk` binary exists under
+> `/home/dev/dev/VK-GL-CTS/` in this environment, and building the full CTS
+> framework from source (a large, multi-dependency C++ project with its own
+> build system) was judged out of scope for a single session -- needs its own
+> feasibility check (build-time budget, missing system dependencies) before a
+> real pass-rate measurement of `dEQP-VK.wsi` against a genuine platform surface
+> can happen for the first time
+
+If there are missing system dependencies to build and run the CTS, can you
+please add a section to the Vulkan CTS report document detailing the missing
+dependencies and install them. The documentation will allow me to update the
+configuration scripts for the environment in the future.
