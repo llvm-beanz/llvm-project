@@ -55543,3 +55543,119 @@ has a `default:` or already covered every case it needs to. A full
 `ninja check-feme` afterward passed 2,427/2,454 (4 new tests, 0
 failures), and the real CTS re-run confirms `b8g8r8a8_srgb` moving from
 Fail to Pass with zero regressions elsewhere.
+
+# H8s: Re-audit prior H8 CTS-verified claims (post H8g env-var fix)
+
+## Task
+
+H8s asked me to re-confirm every prior H8 row's "N/N Pass" CTS claim
+now that H8g fixed the CTS-runner's own `VK_ICD_FILENAME` (singular)
+vs `VK_ICD_FILENAMES` (plural) environment-variable bug -- every prior
+`deqp-vk` invocation in this project's history had silently been
+validating Mesa's own lavapipe ICD (globally exported in this
+environment), not feme's, because the Vulkan loader only reads the
+plural spelling. The row's own framing was explicit that this is
+fundamentally a *re-scoping* exercise, not necessarily a fix-everything
+exercise: fix what's tractable, split off what isn't into new sibling
+rows.
+
+## Methodology
+
+Continuing from the prior (compacted) part of this session: a fresh
+baseline `dEQP-VK.api.info.format_properties.*` run against feme's own
+ICD (`VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json`,
+run from `/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/`,
+always `unset VK_ICD_FILENAME` first) showed **202/225 Pass, 23 Fail**.
+I parsed the QPA log's `missing:` fields with an inline Python snippet
+to get exact per-format bit gaps rather than trusting the summary line,
+then grouped by identical bit signature into 7 clusters.
+
+For each cluster I cross-checked the CTS's own mandatory-feature-bit
+source of truth (`vktApiFeatureInfo.cpp`'s `s_required*` tables) to
+confirm the bit really is spec-mandatory for that format (not an
+optional extra CTS merely reports), then grepped the feme runtime
+(`FeMeRuntimeCPU.c`'s `femeRTUnpackImageTexel(I32)`/
+`femeRTPackImageTexel(I32)`) and fixture pack/unpack helpers
+(`ImageFixture.cpp`) to see whether the underlying data-path support
+already existed via some other resource-binding role for the same
+`ResourceFormat` (vertex fetch, texel buffer, storage image, color
+attachment) -- if so, the gap is *provably* a pure label/switch-case
+omission in `formatFeatureFlags`/`isSupportedColorAttachmentFormat`/
+`isTexelBufferFormatSupported`, safe and cheap to fix directly. If not,
+it's a real new-feature gap that needs its own scoping row.
+
+## What I found and fixed
+
+5 of 7 clusters were pure switch-case omissions, each fixed as its own
+small, unit-tested, separately-committed change:
+
+1. `R16G16_{UINT,SINT}` missing `UNIFORM_TEXEL_BUFFER_BIT`
+   (`isTexelBufferFormatSupported`).
+2. `R32_{UINT,SINT}`/`R32G32_{UINT,SINT}` missing `SAMPLED_IMAGE_BIT`;
+   `R32G32_FLOAT`/`R8G8B8A8_{UINT,UNORM}` missing `STORAGE_IMAGE_BIT`
+   (`formatFeatureFlags`).
+3. `R8_UNORM`/`R8G8_UNORM`/`R16_FLOAT`/`R16G16_FLOAT` missing
+   `COLOR_ATTACHMENT_BIT`/`_BLEND_BIT` (`isSupportedColorAttachmentFormat`)
+   -- a genuine non-integer breadth gap H8p's own integer-only framing
+   never covered.
+4. 12 more integer formats extending H8p's `isIntegerColorAttachmentFormat`
+   from 7 to 19 total (`RuntimeABI.h`).
+5. A follow-up CTS re-run *after* fix 1 landed surfaced `R16G16_FLOAT`
+   also missing `UNIFORM_TEXEL_BUFFER_BIT` -- the same cluster as fix
+   1, but not visible until fix 1's own re-run happened. This is a
+   useful lesson: a single CTS re-run does not necessarily surface the
+   *entire* true gap set for a cluster; some gaps only become visible
+   once nearby gaps are cleared (in this instance purely because I
+   only checked the two formats the original 23-item list happened to
+   name, not the full family).
+
+Widening these predicates broke pre-existing unit tests that had used
+specific formats as "known still unsupported" examples (5 in
+`EntryPointsTest.cpp` after fix 2, 1 in `FormatTest.cpp` after fix 4).
+Each was swapped for a format that provably, permanently lacks the
+capability for a structural reason (an `_SRGB` variant for
+storage-image tests -- sRGB never supports storage-image usage per
+spec; a 3-component 32-bit format for another -- no real GPU implements
+3-component 32-bit image formats) rather than just loosening the
+assertion.
+
+I also hit a self-inflicted syntax error mid-session: an `edit` tool
+call's `old_str` accidentally consumed a `TEST(...)` declaration line
+without replacing it, cascading into ~20 top-level-statement compiler
+errors in the following lines. Diagnosed by viewing the raw file
+around the reported error line and re-inserting the missing
+declaration.
+
+## What I scoped instead of fixing
+
+2 of 7 clusters are genuine new-capability gaps, not label fixes, and
+I split them into new sibling roadmap rows rather than attempting them
+in this same task:
+
+- **H8t**: `b8g8r8a8_unorm`'s `VERTEX_BUFFER_BIT` gap.
+  `decodeAttribute` (`Executor.cpp`) has no case for this exact byte
+  order at all (distinct from H8h's `a2b10g10r10_unorm_pack32`, which
+  is a packed sub-byte layout needing a wholly different kind of fix
+  and was already tracked by an existing open row -- no new row
+  needed for that one).
+- **H8u**: `STORAGE_IMAGE_ATOMIC_BIT` for `r32_{sint,uint}`. Confirmed
+  by grep that *zero* `OpAtomic*`/`ImageAtomic` support exists anywhere
+  in this project's SPIR-V-to-LLVM lowering or CPU runtime -- this
+  needs real new codegen and runtime entry points, a categorically
+  bigger lift than every other H8s gap, so it gets its own row rather
+  than being folded into H8s's own closure.
+
+Both new rows are direct `H8` siblings (not nested further under H8s),
+respecting the max-one-lowercase-letter-of-nesting rule the user has
+repeated across sessions.
+
+## Result
+
+`ninja check-feme` (ccache + assertions) passed in full after every
+commit, 0 regressions throughout. The real CTS moved from 202/225 to
+**221/225 Pass** across the whole task, with the 4 remaining failures
+exactly matching the 3 rows now tracking them (H8h, H8t, H8u x2) --
+nothing left unaccounted for. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` needed no changes: this entire task was
+pure `VkFormatFeatureFlags` breadth work, no `VkPhysicalDeviceFeatures`
+bit or extension was touched.
