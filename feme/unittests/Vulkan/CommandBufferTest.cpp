@@ -2967,10 +2967,13 @@ TEST_F(CommandBufferTest, QueryPoolWriteTimestampThenGetResults) {
             VK_NOT_READY); // Query 1 is not yet available.
   // Every value this ICD reports is zero (see QueryPool.h's file comment);
   // only the availability flag distinguishes query 0 (written) from query
-  // 1 (reset but never written).
+  // 1 (reset but never written). Per spec, an unavailable query with
+  // neither VK_QUERY_RESULT_WAIT_BIT nor VK_QUERY_RESULT_PARTIAL_BIT set
+  // has its *value* left untouched (only its availability flag is written)
+  // -- query 1's sentinel value survives unchanged.
   EXPECT_EQ(Results[0], 0u); // Query 0's value.
   EXPECT_EQ(Results[1], 1u); // Query 0's availability: available.
-  EXPECT_EQ(Results[2], 0u); // Query 1's value.
+  EXPECT_EQ(Results[2], 0xDEADBEEFDEADBEEFull); // Query 1's value: untouched.
   EXPECT_EQ(Results[3], 0u); // Query 1's availability: unavailable.
 
   uint64_t Availability[2] = {0, 0};
@@ -3035,6 +3038,63 @@ TEST_F(CommandBufferTest, QueryPoolRejectsUnknownPipelineStatisticsBit) {
   VkQueryPool QPool = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreateQueryPool(Device, &PoolInfo, nullptr, &QPool),
             VK_ERROR_INITIALIZATION_FAILED);
+}
+
+/// (Roadmap H9) `vkGetQueryPoolResults`, without `VK_QUERY_RESULT_WAIT_BIT`
+/// or `VK_QUERY_RESULT_PARTIAL_BIT` set, must leave an unavailable query's
+/// own value untouched in `pData` -- only its availability flag gets
+/// written (spec: "no result values are written to pData for queries that
+/// are in the unavailable state ... However, availability state is still
+/// written"). Discovered by a real `dEQP-VK.query_pool.statistics_query.
+/// host_query_reset.compute_shader_invocations.*` CTS re-run: after a host
+/// `vkResetQueryPool` following a successful read, CTS re-reads without
+/// `WAIT_BIT` and expects the previously-read value to survive unchanged
+/// (only availability flips to 0) -- this ICD previously always
+/// overwrote the value with 0 whenever `WAIT_BIT` was unset, regardless of
+/// availability.
+TEST_F(CommandBufferTest, GetQueryPoolResultsLeavesUnavailableValueUntouched) {
+  VkQueryPoolCreateInfo PoolInfo{};
+  PoolInfo.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
+  PoolInfo.queryCount = 1;
+  PoolInfo.pipelineStatistics =
+      VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT;
+  VkQueryPool QPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &PoolInfo, nullptr, &QPool), VK_SUCCESS);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdResetQueryPool(CmdBuf, QPool, 0, 1);
+  vkCmdBeginQuery(CmdBuf, QPool, 0, 0);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdDispatch(CmdBuf, 2, 3, 1);
+  vkCmdEndQuery(CmdBuf, QPool, 0);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint64_t Results[2] = {0, 0};
+  ASSERT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 1, sizeof(Results),
+                                  Results, 2 * sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT |
+                                      VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+            VK_SUCCESS);
+  ASSERT_EQ(Results[0], 6u);
+  ASSERT_EQ(Results[1], 1u);
+
+  vkResetQueryPool(Device, QPool, 0, 1);
+  // No VK_QUERY_RESULT_WAIT_BIT/VK_QUERY_RESULT_PARTIAL_BIT: the value must
+  // stay 6 (unwritten), only the availability flag flips to 0.
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 1, sizeof(Results),
+                                  Results, 2 * sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT |
+                                      VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+            VK_NOT_READY);
+  EXPECT_EQ(Results[0], 6u); // Untouched, per spec.
+  EXPECT_EQ(Results[1], 0u); // Availability: unavailable.
+
+  vkDestroyQueryPool(Device, QPool, nullptr);
 }
 
 // Roadmap E3: `vkCmdWriteTimestamp2`'s 2-stage-mask `stage` argument

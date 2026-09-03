@@ -234,19 +234,34 @@ inline VkDeviceSize queryResultEntrySize(const QueryPool &Pool, bool Is64Bit,
   return ResultWidth * (Pool.componentCount() + (WithAvailability ? 1 : 0));
 }
 
+/// Writes one query's own result into \p Dst: `componentCount()`-many
+/// values (see `queryResultEntrySize`'s own comment on that count), plus a
+/// trailing availability flag if \p WithAvailability. \p WriteValues
+/// gates only the value portion -- per spec, "no result values are
+/// written to pData for queries that are in the unavailable state" unless
+/// `VK_QUERY_RESULT_WAIT_BIT`/`VK_QUERY_RESULT_PARTIAL_BIT` is set (see
+/// `vkGetQueryPoolResults`'s own call site), but "availability state is
+/// still written to pData for those queries if
+/// VK_QUERY_RESULT_WITH_AVAILABILITY_BIT is set" -- unconditionally, even
+/// when \p WriteValues is false. `vkCmdCopyQueryPoolResults`'s own
+/// execution (`CommandBuffer.cpp`'s `runCopyQueryPoolResults`) always
+/// passes `WriteValues = true`, since that entry point has no WAIT_BIT/
+/// PARTIAL_BIT-style "don't touch pData" case to honor.
 inline void writeQueryResult(const QueryPool &Pool, uint32_t Query,
                              bool Is64Bit, bool WithAvailability,
-                             uint8_t *Dst) {
+                             uint8_t *Dst, bool WriteValues = true) {
   VkDeviceSize ResultWidth = Is64Bit ? sizeof(uint64_t) : sizeof(uint32_t);
-  llvm::ArrayRef<uint64_t> Values = Pool.values(Query);
-  for (uint32_t C = 0; C != Pool.componentCount(); ++C) {
-    uint64_t Value = C < Values.size() ? Values[C] : 0;
-    uint8_t *Out = Dst + ResultWidth * C;
-    if (Is64Bit)
-      std::memcpy(Out, &Value, sizeof(Value));
-    else {
-      uint32_t Value32 = static_cast<uint32_t>(Value);
-      std::memcpy(Out, &Value32, sizeof(Value32));
+  if (WriteValues) {
+    llvm::ArrayRef<uint64_t> Values = Pool.values(Query);
+    for (uint32_t C = 0; C != Pool.componentCount(); ++C) {
+      uint64_t Value = C < Values.size() ? Values[C] : 0;
+      uint8_t *Out = Dst + ResultWidth * C;
+      if (Is64Bit)
+        std::memcpy(Out, &Value, sizeof(Value));
+      else {
+        uint32_t Value32 = static_cast<uint32_t>(Value);
+        std::memcpy(Out, &Value32, sizeof(Value32));
+      }
     }
   }
   if (WithAvailability) {

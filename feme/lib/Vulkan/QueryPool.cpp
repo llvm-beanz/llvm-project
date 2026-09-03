@@ -78,9 +78,17 @@ vkGetQueryPoolResults(VkDevice, VkQueryPool queryPool, uint32_t firstQuery,
       return VK_ERROR_INITIALIZATION_FAILED;
     auto *Dst = static_cast<uint8_t *>(pData) + Offset;
     bool Available = Pool->isAvailable(firstQuery + I);
-    if (Available || (flags & VK_QUERY_RESULT_PARTIAL_BIT) != 0 ||
-        (flags & VK_QUERY_RESULT_WAIT_BIT) == 0)
-      writeQueryResult(*Pool, firstQuery + I, Is64Bit, WithAvailability, Dst);
+    // Per spec: "If VK_QUERY_RESULT_WAIT_BIT and VK_QUERY_RESULT_PARTIAL_BIT
+    // are both not set then no result values are written to pData for
+    // queries that are in the unavailable state" -- WAIT_BIT does not, by
+    // itself, license writing a value; it only means the caller wants this
+    // call to block until every query becomes available, which this ICD's
+    // synchronous execution model (see Sync.h's file comment) never needs
+    // to actually wait for.
+    bool WriteValues =
+        Available || (flags & VK_QUERY_RESULT_PARTIAL_BIT) != 0;
+    writeQueryResult(*Pool, firstQuery + I, Is64Bit, WithAvailability, Dst,
+                     WriteValues);
     if (!Available && Result == VK_SUCCESS)
       // Every query this ICD's synchronous execution model could ever
       // resolve is already resolved by the time this runs (see Sync.h's
