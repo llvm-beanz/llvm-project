@@ -37,10 +37,40 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-The design document marked a "known gap" for the MLIR SPIRV dialect's
-limitations. That was fine in the initial states, but it is time to start
-closing those gaps.
+Can you work on H8u or other prerequisites blocking the H-series milestones?
 
-Can you update the desgin documentation and roadmaps to make it clear that those
-gaps are on the table for future work? Please update the roadmap to reflect
-any known concrete issues that should be addressed.
+> **`STORAGE_IMAGE_ATOMIC_BIT` for `r32_{sint,uint}`, split off from H8s.** A
+> real CTS re-run found `R32_SINT`/`R32_UINT` still missing this bit, confirmed
+> genuinely mandatory via CTS's own `s_required*` tables
+> (`vktApiFeatureInfo.cpp`). Investigated this session and found the real
+> blocker: a storage-image atomic needs SPIR-V's `OpImageTexelPointer` (opcode
+> 60) to first materialize an addressable pointer from the image handle before a
+> following `OpAtomicIAdd`/`OpAtomicExchange`/etc. can operate on it (unlike an
+> ordinary buffer/shared-memory atomic, which already deserializes and converts
+> fine today, needing no `feme`-side change at all -- MLIR's own `spirv` dialect
+> already models every `Atomic*` op generically over any pointer).
+> `OpImageTexelPointer` itself has **zero** representation anywhere in MLIR's
+> own `spirv` dialect -- no op definition (unlike `OpImageRead`/`OpImageWrite`,
+> which both have one) and no named opcode-enum case at all in `SPIRVBase.td`
+> (confirmed by grep) -- so a real driver-side SPIR-V binary using it (exactly
+> what `dEQP-VK`'s own image-atomics conformance tests compile to) cannot even
+> be deserialized by `feme::SPIRVImporter`, the same "unhandled opcode" shape as
+> the pre-existing
+> `feme::SPIRVImporter`-cannot-deserialize-LLVM-SPIR-V-backend-output known gap
+> (Design.md, found by roadmap R14). Documented as its own new "Known gap" in
+> Design.md, alongside the concrete shape closing it would need (a new
+> `spirv.ImageTexelPointer` op in MLIR's own `SPIRVImageOps.td` plus its own
+> opcode-enum entry -- real, scoped, tractable work in `mlir/`, this same tree
+> -- see roadmap R39, which now tracks doing it directly rather than only
+> documenting it, matching F8c's own precedent for landing a real
+> upstream-shaped MLIR SPIR-V fix in this project) and the further `feme`-side
+> work still needed after that (a `SPIRVToLLVMPatterns.cpp` conversion pattern
+> lowering the new op into the existing `createResourcePointer` intrinsic so a
+> following `Atomic*` op becomes an ordinary LLVM `atomicrmw`/`cmpxchg`, and
+> `SPIRVResourceLowering.cpp`'s `lowerImageAccesses` learning to rewrite an
+> `AtomicRMWInst`/`AtomicCmpXchgInst` user of a storage-image `getpointer` call
+> into a new `feme.cpu.image.atomic.*` runtime entry point mirroring
+> `feme.cpu.image.store.2d.v4i32`'s own precedent). None of that feme-side work
+> is even testable until the upstream gap closes, since no such SPIR-V module
+> can be imported today -- `STORAGE_IMAGE_ATOMIC_BIT` stays honestly unset for
+> `R32_{SINT,UINT}` until it does
