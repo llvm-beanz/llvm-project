@@ -56532,3 +56532,60 @@ that path works today. Worth flagging explicitly in the closure text
 rather than silently dropping the discrepancy, since a future reader
 might otherwise wonder whether shared-memory atomics were ever actually
 fixed.
+
+# H8h: A2B10G10R10_UNORM_PACK32 as a vertex attribute
+
+H8b already implemented 23 of the 24 remaining mandatory `VERTEX_BUFFER_BIT`
+formats it discovered, deliberately leaving one: `A2B10G10R10_UNORM_PACK32`.
+Every format `decodeAttribute` (Executor.cpp) implemented before this row
+shared one convention -- "N bytes per component," one independent memory
+span per output component -- which this packed format genuinely doesn't
+fit: it's a single 32-bit word, 2 bits A / 10 bits each of B/G/R packed
+together, so decoding *any* component requires reading and bit-unpacking
+the whole word at once.
+
+The decode case itself was mechanical once I looked at
+`FeMeRuntimeCPU.c`'s existing `femeRTUnpackR10G10B10A2Unorm` (used for the
+texel/image path) -- same bit layout, just reimplemented in host C++
+rather than called directly, matching this same file's own
+`halfBitsToFloat` precedent (host code doesn't call into the compiled
+shader runtime's own bitcode-side helpers, it duplicates the small amount
+of matching logic instead, since they're not linked together).
+
+The part the roadmap row's own text flagged as the real design question
+was the bounds-check arithmetic: `attributeComponentByteSize` returned a
+single per-component byte count, and the caller multiplied that against
+available bytes to decide how many components were in-bounds --
+implicitly assuming one fetch produces exactly one component. I
+generalized this into a small `{FetchByteSize, ComponentsPerFetch}` pair
+(renamed to `attributeFetchLayout`) rather than inventing a special case
+just for the packed format: every pre-existing format keeps
+`ComponentsPerFetch == 1`, which by construction makes the new formula
+(`AvailableFetches * ComponentsPerFetch`) reduce to the exact same
+arithmetic as before, so there was no risk of a subtle regression to
+already-passing formats. The packed case is `{4, 4}`: one 4-byte fetch,
+available in full or not at all, which happens to fall directly out of
+the existing `VkPipelineRobustnessCreateInfo::vertexInputs` "zero
+out-of-bounds components" convention (roadmap F10) with no special-casing
+needed -- if fewer than 4 bytes remain, `AvailableFetches` is 0, so all 4
+components correctly zero-fill together, never partially.
+
+The real CTS run was satisfying: `dEQP-VK.api.info.format_properties.*`
+moved from 224/225 to a clean 225/225 -- this was the very last remaining
+failure in that entire suite, closing out a thread that's run through
+several H8-series rows (H8a, H8b, H8t, and now this one). I also
+opportunistically ran the more targeted
+`dEQP-VK.pipeline.monolithic.vertex_input.*a2b10g10r10*` family (104
+cases) out of due diligence, since that's a much more direct test of
+real vertex-attribute fetch correctness than the format-properties query
+alone. Found 4 real failures there, but before assuming they were mine to
+fix, I cross-checked by running the exact same test shape
+(`single_attribute.vec4.as_..._rate_vertex`) against an
+already-long-supported format (`r8g8b8a8_unorm`) -- it hit the identical
+`VK_ERROR_INITIALIZATION_FAILED` at pipeline-construction time, proving
+the failure is a pre-existing gap in that whole test family's own
+pipeline-construction path, unrelated to vertex-format decoding at all
+(and specifically, unrelated to this row's own change). Recorded it as a
+new, unattributed observation for a future row to scope, rather than
+either silently ignoring it or wrongly claiming it as this row's own
+regression.
