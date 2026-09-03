@@ -22392,3 +22392,63 @@ by `DrawTest.cpp`'s existing extension-advertisement coverage, updated for
 See `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` for the
 new `VK_KHR_surface`/`VK_EXT_headless_surface`/`VK_KHR_swapchain` entries
 this row adds.
+
+## Roadmap H10a: measured impact
+
+Scoped H10a slice: a real CI-exercisable platform surface,
+`VK_KHR_xcb_surface`, backed by `libxcb` against a real `Xvfb`-hosted X
+window (this environment's own feasibility-driven answer to
+FeMeVulkanDesign.md's "Window-system integration" decision point 2 --
+`Xvfb` is the only display server genuinely CI-exercisable here, with no
+real GPU/display hardware or Wayland compositor present). Reuses H10's
+existing `Surface`/`Swapchain` classes (`SurfaceKind::Xcb` discriminator
+plus opaque xcb connection/window state) rather than a parallel class
+hierarchy, and H10's existing `vkQueuePresentKHR` machinery, with a new
+post-present `presentToSurface` call (scanline-at-a-time `xcb_put_image`,
+matching this section's own "presenting a host-memory image is a blit"
+design) added to it.
+
+**A full `deqp-vk` re-run was assessed and not performed**, for the same
+reason as every prior row in this chain: no prebuilt `deqp-vk` binary
+exists under the `/home/dev/dev/VK-GL-CTS/` checkout, and building the
+full CTS framework from source was judged out of scope for a single
+session (a large, multi-dependency C++ project with its own build
+system and no local `external/vulkan-docs`/other fetched submodules
+present in this checkout). This is tracked as its own new roadmap row,
+H10b.
+
+In place of a CTS re-run, this row's correctness is instead covered by:
+
+- A new end-to-end smoke tool, `feme-vulkan-xcb-smoke`, run manually
+  against a live `Xvfb` instance in this session: creates a real X
+  window, a real `VkSurfaceKHR`/`VkSwapchainKHR` against it, clears an
+  image to pure saturated red (chosen specifically because a broken R/B
+  channel swap would instead produce pure blue -- an unambiguous,
+  rounding-tolerant mismatch), presents, and reads the actual window
+  pixels back via `xcb_get_image` to confirm the real presented color.
+  Manual run output:
+  ```
+  currentExtent: 64x64
+  presented pixel: R=ff G=00 B=00
+  PASS
+  ```
+- The same tool wired into a new lit test, `xcb-surface-smoke.test`,
+  which spins up its own private, self-selected-display-number `Xvfb`
+  instance (`-displayfd`, avoiding fixed-display-number collisions with
+  any other concurrent test run on the same host) and tears it down via
+  `trap ... EXIT`. Passes under `ninja check-feme`.
+- 4 new `SurfaceObjectModel.*` unit tests (`SurfaceTest.cpp`) covering
+  the parts of the new `Surface` object model reachable without a live
+  xcb connection: default-constructed (`Headless`) vs. xcb-constructed
+  `kind()`/accessor correctness, and `presentToSurface`/
+  `currentSurfaceExtent`'s no-op/`std::nullopt` behavior for a
+  non-`Xcb`-kind surface (exercised regardless of whether `libxcb` was
+  found at configure time, since XcbSurface.cpp's early-return branch for
+  a non-`Xcb` surface is always compiled).
+
+`ninja check-feme` (assertions-enabled, ccache build, `build2`) passes in
+full, 2449/2508 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`).
+`FeMeVulkanTests` (unit tests): 598/598 passed.
+
+See `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` for the
+new `VK_KHR_xcb_surface` entry this row adds.

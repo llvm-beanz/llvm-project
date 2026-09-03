@@ -62,10 +62,10 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 
 | Status | Count |
 |---|---:|
-| Advertised | 35 |
+| Advertised | 36 |
 | Implemented (core, not advertised by name) | 18 |
 | Planned (in scope, not implemented) | 45 |
-| Not implemented (out of scope) | 202 |
+| Not implemented (out of scope) | 201 |
 
 - **The 35 advertised** are the ones a `deqp-vk` case enables by name
   regardless of the advertised `apiVersion`, plus the three that predate
@@ -96,11 +96,16 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `meshShader` plus every `VkPhysicalDeviceMeshShaderPropertiesEXT` limit are
   advertised at this implementation's own honest, bounded ceilings
   (EntryPoints.cpp, PhysicalDeviceInfo.cpp) -- see Roadmap.md's H6f entry.
-  This edition's own additions, `VK_KHR_surface`/`VK_EXT_headless_surface`
+  This edition's own additions, `VK_KHR_xcb_surface` (advertised at the
+  instance level, conditional on `libxcb` being found at configure time --
+  `FEME_HAVE_XCB`), move from "Not implemented (out of scope)" to
+  "Advertised" now that `XcbSurface.cpp` implements it -- see Roadmap.md's
+  H10a entry. A prior edition's own additions, `VK_KHR_surface`/
+  `VK_EXT_headless_surface`
   (advertised at the instance level, the first two extensions in this file
   distinguished from the device-level list) and `VK_KHR_swapchain` (H10,
-  partially closed), move from "Planned" to "Advertised" now that
-  `Surface.cpp`/`Swapchain.cpp` implement the headless surface object model
+  partially closed), moved from "Planned" to "Advertised" once
+  `Surface.cpp`/`Swapchain.cpp` implemented the headless surface object model
   and the full swapchain state machine -- see Roadmap.md's H10 entry.
 - **The 17 core-but-unadvertised** were 3 until roadmap E-series' own
   audit. A full audit of every core-promoted extension against this ICD's
@@ -463,6 +468,6 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_win32_keyed_mutex` | Not implemented |  |
 | `VK_KHR_win32_surface` | Not implemented |  |
 | `VK_KHR_workgroup_memory_explicit_layout` | Not implemented |  |
-| `VK_KHR_xcb_surface` | Not implemented |  |
+| `VK_KHR_xcb_surface` | Advertised (conditional) | roadmap H10a: the second surface this ICD implements, backed by `libxcb` against a real Xvfb-hosted X window (`XcbSurface.cpp`); only advertised when `libxcb` was found at configure time (`FEME_HAVE_XCB`, see `feme/CMakeLists.txt`) |
 | `VK_KHR_xlib_surface` | Not implemented |  |
 | `VK_KHR_zero_initialize_workgroup_memory` | Advertised |  |

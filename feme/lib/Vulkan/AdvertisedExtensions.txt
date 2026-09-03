@@ -50,5 +50,7 @@ VK_EXT_mesh_shader
 # Roadmap H10 (V8, partially closed): instance-level surface object model.
 VK_KHR_surface = roadmap H10 (V8): headless surface first (Surface.cpp)
 VK_EXT_headless_surface = roadmap H10 (V8): the first surface this ICD implements, per FeMeVulkanDesign.md's WSI decision (Surface.cpp)
+# Roadmap H10a (V8): xcb platform surface, conditional on libxcb (FEME_HAVE_XCB).
+VK_KHR_xcb_surface = roadmap H10a (V8): the second surface this ICD implements, backed by libxcb against a real Xvfb-hosted X window (XcbSurface.cpp); only advertised when libxcb was found at configure time
 # Roadmap H10 (V8, partially closed): device-level swapchain state machine.
 VK_KHR_swapchain = roadmap H10 (V8): full create/destroy/get-images/acquire/present state machine (Swapchain.cpp)

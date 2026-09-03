@@ -2092,6 +2092,35 @@ never acquired) as `vkQueueSubmit` already uses for an unresolved wait.
 Step 2 (one real CI-exercisable platform surface) and confirming the whole
 `dEQP-VK.wsi` CTS group against it are still open, tracked as roadmap H10a.
 
+**Status (roadmap H10a):** step 2 above is implemented, resolving this
+section's own decision point 2 above: `VK_KHR_xcb_surface`, backed by
+`libxcb` against a real `Xvfb`-hosted X window. `Xvfb` is this
+environment's own answer -- the only display server genuinely
+CI-exercisable here, with no real GPU/display hardware or Wayland
+compositor present, so the choice between the two named candidates was
+made by feasibility rather than preference, exactly as this section's
+decision anticipates. `Surface` gained a `SurfaceKind` discriminator
+(`Headless`/`Xcb`) plus opaque xcb connection/window state rather than a
+new sibling class, since every `VkSurfaceKHR` still shares the same
+`vkDestroySurfaceKHR`/`vkGetPhysicalDeviceSurface*KHR` query entry
+points regardless of backing kind; `XcbSurface.cpp` implements
+`vkCreateXcbSurfaceKHR`/`vkGetPhysicalDeviceXcbPresentationSupportKHR`,
+and this section's own "presenting a host-memory image is a blit"
+decision is realized as a scanline-at-a-time `xcb_put_image` sequence
+(one scanline per request to stay under the X protocol's own
+`max-request-size` cap for large swapchain images), reusing
+`Swapchain.h`'s existing `vkQueuePresentKHR` machinery unchanged apart
+from a new post-present `presentToSurface` call that reports
+`VK_ERROR_SURFACE_LOST_KHR` on failure (a lost X connection). A real
+window's live size is now reported as `currentExtent` (via a real
+`xcb_get_geometry` query) instead of headless's `{UINT32_MAX,
+UINT32_MAX}` sentinel. `VK_KHR_xcb_surface` is only advertised when
+`libxcb` was actually found at configure time (`FEME_HAVE_XCB`, see
+`feme/CMakeLists.txt`), so a build without it is unaffected. Confirming
+the whole `dEQP-VK.wsi` CTS group against this new backend needs a real
+`deqp-vk` build, which does not exist in this environment -- tracked as
+roadmap H10b.
+
 ### Mesh shading and ray tracing exposure
 
 Mesh shading (`VK_EXT_mesh_shader`) and ray tracing (`VK_KHR_ray_query`,
