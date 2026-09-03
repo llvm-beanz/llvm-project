@@ -1927,6 +1927,55 @@ TEST_F(GraphicsPipelineTest,
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap H9a: `VUID-VkGraphicsPipelineCreateInfo-renderPass-07609` only
+/// requires `pColorBlendState->attachmentCount` to match the render
+/// target's own color attachment count when "the subpass uses color
+/// attachments" -- unlike `AcceptsMissingFragmentStageWithMismatchedColor
+/// BlendState` above, this pipeline has a real fragment stage (which
+/// writes only `gl_FragDepth`, matching the render target's own lack of
+/// any color attachment), confirming the same tolerance applies whether or
+/// not a fragment stage is present, not only when one is missing entirely.
+/// Exactly `dEQP-VK.query_pool.statistics_query.*`'s own
+/// `GeometryShaderTestInstance`/`TessellationShaderTestInstance`-family
+/// `noColorAttachments` shape, which keeps a real fragment stage while
+/// still hardcoding `ColorBlendState(1, &attachmentState)` unconditionally.
+TEST_F(GraphicsPipelineTest,
+       AcceptsFragmentStageWithMismatchedColorBlendStateAndNoColorAttachments) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  VkShaderModule Fragment = createModule(NoColorOutputFragmentSource);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  // Deliberately left at the fixture's default of 1, mismatching the zero
+  // color attachments below -- this must be ignored, not rejected, exactly
+  // like the fragment-less case above.
+  ASSERT_EQ(Blend.attachmentCount, 1u);
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthTestEnable = VK_TRUE;
+  DepthInfo.depthWriteEnable = VK_TRUE;
+  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+  Info.pDepthStencilState = &DepthInfo;
+
+  VkFormat DepthFormat = VK_FORMAT_D32_SFLOAT;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 0;
+  Rendering.depthAttachmentFormat = DepthFormat;
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &Rendering;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  auto *Pipe2 = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  EXPECT_EQ(Pipe2->colorAttachmentCount(), 0u);
+  EXPECT_TRUE(Pipe2->hasFragmentStage());
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// Roadmap C1 ("Mandatory formats"): every format
 /// `isSupportedColorAttachmentFormat` grants Vulkan 1.2's mandatory
 /// `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT` status to must build

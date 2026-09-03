@@ -1189,18 +1189,34 @@ Error translateDepthStencilState(
 }
 
 /// \p HasFragmentStage is false for a pipeline that legally omitted its
-/// fragment stage (roadmap H2j, only possible when \p Targets has no color
-/// attachments): per the Vulkan spec, a pipeline with no fragment shader
-/// has no fragment output interface, so `pColorBlendState` -- including its
-/// own `attachmentCount` -- is entirely ignored rather than validated
-/// against (the necessarily empty) `Targets.Colors`, exactly like `Info`
-/// being null below.
+/// fragment stage (roadmap H2j, no longer tied to \p Targets having no
+/// color attachments as of roadmap H9a -- a fragment-less pipeline may now
+/// legally have color attachments too): per the Vulkan spec, a pipeline
+/// with no fragment shader has no fragment output interface, so
+/// `pColorBlendState` -- including its own `attachmentCount` -- is
+/// entirely ignored rather than validated against `Targets.Colors`, exactly
+/// like `Info` being null below.
+///
+/// (roadmap H9a) Separately, `VUID-VkGraphicsPipelineCreateInfo-renderPass-
+/// 07609` only requires `pColorBlendState->attachmentCount` to match
+/// `Targets.Colors.size()` when "the subpass uses color attachments" --
+/// when it has none at all (a depth-only render target, `Targets.Colors`
+/// empty), the whole `attachmentCount` check, along with everything else
+/// `pColorBlendState` configures, is simply never consulted, regardless of
+/// whether a fragment stage is present. This is `GeometryShaderTestInstance`
+/// /`TessellationShaderTestInstance`/`TessellationGeometryShaderTestInstance`
+/// 's own shape in `dEQP-VK.query_pool.statistics_query.*`'s own
+/// `noColorAttachments` variants: unlike `VertexShaderTestInstance`'s own
+/// `vertexOnlyPipe` (which omits the fragment stage entirely), these keep a
+/// real fragment stage but still hardcode `ColorBlendState(1,
+/// &attachmentState)` unconditionally, even when the render target itself
+/// has zero color attachments.
 Error translateColorBlendState(const VkPipelineColorBlendStateCreateInfo *Info,
                                const PipelineRenderTargets &Targets,
                                bool HasFragmentStage,
                                GraphicsPipelineState &Out) {
   Out.ColorBlends.assign(Targets.Colors.size(), BlendState{});
-  if (!Info || !HasFragmentStage)
+  if (!Info || !HasFragmentStage || Targets.Colors.empty())
     return Error::success();
   if (Info->attachmentCount != Targets.Colors.size())
     return createStringError(inconvertibleErrorCode(),
