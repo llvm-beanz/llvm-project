@@ -827,6 +827,56 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
           return false;
         continue;
       }
+      // A `getpointer` user materialized by `ImageTexelPointerPattern`
+      // (`SPIRVToLLVMPatterns.cpp`, roadmap H8v) is scalar-typed rather
+      // than a `<4 x i32>`/`<4 x float>` texel, so it never reaches the
+      // `LoadInst`/`StoreInst` branches above -- an image atomic
+      // (`AtomicRMWInst`/`AtomicCmpXchgInst`) only exists over a single-
+      // 32-bit-scalar *integer* storage-image format
+      // (`R32_SINT`/`R32_UINT`; SPIR-V disallows an atomic against a
+      // float-channel image outright), and only `Plain2D` is implemented
+      // today -- widening to every other `ImageShape` is left as future
+      // work (see Design.md's own H8v note).
+      if (const auto *RMW = dyn_cast<AtomicRMWInst>(PU)) {
+        if (!IsInteger || Shape != ImageShape::Plain2D)
+          return false;
+        if (RMW->getPointerOperand() != CI ||
+            !RMW->getValOperand()->getType()->isIntegerTy(32))
+          return false;
+        switch (RMW->getOperation()) {
+        case AtomicRMWInst::Add:
+        case AtomicRMWInst::Sub:
+        case AtomicRMWInst::And:
+        case AtomicRMWInst::Or:
+        case AtomicRMWInst::Xor:
+        case AtomicRMWInst::Max:
+        case AtomicRMWInst::Min:
+        case AtomicRMWInst::UMax:
+        case AtomicRMWInst::UMin:
+        case AtomicRMWInst::Xchg:
+          continue;
+        default:
+          return false;
+        }
+      }
+      if (const auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(PU)) {
+        if (!IsInteger || Shape != ImageShape::Plain2D)
+          return false;
+        if (CmpXchg->getPointerOperand() != CI ||
+            !CmpXchg->getCompareOperand()->getType()->isIntegerTy(32))
+          return false;
+        // `AtomicCompareExchangePattern` (`SPIRVToLLVMPatterns.cpp`)
+        // always follows an `llvm.cmpxchg` with exactly one
+        // `extractvalue ..., 0` picking out the old value (SPIR-V's own
+        // result); reject anything else so `lowerImageAccesses` below can
+        // assume that shape unconditionally.
+        for (const User *CU : CmpXchg->users()) {
+          const auto *EV = dyn_cast<ExtractValueInst>(CU);
+          if (!EV || EV->getIndices() != ArrayRef<unsigned>{0})
+            return false;
+        }
+        continue;
+      }
       return false;
     }
   }
@@ -1793,6 +1843,86 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
                 "no storage-image write shape for Cube/CubeArray");
           }
           SI->eraseFromParent();
+          continue;
+        }
+        // `AtomicRMWInst`/`AtomicCmpXchgInst` (roadmap H8v): the only
+        // storage-image shape reaching either is `Plain2D`
+        // (`hasOnlySupportedStorageImageUses` already rejected every
+        // other shape for these two instruction kinds), so `X`/`Y` are
+        // always meaningful here with no `Array1D`/`Array2D`/`Plain3D`/
+        // multisample coordinate component ever needed.
+        if (auto *RMW = dyn_cast<AtomicRMWInst>(PU)) {
+          IRBuilder<> AtomicBuilder(RMW);
+          Value *Val = RMW->getValOperand();
+          CallInst *Old;
+          switch (RMW->getOperation()) {
+          case AtomicRMWInst::Add:
+            Old = createAtomicAdd2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
+                                    Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::Sub:
+            Old = createAtomicSub2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
+                                    Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::And:
+            Old = createAtomicAnd2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
+                                    Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::Or:
+            Old = createAtomicOr2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
+                                   Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::Xor:
+            Old = createAtomicXor2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
+                                    Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::Max:
+            Old = createAtomicSMax2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                     Val, Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::Min:
+            Old = createAtomicSMin2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                     Val, Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::UMax:
+            Old = createAtomicUMax2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                     Val, Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::UMin:
+            Old = createAtomicUMin2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                     Val, Mask, RMW->getName());
+            break;
+          case AtomicRMWInst::Xchg:
+            Old = createAtomicExchange2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                         Val, Mask, RMW->getName());
+            break;
+          default:
+            llvm_unreachable(
+                "hasOnlySupportedStorageImageUses only accepts the RMW "
+                "kinds handled above");
+          }
+          RMW->replaceAllUsesWith(Old);
+          RMW->eraseFromParent();
+          continue;
+        }
+        if (auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(PU)) {
+          IRBuilder<> AtomicBuilder(CmpXchg);
+          CallInst *Old = createAtomicCompareExchange2D(
+              AtomicBuilder, Env, ImageIndex, X, Y,
+              CmpXchg->getCompareOperand(), CmpXchg->getNewValOperand(), Mask,
+              CmpXchg->getName());
+          // `hasOnlySupportedStorageImageUses` already guaranteed every
+          // user of `CmpXchg` is an `extractvalue ..., 0` picking out the
+          // old value (SPIR-V's own result) -- replace each with the new
+          // call directly, since the call's own result *is* that old
+          // value (unlike `llvm.cmpxchg`, no `{i32, i1}` struct to
+          // extract from).
+          for (User *EU : llvm::make_early_inc_range(CmpXchg->users())) {
+            auto *EV = cast<ExtractValueInst>(EU);
+            EV->replaceAllUsesWith(Old);
+            EV->eraseFromParent();
+          }
+          CmpXchg->eraseFromParent();
           continue;
         }
         auto *LI = cast<LoadInst>(PU);
