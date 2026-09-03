@@ -56589,3 +56589,87 @@ pipeline-construction path, unrelated to vertex-format decoding at all
 new, unattributed observation for a future row to scope, rather than
 either silently ignoring it or wrongly claiming it as this row's own
 regression.
+
+# H9: Query and pipeline-statistics breadth
+
+## Scoping
+
+H9's stated scope was narrower than it first looked: "implement all 11
+`VkQueryPipelineStatisticFlagBits` counters" is a real, closed-form task
+once you notice the raster pipeline already computes (or trivially can
+compute) every count the spec asks for -- there was no missing hardware
+model to invent, only missing plumbing. The actual design question was
+*where* to hook each counter so it stays honest across every entry point
+that can produce it (a plain draw, an indexed draw, an indirect draw, a
+mesh-shader draw, a dispatch), rather than duplicating counting logic per
+entry point and risking them drift apart.
+
+The answer: `Executor.cpp` already funnels every draw-shaped entry point
+through one shared `RasterizePrimitives`-style lambda before rasterizing,
+so that's the one place `INPUT_ASSEMBLY_VERTICES`/`_PRIMITIVES`,
+`VERTEX_SHADER_INVOCATIONS`, `CLIPPING_INVOCATIONS`/`_PRIMITIVES`, and
+`FRAGMENT_SHADER_INVOCATIONS` all need instrumenting -- one hook, every
+draw shape covered for free. `COMPUTE_SHADER_INVOCATIONS` similarly only
+needed one hook in `runDispatch`'s workgroup loop. Geometry/tessellation
+counters stay honestly zero since those stages aren't implemented yet
+(this is spec-correct: `pipelineStatisticsQuery` doesn't promise every
+stage exists, only that supported bits count truthfully).
+
+## The `QueryPool` storage model
+
+The pre-existing `QueryPool` only ever stored one `uint64_t` per query
+slot (an occlusion count or a timestamp). Pipeline-statistics queries need
+up to 11 values per slot (one per requested bit, in bit order, per the
+spec's own "packed tightly" `pQueryPoolCreateInfo->pipelineStatistics`
+convention) -- this forced an actual storage-model rewrite, not just an
+additive branch, since `vkGetQueryPoolResults`/`vkCmdCopyQueryPoolResults`
+both need to know each query's own component count to compute strides.
+Chose a `PipelineStatisticIndex` enum (mirroring the real bit order
+exactly, confirmed against the actual Vulkan header rather than assumed)
+plus a `values()`/`componentCount()` accessor pair, so the existing
+single-value occlusion/timestamp query paths could be expressed as the
+`componentCount() == 1` degenerate case without their own code path
+duplicating.
+
+## The two bugs a real CTS run actually found
+
+The `vkGetQueryPoolResults` reset-value bug was worth calling out
+specifically: it was a pre-existing correctness bug (confirmed via `git
+log -L` against `QueryPool.cpp`'s history predating this session) that no
+prior CTS coverage had ever exercised, because no prior CTS group hosts
+both a host-reset and a no-WAIT_BIT re-read of a query in the same test.
+This is the same "H6l unlocks H6m" pattern this project's history keeps
+repeating: flipping one feature bit lets an entire suite run for the
+first time, and that suite's own edge cases surface real, unrelated,
+previously-unreachable gaps. The fix here was genuinely in scope for H9
+(it's `vkGetQueryPoolResults`'s own general correctness, exercised via a
+pipeline-statistics query but not specific to pipeline statistics at all)
+so it got its own commit and its own regression test, rather than being
+filed as a new row.
+
+The two *not*-fixed gaps (H9a: fragment-shader-less pipelines with
+unwritten color attachments rejected outright; H9b: vertex-to-geometry
+stage-IO signature mismatch) are different in kind: neither touches
+`QueryPool`, `Executor.cpp`'s counters, or anything else this row's own
+scope owns. They're graphics-pipeline-creation and stage-linking gaps
+that happen to be reachable, for the first time, only via this specific
+suite's own pipeline shapes. Per the project's own established
+convention (H6l -> H6m, H8u -> H8v/H8w/H8x), these get filed as sibling
+rows rather than folded into H9's own fix, since scoping either properly
+needs its own real IR reduction (the same technique that whole chain has
+used throughout) that would meaningfully expand this row's blast radius
+beyond "implement the counters".
+
+## Why H9 is struck through despite ~63% of the CTS group still failing
+
+The stated H9 scope (VulkanCTSReport.md's "measured impact" section
+verifies this precisely) is fully closed: every one of the 11 counters
+is correctly implemented, unit-tested at every phase it flows through,
+and confirmed correct by CTS wherever a case actually reaches the
+counting code. The remaining ~8,909 failures are, without exception,
+attributable to the two filed-off gaps above -- neither is a counter
+correctness bug, and fixing either would not touch a single line this
+row's own commits touched. Leaving H9 unstruck because *other*,
+unrelated rows (H9a/H9b) haven't landed yet would misrepresent what's
+actually done, and doesn't match how the project's own history has
+handled this same situation every previous time it's come up.
