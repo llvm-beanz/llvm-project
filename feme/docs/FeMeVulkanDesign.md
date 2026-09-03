@@ -201,8 +201,13 @@ V6–V8 — and nothing below is permanently excluded except where it says so.
   excusing the failure.
 
   **Deviation, found while re-scoping for conformance: the last clause is
-  not true today.** None of `vkEnumeratePhysicalDeviceGroups`,
-  `vkGetDeviceGroupPeerMemoryFeatures`,
+  not true today.** ~~None of `vkEnumeratePhysicalDeviceGroups`,
+  `vkGetDeviceGroupPeerMemoryFeatures`,~~ (closed for these two, roadmap
+  H10c: both are now implemented, landed once roadmap H10b's own real
+  `dEQP-VK.wsi.xcb.*` CTS re-run hit exactly the crash this bullet warns
+  about -- a null loader dispatch-table entry -- directly, inside CTS's
+  own `query_devgroup_present_capabilities`/`query_devgroup_present_modes`
+  cases. Still true for the rest of this list:
   `vkGetPhysicalDeviceExternal{Buffer,Fence,Semaphore}Properties`,
   `vkGetPhysicalDeviceImageFormatProperties2`,
   `vkGetPhysicalDeviceSparseImageFormatProperties2`,
@@ -211,8 +216,8 @@ V6–V8 — and nothing below is permanently excluded except where it says so.
   implemented — each is a core 1.1 command, and an unimplemented one is a
   null loader dispatch-table entry, i.e. a crash rather than the truthful
   degenerate answer this bullet promises. [Roadmap.md](Roadmap.md)
-  §1.9.10's K1 is the row that closes it, and it is P0 for exactly that
-  reason.
+  §1.9.10's K1 is the row that closes the remainder, and it is P0 for
+  exactly that reason.
 - Images, sampling, and samplers in the first executing milestone. These are
   required for broader Vulkan compute compatibility, but FeMe's current CPU
   resource runtime is buffer-oriented and deliberately does not implement

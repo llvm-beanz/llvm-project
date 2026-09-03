@@ -22452,3 +22452,194 @@ full, 2449/2508 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`).
 
 See `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` for the
 new `VK_KHR_xcb_surface` entry this row adds.
+
+## Missing system dependencies for a real `deqp-vk` build
+
+Every prior row in this report assessed building `deqp-vk` from source as
+out of scope for a single session, on the assumption that fetching its
+external dependencies and/or building the CTS framework itself was
+infeasible in this environment. **That assumption was wrong.** This
+section documents the real, minimal set of steps and system packages that
+make a genuine `deqp-vk` build (with real, non-Vanilla Vulkan platform
+support) work here, so environment configuration scripts can be updated
+to provision them up front.
+
+1. **Fetch external sources first.** Every `external/*` subdirectory
+   (`glslang`, `spirv-tools`, `spirv-headers`, `vulkan-docs`, `amber`,
+   `jsoncpp`, `zlib`, `libpng`, `vulkan-video-samples`, `video_generator`,
+   `vulkansc-pcutil`, etc.) ships in the `VK-GL-CTS` checkout as an empty
+   wrapper directory containing only a `CMakeLists.txt` -- the real source
+   has never been fetched until this script runs:
+   ```
+   cd /home/dev/dev/VK-GL-CTS
+   python3 external/fetch_sources.py --insecure
+   ```
+   Network access (both `git clone` and plain HTTPS package downloads)
+   **works** in this environment; `--insecure` was needed only because
+   this environment's CA trust store does not validate one of the
+   fetch script's TLS endpoints, not because of any outbound network
+   restriction.
+
+2. **`libx11-dev` (plus its `xtrans-dev` dependency).** Without it,
+   CMake's `find_package(X11)` fails, `DEQP_USE_X11` stays `OFF`, and
+   `framework/platform/CMakeLists.txt` links the Vulkan-less "Vanilla"
+   platform (`vanilla/tcuVanillaPlatform.cpp`) instead of the real
+   Vulkan-capable "Lnx" platform (`lnx/tcuLnxVulkanPlatform.cpp`) --
+   **even when `libxcb1-dev` alone is already present** and lets
+   `DEQP_PLATFORM_LIBRARIES` resolve to `xcb` at configure time. The
+   resulting `deqp-vk` binary builds and links cleanly either way, so
+   this gap is invisible until runtime, where it produces a genuinely
+   misleading error that looks like a Vulkan/ICD problem but is actually
+   a CTS build-configuration problem:
+   ```
+   FATAL ERROR: Vulkan is not supported at tcuPlatform.cpp:54
+   ```
+   (Root cause: `targets/default/default.cmake`'s XCB detection is
+   nested inside an `if (DEQP_USE_X11) ... if (DEQP_USE_XCB) ...` block
+   that requires X11 first, before XCB's own Vulkan-facing platform code
+   is ever compiled in.)
+
+3. **`libglx-dev` and `libgl-dev`.** Once `libx11-dev` is present, CMake
+   sets `DEQP_SUPPORT_GLX=ON` as a side effect of `X11_FOUND=ON`, which
+   then requires `pkg_check_modules(... glx ...)` to succeed. Without
+   these two packages, CMake configure fails outright:
+   ```
+   Could NOT find PkgConfig (missing: PKG_CONFIG_EXECUTABLE)
+   ... The following required packages were not found:
+    - glx
+   ```
+
+Install command used in this environment:
+```
+sudo apt-get install -y libx11-dev libglx-dev libgl-dev
+```
+(`libxcb1-dev` was already installed in a prior session, and remains a
+prerequisite alongside the three packages above -- all four are needed
+together for a real Vulkan-capable, XCB-surface-exercising `deqp-vk`
+build.)
+
+After installing these packages, force CMake to re-run its
+`find_package`/`pkg_check_modules` detection (a stale `CMakeCache.txt`
+from a prior, incomplete configure will not pick them up automatically):
+```
+cd /home/dev/dev/VK-GL-CTS/build
+rm -rf CMakeCache.txt CMakeFiles
+cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DSELECTED_BUILD_TARGETS="deqp-vk" ..
+ninja deqp-vk
+```
+
+No other missing system dependency was found; the full `ninja deqp-vk`
+build (1519/1519 targets, including `glslang`/`spirv-tools`/`shaderc`
+built entirely from the freshly-fetched `external/` sources) completed
+without any further gap once the above three packages were installed.
+
+**Running a real CTS case** additionally needs a live X server this
+environment has no physical display for; a headless `Xvfb :99` instance
+(already running from a prior session) stands in for one:
+```
+Xvfb :99 -screen 0 1024x768x24 &
+DISPLAY=:99 VK_DRIVER_FILES=<path to feme_icd.json> ./deqp-vk -n '<case pattern>'
+```
+
+**Mustpass case list note**: the generic `external/vulkancts/mustpass/main/vk-default.txt`
+contains **zero** `dEQP-VK.wsi.*` cases (WSI is platform-specific and
+excluded from the generic list) -- the real per-platform case names live
+in `external/vulkancts/mustpass/main/vk-default/wsi.txt` (36,876 lines,
+4,029 of them `dEQP-VK.wsi.xcb.*`). Always consult the per-group
+`vk-default/*.txt` files, not the flat top-level list, when counting real
+CTS cases for a specific group.
+
+## Roadmap H10b: measured impact
+
+With the missing dependencies above installed and a real `deqp-vk` built
+from source, the full `dEQP-VK.wsi.xcb.*` group (4,029 cases) was run
+against feme's ICD for the first time.
+
+**First attempt: crashed.** The run progressed through most of the case
+list in well under two minutes, then died silently (no `DONE!` summary).
+Reproduced deterministically down to a single case,
+`dEQP-VK.wsi.xcb.surface.query_devgroup_present_capabilities`; a `gdb -batch
+-ex run -ex bt` backtrace confirmed a genuine `SIGSEGV` from a
+null-function-pointer call inside `vkt::wsi::queryDevGroupSurfacePresentCapabilitiesTest`.
+Root-caused to `vkEnumeratePhysicalDeviceGroups` (core Vulkan 1.1,
+obligated by feme's own advertised `apiVersion = VK_API_VERSION_1_4`)
+never having been implemented anywhere in feme -- closed as new roadmap
+row H10c (see its own closure note in `Roadmap.md` and further down this
+report).
+
+**After H10c's fix, a full, clean, non-crashing re-run:**
+
+```
+Test run totals:
+  Passed:        52/4029 (1.3%)
+  Failed:         8/4029 (0.2%)
+  Not supported: 3969/4029 (98.5%)
+  Warnings:       0/4029 (0.0%)
+  Waived:         0/4029 (0.0%)
+```
+
+The overwhelming `NotSupported` majority is expected and correct: almost
+every case in this group is gated on `VK_KHR_device_group_creation` (a
+real *instance* extension enabling multi-physical-device discovery),
+which remains genuinely, correctly unimplemented -- H10c implemented only
+the single-device-group *query* commands a `VK_VERSION_1_1`/
+`VK_KHR_swapchain`-advertising ICD must answer honestly regardless of
+device-group support, not the separate multi-device-group extension
+itself.
+
+The 8 real failures split into two distinct, unrelated new gaps, each
+split off as its own new roadmap row rather than expanding H10b's own
+scope:
+
+- **7 failures, one root cause** (`swapchain.render.basic`/`basic2`/
+  `2swapchains`/`2swapchains2`/`10swapchains`/`10swapchains2`): all fail
+  `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`, and
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1` shows the same underlying MLIR
+  diagnostic in every case:
+  ```
+  error: failed to legalize operation 'spirv.CompositeConstruct' that was
+  explicitly marked illegal: %109 = "spirv.CompositeConstruct"(%58, %72,
+  %90, %108) : (vector<4xf32>, vector<4xf32>, vector<4xf32>,
+  vector<4xf32>) -> !spirv.matrix<4 x vector<4xf32>>
+  ```
+  A SPIR-V-to-LLVM lowering gap for matrix-typed `OpCompositeConstruct`
+  (building a `mat4` from four column vectors, a common GLSL pattern),
+  entirely unrelated to WSI/swapchain/device-group. Split off as new
+  roadmap row **H10d**.
+- **1 failure**, `swapchain.acquire.too_many`: `"Implementation failed to
+  respond well acquiring too many images with 0 timeout"` -- a distinct,
+  single-case gap in this ICD's zero-timeout too-many-images
+  `vkAcquireNextImageKHR` handling. Split off as new roadmap row **H10e**.
+
+Note also that `dEQP-VK.wsi.xcb.swapchain.create.clipped` (an unattributed
+single-case failure noted earlier in this same session, before the full
+group re-run) passed cleanly in this full run; the earlier failure did not
+reproduce and is not counted among the 8 above.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+2513/2513 (59 pre-existing, unrelated `Unsupported`, 0 `Failed`).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed (no new extension advertised by this row itself; the
+already-advertised `VK_KHR_xcb_surface` (H10a)/`VK_KHR_swapchain` stay
+unchanged, and `VK_KHR_device_group_creation` correctly stays
+unimplemented).
+
+## Roadmap H10c: measured impact
+
+See H10b's own section above for the full crash-to-fix narrative and the
+resulting clean `dEQP-VK.wsi.xcb.*` re-run tally. Directly re-running the
+two specific cases that previously crashed confirms both now genuinely
+pass:
+```
+Test case 'dEQP-VK.wsi.xcb.surface.query_devgroup_present_capabilities'..
+  Pass (Querying deviceGroup present capabilities succeeded)
+Test case 'dEQP-VK.wsi.xcb.surface.query_devgroup_present_modes'..
+  Pass (Pass)
+
+Test run totals:
+  Passed:        2/2 (100.0%)
+  Failed:        0/2 (0.0%)
+```
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+2513/2513 (59 pre-existing `Unsupported`, 0 `Failed`, up 5 tests from this
+row's own new `EntryPointsTest.cpp`/`SwapchainTest.cpp` coverage).
