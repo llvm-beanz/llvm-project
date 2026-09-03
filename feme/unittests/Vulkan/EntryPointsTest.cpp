@@ -92,6 +92,14 @@ TEST_F(EntryPointsTest, FormatPropertiesReportsVertexBufferBit) {
   vkGetPhysicalDeviceFormatProperties(Physical, VK_FORMAT_B8G8R8A8_UNORM,
                                       &Props3);
   EXPECT_TRUE(Props3.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
+
+  // (Roadmap H8h) `A2B10G10R10_UNORM_PACK32` now decodes as a vertex
+  // attribute too (see Executor.cpp's `decodeAttribute`, which unpacks the
+  // single packed 32-bit word) -- must claim the bit.
+  VkFormatProperties Props4{};
+  vkGetPhysicalDeviceFormatProperties(
+      Physical, VK_FORMAT_A2B10G10R10_UNORM_PACK32, &Props4);
+  EXPECT_TRUE(Props4.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
 }
 
 TEST_F(EntryPointsTest, FormatPropertiesNeverReportsStorageImage) {

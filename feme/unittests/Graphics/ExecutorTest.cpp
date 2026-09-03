@@ -616,6 +616,20 @@ TEST(ExecutorTest, VertexAttributeDecodesB8G8R8A8UnormColor) {
       cpu::ResourceFormat::B8G8R8A8_UNORM, ColorBytes, {255, 0, 0, 255});
 }
 
+TEST(ExecutorTest, VertexAttributeDecodesR10G10B10A2UnormColor) {
+  // (Roadmap H8h) `R10G10B10A2_UNORM` (`VK_FORMAT_A2B10G10R10_UNORM_
+  // PACK32`) is one packed 32-bit word, MSB down: 2 bits A, 10 bits each
+  // of B/G/R. Solid red (R=1.0, G=0.0, B=0.0, A=1.0) packs to R=1023,
+  // G=0, B=0, A=3 -- confirms `decodeAttribute`'s dedicated packed-word
+  // case, not just `attributeFetchLayout`'s all-or-nothing bounds
+  // arithmetic in isolation, through a real compiled pipeline.
+  uint32_t Raw = 1023u | (0u << 10) | (0u << 20) | (3u << 30);
+  std::array<uint8_t, 4> ColorBytes;
+  memcpy(ColorBytes.data(), &Raw, sizeof(Raw));
+  renderSolidColorTriangleWithAttributeFormat(
+      cpu::ResourceFormat::R10G10B10A2_UNORM, ColorBytes, {255, 0, 0, 255});
+}
+
 /// (roadmap H7t) The same fully-covered, solid-color triangle as
 /// `FillsFullyCoveredTriangleWithSolidColor`, but the fragment stage's own
 /// `SV_Target0` output is a 3-component `vec3` (`Vec3FragmentShaderIR`,
