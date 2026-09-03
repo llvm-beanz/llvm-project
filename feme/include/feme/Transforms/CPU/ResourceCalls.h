@@ -48,10 +48,67 @@ enum class ResourceCallKind : uint8_t {
   StoreTyped,
   LoadRaw,
   StoreRaw,
+  /// `feme.cpu.resource.atomic.add.typed.i32` (roadmap H8w): a storage
+  /// texel buffer RMW atomic (`OpAtomicIAdd` against an
+  /// `OpImageTexelPointer` whose own image operand has `Dim == Buffer`,
+  /// the identical SPIR-V shape roadmap H8v's storage-*image* atomics use
+  /// -- a texel buffer's own atomic is not, as roadmap H8w originally
+  /// guessed, an ordinary `OpAccessChain`-derived-pointer atomic).
+  /// Addressed by descriptor index and element index exactly like
+  /// `LoadTyped`/`StoreTyped`, since `OpImageTexelPointer`'s own
+  /// `Coordinate` operand for a 1D buffer image is a single scalar index,
+  /// not an (x, y) pair. Returns the value that was in memory immediately
+  /// before the add, matching `OpAtomicIAdd`'s own result semantics.
+  AtomicAddTyped,
+  /// `feme.cpu.resource.atomic.sub.typed.i32` (roadmap H8w):
+  /// `OpAtomicISub`'s counterpart to `AtomicAddTyped`.
+  AtomicSubTyped,
+  /// `feme.cpu.resource.atomic.and.typed.i32` (roadmap H8w): `OpAtomicAnd`'s
+  /// counterpart to `AtomicAddTyped`.
+  AtomicAndTyped,
+  /// `feme.cpu.resource.atomic.or.typed.i32` (roadmap H8w): `OpAtomicOr`'s
+  /// counterpart to `AtomicAddTyped`.
+  AtomicOrTyped,
+  /// `feme.cpu.resource.atomic.xor.typed.i32` (roadmap H8w): `OpAtomicXor`'s
+  /// counterpart to `AtomicAddTyped`.
+  AtomicXorTyped,
+  /// `feme.cpu.resource.atomic.smax.typed.i32` (roadmap H8w):
+  /// `OpAtomicSMax`'s counterpart to `AtomicAddTyped` -- a signed maximum.
+  AtomicSMaxTyped,
+  /// `feme.cpu.resource.atomic.smin.typed.i32` (roadmap H8w):
+  /// `OpAtomicSMin`'s counterpart to `AtomicAddTyped` -- a signed minimum.
+  AtomicSMinTyped,
+  /// `feme.cpu.resource.atomic.umax.typed.i32` (roadmap H8w):
+  /// `OpAtomicUMax`'s counterpart to `AtomicAddTyped` -- an unsigned
+  /// maximum.
+  AtomicUMaxTyped,
+  /// `feme.cpu.resource.atomic.umin.typed.i32` (roadmap H8w):
+  /// `OpAtomicUMin`'s counterpart to `AtomicAddTyped` -- an unsigned
+  /// minimum.
+  AtomicUMinTyped,
+  /// `feme.cpu.resource.atomic.exchange.typed.i32` (roadmap H8w):
+  /// `OpAtomicExchange`'s counterpart to `AtomicAddTyped` -- an
+  /// unconditional swap.
+  AtomicExchangeTyped,
+  /// `feme.cpu.resource.atomic.compare_exchange.typed.i32` (roadmap H8w):
+  /// `OpAtomicCompareExchange`'s counterpart to `AtomicAddTyped`, taking an
+  /// extra comparator operand (see `MatchedResourceCall::Comparator`)
+  /// before the value -- the memory word is only replaced with the value
+  /// when it currently equals the comparator, but the value returned is
+  /// always the pre-op value either way, matching
+  /// `OpAtomicCompareExchange`'s own result semantics.
+  AtomicCompareExchangeTyped,
 };
 
 /// Returns whether \p Kind reads or writes through the resource.
 bool isLoad(ResourceCallKind Kind);
+
+/// Returns whether \p Kind is one of the `Atomic*Typed` kinds above: reads
+/// *and* writes through the resource in a single call, unlike every
+/// `Load*`/`Store*` kind (see `MemoryEffects::argMemOnly(ModRefInfo::ModRef)`
+/// in `getOrInsertResourceCall`'s own comment for why this needs its own
+/// category rather than reusing `isLoad`).
+bool isAtomic(ResourceCallKind Kind);
 
 /// The heap/root-constant operands every `feme.cpu.resource.*` call carries
 /// alongside its access-specific operands (see "Lowering": "The heap
@@ -86,8 +143,14 @@ struct MatchedResourceCall {
   llvm::Value *DescriptorIndex = nullptr;
   /// The element index (`Typed`) or byte offset (`Raw`) operand.
   llvm::Value *Offset = nullptr;
-  /// The stored value operand, for `StoreTyped`/`StoreRaw`; null for a load.
+  /// The stored value operand, for `StoreTyped`/`StoreRaw`; the RMW/xchg
+  /// value operand, for every `Atomic*Typed` kind (roadmap H8w); null for a
+  /// load.
   llvm::Value *StoredValue = nullptr;
+  /// `AtomicCompareExchangeTyped` (roadmap H8w) only: the comparator
+  /// operand; null for every other kind, including every other atomic
+  /// kind.
+  llvm::Value *Comparator = nullptr;
   llvm::Value *Mask = nullptr;
 };
 
@@ -141,6 +204,108 @@ llvm::CallInst *createRawStore(llvm::IRBuilderBase &Builder,
                                llvm::Value *DescriptorIndex,
                                llvm::Value *ByteOffset,
                                llvm::Value *StoredValue, llvm::Value *Mask);
+
+/// Builds a `feme.cpu.resource.atomic.add.typed.i32` call (roadmap H8w):
+/// performs `*element += Value` at \p ElementIndex through descriptor
+/// \p DescriptorIndex, returning the pre-op value.
+llvm::CallInst *createAtomicAddTyped(llvm::IRBuilderBase &Builder,
+                                     const ResourceCallEnv &Env,
+                                     llvm::Value *DescriptorIndex,
+                                     llvm::Value *ElementIndex,
+                                     llvm::Value *Val, llvm::Value *Mask,
+                                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.sub.typed.i32` call (roadmap H8w).
+/// See `createAtomicAddTyped`'s own doc.
+llvm::CallInst *createAtomicSubTyped(llvm::IRBuilderBase &Builder,
+                                     const ResourceCallEnv &Env,
+                                     llvm::Value *DescriptorIndex,
+                                     llvm::Value *ElementIndex,
+                                     llvm::Value *Val, llvm::Value *Mask,
+                                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.and.typed.i32` call (roadmap H8w).
+/// See `createAtomicAddTyped`'s own doc.
+llvm::CallInst *createAtomicAndTyped(llvm::IRBuilderBase &Builder,
+                                     const ResourceCallEnv &Env,
+                                     llvm::Value *DescriptorIndex,
+                                     llvm::Value *ElementIndex,
+                                     llvm::Value *Val, llvm::Value *Mask,
+                                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.or.typed.i32` call (roadmap H8w). See
+/// `createAtomicAddTyped`'s own doc.
+llvm::CallInst *createAtomicOrTyped(llvm::IRBuilderBase &Builder,
+                                    const ResourceCallEnv &Env,
+                                    llvm::Value *DescriptorIndex,
+                                    llvm::Value *ElementIndex,
+                                    llvm::Value *Val, llvm::Value *Mask,
+                                    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.xor.typed.i32` call (roadmap H8w).
+/// See `createAtomicAddTyped`'s own doc.
+llvm::CallInst *createAtomicXorTyped(llvm::IRBuilderBase &Builder,
+                                     const ResourceCallEnv &Env,
+                                     llvm::Value *DescriptorIndex,
+                                     llvm::Value *ElementIndex,
+                                     llvm::Value *Val, llvm::Value *Mask,
+                                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.smax.typed.i32` call (roadmap H8w).
+/// See `createAtomicAddTyped`'s own doc.
+llvm::CallInst *createAtomicSMaxTyped(llvm::IRBuilderBase &Builder,
+                                      const ResourceCallEnv &Env,
+                                      llvm::Value *DescriptorIndex,
+                                      llvm::Value *ElementIndex,
+                                      llvm::Value *Val, llvm::Value *Mask,
+                                      const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.smin.typed.i32` call (roadmap H8w).
+/// See `createAtomicAddTyped`'s own doc.
+llvm::CallInst *createAtomicSMinTyped(llvm::IRBuilderBase &Builder,
+                                      const ResourceCallEnv &Env,
+                                      llvm::Value *DescriptorIndex,
+                                      llvm::Value *ElementIndex,
+                                      llvm::Value *Val, llvm::Value *Mask,
+                                      const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.umax.typed.i32` call (roadmap H8w).
+/// See `createAtomicAddTyped`'s own doc.
+llvm::CallInst *createAtomicUMaxTyped(llvm::IRBuilderBase &Builder,
+                                      const ResourceCallEnv &Env,
+                                      llvm::Value *DescriptorIndex,
+                                      llvm::Value *ElementIndex,
+                                      llvm::Value *Val, llvm::Value *Mask,
+                                      const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.umin.typed.i32` call (roadmap H8w).
+/// See `createAtomicAddTyped`'s own doc.
+llvm::CallInst *createAtomicUMinTyped(llvm::IRBuilderBase &Builder,
+                                      const ResourceCallEnv &Env,
+                                      llvm::Value *DescriptorIndex,
+                                      llvm::Value *ElementIndex,
+                                      llvm::Value *Val, llvm::Value *Mask,
+                                      const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.exchange.typed.i32` call (roadmap
+/// H8w). See `createAtomicAddTyped`'s own doc.
+llvm::CallInst *createAtomicExchangeTyped(llvm::IRBuilderBase &Builder,
+                                          const ResourceCallEnv &Env,
+                                          llvm::Value *DescriptorIndex,
+                                          llvm::Value *ElementIndex,
+                                          llvm::Value *Val,
+                                          llvm::Value *Mask,
+                                          const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.resource.atomic.compare_exchange.typed.i32` call
+/// (roadmap H8w): like `createAtomicAddTyped`, but only replaces
+/// `*element` with \p Value when it currently equals \p Comparator --
+/// either way, returns the pre-op value.
+llvm::CallInst *createAtomicCompareExchangeTyped(
+    llvm::IRBuilderBase &Builder, const ResourceCallEnv &Env,
+    llvm::Value *DescriptorIndex, llvm::Value *ElementIndex,
+    llvm::Value *Comparator, llvm::Value *Val, llvm::Value *Mask,
+    const llvm::Twine &Name = "");
 
 /// Recognizes \p CI as one of the canonical `feme.cpu.resource.*` calls,
 /// returning its decoded operands, or `std::nullopt` if \p CI's callee isn't
