@@ -3372,6 +3372,127 @@ public:
   }
 };
 
+/// Converts `spirv.ImageTexelPointer` (roadmap R39/H8u) into the same
+/// `llvm.spv.resource.getpointer` call `ImageReadPattern`/`ImageWritePattern`
+/// use to form a storage-image texel address, so a following
+/// `spirv.Atomic*` op (already converted generically by MLIR's own
+/// upstream `spirv` -> `llvm` patterns, since every `Atomic*` op is generic
+/// over any pointer type) becomes an ordinary LLVM `atomicrmw`/`cmpxchg`
+/// against that pointer with no new intrinsic of its own.
+///
+/// `$image`'s type is a pointer-to-image (`!spirv.ptr<!spirv.image<...>,
+/// UniformConstant>`), unlike `ImageRead`'s/`ImageWrite`'s own loaded-image-
+/// value `$image` operand -- but `ResourceAddressOfPattern` already
+/// converts a resource variable's `spirv.mlir.addressof` directly to the
+/// handle value itself (see its own comment), so `Adaptor.getImage()` here
+/// is already that same handle, needing no further indirection.
+class ImageTexelPointerPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageTexelPointerOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageTexelPointerOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageTexelPointerOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto ImagePtrType =
+        mlir::cast<mlir::spirv::PointerType>(Op.getImage().getType());
+    auto ImageType =
+        mlir::cast<mlir::spirv::ImageType>(ImagePtrType.getPointeeType());
+
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+    if (isMultisampled2DImage(ImageType))
+      Coordinate = appendVectorLane(Rewriter, Op.getLoc(), Coordinate,
+                                    Adaptor.getSample());
+    // A single-sampled image's `Sample` operand carries no address
+    // information of its own -- the SPIR-V spec requires it to be 0 in
+    // that case (its value is otherwise undefined) -- so every other
+    // image dimension this converter already handles (Plain2D/Array2D/
+    // Plain3D) needs no change to admit `ImageTexelPointer` alongside
+    // `ImageRead`/`ImageWrite`.
+
+    Rewriter.replaceOp(Op, createResourcePointer(Rewriter, Op.getLoc(),
+                                                 Adaptor.getImage(),
+                                                 Coordinate));
+    return mlir::success();
+  }
+};
+
+/// Roadmap R39/H8u: MLIR's own upstream `spirv` -> `llvm` conversion has no
+/// pattern at all for any `spirv.Atomic*` op (confirmed by grep -- unlike
+/// the ordinary arithmetic/logical ops, which upstream already converts
+/// with `DirectConversionPattern`), so every atomic op this converter
+/// needs to support against a storage-image texel pointer (formed by
+/// `ImageTexelPointerPattern` above) needs its own `feme`-side pattern.
+///
+/// Maps a SPIR-V `MemorySemantics` bitmask onto the closest LLVM
+/// `AtomicOrdering`. This converter targets a single CPU device with one
+/// coherent address space, so there is no weaker-than-`seq_cst` ordering
+/// that is unsafe to use -- `seq_cst` is picked whenever none of the
+/// ordering-relevant bits are set, which is always correct (if
+/// conservative) for every caller.
+static mlir::LLVM::AtomicOrdering
+convertAtomicOrdering(mlir::spirv::MemorySemantics Semantics) {
+  bool Acquire =
+      mlir::spirv::bitEnumContainsAll(Semantics, mlir::spirv::MemorySemantics::Acquire);
+  bool Release =
+      mlir::spirv::bitEnumContainsAll(Semantics, mlir::spirv::MemorySemantics::Release);
+  if (Acquire && Release)
+    return mlir::LLVM::AtomicOrdering::acq_rel;
+  if (Acquire)
+    return mlir::LLVM::AtomicOrdering::acquire;
+  if (Release)
+    return mlir::LLVM::AtomicOrdering::release;
+  return mlir::LLVM::AtomicOrdering::seq_cst;
+}
+
+/// Converts an `AtomicUpdateWithValueOp`-shaped `spirv.Atomic*` RMW op (and
+/// `spirv.AtomicExchange`, which shares the same `pointer`/`memory_scope`/
+/// `semantics`/`value` operand shape) into an `llvm.atomicrmw` of the given
+/// `BinOp` kind.
+template <typename SPIRVOpTy, mlir::LLVM::AtomicBinOp BinOp>
+class AtomicRMWPattern : public mlir::SPIRVToLLVMConversion<SPIRVOpTy> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOpTy>::SPIRVToLLVMConversion;
+  using OpAdaptor = typename mlir::SPIRVToLLVMConversion<SPIRVOpTy>::OpAdaptor;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOpTy Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::LLVM::AtomicOrdering Ordering =
+        convertAtomicOrdering(Op.getSemantics());
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::AtomicRMWOp>(
+        Op, BinOp, Adaptor.getPointer(), Adaptor.getValue(), Ordering);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.AtomicCompareExchange` into an `llvm.cmpxchg` plus the
+/// `extractvalue` picking out the *old* value -- SPIR-V's own result is
+/// always the value that was in memory before the swap, whether or not the
+/// comparison succeeded, matching `llvm.cmpxchg`'s first result element.
+class AtomicCompareExchangePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AtomicCompareExchangeOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::AtomicCompareExchangeOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AtomicCompareExchangeOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::LLVM::AtomicOrdering SuccessOrdering =
+        convertAtomicOrdering(Op.getEqualSemantics());
+    mlir::LLVM::AtomicOrdering FailureOrdering =
+        convertAtomicOrdering(Op.getUnequalSemantics());
+    auto CmpXchg = mlir::LLVM::AtomicCmpXchgOp::create(
+        Rewriter, Op.getLoc(), Adaptor.getPointer(), Adaptor.getComparator(),
+        Adaptor.getValue(), SuccessOrdering, FailureOrdering);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ExtractValueOp>(
+        Op, CmpXchg.getResult(), llvm::ArrayRef<int64_t>{0});
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.ImageQuerySize` into the `llvm.spv.resource.getdimensions`
 /// intrinsic returning as many dimensions as the query asks for.
 class ImageQuerySizePattern
@@ -4861,6 +4982,18 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const FastMathDefaultMap &FastMathDefaults) {
   Patterns.add<
       ArrayConstantPattern, AssumeTrueConversionPattern,
+      AtomicCompareExchangePattern,
+      AtomicRMWPattern<mlir::spirv::AtomicIAddOp, mlir::LLVM::AtomicBinOp::add>,
+      AtomicRMWPattern<mlir::spirv::AtomicISubOp, mlir::LLVM::AtomicBinOp::sub>,
+      AtomicRMWPattern<mlir::spirv::AtomicAndOp, mlir::LLVM::AtomicBinOp::_and>,
+      AtomicRMWPattern<mlir::spirv::AtomicOrOp, mlir::LLVM::AtomicBinOp::_or>,
+      AtomicRMWPattern<mlir::spirv::AtomicXorOp, mlir::LLVM::AtomicBinOp::_xor>,
+      AtomicRMWPattern<mlir::spirv::AtomicSMaxOp, mlir::LLVM::AtomicBinOp::max>,
+      AtomicRMWPattern<mlir::spirv::AtomicSMinOp, mlir::LLVM::AtomicBinOp::min>,
+      AtomicRMWPattern<mlir::spirv::AtomicUMaxOp, mlir::LLVM::AtomicBinOp::umax>,
+      AtomicRMWPattern<mlir::spirv::AtomicUMinOp, mlir::LLVM::AtomicBinOp::umin>,
+      AtomicRMWPattern<mlir::spirv::AtomicExchangeOp,
+                       mlir::LLVM::AtomicBinOp::xchg>,
       BranchConditionalPattern, BuiltInAddressOfPattern,
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
       BlockAccessChainPattern, CompositeConstructPattern,
@@ -4870,7 +5003,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       ExecutionModeIdPattern, ExpectConversionPattern, ImageFetchPattern,
       ImageFetchLodPattern, ImageSampleExplicitLodPattern,
       ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
-      ImageWritePattern,
+      ImageTexelPointerPattern, ImageWritePattern,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIAddOp>,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIMulOp>,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformSMinOp>,
