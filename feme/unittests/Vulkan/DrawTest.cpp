@@ -882,7 +882,12 @@ protected:
   /// with a chained `VkPipelineRenderingCreateInfo` (dynamic rendering).
   /// \p CustomLayout, when non-null, replaces the fixture's own (empty)
   /// `Layout` -- needed by a test whose shader binds a real descriptor
-  /// (e.g. roadmap H7g's storage-buffer tests).
+  /// (e.g. roadmap H7g's storage-buffer tests). \p Fragment may be
+  /// `VK_NULL_HANDLE` (roadmap H9a) to build a fragment-less pipeline;
+  /// the fragment stage is then omitted from `pStages` entirely, while
+  /// `pColorBlendState` still declares the fixture's usual one (necessarily
+  /// unwritten) color attachment, exactly
+  /// `dEQP-VK.query_pool.statistics_query.*`'s own `vertexOnlyPipe` shape.
   VkPipeline
   createPipeline(VkShaderModule Vertex, VkShaderModule Fragment,
                  const VkPipelineRenderingCreateInfo *Rendering = nullptr,
@@ -892,10 +897,14 @@ protected:
     Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     Stages[0].module = Vertex;
     Stages[0].pName = "main";
-    Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    Stages[1].module = Fragment;
-    Stages[1].pName = "main";
+    uint32_t StageCount = 1;
+    if (Fragment != VK_NULL_HANDLE) {
+      Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+      Stages[1].module = Fragment;
+      Stages[1].pName = "main";
+      StageCount = 2;
+    }
 
     VkPipelineVertexInputStateCreateInfo VertexInput{};
     VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
@@ -921,7 +930,7 @@ protected:
 
     VkGraphicsPipelineCreateInfo Info{};
     Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    Info.stageCount = 2;
+    Info.stageCount = StageCount;
     Info.pStages = Stages;
     Info.pVertexInputState = &VertexInput;
     Info.pInputAssemblyState = &InputAssembly;
@@ -5342,6 +5351,62 @@ TEST_F(DrawTest, OcclusionQueryCountsPassedSamples) {
   vkDestroyQueryPool(Device, QueryPool, nullptr);
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (Roadmap H9a) A pipeline with no fragment stage at all, drawn against a
+/// render target that still has a (necessarily unwritten) color
+/// attachment: exactly `dEQP-VK.query_pool.statistics_query.*`'s own
+/// `VertexShaderTestInstance` `vertexOnlyPipe` shape, which
+/// `GraphicsPipelineTest.AcceptsMissingFragmentStageWithColorAttachments`
+/// already confirms creates successfully. This test goes one step
+/// further and confirms it also *draws* successfully end to end: the
+/// clear color must survive untouched (no fragment stage ever runs to
+/// overwrite it, matching the spec's own "fragment color outputs have
+/// undefined values" wording -- realized here as "unchanged"), and an
+/// occlusion query wrapped around the same draw must still count the
+/// covered samples (early depth/stencil-less occlusion counting has no
+/// dependency on a fragment stage being present at all, roadmap H2j).
+TEST_F(DrawTest, DrawsWithMissingFragmentStageAndColorAttachment) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkPipeline Pipe = createPipeline(Vertex, VK_NULL_HANDLE);
+
+  VkQueryPoolCreateInfo QueryInfo{};
+  QueryInfo.queryType = VK_QUERY_TYPE_OCCLUSION;
+  QueryInfo.queryCount = 1;
+  VkQueryPool QueryPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &QueryInfo, nullptr, &QueryPool),
+            VK_SUCCESS);
+
+  beginRenderPass({{0.25f, 0.5f, 0.75f, 1.0f}});
+  vkCmdResetQueryPool(Cmd, QueryPool, 0, 1);
+  vkCmdBeginQuery(Cmd, QueryPool, 0, 0);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndQuery(Cmd, QueryPool, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // The clear color (0.25, 0.5, 0.75, 1.0) in R8G8B8A8_UNORM: no fragment
+  // stage ever ran to overwrite it.
+  std::array<uint8_t, 4> Texel = texel(0, 0);
+  EXPECT_EQ(Texel[0], 64u);
+  EXPECT_EQ(Texel[1], 128u);
+  EXPECT_EQ(Texel[2], 191u);
+  EXPECT_EQ(Texel[3], 255u);
+
+  uint64_t Results[2] = {0, 0};
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QueryPool, 0, 1, sizeof(Results),
+                                  Results, 2 * sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT |
+                                      VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+            VK_SUCCESS);
+  EXPECT_EQ(Results[0], uint64_t(Extent * Extent));
+  EXPECT_EQ(Results[1], 1u);
+
+  vkDestroyQueryPool(Device, QueryPool, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 

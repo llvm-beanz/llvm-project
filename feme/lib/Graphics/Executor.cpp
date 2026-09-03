@@ -1786,51 +1786,62 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     return std::nullopt;
   };
   SmallVector<const SignatureElement *, 4> FSColors;
-  for (uint32_t I = 0; I != Draw.Attachments.size(); ++I) {
-    if (Draw.Attachments[I].Data.empty()) {
-      // (Roadmap E5) `VK_KHR_maintenance5`: this color slot's
-      // `VkRenderingAttachmentInfo::imageView` was `VK_NULL_HANDLE` --
-      // present but unused. The spec requires the fragment shader not to
-      // write here, so no output is required (or consulted) at this
-      // location either.
-      FSColors.push_back(nullptr);
-      continue;
+  // (roadmap H9a) A fragment-less pipeline (`GraphicsPipeline.cpp`'s own
+  // pipeline-creation-time rejection of this shape removed by this same
+  // row) has no fragment output to link against any color attachment at
+  // all -- skip this whole per-location lookup/validation loop entirely
+  // rather than have every location's lookup fail against `FSSig`'s own
+  // (correctly empty) element list. `FSColors` is only ever read later,
+  // within the per-quad shading path below the `!Pipeline.
+  // hasFragmentStage()` early return this same file already has, so
+  // leaving it empty here is never observed.
+  if (Pipeline.hasFragmentStage()) {
+    for (uint32_t I = 0; I != Draw.Attachments.size(); ++I) {
+      if (Draw.Attachments[I].Data.empty()) {
+        // (Roadmap E5) `VK_KHR_maintenance5`: this color slot's
+        // `VkRenderingAttachmentInfo::imageView` was `VK_NULL_HANDLE` --
+        // present but unused. The spec requires the fragment shader not to
+        // write here, so no output is required (or consulted) at this
+        // location either.
+        FSColors.push_back(nullptr);
+        continue;
+      }
+      std::optional<uint32_t> Loc = locationForAttachment(I);
+      if (!Loc) {
+        // (roadmap F8) No fragment output location is remapped onto this
+        // attachment: it keeps whatever it already held, exactly like an
+        // unused `VkRenderingAttachmentInfo` slot above.
+        FSColors.push_back(nullptr);
+        continue;
+      }
+      const SignatureElement *FSColor =
+          findElementByLocation(FSSig, SignatureDirection::Output, *Loc);
+      if (!FSColor)
+        return createStringError(inconvertibleErrorCode(),
+                                 "fragment stage has no output at location %u "
+                                 "(mapped to color attachment %u)",
+                                 *Loc, I);
+      // (Roadmap H8p) An integer color attachment (one of
+      // `isIntegerColorAttachmentFormat`'s 7 formats, RuntimeABI.h) expects
+      // a matching `UInt`/`SInt` fragment output instead of `Float` --
+      // `expectedColorComponentType` (above) resolves which, so a real
+      // `ivec4`/`uvec4` fragment output can now be drawn to a real integer
+      // attachment rather than being hard-rejected outright regardless of
+      // the attachment's own format.
+      SignatureComponentType Want =
+          expectedColorComponentType(Draw.Attachments[I].Format);
+      if (FSColor->ComponentCount == 0 || FSColor->ComponentCount > 4 ||
+          FSColor->ComponentType != Want)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "the fragment output at location %u mapped to color attachment "
+            "%u must be a%s output of 1-4 components",
+            *Loc, I,
+            Want == SignatureComponentType::Float  ? " floating-point"
+            : Want == SignatureComponentType::UInt ? "n unsigned-integer"
+                                                    : " signed-integer");
+      FSColors.push_back(FSColor);
     }
-    std::optional<uint32_t> Loc = locationForAttachment(I);
-    if (!Loc) {
-      // (roadmap F8) No fragment output location is remapped onto this
-      // attachment: it keeps whatever it already held, exactly like an
-      // unused `VkRenderingAttachmentInfo` slot above.
-      FSColors.push_back(nullptr);
-      continue;
-    }
-    const SignatureElement *FSColor =
-        findElementByLocation(FSSig, SignatureDirection::Output, *Loc);
-    if (!FSColor)
-      return createStringError(inconvertibleErrorCode(),
-                               "fragment stage has no output at location %u "
-                               "(mapped to color attachment %u)",
-                               *Loc, I);
-    // (Roadmap H8p) An integer color attachment (one of
-    // `isIntegerColorAttachmentFormat`'s 7 formats, RuntimeABI.h) expects
-    // a matching `UInt`/`SInt` fragment output instead of `Float` --
-    // `expectedColorComponentType` (above) resolves which, so a real
-    // `ivec4`/`uvec4` fragment output can now be drawn to a real integer
-    // attachment rather than being hard-rejected outright regardless of
-    // the attachment's own format.
-    SignatureComponentType Want =
-        expectedColorComponentType(Draw.Attachments[I].Format);
-    if (FSColor->ComponentCount == 0 || FSColor->ComponentCount > 4 ||
-        FSColor->ComponentType != Want)
-      return createStringError(
-          inconvertibleErrorCode(),
-          "the fragment output at location %u mapped to color attachment "
-          "%u must be a%s output of 1-4 components",
-          *Loc, I,
-          Want == SignatureComponentType::Float  ? " floating-point"
-          : Want == SignatureComponentType::UInt ? "n unsigned-integer"
-                                                  : " signed-integer");
-    FSColors.push_back(FSColor);
   }
 
   // Dual-source blending (`VK_BLEND_FACTOR_SRC1_*`, "Dual-source blending"
@@ -2915,10 +2926,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // stencil testing is needed, since there is no fragment stage that
         // could override it, see `UseEarlyDepthStencil`) already resolved
         // final per-sample pass/fail and performed any depth/stencil
-        // writes; only per-sample occlusion-query bookkeeping remains
-        // (there is no color attachment to write into either -- pipeline
-        // creation only allows a fragment-less pipeline when the render
-        // target has none).
+        // writes; only per-sample occlusion-query bookkeeping remains. A
+        // fragment-less pipeline may legally have a nonempty color
+        // attachment list too (roadmap H9a, loosening this comment's own
+        // prior assumption): simply leaving every color attachment
+        // untouched below is a valid realization of the spec's own
+        // "fragment color outputs have undefined values" wording for that
+        // case.
         if (Draw.PassedSampleCounter)
           for (uint32_t Q = 0, E = static_cast<uint32_t>(Quads.size()); Q != E;
                ++Q)

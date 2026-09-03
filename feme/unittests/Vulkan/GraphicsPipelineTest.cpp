@@ -1857,12 +1857,18 @@ TEST_F(GraphicsPipelineTest, AcceptsMissingFragmentStage) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// Roadmap H2j: unlike a depth-only pipeline, a pipeline whose render
-/// target has at least one color attachment still requires a fragment
-/// stage to produce it -- omitting `pStages`'s fragment entry is only
-/// legal when `Targets.Colors` is empty, matching
-/// `VUID-VkGraphicsPipelineCreateInfo-pStages-06894`'s own condition.
-TEST_F(GraphicsPipelineTest, RejectsMissingFragmentStageWithColorAttachments) {
+/// Roadmap H9a: a pipeline whose render target has one or more color
+/// attachments may still legally omit its fragment stage -- per the
+/// spec's own "Valid Combinations of Stages for Graphics Pipelines" text,
+/// "If a fragment shader is omitted, fragment color outputs have
+/// undefined values", with no condition on the color attachment count.
+/// Exactly `dEQP-VK.query_pool.statistics_query.*`'s own
+/// `VertexShaderTestInstance` `vertexOnlyPipe` shape, which declares one
+/// (necessarily unwritten) color attachment via `pColorBlendState` while
+/// omitting the fragment stage from `pStages` entirely. Originally
+/// rejected outright (`VK_ERROR_INITIALIZATION_FAILED`), which was
+/// stricter than the spec allows.
+TEST_F(GraphicsPipelineTest, AcceptsMissingFragmentStageWithColorAttachments) {
   VkShaderModule Vertex = createModule(VertexSource);
   ASSERT_NE(Vertex, VK_NULL_HANDLE);
 
@@ -1870,8 +1876,12 @@ TEST_F(GraphicsPipelineTest, RejectsMissingFragmentStageWithColorAttachments) {
   Info.stageCount = 1;
 
   VkPipeline Pipe = VK_NULL_HANDLE;
-  EXPECT_NE(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  auto *Pipe2 = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  EXPECT_EQ(Pipe2->colorAttachmentCount(), 1u);
+  EXPECT_FALSE(Pipe2->hasFragmentStage());
 
+  vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 

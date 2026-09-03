@@ -684,8 +684,17 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                                  I, I);
     }
   }
-  assert((FragmentStage || ColorAttachments.empty()) &&
-         "a fragment-less pipeline must not declare color attachments");
+  // (roadmap H9a) A fragment-less pipeline may legally declare a nonempty
+  // `ColorAttachments` too -- this used to be an invariant this function
+  // itself enforced (`GraphicsPipeline.cpp`'s own pipeline-creation-time
+  // rejection, removed by this same row), but is no longer one now that
+  // the rejection is gone. Nothing above this point needed
+  // `ColorAttachments` to be empty in the `!FragmentStage` case anyway:
+  // the whole per-location fragment-output-matching loop above is already
+  // scoped to `if (FragmentStage)`, so it is simply never reached here,
+  // leaving every color attachment unvalidated (and, at draw time,
+  // unwritten -- `Executor.cpp`'s own `!Pipeline.hasFragmentStage()`
+  // early return).
 
   // Every located vertex *input* must be supplied by a vertex attribute:
   // an unbound one would read as zero at every vertex, which is a silently
@@ -1576,14 +1585,22 @@ Error translateFixedFunctionState(
   if (Targets->Colors.size() > DeviceInfo.Properties.limits.maxColorAttachments)
     return createStringError(inconvertibleErrorCode(),
                              "the render target exceeds maxColorAttachments");
-  // (roadmap H2j) A fragment shader is only genuinely optional when the
-  // render target has no color attachments at all
-  // (`VUID-VkGraphicsPipelineCreateInfo-pStages-06894`/neighbors); a
-  // color-attached pipeline still requires one to produce those outputs.
-  if (!FragmentInfo && !Targets->Colors.empty())
-    return createStringError(inconvertibleErrorCode(),
-                             "a graphics pipeline with color attachments "
-                             "needs a fragment stage");
+  // (roadmap H2j, loosened by H9a) A fragment shader is always optional,
+  // regardless of how many color attachments the render target has: per
+  // the spec's own "Valid Combinations of Stages for Graphics Pipelines"
+  // text, "If a fragment shader is omitted, fragment color outputs have
+  // undefined values" -- there is no VUID conditioning that on an empty
+  // attachment list. This was originally rejected outright
+  // (`VK_ERROR_INITIALIZATION_FAILED`), which was stricter than the spec
+  // allows and broke every otherwise-valid `vertexOnlyPipe`-shaped
+  // pipeline that still declares a (necessarily unwritten) color
+  // attachment, such as the `dEQP-VK.query_pool.statistics_query.*`
+  // suite's own `VertexShaderTestInstance` shape -- fixed by simply not
+  // requiring a fragment stage here at all. `Executor.cpp`'s
+  // `!Pipeline.hasFragmentStage()` early-return (roadmap H2j) already
+  // leaves every color attachment untouched in this case, which is a
+  // valid realization of "undefined values" (the spec permits any
+  // value, including whatever was already there).
 
   const VkPipelineInputAssemblyStateCreateInfo *InputAssembly =
       CreateInfo.pInputAssemblyState;
