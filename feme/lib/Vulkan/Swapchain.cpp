@@ -15,6 +15,7 @@
 #include "Sync.h"
 
 #include <cstdlib>
+#include <cstring>
 
 using namespace feme::vulkan;
 using namespace feme::cpu;
@@ -263,6 +264,56 @@ vkQueuePresentKHR(VkQueue, const VkPresentInfoKHR *pPresentInfo) {
       FinalResult = ThisResult;
   }
   return FinalResult;
+}
+
+// Roadmap H10c: `VK_KHR_swapchain`'s own device-group companion commands
+// (see EntryPoints.h's own comment on why these were missing entirely
+// until now). Every value below reflects the same fact
+// `vkEnumeratePhysicalDeviceGroups` (EntryPoints.cpp) does: this ICD's one
+// physical-device group has exactly one member, so
+// `VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR` is the only present mode
+// that can ever apply, and every device index an application legally
+// passes is device 0.
+VKAPI_ATTR VkResult VKAPI_CALL vkGetDeviceGroupPresentCapabilitiesKHR(
+    VkDevice, VkDeviceGroupPresentCapabilitiesKHR
+                  *pDeviceGroupPresentCapabilities) {
+  std::memset(pDeviceGroupPresentCapabilities->presentMask, 0,
+             sizeof(pDeviceGroupPresentCapabilities->presentMask));
+  pDeviceGroupPresentCapabilities->presentMask[0] = 1;
+  pDeviceGroupPresentCapabilities->modes =
+      VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkGetDeviceGroupSurfacePresentModesKHR(
+    VkDevice, VkSurfaceKHR, VkDeviceGroupPresentModeFlagsKHR *pModes) {
+  *pModes = VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDevicePresentRectanglesKHR(
+    VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
+    uint32_t *pRectCount, VkRect2D *pRects) {
+  // Only meaningful when `VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_MULTI_DEVICE_BIT_KHR`
+  // is set (never true here, see `vkGetDeviceGroupSurfacePresentModesKHR`
+  // above) -- still expected to report one rectangle covering the whole
+  // surface, matching a single-device group's one implicit rectangle.
+  VkSurfaceCapabilitiesKHR Caps{};
+  VkResult Result = feme::vulkan::vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+      physicalDevice, surface, &Caps);
+  if (Result != VK_SUCCESS)
+    return Result;
+  if (!pRects) {
+    *pRectCount = 1;
+    return VK_SUCCESS;
+  }
+  if (*pRectCount < 1) {
+    *pRectCount = 0;
+    return VK_INCOMPLETE;
+  }
+  pRects[0] = VkRect2D{{0, 0}, Caps.currentExtent};
+  *pRectCount = 1;
+  return VK_SUCCESS;
 }
 
 } // namespace feme::vulkan
