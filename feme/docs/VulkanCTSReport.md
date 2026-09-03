@@ -21183,3 +21183,111 @@ entirely-unrecognized `VkFormat` recognized, and widens its own
 `VkFormatFeatureFlags` from nothing to a real, CTS-confirmed subset.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap H8f: measured impact
+
+H8f's own text asked for a scoping pass of `VkImageFormatProperties::
+sampleCounts` versus the mandatory `VK_SAMPLE_COUNT_1_BIT`/`_4_BIT`
+minimums for color/depth/stencil formats. A real
+`dEQP-VK.api.info.image_format_properties*` re-run (1,186 cases,
+`image_format_properties`/`image_format_properties2` combined) found
+this specific group already fully passing, both before this row's own
+fix (1,186/1,186) and after (2,372/2,372, once
+`image_format_properties2`'s own larger case count is included) -- so
+the CTS-visible side of this scoping pass was already clean. The
+reason: `vktApiFeatureInfo.cpp`'s own check
+(`getRequiredOptimalTilingSampleCounts`) is a "must include at least
+this minimum" check (`(properties.sampleCounts & requiredSampleCounts)
+== requiredSampleCounts`), not an equality one, so a device that
+*over-reports* a wider mask than required still passes it.
+
+That over-report is exactly what this row's own scoping pass found,
+reading `Image.cpp`'s `supportedSampleCounts` line by line against the
+CTS's own reference algorithm: it never looked at the image's own
+format at all, so a depth or stencil format's `VK_IMAGE_USAGE_
+SAMPLED_BIT` usage was unconditionally intersected against the
+*color* sample-count limit (`sampledImageColorSampleCounts`, `1|2|4|8`
+on this device) rather than `sampledImageDepthSampleCounts`/
+`sampledImageStencilSampleCounts` (each `VK_SAMPLE_COUNT_1_BIT` only,
+`PhysicalDeviceInfo.cpp`) -- silently contradicting this very file's
+own design-intent comment ("a *sampled* depth/stencil image stays
+single-sample: reading an individual sample of one from a shader needs
+`OpImageFetch`-with-sample-index raising, which R30 left out of
+scope"). `vkCreateImage` would accept a 4x/8x-multisample, sampled-only
+depth or stencil image outright, a shape nothing downstream can
+service correctly since no per-sample depth/stencil texel fetch
+exists.
+
+The fix threads an optional `feme::cpu::ResourceFormat` through
+`supportedSampleCounts`/`isValidImageShape` (`Image.{h,cpp}`); every
+real call site (`vkCreateImage`, `vkGetDeviceImageMemoryRequirements`,
+and `vkGetPhysicalDeviceImageFormatProperties`'s own shape probe) already
+has a mapped format available by the time it needs a sample-count mask,
+so `std::nullopt` is now purely a theoretical option, not something any
+call site actually passes. Classification reuses `RenderPass.h`'s
+existing `isSupportedDepthAttachmentFormat`/
+`isSupportedStencilAttachmentFormat` predicates and mirrors the CTS's
+own `hasDepthComp`/`hasStencilComp` branching exactly, including that
+they are not mutually exclusive: a combined `D24_UNORM_S8_UINT` format
+now narrows by *both* the depth and stencil limits for `SAMPLED_BIT`/
+`DEPTH_STENCIL_ATTACHMENT_BIT` usage, not just one.
+
+While reading the surrounding code for other per-format sample-count
+staleness, also found and fixed `EntryPoints.cpp`'s
+`framebufferIntegerColorSampleCounts`, still hard-coded to
+`VK_SAMPLE_COUNT_1_BIT` with a comment claiming "no integer color
+format is an accepted color-attachment format at all yet" -- stale
+since roadmap H8p added real fragment-output write support for 7
+integer color-attachment formats (`isIntegerColorAttachmentFormat`,
+RuntimeABI.h). Nothing in `Executor.cpp`'s multisample render path
+(`executeDraws`'s per-sample color/depth/stencil writes) branches on a
+format's integer-ness, so this field now matches
+`framebufferColorSampleCounts` (`1|2|4|8`) instead of trailing it.
+
+Deliberately did *not* add a format-specific branch distinguishing
+`sampledImageIntegerSampleCounts` from `sampledImageColorSampleCounts`
+inside `supportedSampleCounts` itself: both fields are hard-coded to
+the identical `1|2|4|8` mask on this device (`PhysicalDeviceInfo.cpp`),
+so no reachable input could make that branch produce a different
+answer than the code already gives without it -- a deliberate no-op
+documented in `supportedSampleCounts`'s own comment, not a gap silently
+left unscoped.
+
+4 new unit tests directly exercise the fixed behavior at both layers:
+`ImageTest.cpp`'s `RejectsMultisampleSampledDepthImage` (a 4-sample,
+`SAMPLED_BIT`-only `D32_SFLOAT` image now correctly fails
+`vkCreateImage`), `RejectsMultisampleSampledStencilImage` (the
+stencil-only counterpart, `S8_UINT`), and
+`AcceptsSingleSampleSampledDepthImage` (confirms the fix does not
+regress the always-legal single-sample case); `EntryPointsTest.cpp`'s
+`ImageFormatPropertiesReportsSingleSampleForSampledDepth` confirms
+`vkGetPhysicalDeviceImageFormatProperties` itself now reports
+`sampleCounts == VK_SAMPLE_COUNT_1_BIT` (not `1|2|4|8`) for a sampled
+`D16_UNORM` image -- the one depth format with a real `SAMPLED_IMAGE_BIT`
+(roadmap H8e), and so the only one this query does not already reject
+before ever computing `sampleCounts`.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full:
+2,421/2,448 Total Discovered Tests (27 pre-existing `Unsupported`,
+0 `Failed`, up 4 tests from this row's own new coverage).
+
+Real CTS: `dEQP-VK.api.info.image_format_properties*` 2,372/2,372 Pass
+(0 regressions, confirming the fix does not newly reject any format
+this same query previously, correctly, accepted). The full
+`dEQP-VK.api.info.*` sweep (10,484 cases) is unchanged at 6,326 Pass/
+0 Fail/4,158 `NotSupported` (the same figures measured before this
+row's own fix) -- no numeric CTS movement is expected from this row at
+all: it tightens an over-permissive result the CTS's own
+minimum-inclusion check could never have flagged as a failure either
+way, real-hardware-matching correctness rather than a conformance
+delta. No `dEQP-VK` case exercising multisample rendering to an integer
+color attachment was found in this checkout's own case list to confirm
+the `framebufferIntegerColorSampleCounts` fix against directly, so the
+new unit tests above are this fix's real, direct verification.
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+row -- confirmed, not assumed: this row only corrects two
+`VkPhysicalDeviceLimits`/`VkPhysicalDeviceVulkan12Properties`
+sample-count fields and the format-awareness of the internal helper
+computing them. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update.
