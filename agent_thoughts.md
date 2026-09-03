@@ -55495,3 +55495,51 @@ Given the standing instruction to run the real Vulkan CTS "after each
 change," I want to flag directly for whoever picks this up next: check
 your own shell's `VK_ICD_FILENAMES` before trusting any `deqp-vk` run
 in this environment. It is not empty by default here.
+
+# H8r: wiring up VK_FORMAT_B8G8R8A8_SRGB
+
+Straightforward compared to H8g's own environment-bug detour: this row
+had a clear, already-scoped precedent (H8g's own closure note) --
+`VK_FORMAT_B8G8R8A8_SRGB` is an entirely unmapped `VkFormat`, and the
+fix shape is "add a new `ResourceFormat`, append it at the enum's own
+tail, wire it through every place its two closest relatives
+(`R8G8B8A8_UNORM_SRGB`, `B8G8R8A8_UNORM`) already appear."
+
+The one part of this that needed real investigation rather than
+mechanical mirroring was figuring out the new enum's actual ordinal
+value. `RuntimeABI.h`'s own `ResourceFormat` enum has grown through many
+sessions' worth of appends, with block-compressed/ETC2/ASTC families
+each occupying dozens of contiguous values and several "append a single
+format" rows (H8q's `E5B9G9R9_UFLOAT`) scattered at the very end. Rather
+than trying to manually count enum entries by eye (exactly the kind of
+static-reading mistake H8g's own investigation just demonstrated is
+unreliable), I compiled a two-line C++ file that includes the real
+header and prints `(unsigned)ResourceFormat::E5B9G9R9_UFLOAT` directly
+-- got 131, so my new entry is 132. This is worth remembering as a
+pattern for any future "append a new enumerator whose raw numeric value
+matters" task in this codebase: compile-and-print the real ordinal
+rather than counting by hand.
+
+I looked for every file H8g's own closure note flagged as a possible
+wiring site (`Executor.cpp`, `CommandBuffer.cpp`,
+`BCSamplingBridge.cpp`, `ETC2SamplingBridge.cpp`) and confirmed none of
+them actually needed a change: `Executor.cpp`'s vertex-attribute decode
+switch has no `B8G8R8A8_UNORM` case at all (BGRA8 was never a supported
+vertex format, sRGB or not), and neither BC nor ETC2 decoding ever
+targets BGRA8 memory order specifically (both always decode into
+`R8G8B8A8_UNORM`/`_UNORM_SRGB`). Recording this explicitly rather than
+silently skipping those files, so a future reader knows the omission
+was checked, not missed.
+
+After wiring `mapVkFormat`/`formatElementSize`/`formatFeatureFlags`
+(Format.cpp), `isSupportedColorAttachmentFormat` (RenderPass.cpp), the
+five `ImageFixture.cpp` functions, and the runtime's element-size/unpack
+tables (FeMeRuntimeCPU.c), I rebuilt just the two affected static
+libraries first (`FeMeVulkanCore`/`FeMeRuntimeCPU`) to catch any
+missing-switch-case compile error cheaply before paying for a full
+`check-feme` build -- none turned up, confirming every switch over
+`ResourceFormat` in this codebase that matters for this format already
+has a `default:` or already covered every case it needs to. A full
+`ninja check-feme` afterward passed 2,427/2,454 (4 new tests, 0
+failures), and the real CTS re-run confirms `b8g8r8a8_srgb` moving from
+Fail to Pass with zero regressions elsewhere.
