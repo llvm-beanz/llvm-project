@@ -37,25 +37,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8h or other prerequisites blocking the H-series milestones?
+Can you work on H9 or other prerequisites blocking the H-series milestones?
 
-> **`A2B10G10R10_UNORM_PACK32` (`R10G10B10A2_UNORM`) as a vertex attribute.**
-> H8b deliberately deferred this one remaining mandatory `VERTEX_BUFFER_BIT`
-> format: it is a single packed 32-bit word (2 bits A, 10 bits each of B/G/R,
-> MSB-down), not a "N bytes per component" layout `decodeAttribute`'s existing
-> convention fits mechanically -- needs its own dedicated decode case mirroring
-> `femeRTUnpackR10G10B10A2Unorm`'s (`FeMeRuntimeCPU.c`) existing bit-unpacking
-> convention, plus a `attributeComponentByteSize`-adjacent way to describe "one
-> 4-byte fetch produces all 4 components" to the caller's own bounds-check
-> arithmetic (`Executor.cpp`'s draw loop), which currently assumes one fetch per
-> component | H8b | `feme/lib/Graphics/Executor.cpp`,
-> `feme/lib/Vulkan/Format.cpp` | P2 | (`R10G10B10A2_UNORM`) as a vertex
-> attribute.** H8b deliberately deferred this one remaining mandatory
-> `VERTEX_BUFFER_BIT` format: it is a single packed 32-bit word (2 bits A, 10
-> bits each of B/G/R, MSB-down), not a "N bytes per component" layout
-> `decodeAttribute`'s existing convention fits mechanically -- needs its own
-> dedicated decode case mirroring `femeRTUnpackR10G10B10A2Unorm`'s
-> (`FeMeRuntimeCPU.c`) existing bit-unpacking convention, plus a
-> `attributeComponentByteSize`-adjacent way to describe "one 4-byte fetch
-> produces all 4 components" to the caller's own bounds-check arithmetic
-> (`Executor.cpp`'s draw loop), which currently assumes one fetch per component
+> **Query and pipeline-statistics breadth.** `VK_QUERY_TYPE_PIPELINE_STATISTICS`
+> is still declined (roadmap C5's own remaining exception) because no truthful
+> counter existed; once the raster pipeline owns primitive/invocation counts per
+> stage, the counters become real. Also covers inherited-render-pass secondary
+> command buffers if that path is ever advertised
