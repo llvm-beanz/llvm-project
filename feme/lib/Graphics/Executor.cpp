@@ -52,11 +52,11 @@
 //  - Vertex attribute and color-output formats are the subset "Texture
 //    layout and formats" in feme/docs/FeMeGraphicsDesign.md already
 //    implements: the 32-bit-per-component family, the 8-bit-per-component
-//    `R8_*`/`R8G8_*`/`R8G8B8A8_*` families, and the 16-bit-per-component
-//    `R16_*`/`R16G16_*`/`R16G16B16A16_*` families (roadmap H8b) -- other
-//    formats (a packed/sub-byte format like `A2B10G10R10_UNORM_PACK32`, or
-//    a block-compressed format) are a mechanical, on-demand addition to
-//    `decodeAttribute`.
+//    `R8_*`/`R8G8_*`/`R8G8B8A8_*` families, the 16-bit-per-component
+//    `R16_*`/`R16G16_*`/`R16G16B16A16_*` families (roadmap H8b), and the
+//    single packed `R10G10B10A2_UNORM` format (roadmap H8h) -- other
+//    formats (a block-compressed format) are a mechanical, on-demand
+//    addition to `decodeAttribute`.
 //
 //===----------------------------------------------------------------------===//
 
@@ -341,6 +341,31 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
     }
     return Error::success();
   }
+  // (Roadmap H8h) `R10G10B10A2_UNORM` (`VK_FORMAT_A2B10G10R10_UNORM_
+  // PACK32`): unlike every case above, this is one packed 32-bit word --
+  // from the MSB down, 2 bits of A, 10 bits each of B/G/R -- not "N bytes
+  // per component", so all `WantComponents` are unpacked from the same
+  // single 4-byte read. Mirrors `FeMeRuntimeCPU.c`'s
+  // `femeRTUnpackR10G10B10A2Unorm` bit layout, reimplemented here (rather
+  // than called directly) since this is host C++ code, not compiled
+  // shader IR, matching `halfBitsToFloat`'s own precedent above.
+  case cpu::ResourceFormat::R10G10B10A2_UNORM: {
+    if (WantType != SignatureComponentType::Float)
+      return createStringError(inconvertibleErrorCode(),
+                               "*_UNORM vertex attribute requires a "
+                               "floating-point shader input");
+    uint32_t Raw;
+    memcpy(&Raw, Src, 4);
+    float Components[4] = {
+        (Raw & 0x3FFu) / 1023.0f,
+        ((Raw >> 10) & 0x3FFu) / 1023.0f,
+        ((Raw >> 20) & 0x3FFu) / 1023.0f,
+        ((Raw >> 30) & 0x3u) / 3.0f,
+    };
+    for (uint32_t I = 0; I != WantComponents; ++I)
+      putFloat(I, Components[I]);
+    return Error::success();
+  }
   default:
     return createStringError(inconvertibleErrorCode(),
                              "vertex attribute format is not yet supported "
@@ -348,11 +373,29 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
   }
 }
 
-/// The per-component byte size of \p Format in the vertex-attribute decode
-/// table above (distinct from ImageFixture.cpp's texel-encoding table: this
-/// one describes what `decodeAttribute` reads, not how a fixture stores a
-/// full texel).
-Expected<uint32_t> attributeComponentByteSize(cpu::ResourceFormat Format) {
+/// Describes how `decodeAttribute` reads \p Format's components from
+/// memory: \p FetchByteSize bytes produce \p ComponentsPerFetch components
+/// at once, available in full or not at all (never partially per
+/// component). Every format `decodeAttribute` implemented before roadmap
+/// H8h read one component per fetch (`ComponentsPerFetch == 1`,
+/// `FetchByteSize` equal to that one component's own byte size, matching
+/// this function's original, simpler "per-component byte size" framing) --
+/// `R10G10B10A2_UNORM` (roadmap H8h) is the first format where a single
+/// fetch instead produces every component together, since it is one packed
+/// 32-bit word rather than one memory span per component.
+struct AttributeFetchLayout {
+  uint32_t FetchByteSize;
+  uint32_t ComponentsPerFetch;
+};
+
+/// Distinct from ImageFixture.cpp's texel-encoding table: this one
+/// describes what `decodeAttribute` reads, not how a fixture stores a full
+/// texel.
+Expected<AttributeFetchLayout>
+attributeFetchLayout(cpu::ResourceFormat Format) {
+  auto PerComponent = [](uint32_t ByteSize) {
+    return AttributeFetchLayout{ByteSize, 1};
+  };
   switch (Format) {
   case cpu::ResourceFormat::R32_FLOAT:
   case cpu::ResourceFormat::R32G32_FLOAT:
@@ -366,7 +409,7 @@ Expected<uint32_t> attributeComponentByteSize(cpu::ResourceFormat Format) {
   case cpu::ResourceFormat::R32G32_SINT:
   case cpu::ResourceFormat::R32G32B32_SINT:
   case cpu::ResourceFormat::R32G32B32A32_SINT:
-    return 4;
+    return PerComponent(4);
   case cpu::ResourceFormat::R8_UNORM:
   case cpu::ResourceFormat::R8_SNORM:
   case cpu::ResourceFormat::R8_UINT:
@@ -383,7 +426,7 @@ Expected<uint32_t> attributeComponentByteSize(cpu::ResourceFormat Format) {
   // (Roadmap H8t) `B8G8R8A8_UNORM`: same 1-byte-per-component layout as
   // `R8G8B8A8_UNORM` above, just reordered in memory.
   case cpu::ResourceFormat::B8G8R8A8_UNORM:
-    return 1;
+    return PerComponent(1);
   // (Roadmap H8b) The 16-bit-per-component families.
   case cpu::ResourceFormat::R16_UNORM:
   case cpu::ResourceFormat::R16_SNORM:
@@ -400,7 +443,12 @@ Expected<uint32_t> attributeComponentByteSize(cpu::ResourceFormat Format) {
   case cpu::ResourceFormat::R16G16B16A16_UINT:
   case cpu::ResourceFormat::R16G16B16A16_SINT:
   case cpu::ResourceFormat::R16G16B16A16_FLOAT:
-    return 2;
+    return PerComponent(2);
+  // (Roadmap H8h) `R10G10B10A2_UNORM`: one 4-byte fetch produces all 4
+  // components at once (available in full or not at all), unlike every
+  // `PerComponent` case above.
+  case cpu::ResourceFormat::R10G10B10A2_UNORM:
+    return AttributeFetchLayout{4, 4};
   default:
     return createStringError(inconvertibleErrorCode(),
                              "vertex attribute format is not yet supported "
@@ -3655,10 +3703,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               (Invocations[Flat].InstanceID - FirstInstance) / Binding->Divisor;
         }
         uint64_t SrcOff = (uint64_t)Binding->Stride * FetchIndex + Attr->Offset;
-        Expected<uint32_t> CompByteSize =
-            attributeComponentByteSize(Attr->Format);
-        if (!CompByteSize)
-          return CompByteSize.takeError();
+        Expected<AttributeFetchLayout> FetchLayout =
+            attributeFetchLayout(Attr->Format);
+        if (!FetchLayout)
+          return FetchLayout.takeError();
         // (roadmap F10) `VkPipelineRobustnessCreateInfo::vertexInputs` /
         // `robustBufferAccess` (unconditionally on, see
         // `PhysicalDeviceInfo.cpp`'s own comment): an out-of-bounds vertex
@@ -3667,11 +3715,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // is per-component" convention ("Bounds checking" in
         // FeMeCPUDesign.md) -- rather than fail the whole draw. Only the
         // components that actually fit within `Binding->Data` are decoded;
-        // `Bits` is already zero-initialized for the rest.
+        // `Bits` is already zero-initialized for the rest. `AvailableFetches`
+        // counts whole `FetchByteSize`-byte reads available (roadmap H8h: a
+        // packed format's single fetch is available in full or not at all,
+        // never partially per component -- this generalizes the pre-H8h
+        // one-fetch-per-component arithmetic, since `ComponentsPerFetch == 1`
+        // there makes `AvailableFetches * ComponentsPerFetch` identical to
+        // the old `AvailableBytes / CompByteSize` formula).
         uint64_t AvailableBytes =
             SrcOff < Binding->Data.size() ? Binding->Data.size() - SrcOff : 0;
+        uint64_t AvailableFetches = AvailableBytes / FetchLayout->FetchByteSize;
         uint32_t InBoundsComponents = static_cast<uint32_t>(std::min<uint64_t>(
-            Elt.ComponentCount, AvailableBytes / *CompByteSize));
+            Elt.ComponentCount,
+            AvailableFetches * FetchLayout->ComponentsPerFetch));
         std::array<uint32_t, 4> Bits{};
         if (InBoundsComponents != 0) {
           if (Error E =
