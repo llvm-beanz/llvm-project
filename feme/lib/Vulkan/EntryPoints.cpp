@@ -410,13 +410,21 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props12->maxTimelineSemaphoreValueDifference =
           Info.MaxTimelineSemaphoreValueDifference;
       // (roadmap C6) Required unconditionally once apiVersion >= 1.2
-      // (`dEQP-VK.api.info.vulkan1p2_limits_validation.general`), and
-      // honest at the minimum: no `VK_FORMAT_*_UINT`/`_SINT` color format
-      // is an accepted color-attachment format at all yet
-      // (`isSupportedColorAttachmentFormat`, `RenderPass.cpp`), so there is
-      // no multisample integer color attachment this ICD could claim
-      // beyond the trivial single-sample case.
-      Props12->framebufferIntegerColorSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+      // (`dEQP-VK.api.info.vulkan1p2_limits_validation.general`). (Roadmap
+      // H8f) This used to be honest at the trivial `VK_SAMPLE_COUNT_1_BIT`
+      // minimum because no integer color format was an accepted
+      // color-attachment format at all -- stale since H8p added real
+      // fragment-output write support for 7 of them
+      // (`isIntegerColorAttachmentFormat`, RuntimeABI.h;
+      // `isSupportedColorAttachmentFormat`, RenderPass.cpp). Nothing in
+      // the multisample render path (`Executor.cpp`'s `executeDraws`,
+      // whose per-sample color/depth/stencil writes never branch on a
+      // format's integer-ness) limits a multisample integer-format
+      // attachment differently from a multisample float one, so this now
+      // matches `framebufferColorSampleCounts` above exactly.
+      Props12->framebufferIntegerColorSampleCounts =
+          VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT |
+          VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT;
       break;
     }
     // (roadmap L12b) `VK_EXT_descriptor_indexing`'s own pre-promotion
