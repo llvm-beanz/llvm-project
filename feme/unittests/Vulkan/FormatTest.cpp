@@ -510,6 +510,9 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   // own two-channel-16-bit coverage above.
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R16G16_UINT));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R16G16_SINT));
+  // (Roadmap H8s) `R16G16_FLOAT`: a follow-up CTS re-run found this third
+  // two-channel 16-bit sibling also still missing the same bit.
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R16G16_FLOAT));
 
   EXPECT_FALSE(
       isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM_SRGB));

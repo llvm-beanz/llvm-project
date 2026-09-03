@@ -784,6 +784,12 @@ bool feme::vulkan::isTexelBufferFormatSupported(ResourceFormat Format) {
   // by the storage-image and vertex-fetch paths.
   case ResourceFormat::R16G16_UINT:
   case ResourceFormat::R16G16_SINT:
+  // (Roadmap H8s) `R16G16_FLOAT`: a follow-up CTS re-run (after the
+  // `R16G16_UINT`/`_SINT` fix above) found this third two-channel 16-bit
+  // sibling also still missing `UNIFORM_TEXEL_BUFFER_BIT` -- the same
+  // plain omission, `femeRTUnpackImageTexel` (FeMeRuntimeCPU.c, roadmap
+  // H19n) already decoding it losslessly.
+  case ResourceFormat::R16G16_FLOAT:
     return true;
   default:
     return false;
