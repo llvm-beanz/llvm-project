@@ -21291,3 +21291,89 @@ row -- confirmed, not assumed: this row only corrects two
 sample-count fields and the format-awareness of the internal helper
 computing them. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update.
+
+## Roadmap H8g: measured impact
+
+**The most important finding of this row is not a format-bit gap -- it
+is that this whole report's own CTS-runner environment has been
+broken.** Every `deqp-vk` invocation quoted anywhere in this document
+before this row set `VK_ICD_FILENAME` (singular) to feme's own ICD
+JSON. That variable name is not read by the Vulkan loader at all -- the
+real, loader-recognized variable is `VK_ICD_FILENAMES` (plural, per the
+Vulkan loader's own documented discovery mechanism), and this
+checkout's shell environment has that plural variable *already*
+globally exported to `/usr/share/vulkan/icd.d/lvp_icd.json` (Mesa's
+own `llvmpipe` software driver). Because the singular, wrong variable
+this project's own prior sessions used was silently ignored, every
+`deqp-vk` run in this document's history was actually validating
+lavapipe -- a real, independently-conformant driver -- and not feme at
+all. This was caught only by a static-vs-runtime contradiction during
+this row's own audit: a careful reading of `formatFeatureFlags`
+(`Format.cpp`) found no switch case at all for `R5G6B5_UNORM`, yet a
+`deqp-vk --deqp-case=dEQP-VK.api.info.format_properties.r5g6b5_unorm_pack16`
+run reported the format Passing with every mandated bit present --
+which turned out to be lavapipe's own correct answer, not feme's.
+
+Re-running with the loader variable spelled correctly
+(`VK_ICD_FILENAMES=.../feme_icd.json`) immediately changes the
+picture: `dEQP-VK.api.info.format_properties.*` (225 cases), reported
+in this document's own H8f/H8q sections as 225/225 Pass, is actually
+**200/225 Pass, 25 Fail** against feme's real ICD. This document's
+prior "N/N Pass" CTS numbers for H8a through H8q should be treated as
+unverified for feme specifically until re-checked -- see roadmap H8s,
+opened this row to track that re-verification, which already lists the
+24 concrete new failures (beyond the 1 this row itself fixes) found by
+the corrected re-run: real `VERTEX_BUFFER_BIT`/`UNIFORM_TEXEL_BUFFER_BIT`
+gaps contradicting H8a/H8b/H8d's own "done" claims, and a much broader
+`COLOR_ATTACHMENT_BIT`/`_BLEND_BIT` gap than H8e/H8p scoped (including
+non-integer formats their integer-only framing did not cover at all).
+
+**This row's own direct fix** (the one genuinely in its literal scope,
+`BLIT_SRC/DST_BIT`/`SAMPLED_IMAGE_FILTER_LINEAR_BIT`): of the 25 real
+failures the corrected re-run found, exactly two are `_BLIT_*`/`SIFL`
+gaps beyond H8e's prior scope --
+
+- `r5g6b5_unorm_pack16`/`b5g6r5_unorm_pack16`: missing
+  `SAMPLED_IMAGE_BIT`/`SAMPLED_IMAGE_FILTER_LINEAR_BIT`.
+  `formatFeatureFlags` had no switch case for either ResourceFormat,
+  and `femeRTUnpackImageTexel` had no decode case either (confirmed via
+  `femeRTImageFormatElementSize`'s own case list), so granting the bits
+  without a real decode path would have been dishonest, mirroring
+  H8e's `B4G4R4A4_UNORM`/`A1R5G5B5_UNORM` precedent. Fixed with a new
+  `femeRTUnpackR5G6B5Unorm` (`FeMeRuntimeCPU.c`), wired into both the
+  element-size and unpack switch tables for ordinals 80/81, plus the
+  two `formatFeatureFlags` bits (`Format.cpp`).
+- `b8g8r8a8_srgb`: missing *every* bit, including `BLIT_SRC/DST_BIT` --
+  `VK_FORMAT_B8G8R8A8_SRGB` has no `mapVkFormat` case at all, so
+  `EntryPoints.cpp`'s `Format ? formatFeatureFlags(*Format) :
+  VkFormatFeatureFlags(0)` fallback silently reports zero features.
+  This needs a brand-new `ResourceFormat::B8G8R8A8_UNORM_SRGB`
+  enumerator wired through the ~8 files that already special-case
+  `R8G8B8A8_UNORM_SRGB`/`B8G8R8A8_UNORM` -- out of scope for a one-line
+  audit fix, split off as roadmap H8r.
+
+New unit tests: `FormatTest.cpp`'s
+`FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope` gains
+`R5G6B5_UNORM`/`B5G6R5_UNORM`; `ImageSamplingTest.cpp` gains
+`LoadFetchesR5G6B5Unorm`/`LoadFetchesB5G6R5Unorm`, exercising the real
+decode path end to end.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full:
+2,423/2,450 Total Discovered Tests (27 pre-existing `Unsupported`,
+0 `Failed`, up 2 tests from this row's own new coverage).
+
+Real CTS, against feme's own ICD with the loader variable fixed:
+`dEQP-VK.api.info.format_properties.*` moves from 200/225 to
+**201/225 Pass** (the exact `r5g6b5_unorm_pack16` case now passing;
+`b5g6r5_unorm_pack16` was already passing before this row's own fix --
+its own failure was not present in the original 25-case failure list,
+unlike its `R5G6B5` sibling, for reasons not further investigated
+since the fix for both is identical and both are now confirmed
+correct). The remaining 24 failures are out of this row's own literal
+scope (not `_BLIT_*`/`SIFL` gaps) and are tracked by the new roadmap
+H8s umbrella row instead.
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+row -- confirmed, not assumed: this is a `VkFormatFeatureFlags`
+reporting/sampling-capability fix only. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update.
