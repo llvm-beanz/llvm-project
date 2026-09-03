@@ -37,22 +37,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8q or other prerequisites blocking the H-series milestones?
+Can you work on H8f or other prerequisites blocking the H-series milestones?
 
-> **`e5b9g9r9_ufloat_pack32` (`VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`) is an entirely
-> unimplemented format, split off from H8e.** A real `deqp-vk` run found this
-> format missing *every* required feature bit
-> (`BLIT_SRC_BIT`/`SAMPLED_IMAGE_BIT`/`FILTER_LINEAR_BIT`/`TRANSFER_DST_BIT`/`TRANSFER_SRC_BIT`),
-> the tell-tale sign `mapVkFormat` has no case for it at all (unlike H8p's own
-> formats, which are each missing only one specific bit) -- there is no
-> `ResourceFormat` enumerator, no pack/unpack support, nothing. A real fix needs
-> a brand-new shared-exponent RGB9E5 packed format: a new
-> `ResourceFormat::E5B9G9R9_UFLOAT` enumerator (appended at `RuntimeABI.h`'s own
-> tail, per that file's append-only hard-coded-switch-case constraint), a
-> `mapVkFormat` case, `packClearColor`/`unpackColor` shared-exponent
-> encode/decode logic (distinct from every existing packed-format case in
-> `ImageFixture.cpp`: a shared 5-bit exponent plus three independent 9-bit
-> mantissas, needing real floating-point range-reduction math, not just bitfield
-> extraction), and (if sampling is also wanted) a
-> `femeRTImageFormatElementSize`/`femeRTUnpackImageTexel` runtime case mirroring
-> `R11G11B10_FLOAT`'s own precedent for the closest existing packed-float format
+> **Multisample capability per format.** Not yet investigated at all this
+> session -- needs its own scoping pass of what
+> `VkImageFormatProperties::sampleCounts` currently reports per format versus
+> the mandatory `VK_SAMPLE_COUNT_1_BIT`/`_4_BIT` minimums for
+> color/depth/stencil formats
