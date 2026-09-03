@@ -55879,3 +55879,100 @@ session's changes are docs-only), and a real
 `dEQP-VK.api.info.format_properties.*` re-run confirms no change: still
 222/225 Pass, the same 3 remaining failures (H8h's, and this row's own
 2).
+
+## Session: Reframing the SPIR-V/MLIR "Known gap" sections as actionable, in-tree work
+
+**Request**: Design.md's three SPIR-V "Known gap" sections framed fixing
+MLIR's own `spirv` dialect (deserializer coverage, missing ops, an
+importer/exporter incompatibility) as "squarely outside this repository" /
+"upstream MLIR" / "out of scope here". The user pointed out that framing was
+appropriate initially but it's now time to treat these as legitimate future
+work, and asked for Design.md and Roadmap.md to reflect that, plus concrete
+roadmap entries for the specific known issues.
+
+**Investigation**: Before touching anything I looked for precedent, since
+changing the framing without evidence it's actually tractable in this project
+would just be optimistic rewording. Re-reading Roadmap.md found real,
+already-shipped counterexamples to the "out of scope" framing:
+
+- A roadmap row (inside the §1.9 Vulkan runtime gap table) documents a real
+  fix to `processSpecConstantComposite`
+  (`mlir/lib/Target/SPIR-V/Deserialization/Deserializer.cpp`) — a crash on any
+  spec-constant composite whose constituents weren't themselves spec
+  constants, fixed to accept an inline typed-attribute constant too.
+- The same table documents fixing `IComparePattern`/`FComparePattern` (an
+  MLIR `spirv`->`llvm` conversion pattern) building `llvm.icmp`/`llvm.fcmp`
+  from unconverted operands — 31% of all CTS failures by diagnostic count
+  when found.
+- Roadmap row F8c directly edited `mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`,
+  adding a minimal `Sample` image-operand validation case to MLIR's own
+  generic `spirv.ImageRead`/`ImageFetch`/`ImageWrite`/`ImageDrefGather`
+  verifier, which previously rejected `Sample` unconditionally as an
+  "unimplemented Image Operand".
+
+All three are inside `mlir/`, in this same tree (branch `cbieneman/feme` is
+the full llvm-project monorepo), and all three landed successfully. That's
+direct proof the H8u session's "squarely outside this repository" language
+for the `OpImageTexelPointer` gap (and the similar language in the other two
+Known-gap sections) was more conservative than this project's own established
+practice, not a real technical wall.
+
+I also checked whether Design.md's "Sampling variants" bullet (the
+`*DrefImplicitLod`/`OpImageGather`/`OpImageDrefGather` sampling instructions
+still missing a `spirv`->`llvm` conversion pattern) needed a new roadmap row
+of its own. It doesn't: every one of those ops already exists in upstream
+MLIR's `SPIRVImageOps.td` — the only gap is a missing `feme`-side
+`SPIRVToLLVMPatterns.cpp` pattern, and roadmap row L7 already names
+`spirv.ImageDrefGather` on its own untriaged list. Reworded that bullet to
+say so explicitly (it was never actually an upstream gap at all) and left L7
+as its home instead of creating a duplicate.
+
+**Changes made**:
+
+1. **Design.md** (one commit): reworded all three Known-gap sections'
+   closing language to point at a concrete roadmap step that now owns closing
+   the gap in-tree, and to cite the `processSpecConstantComposite`/
+   `IComparePattern`/`ImageOps.cpp` precedents as proof the work is tractable
+   here rather than someone else's problem. Also corrected the "Sampling
+   variants" bullet's framing (no upstream MLIR gap there at all, purely a
+   missing feme-side conversion pattern, already tracked by L7).
+
+2. **Roadmap.md** (one commit): added three new steps to §3.1 (compute and
+   retargeting track), continuing the existing R-series numbering right
+   after R37 (the highest number in use, at the end of §3.2's table, since
+   the R-series only appears in §3.1/§3.2 — §3.3 switches to V/W prefixes):
+   - **R38**: close the `feme::SPIRVImporter`/LLVM-SPIR-V-backend
+     `OpAccessChain` round-trip incompatibility R14 found (`error: unhandled
+     opcode 83` deserializing what `feme --target=spirv` itself just
+     produced) — either extend MLIR's deserializer to accept the shape
+     LLVM's SPIR-V backend emits, or give `feme::SPIRVExporter` its own
+     `spirv`-dialect-based serialization path — completing §2.2.6's SPIR-V
+     round-trip test.
+   - **R39**: add `spirv.ImageTexelPointer` (opcode 60) to MLIR's own
+     `SPIRVImageOps.td`/`SPIRVBase.td` (H8u's own scoped shape: mirror
+     `ImageReadOp`'s operand layout but with `$image` as a pointer-to-image
+     and a `$sample` operand), then the remaining `feme`-side conversion
+     pattern/runtime work H8u already scoped, completing H8u's
+     `STORAGE_IMAGE_ATOMIC_BIT` work for `R32_{SINT,UINT}`.
+   - **R40**: extend MLIR's SPIR-V deserializer to parse `Component`/
+     `Centroid`/`Sample`/`PerPrimitiveEXT` decorations from a real binary
+     (today R19 only handles these once they're already in-memory `spirv`
+     dialect attributes — a real driver-facing binary using them can't be
+     deserialized with them intact), unblocking the deserializer-side half
+     of FeMeGraphicsDesign.md's remaining "Signature reflection" work.
+
+   Also updated H8u's own row text and §2.2.6's prose to point at R39/R38
+   respectively instead of describing the gaps as "squarely upstream,
+   outside this repository".
+
+**Why no new H-row and no CTS/inventory update**: none of these three gaps
+are Vulkan-conformance-motivated on their own terms (they're MLIR SPIR-V
+dialect infrastructure the compute *and* graphics tracks both depend on), so
+they fit the existing R-series better than a new H-row; H8u (which already
+exists and is Vulkan/CTS-motivated) is left open and just points at R39 now.
+This session made no functional/behavioral changes — `feme`, `mlir`, and
+`runtime/CPU` sources are untouched — so `ninja check-feme` is a no-op by
+construction and there is nothing new to re-run through the Vulkan CTS;
+`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+are left unchanged since no `VkPhysicalDeviceFeatures`/extension bit or CTS
+pass/fail count moved.
