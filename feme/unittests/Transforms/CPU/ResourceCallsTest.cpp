@@ -151,4 +151,100 @@ TEST_F(ResourceCallsTest, MatchResourceCallRejectsUnrelatedCall) {
   EXPECT_FALSE(matchResourceCall(*CI).has_value());
 }
 
+// Roadmap H8w: `createAtomicAddTyped`/`matchResourceCall` round-trip a
+// plain RMW atomic's `(heap, heap_count, descriptor_index, element_index,
+// value, mask)` scalar-shaped call correctly, mirroring
+// `ImageCallsTest.MatchesAtomicAdd2DCall`'s own identical shape for the
+// storage-*image* atomic roadmap H8v added -- `StoredValue` (reused
+// generically, unlike `MatchedImageCall`'s own dedicated `AtomicValue`
+// field) carries the RMW value here.
+TEST_F(ResourceCallsTest, CreateAtomicAddTypedRoundTrips) {
+  IRBuilder<> Builder(BB);
+  ResourceCallEnv Env = makeEnv(Builder);
+  Value *DescIdx = Builder.getInt32(3);
+  Value *ElemIdx = Builder.getInt64(1);
+  Value *Val = Builder.getInt32(7);
+  Value *Mask = Builder.getTrue();
+
+  CallInst *CI =
+      createAtomicAddTyped(Builder, Env, DescIdx, ElemIdx, Val, Mask);
+  ASSERT_TRUE(CI);
+  EXPECT_EQ(CI->getType(), Type::getInt32Ty(Ctx));
+  EXPECT_EQ(CI->getCalledFunction()->getName(),
+            "feme.cpu.resource.atomic.add.typed.i32");
+
+  std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ResourceCallKind::AtomicAddTyped);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->DescriptorIndex, DescIdx);
+  EXPECT_EQ(Matched->Offset, ElemIdx);
+  EXPECT_EQ(Matched->StoredValue, Val);
+  EXPECT_EQ(Matched->Comparator, nullptr);
+  EXPECT_EQ(Matched->Mask, Mask);
+}
+
+// Every other simple RMW kind (`AtomicUMaxTyped` picked arbitrarily)
+// shares `AtomicAddTyped`'s own shape -- confirm the callee name alone is
+// what `matchResourceCall` uses to distinguish the RMW operation actually
+// performed, mirroring `ImageCallsTest.MatchesAtomicUMax2DCall`'s own
+// identical rationale.
+TEST_F(ResourceCallsTest, CreateAtomicUMaxTypedRoundTrips) {
+  IRBuilder<> Builder(BB);
+  ResourceCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createAtomicUMaxTyped(Builder, Env, Builder.getInt32(0),
+                            Builder.getInt64(4), Builder.getInt32(9),
+                            Builder.getFalse());
+  std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ResourceCallKind::AtomicUMaxTyped);
+  EXPECT_EQ(Matched->StoredValue, Builder.getInt32(9));
+  EXPECT_EQ(Matched->Mask, Builder.getFalse());
+}
+
+// Roadmap H8w: `createAtomicCompareExchangeTyped`/`matchResourceCall`
+// round-trip the one atomic kind with an extra `Comparator` operand
+// before the value -- the 7-argument shape (unlike every other kind's 5-
+// or 6-argument shape) `matchResourceCall`'s own arg-count guard must
+// recognize correctly.
+TEST_F(ResourceCallsTest, CreateAtomicCompareExchangeTypedRoundTrips) {
+  IRBuilder<> Builder(BB);
+  ResourceCallEnv Env = makeEnv(Builder);
+  Value *DescIdx = Builder.getInt32(2);
+  Value *ElemIdx = Builder.getInt64(1);
+  Value *Comparator = Builder.getInt32(0);
+  Value *Val = Builder.getInt32(42);
+  Value *Mask = Builder.getTrue();
+
+  CallInst *CI = createAtomicCompareExchangeTyped(
+      Builder, Env, DescIdx, ElemIdx, Comparator, Val, Mask);
+  ASSERT_TRUE(CI);
+  EXPECT_EQ(CI->getCalledFunction()->getName(),
+            "feme.cpu.resource.atomic.compare_exchange.typed.i32");
+  EXPECT_EQ(CI->arg_size(), 7u);
+
+  std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ResourceCallKind::AtomicCompareExchangeTyped);
+  EXPECT_EQ(Matched->DescriptorIndex, DescIdx);
+  EXPECT_EQ(Matched->Offset, ElemIdx);
+  EXPECT_EQ(Matched->Comparator, Comparator);
+  EXPECT_EQ(Matched->StoredValue, Val);
+  EXPECT_EQ(Matched->Mask, Mask);
+}
+
+// Roadmap H8w: an atomic reads *and* writes through the resource in one
+// call, unlike a plain load (read-only) or store (write-only) --
+// `ModRefInfo::ModRef` rather than either one-sided variant, mirroring
+// `MemoryEffectsAreArgMemOnly`'s own load/store checks above.
+TEST_F(ResourceCallsTest, AtomicMemoryEffectsAreArgMemOnlyModRef) {
+  Type *I32 = Type::getInt32Ty(Ctx);
+  Function *Atomic =
+      getOrInsertResourceCall(*M, ResourceCallKind::AtomicAddTyped, I32);
+  EXPECT_TRUE(Atomic->getMemoryEffects().onlyAccessesArgPointees());
+  EXPECT_TRUE(isModAndRefSet(Atomic->getMemoryEffects().getModRef()));
+}
+
 } // namespace
+
