@@ -774,6 +774,16 @@ bool feme::vulkan::isTexelBufferFormatSupported(ResourceFormat Format) {
   case ResourceFormat::R8G8_SNORM:
   case ResourceFormat::R8G8_UINT:
   case ResourceFormat::R8G8_SINT:
+  // (Roadmap H8s) `R16G16_UINT`/`_SINT`: a real
+  // `dEQP-VK.api.info.format_properties.*` re-run against feme's own ICD
+  // (not lavapipe -- see H8g) found this pair still missing
+  // `VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT`, a plain omission from
+  // this switch's own two-channel-16-bit-family coverage above --
+  // `femeRTUnpackImageTexelI32`/`PackImageTexelI32` (FeMeRuntimeCPU.c,
+  // roadmap H19n) already decode/encode both losslessly, reused already
+  // by the storage-image and vertex-fetch paths.
+  case ResourceFormat::R16G16_UINT:
+  case ResourceFormat::R16G16_SINT:
     return true;
   default:
     return false;

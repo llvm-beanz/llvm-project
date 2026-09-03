@@ -505,6 +505,11 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8_SNORM));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8_UINT));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8_SINT));
+  // (Roadmap H8s) `R16G16_UINT`/`_SINT`: a real CTS re-run found this pair
+  // still missing `UNIFORM_TEXEL_BUFFER_BIT`, a plain omission from H8d's
+  // own two-channel-16-bit coverage above.
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R16G16_UINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R16G16_SINT));
 
   EXPECT_FALSE(
       isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM_SRGB));
