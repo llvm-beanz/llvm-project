@@ -37,19 +37,32 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H8r or other prerequisites blocking the H-series milestones?
+Can you work on H8s or other prerequisites blocking the H-series milestones?
 
-> **`b8g8r8a8_srgb` (`VK_FORMAT_B8G8R8A8_SRGB`) is an entirely unmapped format,
-> split off from H8g.** A real `deqp-vk` run (against feme's own ICD, see H8g's
-> closure note) found this format missing every mandated bit -- `mapVkFormat`
-> has no case for it, so `formatFeatureFlags` never even runs for it (the
-> `Format ? formatFeatureFlags(*Format) : VkFormatFeatureFlags(0)` fallback in
-> `EntryPoints.cpp` returns zero features for any unrecognized `VkFormat`). A
-> real fix needs a new `ResourceFormat::B8G8R8A8_UNORM_SRGB` enumerator
-> (appended at `RuntimeABI.h`'s own tail) mirroring `B8G8R8A8_UNORM`'s existing
-> byte-swap-of-`R8G8B8A8_UNORM_SRGB` relationship, then wiring it through every
-> file that already special-cases `R8G8B8A8_UNORM_SRGB`/`B8G8R8A8_UNORM`
-> (`ImageFixture.cpp`, `Executor.cpp`, `RenderPass.cpp`, `CommandBuffer.cpp`,
-> `BCSamplingBridge.cpp`/`ETC2SamplingBridge.cpp` if their own sRGB-decode paths
-> apply, `Format.cpp`) before `formatFeatureFlags` can honestly grant it
-> `BLIT_SRC/DST_BIT`/`SAMPLED_IMAGE_BIT`/`SIFL`/`COLOR_ATTACHMENT_BIT`
+> **Re-audit every prior H8 row's CTS-verified claim now that the CTS-runner
+> environment-variable bug (H8g) is fixed.** `VK_ICD_FILENAME` (singular, used
+> by every prior session's `deqp-vk` invocation) is silently ignored by the
+> Vulkan loader, which only reads `VK_ICD_FILENAMES` (plural); this environment
+> has that plural variable globally exported to Mesa's own lavapipe ICD, so
+> every `deqp-vk` run in this project's history before this row validated
+> lavapipe's own conformant driver, not feme, and every "N/N Pass" CTS number
+> this doc records for H8a-H8q (and likely many other rows outside H8) is
+> unverified for feme specifically. A real re-run of
+> `dEQP-VK.api.info.format_properties.*` against feme's own ICD
+> (`VK_ICD_FILENAMES=.../feme_icd.json`, loader var spelled correctly) found 24
+> remaining real failures this session did not have time to fix, several
+> contradicting rows already struck through as done:
+> `a2b10g10r10_unorm_pack32`/`b8g8r8a8_unorm` missing `VERTEX_BUFFER_BIT`
+> (reopens H8a/H8b's own scope), `r16g16_{sint,uint}` missing
+> `UNIFORM_TEXEL_BUFFER_BIT` (reopens H8d's own scope), a much broader
+> `COLOR_ATTACHMENT_BIT`/`_BLEND_BIT` gap than H8e/H8p scoped -- including
+> *non-integer* formats H8p's own integer-only framing did not cover
+> (`r8_unorm`, `r8g8_unorm`, `r16_sfloat`, `r16g16_sfloat`) alongside more
+> integer formats than H8p's 7 (`r16g16b16a16_{sint,uint}`,
+> `r32g32b32a32_{sint,uint}`, `r8_{sint,uint}`, `r8g8_{sint,uint}`) -- plus new
+> `SAMPLED_IMAGE_BIT`/`STORAGE_IMAGE_ATOMIC_BIT` gaps for
+> `r32_{sint,uint}`/`r32g32_{sint,uint}` and `STORAGE_IMAGE_BIT` gaps for
+> `r32g32_sfloat`/`r8g8b8a8_{uint,unorm}`. Each cluster needs its own scoping
+> pass (mirroring H8e's own split into H8p/H8q) before a fix -- this row exists
+> to make sure that re-scoping actually happens rather than the gaps staying
+> invisible behind a stale "done" strikethrough
