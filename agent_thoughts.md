@@ -56125,3 +56125,191 @@ describe what's now closed versus what moved to H8v. Ran a real
 (confirmed via `vulkaninfo --summary`) to verify no regression — still
 222/225 Pass, exactly as before this session, since no format-feature bit
 was touched. Appended a VulkanCTSReport.md section recording this.
+
+# H8v: CPU-runtime lowering for storage-image atomics
+
+Picked up exactly where the prior session's H8u/R39 work left off: the
+SPIR-V/MLIR/LLVM-IR side of a storage-image atomic (`OpImageTexelPointer` +
+`OpAtomicIAdd`/etc.) already imported, converted, and legalized cleanly, but
+`SPIRVResourceLowering.cpp`'s CPU-side lowering had no case for an
+`AtomicRMWInst`/`AtomicCmpXchgInst` user of a storage-image `getpointer`
+call — only `LoadInst`/`StoreInst`, which carry a whole `<4 x i32>` texel
+rather than the scalar 32-bit component an image atomic actually operates
+on.
+
+## Designing the new call kinds
+
+Followed the existing `feme.cpu.image.*` convention closely: 11 new
+`ImageCallKind` values (`AtomicAdd2D` through `AtomicCompareExchange2D`),
+each with a `createAtomic*2D` builder function and a `getImageCallName`
+mapping to `feme.cpu.image.atomic.<op>.2d.i32`. Two real design choices had
+to be made that don't have a clean precedent in the existing Load*/Store*
+kinds:
+
+1. **Memory effects.** Every existing kind is either read-only (`Load*`,
+   `Sample*`) or write-only (`Store*`) — `MemoryEffects::argMemOnly` picks
+   `ModRefInfo::Ref` or `ModRefInfo::Mod` accordingly. An atomic is neither:
+   it reads the pre-op value *and* writes the post-op value in one
+   instruction, so it needed its own `ModRefInfo::ModRef` branch. Getting
+   this right matters for correctness, not just performance — if an atomic
+   were marked read-only, an optimization pass could sink/CSE/reorder it in
+   a way that breaks its own ordering guarantees relative to another access
+   to the same heap.
+
+2. **Scalar vs. vector shape.** Every existing kind carries a `<4 x f32>`/
+   `<4 x i32>` texel (`Texel` in `MatchedImageCall`). SPIR-V only permits an
+   image atomic against a single-component `R32i`/`R32ui` format, so the
+   value operand here is always a bare scalar `i32` — hence the new
+   `AtomicValue`/`Comparator` fields on `MatchedImageCall` rather than
+   reusing `Texel`.
+
+## Runtime entry points and the AArch64 surprise
+
+Implemented `femeRTAtomicTexelAddress2D` (mirroring the existing
+`femeRTStoreTexel2DI32` bounds-check helper, but returning a raw
+`int32_t*` instead of writing through it) and 11 public entry points using
+real `__atomic_fetch_*`/`__atomic_exchange_n`/`__atomic_compare_exchange_n`
+builtins with `__ATOMIC_SEQ_CST` ordering. This *has* to be a real atomic,
+not a plain read-modify-write: `Executor.cpp` dispatches shader
+invocations across real host threads, and two lanes in different waves can
+race on the same texel exactly the way two real GPU shader cores would.
+
+This compiled and linked cleanly in isolation, and the SPIRVResourceLowering
+extension built cleanly too — but the very first real CTS run hit
+`JIT session error: Symbols not found: [ __aarch64_ldadd4_acq_rel ]`. This
+was a genuine surprise: on this session's AArch64 host, clang's default
+codegen for `__atomic_fetch_add` etc. is *not* an inline LDADD instruction
+but a call to an out-of-line `__aarch64_ldadd4_acq_rel`-style helper from
+libgcc/compiler-rt, resolved via IFUNC at ordinary static-link time (this
+lets one binary run correctly on both LSE-capable and pre-LSE ARMv8.0
+cores, picking the right implementation at load time). `FeMeRuntimeCPU`'s
+own bitcode is never statically linked at all — it's parsed and JIT-executed
+directly by `feme::cpu::JITEngine`'s ORC session, which has no such runtime
+library to resolve those symbols against. Fixed with `-mno-outline-atomics`
+in the bitcode-compile step, forcing inline atomic instructions instead —
+but only when the host is actually AArch64, since the flag is
+AArch64-specific and clang errors on it under `-Werror` (`-Woption-ignored`)
+on every other architecture. This is exactly the kind of "worked in
+isolation, broke for real" gap the standing instructions ask me to catch by
+actually running the real CTS rather than trusting a unit test or a clean
+build.
+
+## The SIMDize gap
+
+After fixing the JIT symbol issue, the target CTS case failed again with a
+completely different error: `feme-cpu-simdize: unsupported divergent call
+to 'feme.cpu.image.atomic.add.2d.i32'`. The real target CTS case (unlike my
+own hand-written FileCheck test, which used uniform control flow) exercises
+a genuinely divergent atomic — each invocation's own coordinate and add
+operand come from its own thread id. `feme::cpu::SIMDizePass`'s dispatch
+had no entry recognizing the new call kinds at all, so it fell through
+every other widening strategy straight to `widenElementwise`'s hard error.
+
+Investigating `widenImageCall` turned up a pleasant surprise: it's already
+fully generic over any `feme.cpu.image.*` call, scalarizing per lane purely
+from `MatchedImageCall`'s own operand list — it needed *zero* new widening
+logic. The only two things needed were (1) recognizing the new kinds in
+`matchImageCall`'s lookup table and operand-extraction switch (already done
+in an earlier commit, since `SPIRVResourceLowering.cpp`'s own tests didn't
+need it, but `SIMDize.cpp`'s dispatch does), and (2) teaching
+`widenImageCall`'s `LaneMaskBase` selection that an atomic's value operand
+is exactly as side-effecting as a store's texel — a one-line fix
+(`Matched.Texel || Matched.AtomicValue`). This is a good example of a gap
+that only a real, divergent CTS case could find: every prior unit/FileCheck
+test I wrote used uniform control flow, and the uniform case genuinely
+worked without this fix (a single scalar call, no widening attempted at
+all).
+
+## A self-inflicted setback (and the lesson from it)
+
+While trying to confirm that `simdize-image-atomic-scalarize.ll` (the new
+test for the divergent-atomic gap above) actually caught a real regression,
+I tried to `git stash push` just three files (`SIMDize.cpp`,
+`ImageCalls.cpp`, `ImageCalls.h`) to rebuild and observe the old failure —
+but `SPIRVResourceLowering.cpp` (not stashed) still referenced the new
+`createAtomic*` symbols declared in the stashed header, so the build failed
+for an unrelated reason. I popped the stash back immediately, but then
+made the mistake of running `git checkout -- ImageCalls.cpp` to "revert
+just the AllKinds edit" for a similar experiment — forgetting that with no
+commit yet, `git checkout` on an unstaged file discards *all* of that
+file's uncommitted changes back to `HEAD`, not just the specific edit I
+had in mind. This silently reverted the entire `ImageCalls.cpp`
+implementation (function-type construction, memory effects, all 11
+`createAtomic*` builders, `matchImageCall`'s table and switch) built up
+over the session. I caught it immediately from the resulting link errors
+(`undefined symbol: feme::cpu::createAtomicSub2D` etc.) and had to
+reconstruct the entire file's worth of edits from scratch by reading back
+through `ImageCalls.h`'s still-intact declarations and the surrounding
+`ImageCalls.cpp` structure. Everything was successfully rebuilt and
+re-verified (rebuild clean, both new lit tests pass, CTS re-run still
+16/16, full `ninja check-feme` still 0 regressions) — but the lesson is
+worth recording plainly: **`git checkout -- <file>` on an uncommitted file
+throws away the whole file's changes, not a targeted subset** — for a
+partial/targeted revert-and-compare experiment on uncommitted work, either
+commit first (so `checkout`/`stash` has something safe to return to) or
+use a scoped, in-place text edit (like the `sed`-based disable I used
+successfully for the `SPIRVResourceLowering.cpp` regression check earlier
+in the same investigation) instead.
+
+## Testing at each phase
+
+New coverage at every phase this row touched, per the standing "unit tests
+covering each phase of translation" instruction:
+
+- `ImageCallsTest.cpp` (C++ gtest): `createAtomicAdd2D`/`matchImageCall`
+  round-trip, `createAtomicUMax2D` (confirming the callee name alone
+  distinguishes the RMW operation, since `AtomicRMWInst::getOperation()` is
+  already fully resolved by the time `SPIRVResourceLowering.cpp` picks a
+  wrapper), `createAtomicCompareExchange2D`'s extra `Comparator` operand.
+- `spirv-resource-lowering-image-atomic.ll` (FileCheck): `OpImageTexelPointer`
+  + atomic lowering to the new runtime calls, uniform control flow —
+  `atomic_add`, `atomic_umax`, `atomic_compare_exchange`.
+- `simdize-image-atomic-scalarize.ll` (FileCheck): the same lowering under
+  *divergent* control flow — the exact gap the real CTS run found.
+  Deliberately verified this test actually fails without the `SIMDize.cpp`
+  fix (via a scoped, reversible `matchImageCall`-table edit, not a
+  `git checkout`) before committing it, so it's a real regression test and
+  not just a test that happens to pass.
+- Real CTS: all 8 RMW/compare-exchange kinds × 2 formats
+  (`dEQP-VK.image.atomic_operations.{add,subtract,and,or,xor,min,max,
+  exchange,compare_exchange}.2d.notransfer.normal_read.normal_img.r32{i,ui}_
+  end_result`) — 16/16 Pass. (Note: I initially guessed a `subtract`-named
+  case that doesn't exist in this CTS version; the 16 cases that did run
+  covered `add`/`and`/`or`/`xor`/`min`/`max`/`exchange`/`compare_exchange`
+  × 2 formats, which is full coverage of every RMW kind `feme` now
+  implements.)
+- `dEQP-VK.api.info.format_properties.*` re-run: 222/225 → 223/225 Pass,
+  confirming `STORAGE_IMAGE_ATOMIC_BIT` is now honestly set for
+  `R32_{SINT,UINT}` with no regressions elsewhere.
+- `ninja check-feme`: 2436/2463 (27 unsupported), 0 regressions, across
+  every commit in this row.
+
+## Scoping decision and the new gap it surfaced
+
+Kept the implementation scoped to `Plain2D` shape only, matching the
+roadmap row's own text ("only needed for the two mandatory formats' own
+shapes to close this milestone") — wider shapes (`Plain1D`/`Array1D`/
+`Array2D`/`Plain3D`/`Plain2DMS`/`Array2DMS`) are real, tractable follow-on
+work if a future CTS case ever needs one, but aren't required for
+conformance today, so I didn't speculatively build them.
+
+The final `format_properties` re-run (done as part of the standing
+"re-run CTS after each change" instruction) surfaced one more real, unrelated
+gap: `R32_{SINT,UINT}` are *also* missing `STORAGE_TEXEL_BUFFER_ATOMIC_BIT`
+on the `bufferFeatures` side — a genuinely distinct SPIR-V feature (a texel
+buffer atomic uses an ordinary `OpAccessChain`-derived pointer, no
+`OpImageTexelPointer` involved at all) that this row's own scope never
+covered. Rather than silently leave it unnoticed behind H8v's own
+strikethrough, added it as a new roadmap row, H8w, one letter under H8v
+per the "avoid nesting more than one lowercase letter deep" standing
+instruction, scoped but not started this session.
+
+## Also noticed, not fixed
+
+The `ImageSamplingTest` (`FeMeRuntimeCPUTests`) intermittent
+crash/hang from the prior session recurred inconsistently across
+`ninja check-feme` runs this session too (present in an early run, absent
+in later ones) — still appears to be flaky, pre-existing, and unrelated to
+this row's own changes (nothing in H8v touches image *sampling* at all,
+only storage-image atomics), consistent with the prior session's `git
+stash`-based confirmation. Did not investigate further, staying in scope.
