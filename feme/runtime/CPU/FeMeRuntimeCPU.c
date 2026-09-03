@@ -1554,6 +1554,11 @@ femeRTImageFormatElementSize(uint32_t Format) {
   case 103: // R10G10B10A2_SNORM
   case 104: // R10G10B10A2_SINT
     return 4;
+  // (Roadmap H8q) `E5B9G9R9_UFLOAT` (`VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`):
+  // a shared-exponent RGB9E5 value, also packed into a single 4-byte
+  // word like `R11G11B10_FLOAT` (case 23) above.
+  case 131: // E5B9G9R9_UFLOAT
+    return 4;
   default:
     return 0;
   }
@@ -1794,6 +1799,111 @@ femeRTPackR11G11B10Float(FemeRTv4f32 Value) {
   return R11 | (G11 << 11) | (B10 << 22);
 }
 
+// (Roadmap H8q) Returns `2^Exp` as a `float`, built directly from its
+// IEEE 754 bit pattern (an exponent field of `Exp + 127`, zero mantissa)
+// rather than via `__builtin_powf` -- exact for every `Exp` this file's
+// own `E5B9G9R9_UFLOAT` callers below pass it (that format's bounded
+// exponent range keeps the result comfortably inside binary32's normal
+// range), and cheaper.
+__attribute__((always_inline)) static float femeRTExp2(int32_t Exp) {
+  uint32_t Bits = (uint32_t)(Exp + 127) << 23;
+  float F;
+  __builtin_memcpy(&F, &Bits, sizeof(F));
+  return F;
+}
+
+// (Roadmap H8q) Returns `floor(log2(X))` for a normalized, positive
+// `float` `X` -- reads the IEEE 754 exponent field directly (valid since
+// `1.0 <= mantissa < 2.0` for any normalized value, so the stored
+// exponent field minus its 127 bias already equals the floor) rather
+// than computing a real logarithm, matching the Khronos
+// `EXT_texture_shared_exponent` spec's own reference "FloorLog2" helper's
+// own bit-trick definition.
+__attribute__((always_inline)) static int32_t femeRTFloorLog2(float X) {
+  uint32_t Bits;
+  __builtin_memcpy(&Bits, &X, sizeof(Bits));
+  return (int32_t)((Bits >> 23) & 0xFFu) - 127;
+}
+
+// (Roadmap H8q) Unpacks an `E5B9G9R9_UFLOAT` value
+// (`VK_FORMAT_E5B9G9R9_UFLOAT_PACK32`): from the LSB up, a 9-bit R
+// mantissa, a 9-bit G mantissa, a 9-bit B mantissa, then a 5-bit shared
+// exponent (bias 15) at the top -- each channel's real value is
+// `mantissa * 2^(exponent - 15 - 9)`, per the Khronos
+// `EXT_texture_shared_exponent` spec's own reference decode. Unlike
+// `femeRTUnpackR11G11B10Float` above, all three channels share one
+// exponent field rather than each carrying its own. Alpha is always
+// `1.0` (this format carries no alpha channel).
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackRGB9E5(uint32_t Raw) {
+  uint32_t ExpBits = (Raw >> 27) & 0x1Fu;
+  float Scale = femeRTExp2((int32_t)ExpBits - 15 - 9);
+  FemeRTv4f32 V;
+  V[0] = (float)(Raw & 0x1FFu) * Scale;
+  V[1] = (float)((Raw >> 9) & 0x1FFu) * Scale;
+  V[2] = (float)((Raw >> 18) & 0x1FFu) * Scale;
+  V[3] = 1.0f;
+  return V;
+}
+
+// (Roadmap H8q) The inverse of `femeRTUnpackRGB9E5` above: chooses the
+// smallest shared exponent that can represent the single largest of
+// R/G/B without mantissa overflow, then rounds each channel to that
+// exponent's own 9-bit mantissa -- the real "range reduction" this
+// format's shared exponent needs, unlike `femeRTPackR11G11B10Float`'s
+// three independent per-channel exponents above. Mirrors the Khronos
+// `EXT_texture_shared_exponent` spec's own reference `FloatsToRGB9E5`
+// algorithm (clamp to `[0, MAX_RGB9E5]`, choose `exp_shared = max(-bias -
+// 1, FloorLog2(maxrgb)) + 1 + bias`, round each channel to that
+// exponent's own mantissa, then bump the exponent once more and re-round
+// if rounding overflowed the 9-bit mantissa).
+__attribute__((always_inline)) static uint32_t
+femeRTPackRGB9E5(FemeRTv4f32 Value) {
+  const int32_t Bias = 15;
+  const int32_t MantissaBits = 9;
+  const int32_t MaxExp = 31; // 5-bit field, max biased exponent.
+  const float MaxValue = (511.0f / 512.0f) * femeRTExp2(MaxExp - Bias);
+  float R = __builtin_fminf(__builtin_fmaxf(Value[0], 0.0f), MaxValue);
+  float G = __builtin_fminf(__builtin_fmaxf(Value[1], 0.0f), MaxValue);
+  float B = __builtin_fminf(__builtin_fmaxf(Value[2], 0.0f), MaxValue);
+  float MaxRGB = __builtin_fmaxf(__builtin_fmaxf(R, G), B);
+  int32_t ExpShared;
+  if (MaxRGB <= 0.0f) {
+    ExpShared = 0;
+  } else {
+    int32_t Floor = femeRTFloorLog2(MaxRGB);
+    if (Floor < -Bias - 1)
+      Floor = -Bias - 1;
+    ExpShared = Floor + 1 + Bias;
+    if (ExpShared > MaxExp)
+      ExpShared = MaxExp;
+  }
+  float Denom = femeRTExp2(ExpShared - Bias - MantissaBits);
+  uint32_t Rm = (uint32_t)__builtin_roundf(R / Denom);
+  uint32_t Gm = (uint32_t)__builtin_roundf(G / Denom);
+  uint32_t Bm = (uint32_t)__builtin_roundf(B / Denom);
+  uint32_t MaxM = Rm > Gm ? Rm : Gm;
+  MaxM = MaxM > Bm ? MaxM : Bm;
+  if (MaxM > 511u && ExpShared < MaxExp) {
+    // Rounding pushed the mantissa one bit too wide for this exponent --
+    // bump the shared exponent once more and re-round every channel, per
+    // the reference algorithm's own overflow handling.
+    ++ExpShared;
+    Denom = femeRTExp2(ExpShared - Bias - MantissaBits);
+    Rm = (uint32_t)__builtin_roundf(R / Denom);
+    Gm = (uint32_t)__builtin_roundf(G / Denom);
+    Bm = (uint32_t)__builtin_roundf(B / Denom);
+  }
+  if (Rm > 511u)
+    Rm = 511u;
+  if (Gm > 511u)
+    Gm = 511u;
+  if (Bm > 511u)
+    Bm = 511u;
+  return (Rm & 0x1FFu) | ((Gm & 0x1FFu) << 9) | ((Bm & 0x1FFu) << 18) |
+         ((uint32_t)ExpShared << 27);
+}
+
 // Unpacks an `A8_UNORM` value (a single normalized `[0, 255]` alpha byte,
 // no color channels at all) into a `<4 x float>`, color channels `0.0`.
 __attribute__((always_inline)) static FemeRTv4f32
@@ -1921,6 +2031,11 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     uint32_t Raw;
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackR11G11B10Float(Raw);
+  }
+  case 131: { // E5B9G9R9_UFLOAT (roadmap H8q)
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackRGB9E5(Raw);
   }
   case 24: { // R10G10B10A2_UNORM
     uint32_t Raw;
@@ -2332,6 +2447,11 @@ femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel) {
   }
   case 23: { // R11G11B10_FLOAT (roadmap H19n, packed into one 4-byte word).
     uint32_t Raw = femeRTPackR11G11B10Float(Texel);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
+  case 131: { // E5B9G9R9_UFLOAT (roadmap H8q, packed into one 4-byte word).
+    uint32_t Raw = femeRTPackRGB9E5(Texel);
     __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
     return;
   }
