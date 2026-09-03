@@ -20,6 +20,18 @@
 
 #include <vulkan/vulkan_core.h>
 
+// Roadmap H10a: `VK_KHR_xcb_surface`'s own platform header, included here
+// (before `namespace feme::vulkan` opens below) so its `xcb_connection_t`/
+// `xcb_visualid_t`/`VkXcbSurfaceCreateInfoKHR` declarations land at global
+// scope, exactly where `<vulkan/vk_icd.h>` (Icd.h) and every other TU
+// expects them -- not nested inside `feme::vulkan` the way including it
+// further down inside the namespace block would leave them.
+#if FEME_VULKAN_HAVE_XCB
+#define VK_USE_PLATFORM_XCB_KHR
+#include <xcb/xcb.h>
+#include <vulkan/vulkan_xcb.h>
+#endif // FEME_VULKAN_HAVE_XCB
+
 namespace feme::vulkan {
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
@@ -904,6 +916,26 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
     VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
     uint32_t *pPresentModeCount, VkPresentModeKHR *pPresentModes);
+
+// Roadmap H10a: `VK_KHR_xcb_surface` -- the real, CI-exercisable (via
+// Xvfb) platform surface backend picked in FeMeVulkanDesign.md's "Window-
+// system integration" (see XcbSurface.cpp). Declared only in a build that
+// found `libxcb` (`FEME_VULKAN_HAVE_XCB`, see feme/CMakeLists.txt's
+// `FEME_HAVE_XCB`): a build without it never advertises this extension
+// (Surface.cpp's `getSupportedInstanceExtensions`) nor generates
+// dispatch-table rows referencing these two names at all
+// (lib/Vulkan/CMakeLists.txt only passes `--extra-extension
+// VK_KHR_xcb_surface` when `FEME_HAVE_XCB`), so no other TU needs these
+// declared when they don't apply. (The platform header itself is included
+// above, before this file's own `namespace feme::vulkan` opens.)
+#if FEME_VULKAN_HAVE_XCB
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateXcbSurfaceKHR(
+    VkInstance instance, const VkXcbSurfaceCreateInfoKHR *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface);
+VKAPI_ATTR VkBool32 VKAPI_CALL vkGetPhysicalDeviceXcbPresentationSupportKHR(
+    VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex,
+    xcb_connection_t *connection, xcb_visualid_t visual_id);
+#endif // FEME_VULKAN_HAVE_XCB
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,

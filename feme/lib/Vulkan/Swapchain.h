@@ -49,6 +49,7 @@
 #include "Image.h"
 #include "Memory.h"
 #include "PhysicalDeviceInfo.h"
+#include "Surface.h"
 
 #include "feme/Target/CPU/RuntimeABI.h"
 
@@ -69,10 +70,16 @@ public:
   /// if any image or its backing memory failed to allocate partway through
   /// (mirroring `Alloc.create`'s own null-on-failure convention, but a
   /// constructor cannot itself return null, so the caller must check this
-  /// before publishing the handle).
+  /// before publishing the handle). \p Surf is the surface this swapchain
+  /// presents to (roadmap H10a: `vkQueuePresentKHR` copies a presented
+  /// image's real pixels there via `presentToSurface`, Surface.h); it is
+  /// not owned here -- `vkCreateSwapchainKHR`'s own `pCreateInfo->surface`
+  /// outlives every swapchain created against it, per the spec's own
+  /// destruction-order rules.
   Swapchain(const Allocator &Alloc, const PhysicalDeviceInfo &Info,
             feme::cpu::ResourceFormat Format, uint32_t Width, uint32_t Height,
-            uint32_t ArrayLayers, VkImageUsageFlags Usage, uint32_t ImageCount);
+            uint32_t ArrayLayers, VkImageUsageFlags Usage, uint32_t ImageCount,
+            Surface *Surf);
   ~Swapchain();
 
   Swapchain(const Swapchain &) = delete;
@@ -83,6 +90,15 @@ public:
   VkImage image(uint32_t Index) const {
     return toHandle<VkImage>(Images[Index]);
   }
+  /// The underlying `Image` object itself, rather than its handle -- used
+  /// by `vkQueuePresentKHR` to reach `Image::data()`/`width()`/`height()`
+  /// directly without a round-trip through `fromHandle`.
+  Image *imageObject(uint32_t Index) const { return Images[Index]; }
+
+  /// The surface this swapchain presents to, or null for a swapchain never
+  /// given one (not possible via the public API -- `vkCreateSwapchainKHR`
+  /// always requires a surface -- but a defensive accessor regardless).
+  Surface *surface() const { return Surf; }
 
   /// `vkAcquireNextImageKHR`'s own image-selection logic: the first
   /// `Available` image, marked `Acquired` in the same step, or
@@ -115,6 +131,7 @@ private:
   std::vector<Image *> Images;
   std::vector<DeviceMemory *> Backing;
   std::vector<ImageState> States;
+  Surface *Surf = nullptr;
   bool Valid = true;
   bool Retired = false;
 };

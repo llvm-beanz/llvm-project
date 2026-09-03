@@ -1,0 +1,16 @@
+# `VK_KHR_xcb_surface`'s own two commands (roadmap H10a: "A real
+# CI-exercisable platform surface" -- see feme/docs/FeMeVulkanDesign.md's
+# "Window-system integration" and its Open Question 13). One command name
+# per line, consumed by feme/utils/vk_gen_entrypoints.py via `--implemented`,
+# folded in alongside `--extra-extension VK_KHR_xcb_surface` only when
+# `FEME_HAVE_XCB` is actually ON (see lib/Vulkan/CMakeLists.txt) -- a build
+# without libxcb never advertises this extension nor generates dispatch-table
+# rows for these two commands at all (rather than generating rows whose
+# implementation would just be an always-failing stub).
+#
+# Every name here must have a matching `feme::vulkan::<name>` declaration in
+# EntryPoints.h (guarded by `#if FEME_VULKAN_HAVE_XCB`) and definition in
+# XcbSurface.cpp.
+
+vkCreateXcbSurfaceKHR
+vkGetPhysicalDeviceXcbPresentationSupportKHR

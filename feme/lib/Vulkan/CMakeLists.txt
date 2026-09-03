@@ -12,6 +12,24 @@ set(feme_vulkan_entrypoints_inc
   ${feme_vulkan_gen_dir}/VulkanEntrypoints.inc)
 set(feme_vulkan_implemented
   ${CMAKE_CURRENT_SOURCE_DIR}/ImplementedEntrypoints.txt)
+# `VK_KHR_xcb_surface`'s own two commands (roadmap H10a): kept in a
+# separate `--implemented` file, folded into the generator invocation only
+# when `FEME_HAVE_XCB` is actually on, rather than merged into
+# `ImplementedEntrypoints.txt` unconditionally -- see
+# `vk_gen_entrypoints.py`'s own `--extra-extension` comment on why
+# `SUPPORTED_EXTENSIONS` must not claim an extension this particular build
+# does not genuinely implement.
+set(feme_vulkan_implemented_xcb
+  ${CMAKE_CURRENT_SOURCE_DIR}/ImplementedEntrypointsXcb.txt)
+set(feme_vulkan_entrypoints_gen_args
+  --implemented ${feme_vulkan_implemented})
+set(feme_vulkan_entrypoints_gen_deps ${feme_vulkan_implemented})
+if(FEME_HAVE_XCB)
+  list(APPEND feme_vulkan_entrypoints_gen_args
+    --extra-extension VK_KHR_xcb_surface
+    --implemented ${feme_vulkan_implemented_xcb})
+  list(APPEND feme_vulkan_entrypoints_gen_deps ${feme_vulkan_implemented_xcb})
+endif()
 
 # A Vulkan SDK installs vk.xml at `<prefix>/share/vulkan/registry/vk.xml`, a
 # sibling of the `<prefix>/include` directory `find_package(Vulkan)` records
@@ -33,9 +51,9 @@ add_custom_command(
   COMMAND ${Python3_EXECUTABLE}
           ${FEME_SOURCE_DIR}/utils/vk_gen_entrypoints.py
           ${FEME_VULKAN_XML} ${feme_vulkan_entrypoints_inc}
-          --implemented ${feme_vulkan_implemented}
+          ${feme_vulkan_entrypoints_gen_args}
   DEPENDS ${FEME_SOURCE_DIR}/utils/vk_gen_entrypoints.py
-          ${feme_vulkan_implemented} ${FEME_VULKAN_XML}
+          ${feme_vulkan_entrypoints_gen_deps} ${FEME_VULKAN_XML}
   COMMENT "Generating FeMe Vulkan ICD entrypoint table"
   VERBATIM
   )
@@ -106,6 +124,7 @@ add_feme_library(FeMeVulkanCore STATIC
   Surface.cpp
   Swapchain.cpp
   Sync.cpp
+  XcbSurface.cpp
 
   DISABLE_INSTALL
 
@@ -134,3 +153,20 @@ else()
   target_compile_definitions(FeMeVulkanCore PRIVATE
     FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA=0)
 endif()
+
+# Roadmap H10a: `VK_KHR_xcb_surface`'s implementation (`XcbSurface.cpp`) is
+# always compiled, guarding its own body internally, so this definition
+# must be PUBLIC -- `EntryPoints.h` uses it to decide whether to declare
+# the two xcb-specific entry points at all (see that header's own comment),
+# and every TU that includes it, including consumers linking
+# FeMeVulkanCore rather than building inside it (unit tests, and the
+# `feme_vulkan` shared object built from feme/tools/feme-vulkan), must
+# agree with FeMeVulkanCore's own build on this macro's value.
+if(FEME_HAVE_XCB)
+  target_compile_definitions(FeMeVulkanCore PUBLIC FEME_VULKAN_HAVE_XCB=1)
+  target_include_directories(FeMeVulkanCore PUBLIC ${FEME_XCB_INCLUDE_DIR})
+  target_link_libraries(FeMeVulkanCore PUBLIC ${FEME_XCB_LIBRARY})
+else()
+  target_compile_definitions(FeMeVulkanCore PUBLIC FEME_VULKAN_HAVE_XCB=0)
+endif()
+

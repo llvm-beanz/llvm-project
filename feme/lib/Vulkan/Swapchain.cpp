@@ -24,8 +24,9 @@ namespace feme::vulkan {
 Swapchain::Swapchain(const Allocator &Alloc, const PhysicalDeviceInfo &,
                      feme::cpu::ResourceFormat Format, uint32_t Width,
                      uint32_t Height, uint32_t ArrayLayers,
-                     VkImageUsageFlags Usage, uint32_t ImageCount)
-    : Alloc(Alloc) {
+                     VkImageUsageFlags Usage, uint32_t ImageCount,
+                     Surface *Surf)
+    : Alloc(Alloc), Surf(Surf) {
   // A swapchain image is always 2D, single-mip, single-sample -- see
   // Swapchain.h's own comment on this ICD's initial `maxImageArrayLayers ==
   // 1` scope (`ArrayLayers` is threaded through anyway so a future increase
@@ -139,7 +140,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
   Swapchain *Obj = Alloc.create<Swapchain>(
       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Alloc, Info, *Format,
       pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height,
-      pCreateInfo->imageArrayLayers, pCreateInfo->imageUsage, ImageCount);
+      pCreateInfo->imageArrayLayers, pCreateInfo->imageUsage, ImageCount,
+      fromHandle<Surface>(pCreateInfo->surface));
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   if (!Obj->isValid()) {
@@ -239,6 +241,21 @@ vkQueuePresentKHR(VkQueue, const VkPresentInfoKHR *pPresentInfo) {
       // reports any other detected ordering error, rather than silently
       // accepting or crashing on it.
       ThisResult = VK_ERROR_INITIALIZATION_FAILED;
+    else if (Image *Img = SC->imageObject(pPresentInfo->pImageIndices[I])) {
+      // Roadmap H10a: copy this now-presented image's real pixels to its
+      // surface's real backing window, if any (Surface.h's own
+      // `presentToSurface` -- a no-op for a non-`Xcb`-kind surface). A
+      // genuine presentation failure here (e.g. a lost X connection) is a
+      // real, spec-defined `VK_ERROR_SURFACE_LOST_KHR` -- a different
+      // failure class than the application-ordering errors above (external
+      // resource loss, not application misuse), so it is never conflated
+      // with `VK_ERROR_INITIALIZATION_FAILED`.
+      bool SwapRedBlue = Img->format() == feme::cpu::ResourceFormat::
+                             R8G8B8A8_UNORM;
+      if (!presentToSurface(SC->surface(), Img->data(), Img->width(),
+                            Img->height(), SwapRedBlue))
+        ThisResult = VK_ERROR_SURFACE_LOST_KHR;
+    }
 
     if (pPresentInfo->pResults)
       pPresentInfo->pResults[I] = ThisResult;

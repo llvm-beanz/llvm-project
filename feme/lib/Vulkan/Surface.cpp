@@ -15,6 +15,12 @@
 #include <cstdint>
 #include <iterator>
 
+#if FEME_VULKAN_HAVE_XCB
+#define VK_USE_PLATFORM_XCB_KHR
+#include <xcb/xcb.h>
+#include <vulkan/vulkan_xcb.h>
+#endif
+
 using namespace feme::vulkan;
 
 namespace {
@@ -74,6 +80,9 @@ llvm::ArrayRef<VkExtensionProperties> getSupportedInstanceExtensions() {
       {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_SURFACE_SPEC_VERSION},
       {VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME,
        VK_EXT_HEADLESS_SURFACE_SPEC_VERSION},
+#if FEME_VULKAN_HAVE_XCB
+      {VK_KHR_XCB_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_SPEC_VERSION},
+#endif
   };
   return Extensions;
 }
@@ -111,7 +120,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
-    VkPhysicalDevice physicalDevice, VkSurfaceKHR,
+    VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
     VkSurfaceCapabilitiesKHR *pSurfaceCapabilities) {
   const PhysicalDeviceInfo &Info =
       fromHandle<PhysicalDevice>(physicalDevice)->getInfo();
@@ -125,8 +134,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
   // has no fixed size of its own -- the application picks
   // `imageExtent` freely within `min`/`maxImageExtent` below", the
   // conventional answer every real headless-surface implementation gives
-  // since there is no real window to report a size from.
-  Caps.currentExtent = {UINT32_MAX, UINT32_MAX};
+  // since there is no real window to report a size from. A real xcb
+  // window (roadmap H10a) does have a genuine current size, so report
+  // that live instead when one is available.
+  if (std::optional<VkExtent2D> Extent =
+          currentSurfaceExtent(fromHandle<Surface>(surface)))
+    Caps.currentExtent = *Extent;
+  else
+    Caps.currentExtent = {UINT32_MAX, UINT32_MAX};
   Caps.minImageExtent = {1, 1};
   Caps.maxImageExtent = {Info.Properties.limits.maxImageDimension2D,
                          Info.Properties.limits.maxImageDimension2D};
