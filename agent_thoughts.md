@@ -55659,3 +55659,87 @@ nothing left unaccounted for. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` needed no changes: this entire task was
 pure `VkFormatFeatureFlags` breadth work, no `VkPhysicalDeviceFeatures`
 bit or extension was touched.
+
+# H8t: `b8g8r8a8_unorm` as a vertex attribute
+
+## Task
+
+H8s's own re-audit split this row off: a real CTS run found
+`VK_FORMAT_B8G8R8A8_UNORM` still missing `VERTEX_BUFFER_BIT`. Unlike
+`a2b10g10r10_unorm_pack32`'s H8h gap (a packed sub-byte layout that
+doesn't fit `decodeAttribute`'s "N bytes per component" convention
+mechanically), the request framing was explicit that `B8G8R8A8_UNORM`
+is a plain 4-byte-per-texel format `decodeAttribute` simply had no
+case for at all -- so this looked like a much more mechanical fix,
+and it was.
+
+## Investigation
+
+Confirmed via the CTS's own ground truth
+(`vktApiFeatureInfo.cpp`'s `s_requiredVertexBufferFormats[]`) that
+`VK_FORMAT_B8G8R8A8_UNORM` really is on the mandatory vertex-buffer
+list (alongside `R8G8B8A8_UNORM`, which `decodeAttribute` already
+handles). Then checked `ImageFixture.cpp`'s existing
+`packClearColor`/`unpackColor` handling for this exact `ResourceFormat`
+to find the established byte-order convention this codebase already
+uses elsewhere: memory order is B, G, R, A (a `Swizzle` array
+`{2, 1, 0, 3}` maps logical `Clear[R,G,B,A]` into memory position
+order), which I mirrored exactly rather than inventing a new
+convention.
+
+## Fix
+
+Three small, mechanical changes:
+
+1. A new `decodeAttribute` (`Executor.cpp`) switch case for
+   `B8G8R8A8_UNORM`: identical 1-byte-per-component UNORM conversion
+   to `R8G8B8A8_UNORM`'s existing case, but reading `Src[Swizzle[I]]`
+   (Swizzle = {2,1,0,3}) instead of `Src[I]` directly, so the decoded
+   output is still logical R,G,B,A order regardless of the reversed
+   memory layout.
+2. A matching `attributeComponentByteSize` case (1 byte, same as every
+   other 8-bit-per-component format).
+3. Flipped `isVertexBufferFormatSupported` (`Format.cpp`) to report
+   `true` for this format -- the single gate both
+   `formatFeatureFlags`'s `VERTEX_BUFFER_BIT` advertisement
+   (`EntryPoints.cpp`) and `GraphicsPipeline.cpp`'s own
+   vertex-attribute-format acceptance check both already forward to,
+   so no other file needed a change.
+
+## Testing
+
+Mirrored the exact pattern the H8b session used for
+`R16G16B16A16_{UNORM,SNORM,FLOAT}`: a new
+`ExecutorTest.cpp` test (`VertexAttributeDecodesB8G8R8A8UnormColor`)
+that renders a real, fully covered, solid-color triangle through a
+compiled pipeline with a `B8G8R8A8_UNORM` color vertex attribute fed
+the raw memory bytes for logical red (`{B=0, G=0, R=255, A=255}`), and
+asserts the rendered `R8G8B8A8_UNORM` attachment is red -- not blue,
+which is what a swizzle-direction bug would produce. This exercises
+the byte-order logic through the real pipeline rather than only in
+isolation, matching the existing test file's own stated rationale for
+why these tests render rather than call `decodeAttribute` directly
+(it has no direct unit test seam; it is a file-local static function
+only reachable through a real draw).
+
+Fixing `isVertexBufferFormatSupported` flipped 2 pre-existing
+assertions from `EXPECT_FALSE`/`false` to `EXPECT_TRUE`/`true`
+(`EntryPointsTest.cpp`'s `FormatPropertiesReportsVertexBufferBit`,
+`FormatTest.cpp`'s `VertexBufferFormatSupportMatchesDecodeAttributeScope`)
+-- both had explicit comments documenting the format as "not yet
+supported" that needed updating alongside the assertion itself, not
+just silently flipped.
+
+`ninja check-feme` (ccache + assertions) passed in full: 2430/2457
+(27 unsupported), 0 regressions, +1 new test.
+
+## Result
+
+A real `dEQP-VK.api.info.format_properties.*` re-run confirms
+`b8g8r8a8_unorm` moving from Fail to Pass: 221/225 -> **222/225
+Pass**, 0 regressions. Only 3 failures remain, exactly matching the
+2 still-open roadmap rows tracking them (H8h, H8u). No
+`VkPhysicalDeviceFeatures`/extension changes were needed -- confirmed
+this is pure vertex-attribute-decode plus `VkFormatFeatureFlags` work,
+so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` were
+left untouched.
