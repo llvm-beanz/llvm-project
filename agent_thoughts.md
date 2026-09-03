@@ -57317,3 +57317,134 @@ row: no prebuilt `deqp-vk` binary exists under the `/home/dev/dev/VK-GL-CTS/`
 checkout, and this row's own `dEQP-VK.wsi` target group specifically needs a
 real (non-headless) platform surface to even reach `checkSupport`, which is
 H10a's own open work, not this row's.
+
+# H10a: xcb platform surface (backed by Xvfb)
+
+Picked up H10a since it was the only open prerequisite among the four
+requests in this batch (H9b, H9c, and the general "H10 or other
+prerequisites" thread had all already been closed by other sessions working
+this same tree between my own turns -- confirmed via the roadmap's own
+struck-through rows and `agent_thoughts.md`'s own prior H9b/H9c headings
+before starting, rather than duplicating already-committed work).
+
+## Picking the platform backend
+
+FeMeVulkanDesign.md's own "Window-system integration" decision names two
+candidates on Linux -- `VK_KHR_xcb_surface` and `VK_KHR_wayland_surface` --
+and explicitly defers the choice to "whichever one this tree's CI can
+actually exercise." This environment has no real GPU/display hardware and
+no running Wayland compositor, but does have `Xvfb` (a virtual X11 frame
+buffer needing no real display) and `libxcb` available to install --
+confirmed empirically with a throwaway xcb client against a running `Xvfb
+:99` before committing to this backend. `VK_KHR_display` remains correctly
+out of scope per the design doc's own "Initial Non-Goals" (it would need
+external-memory/modifier negotiation for direct-mode/cross-driver image
+sharing). This is the concrete, testable answer the design doc's own
+decision point was left open for.
+
+## Reusing H10's object model rather than a parallel one
+
+`Surface` gained a `SurfaceKind` discriminator (`Headless`/`Xcb`) plus
+opaque `void*`/`uint32_t` xcb connection/window state, rather than a new
+sibling class -- every `VkSurfaceKHR` still shares the same
+`vkDestroySurfaceKHR`/`vkGetPhysicalDeviceSurface*KHR` query entry points
+regardless of backing kind, so a discriminator plus per-kind state keeps
+that dispatch code entirely unchanged. The xcb state is stored as opaque
+`void*`/`uint32_t` specifically so `Surface.h` itself never needs to
+`#include <xcb/xcb.h>` -- every other translation unit across
+`FeMeVulkanCore` that includes `Surface.h` stays buildable whether or not
+`libxcb` was found at configure time; only `XcbSurface.cpp` (which does
+include the real headers) ever casts the opaque state back. `Swapchain`
+similarly just gained a `Surface *` member threaded through construction,
+with `vkQueuePresentKHR` calling a new `presentToSurface` helper after a
+successful present and reporting `VK_ERROR_SURFACE_LOST_KHR` on failure
+(e.g. a lost X connection) -- the existing acquire/present state machine
+itself needed no other change.
+
+## Two build-system gotchas worth recording for future sessions
+
+- **Header include order.** `<vulkan/vulkan_xcb.h>` requires
+  `<xcb/xcb.h>` to already be included first (it does not include it
+  itself) -- this produced `unknown type name 'xcb_connection_t'` errors
+  in four separate files before I got the order right everywhere
+  (`XcbSurface.cpp`, `Surface.cpp`, `EntryPoints.h`, the new smoke-test
+  tool).
+- **Namespace-scoping bug.** `EntryPoints.h` opens `namespace feme::vulkan
+  { ... }` near its top and never closes it until EOF. I first placed the
+  guarded xcb `#include` block right next to the two new function
+  declarations it supports, deep inside that namespace body -- which put
+  `<xcb/xcb.h>`'s own top-level `typedef`s *inside* `feme::vulkan` instead
+  of at global scope, breaking `<vulkan/vk_icd.h>`'s separately-included,
+  genuinely-global-scope `VkIcdSurfaceXcb` struct (which needs
+  `xcb_connection_t`/`xcb_window_t` visible globally, not namespaced).
+  Fixed by moving the guarded include block to before the namespace opens.
+  General lesson: any header included partway through a namespace-scoped
+  file's body has its top-level declarations nested in that namespace,
+  which is invisible until something outside that TU expects them at
+  global scope.
+- **`FEME_VULKAN_HAVE_XCB` needed to be a PUBLIC compile definition** on
+  `FeMeVulkanCore` (departing from the existing PRIVATE precedent
+  `FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA` set), because `EntryPoints.h`
+  uses it to conditionally declare the two new entry points, and that
+  header is included by consumers linking `FeMeVulkanCore` from outside
+  the target itself (`FeMeVulkanTests`, the `feme_vulkan` shared object) --
+  those consumers need to see the same macro value the core library's own
+  build used, or the declarations silently disagree between TUs.
+
+## Verifying the pixel path end to end
+
+Before trusting the lit test, I ran `feme-vulkan-xcb-smoke` manually
+against a live `Xvfb` instance with `VK_DRIVER_FILES` pointed at the build's
+own ICD manifest:
+
+```
+currentExtent: 64x64
+presented pixel: R=ff G=00 B=00
+PASS
+```
+
+This confirms three real things at once: a real window's live size flows
+correctly into `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`'s `currentExtent`
+(replacing headless's `{UINT32_MAX, UINT32_MAX}` sentinel), the scanline
+`xcb_put_image` present path genuinely reaches the window, and the R/B
+channel swap for `VK_FORMAT_R8G8B8A8_UNORM` is correct (a broken swap would
+have produced pure blue instead of the pure red the tool clears to --
+chosen specifically to make that failure mode unambiguous).
+
+## A lit-test authoring bug worth recording
+
+My first version of `xcb-surface-smoke.test` spread the whole
+Xvfb-spawn/`trap`/present sequence across multiple `RUN:` lines joined by a
+bare `&` backgrounding operator (`Xvfb ... & \` on one line, `XVFB_PID=$!;
+trap ...` on the next). This crashed lit's own internal shell interpreter
+with `AttributeError: 'Seq' object has no attribute 'args'` -- lit's
+`ShUtil`/`TestRunner` internal shell does not support `&` async job control
+as a top-level shell operator. Fixed by wrapping the entire sequence in a
+single `bash -c '...'` invocation instead: lit's parser then only ever sees
+one command (`bash`) with one quoted string argument, and the real `&`/
+`trap`/`$!`/`$(...)` handling happens inside a genuine bash process instead
+of lit's own limited internal one. General lesson: prefer `bash -c '...'`
+over bare shell background/job-control operators directly in a `RUN:` line.
+
+## Verification
+
+Manual `feme-vulkan-xcb-smoke` run (above): `PASS`. New lit test
+`xcb-surface-smoke.test`: passes (verified both standalone and as part of
+the full suite). `FeMeVulkanTests` (unit tests): 598/598 passing, including
+4 new `SurfaceObjectModel.*` tests covering the new `Surface` object model's
+parts reachable without a live xcb connection (default-constructed vs.
+xcb-constructed `kind()`/accessor correctness, and `presentToSurface`/
+`currentSurfaceExtent`'s no-op/`std::nullopt` behavior for a non-`Xcb`-kind
+surface). `ninja check-feme` (ccache + assertions build, `build2`, all
+target dependencies rebuilt automatically by the target itself): 2449
+passed, 59 pre-existing baseline `Unsupported`, 0 failed.
+
+A real Vulkan CTS run remains infeasible this session, same as every prior
+row: no prebuilt `deqp-vk` binary exists under the
+`/home/dev/dev/VK-GL-CTS/` checkout (confirmed again this session), and no
+`external/vulkan-docs`/other CTS-fetched submodule content is present
+locally to even attempt a from-source build within this session's scope.
+Split the remaining "confirm `dEQP-VK.wsi` against a real surface" work into
+a new roadmap row, H10b, rather than leave H10a open indefinitely on an
+environment limitation outside this session's control -- the platform
+surface itself (this row's own concrete, testable scope) is genuinely done.
