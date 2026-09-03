@@ -21377,3 +21377,75 @@ No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
 row -- confirmed, not assumed: this is a `VkFormatFeatureFlags`
 reporting/sampling-capability fix only. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update.
+
+## Roadmap H8r: measured impact
+
+H8g's own audit split this row off as an entirely unmapped format:
+`VK_FORMAT_B8G8R8A8_SRGB` had no `mapVkFormat` case at all, so
+`formatFeatureFlags` never even ran for it -- `EntryPoints.cpp`'s
+`Format ? formatFeatureFlags(*Format) : VkFormatFeatureFlags(0)`
+fallback silently reported zero features for the whole format.
+
+Added a new `ResourceFormat::B8G8R8A8_UNORM_SRGB` at `RuntimeABI.h`'s
+own tail (ordinal 132, respecting the hard-coded-switch-case
+append-only constraint `FeMeRuntimeCPU.c` depends on), mirroring
+`B8G8R8A8_UNORM`'s existing byte-swap-of-`R8G8B8A8_UNORM_SRGB`
+relationship. Wired through every file that already special-cases
+`R8G8B8A8_UNORM_SRGB`/`B8G8R8A8_UNORM`:
+
+- `Format.cpp`: `mapVkFormat` (`VK_FORMAT_B8G8R8A8_SRGB`),
+  `formatElementSize` (4 bytes, same shape as `B8G8R8A8_UNORM`),
+  `formatFeatureFlags` (`SAMPLED_IMAGE_BIT`/`SIFL` explicitly --
+  `BLIT_SRC/DST_BIT` and `TRANSFER_SRC/DST_BIT` already fall out of
+  this function's existing "every non-block-compressed recognized
+  format" rules once `mapVkFormat` recognizes the format at all).
+- `RenderPass.cpp`: `isSupportedColorAttachmentFormat`
+  (`COLOR_ATTACHMENT_BIT`/`_BLEND_BIT`).
+- `ImageFixture.cpp`: `getFormatInfo`, `parseFixtureFormat`,
+  `packClearColor`/`unpackColor` (the same B/G/R/A memory swizzle
+  `B8G8R8A8_UNORM` already has -- no gamma curve applied on this path,
+  matching `R8G8B8A8_UNORM_SRGB`'s own existing precedent: sRGB decode
+  only happens on the real sampling path below), `formatToString`.
+- `FeMeRuntimeCPU.c`: `femeRTImageFormatElementSize`, and a new
+  `femeRTUnpackImageTexel` case applying `femeRTSRGBToLinear` to
+  `femeRTUnpackB8G8R8A8Unorm`'s own RGB channels (mirroring
+  `R8G8B8A8_UNORM_SRGB`'s own case exactly, just B/G/R/A-swizzled).
+- `feme-run.cpp`: the CLI's own textual-format parser and
+  element-size table.
+
+`Executor.cpp`, `CommandBuffer.cpp`, `BCSamplingBridge.cpp`, and
+`ETC2SamplingBridge.cpp` needed **no** change: none of them
+special-case `B8G8R8A8_UNORM`/`_SRGB` specifically -- `B8G8R8A8_UNORM`
+was never a supported vertex-attribute format (`Executor.cpp`'s
+`decodeAttribute`), and neither BC nor ETC2 decoding ever targets BGRA8
+memory order (`BCSamplingBridge.cpp`/`ETC2SamplingBridge.cpp` both
+decode into `R8G8B8A8_UNORM`/`_UNORM_SRGB` specifically, never the BGRA
+variant). No `femeRTPackImageTexel` case was needed either: neither
+`R8G8B8A8_UNORM_SRGB` nor `B8G8R8A8_UNORM_SRGB` is a storage-image
+format (an sRGB format is never `STORAGE_IMAGE_BIT`-mandated per spec).
+
+New unit tests: `FormatTest.cpp`'s `MapsBGRA8SRGBFormat` and
+`FormatFeatureFlagsBGRA8SRGBMatchesCTSMandatoryBits` (checks every one
+of the CTS's own mandated bits for `b8g8r8a8_srgb` in one place, not
+just the `SAMPLED_IMAGE_BIT`/`SIFL` bits this row's own literal scope
+adds); `ImageFixtureTest.cpp`'s `PacksAndUnpacksB8G8R8A8UnormSrgb`;
+`ImageSamplingTest.cpp`'s `SRGBDecodeOnSampleBGRA8` (a real sRGB decode
+through the runtime, combining `SRGBDecodeOnSample`'s sRGB math with
+`LoadFetchesB8G8R8A8Unorm`'s own B/G/R/A memory swizzle).
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full:
+2,427/2,454 Total Discovered Tests (27 pre-existing `Unsupported`,
+0 `Failed`, up 4 tests from this row's own new coverage).
+
+Real CTS, against feme's own ICD:
+`dEQP-VK.api.info.format_properties.b8g8r8a8_srgb`, previously Fail
+(missing every mandated bit), now **Pass**. The full
+`dEQP-VK.api.info.format_properties.*` group moves from 201/225 to
+**202/225 Pass**, with the same 23 pre-existing failures (all within
+roadmap H8s's own already-tracked scope) unchanged -- no regressions.
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+row -- confirmed, not assumed: this is a `VkFormatFeatureFlags`
+reporting/sampling-capability fix for one specific `VkFormat` only.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
