@@ -71,3 +71,4 @@ Can you work on H8u or other prerequisites blocking the H-series milestones?
 > `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT` stays honestly unset for
 > `R32_{SINT,UINT}` until H8v lands and a real
 > `dEQP-VK.image.atomic_operations.*` case passes end to end
+
