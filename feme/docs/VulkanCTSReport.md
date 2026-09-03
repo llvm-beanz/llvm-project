@@ -21524,3 +21524,54 @@ No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by any
 H8s fix -- confirmed, not assumed: this entire row is pure
 `VkFormatFeatureFlags` breadth work. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update.
+
+## Roadmap H8t: measured impact
+
+H8s's own re-audit split this row off: `VK_FORMAT_B8G8R8A8_UNORM` was
+still missing `VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT`, confirmed
+mandatory via the CTS's own `s_requiredVertexBufferFormats` table
+(`vktApiFeatureInfo.cpp`). Unlike `a2b10g10r10_unorm_pack32`'s H8h gap
+(a packed sub-byte layout `decodeAttribute` cannot fit mechanically),
+`B8G8R8A8_UNORM` is a plain 4-byte-per-texel format `decodeAttribute`
+(`Executor.cpp`) simply had no case for at all.
+
+Added a new `decodeAttribute` case: the same 1-byte-per-component
+UNORM conversion `R8G8B8A8_UNORM` already implements, but reading the
+4 source bytes in B, G, R, A memory order (mirroring
+`ImageFixture.cpp`'s own `packClearColor`/`unpackColor` swizzle
+convention for this format) and writing them out in logical R, G, B, A
+component order for the shader. Added the matching
+`attributeComponentByteSize` case (1 byte/component, same as
+`R8G8B8A8_UNORM`) and flipped `isVertexBufferFormatSupported`
+(`Format.cpp`) to report it, which is the single place
+`formatFeatureFlags`'s `VERTEX_BUFFER_BIT` advertisement
+(`EntryPoints.cpp`) and `GraphicsPipeline.cpp`'s own vertex-attribute
+acceptance both gate on.
+
+Added `ExecutorTest.cpp`'s `VertexAttributeDecodesB8G8R8A8UnormColor`,
+mirroring the existing `VertexAttributeDecodesR16G16B16A16*Color`
+pattern: renders a real solid-color triangle through a fully compiled
+pipeline with raw `B8G8R8A8_UNORM` vertex bytes for logical red
+(fed as `{B=0, G=0, R=255, A=255}` in memory) and confirms the
+rendered `R8G8B8A8_UNORM` attachment shows red, not blue -- so a
+byte-order swizzle bug would be caught by a real render, not just
+`attributeComponentByteSize`'s arithmetic in isolation. Updated stale
+`EntryPointsTest.cpp`/`FormatTest.cpp` assertions that had assumed
+this format was still unsupported.
+
+`ninja check-feme` (assertions-enabled, ccache build) passed in full:
+2430/2457 (27 unsupported), 0 regressions, +1 new test versus H8s's
+own closing state.
+
+A real `dEQP-VK.api.info.format_properties.*` re-run (against feme's
+own correctly-spelled `VK_ICD_FILENAMES`) confirms `b8g8r8a8_unorm`
+moving from Fail to Pass: **221/225 -> 222/225 Pass**, with no
+regressions. The 3 remaining failures are exactly H8h's
+`a2b10g10r10_unorm_pack32` `VERTEX_BUFFER_BIT` gap and H8u's 2
+`r32_{sint,uint}` `STORAGE_IMAGE_ATOMIC_BIT` gaps.
+
+No `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by this
+row -- confirmed, not assumed: this is a vertex-attribute-decode and
+`VkFormatFeatureFlags` fix for one specific `VkFormat` only.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
