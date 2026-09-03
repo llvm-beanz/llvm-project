@@ -55743,3 +55743,139 @@ Pass**, 0 regressions. Only 3 failures remain, exactly matching the
 this is pure vertex-attribute-decode plus `VkFormatFeatureFlags` work,
 so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` were
 left untouched.
+
+# H8u: `STORAGE_IMAGE_ATOMIC_BIT` for `r32_{sint,uint}` -- scoping, not fixing
+
+## Task
+
+H8s's own re-audit split this row off, framed as: "no `OpAtomic*`
+support against a storage image exists anywhere in this project yet
+... a real fix needs, at minimum: SPIR-V-to-LLVM lowering ... new
+runtime entry points ... a substantially bigger lift than every other
+H8s row, scoped here but not started." My job was to work on this row
+or find other prerequisites, understanding going in that this might
+not be a same-session fix.
+
+## Investigation
+
+Started from the same place the original framing did: confirmed via
+`grep -rln "OpAtomic\|ImageAtomic\|imageAtomic"` across `feme/lib`,
+`feme/runtime`, `feme/include` that indeed nothing exists yet. But
+before writing any new lowering code, I wanted to understand *why*
+nothing exists -- was this simply "nobody got to it yet", or is there a
+structural reason?
+
+I traced the real SPIR-V requirement: a storage-image atomic
+(`OpAtomicIAdd`, `OpAtomicExchange`, etc., against an image rather than
+a buffer or shared-memory location) needs its address computed by a
+dedicated `OpImageTexelPointer` instruction first (SPIR-V spec
+"Instructions" chapter) -- unlike an ordinary buffer/shared-memory
+atomic, which operates directly on an `OpAccessChain`-derived pointer.
+
+I checked whether ordinary (non-image) atomics already work in this
+project's SPIR-V import pipeline, since if even those were missing,
+the scope would be much larger. They already do, structurally: MLIR's
+own `spirv` dialect (`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVAtomicOps.td`)
+defines every `Atomic*` instruction generically over
+`SPIRV_AnyPtr` (`SPIRV_AtomicUpdateOp`/`SPIRV_AtomicUpdateWithValueOp`
+base classes), and its opcode enum
+(`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`) already names
+`OpAtomicIAdd` (`SPIRV_OC_OpAtomicIAdd`, value 234) and its siblings.
+So a buffer/shared-memory atomic should deserialize and (once a
+`SPIRVToLLVMPatterns.cpp` pattern for it is added) convert with no
+upstream blocker at all -- that's a separate, smaller, genuinely
+tractable follow-on if this project ever needs it (not what H8u is
+about, since H8u is specifically about a storage *image*).
+
+Then I checked whether `OpImageTexelPointer` -- the piece an *image*
+atomic specifically needs -- has any representation in MLIR's `spirv`
+dialect at all. It does not, at any level:
+
+- No op definition in `SPIRVAtomicOps.td` or `SPIRVImageOps.td` (unlike
+  `OpImageRead`/`OpImageWrite`, which both have `SPIRV_ImageReadOp`/
+  `SPIRV_ImageWriteOp`).
+- No named case in `SPIRVBase.td`'s own generated `Opcode` enum at all
+  -- confirmed by grepping the whole file for "ImageTexelPointer" (no
+  hit), versus `OpImageRead`'s own `SPIRV_OC_OpImageRead` entry
+  (opcode 98).
+- No deserializer support anywhere in
+  `mlir/lib/Target/SPIRV/Deserialization/` (searched explicitly).
+
+I also checked whether LLVM's own SPIR-V *target* backend (the
+emission direction, used when `feme::SPIRVExporter` retargets FeMe's
+own compiled IR *to* SPIR-V) has any awareness of this instruction --
+it does (`llvm/lib/Target/SPIRV/SPIRVInstrInfo.td:259`, opcode 60), but
+that is irrelevant to `feme::SPIRVImporter`'s own deserialization
+direction, which is what matters for real driver-side
+`vkCreateShaderModule` input (i.e. what `dEQP-VK`'s image-atomics tests
+actually exercise). This mirrors this project's own pre-existing
+"`feme::SPIRVImporter` cannot deserialize LLVM SPIR-V backend output"
+known gap (Design.md, found by roadmap R14): two independent, upstream
+components (MLIR's deserializer, LLVM's target backend) with no
+cross-compatibility contract, this time for a different instruction.
+
+## Why I did not attempt a fix
+
+This project's own established precedent (Design.md's existing "Known
+gap" sections, and roadmap R14's own closure text) treats gaps in
+MLIR's own upstream `spirv` dialect/deserializer as out of scope for
+this repository to fix directly -- R14 itself found a very similarly
+shaped deserializer gap (`OpAccessChain` in a shape LLVM's backend
+emits) and was marked "done" once it was found and documented, not
+once it was fixed, with the fix itself explicitly deferred as
+"upstream MLIR work, outside this repository."
+
+Given that precedent, and the genuine size of adding a new SPIR-V
+dialect op upstream (tablegen op definition, opcode-enum registration,
+verifying deserializer autogen actually handles it end-to-end, likely
+new MLIR-level tests too) -- itself before any of this project's own
+conversion/runtime work could even be attempted or tested -- I judged
+that attempting this within one session's scope would either produce
+an untested, unreviewed drive-by change to `mlir/` (a much larger,
+riskier undertaking than this task's own framing anticipated) or an
+incomplete, uncompilable partial change. Neither serves the project
+well. Following R14's own precedent, I instead did the thorough
+investigation to nail down *exactly* what is blocking this row (not
+just "nobody wrote the lowering code yet", but "there is currently no
+way to even get such a SPIR-V module through import"), and documented
+it precisely so a future session (or an actual upstream MLIR
+contribution) knows exactly what shape of fix is needed.
+
+## What I changed
+
+- **`Design.md`**: added a new "Known gap: no way to deserialize
+  `OpImageTexelPointer`, blocking storage-image atomics" section,
+  modeled on the existing round-trip gap section immediately above it.
+  Documents the precise finding, the concrete shape of the upstream fix
+  (a new `spirv.ImageTexelPointer` op, mirroring `ImageReadOp`'s/
+  `ImageWriteOp`'s existing shape but with a pointer-to-image operand
+  per the spec), confirmation that MLIR's deserializer autogen
+  infrastructure needs no hand-written support once such an op exists
+  (since `OpImageRead`/`OpImageWrite` already prove this), and the
+  further `feme`-side work that would still be needed after that (a
+  `SPIRVToLLVMPatterns.cpp` pattern reusing the existing
+  `createResourcePointer` intrinsic, and `SPIRVResourceLowering.cpp`
+  learning to rewrite an `atomicrmw`/`cmpxchg` user of a storage-image
+  `getpointer` call into a new runtime entry point).
+- **`Roadmap.md`**: rewrote H8u's own row text to capture this precise
+  finding (replacing the vaguer "no support exists yet ... scoped here
+  but not started" framing) and cross-reference the new Design.md
+  section. Left it **open, not struck through** -- unlike R14, this
+  row's own stated goal is a concrete conformance outcome
+  (`STORAGE_IMAGE_ATOMIC_BIT` honestly set), which remains unmet and
+  genuinely cannot be progressed further from within this repository
+  alone; striking it through would misrepresent that as done.
+- **`VulkanCTSReport.md`**: added a new section documenting this
+  session's investigation-only outcome and the CTS re-run confirming
+  no regression.
+
+No code changes were needed or made this session -- correctly, since
+there is nothing safely committable that would make functional
+progress on this row without either a large, risky, untested upstream
+MLIR change or a dishonest flip of `STORAGE_IMAGE_ATOMIC_BIT` with no
+real support behind it. `ninja check-feme` still passes in full
+(2430/2457, 27 unsupported, 0 regressions -- unaffected since this
+session's changes are docs-only), and a real
+`dEQP-VK.api.info.format_properties.*` re-run confirms no change: still
+222/225 Pass, the same 3 remaining failures (H8h's, and this row's own
+2).
