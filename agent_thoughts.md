@@ -55419,3 +55419,79 @@ updates: this row corrects two `VkPhysicalDeviceLimits`/
 `VkPhysicalDeviceVulkan12Properties` sample-count fields and an internal
 helper's format-awareness, touching no `VkPhysicalDeviceFeatures` bit or
 `VkExtension`.
+
+# H8g: Mandatory blit/filter bits audit -- and a broken CTS runner
+
+Started this the same way as H8f: read the CTS's own ground-truth
+mandatory format-feature table (`getBaseRequiredOptimalTilingFeatures`,
+`vktApiFeatureInfo.cpp`, a 46-entry table using short bit aliases), ran
+the exact CTS group that checks it
+(`dEQP-VK.api.info.format_properties.*`, 225 cases) as a baseline, and
+got 225/225 Pass -- so, on paper, nothing to fix. Rather than stopping
+there, I tried to cross-check by reading `formatFeatureFlags`
+(`Format.cpp`) by eye against the table, to have independent evidence
+the pass wasn't accidental.
+
+That's where it got strange. I could not find a switch case anywhere
+in `formatFeatureFlags` for `R5G6B5_UNORM`/`B5G6R5_UNORM` -- grepped
+the whole file twice, both times getting only the `mapVkFormat` hits.
+By the table, this format needs `SAMPLED_IMAGE_BIT`/`SIFL`/
+`COLOR_ATTACHMENT_BIT`/`_BLEND_BIT` and none of those looked reachable
+from the code as I'd read it. So I ran the single case in isolation
+expecting a Fail to explain the discrepancy -- and got a Pass, with a
+QPA log showing every single mandated bit present. That's the opposite
+of what static reading predicted, in a very suspicious way: not
+"static reading found a bug the CTS run also caught" but "static
+reading found something that looks impossible yet the runtime handles
+correctly anyway."
+
+The lesson here mattered more than any specific format bug: when
+static code reading and runtime behavior disagree, don't assume the
+runtime is smarter than you gave it credit for. Check whether the
+runtime you tested is actually the code you read. It wasn't. Every
+`deqp-vk` invocation I (and, per the CTS numbers already sitting in
+this document, every prior session) had been running set
+`VK_ICD_FILENAME` (singular) to feme's own ICD JSON. That variable
+name does not exist in the Vulkan loader's spec -- the real one is
+`VK_ICD_FILENAMES` (plural). This shell's own environment already has
+that plural variable exported, pointing at
+`/usr/share/vulkan/icd.d/lvp_icd.json` -- Mesa's `llvmpipe` software
+rasterizer. Every prior "confirmed passing" CTS run in this whole
+session (and, it now looks certain, in every session before it that
+used the same copy-pasted wrong variable name) was quietly testing
+lavapipe's own correct, conformant answer, not feme's.
+
+Re-running with the loader variable spelled correctly changed
+everything: `format_properties.*` went from the "confirmed" 225/225 to
+a real 200/225 (25 Fail) against feme's actual ICD. That's a big
+enough discrepancy that I don't think it's responsible to just quietly
+fix the two format bits this row's own literal scope covers and move
+on as if nothing else happened. I did three things about it:
+
+1. Fixed the environment for the rest of this session and used it
+   correctly going forward (confirmed via an explicit isolated-case
+   re-run before trusting any further sweep).
+2. Fixed the two real gaps that fall inside H8g's own literal scope
+   (`_BLIT_*`/`SIFL` bits): `r5g6b5_unorm_pack16`/`b5g6r5_unorm_pack16`
+   missing `SAMPLED_IMAGE_BIT`/`SIFL` (no runtime decode case existed
+   either, so I added one -- `femeRTUnpackR5G6B5Unorm` -- rather than
+   granting the bit dishonestly), and identified (but did not fix,
+   since it needs a whole new `ResourceFormat` wired through ~8 files)
+   `b8g8r8a8_srgb`, which has no `mapVkFormat` case at all and so
+   reports zero features outright. Split that one off as roadmap H8r.
+3. Did **not** attempt to re-verify or re-fix every prior H8 row's own
+   CTS claim in this same session -- that's an enormous scope (every
+   row from H8a onward potentially needs re-checking, and the 24
+   remaining `format_properties` failures alone touch at least four
+   other rows' claimed scope: H8a/H8b's `VERTEX_BUFFER_BIT`, H8d's
+   `UNIFORM_TEXEL_BUFFER_BIT`, H8e/H8p's `COLOR_ATTACHMENT_BIT`, plus
+   new `SAMPLED_IMAGE_BIT`/`STORAGE_IMAGE_BIT`/`_ATOMIC_BIT` gaps
+   H8e/H8p never scoped at all). Instead I opened roadmap H8s as an
+   explicit, deliberately-unscoped tracking row listing exactly what
+   the corrected re-run found, so this doesn't quietly disappear behind
+   a stale "done" strikethrough the next time someone reads this doc.
+
+Given the standing instruction to run the real Vulkan CTS "after each
+change," I want to flag directly for whoever picks this up next: check
+your own shell's `VK_ICD_FILENAMES` before trusting any `deqp-vk` run
+in this environment. It is not empty by default here.
