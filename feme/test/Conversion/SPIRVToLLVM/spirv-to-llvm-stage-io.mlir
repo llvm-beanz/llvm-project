@@ -65,6 +65,22 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // -----
 
+// (Roadmap H21a) `VK_EXT_transform_feedback`'s own `xfb_buffer`/
+// `xfb_stride`/`offset` attributes -- read exactly like `component`/
+// `index` above (a plain attribute, not an ODS-special-cased one) -- fold
+// into the same `feme.spirv.decorations` attribute too, as codes 36/37/35
+// respectively. No feature bit or extension is gated here: this pattern
+// simply forwards whatever decorations a module already carries.
+
+// CHECK: feme.spirv.decorations = {{\[}}[30 : i32, 4 : i32], [35 : i32, 16 : i32], [36 : i32, 1 : i32], [37 : i32, 32 : i32]{{\]}}
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @out_var {location = 4 : i32, offset = 16 : i32,
+                                 xfb_buffer = 1 : i32, xfb_stride = 32 : i32}
+      : !spirv.ptr<f32, Output>
+}
+
+// -----
+
 // A builtin `Input` variable still converts through BuiltInAddressOfPattern
 // (the `llvm.spv.*` intrinsic), never through the ordinary-memory stage-IO
 // path above, since the two are mutually exclusive on the same variable.

@@ -1305,9 +1305,10 @@ constexpr StageIODecoration StageIOFlagDecorations[] = {
 /// Builds the getStageIODecorationsAttrName() attribute for \p Op -- an
 /// `Input`/`Output` variable that is not one of the compute builtins
 /// `BuiltInMappings` legalizes to an `llvm.spv.*` intrinsic -- from its
-/// `BuiltIn`/`Location`/`Component`/`Index` and boolean interpolation/
-/// per-primitive/per-patch attributes (`StageIOFlagDecorations`), or a null
-/// attribute if it carries none of them.
+/// `BuiltIn`/`Location`/`Component`/`Index`/`Offset`/`XfbBuffer`/
+/// `XfbStride` and boolean interpolation/per-primitive/per-patch
+/// attributes (`StageIOFlagDecorations`), or a null attribute if it
+/// carries none of them.
 ///
 /// A *graphics* builtin (`Position`, `VertexIndex`, `FragCoord`, ...) is
 /// ordinary interface memory here, exactly like a user varying: it has no
@@ -1344,6 +1345,20 @@ mlir::ArrayAttr buildStageIODecorationsAttr(mlir::spirv::GlobalVariableOp Op) {
   addIntDecoration(30, Op.getLocationAttr());
   addIntDecoration(31, Op->getAttr("component"));
   addIntDecoration(32, Op->getAttr("index"));
+  // (Roadmap H21a) `VK_EXT_transform_feedback`'s own three per-variable
+  // decorations -- read the same "plain attribute, MLIR's own deserializer
+  // naming" way as `component`/`index` above, since MLIR's SPIR-V dialect
+  // does not special-case these either (`Deserializer.cpp`'s own
+  // `Offset`/`XfbBuffer`/`XfbStride` handling stores each as a plain
+  // `IntegerAttr`, exactly like `component`/`index`). Forwarded here
+  // unconditionally, with no feature-bit/extension gate: this pattern
+  // lowers whatever decorations a module already carries, and a module
+  // that was never allowed to declare these in the first place (the
+  // extension not yet being advertised, roadmap H21) simply never has
+  // them to forward.
+  addIntDecoration(35, Op->getAttr("offset"));
+  addIntDecoration(36, Op->getAttr("xfb_buffer"));
+  addIntDecoration(37, Op->getAttr("xfb_stride"));
 
   for (const StageIODecoration &Flag : StageIOFlagDecorations)
     if (Op->hasAttr(Flag.AttrName))
