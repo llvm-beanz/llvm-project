@@ -907,14 +907,6 @@ TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   Info.pDynamicState = &DynamicInfo;
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
 
-  // Depth testing with no depth attachment in the render target.
-  Info = makeCreateInfo(Vertex, Fragment);
-  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
-  DepthInfo.depthTestEnable = VK_TRUE;
-  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
-  Info.pDepthStencilState = &DepthInfo;
-  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
-
   // A stage this milestone does not compile.
   Info = makeCreateInfo(Vertex, Fragment);
   Stages[1].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
@@ -1547,12 +1539,20 @@ TEST_F(GraphicsPipelineTest, DynamicLineWidthAndStippleOverrideStaticState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// (roadmap C4c) A pipeline declaring `VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE`
-/// (or `_WRITE_ENABLE`) dynamic may still enable the test at draw time even
-/// though its own static `depthTestEnable`/`depthWriteEnable` are both
-/// `VK_FALSE` -- so it still needs a depth attachment in its render target,
-/// exactly like a pipeline whose *static* fields already enable the test.
-TEST_F(GraphicsPipelineTest, DynamicDepthTestEnableRequiresDepthAttachment) {
+/// (roadmap H29j) Per the Vulkan spec ("If there is no depth attachment
+/// then the depth test is skipped."), a pipeline declaring
+/// `VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE` dynamic (so its own static
+/// `depthTestEnable`/`depthWriteEnable` are irrelevant) is *not* rejected
+/// just because its render target has no depth attachment -- the dynamic
+/// test is simply a no-op whenever it is actually enabled at draw time.
+/// Originally rejected outright at pipeline-creation time, which was
+/// stricter than the spec allows (see also `AcceptsDepthTestWithNo
+/// DepthAttachment` below for the equivalent *static* shape, both
+/// discovered via `dEQP-VK.pipeline.pipeline_library.graphics_library.
+/// misc.bind_null_descriptor_set.*`/`misc.other.null_descriptor_set_in_
+/// monolithic_pipeline`, neither of which is graphics-pipeline-library-
+/// specific despite the roadmap row that reported it).
+TEST_F(GraphicsPipelineTest, DynamicDepthTestEnableToleratesNoDepthAttachment) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
 
@@ -1566,9 +1566,49 @@ TEST_F(GraphicsPipelineTest, DynamicDepthTestEnableRequiresDepthAttachment) {
   // depth-less `Pass`.
 
   VkPipeline Pipe = VK_NULL_HANDLE;
-  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
-  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
 
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29j) The equivalent *static* shape: `depthTestEnable`/
+/// `depthWriteEnable` both statically `VK_TRUE` (no dynamic state at all)
+/// against a render target with no depth attachment must likewise be
+/// accepted -- and the resolved depth state must come out fully disabled,
+/// confirming the pipeline behaves as if depth testing/writes were never
+/// requested rather than merely being accepted-but-still-somehow-armed.
+/// Exactly the shape `PipelineLibraryMiscTestInstance::
+/// runNullDescriptorSet()`/`...InMonolithicPipeline()`
+/// (`vktPipelineLibraryTests.cpp`) both build via their shared
+/// `updatePostRasterization(..., /*enableDepth=*/true)` default, against a
+/// render pass with only a color attachment.
+TEST_F(GraphicsPipelineTest, AcceptsDepthTestWithNoDepthAttachment) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthTestEnable = VK_TRUE;
+  DepthInfo.depthWriteEnable = VK_TRUE;
+  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+  Info.pDepthStencilState = &DepthInfo;
+  // `Info.renderPass` (set by `makeCreateInfo`) is the fixture's
+  // depth-less `Pass`.
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  feme::graphics::DepthState Resolved =
+      Graphics->buildExecutorPipeline(DynamicGraphicsState{}).getDepthState();
+  EXPECT_FALSE(Resolved.TestEnable);
+  EXPECT_FALSE(Resolved.WriteEnable);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }

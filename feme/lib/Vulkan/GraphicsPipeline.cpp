@@ -1141,30 +1141,30 @@ Error translateDepthStencilState(
   bool NeedsDepth = TestDynamic || WriteDynamic || BoundsDynamic;
   bool NeedsStencil = StencilTestDynamic;
   if (!Info) {
-    // A dynamically-enabled test still needs somewhere to test/write into.
-    if (NeedsDepth &&
-        (!Targets.DepthStencil ||
-         !isSupportedDepthAttachmentFormat(*Targets.DepthStencil)))
-      return createStringError(inconvertibleErrorCode(),
-                               "depth testing/writes need a depth attachment "
-                               "in the pipeline's render target");
-    if (NeedsStencil &&
-        (!Targets.DepthStencil ||
-         !isSupportedStencilAttachmentFormat(*Targets.DepthStencil)))
-      return createStringError(inconvertibleErrorCode(),
-                               "stencil testing needs an S8_UINT attachment "
-                               "in the pipeline's render target");
+    // (roadmap H29j) Per the Vulkan spec ("If there is no depth attachment
+    // then the depth test is skipped."/analogous stencil text), enabling
+    // depth/stencil test (whether statically or, as here, only via a
+    // dynamic state) against a render target lacking the corresponding
+    // attachment is *not* a pipeline-creation-time error -- the test is
+    // simply a no-op at draw time. There is nothing to resolve here (the
+    // dynamic bits' actual values come from `DynamicGraphicsState` at draw
+    // time, not from this function), so just accept the pipeline.
     return Error::success();
   }
 
+  bool HasDepthAttachment =
+      Targets.DepthStencil &&
+      isSupportedDepthAttachmentFormat(*Targets.DepthStencil);
   NeedsDepth = NeedsDepth || Info->depthTestEnable || Info->depthWriteEnable ||
                Info->depthBoundsTestEnable;
+  // (roadmap H29j) As above: a *statically* enabled depth test/write/
+  // bounds-test against a render target with no (supported) depth
+  // attachment is likewise just a no-op, not a rejection -- force it off
+  // here instead of erroring, so the rest of this function (and the
+  // draw-time state resolved from it) behaves as if depth were disabled.
+  if (NeedsDepth && !HasDepthAttachment)
+    NeedsDepth = false;
   if (NeedsDepth) {
-    if (!Targets.DepthStencil ||
-        !isSupportedDepthAttachmentFormat(*Targets.DepthStencil))
-      return createStringError(inconvertibleErrorCode(),
-                               "depth testing/writes need a depth attachment "
-                               "in the pipeline's render target");
     Out.Depth.TestEnable = Info->depthTestEnable != VK_FALSE;
     Out.Depth.WriteEnable = Info->depthWriteEnable != VK_FALSE;
     if (CompareDynamic) {
@@ -1205,11 +1205,13 @@ Error translateDepthStencilState(
   NeedsStencil = NeedsStencil || Info->stencilTestEnable;
   if (!NeedsStencil)
     return Error::success();
+  // (roadmap H29j) As with depth above: statically enabling stencil test
+  // against a render target with no (supported) stencil attachment is a
+  // no-op, not a pipeline-creation error -- leave `Out.Stencil` disabled
+  // (its zero-initialized default) instead of rejecting the pipeline.
   if (!Targets.DepthStencil ||
       !isSupportedStencilAttachmentFormat(*Targets.DepthStencil))
-    return createStringError(inconvertibleErrorCode(),
-                             "stencil testing needs an S8_UINT attachment in "
-                             "the pipeline's render target");
+    return Error::success();
   Out.Stencil.TestEnable = Info->stencilTestEnable != VK_FALSE;
   if (StencilOpDynamic) {
     // `Info->front`/`Info->back`'s op/compare fields are ignored per the
