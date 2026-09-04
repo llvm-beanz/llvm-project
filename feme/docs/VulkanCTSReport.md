@@ -24803,3 +24803,114 @@ was narrowed rather than closed: a *library part's* rendering info now survives
 the merge, but one chained onto the **linking call itself** is still dropped, and
 merging the two is that row's own remaining work. H29q(2) (`Result.pDynamicState`)
 is untouched.
+
+## Roadmap H29n: measured impact
+
+**Row.** *A `graphics-pipeline-library` merge loses its own vertex/mesh stage
+presence check ordering*: `"a graphics pipeline needs a vertex stage or a mesh
+stage"`, 4 of H29f's own re-run's `graphics_library.*` failures, "confined to
+`fast.0_0*`/`fast.0_1*` (partial-library combinations whose
+vertex-input-interface or pre-rasterization-shaders part is supplied by a
+separate linked library from the one this check inspects)".
+
+### Almost nothing in the row's framing survived its reduction
+
+There is no "presence check ordering" problem, nothing is inspected in the wrong
+order, and the failing shapes are not "partial-library combinations" in the sense
+the row meant (H29c already handles a partially-monolithic/partially-library mix,
+and those cases pass).
+
+What the case names actually encode is a **tree**. `getTestName`
+(`vktPipelineLibraryTests.cpp`) walks a `PipelineTreeConfiguration`'s own
+`parentIndex` levels and emits one `_`-separated segment per level, one digit per
+node. So `0_00_11_11` is not a flag combination at all -- it is a four-level
+build: a root owning 0 shaders, two intermediate libraries owning 0 shaders each,
+and four leaf libraries owning 1 shader each.
+
+Listing every configuration's result made the pattern unmistakable:
+
+| Depth | Configurations | Result (before) |
+|---|---|---|
+| ≤ 2 | `0_1111`, `0_112`, `0_121`, `0_22`, `1_21`, `1_3`, `2_11`, `3_1`, `4`, `maintenance5` | all **Pass** |
+| ≥ 3 | `0_00_11_11`, `0_01_11_1`, `1_01_11`, `1_1_11`, `1_1_1_1` | all **Fail** |
+
+The split is total, in both the `fast.*` and `optimize.*` groups. Nothing about
+*which* parts a library owned mattered; only how deep the tree was.
+
+### Root cause
+
+`VK_EXT_graphics_pipeline_library` lets a library itself be built by linking
+other libraries -- a library create call may chain its own
+`VkPipelineLibraryCreateInfoKHR` -- to arbitrary depth. This ICD's
+library-creation path ignored that chain completely:
+`captureGraphicsPipelineLibraryState` captured only the state the create call
+declared *directly*, so an intermediate node captured **nothing** of its
+children, and a node owning no part of its own (a `0`-shader-count tree node,
+perfectly legal) captured nothing at all.
+
+At depth 2 every library is a leaf, so the gap is invisible. At depth 3 the
+root's linked libraries are intermediate nodes whose subtrees have been silently
+discarded.
+
+That also explains why the row's own diagnostic accounted for less than half the
+damage. The missing state surfaced two different ways depending on *which* part
+went missing:
+
+- If the pre-rasterization part (and with it the vertex stage) was below the
+  first level, creation failed loudly with the row's named diagnostic.
+- Otherwise the pipeline was created successfully but silently missing whichever
+  parts lived deeper, and failed later as a **rendering mismatch** (`At
+  permutation 0`) with no diagnostic at all.
+
+The second group is invisible to a diagnostic-grouping pass like H29f's, which is
+exactly why it was never attributed.
+
+### Fix
+
+Fold each linked library's own state into the capturing library's, unioning the
+flags. Because every library's captured state is already flattened by the time it
+can be named by another, this is inductive rather than recursive -- one level of
+folding per create call handles a tree of any depth, with no traversal.
+
+"Own state wins" needs no tie-break policy: the spec allows each part to be
+provided exactly once across an entire link, so a bit the parent already holds
+can never also be owned by a child. The one field that cannot be folded by flag
+mask is `pMultisampleState`, which the spec's own table lists under *both* the
+fragment-shader and fragment-output parts; it is taken from a child whenever the
+parent has none.
+
+### Unit tests
+
+| Phase | Test |
+|---|---|
+| Library capture (nested) | `GraphicsPipelineTest.CapturesStateOfLibrariesLinkedIntoALibrary` -- an intermediate library declaring **no** `VkGraphicsPipelineLibraryCreateInfoEXT::flags` of its own, asserting its captured flags are the union of its two children's and that its pre-rasterization stage list is non-empty |
+| Link-time merge (nested) | `GraphicsPipelineTest.LinksANestedLibraryTreeIntoAnExecutablePipeline` -- a real depth-3 tree in which no library declares more than one bit and the root declares none, asserting it still links to a `Kind::Graphics` pipeline |
+
+Both were confirmed to **fail** without the source change (stashed, rebuilt,
+re-run) and pass with it.
+
+**Regression suite.** `ninja check-feme`: 2582 discovered, 2523 passed, 59
+unsupported, **0 failures**.
+
+### CTS re-run
+
+| Measurement | Before | After |
+|---|---|---|
+| `"a graphics pipeline needs a vertex stage or a mesh stage"` across `graphics_library.*` | 4 | **0** |
+| `graphics_library.fast.*` (15 cases) | 10 Pass / 5 Fail | **15 Pass / 0 Fail** |
+| `graphics_library.optimize.*` (14 cases) | 9 Pass / 5 Fail | **14 Pass / 0 Fail** |
+| `graphics_library.*` (836 cases) | 121/427/288 | **131/417/288** |
+
+A case-by-case pass-set diff confirms **zero regressions**: exactly 10 cases
+moved `Fail` -> `Pass` and none moved the other way.
+
+The row's stated footprint (4 cases) was under-counted by more than half. Its 4
+were the subset whose missing part happened to be the vertex stage; the other 6
+(`{fast,optimize}.{1_01_11,1_1_11,1_1_1_1}`) were silent rendering mismatches
+with the identical root cause, fixed by the same change. This is the second row
+running whose real footprint exceeded its characterization -- both times because
+one root cause manifested as more than one failure signature, and a
+grouping-by-diagnostic pass can only ever see one of them.
+
+**Disposition.** Roadmap **H29n closed** (struck through). Nested pipeline
+libraries -- previously unimplemented outright -- now work to arbitrary depth.
