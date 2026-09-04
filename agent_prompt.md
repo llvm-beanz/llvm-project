@@ -37,15 +37,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H21 or other prerequisites blocking the H-series milestones?
+Can you work on H21b or other prerequisites blocking the H-series milestones?
 
-> **`VK_EXT_transform_feedback`**, split out of H12's own decision to bring this
-> group into scope. `dEQP-VK.transform_feedback.*` is 133,719 cases, all
-> currently `NotSupported` (the extension is not advertised and no runtime
-> support exists). `FeMeVulkanDesign.md`'s V7 section already anticipates this
-> ("Implement transform feedback only if it is advertised; otherwise report it
-> unsupported truthfully") but no implementation work has started. Needs its own
-> scoping pass (which of the extension's sub-features -- multiple streams,
-> rasterization stream selection, queries -- a representative CTS slice actually
-> exercises) before code lands, the same discipline H6/H8c/H10f used for their
-> own large groups
+> **Wire `VK_EXT_transform_feedback`'s entry points and pipeline-creation
+> surface**: register
+> `vkCmdBindTransformFeedbackBuffersEXT`/`vkCmdBeginTransformFeedbackEXT`/`vkCmdEndTransformFeedbackEXT`/`vkCmdBeginQueryIndexedEXT`/`vkCmdEndQueryIndexedEXT`/`vkCmdDrawIndirectByteCountEXT`
+> (`EntryPoints.{h,cpp}`/`ImplementedEntrypoints.txt`), and accept
+> `VkPipelineRasterizationStateStreamCreateInfoEXT` during graphics pipeline
+> creation (`GraphicsPipeline.cpp`) -- still no actual buffer-write capture or
+> extension advertisement, purely making the API surface present and
+> spec-shaped, the same discipline H10i used for `vkAcquireNextImage2KHR`
