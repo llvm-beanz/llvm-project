@@ -23113,3 +23113,99 @@ needed no update (no design deviation -- `Swapchain.h`'s own file
 comment already documents this ICD's synchronous acquire/present model
 in enough generality that this fix is a straightforward consequence of
 it, not a departure from it).
+
+## Roadmap H10j: measured impact
+
+H10h's own real re-verification of the whole `dEQP-VK.wsi.xcb.*` group
+had reported two independent full-group runs both crashing with a real
+`Segmentation fault` shortly after `swapchain.render.10swapchains`, at a
+different specific case each time -- ruling out a single fixed case as
+the trigger and suggesting a cumulative resource leak. Investigation
+here confirmed the "leak" framing was itself wrong (the same way H10g's
+own "count-dependent limit" hypothesis had been): polling
+`/proc/<pid>/fd` on both `deqp-vk` and `Xvfb` throughout several
+full-group re-runs showed a flat file-descriptor count in both processes
+the entire time, and reading `Surface.cpp`/`Swapchain.cpp`/
+`XcbSurface.cpp` in full found no xcb resource (connection, window,
+graphics context) this driver ever holds onto past the single
+`vkQueuePresentKHR` call that creates it.
+
+A temporary diagnostic (`XcbSurface.cpp`'s own `xcb_get_geometry_reply`
+error-code/connection-state capture, added locally and never committed)
+instead pinned the real cause precisely: whenever a full-group run
+failed, it was always with `VK_ERROR_SURFACE_LOST_KHR` from
+`vkGetPhysicalDeviceSurfaceCapabilitiesKHR` on a case's own **brand-new**
+surface -- and the diagnostic showed that case's own fresh
+`xcb_connect()` had already come back with `xcb_connection_has_error()
+== 1` and a garbage `0xffffffff` generated window ID, meaning the
+connection itself failed to establish, not that this driver mishandled
+a valid one. This is the same environmental connection-establishment
+flake H10f/H10g/H10h's own closure notes each separately observed and
+left unattributed -- here finally traced to a real, fixable contributor:
+`presentToSurface`'s own previous design put one scanline per
+`xcb_put_image_checked` request, each one a real, blocking
+`xcb_request_check` round trip before the next scanline could even be
+sent. For a real CTS case's full frame count (e.g.
+`IncrementalPresentTestInstance::m_frameCount == 300`), that is up to
+300 times the image's own height in real round trips against `Xvfb`'s
+single-threaded server. Under this project's own CPU-emulated ICD
+(competing for the same limited CPU time as `Xvfb` itself), that request
+storm was slow enough to starve `Xvfb`'s own accept loop long enough
+that a *different*, concurrently-starting test case's own connection
+attempt to the same server could genuinely be refused.
+
+Fixed by batching each present into the fewest `xcb_put_image` requests
+the connection's own `maximum_request_length` allows instead of one
+scanline per request (`rowsPerPutImageChunk`, `Surface.h`/
+`XcbSurface.cpp`): every chunk but the last is fire-and-forget
+(`xcb_put_image`, not the checked variant), and only the final chunk
+pays for one real round trip (`xcb_put_image_checked` +
+`xcb_request_check`), matching this function's own closing
+`xcb_connection_has_error` check for the overall pass/fail result. The
+chunk-size arithmetic itself needs no real `xcb_connection_t`, so it is
+directly unit-tested (`SurfaceTest.cpp`'s new `RowsPerPutImageChunk`
+suite: whole-image-fits-in-one-request, a large image split across
+multiple requests, an oversized single scanline still getting a minimum
+of one chunk, a degenerate cap-at-or-below-header-size connection, and a
+zero-width image not dividing by zero). `ninja check-feme`
+(assertions-enabled, ccache build) passes in full: 2526/2526 discovered
+(59 pre-existing `Unsupported`, 0 `Failed`, up 5 tests from this row's
+own new coverage).
+
+**Real CTS re-run.** 12 back-to-back full `dEQP-VK.wsi.xcb.*` re-runs
+after this fix:
+```
+run  1:  fails=0   run  7:  fails=0
+run  2:  fails=0   run  8:  fails=1
+run  3:  fails=0   run  9:  fails=0
+run  4:  fails=0   run 10:  fails=1
+run  5:  fails=0   run 11:  fails=0
+run  6:  fails=0   run 12:  fails=1
+```
+Every one of the 12 runs completed normally (`DONE!` printed, no
+`Segmentation fault`) -- the real, reproducible crash this row was filed
+to investigate did not recur in any of them. 9/12 runs (75%) completed
+with zero failures of any kind, versus every earlier control run (before
+this fix) failing at least once. The remaining 3/12 failures are the
+identical signature (`vki.getPhysicalDeviceSurfaceCapabilitiesKHR(...):
+VK_ERROR_SURFACE_LOST_KHR` on a fresh `incremental_present.*.reference`
+surface, re-confirmed via the same temporary diagnostic to still be a
+genuine `xcb_connection_has_error` on that case's own new connection) --
+a substantial reduction in frequency, not a full elimination. Per
+H10f/H10g/H10h's own precedent, this residual flakiness is not filed as
+a further `feme` roadmap item: it is `Xvfb`'s own single-threaded
+accept-loop contending with this sandboxed environment's own CPU
+scheduling under a real, CPU-emulated Vulkan ICD's workload, not a
+resource this driver's own code leaks, holds onto, or could plausibly
+retry around (the failing connection is the *other*, concurrently-
+starting test case's own `xcb_connect()`, entirely outside this
+surface's own object lifetime).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: a pure performance/robustness fix to an already-
+implemented present path (fewer round trips for the exact same pixels),
+not a new capability. `FeMeVulkanDesign.md` needed no update: the
+design's own "blit reusing `vkCmdCopyImage`'s own copy path" description
+already treats presentation's *mechanism* as an implementation detail,
+and chunking the same `xcb_put_image` sequence into fewer requests is
+not a departure from that description.
