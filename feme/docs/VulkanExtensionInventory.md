@@ -275,7 +275,7 @@ still out of scope (cooperative matrix/vector, per Part 4):**
 | `VK_EXT_pageable_device_local_memory` | Not implemented |  |
 | `VK_EXT_pci_bus_info` | Not implemented |  |
 | `VK_EXT_physical_device_drm` | Not implemented |  |
-| `VK_EXT_pipeline_creation_cache_control` | Advertised |  |
+| `VK_EXT_pipeline_creation_cache_control` | Advertised | roadmap H29o: a pipeline satisfied from a `VkPipelineCache` now keeps its reflected tessellation/geometry/mesh stage state, which previously only a real compile ever produced |
 | `VK_EXT_pipeline_creation_feedback` | Advertised |  |
 | `VK_EXT_pipeline_library_group_handles` | Not implemented |  |
 | `VK_EXT_pipeline_properties` | Not implemented |  |
