@@ -60678,3 +60678,119 @@ the no-op behavior rather than just the absence of an error).
    synthesizeLinkedGraphicsPipelineCreateInfo gaps` -- `Roadmap.md`,
    `VulkanCTSReport.md`, `VulkanExtensionInventory.md`.
 3. This `agent_thoughts.md` entry (below, in its own commit).
+
+# H29k: zero-attachment rasterization extent + mesh primitive-index gap
+
+## Task
+
+Work on H29k or another prerequisite blocking the H-series milestones:
+a real rendering-correctness mismatch (not a pipeline-creation-time
+diagnostic) in `independent_sets_random`'s own IO-buffer/descriptor-
+contents check (`vktIndependentSetsUtil.cpp`), 6 of H29f's own re-run's
+`graphics_library.*` failures, confined to `mesh_frag.case_1`/
+`case_1_io_ssbo_first` across `fast_lib`/`monolithic`/`optimized_lib`.
+
+## Investigation
+
+Confirmed the 6 failing cases first (`independent_sets_random.*`, 720
+cases, 36/414/270 baseline unchanged from H29p's already-tracked
+resource-binding gap) and isolated the exact 6 case names via log
+grepping. `case_1` is the only `mesh_frag.case_N` (of 0..9) whose
+pipeline clears creation at all; every other one still hits H29p's
+gap first. Read `vktIndependentSetsUtil.cpp`'s generation/verification
+logic and dumped the actual generated GLSL sources for
+`monolithic.mesh_frag.case_1`: a mesh shader emitting a full-screen
+quad (`SetMeshOutputsEXT(4, 2)`, two triangles via
+`gl_PrimitiveTriangleIndicesEXT`), and a fragment shader that,
+guarded by `pixCoord == (0, 0)`, reads three descriptors (`set=1`,
+bindings 0-2) and writes their contents into a separate IO SSBO
+(`set=2`) purely as an observable side effect -- the render pass has
+*zero* attachments of any kind (no color, no depth/stencil, no input
+attachments), a legal but unusual shape.
+
+The failure log showed `descriptor=<real value>` vs `io_ssbo=(0,0,0,0)`
+for all three `set=1` bindings -- meaning the fragment shader's guarded
+body never ran. First hypothesis: `Executor.cpp`'s `executeDraws`
+derives its rasterization extent (`ExtentWidth`/`ExtentHeight`, used to
+clamp every triangle's scissor rect) solely from `Draw.Attachments`/
+`Draw.DepthStencil`, both loops finding nothing and leaving both stuck
+at `0` -- collapsing every scissor to a degenerate 0x0 rectangle and
+discarding the whole draw via the tile-binning early-return, regardless
+of the real, non-empty, already-render-area-clipped `Draw.Scissors`.
+
+Fixed this by falling back to the union of `Draw.Scissors` when no
+attachment supplies an extent. Rebuilt, re-ran the same 6 cases -- **no
+change at all**, same mismatch. Rather than assume the fix was wrong,
+added targeted `fprintf(stderr, ...)` instrumentation directly in
+`Executor.cpp` (temporary, removed before committing) to trace exactly
+where fragments were being lost. Traced through: `ExtentWidth`/
+`ExtentHeight` now correctly `1`/`1` (matching the render area); the
+mesh shader's 2 triangles reached `RasterizePrimitives` fine
+(`VSPosition` non-null); but `ScreenTris` ended up **empty** after the
+per-triangle clip/cull loop. Added one more instrumentation layer: both
+triangles' three vertices all read back the *same* clip-space position
+(matching `gl_MeshVerticesEXT[1]`'s own value), meaning every vertex
+index in `AbsTriIndices` resolved to the same storage row. Traced this
+to `Meshlet::getPrimitiveIndices(0)`/`(1)`, both returning `(0, 0, 0)`
+instead of the shader's real `(0, 1, 2)`/`(2, 1, 3)`.
+
+Grepped for where `gl_PrimitiveTriangleIndicesEXT` writes get lowered
+and found `MeshOutputWrapper.h`'s own file comment already documents
+this exact gap: *"a primitive's own vertex index list (`PrimitiveIndices`,
+`gl_PrimitiveTriangleIndicesEXT`-shaped) has no canonicalized
+`feme.stage.*` op to lower at all yet, so it is still not written by
+this pass ... `PrimitiveIndices` itself remains a separate, still-open
+gap for a future row"* -- confirmed by `SIMDize.cpp`'s own comments
+describing the same store as one with "no canonicalized `feme.stage.*`/
+`feme.cpu.resource.*` op of its own." This was a pre-existing,
+already-identified-but-never-filed gap, not something new -- and it is
+the *actual* root cause of all 6 of H29k's own targeted mismatches: the
+extent fix (real, and now covered by its own unit test) was necessary
+but not sufficient, since a degenerate (all-first-vertex) triangle never
+has any real area to rasterize regardless of a correct extent.
+
+## Decision
+
+Given the scope of implementing this properly (a new canonicalized op
+recognized by `CanonicalizeStage.cpp`, a `MeshOutputWrapper.cpp`
+extension to lower it into `FemeMeshArgs::PrimitiveIndices`, likely a
+`SIMDize.cpp` change too) is a substantial, standalone compiler feature
+-- not a small, single-commit fix -- I did not attempt it this turn.
+Instead:
+
+1. Kept and tested the zero-attachment-extent fix (a real, independently
+   -correct bug fix, confirmed via a new `ExecutorTest.cpp` unit test
+   that fails without the fix and passes with it).
+2. Did **not** strike through H29k: corrected its own scope to record
+   (1) as fixed and (2) as the row's own actual remaining blocker.
+3. Filed the primitive-index gap as its own new row, H29r (this
+   project's H-series `nesting no more than one lowercase letter deep`
+   rule, so a fresh top-level H29-suffix letter rather than a
+   sub-letter of H29k).
+4. Corrected H29q's own earlier speculation that its
+   `Result.pDynamicState` gap "likely explain[ed]" H29k's mismatch --
+   confirmed, via this turn's real reduction, that it does not; H29k's
+   mismatch has a distinct, unrelated root cause (H29r).
+
+## Verification
+
+- New unit test: `ExecutorTest.RasterizesWithNoAttachmentsAtAllUsingScissorAsExtent`,
+  confirmed to fail (`PassedSamples == 0`, expected `16`) against the
+  pre-fix `Executor.cpp` and pass against the fixed version.
+- `ninja FeMeGraphicsTests`: 276/276 passed (was 275; +1 new test).
+- Full `ninja check-feme`: 2514/2573 passed, 59 unsupported, 0 unexpected
+  failures.
+- Real CTS re-run (`independent_sets_random.*`, 720 cases):
+  36/414/270 (Passed/Failed/NotSupported), unchanged from baseline, as
+  expected -- the 6 targeted cases still fail on the same diagnostic,
+  now correctly attributed to H29r rather than left unexplained.
+- `git-clang-format --diff HEAD` on both touched source files: no
+  changes needed.
+
+## Commits this turn (in order)
+
+1. `[feme] Fix zero-attachment draws collapsing to a 0x0 rasterization
+   extent` -- `Executor.cpp` fix plus `ExecutorTest.cpp` unit test.
+2. `[feme] docs: H29k partially fixed, correct scope, file H29r` --
+   `Roadmap.md`, `VulkanCTSReport.md`, `VulkanExtensionInventory.md`.
+3. This `agent_thoughts.md` entry (below, in its own commit).
