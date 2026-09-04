@@ -3274,4 +3274,288 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [MeshShadingEXT], [SPV_EX
   vkDestroyShaderModule(Device, Mesh, nullptr);
 }
 
+/// (roadmap H29b) `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` plus a chained
+/// `VkGraphicsPipelineLibraryCreateInfoEXT` produces a
+/// `GraphicsPipelineLibrary` object (`Pipeline::Kind::GraphicsLibrary`)
+/// rather than a compiled, executable `GraphicsPipeline` -- confirmed
+/// directly on the handle, mirroring H21a's own "decoder complete but
+/// unwired" precedent: this recognition path is real and reachable
+/// through the actual `vkCreateGraphicsPipelines` entry point, it is only
+/// the extension's own advertisement (H29a) that stays off.
+TEST_F(GraphicsPipelineTest,
+       LibraryBitProducesAGraphicsPipelineLibraryNotAGraphicsPipeline) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  VkGraphicsPipelineLibraryCreateInfoEXT LibraryInfo{};
+  LibraryInfo.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  LibraryInfo.flags =
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT;
+  Info.pNext = &LibraryInfo;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+  ASSERT_NE(Handle, VK_NULL_HANDLE);
+
+  Pipeline *Obj = fromHandle<Pipeline>(Handle);
+  EXPECT_EQ(Obj->kind(), Pipeline::Kind::GraphicsLibrary);
+  auto *Library = static_cast<GraphicsPipelineLibrary *>(Obj);
+  EXPECT_EQ(Library->state().Flags,
+            static_cast<VkGraphicsPipelineLibraryFlagsEXT>(
+                VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT));
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29b) `VERTEX_INPUT_INTERFACE_BIT` captures exactly the
+/// vertex-input and input-assembly state -- nothing that belongs to one
+/// of the other three parts.
+TEST_F(GraphicsPipelineTest, LibraryCapturesVertexInputInterfaceState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkVertexInputBindingDescription Binding{0, 16, VK_VERTEX_INPUT_RATE_VERTEX};
+  VkVertexInputAttributeDescription Attribute{0, 0,
+                                              VK_FORMAT_R32G32B32A32_SFLOAT, 0};
+  VertexInput.vertexBindingDescriptionCount = 1;
+  VertexInput.pVertexBindingDescriptions = &Binding;
+  VertexInput.vertexAttributeDescriptionCount = 1;
+  VertexInput.pVertexAttributeDescriptions = &Attribute;
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  Info.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  VkGraphicsPipelineLibraryCreateInfoEXT LibraryInfo{};
+  LibraryInfo.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  LibraryInfo.flags =
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT;
+  Info.pNext = &LibraryInfo;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+  auto *Library =
+      static_cast<GraphicsPipelineLibrary *>(fromHandle<Pipeline>(Handle));
+  const GraphicsPipelineLibraryState &State = Library->state();
+
+  ASSERT_EQ(State.VertexBindings.size(), 1u);
+  EXPECT_EQ(State.VertexBindings[0].stride, 16u);
+  ASSERT_EQ(State.VertexAttributes.size(), 1u);
+  EXPECT_EQ(State.VertexAttributes[0].format, VK_FORMAT_R32G32B32A32_SFLOAT);
+  ASSERT_TRUE(State.InputAssembly.has_value());
+  EXPECT_EQ(State.InputAssembly->topology, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+  // None of the other three parts' own state was requested.
+  EXPECT_TRUE(State.PreRasterizationStages.empty());
+  EXPECT_FALSE(State.FragmentStage.has_value());
+  EXPECT_FALSE(State.ViewportState.has_value());
+  EXPECT_FALSE(State.DepthStencilState.has_value());
+  EXPECT_FALSE(State.ColorBlendState.has_value());
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29b) `PRE_RASTERIZATION_SHADERS_BIT` captures every
+/// non-fragment stage (vertex here) plus viewport/rasterization state --
+/// the fragment stage and its own depth/stencil state stay uncaptured.
+TEST_F(GraphicsPipelineTest, LibraryCapturesPreRasterizationShadersState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  VkGraphicsPipelineLibraryCreateInfoEXT LibraryInfo{};
+  LibraryInfo.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  LibraryInfo.flags =
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT;
+  Info.pNext = &LibraryInfo;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+  auto *Library =
+      static_cast<GraphicsPipelineLibrary *>(fromHandle<Pipeline>(Handle));
+  const GraphicsPipelineLibraryState &State = Library->state();
+
+  ASSERT_EQ(State.PreRasterizationStages.size(), 1u);
+  EXPECT_EQ(State.PreRasterizationStages[0].Stage, VK_SHADER_STAGE_VERTEX_BIT);
+  EXPECT_EQ(State.PreRasterizationStages[0].Module, Vertex);
+  EXPECT_EQ(State.PreRasterizationStages[0].Name, "main");
+  ASSERT_TRUE(State.ViewportState.has_value());
+  EXPECT_EQ(State.Viewports.size(), 1u);
+  EXPECT_EQ(State.Scissors.size(), 1u);
+  ASSERT_TRUE(State.RasterizationState.has_value());
+  EXPECT_EQ(State.RasterizationState->polygonMode, VK_POLYGON_MODE_FILL);
+  EXPECT_FALSE(State.FragmentStage.has_value());
+  EXPECT_FALSE(State.DepthStencilState.has_value());
+  EXPECT_FALSE(State.ColorBlendState.has_value());
+  EXPECT_TRUE(State.VertexBindings.empty());
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29b) `FRAGMENT_SHADER_BIT` captures only the fragment stage
+/// and depth/stencil state -- the vertex stage and color-blend state stay
+/// uncaptured.
+TEST_F(GraphicsPipelineTest, LibraryCapturesFragmentShaderState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipelineDepthStencilStateCreateInfo DepthStencil{};
+  DepthStencil.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  DepthStencil.depthTestEnable = VK_TRUE;
+  DepthStencil.depthWriteEnable = VK_TRUE;
+  Info.pDepthStencilState = &DepthStencil;
+  Info.renderPass = PassWithDepth;
+  Info.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  VkGraphicsPipelineLibraryCreateInfoEXT LibraryInfo{};
+  LibraryInfo.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  LibraryInfo.flags = VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT;
+  Info.pNext = &LibraryInfo;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+  auto *Library =
+      static_cast<GraphicsPipelineLibrary *>(fromHandle<Pipeline>(Handle));
+  const GraphicsPipelineLibraryState &State = Library->state();
+
+  ASSERT_TRUE(State.FragmentStage.has_value());
+  EXPECT_EQ(State.FragmentStage->Stage, VK_SHADER_STAGE_FRAGMENT_BIT);
+  EXPECT_EQ(State.FragmentStage->Module, Fragment);
+  ASSERT_TRUE(State.DepthStencilState.has_value());
+  EXPECT_TRUE(State.DepthStencilState->depthTestEnable);
+  EXPECT_TRUE(State.DepthStencilState->depthWriteEnable);
+  EXPECT_TRUE(State.PreRasterizationStages.empty());
+  EXPECT_FALSE(State.ColorBlendState.has_value());
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29b) `FRAGMENT_OUTPUT_INTERFACE_BIT` captures the color-blend
+/// state (and the shared multisample state) -- the vertex/fragment stages
+/// stay uncaptured.
+TEST_F(GraphicsPipelineTest, LibraryCapturesFragmentOutputInterfaceState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  BlendAttachment.blendEnable = VK_TRUE;
+  Info.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  VkGraphicsPipelineLibraryCreateInfoEXT LibraryInfo{};
+  LibraryInfo.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  LibraryInfo.flags =
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT;
+  Info.pNext = &LibraryInfo;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+  auto *Library =
+      static_cast<GraphicsPipelineLibrary *>(fromHandle<Pipeline>(Handle));
+  const GraphicsPipelineLibraryState &State = Library->state();
+
+  ASSERT_TRUE(State.ColorBlendState.has_value());
+  ASSERT_EQ(State.ColorBlendAttachments.size(), 1u);
+  EXPECT_TRUE(State.ColorBlendAttachments[0].blendEnable);
+  ASSERT_TRUE(State.MultisampleState.has_value());
+  EXPECT_TRUE(State.PreRasterizationStages.empty());
+  EXPECT_FALSE(State.FragmentStage.has_value());
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29b) Every array/struct the library captures is a real,
+/// independent deep copy: overwriting the application's own arrays after
+/// `vkCreateGraphicsPipelines` returns must not perturb the already-stored
+/// state (the same hazard `ShaderModule`'s own owned-`Words` copy guards
+/// against for SPIR-V, see Pipeline.h).
+TEST_F(GraphicsPipelineTest, LibraryStateIsDeepCopied) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkVertexInputBindingDescription Binding{0, 16, VK_VERTEX_INPUT_RATE_VERTEX};
+  VertexInput.vertexBindingDescriptionCount = 1;
+  VertexInput.pVertexBindingDescriptions = &Binding;
+  Info.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  VkGraphicsPipelineLibraryCreateInfoEXT LibraryInfo{};
+  LibraryInfo.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  LibraryInfo.flags =
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT;
+  Info.pNext = &LibraryInfo;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+  auto *Library =
+      static_cast<GraphicsPipelineLibrary *>(fromHandle<Pipeline>(Handle));
+
+  // Mutate the application-owned binding *after* creation: a shallow copy
+  // (a stored pointer into `Binding`) would observe this; a real deep copy
+  // must not.
+  Binding.stride = 999;
+  EXPECT_EQ(Library->state().VertexBindings[0].stride, 16u);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29b) A `GraphicsPipelineLibrary` is never a legal
+/// `vkCmdBindPipeline` target: binding one must not crash, and must not
+/// leave a library object recorded where later draw-time code expects a
+/// real `GraphicsPipeline`/`ComputePipeline` (see that command's own
+/// guard in CommandBuffer.cpp).
+TEST_F(GraphicsPipelineTest, CmdBindPipelineRejectsAGraphicsPipelineLibrary) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  VkGraphicsPipelineLibraryCreateInfoEXT LibraryInfo{};
+  LibraryInfo.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  LibraryInfo.flags =
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT;
+  Info.pNext = &LibraryInfo;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo AllocInfo{};
+  AllocInfo.commandPool = Pool;
+  AllocInfo.commandBufferCount = 1;
+  VkCommandBuffer Cmd = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &Cmd), VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  // Must not crash; the bind is simply dropped (mirroring how a
+  // protected-access-only pipeline or the ray-tracing bind point are
+  // silently rejected by the same command).
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Handle);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 } // namespace

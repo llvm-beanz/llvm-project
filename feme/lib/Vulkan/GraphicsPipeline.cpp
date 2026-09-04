@@ -2428,6 +2428,123 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
 
 namespace feme::vulkan {
 
+/// (roadmap H29b) Deep-copies one `VkPipelineShaderStageCreateInfo` for
+/// `GraphicsPipelineLibraryState`'s own `PreRasterizationStages`/
+/// `FragmentStage` -- see that struct's own comment.
+static GraphicsPipelineLibraryStage
+captureLibraryStage(const VkPipelineShaderStageCreateInfo &Stage) {
+  GraphicsPipelineLibraryStage Out;
+  Out.Stage = Stage.stage;
+  Out.Module = Stage.module;
+  Out.Name = Stage.pName ? Stage.pName : "main";
+  if (const VkSpecializationInfo *Spec = Stage.pSpecializationInfo) {
+    Out.SpecMapEntries.assign(Spec->pMapEntries,
+                              Spec->pMapEntries + Spec->mapEntryCount);
+    const auto *Data = static_cast<const uint8_t *>(Spec->pData);
+    Out.SpecData.assign(Data, Data + Spec->dataSize);
+  }
+  return Out;
+}
+
+GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
+    const VkGraphicsPipelineCreateInfo &CreateInfo,
+    VkGraphicsPipelineLibraryFlagsEXT Flags) {
+  GraphicsPipelineLibraryState Out;
+  Out.Flags = Flags;
+  Out.Layout = CreateInfo.layout;
+  Out.RenderPass = CreateInfo.renderPass;
+  Out.Subpass = CreateInfo.subpass;
+
+  if (Flags & VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT) {
+    if (const auto *VI = CreateInfo.pVertexInputState) {
+      Out.VertexBindings.assign(VI->pVertexBindingDescriptions,
+                                VI->pVertexBindingDescriptions +
+                                    VI->vertexBindingDescriptionCount);
+      Out.VertexAttributes.assign(VI->pVertexAttributeDescriptions,
+                                  VI->pVertexAttributeDescriptions +
+                                      VI->vertexAttributeDescriptionCount);
+    }
+    if (const auto *IA = CreateInfo.pInputAssemblyState) {
+      VkPipelineInputAssemblyStateCreateInfo Copy = *IA;
+      Copy.pNext = nullptr;
+      Out.InputAssembly = Copy;
+    }
+  }
+
+  if (Flags & VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT) {
+    for (uint32_t I = 0; I != CreateInfo.stageCount; ++I)
+      if (CreateInfo.pStages[I].stage != VK_SHADER_STAGE_FRAGMENT_BIT)
+        Out.PreRasterizationStages.push_back(
+            captureLibraryStage(CreateInfo.pStages[I]));
+    if (const auto *VP = CreateInfo.pViewportState) {
+      VkPipelineViewportStateCreateInfo Copy = *VP;
+      if (Copy.pViewports)
+        Out.Viewports.assign(Copy.pViewports,
+                             Copy.pViewports + Copy.viewportCount);
+      if (Copy.pScissors)
+        Out.Scissors.assign(Copy.pScissors, Copy.pScissors + Copy.scissorCount);
+      Copy.pNext = nullptr;
+      Copy.pViewports = nullptr;
+      Copy.pScissors = nullptr;
+      Out.ViewportState = Copy;
+    }
+    if (const auto *RS = CreateInfo.pRasterizationState) {
+      VkPipelineRasterizationStateCreateInfo Copy = *RS;
+      Copy.pNext = nullptr;
+      Out.RasterizationState = Copy;
+    }
+    if (const auto *TS = CreateInfo.pTessellationState) {
+      VkPipelineTessellationStateCreateInfo Copy = *TS;
+      Copy.pNext = nullptr;
+      Out.TessellationState = Copy;
+    }
+  }
+
+  if (Flags & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) {
+    for (uint32_t I = 0; I != CreateInfo.stageCount; ++I)
+      if (CreateInfo.pStages[I].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
+        Out.FragmentStage = captureLibraryStage(CreateInfo.pStages[I]);
+    if (const auto *DS = CreateInfo.pDepthStencilState) {
+      VkPipelineDepthStencilStateCreateInfo Copy = *DS;
+      Copy.pNext = nullptr;
+      Out.DepthStencilState = Copy;
+    }
+  }
+
+  if (Flags & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT) {
+    if (const auto *CB = CreateInfo.pColorBlendState) {
+      VkPipelineColorBlendStateCreateInfo Copy = *CB;
+      if (Copy.pAttachments)
+        Out.ColorBlendAttachments.assign(
+            Copy.pAttachments, Copy.pAttachments + Copy.attachmentCount);
+      Copy.pNext = nullptr;
+      Copy.pAttachments = nullptr;
+      Out.ColorBlendState = Copy;
+    }
+  }
+
+  // (roadmap H29b) `pMultisampleState` is shared by `FRAGMENT_SHADER_BIT`/
+  // `FRAGMENT_OUTPUT_INTERFACE_BIT` alike (the spec's own "Multiple
+  // Pipeline Creation" table lists it under both), so it is captured
+  // whenever either bit is set rather than gated on just one.
+  if ((Flags &
+       (VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT |
+        VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)) &&
+      CreateInfo.pMultisampleState) {
+    VkPipelineMultisampleStateCreateInfo Copy = *CreateInfo.pMultisampleState;
+    if (Copy.pSampleMask) {
+      uint32_t MaskWords =
+          (static_cast<uint32_t>(Copy.rasterizationSamples) + 31) / 32;
+      Out.SampleMask.assign(Copy.pSampleMask, Copy.pSampleMask + MaskWords);
+    }
+    Copy.pNext = nullptr;
+    Copy.pSampleMask = nullptr;
+    Out.MultisampleState = Copy;
+  }
+
+  return Out;
+}
+
 feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
     const DynamicGraphicsState &Dynamic) const {
   feme::graphics::StencilState ResolvedStencil = State.Stencil;
@@ -2554,6 +2671,47 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
   VkResult Result = VK_SUCCESS;
   for (uint32_t I = 0; I != createInfoCount; ++I) {
     pPipelines[I] = VK_NULL_HANDLE;
+    // (roadmap H29b) `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` marks this call
+    // as creating a `VK_EXT_graphics_pipeline_library` pipeline library
+    // rather than a complete, executable pipeline: capture whichever
+    // `VkGraphicsPipelineLibraryCreateInfoEXT::flags` parts this call
+    // provides (deep-copied, since `pCreateInfos[I]` need not outlive this
+    // call) into a `GraphicsPipelineLibrary` object instead of running the
+    // full `compileGraphicsPipeline` path below, which requires a
+    // pipeline's *complete* state to be present all at once. Not yet
+    // linkable into anything executable (roadmap H29c); still safe to
+    // recognize unconditionally the same way every other H21-series
+    // "decoder complete but unwired" struct was, since the extension
+    // itself stays unadvertised (H29a) regardless of what this call
+    // recognizes.
+    if (pCreateInfos[I].flags & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) {
+      VkGraphicsPipelineLibraryFlagsEXT LibraryFlags = 0;
+      for (const auto *Next =
+               static_cast<const VkBaseInStructure *>(pCreateInfos[I].pNext);
+           Next; Next = Next->pNext) {
+        if (Next->sType !=
+            VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT)
+          continue;
+        LibraryFlags =
+            reinterpret_cast<const VkGraphicsPipelineLibraryCreateInfoEXT *>(
+                Next)
+                ->flags;
+        break;
+      }
+      fillPipelineCreationFeedback(pCreateInfos[I].pNext,
+                                   pCreateInfos[I].stageCount,
+                                   /*CacheHit=*/false);
+      GraphicsPipelineLibrary *Obj = Alloc.create<GraphicsPipelineLibrary>(
+          VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
+          captureGraphicsPipelineLibraryState(pCreateInfos[I], LibraryFlags),
+          pCreateInfos[I].flags);
+      if (!Obj) {
+        Result = VK_ERROR_OUT_OF_HOST_MEMORY;
+        continue;
+      }
+      pPipelines[I] = toHandle<VkPipeline>(static_cast<Pipeline *>(Obj));
+      continue;
+    }
     bool CacheHit = false;
     Expected<std::optional<GraphicsPipelineState>> Compiled =
         compileGraphicsPipeline(pCreateInfos[I], DeviceInfo, Cache, CacheHit);

@@ -3210,6 +3210,16 @@ vkCmdBindPipeline(VkCommandBuffer commandBuffer,
   // (`Pipeline::kind`), so the bind point argument only selects which
   // pipelines this ICD accepts at all.
   Pipeline *P = fromHandle<Pipeline>(pipeline);
+  // (roadmap H29b) A `VK_EXT_graphics_pipeline_library` pipeline library
+  // (`VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` set at creation) is never a
+  // legal bind target on its own -- it is missing state no draw could run
+  // without, and the spec only ever consumes one via `VkPipelineLibrary
+  // CreateInfoKHR::pLibraries` at another pipeline's *creation* time, not
+  // `vkCmdBindPipeline`. Skip recording the bind entirely, exactly like
+  // the ray-tracing bind point and a protected-access-only pipeline are
+  // silently rejected above/below.
+  if (P->kind() == Pipeline::Kind::GraphicsLibrary)
+    return;
   // (roadmap F9) `VK_EXT_pipeline_protected_access`: this ICD has no
   // protected-memory model at all (`protectedMemory` always reports
   // `VK_FALSE`, see EntryPoints.cpp), so no `VkCommandBuffer` it ever hands

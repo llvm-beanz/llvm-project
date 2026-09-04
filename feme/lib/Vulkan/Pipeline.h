@@ -151,6 +151,14 @@ public:
   enum class Kind : uint8_t {
     Compute,
     Graphics,
+    /// (roadmap H29b) A `VK_EXT_graphics_pipeline_library` pipeline
+    /// library: one or more of the four `VkGraphicsPipelineLibraryFlag
+    /// BitsEXT` parts' own deep-copied create-info state, captured but not
+    /// yet compiled or linkable into anything executable (see
+    /// `GraphicsPipeline.h`'s `GraphicsPipelineLibrary`). Never a legal
+    /// `vkCmdBindPipeline` target -- see that command's own guard in
+    /// `CommandBuffer.cpp`.
+    GraphicsLibrary,
   };
 
   explicit Pipeline(Kind PipelineKind, VkPipelineCreateFlags CreateFlags = 0)

@@ -48,6 +48,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace feme {
@@ -489,6 +490,119 @@ public:
 
 private:
   GraphicsPipelineState State;
+};
+
+/// (roadmap H29b) One deep-copied `VkPipelineShaderStageCreateInfo`, as
+/// captured by a `VK_EXT_graphics_pipeline_library` library part (see
+/// `GraphicsPipelineLibraryState` below). `pName`/the specialization
+/// info's map entries and data are all copied by value, since the
+/// application's own `VkGraphicsPipelineCreateInfo` (and everything it
+/// points to) need not outlive `vkCreateGraphicsPipelines`' return.
+struct GraphicsPipelineLibraryStage {
+  VkShaderStageFlagBits Stage = VK_SHADER_STAGE_VERTEX_BIT;
+  VkShaderModule Module = VK_NULL_HANDLE;
+  std::string Name;
+  /// Empty when the application supplied no `pSpecializationInfo`.
+  std::vector<VkSpecializationMapEntry> SpecMapEntries;
+  std::vector<uint8_t> SpecData;
+};
+
+/// (roadmap H29b) One `VkGraphicsPipelineLibraryFlagBitsEXT` part's own
+/// deep-copied `VkGraphicsPipelineCreateInfo` sub-state, captured verbatim
+/// at library-pipeline creation time and not yet interpreted or compiled
+/// in any way -- that translation is entirely roadmap H29c's own job,
+/// once a complete pipeline's worth of parts have been linked together
+/// via `VkPipelineLibraryCreateInfoKHR` and can be handed to the existing
+/// `compileGraphicsPipeline` as a whole. Deep-copied for the same reason
+/// `GraphicsPipelineLibraryStage` is: the owning `VkGraphicsPipelineCreate
+/// Info` and everything it points to may legally be destroyed once
+/// `vkCreateGraphicsPipelines` returns.
+///
+/// Each field is populated only when the state it names is one the
+/// spec's own "14.2. Multiple Pipeline Creation" table assigns to a bit
+/// set in `Flags` (this library's own `VkGraphicsPipelineLibraryCreate
+/// InfoEXT::flags`): `VERTEX_INPUT_INTERFACE_BIT` owns `VertexBindings`/
+/// `VertexAttributes`/`InputAssemblyState`; `PRE_RASTERIZATION_SHADERS_BIT`
+/// owns `PreRasterizationStages`/`ViewportState`/`RasterizationState`/
+/// `TessellationState`; `FRAGMENT_SHADER_BIT` owns `FragmentStage`/
+/// `DepthStencilState`; `FRAGMENT_OUTPUT_INTERFACE_BIT` owns
+/// `ColorBlendState`. `MultisampleState`/`Layout`/`RenderPass`/`Subpass`
+/// are each shared by more than one part per that same table, so they are
+/// simply captured whenever the owning `VkGraphicsPipelineCreateInfo`
+/// itself provided them, independent of which single-purpose fields above
+/// were populated.
+///
+/// Nested `pNext` chains (e.g. a rasterization state's own line/stream
+/// extension structs) are deliberately not chased here: every `pNext` in
+/// a copied struct below is unconditionally nulled out rather than left
+/// dangling or shallow-copied, since interpreting them is meaningless
+/// before a complete pipeline exists to interpret them for.
+struct GraphicsPipelineLibraryState {
+  VkGraphicsPipelineLibraryFlagsEXT Flags = 0;
+  VkPipelineLayout Layout = VK_NULL_HANDLE;
+  VkRenderPass RenderPass = VK_NULL_HANDLE;
+  uint32_t Subpass = 0;
+
+  /// Every non-fragment stage this library part declares (vertex,
+  /// tessellation control/evaluation, geometry, task, mesh); populated
+  /// only for `PRE_RASTERIZATION_SHADERS_BIT`.
+  std::vector<GraphicsPipelineLibraryStage> PreRasterizationStages;
+  /// Populated only for `FRAGMENT_SHADER_BIT`.
+  std::optional<GraphicsPipelineLibraryStage> FragmentStage;
+
+  /// Populated only for `VERTEX_INPUT_INTERFACE_BIT`.
+  std::vector<VkVertexInputBindingDescription> VertexBindings;
+  std::vector<VkVertexInputAttributeDescription> VertexAttributes;
+  std::optional<VkPipelineInputAssemblyStateCreateInfo> InputAssembly;
+
+  /// Populated only for `PRE_RASTERIZATION_SHADERS_BIT`.
+  std::vector<VkViewport> Viewports;
+  std::vector<VkRect2D> Scissors;
+  std::optional<VkPipelineViewportStateCreateInfo> ViewportState;
+  std::optional<VkPipelineRasterizationStateCreateInfo> RasterizationState;
+  std::optional<VkPipelineTessellationStateCreateInfo> TessellationState;
+
+  /// Populated only for `FRAGMENT_SHADER_BIT`.
+  std::optional<VkPipelineDepthStencilStateCreateInfo> DepthStencilState;
+
+  /// Populated only for `FRAGMENT_OUTPUT_INTERFACE_BIT`.
+  std::vector<VkPipelineColorBlendAttachmentState> ColorBlendAttachments;
+  std::optional<VkPipelineColorBlendStateCreateInfo> ColorBlendState;
+
+  /// Shared by `FRAGMENT_SHADER_BIT`/`FRAGMENT_OUTPUT_INTERFACE_BIT`
+  /// alike (the spec's own table lists `pMultisampleState` under both).
+  std::vector<VkSampleMask> SampleMask;
+  std::optional<VkPipelineMultisampleStateCreateInfo> MultisampleState;
+};
+
+/// Deep-copies \p CreateInfo's sub-state owned by whichever
+/// `VkGraphicsPipelineLibraryFlagBitsEXT` bits are set in \p Flags (the
+/// chained `VkGraphicsPipelineLibraryCreateInfoEXT::flags` -- see
+/// `GraphicsPipelineLibraryState`'s own comment for exactly which field
+/// each bit owns). \p Flags may be `0` (a library that captures no state
+/// of its own yet, legal but useless until linked against parts that do).
+GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
+    const VkGraphicsPipelineCreateInfo &CreateInfo,
+    VkGraphicsPipelineLibraryFlagsEXT Flags);
+
+/// A `VkPipeline` graphics pipeline library (`VK_EXT_graphics_pipeline_
+/// library`, roadmap H29b): one or more `VkGraphicsPipelineLibraryFlagBits
+/// EXT` parts' own deep-copied state (see `GraphicsPipelineLibraryState`),
+/// not yet compiled or linkable into an executable pipeline -- that is
+/// roadmap H29c's own job. A distinct `Pipeline::Kind` from `Graphics`
+/// precisely so `vkCmdBindPipeline` can refuse it outright (see that
+/// command's own guard in `CommandBuffer.cpp`): a library alone is never a
+/// legal draw-time pipeline.
+class GraphicsPipelineLibrary : public Pipeline {
+public:
+  explicit GraphicsPipelineLibrary(GraphicsPipelineLibraryState State,
+                                   VkPipelineCreateFlags CreateFlags = 0)
+      : Pipeline(Kind::GraphicsLibrary, CreateFlags), State(std::move(State)) {}
+
+  const GraphicsPipelineLibraryState &state() const { return State; }
+
+private:
+  GraphicsPipelineLibraryState State;
 };
 
 } // namespace feme::vulkan
