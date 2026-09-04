@@ -37,16 +37,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29i or other prerequisites blocking the H-series milestones?
+Can you work on H29j or other prerequisites blocking the H-series milestones?
 
-> **Inline shader-module state (H29d) does not survive a
-> `graphics-pipeline-library` merge**: `"pipeline stage has a null
-> VkShaderModule and no chained VkShaderModuleCreateInfo to compile inline"`, 23
-> of H29f's own re-run's `graphics_library.*` failures, confined to the `fast.*`
-> sub-group (link-time-merged pipelines). H29b's own
-> `captureGraphicsPipelineLibraryState` (deep-copying each library part's
-> `VkGraphicsPipelineCreateInfo` sub-state) most likely does not deep-copy a
-> chained `VkShaderModuleCreateInfo` the way it does an ordinary
-> `VkShaderModule` handle, losing the inline module's own code once the
-> originating `pCreateInfo` the app supplied is freed; needs its own real
-> IR/pipeline reduction to confirm before fixing
+> **A graphics-pipeline-library merge loses its own depth-attachment format**:
+> `"depth testing/writes need a depth attachment in the pipeline's render
+> target"`, 12 of H29f's own re-run's `graphics_library.*` failures, confined to
+> `misc.bind_null_descriptor_set.*`. The fragment-output-interface library part
+> (which owns the render target's attachment formats, per
+> `VkGraphicsPipelineLibraryFlagBitsEXT`) is a different part than the one whose
+> depth-test state is being checked; needs its own real pipeline reduction to
+> confirm whether the depth format is dropped by
+> `captureGraphicsPipelineLibraryState`'s own deep copy or lost during
+> `synthesizeLinkedGraphicsPipelineCreateInfo`'s own merge
