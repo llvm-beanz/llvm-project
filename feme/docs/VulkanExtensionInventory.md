@@ -238,7 +238,7 @@ still out of scope (cooperative matrix/vector, per Part 4):**
 | `VK_EXT_full_screen_exclusive` | Not implemented |  |
 | `VK_EXT_global_priority` | Not implemented |  |
 | `VK_EXT_global_priority_query` | Not implemented |  |
-| `VK_EXT_graphics_pipeline_library` | Planned (in scope, not implemented) | roadmap H29: discovered as a blocker while scoping H21a/H21f (`transform_feedback`'s own `*_gpl` sub-groups); real footprint measured at ~127,842 CTS cases (`dEQP-VK.pipeline.pipeline_library.*` alone is 120,483), far larger than transform-feedback's own 15,782-case slice |
+| `VK_EXT_graphics_pipeline_library` | Planned (in scope, not implemented, not advertised) | roadmap H29: discovered as a blocker while scoping H21a/H21f (`transform_feedback`'s own `*_gpl` sub-groups); real footprint measured at ~127,842 CTS cases (`dEQP-VK.pipeline.pipeline_library.*` alone is 120,483), far larger than transform-feedback's own 15,782-case slice. H29a recognizes `VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT`/`PropertiesEXT` (all fields `VK_FALSE`) ahead of any object model existing; the extension itself stays unadvertised since CTS's own device-construction-type gate checks extension advertisement only, not this feature bit -- advertising early would turn every `pipeline_library` case's current clean `NotSupported` into a real `Failed` |
 | `VK_EXT_hdr_metadata` | Not implemented |  |
 | `VK_EXT_headless_surface` | Advertised | roadmap H10 (V8): the first surface this ICD implements, per FeMeVulkanDesign.md's WSI decision (Surface.cpp) |
 | `VK_EXT_host_image_copy` | Advertised |  |

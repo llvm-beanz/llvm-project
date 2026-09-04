@@ -23752,3 +23752,58 @@ of them landed code.
 `ninja check-feme` was not re-run for this pass (no code changed); the
 last recorded full run (H21e's own commit) remains the current
 baseline: 2491 passed, 0 failed, 59 pre-existing `Unsupported`.
+
+## Roadmap H29a: measured impact (feature/properties struct recognition only, no CTS delta expected)
+
+**Context.** H21f's investigation (above) found no safe "recognize but
+don't advertise" partial step exists for `VK_EXT_graphics_pipeline_library`
+via the pipeline-creation surface itself, since CTS's own device-
+construction-type gate rejects every relevant case before any pipeline-
+creation code runs regardless of what that code recognizes. There is,
+however, a genuinely safe and independently verifiable first step one
+layer up: `VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT`/
+`PropertiesEXT` recognition in `vkGetPhysicalDeviceFeatures2`/
+`Properties2`, mirroring `VK_EXT_mesh_shader`'s/`VK_EXT_transform_
+feedback`'s own precedent of recognizing a feature struct (reporting
+every bit honestly false/unimplemented) well before the extension itself
+is advertised.
+
+**Change.** `EntryPoints.cpp`'s `fillFeatures2Chain`/`fillProperties2Chain`
+now recognize both structs: `graphicsPipelineLibrary` (feature) and
+`graphicsPipelineLibraryFastLinking`/
+`graphicsPipelineLibraryIndependentInterpolationDecoration` (properties)
+all report `VK_FALSE` -- no pipeline-library object model exists yet
+(roadmap H29b/H29c). The extension itself remains unadvertised via
+`getSupportedDeviceExtensions`.
+
+**Verification.** New unit test
+`PhysicalDeviceInfoTest.GraphicsPipelineLibraryIsRecognizedButNotYetImplementedOrAdvertised`
+chains both structs through real `vkGetPhysicalDeviceFeatures2`/
+`Properties2` calls and asserts every field is `VK_FALSE`, plus asserts
+the extension name is absent from `getSupportedDeviceExtensions()`.
+`ninja check-feme` passes in full: 1006 lit tests unaffected (all still
+pass), and the underlying gtest suite (`FeMeVulkanTests` among others)
+now includes this new case, still 0 `Failed`.
+
+**CTS impact.** None expected or observed by design: the extension stays
+unadvertised, so CTS's own device-construction-type gate
+(`vkPipelineConstructionUtil.cpp:212`) continues to reject every
+`dEQP-VK.pipeline.pipeline_library.*`/`*_gpl`-shaped case as
+`NotSupported`, unchanged from the H21e baseline (2491 passed, 0 failed,
+59 pre-existing `Unsupported`). A full Vulkan CTS re-run was not
+performed for this pass, since this change touches only a feature/
+properties query path CTS's own pipeline-construction-type gate never
+consults (confirmed in the H21f investigation above) -- there is no
+CTS-observable surface this change could plausibly affect, and the
+existing recorded baseline remains accurate. `dEQP-VK.api.info.*`
+feature/property consistency cases (e.g.
+`vulkan1p2.feature_extensions_consistency`) are unaffected: they only
+compare structs an application actually chains for extensions the
+implementation *does* advertise, and this extension is not advertised.
+
+**Disposition.** Roadmap H29a closed (struck through in `Roadmap.md`);
+H29b (object model for a partial "library" pipeline) and H29c (link-time
+merge, reuse of the existing monolithic `compileGraphicsPipeline`, and
+the first real feature/extension advertisement plus CTS re-run) remain
+open, each depending on the previous, per H29's own now-detailed
+breakdown.
