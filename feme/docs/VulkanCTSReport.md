@@ -24278,3 +24278,70 @@ pointer type ..."` type mismatch on a struct-wrapped/plain
 **Disposition.** Roadmap H29h closed (struck through in `Roadmap.md`). New
 follow-on row H29p added for the resource-binding normalization gap this
 fix uncovered.
+
+## Roadmap H29i: measured impact
+
+**Goal.** Fix inline shader-module state (H29d) not surviving a
+`graphics-pipeline-library` merge -- 23 of H29f's own re-run's
+`graphics_library.*` failures, confined to the `fast.*` (link-time-merged)
+sub-group.
+
+**Root cause.** `captureGraphicsPipelineLibraryState`'s own
+`captureLibraryStage` (roadmap H29b) deep-copies a stage's `module`
+handle, `pName`, and specialization info, but never looked at `pNext` at
+all -- so a `PRE_RASTERIZATION_SHADERS_BIT`/`FRAGMENT_SHADER_BIT` library
+part whose stage used H29d's own inline-shader-module path (a null
+`module` with a chained `VkShaderModuleCreateInfo` supplying real SPIR-V
+words instead) lost that code entirely once the application's own
+`pCreateInfos[I]` (and everything it points to) was freed after
+`vkCreateGraphicsPipelines` returned. A later link then synthesized a
+stage with both a null `module` and no `pNext`, so
+`resolveShaderStageModule` correctly (if confusingly, from this gap's own
+real-world vantage point) reported `"pipeline stage has a null
+VkShaderModule and no chained VkShaderModuleCreateInfo to compile
+inline"`. Confirmed via a new unit test,
+`GraphicsPipelineTest.LinksLibraryWithInlineVertexShaderModule` (a
+`PRE_RASTERIZATION_SHADERS_BIT` library capturing an inline vertex module,
+linked with the other three library parts), which reproduced the exact
+failure before any fix.
+
+**Fix.** Added `GraphicsPipelineLibraryStage::InlineModuleWords`, deep-
+copied by `captureLibraryStage` from the chained
+`VkShaderModuleCreateInfo` whenever `Module` is null (left empty, as
+before, when neither a real module nor a chained info is present --
+letting the existing diagnostic still fire for that genuine application
+error). `addLinkedStage` now reconstructs an equivalent chained
+`VkShaderModuleCreateInfo` referencing that owned storage
+(`LinkedPipelineStorage::InlineModuleInfos`, a `std::deque` for the same
+address-stability reason `SpecInfos` already is) when synthesizing a
+linked pipeline's stages, so `resolveShaderStageModule` resolves it
+exactly as it would the application's own original chain.
+
+**Testing.** New unit test
+`LinksLibraryWithInlineVertexShaderModule` (fails before the fix with the
+exact diagnosed error, passes after). Full `ninja check-feme`: 2512/2571
+passed (59 unsupported, 0 unexpected failures) -- one net-new passing
+test versus H29h's own baseline, otherwise unchanged.
+
+**CTS re-run.** `dEQP-VK.pipeline.pipeline_library.graphics_library.*`
+(836 cases; `VK_ICD_FILENAMES` + `FEME_VULKAN_LOG_CREATION_ERRORS=1`) --
+this is the group's first full re-measurement since H29f's own 83/465/288
+baseline, so it also reflects H29h's own already-landed fix cumulatively:
+
+| | H29f baseline | After H29h + H29i |
+|---|---|---|
+| `"...null VkShaderModule and no chained..."` failures | 23 | **0** |
+| Passed | 83/836 (9.9%) | 99/836 (11.8%) |
+| Failed | 465/836 (55.6%) | 449/836 (53.7%) |
+| Not supported | 288/836 (34.4%) | 288/836 (34.4%) |
+
+The targeted diagnostic is fully eliminated. Every remaining failure
+signature in the re-run's log matches an already-filed row: the
+resource-binding-normalization gap (H6g-b-a-i-a-i/H29p family, still the
+largest single share), H29j's depth-attachment gap, H29l's fragment-output
+gap, and H29k/H29m/H29n's own already-scoped shares -- no new, distinct
+blocker was uncovered by this fix.
+
+**Disposition.** Roadmap H29i closed (struck through in `Roadmap.md`). No
+new follow-on row needed; every remaining `graphics_library.*` failure
+this re-run surfaced was already tracked by an existing row.
