@@ -60023,3 +60023,139 @@ performant, simplification rather than a real gap.
 2. `[feme] docs: close H29d` -- `Roadmap.md`, `VulkanCTSReport.md`,
    `VulkanExtensionInventory.md`, `FeMeVulkanDesign.md`.
 3. This `agent_thoughts.md` entry.
+
+# H29e: hull-stage Position-input dispatch gap (and its H21k bonus closure)
+
+## Request
+
+Work on H29e (or other prerequisites blocking the H-series milestones):
+`vkCreateGraphicsPipelines` fails a tessellation-control-shader pipeline with
+`"feme-cpu-wrap-hull: masked output store references an unknown patch-output
+signature element"` -- wait, no: the actual filed H29e text (once I read the
+real roadmap row rather than the request's own restated summary) was
+`"feme-cpu-wrap-hull: unsupported hull input system value"`, a crash-free-
+but-failing gap H29c's own `cache.*` re-run surfaced on tessellation-stage
+cache cases. (The initial user message in this session's history quoted a
+*different*, H9a-era patch-constant masked-store defect description that
+does not match this row's own roadmap text at all -- I went with the actual
+`Roadmap.md` H29e row, since that is the authoritative definition of what
+"H29e" means, and the masked-patch-output-store issue does not appear
+anywhere in the current roadmap under that name.)
+
+## Investigation
+
+Found the error site immediately: `HullWrapper.cpp`'s `lowerHullStageOps`,
+an `InputLoad` dispatch switch that only routes `SignatureSystemValue::None`
+to the generic `lowerHullInputLoad` and `PatchVertices` to
+`lowerPatchVerticesIn`, erroring on everything else. Traced the real CTS
+shader (`vktPipelineCacheTests.cpp`'s `basic_tcs`) and confirmed it reads
+`gl_in[gl_InvocationID].gl_Position`, which `CanonicalizeStage.cpp`'s
+`getSystemValueForBuiltIn` tags `SignatureSystemValue::Position` for any
+stage -- including a hull-stage input, where it's really just an ordinary
+per-control-point attribute forwarded from the vertex stage, not a
+synthesized value. Confirmed `lowerHullInputLoad` itself has zero actual
+dependency on `SystemValue` (it addresses storage purely via
+`Elt.ElementID`/`Row`/`Component`/the control-point index) -- so the bug is
+purely in the dispatch switch's own restrictiveness, not in any addressing
+logic. `PatchVertices` is the one system value that legitimately needs its
+own lowering (a synthesized per-patch scalar), so I inverted the switch:
+keep `PatchVertices` as its own case, route everything else through the
+unchanged `lowerHullInputLoad`.
+
+While investigating I noticed `DomainWrapper.cpp`'s `lowerDomainInputLoad`
+has a structurally identical latent bug (only `None`/`DomainLocation`/
+`PatchVertices` routed correctly). I suspected this was the real root cause
+of the still-open H21k row, since H21k's own quoted error text was literally
+the *hull* wrapper's message, discovered via `.tese.`-named CTS cases -- and
+Vulkan requires a tesc/tese pair to always coexist in one pipeline, so a
+`.tese.`-named failure could easily be the paired hull stage tripping this
+same class of bug. I did not assume this was correct without evidence,
+though: I re-ran the real CTS group H21k names
+(`dEQP-VK.transform_feedback.primitives_generated_query.*.tese.*`, which
+required first discovering it actually lives under `transform_feedback`,
+not `query_pool.statistics_query` as H21d's own original discovery implied)
+both *before* and *after* fixing `DomainWrapper.cpp`, and confirmed: before
+the fix, all 162 of that row's failures emitted
+`"feme-cpu-wrap-domain: unsupported domain system value"` -- not the hull
+wrapper's message at all. H21k's own filed error text turned out to be a
+copy-paste artifact from H29e's row, and the real bug was always in the
+domain (tessellation-evaluation) stage's own analogous dispatch switch, not
+the hull stage's. This is a good illustration of why re-verifying a roadmap
+row's own claimed symptom against a fresh, real CTS run -- rather than
+trusting the filed text -- matters before declaring anything closed.
+
+## Fix and verification (per stage)
+
+Both fixes follow the same shape: only the genuinely-synthesized system
+value(s) for that stage (`PatchVertices` for hull; `DomainLocation`/
+`PatchVertices` for domain) keep a dedicated switch case, and every other
+input system value now falls through to the stage's existing, already
+system-value-agnostic generic load. New unit tests
+(`HullWrapperTest.LowersPositionInputSystemValue`,
+`DomainWrapperTest.LowersPositionInputSystemValue`) reproduce the real CTS
+shape in each stage; I confirmed both fail with the original diagnostic
+before their respective fix (via a temporary `git stash` of just the one
+file under test) and pass after -- the "reproduce before fixing" discipline
+this project's H6/H8/H9/H21/H29 chains have used throughout.
+
+`ninja check-feme` (ccache + assertions, `build2/`) passes in full after
+both fixes: 2510/2569 (59 pre-existing `Unsupported`, 0 `Failed`), up 2
+tests from H29d's own 2508/2567 baseline, 0 regressions.
+
+## Real CTS re-runs
+
+Rebuilt `feme_vulkan` and re-ran, with `VK_ICD_FILENAMES` pointed at
+`build2/tools/feme/tools/feme-vulkan/feme_icd.json` (confirmed via
+`vulkaninfo --summary`, `deviceName = FeMe CPU Vulkan Device`):
+
+- `dEQP-VK.pipeline.pipeline_library.cache.*` (773 cases): the exact
+  `"unsupported hull input system value"` diagnostic is now completely gone
+  (0 occurrences, confirmed by grepping the full run log). Aggregate totals
+  are unchanged at 297/475/1 (Passed/Failed/NotSupported) because the same
+  tessellation-stage cases now fail on a *different*, pre-existing,
+  already-diagnosed limitation instead:
+  `"feme-cpu-wrap-hull: control-point phase only supports a control point
+  reading its own input control point's attributes"` (a real, distinct gap
+  in the CPU-emulated control-point phase's per-invocation-isolated storage
+  model). This is not a failure of the fix -- it's a second, independent
+  layer this fix peeled back to expose, exactly the "the next bug was
+  waiting underneath" pattern this project's H-series work has hit
+  repeatedly. Filed as new roadmap row H29g.
+
+- `dEQP-VK.transform_feedback.primitives_generated_query.*.tese.*` (1674
+  cases): the exact `"unsupported domain system value"` diagnostic is
+  likewise completely gone (0 occurrences, down from 162). Aggregate totals
+  stay at 174 `Failed` (composition shifted, did not shrink): 12 were
+  already, and remain, roadmap H21j's own separately-tracked fragment-stage
+  metadata gap; the other 162 now genuinely execute and render, but fail a
+  real query-result check --
+  `"[Query 0] pgqGenerated == 224, expected 32"` /
+  `"== 448, expected 64"`, both a consistent 7x multiple of the expected
+  count -- a distinct, genuine tessellation-stage `primitives_generated_
+  query` counting bug. Filed as new roadmap row H21m.
+
+## Formatting and commits
+
+`git-clang-format --diff` flagged one line-wrap issue in the new
+`DomainWrapperTest.cpp` test (a two-line variable declaration that fit on
+one line once reformatted); fixed directly rather than via `git apply`
+(the diff was small enough to apply by hand). `HullWrapper.cpp`/
+`HullWrapperTest.cpp` needed no reformatting.
+
+Commits, each scoped and separately made:
+1. `[feme] H29e: route hull-stage input system values through the generic
+   load` -- `HullWrapper.cpp`, `HullWrapperTest.cpp` (new test).
+2. `[feme] H21k: route domain-stage input system values through the
+   generic load` -- `DomainWrapper.cpp`, `DomainWrapperTest.cpp` (new
+   test).
+3. `[feme] Docs: close H29e/H21k, add H29g/H21m follow-ons` -- `Roadmap.md`,
+   `VulkanCTSReport.md`, `VulkanExtensionInventory.md`.
+4. This `agent_thoughts.md` entry.
+
+## Notes on H-series milestone-nesting discipline
+
+Both new follow-on rows (`H29g`, `H21m`) use a single lowercase letter,
+consistent with the "no more than one lowercase letter deep" rule -- I
+picked the next unused letter in each series (`H29` already had `a`-`f`;
+`H21` already had `a`-`l`) rather than nesting further under `H29e`/`H21k`
+themselves.
