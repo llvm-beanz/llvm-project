@@ -37,12 +37,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29e or other prerequisites blocking the H-series milestones?
+Can you work on H29f or other prerequisites blocking the H-series milestones?
 
-> **`feme-cpu-wrap-hull: unsupported hull input system value`**, a real
-> crash-free-but-failing gap the H29c `cache.*` re-run surfaced on
-> tessellation-stage cache cases (e.g.
-> `pipeline_from_incomplete_get_data.vertex_stage_tessellation_control_stage_tessellation_evaluation_stage_fragment_stage`):
-> needs its own real IR reduction of one of these cases to identify which
-> hull-stage input system value `feme-cpu-wrap-hull` doesn't yet recognize, the
-> same technique this project's H6/H8/H9-series chains have used throughout
+> **Characterize the remaining `graphics_library.*`/`cache.*` `Failed` cases
+> beyond H29d/H29e** (386 of 467 `graphics_library.*` failures and roughly 474
+> of 475 `cache.*` failures not yet attributed to a specific named gap): needs a
+> systematic pass grouping the remaining failure messages by signature (most
+> seen so far: `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED
+> at vkRefUtil.cpp:37` from this ICD's own merge/compile rejection, and
+> `retcode: VK_ERROR_INITIALIZATION_FAILED at
+> vkPipelineConstructionUtil.cpp:176`, a CTS-side wrapper failure downstream of
+> the first) to produce further named, scoped follow-on rows, the same
+> discipline H21a's own CTS-shape scoping pass used
