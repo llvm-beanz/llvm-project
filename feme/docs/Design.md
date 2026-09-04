@@ -609,6 +609,7 @@ dialect can then name the backend's intrinsics directly, as
 | `spirv.ImageFetch` with a lone `Lod` operand (`Texture2D<T>::Load`, which `dxc` always gives an explicit mip) | `llvm.spv.resource.load.level` | *(no pattern; fails to legalize)* |
 | `spirv.ImageQuerySize` | `llvm.spv.resource.getdimensions.{x,xy,xyz}` | *(no pattern; fails to legalize)* |
 | `spirv.SampledImage` + `spirv.ImageSampleImplicitLod` (no modifiers) | `llvm.spv.resource.sample`, image/sampler handles carried as a struct in between | *(folds both handles into one combined runner-facing type; no sampling op pattern at all)* |
+| `spirv.Image` (extracting a plain image handle back out of a combined `!spirv.sampled_image` value, e.g. so a combined-image-sampler binding can still feed `spirv.ImageFetch`/`spirv.ImageQuerySize`) | `llvm.extractvalue` reading field 0 of that same image/sampler struct (roadmap H29h) | *(no pattern; fails to legalize)* |
 | `spirv.ImageSampleExplicitLod` with a lone `Lod` operand | `llvm.spv.resource.samplelevel` | *(no pattern; fails to legalize)* |
 | `spirv.Switch` | `llvm.switch`, case literals rebuilt against the (post-conversion, signless) selector type | *(no pattern; fails to legalize -- see "`spirv.Switch` op is not supported at the moment" in `mlir::populateSPIRVToLLVMConversionPatterns`)* |
 | `spirv.Dot` | a per-lane `llvm.intr.fmuladd` chain, mirroring `feme::dxil::expandFDot`'s expansion of the analogous (post-raising) `llvm.dx.fdot` intrinsic | *(no pattern; fails to legalize)* |

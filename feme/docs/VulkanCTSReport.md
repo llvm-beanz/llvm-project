@@ -24214,3 +24214,67 @@ new follow-on rows added: H29h-H29n (all `graphics_library.*`-specific,
 confined to their own named sub-groups) and H29o (a `cache.*`-specific,
 non-library-specific geometry-stage bug, the group's new dominant cause
 after H29g).
+
+## Roadmap H29h: measured impact
+
+**Goal.** Fix the `spirv.Image`-from-`spirv.SampledImage` legalization gap
+H29f's own characterization found dominating (387 of 465) `dEQP-VK.pipeline.
+pipeline_library.graphics_library.independent_sets_random.*`'s real
+failures.
+
+**Root cause.** `spirv::ImageOp` (`spirv.Image`, extracting a plain image
+handle back out of a combined `!spirv.sampled_image` value) had zero
+conversion-pattern coverage anywhere: neither upstream MLIR's own
+`SPIRVToLLVM.cpp` (which has no image-*operation* patterns at all, only the
+three image/sampled-image/sampler *type* conversions) nor FeMe's own
+extensive out-of-tree `SPIRVToLLVMPatterns.cpp` (which implements every
+other image op -- `ImageFetch`, `ImageRead`, `ImageWrite`, `ImageQuerySize`,
+`ImageSample{Implicit,Explicit}Lod`, `SampledImage`, `SubpassLoad`,
+`ImageTexelPointer` -- but simply missed this one). Reproduced directly via
+`feme-opt --feme-convert-spirv-to-llvm` on a minimal hand-written
+`spirv.module` (a combined image+sampler global, `spirv.SampledImage`
+combining them, `spirv.Image` extracting the image back out, then
+`spirv.ImageFetch` using it) before any fix, confirming the exact
+`"failed to legalize operation 'spirv.Image' that was explicitly marked
+illegal"` diagnostic H29f's re-run reported.
+
+**Fix.** Added `ImagePattern` to `SPIRVToLLVMPatterns.cpp`, the mirror image
+of the existing `SampledImagePattern`: where that pattern builds FeMe's own
+`!llvm.struct<(ImageHandle, SamplerHandle)>` vehicle type via two
+`llvm.insertvalue` ops, `ImagePattern` reads it back out again via a single
+`llvm.extractvalue` at index 0, registered at the same `FeMeBenefit` in
+`populateSPIRVToLLVMTargetPatterns`.
+
+**Testing.** New lit test `spirv-to-llvm-image-op.mlir` (the reduction case
+above, `fetch_from_combined`), run standalone (`58/58` passed in the
+`Conversion/SPIRVToLLVM` directory) and as part of the full suite:
+`ninja check-feme` -- 2511/2570 passed (59 unsupported, 0 unexpected
+failures), matching this project's established `check-feme` baseline shape
+with one net-new passing test.
+
+**CTS re-run.** `dEQP-VK.pipeline.pipeline_library.graphics_library.
+independent_sets_random.*` (720 cases; `VK_ICD_FILENAMES` +
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`):
+
+| | Before (H29f baseline, this sub-group's own slice of 465) | After H29h |
+|---|---|---|
+| `spirv.Image` legalization failures | 387 | **0** |
+| Passed | (not separately measured pre-fix) | 36/720 (5.0%) |
+| Failed | (this sub-group's own share of 465) | 414/720 (57.5%) |
+| Not supported | -- | 270/720 (37.5%) |
+
+The targeted diagnostic is fully eliminated, confirming the fix. The
+sub-group's own aggregate pass rate barely moved, because a distinct,
+deeper gap in the FeMe CPU target's own resource-binding normalization pass
+(unrelated to MLIR's SPIRVToLLVM conversion) was waiting underneath and now
+dominates the remaining 414 failures: 378 `"... is a register-bound
+resource handle the FeMe CPU target cannot normalize into a heap access or
+the root-constant block ..."` (several distinct `spirv.Image`/
+`spirv.VulkanBuffer` type-mangled shapes, at binding numbers up to at least
+12) plus 21 a distinct `"'llvm.getelementptr' op result #0 must be LLVM
+pointer type ..."` type mismatch on a struct-wrapped/plain
+`target<"spirv.Image", ...>`-typed value. Filed as new follow-on row H29p.
+
+**Disposition.** Roadmap H29h closed (struck through in `Roadmap.md`). New
+follow-on row H29p added for the resource-binding normalization gap this
+fix uncovered.
