@@ -44,4 +44,10 @@ Can you work on H21f or other prerequisites blocking the H-series milestones?
 > cases, 12%, per H21a's own scoping): blocked on a separate, unrelated
 > `VK_EXT_graphics_pipeline_library` implementation existing at all -- no
 > transform-feedback work alone can close these regardless of how complete
-> H21c/H21d/H21e become
+> H21c/H21d/H21e become. This dependency is now tracked as its own dedicated
+> top-level milestone, H29, since a real `deqp-vk` case-list re-run (done while
+> investigating this row) found the extension's own footprint is far larger than
+> transform-feedback's own 15,782-case slice
+> (`dEQP-VK.pipeline.pipeline_library.*` alone is 120,483 cases) -- see H29 for
+> the real scope and why full implementation is out of reach of this row alone.
+> This row stays open, blocked on H29, until that milestone lands
