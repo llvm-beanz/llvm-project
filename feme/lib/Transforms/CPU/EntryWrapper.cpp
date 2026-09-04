@@ -239,6 +239,10 @@ struct WrapperEnv {
   /// per-invocation `VertexID`/`InstanceID`), so threaded exactly like
   /// `MeshMaxOutputVertices` et al. above rather than per-lane.
   Value *MeshDrawID = nullptr;
+  /// (Roadmap H29r) `FemeMeshArgs::PrimitiveIndices`, the flat
+  /// primitive-major index array a lowered
+  /// `SignatureSystemValue::PrimitiveIndices` output store writes through.
+  Value *MeshPrimitiveIndices = nullptr;
 
   /// The `FemeTaskArgs`-only fields `feme::cpu::TaskPayloadWrapperPass`
   /// (roadmap H6c-a-b) appends to a task entry's wave body before this
@@ -363,6 +367,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
         Entry, ArgsTy, Args, MeshArgsFieldActualPrimitiveCount, PtrTy);
     Env.MeshDrawID =
         loadArgsField(Entry, ArgsTy, Args, MeshArgsFieldDrawID, I32Ty);
+    Env.MeshPrimitiveIndices = loadArgsField(
+        Entry, ArgsTy, Args, MeshArgsFieldPrimitiveIndices, PtrTy);
   }
   if (IsTask) {
     Env.TaskPayload =
@@ -422,6 +428,7 @@ bool isKnownWaveBodyParameter(StringRef Name) {
       "mesh_actual_vertex_count",
       "mesh_actual_primitive_count",
       "mesh_draw_id",
+      "mesh_primitive_indices",
       "task_payload",
       "task_max_payload_bytes",
       "task_mesh_group_count",
@@ -538,6 +545,8 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       CallArgs.push_back(Env.MeshActualPrimitiveCount);
     else if (Arg.getName() == "mesh_draw_id")
       CallArgs.push_back(Env.MeshDrawID);
+    else if (Arg.getName() == "mesh_primitive_indices")
+      CallArgs.push_back(Env.MeshPrimitiveIndices);
     else if (Arg.getName() == "task_payload")
       CallArgs.push_back(Env.TaskPayload);
     else if (Arg.getName() == "task_max_payload_bytes")

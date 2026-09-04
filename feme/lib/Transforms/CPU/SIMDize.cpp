@@ -810,9 +810,10 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   // per-lane reassembly a matched resource-store call's stored-value
   // operand already gets (see `widenMaskedStore`), needed for a write with
   // no canonicalized `feme.stage.*`/`feme.cpu.resource.*` op of its own to
-  // become instead, e.g. a mesh entry point's own
-  // `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)` (see
-  //    MeshOutputWrapper.h's file comment), and
+  // become instead (this used to name a mesh entry point's own
+  // `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)` as its example, but
+  // roadmap H6l canonicalizes that shape and H29r lowers it, so the
+  // fallback now covers only genuinely uncanonicalized writes), and
   //  - (roadmap H7o) an ordinary, non-groupshared `load` of vector type
   //    through a divergent address -- the common "local constant lookup
   //    table indexed by a per-invocation builtin" shape, e.g.
@@ -1032,12 +1033,14 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         // A `feme.cpu.masked.store.*` call (see MaskIntrinsics.h) is
         // `feme::cpu::LinearizePass`'s masked form of an ordinary `store`
         // under divergent control flow -- the shape a mesh entry point's
-        // own `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)` write
-        // takes, since (unlike an output element write) it has no
-        // canonicalized `feme.stage.*` op to become a `feme.cpu.resource.*`/
-        // masked-output-store call instead (see MeshOutputWrapper.h's file
-        // comment). Its stored value is decomposed exactly like a matched
-        // resource-store call's (see `widenMaskedStore`).
+        // shape any write with no canonicalized `feme.stage.*` op of its
+        // own to become a `feme.cpu.resource.*`/masked-output-store call
+        // instead still takes. (This used to name a mesh entry point's own
+        // `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)` write as its
+        // example; roadmap H6l canonicalizes that shape and H29r lowers it,
+        // so it no longer reaches here.) Its stored value is decomposed
+        // exactly like a matched resource-store call's (see
+        // `widenMaskedStore`).
         std::optional<MatchedMaskedMemOp> MaskedStore = matchMaskedStore(*UserCI);
         if (MaskedStore && MaskedStore->ValueOperand == &I)
           continue;
@@ -2055,9 +2058,10 @@ void FunctionWidener::widenMaskedStore(CallInst &CI,
   Value *WidePtr = getWidened(Matched.Ptr, Builder);
 
   // "Vectors become components, not nested vectors" (roadmap H6g-b-a-i-a-i-a):
-  // a vector-typed stored value -- a mesh entry point's own
+  // a vector-typed stored value -- historically a mesh entry point's own
   // `gl_PrimitiveTriangleIndicesEXT[...] = uvec3(...)`, the shape a
-  // dEQP-VK.mesh_shader.* re-run first surfaced this gap with -- is
+  // dEQP-VK.mesh_shader.* re-run first surfaced this gap with, since
+  // canonicalized by roadmap H6l and lowered by H29r -- is
   // decomposed into per-component wide values exactly like a matched
   // resource-store call's stored value (`widenResourceCall`), not one
   // illegal `<W x <N x T>>` `getWidened` would otherwise try to broadcast.

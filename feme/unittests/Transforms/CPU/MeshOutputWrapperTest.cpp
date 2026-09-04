@@ -228,6 +228,70 @@ TEST(MeshOutputWrapperTest, LowersPerPrimitiveOutputStore) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// A mesh entry's `gl_PrimitiveTriangleIndicesEXT` store (roadmap H29r,
+// `SignatureSystemValue::PrimitiveIndices`) lowers into a store addressed off
+// the flat `mesh_primitive_indices` array rather than off
+// `mesh_primitive_outputs`'s own structure-of-arrays attribute storage: this
+// element's data lives in `FemeMeshArgs::PrimitiveIndices`, not in either
+// output block. Before this row it was routed to attribute storage like any
+// other per-primitive element, leaving every meshlet's index list at its
+// zero-initialized default and degenerating every emitted triangle.
+TEST(MeshOutputWrapperTest, LowersPrimitiveIndicesOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ms_main() #0 {
+      %pid = call i32 @llvm.dx.thread.id(i32 0)
+      call void @feme.stage.output.store.i32(i32 0, i32 0, i32 2, i32 %pid, i32 %pid)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+    attributes #0 = { "feme.shader.stage"="mesh" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  SignatureElement Elt = makeOutputElement(0, SignatureFrequency::PerPrimitive);
+  Elt.ComponentType = SignatureComponentType::UInt;
+  Elt.SystemValue = SignatureSystemValue::PrimitiveIndices;
+  Elt.ComponentCount = 3;
+  EntrySignature Sig;
+  Sig.Elements = {Elt};
+  dxil::setEntrySignature(*M->getFunction("ms_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  MeshOutputWrapperPass().run(*M, MAM);
+
+  Function *Body = M->getFunction("ms_main");
+  ASSERT_TRUE(Body);
+  for (const Instruction &I : instructions(*Body))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  Argument *PrimitiveIndicesArg = nullptr;
+  Argument *PrimitiveOutputsArg = nullptr;
+  for (Argument &Arg : Body->args()) {
+    if (Arg.getName() == "mesh_primitive_indices")
+      PrimitiveIndicesArg = &Arg;
+    else if (Arg.getName() == "mesh_primitive_outputs")
+      PrimitiveOutputsArg = &Arg;
+  }
+  ASSERT_TRUE(PrimitiveIndicesArg);
+  ASSERT_TRUE(PrimitiveOutputsArg);
+
+  bool SawIndexGEP = false;
+  for (const Use &U : PrimitiveIndicesArg->uses())
+    if (isa<GetElementPtrInst>(U.getUser()))
+      SawIndexGEP = true;
+  EXPECT_TRUE(SawIndexGEP);
+  // The attribute-storage block is left completely untouched.
+  EXPECT_TRUE(PrimitiveOutputsArg->use_empty());
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // A mesh entry with no output store at all (e.g. one that only ever writes
 // `SetMeshOutputsEXT`-declared counts, which this pass now also lowers, see
 // `LowersSetMeshOutputsCall` below) is left completely alone: this pass's own

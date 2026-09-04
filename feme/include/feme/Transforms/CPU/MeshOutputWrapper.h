@@ -48,14 +48,24 @@
 // storage, since `SetMeshOutputsEXT` is called once (with identical
 // arguments) by the whole workgroup, not once per output slot.
 //
-// **Left open by this row**: a primitive's own vertex index list
-// (`PrimitiveIndices`, `gl_PrimitiveTriangleIndicesEXT`-shaped) has no
-// canonicalized `feme.stage.*` op to lower at all yet, so it is still not
-// written by this pass -- (roadmap H6c-a-a-ii, now closed, fixed
-// `Executor.cpp`'s own `flattenMeshRow`/`unflattenMeshRow` to route a
-// `PerPrimitive`-frequency element into `PrimitiveOutputs` instead of
-// misreading it as per-vertex; `PrimitiveIndices` itself remains a
-// separate, still-open gap for a future row).
+// (Roadmap H29r) A primitive's own vertex index list
+// (`gl_PrimitiveTriangleIndicesEXT`/`PrimitiveLineIndicesEXT`/
+// `PrimitivePointIndicesEXT`) is lowered here too, by
+// `lowerMeshPrimitiveIndicesStore`, into the flat primitive-major
+// `FemeMeshArgs::PrimitiveIndices` array appended as
+// `mesh_primitive_indices` -- *not* into `PrimitiveOutputs`'s own
+// structure-of-arrays attribute storage, which holds no data for it at
+// all. `CanonicalizeStagePass` classifies the three builtins as
+// `SignatureSystemValue::PrimitiveIndices` (whose `ComponentCount` is the
+// topology's vertices-per-primitive), which is what this pass dispatches
+// on. This corrects this comment's original claim that such a write had
+// "no canonicalized `feme.stage.*` op to lower at all": roadmap H6l added
+// exactly that canonicalization, but the resulting element carried no
+// system value, so it was misrouted into attribute storage and every
+// emitted primitive degenerated to "all vertices are vertex 0".
+// (Roadmap H6c-a-a-ii, now closed, separately fixed `Executor.cpp`'s own
+// `flattenMeshRow`/`unflattenMeshRow` to route a `PerPrimitive`-frequency
+// element into `PrimitiveOutputs` instead of misreading it as per-vertex.)
 //
 // (Roadmap H6p) A mesh entry point *does* have one legitimate ordinary
 // stage-IO input to read after all: SPIR-V's `DrawIndex` builtin

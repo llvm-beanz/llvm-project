@@ -54,6 +54,11 @@ constexpr StringLiteral ActualPrimitiveCountParamName =
 /// actually has, unlike this pass's file comment's original "a mesh entry
 /// point has no ordinary stage-IO input to read" assumption.
 constexpr StringLiteral DrawIDParamName = "mesh_draw_id";
+/// (Roadmap H29r) `FemeMeshArgs::PrimitiveIndices`, the flat primitive-major
+/// `MaxOutputPrimitives * getVerticesPerPrimitive(OutputTopology)` array a
+/// lowered `SignatureSystemValue::PrimitiveIndices` output store writes
+/// through -- see `lowerMeshPrimitiveIndicesStore`.
+constexpr StringLiteral PrimitiveIndicesParamName = "mesh_primitive_indices";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -84,6 +89,8 @@ struct MeshOutputStageEnv {
   /// (Roadmap H6p) `FemeMeshArgs::DrawID`, workgroup-uniform, threaded
   /// through unchanged from `EntryWrapper.cpp`'s own `MeshDrawID`.
   Value *DrawID = nullptr;
+  /// (Roadmap H29r) `FemeMeshArgs::PrimitiveIndices`.
+  Value *PrimitiveIndices = nullptr;
 };
 
 std::optional<MeshOutputStageEnv> getMeshOutputStageEnv(Function &F) {
@@ -108,6 +115,8 @@ std::optional<MeshOutputStageEnv> getMeshOutputStageEnv(Function &F) {
       Env.ActualPrimitiveCount = &Arg, Found = true;
     else if (Arg.getName() == DrawIDParamName)
       Env.DrawID = &Arg, Found = true;
+    else if (Arg.getName() == PrimitiveIndicesParamName)
+      Env.PrimitiveIndices = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -123,7 +132,8 @@ Function *appendMeshOutputParams(Function &F) {
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 8> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, PtrTy, PtrTy, I32Ty});
+  ParamTypes.append(
+      {PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, PtrTy, PtrTy, I32Ty, PtrTy});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -152,6 +162,7 @@ Function *appendMeshOutputParams(Function &F) {
   (&*ArgIt++)->setName(ActualVertexCountParamName);
   (&*ArgIt++)->setName(ActualPrimitiveCountParamName);
   (&*ArgIt++)->setName(DrawIDParamName);
+  (&*ArgIt++)->setName(PrimitiveIndicesParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -278,6 +289,57 @@ void lowerMeshOutputStore(CallInst &CI, const SignatureElement &Elt,
   }
 }
 
+/// Lowers `feme.cpu.masked.stage.output.store` for a mesh entry's
+/// `SignatureSystemValue::PrimitiveIndices` element (roadmap H29r): SPIR-V's
+/// `gl_PrimitiveTriangleIndicesEXT`/`PrimitiveLineIndicesEXT`/
+/// `PrimitivePointIndicesEXT`. Unlike every other mesh output element, this
+/// one has no structure-of-arrays attribute storage of its own at all -- it
+/// lives in `FemeMeshArgs::PrimitiveIndices`, a flat primitive-major
+/// `MaxOutputPrimitives * VerticesPerPrimitive` `uint32_t` array, so the
+/// address is a plain `Slot * VerticesPerPrimitive + Component` index rather
+/// than a layout-driven byte offset.
+///
+/// `VerticesPerPrimitive` is `Elt.ComponentCount` (3/2/1 for triangles/lines/
+/// points), which `CanonicalizeStage.cpp`'s own classification already
+/// derived from the declared builtin, so the topology never has to be
+/// threaded in separately.
+void lowerMeshPrimitiveIndicesStore(CallInst &CI, const SignatureElement &Elt,
+                                    const MeshOutputStageEnv &MEnv) {
+  IRBuilder<> Builder(&CI);
+  Type *I32Ty = Builder.getInt32Ty();
+  unsigned WaveSize =
+      cast<FixedVectorType>(CI.getArgOperand(3)->getType())->getNumElements();
+  Value *VerticesPerPrim = Builder.getInt32(Elt.ComponentCount);
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Mask = extractLaneOrScalar(Builder, CI.getArgOperand(5), Lane);
+    auto *MaskConst = dyn_cast<ConstantInt>(Mask);
+    if (MaskConst && MaskConst->isZero())
+      continue;
+
+    Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
+    Value *Slot = extractLaneOrScalar(Builder, CI.getArgOperand(4), Lane);
+    Value *ClampedSlot =
+        clampSlotIndex(Builder, Slot, MEnv.MaxOutputPrimitives);
+    Value *RelComponent = Builder.CreateSub(
+        Component, Builder.getInt32(Elt.FirstComponent), "component.rel");
+    Value *ClampedComponent =
+        clampSlotIndex(Builder, RelComponent, VerticesPerPrim);
+    Value *Index =
+        Builder.CreateAdd(Builder.CreateMul(ClampedSlot, VerticesPerPrim),
+                          ClampedComponent, "prim.index.slot");
+    Value *Addr = Builder.CreateInBoundsGEP(I32Ty, MEnv.PrimitiveIndices, Index,
+                                            "prim.index.addr");
+    Value *LaneVal = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
+    if (LaneVal->getType() != I32Ty)
+      LaneVal = Builder.CreateZExtOrTrunc(LaneVal, I32Ty);
+    if (!(MaskConst && MaskConst->isOne())) {
+      Value *OldVal = Builder.CreateLoad(I32Ty, Addr);
+      LaneVal = Builder.CreateSelect(Mask, LaneVal, OldVal);
+    }
+    Builder.CreateStore(LaneVal, Addr);
+  }
+}
+
 /// Lowers `feme.cpu.masked.set_mesh_outputs` (roadmap H6c-a-a-i): writes
 /// each active lane's `(vertexCount, primitiveCount)` through
 /// `MEnv.ActualVertexCount`/`ActualPrimitiveCount`. Unlike
@@ -393,7 +455,10 @@ bool lowerMeshStageOps(Function &F, const WaveBodyEnv &WEnv) {
                 "an unknown signature element");
         return false;
       }
-      lowerMeshOutputStore(*CI, *Elt, *MEnv);
+      if (Elt->SystemValue == SignatureSystemValue::PrimitiveIndices)
+        lowerMeshPrimitiveIndicesStore(*CI, *Elt, *MEnv);
+      else
+        lowerMeshOutputStore(*CI, *Elt, *MEnv);
       CI->eraseFromParent();
       continue;
     }

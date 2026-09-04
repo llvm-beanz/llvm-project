@@ -1461,7 +1461,8 @@ struct FemeDispatchArgs {
 /// `SetMeshOutputsEXTConversionPattern` in SPIRVToLLVMPatterns.cpp), and
 /// `VertexOutputs`/`PrimitiveOutputs` are written by a per-vertex/per-
 /// primitive output store's own canonicalization (H6b). `PrimitiveIndices`
-/// remains unwritten by any compiled shape (roadmap H6c-a-a-ii), and
+/// is written by `MeshOutputWrapperPass`'s own lowering of a
+/// `SignatureSystemValue::PrimitiveIndices` output store (roadmap H29r), and
 /// `CanonicalizeStagePass::run`'s stage filter itself does not yet accept
 /// `ShaderStage::Mesh` for the raw-IR canonicalization patterns that still
 /// need it (roadmap H6i) -- ops converted directly at the MLIR level (like
