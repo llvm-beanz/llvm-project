@@ -24494,3 +24494,95 @@ blocker, filed as new roadmap H29r (`feme/lib/Transforms/Graphics/CanonicalizeSt
 row also corrects roadmap H29q's earlier speculation that its
 `Result.pDynamicState` gap "likely explain[ed]" H29k's mismatch -- it does
 not; H29k's mismatch has a distinct, unrelated root cause.
+
+## Roadmap H29r: measured impact
+
+**Row.** *A mesh shader's own `gl_PrimitiveTriangleIndicesEXT`/
+`gl_PrimitiveLineIndicesEXT` output ... is never routed into
+`FemeMeshArgs::PrimitiveIndices`*, filed while closing half of H29k.
+
+**The row's own framing was corrected by its reduction.** H29r (and, before
+it, `MeshOutputWrapper.h`'s own file comment and three comments in
+`SIMDize.cpp`) claimed these writes had *no canonicalized `feme.stage.*` op
+at all*, and proposed a new op (`feme.stage.mesh.store_primitive_indices`)
+as the fix. That was true when the comment was written, but roadmap **H6l**
+subsequently added exactly that canonicalization -- see
+`CanonicalizeStageTest.FoldsConstantVertexIndexIntoPlainVectorArrayOutputStoreWithPadding`,
+which exists precisely to handle the `[N x <3 x i32>]` ABI-padding-versus-
+packed-offset problem these stores raise. A real reduction settled it:
+
+```
+; /tmp/prim_idx_repro.ll -- a BuiltIn 5294-decorated [2 x <3 x i32>] global
+; stored through a constant GEP
+$ feme-opt --llvm -passes=feme-graphics-canonicalize-stage -S /tmp/prim_idx_repro.ll
+```
+
+produces three `feme.stage.output.store.i32(i32 0, i32 0, i32 {0,1,2}, i32 %N, i32 1)`
+calls and no residual `store`. So no new op was needed.
+
+**The real gap.** The resulting signature element carried
+`SignatureSystemValue::None`. With no system value and (per glslang, which
+does not additionally decorate these three globals `PerPrimitiveEXT`) no
+`PerPrimitive` frequency either, it was indistinguishable from an ordinary
+per-primitive *attribute*, so `MeshOutputWrapper.cpp`'s `lowerMeshOutputStore`
+sent it through `computeMeshOutputAddress` into `PrimitiveOutputs`'s
+structure-of-arrays attribute block. `FemeMeshArgs::PrimitiveIndices` -- the
+array `Executor.cpp`'s `runMeshWorkgroup` actually slices per primitive into
+`MeshOutputBuilder::setPrimitiveIndices` -- was never written by any compiled
+shape at all, so every meshlet's index list stayed at its zero-initialized
+default and every emitted primitive degenerated to `(vertex 0, vertex 0,
+vertex 0)`.
+
+**Fix**, in two separately-committed phases, one per phase of translation:
+
+1. *Classification.* Added `SignatureSystemValue::PrimitiveIndices`; mapped
+   SPIR-V BuiltIns 5294 (`PrimitiveTriangleIndicesEXT`), 5295
+   (`PrimitiveLineIndicesEXT`) and 5296 (`PrimitivePointIndicesEXT`) to it in
+   `getSystemValueForBuiltIn`; forced `SignatureFrequency::PerPrimitive` for
+   the system value in `classifySPIRVElement`. Unit test:
+   `CanonicalizeStageTest.ClassifiesMeshPrimitiveIndexBuiltinsAsPrimitiveIndices`,
+   covering all three builtins and asserting system value, frequency and
+   component count (3/2/1).
+2. *Lowering.* Appended `mesh_primitive_indices` to a mesh wave body's
+   parameters (wired from `MeshArgsFieldPrimitiveIndices` by
+   `EntryWrapperPass`) and added `lowerMeshPrimitiveIndicesStore`, which
+   indexes the flat primitive-major array directly as
+   `clamp(Slot, MaxOutputPrimitives) * VerticesPerPrimitive +
+   clamp(Component, VerticesPerPrimitive)`. The vertices-per-primitive is the
+   element's own `ComponentCount`, already derived from the declared builtin
+   during classification, so `FemeMeshArgs::OutputTopology` never has to be
+   threaded into the wave body at all. Unit test:
+   `MeshOutputWrapperTest.LowersPrimitiveIndicesOutputStore`, which also pins
+   down that `mesh_primitive_outputs` is left entirely unused by such a store.
+
+The stale comments in `MeshOutputWrapper.h`, `SIMDize.cpp` and `RuntimeABI.h`
+were corrected in the same commit as (2).
+
+**Regression suite.** `ninja check-feme`: 2575 discovered, 2516 passed, 59
+unsupported, **0 failures**.
+
+**CTS re-run.** (`VK_ICD_FILENAMES` + `FEME_VULKAN_LOG_CREATION_ERRORS=1`)
+
+| Group | Before | After |
+|---|---|---|
+| `independent_sets_random.*` (720 cases) | 36/414/270 | **42**/**408**/270 |
+| `*independent_sets_random.*mesh_frag.case_1*` (12 cases) | 0 passed, 9 `Fail`, 3 not supported | **6 passed**, 3 `Fail`, 3 not supported |
+| `mesh_shader.ext.smoke.*` (67 cases) | 20/29/18 | 20/29/18 (unchanged) |
+
+The `independent_sets_random.*` delta is exactly +6 passed / -6 failed --
+precisely H29k's own 6 named cases (`mesh_frag.case_1` and
+`case_1_io_ssbo_first` across `fast_lib`, `monolithic` and `optimized_lib`),
+all of which now report `Pass`. The 3 still-failing cases in the targeted
+selection are all `task_mesh_frag.*` and fail on H29p's own separate
+`"... is a register-bound resource handle ..."` diagnostic, not this row's.
+
+The `mesh_shader.ext.smoke.*` figures are a deliberate **control**: they were
+measured twice, once with this fix in place and once with the BuiltIn-5294
+mapping temporarily disabled and `libfeme_vulkan.so` relinked, giving
+identical 20/29/18 both times. That group's own failures are therefore all
+upstream of this gap (they never reach mesh primitive-index lowering at all),
+not evidence that the fix is inert.
+
+**Disposition.** Roadmap **H29r closed** (struck through), and **H29k closed**
+with it -- H29r was that row's own sole remaining blocker, and both of H29k's
+root causes are now fixed and measured.
