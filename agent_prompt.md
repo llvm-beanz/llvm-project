@@ -37,22 +37,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H10j or other prerequisites blocking the H-series milestones?
+Can you work on H11 or other prerequisites blocking the H-series milestones?
 
-> **A real `deqp-vk` segfault partway through any full `dEQP-VK.wsi.xcb.*` group
-> run**, discovered by H10h's own real re-run of the whole group once its
-> `BitField*` fix let `incremental_present.*` clear pipeline creation for the
-> first time: two independent full-group attempts (a fresh `Xvfb` restart
-> between them) both crashed with `Segmentation fault` shortly after
-> `swapchain.render.10swapchains`, at a different specific case each time
-> (`10swapchains2` in one run, `2swapchains` in the other) -- ruling out a
-> single fixed case as the trigger and instead suggesting a real, cumulative
-> resource leak (most likely xcb connections/windows/some other per-case handle
-> this ICD's own `deqp-vk` client or `feme_vulkan` itself never releases) that
-> only trips once enough cases have run in the same process, not a per-case
-> count-dependent limit like H10g's own (already-closed, unrelated) hypothesis.
-> Confirmed NOT reproducible running the crash-adjacent cases in isolation (each
-> passes/fails cleanly alone, no crash) -- needs a real investigation (most
-> likely `gdb`/`valgrind`/`ASan` against a full-group run) to find what resource
-> actually leaks/exhausts across many consecutive WSI cases in one process,
-> entirely orthogonal to H10h's own shader-lowering scope
+> **Secondary command buffers inside a render pass**, and the render-pass state
+> inheritance they carry — recorded as part of V7 but independently testable,
+> and a prerequisite for several `renderpasses`/`dynamic_rendering` cases rather
+> than a feature bit of its own
