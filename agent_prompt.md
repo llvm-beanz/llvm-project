@@ -37,10 +37,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H21d or other prerequisites blocking the H-series milestones?
+Can you work on H21e or other prerequisites blocking the H-series milestones?
 
-> **Transform-feedback queries** (`primitives_generated_query`, the single
-> largest sub-group at 107,866 of 133,719 cases, 81%): implement the query
-> type's counting semantics (primitives written to a transform-feedback buffer,
-> distinct from the existing pipeline-statistics query) and wire it through the
-> existing query-pool infrastructure
+> **Multi-stream / geometry-shader-stream transform-feedback capture** (a small
+> minority of the group -- 60 of 133,719 cases per H21a's own scoping -- but a
+> real gap once H21c lands): reuse the existing `GeometryStreamBuilder`
+> (`GeometryStream.cpp`/`GeometryStreamCollection.cpp`, built for
+> geometry-shader multi-stream output routing) to route each stream's captured
+> outputs to its own bound buffer, and support
+> `VkPipelineRasterizationStateStreamCreateInfoEXT`'s rasterization-stream
+> selection for real
