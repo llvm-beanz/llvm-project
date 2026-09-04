@@ -60907,3 +60907,160 @@ do it again whenever a re-run has no recorded baseline to compare against.
 The stale comments in `MeshOutputWrapper.h`, `SIMDize.cpp` (three sites) and
 `RuntimeABI.h` were all corrected in the lowering commit. Leaving them would
 have set up the next person to make exactly the mistake I nearly made.
+
+# Roadmap H29l: an integer fragment output rejected as "not floating-point"
+
+## The premise was wrong, for the second row running
+
+The row read: *"a graphics-pipeline-library merge wrongly rejects a fragment
+stage with no color output at all as missing a floating-point output"*, and
+suggested two family resemblances (H21j's empty-fragment-stage metadata gap,
+H3a's `ViewportArrayIndex` handling).
+
+The very first thing I did was read the rejecting code, and it disproved the
+premise in about thirty seconds: the loop in `validateStageInterfaces` already
+begins `if (!Color) continue;`. A fragment stage with *no* output at that
+location is silently skipped, and always has been. Whatever these six cases
+were doing, they were not "writing no color attachment".
+
+So I read the actual CTS shader. `vktPipelineLibraryTests.cpp`'s
+`VIEW_INDEX_FROM_DEVICE_INDEX` programs declare `layout(location = 0) out uvec4
+color;`, and the test's own color format (same file) is
+`VK_FORMAT_R8G8B8A8_UINT`. That is not a missing output. It is a *perfectly
+matched* one -- an integer output against an integer attachment -- being
+rejected because the check demanded floating-point unconditionally.
+
+This is the second row in a row whose stated diagnosis was wrong. That is worth
+naming as a pattern rather than shrugging at, because both times the row's
+framing would have sent me somewhere useless (here: into H21j's and H3a's
+metadata code, neither of which is on this path). The habit that saved both
+turns was the same and is cheap: **before believing a row's causal story, read
+the code that emits the diagnostic and the test input that triggers it.** A row
+is a hypothesis written by someone who was looking at a log, not at the source.
+
+I also checked, and recorded, that nothing here is graphics-pipeline-library
+specific. `validateStageInterfaces` is not library-aware in any way, and my new
+`GraphicsPipelineTest.AcceptsAnIntegerFragmentOutputForAUintAttachment`
+reproduces the failure on a plain monolithic pipeline. The row was filed from a
+`pipeline_library.*` re-run, so it inherited that framing by accident of where
+it was observed. Attributing a bug to the group you happened to see it in is an
+easy and expensive mistake.
+
+## Two layers, and the intermediate CTS run is what found the second
+
+The first layer was straightforward once the premise was cleared away, and
+slightly embarrassing for the project: roadmap **H8p** had already taught the
+*draw-time* fragment-output linkage in `Executor.cpp` to derive the expected
+component type from the attachment's own format, via
+`expectedColorComponentType`. Its **creation-time** twin in
+`GraphicsPipeline.cpp` was never updated. The ICD was rejecting at
+`vkCreateGraphicsPipelines` exactly the shape its own executor had been ready to
+draw since H8p landed. Two checks expressing the same rule, one of them fixed --
+a classic.
+
+I fixed it, re-ran CTS expecting six passes, and got six failures with a *new*
+message: `"fragment stage has non unsigned-integer output..."`. That re-run is
+the single most valuable thing I did this turn. Had I trusted the unit test I
+had just written and skipped it, I would have closed the row on a fix that moved
+the failure by one word.
+
+The second layer is the genuinely interesting one. LLVM's integer types are
+**signless**. The SPIR-V -> LLVM conversion therefore drops `OpTypeInt`'s
+signedness bit, and `CanonicalizeStage.cpp`'s `getComponentType` maps *every*
+integer, of every width and signedness, to `SignatureComponentType::SInt`. I
+confirmed this rather than assuming it, by grepping for every producer of
+`SignatureComponentType::UInt`: there are exactly two, both in
+`Transforms/DXIL/SignatureImport.cpp`, which reads a real signature blob that
+does record signedness. So `SInt` coming out of a SPIR-V stage does not mean
+"signed integer". It means "integer, signedness unrecoverable". Comparing it for
+equality against a format-derived `UInt` can only ever fail.
+
+## Why widening the match is correct, not merely convenient
+
+I want to be careful about the distinction, because "the check was too strict so
+I loosened it" is how checks quietly stop checking anything.
+
+Signedness affects only *interpretation*, never how many bits move or where they
+go. `readFragmentColorInt` and `packClearColor` already pass an integer output's
+raw value through unchanged. There is no reinterpretation step for signedness to
+get wrong, so accepting `SInt` where the format wants `UInt` cannot produce a
+wrong result -- and, more to the point, *refusing* it cannot produce a right one,
+since no SPIR-V pipeline can ever satisfy the strict form.
+
+Float-versus-integer is a completely different matter: those genuinely do need a
+conversion, the check still rejects the mismatch, and I wrote
+`RejectsAnIntegerFragmentOutputForAUnormAttachment` specifically so that a future
+reader can see the loosening was bounded. A widening without a negative test
+alongside it is indistinguishable from a deletion.
+
+## H8p's own test was passing while every real pipeline failed
+
+`ExecutorTest.RendersAUvec2FragmentOutputToAnIntegerColorAttachment` exists, and
+is green, and has been since H8p. It hand-builds an `EntrySignature` with
+`ComponentType = UInt` -- a value no SPIR-V front end in this project can
+produce. It tested a shape that cannot occur, and so it certified a code path
+that was broken for every shape that can.
+
+The lesson I'd draw is narrower than "don't hand-build fixtures", which is
+sometimes the only practical option. It's that a hand-built fixture should be
+checked against what the real front end actually emits for the same source,
+because the fixture encodes an assumption about the front end that nothing else
+verifies. My new `SInt` sibling test is the one that reflects reality; I left
+H8p's in place, since `UInt` is reachable from DXIL.
+
+## Fixing both sites, not just the failing one
+
+Having understood layer two, it was immediately obvious the draw-time check in
+`Executor.cpp` had the identical latent bug -- it was doing exact equality too.
+Only the creation-time check was failing, purely because it runs first and
+short-circuits. Fixing only the observed failure would have moved these six
+cases forward by one phase and straight into the same bug wearing a different
+diagnostic. I fixed both, and hoisted `expectedColorComponentType` into
+`Graphics/Pipeline.h` (as its own separate, functionally-inert commit) so the two
+sites now share one definition of the rule that had just drifted between them.
+That hoist is the actual fix for the *class* of bug; the rest is the instance.
+
+## Measuring the before-state instead of asserting it
+
+For the impact numbers I stashed only the three changed non-test files, relinked
+`libfeme_vulkan.so`, and re-ran. One relink, a couple of minutes, and the "6"
+in the report is a number I observed rather than a number I copied out of H29f's
+row and hoped still applied. I'd been doing this for a few turns now and it keeps
+paying: it also catches the case where the baseline has silently moved under you
+since the row was filed.
+
+## The honest ending: fixed, but not passing
+
+The diagnostic is gone, 6 to 0. All six cases now clear pipeline creation for
+the first time. None of them pass. They fail one phase later at `vkQueueSubmit`
+with `"vertex/domain stage output -> geometry stage input: element 5 has no
+matching producer element"`.
+
+There was a real temptation here to keep going, because the surface diagnosis is
+a one-liner: `linkStageElements`'s geometry call already takes a `ConsumerFilter`
+that excludes `SV_PrimitiveID` and `gl_InvocationID` as system-supplied, and
+`gl_ViewIndex` is system-supplied in exactly the same sense. Adding it to that
+filter would make the error go away.
+
+I checked before reaching for it, and I'm glad I did. `FemeGeometryInvocation`
+has no `ViewIndex` field at all -- just `PrimitiveID`, `InvocationID` and
+`Reserved[6]` -- and no geometry, hull or domain stage wrapper lowers a
+`ViewIndex` input load. Adding the filter alone would have converted a loud,
+correct failure into a silent wrong answer: every `gl_ViewIndex` read in a
+geometry or tessellation stage returning whatever happened to be in memory.
+That is strictly worse than the current state, and it would have "passed" the
+CTS case only if the test's own expected values happened to tolerate it.
+
+So I filed **H29s** with the whole chain scoped -- ABI field, wrapper lowering,
+executor plumbing from `Draw.ViewIndex`, and *then* the linkage filter, in that
+order, matching the shape roadmap H2 used for the vertex and fragment stages --
+and closed H29l on its own merits. A row's scope is its named diagnostic; a fix
+that eliminates that diagnostic and proves it did is finished, even when the
+case behind it still fails. Stretching a row to cover whatever it uncovers is
+how rows stop meaning anything.
+
+One genuinely useful side effect: this makes the advertised
+`multiviewGeometryShader` bit over-advertised, since a geometry stage under
+multiview can be created but cannot read `gl_ViewIndex`. I noted that in
+`Vulkan14FeatureInventory.md` rather than leaving the inventory quietly
+optimistic.
