@@ -59689,3 +59689,98 @@ standing nesting rule.
    -- replaced a "not re-run" placeholder with the actual measured figures
    above.
 4. This `agent_thoughts.md` entry.
+
+# Agent thoughts: H29b -- object model for a partial ("library") graphics pipeline
+
+Continuing H29 after H29a (feature/properties struct recognition): this
+turn's request named H29b directly, which the prior turn's own breakdown
+already scoped concretely, so the design work was mostly done -- the task
+was actually implementing it correctly and safely.
+
+## Design decisions
+
+I chose to capture each library part's state as **raw, deep-copied
+`Vk*CreateInfo` sub-structs** (vertex bindings/attributes, shader stage
+descriptors with owned `pName`/specialization data, viewport/raster/
+tessellation/depth-stencil/color-blend/multisample state) rather than
+attempting to translate any of it into `feme::graphics`' normalized
+representation yet. This keeps H29b's own scope honestly bounded to what
+the roadmap row asked for ("store ... as a real, self-owned ... object --
+not yet linkable into anything executable"): translation only becomes
+meaningful once a complete pipeline's worth of parts exist to translate
+together, which is entirely H29c's job (reusing the existing, unmodified
+`compileGraphicsPipeline`). Every nested `pNext` chain in a copied struct
+(e.g. a rasterization state's own line/stream extension structs) is
+unconditionally nulled out rather than shallow-copied or chased -- chasing
+it now would be wasted, premature work, and leaving it un-nulled would be a
+dangling-pointer hazard the very next line of any future H29c code could
+trip over.
+
+I mapped the four `VkGraphicsPipelineLibraryFlagBitsEXT` bits to fields
+using the spec's own "14.2. Multiple Pipeline Creation" ownership table:
+`VERTEX_INPUT_INTERFACE_BIT` owns vertex input/input assembly;
+`PRE_RASTERIZATION_SHADERS_BIT` owns every non-fragment stage plus
+viewport/raster/tessellation state; `FRAGMENT_SHADER_BIT` owns the
+fragment stage plus depth/stencil state; `FRAGMENT_OUTPUT_INTERFACE_BIT`
+owns color-blend state; `pMultisampleState` is shared by the fragment
+stage and fragment output interface bits per that same table, so it is
+captured whenever either is set.
+
+## A real, non-speculative safety issue this design surfaced
+
+Adding a third `Pipeline::Kind` (`GraphicsLibrary`, alongside the existing
+`Compute`/`Graphics`) is not risk-free: I found `CommandBuffer.cpp`'s
+bind-replay code (the loop that turns recorded `BindPipeline` commands
+into `BoundGraphicsPipeline`/`BoundPipeline` at draw/dispatch time)
+unconditionally assumed only those two kinds could ever appear --
+anything that was not `Kind::Graphics` fell through to an unchecked
+`static_cast<ComputePipeline *>`. A library pipeline reaching that code
+path would have been a real, silent type-confusion bug, not merely
+untested code. Since a pipeline library is never spec-legal to bind
+directly anyway (only consumable via `VkPipelineLibraryCreateInfoKHR::
+pLibraries` at another pipeline's own *creation* time), I fixed this by
+having `vkCmdBindPipeline` refuse to record a bind of a `GraphicsLibrary`
+object at all -- mirroring the same function's existing silent-rejection
+precedent for a protected-access-only pipeline and the ray-tracing bind
+point. This felt like a directly-coupled fix (caused by this row's own
+new `Kind` value), not scope creep, so I made it part of this same change
+rather than filing it as a separate future row.
+
+## Reachability and the still-missing advertisement step
+
+Like H21b's transform-feedback entry points, this recognition path is
+wired into the *real* `vkCreateGraphicsPipelines` entry point -- not a
+test-only helper -- so it is genuinely reachable by any caller, gated only
+by the extension's own (still-absent) device-extension advertisement.
+`vkCreateDevice`'s own extension validation only checks names against
+`getSupportedDeviceExtensions`, with no separate per-feature-bit check, so
+recognizing this struct ahead of advertising the extension carries no
+risk of an application spuriously relying on functionality that does not
+yet exist -- confirmed by re-reading that validation loop before
+committing to this design.
+
+## Verification
+
+- 7 new unit tests (`GraphicsPipelineTest.cpp`): library-vs-pipeline kind
+  distinction, all four flag bits' state capture verified independently
+  (confirming no part leaks another's fields), a deep-copy check, and the
+  new `vkCmdBindPipeline` rejection.
+- `ninja check-feme` (ccache + assertions, `build2/`): full pass, 2499/2558
+  (up 7 from H29a's 2492/2551), 0 `Failed`.
+- Real `deqp-vk` re-run against the actual built ICD:
+  `dEQP-VK.pipeline.pipeline_library.graphics_library.*` (836 cases) and
+  `dEQP-VK.api.info.*` (10,486 cases) both reproduce H29a's own recorded
+  figures exactly -- the expected zero delta, since the extension stays
+  unadvertised.
+
+## Commits
+
+1. `[feme] H29b: object model for a partial ("library") graphics pipeline`
+   -- `Pipeline.h` (new `Kind::GraphicsLibrary`), `GraphicsPipeline.h`/
+   `.cpp` (new types + `captureGraphicsPipelineLibraryState` +
+   `vkCreateGraphicsPipelines` wiring), `CommandBuffer.cpp`
+   (`vkCmdBindPipeline` guard), `GraphicsPipelineTest.cpp` (7 new tests).
+2. `[feme] docs: close H29b, record measured impact, note design deviation`
+   -- `Roadmap.md`, `VulkanExtensionInventory.md`, `VulkanCTSReport.md`,
+   `FeMeVulkanDesign.md`.
+3. This `agent_thoughts.md` entry.
