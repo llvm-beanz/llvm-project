@@ -200,4 +200,67 @@ TEST(HullWrapperTest, LowersPatchVerticesInput) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+/// (Roadmap H29e) A real CTS-shaped hull entry reading its own input
+/// control point's `Position` (`gl_in[gl_InvocationID].gl_Position` /
+/// `SV_Position`, an ordinary per-control-point attribute the previous
+/// stage produced, tagged `SignatureSystemValue::Position` -- not a
+/// synthesized invocation-metadata value like `PatchVertices`/
+/// `OutputControlPointID`) previously hit "unsupported hull input system
+/// value": the input-load switch only routed `SignatureSystemValue::None`
+/// through the generic, storage-addressed `lowerHullInputLoad`, rejecting
+/// every other input system value outright even though that same generic
+/// load addresses any element identically regardless of which (if any)
+/// system value it represents. Mirrors the exact shape
+/// `vktPipelineCacheTests.cpp`'s own `basic_tcs` shader emits (root cause
+/// of the `dEQP-VK.pipeline.pipeline_library.cache.*` re-run's own
+/// tessellation-stage failures) and, sharing this same root cause, roadmap
+/// H21k's `primitives_generated_query.*.tese.*`.
+TEST(HullWrapperTest, LowersPositionInputSystemValue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @hs_main() #0 {
+      %id = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+      %pos = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %id)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %pos, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement Position;
+  Position.ElementID = 0;
+  Position.Direction = SignatureDirection::Input;
+  Position.SystemValue = SignatureSystemValue::Position;
+  Position.ComponentType = SignatureComponentType::Float;
+  SignatureElement Out = Position;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::Output;
+  Out.SystemValue = SignatureSystemValue::None;
+  SignatureElement ID;
+  ID.ElementID = 2;
+  ID.Direction = SignatureDirection::Input;
+  ID.SystemValue = SignatureSystemValue::OutputControlPointID;
+  ID.ComponentType = SignatureComponentType::UInt;
+  Sig.Elements = {Position, Out, ID};
+  dxil::setEntrySignature(*M->getFunction("hs_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  HullWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_hs_main"));
+  for (const Instruction &I : instructions(*M->getFunction("hs_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace

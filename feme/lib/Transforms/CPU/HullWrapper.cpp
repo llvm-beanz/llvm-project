@@ -466,16 +466,33 @@ bool lowerHullStageOps(Function &F) {
       }
       Value *Lowered = nullptr;
       switch (Elt->SystemValue) {
-      case SignatureSystemValue::None:
-        Lowered = lowerHullInputLoad(*CI, *Elt, *WEnv, *HEnv, SelfIndex);
-        break;
       case SignatureSystemValue::PatchVertices:
         Lowered = lowerPatchVerticesIn(*CI, *WEnv, *HEnv);
         break;
       default:
-        F.getContext().emitError(
-            CI, "feme-cpu-wrap-hull: unsupported hull input system value");
-        return false;
+        // (roadmap H29e) Every other input system value a control-point
+        // phase's own `feme.stage.input.load` can reach here with -- `None`
+        // (an ordinary user varying) and any per-control-point attribute
+        // this stage merely *receives*, rather than synthesizes, from the
+        // previous stage's matching output (e.g. `Position`/`ClipDistance`/
+        // `CullDistance`/`PointSize`, forwarded verbatim through
+        // `gl_in[]`/`SV_Position` et al.) -- is addressed identically to a
+        // user-location element: only its numeric *identity* differs from
+        // one, not its storage shape, so it needs no dedicated lowering of
+        // its own. (`OutputControlPointID` never reaches this switch at
+        // all: the earlier loop above already erased every load of it
+        // before this one runs.) A real CTS reduction of
+        // `dEQP-VK.pipeline.pipeline_library.cache.*`'s tessellation-stage
+        // cases (and, sharing this same root cause, roadmap H21k's
+        // `primitives_generated_query.*.tese.*`) found this default had
+        // wrongly diagnosed exactly this shape -- a hull shader reading its
+        // own input control point's `Position` (`gl_in[gl_InvocationID].
+        // gl_Position`) -- as an "unsupported" system value, when the
+        // generic per-control-point load below already addresses it
+        // correctly regardless of *which* system value (if any) the
+        // element represents.
+        Lowered = lowerHullInputLoad(*CI, *Elt, *WEnv, *HEnv, SelfIndex);
+        break;
       }
       if (!Lowered)
         return false;
