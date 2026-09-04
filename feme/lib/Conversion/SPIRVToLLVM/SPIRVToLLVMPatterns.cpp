@@ -3779,28 +3779,39 @@ public:
 /// and/or shorter-vector constituents (e.g. HLSL's `float3(x, x, x)`, which
 /// SPIR-V spells as a `CompositeConstruct` of three scalar constituents, or
 /// a `.xxx` splat's `CompositeConstruct` of the same scalar three times),
-/// or building a struct value out of one constituent per member (e.g.
-/// assembling a whole HLSL struct value before storing it in one shot).
-/// MLIR has no pattern for this op at all, for any of the composite kinds
-/// (vector, array, struct, matrix) it can build; only the vector and
-/// struct cases are implemented here. The vector case lowers to an
-/// `llvm.mlir.poison` seed with one `llvm.insertelement` per resulting lane
-/// -- each lane's value either the scalar constituent supplying it
-/// directly, or one `llvm.extractelement` out of the vector constituent
-/// supplying a contiguous run of lanes, per this op's "contiguous subset of
-/// scalars" semantics. The struct case lowers to an `llvm.mlir.poison` seed
-/// with one `llvm.insertvalue` per member, in order (SPIR-V's own
-/// `OpCompositeConstruct` for a struct result requires exactly one
-/// constituent per member, each already of that member's own type -- unlike
-/// the vector case's "contiguous subset" flexibility); a constituent whose
-/// type doesn't exactly match its member's converted LLVM type is
-/// reassembled lane-by-lane into that member's type first (an
-/// `llvm.extractelement` per lane followed by an `llvm.insertvalue` into a
-/// poison array at the same position -- `llvm.bitcast` itself cannot do
-/// this directly, since its own verifier requires a non-aggregate result),
-/// needed whenever that member is a vector the struct's own conversion
-/// (see convertOffsetStructTypeIgnoringDecorations's "tight-vector retry")
-/// substituted a same-bit-width tightly-packed array for.
+/// building a struct value out of one constituent per member (e.g.
+/// assembling a whole HLSL struct value before storing it in one shot), or
+/// building a matrix value out of one column-vector constituent per column
+/// (e.g. GLSL's `mat4(c0, c1, c2, c3)`). MLIR has no pattern for this op at
+/// all, for any of the composite kinds (vector, array, struct, matrix) it
+/// can build; the vector, struct, and matrix cases are implemented here.
+/// The vector case lowers to an `llvm.mlir.poison` seed with one
+/// `llvm.insertelement` per resulting lane -- each lane's value either the
+/// scalar constituent supplying it directly, or one `llvm.extractelement`
+/// out of the vector constituent supplying a contiguous run of lanes, per
+/// this op's "contiguous subset of scalars" semantics. The struct case
+/// lowers to an `llvm.mlir.poison` seed with one `llvm.insertvalue` per
+/// member, in order (SPIR-V's own `OpCompositeConstruct` for a struct
+/// result requires exactly one constituent per member, each already of
+/// that member's own type -- unlike the vector case's "contiguous subset"
+/// flexibility); a constituent whose type doesn't exactly match its
+/// member's converted LLVM type is reassembled lane-by-lane into that
+/// member's type first (an `llvm.extractelement` per lane followed by an
+/// `llvm.insertvalue` into a poison array at the same position --
+/// `llvm.bitcast` itself cannot do this directly, since its own verifier
+/// requires a non-aggregate result), needed whenever that member is a
+/// vector the struct's own conversion (see
+/// convertOffsetStructTypeIgnoringDecorations's "tight-vector retry")
+/// substituted a same-bit-width tightly-packed array for. The matrix case
+/// mirrors `MatrixCompositeExtractPattern`/`MatrixCompositeInsertPattern`'s
+/// own understanding of a matrix's converted representation (an
+/// `!llvm.array` of column vectors, see the `spirv.MatrixType` conversion
+/// in populateSPIRVToLLVMTargetTypeConversions): `OpCompositeConstruct` for
+/// a matrix result requires exactly one whole-column constituent per
+/// column, so it lowers to an `llvm.mlir.poison` seed with one
+/// `llvm.insertvalue` per column, each constituent inserted as-is (already
+/// a converted column vector, with no "contiguous subset"/tight-vector
+/// reassembly the vector/struct cases above need).
 class CompositeConstructPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeConstructOp> {
 public:
@@ -3812,6 +3823,9 @@ public:
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(Op.getType()))
       return convertStruct(Op, Adaptor, Rewriter, StructTy);
+
+    if (auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(Op.getType()))
+      return convertMatrix(Op, Adaptor, Rewriter, MatrixTy);
 
     auto ResultType = mlir::dyn_cast<mlir::VectorType>(Op.getType());
     if (!ResultType || ResultType.getRank() != 1)
@@ -3922,6 +3936,39 @@ private:
           Rewriter, Loc, Result, Field,
           llvm::ArrayRef<int64_t>{static_cast<int64_t>(Index)});
     }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+
+  /// Builds a matrix's `!llvm.array` of column vectors from one whole
+  /// column-vector constituent per column, mirroring how
+  /// `MatrixCompositeExtractPattern`/`MatrixCompositeInsertPattern` already
+  /// understand that representation (see this class's own file comment).
+  mlir::LogicalResult convertMatrix(mlir::spirv::CompositeConstructOp Op,
+                                    OpAdaptor Adaptor,
+                                    mlir::ConversionPatternRewriter &Rewriter,
+                                    mlir::spirv::MatrixType MatrixTy) const {
+    mlir::Type DstType = getTypeConverter()->convertType(MatrixTy);
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(DstType);
+    if (!ArrTy)
+      return Rewriter.notifyMatchFailure(Op, "not an LLVM array result");
+
+    // `OpCompositeConstruct` for a matrix result requires exactly one
+    // constituent per column (SPIR-V spec, `OpCompositeConstruct`'s own
+    // "Matrix type" validation rule), unlike the vector case's "contiguous
+    // subset of scalars" flexibility.
+    if (Adaptor.getConstituents().size() != ArrTy.getNumElements())
+      return Rewriter.notifyMatchFailure(
+          Op, "constituent count does not match matrix column count");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ArrTy);
+    for (auto [Index, Column] : llvm::enumerate(Adaptor.getConstituents()))
+      Result = mlir::LLVM::InsertValueOp::create(
+          Rewriter, Loc, Result, Column,
+          llvm::ArrayRef<int64_t>{static_cast<int64_t>(Index)});
     Rewriter.replaceOp(Op, Result);
     return mlir::success();
   }
