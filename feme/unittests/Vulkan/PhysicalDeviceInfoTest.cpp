@@ -1854,4 +1854,49 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(IdProps.deviceLUIDValid, VK_FALSE);
 }
 
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    GraphicsPipelineLibraryIsRecognizedButNotYetImplementedOrAdvertised) {
+  // Roadmap H29a: `VK_EXT_graphics_pipeline_library`'s own feature and
+  // properties structs are recognized (`EntryPoints.cpp`'s
+  // `fillFeatures2Chain`/`fillProperties2Chain`) ahead of any real
+  // pipeline-library object model existing, exactly like `VK_EXT_mesh_
+  // shader`'s/`VK_EXT_transform_feedback`'s own structs were recognized
+  // before those extensions' first real feature landed. Every field must
+  // report the honest "unimplemented" answer, and the extension itself
+  // must not yet be advertised (Roadmap H29 -- CTS's own device-
+  // construction-type gate,
+  // `vkPipelineConstructionUtil.cpp`'s `checkPipelineConstructionRequire
+  // ments`, checks only `vkEnumerateDeviceExtensionProperties`, not this
+  // feature bit, so advertising the extension name before real library
+  // construction/linking exists would turn today's clean `NotSupported`
+  // result into a real `Failed` one for every
+  // `dEQP-VK.pipeline.pipeline_library.*` case).
+  VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT GplFeatures{};
+  GplFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &GplFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(GplFeatures.graphicsPipelineLibrary, VK_FALSE);
+
+  VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT GplProps{};
+  GplProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &GplProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(GplProps.graphicsPipelineLibraryFastLinking, VK_FALSE);
+  EXPECT_EQ(GplProps.graphicsPipelineLibraryIndependentInterpolationDecoration,
+            VK_FALSE);
+
+  for (const VkExtensionProperties &Extension :
+       feme::vulkan::getSupportedDeviceExtensions())
+    EXPECT_STRNE(Extension.extensionName,
+                 VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+}
+
 } // namespace

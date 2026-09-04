@@ -1221,6 +1221,21 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       XfbProps->transformFeedbackDraw = VK_TRUE;
       break;
     }
+    // (roadmap H29a) `VK_EXT_graphics_pipeline_library`'s own properties
+    // struct: recognized ahead of any real implementation (see the
+    // matching feature-struct case in `fillFeatures2Chain` below), so both
+    // fields report the truthful "nothing built yet" answer -- neither a
+    // fast-linking guarantee nor an independent-interpolation-decoration
+    // guarantee exists, since no library object of any kind can be
+    // created.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT: {
+      auto *GplProps = reinterpret_cast<
+          VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT *>(Base);
+      GplProps->graphicsPipelineLibraryFastLinking = VK_FALSE;
+      GplProps->graphicsPipelineLibraryIndependentInterpolationDecoration =
+          VK_FALSE;
+      break;
+    }
     default:
       break;
     }
@@ -2111,6 +2126,23 @@ void fillFeatures2Chain(void *pNext) {
       Features->primitivesGeneratedQuery = VK_TRUE;
       Features->primitivesGeneratedQueryWithRasterizerDiscard = VK_FALSE;
       Features->primitivesGeneratedQueryWithNonZeroStreams = VK_FALSE;
+      break;
+    }
+    // (roadmap H29a) `VK_EXT_graphics_pipeline_library`'s own feature
+    // struct: this ICD does not yet implement pipeline-library creation or
+    // linking (roadmap H29's own scoping found the real gap is a new
+    // pipeline-construction object model, not a small wiring pass -- see
+    // `VulkanCTSReport.md`'s "Roadmap H21f investigation" and Roadmap.md's
+    // H29 entry), so `graphicsPipelineLibrary` is unconditionally false.
+    // The struct is nonetheless recognized here -- not yet advertised via
+    // `getSupportedDeviceExtensions` -- purely so a future H29 change only
+    // has to flip this one bit, mirroring `VK_EXT_mesh_shader`'s/
+    // `VK_EXT_transform_feedback`'s own "struct recognized ahead of any
+    // real implementation" precedent above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT *>(Base);
+      Features->graphicsPipelineLibrary = VK_FALSE;
       break;
     }
     default:
