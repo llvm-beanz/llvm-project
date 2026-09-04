@@ -24428,3 +24428,69 @@ gaps discovered while ruling out the render-target-merge hypothesis
 `Result.pNext` or `Result.pDynamicState`) were filed as their own new row,
 H29q, since neither is this row's own cause and both need their own
 reduction/design before fixing.
+
+## Roadmap H29k: measured impact (partial -- one of two root causes fixed)
+
+**Investigation.** H29k's own row targeted 6 `graphics_library.*` failures
+(`"Found mismatches between IO buffer and descriptor contents"`, all
+`mesh_frag.case_1`/`case_1_io_ssbo_first` across `fast_lib`/`monolithic`/
+`optimized_lib`), a real rendering-correctness mismatch rather than a
+pipeline-creation-time diagnostic. A real reduction of
+`independent_sets_random.monolithic.mesh_frag.case_1` (via direct
+instrumentation of `feme/lib/Graphics/Executor.cpp`, since this is not an
+IR-level bug) found **two** distinct, independently-real gaps standing
+between this test and a passing result:
+
+1. **`executeDraws`'s rasterization extent collapsed to `0x0` for a draw
+   with no attachments of any kind.** This test's fragment shader runs
+   purely for descriptor side effects against a render pass/framebuffer
+   with zero color, depth, and stencil attachments (a legal Vulkan shape);
+   `ExtentWidth`/`ExtentHeight` (used to clamp every triangle's scissor
+   rect) were derived solely from `Draw.Attachments`/`Draw.DepthStencil`,
+   staying at their initialized `0` when neither exists, discarding the
+   whole draw before a single fragment ran regardless of the real,
+   non-empty, already-render-area-clipped `Draw.Scissors`. **Fixed** by
+   falling back to the union of `Draw.Scissors` when no attachment
+   supplies an extent.
+2. **A mesh shader's `gl_PrimitiveTriangleIndicesEXT` output has no
+   canonicalized `feme.stage.*` op and is never routed into
+   `FemeMeshArgs::PrimitiveIndices` at all.** Confirmed via direct
+   instrumentation: `Meshlet::getPrimitiveIndices(0)`/`(1)` both read back
+   `(0, 0, 0)` for this test's own mesh shader (which writes
+   `gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2)` /
+   `[1] = uvec3(2, 1, 3)`), leaving every primitive degenerate (all three
+   "vertices" aliasing vertex 0) and therefore zero-area -- never
+   rasterizing regardless of (1)'s fix. **Not fixed this turn** (filed as
+   its own row, H29r): this is a real compiler gap (a missing
+   canonicalization + `MeshOutputWrapper.cpp` lowering), already flagged
+   as "left open" in `MeshOutputWrapper.h`'s own file comment but never
+   previously given its own lettered roadmap row.
+
+**Testing.** New `ExecutorTest.RasterizesWithNoAttachmentsAtAllUsingScissorAsExtent`
+(a no-fragment-stage, no-attachment-of-any-kind draw, asserting the
+occlusion-query `PassedSampleCounter` still counts every covered texel of
+the scissor rect) reproduces (1) -- confirmed to fail without the fix
+(`PassedSamples == 0`, expected `16`) and pass with it. Full
+`ninja check-feme`: 2514/2573 passed (59 unsupported, 0 unexpected
+failures); `FeMeGraphicsTests` 276/276 passed.
+
+**CTS re-run.** (`VK_ICD_FILENAMES` + `FEME_VULKAN_LOG_CREATION_ERRORS=1`)
+
+| Group | Before | After |
+|---|---|---|
+| `independent_sets_random.*` (720 cases) | 36/414/270 | 36/414/270 (unchanged) |
+| The 6 named `mesh_frag.case_1*` cases | 6 `Fail` (IO/descriptor mismatch) | 6 `Fail` (same diagnostic, unchanged -- still blocked on H29r) |
+
+As expected, (1) alone does not flip any of these 6 cases (or the wider
+group's own pass count) since (2) still blocks every one of them; the fix
+is nonetheless a genuine, separately-real correctness bug (confirmed via
+its own targeted unit test) worth keeping, and narrows this row's own
+remaining scope to exactly one gap.
+
+**Disposition.** Roadmap H29k **not** closed -- not struck through.
+Corrected to record (1) as fixed and (2) as the row's own actual remaining
+blocker, filed as new roadmap H29r (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`,
+`feme/lib/Transforms/CPU/MeshOutputWrapper.cpp`/`SIMDize.cpp`). H29r's own
+row also corrects roadmap H29q's earlier speculation that its
+`Result.pDynamicState` gap "likely explain[ed]" H29k's mismatch -- it does
+not; H29k's mismatch has a distinct, unrelated root cause.
