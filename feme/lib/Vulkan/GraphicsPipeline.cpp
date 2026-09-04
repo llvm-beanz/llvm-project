@@ -2514,6 +2514,61 @@ captureLibraryStage(const VkPipelineShaderStageCreateInfo &Stage) {
   return Out;
 }
 
+/// (roadmap H29n) Folds \p Child's own captured state into \p Out for every
+/// `VkGraphicsPipelineLibraryFlagBitsEXT` part \p Child provides that \p Out
+/// does not already provide itself, flattening a nested pipeline-library
+/// tree one level at a time. `VK_EXT_graphics_pipeline_library` lets a
+/// library be built by linking *other* libraries (a library create call may
+/// chain its own `VkPipelineLibraryCreateInfoKHR`), and a library whose
+/// parts all come from its children legitimately declares no
+/// `VkGraphicsPipelineLibraryCreateInfoEXT::flags` of its own at all.
+/// Since each part may be provided exactly once across a whole link, a bit
+/// \p Out already has can never also be owned by a child, so "own state
+/// wins" is a total order rather than a tie-break policy.
+static void foldLinkedLibraryState(GraphicsPipelineLibraryState &Out,
+                                   const GraphicsPipelineLibraryState &Child) {
+  if (!Out.Layout)
+    Out.Layout = Child.Layout;
+  if (!Out.RenderPass) {
+    Out.RenderPass = Child.RenderPass;
+    Out.Subpass = Child.Subpass;
+  }
+
+  const VkGraphicsPipelineLibraryFlagsEXT New = Child.Flags & ~Out.Flags;
+  if (New & VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT) {
+    Out.VertexBindings = Child.VertexBindings;
+    Out.VertexAttributes = Child.VertexAttributes;
+    Out.InputAssembly = Child.InputAssembly;
+  }
+  if (New & VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT) {
+    Out.PreRasterizationStages = Child.PreRasterizationStages;
+    Out.Viewports = Child.Viewports;
+    Out.Scissors = Child.Scissors;
+    Out.ViewportState = Child.ViewportState;
+    Out.RasterizationState = Child.RasterizationState;
+    Out.TessellationState = Child.TessellationState;
+  }
+  if (New & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) {
+    Out.FragmentStage = Child.FragmentStage;
+    Out.DepthStencilState = Child.DepthStencilState;
+  }
+  if (New & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT) {
+    Out.ColorBlendAttachments = Child.ColorBlendAttachments;
+    Out.ColorBlendState = Child.ColorBlendState;
+    Out.ColorAttachmentFormats = Child.ColorAttachmentFormats;
+    Out.RenderingCreateInfo = Child.RenderingCreateInfo;
+  }
+  // Multisample state is shared by the fragment-shader/fragment-output
+  // parts alike, so it is not owned by a single bit and cannot be folded
+  // by the `New` mask above: take a child's whenever this level has none.
+  if (!Out.MultisampleState && Child.MultisampleState) {
+    Out.SampleMask = Child.SampleMask;
+    Out.MultisampleState = Child.MultisampleState;
+  }
+
+  Out.Flags |= Child.Flags;
+}
+
 GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
     const VkGraphicsPipelineCreateInfo &CreateInfo,
     VkGraphicsPipelineLibraryFlagsEXT Flags) {
@@ -2625,6 +2680,27 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
     Copy.pNext = nullptr;
     Copy.pSampleMask = nullptr;
     Out.MultisampleState = Copy;
+  }
+
+  // (roadmap H29n) This library may itself be built by linking other
+  // libraries. Flatten their state in now, at capture time, so that every
+  // consumer of a `GraphicsPipelineLibraryState` -- above all
+  // `synthesizeLinkedGraphicsPipelineCreateInfo` -- sees one library's
+  // complete subtree without having to walk a tree of its own.
+  for (const auto *Next =
+           static_cast<const VkBaseInStructure *>(CreateInfo.pNext);
+       Next; Next = Next->pNext) {
+    if (Next->sType != VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR)
+      continue;
+    const auto *LinkInfo =
+        reinterpret_cast<const VkPipelineLibraryCreateInfoKHR *>(Next);
+    for (uint32_t I = 0; I != LinkInfo->libraryCount; ++I) {
+      auto *P = fromHandle<Pipeline>(LinkInfo->pLibraries[I]);
+      if (P && P->kind() == Pipeline::Kind::GraphicsLibrary)
+        foldLinkedLibraryState(
+            Out, static_cast<const GraphicsPipelineLibrary *>(P)->state());
+    }
+    break;
   }
 
   return Out;

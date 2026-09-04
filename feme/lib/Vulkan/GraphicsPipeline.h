@@ -605,6 +605,14 @@ struct GraphicsPipelineLibraryState {
 /// `GraphicsPipelineLibraryState`'s own comment for exactly which field
 /// each bit owns). \p Flags may be `0` (a library that captures no state
 /// of its own yet, legal but useless until linked against parts that do).
+///
+/// (roadmap H29n) If \p CreateInfo chains a
+/// `VkPipelineLibraryCreateInfoKHR` -- a library built by linking *other*
+/// libraries, which the extension permits to arbitrary depth -- each named
+/// library's own already-flattened state is folded in too, and the
+/// resulting `Flags` is the union of this level's and its whole subtree's.
+/// A library whose parts all come from its children therefore captures
+/// their state even though \p Flags is `0`.
 GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
     const VkGraphicsPipelineCreateInfo &CreateInfo,
     VkGraphicsPipelineLibraryFlagsEXT Flags);

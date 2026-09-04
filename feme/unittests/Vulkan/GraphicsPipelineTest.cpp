@@ -3895,6 +3895,111 @@ TEST_F(GraphicsPipelineTest, IgnoresARenderingCreateInfoOnANonOutputLibrary) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap H29n) `VK_EXT_graphics_pipeline_library` lets a library itself
+/// be built by *linking other libraries* -- a library create call may chain
+/// its own `VkPipelineLibraryCreateInfoKHR` -- so a real pipeline-library
+/// build is a tree, not a flat list. This is the intermediate node's own
+/// shape: a library declaring no `VkGraphicsPipelineLibraryCreateInfoEXT::
+/// flags` at all, whose entire contents come from two linked children.
+/// Reproduces `dEQP-VK.pipeline.pipeline_library.graphics_library.fast.
+/// 0_00_11_11`'s own inner nodes, where before this row the child state was
+/// dropped and the eventual root link failed for want of a vertex stage.
+TEST_F(GraphicsPipelineTest, CapturesStateOfLibrariesLinkedIntoALibrary) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+
+  // An intermediate library owning no part of its own, aggregating the two
+  // above.
+  VkPipeline Children[2] = {VertexInputLib, PreRasterLib};
+  VkPipelineLibraryCreateInfoKHR ChildLinkInfo{};
+  ChildLinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  ChildLinkInfo.libraryCount = 2;
+  ChildLinkInfo.pLibraries = Children;
+  VkPipeline AggregateLib = createLibrary(Device, Info, 0, &ChildLinkInfo);
+
+  auto *Lib = static_cast<GraphicsPipelineLibrary *>(
+      fromHandle<Pipeline>(AggregateLib));
+  EXPECT_EQ(
+      Lib->state().Flags,
+      static_cast<VkGraphicsPipelineLibraryFlagsEXT>(
+          VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT |
+          VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT));
+  EXPECT_FALSE(Lib->state().PreRasterizationStages.empty());
+
+  vkDestroyPipeline(Device, AggregateLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29n) The whole point of the capture above: a root link against
+/// a *nested* library tree must produce the same executable pipeline a flat
+/// four-library link does. Here each of two intermediate libraries owns one
+/// part and links one leaf that owns another, so no library in the build
+/// declares more than one bit itself and the root declares none.
+TEST_F(GraphicsPipelineTest, LinksANestedLibraryTreeIntoAnExecutablePipeline) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+
+  VkPipelineLibraryCreateInfoKHR PreRasterLinkInfo{};
+  PreRasterLinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  PreRasterLinkInfo.libraryCount = 1;
+  PreRasterLinkInfo.pLibraries = &VertexInputLib;
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT,
+      &PreRasterLinkInfo);
+
+  VkPipelineLibraryCreateInfoKHR FragmentLinkInfo{};
+  FragmentLinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  FragmentLinkInfo.libraryCount = 1;
+  FragmentLinkInfo.pLibraries = &FragmentOutputLib;
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT,
+      &FragmentLinkInfo);
+
+  VkPipeline Roots[2] = {PreRasterLib, FragmentLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 2;
+  LinkInfo.pLibraries = Roots;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = Pass;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  EXPECT_EQ(fromHandle<Pipeline>(Handle)->kind(), Pipeline::Kind::Graphics);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H29c) A pipeline linked from libraries is a real, bindable
 /// `GraphicsPipeline` -- `vkCmdBindPipeline`'s own `Kind::GraphicsLibrary`
 /// guard (`CommandBuffer.cpp`) must not reject it the way it rejects an
