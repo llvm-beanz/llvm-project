@@ -576,6 +576,23 @@ struct GraphicsPipelineLibraryState {
   std::vector<VkPipelineColorBlendAttachmentState> ColorBlendAttachments;
   std::optional<VkPipelineColorBlendStateCreateInfo> ColorBlendState;
 
+  /// (roadmap H29m) A chained `VkPipelineRenderingCreateInfo`: dynamic
+  /// rendering's own replacement for a `VkRenderPass`, naming the formats
+  /// this pipeline renders into. Captured only for
+  /// `FRAGMENT_OUTPUT_INTERFACE_BIT`, which is the one part that owns the
+  /// render target's attachment formats -- a part that does *not* set that
+  /// bit may legally chain an arbitrary, even deliberately-garbage,
+  /// `VkPipelineRenderingCreateInfo` that a driver must ignore entirely
+  /// rather than dereference (`dEQP-VK.pipeline.pipeline_library.
+  /// graphics_library.misc.other.bad_rendering_create_info` chains one
+  /// whose `pColorAttachmentFormats` is a non-null junk pointer for
+  /// exactly this reason). `ColorAttachmentFormats` owns the array
+  /// `RenderingCreateInfo::pColorAttachmentFormats` is rebuilt to point
+  /// at when the part is linked, since the application's own array need
+  /// not outlive the creating call.
+  std::vector<VkFormat> ColorAttachmentFormats;
+  std::optional<VkPipelineRenderingCreateInfo> RenderingCreateInfo;
+
   /// Shared by `FRAGMENT_SHADER_BIT`/`FRAGMENT_OUTPUT_INTERFACE_BIT`
   /// alike (the spec's own table lists `pMultisampleState` under both).
   std::vector<VkSampleMask> SampleMask;

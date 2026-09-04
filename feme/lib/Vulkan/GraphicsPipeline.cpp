@@ -2589,6 +2589,23 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
       Copy.pAttachments = nullptr;
       Out.ColorBlendState = Copy;
     }
+    // (roadmap H29m) Only this part owns the render target's attachment
+    // formats, so only this part's own chained
+    // `VkPipelineRenderingCreateInfo` is captured -- see
+    // `GraphicsPipelineLibraryState::RenderingCreateInfo`'s own comment for
+    // why reading one from any other part would be a real bug rather than
+    // merely redundant.
+    if (const VkPipelineRenderingCreateInfo *RI =
+            findRenderingCreateInfo(CreateInfo.pNext)) {
+      VkPipelineRenderingCreateInfo Copy = *RI;
+      if (Copy.pColorAttachmentFormats)
+        Out.ColorAttachmentFormats.assign(Copy.pColorAttachmentFormats,
+                                          Copy.pColorAttachmentFormats +
+                                              Copy.colorAttachmentCount);
+      Copy.pNext = nullptr;
+      Copy.pColorAttachmentFormats = nullptr;
+      Out.RenderingCreateInfo = Copy;
+    }
   }
 
   // (roadmap H29b) `pMultisampleState` is shared by `FRAGMENT_SHADER_BIT`/
@@ -2644,6 +2661,13 @@ struct LinkedPipelineStorage {
   VkPipelineDepthStencilStateCreateInfo DepthStencilState{};
   VkPipelineColorBlendStateCreateInfo ColorBlendState{};
   VkPipelineMultisampleStateCreateInfo MultisampleState{};
+  /// (roadmap H29m) Rebuilt from the fragment-output-interface library
+  /// part's own captured `VkPipelineRenderingCreateInfo`, and chained onto
+  /// the synthesized create info's `pNext` so `getRenderTargets` can find
+  /// it. Held here rather than pointed at in the library part directly
+  /// because its `pColorAttachmentFormats` must be re-aimed at that part's
+  /// own owned format array.
+  VkPipelineRenderingCreateInfo RenderingState{};
 };
 
 } // namespace
@@ -2854,6 +2878,22 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
           S.ColorBlendAttachments.empty() ? nullptr
                                           : S.ColorBlendAttachments.data();
       Result.pColorBlendState = &Storage.ColorBlendState;
+    }
+    // (roadmap H29m) Re-chain this part's own captured
+    // `VkPipelineRenderingCreateInfo`, the dynamic-rendering counterpart of
+    // the `RenderPass` handle merged above. Without this a linked pipeline
+    // whose render target was declared only through dynamic rendering
+    // reaches `getRenderTargets` with neither a render pass nor a rendering
+    // create info and is rejected outright, even though the
+    // fragment-output-interface part named its formats perfectly well.
+    if (S.RenderingCreateInfo) {
+      Storage.RenderingState = *S.RenderingCreateInfo;
+      Storage.RenderingState.colorAttachmentCount =
+          static_cast<uint32_t>(S.ColorAttachmentFormats.size());
+      Storage.RenderingState.pColorAttachmentFormats =
+          S.ColorAttachmentFormats.empty() ? nullptr
+                                           : S.ColorAttachmentFormats.data();
+      Result.pNext = &Storage.RenderingState;
     }
   } else {
     Result.pColorBlendState = CreateInfo.pColorBlendState;

@@ -3687,16 +3687,21 @@ TEST_F(GraphicsPipelineTest, CmdBindPipelineRejectsAGraphicsPipelineLibrary) {
 /// shaped `VkGraphicsPipelineCreateInfo`, so every field a given flag bit
 /// might read is already populated) -- a small helper shared by this
 /// file's own H29c link-time-merge tests below, which each need several
-/// such libraries alive at once.
-static VkPipeline
-createLibrary(VkDevice Device, const VkGraphicsPipelineCreateInfo &Info,
-              VkGraphicsPipelineLibraryFlagsEXT LibraryFlags) {
+/// such libraries alive at once. \p ExtraNext, when non-null, is chained
+/// after the `VkGraphicsPipelineLibraryCreateInfoEXT` so a caller can hang
+/// per-part state (e.g. roadmap H29m's own `VkPipelineRenderingCreateInfo`)
+/// off this part alone.
+static VkPipeline createLibrary(VkDevice Device,
+                                const VkGraphicsPipelineCreateInfo &Info,
+                                VkGraphicsPipelineLibraryFlagsEXT LibraryFlags,
+                                const void *ExtraNext = nullptr) {
   VkGraphicsPipelineCreateInfo LibInfo = Info;
   LibInfo.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
   VkGraphicsPipelineLibraryCreateInfoEXT LibraryInfo{};
   LibraryInfo.sType =
       VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
   LibraryInfo.flags = LibraryFlags;
+  LibraryInfo.pNext = ExtraNext;
   LibInfo.pNext = &LibraryInfo;
   VkPipeline Handle = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &LibInfo,
@@ -3746,6 +3751,140 @@ TEST_F(GraphicsPipelineTest, LinksAllFourLibraryPartsIntoAnExecutablePipeline) {
   ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
   ASSERT_NE(Handle, VK_NULL_HANDLE);
   EXPECT_EQ(fromHandle<Pipeline>(Handle)->kind(), Pipeline::Kind::Graphics);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29m) A graphics-pipeline-library link whose render target was
+/// declared through *dynamic rendering* rather than a `VkRenderPass`: the
+/// fragment-output-interface part -- the one part
+/// `VkGraphicsPipelineLibraryFlagBitsEXT` gives ownership of the render
+/// target's attachment formats -- chains the only
+/// `VkPipelineRenderingCreateInfo` in the whole build, and the linking call
+/// itself supplies neither a render pass nor a rendering create info of its
+/// own. Reproduces `dEQP-VK.pipeline.pipeline_library.graphics_library.
+/// misc.other.null_rendering_create_info_ptr`'s own shape: before this row
+/// the captured rendering info was dropped on the floor and the merged
+/// pipeline was rejected outright for having no render target at all.
+TEST_F(GraphicsPipelineTest, LinksADynamicRenderingFragmentOutputLibrary) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = VK_NULL_HANDLE;
+
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = &ColorFormat;
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
+      &Rendering);
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = VK_NULL_HANDLE;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle))
+                ->colorAttachmentCount(),
+            1u);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29m) Only the fragment-output-interface part owns the render
+/// target's attachment formats, so a `VkPipelineRenderingCreateInfo`
+/// chained onto any *other* part must be ignored entirely rather than
+/// merged. `dEQP-VK.pipeline.pipeline_library.graphics_library.misc.other.
+/// bad_rendering_create_info` makes this observable by chaining one whose
+/// `pColorAttachmentFormats` is a non-null junk pointer with a nonzero
+/// `colorAttachmentCount`: reading it at all would fault, and preferring it
+/// over the fragment-output part's own would silently give the merged
+/// pipeline the wrong attachment count.
+TEST_F(GraphicsPipelineTest, IgnoresARenderingCreateInfoOnANonOutputLibrary) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = VK_NULL_HANDLE;
+
+  VkPipelineRenderingCreateInfo BadRendering{};
+  BadRendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  BadRendering.colorAttachmentCount = 2;
+  BadRendering.pColorAttachmentFormats =
+      reinterpret_cast<VkFormat *>(0xdeadbeef);
+
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkPipelineRenderingCreateInfo GoodRendering{};
+  GoodRendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  GoodRendering.colorAttachmentCount = 1;
+  GoodRendering.pColorAttachmentFormats = &ColorFormat;
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT,
+      &BadRendering);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT,
+      &BadRendering);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
+      &GoodRendering);
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = VK_NULL_HANDLE;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle))
+                ->colorAttachmentCount(),
+            1u);
 
   vkDestroyPipeline(Device, Handle, nullptr);
   vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
