@@ -8,10 +8,10 @@
 //===----------------------------------------------------------------------===//
 
 #define VK_NO_PROTOTYPES
+#include "Surface.h"
 #include "EntryPoints.h"
 #include "Icd.h"
 #include "Objects.h"
-#include "Surface.h"
 
 #include "gtest/gtest.h"
 
@@ -178,6 +178,54 @@ TEST(SurfaceObjectModel, PresentToHeadlessSurfaceIsNoop) {
 TEST(SurfaceObjectModel, CurrentExtentOfHeadlessSurfaceIsNullopt) {
   Surface Surf;
   EXPECT_EQ(currentSurfaceExtent(&Surf), std::nullopt);
+}
+
+// Roadmap H10j: `rowsPerPutImageChunk`'s own chunk-size arithmetic --
+// needs no real `xcb_connection_t` (see its own declaration in Surface.h
+// for why), so it's fully covered here rather than only end-to-end by
+// `feme-vulkan-xcb-smoke.cpp`'s own real (but small, single-chunk) image.
+TEST(RowsPerPutImageChunk, WholeImageFitsInOneRequest) {
+  // A tiny image comfortably inside a real request-size cap: every
+  // scanline fits in one chunk.
+  EXPECT_EQ(rowsPerPutImageChunk(/*MaxRequestBytes=*/262144,
+                                 /*HeaderBytes=*/24, /*RowBytes=*/256),
+            1023u);
+}
+
+TEST(RowsPerPutImageChunk, LargeImageIsSplitAcrossMultipleRequests) {
+  // A wide enough row that only a handful fit per request -- exercises
+  // the actual division, not just the "everything fits" case above.
+  EXPECT_EQ(rowsPerPutImageChunk(/*MaxRequestBytes=*/1024,
+                                 /*HeaderBytes=*/24, /*RowBytes=*/100),
+            10u);
+}
+
+TEST(RowsPerPutImageChunk, OversizedSingleScanlineStillGetsOne) {
+  // A single scanline already larger than the whole request cap: still
+  // has to be attempted as its own request rather than never sent (see
+  // this function's own "no fixed upper bound on image size" contract).
+  EXPECT_EQ(rowsPerPutImageChunk(/*MaxRequestBytes=*/1024,
+                                 /*HeaderBytes=*/24, /*RowBytes=*/4096),
+            1u);
+}
+
+TEST(RowsPerPutImageChunk, HeaderAtOrAboveCapStillGetsOne) {
+  // A degenerate connection whose own reported cap doesn't even leave
+  // room for one request's fixed header: still returns `1`, never `0` or
+  // a division by a non-positive remainder.
+  EXPECT_EQ(rowsPerPutImageChunk(/*MaxRequestBytes=*/24, /*HeaderBytes=*/24,
+                                 /*RowBytes=*/64),
+            1u);
+  EXPECT_EQ(rowsPerPutImageChunk(/*MaxRequestBytes=*/16, /*HeaderBytes=*/24,
+                                 /*RowBytes=*/64),
+            1u);
+}
+
+TEST(RowsPerPutImageChunk, ZeroRowBytesStillGetsOne) {
+  // A zero-width image (`RowBytes == 0`) must not divide by zero.
+  EXPECT_EQ(rowsPerPutImageChunk(/*MaxRequestBytes=*/262144,
+                                 /*HeaderBytes=*/24, /*RowBytes=*/0),
+            1u);
 }
 
 } // namespace
