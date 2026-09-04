@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 resume: ec2f5570-263a-4b95-917f-6c2230e594cf
 ---
 # Initial Guidelines
@@ -30,6 +30,11 @@ During the H6 milestone breakdowns things have gone a little crazy with nesting
 letters in strange ways. Please avoid nesting milestones more than one lowercase
 letter deep going forward.
 
+The offload-test-suite checked out at /home/dev/dev/offload-test-suite has a
+branch named feme on the remote at
+https://github.com/llvm-beanz/offload-test-suite.git, which adds a generated set
+of targets to run the tests against the feme ICD (check-hlsl-feme-vk).
+
 Break your changes into small code changes with each change committed
 spearately. Record your thought process into a file named "agent_thoughts.md" at
 the root of the repository, appending to the file under a new top-level heading
@@ -37,20 +42,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29g or other prerequisites blocking the H-series milestones?
+Can you work on L3 or other prerequisites blocking the H-series milestones?
 
-> **`feme-cpu-wrap-hull: control-point phase only supports a control point
-> reading its own input control point's attributes`**, the real, distinct
-> limitation H29e's own fix exposed underneath its `cache.*` re-run's
-> tessellation-stage cases (e.g.
-> `pipeline_from_incomplete_get_data.vertex_stage_tessellation_control_stage_tessellation_evaluation_stage_fragment_stage`,
-> still `Failed` post-H29e, now on this diagnostic instead): `HullWrapper.cpp`'s
-> existing (and, per `HullWrapperTest.DiagnosesCrossControlPointInputLoad`,
-> deliberately diagnosed rather than silently miscompiled) cross-control-point
-> input-read restriction -- a control point reading another control point's own
-> attributes (not just its own, self-indexed ones) needs a real design for how
-> the CPU-emulated control-point phase, which currently processes one
-> invocation's own storage in isolation, would access a sibling invocation's
-> already-computed (or not-yet-computed, depending on scheduling) input storage.
-> Needs its own real IR reduction of one of these exact `cache.*` cases to
-> confirm the precise cross-indexing shape before designing a fix
+> **A `gpu-exec: error: Failed to create render pass. (VkResult = -11)`
+> (`VK_ERROR_FORMAT_NOT_SUPPORTED`'s numeric value) bucket** -- re-counted
+> alongside L2: 35 distinct failing cases (34 originally estimated, effectively
+> unchanged by L1/L4, as expected since neither fix touches render-pass/format
+> code at all). Likely a real, currently-unadvertised format gap in this suite's
+> own render-target format choices (distinct from any §1.9 `deqp-vk` coverage,
+> which may simply never probe the same formats this HLSL suite's own YAML
+> pipeline descriptions request); needs a per-case format survey to confirm
+> before deciding between "extend format support" and "the format genuinely is
+> out of scope, document why"
+
+Ideally we should support all formats comprehensively unless there is a reason
+why some format is not supportable.
