@@ -1798,6 +1798,48 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (Roadmap H11) A fragment stage need not declare an output at every
+/// location a pipeline's own (real, non-`VK_ATTACHMENT_UNUSED`) color
+/// attachment format occupies -- simply never writing a location is legal
+/// per the Vulkan spec's fragment-output-interface rules (the attachment
+/// keeps whatever it already held), not a pipeline-creation-time error.
+/// CTS's own `dEQP-VK.renderpasses.*.unused_clear_attachments.*` family (and
+/// several `sampleread`/`load_store_op_none` siblings) shares one pipeline
+/// across many draws, each binding a different subset of that pipeline's
+/// own declared attachments, with a fragment stage that only ever declares
+/// an output for the locations *some* draw plans to use.
+TEST_F(GraphicsPipelineTest,
+      AcceptsFragmentStageNotWritingEveryColorAttachmentLocation) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  // Declares only a location-0 output; a real (`R8G8B8A8_UNORM`) location-1
+  // color attachment below has no matching fragment output at all.
+  VkShaderModule Fragment = createModule(FragmentSource);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  std::array<VkFormat, 2> ColorFormats{VK_FORMAT_R8G8B8A8_UNORM,
+                                       VK_FORMAT_R8G8B8A8_UNORM};
+  std::array<VkPipelineColorBlendAttachmentState, 2> BlendAttachments{};
+  BlendAttachments[0].colorWriteMask = 0xF;
+  BlendAttachments[1].colorWriteMask = 0xF;
+  Blend.attachmentCount = 2;
+  Blend.pAttachments = BlendAttachments.data();
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 2;
+  Rendering.pColorAttachmentFormats = ColorFormats.data();
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &Rendering;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_SUCCESS);
+  EXPECT_NE(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// A fragment input at a location no vertex output writes is a mislinked
 /// varying; cross-stage interface matching catches it at creation.
 TEST_F(GraphicsPipelineTest, RejectsUnmatchedVarying) {

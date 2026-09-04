@@ -2920,6 +2920,104 @@ TEST(ExecutorTest, ColorAttachmentLocationsUnusedLeavesAttachmentUnchanged) {
   }
 }
 
+/// (Roadmap H11) A genuinely-bound (not `VK_ATTACHMENT_UNUSED`/unmapped)
+/// color attachment with no matching fragment-shader output at all --
+/// distinct from `ColorAttachmentLocationsUnusedLeavesAttachmentUnchanged`
+/// above, which tests an explicit unused *remap*, not a plain single-output
+/// fragment stage bound against more attachments than it writes -- must
+/// leave that attachment unchanged rather than fail the draw. CTS's own
+/// `dEQP-VK.renderpasses.*.unused_clear_attachments.*` family shares one
+/// pipeline (with every slot's format populated) across draws that only
+/// ever write a subset of its declared attachments.
+TEST(ExecutorTest, ColorAttachmentWithNoFragmentOutputLeavesItUnchanged) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  // Only declares an output at location 0; there is no location-1 output at
+  // all (not merely an unused remap of one).
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  // Two real, bound color attachments -- the pipeline itself only knows
+  // about attachment 0's format via the fragment stage's own output, but
+  // the draw binds a second, genuinely-real attachment the shader never
+  // writes.
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4},
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments),
+      StencilState{}, std::vector<BlendState>{BlendState{}, BlendState{}});
+
+  std::array<uint8_t, 64> Color0Storage{};
+  // A distinctive pre-existing value so a surviving "unchanged" attachment
+  // is unambiguous.
+  std::array<uint8_t, 64> Color1Storage;
+  for (size_t I = 0; I != Color1Storage.size(); I += 4) {
+    Color1Storage[I] = 0x10;
+    Color1Storage[I + 1] = 0x20;
+    Color1Storage[I + 2] = 0x30;
+    Color1Storage[I + 3] = 0xFF;
+  }
+  AttachmentView Color0{Color0Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4,
+                        4};
+  AttachmentView Color1{Color1Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4,
+                        4};
+  std::array<AttachmentView, 2> Attachs{Color0, Color1};
+
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
+      0.0f,  0.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f,
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I) {
+    // Target 0 gets the solid red input color...
+    EXPECT_EQ(Color0Storage[I * 4], 255) << "texel " << I;
+    EXPECT_EQ(Color0Storage[I * 4 + 1], 0) << "texel " << I;
+    // ...and target 1, with no fragment output at all, is unchanged from
+    // its distinctive pre-existing value.
+    EXPECT_EQ(Color1Storage[I * 4], 0x10) << "texel " << I;
+    EXPECT_EQ(Color1Storage[I * 4 + 1], 0x20) << "texel " << I;
+    EXPECT_EQ(Color1Storage[I * 4 + 2], 0x30) << "texel " << I;
+  }
+}
+
 TEST(ExecutorTest, RejectsMismatchedColorBlendCount) {
   Context Ctx;
   EntrySignature VSSig;

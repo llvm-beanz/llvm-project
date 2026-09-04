@@ -667,6 +667,32 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
         continue;
       const feme::SignatureElement *Color =
           findLocation(*FSSig, feme::SignatureDirection::Output, I);
+      // (roadmap H11) A fragment stage is not required to declare an
+      // output at every location a real (non-`Unknown`) color attachment
+      // occupies -- unlike a *used* attachment's own component-count/type
+      // shape (still validated below when an output does exist), simply
+      // never writing a location at all is legal per the Vulkan spec's own
+      // fragment-output-interface rules (the color attachment keeps
+      // whatever value it already held, "undefined" only in the sense
+      // that this ICD need not compute one, not a validation error): CTS's
+      // own `dEQP-VK.renderpasses.*.unused_clear_attachments.*` family
+      // (and, transitively, every `sampleread`/`load_store_op_none`/
+      // `local_read` case reusing the same pipeline shape) creates one
+      // shared pipeline whose `VkPipelineRenderingCreateInfo` always names
+      // every slot's real format, then renders it against a *subset* of
+      // real attachments at a time (the rest `VK_NULL_HANDLE` in that
+      // draw's own `VkRenderingAttachmentInfo`, `Executor.cpp`'s own
+      // `Att.Data.empty()` handling) with a fragment stage that only ever
+      // declares an output for the locations it plans to use across any
+      // draw -- there is no requirement (and no way, at pipeline-creation
+      // time) for every one of that pipeline's declared attachments to be
+      // bound on every draw that reuses it. Only a *present* output's own
+      // shape is still validated (below), matching what `Executor.cpp`'s
+      // parallel draw-time linkage already does when an attachment is
+      // genuinely bound (non-`Unknown`, non-`VK_NULL_HANDLE`) but the
+      // fragment stage still has no matching output there.
+      if (!Color)
+        continue;
       // (roadmap H7t) A fragment output narrower than 4 components (e.g.
       // a `vec3`) is legal per the SPIR-V/GLSL spec -- the missing
       // trailing components are simply never written by the shader, and
@@ -675,7 +701,7 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
       // `1.0` for a missing alpha) at draw time, mirroring
       // `ImageFixture.cpp`'s `unpackColor`'s own precedent for a color
       // format lacking a channel entirely.
-      if (!Color || Color->ComponentCount == 0 || Color->ComponentCount > 4 ||
+      if (Color->ComponentCount == 0 || Color->ComponentCount > 4 ||
           Color->ComponentType != feme::SignatureComponentType::Float)
         return createStringError(inconvertibleErrorCode(),
                                  "fragment stage has no floating-point "

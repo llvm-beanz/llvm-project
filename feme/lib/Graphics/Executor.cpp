@@ -1816,11 +1816,24 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       }
       const SignatureElement *FSColor =
           findElementByLocation(FSSig, SignatureDirection::Output, *Loc);
-      if (!FSColor)
-        return createStringError(inconvertibleErrorCode(),
-                                 "fragment stage has no output at location %u "
-                                 "(mapped to color attachment %u)",
-                                 *Loc, I);
+      // (roadmap H11) A genuinely bound color attachment whose location
+      // the fragment stage simply never declares an output for is legal
+      // per the Vulkan spec's own fragment-output-interface rules (the
+      // attachment keeps whatever it already held -- the same "nothing to
+      // write" case as an unused `VK_NULL_HANDLE` slot or an unmapped
+      // `vkCmdSetRenderingAttachmentLocations` location above), not a
+      // draw-time error: `GraphicsPipeline.cpp`'s own parallel
+      // pipeline-creation-time check was relaxed the same way by this same
+      // row, since one pipeline's declared attachment formats need not
+      // all be written by every draw that reuses it (CTS's own
+      // `dEQP-VK.renderpasses.*.unused_clear_attachments.*` family shares
+      // one pipeline, with its fragment stage declaring only the
+      // locations *some* draw plans to use, across every location a real,
+      // possibly-bound attachment format occupies).
+      if (!FSColor) {
+        FSColors.push_back(nullptr);
+        continue;
+      }
       // (Roadmap H8p) An integer color attachment (one of
       // `isIntegerColorAttachmentFormat`'s 7 formats, RuntimeABI.h) expects
       // a matching `UInt`/`SInt` fragment output instead of `Float` --
