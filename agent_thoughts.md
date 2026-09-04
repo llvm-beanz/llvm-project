@@ -60420,3 +60420,128 @@ specifically, so it needed no correction.
 2. Docs: `Roadmap.md`, `VulkanCTSReport.md`, `VulkanExtensionInventory.md`,
    `Design.md`.
 3. This `agent_thoughts.md` entry (below, in its own commit).
+
+# H29i: inline shader-module state lost across a graphics-pipeline-library merge
+
+## Task
+
+H29f's own characterization pass found 23 of `graphics_library.*`'s real
+failures (confined to the `fast.*`, link-time-merged sub-group) hitting
+`"pipeline stage has a null VkShaderModule and no chained
+VkShaderModuleCreateInfo to compile inline"` -- H29d's own inline-shader-
+module path apparently not surviving a `graphics-pipeline-library` merge.
+The roadmap text's own hypothesis was that `captureGraphicsPipelineLibrary
+State` (H29b) doesn't deep-copy a chained `VkShaderModuleCreateInfo` the
+way it does an ordinary `VkShaderModule` handle. This turn's job: confirm
+via a real reduction, then fix.
+
+## Investigation
+
+Read `captureLibraryStage` (`GraphicsPipeline.cpp`, H29b) directly: it
+copies `Stage.module`, `Stage.pName`, and `pSpecializationInfo`'s contents,
+but never looks at `Stage.pNext` at all. Confirmed the hypothesis
+immediately by inspection -- no need to trace further before writing a
+reduction, since the gap was this obvious once I looked at the right
+function.
+
+Also read `resolveShaderStageModule` (`Pipeline.cpp`, H29d) to confirm its
+own contract: a null `module` with a chained `VkShaderModuleCreateInfo` in
+`pNext` resolves the inline code; a null `module` with *no* chained info
+produces exactly the diagnosed error message. And `addLinkedStage`
+(`GraphicsPipeline.cpp`, H29c), which builds the synthesized linked
+pipeline's `VkPipelineShaderStageCreateInfo` array purely from `Stage.
+Module` (a `GraphicsPipelineLibraryStage`'s own field) with no `pNext` at
+all -- so even if `captureLibraryStage` *had* preserved the chained struct
+somehow, `addLinkedStage` would still need its own fix to actually chain
+it back on, since a `GraphicsPipelineLibraryStage` has no `pNext`-shaped
+storage of its own today.
+
+## Reduction
+
+Per the standing "reduce before fixing" discipline, wrote a new unit test,
+`LinksLibraryWithInlineVertexShaderModule`, modeled directly on the
+existing `LinksAllFourLibraryPartsIntoAnExecutablePipeline` test (H29c)
+but substituting the vertex-input library's stage for one built the same
+way `CompilesInlineShaderModuleVertexStage` (H29d) builds its own inline
+vertex stage: `Stages[0].module = VK_NULL_HANDLE`, `Stages[0].pNext =
+&InlineVertexModuleInfo`. Deliberately cleared `Stages[0].pNext = nullptr`
+again right after creating the four libraries (before linking), mirroring
+what a real application legitimately does -- destroy/reuse its own
+`pCreateInfos[I]` contents once `vkCreateGraphicsPipelines` returns -- to
+make sure the test genuinely exercises "does this survive past the
+capturing call," not just "does it work while the original pNext chain
+happens to still be alive by accident."
+
+Built and ran this test *before* any fix: it failed with exactly `VK_ERROR
+_INITIALIZATION_FAILED` (-3), the same retcode the CTS's own `fast.*`
+cases hit. Confirmed the reduction reproduces the real gap.
+
+## Fix
+
+Added `GraphicsPipelineLibraryStage::InlineModuleWords` (a
+`std::vector<uint32_t>`), populated by `captureLibraryStage` via a direct
+pNext walk (matching this file's own established inline style for such
+walks, e.g. the `VkGraphicsPipelineLibraryCreateInfoEXT` walk a few
+hundred lines below) whenever `Stage.module` is null. Deliberately left it
+empty (not an error) when no chained `VkShaderModuleCreateInfo` is found
+either -- consistent with the "don't duplicate the existing diagnostic"
+principle, since the null-module-no-inline-info case is still a genuine
+application error that should still surface via `resolveShaderStageModule`
+at link/compile time, just as it always has.
+
+On the link side, added `LinkedPipelineStorage::InlineModuleInfos` (a
+`std::deque<VkShaderModuleCreateInfo>`, for the same address-stability
+reason `SpecInfos` is already a deque rather than a vector -- appending
+later entries must never invalidate an earlier stage's own `pNext`
+pointer) and had `addLinkedStage` push a reconstructed
+`VkShaderModuleCreateInfo` (referencing `Stage.InlineModuleWords`'s own
+already-stable storage) and chain it onto the synthesized stage's `pNext`
+whenever `Stage.Module` is null and `InlineModuleWords` is non-empty.
+`resolveShaderStageModule` then needs no changes at all -- it already
+knows exactly how to consume this shape, since it's the same shape a
+non-library monolithic pipeline's own directly-supplied inline module
+takes.
+
+Ran the new test again post-fix: passed. Ran the full `GraphicsPipeline
+Test` suite (87 tests, all passing) and full `check-feme` (2512/2571
+passed, 0 unexpected failures, one net-new test versus H29h's baseline).
+
+## CTS re-run
+
+Rebuilt `feme_vulkan` and re-ran the *entire* `graphics_library.*` group
+(836 cases) rather than just the `fast.*` sub-group, since H29h's own fix
+(last turn) had only been measured against `independent_sets_random.*`
+in isolation and this was a natural opportunity to get the group's first
+full post-H29h+H29i number. Confirmed via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` that the exact targeted diagnostic
+("...null VkShaderModule and no chained...") is now completely absent (0
+occurrences, down from 23), and the group's aggregate moved from H29f's
+83/465/288 baseline to 99/449/288 (Passed/Failed/NotSupported) -- a real,
+if modest, improvement (this fix alone only ever affected 23 of the
+group's 836 cases). Grepped every remaining failure signature and
+confirmed each one matches an already-filed row (the H6g-b-a-i-a-i/H29p
+resource-binding-normalization family, H29j's depth-attachment gap,
+H29l's fragment-output gap, and so on) -- no new, distinct blocker was
+uncovered by this fix, so no new roadmap row was needed this turn (a nice
+change of pace from the last several turns' own "next bug waiting
+underneath" pattern).
+
+## Documentation
+
+Struck through H29i in `Roadmap.md` with the full root-cause/fix/CTS-delta
+summary. Added a "Roadmap H29i: measured impact" section to
+`VulkanCTSReport.md`. Updated the `VK_EXT_graphics_pipeline_library` row
+in `VulkanExtensionInventory.md` to record H29i's closure. No `Design.md`
+changes were needed this turn -- this fix is pure object-model/state-
+capture-lifetime plumbing internal to `feme/lib/Vulkan/GraphicsPipeline.
+cpp`, not a new SPIR-V/LLVM-dialect conversion behavior the design doc's
+own conversion-coverage tables track.
+
+## Commits
+
+1. Code + unit test: `GraphicsPipelineLibraryStage::InlineModuleWords`,
+   `addLinkedStage`'s reconstruction of the chained
+   `VkShaderModuleCreateInfo`, and the new
+   `LinksLibraryWithInlineVertexShaderModule` regression test.
+2. Docs: `Roadmap.md`, `VulkanCTSReport.md`, `VulkanExtensionInventory.md`.
+3. This `agent_thoughts.md` entry (below, in its own commit).
