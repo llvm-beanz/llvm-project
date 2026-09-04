@@ -37,13 +37,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H21b or other prerequisites blocking the H-series milestones?
+Can you work on H21c or other prerequisites blocking the H-series milestones?
 
-> **Wire `VK_EXT_transform_feedback`'s entry points and pipeline-creation
-> surface**: register
-> `vkCmdBindTransformFeedbackBuffersEXT`/`vkCmdBeginTransformFeedbackEXT`/`vkCmdEndTransformFeedbackEXT`/`vkCmdBeginQueryIndexedEXT`/`vkCmdEndQueryIndexedEXT`/`vkCmdDrawIndirectByteCountEXT`
-> (`EntryPoints.{h,cpp}`/`ImplementedEntrypoints.txt`), and accept
-> `VkPipelineRasterizationStateStreamCreateInfoEXT` during graphics pipeline
-> creation (`GraphicsPipeline.cpp`) -- still no actual buffer-write capture or
-> extension advertisement, purely making the API surface present and
-> spec-shaped, the same discipline H10i used for `vkAcquireNextImage2KHR`
+> **Actual transform-feedback buffer-write capture**,
+> single-stream/vertex-shader-only first (the CTS-dominant shape H21a's own
+> scoping found): `Executor.cpp` writes each captured output element (using
+> H21a's `XfbBuffer`/`XfbOffset`/`XfbStride` fields) to its bound
+> transform-feedback buffer during vertex processing, followed by flipping the
+> `transformFeedback` feature bit and advertising the extension. Needs a real
+> `dEQP-VK.transform_feedback.simple.*` re-run to confirm a genuine
+> (non-`NotSupported`) result
