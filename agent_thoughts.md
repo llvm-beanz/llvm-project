@@ -58061,3 +58061,145 @@ environmental (not `feme`-code) question. All debug instrumentation
 (`fprintf` calls in `Swapchain.cpp`/`XcbSurface.cpp`) was reverted via
 `cp` from a pre-edit backup before committing anything; neither file has
 any residual diff in the final commits.
+
+# H10h: BitField* SPIR-V-to-LLVM patterns leak stale si32/ui32 operands into llvm.shl/llvm.lshr/llvm.ashr
+
+Picked up H10h: `dEQP-VK.wsi.xcb.incremental_present.scale_none.fifo.
+identity.opaque.reference` failing `vkCreateGraphicsPipelines` with
+`"'llvm.shl' op operand #1 must be signless integer or LLVM
+dialect-compatible vector of signless integer, but got 'si32'"`. The
+milestone's own framing explicitly named `ShiftPattern` (the
+`spirv.ShiftLeftLogical`/`ShiftRightLogical`/`ShiftRightArithmetic` ->
+`llvm.shl`/`llvm.lshr`/`llvm.ashr` conversion) as the prime suspect, and
+asked whether `llvm.lshr`/`llvm.ashr` are affected identically.
+
+## False lead #1: `ShiftPattern` itself
+
+Grepped `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` first --
+feme has no custom shift pattern at all, so the actual lowering is
+entirely upstream MLIR's `ShiftPattern`
+(`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`). Read it in full:
+every branch correctly uses `adaptor.getOperand1()`/`adaptor.getOperand2()`
+(the type-converted values) for the actual `LLVMOp::create` calls; only
+the *raw* `op.getOperandX().getType()` is used, and only for width-
+comparison logic, never as a value fed into a new op. Concluded this
+pattern is not the bug, despite the milestone's own suspicion.
+
+## False lead #2: `LoopPattern`/`SelectionPattern`
+
+Found an existing precedent for the right *bug class* though: a lit test,
+`spirv-to-llvm-branch-conditional-signed-argument.mlir` (from an L18-era
+fix), documents the exact same diagnostic shape coming from a different
+pattern (`BranchConditionalConversionPattern` building `llvm.cond_br` from
+raw `op.getTrueBlockArguments()` instead of the adaptor's
+`adaptor.getTrueTargetOperands()`). Searched upstream for other patterns
+with the same "raw accessor instead of adaptor" shape near shift/branch
+code and found `LoopPattern`/`SelectionPattern` both splice structured-
+control-flow terminator operands via raw `terminator->getOperands()`.
+Tried a hand-written `spirv.mlir.selection` repro to test this theory; it
+failed on an unrelated MLIR syntax error (malformed bb-argument type) that
+neither confirmed nor denied the theory, so I set it aside as inconclusive
+rather than sinking more time into hand-writing valid structured-control-
+flow SPIR-V-dialect IR from scratch.
+
+## The real lead: reading the actual shader
+
+Pivoted to finding the real GLSL shader source for the reported CTS case
+directly in the CTS checkout (`vktWsiIncrementalPresentTests.cpp`'s
+`Programs::init`) rather than continuing to guess at MLIR patterns in the
+abstract. It uses `bitfieldExtract(x, 0, 1)`/`bitfieldExtract(y, 1, 1)` on
+`highp uint` values -- `spirv.BitFieldUExtract`, not a shift op or
+structured control flow at all. This one piece of ground truth
+immediately redirected the whole investigation: re-read upstream's
+`BitFieldInsertPattern`/`BitFieldSExtractPattern`/`BitFieldUExtractPattern`
+and found they *do* use raw `op.getBase()`/`op.getInsert()`, and pass raw
+`op.getOffset()`/`op.getCount()` into a `processCountOrOffset` helper that
+itself takes them as raw, unconverted values.
+
+Wrote a minimal standalone repro (`spirv.BitFieldUExtract %base, %offset,
+%count : si32, si32, si32` in a trivial `spirv.func`, run through
+`feme-opt --feme-convert-spirv-to-llvm`) and it reproduced the *exact*
+reported diagnostic on the first try. Dumping the IR at failure
+(`--mlir-print-ir-after-failure`) showed the culprit was an
+`unrealized_conversion_cast` materializing `count` back to `si32` right
+before it fed into `llvm.shl` -- confirming `processCountOrOffset`'s own
+broadcast/truncate-or-extend logic is a silent no-op whenever the
+operand's width already matches `Base`'s (the common case, since the
+SPIR-V spec requires same-width `Offset`/`Count`), letting the stale,
+pre-conversion value leak straight through. This matches the exact same
+underlying mechanism as the already-fixed `BranchConditionalPattern` bug,
+just triggered via a width-equality fast path rather than a structured-
+control-flow terminator.
+
+## The fix
+
+Upstream's helper functions (`processCountOrOffset`,
+`createConstantAllBitsSet`, `optionallyBroadcast`,
+`optionallyTruncateOrExtend`, etc.) are all `static`/file-local to
+`SPIRVToLLVM.cpp`, so feme can't reuse them directly -- had to reimplement
+the same broadcast-then-truncate-or-extend logic feme-side (as
+`processBitFieldCountOrOffset`, `createBitFieldConstant`,
+`broadcastBitFieldOperand`, `getBitFieldElementBitWidth`), but simplified
+now that the input is *already* the adaptor's converted value (always a
+signless integer or fixed vector thereof), rather than potentially-still-
+raw SPIR-V-dialect-typed. Wrote three new pattern classes
+(`BitFieldInsertPattern`/`BitFieldSExtractPattern`/
+`BitFieldUExtractPattern`) mirroring upstream's own mask/shift
+construction verbatim, sourcing `Base`/`Insert`/`Offset`/`Count` from the
+adaptor throughout, registered at `FeMeBenefit` in
+`populateSPIRVToLLVMTargetPatterns` so they win over the upstream
+patterns for the same three ops.
+
+Verified with four standalone repros (unsigned extract, signed extract,
+insert, and a vector-`Base`/scalar-`Offset`+`Count` case exercising the
+broadcast path all four scalar-only repros don't touch) -- all produce
+clean, fully signless `llvm.shl`/`llvm.lshr`/`llvm.ashr`/`llvm.and`/
+`llvm.xor` sequences with no residual `si32`/`ui32`/`unrealized_conversion_
+cast`. This directly answers the milestone's own question: `llvm.lshr`
+(via `BitFieldUExtractPattern`) and `llvm.ashr` (via
+`BitFieldSExtractPattern`) are indeed affected identically to `llvm.shl` --
+just via a different pattern family (`BitField*`) than the one the
+milestone's own framing guessed (`Shift*`), which turned out to be a red
+herring.
+
+Added a permanent lit test (`spirv-to-llvm-bitfield-signed-argument.mlir`)
+covering all three ops plus the vector case, following the existing
+branch-conditional test's style. `ninja check-feme` (assertions-enabled,
+ccache build2) passed in full: 2457/2516, 0 failures, up 1 test from the
+new lit coverage.
+
+## Real CTS verification, and an unrelated crash discovered along the way
+
+Re-ran the exact reported CTS case against the fixed `feme_vulkan` ICD
+(`Xvfb :99`, `VK_DRIVER_FILES` pointed at `feme_icd.json`): passed 3/3
+across repeated runs (one earlier run hit the already-documented,
+unrelated environmental xcb connection flake instead). Re-ran the whole
+`dEQP-VK.wsi.xcb.incremental_present.*` group (360 cases) clean: 1
+`Pass`/0 `Fail`/359 `NotSupported` (only `fifo` present mode is
+implemented, consistent with every other WSI row's scope, not a
+regression).
+
+Also attempted a full `dEQP-VK.wsi.xcb.*` group re-run (4,029 cases) to
+check for any wider regression from this fix. Two independent attempts
+(with a fresh `Xvfb` restart between them) both crashed with a real
+`Segmentation fault` shortly after `swapchain.render.10swapchains` -- at a
+*different* specific subsequent case each time (`10swapchains2` in one
+run, `2swapchains` in the other). Confirmed both crash-adjacent cases
+pass/fail cleanly with no crash when run in isolation, ruling out a
+single case as the trigger. This looks like a real, cumulative resource
+leak (xcb connections/windows/some handle never released) that only
+manifests once enough WSI cases have run in the same process -- distinct
+from H10g's own (already-closed, and shown to be unrelated)
+count-dependent-limit hypothesis, and entirely orthogonal to this row's
+own `BitField*` shader-lowering scope. Rather than chase an unrelated,
+harder-to-reproduce crash inside this session (it did not reproduce with
+the exact same case run standalone, so isolating it needs a real
+`gdb`/`valgrind`/`ASan` investigation of its own), filed it as a new
+roadmap row, H10j, for a future session -- keeping H10h's own closure
+focused on the shader-lowering bug it actually asked about.
+
+Checked `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+change needed, since this is a pure correctness fix to an already-
+implemented op family, not a new capability. `FeMeVulkanDesign.md` needed
+no update either -- this is an MLIR-conversion-layer bug fix, not a
+Vulkan-API-shape design decision.
