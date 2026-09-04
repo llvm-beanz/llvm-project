@@ -57669,3 +57669,172 @@ built incrementally with head/tail or context-window flags, it's easy to
 silently truncate a diagnostic block that spans more lines than the
 context window covers -- worth re-verifying total counts add up exactly
 before writing them into a permanent report.
+
+# H10f: SPIR-V matrix arithmetic op family (MatrixTimesVector et al.)
+
+## Starting point
+
+H10d's own real CTS re-run (fixing the `CompositeConstruct`-to-matrix
+legalization gap) revealed that 4 of its 6 previously-blocked
+`dEQP-VK.wsi.xcb.swapchain.render.*` cases (`basic`/`basic2`/
+`2swapchains`/`2swapchains2`) now failed one layer deeper, on
+`spirv.MatrixTimesVector` -- an ordinary `mat4 * vec4` vertex transform,
+about as common a shape as GLSL shaders get. `grep`-confirming zero
+matches for any of the five related op names
+(`MatrixTimesVector`/`VectorTimesMatrix`/`MatrixTimesMatrix`/
+`MatrixTimesScalar`/`Transpose`) anywhere in `SPIRVToLLVMPatterns.cpp`
+made this an easy scoping call: implement the whole family in one pass,
+since a `mat4*vec4` in a vertex shader all but guarantees `mat4*mat4`
+(model-view-projection composition) and probably `Transpose` (normal
+matrices) are close behind in real CTS coverage too.
+
+## Design
+
+Read `SPIRVMatrixOps.td` directly rather than working from memory, since
+correctness here is genuinely subtle (this is exactly the kind of file
+where "I'm pretty sure MatrixTimesVector's semantics are..." gets you a
+transposed result that still type-checks and still passes a
+shape-only lit test). Two things from that reading shaped the whole
+design:
+
+1. **`MatrixTimesVector` and `VectorTimesMatrix` are NOT the same
+   algorithm transposed** -- despite `Result = Matrix * Vector` vs.
+   `Result = Vector * Matrix` looking like mirror images of each other.
+   `MatrixTimesVector`'s result has the *matrix's* row count, and is a
+   weighted sum of *whole columns* (`result = Σ_j vector[j] *
+   column[j]`) -- never any horizontal (cross-lane) reduction, since
+   each scalar weight multiplies an entire already-output-shaped column.
+   `VectorTimesMatrix`'s result has the *matrix's* column count, and
+   needs one horizontal reduction (a dot product) *per output lane*
+   (multiply the vector against one column, then sum that column's own
+   lanes down to a scalar, then place that scalar into the
+   corresponding output lane). Writing this out in a comment right next
+   to both functions felt necessary -- I nearly reached for "just call
+   the other one with swapped arguments" at first, which would have
+   silently produced wrong results for any non-square matrix (right
+   shapes, wrong math) rather than a compile error, exactly the kind of
+   bug a FileCheck-only test only catches if the test itself uses
+   non-square dimensions.
+
+2. **`MatrixTimesScalarOp`'s own assembly format has no `->
+   type($result)` clause** -- confirmed directly from the `.td` file's
+   `assemblyFormat` string, since `AllTypesMatch<["matrix","result"]>`
+   already makes the result type redundant to spell out. This bit me
+   immediately: my first hand-written scratch test file included an
+   explicit `-> !spirv.matrix<...>` suffix on this one op (copy-pasted
+   from the pattern every *other* op in the file uses) and got a genuine
+   parse error (`expected operation name in quotes`) until I removed it.
+   Worth remembering for anyone extending this test file later --
+   `MatrixTimesScalar` really is the odd one out here, not a bug in the
+   test.
+
+`MatrixTimesMatrix` reuses `computeMatrixTimesVector` once per column of
+the right-hand operand -- this is just the literal mathematical
+definition (`result.column[j] = LeftMatrix * RightMatrix.column[j]`),
+and sharing the helper rather than re-deriving the same weighted-sum
+logic a third time felt like the right level of DRY-ness (three
+call-sites, one already-tested implementation, versus three separately-
+maintained near-duplicates that could quietly drift apart on a future
+edit to one but not the others).
+
+`broadcastScalar` (insertelement-into-poison + zero-mask
+`shufflevector`) was needed because there's no direct "multiply a vector
+by a scalar" instruction to reach for in LLVM dialect -- this is the
+standard idiom real backends use for exactly this, and it was worth
+double-checking `LLVM::ShuffleVectorOp::create`'s own `build()` method to
+confirm it infers the result type from the mask length rather than
+needing an explicit result-type argument (it does), since guessing wrong
+there would have been a compile error, not a silent bug.
+
+## What actually happened when I ran the real CTS re-run
+
+This is the part worth recording in the most detail, because it took the
+most time and very nearly led me down a wrong path.
+
+After implementing, building, and lit-testing the five patterns (all
+green), I rebuilt the ICD and ran the four previously-named CTS cases
+one at a time (`-n dEQP-VK.wsi.xcb.swapchain.render.basic`, then
+`basic2`, then `2swapchains`, then `2swapchains2` -- one `deqp-vk`
+process invocation per case, to get a clean individual pass/fail for
+each). The results were maddeningly inconsistent across repeated runs of
+the *exact same* case: `basic` would `Pass` on one invocation, then
+`Fail` at `vkCreateSwapchainKHR` with `VK_ERROR_INITIALIZATION_FAILED`
+on the very next, with nothing in the environment changed between them.
+
+My first hypothesis (killing an hour) was that this was a real,
+deterministic bug correlated with the `AcquireNextImage2Wrapper` template
+parameter (`basic2`/`2swapchains2`/`10swapchains2` "always" failed in my
+early samples, `basic`/`2swapchains`/`10swapchains` "usually" passed) --
+plausible on its face, since a device/instance created differently to
+support `vkAcquireNextImage2KHR` could in principle behave differently
+enough to matter. I added temporary `fprintf` debug instrumentation to
+`Swapchain.cpp`/`XcbSurface.cpp` (never committed -- reverted via `git
+checkout --` once done) to trace exactly which validation check was
+tripping, and the debug output was the real "aha": the surface's
+`currentExtent` was coming back as the spec's own `{UINT32_MAX,
+UINT32_MAX}` "undefined size" sentinel, meaning `currentSurfaceExtent`'s
+own `xcb_get_geometry` query was failing -- and `xcb_connection_has_error()`
+on that same connection returned `XCB_CONN_ERROR` (a genuine, low-level
+I/O connection failure) *immediately* at `vkCreateXcbSurfaceKHR`'s own
+entry, before this ICD's code had done anything at all with that
+connection yet.
+
+That reframed the whole investigation: this wasn't a matrix-arithmetic
+bug, a device-creation bug, or even a `feme`-side bug at all -- it was
+CTS's own `xcb_connect()` call, deep inside its own `NativeObjects`
+window-creation code, occasionally failing at the raw socket/protocol
+level before my ICD ever got a chance to touch it. A hand-written,
+completely independent C program using the same `libxcb` directly
+(create a window, query its geometry) against the same `Xvfb :99`
+succeeded every single time I tried it manually -- but repeatedly
+launching many separate `deqp-vk` processes back-to-back against that
+one long-running `Xvfb` (which is exactly what my one-case-per-process
+`-n` loop was doing, dozens of times in a few minutes, far more
+aggressively than a real CTS run's own natural per-test-case pacing)
+reproduced the flake reliably. Running the *entire* `render.*` subgroup
+in a single `deqp-vk` process invocation instead (one process, one
+connection reused/recreated at CTS's own natural internal pace) made the
+flake almost disappear, confirming the process-launch-rate theory rather
+than a real code bug in either `feme` or CTS itself.
+
+The lesson I'm keeping for future sessions: when gathering "does this
+specific CTS case pass" data by running `deqp-vk -n <one case>` in a
+tight loop across many separate process launches, don't trust a single
+run's result at face value if it looks surprising -- prefer running the
+whole containing test *group* in one process invocation instead, which
+is both closer to how CTS is actually meant to be run and apparently far
+less prone to this particular kind of environment-level connection
+flakiness. I also want to flag, for whoever reads this later: this
+flakiness is real and reproducible in *this* environment specifically,
+but I have no way to know whether it's specific to this sandboxed Xvfb
+setup or would show up against a "real" X server too -- it's recorded in
+`VulkanCTSReport.md` as an observation, not a roadmap-blocking bug,
+precisely because I can't yet tell which of those two categories it
+belongs in.
+
+## The genuinely new bug this fix uncovered
+
+Once I ran the whole `render.*` group in a single process (the
+reliable way), the picture was completely clean: `basic`/`2swapchains`
+(the two cases using the ordinary, already-implemented
+`vkAcquireNextImageKHR`) now **genuinely `Pass`** -- confirmed rendering
+and presenting real triangle output, not just "legalization no longer
+complains." `basic2`/`2swapchains2` (the `vkAcquireNextImage2KHR`
+variants) also cleared the matrix-arithmetic legalization cleanly with
+zero diagnostic output, but crashed with a real `SIGSEGV` one layer
+further in. Running the group under `gdb` pinned this precisely: a call
+through a null function pointer inside CTS's own
+`multiSwapchainRenderTest<AcquireNextImage2Wrapper>` -- meaning this
+ICD's own `vkGetDeviceProcAddr` returns null for `vkAcquireNextImage2KHR`
+(confirmed via `grep`: it doesn't exist anywhere in `feme/lib/Vulkan/`),
+and CTS calls through that null pointer unconditionally rather than
+checking for it. This is a distinct, genuine ICD conformance gap (a core
+Vulkan 1.1 command this ICD's own advertised `apiVersion = 1.4`
+obligates implementing, exactly the same "every core command this
+version claims must be present" precedent H10c's device-group family
+already established) -- split off as new roadmap milestone H10i rather
+than folded into this row, since it's an entirely separate command with
+its own separate fix (most likely a thin wrapper around the existing
+`vkAcquireNextImageKHR`/`Swapchain::acquireNextImage` logic, given this
+ICD's already-established single-physical-device-group scope makes
+`VkAcquireNextImageInfoKHR::deviceMask` trivially satisfiable).
