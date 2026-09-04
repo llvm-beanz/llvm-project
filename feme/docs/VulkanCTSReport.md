@@ -24345,3 +24345,86 @@ blocker was uncovered by this fix.
 **Disposition.** Roadmap H29i closed (struck through in `Roadmap.md`). No
 new follow-on row needed; every remaining `graphics_library.*` failure
 this re-run surfaced was already tracked by an existing row.
+
+## Roadmap H29j: measured impact
+
+**Goal.** Fix a graphics-pipeline-library merge supposedly losing its own
+depth-attachment format -- `"depth testing/writes need a depth attachment
+in the pipeline's render target"`, 12 of H29f's own re-run's
+`graphics_library.*` failures, confined to `misc.bind_null_descriptor_set.*`.
+
+**Root cause (not what the row's own diagnostic implied).** Reading
+`PipelineLibraryMiscTestInstance::runNullDescriptorSet()`
+(`vktPipelineLibraryTests.cpp`) confirmed the render pass it builds
+(`makeRenderPass(vk, device, m_colorFormat)`) has only a color attachment
+-- no dynamic rendering, no `VkPipelineRenderingCreateInfo` -- so the
+`VkPipelineRenderingCreateInfo`-capture gaps found while investigating (see
+H29q below) could not be this row's own cause. Tracing further:
+`updatePostRasterization` (the shared CTS helper both the library and
+monolithic variants of this test call) defaults `enableDepth` to `true`,
+so the fragment-stage library part's `VkPipelineDepthStencilStateCreateInfo`
+statically enables `depthTestEnable`/`depthWriteEnable` even though the
+shared render pass has no depth attachment at all. A real CTS re-run of
+both `misc.bind_null_descriptor_set.*` (library) and its sibling
+`misc.other.null_descriptor_set_in_monolithic_pipeline` (a plain,
+non-library pipeline built the exact same way) showed **both** hit the
+exact same diagnostic -- proving this is not a graphics-pipeline-library
+merge/capture bug (the render pass and depth-stencil state were both being
+carried through to `compileGraphicsPipeline` correctly), but a
+pre-existing, general bug in `translateDepthStencilState`: it rejected
+pipeline creation whenever depth/stencil test/write was enabled (statically
+or only via a declared dynamic state) but the render target had no
+matching attachment. Per the Vulkan spec ("If there is no depth attachment
+then the depth test is skipped.", `fragops.adoc`), this is legal usage --
+the test/write is simply a no-op at draw time, not a creation-time error.
+No VUID requires the opposite (checked `validusage.json`/`pipelines.adoc`
+for any "`depthTestEnable` must be `VK_FALSE` when no depth attachment"
+rule; none exists).
+
+**Fix.** `translateDepthStencilState` now computes `HasDepthAttachment`
+(`Targets.DepthStencil` present and a supported format) and, whenever a
+depth test/write/bounds-test is requested (statically or via a declared
+dynamic state) but `HasDepthAttachment` is false, forces the corresponding
+`NeedsDepth`/`NeedsStencil` flag off instead of returning an error -- so
+`Out.Depth`/`Out.Stencil` come out fully disabled (their zero-initialized
+default) rather than rejecting the pipeline. The dynamic-state-only
+(`!Info`) early-return path had the same two error checks removed for the
+same reason (a dynamically-enabled test still resolves from
+`DynamicGraphicsState` at draw time, not from this function, so there is
+nothing here to force off in the first place).
+
+**Testing.** Two pre-existing unit tests encoded the old, spec-incorrect
+expectation and were updated: `RejectsUnimplementedStateCombinations`'s
+depth sub-case (removed -- no longer a rejection case) and
+`DynamicDepthTestEnableRequiresDepthAttachment` (renamed
+`DynamicDepthTestEnableToleratesNoDepthAttachment`, now asserting success).
+Added `AcceptsDepthTestWithNoDepthAttachment`, covering the static shape
+and asserting the resolved `DepthState` comes out with both `TestEnable`
+and `WriteEnable` false. Full `ninja check-feme`: 2513/2572 passed (59
+unsupported, 0 unexpected failures); `FeMeVulkanTests` 642/642 passed.
+
+**CTS re-run.** (`VK_ICD_FILENAMES` + `FEME_VULKAN_LOG_CREATION_ERRORS=1`)
+
+| Group | Before | After |
+|---|---|---|
+| `misc.bind_null_descriptor_set.*` | 0/7 (0.0%) | **7/7 (100.0%)** |
+| `misc.other.null_descriptor_set_in_monolithic_pipeline` | 0/1 | **1/1** |
+| `graphics_library.*` (836 cases) | 99/449/288 (H29i baseline) | **110/438/288** |
+| `cache.*` (773 cases) | 297/475/1 | 297/475/1 (unaffected, as expected) |
+
+The targeted diagnostic (`"depth testing/writes need a depth attachment
+..."`) is fully eliminated from both groups. `cache.*` is unchanged,
+confirming the fix is correctly scoped (its own remaining failures are
+H29g's hull-stage cross-control-point-read gap and H29o's geometry-stage
+topology-mismatch gap, neither touched by this change).
+
+**Disposition.** Roadmap H29j closed (struck through in `Roadmap.md`), with
+a correction: the row's own diagnostic ("graphics-pipeline-library merge
+loses its own depth-attachment format") was not the real root cause --
+this was a general `translateDepthStencilState` bug exposed by, but not
+caused by, graphics-pipeline-library. Two additional, independently-real
+gaps discovered while ruling out the render-target-merge hypothesis
+(`synthesizeLinkedGraphicsPipelineCreateInfo` never forwarding
+`Result.pNext` or `Result.pDynamicState`) were filed as their own new row,
+H29q, since neither is this row's own cause and both need their own
+reduction/design before fixing.
