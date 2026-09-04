@@ -4070,7 +4070,14 @@ public:
 /// column, so it lowers to an `llvm.mlir.poison` seed with one
 /// `llvm.insertvalue` per column, each constituent inserted as-is (already
 /// a converted column vector, with no "contiguous subset"/tight-vector
-/// reassembly the vector/struct cases above need).
+/// reassembly the vector/struct cases above need). The array case (e.g. a
+/// tessellation-control-shader patch function assembling its own
+/// `HSInput[3]`-shaped output from three per-control-point struct values)
+/// mirrors the matrix case exactly -- `OpCompositeConstruct` for an array
+/// result requires exactly one whole-element constituent per array
+/// element, already of the array's own element type, so it lowers the same
+/// way: one `llvm.insertvalue` per element, each constituent inserted
+/// as-is.
 class CompositeConstructPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeConstructOp> {
 public:
@@ -4085,6 +4092,9 @@ public:
 
     if (auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(Op.getType()))
       return convertMatrix(Op, Adaptor, Rewriter, MatrixTy);
+
+    if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Op.getType()))
+      return convertArray(Op, Adaptor, Rewriter, ArrayTy);
 
     auto ResultType = mlir::dyn_cast<mlir::VectorType>(Op.getType());
     if (!ResultType || ResultType.getRank() != 1)
@@ -4227,6 +4237,48 @@ private:
     for (auto [Index, Column] : llvm::enumerate(Adaptor.getConstituents()))
       Result = mlir::LLVM::InsertValueOp::create(
           Rewriter, Loc, Result, Column,
+          llvm::ArrayRef<int64_t>{static_cast<int64_t>(Index)});
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+
+  /// Builds an array's `!llvm.array` from one whole-element constituent per
+  /// array element (e.g. a tessellation-control-shader patch function's own
+  /// `HSInput[3]` output, assembled from three already-converted `HSInput`
+  /// struct values, one per control point) -- see this class's own file
+  /// comment.
+  mlir::LogicalResult convertArray(mlir::spirv::CompositeConstructOp Op,
+                                   OpAdaptor Adaptor,
+                                   mlir::ConversionPatternRewriter &Rewriter,
+                                   mlir::spirv::ArrayType ArrayTy) const {
+    mlir::Type DstType = getTypeConverter()->convertType(ArrayTy);
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(DstType);
+    if (!ArrTy)
+      return Rewriter.notifyMatchFailure(Op, "not an LLVM array result");
+
+    // `OpCompositeConstruct` for an array result requires exactly one
+    // constituent per element (SPIR-V spec, `OpCompositeConstruct`'s own
+    // "Array type" validation rule), each already of the array's own
+    // (converted) element type -- unlike the vector case's "contiguous
+    // subset of scalars" flexibility.
+    if (Adaptor.getConstituents().size() != ArrTy.getNumElements())
+      return Rewriter.notifyMatchFailure(
+          Op, "constituent count does not match array element count");
+
+    mlir::Type ElementTy = ArrTy.getElementType();
+    for (mlir::Value Constituent : Adaptor.getConstituents()) {
+      if (Constituent.getType() != ElementTy)
+        return Rewriter.notifyMatchFailure(
+            Op, "constituent type does not match array element type");
+    }
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ArrTy);
+    for (auto [Index, Element] : llvm::enumerate(Adaptor.getConstituents()))
+      Result = mlir::LLVM::InsertValueOp::create(
+          Rewriter, Loc, Result, Element,
           llvm::ArrayRef<int64_t>{static_cast<int64_t>(Index)});
     Rewriter.replaceOp(Op, Result);
     return mlir::success();

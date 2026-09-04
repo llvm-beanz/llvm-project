@@ -1,11 +1,12 @@
 // RUN: feme-opt --feme-convert-spirv-to-llvm --split-input-file %s | FileCheck %s
 
-// Checks that `spirv.CompositeConstruct` building a vector, struct, or
-// matrix converts, which MLIR has no pattern for at all: a vector result
+// Checks that `spirv.CompositeConstruct` building a vector, struct, matrix,
+// or array converts, which MLIR has no pattern for at all: a vector result
 // lowers to an `llvm.mlir.poison` seed with one `llvm.insertelement` per
 // lane; a struct result lowers similarly with one `llvm.insertvalue` per
 // member; a matrix result (roadmap H10d) lowers similarly with one
-// `llvm.insertvalue` per column.
+// `llvm.insertvalue` per column; an array result (roadmap L22) lowers the
+// same way as the matrix case, with one `llvm.insertvalue` per element.
 
 // A splat (e.g. HLSL's `.xxx` swizzle) constructs every lane from the same
 // scalar constituent.
@@ -121,5 +122,43 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @construct_matrix(%c0 : vector<2xf32>, %c1 : vector<2xf32>) -> !spirv.matrix<2 x vector<2xf32>> "None" {
     %0 = spirv.CompositeConstruct %c0, %c1 : (vector<2xf32>, vector<2xf32>) -> !spirv.matrix<2 x vector<2xf32>>
     spirv.ReturnValue %0 : !spirv.matrix<2 x vector<2xf32>>
+  }
+}
+
+// -----
+
+// Checks that `spirv.CompositeConstruct` building an array-of-struct value
+// (roadmap L22, e.g. a tessellation-control-shader patch function's own
+// `HSInput[3]`-shaped output, assembled from three already-converted
+// `HSInput` struct values, one per control point) converts: MLIR has no
+// pattern at all for an array-result `CompositeConstruct` (only the
+// vector, struct, and matrix cases above were previously implemented),
+// discovered by a real check-hlsl-feme-vk run
+// (Feature/Semantics/HullSystemValues.test,
+// Feature/Semantics/DomainSystemValues.test) failing
+// `vkCreateGraphicsPipelines` with `"failed to legalize operation
+// 'spirv.CompositeConstruct' that was explicitly marked illegal"`. Mirrors
+// the matrix case exactly: lowers to an `llvm.mlir.poison` seed with one
+// `llvm.insertvalue` per element, each already-converted whole-element
+// constituent inserted as-is.
+
+// CHECK-LABEL: llvm.func @construct_array_of_struct
+// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.array<3 x struct<(vector<4xf32>)>>
+// CHECK: %[[V0:.*]] = llvm.insertvalue %arg0, %[[POISON]][0]
+// CHECK: %[[V1:.*]] = llvm.insertvalue %arg1, %[[V0]][1]
+// CHECK: %[[V2:.*]] = llvm.insertvalue %arg2, %[[V1]][2]
+// CHECK: llvm.return %[[V2]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @construct_array_of_struct(
+      %c0 : !spirv.struct<HSInput, (vector<4xf32> [0])>,
+      %c1 : !spirv.struct<HSInput, (vector<4xf32> [0])>,
+      %c2 : !spirv.struct<HSInput, (vector<4xf32> [0])>)
+      -> !spirv.array<3 x !spirv.struct<HSInput, (vector<4xf32> [0])>> "None" {
+    %0 = spirv.CompositeConstruct %c0, %c1, %c2
+        : (!spirv.struct<HSInput, (vector<4xf32> [0])>,
+           !spirv.struct<HSInput, (vector<4xf32> [0])>,
+           !spirv.struct<HSInput, (vector<4xf32> [0])>)
+        -> !spirv.array<3 x !spirv.struct<HSInput, (vector<4xf32> [0])>>
+    spirv.ReturnValue %0 : !spirv.array<3 x !spirv.struct<HSInput, (vector<4xf32> [0])>>
   }
 }
