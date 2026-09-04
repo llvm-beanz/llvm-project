@@ -23960,3 +23960,72 @@ follow-on rows added for the gaps this row's own re-run surfaced: H29d
 (inline shader-module creation), H29e (`feme-cpu-wrap-hull` unsupported
 input system value), and H29f (systematic characterization of the remaining
 unattributed `Failed` cases).
+
+## Roadmap H29d: measured impact (inline shader-module creation)
+
+**Context.** H29c's own crash-fix left `compileComputePipeline` and
+`compileGraphicsStage` both rejecting a null `stage.module` cleanly rather
+than crashing, deferring the real, spec-legal case
+`VK_EXT_graphics_pipeline_library` newly exposes: a `VkPipelineShaderStage
+CreateInfo` with `module == VK_NULL_HANDLE` and a chained
+`VkShaderModuleCreateInfo`, compiled directly at pipeline-creation time
+with no separate `VkShaderModule` object at all. This row implements that
+inline path.
+
+**Change.** `Pipeline.h`/`.cpp` add a shared `resolveShaderStageModule`:
+given a `VkPipelineShaderStageCreateInfo`, it returns the module behind a
+real handle unchanged, or -- when `module` is null -- walks `pNext` for a
+`VkShaderModuleCreateInfo` and compiles it into an owned, caller-held
+`ShaderModule`, reusing `vkCreateShaderModule`'s own `codeSize` validation
+via a newly factored-out `copyShaderModuleWords` (also used to simplify
+`vkCreateShaderModule` itself). `compileComputePipeline` (Pipeline.cpp) now
+calls this instead of the H29c placeholder rejection;
+`compileGraphicsStage` (GraphicsPipeline.cpp) does the same, replacing its
+own `!StageInfo.module` early return. A third, previously-unguarded
+dereference site this row's own audit found -- `validateMeshOrTaskGroupSize`,
+called on the same stage info after `compileGraphicsStage` already resolved
+it -- re-resolves independently rather than threading the pointer through,
+a deliberate, documented "cheap to duplicate, not worth coupling two
+otherwise-unrelated call sites" tradeoff. The graphics pipeline-cache-key
+computation (`compileGraphicsPipeline`) already tolerated a null module
+handle without crashing (`fromHandle(nullptr)` is a plain `nullptr`, not a
+dereference); documented in place that it now harmlessly skips caching for
+an inline-module stage rather than keying on the inline bytes, an honest
+simplification rather than a correctness gap.
+
+**Verification.** 5 new unit tests: `PipelineTest.cpp`'s
+`CompilesInlineShaderModuleComputePipeline`,
+`RejectsNullModuleWithNoInlineShaderModuleCreateInfo`,
+`RejectsInlineShaderModuleWithMisalignedCodeSize`; `GraphicsPipelineTest.
+cpp`'s `CompilesInlineShaderModuleVertexStage` (mixed with a normal,
+handle-based fragment stage -- the spec permits freely mixing inline and
+handle-based stage modules within one pipeline) and
+`RejectsNullVertexModuleWithNoInlineShaderInfo`. `ninja check-feme` (ccache
++ assertions, `build2/`) passes in full: 2508/2567 (59 pre-existing
+`Unsupported`, 0 `Failed`), up 5 tests from H29c's own 2503/2562 baseline,
+0 regressions.
+
+**CTS impact.** Correct ICD confirmed via `vulkaninfo --summary`
+(`deviceName = FeMe CPU Vulkan Device`).
+
+| Group | Cases | Passed (H29c -> H29d) | Failed (H29c -> H29d) | NotSupported (H29c -> H29d) |
+|---|---|---|---|---|
+| `graphics_library.*` | 836 | 81 -> 83 | 467 -> 465 | 288 -> 288 (unchanged) |
+| `cache.*` | 773 | 297 -> 297 (unchanged) | 475 -> 475 (unchanged) | 1 -> 1 (unchanged) |
+
+`dEQP-VK.pipeline.pipeline_library.graphics_library.misc.non_graphics.
+shader_module_info_comp` -- the exact compute-pipeline case whose crash
+motivated H29c's own placeholder rejection and this row's real fix -- now
+genuinely `Pass`es (confirmed directly in the log, not just inferred from
+the aggregate delta). The modest two-case-wide `graphics_library.*` shift
+is expected: inline shader-module creation is a small, specific gap within
+that group's own much larger remaining `Failed` set (still dominated by
+the unrelated causes H29f is scoped to characterize). `cache.*` shows no
+delta, exactly as expected -- its own dominant remaining gap is H29e's
+`feme-cpu-wrap-hull` issue, unrelated to shader-module creation, and no
+`cache.*` case happens to combine tessellation with an inline module.
+
+**Disposition.** Roadmap H29d closed (struck through in `Roadmap.md`). No
+new follow-on rows: the remaining `graphics_library.*`/`cache.*` `Failed`
+cases are already tracked under H29e (hull-stage system value) and H29f
+(systematic characterization of the rest).

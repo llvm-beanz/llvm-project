@@ -2016,7 +2016,7 @@ VulkanCTSReport.md for the real `dEQP-VK.tessellation.winding.*` numbers,
 and roadmap H4j for a distinct, smaller rasterizer-precision defect that
 run surfaced next.
 
-**Status (roadmap H29a-H29c): `VK_EXT_graphics_pipeline_library`
+**Status (roadmap H29a-H29d): `VK_EXT_graphics_pipeline_library`
 implemented and advertised.** A `VkGraphicsPipelineCreateInfo` with
 `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` set, plus a chained
 `VkGraphicsPipelineLibraryCreateInfoEXT`, no longer runs the monolithic
@@ -2050,10 +2050,17 @@ with a chained `VkShaderModuleCreateInfo` in `pNext` for *any* pipeline
 stage (not just a library one), which `compileComputePipeline`
 (`Pipeline.cpp`) dereferenced unconditionally; fixed with the same guard
 `compileGraphicsStage` already had, deferring full inline-shader-module
-support to roadmap H29d. See "Roadmap H29c: measured impact" in
+support to roadmap H29d, which now implements it: a shared
+`resolveShaderStageModule` (`Pipeline.h`/`.cpp`) resolves either a real
+`VkShaderModule` handle or, when `module` is null, compiles a chained
+`VkShaderModuleCreateInfo` directly into an owned, caller-held
+`ShaderModule` -- used by both `compileComputePipeline` and
+`compileGraphicsStage`/`validateMeshOrTaskGroupSize`, so a stage compiled
+this way needs no separate `vkCreateShaderModule` call at all. See
+"Roadmap H29c: measured impact" and "Roadmap H29d: measured impact" in
 `VulkanCTSReport.md` for the real before/after `dEQP-VK.pipeline.
-pipeline_library.*` figures and the remaining named gaps (H29d, H29e,
-H29f).
+pipeline_library.*` figures and the remaining named gaps (H29e, H29f).
+
 
 ### Draw commands and vertex data
 
