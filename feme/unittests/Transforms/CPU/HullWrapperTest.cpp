@@ -91,6 +91,62 @@ TEST(HullWrapperTest, LowersSelfIndexedStageIOAndBuildsWrapper) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST(HullWrapperTest, LowersRepeatedOutputControlPointIDReads) {
+  LLVMContext Ctx;
+  // (roadmap H29g) A real SPIR-V hull shader reads `gl_InvocationID` once
+  // per use rather than once per function, so an entry point indexing two
+  // attributes by it produces two separate `OutputControlPointID` loads.
+  // Both are the invocation's own control point index and both attribute
+  // loads must therefore be accepted.
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @hs_main() #0 {
+      %id0 = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+      %pos = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %id0)
+      %id1 = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+      %col = call float @feme.stage.input.load.f32(i32 3, i32 0, i32 0, i32 %id1)
+      %sum = fadd float %pos, %col
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %sum, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement In;
+  In.ElementID = 0;
+  In.Direction = SignatureDirection::Input;
+  In.ComponentType = SignatureComponentType::Float;
+  SignatureElement Color = In;
+  Color.ElementID = 3;
+  SignatureElement Out = In;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::Output;
+  SignatureElement ID;
+  ID.ElementID = 2;
+  ID.Direction = SignatureDirection::Input;
+  ID.SystemValue = SignatureSystemValue::OutputControlPointID;
+  ID.ComponentType = SignatureComponentType::UInt;
+  Sig.Elements = {In, Out, ID, Color};
+  dxil::setEntrySignature(*M->getFunction("hs_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  HullWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_hs_main"));
+  for (const Instruction &I : instructions(*M->getFunction("hs_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST(HullWrapperTest, DiagnosesCrossControlPointInputLoad) {
   LLVMContext Ctx;
   // Reads control point 1's input unconditionally -- not this invocation's

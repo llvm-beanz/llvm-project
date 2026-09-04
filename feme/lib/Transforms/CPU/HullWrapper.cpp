@@ -35,10 +35,12 @@
 //    invocation model), so a control point reading a *different* control
 //    point's input needs an addressing model this milestone does not build.
 //    `lowerHullInputLoad` requires the load's control-point-index operand to
-//    be either the invocation's own `OutputControlPointID` value (the
-//    common, and structurally required for embarrassingly-parallel
-//    per-control-point processing, case) or, when the function never reads
-//    that system value at all, the constant `0` -- matching
+//    be one of the invocation's own lowered `OutputControlPointID` reads
+//    (the common, and structurally required for embarrassingly-parallel
+//    per-control-point processing, case; there may be several equivalent
+//    such values, since a real SPIR-V shader reads `gl_InvocationID` once
+//    per use) or, when the function never reads that system value at all,
+//    the constant `0` -- matching
 //    `VertexWrapperPass`'s own precedent for its analogous "vertex" operand
 //    -- and is diagnosed otherwise instead of silently reading the wrong
 //    control point.
@@ -89,6 +91,7 @@
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -285,24 +288,29 @@ Value *lowerPatchVerticesIn(CallInst &CI, const WaveBodyEnv &WEnv,
 
 /// Lowers an ordinary (non-system-value) `feme.stage.input.load`, requiring
 /// the load's control-point-index operand (`CI`'s 4th argument) to be either
-/// \p SelfIndex (the invocation's own `OutputControlPointID`, already
-/// lowered by `lowerOutputControlPointID` above and therefore already
-/// present at every use by the time this runs) or the constant `0` if the
-/// function never reads that system value at all -- see the file comment's
-/// scope note. Returns null (having emitted a diagnostic) for any other
-/// operand.
+/// one of \p SelfIndices (a lowered `OutputControlPointID` read, i.e. the
+/// invocation's own control point index, already lowered by
+/// `lowerOutputControlPointID` above and therefore already present at every
+/// use by the time this runs) or the constant `0` if the function never
+/// reads that system value at all -- see the file comment's scope note.
+/// Returns null (having emitted a diagnostic) for any other operand.
+///
+/// (roadmap H29g) There is a *set* of self indices rather than a single one
+/// because a real SPIR-V shader reads `gl_InvocationID` once per use rather
+/// than once per function, so a hull entry point indexing several attributes
+/// by it lowers to several distinct, equivalent values.
 Value *lowerHullInputLoad(CallInst &CI, const SignatureElement &Elt,
                           const WaveBodyEnv &WEnv, const HullStageEnv &HEnv,
-                          Value *SelfIndex) {
+                          const SmallPtrSetImpl<Value *> &SelfIndices) {
   unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
   Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
   IRBuilder<> Builder(&CI);
 
   Value *ControlPoint = CI.getArgOperand(3);
-  bool SelfReference = ControlPoint == SelfIndex;
+  bool SelfReference = SelfIndices.contains(ControlPoint);
   auto *ControlPointConst = dyn_cast<ConstantInt>(ControlPoint);
   bool ZeroConstant = ControlPointConst && ControlPointConst->isZero();
-  if (!SelfReference && !(ZeroConstant && !SelfIndex)) {
+  if (!SelfReference && !(ZeroConstant && SelfIndices.empty())) {
     CI.getContext().emitError(
         &CI, "feme-cpu-wrap-hull: control-point phase only supports a "
              "control point reading its own input control point's "
@@ -400,7 +408,7 @@ bool lowerHullStageOps(Function &F) {
   // indexed by that same value already sees the replacement, since a
   // forward pass over `instructions(F)` visits a def before any use that
   // followed it in the source.
-  Value *SelfIndex = nullptr;
+  SmallPtrSet<Value *, 4> SelfIndices;
   for (Instruction &I : make_early_inc_range(instructions(F))) {
     auto *CI = dyn_cast<CallInst>(&I);
     if (!CI)
@@ -416,7 +424,8 @@ bool lowerHullStageOps(Function &F) {
                     SignatureDirection::Input);
     if (!Elt || Elt->SystemValue != SignatureSystemValue::OutputControlPointID)
       continue;
-    SelfIndex = lowerOutputControlPointID(*CI, *WEnv);
+    Value *SelfIndex = lowerOutputControlPointID(*CI, *WEnv);
+    SelfIndices.insert(SelfIndex);
     CI->replaceAllUsesWith(SelfIndex);
     CI->eraseFromParent();
   }
@@ -491,7 +500,7 @@ bool lowerHullStageOps(Function &F) {
         // generic per-control-point load below already addresses it
         // correctly regardless of *which* system value (if any) the
         // element represents.
-        Lowered = lowerHullInputLoad(*CI, *Elt, *WEnv, *HEnv, SelfIndex);
+        Lowered = lowerHullInputLoad(*CI, *Elt, *WEnv, *HEnv, SelfIndices);
         break;
       }
       if (!Lowered)
