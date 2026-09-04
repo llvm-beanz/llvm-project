@@ -37,15 +37,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H10e or other prerequisites blocking the H-series milestones?
+Can you work on H10j or other prerequisites blocking the H-series milestones?
 
-> **`dEQP-VK.wsi.xcb.swapchain.acquire.too_many` fails**: `"Implementation
-> failed to respond well acquiring too many images with 0 timeout"`, discovered
-> by H10b's own real, now-non-crashing `dEQP-VK.wsi.xcb.*` re-run (the 8th and
-> last of its 8 real failures, and the only one not sharing H10d's own
-> `render.*`-shaped root cause). Needs a real investigation into
-> `vkAcquireNextImageKHR`'s (`Swapchain.cpp`) own handling of a zero-timeout
-> acquire once every swapchain image is already acquired/unavailable -- CTS
-> expects a specific, spec-defined error response (most likely `VK_NOT_READY`,
-> the documented zero-timeout-and-nothing-available result) that this ICD's
-> current logic does not produce
+> **A real `deqp-vk` segfault partway through any full `dEQP-VK.wsi.xcb.*` group
+> run**, discovered by H10h's own real re-run of the whole group once its
+> `BitField*` fix let `incremental_present.*` clear pipeline creation for the
+> first time: two independent full-group attempts (a fresh `Xvfb` restart
+> between them) both crashed with `Segmentation fault` shortly after
+> `swapchain.render.10swapchains`, at a different specific case each time
+> (`10swapchains2` in one run, `2swapchains` in the other) -- ruling out a
+> single fixed case as the trigger and instead suggesting a real, cumulative
+> resource leak (most likely xcb connections/windows/some other per-case handle
+> this ICD's own `deqp-vk` client or `feme_vulkan` itself never releases) that
+> only trips once enough cases have run in the same process, not a per-case
+> count-dependent limit like H10g's own (already-closed, unrelated) hypothesis.
+> Confirmed NOT reproducible running the crash-adjacent cases in isolation (each
+> passes/fails cleanly alone, no crash) -- needs a real investigation (most
+> likely `gdb`/`valgrind`/`ASan` against a full-group run) to find what resource
+> actually leaks/exhausts across many consecutive WSI cases in one process,
+> entirely orthogonal to H10h's own shader-lowering scope
