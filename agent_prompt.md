@@ -37,15 +37,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29j or other prerequisites blocking the H-series milestones?
+Can you work on H29k or other prerequisites blocking the H-series milestones?
 
-> **A graphics-pipeline-library merge loses its own depth-attachment format**:
-> `"depth testing/writes need a depth attachment in the pipeline's render
-> target"`, 12 of H29f's own re-run's `graphics_library.*` failures, confined to
-> `misc.bind_null_descriptor_set.*`. The fragment-output-interface library part
-> (which owns the render target's attachment formats, per
-> `VkGraphicsPipelineLibraryFlagBitsEXT`) is a different part than the one whose
-> depth-test state is being checked; needs its own real pipeline reduction to
-> confirm whether the depth format is dropped by
-> `captureGraphicsPipelineLibraryState`'s own deep copy or lost during
-> `synthesizeLinkedGraphicsPipelineCreateInfo`'s own merge
+> **A real rendering-correctness mismatch in `independent_sets_random`'s own
+> IO-buffer/descriptor-contents check** (`vktIndependentSetsUtil.cpp`'s own
+> comparison, not a pipeline-creation-time diagnostic), 6 of H29f's own re-run's
+> `graphics_library.*` failures. Distinct from H29h's own legalization gap
+> (these 6 cases already clear pipeline creation and reach real rendering);
+> needs its own real reduction once H29h unblocks enough of this sub-group's own
+> cases to make one self-contained
