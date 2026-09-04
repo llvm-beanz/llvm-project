@@ -58301,3 +58301,91 @@ Checked `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
 needed -- this fix completes an already-claimed extension's command set
 rather than adding new capability. `FeMeVulkanDesign.md` needed no
 update either (no design deviation).
+
+# H10e: vkAcquireNextImageKHR ignores its own timeout, always returns VK_TIMEOUT instead of VK_NOT_READY for a zero timeout
+
+Picked up H10e, the last of H10's original 8 real
+`dEQP-VK.wsi.xcb.*` failures: `dEQP-VK.wsi.xcb.swapchain.acquire.too_many`
+failing with "Implementation failed to respond well acquiring too many
+images with 0 timeout". Like H10i, this row's own framing had already
+correctly diagnosed both the root cause (the zero-timeout case) and the
+likely fix (`VK_NOT_READY`), so this was mostly verification-driven
+implementation rather than open-ended investigation.
+
+## Confirming the exact spec requirement
+
+Rather than trust the milestone's own "most likely `VK_NOT_READY`"
+hedge, read the actual CTS test source
+(`vktWsiSwapchainTests.cpp`'s `acquireTooManyTest`) to get the precise,
+real acceptance criteria: it acquires every image but one, then does a
+zero-timeout acquire on the one remaining "always-acquired" slot and
+requires the result be exactly one of
+`VK_SUCCESS`/`VK_SUBOPTIMAL_KHR`/`VK_NOT_READY` -- confirming
+`VK_NOT_READY` (not, say, `VK_ERROR_OUT_OF_DATE_KHR` or some other
+plausible-sounding code) is genuinely the expected answer. Also read
+its neighboring `acquireTooManyTimeoutTest`, which does the identical
+setup but with a real nonzero (50ms) timeout and requires
+`VK_SUCCESS`/`VK_SUBOPTIMAL_KHR`/`VK_TIMEOUT` instead -- confirming
+`VK_TIMEOUT` and `VK_NOT_READY` are both real, spec-distinct, and
+already separately CTS-tested, not a case where returning one constant
+uniformly could accidentally satisfy both tests.
+
+## The bug, and the fix
+
+`vkAcquireNextImageKHR` (`Swapchain.cpp`) had its own `timeout`
+parameter marked `/*timeout*/` -- explicitly unused -- and always
+returned `VK_TIMEOUT` whenever no image was available, regardless of
+what timeout value was actually passed. This is a real behavioral bug,
+not just a missing optimization: the Vulkan spec reserves `VK_TIMEOUT`
+for a real wait that expired, but a zero-length timeout never begins
+waiting in the first place.
+
+Fixed with the smallest possible change: un-ignored the parameter,
+and changed the "no image available" return to
+`timeout == 0 ? VK_NOT_READY : VK_TIMEOUT`. Updated the surrounding
+comment to explain *why* this distinction is real (rather than just
+restating the two-line diff), since the previous comment's own
+"however long could let this call make progress" phrasing was itself
+subtly wrong about *why* immediate failure is correct -- it's not that
+a longer timeout couldn't help (true), it's that the two failure codes
+mean different things regardless of whether progress could ever be
+made.
+
+## Testing
+
+Added two `SwapchainTest.cpp` tests: one confirming the zero-timeout/
+no-image-available combination reports `VK_NOT_READY` (mirroring the
+existing `UINT64_MAX`-timeout `AcquireFailsOnceEveryImageIsAcquired`
+test), and one confirming a zero timeout is *not* a blanket override --
+it must still succeed normally (`VK_SUCCESS`) whenever an image
+genuinely is available, so the fix doesn't accidentally special-case
+"timeout is zero" into "always report VK_NOT_READY" instead of the
+correct "only when nothing's available and timeout is zero".
+
+`ninja check-feme` (assertions-enabled, ccache build2): 2462/2521, 0
+failures, up 2 tests from this row's own new coverage. Confirmed no
+regression to the existing `AcquireFailsOnceEveryImageIsAcquired`
+(`UINT64_MAX` timeout) test, which is unaffected by this change.
+
+## Real CTS verification
+
+Re-ran the exact reported case 3 times against the fixed ICD: all 3
+`Pass`. Re-ran its `too_many_timeout` sibling (the nonzero-timeout
+path, which this fix leaves entirely unchanged) to confirm no
+regression: still `Pass`. Re-ran the whole `dEQP-VK.wsi.xcb.swapchain.*`
+group for a wider check: 46/63 `Pass`, 0 `Fail`, 17 pre-existing
+`NotSupported` -- no regression anywhere in the group.
+
+This closes out the last of H10's original 8 real
+`dEQP-VK.wsi.xcb.*` failures (H10d/e/f/g/h/i, plus the two crashes
+H10b's own report separately closed already) -- the only H10-series
+item still open is H10j, the unrelated full-group `deqp-vk` segfault
+filed during H10h's own re-verification pass, which needs its own
+investigation session.
+
+Checked `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+change needed, a pure correctness fix to an already-implemented
+command's zero-timeout path. `FeMeVulkanDesign.md` needed no update --
+`Swapchain.h`'s own existing file comment on this ICD's synchronous
+acquire/present model already covers this case in enough generality
+that the fix is a straightforward consequence of it, not a deviation.
