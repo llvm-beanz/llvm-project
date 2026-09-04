@@ -294,6 +294,9 @@ enum SPIRVDecorationCode : uint32_t {
   SPIRVDecorationPatch = 15,
   SPIRVDecorationCentroid = 16,
   SPIRVDecorationSample = 17,
+  SPIRVDecorationOffset = 35,
+  SPIRVDecorationXfbBuffer = 36,
+  SPIRVDecorationXfbStride = 37,
   SPIRVDecorationLocation = 30,
   SPIRVDecorationComponent = 31,
   SPIRVDecorationIndex = 32,
@@ -327,6 +330,15 @@ struct ParsedSPIRVDecorations {
   bool Centroid = false;
   bool Sample = false;
   bool PerPrimitive = false;
+  /// (Roadmap H21a) `VK_EXT_transform_feedback`'s own three per-variable
+  /// decorations, feeding `SignatureElement::XfbBuffer`/`XfbOffset`/
+  /// `XfbStride` (see `buildStageIODecorationsAttr` in
+  /// SPIRVToLLVMPatterns.cpp, the writer side of this same encoding, and
+  /// `feme::SignatureElement`'s own field-level documentation for what
+  /// each means).
+  std::optional<uint32_t> XfbBuffer;
+  std::optional<uint32_t> XfbOffset;
+  std::optional<uint32_t> XfbStride;
 };
 
 ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
@@ -359,6 +371,18 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
     case SPIRVDecorationIndex:
       if (Arg)
         Result.Index = static_cast<uint32_t>(*Arg);
+      break;
+    case SPIRVDecorationOffset:
+      if (Arg)
+        Result.XfbOffset = static_cast<uint32_t>(*Arg);
+      break;
+    case SPIRVDecorationXfbBuffer:
+      if (Arg)
+        Result.XfbBuffer = static_cast<uint32_t>(*Arg);
+      break;
+    case SPIRVDecorationXfbStride:
+      if (Arg)
+        Result.XfbStride = static_cast<uint32_t>(*Arg);
       break;
     case SPIRVDecorationNoPerspective:
       Result.NoPerspective = true;
@@ -2085,6 +2109,16 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       Elt.Index = D.Index;
       if (D.BuiltIn)
         Elt.SystemValue = getSystemValueForBuiltIn(*D.BuiltIn);
+
+      // (Roadmap H21a) `XfbBuffer`'s presence is what makes `XfbOffset`/
+      // `XfbStride` meaningful (see `verifySignature`'s own
+      // `checkXfbCapture`); a real SPIR-V module always decorates all
+      // three together for a captured variable (the Vulkan spec requires
+      // it), so defaulting the latter two to 0 when `XfbBuffer` is absent
+      // matches every element that captures nothing.
+      Elt.XfbBuffer = D.XfbBuffer;
+      Elt.XfbOffset = D.XfbOffset.value_or(0);
+      Elt.XfbStride = D.XfbStride.value_or(0);
 
       StageIORowShape Shape = getStageIORowShape(ValueTy);
       std::tie(Elt.ComponentType, Elt.BitWidth) =

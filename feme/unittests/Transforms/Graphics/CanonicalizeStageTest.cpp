@@ -210,6 +210,57 @@ TEST(CanonicalizeStageTest, MapsSPIRVBuiltInsToSystemValues) {
   EXPECT_EQ(*Varying.Location, 0u);
 }
 
+/// (Roadmap H21a) `VK_EXT_transform_feedback`'s own `XfbBuffer` (36),
+/// `Offset` (35, reused for its transform-feedback meaning) and
+/// `XfbStride` (37) decorations map onto `SignatureElement::XfbBuffer`/
+/// `XfbOffset`/`XfbStride` for an `Output` variable that carries them, and
+/// leave `XfbBuffer` unset (`std::nullopt`) for one that does not (e.g.
+/// `gl_Position`, decorated only with `BuiltIn` here, never captured by a
+/// real shader). This test only exercises the reflection plumbing itself
+/// -- no feature bit is flipped and no buffer is actually written yet
+/// (that is a later roadmap H21 row).
+TEST(CanonicalizeStageTest, MapsXfbDecorationsToTransformFeedbackCapture) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_Position = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+    @out_var = external addrspace(8) global <4 x float>, !spirv.Decorations !1
+    define void @main() #0 {
+      %v = load <4 x float>, ptr addrspace(8) @gl_Position
+      store <4 x float> %v, ptr addrspace(8) @gl_Position
+      store <4 x float> %v, ptr addrspace(8) @out_var
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!2}
+    !1 = !{!3, !4, !5, !6}
+    !2 = !{i32 11, i32 0}
+    !3 = !{i32 30, i32 0}
+    !4 = !{i32 36, i32 1}
+    !5 = !{i32 35, i32 16}
+    !6 = !{i32 37, i32 32}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  const SignatureElement &Position = Sig->Elements[0];
+  EXPECT_EQ(Position.SystemValue, SignatureSystemValue::Position);
+  EXPECT_FALSE(Position.XfbBuffer.has_value());
+  EXPECT_EQ(Position.XfbOffset, 0u);
+  EXPECT_EQ(Position.XfbStride, 0u);
+
+  const SignatureElement &Varying = Sig->Elements[1];
+  ASSERT_TRUE(Varying.Location.has_value());
+  EXPECT_EQ(*Varying.Location, 0u);
+  ASSERT_TRUE(Varying.XfbBuffer.has_value());
+  EXPECT_EQ(*Varying.XfbBuffer, 1u);
+  EXPECT_EQ(Varying.XfbOffset, 16u);
+  EXPECT_EQ(Varying.XfbStride, 32u);
+}
+
 /// (Roadmap H2) `BuiltIn ViewIndex` (SPIR-V code 4440, `gl_ViewIndex`) maps
 /// to `SignatureSystemValue::ViewIndex` -- the multiview render-pass
 /// instance view a vertex/fragment invocation runs for, readable from
