@@ -37,15 +37,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29l or other prerequisites blocking the H-series milestones?
+Can you work on H29m or other prerequisites blocking the H-series milestones?
 
-> **A `graphics-pipeline-library` merge wrongly rejects a fragment stage with no
-> color output at all as missing a floating-point output**: `"fragment stage has
-> no floating-point output of ... components at location ... (SV_TargetN)"`, 6
-> of H29f's own re-run's `graphics_library.*` failures, confined to
-> `misc.other.view_index_from_device_index_in_all_stages*` (a `ViewIndex`-only
-> fragment stage, legitimately writing no color attachment). Shares a family
-> resemblance with the already-closed H21j (an empty/near-empty fragment stage's
-> own metadata gap) and H3a (`ViewportArrayIndex` fragment-input handling);
-> needs its own real reduction to confirm whether this is the same root cause
-> recurring in the library-merge path specifically
+> **A `graphics-pipeline-library` merge loses its own
+> render-target/dynamic-rendering state**: `"a graphics pipeline needs either a
+> VkRenderPass or a chained VkPipelineRenderingCreateInfo"`, 5 of H29f's own
+> re-run's `graphics_library.*` failures, confined to
+> `misc.other.{bad,null}_rendering_create_info` (deliberately-negative CTS
+> shapes the library-merge path may be validating too early, before every part's
+> own state is merged in)
