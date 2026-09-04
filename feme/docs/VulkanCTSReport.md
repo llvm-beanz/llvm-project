@@ -23470,3 +23470,77 @@ needed: confirmed, not assumed, by grepping both -- `VK_EXT_transform_
 feedback`'s `VulkanExtensionInventory.md` row already reads "Planned (in
 scope, not implemented)" from H21's own entry, which remains accurate
 until H21c actually advertises it.
+
+## Roadmap H21c: measured impact (first genuine, non-`NotSupported` result)
+
+**Scope.** `Executor.cpp` now captures each `Output`-direction,
+`XfbBuffer`-tagged vertex-shader output element's raw bytes into its
+bound transform-feedback buffer right after vertex invocation succeeds
+(gated off when a tessellation or geometry stage is present, matching
+H21a/H21b's single-stream/vertex-shader-only scope).
+`CommandBuffer.cpp`'s `GraphicsState` gained a real per-buffer running
+byte counter (`XfbCapturedBytes`): reset to zero at
+`vkCmdBeginTransformFeedbackEXT`, advanced by each draw that captures
+into it, and written back for real at `vkCmdEndTransformFeedbackEXT`
+(replacing H21b's honest hardcoded `0`). `transformFeedback`/
+`transformFeedbackDraw` feature bits are now `VK_TRUE` and
+`VK_EXT_transform_feedback` is genuinely advertised in
+`getSupportedDeviceExtensions()` (`geometryStreams` stays `VK_FALSE` --
+deferred to H21e).
+
+**Real `deqp-vk` re-run, correct ICD confirmed via the `feme_icd.json`
+manifest path:**
+- `dEQP-VK.transform_feedback.*` (133,719 cases): **30 passed** / 980
+  failed / 132,709 not supported -- the first genuine, non-`NotSupported`
+  result this group has ever produced (H21a/H21b were both a confirmed
+  zero delta). All 30 passes are in `simple.*`.
+- Of the 980 failures, three distinct root causes, isolated with
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1`:
+  - **973** (766 of `fuzz.*`, 205 of `simple.*` -- `basic_1_*`,
+    `resume_1_*`, `winding_*`, most of the group -- plus 0 of
+    `primitive_restart`) all fail `vkCreateGraphicsPipelines` with the
+    identical `"rasterizer discard is not implemented"` rejection
+    (`GraphicsPipeline.cpp:992-994`) -- a pre-existing, entirely
+    unrelated-to-transform-feedback gap (any pipeline requesting
+    `rasterizerDiscardEnable` hits the same rejection) that transform-
+    feedback-only capture tests happen to trip constantly, since they
+    routinely disable rasterization outright (only the vertex stage's
+    side effects matter to them). Broken out as roadmap H21g.
+  - **2** (`primitive_restart.static_primitive_restart_dynamic_primitive_
+    topology`/`static_primitive_restart_static_primitive_topology`) fail
+    `vkCreateGraphicsPipelines` with `"primitiveRestartEnable requires a
+    strip or fan primitive topology"` -- evaluated against the pipeline's
+    static topology even when `VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY` defers
+    the real topology to bind time. Broken out as roadmap H21h.
+  - **5** (`simple.backward_dependency`,
+    `simple.backward_dependency_beginqueryindexed_streamid_0`,
+    `simple.backward_dependency_endqueryindexed_streamid_0`,
+    `simple.backward_dependency_no_offset_array`,
+    `simple.draw_indirect_counter_resubmit`) clear pipeline creation and
+    fail with a real content mismatch (`"Failed at item 0 received:64
+    expected:0"`, `vktTransformFeedbackSimpleTests.cpp:1134`) -- a genuine,
+    in-scope capture-semantics gap in this row's own byte-counter design.
+    Broken out as roadmap H21i.
+- `dEQP-VK.api.info.*` (10,486 cases), as a general regression spot
+  check: 5,241 passed / 720 failed / 4,525 not supported -- matches
+  H21a/H21b's own recorded figures exactly, confirming no regression
+  from this row's own code change either.
+
+**`ninja check-feme`** (assertions-enabled, ccache build, `build2/`):
+2484/2543 tests pass (59 pre-existing `Unsupported`, 0 `Failed`), up 2
+tests from H21b's own 2482/2541 baseline (`ExecutorTest.cpp`'s
+`CapturesVertexShaderOutputToBoundTransformFeedbackBuffer` and
+`TransformFeedbackCaptureAppendsAcrossMultipleDraws`), 0 regressions.
+One existing test required a collateral update:
+`DrawTest.AdvertisesDynamicRenderingExtension`'s hardcoded
+`vkEnumerateDeviceExtensionProperties` count (33 -> 34), since
+`VK_EXT_transform_feedback` is now genuinely advertised alongside the
+existing thirty-three.
+
+`VulkanExtensionInventory.md`'s `VK_EXT_transform_feedback` row updated
+from "Planned (in scope, not implemented)" to "Advertised (single-
+stream, vertex-shader-only capture; no queries)", with a note on the
+still-missing `geometryStreams`/`primitives_generated_query` pieces
+(H21d/H21e). No `Vulkan14FeatureInventory.md` update needed: that
+document's own scope is core 1.0-1.4 mandatory features/limits, not
+extension-specific feature-struct bits like `transformFeedback`.

@@ -326,7 +326,7 @@ still out of scope (cooperative matrix/vector, per Part 4):**
 | `VK_EXT_texture_compression_astc_3d` | Not implemented |  |
 | `VK_EXT_texture_compression_astc_hdr` | Planned (in scope, not implemented) | roadmap E21: HDR block formats and decodeASTCBlockHDR exist, but no copy/blit/sampling path consumes one, so the feature bit stays false (E22's own closing note) |
 | `VK_EXT_tooling_info` | Advertised |  |
-| `VK_EXT_transform_feedback` | Planned (in scope, not implemented) | roadmap H21: split out of roadmap H12's decision to bring this group into scope |
+| `VK_EXT_transform_feedback` | Advertised (single-stream, vertex-shader-only capture; no queries) | roadmap H21c: real vertex-shader-output capture to bound XFB buffers, `transformFeedback`/`transformFeedbackDraw` features `VK_TRUE`, `geometryStreams` `VK_FALSE` (H21e); `primitives_generated_query` not yet implemented (H21d) |
 | `VK_EXT_validation_cache` | Not implemented |  |
 | `VK_EXT_validation_features` | Not implemented |  |
 | `VK_EXT_validation_flags` | Not implemented |  |

@@ -3767,6 +3767,22 @@ Depends on G5.
   CTS run found still open.
 - Implement transform feedback only if it is advertised; otherwise report it
   unsupported truthfully (roadmap H21 tracks bringing this into scope).
+  **Single-stream, vertex-shader-only capture is done** (roadmap H21c):
+  `feme::graphics::Executor::executeDraws` writes each `Output`-direction,
+  `XfbBuffer`-tagged vertex-shader output element's raw bytes to its bound
+  transform-feedback buffer right after vertex invocation (gated off when a
+  tessellation or geometry stage is present), `CommandBuffer.cpp`'s
+  `GraphicsState::XfbCapturedBytes` tracks a real running byte count per
+  bound buffer (reset at `vkCmdBeginTransformFeedbackEXT`, written back at
+  `vkCmdEndTransformFeedbackEXT`), and `transformFeedback`/
+  `transformFeedbackDraw` are advertised. Multi-stream/geometry-shader-stream
+  capture (`geometryStreams`), `primitives_generated_query`, and a real
+  content-mismatch gap in the byte-counter design's "backward dependency"
+  scenario remain open (roadmap H21d/H21e/H21i); a multiview draw combined
+  with active transform feedback also currently captures every view's
+  vertices into the same running counter with no per-view separation, an
+  undocumented-until-now interaction nothing in the CTS-dominant shape H21a
+  scoped exercises yet.
 - Add pipeline-statistics queries and any remaining occlusion-query state
   breadth not already closed by roadmap C5's exact passed-sample counting
   over ordinary draws (for example inherited-render-pass secondary-command-
