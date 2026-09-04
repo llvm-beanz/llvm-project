@@ -13,22 +13,34 @@
 #     floor is inherited by any later version's claim), plus
 #  2. the ray-tracing extension set and its dependencies (roadmap 1.9.8),
 #     plus
-#  3. the graphics/WSI extensions roadmap 1.9.7 assigns.
+#  3. the graphics/WSI extensions roadmap 1.9.7 assigns, plus
+#  4. the large optional extension groups roadmap H12 (1.9.7) decided
+#     belong in scope for this effort: VK_EXT_transform_feedback,
+#     VK_EXT_shader_object, VK_KHR_fragment_shading_rate,
+#     VK_EXT_fragment_shader_interlock, VK_KHR_fragment_shader_barycentric,
+#     and VK_EXT_conditional_rendering (each with its own H21-H26 breakdown
+#     row). Sparse residency and protected memory were part of that same
+#     H12 decision too, but promote core 1.0/1.1 *feature bits*
+#     (Vulkan14FeatureInventory.md), not a dedicated extension name, so
+#     they are not listed here.
 #
-# Anything else -- video, sparse residency, protected memory, external
-# memory/synchronization, transform feedback, VK_EXT_shader_object,
+# Anything else -- video, device groups, external memory/synchronization,
 # cooperative matrix/vector -- is optional for a 1.4 submission and stays
 # out of scope (Roadmap.md, Part 4), so it must NOT be listed here.
 # A partially-implemented extension belongs here too: partial is a gap,
 # not a status.
 
+VK_EXT_conditional_rendering = roadmap H26: split out of roadmap H12's decision to bring this group into scope
 VK_EXT_descriptor_indexing = roadmap J2: needed in large part by the ray-tracing CTS corpus, independent of ray tracing itself
 VK_EXT_extended_dynamic_state2 = roadmap 1.9.4 (E-series): the 1.3 floor's remaining dynamic states
+VK_EXT_fragment_shader_interlock = roadmap H24: split out of roadmap H12's decision to bring this group into scope
 VK_EXT_image_robustness = roadmap E16
 VK_EXT_sampler_filter_minmax = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_EXT_scalar_block_layout = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_EXT_separate_stencil_usage = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_EXT_shader_object = roadmap H22: split out of roadmap H12's decision to bring this group into scope
 VK_EXT_texture_compression_astc_hdr = roadmap E21: HDR block formats and decodeASTCBlockHDR exist, but no copy/blit/sampling path consumes one, so the feature bit stays false (E22's own closing note)
+VK_EXT_transform_feedback = roadmap H21: split out of roadmap H12's decision to bring this group into scope
 VK_EXT_ycbcr_2plane_444_formats = roadmap E19 declined it while samplerYcbcrConversion is unimplemented; still part of the 1.3 mandatory floor, so it returns as roadmap 1.9.10 K-series work alongside VK_KHR_sampler_ycbcr_conversion
 VK_KHR_16bit_storage = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_8bit_storage = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
@@ -46,6 +58,8 @@ VK_KHR_external_memory = core-promoted into Vulkan 1.1: part of the mandatory fl
 VK_KHR_external_memory_capabilities = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_external_semaphore = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_external_semaphore_capabilities = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_fragment_shader_barycentric = roadmap H25: split out of roadmap H12's decision to bring this group into scope
+VK_KHR_fragment_shading_rate = roadmap H23: split out of roadmap H12's decision to bring this group into scope
 VK_KHR_get_memory_requirements2 = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_get_physical_device_properties2 = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_get_surface_capabilities2 = roadmap H10 (V8)
