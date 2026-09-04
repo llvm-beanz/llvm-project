@@ -59910,3 +59910,116 @@ already known from a prior row.
    `VulkanCTSReport.md`, `VulkanExtensionInventory.md`,
    `FeMeVulkanDesign.md`.
 4. This `agent_thoughts.md` entry.
+
+# Agent thoughts: H29d -- inline shader-module creation
+
+## Goal
+
+H29c's own compute-pipeline crash-fix rejected a null `stage.module` with a
+chained `VkShaderModuleCreateInfo` cleanly, but didn't implement the real,
+spec-legal capability `VK_EXT_graphics_pipeline_library` newly exposes:
+compiling a shader directly at pipeline-creation time, with no separate
+`VkShaderModule` object at all -- legal for *any* pipeline stage (compute or
+graphics) once the extension is enabled, not just a graphics-pipeline-
+library part. This row implements that.
+
+## Design: one shared resolution helper, three call sites
+
+The interesting design question was where this logic should live. Both
+`compileComputePipeline` (Pipeline.cpp) and `compileGraphicsStage`
+(GraphicsPipeline.cpp) do the exact same thing today: `fromHandle<ShaderModule>
+(StageInfo.module)` then immediately use `Module->words()`. The natural fix
+is a single shared function, `resolveShaderStageModule`, that either passes
+the handle-resolved module through unchanged or -- when `module` is null --
+walks `pNext` for a `VkShaderModuleCreateInfo` and compiles it into a
+freshly-owned `ShaderModule`, returned via an out-parameter
+(`std::unique_ptr<ShaderModule> &InlineStorage`) so the caller controls its
+lifetime exactly like H29c's own `LinkedPipelineStorage` out-parameter
+pattern did for a similar reason (avoiding an NRVO-dependent return-by-value
+of something whose validity the caller needs to control).
+
+I declared this in `Pipeline.h` (where `ShaderModule` itself already lives)
+and defined it in `Pipeline.cpp`, in the same `feme::vulkan` namespace
+`resolvePipelineRobustness` already uses for a cross-file-shared helper --
+consistent with how this codebase already organizes "shared between compute
+and graphics" logic (see that header's own comment about `PipelineLayout`
+being consulted from both paths).
+
+To avoid duplicating the `codeSize` validation/copy logic
+`vkCreateShaderModule` already had, I factored it out into
+`copyShaderModuleWords`, used by both the real entry point and the new
+inline path -- one honest bugfix-adjacent cleanup that also means an inline
+module gets exactly the same "malformed codeSize fails cleanly, not a read
+out of bounds" guarantee a real `vkCreateShaderModule` call already had,
+with no risk of the two paths drifting apart later.
+
+## A third dereference site, found by re-auditing rather than by crashing
+
+While implementing this, I re-checked every place in `GraphicsPipeline.cpp`
+that touches `StageInfo.module` directly, since H29c's own crash taught me
+not to assume the two call sites I already knew about
+(`compileComputePipeline`, `compileGraphicsStage`) were the only ones.
+I found a third: `validateMeshOrTaskGroupSize`, called on the same
+`VkPipelineShaderStageCreateInfo` *after* `compileGraphicsStage` already
+resolves it, but doing its own independent `fromHandle` dereference with no
+null guard at all. Once `compileGraphicsStage` started accepting inline
+modules, this would have been a second real, undiscovered crash waiting for
+a mesh/task-stage CTS case combining a null module with a chained
+create-info to exercise it -- exactly the same shape of gap H29c's own
+crash was. I fixed it proactively rather than waiting for CTS to find it,
+by having it call `resolveShaderStageModule` independently rather than
+threading the already-resolved pointer through from
+`compileGraphicsStage` -- a deliberate, documented tradeoff: duplicating a
+small memcpy for an inline module is trivially cheap and correctness-
+neutral, and avoids coupling two otherwise-unrelated call sites' own
+signatures together just to share one pointer.
+
+I also checked the graphics pipeline-cache-key computation
+(`compileGraphicsPipeline`'s own `fromHandle<ShaderModule>(VertexInfo->
+module)` etc. calls) for the same hazard. This one turned out to already be
+safe: `fromHandle` is a plain `reinterpret_cast`, so calling it on a null
+handle returns `nullptr`, not a crash -- and every place that pointer is
+later used already null-guards it (`VertexModule ? VertexModule->words() :
+ArrayRef<uint32_t>()`), so an inline-module stage simply causes the whole
+`Cache && ...` gating condition to be false and caching is silently skipped
+for that pipeline. Not a bug, but worth documenting in place (which I did)
+since a future reader might otherwise wonder why caching mysteriously
+doesn't apply to some pipelines -- it's an honest, if not maximally
+performant, simplification rather than a real gap.
+
+## Verification
+
+- 5 new unit tests: `PipelineTest.cpp`'s
+  `CompilesInlineShaderModuleComputePipeline`,
+  `RejectsNullModuleWithNoInlineShaderModuleCreateInfo`,
+  `RejectsInlineShaderModuleWithMisalignedCodeSize`;
+  `GraphicsPipelineTest.cpp`'s `CompilesInlineShaderModuleVertexStage`
+  (deliberately mixed with a normal, handle-based fragment module, since
+  the spec permits freely mixing inline and handle-based stages within one
+  pipeline -- worth exercising that mix rather than only the
+  all-inline/all-handle extremes) and
+  `RejectsNullVertexModuleWithNoInlineShaderInfo`.
+- `ninja check-feme` (ccache + assertions, `build2/`): full pass,
+  2508/2567 (up 5 from H29c's 2503/2562), 0 `Failed`.
+- Real `deqp-vk` re-run against the rebuilt ICD:
+  `graphics_library.*` (836 cases): 81/467/288 -> 83/465/288
+  (Passed/Failed/NotSupported). Confirmed directly in the log (not just
+  inferred from the aggregate) that
+  `misc.non_graphics.shader_module_info_comp` -- the exact case whose
+  crash motivated H29c's own placeholder rejection -- now genuinely
+  `Pass`es. `cache.*` (773 cases) unchanged at 297/475/1, exactly as
+  expected: that group's own dominant remaining gap is H29e's
+  `feme-cpu-wrap-hull` issue, unrelated to shader-module creation.
+
+## Commits
+
+1. `[feme] H29d: inline shader-module creation (VK_EXT_graphics_pipeline_library)`
+   -- `Pipeline.h`/`.cpp` (`resolveShaderStageModule`,
+   `copyShaderModuleWords`, `findShaderModuleCreateInfo`),
+   `GraphicsPipeline.cpp` (`compileGraphicsStage`/
+   `validateMeshOrTaskGroupSize` wired through the shared helper, cache-key
+   comment), `PipelineTest.cpp`/`GraphicsPipelineTest.cpp` (5 new tests),
+   amended once for `git-clang-format`-scoped formatting.
+2. `[feme] docs: close H29d` -- `Roadmap.md`, `VulkanCTSReport.md`,
+   `VulkanExtensionInventory.md`, `FeMeVulkanDesign.md`.
+3. This `agent_thoughts.md` entry.
