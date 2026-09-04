@@ -59216,3 +59216,133 @@ caught immediately by `ninja check-feme`, not missed.
 `ninja check-feme`: 2484/2543 passing (59 pre-existing `Unsupported`,
 0 `Failed`, +2 new tests, 0 regressions), assertions-enabled ccache
 build in `build2/`.
+
+# H21d: transform-feedback queries (`primitives_generated_query`)
+
+## What this session inherited
+
+A prior (compacted) session had already implemented and committed
+H21d's core plumbing: query-list reuse in `CommandBuffer.cpp`/
+`QueryPool.h`/`QueryPool.cpp` so `VK_QUERY_TYPE_PRIMITIVES_GENERATED_
+EXT` counts primitives through the same accumulator machinery
+roadmap H9 built for pipeline-statistics queries, plus feature/
+extension advertisement (`EntryPoints.cpp`/`PhysicalDeviceInfo.cpp`)
+and a new unit test. A real CTS re-run of the full 107,866-case
+`dEQP-VK.transform_feedback.primitives_generated_query.*` group had
+found 972 passed / 2646 failed / 104,248 not supported, with 2,160 of
+the 2,646 failures sharing one exact pattern -- `"[Query 0]
+pgqGenerated == 0, expected N"` -- for every geometry-shader case
+whose input topology is `Line`- or `Triangle`-shaped, but not
+`point_list`. This session picked up mid-root-cause.
+
+## Root-causing the geometry zero-count bug
+
+A synthetic `ExecutorTest.cpp`-level repro (a real
+`TriangleList`->GS`TriangleStrip` passthrough pipeline) produced
+correct counts, ruling out a general bug in the strip-rebuild logic.
+Reviewing the H21d-specific plumbing (`ActivePipelineStatsQueries`,
+`accumulatePipelineStats`, `QueryPool`'s accumulate helpers) found
+nothing wrong there either -- everything upstream of `Executor.cpp`
+was structurally sound.
+
+Reading CTS's actual `vktPrimitivesGeneratedQueryTests.cpp` source
+was the turning point: `primitivesGenerated = 32` was expected, and
+the geometry shader body for every failing topology *never writes
+`gl_Position` or any other output* -- it only calls `EmitVertex()`/
+`EndPrimitive()` in a loop, writing `gl_PointSize` only when
+`outputPoints` is true (true only for `point_list` input or non-zero
+streams). A quick `getenv`-guarded debug print confirmed the `if
+(GSSig)` block in `Executor.cpp` was never even reached for this
+draw. Tracing backward found the real culprit: an existing (roadmap
+H5e-b) early-return, `if (GSSig && GSSig->Elements.empty()) return
+Error::success();`, added to make `dEQP-VK.geometry.emit.*_emit_0_
+end_0`'s genuine no-op shaders legal. The bug: SPIR-V only reflects
+an entry point's *used* interface variables, so a geometry shader
+that emits real primitives but writes zero per-vertex attributes
+reflects with an *identically empty* signature to a shader that
+never emits at all. The two shapes are indistinguishable by
+signature alone. `GeometryState::MaxOutputVertices` (the entry
+point's own declared `max_vertices`) is the correct discriminator:
+zero only for a body that provably never calls `EmitVertex`, since
+doing so requires a nonzero output-vertex budget.
+
+## The fix
+
+Narrowed the fast path to also require `MaxOutputVertices == 0`.
+Relaxed the later `!VSPosition` validation error (and its
+`ComponentCount != 4` check) to tolerate the "empty signature but
+real emission" case via a new `GSEmitsWithoutAttributes` bool.  Added
+an early bail inside the `RasterizePrimitives` lambda, placed
+*after* its existing unconditional `ClippingInvocations` increment
+(which uses only index-buffer sizes, never touching `VSPosition`) so
+every primitive is still counted correctly, but before any
+`VSPosition->ElementID` dereference that would otherwise crash. This
+narrow surface -- only two call sites in the whole file ever read
+`VSPosition->ElementID`/`->ComponentCount` -- made the fix low-risk
+and easy to verify exhaustively by inspection.
+
+Added a permanent regression test,
+`GeometryStageThatEmitsRealPrimitivesWithoutAttributesCountsThem`,
+using a synthetic geometry shader IR that calls `feme.stage.stream.
+emit`/`.cut` with a genuinely empty `EntrySignature` but a nonzero
+`MaxOutputVertices`, mirroring the real SPIR-V-reflected shape rather
+than assuming it. Hit two small snags along the way: the fragment
+shader used needed at least one real `Output` element declared (an
+entirely empty `EntrySignature` is rejected by `feme-graphics-
+validate-stage` the moment the IR body actually stores to it), and a
+pre-existing later-in-file `SolidRedFragmentShaderIR` couldn't be
+forward-referenced from a plain top-level `constexpr char[]`, so a
+local duplicate was defined instead of reordering the file.
+
+## Validation
+
+`FeMeGraphicsTests` (272 tests): all pass, 0 regressions. `ninja
+check-feme` (assertions-enabled ccache build, `build2/`): 2486/2545
+passing (59 pre-existing `Unsupported`, 0 `Failed`), up from 2485/2544
+before the fix (net +1, from the test swap).
+
+Rebuilt the ICD and re-ran the single previously-failing case
+end-to-end through the real SPIR-V translation path: now passes.
+Then launched a full re-run of the entire 107,866-case
+`primitives_generated_query.*` group in the background and let it run
+to completion (it took roughly two hours of wall time, since the vast
+majority of the group's combinatoric parameter space -- 32-bit/64-bit
+x host_reset/queue_reset x copy/get x single/two draws x many
+topologies -- means a large number of genuinely-rendered cases, not
+just fast `NotSupported` rejections). Polled it periodically along the
+way, spot-checking every new failure signature that appeared to
+confirm it matched one of the two already-known, pre-existing,
+unrelated buckets (`feme-cpu-wrap-fragment`/`feme-cpu-wrap-hull`)
+rather than a new regression -- it never deviated.
+
+Final result: **3,132 passed** (up from 972, +2,160 -- exactly the
+geometry-shader bucket this fix targeted, confirming it fully closes
+that gap with zero partial misses across every topology/bit-width/
+reset-mode/retrieval-mode combination), **486 failed** (down from
+2,646, -2,160), **104,248 not supported** (unchanged, confirming the
+fix touched no gating logic). The remaining 486 failures split
+exactly into 324 `feme-cpu-wrap-fragment` + 162 `feme-cpu-wrap-hull`
+-- both pre-existing, both unrelated to transform-feedback or query
+counting, broken out as new roadmap rows H21j/H21k rather than fixed
+in this row's own scope. Confirmed the `.tese.`/hull failures are a
+*different* shape than the one roadmap H9c already closed for a
+different CTS group -- H9c's own fix evidently did not cover every
+hull-input-system-value case, so H21k should investigate what shape
+`primitives_generated_query`'s own tessellation-control shaders use
+that H9c's fix missed.
+
+## Documentation
+
+Struck through H21d in `Roadmap.md`, added H21j/H21k as new sibling
+rows (both nested exactly one lowercase letter under H21, per this
+project's own nesting-depth rule). Added a "Roadmap H21d: measured
+impact" section to `VulkanCTSReport.md`. Flipped
+`VK_EXT_primitives_generated_query`'s row in
+`VulkanExtensionInventory.md` from "Not implemented" to "Advertised".
+Updated `FeMeVulkanDesign.md`'s transform-feedback section to
+describe both the query-counting semantics now in place and the
+corrected geometry no-op fast-path heuristic (since the old wording
+described only the H21c-era single-stream-capture status).
+`Vulkan14FeatureInventory.md` needed no change -- its own scope is
+core 1.0-1.4 mandatory features, not extension-specific feature-struct
+bits.
