@@ -24990,3 +24990,81 @@ graphics-pipeline-library-specific in either direction.
 
 **Disposition.** Roadmap **H29o closed** (struck through). This is the largest
 single-row CTS gain of the H29 series so far.
+
+## Roadmap H29g: measured impact
+
+**Row.** *`feme-cpu-wrap-hull: control-point phase only supports a control
+point reading its own input control point's attributes`*, the limitation H29e's
+fix exposed underneath the `cache.*` tessellation-stage cases, 257 of the
+group's remaining failures.
+
+**Reproduction.** `dEQP-VK.pipeline.monolithic.cache.
+pipeline_from_incomplete_get_data.
+vertex_stage_tessellation_control_stage_tessellation_evaluation_stage_fragment_stage`,
+one case, `Fail` at `vkCreateGraphicsPipelines`. The CTS `basic_tcs`
+(`vktPipelineCacheTests.cpp:450`) is entirely self-indexed --
+`gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;` and
+`vtxColor[gl_InvocationID] = color[gl_InvocationID];` -- and performs no
+cross-control-point read of any kind, so the row's premise did not survive
+contact with the shader.
+
+**Root cause (1): a set, not a value.** The diagnostic was instrumented to print
+the rejected load and the self index it was compared against. The load's
+control-point operand was `%24` and `SelfIndex` was `%60` -- two *different*
+lowered reads of the same `gl_InvocationID`. SPIR-V loads a builtin once per
+use, so this shader contains several `OutputControlPointID`
+`feme.stage.input.load`s. `lowerHullStageOps` lowered all of them but kept only
+the last in a single `Value *SelfIndex`, so every attribute load indexed by an
+*earlier* read failed the pointer-identity `ControlPoint == SelfIndex` test.
+Fixed by tracking a `SmallPtrSet` of every lowered self index; the empty-set
+case replaces the old null check that permits a constant `0` operand when the
+function never reads the system value at all. The genuine cross-control-point
+limitation the row describes is untouched and still correctly diagnosed
+(`HullWrapperTest.DiagnosesCrossControlPointInputLoad` still passes) -- it
+simply was not what these cases were hitting.
+
+**Root cause (2): a hull output's control-point array.** With (1) fixed the case
+cleared pipeline creation and failed one phase later, at `vkQueueSubmit`, with
+`"hull stage output -> domain stage input: element 2 and its producer element 4
+disagree on component/row count or type"`. `CanonicalizeStage.cpp`'s
+`addElements` folded a hull entry's plain (non-block) per-control-point `Output`
+global's outer array dimension -- the output patch's own control point count,
+3 here -- into the element's `RowCount`, while the domain stage links against it
+by `Location` expecting the single control point each of its own inputs
+describes. This is exactly the shape roadmap H6j already identified and peeled
+for a *mesh* entry's per-vertex output array, in the same function, and its
+reasoning transfers verbatim: a hull stage has no ordinary unindexed output to
+write a real matrix into, so the dimension is never a genuine row count to
+preserve. Extended that peel to hull outputs. Closed here rather than deferred
+to its own row because it blocks precisely the same cases.
+
+**Tests.** `HullWrapperTest.LowersRepeatedOutputControlPointIDReads` (the
+CPU-wrapping phase) and
+`CanonicalizeStageTest.HullStagePeelsPerControlPointArrayFromOutputRowCount`
+(the canonicalization phase). Both were confirmed to fail without their
+respective fix. `ninja check-feme`: 2586 discovered, 2527 passed, 0 failed.
+
+**Measured CTS impact.** `dEQP-VK.pipeline.monolithic.cache.*`, 774 cases:
+
+| | Passed | Failed | NotSupported |
+| --- | --- | --- | --- |
+| Before (post-H29o) | 516 | 257 | 1 |
+| After | **772** | **1** | 1 |
+
+**+256 gained, 0 regressed** on a case-by-case pass-set diff. The group is now
+effectively fully passing: its single remaining failure is
+`misc_tests.invalid_size_test`, the CTS-side `GetPipelineCacheData`
+size-validation harness assertion H29f already declined to file as an ICD gap.
+`dEQP-VK.pipeline.pipeline_library.graphics_library.*` unchanged at 131/417/288.
+
+**A note on the `tessellation.*` group.** The obvious regression sweep for a
+hull/domain change is `dEQP-VK.tessellation.*`, but that group cannot currently
+be measured as a whole: a hard SIGSEGV inside JIT-compiled shader code at
+`misc_draw.switch_domain_origin_lower_left_to_upper_left` kills the process and
+every case ordered after it. The crash was confirmed to reproduce identically on
+the pre-H29g build, so it is pre-existing and not a regression; it is filed as
+new row **H29t**. Comparing the truncated runs before and after (deterministic,
+same crash point in both) gives +1 pass and 0 regressions.
+
+**Disposition.** Roadmap **H29g closed** (struck through). Combined with H29o
+this takes `monolithic.cache.*` from 298 to 772 of 774 in one session.
