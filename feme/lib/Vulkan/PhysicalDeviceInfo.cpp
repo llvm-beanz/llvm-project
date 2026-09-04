@@ -1247,6 +1247,25 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // (`depends="VK_KHR_surface"`), so it belongs in this device-level
       // list, not `getSupportedInstanceExtensions` (Surface.h).
       {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_SPEC_VERSION},
+      // (roadmap H21c) `vkCmdBindTransformFeedbackBuffersEXT`/
+      // `vkCmdBeginTransformFeedbackEXT`/`vkCmdEndTransformFeedbackEXT`/
+      // `vkCmdDrawIndirectByteCountEXT` (CommandBuffer.cpp) now perform
+      // real single-stream, vertex-shader-only capture (Executor.cpp's
+      // "Transform feedback capture"), and `VkPipelineRasterizationState
+      // StreamCreateInfoEXT` is accepted at graphics pipeline creation
+      // (GraphicsPipeline.cpp, roadmap H21b) -- unlike H21b's own
+      // deliberate exception (this extension was left out of
+      // `vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` there precisely
+      // because it advertised nothing yet), this row closes that gap:
+      // `transformFeedback`/every `VkPhysicalDeviceTransformFeedback
+      // PropertiesEXT` limit is now genuinely honored (`EntryPoints.cpp`'s
+      // features2/properties2 cases), so the extension belongs in both
+      // places now, mirroring `mesh_shader`'s own precedent just above.
+      // `dEQP-VK.transform_feedback.*` enables this extension by name
+      // regardless of the advertised `apiVersion`, so it must be listed
+      // here too.
+      {VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME,
+       VK_EXT_TRANSFORM_FEEDBACK_SPEC_VERSION},
   };
   return Extensions;
 }

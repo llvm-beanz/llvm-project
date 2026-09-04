@@ -76,17 +76,11 @@ CORE_FEATURES = (
 # reject a direct, non-`KHR`-suffixed query for a command newer than that,
 # so this driver must implement the `KHR` name to be reachable through the
 # loader at all, confirmed by `dEQP-VK.api.granularity.
-# in_dynamic_render_pass.*` SIGSEGV'ing on exactly this gap). Every name
-# here must also appear in `feme::vulkan::getSupportedDeviceExtensions`,
-# with one deliberate, temporary exception: `VK_EXT_transform_feedback`
-# (roadmap H21b) implements and lists its own six commands here so the
-# generated table (and `ImplementedEntrypoints.txt`) carry them, but is not
-# yet in `getSupportedDeviceExtensions` -- no real `vkCreateDevice` call can
-# enable an unadvertised extension, so this is safe (unlike every other
-# entry here, whose commands a real application can reach the moment it
-# enables the extension by name) and does not change any CTS result;
-# roadmap H21c advertises it for real, once actual buffer-write capture
-# exists, at which point this becomes a normal entry like every other one.
+# in_dynamic_render_pass.*` SIGSEGV'ing on exactly this gap; roadmap H21c:
+# `VK_EXT_transform_feedback`'s own six commands, now that real single-
+# stream, vertex-shader-only capture exists and the extension is genuinely
+# advertised -- see `getSupportedDeviceExtensions`'s own comment). Every
+# name here must also appear in `feme::vulkan::getSupportedDeviceExtensions`.
 SUPPORTED_EXTENSIONS = (
     "VK_KHR_dynamic_rendering",
     "VK_EXT_extended_dynamic_state",
@@ -151,15 +145,16 @@ SUPPORTED_EXTENSIONS = (
     "VK_KHR_surface",
     "VK_EXT_headless_surface",
     "VK_KHR_swapchain",
-    # (roadmap H21b) `vkCmdBindTransformFeedbackBuffersEXT`/
+    # (roadmap H21b/H21c) `vkCmdBindTransformFeedbackBuffersEXT`/
     # `vkCmdBeginTransformFeedbackEXT`/`vkCmdEndTransformFeedbackEXT`/
     # `vkCmdBeginQueryIndexedEXT`/`vkCmdEndQueryIndexedEXT`/
     # `vkCmdDrawIndirectByteCountEXT` (CommandBuffer.cpp) are all
-    # implemented, and `VkPipelineRasterizationStateStreamCreateInfoEXT` is
-    # recognized during graphics pipeline creation (GraphicsPipeline.cpp) --
-    # see this tuple's own doc comment above for why
-    # `getSupportedDeviceExtensions` does *not* yet list this extension,
-    # unlike every other entry here.
+    # implemented, `VkPipelineRasterizationStateStreamCreateInfoEXT` is
+    # recognized during graphics pipeline creation (GraphicsPipeline.cpp),
+    # and real single-stream, vertex-shader-only capture now exists
+    # (Executor.cpp's "Transform feedback capture") -- this extension is
+    # genuinely advertised now (`getSupportedDeviceExtensions`), like every
+    # other entry in this tuple.
     "VK_EXT_transform_feedback",
 )
 

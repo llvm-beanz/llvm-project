@@ -1187,6 +1187,40 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       MeshShader->prefersCompactPrimitiveOutput = VK_FALSE;
       break;
     }
+    // (roadmap H21c) `VK_EXT_transform_feedback`'s own properties struct.
+    // `maxTransformFeedbackStreams` is 1 (matching `geometryStreams ==
+    // VK_FALSE` above -- the spec requires exactly 1 when that bit is
+    // unset), `maxTransformFeedbackBuffers`/every size/stride limit below
+    // is each set to its own Vulkan-spec-mandated minimum: this
+    // implementation enforces none of them itself (`CommandBuffer.cpp`'s
+    // `GraphicsState::XfbBuffers` grows to fit any binding index/buffer
+    // size/stride a real caller uses), so the spec floor is the only
+    // truthful, always-honored answer, exactly like
+    // `VK_KHR_shader_integer_dot_product`'s own "supported but not
+    // accelerated" precedent above. `transformFeedbackQueries` (the
+    // dedicated `VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT` query type)
+    // and `transformFeedbackStreamsLinesTriangles`/
+    // `transformFeedbackRasterizationStreamSelect` (both meaningless with
+    // only one stream) are all unimplemented, so all three stay false;
+    // `transformFeedbackDraw` (`vkCmdDrawIndirectByteCountEXT`) is real
+    // and already tested (`DrawIndirectByteCountComputesVertexCount
+    // FromCounterBuffer`, DrawTest.cpp), so it is true.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT: {
+      auto *XfbProps =
+          reinterpret_cast<VkPhysicalDeviceTransformFeedbackPropertiesEXT *>(
+              Base);
+      XfbProps->maxTransformFeedbackStreams = 1;
+      XfbProps->maxTransformFeedbackBuffers = 4;
+      XfbProps->maxTransformFeedbackBufferSize = 1u << 27;
+      XfbProps->maxTransformFeedbackStreamDataSize = 512;
+      XfbProps->maxTransformFeedbackBufferDataSize = 512;
+      XfbProps->maxTransformFeedbackBufferDataStride = 512;
+      XfbProps->transformFeedbackQueries = VK_FALSE;
+      XfbProps->transformFeedbackStreamsLinesTriangles = VK_FALSE;
+      XfbProps->transformFeedbackRasterizationStreamSelect = VK_FALSE;
+      XfbProps->transformFeedbackDraw = VK_TRUE;
+      break;
+    }
     default:
       break;
     }
@@ -2040,6 +2074,24 @@ void fillFeatures2Chain(void *pNext) {
       Features->multiviewMeshShader = VK_FALSE;
       Features->primitiveFragmentShadingRateMeshShader = VK_FALSE;
       Features->meshShaderQueries = VK_FALSE;
+      break;
+    }
+    // (roadmap H21c) `VK_EXT_transform_feedback`'s own feature struct:
+    // real single-stream, vertex-shader-only capture now exists
+    // (Executor.cpp's "Transform feedback capture", CommandBuffer.cpp's
+    // `EndTransformFeedback`), so `transformFeedback` is true; multiple
+    // simultaneous output streams (a geometry stage's own
+    // `VkPipelineRasterizationStateStreamCreateInfoEXT`-selected stream,
+    // roadmap H21e) do not capture yet, so `geometryStreams` stays false
+    // -- mirroring `meshShader`'s own "advertise the wiring this
+    // implementation actually has, not the whole extension at once"
+    // precedent just above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceTransformFeedbackFeaturesEXT *>(
+              Base);
+      Features->transformFeedback = VK_TRUE;
+      Features->geometryStreams = VK_FALSE;
       break;
     }
     default:
