@@ -772,6 +772,219 @@ public:
   }
 };
 
+/// Returns the bit width of `Type`'s element, where `Type` is always the
+/// *already-converted* LLVM dialect type of a `BitField*` operand (a
+/// signless integer, or a fixed vector thereof) -- never the original,
+/// still-SPIR-V-dialect-tagged (`si32`/`ui32`) type of the op's own operand.
+static unsigned getBitFieldElementBitWidth(mlir::Type Type) {
+  if (auto VecTy = mlir::dyn_cast<mlir::VectorType>(Type))
+    return mlir::cast<mlir::IntegerType>(VecTy.getElementType()).getWidth();
+  return mlir::cast<mlir::IntegerType>(Type).getWidth();
+}
+
+/// Builds an `llvm.mlir.constant` of `Value`, splatted across every lane if
+/// `DstType` is a vector -- shared by the `Offset`+`Count`-mask constants in
+/// `BitFieldInsertPattern`/`BitFieldUExtractPattern` and the base-bit-width
+/// constant in `BitFieldSExtractPattern`.
+static mlir::Value createBitFieldConstant(mlir::ConversionPatternRewriter &Rewriter,
+                                          mlir::Location Loc, mlir::Type DstType,
+                                          int64_t Value) {
+  if (auto VecTy = mlir::dyn_cast<mlir::VectorType>(DstType)) {
+    auto ElemTy = mlir::cast<mlir::IntegerType>(VecTy.getElementType());
+    auto Attr = Rewriter.getIntegerAttr(ElemTy, Value);
+    return mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, DstType, mlir::SplatElementsAttr::get(VecTy, Attr));
+  }
+  auto ElemTy = mlir::cast<mlir::IntegerType>(DstType);
+  return mlir::LLVM::ConstantOp::create(Rewriter, Loc, DstType,
+                                        Rewriter.getIntegerAttr(ElemTy, Value));
+}
+
+/// Broadcasts an already-converted scalar `Value` to a `NumElements`-lane
+/// vector of its own type -- the vector-`Base` counterpart of
+/// `broadcastScalar` above (which broadcasts into a caller-chosen
+/// `VectorType` for matrix arithmetic); this one derives the vector type
+/// from `Value` itself, matching upstream's own `broadcast` helper in
+/// `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`.
+static mlir::Value broadcastBitFieldOperand(mlir::ConversionPatternRewriter &Rewriter,
+                                            mlir::Location Loc, mlir::Value Value,
+                                            unsigned NumElements) {
+  auto VecTy = mlir::VectorType::get(NumElements, Value.getType());
+  mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, VecTy);
+  for (unsigned I = 0; I != NumElements; ++I) {
+    mlir::Value Index = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI32Type(), Rewriter.getI32IntegerAttr(I));
+    Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, VecTy, Result,
+                                                 Value, Index);
+  }
+  return Result;
+}
+
+/// Prepares a `BitField*` op's `Offset` or `Count` operand for use as an
+/// `llvm.shl`/`llvm.lshr` shift amount: broadcasts it to match `DstType`'s
+/// lane count if `Base` is a vector, then zero-extends or truncates it to
+/// `DstType`'s own element width (`Offset`/`Count` are always "consumed as
+/// an unsigned value" per the SPIR-V spec, so this never sign-extends,
+/// matching upstream's own `processCountOrOffset`/`optionallyTruncateOrExtend`).
+///
+/// Unlike upstream's version, `AdaptorValue` here is always the pattern's
+/// own `OpAdaptor`-supplied, already-type-converted value (a signless
+/// integer, never a stale `si32`/`ui32`) -- this is the actual fix for
+/// H10h: upstream's `BitFieldInsertPattern`/`BitFieldSExtractPattern`/
+/// `BitFieldUExtractPattern` instead call this helper (`processCountOrOffset`)
+/// with the *op's own raw* `getOffset()`/`getCount()`, which -- whenever the
+/// operand's width already matches `Base`'s width, the common case, since
+/// SPIR-V's `BitField*` ops require same-width `Offset`/`Count` in every
+/// real shader -- both this broadcast step and the truncate/extend step
+/// below become no-ops, silently returning that stale, dialect-conversion-
+/// illegal value straight through into the final `llvm.shl`/`llvm.lshr`.
+static mlir::Value processBitFieldCountOrOffset(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    mlir::Value AdaptorValue, mlir::Type DstType) {
+  mlir::Value Value = AdaptorValue;
+  if (auto VecTy = mlir::dyn_cast<mlir::VectorType>(DstType))
+    if (!mlir::isa<mlir::VectorType>(Value.getType()))
+      Value = broadcastBitFieldOperand(Rewriter, Loc, Value,
+                                       VecTy.getNumElements());
+
+  unsigned TargetWidth = getBitFieldElementBitWidth(DstType);
+  unsigned ValueWidth = getBitFieldElementBitWidth(Value.getType());
+  if (ValueWidth < TargetWidth)
+    return mlir::LLVM::ZExtOp::create(Rewriter, Loc, DstType, Value);
+  if (ValueWidth > TargetWidth)
+    return mlir::LLVM::TruncOp::create(Rewriter, Loc, DstType, Value);
+  return Value;
+}
+
+/// Converts `spirv.BitFieldInsert` -- overriding MLIR's own pattern (see
+/// `processBitFieldCountOrOffset` above for why: it feeds `Base`/`Insert`/
+/// `Offset`/`Count` from the op's own raw accessors into the final
+/// `llvm.shl`/`llvm.and`/`llvm.xor` ops instead of the adaptor's
+/// type-converted ones, producing an ill-typed `llvm.shl` whenever the
+/// SPIR-V module's integers are signed/unsigned rather than already
+/// signless). Otherwise mirrors upstream's own bit-mask construction
+/// verbatim: build a mask covering `[Offset, Offset + Count - 1]`, clear
+/// those bits in `Base`, and `or` in `Insert`'s low `Count` bits shifted up
+/// by `Offset`.
+class BitFieldInsertPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::BitFieldInsertOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::BitFieldInsertOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::BitFieldInsertOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Location Loc = Op.getLoc();
+
+    mlir::Value Offset = processBitFieldCountOrOffset(
+        Rewriter, Loc, Adaptor.getOffset(), DstType);
+    mlir::Value Count = processBitFieldCountOrOffset(Rewriter, Loc,
+                                                     Adaptor.getCount(), DstType);
+
+    mlir::Value MinusOne = createBitFieldConstant(Rewriter, Loc, DstType, -1);
+    mlir::Value MaskShiftedByCount =
+        mlir::LLVM::ShlOp::create(Rewriter, Loc, DstType, MinusOne, Count);
+    mlir::Value Negated = mlir::LLVM::XOrOp::create(
+        Rewriter, Loc, DstType, MaskShiftedByCount, MinusOne);
+    mlir::Value MaskShiftedByCountAndOffset =
+        mlir::LLVM::ShlOp::create(Rewriter, Loc, DstType, Negated, Offset);
+    mlir::Value Mask = mlir::LLVM::XOrOp::create(
+        Rewriter, Loc, DstType, MaskShiftedByCountAndOffset, MinusOne);
+
+    mlir::Value BaseAndMask = mlir::LLVM::AndOp::create(
+        Rewriter, Loc, DstType, Adaptor.getBase(), Mask);
+    mlir::Value InsertShiftedByOffset = mlir::LLVM::ShlOp::create(
+        Rewriter, Loc, DstType, Adaptor.getInsert(), Offset);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::OrOp>(Op, DstType, BaseAndMask,
+                                                  InsertShiftedByOffset);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.BitFieldSExtract` -- see `BitFieldInsertPattern` above for
+/// why this overrides MLIR's own pattern. Mirrors upstream's own two-shift
+/// sign-extension construction verbatim: shift `Base` left so the field's
+/// most-significant bit lands in `Base`'s own sign position, then shift
+/// right by the same amount plus `Offset`, letting `llvm.ashr` replicate
+/// that sign bit across the vacated high bits.
+class BitFieldSExtractPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::BitFieldSExtractOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::BitFieldSExtractOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::BitFieldSExtractOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Location Loc = Op.getLoc();
+
+    mlir::Value Offset = processBitFieldCountOrOffset(
+        Rewriter, Loc, Adaptor.getOffset(), DstType);
+    mlir::Value Count = processBitFieldCountOrOffset(Rewriter, Loc,
+                                                     Adaptor.getCount(), DstType);
+
+    mlir::Value Size = createBitFieldConstant(
+        Rewriter, Loc, DstType, getBitFieldElementBitWidth(DstType));
+
+    mlir::Value CountPlusOffset =
+        mlir::LLVM::AddOp::create(Rewriter, Loc, DstType, Count, Offset);
+    mlir::Value AmountToShiftLeft = mlir::LLVM::SubOp::create(
+        Rewriter, Loc, DstType, Size, CountPlusOffset);
+    mlir::Value BaseShiftedLeft = mlir::LLVM::ShlOp::create(
+        Rewriter, Loc, DstType, Adaptor.getBase(), AmountToShiftLeft);
+
+    mlir::Value AmountToShiftRight = mlir::LLVM::AddOp::create(
+        Rewriter, Loc, DstType, Offset, AmountToShiftLeft);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::AShrOp>(
+        Op, DstType, BaseShiftedLeft, AmountToShiftRight);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.BitFieldUExtract` -- see `BitFieldInsertPattern` above for
+/// why this overrides MLIR's own pattern. Mirrors upstream's own
+/// mask-and-shift construction verbatim: shift `Base` right by `Offset`,
+/// then mask off everything above bit `Count - 1`.
+class BitFieldUExtractPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::BitFieldUExtractOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::BitFieldUExtractOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::BitFieldUExtractOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Location Loc = Op.getLoc();
+
+    mlir::Value Offset = processBitFieldCountOrOffset(
+        Rewriter, Loc, Adaptor.getOffset(), DstType);
+    mlir::Value Count = processBitFieldCountOrOffset(Rewriter, Loc,
+                                                     Adaptor.getCount(), DstType);
+
+    mlir::Value MinusOne = createBitFieldConstant(Rewriter, Loc, DstType, -1);
+    mlir::Value MaskShiftedByCount =
+        mlir::LLVM::ShlOp::create(Rewriter, Loc, DstType, MinusOne, Count);
+    mlir::Value Mask = mlir::LLVM::XOrOp::create(
+        Rewriter, Loc, DstType, MaskShiftedByCount, MinusOne);
+
+    mlir::Value ShiftedBase = mlir::LLVM::LShrOp::create(
+        Rewriter, Loc, DstType, Adaptor.getBase(), Offset);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::AndOp>(Op, DstType, ShiftedBase,
+                                                   Mask);
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.Dot` -- which, like `spirv.Switch` above, MLIR has no
 /// pattern for at all -- into a per-lane `llvm.intr.fmuladd` chain, mirroring
 /// `feme::dxil::expandFDot`'s expansion of the analogous (post-raising)
@@ -5323,6 +5536,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       AtomicRMWPattern<mlir::spirv::AtomicUMinOp, mlir::LLVM::AtomicBinOp::umin>,
       AtomicRMWPattern<mlir::spirv::AtomicExchangeOp,
                        mlir::LLVM::AtomicBinOp::xchg>,
+      BitFieldInsertPattern, BitFieldSExtractPattern, BitFieldUExtractPattern,
       BranchConditionalPattern, BuiltInAddressOfPattern,
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
       BlockAccessChainPattern, CompositeConstructPattern,
