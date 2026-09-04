@@ -495,7 +495,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_3 | `synchronization2` | yes |  |
 | feature | VK_VERSION_1_3 | `textureCompressionASTC_HDR` | no |  |
 | feature | VK_VERSION_1_3 | `shaderZeroInitializeWorkgroupMemory` | yes |  |
-| feature | VK_VERSION_1_3 | `dynamicRendering` | yes |  |
+| feature | VK_VERSION_1_3 | `dynamicRendering` | yes | roadmap H29m: dynamic rendering now also survives a `VK_EXT_graphics_pipeline_library` link -- the fragment-output-interface part's own chained `VkPipelineRenderingCreateInfo` was previously never captured, so every dynamic-rendering library build lost its attachment formats at merge time |
 | feature | VK_VERSION_1_3 | `shaderIntegerDotProduct` | yes |  |
 | feature | VK_VERSION_1_3 | `maintenance4` | yes |  |
 | limit | VK_VERSION_1_3 | `minSubgroupSize` | n/a |  |

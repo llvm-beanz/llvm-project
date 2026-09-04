@@ -24697,3 +24697,109 @@ itself would silently return garbage instead of failing loudly. Filed as new row
 **Disposition.** Roadmap **H29l closed** (struck through) -- its own named
 diagnostic is fixed, verified by targeted unit tests at both phases and by a
 real CTS re-run. New row **H29s** filed for the gap it uncovered.
+
+## Roadmap H29m: measured impact
+
+**Row.** *A `graphics-pipeline-library` merge loses its own render-target/
+dynamic-rendering state*: `"a graphics pipeline needs either a VkRenderPass or a
+chained VkPipelineRenderingCreateInfo"`, 5 of H29f's own re-run's
+`graphics_library.*` failures, "confined to
+`misc.other.{bad,null}_rendering_create_info` (deliberately-negative CTS shapes
+the library-merge path may be validating too early, before every part's own
+state is merged in)".
+
+### The row's parenthetical guess was wrong, in the opposite direction
+
+Reading the CTS source (`vktPipelineLibraryTests.cpp`'s
+`NULL_RENDERING_CREATE_INFO`/`NULL_RENDERING_CREATE_INFO_PTR`/
+`BAD_RENDERING_CREATE_INFO` modes) settled it:
+
+- These are **not** "deliberately-negative shapes". All three are ordinary
+  positive tests that a conformant driver must *pass*. The "bad"/"null" in their
+  names describes a `VkPipelineRenderingCreateInfo` chained onto the library
+  parts that do **not** own the render target, which the driver is required to
+  **ignore**. `bad_rendering_create_info` makes the requirement observable by
+  chaining one whose `pColorAttachmentFormats` is the junk pointer `0xdeadbeef`
+  with `colorAttachmentCount = 2` -- a driver that reads it faults, and one that
+  merges it silently gets the wrong attachment count.
+- Nothing was being validated **too early**. Every library part was created
+  successfully; only the final linking `vkCreateGraphicsPipelines` failed. The
+  validation ran at exactly the right time, on state that had genuinely gone
+  missing by then.
+
+The test builds all four parts against `renderPass = VK_NULL_HANDLE`, gives the
+**fragment-output-interface** part the one real `VkPipelineRenderingCreateInfo`
+(`colorAttachmentCount = 1`), and links with a create info that chains only
+`VkPipelineLibraryCreateInfoKHR` -- no render pass and no rendering info of its
+own. So the fragment-output part's captured state is the *only* possible source
+of the render target.
+
+### Root cause
+
+`captureGraphicsPipelineLibraryState` captured `RenderPass` and `Subpass` and
+nothing else render-target-related: a chained `VkPipelineRenderingCreateInfo` was
+never captured **at all**, for any part. Dynamic rendering's entire replacement
+for a `VkRenderPass` was therefore dropped on the floor by every library merge,
+and `synthesizeLinkedGraphicsPipelineCreateInfo` (which never sets `Result.pNext`
+either) had nothing to re-chain even if it had wanted to. `getRenderTargets` then
+correctly reported that the pipeline had neither.
+
+This was not specific to the "bad"/"null" shapes at all -- it would have hit
+*any* dynamic-rendering graphics-pipeline-library build.
+
+### Fix
+
+Capture the chained `VkPipelineRenderingCreateInfo`, deep-copying
+`pColorAttachmentFormats` (the application's own array need not outlive the
+creating call), **only** under
+`VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT` -- the one part
+`VkGraphicsPipelineLibraryFlagBitsEXT` gives ownership of the render target's
+attachment formats -- and re-chain it onto the synthesized create info's `pNext`
+at link time. The gating is not an optimization: capturing from any part would
+dereference `bad_rendering_create_info`'s junk pointer.
+
+`VkPipelineRenderingCreateInfo` is consumed by exactly one place in this ICD
+(`getRenderTargets`), and its `viewMask` field by none, so no further plumbing
+was needed.
+
+### Unit tests
+
+| Phase | Test |
+|---|---|
+| Library capture + link-time merge | `GraphicsPipelineTest.LinksADynamicRenderingFragmentOutputLibrary` -- four parts, `renderPass = VK_NULL_HANDLE` throughout, rendering info only on the fragment-output part; asserts the merged pipeline's own `colorAttachmentCount()` is 1 |
+| Capture gating (negative) | `GraphicsPipelineTest.IgnoresARenderingCreateInfoOnANonOutputLibrary` -- reproduces the `0xdeadbeef` shape on the pre-rasterization and fragment-shader parts and asserts the merge still takes its formats from the fragment-output part alone |
+
+Both were confirmed to **fail** without the source change (stashed, rebuilt, re-run)
+and pass with it.
+
+**Regression suite.** `ninja check-feme`: 2580 discovered, 2521 passed, 59
+unsupported, **0 failures**.
+
+### CTS re-run
+
+| Measurement | Before | After |
+|---|---|---|
+| `"a graphics pipeline needs either a VkRenderPass or a chained VkPipelineRenderingCreateInfo"` across `graphics_library.*` | 5 | **0** |
+| `misc.other.*_rendering_create_info*` (3 cases) | 0 Pass / 3 Fail | **3 Pass / 0 Fail** |
+| `misc.view_mask.{fast,optimized}` (2 cases) | 0 Pass / 2 Fail | **2 Pass / 0 Fail** |
+| `graphics_library.*` (836 cases) | 116/432/288 | **121/427/288** |
+
+A case-by-case diff of the two runs' own pass sets confirms **zero regressions**:
+exactly 5 cases moved from `Fail` to `Pass` and none moved the other way.
+
+The row's "confined to `misc.other.{bad,null}_rendering_create_info`" accounted
+for only 3 of its own 5 cases. The other 2 were `misc.view_mask.{fast,optimized}`
+-- also dynamic-rendering library builds, fixed by the same change. This is the
+first row in this series whose real footprint was *larger* than its own
+characterization, rather than smaller.
+
+**Remaining `graphics_library.*` creation diagnostics** after this row: 174 + 108
++ 96 = 378 register-bound-resource-handle (H29p), 30 `"failed to convert spirv
+dialect module to the llvm dialect"`, 4 no-vertex-or-mesh-stage (H29n), plus 3
+singletons.
+
+**Disposition.** Roadmap **H29m closed** (struck through). H29q's own item (1)
+was narrowed rather than closed: a *library part's* rendering info now survives
+the merge, but one chained onto the **linking call itself** is still dropped, and
+merging the two is that row's own remaining work. H29q(2) (`Result.pDynamicState`)
+is untouched.
