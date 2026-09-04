@@ -4063,6 +4063,288 @@ public:
   }
 };
 
+/// Broadcasts a scalar to every lane of \p VecTy, the canonical LLVM
+/// broadcast idiom: insert the scalar into lane 0 of a poison seed, then a
+/// zero-mask `llvm.shufflevector` replicates that one lane across the
+/// whole result. Every matrix arithmetic pattern below needs this to scale
+/// a column vector by a single extracted scalar component (there is no
+/// vector-by-scalar multiply instruction to reach for directly).
+static mlir::Value broadcastScalar(mlir::ConversionPatternRewriter &Rewriter,
+                                   mlir::Location Loc, mlir::Value Scalar,
+                                   mlir::VectorType VecTy) {
+  mlir::Value Poison = mlir::LLVM::PoisonOp::create(Rewriter, Loc, VecTy);
+  mlir::Value ZeroLane = mlir::LLVM::ConstantOp::create(
+      Rewriter, Loc, Rewriter.getI32Type(), 0);
+  mlir::Value Inserted = mlir::LLVM::InsertElementOp::create(
+      Rewriter, Loc, Poison, Scalar, ZeroLane);
+  llvm::SmallVector<int32_t> Mask(VecTy.getNumElements(), 0);
+  return mlir::LLVM::ShuffleVectorOp::create(Rewriter, Loc, Inserted, Poison,
+                                             Mask);
+}
+
+/// Extracts column \p Index (an `llvm.extractvalue` out of the matrix's
+/// own `!llvm.array` of column vectors, see the `spirv.MatrixType`
+/// conversion in populateSPIRVToLLVMTargetTypeConversions).
+static mlir::Value extractColumn(mlir::ConversionPatternRewriter &Rewriter,
+                                 mlir::Location Loc, mlir::Value Matrix,
+                                 int64_t Index) {
+  return mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Matrix, Index);
+}
+
+/// Computes `Matrix * Vector` (an ordinary linear-algebraic matrix-vector
+/// product) directly against the converted LLVM values -- shared by
+/// `MatrixTimesVectorPattern` below and `MatrixTimesMatrixPattern`, which
+/// is itself just this same product applied once per column of its right
+/// operand. Column `j` of Matrix is weighted by lane `j` of Vector and the
+/// weighted columns are summed: `result = sum_j vector[j] * column[j]`,
+/// avoiding any per-row horizontal reduction (unlike
+/// `computeVectorTimesMatrix` below, whose per-column dot product needs
+/// exactly that).
+static mlir::Value computeMatrixTimesVector(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    mlir::Value Matrix, mlir::Value Vector, int64_t NumColumns,
+    mlir::VectorType ColumnTy) {
+  mlir::Value Result;
+  for (int64_t J = 0; J != NumColumns; ++J) {
+    mlir::Value LaneIndex =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), J);
+    mlir::Value Lane =
+        mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Vector, LaneIndex);
+    mlir::Value Weight = broadcastScalar(Rewriter, Loc, Lane, ColumnTy);
+    mlir::Value Column = extractColumn(Rewriter, Loc, Matrix, J);
+    mlir::Value Term =
+        mlir::LLVM::FMulOp::create(Rewriter, Loc, ColumnTy, Weight, Column);
+    Result = Result ? mlir::LLVM::FAddOp::create(Rewriter, Loc, ColumnTy,
+                                                 Result, Term)
+                    : Term;
+  }
+  return Result;
+}
+
+/// Computes `Vector * Matrix` (linear-algebraic vector-matrix product):
+/// lane `j` of the result is the dot product of Vector with column `j` of
+/// Matrix, unlike `computeMatrixTimesVector`'s per-column weighted sum --
+/// each column needs its own full horizontal reduction here, since the
+/// matrix is on the *right* and each output lane draws from a whole
+/// column rather than each input lane weighting a whole column.
+static mlir::Value computeVectorTimesMatrix(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    mlir::Value Vector, mlir::Value Matrix, int64_t NumColumns,
+    int64_t NumRows, mlir::VectorType ColumnTy, mlir::Type ResultTy) {
+  mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultTy);
+  for (int64_t J = 0; J != NumColumns; ++J) {
+    mlir::Value Column = extractColumn(Rewriter, Loc, Matrix, J);
+    mlir::Value Products =
+        mlir::LLVM::FMulOp::create(Rewriter, Loc, ColumnTy, Vector, Column);
+    mlir::Value Dot;
+    for (int64_t I = 0; I != NumRows; ++I) {
+      mlir::Value LaneIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI32Type(), I);
+      mlir::Value Lane = mlir::LLVM::ExtractElementOp::create(
+          Rewriter, Loc, Products, LaneIndex);
+      Dot = Dot ? mlir::LLVM::FAddOp::create(
+                     Rewriter, Loc, ColumnTy.getElementType(), Dot, Lane)
+                : Lane;
+    }
+    mlir::Value DstIndex =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), J);
+    Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result, Dot,
+                                                 DstIndex);
+  }
+  return Result;
+}
+
+/// Converts `spirv.MatrixTimesVector` (roadmap H10f: an ordinary `mat *
+/// vec` transform, one of the most common shapes in any real vertex
+/// shader -- found entirely unimplemented by a real Vulkan-CTS run,
+/// `dEQP-VK.wsi.xcb.swapchain.render.basic` et al.). MLIR has no pattern
+/// for any of this file's five matrix-arithmetic ops, so this whole
+/// family (this pattern plus `VectorTimesMatrixPattern`,
+/// `MatrixTimesMatrixPattern`, `MatrixTimesScalarPattern`,
+/// `TransposePattern` below) is new. See `computeMatrixTimesVector`'s own
+/// comment for the actual per-column-weighted-sum algorithm.
+class MatrixTimesVectorPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::MatrixTimesVectorOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::MatrixTimesVectorOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::MatrixTimesVectorOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto MatrixTy = mlir::cast<mlir::spirv::MatrixType>(Op.getMatrix().getType());
+    mlir::Type ColumnTy = getTypeConverter()->convertType(MatrixTy.getColumnType());
+    if (!ColumnTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Value Result = computeMatrixTimesVector(
+        Rewriter, Op.getLoc(), Adaptor.getMatrix(), Adaptor.getVector(),
+        MatrixTy.getNumColumns(), mlir::cast<mlir::VectorType>(ColumnTy));
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.VectorTimesMatrix` (roadmap H10f). See
+/// `computeVectorTimesMatrix`'s own comment for the per-column dot-product
+/// algorithm.
+class VectorTimesMatrixPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::VectorTimesMatrixOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::VectorTimesMatrixOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::VectorTimesMatrixOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto MatrixTy = mlir::cast<mlir::spirv::MatrixType>(Op.getMatrix().getType());
+    mlir::Type ColumnTy = getTypeConverter()->convertType(MatrixTy.getColumnType());
+    mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
+    if (!ColumnTy || !ResultTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Value Result = computeVectorTimesMatrix(
+        Rewriter, Op.getLoc(), Adaptor.getVector(), Adaptor.getMatrix(),
+        MatrixTy.getNumColumns(), MatrixTy.getNumRows(),
+        mlir::cast<mlir::VectorType>(ColumnTy), ResultTy);
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.MatrixTimesMatrix` (roadmap H10f): `LeftMatrix *
+/// RightMatrix`, column `j` of the result is `LeftMatrix *
+/// RightMatrix.column[j]` -- exactly `computeMatrixTimesVector`'s own
+/// matrix-vector product, applied once per column of RightMatrix (the
+/// standard "matrix-vector product per output column" definition of
+/// matrix-matrix multiplication).
+class MatrixTimesMatrixPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::MatrixTimesMatrixOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::MatrixTimesMatrixOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::MatrixTimesMatrixOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto LeftTy =
+        mlir::cast<mlir::spirv::MatrixType>(Op.getLeftmatrix().getType());
+    auto RightTy =
+        mlir::cast<mlir::spirv::MatrixType>(Op.getRightmatrix().getType());
+    mlir::Type ColumnTy = getTypeConverter()->convertType(LeftTy.getColumnType());
+    mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
+    if (!ColumnTy || !ResultTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    auto ResultArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(ResultTy);
+    if (!ResultArrTy)
+      return Rewriter.notifyMatchFailure(Op, "not an LLVM array result");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultArrTy);
+    auto ColumnVecTy = mlir::cast<mlir::VectorType>(ColumnTy);
+    for (int64_t J = 0; J != RightTy.getNumColumns(); ++J) {
+      mlir::Value RightColumn =
+          extractColumn(Rewriter, Loc, Adaptor.getRightmatrix(), J);
+      mlir::Value ResultColumn = computeMatrixTimesVector(
+          Rewriter, Loc, Adaptor.getLeftmatrix(), RightColumn,
+          LeftTy.getNumColumns(), ColumnVecTy);
+      Result = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result,
+                                                 ResultColumn, J);
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.MatrixTimesScalar` (roadmap H10f): scales every column
+/// by the same broadcast scalar.
+class MatrixTimesScalarPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::MatrixTimesScalarOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::MatrixTimesScalarOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::MatrixTimesScalarOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto MatrixTy = mlir::cast<mlir::spirv::MatrixType>(Op.getMatrix().getType());
+    mlir::Type ColumnTy = getTypeConverter()->convertType(MatrixTy.getColumnType());
+    mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
+    if (!ColumnTy || !ResultTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    auto ResultArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(ResultTy);
+    if (!ResultArrTy)
+      return Rewriter.notifyMatchFailure(Op, "not an LLVM array result");
+
+    mlir::Location Loc = Op.getLoc();
+    auto ColumnVecTy = mlir::cast<mlir::VectorType>(ColumnTy);
+    mlir::Value Scalar = broadcastScalar(Rewriter, Loc, Adaptor.getScalar(),
+                                        ColumnVecTy);
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultArrTy);
+    for (int64_t J = 0; J != MatrixTy.getNumColumns(); ++J) {
+      mlir::Value Column =
+          extractColumn(Rewriter, Loc, Adaptor.getMatrix(), J);
+      mlir::Value Scaled = mlir::LLVM::FMulOp::create(Rewriter, Loc, ColumnTy,
+                                                      Column, Scalar);
+      Result =
+          mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result, Scaled, J);
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.Transpose` (roadmap H10f): builds each row `r` of the
+/// input matrix (element `r` of every column) into column `r` of the
+/// result, one `llvm.extractelement`/`llvm.insertelement` pair per
+/// (row, column) cell -- there is no bulk "transpose" instruction to reach
+/// for, since the source and destination are both arrays of vectors, not
+/// a single flat buffer a shuffle could reinterpret.
+class TransposePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::TransposeOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::TransposeOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::TransposeOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto MatrixTy = mlir::cast<mlir::spirv::MatrixType>(Op.getMatrix().getType());
+    mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
+    if (!ResultTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    auto ResultArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(ResultTy);
+    if (!ResultArrTy)
+      return Rewriter.notifyMatchFailure(Op, "not an LLVM array result");
+    auto ResultColumnTy =
+        mlir::cast<mlir::VectorType>(ResultArrTy.getElementType());
+
+    mlir::Location Loc = Op.getLoc();
+    int64_t NumColumns = MatrixTy.getNumColumns();
+    int64_t NumRows = MatrixTy.getNumRows();
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultArrTy);
+    for (int64_t R = 0; R != NumRows; ++R) {
+      mlir::Value RowIndex =
+          mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), R);
+      mlir::Value NewColumn =
+          mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultColumnTy);
+      for (int64_t C = 0; C != NumColumns; ++C) {
+        mlir::Value Column =
+            extractColumn(Rewriter, Loc, Adaptor.getMatrix(), C);
+        mlir::Value Elem = mlir::LLVM::ExtractElementOp::create(
+            Rewriter, Loc, Column, RowIndex);
+        mlir::Value DstIndex = mlir::LLVM::ConstantOp::create(
+            Rewriter, Loc, Rewriter.getI32Type(), C);
+        NewColumn = mlir::LLVM::InsertElementOp::create(Rewriter, Loc,
+                                                        NewColumn, Elem,
+                                                        DstIndex);
+      }
+      Result =
+          mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result, NewColumn, R);
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Drops `spirv.ExecutionMode`, whose contents FeMe instead reads before
 /// conversion and re-emits as function attributes on the entry point (see
 /// feme::spirv::createConvertSPIRVToLLVMPass). MLIR's own pattern turns it
@@ -5064,7 +5346,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       IntegerGroupNonUniformReducePattern<
           mlir::spirv::GroupNonUniformBitwiseXorOp>,
       LoadValuePattern, MatrixCompositeExtractPattern,
-      MatrixCompositeInsertPattern,
+      MatrixCompositeInsertPattern, MatrixTimesVectorPattern,
+      VectorTimesMatrixPattern, MatrixTimesMatrixPattern,
+      MatrixTimesScalarPattern, TransposePattern,
       OffsetStructLeadingPadAccessChainPattern, PushConstantGlobalVariablePattern,
       RotateConversionPattern, SampledImagePattern, SDotConversionPattern,
       UDotConversionPattern, SUDotConversionPattern,
