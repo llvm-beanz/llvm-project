@@ -37,17 +37,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H12 or other prerequisites blocking the H-series milestones?
+Can you work on H21 or other prerequisites blocking the H-series milestones?
 
-> **Decide, once, which large optional extension groups stay out of scope**, and
-> record the decision here rather than rediscovering it per run:
-> `transform_feedback` (133,719 cases), `shader_object` (243,853),
-> `fragment_shading_rate`, `fragment_shader_interlock`,
-> `fragment_shading_barycentric`, `conditional_rendering`,
-> `descriptor_indexing`, `sparse_resources`, `protected_memory`, `video`. None
-> is required for a 1.4 submission; `descriptor_indexing` is the one with a real
-> conformance consequence, since J-series ray tracing needs a large part of it
-> (see §1.9.8's J2). Everything else defaults to out of scope, per Part 4
-
-Of the listed optional groups, video is the only one that should be out of scope
-for this effort.
+> **`VK_EXT_transform_feedback`**, split out of H12's own decision to bring this
+> group into scope. `dEQP-VK.transform_feedback.*` is 133,719 cases, all
+> currently `NotSupported` (the extension is not advertised and no runtime
+> support exists). `FeMeVulkanDesign.md`'s V7 section already anticipates this
+> ("Implement transform feedback only if it is advertised; otherwise report it
+> unsupported truthfully") but no implementation work has started. Needs its own
+> scoping pass (which of the extension's sub-features -- multiple streams,
+> rasterization stream selection, queries -- a representative CTS slice actually
+> exercises) before code lands, the same discipline H6/H8c/H10f used for their
+> own large groups
