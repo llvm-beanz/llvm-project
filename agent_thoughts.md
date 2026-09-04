@@ -61446,3 +61446,79 @@ remaining failure is a CTS harness assertion rather than an ICD gap. Both
 sessions' fixes were under ten lines. Both were found by reducing rather than
 by reading, and in both cases the row's own stated hypothesis was the thing
 that would have cost the most time to pursue.
+
+# L3: a missing depth-stencil format acceptance, and a wrong-branch trap along the way
+
+L3 was described as a 35-case `check-hlsl-feme-vk` bucket failing at
+`vkCreateRenderPass` with `VK_ERROR_FORMAT_NOT_SUPPORTED`, with the user's
+own explicit steer: support all formats comprehensively unless there is a
+real reason not to. Before touching any source, I had to get
+`check-hlsl-feme-vk` itself working, and that surfaced the most useful
+lesson of the session, unrelated to the actual fix.
+
+## The trap: a branch literally named `feme` that was actually `main`
+
+`/home/dev/dev/offload-test-suite` was already checked out on a local branch
+named `feme`. I almost trusted that name outright. `git diff main feme
+--stat` came back empty -- the local `feme` branch had zero content
+difference from `main`. Had I not checked, I would have run the suite,
+gotten a "clean" result using only the generic `vk`/lavapipe targets, and
+either concluded L3 was unreproducible or silently tested against the wrong
+driver entirely. The real content lives on `beanz`'s own remote branch of
+the identical name, at a different commit (`b0ce3d8`, "[Vulkan][FeMe] Add
+FeMe test targets") than the local tip (`78ce66d8`, which really was just
+`main`). Fetching and hard-resetting to the remote tip fixed it.
+
+The general lesson: a branch's name is not evidence of its content. When a
+task depends on a suite-generating branch that is supposed to differ
+meaningfully from its base, verify the diff exists before trusting anything
+downstream of it -- a silently-empty diff is the same shape of trap as a
+test that passes only because it never ran.
+
+## The fix itself
+
+Once the harness was real, reproducing and reducing the 35-case bucket to
+one representative (`Feature/Textures/Sample.test`, whose own YAML asks for
+only a color attachment) and instrumenting `vkCreateRenderPass` found the
+real cause in one pass: `offload-test-suite`'s own `createDefaultDepthStencil
+Target` always attaches a `VK_FORMAT_D32_SFLOAT_S8_UINT` depth-stencil
+target to every raster pipeline, whether or not the test declares a depth
+test, and this ICD only ever recognized the *other* Vulkan-guaranteed
+combined depth-stencil format, `D24_UNORM_S8_UINT`, as attachment-capable.
+Vulkan only promises at least one of the two; picking only one and having a
+major host test suite hardcode the other is exactly a "no real reason not to
+support it" situation the user's framing anticipated.
+
+The fix was two lines (`isSupportedDepthAttachmentFormat`/
+`isSupportedStencilAttachmentFormat` in `RenderPass.cpp`) because everything
+else already worked -- `mapVkFormat` already mapped the `VkFormat`, and
+`ImageFixture.cpp`/`ImageOps.cpp` already had real pack/unpack/clear/readback
+`case`s for `D32_FLOAT_S8X24_UINT`. This was purely a missing predicate, the
+kind of gap that is easy to miss by reading (everything *around* the check
+looks complete) and easy to find by reducing and instrumenting (the
+rejection happens at one specific, loud call site).
+
+## A pattern worth naming: "the fix is correct but the suite doesn't move"
+
+After the fix, a full-suite before/after diff showed literally the same 187
+`Failed` count and the same set of failing test names. My first instinct was
+to worry the fix was wrong or pointless. It was neither -- a diagnostic-level
+check (not just a name-set diff) on the isolated case confirmed the render
+pass now succeeds where it used to fail outright, and a targeted real
+`deqp-vk` sweep (`*d32_sfloat_s8_uint*`, 1529 cases) confirms zero
+occurrences of the old rejection anywhere. What happened is that every one
+of the 35 cases has a *second*, independent bug stacked directly behind the
+first, and fixing the first only moves the failure to a later, different
+diagnostic -- 13 now fail pipeline creation, 11 fail queue submission, 11
+produce a wrong rendered result. This is the same shape H29g/H29k/H29l/H29m/
+H29n all hit this session in the H-series (a fix closes its own named gap
+and immediately exposes the next one underneath), just discovered from the
+L-series side. The rule I'm taking from this: never let an unchanged
+aggregate pass/fail count alone stand in for "did this fix do anything" --
+diff at the diagnostic level, or measure the isolated case directly, before
+concluding a fix had no effect.
+
+Filed the three newly-exposed buckets as new top-level rows L22/L23/L24
+(not nested under L3) per the flat-numbering convention this series already
+uses, categorized here by their new diagnostic and case list but not yet
+reduced further -- that's real follow-on work for another session.
