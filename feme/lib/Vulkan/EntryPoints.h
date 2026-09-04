@@ -1001,6 +1001,44 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDevicePresentRectanglesKHR(
     VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
     uint32_t *pRectCount, VkRect2D *pRects);
 
+// Roadmap H21b: `VK_EXT_transform_feedback`'s six commands -- buffer
+// binding, the begin/end capture scope, indexed queries (selecting which
+// geometry-shader-output stream a `VK_QUERY_TYPE_TRANSFORM_FEEDBACK_
+// STREAM_EXT` query counts, roadmap H21d), and the byte-count-driven
+// indirect draw variant CTS's own `primitives_generated_query`-adjacent
+// cases use. Registered so the entry-point table and `ImplementedEntrypoints
+// .txt` carry every command this milestone's own scoping pass (roadmap
+// H21a) found, but the extension itself is not yet advertised
+// (`getSupportedDeviceExtensions`, EntryPoints.cpp) -- see
+// `SUPPORTED_EXTENSIONS`'s own comment in vk_gen_entrypoints.py for why it
+// still lists it regardless -- so no real `vkCreateDevice` call can ever
+// enable it yet, and every CTS case in `dEQP-VK.transform_feedback.*`
+// stays `NotSupported` (roadmap H21c advertises it for real, once actual
+// buffer-write capture exists).
+VKAPI_ATTR void VKAPI_CALL vkCmdBindTransformFeedbackBuffersEXT(
+    VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount,
+    const VkBuffer *pBuffers, const VkDeviceSize *pOffsets,
+    const VkDeviceSize *pSizes);
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginTransformFeedbackEXT(
+    VkCommandBuffer commandBuffer, uint32_t firstCounterBuffer,
+    uint32_t counterBufferCount, const VkBuffer *pCounterBuffers,
+    const VkDeviceSize *pCounterBufferOffsets);
+VKAPI_ATTR void VKAPI_CALL vkCmdEndTransformFeedbackEXT(
+    VkCommandBuffer commandBuffer, uint32_t firstCounterBuffer,
+    uint32_t counterBufferCount, const VkBuffer *pCounterBuffers,
+    const VkDeviceSize *pCounterBufferOffsets);
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginQueryIndexedEXT(
+    VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t query,
+    VkQueryControlFlags flags, uint32_t index);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdEndQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                        uint32_t query, uint32_t index);
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirectByteCountEXT(
+    VkCommandBuffer commandBuffer, uint32_t instanceCount,
+    uint32_t firstInstance, VkBuffer counterBuffer,
+    VkDeviceSize counterBufferOffset, uint32_t counterOffset,
+    uint32_t vertexStride);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_ENTRYPOINTS_H

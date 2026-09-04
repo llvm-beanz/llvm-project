@@ -1069,6 +1069,25 @@ struct GraphicsState {
   std::vector<uint32_t> ColorAttachmentInputIndices;
   std::optional<uint32_t> DepthInputAttachmentIndex;
   std::optional<uint32_t> StencilInputAttachmentIndex;
+
+  /// (roadmap H21b) `vkCmdBindTransformFeedbackBuffersEXT`'s current
+  /// binding: `XfbBuffers[I]`/`XfbBufferOffsets[I]`/`XfbBufferSizes[I]` is
+  /// the buffer, byte offset, and byte size bound at transform-feedback
+  /// binding `I`, mirroring `VertexBuffers` above exactly, down to
+  /// `XfbBufferSizes[I] == VK_WHOLE_SIZE` meaning "through the end of the
+  /// buffer" (`vkCmdBindTransformFeedbackBuffersEXT`'s own `pSizes` may be
+  /// null). Recorded for a future consumer (roadmap H21c's actual capture
+  /// writes) to use; nothing reads these yet.
+  std::vector<Buffer *> XfbBuffers;
+  std::vector<VkDeviceSize> XfbBufferOffsets;
+  std::vector<VkDeviceSize> XfbBufferSizes;
+  /// (roadmap H21b) Whether a `vkCmdBeginTransformFeedbackEXT`/
+  /// `vkCmdEndTransformFeedbackEXT` scope is currently open, matching
+  /// `vkCmdBeginQuery`/`vkCmdEndQuery`'s own "no nested scope of the same
+  /// kind" rule (validated the same defensive way `beginTransformFeedback`/
+  /// `endTransformFeedback`'s own callers already validate other
+  /// begin/end pairs).
+  bool XfbActive = false;
 };
 
 /// Builds the normalized render-target binding \p Subpass of \p Pass
@@ -2260,6 +2279,38 @@ Expected<uint32_t> readIndirectDrawCount(Buffer *Buf, uint64_t Offset,
   return std::min(Count, MaxDrawCount);
 }
 
+/// (roadmap H21b) `vkCmdDrawIndirectByteCountEXT`'s own vertex count: a
+/// single `uint32_t` byte count read from \p Buf at \p Offset (the
+/// transform-feedback counter buffer a prior `vkCmdEndTransformFeedbackEXT`
+/// would have written -- though this ICD never writes a nonzero one yet,
+/// roadmap H21c), converted to a vertex count via `(byteCount -
+/// CounterOffset) / VertexStride`. Clamped to 0 rather than underflowing
+/// when `CounterOffset` exceeds the stored byte count, matching the
+/// spec's own worked example ("if the value ... is less than
+/// `counterOffset` ... the number of vertices ... is zero").
+Expected<uint32_t> readIndirectByteCountVertices(Buffer *Buf, uint64_t Offset,
+                                                 uint32_t CounterOffset,
+                                                 uint32_t VertexStride) {
+  if (!Buf || !Buf->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "vkCmdDrawIndirectByteCountEXT's counter "
+                             "buffer is not bound");
+  if (VertexStride == 0)
+    return createStringError(inconvertibleErrorCode(),
+                             "vkCmdDrawIndirectByteCountEXT's vertexStride "
+                             "must be nonzero");
+  if (Offset + sizeof(uint32_t) > Buf->size())
+    return createStringError(inconvertibleErrorCode(),
+                             "vkCmdDrawIndirectByteCountEXT's counter "
+                             "buffer offset is out of range of its buffer");
+  uint32_t ByteCount = 0;
+  std::memcpy(&ByteCount, static_cast<const uint8_t *>(Buf->data()) + Offset,
+              sizeof(ByteCount));
+  if (ByteCount <= CounterOffset)
+    return 0u;
+  return (ByteCount - CounterOffset) / VertexStride;
+}
+
 /// Interprets \p Commands into \p BoundPipeline/\p BoundSets/
 /// \p PushConstants -- shared, mutable execution state a primary command
 /// buffer's own commands and every `vkCmdExecuteCommands`-referenced
@@ -2590,6 +2641,68 @@ Error executeCommandsInto(
       Gfx.IndexType = Cmd.IndexType;
       Gfx.IndexBufferSize = Cmd.DstSize;
       break;
+    case RecordedCommand::Kind::BindTransformFeedbackBuffers: {
+      // `VK_WHOLE_SIZE` is reused here exactly like `BindVertexBuffers`'s
+      // own `NoStrideOverride` above: a null `pSizes` entry means "through
+      // the end of the buffer".
+      size_t Required = Cmd.FirstSet + Cmd.XfbBuffers.size();
+      if (Gfx.XfbBuffers.size() < Required) {
+        Gfx.XfbBuffers.resize(Required, nullptr);
+        Gfx.XfbBufferOffsets.resize(Required, 0);
+        Gfx.XfbBufferSizes.resize(Required, VK_WHOLE_SIZE);
+      }
+      for (size_t I = 0; I != Cmd.XfbBuffers.size(); ++I) {
+        Gfx.XfbBuffers[Cmd.FirstSet + I] = Cmd.XfbBuffers[I];
+        Gfx.XfbBufferOffsets[Cmd.FirstSet + I] = Cmd.XfbBufferOffsets[I];
+        Gfx.XfbBufferSizes[Cmd.FirstSet + I] = I < Cmd.XfbBufferSizes.size()
+                                                   ? Cmd.XfbBufferSizes[I]
+                                                   : VK_WHOLE_SIZE;
+      }
+      break;
+    }
+    case RecordedCommand::Kind::BeginTransformFeedback:
+      // (Roadmap H21b) The Vulkan spec forbids a nested
+      // `vkCmdBeginTransformFeedbackEXT` with no matching end in between,
+      // the same rule `vkCmdBeginQuery`'s own pool already enforces for
+      // itself; `Cmd.XfbBuffers`/`XfbBufferOffsets` (the resume-from
+      // counter buffers) are not consumed by anything yet, since no real
+      // capture exists to resume (roadmap H21c).
+      if (Gfx.XfbActive)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vkCmdBeginTransformFeedbackEXT called "
+                                 "with another transform feedback scope "
+                                 "already active");
+      Gfx.XfbActive = true;
+      break;
+    case RecordedCommand::Kind::EndTransformFeedback:
+      if (!Gfx.XfbActive)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vkCmdEndTransformFeedbackEXT called with "
+                                 "no transform feedback scope active");
+      Gfx.XfbActive = false;
+      // (Roadmap H21b) Writes back the real byte count captured since the
+      // matching begin, for every named counter buffer -- always 0 today,
+      // since nothing yet writes to a transform-feedback buffer at all
+      // (roadmap H21c), which is the truthful answer rather than a stub:
+      // zero bytes really were captured.
+      for (size_t I = 0; I != Cmd.XfbBuffers.size(); ++I) {
+        Buffer *CounterBuf = Cmd.XfbBuffers[I];
+        if (!CounterBuf)
+          continue;
+        if (!CounterBuf->isBound())
+          return createStringError(inconvertibleErrorCode(),
+                                   "vkCmdEndTransformFeedbackEXT's counter "
+                                   "buffer is not bound");
+        VkDeviceSize Offset = Cmd.XfbBufferOffsets[I];
+        if (Offset + sizeof(uint32_t) > CounterBuf->size())
+          return createStringError(inconvertibleErrorCode(),
+                                   "vkCmdEndTransformFeedbackEXT's counter "
+                                   "buffer offset is out of range");
+        uint32_t Zero = 0;
+        std::memcpy(static_cast<uint8_t *>(CounterBuf->data()) + Offset, &Zero,
+                    sizeof(Zero));
+      }
+      break;
     case RecordedCommand::Kind::SetViewport:
       if (Gfx.Dynamic.Viewports.size() <
           Cmd.FirstViewport + Cmd.ViewportsValue.size())
@@ -2869,6 +2982,26 @@ Error executeCommandsInto(
                                  ActiveOcclusionQueries,
                                  ActivePipelineStatsQueries))
           return E;
+      break;
+    }
+    case RecordedCommand::Kind::DrawIndirectByteCount: {
+      if (!BoundGraphicsPipeline)
+        return createStringError(inconvertibleErrorCode(),
+                                 "draw with no bound graphics pipeline");
+      Expected<uint32_t> VertexCount = readIndirectByteCountVertices(
+          Cmd.SrcBuffer, Cmd.DstOffset, Cmd.FillData,
+          static_cast<uint32_t>(Cmd.DstSize));
+      if (!VertexCount)
+        return VertexCount.takeError();
+      feme::graphics::DrawCommand Draw;
+      Draw.VertexCount = *VertexCount;
+      Draw.InstanceCount = Cmd.InstanceCount;
+      Draw.FirstInstance = Cmd.FirstInstance;
+      if (Error E =
+              runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw, DeviceInfo,
+                               BoundSets, PushConstants, ActiveOcclusionQueries,
+                               ActivePipelineStatsQueries))
+        return E;
       break;
     }
     }
@@ -4229,6 +4362,106 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawMeshTasksIndirectCountEXT(
           fromHandle<vulkan::Buffer>(buffer), offset,
           fromHandle<vulkan::Buffer>(countBuffer), countBufferOffset,
           maxDrawCount, stride);
+}
+
+// (roadmap H21b) `VK_EXT_transform_feedback`'s own commands -- see
+// EntryPoints.h's own comment above their declarations for this row's
+// scope (registered, not yet advertised).
+VKAPI_ATTR void VKAPI_CALL vkCmdBindTransformFeedbackBuffersEXT(
+    VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount,
+    const VkBuffer *pBuffers, const VkDeviceSize *pOffsets,
+    const VkDeviceSize *pSizes) {
+  std::vector<vulkan::Buffer *> Buffers;
+  std::vector<VkDeviceSize> Offsets;
+  std::vector<VkDeviceSize> Sizes;
+  Buffers.reserve(bindingCount);
+  Offsets.reserve(bindingCount);
+  if (pSizes)
+    Sizes.reserve(bindingCount);
+  for (uint32_t I = 0; I != bindingCount; ++I) {
+    Buffers.push_back(fromHandle<vulkan::Buffer>(pBuffers[I]));
+    Offsets.push_back(pOffsets[I]);
+    if (pSizes)
+      Sizes.push_back(pSizes[I]);
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->bindTransformFeedbackBuffers(firstBinding, std::move(Buffers),
+                                     std::move(Offsets), std::move(Sizes));
+}
+
+/// Shared by `vkCmdBeginTransformFeedbackEXT`/`vkCmdEndTransformFeedbackEXT`:
+/// both take the same `firstCounterBuffer`/`counterBufferCount`/
+/// `pCounterBuffers`/`pCounterBufferOffsets` argument shape, with `either`
+/// possibly null (no counter buffers named at all -- every stream implicitly
+/// resumes from/writes back to nowhere).
+std::pair<std::vector<vulkan::Buffer *>, std::vector<VkDeviceSize>>
+readTransformFeedbackCounterBuffers(uint32_t counterBufferCount,
+                                    const VkBuffer *pCounterBuffers,
+                                    const VkDeviceSize *pCounterBufferOffsets) {
+  std::vector<vulkan::Buffer *> Buffers;
+  std::vector<VkDeviceSize> Offsets;
+  if (!pCounterBuffers)
+    return {std::move(Buffers), std::move(Offsets)};
+  Buffers.reserve(counterBufferCount);
+  Offsets.reserve(counterBufferCount);
+  for (uint32_t I = 0; I != counterBufferCount; ++I) {
+    Buffers.push_back(fromHandle<vulkan::Buffer>(pCounterBuffers[I]));
+    Offsets.push_back(pCounterBufferOffsets ? pCounterBufferOffsets[I] : 0);
+  }
+  return {std::move(Buffers), std::move(Offsets)};
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginTransformFeedbackEXT(
+    VkCommandBuffer commandBuffer, uint32_t firstCounterBuffer,
+    uint32_t counterBufferCount, const VkBuffer *pCounterBuffers,
+    const VkDeviceSize *pCounterBufferOffsets) {
+  auto [Buffers, Offsets] = readTransformFeedbackCounterBuffers(
+      counterBufferCount, pCounterBuffers, pCounterBufferOffsets);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->beginTransformFeedback(firstCounterBuffer, std::move(Buffers),
+                               std::move(Offsets));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdEndTransformFeedbackEXT(
+    VkCommandBuffer commandBuffer, uint32_t firstCounterBuffer,
+    uint32_t counterBufferCount, const VkBuffer *pCounterBuffers,
+    const VkDeviceSize *pCounterBufferOffsets) {
+  auto [Buffers, Offsets] = readTransformFeedbackCounterBuffers(
+      counterBufferCount, pCounterBuffers, pCounterBufferOffsets);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->endTransformFeedback(firstCounterBuffer, std::move(Buffers),
+                             std::move(Offsets));
+}
+
+// (roadmap H21b) `index` selects which geometry-shader-output stream a
+// `VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT` query counts -- a query
+// type this ICD does not implement yet (roadmap H21d), so it is accepted
+// but otherwise ignored here, exactly like `vkCmdWriteTimestamp2` above
+// delegates straight to its non-2 counterpart's identical payload once its
+// own new argument is dropped.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBeginQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                          uint32_t query, VkQueryControlFlags, uint32_t) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->beginQuery(fromHandle<QueryPool>(queryPool), query);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdEndQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                        uint32_t query, uint32_t) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->endQuery(fromHandle<QueryPool>(queryPool), query);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirectByteCountEXT(
+    VkCommandBuffer commandBuffer, uint32_t instanceCount,
+    uint32_t firstInstance, VkBuffer counterBuffer,
+    VkDeviceSize counterBufferOffset, uint32_t counterOffset,
+    uint32_t vertexStride) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->drawIndirectByteCount(instanceCount, firstInstance,
+                              fromHandle<vulkan::Buffer>(counterBuffer),
+                              counterBufferOffset, counterOffset, vertexStride);
 }
 
 } // namespace feme::vulkan

@@ -2635,6 +2635,43 @@ TEST_F(DrawTest, RendersIndirectDraw) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap H21b) `vkCmdDrawIndirectByteCountEXT` computes its vertex count
+/// from a counter buffer's own byte count (`(byteCount - counterOffset) /
+/// vertexStride`) rather than taking it directly -- 12 bytes at
+/// `vertexStride == 4` with a `counterOffset` of 0 gives exactly the 3
+/// vertices `FullscreenVertexSource` needs to cover the render target.
+TEST_F(DrawTest, DrawIndirectByteCountComputesVertexCountFromCounterBuffer) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkBuffer Counter =
+      createBuffer(sizeof(uint32_t), Memory,
+                   VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT);
+  uint32_t ByteCount = 12; // 3 vertices * 4-byte vertexStride.
+  std::memcpy(fromHandle<Buffer>(Counter)->data(), &ByteCount,
+              sizeof(ByteCount));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawIndirectByteCountEXT(Cmd, /*instanceCount=*/1, /*firstInstance=*/0,
+                                Counter, /*counterBufferOffset=*/0,
+                                /*counterOffset=*/0, /*vertexStride=*/4);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(1, 2)[0], 0xFF);
+  EXPECT_EQ(texel(1, 2)[3], 0xFF);
+
+  vkDestroyBuffer(Device, Counter, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// An indirect draw whose command array overruns its buffer is rejected,
 /// not clamped -- and so is one whose stride is smaller than the command it
 /// describes.

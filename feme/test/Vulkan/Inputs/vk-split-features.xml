@@ -12,9 +12,10 @@
      `VK_KHR_line_rasterization`, `VK_KHR_dynamic_rendering_local_read`,
      `VK_KHR_map_memory2`, `VK_EXT_mesh_shader`, and
      `VK_KHR_push_descriptor`, plus roadmap H10's `VK_KHR_surface`,
-     `VK_EXT_headless_surface`, and `VK_KHR_swapchain`: the eleven
-     extensions `SUPPORTED_EXTENSIONS` lists, whose commands must be read
-     out of `<extensions>` rather than out of any core feature. -->
+     `VK_EXT_headless_surface`, and `VK_KHR_swapchain`, plus roadmap H21b's
+     `VK_EXT_transform_feedback`: the twelve extensions
+     `SUPPORTED_EXTENSIONS` lists, whose commands must be read out of
+     `<extensions>` rather than out of any core feature. -->
 <registry>
   <commands>
     <command>
@@ -89,6 +90,10 @@
     <command>
       <proto><type>void</type><name>vkCreateSwapchainKHR</name></proto>
       <param><type>VkDevice</type><name>device</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkCmdBindTransformFeedbackBuffersEXT</name></proto>
+      <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
     </command>
   </commands>
   <feature api="vulkan" name="VK_BASE_VERSION_1_0" number="1.0">
@@ -192,6 +197,12 @@
                supported="vulkan">
       <require>
         <command name="vkCreateSwapchainKHR"/>
+      </require>
+    </extension>
+    <extension name="VK_EXT_transform_feedback" number="29" type="device"
+               supported="vulkan">
+      <require>
+        <command name="vkCmdBindTransformFeedbackBuffersEXT"/>
       </require>
     </extension>
   </extensions>

@@ -143,6 +143,14 @@ struct RecordedCommand {
     DrawMeshTasks,
     DrawMeshTasksIndirect,
     DrawMeshTasksIndirectCount,
+    // (roadmap H21b) `VK_EXT_transform_feedback`'s own binding and
+    // begin/end-scope commands, plus its `vkCmdDrawIndirectByteCountEXT`
+    // draw variant -- see each one's own recording method below for its
+    // payload shape.
+    BindTransformFeedbackBuffers,
+    BeginTransformFeedback,
+    EndTransformFeedback,
+    DrawIndirectByteCount,
   };
 
   Kind Op;
@@ -344,6 +352,17 @@ struct RecordedCommand {
   uint32_t FirstVertexOrIndex = 0;
   uint32_t FirstInstance = 0;
   int32_t VertexOffset = 0;
+  /// (roadmap H21b) `BindTransformFeedbackBuffers`: the buffers bound at
+  /// `[FirstSet, FirstSet + XfbBuffers.size())` (`FirstSet` reused as
+  /// `firstBinding`, exactly like `BindVertexBuffers` above), their byte
+  /// offsets, and their byte sizes (`VK_WHOLE_SIZE` for a null `pSizes`
+  /// entry). `BeginTransformFeedback`/`EndTransformFeedback`: the counter
+  /// buffers/offsets named at `[FirstSet, FirstSet + XfbBuffers.size())`
+  /// (`XfbBufferSizes` unused by either, since a counter buffer's own size
+  /// is not part of either command's payload).
+  std::vector<Buffer *> XfbBuffers;
+  std::vector<VkDeviceSize> XfbBufferOffsets;
+  std::vector<VkDeviceSize> XfbBufferSizes;
 };
 
 /// A `VkCommandBuffer`: an append-only typed command stream while
@@ -952,6 +971,78 @@ public:
     Cmd.CountBufferOffset = CountOffset;
     Cmd.Count[0] = MaxDrawCount;
     Cmd.DstSize = Stride;
+    Commands.push_back(Cmd);
+  }
+
+  /// (roadmap H21b) `vkCmdBindTransformFeedbackBuffersEXT`: \p Sizes may be
+  /// shorter than \p Buffers (a null `pSizes`), matching
+  /// `bindVertexBuffers`'s own `Strides` shape -- each missing entry means
+  /// "through the end of the buffer" (`VK_WHOLE_SIZE`), filled in when this
+  /// command replays (mirroring `VkWholeSize`'s own reuse for
+  /// `bindIndexBuffer`'s `Size`).
+  void bindTransformFeedbackBuffers(uint32_t FirstBinding,
+                                    std::vector<Buffer *> Buffers,
+                                    std::vector<VkDeviceSize> Offsets,
+                                    std::vector<VkDeviceSize> Sizes) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::BindTransformFeedbackBuffers;
+    Cmd.FirstSet = FirstBinding;
+    Cmd.XfbBuffers = std::move(Buffers);
+    Cmd.XfbBufferOffsets = std::move(Offsets);
+    Cmd.XfbBufferSizes = std::move(Sizes);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (roadmap H21b) `vkCmdBeginTransformFeedbackEXT`: \p CounterBuffers/
+  /// \p CounterBufferOffsets (both possibly empty, for a null
+  /// `pCounterBuffers`) name where each bound transform-feedback buffer
+  /// should *resume* counting from, rather than restarting at 0 -- not yet
+  /// consumed by anything, since no real capture exists yet to resume
+  /// (roadmap H21c).
+  void beginTransformFeedback(uint32_t FirstCounterBuffer,
+                              std::vector<Buffer *> CounterBuffers,
+                              std::vector<VkDeviceSize> CounterBufferOffsets) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::BeginTransformFeedback;
+    Cmd.FirstSet = FirstCounterBuffer;
+    Cmd.XfbBuffers = std::move(CounterBuffers);
+    Cmd.XfbBufferOffsets = std::move(CounterBufferOffsets);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (roadmap H21b) `vkCmdEndTransformFeedbackEXT`: like
+  /// `beginTransformFeedback` above, but every named counter buffer is
+  /// *written* to at execution time (the byte count captured since the
+  /// matching begin) rather than read from.
+  void endTransformFeedback(uint32_t FirstCounterBuffer,
+                            std::vector<Buffer *> CounterBuffers,
+                            std::vector<VkDeviceSize> CounterBufferOffsets) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::EndTransformFeedback;
+    Cmd.FirstSet = FirstCounterBuffer;
+    Cmd.XfbBuffers = std::move(CounterBuffers);
+    Cmd.XfbBufferOffsets = std::move(CounterBufferOffsets);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (roadmap H21b) `vkCmdDrawIndirectByteCountEXT`: draws \p InstanceCount
+  /// instances of a vertex count computed from a single `uint32_t` byte
+  /// count read from \p CounterBuffer at \p CounterBufferOffset at
+  /// execution time (`(byteCount - CounterOffset) / VertexStride`),
+  /// mirroring `drawIndirect`'s own "read the real argument at execution
+  /// time" shape. `SrcBuffer`/`DstOffset` are reused for the counter
+  /// buffer/offset (distinct from `IndirectBuffer` above, which no
+  /// `DrawIndirectByteCount` command uses), `FillData` for
+  /// `CounterOffset`, and `DstSize` for `VertexStride`.
+  void drawIndirectByteCount(uint32_t InstanceCount, uint32_t FirstInstance,
+                             Buffer *CounterBuffer,
+                             VkDeviceSize CounterBufferOffset,
+                             uint32_t CounterOffset, uint32_t VertexStride) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::DrawIndirectByteCount;
+    Cmd.InstanceCount = InstanceCount;
+    Cmd.FirstInstance = FirstInstance;
+    Cmd.SrcBuffer = CounterBuffer;
+    Cmd.DstOffset = CounterBufferOffset;
+    Cmd.FillData = CounterOffset;
+    Cmd.DstSize = VertexStride;
     Commands.push_back(Cmd);
   }
 

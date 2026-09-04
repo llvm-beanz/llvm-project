@@ -77,7 +77,16 @@ CORE_FEATURES = (
 # so this driver must implement the `KHR` name to be reachable through the
 # loader at all, confirmed by `dEQP-VK.api.granularity.
 # in_dynamic_render_pass.*` SIGSEGV'ing on exactly this gap). Every name
-# here must also appear in `feme::vulkan::getSupportedDeviceExtensions`.
+# here must also appear in `feme::vulkan::getSupportedDeviceExtensions`,
+# with one deliberate, temporary exception: `VK_EXT_transform_feedback`
+# (roadmap H21b) implements and lists its own six commands here so the
+# generated table (and `ImplementedEntrypoints.txt`) carry them, but is not
+# yet in `getSupportedDeviceExtensions` -- no real `vkCreateDevice` call can
+# enable an unadvertised extension, so this is safe (unlike every other
+# entry here, whose commands a real application can reach the moment it
+# enables the extension by name) and does not change any CTS result;
+# roadmap H21c advertises it for real, once actual buffer-write capture
+# exists, at which point this becomes a normal entry like every other one.
 SUPPORTED_EXTENSIONS = (
     "VK_KHR_dynamic_rendering",
     "VK_EXT_extended_dynamic_state",
@@ -142,6 +151,16 @@ SUPPORTED_EXTENSIONS = (
     "VK_KHR_surface",
     "VK_EXT_headless_surface",
     "VK_KHR_swapchain",
+    # (roadmap H21b) `vkCmdBindTransformFeedbackBuffersEXT`/
+    # `vkCmdBeginTransformFeedbackEXT`/`vkCmdEndTransformFeedbackEXT`/
+    # `vkCmdBeginQueryIndexedEXT`/`vkCmdEndQueryIndexedEXT`/
+    # `vkCmdDrawIndirectByteCountEXT` (CommandBuffer.cpp) are all
+    # implemented, and `VkPipelineRasterizationStateStreamCreateInfoEXT` is
+    # recognized during graphics pipeline creation (GraphicsPipeline.cpp) --
+    # see this tuple's own doc comment above for why
+    # `getSupportedDeviceExtensions` does *not* yet list this extension,
+    # unlike every other entry here.
+    "VK_EXT_transform_feedback",
 )
 
 # First-parameter handle types that make a command dispatched at the

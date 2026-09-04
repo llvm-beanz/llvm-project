@@ -384,3 +384,11 @@ vkGetDeviceGroupPresentCapabilitiesKHR
 vkGetDeviceGroupSurfacePresentModesKHR
 vkGetPhysicalDevicePresentRectanglesKHR
 
+# Roadmap H21b: VK_EXT_transform_feedback's six commands (see EntryPoints.h's
+# own comment: registered, not yet advertised).
+vkCmdBindTransformFeedbackBuffersEXT
+vkCmdBeginTransformFeedbackEXT
+vkCmdEndTransformFeedbackEXT
+vkCmdBeginQueryIndexedEXT
+vkCmdEndQueryIndexedEXT
+vkCmdDrawIndirectByteCountEXT

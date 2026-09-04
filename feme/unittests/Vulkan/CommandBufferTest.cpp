@@ -3127,6 +3127,117 @@ TEST_F(CommandBufferTest, QueryPoolWriteTimestamp2ThenGetResults) {
   vkDestroyQueryPool(Device, QPool, nullptr);
 }
 
+/// (Roadmap H21b) `vkCmdBeginTransformFeedbackEXT`/
+/// `vkCmdEndTransformFeedbackEXT` around a `vkCmdBindTransformFeedbackBuffers
+/// EXT`-bound counter buffer: since nothing yet captures any transform-
+/// feedback bytes (roadmap H21c), the counter buffer must read back exactly
+/// 0 after `vkCmdEndTransformFeedbackEXT` -- the truthful "zero bytes were
+/// really captured" answer, not a stub.
+TEST_F(CommandBufferTest, TransformFeedbackEndWritesZeroToCounterBuffer) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 4;
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT;
+  VkBuffer CounterBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &CounterBuf),
+            VK_SUCCESS);
+
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 4;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, CounterBuf, Memory, 0), VK_SUCCESS);
+
+  void *Data = nullptr;
+  ASSERT_EQ(vkMapMemory(Device, Memory, 0, 4, 0, &Data), VK_SUCCESS);
+  *static_cast<uint32_t *>(Data) = 0xDEADBEEFu; // A sentinel to overwrite.
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  VkDeviceSize Offset = 0;
+  vkCmdBindTransformFeedbackBuffersEXT(CmdBuf, 0, 1, &CounterBuf, &Offset,
+                                       nullptr);
+  vkCmdBeginTransformFeedbackEXT(CmdBuf, 0, 0, nullptr, nullptr);
+  vkCmdEndTransformFeedbackEXT(CmdBuf, 0, 1, &CounterBuf, nullptr);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+  EXPECT_EQ(*static_cast<uint32_t *>(Data), 0u);
+
+  vkUnmapMemory(Device, Memory);
+  vkDestroyBuffer(Device, CounterBuf, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+/// (Roadmap H21b) A second `vkCmdBeginTransformFeedbackEXT` with no
+/// matching `vkCmdEndTransformFeedbackEXT` in between must fail, the same
+/// nested-scope rule `vkCmdBeginQuery` already enforces for itself.
+TEST_F(CommandBufferTest, TransformFeedbackRejectsNestedBegin) {
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBeginTransformFeedbackEXT(CmdBuf, 0, 0, nullptr, nullptr);
+  vkCmdBeginTransformFeedbackEXT(CmdBuf, 0, 0, nullptr, nullptr);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Failed());
+}
+
+/// (Roadmap H21b) `vkCmdEndTransformFeedbackEXT` with no matching begin
+/// must fail rather than silently succeed.
+TEST_F(CommandBufferTest, TransformFeedbackRejectsEndWithNoBegin) {
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdEndTransformFeedbackEXT(CmdBuf, 0, 0, nullptr, nullptr);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Failed());
+}
+
+/// (Roadmap H21b) `vkCmdBeginQueryIndexedEXT`/`vkCmdEndQueryIndexedEXT`
+/// delegate straight to `vkCmdBeginQuery`/`vkCmdEndQuery`, ignoring
+/// `index` -- confirmed the same way `QueryPoolWriteTimestampThenGetResults`
+/// above confirms its own non-indexed counterpart, by reading back a real
+/// query result.
+TEST_F(CommandBufferTest, QueryIndexedDelegatesToNonIndexedQuery) {
+  VkQueryPoolCreateInfo PoolInfo{};
+  PoolInfo.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
+  PoolInfo.queryCount = 1;
+  PoolInfo.pipelineStatistics =
+      VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT;
+  VkQueryPool QPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &PoolInfo, nullptr, &QPool), VK_SUCCESS);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdResetQueryPool(CmdBuf, QPool, 0, 1);
+  vkCmdBeginQueryIndexedEXT(CmdBuf, QPool, 0, 0, /*index=*/3);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdDispatch(CmdBuf, 2, 3, 1);
+  vkCmdEndQueryIndexedEXT(CmdBuf, QPool, 0, /*index=*/3);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint64_t Results[2] = {0, 0};
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 1, sizeof(Results), Results,
+                                  2 * sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT |
+                                      VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+            VK_SUCCESS);
+  EXPECT_EQ(Results[0], 6u); // ComputeShaderInvocations: 2*3*1 groups * 1.
+  EXPECT_EQ(Results[1], 1u); // Availability.
+
+  vkDestroyQueryPool(Device, QPool, nullptr);
+}
+
 TEST_F(CommandBufferTest, ExecuteCommandsInterpretsSecondaryIntoPrimary) {
   VkCommandBufferAllocateInfo SecondaryAllocInfo{};
   SecondaryAllocInfo.commandPool = Pool;

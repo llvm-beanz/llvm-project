@@ -83,6 +83,21 @@ TEST(ProcAddr, DeviceProcAddrResolvesAcquireNextImage2) {
   EXPECT_NE(getDeviceProcAddr("vkAcquireNextImage2KHR"), nullptr);
 }
 
+// Roadmap H21b: `VK_EXT_transform_feedback`'s six commands are registered
+// in `SUPPORTED_EXTENSIONS`/`ImplementedEntrypoints.txt` so the dispatch
+// table carries real function pointers for them, even though the
+// extension itself is not yet advertised (`getSupportedDeviceExtensions`)
+// -- mirrors `DeviceProcAddrResolvesAcquireNextImage2` above, guarding the
+// same "resolves to a real symbol, not null" dispatch-table property.
+TEST(ProcAddr, DeviceProcAddrResolvesTransformFeedbackCommands) {
+  EXPECT_NE(getDeviceProcAddr("vkCmdBindTransformFeedbackBuffersEXT"), nullptr);
+  EXPECT_NE(getDeviceProcAddr("vkCmdBeginTransformFeedbackEXT"), nullptr);
+  EXPECT_NE(getDeviceProcAddr("vkCmdEndTransformFeedbackEXT"), nullptr);
+  EXPECT_NE(getDeviceProcAddr("vkCmdBeginQueryIndexedEXT"), nullptr);
+  EXPECT_NE(getDeviceProcAddr("vkCmdEndQueryIndexedEXT"), nullptr);
+  EXPECT_NE(getDeviceProcAddr("vkCmdDrawIndirectByteCountEXT"), nullptr);
+}
+
 TEST(ProcAddr, PhysicalDeviceProcAddrHasNoUnknownExtensionCommand) {
   // This milestone implements every physical-device command it advertises
   // directly, so there is nothing for the "unknown extension" path to
