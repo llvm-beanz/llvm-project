@@ -59490,3 +59490,106 @@ recorded figures to confirm no unrelated regression.
    `VulkanCTSReport.md` (measured-impact section), `FeMeVulkanDesign.md`
    (V7 section updated).
 4. This `agent_thoughts.md` entry.
+
+# H21f: `VK_EXT_graphics_pipeline_library`'s real scope (new roadmap H29)
+
+## Starting point
+
+H21f's own literal text was already honest about being blocked: "no
+transform-feedback work alone can close these regardless of how
+complete H21c/H21d/H21e become." My first instinct was to treat this
+as a quick "nothing to do here, still blocked" pass and move on to
+another prerequisite. But the instructions ask me to work on H21f "or
+other prerequisites blocking the H-series milestones" -- and
+`VK_EXT_graphics_pipeline_library` itself, as a real implementation
+gap, clearly qualifies as exactly that kind of prerequisite. So before
+writing it off, I decided to actually measure how big a prerequisite it
+really is, the same way H21a's own scoping pass did for the whole
+transform-feedback group before any of H21b-H21e could be planned
+sensibly.
+
+## The measurement
+
+Ran a real `deqp-vk --deqp-runmode=txt-caselist` dump against the whole
+CTS (not just transform_feedback) and grepped for `pipeline_library`.
+The result surprised me: H21f's own 15,782-case estimate for the two
+`_gpl` transform-feedback sub-groups is a small fraction of this
+extension's actual footprint. `dEQP-VK.pipeline.pipeline_library.*`
+alone is 120,483 cases -- a dedicated group that re-runs this ICD's
+existing pipeline-state test matrix (stencil ops, vertex input,
+samplers, blend state, multisample, etc.) three times over, once per
+`PipelineConstructionType` (monolithic/optimized-library/fast-linked-
+library). Add `fragment_shading_barycentric.pipeline_library`,
+`ray_tracing_pipeline.pipeline_library`, and
+`dynamic_state.pipeline_library`, and the real total is around 127,842
+cases -- an order of magnitude larger than what H21f alone accounts
+for.
+
+This is the kind of discovery that changes how a milestone should be
+tracked: `VK_EXT_graphics_pipeline_library` isn't really a small,
+transform-feedback-specific dependency any more once you look at its
+real footprint -- it's arguably one of the highest-leverage remaining
+gaps in the whole roadmap, bigger in absolute case count than several
+of H12's own named groups (`fragment_shader_interlock` 576,
+`fragment_shading_barycentric` 20,991, `conditional_rendering` 1,030,
+`protected_memory` 6,000 are all smaller).
+
+## Why I didn't implement it
+
+I considered attempting even a first small step (mirroring H21a's own
+"land the smallest possible real step" precedent), but concluded there
+genuinely isn't one available here that would be verifiable. H21a's own
+first step (SPIR-V decoration plumbing for `XfbBuffer`/`XfbOffset`/
+`XfbStride`) was buildable and unit-testable in isolation even though it
+produced a zero CTS delta, because the underlying signature-reflection
+machinery it touched was already exercised by every other pipeline in
+the test suite. Graphics-pipeline-library's own first useful step would
+be different in kind: `VkPipelineConstructionUtil.cpp:212`'s own
+device-feature check means *no* CTS case can ever reach any of this
+ICD's own pipeline-creation code without the extension being genuinely
+advertised, which in turn requires an actual working four-part-library-
+plus-linking implementation to exist, not just parsed-and-ignored
+structs. There's no safe, small, verifiable slice to land first the way
+H21a found one -- the smallest *meaningful* unit of work here is much
+larger, spanning a real architecture change to `compileGraphicsPipeline`
+(currently a single monolithic entry point requiring every stage and
+all fixed-function state present together) into an independently-
+creatable-and-linkable four-part model. That's multi-session-scale
+work I judged unwise to start speculatively without first doing (in a
+later session) the same kind of detailed feature-by-feature scoping
+pass H21a/H12 modeled -- which sub-parts of the four library parts
+actually matter to the CTS's own case shapes, whether fast-linking and
+optimized-linking need materially different code paths, whether
+`shader_module_identifier` retention needs separate support, etc.
+
+## Disposition
+
+Rather than silently fold this finding into H21f's own row (which
+would understate its real significance) or leave it undocumented, I
+gave it its own dedicated top-level milestone, H29, recording the
+measured numbers and the required object-model shape as I currently
+understand it, explicitly flagging that H29's own detailed scoping pass
+is itself still future work. Updated H21f's own text to point at H29
+by number rather than just gesturing at "a separate implementation."
+This keeps the roadmap honest about scale without pretending I did more
+implementation work than I did.
+
+## Verification
+
+This was a pure investigation/documentation pass -- no `feme` source
+changed, so no rebuild or unit-test run was needed. I did run the real
+`deqp-vk` case-list dump against the actual built ICD (confirmed via
+the `feme_icd.json` manifest path) to get the case counts above; that
+re-run is the "Vulkan CTS run" for this pass, recorded in
+`VulkanCTSReport.md`'s new "Roadmap H21f investigation" section along
+with the reasoning for not attempting code this time. `check-feme`'s
+last recorded baseline (H21e's own commit, 2491 passed/0 failed/59
+`Unsupported`) is unchanged and still current.
+
+## Commits
+
+1. `[feme] H21f: scoping investigation -- VK_EXT_graphics_pipeline_
+   library's real scope, new H29` -- `Roadmap.md` (H21f updated, H29
+   added), `VulkanExtensionInventory.md` (row updated), `VulkanCTSReport
+   .md` (investigation section added).
+2. This `agent_thoughts.md` entry.
