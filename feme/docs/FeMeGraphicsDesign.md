@@ -3537,7 +3537,14 @@ loop), neither of which consult the flag. `CanonicalizeStage.cpp` now
 peels that dimension off a mesh entry's own plain `Output` global before
 building its `SignatureElement`, the same way a builtin interface block's
 per-member element already has it peeled, rather than folding it in and
-flagging it. Roadmap H6k has since found and closed a related gap one
+flagging it. Roadmap H29g has since extended that same peel to a *hull*
+entry's own plain per-control-point `Output` global (e.g.
+`layout(location=0) out vec4 vtxColor[];` against `layout(vertices = N)
+out;`), which is the identical shape for the identical reason: the outer
+array dimension is the output patch's own control point count rather than
+a matrix row count, and the domain stage links against the element by
+`Location` expecting the single control point each of its own inputs
+describes. Roadmap H6k has since found and closed a related gap one
 level down, in `CanonicalizeStage.cpp`'s constant-vertex-index fold
 itself rather than its `RowCount` reflection: a real mesh entry's
 per-vertex output stores are compile-time-unrolled by glslang into
