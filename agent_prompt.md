@@ -37,15 +37,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29f or other prerequisites blocking the H-series milestones?
+Can you work on H29h or other prerequisites blocking the H-series milestones?
 
-> **Characterize the remaining `graphics_library.*`/`cache.*` `Failed` cases
-> beyond H29d/H29e** (386 of 467 `graphics_library.*` failures and roughly 474
-> of 475 `cache.*` failures not yet attributed to a specific named gap): needs a
-> systematic pass grouping the remaining failure messages by signature (most
-> seen so far: `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED
-> at vkRefUtil.cpp:37` from this ICD's own merge/compile rejection, and
-> `retcode: VK_ERROR_INITIALIZATION_FAILED at
-> vkPipelineConstructionUtil.cpp:176`, a CTS-side wrapper failure downstream of
-> the first) to produce further named, scoped follow-on rows, the same
-> discipline H21a's own CTS-shape scoping pass used
+> **MLIR's `ConvertSPIRVToLLVMPass` fails to legalize a `spirv.Image` extracted
+> from a `spirv.SampledImage`** (`"failed to convert spirv dialect module to the
+> llvm dialect"`, the generic pass-failure wrapper around `"failed to legalize
+> operation 'spirv.Image' that was explicitly marked illegal"`), the single
+> dominant cause H29f's own re-run found within
+> `dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_random.*`
+> (387 of that re-run's 465 real failures, confined entirely to this sub-group,
+> both mesh- and non-mesh-shader cases). Needs its own real IR reduction (a
+> minimal SPIR-V module using `OpImage` on a combined-image-sampler variable) to
+> confirm whether `SPIRVToLLVM.cpp`'s pattern-registration list is simply
+> missing an `OpImage`-to-LLVM-dialect conversion pattern outright (the same
+> shape as the already-closed H6g-b-a-i-a's `spirv.All`/`spirv.Any` gap) or one
+> exists but does not cover this operand shape
