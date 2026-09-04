@@ -58588,3 +58588,141 @@ more `feme` source changes could actually fix.
   specific question. I'd reach for it if a *future* milestone's own
   evidence pointed at actual memory corruption rather than a timing/
   scheduling issue.
+
+# H11: Secondary command buffers inside a render pass
+
+## Task
+
+Work on H11 ("Secondary command buffers inside a render pass, and the
+render-pass state inheritance they carry") or other prerequisites
+blocking the H-series milestones.
+
+## Investigation
+
+Read `CommandBuffer.cpp`'s secondary-command-buffer support
+(`vkCmdExecuteCommands`/`executeCommandsInto`, already implemented since
+V3) closely before writing any code. The recursive
+`executeCommandsInto` function threads `Gfx`/`BoundPipeline`/
+`BoundGraphicsPipeline`/`BoundSets`/`PushConstants` *by reference* into a
+secondary buffer's own commands. That means render-pass state
+(framebuffer, bound pipeline, viewport, scissor, etc.) is already
+correctly inherited "for free" -- a secondary buffer executed inside an
+active render pass simply runs against the exact same shared state
+object the primary already set up. There is no separate "inheritance"
+mechanism to build. `VkCommandBufferInheritanceInfo`/
+`VkCommandBufferInheritanceRenderingInfo`/`VkSubpassContents` are read
+by nothing in the driver, but this causes no functional bug given the
+by-reference design.
+
+This meant H11's own literal scope was, on inspection, already correct.
+Rather than invent busywork or declare victory with no evidence, I ran
+the real CTS group whose name most directly exercises this row's own
+scope: `dEQP-VK.renderpasses.dynamic_rendering.*secondary*` (8038
+cases). Initial run: 105 passed, 979 failed, 6954 NotSupported. A large
+failure count against a supposedly-already-correct feature demanded an
+explanation before I could honestly close the row either way.
+
+## Methodology: separating "secondary-specific" from "shared, pre-existing" bugs
+
+For every failing case under a `*secondary*`-named group, I re-ran the
+identical case suffix under the sibling `primary_cmd_buff` prefix. If
+that primary-command-buffer variant fails identically, the bug cannot
+be about secondary-command-buffer state inheritance (not H11's literal
+scope) -- it must be a general dynamic-rendering pipeline/execution bug
+that this test family happens to expose (because it tests many
+partial-attachment-write draws sharing one pipeline, a shape other test
+families exercise less). This methodology found that *every one* of the
+979 original failures was of this shared kind, confirming the
+inheritance mechanism itself was not at fault anywhere in the failure
+set.
+
+## Bug #1: pipeline creation over-requires fragment outputs
+
+Used `FEME_VULKAN_LOG_CREATION_ERRORS=1` on one failing case
+(`unused_clear_attachments.colorunused_colorunused_colorunused_colorused_
+depthonly_d32_unused`): `vkCreateGraphicsPipelines` failed with
+`"fragment stage has no floating-point output of 1-4 components at
+location 0 (SV_Target0)"`.
+
+Traced to `GraphicsPipeline.cpp`'s `validateStageInterfaces`: for every
+non-`Unknown` `ColorAttachments[I]`, it hard-required the fragment
+shader to declare a matching float output at location `I`. I initially
+suspected the dynamic-rendering attachment-format-mapping code
+(`getRenderTargets`) was reporting a bogus non-`Unknown` format for an
+attachment CTS actually left `VK_FORMAT_UNDEFINED`. I added a temporary
+`fprintf` diagnostic there (backing the file up to `/tmp/
+GraphicsPipeline.cpp.orig` first), rebuilt, and re-ran: all 4 attachment
+formats were genuinely `R8G8B8A8_UNORM` (37), not `VK_FORMAT_UNDEFINED`.
+That disproved my first hypothesis and pointed at the real one: reading
+CTS's own source (`vktRenderPassUnusedClearAttachmentTests.cpp` lines
+305-330, 810) confirmed it deliberately shares one pipeline (with every
+`pColorAttachmentFormats` slot populated) across many draws, each
+writing only a subset of that pipeline's own declared attachments via
+the fragment shader. This is legal Vulkan -- an unwritten declared
+location simply keeps its prior/undefined content, not a
+pipeline-creation error.
+
+I reverted the temporary diagnostic and fixed `validateStageInterfaces`
+to skip (not reject) a real attachment location with no matching
+fragment output, while still validating a *present* output's own
+component-count/type shape (preserving the existing H7t narrower-
+than-4-components logic). Found and fixed the identical shape in
+`Executor.cpp`'s draw-time `FSColors` linkage loop, which returned a
+hard error instead of the already-established `nullptr`
+("leave unmodified") convention.
+
+## Bug #2: vkCmdClearAttachments crashes on an unused slot
+
+After fixing bug #1, pipeline creation succeeded but `vkQueueSubmit`
+then failed with `"a render target attachment is not bound to memory"`.
+Added a temporary diagnostic to `resolveAttachmentView`
+(`RenderPass.cpp`, backed up first) to confirm a null `View` was being
+passed in directly, without a null check upstream.
+
+Traced to `ImageOps.cpp`'s `runClearAttachments` (the
+`vkCmdClearAttachments` handler -- directly relevant given this test
+group's own name): the color path called `resolveAttachmentView
+(Target.View)` without checking `!Target.View` first. A present-but-
+unused (`VK_NULL_HANDLE` imageView) color slot is an established
+"present but unused" convention elsewhere in the codebase (roadmap E5/
+`VK_KHR_maintenance5`), but this one code path didn't honor it. Fixed
+with `if (!Target.View) continue;` for color, and `if` guards (not
+early-return) for the depth/stencil paths -- guards rather than
+continue/return, since a single combined depth+stencil `VkClearAttachment`
+entry must still process whichever aspect is actually bound even when
+the other is unused.
+
+Reverted the temporary `RenderPass.cpp` diagnostic once it had served
+its purpose.
+
+## Results
+
+Re-ran the full `dEQP-VK.renderpasses.dynamic_rendering.*secondary*`
+group after both fixes: 217/8016 passed (up from 105/8038), 867 failed
+(down from 979), 6932 NotSupported. Wrote three new unit tests (one per
+fix), and confirmed each fails when its corresponding `feme/lib` fix is
+reverted (via `git stash push` on just the three library files,
+rebuild, run the new tests, then `git stash pop` to restore) -- a real
+regression check, not just "the test passes with the fix in place."
+`ninja check-feme`: 2470/2529 passing, 0 Failed (up from the prior
+session's 2467).
+
+Applied the same primary/secondary suffix-comparison methodology to a
+sample of the remaining 867 failures (`multisample_resolve.
+r8g8b8a8_unorm.samples_2` specifically) and confirmed they too
+reproduce under `primary_cmd_buff` -- further pre-existing,
+non-secondary-specific dynamic-rendering gaps, not fixed this session.
+Rather than chase all of them (a much larger scope than H11's own
+mandate), I closed H11 with a detailed note documenting the actual
+finding (inheritance was already correct; two real, unrelated bugs
+found and fixed along the way) and broke the remaining categories out
+as new roadmap rows H20/H20a-H20f, following the H10j/H8c precedent for
+honest closure notes that diverge from a milestone's original
+hypothesis.
+
+## Commits
+
+Three code+test commits (pipeline/executor fix, clear-attachments fix,
+each with its own regression-tested unit test) plus one docs commit
+(Roadmap.md H11 closure + H20 breakdown, VulkanCTSReport.md measured-
+impact section), followed by this thoughts entry.
