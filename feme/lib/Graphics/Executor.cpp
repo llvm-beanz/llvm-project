@@ -85,6 +85,7 @@
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MathExtras.h"
@@ -1391,6 +1392,81 @@ Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
 }
 
 } // namespace
+
+/// (Roadmap H21c/H21e) Captures every `Output`-direction element of \p
+/// Elements with its own `XfbBuffer`/`XfbOffset`/`XfbStride` into \p
+/// Draw's own bound transform-feedback buffers, reading each element's
+/// scalar values from \p Output's row `Flat` for every `Flat` in
+/// `[0, Count)` -- the shared logic roadmap H21c's original vertex-shader-
+/// only capture used, factored out so H21e's geometry-shader-sourced
+/// capture (a different `Elements`/`Output`/`Count` triple, the same
+/// buffer-write shape) can reuse it verbatim rather than duplicating it.
+static void captureTransformFeedback(llvm::ArrayRef<const SignatureElement *>
+                                         Elements,
+                                     const StageStorage &Output,
+                                     uint32_t Count,
+                                     const PreparedDraw &Draw) {
+  // Every element captured to the same `XfbBuffer` shares that buffer's
+  // own per-vertex record stride (a real shader repeats SPIR-V's
+  // `XfbStride` decoration on every one of that buffer's captured
+  // variables); \p Count newly emitted vertices must advance that
+  // buffer's running byte counter exactly once, not once per element
+  // captured to it, so each buffer's base (already-captured) vertex
+  // count is computed once, from the first such element found, before
+  // the per-element write loop below.
+  struct XfbBufferProgress {
+    uint32_t Stride = 0;
+    uint64_t BaseVertex = 0;
+    bool Seen = false;
+  };
+  llvm::SmallVector<XfbBufferProgress, 4> Progress(Draw.XfbBuffers.size());
+  for (const SignatureElement *Elt : Elements) {
+    if (Elt->Direction != SignatureDirection::Output || !Elt->XfbBuffer)
+      continue;
+    uint32_t BufIdx = *Elt->XfbBuffer;
+    if (BufIdx >= Draw.XfbBuffers.size() ||
+        !Draw.XfbBuffers[BufIdx].CapturedBytes || Elt->XfbStride == 0)
+      continue;
+    XfbBufferProgress &Prog = Progress[BufIdx];
+    if (Prog.Seen)
+      continue;
+    Prog.Stride = Elt->XfbStride;
+    Prog.BaseVertex = *Draw.XfbBuffers[BufIdx].CapturedBytes / Elt->XfbStride;
+    Prog.Seen = true;
+  }
+  for (const SignatureElement *Elt : Elements) {
+    if (Elt->Direction != SignatureDirection::Output || !Elt->XfbBuffer)
+      continue;
+    uint32_t BufIdx = *Elt->XfbBuffer;
+    if (BufIdx >= Draw.XfbBuffers.size())
+      continue;
+    const feme::graphics::PreparedDraw::XfbCaptureBuffer &CB =
+        Draw.XfbBuffers[BufIdx];
+    if (!CB.CapturedBytes || Elt->XfbStride == 0)
+      continue;
+    uint64_t BaseVertex = Progress[BufIdx].BaseVertex;
+    for (uint32_t Flat = 0; Flat != Count; ++Flat) {
+      uint64_t RecordStart =
+          (BaseVertex + Flat) * Elt->XfbStride + Elt->XfbOffset;
+      for (uint32_t C = 0; C != Elt->ComponentCount; ++C) {
+        uint64_t Dst = RecordStart + uint64_t(C) * sizeof(uint32_t);
+        // (roadmap F10-style) A destination past the bound buffer's own
+        // byte range is dropped, not fatal -- the same "clamp/skip
+        // rather than fail the whole draw" out-of-bounds convention
+        // `robustBufferAccess` already uses elsewhere in this file.
+        if (Dst + sizeof(uint32_t) > CB.Data.size())
+          continue;
+        uint32_t Bits =
+            Output.readRaw(Elt->ElementID, Elt->FirstComponent + C, Flat);
+        std::memcpy(CB.Data.data() + Dst, &Bits, sizeof(Bits));
+      }
+    }
+  }
+  for (size_t BufIdx = 0; BufIdx != Progress.size(); ++BufIdx)
+    if (Progress[BufIdx].Seen)
+      *Draw.XfbBuffers[BufIdx].CapturedBytes +=
+          uint64_t(Count) * Progress[BufIdx].Stride;
+}
 
 Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                    uint32_t WorkerCount) {
@@ -3873,84 +3949,23 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     if (Error E = Pipeline.getVertexStage().invokeVertices(PVB))
       return E;
 
-    // --- Transform feedback capture (roadmap H21c). ---
+    // --- Transform feedback capture (roadmap H21c/H21e). ---
     //
     // `VK_EXT_transform_feedback` captures the output of the last vertex-
-    // processing stage before rasterization; scoped here to a vertex-
-    // shader-only pipeline's own direct `VSOutput` (no tessellation or
-    // geometry stage), the CTS-dominant shape roadmap H21a's own scoping
-    // found -- a later roadmap H21 row may extend this to source from the
-    // domain/geometry stage's own output instead. `Draw.XfbBuffers`
-    // is empty unless a `vkCmdBeginTransformFeedbackEXT` scope is
-    // currently active (`CommandBuffer.cpp`'s `runDraw`), so this is a
-    // no-op for every draw before this row, and any non-XFB draw after
-    // it.
+    // processing stage before rasterization; scoped here to a
+    // tessellation-free pipeline's own direct `VSOutput` when it has no
+    // geometry stage either (a geometry stage's own merged stream output
+    // is captured separately below, once it exists -- roadmap H21e).
+    // `Draw.XfbBuffers` is empty unless a `vkCmdBeginTransformFeedbackEXT`
+    // scope is currently active (`CommandBuffer.cpp`'s `runDraw`), so this
+    // is a no-op for every draw before this row, and any non-XFB draw
+    // after it.
     if (!Draw.XfbBuffers.empty() && !Pipeline.hasTessellationStages() &&
         !Pipeline.hasGeometryStages()) {
-      // Every `Output`-direction element captured to the same
-      // `XfbBuffer` shares that buffer's own per-vertex record stride (a
-      // real shader repeats SPIR-V's `XfbStride` decoration on every one
-      // of that buffer's captured variables); this draw's own `Total`
-      // newly emitted vertices must advance that buffer's running byte
-      // counter exactly once, not once per element captured to it, so
-      // each buffer's base (already-captured) vertex count is computed
-      // once, from the first such element found, before the per-element
-      // write loop below.
-      struct XfbBufferProgress {
-        uint32_t Stride = 0;
-        uint64_t BaseVertex = 0;
-        bool Seen = false;
-      };
-      llvm::SmallVector<XfbBufferProgress, 4> Progress(
-          Draw.XfbBuffers.size());
-      for (const SignatureElement &Elt : VSSigValue.Elements) {
-        if (Elt.Direction != SignatureDirection::Output || !Elt.XfbBuffer)
-          continue;
-        uint32_t BufIdx = *Elt.XfbBuffer;
-        if (BufIdx >= Draw.XfbBuffers.size() ||
-            !Draw.XfbBuffers[BufIdx].CapturedBytes || Elt.XfbStride == 0)
-          continue;
-        XfbBufferProgress &Prog = Progress[BufIdx];
-        if (Prog.Seen)
-          continue;
-        Prog.Stride = Elt.XfbStride;
-        Prog.BaseVertex =
-            *Draw.XfbBuffers[BufIdx].CapturedBytes / Elt.XfbStride;
-        Prog.Seen = true;
-      }
-      for (const SignatureElement &Elt : VSSigValue.Elements) {
-        if (Elt.Direction != SignatureDirection::Output || !Elt.XfbBuffer)
-          continue;
-        uint32_t BufIdx = *Elt.XfbBuffer;
-        if (BufIdx >= Draw.XfbBuffers.size())
-          continue;
-        const feme::graphics::PreparedDraw::XfbCaptureBuffer &CB =
-            Draw.XfbBuffers[BufIdx];
-        if (!CB.CapturedBytes || Elt.XfbStride == 0)
-          continue;
-        uint64_t BaseVertex = Progress[BufIdx].BaseVertex;
-        for (uint32_t Flat = 0; Flat != Total; ++Flat) {
-          uint64_t RecordStart =
-              (BaseVertex + Flat) * Elt.XfbStride + Elt.XfbOffset;
-          for (uint32_t C = 0; C != Elt.ComponentCount; ++C) {
-            uint64_t Dst = RecordStart + uint64_t(C) * sizeof(uint32_t);
-            // (roadmap F10-style) A destination past the bound buffer's
-            // own byte range is dropped, not fatal -- the same
-            // "clamp/skip rather than fail the whole draw"
-            // out-of-bounds convention `robustBufferAccess` already
-            // uses elsewhere in this file.
-            if (Dst + sizeof(uint32_t) > CB.Data.size())
-              continue;
-            uint32_t Bits = VSOutput->readRaw(Elt.ElementID,
-                                              Elt.FirstComponent + C, Flat);
-            std::memcpy(CB.Data.data() + Dst, &Bits, sizeof(Bits));
-          }
-        }
-      }
-      for (size_t BufIdx = 0; BufIdx != Progress.size(); ++BufIdx)
-        if (Progress[BufIdx].Seen)
-          *Draw.XfbBuffers[BufIdx].CapturedBytes +=
-              uint64_t(Total) * Progress[BufIdx].Stride;
+      llvm::SmallVector<const SignatureElement *, 8> VSOutputElements;
+      for (const SignatureElement &Elt : VSSigValue.Elements)
+        VSOutputElements.push_back(&Elt);
+      captureTransformFeedback(VSOutputElements, *VSOutput, Total, Draw);
     }
 
     // --- Tessellation (roadmap H4). ---
@@ -4360,17 +4375,40 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       }
 
       // Every `Output`-direction element of the geometry stage's own
-      // signature, in signature order: the exact flattening order
-      // GeometryWrapper.cpp's `lowerGeometryStreamEmit` writes one emitted
-      // vertex record's scalars in, which this must mirror to read them
-      // back correctly.
-      SmallVector<const SignatureElement *, 8> GSOutputElements;
-      uint32_t OutputScalarsPerVertex = 0;
+      // signature, split by `layout(stream=N)`: the exact flattening
+      // order GeometryWrapper.cpp's `lowerGeometryStreamEmit` writes one
+      // emitted vertex record's scalars in for that stream, which this
+      // must mirror to read them back correctly. (Roadmap H21e) A real
+      // multi-stream geometry shader may declare a different subset of
+      // output elements per stream; `OutputScalarsPerVertex` -- the
+      // shared per-vertex row width every stream's own `EmittedVertices`
+      // records use -- is the *maximum* over every stream's own total
+      // component count, exactly matching `lowerGeometryStreamEmit`'s own
+      // per-stream `OutputElements` filtering.
+      llvm::DenseMap<uint32_t, SmallVector<const SignatureElement *, 4>>
+          GSOutputElementsByStream;
+      llvm::DenseMap<uint32_t, uint32_t> ScalarsPerStream;
+      uint32_t StreamCount = 1;
       for (const SignatureElement &Elt : GSSig->Elements)
         if (Elt.Direction == SignatureDirection::Output) {
-          GSOutputElements.push_back(&Elt);
-          OutputScalarsPerVertex += Elt.ComponentCount * Elt.RowCount;
+          GSOutputElementsByStream[Elt.Stream].push_back(&Elt);
+          ScalarsPerStream[Elt.Stream] += Elt.ComponentCount * Elt.RowCount;
+          StreamCount = std::max(StreamCount, Elt.Stream + 1);
         }
+      uint32_t OutputScalarsPerVertex = 0;
+      for (const auto &Entry : ScalarsPerStream)
+        OutputScalarsPerVertex = std::max(OutputScalarsPerVertex, Entry.second);
+
+      // (Roadmap H21e) Which stream rasterization/stream-output actually
+      // consume: `VkPipelineRasterizationStateStreamCreateInfoEXT`'s own
+      // selection (`RasterState::RasterizationStream`, `GraphicsPipeline.
+      // cpp`), clamped to a stream this geometry stage's own signature
+      // actually declares -- a pipeline naming a stream this shader never
+      // writes rasterizes nothing from it (an empty stream) rather than
+      // reading past `StreamCount`.
+      uint32_t RasterizationStream =
+          std::min(Pipeline.getRasterState().RasterizationStream,
+                   StreamCount - 1);
 
       uint32_t PrimitiveCount = static_cast<uint32_t>(Primitives.size());
       // (Roadmap H5d-a) SPIR-V's `Invocations` execution mode: how many
@@ -4390,7 +4428,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // row after the first that reaches that single-row bound, silently
       // dropping every later primitive's (or, since H5d-a, later invocation's)
       // own emissions.
-      GeometryStreamBuilder Combined(/*StreamCount=*/1,
+      GeometryStreamBuilder Combined(StreamCount,
                                      RowCount * GState.MaxOutputVertices);
       if (RowCount != 0) {
         // (roadmap H5h) Every system-value member of a geometry entry's
@@ -4431,13 +4469,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         std::vector<cpu::FemeGeometryInvocation> GeomInvocations =
             buildGeometryInvocations(PrimitiveIDs, InvocationIDs);
 
-        std::vector<float> EmittedVertices((size_t)RowCount *
+        std::vector<float> EmittedVertices((size_t)RowCount * StreamCount *
                                                GState.MaxOutputVertices *
                                                OutputScalarsPerVertex,
                                            0.0f);
-        std::vector<uint32_t> EmittedVertexCounts(RowCount, 0);
+        std::vector<uint32_t> EmittedVertexCounts(
+            (size_t)RowCount * StreamCount, 0);
         std::vector<uint8_t> StripEndsAfter(
-            (size_t)RowCount * GState.MaxOutputVertices, 0);
+            (size_t)RowCount * StreamCount * GState.MaxOutputVertices, 0);
 
         cpu::FemeStageLayout GSInLayout = GSInput->layout();
         cpu::FemeStageLayout GSOutLayout = GSScratch->layout();
@@ -4457,6 +4496,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         GRes.VerticesPerPrimitive = GeomVerticesPerPrimitive;
         GRes.MaxVerticesPerStream = GState.MaxOutputVertices;
         GRes.OutputScalarsPerVertex = OutputScalarsPerVertex;
+        GRes.StreamCount = StreamCount;
         GRes.EmittedVertices = EmittedVertices;
         GRes.EmittedVertexCounts = EmittedVertexCounts;
         GRes.StripEndsAfter = StripEndsAfter;
@@ -4472,8 +4512,15 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // Rebuilds the merged stream's flat vertex records into a
       // `StageStorage` shaped like `GSSig`'s own outputs, so everything
       // downstream (clipping, the viewport transform, the interpolator)
-      // reads it exactly as it already reads `RasterOut`.
-      llvm::ArrayRef<StreamVertex> MergedVerts = Combined.getVertices(0);
+      // reads it exactly as it already reads `RasterOut`. (Roadmap H21e)
+      // Rasterization consumes whichever stream
+      // `RasterizationStream` names, not always stream 0, and only that
+      // stream's own output elements are meaningful in each record (see
+      // `GSOutputElementsByStream`'s own comment above).
+      llvm::ArrayRef<StreamVertex> MergedVerts =
+          Combined.getVertices(RasterizationStream);
+      const SmallVector<const SignatureElement *, 4> &RasterOutputElements =
+          GSOutputElementsByStream[RasterizationStream];
       Expected<StageStorage> Flat =
           buildStageStorage(*GSSig, SignatureDirection::Output,
                             static_cast<uint32_t>(MergedVerts.size()));
@@ -4483,7 +4530,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       for (uint32_t Slot = 0; Slot != MergedVerts.size(); ++Slot) {
         const StreamVertex &Vtx = MergedVerts[Slot];
         uint32_t Cursor = 0;
-        for (const SignatureElement *Elt : GSOutputElements)
+        for (const SignatureElement *Elt : RasterOutputElements)
           for (uint32_t Row = 0; Row != Elt->RowCount; ++Row)
             for (uint32_t Comp = 0; Comp != Elt->ComponentCount; ++Comp)
               GeomStreamOutput.writeFloat(Elt->ElementID,
@@ -4501,12 +4548,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       case GeometryOutputPrimitive::Points:
         break;
       case GeometryOutputPrimitive::LineStrip:
-        for (const StreamStrip &S : Combined.getStrips(0))
+        for (const StreamStrip &S : Combined.getStrips(RasterizationStream))
           for (uint32_t I = S.Begin; I + 2 <= S.End; ++I)
             AbsLineIndices.push_back({I, I + 1});
         break;
       case GeometryOutputPrimitive::TriangleStrip:
-        for (const StreamStrip &S : Combined.getStrips(0)) {
+        for (const StreamStrip &S : Combined.getStrips(RasterizationStream)) {
           uint32_t Local = 0;
           for (uint32_t I = S.Begin; I + 3 <= S.End; ++I, ++Local)
             AbsTriIndices.push_back(
@@ -4529,6 +4576,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                 : AbsTriIndices.size() + AbsLineIndices.size();
       }
       RasterOut = &GeomStreamOutput;
+
+      // --- Transform feedback capture from the geometry stage (roadmap
+      // H21e). ---
+      //
+      // Captures the merged, `RasterizationStream`-selected stream's own
+      // output (the same `RasterOutputElements`/`MergedVerts` rasterization
+      // itself just consumed above), reusing roadmap H21c's own
+      // `captureTransformFeedback` helper.
+      if (!Draw.XfbBuffers.empty())
+        captureTransformFeedback(RasterOutputElements, GeomStreamOutput,
+                                 static_cast<uint32_t>(MergedVerts.size()),
+                                 Draw);
     }
 
     if (Error E = RasterizePrimitives(*RasterOut, AbsTriIndices, AbsLineIndices,

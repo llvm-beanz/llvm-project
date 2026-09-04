@@ -4365,6 +4365,321 @@ TEST(ExecutorTest, GeometryStagePassesThroughATriangleCoveringTheViewport) {
   }
 }
 
+// (Roadmap H21e) A two-stream geometry entry point: stream 0 emits a
+// degenerate decoy triangle (an unreferenced varying only, no
+// `SV_Position`), while stream 1 emits a real full-viewport triangle and
+// is the only stream that writes `SV_Position` -- so a real render only
+// covers the viewport if rasterization actually consumes stream 1's own
+// records, not stream 0's (the merged-stream default before this row).
+constexpr char TwoStreamGeometryShaderIR[] = R"(
+  define void @gs_main() #0 {
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 9.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 9.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 9.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 9.0, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.cut(i32 0)
+
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.stream.emit(i32 1)
+
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 3.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.stream.emit(i32 1)
+
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 3.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.stream.emit(i32 1)
+    call void @feme.stage.stream.cut(i32 1)
+    ret void
+  }
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.stream.emit(i32)
+  declare void @feme.stage.stream.cut(i32)
+  attributes #0 = { "feme.shader.stage"="geometry" }
+)";
+
+/// Builds a vertex/geometry/fragment `GraphicsPipeline` whose geometry
+/// stage (`TwoStreamGeometryShaderIR`) writes two independent output
+/// streams, with \p RasterizationStream selecting which one rasterization
+/// consumes (`VkPipelineRasterizationStateStreamCreateInfoEXT`, roadmap
+/// H21e).
+Expected<GraphicsPipeline>
+buildTwoStreamGeometryPipeline(Context &Ctx, uint32_t AttachmentSize,
+                               uint32_t RasterizationStream) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  // Stream 0's own decoy element carries no system value and no
+  // `Location` the fragment stage below ever reads, so it stays
+  // completely inert whichever stream rasterization selects; only
+  // stream 1 declares `SV_Position`, so `findElement` (unfiltered by
+  // stream, an existing simplification this milestone does not lift --
+  // see FeMeVulkanDesign.md's V7 section) always resolves it to stream
+  // 1's own position, matching every real shape any importable shader
+  // can produce today (the MLIR SPIR-V dialect cannot deserialize
+  // `OpEmitStreamVertex`/`OpEndStreamPrimitive` at all, so a real,
+  // CTS-driven multi-stream signature with `SV_Position` on more than
+  // one stream can never actually reach this code).
+  SignatureElement StreamZeroDecoy =
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/1);
+  StreamZeroDecoy.Stream = 0;
+  SignatureElement StreamOnePosition = makeElement(
+      1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+      SignatureSystemValue::Position);
+  StreamOnePosition.Stream = 1;
+  SignatureElement StreamOneColor =
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/0);
+  StreamOneColor.Stream = 1;
+  EntrySignature GSSig;
+  GSSig.Elements = {StreamZeroDecoy, StreamOnePosition, StreamOneColor};
+  Expected<std::shared_ptr<CompiledStage>> GS = compileStage(
+      Ctx, TwoStreamGeometryShaderIR, "gs_main", GSSig, ShaderStage::Geometry);
+  if (!GS)
+    return GS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.RasterizationStream = RasterizationStream;
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      Raster, DepthState{}, BlendMode::Replace, /*SampleCount=*/1,
+      std::move(Attachments));
+  GeometryState Geom;
+  Geom.InputPrimitive = GeometryInputPrimitive::Triangles;
+  Geom.OutputPrimitive = GeometryOutputPrimitive::TriangleStrip;
+  Geom.MaxOutputVertices = 3;
+  Pipeline.setGeometryStage(std::move(*GS), Geom);
+  return Pipeline;
+}
+
+TEST(ExecutorTest, RasterizationStreamSelectsGeometryOutputFromANonzeroStream) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildTwoStreamGeometryPipeline(
+      Ctx, /*AttachmentSize=*/8, /*RasterizationStream=*/1);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  uint32_t Size = 8;
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Solid green: stream 1's own color, at stream 1's own (viewport-
+  // covering) position -- stream 0's decoy triangle (degenerate, off
+  // screen, and colorless since it carries no `SV_Position`) never
+  // reaches the rasterizer at all.
+  for (uint32_t I = 0; I != Size * Size; ++I) {
+    const uint8_t *Texel = Storage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 0) << "texel " << I;
+    EXPECT_EQ(Texel[1], 255) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
+}
+
+// (Roadmap H21e) `VK_EXT_transform_feedback` capture from a geometry
+// stage's own output (roadmap H21c originally scoped this to a vertex-
+// shader-only pipeline): every one of the geometry stage's own emitted
+// vertices, in emission order, has its `XfbBuffer`-tagged element(s)
+// written to the bound transform-feedback buffer, exactly like the
+// vertex-shader-only capture path does for `VSOutput`.
+// (Roadmap H21e) A geometry entry point with a real `SV_Position` (a
+// full-viewport triangle, like the passthrough test's own shape) that
+// also writes a constant color to an `XfbBuffer`-tagged element, used to
+// test transform-feedback capture sourced from a geometry stage's own
+// output rather than `VSOutput`.
+constexpr char GeometryXfbCaptureShaderIR[] = R"(
+  define void @gs_main() #0 {
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 3.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float -1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 3.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.cut(i32 0)
+    ret void
+  }
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.stream.emit(i32)
+  declare void @feme.stage.stream.cut(i32)
+  attributes #0 = { "feme.shader.stage"="geometry" }
+)";
+
+TEST(ExecutorTest, CapturesGeometryStageOutputToBoundTransformFeedbackBuffer) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature GSSig;
+  SignatureElement PositionOut = makeElement(
+      0, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+      SignatureSystemValue::Position);
+  SignatureElement ColorOut =
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0);
+  ColorOut.XfbBuffer = 0;
+  ColorOut.XfbOffset = 0;
+  ColorOut.XfbStride = 16;
+  GSSig.Elements = {PositionOut, ColorOut};
+  Expected<std::shared_ptr<CompiledStage>> GS = compileStage(
+      Ctx, GeometryXfbCaptureShaderIR, "gs_main", GSSig,
+      ShaderStage::Geometry);
+  ASSERT_THAT_EXPECTED(GS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  GeometryState Geom;
+  Geom.InputPrimitive = GeometryInputPrimitive::Triangles;
+  Geom.OutputPrimitive = GeometryOutputPrimitive::TriangleStrip;
+  Geom.MaxOutputVertices = 3;
+  Pipeline.setGeometryStage(std::move(*GS), Geom);
+
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  std::vector<VertexAttribute> VtxAttributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      VtxAttributes}};
+
+  uint32_t Size = 4;
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.VertexBuffers = Bindings;
+
+  std::array<uint8_t, 48> XfbStorage{}; // 3 vertices * 16 bytes each.
+  uint64_t CapturedBytes = 0;
+  std::array<PreparedDraw::XfbCaptureBuffer, 1> XfbBuffers = {
+      PreparedDraw::XfbCaptureBuffer{MutableArrayRef(XfbStorage),
+                                     &CapturedBytes}};
+  Draw.XfbBuffers = XfbBuffers;
+
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  EXPECT_EQ(CapturedBytes, 48u);
+  for (uint32_t V = 0; V != 3; ++V) {
+    float Captured[4];
+    std::memcpy(Captured, XfbStorage.data() + V * 16, sizeof(Captured));
+    EXPECT_FLOAT_EQ(Captured[0], 1.0f) << "vertex " << V;
+    EXPECT_FLOAT_EQ(Captured[1], 0.0f) << "vertex " << V;
+    EXPECT_FLOAT_EQ(Captured[2], 0.0f) << "vertex " << V;
+    EXPECT_FLOAT_EQ(Captured[3], 1.0f) << "vertex " << V;
+  }
+}
+
 // (Roadmap H21d) A geometry entry point that emits real primitives --
 // `EmitVertex`/`EndPrimitive` calls with a nonzero `max_vertices` budget
 // -- but writes no per-vertex attributes at all, mirroring
