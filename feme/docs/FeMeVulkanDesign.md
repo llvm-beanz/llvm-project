@@ -218,6 +218,17 @@ V6–V8 — and nothing below is permanently excluded except where it says so.
   degenerate answer this bullet promises. [Roadmap.md](Roadmap.md)
   §1.9.10's K1 is the row that closes the remainder, and it is P0 for
   exactly that reason.
+
+  **Second deviation, roadmap H12 (§1.9.7):** sparse residency's and
+  protected memory's own *feature bits* (`sparseBinding`/
+  `sparseResidency*`/`protectedMemory`) no longer stay permanently false by
+  this bullet's own original reasoning -- H12's decision on which large
+  optional extension groups stay out of scope for this effort promotes
+  both into scope, leaving `video` as the sole permanently-out-of-scope
+  group this bullet still governs. See Roadmap.md's H27 (sparse resources)
+  and H28 (protected memory) for the breakdown rows that will implement
+  each feature for real; device group execution and external memory/
+  synchronization remain out of scope, unaffected by H12's decision.
 - Images, sampling, and samplers in the first executing milestone. These are
   required for broader Vulkan compute compatibility, but FeMe's current CPU
   resource runtime is buffer-oriented and deliberately does not implement
@@ -3755,12 +3766,12 @@ Depends on G5.
   status note and roadmap H4c/H4d for the two splitting-logic gaps a real
   CTS run found still open.
 - Implement transform feedback only if it is advertised; otherwise report it
-  unsupported truthfully.
+  unsupported truthfully (roadmap H21 tracks bringing this into scope).
 - Add pipeline-statistics queries and any remaining occlusion-query state
   breadth not already closed by roadmap C5's exact passed-sample counting
   over ordinary draws (for example inherited-render-pass secondary-command-
   buffer coverage, if this ICD ever advertises that path), plus conditional
-  rendering if advertised.
+  rendering if advertised (roadmap H26).
 - Add layered rendering, viewport/layer array indexing, and multiple viewports
   and scissors (roadmap H2 closes layered rendering/`multiview`'s own
   object-model and executor half; roadmap H3 closes multiple viewports and
@@ -3801,8 +3812,9 @@ WSI coverage for exactly the extensions advertised, with the headless surface
 exercised in `lit` and the platform surface exercised wherever CI has a
 display.
 
-Video queues, sparse residency, external memory, and cross-driver image
-sharing remain out of scope; see "Initial Non-Goals".
+Video queues, external memory, and cross-driver image sharing remain out of
+scope; see "Initial Non-Goals". Sparse residency left this list per roadmap
+H12's own decision (§1.9.7) -- see Roadmap.md's H27.
 
 ### V9: Conformance submission readiness
 
