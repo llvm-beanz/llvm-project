@@ -37,11 +37,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29n or other prerequisites blocking the H-series milestones?
+Can you work on H29o or other prerequisites blocking the H-series milestones?
 
-> **A `graphics-pipeline-library` merge loses its own vertex/mesh stage presence
-> check ordering**: `"a graphics pipeline needs a vertex stage or a mesh
-> stage"`, 4 of H29f's own re-run's `graphics_library.*` failures, confined to
-> `fast.0_0*`/`fast.0_1*` (partial-library combinations whose
-> vertex-input-interface or pre-rasterization-shaders part is supplied by a
-> separate linked library from the one this check inspects)
+> **`vkQueueSubmit` fails a plain (non-library), monolithic
+> vertex+geometry+fragment pipeline with `"the geometry stage's declared input
+> primitive class does not match the pipeline's topology/tessellation output
+> primitive"`**, 217 of H29f's own re-run's `cache.*` failures (the group's
+> single dominant cause after H29g), reproducing even on the group's own plain
+> `graphics_tests.vertex_stage_geometry_stage_fragment_stage` case -- **not** a
+> graphics-pipeline-library-specific gap despite being discovered by this row's
+> own GPL-focused re-run. The failing shader's own GLSL `layout(triangles) in;`
+> geometry input plainly matches its own pipeline's
+> `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` (`Executor.cpp`'s own
+> `GeomExpectedInput`/`Pipeline.getGeometryState().InputPrimitive` mapping
+> tables both look correct by inspection), so the true defect is not yet
+> isolated; needs its own real IR/pipeline reduction of the plain `cache.*` case
+> (the simplest failing shape) to determine whether the geometry stage's own
+> input-primitive attribute is failing to survive from SPIR-V import through to
+> this check, or the check's own topology-side value is wrong instead
