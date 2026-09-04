@@ -37,22 +37,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H10g or other prerequisites blocking the H-series milestones?
+Can you work on H10h or other prerequisites blocking the H-series milestones?
 
-> **`dEQP-VK.wsi.xcb.swapchain.render.10swapchains`/`10swapchains2` fail
-> `vkCreateSwapchainKHR` with `VK_ERROR_INITIALIZATION_FAILED`**, discovered by
-> H10d's own real re-run once its `CompositeConstruct` fix let these two cases
-> clear pipeline creation and reach swapchain creation itself for the first time
-> (previously masked by the shader-legalization failure the two share with
-> H10f's own four cases). No further diagnostic is logged
-> (`FEME_VULKAN_LOG_CREATION_ERRORS`-visible or not) -- `vkCreateSwapchainKHR`'s
-> own explicit rejection paths (`Swapchain.cpp`, array-layer count, image
-> extent, format) all look satisfied by this test's own request, and CTS's own
-> `multiSwapchainRenderTest<...>(..., 10u)` creates 10 real swapchains (one per
-> real xcb window) where `2swapchains`/`2swapchains2` (already known-blocked by
-> H10f, not this row) create only 2 -- suggesting a real, count-dependent
-> resource limit somewhere in this ICD's own xcb window/surface/swapchain
-> creation path that only 10 concurrent instances trip. Needs a real
-> investigation (most likely inside `XcbSurface.cpp`/`Surface.cpp`'s own
-> window-creation code, or a fixed-size table somewhere in `Swapchain.cpp`) into
-> what specifically fails once a 10th concurrent swapchain/window is requested
+> **`dEQP-VK.wsi.xcb.incremental_present.scale_none.fifo.identity.opaque.reference`
+> fails `vkCreateGraphicsPipelines`**: `"'llvm.shl' op operand #1 must be
+> signless integer or LLVM dialect-compatible vector of signless integer, but
+> got 'si32'"`, discovered by H10b's own real `dEQP-VK.wsi.xcb.*` re-run (one of
+> its original 8 real failures, mistakenly omitted from that row's own closure
+> tally by a counting error -- corrected in H10b's own entry above). An MLIR
+> verifier-level type-legality gap: `llvm.shl`'s second (shift-amount) operand
+> must be a signless integer, but whatever SPIR-V-to-LLVM lowering step produced
+> this particular shift left its operand as a *signed* (`si32`,
+> SPIR-V-dialect-tagged) integer instead of first converting it to LLVM
+> dialect's own signless convention -- entirely unrelated to
+> WSI/CompositeConstruct/matrix-arithmetic (H10d/H10f) or to
+> swapchain/device-group. Needs a real IR reduction of this exact case to find
+> which lowering pattern emits an `llvm.shl` without first stripping/converting
+> its shift-amount operand's SPIR-V signedness, and whether the same gap affects
+> `llvm.lshr`/`llvm.ashr` identically
