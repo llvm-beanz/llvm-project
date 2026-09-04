@@ -3759,6 +3759,32 @@ public:
   }
 };
 
+/// Converts `spirv.Image`, which extracts the image handle back out of a
+/// combined `!spirv.sampled_image` value (e.g. so it can feed an
+/// `spirv.ImageFetch`/`spirv.ImageQuerySize`, both of which -- unlike an
+/// actual sample -- take a plain image handle, not a sampled one), into an
+/// `llvm.extractvalue` reading field 0 of the very
+/// `!llvm.struct<(ImageHandle, SamplerHandle)>` SampledImagePattern (below)
+/// builds -- the inverse of that pattern's `llvm.insertvalue` pair.
+class ImagePattern : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ImageHandleType = getTypeConverter()->convertType(Op.getType());
+    if (!ImageHandleType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ExtractValueOp>(
+        Op, ImageHandleType, Adaptor.getSampledImage(),
+        llvm::ArrayRef<int64_t>{0});
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.SampledImage`, which combines an image and a sampler
 /// handle into one `!spirv.sampled_image` value, into the
 /// `!llvm.struct<(ImageHandle, SamplerHandle)>` FeMe's own
@@ -5547,21 +5573,23 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       AtomicRMWPattern<mlir::spirv::AtomicXorOp, mlir::LLVM::AtomicBinOp::_xor>,
       AtomicRMWPattern<mlir::spirv::AtomicSMaxOp, mlir::LLVM::AtomicBinOp::max>,
       AtomicRMWPattern<mlir::spirv::AtomicSMinOp, mlir::LLVM::AtomicBinOp::min>,
-      AtomicRMWPattern<mlir::spirv::AtomicUMaxOp, mlir::LLVM::AtomicBinOp::umax>,
-      AtomicRMWPattern<mlir::spirv::AtomicUMinOp, mlir::LLVM::AtomicBinOp::umin>,
+      AtomicRMWPattern<mlir::spirv::AtomicUMaxOp,
+                       mlir::LLVM::AtomicBinOp::umax>,
+      AtomicRMWPattern<mlir::spirv::AtomicUMinOp,
+                       mlir::LLVM::AtomicBinOp::umin>,
       AtomicRMWPattern<mlir::spirv::AtomicExchangeOp,
                        mlir::LLVM::AtomicBinOp::xchg>,
       BitFieldInsertPattern, BitFieldSExtractPattern, BitFieldUExtractPattern,
       BranchConditionalPattern, BuiltInAddressOfPattern,
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
       BlockAccessChainPattern, CompositeConstructPattern,
-      DemoteToHelperInvocationConversionPattern,
-      DotConversionPattern, EmitVertexConversionPattern,
-      EndPrimitiveConversionPattern, ExecutionModePattern,
-      ExecutionModeIdPattern, ExpectConversionPattern, ImageFetchPattern,
-      ImageFetchLodPattern, ImageSampleExplicitLodPattern,
-      ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
-      ImageTexelPointerPattern, ImageWritePattern,
+      DemoteToHelperInvocationConversionPattern, DotConversionPattern,
+      EmitVertexConversionPattern, EndPrimitiveConversionPattern,
+      ExecutionModePattern, ExecutionModeIdPattern, ExpectConversionPattern,
+      ImageFetchPattern, ImageFetchLodPattern, ImagePattern,
+      ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
+      ImageQuerySizePattern, ImageReadPattern, ImageTexelPointerPattern,
+      ImageWritePattern,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIAddOp>,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIMulOp>,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformSMinOp>,
@@ -5578,12 +5606,12 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       MatrixCompositeInsertPattern, MatrixTimesVectorPattern,
       VectorTimesMatrixPattern, MatrixTimesMatrixPattern,
       MatrixTimesScalarPattern, TransposePattern,
-      OffsetStructLeadingPadAccessChainPattern, PushConstantGlobalVariablePattern,
-      RotateConversionPattern, SampledImagePattern, SDotConversionPattern,
-      UDotConversionPattern, SUDotConversionPattern,
-      SDotAccSatConversionPattern, UDotAccSatConversionPattern,
-      SUDotAccSatConversionPattern, SetMeshOutputsEXTConversionPattern,
-      EmitMeshTasksEXTConversionPattern,
+      OffsetStructLeadingPadAccessChainPattern,
+      PushConstantGlobalVariablePattern, RotateConversionPattern,
+      SampledImagePattern, SDotConversionPattern, UDotConversionPattern,
+      SUDotConversionPattern, SDotAccSatConversionPattern,
+      UDotAccSatConversionPattern, SUDotAccSatConversionPattern,
+      SetMeshOutputsEXTConversionPattern, EmitMeshTasksEXTConversionPattern,
       SpecConstantErasurePattern, StageIOGlobalVariablePattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern>(
