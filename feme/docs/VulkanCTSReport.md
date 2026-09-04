@@ -23051,3 +23051,65 @@ not a new capability. `FeMeVulkanDesign.md` needed no update (no design
 deviation -- a pure completeness fix filling in a missing core command,
 following the exact shape the design already implies for
 single-physical-device-group deployments).
+
+## Roadmap H10e: measured impact
+
+`vkAcquireNextImageKHR` (`Swapchain.cpp`) ignored its own `timeout`
+parameter entirely (marked `/*timeout*/` in its own signature), always
+reporting `VK_TIMEOUT` once every swapchain image was already acquired,
+regardless of what `timeout` the calling application actually passed.
+That is correct for a nonzero timeout, but the Vulkan spec reserves
+`VK_TIMEOUT` for a real wait that expired -- a `timeout` of exactly `0`
+means "poll, don't wait at all", and never begins a real wait in the
+first place, so it must report `VK_NOT_READY` instead (the documented
+"no image is available and waitTime is zero" result). CTS's own
+`acquireTooManyTest` (`vktWsiSwapchainTests.cpp`) explicitly accepts only
+`VK_SUCCESS`/`VK_SUBOPTIMAL_KHR`/`VK_NOT_READY` for its zero-timeout
+acquire; its `acquireTooManyTimeoutTest` sibling, exercising a real
+nonzero (50ms) timeout, explicitly accepts
+`VK_SUCCESS`/`VK_SUBOPTIMAL_KHR`/`VK_TIMEOUT` instead -- confirming both
+are real, distinct, spec-required behaviors rather than a single
+fallback constant this ICD could uniformly return.
+
+Fixed by un-ignoring `timeout` and reporting `VK_NOT_READY` specifically
+when it is `0`, `VK_TIMEOUT` otherwise, in the same "no image available"
+branch. New `SwapchainTest.cpp` coverage: a zero-timeout/no-image-
+available case (confirms `VK_NOT_READY`) and a zero-timeout/image-
+available case (confirms a zero timeout is not a blanket override -- it
+still succeeds normally, `VK_SUCCESS`, whenever an image genuinely is
+available). `ninja check-feme` (assertions-enabled, ccache build) passes
+in full: 2462/2521 (59 pre-existing `Unsupported`, 0 `Failed`, up 2 tests
+from this row's own new coverage).
+
+**Real CTS re-run.** The exact reported case now passes reliably:
+```
+Test case 'dEQP-VK.wsi.xcb.swapchain.acquire.too_many'..
+  Pass (Acquire too many swapchain images test succeeded)
+```
+(measured 3/3 across repeated runs). Its nonzero-timeout sibling,
+`too_many_timeout`, was re-verified still passing (unaffected by this
+fix, since it already exercised the `VK_TIMEOUT` path this fix leaves
+unchanged):
+```
+Test run totals:
+  Passed:        2/2 (100.0%)
+  Failed:        0/2 (0.0%)
+```
+The whole `dEQP-VK.wsi.xcb.swapchain.*` group was re-run for a wider
+regression check: 46/63 `Pass`, 0 `Fail`, 17 pre-existing `NotSupported`
+(`device_group`/`simulate_oom`'s own out-of-scope sub-cases, consistent
+with every prior H10 row's own scope, not a regression).
+
+With this row closed, every one of H10's original 8 real
+`dEQP-VK.wsi.xcb.*` failures (H10d/H10e/H10f/H10g/H10h/H10i, plus the two
+crashes H10b's own report already separately closed) is now fixed -- the
+only open H10-series item remaining is H10j, the unrelated full-group
+`deqp-vk` segfault discovered while re-verifying H10h.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this is a pure correctness fix to an already-implemented
+command's zero-timeout path, not a new capability. `FeMeVulkanDesign.md`
+needed no update (no design deviation -- `Swapchain.h`'s own file
+comment already documents this ICD's synchronous acquire/present model
+in enough generality that this fix is a straightforward consequence of
+it, not a departure from it).
