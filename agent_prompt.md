@@ -37,18 +37,16 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29h or other prerequisites blocking the H-series milestones?
+Can you work on H29i or other prerequisites blocking the H-series milestones?
 
-> **MLIR's `ConvertSPIRVToLLVMPass` fails to legalize a `spirv.Image` extracted
-> from a `spirv.SampledImage`** (`"failed to convert spirv dialect module to the
-> llvm dialect"`, the generic pass-failure wrapper around `"failed to legalize
-> operation 'spirv.Image' that was explicitly marked illegal"`), the single
-> dominant cause H29f's own re-run found within
-> `dEQP-VK.pipeline.pipeline_library.graphics_library.independent_sets_random.*`
-> (387 of that re-run's 465 real failures, confined entirely to this sub-group,
-> both mesh- and non-mesh-shader cases). Needs its own real IR reduction (a
-> minimal SPIR-V module using `OpImage` on a combined-image-sampler variable) to
-> confirm whether `SPIRVToLLVM.cpp`'s pattern-registration list is simply
-> missing an `OpImage`-to-LLVM-dialect conversion pattern outright (the same
-> shape as the already-closed H6g-b-a-i-a's `spirv.All`/`spirv.Any` gap) or one
-> exists but does not cover this operand shape
+> **Inline shader-module state (H29d) does not survive a
+> `graphics-pipeline-library` merge**: `"pipeline stage has a null
+> VkShaderModule and no chained VkShaderModuleCreateInfo to compile inline"`, 23
+> of H29f's own re-run's `graphics_library.*` failures, confined to the `fast.*`
+> sub-group (link-time-merged pipelines). H29b's own
+> `captureGraphicsPipelineLibraryState` (deep-copying each library part's
+> `VkGraphicsPipelineCreateInfo` sub-state) most likely does not deep-copy a
+> chained `VkShaderModuleCreateInfo` the way it does an ordinary
+> `VkShaderModule` handle, losing the inline module's own code once the
+> originating `pCreateInfo` the app supplied is freed; needs its own real
+> IR/pipeline reduction to confirm before fixing
