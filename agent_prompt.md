@@ -37,17 +37,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H21f or other prerequisites blocking the H-series milestones?
+Can you work on H29b or other prerequisites blocking the H-series milestones?
 
-> **`VK_EXT_graphics_pipeline_library`-gated
-> `simple_fast_gpl`/`simple_optimized_gpl` CTS groups** (15,782 of 133,719
-> cases, 12%, per H21a's own scoping): blocked on a separate, unrelated
-> `VK_EXT_graphics_pipeline_library` implementation existing at all -- no
-> transform-feedback work alone can close these regardless of how complete
-> H21c/H21d/H21e become. This dependency is now tracked as its own dedicated
-> top-level milestone, H29, since a real `deqp-vk` case-list re-run (done while
-> investigating this row) found the extension's own footprint is far larger than
-> transform-feedback's own 15,782-case slice
-> (`dEQP-VK.pipeline.pipeline_library.*` alone is 120,483 cases) -- see H29 for
-> the real scope and why full implementation is out of reach of this row alone.
-> This row stays open, blocked on H29, until that milestone lands
+> **Object model for a partial ("library") graphics pipeline**: recognize
+> `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` and a chained
+> `VkGraphicsPipelineLibraryCreateInfoEXT` in `vkCreateGraphicsPipelines`, and
+> store each of the four `VkGraphicsPipelineLibraryFlagBitsEXT` parts' (vertex
+> input interface / pre-rasterization shaders / fragment shader / fragment
+> output interface) relevant `VkGraphicsPipelineCreateInfo` sub-state as a real,
+> self-owned (deep-copied, since the app may destroy its own `pCreateInfo`
+> contents once the call returns) partial-pipeline object -- a new
+> `GraphicsPipeline`-adjacent type, not yet linkable into anything executable.
+> Not advertised yet (depends on H29a's own already-flipped-false bits staying
+> false until H29c), so no CTS delta from this row alone; validated by new unit
+> tests calling the recognition path directly (mirroring H21a's own "decoder
+> complete but unwired" precedent)
