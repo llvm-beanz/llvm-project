@@ -430,6 +430,24 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   if (!CreateInfo.layout)
     return createStringError(inconvertibleErrorCode(),
                              "compute pipeline requires a VkPipelineLayout");
+  // (roadmap H29d) `VK_EXT_graphics_pipeline_library`'s own spec change
+  // legalizes a null `stage.module` with a chained `VkShaderModuleCreate
+  // Info` in `stage.pNext` instead (a shader compiled directly at
+  // pipeline-creation time, with no separate `VkShaderModule` object) --
+  // for *any* pipeline stage, not just a graphics one, once the extension
+  // is enabled. That inline path is not implemented yet (roadmap H29d);
+  // rejecting it cleanly here, the same way `compileGraphicsStage`'s own
+  // `!StageInfo.module` check already does, is a real, tightly-coupled
+  // fix to a crash this ICD's own H29c advertisement newly exposed
+  // (`dEQP-VK.pipeline.pipeline_library.graphics_library.misc.non_
+  // graphics.shader_module_info_comp` -- a *compute* pipeline case gated
+  // on `VK_EXT_graphics_pipeline_library` support alone -- previously
+  // dereferenced this null module unconditionally).
+  if (!CreateInfo.stage.module)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "a null VkPipelineShaderStageCreateInfo::module with an inline "
+        "VkShaderModuleCreateInfo is not implemented yet (roadmap H29d)");
 
   auto *Module = fromHandle<vulkan::ShaderModule>(CreateInfo.stage.module);
   std::string EntryPoint =
