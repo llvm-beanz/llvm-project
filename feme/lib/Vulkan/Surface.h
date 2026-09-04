@@ -120,6 +120,20 @@ bool presentToSurface(Surface *Surf, const void *PixelData, uint32_t Width,
 /// size the way a headless one legitimately does).
 std::optional<VkExtent2D> currentSurfaceExtent(Surface *Surf);
 
+/// Roadmap H10j: how many scanlines of a `RowBytes`-wide image
+/// `presentToSurface`'s own `xcb_put_image` chunking can pack into a
+/// single request, given the connection's own `MaxRequestBytes` cap and
+/// that request's own fixed `HeaderBytes` -- pure arithmetic (no
+/// `xcb_connection_t` needed), so it is directly unit-testable and always
+/// declared/defined regardless of `FEME_VULKAN_HAVE_XCB` (see
+/// XcbSurface.cpp's own comment on why chunking matters: one scanline per
+/// request each with its own blocking round trip was slow enough, under
+/// this ICD's own CPU-emulated execution, to starve Xvfb's accept loop
+/// and intermittently fail a *different*, concurrently-starting real CTS
+/// case's own fresh `xcb_connect`).
+uint32_t rowsPerPutImageChunk(uint32_t MaxRequestBytes, uint32_t HeaderBytes,
+                              uint32_t RowBytes);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_SURFACE_H

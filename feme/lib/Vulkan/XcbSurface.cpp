@@ -42,14 +42,20 @@
 
 #if FEME_VULKAN_HAVE_XCB
 #define VK_USE_PLATFORM_XCB_KHR
+// clang-format off: `xcb.h` must precede `vulkan_xcb.h`, which relies on
+// `xcb.h`'s own typedefs (`xcb_connection_t`, `xcb_window_t`, ...) without
+// including it itself; alphabetical include-sorting would otherwise swap
+// them and break the build.
 #include <xcb/xcb.h>
 #include <vulkan/vulkan_xcb.h>
+// clang-format on
 #endif
 
 #include "EntryPoints.h"
 #include "Icd.h"
 #include "Objects.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -59,6 +65,14 @@ using namespace feme::vulkan;
 
 namespace feme::vulkan {
 
+// See Surface.h's own declaration.
+uint32_t rowsPerPutImageChunk(uint32_t MaxRequestBytes, uint32_t HeaderBytes,
+                              uint32_t RowBytes) {
+  if (MaxRequestBytes <= HeaderBytes || RowBytes == 0)
+    return 1;
+  return std::max<uint32_t>(1, (MaxRequestBytes - HeaderBytes) / RowBytes);
+}
+
 #if FEME_VULKAN_HAVE_XCB
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateXcbSurfaceKHR(
@@ -67,10 +81,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateXcbSurfaceKHR(
   if (!pCreateInfo->connection || !pCreateInfo->window)
     return VK_ERROR_INITIALIZATION_FAILED;
   Allocator Alloc(pAllocator);
-  Surface *Obj = Alloc.create<Surface>(
-      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
-      static_cast<void *>(pCreateInfo->connection),
-      static_cast<uint32_t>(pCreateInfo->window));
+  Surface *Obj =
+      Alloc.create<Surface>(VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
+                            static_cast<void *>(pCreateInfo->connection),
+                            static_cast<uint32_t>(pCreateInfo->window));
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   *pSurface = toHandle<VkSurfaceKHR>(Obj);
@@ -99,15 +113,14 @@ xcb_window_t window(Surface *Surf) {
 std::unique_ptr<xcb_get_geometry_reply_t, void (*)(void *)>
 queryGeometry(Surface *Surf) {
   xcb_connection_t *Conn = connection(Surf);
-  xcb_get_geometry_cookie_t Cookie =
-      xcb_get_geometry(Conn, window(Surf));
+  xcb_get_geometry_cookie_t Cookie = xcb_get_geometry(Conn, window(Surf));
   return {xcb_get_geometry_reply(Conn, Cookie, nullptr), std::free};
 }
 
 } // namespace
 
 bool presentToSurface(Surface *Surf, const void *PixelData, uint32_t Width,
-                     uint32_t Height, bool SwapRedBlue) {
+                      uint32_t Height, bool SwapRedBlue) {
   if (Surf->kind() != SurfaceKind::Xcb)
     return true;
 
@@ -138,21 +151,58 @@ bool presentToSurface(Surface *Surf, const void *PixelData, uint32_t Width,
   xcb_gcontext_t Gc = xcb_generate_id(Conn);
   xcb_create_gc(Conn, Gc, Window, 0, nullptr);
 
-  // One scanline at a time: the X protocol's own `max-request-size` (the
-  // connection's `Geometry`-independent request-size cap, typically 256KB
-  // by default) could otherwise legally reject a single whole-image
-  // `xcb_put_image` call for a large enough swapchain image.
+  // Chunked into as many scanlines per request as the X protocol's own
+  // `max-request-size` (the connection's own `maximum_request_length`,
+  // queried once per present, not once per row) allows, rather than one
+  // scanline per request: a real swapchain image's own present rate (up
+  // to `IncrementalPresentTestInstance::m_frameCount == 300` frames in a
+  // single real CTS case) previously turned into that many *times the
+  // image's own height* round trips -- each one a real, blocking
+  // `xcb_request_check` wait for Xvfb's single-threaded server to reply
+  // before the next scanline could even be sent. Under this project's own
+  // CPU-emulated ICD (itself competing for the same limited CPU time),
+  // that request storm was slow enough to starve Xvfb's own accept loop:
+  // a *different*, concurrently-starting real CTS case's own fresh
+  // `xcb_connect` to the same Xvfb server could then genuinely fail
+  // (roadmap H10j's real, measured `VK_ERROR_SURFACE_LOST_KHR` on a
+  // brand-new surface, confirmed via this file's own temporary
+  // `xcb_get_geometry_reply` error-code diagnostic to be a real
+  // `xcb_connection_has_error` on that *other* case's own connection --
+  // not a stale/leaked handle of this driver's own). Batching every
+  // present down to the fewest possible round trips removes the
+  // starvation window instead of only masking one symptom of it.
   uint32_t RowBytes = Width * 4;
+  uint32_t MaxRequestBytes = xcb_get_maximum_request_length(Conn) * 4;
+  uint32_t HeaderBytes = static_cast<uint32_t>(sizeof(xcb_put_image_request_t));
+  uint32_t RowsPerChunk =
+      rowsPerPutImageChunk(MaxRequestBytes, HeaderBytes, RowBytes);
+
   bool Ok = true;
-  for (uint32_t Row = 0; Row < Height; ++Row) {
+  for (uint32_t Row = 0; Row < Height; Row += RowsPerChunk) {
+    uint32_t ChunkRows = std::min(RowsPerChunk, Height - Row);
+    const uint8_t *ChunkData = Bytes + static_cast<size_t>(Row) * RowBytes;
+    bool IsLastChunk = Row + ChunkRows >= Height;
+    if (!IsLastChunk) {
+      // Every chunk but the last is fire-and-forget: checking each one
+      // individually is exactly the per-request round trip this change
+      // removes. A real failure on one of these still surfaces below,
+      // since the same window/GC/depth apply to every chunk of the same
+      // present -- the final chunk's own check (and this function's own
+      // closing `xcb_connection_has_error`) catch a genuine failure
+      // without paying for N-1 additional synchronous replies first.
+      xcb_put_image(Conn, XCB_IMAGE_FORMAT_Z_PIXMAP, Window, Gc, Width,
+                    static_cast<uint16_t>(ChunkRows), 0,
+                    static_cast<int16_t>(Row), 0, Geometry->depth,
+                    RowBytes * ChunkRows, ChunkData);
+      continue;
+    }
     xcb_void_cookie_t Cookie = xcb_put_image_checked(
-        Conn, XCB_IMAGE_FORMAT_Z_PIXMAP, Window, Gc, Width, 1, 0,
-        static_cast<int16_t>(Row), 0, Geometry->depth, RowBytes,
-        Bytes + static_cast<size_t>(Row) * RowBytes);
+        Conn, XCB_IMAGE_FORMAT_Z_PIXMAP, Window, Gc, Width,
+        static_cast<uint16_t>(ChunkRows), 0, static_cast<int16_t>(Row), 0,
+        Geometry->depth, RowBytes * ChunkRows, ChunkData);
     if (xcb_generic_error_t *Error = xcb_request_check(Conn, Cookie)) {
       std::free(Error);
       Ok = false;
-      break;
     }
   }
   xcb_free_gc(Conn, Gc);
