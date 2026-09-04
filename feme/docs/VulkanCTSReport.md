@@ -23785,21 +23785,31 @@ the extension name is absent from `getSupportedDeviceExtensions()`.
 pass), and the underlying gtest suite (`FeMeVulkanTests` among others)
 now includes this new case, still 0 `Failed`.
 
-**CTS impact.** None expected or observed by design: the extension stays
-unadvertised, so CTS's own device-construction-type gate
-(`vkPipelineConstructionUtil.cpp:212`) continues to reject every
-`dEQP-VK.pipeline.pipeline_library.*`/`*_gpl`-shaped case as
-`NotSupported`, unchanged from the H21e baseline (2491 passed, 0 failed,
-59 pre-existing `Unsupported`). A full Vulkan CTS re-run was not
-performed for this pass, since this change touches only a feature/
-properties query path CTS's own pipeline-construction-type gate never
-consults (confirmed in the H21f investigation above) -- there is no
-CTS-observable surface this change could plausibly affect, and the
-existing recorded baseline remains accurate. `dEQP-VK.api.info.*`
-feature/property consistency cases (e.g.
-`vulkan1p2.feature_extensions_consistency`) are unaffected: they only
-compare structs an application actually chains for extensions the
-implementation *does* advertise, and this extension is not advertised.
+**CTS impact.** A real `deqp-vk` re-run was done to confirm the expected
+zero delta directly rather than assume it (correct ICD confirmed via the
+`feme_icd.json` manifest path used by every prior row's own re-run):
+- `dEQP-VK.pipeline.pipeline_library.graphics_library.*` (836 cases, the
+  dedicated sub-group CTS's own device-construction-type gate protects):
+  12 passed / 139 failed / 685 not supported -- both the pass/fail counts
+  reproduce a pre-existing, unrelated gap (`VK_ERROR_INITIALIZATION_
+  FAILED`, a `spirv.Image` combined-image-sampler legalization failure in
+  a `maintenance5`-parametrized monolithic-construction sub-case, nothing
+  to do with pipeline libraries or this row's own change), and the 685
+  `NotSupported` cases are exactly the ones gated on
+  `VK_EXT_graphics_pipeline_library`'s own advertisement, unchanged by
+  this row.
+- `dEQP-VK.api.info.*` (10,486 cases), as a general regression spot
+  check: 5,242 passed / 720 failed / 4,524 not supported -- reproduces
+  H21a's own recorded figures (5,241/720/4,525) to within a single case
+  each way, confirming no regression from this row's own change.
+
+`dEQP-VK.api.info.vulkan1p2.feature_extensions_consistency`/
+`vulkan1p4.feature_extensions_consistency` (both included in the
+`api.info` re-run above) pass: they only compare structs an application
+actually chains for extensions the implementation *does* advertise, and
+this extension is not advertised, so this row's newly-recognized
+(always-false) feature/properties structs are never chained by CTS in
+the first place.
 
 **Disposition.** Roadmap H29a closed (struck through in `Roadmap.md`);
 H29b (object model for a partial "library" pipeline) and H29c (link-time
