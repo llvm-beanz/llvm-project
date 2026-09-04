@@ -23,6 +23,7 @@
 #ifndef FEME_GRAPHICS_PIPELINE_H
 #define FEME_GRAPHICS_PIPELINE_H
 
+#include "feme/Core/Signature.h"
 #include "feme/Graphics/AmplificationDispatch.h"
 #include "feme/Graphics/Geometry.h"
 #include "feme/Graphics/Mesh.h"
@@ -470,6 +471,28 @@ struct AttachmentFormat {
   uint32_t Width = 0;
   uint32_t Height = 0;
 };
+
+/// The fragment output `SignatureComponentType` a color attachment of
+/// \p Format expects (roadmap H8p): `UInt`/`SInt` (matching the format's own
+/// signedness) for one of `cpu::isIntegerColorAttachmentFormat`'s integer
+/// formats, `Float` for every other (normalized or floating-point)
+/// color-attachment format.
+///
+/// Shared (roadmap H29l) by the two places that must agree on this: the
+/// draw-time fragment-output linkage in `Executor.cpp`'s own `executeDraws`,
+/// and the pipeline-creation-time check in `GraphicsPipeline.cpp`'s
+/// `validateStageInterfaces`. Before this row the latter hard-coded `Float`
+/// and so rejected a legal `uvec4`/`ivec4` fragment output against a real
+/// integer color attachment at creation, even though the executor had
+/// accepted exactly that shape since H8p.
+constexpr SignatureComponentType
+expectedColorComponentType(cpu::ResourceFormat Format) {
+  if (!cpu::isIntegerColorAttachmentFormat(Format))
+    return SignatureComponentType::Float;
+  return cpu::isUnsignedIntegerColorAttachmentFormat(Format)
+             ? SignatureComponentType::UInt
+             : SignatureComponentType::SInt;
+}
 
 /// The normalized, immutable pipeline description the software graphics
 /// executor consumes (see the file comment above): the compiled raster

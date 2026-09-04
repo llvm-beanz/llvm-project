@@ -1314,21 +1314,6 @@ void readFragmentColorInt(const StageStorage &FSOutput,
   }
 }
 
-/// The fragment output `SignatureComponentType` \p Format's color
-/// attachment expects for a real, non-dishonest `COLOR_ATTACHMENT_BIT`
-/// (roadmap H8p): `UInt`/`SInt` (matching the format's own signedness) for
-/// one of `isIntegerColorAttachmentFormat`'s 7 integer formats, `Float`
-/// for every other (normalized or floating-point) color-attachment format
-/// this executor already wrote to before this row.
-static SignatureComponentType
-expectedColorComponentType(cpu::ResourceFormat Format) {
-  if (!cpu::isIntegerColorAttachmentFormat(Format))
-    return SignatureComponentType::Float;
-  return cpu::isUnsignedIntegerColorAttachmentFormat(Format)
-            ? SignatureComponentType::UInt
-            : SignatureComponentType::SInt;
-}
-
 /// Merges a fragment's new color \p Src into \p Texel (the attachment's
 /// existing texel, read and overwritten in place) per \p Pipeline's blend/
 /// logic-op/write-mask state (roadmap R33). A logic op, when enabled,
@@ -1943,7 +1928,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // (Roadmap H8p) An integer color attachment (one of
       // `isIntegerColorAttachmentFormat`'s 7 formats, RuntimeABI.h) expects
       // a matching `UInt`/`SInt` fragment output instead of `Float` --
-      // `expectedColorComponentType` (above) resolves which, so a real
+      // `expectedColorComponentType` (Pipeline.h) resolves which, so a real
       // `ivec4`/`uvec4` fragment output can now be drawn to a real integer
       // attachment rather than being hard-rejected outright regardless of
       // the attachment's own format.
