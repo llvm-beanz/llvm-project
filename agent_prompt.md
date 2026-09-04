@@ -37,12 +37,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29m or other prerequisites blocking the H-series milestones?
+Can you work on H29n or other prerequisites blocking the H-series milestones?
 
-> **A `graphics-pipeline-library` merge loses its own
-> render-target/dynamic-rendering state**: `"a graphics pipeline needs either a
-> VkRenderPass or a chained VkPipelineRenderingCreateInfo"`, 5 of H29f's own
-> re-run's `graphics_library.*` failures, confined to
-> `misc.other.{bad,null}_rendering_create_info` (deliberately-negative CTS
-> shapes the library-merge path may be validating too early, before every part's
-> own state is merged in)
+> **A `graphics-pipeline-library` merge loses its own vertex/mesh stage presence
+> check ordering**: `"a graphics pipeline needs a vertex stage or a mesh
+> stage"`, 4 of H29f's own re-run's `graphics_library.*` failures, confined to
+> `fast.0_0*`/`fast.0_1*` (partial-library combinations whose
+> vertex-input-interface or pre-rasterization-shaders part is supplied by a
+> separate linked library from the one this check inspects)
