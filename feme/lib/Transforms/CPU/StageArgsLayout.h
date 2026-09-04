@@ -176,7 +176,11 @@ enum GeometryArgsField : unsigned {
   GeometryArgsFieldVerticesPerPrimitive = 2,
   GeometryArgsFieldMaxVerticesPerStream = 3,
   GeometryArgsFieldOutputScalarsPerVertex = 4,
-  GeometryArgsFieldReserved32 = 5,
+  // (Roadmap H21e) Was `GeometryArgsFieldReserved32`; repurposed in place
+  // (same field index/size, no ABI version bump) to name the number of
+  // independent output streams -- see `FemeGeometryArgs::StreamCount`'s
+  // own comment.
+  GeometryArgsFieldStreamCount = 5,
   GeometryArgsFieldResources = 6,
   GeometryArgsFieldInputLayout = 7,
   GeometryArgsFieldInputs = 8,

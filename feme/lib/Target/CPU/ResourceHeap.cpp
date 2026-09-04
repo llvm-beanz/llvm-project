@@ -435,7 +435,7 @@ PreparedGeometryBatch::PreparedGeometryBatch(
     const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
     ArrayRef<FemeGeometryInvocation> Invocations, uint32_t VerticesPerPrimitive,
     uint32_t MaxVerticesPerStream, uint32_t OutputScalarsPerVertex,
-    MutableArrayRef<float> EmittedVertices,
+    uint32_t StreamCount, MutableArrayRef<float> EmittedVertices,
     MutableArrayRef<uint32_t> EmittedVertexCounts,
     MutableArrayRef<uint8_t> StripEndsAfter)
     : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
@@ -445,7 +445,7 @@ PreparedGeometryBatch::PreparedGeometryBatch(
       VerticesPerPrimitive(VerticesPerPrimitive),
       MaxVerticesPerStream(MaxVerticesPerStream),
       OutputScalarsPerVertex(OutputScalarsPerVertex),
-      EmittedVertices(EmittedVertices),
+      StreamCount(StreamCount), EmittedVertices(EmittedVertices),
       EmittedVertexCounts(EmittedVertexCounts), StripEndsAfter(StripEndsAfter) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
   ShaderResources.ResourceHeapCount =
@@ -473,8 +473,9 @@ PreparedGeometryBatch::create(const ResourceInfo &Info,
       Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
       Resources.OutputLayout, Resources.Outputs, Resources.Invocations,
       Resources.VerticesPerPrimitive, Resources.MaxVerticesPerStream,
-      Resources.OutputScalarsPerVertex, Resources.EmittedVertices,
-      Resources.EmittedVertexCounts, Resources.StripEndsAfter);
+      Resources.OutputScalarsPerVertex, Resources.StreamCount,
+      Resources.EmittedVertices, Resources.EmittedVertexCounts,
+      Resources.StripEndsAfter);
 }
 
 FemeGeometryArgs PreparedGeometryBatch::args() const {
@@ -484,6 +485,7 @@ FemeGeometryArgs PreparedGeometryBatch::args() const {
   Args.VerticesPerPrimitive = VerticesPerPrimitive;
   Args.MaxVerticesPerStream = MaxVerticesPerStream;
   Args.OutputScalarsPerVertex = OutputScalarsPerVertex;
+  Args.StreamCount = StreamCount;
   Args.Resources = &ShaderResources;
   Args.InputLayout = InputLayout;
   Args.Inputs = Inputs;

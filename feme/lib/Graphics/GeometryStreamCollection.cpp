@@ -12,6 +12,7 @@
 
 #include "llvm/ADT/ArrayRef.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -21,19 +22,28 @@ using namespace feme::graphics;
 GeometryStreamMergeResult
 feme::graphics::collectGeometryStreams(const cpu::FemeGeometryArgs &Args,
                                        GeometryStreamBuilder &Combined) {
+  // (Roadmap H21e) `Args.StreamCount` streams share every primitive's
+  // `MaxVerticesPerStream` bound; primitive `P` stream `S`'s own records
+  // live at flat index `P * Args.StreamCount + S` -- see
+  // `FemeGeometryArgs`'s own comment in RuntimeABI.h for the exact
+  // addressing this mirrors.
+  uint32_t StreamCount = std::max(Args.StreamCount, 1u);
   std::vector<GeometryStreamBuilder> Lanes;
   Lanes.reserve(Args.PrimitiveCount);
   for (uint32_t Primitive = 0; Primitive != Args.PrimitiveCount; ++Primitive) {
-    GeometryStreamBuilder Lane(/*StreamCount=*/1, Args.MaxVerticesPerStream);
-    uint32_t Count = Args.EmittedVertexCounts[Primitive];
-    for (uint32_t Vertex = 0; Vertex != Count; ++Vertex) {
-      uint32_t Slot = Primitive * Args.MaxVerticesPerStream + Vertex;
-      const float *Scalars =
-          Args.EmittedVertices + (uint64_t)Slot * Args.OutputScalarsPerVertex;
-      Lane.emit(/*Stream=*/0,
-                llvm::ArrayRef(Scalars, Args.OutputScalarsPerVertex));
-      if (Args.StripEndsAfter[Slot])
-        Lane.cut(/*Stream=*/0);
+    GeometryStreamBuilder Lane(StreamCount, Args.MaxVerticesPerStream);
+    for (uint32_t Stream = 0; Stream != StreamCount; ++Stream) {
+      uint32_t StreamSlot = Primitive * StreamCount + Stream;
+      uint32_t Count = Args.EmittedVertexCounts[StreamSlot];
+      for (uint32_t Vertex = 0; Vertex != Count; ++Vertex) {
+        uint32_t Slot = StreamSlot * Args.MaxVerticesPerStream + Vertex;
+        const float *Scalars = Args.EmittedVertices +
+                               (uint64_t)Slot * Args.OutputScalarsPerVertex;
+        Lane.emit(Stream,
+                  llvm::ArrayRef(Scalars, Args.OutputScalarsPerVertex));
+        if (Args.StripEndsAfter[Slot])
+          Lane.cut(Stream);
+      }
     }
     Lanes.push_back(std::move(Lane));
   }

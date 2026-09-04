@@ -953,6 +953,121 @@ TEST(CompiledStageTest, InvokeGeometryRunsStageAwarePath) {
   EXPECT_FALSE(Artifact.Signature.empty());
 }
 
+// (Roadmap H21e) One input vertex per primitive: emits that vertex's own
+// attribute (element 0) unchanged onto stream 0, and `10x` it onto stream
+// 1, cutting both -- covers `lowerGeometryStreamEmit`/`Cut`'s own
+// `[0, StreamCount)` addressing end to end (each stream's own
+// `EmittedVertices`/`EmittedVertexCounts`/`StripEndsAfter` sub-range must
+// be written independently of the other's).
+constexpr char GeometryMultiStreamShaderIR[] = R"(
+  define void @gs_main() #0 {
+    %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %v, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.cut(i32 0)
+    %v10 = fmul float %v, 10.0
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %v10, i32 0)
+    call void @feme.stage.stream.emit(i32 1)
+    call void @feme.stage.stream.cut(i32 1)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.stream.emit(i32)
+  declare void @feme.stage.stream.cut(i32)
+  attributes #0 = { "feme.shader.stage"="geometry" }
+)";
+
+TEST(CompiledStageTest, InvokeGeometryCapturesIndependentStreams) {
+  Context Ctx;
+  EntrySignature Sig;
+  SignatureElement Stream0Out = makeFloatOutput(2);
+  Stream0Out.Stream = 0;
+  SignatureElement Stream1Out = makeFloatOutput(3);
+  Stream1Out.Stream = 1;
+  Sig.Elements = {makeFloatInput(0), Stream0Out, Stream1Out};
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      compileGraphicsStage(Ctx, GeometryMultiStreamShaderIR, "gs_main", Sig,
+                           ShaderStage::Geometry, 4);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+
+  FemeStageElement InputElements[1] = {};
+  InputElements[0].ElementID = 0;
+  InputElements[0].FirstComponent = 0;
+  InputElements[0].ComponentCount = 1;
+  InputElements[0].RowCount = 1;
+  InputElements[0].InvocationStride = 4;
+  FemeStageLayout InputLayout{};
+  InputLayout.Elements = InputElements;
+  InputLayout.ElementCount = 1;
+
+  FemeStageElement OutputElements[4] = {};
+  OutputElements[2].ElementID = 2;
+  OutputElements[2].FirstComponent = 0;
+  OutputElements[2].ComponentCount = 1;
+  OutputElements[2].RowCount = 1;
+  OutputElements[2].InvocationStride = 4;
+  OutputElements[3].ElementID = 3;
+  OutputElements[3].FirstComponent = 0;
+  OutputElements[3].ComponentCount = 1;
+  OutputElements[3].RowCount = 1;
+  OutputElements[3].InvocationStride = 4;
+  FemeStageLayout OutputLayout{};
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 4;
+
+  constexpr uint32_t PrimitiveCount = 2;
+  constexpr uint32_t StreamCount = 2;
+  constexpr uint32_t MaxVerticesPerStream = 2;
+  constexpr uint32_t OutputScalarsPerVertex = 1;
+
+  std::vector<float> Inputs = {5.0f, 7.0f};
+  std::vector<float> Outputs(PrimitiveCount * 2, -1.0f);
+  FemeGeometryInvocation Invocations[PrimitiveCount] = {};
+
+  std::vector<float> EmittedVertices(PrimitiveCount * StreamCount *
+                                         MaxVerticesPerStream *
+                                         OutputScalarsPerVertex,
+                                     0.0f);
+  std::vector<uint32_t> EmittedVertexCounts(PrimitiveCount * StreamCount, 0);
+  std::vector<uint8_t> StripEndsAfter(
+      PrimitiveCount * StreamCount * MaxVerticesPerStream, 0);
+
+  GeometryResources Resources;
+  Resources.InputLayout = &InputLayout;
+  Resources.Inputs = Inputs.data();
+  Resources.OutputLayout = &OutputLayout;
+  Resources.Outputs = Outputs.data();
+  Resources.Invocations = Invocations;
+  Resources.VerticesPerPrimitive = 1;
+  Resources.MaxVerticesPerStream = MaxVerticesPerStream;
+  Resources.OutputScalarsPerVertex = OutputScalarsPerVertex;
+  Resources.StreamCount = StreamCount;
+  Resources.EmittedVertices = EmittedVertices;
+  Resources.EmittedVertexCounts = EmittedVertexCounts;
+  Resources.StripEndsAfter = StripEndsAfter;
+  PreparedGeometryBatch Prepared =
+      PreparedGeometryBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeGeometry(Prepared), Succeeded());
+
+  auto Slot = [&](uint32_t Primitive, uint32_t Stream) {
+    return Primitive * StreamCount + Stream;
+  };
+  EXPECT_EQ(EmittedVertexCounts[Slot(0, 0)], 1u);
+  EXPECT_EQ(EmittedVertexCounts[Slot(0, 1)], 1u);
+  EXPECT_EQ(EmittedVertexCounts[Slot(1, 0)], 1u);
+  EXPECT_EQ(EmittedVertexCounts[Slot(1, 1)], 1u);
+  EXPECT_EQ(EmittedVertices[Slot(0, 0) * MaxVerticesPerStream], 5.0f);
+  EXPECT_EQ(EmittedVertices[Slot(0, 1) * MaxVerticesPerStream], 50.0f);
+  EXPECT_EQ(EmittedVertices[Slot(1, 0) * MaxVerticesPerStream], 7.0f);
+  EXPECT_EQ(EmittedVertices[Slot(1, 1) * MaxVerticesPerStream], 70.0f);
+  EXPECT_TRUE(StripEndsAfter[Slot(0, 0) * MaxVerticesPerStream]);
+  EXPECT_TRUE(StripEndsAfter[Slot(0, 1) * MaxVerticesPerStream]);
+  EXPECT_TRUE(StripEndsAfter[Slot(1, 0) * MaxVerticesPerStream]);
+  EXPECT_TRUE(StripEndsAfter[Slot(1, 1) * MaxVerticesPerStream]);
+}
+
 // Roadmap H6c: a mesh entry point dispatches as a bounded workgroup exactly
 // like compute, so `feme::cpu::EntryWrapperPass` -- the same group loop,
 // groupshared allocation and barrier-region splitting compute already

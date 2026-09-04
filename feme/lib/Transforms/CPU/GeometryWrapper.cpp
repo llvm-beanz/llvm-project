@@ -66,17 +66,30 @@
 // for each recorded vertex and `cut` after any one flagged in
 // `StripEndsAfter`.
 //
-// This milestone deliberately scopes down two shapes, both diagnosed rather
-// than silently mishandled:
+// This milestone deliberately scopes down one shape, diagnosed rather than
+// silently mishandled:
 //
-//  - **More than one output stream.** `feme.stage.stream.emit`/`.cut`
-//    naming any stream other than 0, or an output element whose
-//    `SignatureElement::Stream` is nonzero, is diagnosed: `FemeGeometryArgs`
-//    only carries storage for stream 0.
 //  - **A group-sync barrier.** Geometry invocations are independent (no
 //    groupshared cooperation model for this stage, exactly like the domain
 //    stage), so a surviving `..._with_group_sync` call is diagnosed the same
 //    way `DomainWrapperPass`/`HullWrapperPass` diagnose their own.
+//
+// (Roadmap H21e) `feme.stage.stream.emit`/`.cut` naming any stream in
+// `[0, FemeGeometryArgs::StreamCount)` is supported: every stream's own
+// `(primitive, stream)` pair addresses its own independent
+// `EmittedVertices`/`EmittedVertexCounts`/`StripEndsAfter` range (see
+// `FemeGeometryArgs`'s own comment in RuntimeABI.h for the exact flat
+// layout), and `lowerGeometryStreamEmit` only ever snapshots the output
+// elements whose own `SignatureElement::Stream` names that same stream --
+// a real SPIR-V geometry shader may (and typically does, once it uses more
+// than one stream) declare a different subset of `layout(stream=N)`
+// output variables per stream. A `stream`/`Stream` operand naming
+// anything outside `[0, StreamCount)` is a defensive runtime bounds check
+// (folded into the same active-lane mask `emit`/`cut` already check), not
+// a diagnosed compile-time error -- the caller (`Executor.cpp`) derives
+// `StreamCount` from this same entry point's own signature, so a
+// well-formed shader can never trip it, but a hand-built or malformed one
+// is silently dropped rather than corrupting adjacent storage.
 //
 // One further scope note: `feme.stage.stream.emit`/`.cut` are gated only by
 // the wave's own entry mask (`WaveBodyEnv::EntryMask`), not by any finer
@@ -138,16 +151,13 @@ constexpr StringLiteral MaxVerticesPerStreamParamName =
     "stage_geometry_max_vertices_per_stream";
 constexpr StringLiteral OutputScalarsPerVertexParamName =
     "stage_geometry_output_scalars_per_vertex";
+constexpr StringLiteral StreamCountParamName = "stage_geometry_stream_count";
 constexpr StringLiteral EmittedVerticesParamName =
     "stage_geometry_emitted_vertices";
 constexpr StringLiteral EmittedVertexCountsParamName =
     "stage_geometry_emitted_vertex_counts";
 constexpr StringLiteral StripEndsAfterParamName =
     "stage_geometry_strip_ends_after";
-
-/// This milestone's own scope limit (see the file comment): only output
-/// stream 0 has any storage.
-constexpr uint32_t SupportedStream = 0;
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -167,6 +177,7 @@ struct GeometryStageEnv {
   Value *VerticesPerPrimitive = nullptr;
   Value *MaxVerticesPerStream = nullptr;
   Value *OutputScalarsPerVertex = nullptr;
+  Value *StreamCount = nullptr;
   Value *EmittedVertices = nullptr;
   Value *EmittedVertexCounts = nullptr;
   Value *StripEndsAfter = nullptr;
@@ -192,6 +203,8 @@ std::optional<GeometryStageEnv> getGeometryStageEnv(Function &F) {
       Env.MaxVerticesPerStream = &Arg, Found = true;
     else if (Arg.getName() == OutputScalarsPerVertexParamName)
       Env.OutputScalarsPerVertex = &Arg, Found = true;
+    else if (Arg.getName() == StreamCountParamName)
+      Env.StreamCount = &Arg, Found = true;
     else if (Arg.getName() == EmittedVerticesParamName)
       Env.EmittedVertices = &Arg, Found = true;
     else if (Arg.getName() == EmittedVertexCountsParamName)
@@ -210,7 +223,7 @@ Function *appendGeometryStageParams(Function &F) {
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 16> ParamTypes(F.getFunctionType()->params());
   ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, I32Ty,
-                     PtrTy, PtrTy, PtrTy});
+                     I32Ty, PtrTy, PtrTy, PtrTy});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -238,6 +251,7 @@ Function *appendGeometryStageParams(Function &F) {
   (&*ArgIt++)->setName(VerticesPerPrimitiveParamName);
   (&*ArgIt++)->setName(MaxVerticesPerStreamParamName);
   (&*ArgIt++)->setName(OutputScalarsPerVertexParamName);
+  (&*ArgIt++)->setName(StreamCountParamName);
   (&*ArgIt++)->setName(EmittedVerticesParamName);
   (&*ArgIt++)->setName(EmittedVertexCountsParamName);
   (&*ArgIt++)->setName(StripEndsAfterParamName);
@@ -448,41 +462,44 @@ std::optional<uint64_t> getLaneConstantInt(Value *V, unsigned Lane) {
 /// threading the per-lane side-effect mask exactly as it already does for
 /// `feme.stage.output.store` (see the file comment): snapshots this
 /// invocation's current output scratch storage into one bounded
-/// emitted-vertex record, gated by \p CI's own \p mask operand rather than
-/// only the wave's entry mask. Requires a constant `stream` operand naming
-/// `SupportedStream` in every lane; returns false (having emitted a
-/// diagnostic) otherwise.
+/// emitted-vertex record on the named stream, gated by \p CI's own \p mask
+/// operand rather than only the wave's entry mask. Requires a constant
+/// `stream` operand in every lane (SPIR-V's own `OpEmitStreamVertex`/
+/// `OpEmitVertex` always name a literal stream, never a runtime value);
+/// returns false (having emitted a diagnostic) otherwise.
 bool lowerGeometryStreamEmit(CallInst &CI, const EntrySignature &Sig,
                              const WaveBodyEnv &WEnv,
                              const GeometryStageEnv &GEnv) {
   unsigned WaveSize =
       cast<FixedVectorType>(CI.getArgOperand(1)->getType())->getNumElements();
+  SmallVector<uint64_t, 8> Streams(WaveSize);
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     std::optional<uint64_t> Stream =
         getLaneConstantInt(CI.getArgOperand(0), Lane);
-    if (!Stream || *Stream != SupportedStream) {
+    if (!Stream) {
       CI.getContext().emitError(
-          &CI, "feme-cpu-wrap-geometry: only output stream 0 is supported");
+          &CI, "feme-cpu-wrap-geometry: emit's stream operand must be a "
+              "compile-time constant");
       return false;
     }
+    Streams[Lane] = *Stream;
   }
-
-  SmallVector<const SignatureElement *, 8> OutputElements;
-  for (const SignatureElement &Elt : Sig.Elements)
-    if (Elt.Direction == SignatureDirection::Output) {
-      if (Elt.Stream != SupportedStream) {
-        CI.getContext().emitError(
-            &CI, "feme-cpu-wrap-geometry: only output stream 0 is supported");
-        return false;
-      }
-      OutputElements.push_back(&Elt);
-    }
 
   LLVMContext &Ctx = CI.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
   Type *FloatTy = Type::getFloatTy(Ctx);
 
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    // Only the elements this stream's own `layout(stream=N)` output
+    // variables declare are snapshotted -- a real multi-stream geometry
+    // shader typically declares a different subset of output elements per
+    // stream (see the file comment).
+    SmallVector<const SignatureElement *, 8> OutputElements;
+    for (const SignatureElement &Elt : Sig.Elements)
+      if (Elt.Direction == SignatureDirection::Output &&
+          Elt.Stream == Streams[Lane])
+        OutputElements.push_back(&Elt);
+
     // Every lane's logic is inserted immediately before `CI` itself: each
     // `SplitBlockAndInsertIfThen` call below splits the block right there
     // again, so this remains valid across every lane's iteration (unlike
@@ -492,8 +509,19 @@ bool lowerGeometryStreamEmit(CallInst &CI, const EntrySignature &Sig,
     Value *Active = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
     Value *PrimitiveIndex =
         getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
-    Value *CountAddr = Builder.CreateInBoundsGEP(
-        I32Ty, GEnv.EmittedVertexCounts, PrimitiveIndex);
+    // (Roadmap H21e) `StreamCount` is a runtime value (this same entry
+    // point's caller derives it from the identical signature that fixed
+    // `Streams[Lane]` at compile time, so a well-formed shader can never
+    // fail this bound -- see the file comment), so the check is folded
+    // into `Active` defensively rather than diagnosed.
+    Value *StreamInBounds = Builder.CreateICmpULT(
+        Builder.getInt32(Streams[Lane]), GEnv.StreamCount, "geom.emit.stream");
+    Active = Builder.CreateAnd(Active, StreamInBounds);
+    Value *StreamSlot = Builder.CreateAdd(
+        Builder.CreateMul(PrimitiveIndex, GEnv.StreamCount),
+        Builder.getInt32(Streams[Lane]), "geom.emit.streamslot");
+    Value *CountAddr =
+        Builder.CreateInBoundsGEP(I32Ty, GEnv.EmittedVertexCounts, StreamSlot);
     Value *CurrentCount = Builder.CreateLoad(I32Ty, CountAddr);
     Value *CanEmit = Builder.CreateAnd(
         Active, Builder.CreateICmpULT(CurrentCount, GEnv.MaxVerticesPerStream),
@@ -503,7 +531,7 @@ bool lowerGeometryStreamEmit(CallInst &CI, const EntrySignature &Sig,
         SplitBlockAndInsertIfThen(CanEmit, &CI, /*Unreachable=*/false);
     IRBuilder<> ThenBuilder(ThenTerm);
     Value *SlotIndex = ThenBuilder.CreateAdd(
-        ThenBuilder.CreateMul(PrimitiveIndex, GEnv.MaxVerticesPerStream),
+        ThenBuilder.CreateMul(StreamSlot, GEnv.MaxVerticesPerStream),
         CurrentCount, "geom.emit.slot");
     Value *RowBase =
         ThenBuilder.CreateMul(SlotIndex, GEnv.OutputScalarsPerVertex);
@@ -538,21 +566,25 @@ bool lowerGeometryStreamEmit(CallInst &CI, const EntrySignature &Sig,
 }
 
 /// Lowers `feme.cpu.masked.stage.stream.cut(stream, mask)`: closes the strip
-/// currently accumulating on stream `SupportedStream` for this invocation, a
-/// no-op if nothing has been emitted since the last cut (see the file
-/// comment).
+/// currently accumulating on the named stream for this invocation, a no-op
+/// if nothing has been emitted onto it since the last cut (see the file
+/// comment). Requires a constant `stream` operand in every lane, exactly
+/// like `lowerGeometryStreamEmit`.
 bool lowerGeometryStreamCut(CallInst &CI, const WaveBodyEnv &WEnv,
                             const GeometryStageEnv &GEnv) {
   unsigned WaveSize =
       cast<FixedVectorType>(CI.getArgOperand(1)->getType())->getNumElements();
+  SmallVector<uint64_t, 8> Streams(WaveSize);
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     std::optional<uint64_t> Stream =
         getLaneConstantInt(CI.getArgOperand(0), Lane);
-    if (!Stream || *Stream != SupportedStream) {
+    if (!Stream) {
       CI.getContext().emitError(
-          &CI, "feme-cpu-wrap-geometry: only output stream 0 is supported");
+          &CI, "feme-cpu-wrap-geometry: cut's stream operand must be a "
+              "compile-time constant");
       return false;
     }
+    Streams[Lane] = *Stream;
   }
 
   Type *I32Ty = Type::getInt32Ty(CI.getContext());
@@ -562,8 +594,14 @@ bool lowerGeometryStreamCut(CallInst &CI, const WaveBodyEnv &WEnv,
     Value *Active = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
     Value *PrimitiveIndex =
         getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
-    Value *CountAddr = Builder.CreateInBoundsGEP(
-        I32Ty, GEnv.EmittedVertexCounts, PrimitiveIndex);
+    Value *StreamInBounds = Builder.CreateICmpULT(
+        Builder.getInt32(Streams[Lane]), GEnv.StreamCount, "geom.cut.stream");
+    Active = Builder.CreateAnd(Active, StreamInBounds);
+    Value *StreamSlot = Builder.CreateAdd(
+        Builder.CreateMul(PrimitiveIndex, GEnv.StreamCount),
+        Builder.getInt32(Streams[Lane]), "geom.cut.streamslot");
+    Value *CountAddr =
+        Builder.CreateInBoundsGEP(I32Ty, GEnv.EmittedVertexCounts, StreamSlot);
     Value *CurrentCount = Builder.CreateLoad(I32Ty, CountAddr);
     Value *CanCut = Builder.CreateAnd(
         Active, Builder.CreateICmpUGT(CurrentCount, Builder.getInt32(0)),
@@ -575,7 +613,7 @@ bool lowerGeometryStreamCut(CallInst &CI, const WaveBodyEnv &WEnv,
     Value *LastVertex = ThenBuilder.CreateSub(
         CurrentCount, ThenBuilder.getInt32(1), "geom.cut.last");
     Value *SlotIndex = ThenBuilder.CreateAdd(
-        ThenBuilder.CreateMul(PrimitiveIndex, GEnv.MaxVerticesPerStream),
+        ThenBuilder.CreateMul(StreamSlot, GEnv.MaxVerticesPerStream),
         LastVertex, "geom.cut.slot");
     Value *StripAddr = ThenBuilder.CreateInBoundsGEP(
         ThenBuilder.getInt8Ty(), GEnv.StripEndsAfter, SlotIndex);
@@ -737,6 +775,7 @@ struct WrapperEnv {
   Value *VerticesPerPrimitive = nullptr;
   Value *MaxVerticesPerStream = nullptr;
   Value *OutputScalarsPerVertex = nullptr;
+  Value *StreamCount = nullptr;
   Value *EmittedVertices = nullptr;
   Value *EmittedVertexCounts = nullptr;
   Value *StripEndsAfter = nullptr;
@@ -757,6 +796,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
       Builder, ArgsTy, Args, GeometryArgsFieldMaxVerticesPerStream, I32Ty);
   Env.OutputScalarsPerVertex = loadStructField(
       Builder, ArgsTy, Args, GeometryArgsFieldOutputScalarsPerVertex, I32Ty);
+  Env.StreamCount = loadStructField(Builder, ArgsTy, Args,
+                                    GeometryArgsFieldStreamCount, I32Ty);
   Env.InputLayout = loadStructField(Builder, ArgsTy, Args,
                                     GeometryArgsFieldInputLayout, PtrTy);
   Env.Inputs =
@@ -906,6 +947,8 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.MaxVerticesPerStream);
     else if (Arg.getName() == OutputScalarsPerVertexParamName)
       CallArgs.push_back(Env.OutputScalarsPerVertex);
+    else if (Arg.getName() == StreamCountParamName)
+      CallArgs.push_back(Env.StreamCount);
     else if (Arg.getName() == EmittedVerticesParamName)
       CallArgs.push_back(Env.EmittedVertices);
     else if (Arg.getName() == EmittedVertexCountsParamName)

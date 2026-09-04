@@ -444,13 +444,20 @@ struct GeometryResources {
   uint32_t VerticesPerPrimitive = 0;
   uint32_t MaxVerticesPerStream = 0;
   uint32_t OutputScalarsPerVertex = 0;
-  /// `PrimitiveCount * MaxVerticesPerStream * OutputScalarsPerVertex`
-  /// elements, zero-initialized by the caller before `invokeGeometry`.
+  /// (Roadmap H21e) Number of independent output streams; defaults to 1
+  /// (an ordinary single-stream geometry shader) so every caller predating
+  /// this field keeps working unchanged. See `FemeGeometryArgs::
+  /// StreamCount`'s own comment for the storage layout this implies.
+  uint32_t StreamCount = 1;
+  /// `PrimitiveCount * StreamCount * MaxVerticesPerStream *
+  /// OutputScalarsPerVertex` elements, zero-initialized by the caller
+  /// before `invokeGeometry`.
   llvm::MutableArrayRef<float> EmittedVertices;
-  /// `PrimitiveCount` elements, zero-initialized by the caller.
+  /// `PrimitiveCount * StreamCount` elements, zero-initialized by the
+  /// caller.
   llvm::MutableArrayRef<uint32_t> EmittedVertexCounts;
-  /// `PrimitiveCount * MaxVerticesPerStream` elements, zero-initialized by
-  /// the caller.
+  /// `PrimitiveCount * StreamCount * MaxVerticesPerStream` elements,
+  /// zero-initialized by the caller.
   llvm::MutableArrayRef<uint8_t> StripEndsAfter;
 };
 
@@ -475,6 +482,7 @@ private:
                         uint32_t VerticesPerPrimitive,
                         uint32_t MaxVerticesPerStream,
                         uint32_t OutputScalarsPerVertex,
+                        uint32_t StreamCount,
                         llvm::MutableArrayRef<float> EmittedVertices,
                         llvm::MutableArrayRef<uint32_t> EmittedVertexCounts,
                         llvm::MutableArrayRef<uint8_t> StripEndsAfter);
@@ -492,6 +500,7 @@ private:
   uint32_t VerticesPerPrimitive = 0;
   uint32_t MaxVerticesPerStream = 0;
   uint32_t OutputScalarsPerVertex = 0;
+  uint32_t StreamCount = 1;
   llvm::MutableArrayRef<float> EmittedVertices;
   llvm::MutableArrayRef<uint32_t> EmittedVertexCounts;
   llvm::MutableArrayRef<uint8_t> StripEndsAfter;

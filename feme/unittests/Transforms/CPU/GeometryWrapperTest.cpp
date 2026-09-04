@@ -163,19 +163,77 @@ TEST(GeometryWrapperTest, LowersInvocationIDInputLoad) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST(GeometryWrapperTest, DiagnosesAnUnsupportedOutputStream) {
+// (Roadmap H21e) Two independent output streams: emits one vertex onto
+// stream 0 (element 2) and a different one onto stream 1 (element 3),
+// exercising `lowerGeometryStreamEmit`'s per-stream `OutputElements`
+// filtering (each stream's own snapshot must include only its own
+// signature elements) and the wrapper's widened per-stream storage
+// addressing.
+TEST(GeometryWrapperTest, LowersMultipleOutputStreams) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @gs_main() #0 {
+      %v0 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %v0, i32 0)
+      call void @feme.stage.stream.emit(i32 0)
+      call void @feme.stage.stream.cut(i32 0)
+      %v1 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 1)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %v1, i32 0)
       call void @feme.stage.stream.emit(i32 1)
+      call void @feme.stage.stream.cut(i32 1)
       ret void
     }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    declare void @feme.stage.stream.emit(i32)
+    declare void @feme.stage.stream.cut(i32)
+    attributes #0 = { "feme.shader.stage"="geometry" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement Stream0Out = makeFloatElement(2, SignatureDirection::Output);
+  Stream0Out.Stream = 0;
+  SignatureElement Stream1Out = makeFloatElement(3, SignatureDirection::Output);
+  Stream1Out.Stream = 1;
+  Sig.Elements = {makeFloatElement(0, SignatureDirection::Input), Stream0Out,
+                  Stream1Out};
+  dxil::setEntrySignature(*M->getFunction("gs_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  GeometryWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_gs_main"));
+  for (const Instruction &I : instructions(*M->getFunction("gs_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// (Roadmap H21e) A non-constant `stream` operand cannot be lowered (SPIR-V
+// itself always requires a literal stream operand for
+// `OpEmitStreamVertex`/`OpEmitVertex`) -- exercises the other half of
+// `LowersMultipleOutputStreams`'s coverage, the diagnostic path.
+TEST(GeometryWrapperTest, DiagnosesANonConstantOutputStream) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @gs_main() #0 {
+      %pid = call i32 @feme.stage.input.load.i32(i32 1, i32 0, i32 0, i32 0)
+      call void @feme.stage.stream.emit(i32 %pid)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
     declare void @feme.stage.stream.emit(i32)
     attributes #0 = { "feme.shader.stage"="geometry" "feme.cpu.wavesize"="4" }
   )");
   ASSERT_TRUE(M);
 
   EntrySignature Sig;
+  Sig.Elements = {makePrimitiveIDInput(1)};
   dxil::setEntrySignature(*M->getFunction("gs_main"), Sig);
 
   ModuleAnalysisManager MAM;

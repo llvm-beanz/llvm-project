@@ -49,6 +49,7 @@ TEST(GeometryStreamCollectionTest, ReplaysFlatBatchRecordsInPrimitiveOrder) {
   Args.PrimitiveCount = PrimitiveCount;
   Args.MaxVerticesPerStream = MaxVerticesPerStream;
   Args.OutputScalarsPerVertex = OutputScalarsPerVertex;
+  Args.StreamCount = 1;
   Args.EmittedVertices = EmittedVertices.data();
   Args.EmittedVertexCounts = EmittedVertexCounts.data();
   Args.StripEndsAfter = StripEndsAfter.data();
@@ -75,6 +76,68 @@ TEST(GeometryStreamCollectionTest, ReplaysFlatBatchRecordsInPrimitiveOrder) {
   EXPECT_EQ(Strips[1].End, 4u);
 }
 
+// (Roadmap H21e) Two primitives, two streams: each primitive emits a
+// distinct vertex value onto each of its two streams, verifying every
+// stream's own records replay into the correct `Combined` stream
+// independently (and that stream 0's own records are unaffected by
+// stream 1's, and vice versa).
+TEST(GeometryStreamCollectionTest, ReplaysMultipleStreamsIndependently) {
+  constexpr uint32_t PrimitiveCount = 2;
+  constexpr uint32_t StreamCount = 2;
+  constexpr uint32_t MaxVerticesPerStream = 4;
+  constexpr uint32_t OutputScalarsPerVertex = 1;
+
+  std::vector<float> EmittedVertices(PrimitiveCount * StreamCount *
+                                         MaxVerticesPerStream *
+                                         OutputScalarsPerVertex,
+                                     0.0f);
+  std::vector<uint32_t> EmittedVertexCounts(PrimitiveCount * StreamCount, 0);
+  std::vector<uint8_t> StripEndsAfter(
+      PrimitiveCount * StreamCount * MaxVerticesPerStream, 0);
+
+  auto Slot = [&](uint32_t Primitive, uint32_t Stream, uint32_t Vertex) {
+    return (Primitive * StreamCount + Stream) * MaxVerticesPerStream + Vertex;
+  };
+  // Primitive 0: stream 0 emits {10, 11} and cuts; stream 1 emits {100}.
+  EmittedVertices[Slot(0, 0, 0)] = 10.0f;
+  EmittedVertices[Slot(0, 0, 1)] = 11.0f;
+  EmittedVertexCounts[0 * StreamCount + 0] = 2;
+  StripEndsAfter[Slot(0, 0, 1)] = 1;
+  EmittedVertices[Slot(0, 1, 0)] = 100.0f;
+  EmittedVertexCounts[0 * StreamCount + 1] = 1;
+
+  // Primitive 1: stream 0 emits nothing; stream 1 emits {200, 201}.
+  EmittedVertices[Slot(1, 1, 0)] = 200.0f;
+  EmittedVertices[Slot(1, 1, 1)] = 201.0f;
+  EmittedVertexCounts[1 * StreamCount + 1] = 2;
+
+  FemeGeometryArgs Args{};
+  Args.PrimitiveCount = PrimitiveCount;
+  Args.MaxVerticesPerStream = MaxVerticesPerStream;
+  Args.OutputScalarsPerVertex = OutputScalarsPerVertex;
+  Args.StreamCount = StreamCount;
+  Args.EmittedVertices = EmittedVertices.data();
+  Args.EmittedVertexCounts = EmittedVertexCounts.data();
+  Args.StripEndsAfter = StripEndsAfter.data();
+
+  GeometryStreamBuilder Combined(StreamCount, /*MaxVerticesPerStream=*/8);
+  GeometryStreamMergeResult Result = collectGeometryStreams(Args, Combined);
+
+  EXPECT_FALSE(Result.Truncated);
+  ASSERT_EQ(Result.MergedVertexCount.size(), 2u);
+  EXPECT_EQ(Result.MergedVertexCount[0], 2u);
+  EXPECT_EQ(Result.MergedVertexCount[1], 3u);
+
+  ASSERT_EQ(Combined.getVertices(0).size(), 2u);
+  EXPECT_EQ(Combined.getVertices(0)[0], (StreamVertex{10.0f}));
+  EXPECT_EQ(Combined.getVertices(0)[1], (StreamVertex{11.0f}));
+
+  ASSERT_EQ(Combined.getVertices(1).size(), 3u);
+  EXPECT_EQ(Combined.getVertices(1)[0], (StreamVertex{100.0f}));
+  EXPECT_EQ(Combined.getVertices(1)[1], (StreamVertex{200.0f}));
+  EXPECT_EQ(Combined.getVertices(1)[2], (StreamVertex{201.0f}));
+}
+
 TEST(GeometryStreamCollectionTest, TruncatesWhenTheCombinedBuilderIsTooSmall) {
   constexpr uint32_t PrimitiveCount = 2;
   constexpr uint32_t MaxVerticesPerStream = 2;
@@ -89,6 +152,7 @@ TEST(GeometryStreamCollectionTest, TruncatesWhenTheCombinedBuilderIsTooSmall) {
   Args.PrimitiveCount = PrimitiveCount;
   Args.MaxVerticesPerStream = MaxVerticesPerStream;
   Args.OutputScalarsPerVertex = OutputScalarsPerVertex;
+  Args.StreamCount = 1;
   Args.EmittedVertices = EmittedVertices.data();
   Args.EmittedVertexCounts = EmittedVertexCounts.data();
   Args.StripEndsAfter = StripEndsAfter.data();

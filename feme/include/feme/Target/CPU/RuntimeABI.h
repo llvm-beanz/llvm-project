@@ -1307,8 +1307,13 @@ struct FemeGeometryInvocation {
 ///    store` writes into, and `feme.stage.stream.emit`
 ///    (`StageOpKind::StreamEmit`) is what snapshots that scratch storage's
 ///    *current* values into the bounded `EmittedVertices` record below.
-///    This milestone supports exactly one output stream (stream 0); a
-///    `feme.stage.stream.emit`/`.cut` naming any other stream is diagnosed.
+///    Roadmap H21e generalizes this to `StreamCount` independent output
+///    streams (SPIR-V's `OpEmitStreamVertex`/`OpEndStreamPrimitive`):
+///    every stream shares the same per-primitive `MaxVerticesPerStream`/
+///    `OutputScalarsPerVertex` bound, addressed as if `StreamCount` were an
+///    extra, outermost structure-of-arrays dimension alongside
+///    `PrimitiveCount` (see `EmittedVertices`'s own comment below for the
+///    exact flattening).
 struct FemeGeometryArgs {
   /// `StageArgsAbiVersion`.
   uint32_t AbiVersion;
@@ -1325,19 +1330,29 @@ struct FemeGeometryArgs {
   /// Number of vertices in one input primitive (3 for an ordinary triangle,
   /// 6 for a triangle-with-adjacency, and so on).
   uint32_t VerticesPerPrimitive;
-  /// The maximum number of vertices one invocation may `emit` onto stream 0
-  /// -- the wrapper checks this bound before every emission, exactly as
-  /// `feme::graphics::GeometryStreamBuilder` itself does.
+  /// The maximum number of vertices one invocation may `emit` onto any one
+  /// stream -- the wrapper checks this bound before every emission, exactly
+  /// as `feme::graphics::GeometryStreamBuilder` itself does, independently
+  /// per stream.
   uint32_t MaxVerticesPerStream;
-  /// The number of scalar components one emitted vertex record holds: the
-  /// total component count across every `SignatureDirection::Output`
-  /// element on stream 0, in signature order. The caller (which already has
-  /// the entry point's `EntrySignature`) computes this the same way the
-  /// wrapper itself does -- see GeometryWrapper.cpp's file comment.
+  /// The number of scalar components one emitted vertex record holds,
+  /// shared by every stream: the caller (which already has the entry
+  /// point's `EntrySignature`) computes this as the maximum, over every
+  /// stream `[0, StreamCount)`, of that stream's own `SignatureDirection::
+  /// Output` elements' total component count, in signature order -- see
+  /// GeometryWrapper.cpp's file comment. A stream whose own elements need
+  /// fewer scalars than this simply leaves the row's remaining components
+  /// unwritten.
   uint32_t OutputScalarsPerVertex;
-  /// Reserved 32-bit field to keep pointer fields naturally aligned and
-  /// leave room for later scalar metadata.
-  uint32_t Reserved32;
+  /// (Roadmap H21e) The number of independent output streams
+  /// `feme.stage.stream.emit`/`.cut` may name -- SPIR-V's `OpEmitVertex`/
+  /// `OpEndPrimitive` (stream 0 only) plus `OpEmitStreamVertex`/
+  /// `OpEndStreamPrimitive` (any `[0, StreamCount)`) both lower to these
+  /// stage ops, so an ordinary single-stream geometry shader has
+  /// `StreamCount == 1`. Was `Reserved32` before this row; the field's
+  /// position and size are unchanged, so no `StageArgsAbiVersion` bump was
+  /// needed.
+  uint32_t StreamCount;
   /// Resource/root-constant block shared by every stage.
   const FemeShaderResources *Resources;
   /// Layout describing `Inputs`.
@@ -1354,20 +1369,25 @@ struct FemeGeometryArgs {
   void *Outputs;
   /// Per-invocation system-value records.
   const FemeGeometryInvocation *Invocations;
-  /// Flat `PrimitiveCount * MaxVerticesPerStream * OutputScalarsPerVertex`
-  /// storage for stream 0's emitted vertex records (primitive-major, then
-  /// vertex-slot, then scalar), written by `feme.stage.stream.emit`
+  /// Flat `PrimitiveCount * StreamCount * MaxVerticesPerStream *
+  /// OutputScalarsPerVertex` storage for every stream's emitted vertex
+  /// records (primitive-major, then stream, then vertex-slot, then
+  /// scalar -- i.e. primitive `P` stream `S` vertex `V` scalar `C` is at
+  /// `((P * StreamCount + S) * MaxVerticesPerStream + V) *
+  /// OutputScalarsPerVertex + C`), written by `feme.stage.stream.emit`
   /// lowering.
   float *EmittedVertices;
-  /// `PrimitiveCount` counts of how many vertices each invocation actually
-  /// emitted onto stream 0, bounded to `MaxVerticesPerStream`.
+  /// `PrimitiveCount * StreamCount` counts of how many vertices each
+  /// invocation actually emitted onto each stream (primitive `P` stream
+  /// `S` at `P * StreamCount + S`), bounded to `MaxVerticesPerStream`.
   uint32_t *EmittedVertexCounts;
-  /// Flat `PrimitiveCount * MaxVerticesPerStream` strip-boundary flags:
-  /// `StripEndsAfter[P * MaxVerticesPerStream + I]` is nonzero if a
-  /// `feme.stage.stream.cut` closed the strip immediately after emitted
-  /// vertex `I` of primitive `P` -- see GeometryWrapper.cpp's file comment
-  /// for why this flat representation is equivalent to replaying the
-  /// invocation's actual `emit`/`cut` call sequence.
+  /// Flat `PrimitiveCount * StreamCount * MaxVerticesPerStream`
+  /// strip-boundary flags: `StripEndsAfter[(P * StreamCount + S) *
+  /// MaxVerticesPerStream + I]` is nonzero if a `feme.stage.stream.cut`
+  /// closed stream `S`'s strip immediately after emitted vertex `I` of
+  /// primitive `P` -- see GeometryWrapper.cpp's file comment for why this
+  /// flat representation is equivalent to replaying the invocation's
+  /// actual `emit`/`cut` call sequence.
   uint8_t *StripEndsAfter;
   /// ABI headroom for later geometry-batch metadata.
   void *Reserved[2];
