@@ -33,6 +33,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 
+#include <deque>
 #include <optional>
 
 using namespace feme::vulkan;
@@ -2545,6 +2546,254 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
   return Out;
 }
 
+namespace {
+
+/// (roadmap H29c) Every piece of storage a synthesized
+/// `VkGraphicsPipelineCreateInfo` built by
+/// `synthesizeLinkedGraphicsPipelineCreateInfo` points into. Owned by that
+/// function's caller for exactly as long as the synthesized CreateInfo is
+/// used (a single `compileGraphicsPipeline` call), mirroring the lifetime
+/// contract a real, directly-supplied `VkGraphicsPipelineCreateInfo` and
+/// everything it points to already have to satisfy for that same call.
+/// `SpecInfos` is a `std::deque` (not a `std::vector`) specifically so
+/// appending to it can never invalidate the address of an entry an earlier
+/// `Stages` element's `pSpecializationInfo` already points to.
+struct LinkedPipelineStorage {
+  SmallVector<VkPipelineShaderStageCreateInfo, 4> Stages;
+  std::deque<VkSpecializationInfo> SpecInfos;
+
+  VkPipelineVertexInputStateCreateInfo VertexInputState{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssemblyState{};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  VkPipelineRasterizationStateCreateInfo RasterizationState{};
+  VkPipelineTessellationStateCreateInfo TessellationState{};
+  VkPipelineDepthStencilStateCreateInfo DepthStencilState{};
+  VkPipelineColorBlendStateCreateInfo ColorBlendState{};
+  VkPipelineMultisampleStateCreateInfo MultisampleState{};
+};
+
+} // namespace
+
+/// Appends one shader-stage entry to \p Storage's `Stages`, referencing \p
+/// Stage's own already-owned `Name`/specialization storage directly --
+/// valid for as long as the `GraphicsPipelineLibrary` object \p Stage was
+/// captured from stays alive, guaranteed for the duration of the single
+/// `vkCreateGraphicsPipelines` call this storage exists for.
+static void addLinkedStage(LinkedPipelineStorage &Storage,
+                           const GraphicsPipelineLibraryStage &Stage) {
+  VkPipelineShaderStageCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Info.stage = Stage.Stage;
+  Info.module = Stage.Module;
+  Info.pName = Stage.Name.c_str();
+  if (!Stage.SpecMapEntries.empty()) {
+    VkSpecializationInfo Spec{};
+    Spec.mapEntryCount = static_cast<uint32_t>(Stage.SpecMapEntries.size());
+    Spec.pMapEntries = Stage.SpecMapEntries.data();
+    Spec.dataSize = Stage.SpecData.size();
+    Spec.pData = Stage.SpecData.data();
+    Storage.SpecInfos.push_back(Spec);
+    Info.pSpecializationInfo = &Storage.SpecInfos.back();
+  }
+  Storage.Stages.push_back(Info);
+}
+
+/// Finds the linked library among \p Libraries whose own captured
+/// `GraphicsPipelineLibraryState::Flags` includes \p Bit, or `nullptr` if
+/// none does -- that part's state must then come directly from this
+/// call's own `VkGraphicsPipelineCreateInfo` instead (the "partially
+/// monolithic/partially library" mix the spec permits; see
+/// `synthesizeLinkedGraphicsPipelineCreateInfo`'s own comment).
+static const GraphicsPipelineLibrary *
+findLinkedLibraryForBit(ArrayRef<GraphicsPipelineLibrary *> Libraries,
+                        VkGraphicsPipelineLibraryFlagBitsEXT Bit) {
+  for (const GraphicsPipelineLibrary *Lib : Libraries)
+    if (Lib->state().Flags & Bit)
+      return Lib;
+  return nullptr;
+}
+
+/// (roadmap H29c) Synthesizes one complete `VkGraphicsPipelineCreateInfo`-
+/// equivalent state for a non-library `vkCreateGraphicsPipelines` call
+/// that links one or more `VK_EXT_graphics_pipeline_library` libraries via
+/// a chained `VkPipelineLibraryCreateInfoKHR::pLibraries`, gathering each
+/// of the four `VkGraphicsPipelineLibraryFlagBitsEXT` parts' state from
+/// whichever linked library (roadmap H29b's own `GraphicsPipelineLibrary`
+/// objects) provides it, or -- for a pipeline that is partially monolithic
+/// and partially library, which the spec permits -- from \p CreateInfo's
+/// own fields directly when no linked library supplies that part.
+/// `PIPELINE_CONSTRUCTION_TYPE_LINK_TIME_OPTIMIZED_LIBRARY` and
+/// `FAST_LINKED_LIBRARY` are treated identically: this CPU-emulated ICD
+/// has no genuine fast-vs-optimized-link tradeoff for either to honor, so
+/// nothing here distinguishes them. The caller passes the result to the
+/// existing, unmodified `compileGraphicsPipeline`, exactly as it already
+/// does for a directly-supplied monolithic `VkGraphicsPipelineCreateInfo`.
+///
+/// The returned `VkGraphicsPipelineCreateInfo`'s pointers reference only
+/// \p Storage (owned by the caller for the scope of a single
+/// `compileGraphicsPipeline` call) and each linked library's own already-
+/// owned state (valid for as long as that pipeline handle exists,
+/// guaranteed for the duration of this call) -- never \p CreateInfo's own
+/// pointers reinterpreted into longer-lived storage, so nothing here
+/// depends on \p CreateInfo outliving this function beyond its own,
+/// already-existing lifetime guarantee.
+static Expected<VkGraphicsPipelineCreateInfo>
+synthesizeLinkedGraphicsPipelineCreateInfo(
+    const VkGraphicsPipelineCreateInfo &CreateInfo,
+    ArrayRef<VkPipeline> LibraryHandles, LinkedPipelineStorage &Storage) {
+  SmallVector<GraphicsPipelineLibrary *, 4> Libraries;
+  for (VkPipeline Handle : LibraryHandles) {
+    auto *P = fromHandle<Pipeline>(Handle);
+    if (!P || P->kind() != Pipeline::Kind::GraphicsLibrary)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "VkPipelineLibraryCreateInfoKHR::pLibraries must each name a "
+          "VK_EXT_graphics_pipeline_library pipeline library");
+    Libraries.push_back(static_cast<GraphicsPipelineLibrary *>(P));
+  }
+
+  VkGraphicsPipelineCreateInfo Result{};
+  Result.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Result.flags = CreateInfo.flags;
+
+  // Layout/RenderPass/Subpass are shared by every part per the spec's own
+  // "Multiple Pipeline Creation" table; prefer this call's own value when
+  // it supplies one non-null, since the final link is the one call that
+  // must name the pipeline's real, complete VkPipelineLayout regardless of
+  // which parts came from libraries -- falling back to a linked library's
+  // own captured value only covers a pure-link call that supplies none of
+  // its own state directly.
+  Result.layout = CreateInfo.layout;
+  Result.renderPass = CreateInfo.renderPass;
+  Result.subpass = CreateInfo.subpass;
+  for (const GraphicsPipelineLibrary *Lib : Libraries) {
+    if (!Result.layout)
+      Result.layout = Lib->state().Layout;
+    if (!Result.renderPass)
+      Result.renderPass = Lib->state().RenderPass;
+  }
+
+  // Vertex input interface.
+  if (const GraphicsPipelineLibrary *Lib = findLinkedLibraryForBit(
+          Libraries,
+          VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT)) {
+    const GraphicsPipelineLibraryState &S = Lib->state();
+    Storage.VertexInputState.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    Storage.VertexInputState.vertexBindingDescriptionCount =
+        static_cast<uint32_t>(S.VertexBindings.size());
+    Storage.VertexInputState.pVertexBindingDescriptions =
+        S.VertexBindings.empty() ? nullptr : S.VertexBindings.data();
+    Storage.VertexInputState.vertexAttributeDescriptionCount =
+        static_cast<uint32_t>(S.VertexAttributes.size());
+    Storage.VertexInputState.pVertexAttributeDescriptions =
+        S.VertexAttributes.empty() ? nullptr : S.VertexAttributes.data();
+    Result.pVertexInputState = &Storage.VertexInputState;
+    if (S.InputAssembly) {
+      Storage.InputAssemblyState = *S.InputAssembly;
+      Result.pInputAssemblyState = &Storage.InputAssemblyState;
+    }
+  } else {
+    Result.pVertexInputState = CreateInfo.pVertexInputState;
+    Result.pInputAssemblyState = CreateInfo.pInputAssemblyState;
+  }
+
+  // Pre-rasterization shaders.
+  if (const GraphicsPipelineLibrary *Lib = findLinkedLibraryForBit(
+          Libraries,
+          VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT)) {
+    const GraphicsPipelineLibraryState &S = Lib->state();
+    for (const GraphicsPipelineLibraryStage &Stage : S.PreRasterizationStages)
+      addLinkedStage(Storage, Stage);
+    if (S.ViewportState) {
+      Storage.ViewportState = *S.ViewportState;
+      Storage.ViewportState.viewportCount =
+          static_cast<uint32_t>(S.Viewports.size());
+      Storage.ViewportState.pViewports =
+          S.Viewports.empty() ? nullptr : S.Viewports.data();
+      Storage.ViewportState.scissorCount =
+          static_cast<uint32_t>(S.Scissors.size());
+      Storage.ViewportState.pScissors =
+          S.Scissors.empty() ? nullptr : S.Scissors.data();
+      Result.pViewportState = &Storage.ViewportState;
+    }
+    if (S.RasterizationState) {
+      Storage.RasterizationState = *S.RasterizationState;
+      Result.pRasterizationState = &Storage.RasterizationState;
+    }
+    if (S.TessellationState) {
+      Storage.TessellationState = *S.TessellationState;
+      Result.pTessellationState = &Storage.TessellationState;
+    }
+  } else {
+    for (uint32_t I = 0; I != CreateInfo.stageCount; ++I)
+      if (CreateInfo.pStages[I].stage != VK_SHADER_STAGE_FRAGMENT_BIT)
+        Storage.Stages.push_back(CreateInfo.pStages[I]);
+    Result.pViewportState = CreateInfo.pViewportState;
+    Result.pRasterizationState = CreateInfo.pRasterizationState;
+    Result.pTessellationState = CreateInfo.pTessellationState;
+  }
+
+  // Fragment shader.
+  const GraphicsPipelineLibrary *FragLib = findLinkedLibraryForBit(
+      Libraries, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  if (FragLib) {
+    const GraphicsPipelineLibraryState &S = FragLib->state();
+    if (S.FragmentStage)
+      addLinkedStage(Storage, *S.FragmentStage);
+    if (S.DepthStencilState) {
+      Storage.DepthStencilState = *S.DepthStencilState;
+      Result.pDepthStencilState = &Storage.DepthStencilState;
+    }
+  } else {
+    for (uint32_t I = 0; I != CreateInfo.stageCount; ++I)
+      if (CreateInfo.pStages[I].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
+        Storage.Stages.push_back(CreateInfo.pStages[I]);
+    Result.pDepthStencilState = CreateInfo.pDepthStencilState;
+  }
+
+  // Fragment output interface.
+  const GraphicsPipelineLibrary *OutLib = findLinkedLibraryForBit(
+      Libraries,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+  if (OutLib) {
+    const GraphicsPipelineLibraryState &S = OutLib->state();
+    if (S.ColorBlendState) {
+      Storage.ColorBlendState = *S.ColorBlendState;
+      Storage.ColorBlendState.attachmentCount =
+          static_cast<uint32_t>(S.ColorBlendAttachments.size());
+      Storage.ColorBlendState.pAttachments =
+          S.ColorBlendAttachments.empty() ? nullptr
+                                          : S.ColorBlendAttachments.data();
+      Result.pColorBlendState = &Storage.ColorBlendState;
+    }
+  } else {
+    Result.pColorBlendState = CreateInfo.pColorBlendState;
+  }
+
+  // Multisample state is shared by the fragment-shader/fragment-output-
+  // interface parts alike (same spec table); prefer whichever of the two
+  // linked libraries actually captured one, falling back to this call's
+  // own directly-supplied state when neither did.
+  const GraphicsPipelineLibrary *MultisampleLib =
+      (FragLib && FragLib->state().MultisampleState) ? FragLib
+      : (OutLib && OutLib->state().MultisampleState) ? OutLib
+                                                     : nullptr;
+  if (MultisampleLib) {
+    const GraphicsPipelineLibraryState &S = MultisampleLib->state();
+    Storage.MultisampleState = *S.MultisampleState;
+    Storage.MultisampleState.pSampleMask =
+        S.SampleMask.empty() ? nullptr : S.SampleMask.data();
+    Result.pMultisampleState = &Storage.MultisampleState;
+  } else {
+    Result.pMultisampleState = CreateInfo.pMultisampleState;
+  }
+
+  Result.stageCount = static_cast<uint32_t>(Storage.Stages.size());
+  Result.pStages = Storage.Stages.empty() ? nullptr : Storage.Stages.data();
+  return Result;
+}
+
 feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
     const DynamicGraphicsState &Dynamic) const {
   feme::graphics::StencilState ResolvedStencil = State.Stencil;
@@ -2712,9 +2961,42 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
       pPipelines[I] = toHandle<VkPipeline>(static_cast<Pipeline *>(Obj));
       continue;
     }
+    // (roadmap H29c) A non-library call may chain a
+    // `VkPipelineLibraryCreateInfoKHR` naming one or more of roadmap
+    // H29b's own `GraphicsPipelineLibrary` objects to link against,
+    // instead of (or alongside) supplying every part's state directly.
+    // `LinkedInfo`'s own storage must outlive the `compileGraphicsPipeline`
+    // call below, so both live in this same loop iteration's scope.
+    const VkPipelineLibraryCreateInfoKHR *LinkInfo = nullptr;
+    for (const auto *Next =
+             static_cast<const VkBaseInStructure *>(pCreateInfos[I].pNext);
+         Next; Next = Next->pNext) {
+      if (Next->sType != VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR)
+        continue;
+      LinkInfo = reinterpret_cast<const VkPipelineLibraryCreateInfoKHR *>(Next);
+      break;
+    }
+    LinkedPipelineStorage LinkedStorage;
+    VkGraphicsPipelineCreateInfo LinkedInfo{};
+    const VkGraphicsPipelineCreateInfo *EffectiveInfo = &pCreateInfos[I];
+    if (LinkInfo && LinkInfo->libraryCount != 0) {
+      Expected<VkGraphicsPipelineCreateInfo> Synthesized =
+          synthesizeLinkedGraphicsPipelineCreateInfo(
+              pCreateInfos[I],
+              ArrayRef(LinkInfo->pLibraries, LinkInfo->libraryCount),
+              LinkedStorage);
+      if (!Synthesized) {
+        logCreationFailure(Synthesized.takeError(),
+                           "vkCreateGraphicsPipelines");
+        Result = VK_ERROR_INITIALIZATION_FAILED;
+        continue;
+      }
+      LinkedInfo = *Synthesized;
+      EffectiveInfo = &LinkedInfo;
+    }
     bool CacheHit = false;
     Expected<std::optional<GraphicsPipelineState>> Compiled =
-        compileGraphicsPipeline(pCreateInfos[I], DeviceInfo, Cache, CacheHit);
+        compileGraphicsPipeline(*EffectiveInfo, DeviceInfo, Cache, CacheHit);
     if (!Compiled) {
       logCreationFailure(Compiled.takeError(), "vkCreateGraphicsPipelines");
       Result = VK_ERROR_INITIALIZATION_FAILED;

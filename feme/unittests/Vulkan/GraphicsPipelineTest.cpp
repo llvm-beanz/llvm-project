@@ -3558,4 +3558,220 @@ TEST_F(GraphicsPipelineTest, CmdBindPipelineRejectsAGraphicsPipelineLibrary) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Creates a `GraphicsPipelineLibrary` capturing exactly the state \p
+/// LibraryFlags names, starting from \p Info (a full `makeCreateInfo`-
+/// shaped `VkGraphicsPipelineCreateInfo`, so every field a given flag bit
+/// might read is already populated) -- a small helper shared by this
+/// file's own H29c link-time-merge tests below, which each need several
+/// such libraries alive at once.
+static VkPipeline
+createLibrary(VkDevice Device, const VkGraphicsPipelineCreateInfo &Info,
+              VkGraphicsPipelineLibraryFlagsEXT LibraryFlags) {
+  VkGraphicsPipelineCreateInfo LibInfo = Info;
+  LibInfo.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  VkGraphicsPipelineLibraryCreateInfoEXT LibraryInfo{};
+  LibraryInfo.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  LibraryInfo.flags = LibraryFlags;
+  LibInfo.pNext = &LibraryInfo;
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &LibInfo,
+                                      nullptr, &Handle),
+            VK_SUCCESS);
+  return Handle;
+}
+
+/// (roadmap H29c) Linking all four `VkGraphicsPipelineLibraryFlagBitsEXT`
+/// parts (each its own separately created library) through a chained
+/// `VkPipelineLibraryCreateInfoKHR::pLibraries` on a non-library call
+/// produces a real, executable `GraphicsPipeline` -- not another
+/// `GraphicsPipelineLibrary` -- by merging every linked library's own
+/// captured state into one complete pipeline and running it through the
+/// existing, unmodified `compileGraphicsPipeline`.
+TEST_F(GraphicsPipelineTest, LinksAllFourLibraryPartsIntoAnExecutablePipeline) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = Pass;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  ASSERT_NE(Handle, VK_NULL_HANDLE);
+  EXPECT_EQ(fromHandle<Pipeline>(Handle)->kind(), Pipeline::Kind::Graphics);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29c) A pipeline linked from libraries is a real, bindable
+/// `GraphicsPipeline` -- `vkCmdBindPipeline`'s own `Kind::GraphicsLibrary`
+/// guard (`CommandBuffer.cpp`) must not reject it the way it rejects an
+/// unlinked library.
+TEST_F(GraphicsPipelineTest, LinkedPipelineIsBindable) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = Pass;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo AllocInfo{};
+  AllocInfo.commandPool = Pool;
+  AllocInfo.commandBufferCount = 1;
+  VkCommandBuffer Cmd = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &Cmd), VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Handle);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29c) The spec permits a pipeline that is partially monolithic
+/// and partially library: this links only the vertex-input-interface and
+/// pre-rasterization-shaders parts from libraries, while supplying the
+/// fragment stage and color-blend state directly on the linking call
+/// itself.
+TEST_F(GraphicsPipelineTest, LinksPartiallyMonolithicPartiallyLibraryMix) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+
+  VkPipeline Libraries[2] = {VertexInputLib, PreRasterLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 2;
+  LinkInfo.pLibraries = Libraries;
+
+  // Supply the fragment stage and its state directly, unlinked.
+  VkPipelineShaderStageCreateInfo FragmentStage{};
+  FragmentStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  FragmentStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  FragmentStage.module = Fragment;
+  FragmentStage.pName = "main";
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.stageCount = 1;
+  LinkedCreateInfo.pStages = &FragmentStage;
+  LinkedCreateInfo.pColorBlendState = &Blend;
+  LinkedCreateInfo.pMultisampleState = &Multisample;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = Pass;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  ASSERT_NE(Handle, VK_NULL_HANDLE);
+  EXPECT_EQ(fromHandle<Pipeline>(Handle)->kind(), Pipeline::Kind::Graphics);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29c) `VkPipelineLibraryCreateInfoKHR::pLibraries` must each
+/// name a real `GraphicsPipelineLibrary` -- naming an already-complete,
+/// non-library `VkPipeline` is a creation-time error, not something the
+/// merge silently tolerates.
+TEST_F(GraphicsPipelineTest, RejectsLinkingANonLibraryPipelineHandle) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+
+  VkPipeline Monolithic = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Monolithic), VK_SUCCESS);
+
+  VkPipeline Libraries[1] = {Monolithic};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 1;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo = Info;
+  LinkedCreateInfo.pNext = &LinkInfo;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(LinkedCreateInfo, Handle), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Handle, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Monolithic, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 } // namespace

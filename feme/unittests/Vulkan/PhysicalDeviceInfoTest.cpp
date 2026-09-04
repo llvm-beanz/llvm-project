@@ -1854,24 +1854,17 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(IdProps.deviceLUIDValid, VK_FALSE);
 }
 
-TEST_F(
-    PhysicalDeviceProperties2Test,
-    GraphicsPipelineLibraryIsRecognizedButNotYetImplementedOrAdvertised) {
-  // Roadmap H29a: `VK_EXT_graphics_pipeline_library`'s own feature and
-  // properties structs are recognized (`EntryPoints.cpp`'s
-  // `fillFeatures2Chain`/`fillProperties2Chain`) ahead of any real
-  // pipeline-library object model existing, exactly like `VK_EXT_mesh_
-  // shader`'s/`VK_EXT_transform_feedback`'s own structs were recognized
-  // before those extensions' first real feature landed. Every field must
-  // report the honest "unimplemented" answer, and the extension itself
-  // must not yet be advertised (Roadmap H29 -- CTS's own device-
-  // construction-type gate,
-  // `vkPipelineConstructionUtil.cpp`'s `checkPipelineConstructionRequire
-  // ments`, checks only `vkEnumerateDeviceExtensionProperties`, not this
-  // feature bit, so advertising the extension name before real library
-  // construction/linking exists would turn today's clean `NotSupported`
-  // result into a real `Failed` one for every
-  // `dEQP-VK.pipeline.pipeline_library.*` case).
+TEST_F(PhysicalDeviceProperties2Test,
+       GraphicsPipelineLibraryIsImplementedAndAdvertised) {
+  // Roadmap H29b/H29c: `vkCreateGraphicsPipelines` now recognizes
+  // `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` (building a real
+  // `GraphicsPipelineLibrary` object, H29b) and links one or more such
+  // libraries named by a chained `VkPipelineLibraryCreateInfoKHR::
+  // pLibraries` on a non-library call into one complete, executable
+  // pipeline through the existing `compileGraphicsPipeline` (H29c), so
+  // `graphicsPipelineLibrary` is genuinely advertised now -- see
+  // `GraphicsPipelineTest.cpp`'s own link-time-merge tests for the real
+  // pipeline-creation coverage.
   VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT GplFeatures{};
   GplFeatures.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
@@ -1880,8 +1873,14 @@ TEST_F(
   Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   Features2.pNext = &GplFeatures;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
-  EXPECT_EQ(GplFeatures.graphicsPipelineLibrary, VK_FALSE);
+  EXPECT_EQ(GplFeatures.graphicsPipelineLibrary, VK_TRUE);
 
+  // `graphicsPipelineLibraryFastLinking`/
+  // `graphicsPipelineLibraryIndependentInterpolationDecoration` stay
+  // false: this CPU-emulated ICD's own "link" is a full
+  // `compileGraphicsPipeline` recompile of the merged state, not a
+  // genuinely cheaper path, and no interpolation-decoration-independence
+  // work landed alongside H29c's own state merge.
   VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT GplProps{};
   GplProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT;
 
@@ -1893,10 +1892,22 @@ TEST_F(
   EXPECT_EQ(GplProps.graphicsPipelineLibraryIndependentInterpolationDecoration,
             VK_FALSE);
 
+  bool FoundGpl = false;
+  bool FoundPipelineLibrary = false;
   for (const VkExtensionProperties &Extension :
-       feme::vulkan::getSupportedDeviceExtensions())
-    EXPECT_STRNE(Extension.extensionName,
-                 VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+       feme::vulkan::getSupportedDeviceExtensions()) {
+    if (std::strcmp(Extension.extensionName,
+                    VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) == 0)
+      FoundGpl = true;
+    if (std::strcmp(Extension.extensionName,
+                    VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) == 0)
+      FoundPipelineLibrary = true;
+  }
+  EXPECT_TRUE(FoundGpl);
+  // (roadmap H29c) `VK_KHR_pipeline_library` is `VK_EXT_graphics_pipeline_
+  // library`'s own required dependency (`vk.xml`'s `depends=`); it must be
+  // advertised alongside it.
+  EXPECT_TRUE(FoundPipelineLibrary);
 }
 
 } // namespace

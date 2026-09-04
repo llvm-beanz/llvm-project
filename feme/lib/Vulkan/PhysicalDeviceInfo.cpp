@@ -1278,6 +1278,26 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // the advertised `apiVersion`, so it must be listed here too.
       {VK_EXT_PRIMITIVES_GENERATED_QUERY_EXTENSION_NAME,
        VK_EXT_PRIMITIVES_GENERATED_QUERY_SPEC_VERSION},
+      // (roadmap H29c) `VK_KHR_pipeline_library` defines only
+      // `VkPipelineLibraryCreateInfoKHR` (no entry points of its own) and
+      // is `VK_EXT_graphics_pipeline_library`'s own required dependency
+      // (`vk.xml`'s `depends=`); both are listed together since the
+      // latter is meaningless without the former.
+      {VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
+       VK_KHR_PIPELINE_LIBRARY_SPEC_VERSION},
+      // (roadmap H29b/H29c) `VK_EXT_graphics_pipeline_library`:
+      // `vkCreateGraphicsPipelines` now recognizes
+      // `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` (building a real
+      // `GraphicsPipelineLibrary` object, H29b) and links one or more
+      // such libraries named by a chained `VkPipelineLibraryCreateInfo
+      // KHR::pLibraries` on a non-library call into one complete,
+      // executable pipeline through the existing `compileGraphicsPipeline`
+      // (H29c). `graphicsPipelineLibrary` is genuinely advertised
+      // (`EntryPoints.cpp`); `dEQP-VK.pipeline.pipeline_library.*` enables
+      // this extension by name regardless of the advertised `apiVersion`,
+      // so it must be listed here too.
+      {VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME,
+       VK_EXT_GRAPHICS_PIPELINE_LIBRARY_SPEC_VERSION},
   };
   return Extensions;
 }

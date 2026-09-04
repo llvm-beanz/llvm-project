@@ -1221,13 +1221,17 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       XfbProps->transformFeedbackDraw = VK_TRUE;
       break;
     }
-    // (roadmap H29a) `VK_EXT_graphics_pipeline_library`'s own properties
-    // struct: recognized ahead of any real implementation (see the
-    // matching feature-struct case in `fillFeatures2Chain` below), so both
-    // fields report the truthful "nothing built yet" answer -- neither a
-    // fast-linking guarantee nor an independent-interpolation-decoration
-    // guarantee exists, since no library object of any kind can be
-    // created.
+    // (roadmap H29a/H29c) `VK_EXT_graphics_pipeline_library`'s own
+    // properties struct: `graphicsPipelineLibraryFastLinking` stays false
+    // even now that linking is implemented (H29c) -- this CPU-emulated
+    // ICD's own "link" is a full `compileGraphicsPipeline` recompile of
+    // the merged state (`synthesizeLinkedGraphicsPipelineCreateInfo` in
+    // GraphicsPipeline.cpp), not a genuinely cheaper path, so promising a
+    // fast-link guarantee would be false.
+    // `graphicsPipelineLibraryIndependentInterpolationDecoration` stays
+    // false too: nothing about interpolation-decoration independence
+    // across linked shader stages was implemented alongside H29c's own
+    // state merge.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT: {
       auto *GplProps = reinterpret_cast<
           VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT *>(Base);
@@ -2128,21 +2132,21 @@ void fillFeatures2Chain(void *pNext) {
       Features->primitivesGeneratedQueryWithNonZeroStreams = VK_FALSE;
       break;
     }
-    // (roadmap H29a) `VK_EXT_graphics_pipeline_library`'s own feature
-    // struct: this ICD does not yet implement pipeline-library creation or
-    // linking (roadmap H29's own scoping found the real gap is a new
-    // pipeline-construction object model, not a small wiring pass -- see
-    // `VulkanCTSReport.md`'s "Roadmap H21f investigation" and Roadmap.md's
-    // H29 entry), so `graphicsPipelineLibrary` is unconditionally false.
-    // The struct is nonetheless recognized here -- not yet advertised via
-    // `getSupportedDeviceExtensions` -- purely so a future H29 change only
-    // has to flip this one bit, mirroring `VK_EXT_mesh_shader`'s/
-    // `VK_EXT_transform_feedback`'s own "struct recognized ahead of any
-    // real implementation" precedent above.
+    // (roadmap H29b/H29c) `VK_EXT_graphics_pipeline_library`'s own feature
+    // struct: `vkCreateGraphicsPipelines` now recognizes
+    // `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` (building a real, self-owned
+    // `GraphicsPipelineLibrary` object per H29b) and a chained
+    // `VkPipelineLibraryCreateInfoKHR::pLibraries` on a non-library call
+    // (merging every linked library's own state, plus any this call
+    // supplies directly, into one complete pipeline through the existing,
+    // unmodified `compileGraphicsPipeline` -- H29c,
+    // `synthesizeLinkedGraphicsPipelineCreateInfo` in
+    // GraphicsPipeline.cpp), so `graphicsPipelineLibrary` is genuinely
+    // true now.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT: {
       auto *Features = reinterpret_cast<
           VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT *>(Base);
-      Features->graphicsPipelineLibrary = VK_FALSE;
+      Features->graphicsPipelineLibrary = VK_TRUE;
       break;
     }
     default:
