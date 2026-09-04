@@ -61307,3 +61307,74 @@ discriminator, and that a diagnostic-grouping pass systematically under-counts
 any root cause with more than one failure mode. Those three facts are what would
 have saved the next person the reduction, and none of them were written down
 anywhere before this turn.
+
+# H29o: reflected stage state did not survive a pipeline-cache hit
+
+The row handed me a diagnostic that could not possibly be true. A geometry
+shader declaring `layout(triangles) in;` was rejected for not matching a
+`VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` pipeline. The row had already checked the
+two obvious suspects by inspection and found both innocent, and offered them as
+the two hypotheses anyway: either the input-primitive attribute fails to survive
+SPIR-V import, or the check's topology-side value is wrong.
+
+Both are wrong, and wrong in a way I had not seen before in this series. The
+last four rows I closed each had a *plausible but incorrect* causal story --
+usually blaming the graphics-pipeline-library merge path for a bug that turned
+out to be general. This one is different: both candidate causes are *correct
+code*. `ConvertSPIRVToLLVMPass` stamps the attribute properly and
+`Executor.cpp`'s mapping tables are right. The missing variable was not "which
+of these two is broken" but "did either of them ever run".
+
+The clue was in the group name, and I nearly walked past it. Every failing case
+is under `cache.*`. Reflection of tessellation/geometry/mesh state needs the
+un-JIT-ed `llvm::Function` that only a real compile holds, and it lives inside
+`compileAndValidateStages`, which `compileGraphicsPipeline` guards with
+`if (!Artifact)`. On a `VkPipelineCache` hit that whole function is skipped and
+the state stays default-constructed. `GeometryState::InputPrimitive` defaults to
+`Points`. That is the entire bug: the check was comparing `Points != Triangles`
+and telling the truth about a value that had simply never been filled in.
+
+Two habits I want to keep from this. First, when a diagnostic is *impossible*
+given the source, stop debugging the value and start asking whether the code
+that computes it executes at all. Second, the CTS group name is data. My last
+several turns trained me to distrust a row's prose and go straight to a
+reduction, and that discipline is right, but it made me treat "cache" as an
+incidental part of a test path rather than as the single most load-bearing word
+in the report.
+
+The fix's shape followed once the cause was clear. Reflected state is a property
+of the shader modules alone -- identical modules always reflect identical values
+-- so it belongs in `GraphicsPipelineArtifact`, the object the cache already
+shares between identical pipelines. That is a better home than, say, re-running
+reflection on a hit, which is not even possible after the JIT has consumed the
+functions. I placed the restore before H4i's domain-origin flip so that flip
+still applies last, and checked that explicitly rather than assuming it.
+
+I fixed tessellation and mesh alongside geometry even though only geometry was
+failing. They read the same out-params from the same skipped function; leaving
+them would have been knowingly shipping two more instances of a bug I had just
+finished diagnosing. Tessellation is partly masked because
+`InputControlPointCount` comes from the create info and does survive, which is
+exactly the kind of partial masking that turns a latent bug into a much harder
+one later.
+
+The near-miss worth recording is the tessellation unit test. My first version
+asserted the domain, the output primitive and both control-point counts -- and
+it passed *without the fix*, because `TessellationState`'s defaults
+(3/3/`TriangleCcw`/`Integer`) happen to equal every value my fixtures declared
+except one. A test that cannot fail is worse than no test, because it claims
+coverage it does not have. This is precisely the trap I wrote up for H8p a few
+turns ago, and I still walked into it; the only thing that caught it was running
+the counterfactual, which is now the part of my process I trust most. Asserting
+`Partitioning == FractionalOdd` (against an `Integer` default) made it
+discriminate, and I re-ran the counterfactual to confirm the strengthened
+version actually fails. Both tests also assert a *real* cache hit first, by
+checking the two pipelines share one compiled stage object -- otherwise a
+regression that merely disabled caching would make them pass vacuously.
+
+Measured: +218 cases in `dEQP-VK.pipeline.monolithic.cache.*` (298 -> 516) with
+zero regressions on a case-by-case pass-set diff, against the row's predicted
+217. The remaining 256 failures are all H29g's hull-stage limitation. That is
+the largest single-row gain of the H29 series, from a nine-line change, which
+is a reasonable argument for continuing to spend the reduction effort up front
+rather than pattern-matching a row's own hypothesis into a fix.
