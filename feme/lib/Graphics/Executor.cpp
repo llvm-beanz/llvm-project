@@ -1935,15 +1935,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       SignatureComponentType Want =
           expectedColorComponentType(Draw.Attachments[I].Format);
       if (FSColor->ComponentCount == 0 || FSColor->ComponentCount > 4 ||
-          FSColor->ComponentType != Want)
+          !isCompatibleColorComponentType(Want, FSColor->ComponentType))
         return createStringError(
             inconvertibleErrorCode(),
             "the fragment output at location %u mapped to color attachment "
             "%u must be a%s output of 1-4 components",
             *Loc, I,
-            Want == SignatureComponentType::Float  ? " floating-point"
-            : Want == SignatureComponentType::UInt ? "n unsigned-integer"
-                                                    : " signed-integer");
+            Want == SignatureComponentType::Float ? " floating-point"
+                                                  : "n integer");
       FSColors.push_back(FSColor);
     }
   }

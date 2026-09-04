@@ -494,6 +494,39 @@ expectedColorComponentType(cpu::ResourceFormat Format) {
              : SignatureComponentType::SInt;
 }
 
+/// Whether a fragment output whose signature reports component type \p Have
+/// may legally write a color attachment expecting \p Want (roadmap H29l).
+///
+/// This is deliberately *not* plain equality on the two signedness-carrying
+/// integer types. A SPIR-V-sourced stage's signature can never report
+/// `UInt` at all: LLVM's integer types are signless, so the SPIR-V ->
+/// LLVM conversion drops `OpTypeInt`'s own signedness bit and
+/// `CanonicalizeStage.cpp`'s `getComponentType` maps *every* integer to
+/// `SInt`. `SInt` from such a stage therefore means "some integer of this
+/// width", not "signed integer" -- only the DXIL path
+/// (`SignatureImport.cpp`, which reads a real signature blob) ever
+/// distinguishes the two. Requiring exact equality would reject every
+/// legal `uvec4`-into-`R8G8B8A8_UINT` GLSL/SPIR-V pipeline, which is what
+/// this row found.
+///
+/// Signedness only affects how the raw bits are *interpreted*, not how many
+/// bits move, and `readFragmentColorInt`/`packClearColor` (`Executor.cpp`/
+/// `ImageFixture.cpp`) already write an integer output's raw value through
+/// unchanged, so accepting either integer type against an integer
+/// attachment is correct rather than merely permissive. A `Float` output
+/// against an integer attachment (and vice versa) is still rejected: that
+/// is a genuine type mismatch with no defined reinterpretation.
+constexpr bool isCompatibleColorComponentType(SignatureComponentType Want,
+                                              SignatureComponentType Have) {
+  auto IsInteger = [](SignatureComponentType T) {
+    return T == SignatureComponentType::UInt ||
+           T == SignatureComponentType::SInt;
+  };
+  if (IsInteger(Want))
+    return IsInteger(Have);
+  return Have == Want;
+}
+
 /// The normalized, immutable pipeline description the software graphics
 /// executor consumes (see the file comment above): the compiled raster
 /// stages, primitive topology, rasterization/depth/blend state, and the

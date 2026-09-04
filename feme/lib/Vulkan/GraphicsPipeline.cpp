@@ -722,12 +722,26 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
       // `1.0` for a missing alpha) at draw time, mirroring
       // `ImageFixture.cpp`'s `unpackColor`'s own precedent for a color
       // format lacking a channel entirely.
+      // (roadmap H29l) An integer color attachment expects a matching
+      // `UInt`/`SInt` fragment output rather than a `Float` one --
+      // `expectedColorComponentType` (Pipeline.h) resolves which, exactly
+      // as `Executor.cpp`'s own draw-time linkage has since roadmap H8p.
+      // This check used to hard-code `Float`, so it rejected at creation
+      // the very `uvec4`-into-`R8G8B8A8_UINT` shape the executor was
+      // already prepared to draw.
+      feme::SignatureComponentType Want =
+          feme::graphics::expectedColorComponentType(
+              ColorAttachments[I].Format);
       if (Color->ComponentCount == 0 || Color->ComponentCount > 4 ||
-          Color->ComponentType != feme::SignatureComponentType::Float)
+          !feme::graphics::isCompatibleColorComponentType(Want,
+                                                          Color->ComponentType))
         return createStringError(inconvertibleErrorCode(),
-                                 "fragment stage has no floating-point "
+                                 "fragment stage has no %s "
                                  "output of 1-4 components at location %u "
                                  "(SV_Target%u)",
+                                 Want == feme::SignatureComponentType::Float
+                                     ? "floating-point"
+                                     : "integer",
                                  I, I);
     }
   }

@@ -117,6 +117,25 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (Roadmap H29l) A fragment stage writing an integer vector to location 0,
+/// the shape a GLSL `layout(location=0) out uvec4 color;` compiles to. Note
+/// SPIR-V's own signedness bit does not survive the conversion to LLVM
+/// (whose integer types are signless), so this stage's signature reports
+/// `SInt` no matter which of `uvec4`/`ivec4` the source declared.
+constexpr llvm::StringLiteral IntegerFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xi32>, Output>
+  spirv.func @main() -> () "None" {
+    %c = spirv.Constant dense<[1, 2, 3, 4]> : vector<4xi32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xi32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xi32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
 /// (Roadmap H4b) A tessellation-control entry point declaring 3 output
 /// control points (`OutputVertices`), writing its own control-point
 /// `Position`, then splitting at a real SPIR-V-imported
@@ -2000,6 +2019,71 @@ TEST_F(GraphicsPipelineTest, AcceptsZeroColorAttachments) {
             0u);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (Roadmap H29l) An integer color attachment (`R8G8B8A8_UINT`) paired with
+/// an integer fragment output must build. `validateStageInterfaces` used to
+/// hard-code `SignatureComponentType::Float` as the only legal fragment
+/// output type at a color location, so this legal pairing -- which
+/// `Executor.cpp`'s own draw-time linkage has accepted since roadmap H8p --
+/// was rejected at pipeline creation with "fragment stage has no
+/// floating-point output of 1-4 components at location 0 (SV_Target0)".
+///
+/// The CTS shape this row came from is
+/// `dEQP-VK.pipeline.pipeline_library.graphics_library.misc.other.
+/// view_index_from_device_index_in_all_stages*`, whose fragment stage is
+/// `layout(location=0) out uvec4 color;` against a `VK_FORMAT_R8G8B8A8_UINT`
+/// attachment. Nothing about it is graphics-pipeline-library-specific: this
+/// test builds a plain monolithic pipeline and reproduces it exactly.
+TEST_F(GraphicsPipelineTest, AcceptsAnIntegerFragmentOutputForAUintAttachment) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(IntegerFragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UINT;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = &ColorFormat;
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &Rendering;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (Roadmap H29l) The complement of the test above: an integer fragment
+/// output against a *non*-integer (`R8G8B8A8_UNORM`) color attachment is
+/// still rejected at creation. Widening the check to be signedness-agnostic
+/// between `UInt`/`SInt` must not also make it blind to a real float/integer
+/// mismatch, which has no defined reinterpretation.
+TEST_F(GraphicsPipelineTest,
+       RejectsAnIntegerFragmentOutputForAUnormAttachment) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(IntegerFragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = &ColorFormat;
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &Rendering;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
