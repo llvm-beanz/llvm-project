@@ -25068,3 +25068,65 @@ same crash point in both) gives +1 pass and 0 regressions.
 
 **Disposition.** Roadmap **H29g closed** (struck through). Combined with H29o
 this takes `monolithic.cache.*` from 298 to 772 of 774 in one session.
+
+## Roadmap L3: measured impact (accept `VK_FORMAT_D32_SFLOAT_S8_UINT` as a depth/stencil attachment)
+
+**Starting point.** `check-hlsl-feme-vk` (the `offload-test-suite` real-shader
+suite, `beanz/feme` branch, not the `deqp-vk` conformance suite this report
+otherwise tracks) had a 35-case bucket entirely failing at
+`vkCreateRenderPass` with `gpu-exec: error: Failed to create render pass.
+(VkResult = -11)`. A per-case format survey (isolating `Feature/Textures/
+Sample.test`, whose own YAML declares only a color attachment, and
+instrumenting `vkCreateRenderPass`'s attachment-normalization loop directly)
+found `offload-test-suite`'s own `createDefaultDepthStencilTarget`
+unconditionally requests a `VK_FORMAT_D32_SFLOAT_S8_UINT` depth-stencil target
+for every raster pipeline it runs, regardless of whether the pipeline under
+test declares a depth test at all -- and this ICD's `RenderPass.cpp` only ever
+accepted the *other* Vulkan-mandated combined depth-stencil format,
+`VK_FORMAT_D24_UNORM_S8_UINT`.
+
+**Fix.** Added `D32_FLOAT_S8X24_UINT` to `isSupportedDepthAttachmentFormat`
+and `isSupportedStencilAttachmentFormat` (`RenderPass.cpp`) -- a 2-line
+change. `Format.cpp`'s `mapVkFormat` already mapped the `VkFormat` correctly,
+and `ImageFixture.cpp`/`ImageOps.cpp` already fully implemented the format's
+pack/unpack/clear/readback paths; this was purely a missing acceptance
+predicate, not a missing implementation.
+
+**`check-hlsl-feme-vk` impact.** Before/after full-suite runs (`/tmp/
+l3_full_run.txt`, `/tmp/l3_after.txt`) show the same aggregate 187 `Failed`
+before and after, but a diagnostic-level diff (not just a `FAIL:`-name-set
+diff) confirms **zero** of the 35 cases fail render-pass creation any longer
+-- this row's entire named scope is closed. All 35 now proceed further before
+failing on one of three newly-exposed, distinct, unrelated bugs (13 at
+`vkCreateGraphicsPipelines`, 11 at `vkQueueSubmit`, 11 at real-result
+comparison), filed as roadmap **L22**/**L23**/**L24**.
+
+**Real `deqp-vk` impact.** A targeted sweep, `dEQP-VK.*d32_sfloat_s8_uint*`
+(1529 distinct cases matched by name; run from `VK-GL-CTS/run` with the real
+`feme_icd.json`, 5701 sub-cases completed before a deliberate time cutoff on
+this large a wildcard):
+
+| | Count |
+| --- | --- |
+| Pass | 736 |
+| Fail (unrelated causes) | 2053 |
+| NotSupported (unrelated extensions) | 2911 |
+| `VK_ERROR_FORMAT_NOT_SUPPORTED` for this format | **0** |
+
+Zero occurrences of the format-rejection error anywhere in the sweep, and a
+normal pass/fail/not-supported distribution otherwise -- no regression from
+now advertising this format.
+
+**`ninja check-feme`.** 2528/2587 passed (59 pre-existing unrelated
+`Unsupported`, 0 `Failed`); new `RenderPassTest.
+CompilesFloatDepthStencilAttachment` unit test confirmed to fail without the
+fix (via a counterfactual revert-and-rerun) and pass with it.
+
+**Disposition.** Roadmap **L3 closed** (struck through). No feature/extension
+bit touched (`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed, no change needed). Three follow-on rows filed: **L22** (13 cases,
+`vkCreateGraphicsPipelines` failures), **L23** (11 cases, `vkQueueSubmit`
+failures), **L24** (11 cases, real rendering-correctness mismatches) -- none
+yet reduced beyond the one case (`Feature/Textures/Sample.test`, filed under
+L22) whose `spirv.ImageSampleImplicitLod`/`ConstOffset` legalization gap was
+identified incidentally during this row's own investigation.
