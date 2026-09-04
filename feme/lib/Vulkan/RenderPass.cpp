@@ -120,12 +120,25 @@ bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format) {
 bool isSupportedDepthAttachmentFormat(feme::cpu::ResourceFormat Format) {
   return Format == feme::cpu::ResourceFormat::D16_UNORM ||
          Format == feme::cpu::ResourceFormat::D32_FLOAT ||
-         Format == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT;
+         Format == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT ||
+         // (Roadmap L3) `D32_FLOAT_S8X24_UINT` (`VK_FORMAT_D32_SFLOAT_
+         // S8_UINT`) is the other of the two combined depth-stencil
+         // formats Vulkan's spec guarantees at least one of is supported
+         // -- already backed by a real `ImageFixture.cpp`
+         // pack/unpack/clear case and `ImageOps.cpp` readback case (see
+         // their own `D32_FLOAT_S8X24_UINT` switches), just never
+         // reachable as a render-pass attachment before this row, since
+         // every real raster pipeline this ICD's own HLSL offload-test
+         // suite runs gets an implicit default depth-stencil target of
+         // exactly this format regardless of whether the pipeline
+         // declares a depth test at all.
+         Format == feme::cpu::ResourceFormat::D32_FLOAT_S8X24_UINT;
 }
 
 bool isSupportedStencilAttachmentFormat(feme::cpu::ResourceFormat Format) {
   return Format == feme::cpu::ResourceFormat::S8_UINT ||
-         Format == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT;
+         Format == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT ||
+         Format == feme::cpu::ResourceFormat::D32_FLOAT_S8X24_UINT;
 }
 
 bool isSupportedAttachmentSampleCount(uint32_t SampleCount) {

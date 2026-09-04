@@ -208,6 +208,52 @@ TEST_F(RenderPassTest, CompilesRemainingPackedSixteenBitColorAttachments) {
   }
 }
 
+/// (Roadmap L3) `VK_FORMAT_D32_SFLOAT_S8_UINT` is the other of the two
+/// combined depth-stencil formats the Vulkan spec guarantees at least one
+/// of is supported; `offload-test-suite`'s own `createDefaultDepthStencil
+/// Target` (`Device.cpp`) requests exactly this one for every raster
+/// pipeline it runs, regardless of whether the pipeline under test declares
+/// a depth test at all, so a driver that only implements
+/// `D24_UNORM_S8_UINT` fails every one of that suite's raster pipelines at
+/// render-pass creation before ever reaching the pipeline under test.
+TEST_F(RenderPassTest, CompilesFloatDepthStencilAttachment) {
+  VkAttachmentDescription Attachments[2]{};
+  Attachments[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  Attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference DepthRef{
+      1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  Subpass.pDepthStencilAttachment = &DepthRef;
+
+  VkRenderPassCreateInfo Info{};
+  Info.attachmentCount = 2;
+  Info.pAttachments = Attachments;
+  Info.subpassCount = 1;
+  Info.pSubpasses = &Subpass;
+
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &Info, nullptr, &Pass), VK_SUCCESS);
+  const auto *Obj = fromHandle<RenderPass>(Pass);
+  EXPECT_EQ(Obj->subpasses()[0].DepthStencilAttachment, 1u);
+  EXPECT_EQ(Obj->attachments()[1].Format,
+            feme::cpu::ResourceFormat::D32_FLOAT_S8X24_UINT);
+  vkDestroyRenderPass(Device, Pass, nullptr);
+}
+
 // (Roadmap H8p/H8s) The 19 real integer color-attachment formats (H8p's
 // original 7, plus H8s's 12 more found by a real CTS re-run): a real
 // `RenderPass`/`Framebuffer` combination can now be created against one,
