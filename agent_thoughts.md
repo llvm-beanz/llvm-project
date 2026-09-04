@@ -57599,3 +57599,73 @@ from a differently-ordered prior case, or a race with `Xvfb` initializing
 freshly for a lone process versus a long-running one), but I'm noting the
 inconsistency here rather than silently picking whichever result was more
 convenient. If it ever recurs, it deserves its own investigation.
+
+# Agent thoughts: H10d (matrix spirv.CompositeConstruct legalization gap)
+
+## A clean, well-scoped bug, and a straightforward fix
+
+Of all the H10-series prerequisite bugs so far, this one was the most
+pleasant to work: the diagnostic itself (`"failed to legalize operation
+'spirv.CompositeConstruct' that was explicitly marked illegal"`) already
+told me almost everything I needed. Reading `CompositeConstructPattern`
+in `SPIRVToLLVMPatterns.cpp` confirmed the hypothesis immediately: the
+pattern's `matchAndRewrite` only ever branches on `spirv::StructType` or
+a rank-1 `VectorType` result -- a `spirv::MatrixType` result falls
+through to the vector-construction code path, fails its `!ResultType`
+check, and returns a match failure, leaving the op illegal. No deep
+investigation or IR reduction was actually needed beyond reading the one
+class the diagnostic already named.
+
+The fix itself mirrors a precedent already in the same file:
+`MatrixCompositeExtractPattern`/`MatrixCompositeInsertPattern` already
+understand that a `spirv.matrix` converts to LLVM's own natural
+array-of-column-vectors representation (`!llvm.array<N x column
+vector>`), so `CompositeConstruct`'s own matrix case just needed one
+`llvm.insertvalue` per column into an `llvm.mlir.poison` seed -- almost
+identical in shape to the struct case already implemented, just simpler
+(no lane-by-lane reassembly ever needed, since `OpCompositeConstruct`'s
+own matrix validation rule requires each constituent be a whole column
+already in the right type).
+
+## The value of re-running immediately after a "fix" rather than trusting it
+
+Rather than declaring victory once the specific diagnostic named in this
+milestone's own text was gone, I re-ran the exact CTS cases it named and
+then the whole `dEQP-VK.wsi.xcb.*` group again. This is what caught that
+the fix, while completely correct on its own terms, only "peeled one
+layer of the onion": 4 of the 6 previously-blocked cases now fail one
+step later on `spirv.MatrixTimesVector` (this ICD implements *no* matrix
+arithmetic ops at all -- confirmed by grep, zero matches for the whole
+`MatrixTimesVector`/`VectorTimesMatrix`/`MatrixTimesMatrix`/
+`MatrixTimesScalar`/`Transpose` family), and the other 2 fail
+differently again, at `vkCreateSwapchainKHR` itself, for reasons not yet
+investigated. The overall `dEQP-VK.wsi.xcb.*` pass/fail tally is
+therefore numerically unchanged (52/8/3969) even though the fix is
+genuinely real and correct -- a good reminder that "the specific
+diagnostic this milestone named is gone" and "this milestone's own CTS
+cases now pass" are two different claims, and only re-measuring the
+whole group (not just the one diagnostic) tells you which one is true.
+Both new gaps are split off as their own rows (H10f, H10g) rather than
+chased further in this same session, consistent with this whole
+project's established pattern.
+
+## Catching, and fixing, my own prior documentation mistake
+
+While attributing the 6 vs. 7 CompositeConstruct-sharing failures during
+this session's re-run, I noticed the *previous* session's own H10b
+closure note had miscounted: it said "7 failures, one root cause" for
+the `render.*` group but only actually named 6 cases, and separately
+never mentioned `dEQP-VK.wsi.xcb.incremental_present...reference` at all
+-- yet the original run's own totals said 8 real failures, and 6 + 1
+(`acquire.too_many`) is only 7, not 8. Re-checking the original raw log
+file confirmed `incremental_present...reference` was there the whole
+time, already failing on a completely unrelated `llvm.shl` signedness
+diagnostic, simply never counted. I've corrected both `Roadmap.md`'s and
+`VulkanCTSReport.md`'s H10b closure text to reflect the real breakdown,
+and split the previously-uncounted failure into its own new row (H10h)
+rather than leave the record wrong. Worth remembering for future
+sessions: when a "run all the Test case lines matching Fail" grep is
+built incrementally with head/tail or context-window flags, it's easy to
+silently truncate a diagnostic block that spans more lines than the
+context window covers -- worth re-verifying total counts add up exactly
+before writing them into a permanent report.
