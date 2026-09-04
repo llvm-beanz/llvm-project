@@ -61196,3 +61196,114 @@ and the CTS test was small enough to read end to end. When a row's reduction is
 this direct, the right response is to spend the saved time on the *documentation*
 -- correcting the premise in writing so the next reader doesn't re-derive it --
 rather than on expanding the fix's scope.
+
+# Roadmap H29n: nested pipeline libraries were never implemented
+
+## The row's framing was wrong again -- but this time it hid a whole feature
+
+The row read: *"a graphics-pipeline-library merge loses its own vertex/mesh stage
+presence check ordering ... confined to `fast.0_0*`/`fast.0_1*` (partial-library
+combinations whose vertex-input-interface or pre-rasterization-shaders part is
+supplied by a separate linked library from the one this check inspects)"*.
+
+Nearly every content word there is wrong. There is no ordering problem. Nothing
+is inspected too early or in the wrong sequence. And these are not
+"partial-library combinations" in the sense meant -- H29c already handles a
+partially-monolithic/partially-library mix, and those cases pass fine.
+
+That's four rows running. I've now written about this pattern twice and I want to
+stop restating it and instead say the one thing that has actually changed how I
+work: **I no longer read a row's parenthetical before doing the reduction.** I
+read the diagnostic, the counts, and the case names, and then I go to the test
+source. The parentheticals in this series were written during H29f's
+grouping-by-diagnostic pass, where the author could not have opened the tests --
+they are the honest guesses of someone reading 465 log lines. Reading them first
+just plants an anchor I then have to spend effort escaping.
+
+## The case names were the whole clue, and they weren't flag combinations
+
+I nearly wasted the turn assuming `0_00_11_11` encoded a bitmask of library parts
+(it looks *exactly* like one). It doesn't. `getTestName` walks the
+`PipelineTreeConfiguration`'s own `parentIndex` levels and emits one segment per
+level, one digit per node. So `0_00_11_11` is a four-level **tree**: a root with
+0 shaders, two intermediate libraries with 0 shaders, four leaves with 1 each.
+
+The moment I had that, the cheap thing to do was not to reason further but to
+just tabulate every configuration's result. That took one command and gave a
+completely unambiguous answer:
+
+| depth | result |
+|---|---|
+| ≤ 2 | 10/10 Pass |
+| ≥ 3 | 0/5 Pass |
+
+A split that total is not a bug in a check. It is a missing feature. And so it
+was: `VK_EXT_graphics_pipeline_library` lets a library be built by linking *other*
+libraries to arbitrary depth, and `captureGraphicsPipelineLibraryState` ignored a
+chained `VkPipelineLibraryCreateInfoKHR` completely. Intermediate nodes captured
+nothing of their children. At depth 2 every library is a leaf, so the entire gap
+is invisible -- which is precisely why it survived H29b, H29c, H29i and H29m, all
+of which touched this code.
+
+I want to hold onto the "tabulate before theorising" move. I had a plausible
+mechanism in mind before I ran that command, and it was wrong; the table cost
+thirty seconds and closed the question outright.
+
+## One root cause, two failure signatures -- and why that matters
+
+The row said 4 cases. The fix moved **10**. The other 6 had been failing at `At
+permutation 0` -- a *rendering* mismatch, with no ICD diagnostic at all.
+
+The reason is worth stating precisely, because it generalises. Discarding a
+subtree loses some set of parts, and *which* part goes missing determines how the
+failure looks:
+
+- Lose the pre-rasterization part, and you lose the vertex stage, and creation
+  fails loudly with the row's named diagnostic.
+- Lose anything else, and the pipeline is created quite happily and merely draws
+  the wrong thing.
+
+A characterization pass that groups by diagnostic string can only ever see the
+first kind. The second kind is structurally invisible to it -- not overlooked,
+but unobservable by that method. That's now twice running (H29m: +2 unattributed;
+H29n: +6) that the real footprint exceeded the characterization, and both times
+for this same reason.
+
+The practical consequence I'd draw: H29f's per-row counts should be read as
+**lower bounds**, and the case-by-case pass-set diff is not a nicety but the only
+way to find out what a fix actually did. I'd have reported "4 cases fixed" here
+and been wrong by a factor of two and a half.
+
+## Inductive, not recursive
+
+The fix has one property I'm pleased with. Each library's captured state is
+already flattened by the time any other library can name it -- a library must
+exist before it can be linked. So folding one level at capture time handles a
+tree of *any* depth, with no traversal, no recursion, no depth limit, and no
+cycle concern. The depth-4 `1_1_1_1` configuration works for the same reason the
+depth-3 ones do, and I didn't have to think about it.
+
+That also meant I didn't need a tie-break policy for conflicting state, which was
+my first worry. The spec allows each part to be provided exactly once across an
+entire link, so a bit the parent already holds can never also be owned by a
+child. "Own state wins" is a total order, not a heuristic -- and I wrote that
+reasoning into the code comment, because the next reader will otherwise wonder
+whether it was chosen or merely stumbled into.
+
+The single genuine wrinkle was `pMultisampleState`, which the spec's own table
+lists under *both* the fragment-shader and fragment-output parts and which
+therefore cannot be folded by flag mask at all. It needed its own rule (take a
+child's whenever this level has none), and it needed a comment saying why it is
+not simply an oversight in the mask-driven code above it.
+
+## Where the turn's real value went
+
+The code change is about fifty lines and took maybe fifteen minutes. The
+reduction took longer, and the write-up longer still. That ratio felt right.
+
+The durable output of this turn is not "nested libraries now work" -- it's the
+record that the `fast.N_NN_NN` names encode a tree, that depth was the entire
+discriminator, and that a diagnostic-grouping pass systematically under-counts
+any root cause with more than one failure mode. Those three facts are what would
+have saved the next person the reduction, and none of them were written down
+anywhere before this turn.
