@@ -442,16 +442,29 @@ Value *lowerDomainInputLoad(CallInst &CI, const SignatureElement &Elt,
   if (Elt.Direction == SignatureDirection::PatchInput)
     return lowerDomainPatchConstantLoad(CI, Elt, WEnv, DEnv);
   switch (Elt.SystemValue) {
-  case SignatureSystemValue::None:
-    return lowerDomainControlPointLoad(CI, Elt, WEnv, DEnv);
   case SignatureSystemValue::DomainLocation:
     return lowerDomainLocation(CI, Elt, WEnv, DEnv);
   case SignatureSystemValue::PatchVertices:
     return lowerDomainPatchVertices(CI, WEnv, DEnv);
   default:
-    CI.getContext().emitError(
-        &CI, "feme-cpu-wrap-domain: unsupported domain system value");
-    return nullptr;
+    // (roadmap H21k) Every other input control-point system value this
+    // domain (tessellation-evaluation) stage's own `feme.stage.input.load`
+    // can reach here with -- `None` (an ordinary user varying) and any
+    // per-control-point attribute this stage merely *receives* from the
+    // paired hull stage's output rather than synthesizes (e.g.
+    // `Position`/`ClipDistance`/`CullDistance`/`PointSize`, forwarded
+    // verbatim through `gl_in[]`/`SV_Position` et al., the domain-stage
+    // counterpart of roadmap H29e's hull-stage fix) -- is addressed
+    // identically to a user-location element: only its numeric *identity*
+    // differs from one, not its storage shape, so it needs no dedicated
+    // lowering of its own. A real CTS reduction of
+    // `dEQP-VK.transform_feedback.primitives_generated_query.*.tese.*`
+    // found this default had wrongly diagnosed exactly this shape -- a
+    // domain shader reading its own paired hull stage's per-control-point
+    // `Position` -- as an "unsupported" system value, when the generic
+    // per-control-point load below already addresses it correctly
+    // regardless of *which* system value (if any) the element represents.
+    return lowerDomainControlPointLoad(CI, Elt, WEnv, DEnv);
   }
 }
 

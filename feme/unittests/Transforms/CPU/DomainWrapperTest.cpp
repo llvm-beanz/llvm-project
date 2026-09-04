@@ -209,4 +209,52 @@ TEST(DomainWrapperTest, LowersPatchVerticesInput) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+/// (Roadmap H21k) A domain stage reading its paired hull stage's own
+/// per-control-point `Position` output (`gl_in[].gl_Position`/`SV_Position`,
+/// forwarded as an ordinary control-point attribute -- not a synthesized
+/// value like `DomainLocation`/`PatchVertices`) previously hit "unsupported
+/// domain system value": the input-load switch only routed
+/// `SignatureSystemValue::None` through the generic, storage-addressed
+/// `lowerDomainControlPointLoad`, rejecting every other input system value
+/// even though that same generic load addresses any control-point element
+/// identically regardless of which (if any) system value it represents.
+/// Shares its root cause with roadmap H29e's identical hull-stage gap: a
+/// real CTS reduction of
+/// `dEQP-VK.transform_feedback.primitives_generated_query.*.tese.*` found
+/// this default had wrongly diagnosed exactly this shape.
+TEST(DomainWrapperTest, LowersPositionInputSystemValue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ds_main() #0 {
+      %p0 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %p0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="domain" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  SignatureElement Position = makeFloatElement(0, SignatureDirection::Input);
+  Position.SystemValue = SignatureSystemValue::Position;
+
+  EntrySignature Sig;
+  Sig.Elements = {Position, makeFloatElement(1, SignatureDirection::Output)};
+  dxil::setEntrySignature(*M->getFunction("ds_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  DomainWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_ds_main"));
+  for (const Instruction &I : instructions(*M->getFunction("ds_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace
