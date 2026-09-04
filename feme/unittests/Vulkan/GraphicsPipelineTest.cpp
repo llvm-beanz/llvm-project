@@ -3052,6 +3052,107 @@ TEST_F(GraphicsPipelineTest, AcceptsAdjacencyTopologyWithoutGeometryStage) {
 /// these four with `VK_ERROR_INITIALIZATION_FAILED` and no diagnostic
 /// (`RejectsUnimplementedStateCombinations`'s own default-topology case
 /// above is unaffected: `TriangleList` still correctly rejects restart).
+/// (roadmap H29o) Reflected geometry state -- the input/output primitive
+/// class and `OutputVertices` count read off the compiled module's own
+/// entry point -- must survive a pipeline-cache hit. Reflection needs the
+/// un-JIT-ed `llvm::Function`, which only a real compile ever has, so a
+/// cache hit that skipped compilation used to leave this state at its
+/// defaults (`Points`, and a zero `MaxOutputVertices`), causing the draw to
+/// be rejected later for a primitive-class mismatch that did not exist.
+TEST_F(GraphicsPipelineTest, CachedGeometryPipelineKeepsItsReflectedState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Geometry = createModule(GeometrySource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeGeometryCreateInfo(Vertex, Geometry, Fragment);
+  VkPipeline First = VK_NULL_HANDLE, Second = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, First, Cache), VK_SUCCESS);
+  ASSERT_EQ(create(Info, Second, Cache), VK_SUCCESS);
+
+  auto *FirstPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(First));
+  auto *SecondPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Second));
+  const feme::graphics::GraphicsPipeline FirstExec =
+      FirstPipe->buildExecutorPipeline(DynamicGraphicsState{});
+  const feme::graphics::GraphicsPipeline SecondExec =
+      SecondPipe->buildExecutorPipeline(DynamicGraphicsState{});
+  // The second creation really did hit the cache, so this is a test about
+  // a cache hit and not two independent compiles.
+  ASSERT_EQ(&FirstExec.getGeometryStage(), &SecondExec.getGeometryStage());
+
+  // `GeometrySource` declares `Triangles`/`OutputTriangleStrip`/
+  // `OutputVertices 3`; both pipelines must report exactly that.
+  EXPECT_EQ(FirstExec.getGeometryState().InputPrimitive,
+            feme::graphics::GeometryInputPrimitive::Triangles);
+  EXPECT_EQ(SecondExec.getGeometryState().InputPrimitive,
+            feme::graphics::GeometryInputPrimitive::Triangles);
+  EXPECT_EQ(SecondExec.getGeometryState().OutputPrimitive,
+            feme::graphics::GeometryOutputPrimitive::TriangleStrip);
+  EXPECT_EQ(SecondExec.getGeometryState().MaxOutputVertices, 3u);
+
+  vkDestroyPipeline(Device, Second, nullptr);
+  vkDestroyPipeline(Device, First, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Geometry, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap H29o) The geometry stage's sibling: a tessellation pipeline's
+/// own reflected control-point counts and output primitive must survive a
+/// cache hit too. They come from the same `compileAndValidateStages` call a
+/// cache hit skips entirely, so this had the identical latent defect.
+TEST_F(GraphicsPipelineTest, CachedTessellationPipelineKeepsItsReflectedState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+  VkPipeline First = VK_NULL_HANDLE, Second = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, First, Cache), VK_SUCCESS);
+  ASSERT_EQ(create(Info, Second, Cache), VK_SUCCESS);
+
+  auto *FirstPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(First));
+  auto *SecondPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Second));
+  const feme::graphics::GraphicsPipeline FirstExec =
+      FirstPipe->buildExecutorPipeline(DynamicGraphicsState{});
+  const feme::graphics::GraphicsPipeline SecondExec =
+      SecondPipe->buildExecutorPipeline(DynamicGraphicsState{});
+  ASSERT_TRUE(SecondExec.hasTessellationStages());
+
+  // `TessEvalSource` declares `SpacingFractionalOdd`, which differs from
+  // `TessellationState::Partitioning`'s own `Integer` default -- unlike the
+  // control-point counts and output primitive, whose declared values happen
+  // to coincide with their defaults and so cannot detect the loss.
+  EXPECT_EQ(FirstExec.getTessellationState().Partitioning,
+            feme::graphics::TessPartitioning::FractionalOdd);
+  EXPECT_EQ(SecondExec.getTessellationState().Partitioning,
+            feme::graphics::TessPartitioning::FractionalOdd);
+  EXPECT_EQ(SecondExec.getTessellationState().OutputControlPointCount, 3u);
+
+  vkDestroyPipeline(Device, Second, nullptr);
+  vkDestroyPipeline(Device, First, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 TEST_F(GraphicsPipelineTest, AcceptsPrimitiveRestartOnStripAndFanTopologies) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Geometry = createModule(GeometrySource);

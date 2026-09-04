@@ -325,6 +325,19 @@ struct GraphicsPipelineArtifact {
   /// with no task stage driving it -- see `graphics::GraphicsPipeline::
   /// hasTaskStage`).
   std::shared_ptr<feme::cpu::CompiledStage> TaskStage;
+
+  /// (roadmap H29o) The tessellation/geometry/mesh state reflected out of
+  /// those stages' own compiled modules. This is a property of the shaders
+  /// alone -- the same modules always reflect the same values -- so it
+  /// belongs to the cached artifact rather than being re-derived per
+  /// creation. Without it a pipeline satisfied from the cache would keep
+  /// its default-constructed state (`GeometryInputPrimitive::Points`, a
+  /// zero `MaxOutputVertices`) and fail at draw time, since reflecting it
+  /// requires the un-JIT-ed `llvm::Function` that only a real compile has.
+  /// Each is meaningful exactly when its corresponding stage above is set.
+  feme::graphics::TessellationState Tessellation;
+  feme::graphics::GeometryState Geometry;
+  feme::graphics::MeshState Mesh;
 };
 
 /// One graphics pipeline's compiled stages plus its whole translated,

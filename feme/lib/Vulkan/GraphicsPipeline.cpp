@@ -2301,6 +2301,13 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   Artifact->GeometryStage = std::move(GeometryStageCompiled);
   Artifact->MeshStage = std::move(MeshStageCompiled);
   Artifact->TaskStage = std::move(TaskStageCompiled);
+  // (roadmap H29o) Carry the state reflected above into the artifact, so a
+  // later pipeline satisfied from the cache -- which never re-runs this
+  // function, and so never sees the un-JIT-ed modules reflection needs --
+  // recovers it instead of silently keeping its defaults.
+  Artifact->Tessellation = Tessellation;
+  Artifact->Geometry = Geometry;
+  Artifact->Mesh = Mesh;
   return Artifact;
 }
 
@@ -2450,6 +2457,16 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
       Cache->insertGraphics(*Key, Artifact);
   }
   Result.Artifact = std::move(Artifact);
+  // (roadmap H29o) On a cache hit `compileAndValidateStages` never ran, so
+  // `Result.Tessellation`/`Geometry`/`Mesh` are still default-constructed
+  // -- a geometry stage would claim a `Points` input primitive and a zero
+  // `MaxOutputVertices` regardless of what it actually declared. Take them
+  // from the artifact, which carries the values reflected when these same
+  // modules were really compiled. Assigning unconditionally is safe on a
+  // miss too: the artifact was just built from these very variables.
+  Result.Tessellation = Result.Artifact->Tessellation;
+  Result.Geometry = Result.Artifact->Geometry;
+  Result.Mesh = Result.Artifact->Mesh;
   // (roadmap H4i) `VkTessellationDomainOrigin` is a pipeline-level create
   // parameter, not something a compiled shader's own reflection carries
   // (`compileAndValidateStages`'s `Result.Tessellation.OutputPrimitive`
