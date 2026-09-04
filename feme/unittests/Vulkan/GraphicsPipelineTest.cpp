@@ -1115,6 +1115,36 @@ TEST_F(GraphicsPipelineTest, TranslatesLineRasterizationState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap H21b) `VkPipelineRasterizationStateStreamCreateInfoEXT`,
+/// chained from `pRasterizationState->pNext` alongside
+/// `VkPipelineRasterizationLineStateCreateInfoKHR` above, sets
+/// `RasterState::RasterizationStream` -- both structs must be recognized
+/// in the same chain independently of each other.
+TEST_F(GraphicsPipelineTest, TranslatesRasterizationStateStream) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipelineRasterizationStateStreamCreateInfoEXT StreamState{};
+  StreamState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_STREAM_CREATE_INFO_EXT;
+  StreamState.rasterizationStream = 2;
+  Raster.pNext = &StreamState;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  feme::graphics::RasterState Resolved =
+      Graphics->buildExecutorPipeline(DynamicGraphicsState{}).getRasterState();
+  EXPECT_EQ(Resolved.RasterizationStream, 2u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H7c) `fillModeNonSolid`: `VK_POLYGON_MODE_LINE`/`_POINT` are
 /// now accepted and translated to `RasterState::Polygon`, instead of
 /// unconditionally rejecting any non-`FILL` mode.

@@ -449,6 +449,18 @@ struct RasterState {
   /// CreateInfo` field sets, so `GraphicsPipeline.cpp` never writes it;
   /// every pipeline keeps this struct's own default.
   float MaxPointSize = 64.0f;
+  /// (roadmap H21b) Which geometry-shader output stream rasterizes
+  /// (`VkPipelineRasterizationStateStreamCreateInfoEXT::rasterizationStream`,
+  /// `VK_EXT_transform_feedback`), 0 when the struct is absent from
+  /// `pNext` -- matching the spec's own default and every non-geometry
+  /// pipeline, which only ever has stream 0. Recognized and stored here so
+  /// `GraphicsPipelineState` reflects the full struct, but not yet
+  /// consumed by the executor: this ICD only ever rasterizes stream 0
+  /// today (`GeometryStreamBuilder` routes every stream's own primitives
+  /// separately, but nothing yet selects one for rasterization over the
+  /// others), left to roadmap H21e alongside real multi-stream
+  /// transform-feedback capture.
+  uint32_t RasterizationStream = 0;
 };
 
 /// One attachment's format/extent identity, part of the pipeline's cache key

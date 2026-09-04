@@ -1044,9 +1044,24 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
   // default (`Rectangular`, unstippled), exactly matching the spec's
   // documented behavior for `VK_LINE_RASTERIZATION_MODE_DEFAULT_KHR` with
   // stippling disabled.
+  //
+  // (roadmap H21b) `VkPipelineRasterizationStateStreamCreateInfoEXT`
+  // (`VK_EXT_transform_feedback`) is recognized in the same chain: absent
+  // entirely, `RasterState::RasterizationStream` keeps its own default (0,
+  // stream 0 -- the only stream that exists outside a geometry shader).
+  // Both structs may appear in the same `pNext` chain, so this loop no
+  // longer stops at the first match the way it did when only one struct
+  // type was recognized here.
   for (const VkBaseInStructure *Next =
            reinterpret_cast<const VkBaseInStructure *>(Info->pNext);
        Next; Next = Next->pNext) {
+    if (Next->sType ==
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_STREAM_CREATE_INFO_EXT) {
+      const auto *StreamState = reinterpret_cast<
+          const VkPipelineRasterizationStateStreamCreateInfoEXT *>(Next);
+      Out.Raster.RasterizationStream = StreamState->rasterizationStream;
+      continue;
+    }
     if (Next->sType !=
         VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_KHR)
       continue;
@@ -1076,7 +1091,6 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
         Out.Raster.StipplePattern = LineState->lineStipplePattern;
       }
     }
-    break;
   }
   return Error::success();
 }
