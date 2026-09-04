@@ -58203,3 +58203,101 @@ change needed, since this is a pure correctness fix to an already-
 implemented op family, not a new capability. `FeMeVulkanDesign.md` needed
 no update either -- this is an MLIR-conversion-layer bug fix, not a
 Vulkan-API-shape design decision.
+
+# H10i: vkAcquireNextImage2KHR entirely unimplemented (null dispatch entry, SIGSEGV)
+
+Picked up H10i next: `vkAcquireNextImage2KHR` resolving to a null
+function pointer via `vkGetDeviceProcAddr`, causing a real `SIGSEGV`
+(not a graceful rejection) once H10f's matrix-arithmetic fix let
+`basic2`/`2swapchains2`/`10swapchains2` reach an acquire call through
+this entry point for the first time.
+
+This one was much more mechanical than H10h -- the milestone's own
+framing had already correctly diagnosed the root cause (a missing
+dispatch-table registration, not a logic bug) and the right fix shape
+(a thin wrapper around the existing `vkAcquireNextImageKHR`), so this
+session was mostly implementation and verification rather than
+investigation.
+
+## Implementation
+
+Read `Swapchain.h`/`Swapchain.cpp`'s existing `vkAcquireNextImageKHR` and
+the H10c `vkGetDeviceGroupPresentCapabilitiesKHR`/
+`vkGetDeviceGroupSurfacePresentModesKHR` precedent (same file) for the
+established "single physical-device group makes X trivially
+satisfiable" phrasing/pattern feme's own comments consistently use.
+Added:
+- `EntryPoints.h`: a new `vkAcquireNextImage2KHR` declaration, right
+  after `vkAcquireNextImageKHR`.
+- `Swapchain.cpp`: the implementation itself, a one-line-body wrapper
+  forwarding `pAcquireInfo->swapchain`/`timeout`/`semaphore`/`fence`
+  into `vkAcquireNextImageKHR`. `pAcquireInfo->deviceMask` needs no
+  handling at all beyond the comment explaining why: this ICD's single
+  physical-device group (H10c) has exactly one member at index 0, so
+  every legal value an application could pass is `0x1` and there is no
+  second device to route to.
+- `ImplementedEntrypoints.txt`: registered right after
+  `vkAcquireNextImageKHR`/`vkQueuePresentKHR`.
+
+One build error caught immediately: writing the wrapper's body as a bare
+`vkAcquireNextImageKHR(...)` call (unqualified) is genuinely ambiguous
+inside `namespace feme::vulkan` -- both `feme::vulkan::vkAcquireNextImageKHR`
+(this file, same namespace) and the global `::vkAcquireNextImageKHR`
+declared in `<vulkan/vulkan_core.h>` (included, unguarded, at global
+scope for the real struct/typedef definitions) are visible candidates,
+and unqualified lookup does not prefer the enclosing namespace's own
+overload just because it's "closer". Fixed by explicitly qualifying the
+call as `feme::vulkan::vkAcquireNextImageKHR(...)`, matching the exact
+same qualification `vkGetPhysicalDevicePresentRectanglesKHR` (same file,
+a few lines below) already uses for its own same-namespace call to
+`vkGetPhysicalDeviceSurfaceCapabilitiesKHR` -- a real, recurring gotcha
+worth remembering for any future feme entry point that calls another
+one in the same file.
+
+## Testing
+
+Added two `SwapchainTest.cpp` tests mirroring the existing
+`AcquirePresentRoundTrip`/`AcquireFailsOnceEveryImageIsAcquired`
+coverage, but through the new entry point and additionally checking the
+fence (not just the semaphore) gets signaled, to make sure the wrapper
+forwards every field rather than just the two most obviously exercised
+by `AcquirePresentRoundTrip`'s own semaphore-only usage.
+
+More importantly, added a *third*, more targeted test directly to
+`ProcAddrTest.cpp`: asserting `getDeviceProcAddr("vkAcquireNextImage2KHR")`
+is non-null. This is the one this row's own root symptom (a null
+dispatch-table entry, not a logic bug) actually needed -- the
+`SwapchainTest.cpp` coverage links against the real C++ symbol directly
+and calls it directly, entirely bypassing `vkGetDeviceProcAddr`'s own
+dispatch table, so it could never have caught *this specific* class of
+regression (the function existing but never being resolvable) on its
+own. Good reminder that "does the behavior work" and "is the behavior
+actually reachable through the real API surface" are two different
+things worth testing separately whenever a bug's own root cause was a
+plumbing/registration gap rather than the underlying logic.
+
+`ninja check-feme` (assertions-enabled, ccache build2): 2460/2519, 0
+failures, up 3 tests (2 `SwapchainTest` + 1 `ProcAddrTest`) from this
+row's own new coverage.
+
+## Real CTS verification
+
+Re-ran all three cases this row named, each retried a few times against
+the existing long-lived `Xvfb :99` (given H10g's own documented,
+unrelated connection-establishment flake scaling with concurrent
+xcb window count): `basic2` 3/3 `Pass`, `2swapchains2` 3/3 `Pass`,
+`10swapchains2` 2/3 `Pass` (the one failure being exactly H10g's own
+already-documented flake, `VK_ERROR_SURFACE_LOST_KHR` from
+`vkGetPhysicalDeviceSurfaceCapabilitiesKHR`, at a rate consistent with
+H10g's own measured ~1-in-6). No `SIGSEGV` observed in any of the 9
+runs -- confirms the crash is genuinely fixed, not just less frequent.
+Also re-ran the whole `dEQP-VK.wsi.xcb.swapchain.render.*` group for a
+wider regression check: 6/6 supported cases `Pass`, 0 `Fail`
+(`device_group`/`device_group2` remain the pre-existing, correctly
+reported `NotSupported`).
+
+Checked `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+`VK_KHR_swapchain` is already listed `Advertised` there, so no update
+needed -- this fix completes an already-claimed extension's command set
+rather than adding new capability. `FeMeVulkanDesign.md` needed no
+update either (no design deviation).
