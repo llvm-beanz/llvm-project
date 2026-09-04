@@ -37,21 +37,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29o or other prerequisites blocking the H-series milestones?
+Can you work on H29g or other prerequisites blocking the H-series milestones?
 
-> **`vkQueueSubmit` fails a plain (non-library), monolithic
-> vertex+geometry+fragment pipeline with `"the geometry stage's declared input
-> primitive class does not match the pipeline's topology/tessellation output
-> primitive"`**, 217 of H29f's own re-run's `cache.*` failures (the group's
-> single dominant cause after H29g), reproducing even on the group's own plain
-> `graphics_tests.vertex_stage_geometry_stage_fragment_stage` case -- **not** a
-> graphics-pipeline-library-specific gap despite being discovered by this row's
-> own GPL-focused re-run. The failing shader's own GLSL `layout(triangles) in;`
-> geometry input plainly matches its own pipeline's
-> `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` (`Executor.cpp`'s own
-> `GeomExpectedInput`/`Pipeline.getGeometryState().InputPrimitive` mapping
-> tables both look correct by inspection), so the true defect is not yet
-> isolated; needs its own real IR/pipeline reduction of the plain `cache.*` case
-> (the simplest failing shape) to determine whether the geometry stage's own
-> input-primitive attribute is failing to survive from SPIR-V import through to
-> this check, or the check's own topology-side value is wrong instead
+> **`feme-cpu-wrap-hull: control-point phase only supports a control point
+> reading its own input control point's attributes`**, the real, distinct
+> limitation H29e's own fix exposed underneath its `cache.*` re-run's
+> tessellation-stage cases (e.g.
+> `pipeline_from_incomplete_get_data.vertex_stage_tessellation_control_stage_tessellation_evaluation_stage_fragment_stage`,
+> still `Failed` post-H29e, now on this diagnostic instead): `HullWrapper.cpp`'s
+> existing (and, per `HullWrapperTest.DiagnosesCrossControlPointInputLoad`,
+> deliberately diagnosed rather than silently miscompiled) cross-control-point
+> input-read restriction -- a control point reading another control point's own
+> attributes (not just its own, self-indexed ones) needs a real design for how
+> the CPU-emulated control-point phase, which currently processes one
+> invocation's own storage in isolation, would access a sibling invocation's
+> already-computed (or not-yet-computed, depending on scheduling) input storage.
+> Needs its own real IR reduction of one of these exact `cache.*` cases to
+> confirm the precise cross-indexing shape before designing a fix
