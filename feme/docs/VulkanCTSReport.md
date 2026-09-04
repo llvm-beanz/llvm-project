@@ -24029,3 +24029,132 @@ delta, exactly as expected -- its own dominant remaining gap is H29e's
 new follow-on rows: the remaining `graphics_library.*`/`cache.*` `Failed`
 cases are already tracked under H29e (hull-stage system value) and H29f
 (systematic characterization of the rest).
+
+## Roadmap H29e: measured impact
+
+**Symptom.** `dEQP-VK.pipeline.pipeline_library.cache.*`'s tessellation-stage
+cases (e.g. `pipeline_from_incomplete_get_data.vertex_stage_
+tessellation_control_stage_tessellation_evaluation_stage_fragment_stage`)
+failed `vkCreateGraphicsPipelines` with `"feme-cpu-wrap-hull: unsupported
+hull input system value"`.
+
+**Root cause.** The real CTS shader (`vktPipelineCacheTests.cpp`'s
+`basic_tcs`) reads `gl_in[gl_InvocationID].gl_Position`, a hull-stage input
+tagged `SignatureSystemValue::Position` by `CanonicalizeStage.cpp`'s
+`getSystemValueForBuiltIn` (which classifies SPIR-V `BuiltIn Position` this
+way for any stage, not just outputs). `HullWrapper.cpp`'s `lowerHullStageOps`
+`InputLoad` dispatch switch only routed `SignatureSystemValue::None` to the
+generic `lowerHullInputLoad`, rejecting `Position` (and every other input
+system value) outright with the diagnostic above, even though
+`lowerHullInputLoad` addresses storage purely via `Elt.ElementID`/`Row`/
+`Component`/the control-point index and has no actual dependency on
+`SystemValue` at all.
+
+**Fix.** `HullWrapper.cpp`'s switch is inverted: `PatchVertices` (the one
+system value that is genuinely synthesized rather than stored, reporting
+`HullStageEnv::InputPatchControlPointCount`) keeps its own case, and every
+other system value now falls through to the unchanged, already
+system-value-agnostic `lowerHullInputLoad`.
+
+**Verification.** New unit test `HullWrapperTest.LowersPositionInputSystemValue`
+mirrors the real CTS shape (a `Position`-system-value input load) and was
+confirmed to fail with the original diagnostic before the fix (reproduced by
+temporarily reverting `HullWrapper.cpp` alone) and pass after. `ninja
+check-feme` (ccache + assertions, `build2/`) passes in full: 2509/2568 (59
+pre-existing `Unsupported`, 0 `Failed`), up 1 test from H29d's own
+2508/2567 baseline, 0 regressions.
+
+**CTS impact.** Correct ICD confirmed via `vulkaninfo --summary` (`deviceName
+= FeMe CPU Vulkan Device`).
+
+```
+$ ./deqp-vk --deqp-case='dEQP-VK.pipeline.pipeline_library.cache.*' \
+    --deqp-log-images=disable --deqp-log-shader-sources=disable
+...
+Test run totals:
+  Passed:        297/773 (38.4%)
+  Failed:        475/773 (61.4%)
+  Not supported: 1/773 (0.1%)
+```
+
+The exact `"unsupported hull input system value"` diagnostic no longer
+occurs anywhere in the group (`grep -c` on the full run log: 0 occurrences,
+down from every tessellation-stage case). Aggregate totals are unchanged
+from H29d's own 297/475/1 baseline: the same tessellation-stage cases that
+previously hit this diagnostic now fail on a distinct, separate, pre-existing
+limitation instead --
+`"feme-cpu-wrap-hull: control-point phase only supports a control point
+reading its own input control point's attributes"` -- a real gap in the
+CPU-emulated control-point phase's per-invocation-isolated storage model,
+tracked as new roadmap row H29g.
+
+The same root cause was independently confirmed to also affect
+`DomainWrapper.cpp` (the tessellation-evaluation/domain-stage counterpart),
+closing roadmap H21k as a bonus -- see that row's own measured-impact
+section below.
+
+**Disposition.** Roadmap H29e closed (struck through in `Roadmap.md`). New
+follow-on row H29g added for the newly-exposed cross-control-point-read
+limitation.
+
+## Roadmap H21k: measured impact
+
+**Symptom.** H21k's own filed text quoted `"feme-cpu-wrap-hull: unsupported
+hull input system value"` as the cause of 162 `dEQP-VK.transform_feedback.
+primitives_generated_query.*.tese.*` failures (the group actually lives
+under `transform_feedback`, not `query_pool.statistics_query` as H21d's
+original discovery implied).
+
+**Root cause.** A real re-run shows every one of those 162 failures actually
+emitted `"feme-cpu-wrap-domain: unsupported domain system value"` -- the
+*domain* (tessellation-evaluation) stage's own dispatch-switch gap in
+`DomainWrapper.cpp`'s `lowerDomainInputLoad`, structurally identical to
+roadmap H29e's hull-stage bug (only `None`/`DomainLocation`/`PatchVertices`
+were routed correctly; everything else, including a domain shader reading
+its paired hull stage's own per-control-point `Position` output, hit the
+diagnostic above). H21k's own quoted error text was a copy-paste of the hull
+wrapper's message, discovered via `.tese.`-named cases that necessarily pair
+a tessellation-control (hull) stage in the same pipeline -- but the actual
+failing stage in this specific CTS group is the domain stage.
+
+**Fix.** Same shape as H29e: only `DomainLocation`/`PatchVertices` (genuinely
+synthesized values) keep their own switch case in `lowerDomainInputLoad`;
+everything else now falls through to the existing, already
+system-value-agnostic `lowerDomainControlPointLoad`.
+
+**Verification.** New unit test
+`DomainWrapperTest.LowersPositionInputSystemValue` reproduces the real CTS
+shape (a domain-stage `Position`-system-value control-point input read) and
+was confirmed to fail with the original diagnostic before the fix and pass
+after. `ninja check-feme` (ccache + assertions, `build2/`) passes in full:
+2510/2569 (59 pre-existing `Unsupported`, 0 `Failed`), up 1 test from H29e's
+own 2509/2568 baseline, 0 regressions.
+
+**CTS impact.**
+
+```
+$ ./deqp-vk --deqp-case='dEQP-VK.transform_feedback.primitives_generated_query.*.tese.*' \
+    --deqp-log-images=disable --deqp-log-shader-sources=disable
+...
+Test run totals:
+  Passed:        0/1674 (0.0%)
+  Failed:        174/1674 (10.4%)
+  Not supported: 1500/1674 (89.6%)
+```
+
+The exact `"unsupported domain system value"` diagnostic no longer occurs
+anywhere in the group (0 occurrences, down from 162). Aggregate group
+totals are unchanged at 174 `Failed` because the composition shifted rather
+than shrank: 12 of the 174 were already, and remain, roadmap H21j's own
+unrelated fragment-stage-metadata gap; the other 162 (previously all
+domain-wrapper crashes) now genuinely execute and render, but fail a real
+query-result check instead --
+`"[Query 0] pgqGenerated == 224, expected 32"` /
+`"== 448, expected 64"`, both a consistent 7x multiple of the expected
+count -- a distinct, genuine `primitives_generated_query` tessellation-stage
+counting bug, tracked as new roadmap row H21m.
+
+**Disposition.** Roadmap H21k closed (struck through in `Roadmap.md`,
+crediting the real root cause to `DomainWrapper.cpp` rather than the
+originally-filed `HullWrapper.cpp`). New follow-on row H21m added for the
+newly-exposed query-counting gap.
