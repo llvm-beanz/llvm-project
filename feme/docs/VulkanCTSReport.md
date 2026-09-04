@@ -23675,3 +23675,80 @@ No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update:
 `geometryStreams`/`transformFeedbackRasterizationStreamSelect` remain
 `VK_FALSE` and unadvertised, unchanged from H21b/H21c's own recorded
 state.
+
+## Roadmap H21f investigation: `VK_EXT_graphics_pipeline_library`'s real scope (new roadmap H29)
+
+**Context.** H21f names `VK_EXT_graphics_pipeline_library` as the blocker
+for `dEQP-VK.transform_feedback.simple_{fast,optimized}_gpl` (15,782
+cases). Before concluding H21f is simply "blocked, nothing to do here,"
+a real `deqp-vk --deqp-runmode=txt-caselist` case-list re-run was done
+(correct ICD confirmed via the `feme_icd.json` manifest path,
+`build2/tools/feme/tools/feme-vulkan/feme_icd.json`) to measure the
+extension's actual CTS footprint across the *whole* CTS, not just
+transform-feedback's own slice.
+
+**Findings.** Filtering the full case list (4,620,129 lines) for
+`pipeline_library` found:
+- `dEQP-VK.pipeline.pipeline_library.*`: **120,483 cases** -- a
+  dedicated group re-parametrizing this ICD's existing pipeline-state
+  test matrix over all three `PipelineConstructionType` values
+  (monolithic, link-time-optimized library, fast-linked library).
+  Breakdown by leaf sub-group: `stencil` 65,552, `vertex_input` 1,601,
+  `sampler` 586, `bind_point` 453, `multisample` 317, `blend` 299,
+  `multisample_with_fragment_shading_rate` 236, `dynamic_offset` 209,
+  `input_attribute_offset` 200, `shader_module_identifier` 138,
+  `interface_matching` 89, `attachment_feedback_loop_layout` 85,
+  `render_to_image` 84, `depth` 78, `multisample_interpolation` 67,
+  `bind_buffers_2` 63, `color_write_enable` 55, `spec_constant` 52,
+  **`graphics_library` 52** (a genuine, dedicated API-conformance
+  sub-group for the extension itself, distinct from every other
+  re-parametrized sub-group above), plus a long tail of smaller groups.
+- `dEQP-VK.fragment_shading_barycentric.pipeline_library.*`: 6,997
+  cases, additionally gated behind roadmap H25's own extension.
+- `dEQP-VK.ray_tracing_pipeline.pipeline_library.*`: 301 cases,
+  additionally gated behind J-series ray tracing.
+- `dEQP-VK.dynamic_state.pipeline_library.*`: 61 cases.
+- `dEQP-VK.transform_feedback.simple_{fast,optimized}_gpl`: the 15,782
+  cases H21a/H21f already knew about.
+
+Total real footprint: roughly **127,842 cases** this ICD could
+plausibly reach once `VK_EXT_graphics_pipeline_library` is genuinely
+implemented -- an order of magnitude past transform-feedback's own
+15,782-case slice, and dominated by re-running already-largely-covered
+pipeline-state functionality under a different construction path
+rather than exercising novel features.
+
+**Why this isn't attempted here.** `compileGraphicsPipeline`
+(`GraphicsPipeline.cpp`) is a single monolithic entry point: it
+requires a pipeline's complete fixed-function state and every shader
+stage present together in one `VkGraphicsPipelineCreateInfo` before it
+can produce a `GraphicsPipelineState`. Real library support needs each
+of the four `VkGraphicsPipelineLibraryFlagBitsEXT` parts (vertex input
+interface / pre-rasterization shaders / fragment shader / fragment
+output interface) independently creatable via
+`VkGraphicsPipelineLibraryCreateInfoEXT`+`VK_PIPELINE_CREATE_LIBRARY_
+BIT_KHR`, stored as a real partial-pipeline object, and then linkable
+via `VkPipelineLibraryCreateInfoKHR::pLibraries` into one executable
+pipeline equivalent to what monolithic creation already produces
+today. This is a substantial object-model change, not a small addition
+to the existing single-pass compiler entry point, and (unlike, e.g.,
+H21b's own "wire the entry surface without advertising" precedent)
+there is no partial step that yields any verifiable CTS delta: since
+the extension is not advertised, `VkPipelineConstructionUtil.cpp:212`'s
+own device-feature gate rejects every case above as `NotSupported`
+before any of this ICD's own pipeline-creation code ever runs, so
+recognizing/parsing the new pNext structs alone (without a real,
+working link implementation behind them) could not be verified against
+a real, non-`NotSupported` CTS result either.
+
+**Disposition.** Broken out as a new, dedicated top-level milestone,
+**H29**, recording these measured numbers and the required object-model
+shape; H21f stays open, blocked on H29, rather than closed with a
+"nothing to do" note. No code changed this pass -- this was purely a
+scoping/measurement investigation, matching the discipline H6/H8c/
+H10f/H12/H21a used for their own large-group scoping passes before any
+of them landed code.
+
+`ninja check-feme` was not re-run for this pass (no code changed); the
+last recorded full run (H21e's own commit) remains the current
+baseline: 2491 passed, 0 failed, 59 pre-existing `Unsupported`.
