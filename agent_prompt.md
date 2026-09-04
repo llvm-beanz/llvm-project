@@ -42,18 +42,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L3 or other prerequisites blocking the H-series milestones?
+Can you work on L22 or other prerequisites blocking the L-series milestones?
 
-> **A `gpu-exec: error: Failed to create render pass. (VkResult = -11)`
-> (`VK_ERROR_FORMAT_NOT_SUPPORTED`'s numeric value) bucket** -- re-counted
-> alongside L2: 35 distinct failing cases (34 originally estimated, effectively
-> unchanged by L1/L4, as expected since neither fix touches render-pass/format
-> code at all). Likely a real, currently-unadvertised format gap in this suite's
-> own render-target format choices (distinct from any §1.9 `deqp-vk` coverage,
-> which may simply never probe the same formats this HLSL suite's own YAML
-> pipeline descriptions request); needs a per-case format survey to confirm
-> before deciding between "extend format support" and "the format genuinely is
-> out of scope, document why"
-
-Ideally we should support all formats comprehensively unless there is a reason
-why some format is not supportable.
+> **13 of L3's own 35 cases still fail at `vkCreateGraphicsPipelines` (or the
+> mesh-shader-pipeline equivalent), now with `VkResult = -3`
+> (`VK_ERROR_INITIALIZATION_FAILED`) instead of a render-pass rejection**: a
+> `Feature/Textures/*`-dominated sub-bucket (`Sample`, `SampleBias`,
+> `SampleCmp`, `CalculateLevelOfDetail`, and their `Vk.SampledTexture2D`
+> YAML-generated siblings -- 8 of the 13), plus
+> `Feature/Semantics/{DomainSystemValues,HullSystemValues,InterpolationModifiers,MatrixSemantics}.test`
+> and `Graphics/MeshShaders/SimpleAmplification.test`. One case
+> (`Feature/Textures/Sample.test`) was reduced far enough during L3's own
+> investigation to identify its real cause as `"failed to legalize operation
+> 'spirv.ImageSampleImplicitLod' that was explicitly marked illegal"` -- a
+> `ConstOffset`-image-operand variant of image sampling
+> `SPIRVToLLVMPatterns.cpp` does not yet cover -- but this has not been
+> confirmed as the shared cause for the other 7 texture cases, nor investigated
+> at all for the 5 non-texture cases, which look unrelated by name
+> (tessellation-domain/hull system values, matrix semantics, mesh-shader
+> amplification) and likely need their own separate reductions
