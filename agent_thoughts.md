@@ -59593,3 +59593,99 @@ last recorded baseline (H21e's own commit, 2491 passed/0 failed/59
    added), `VulkanExtensionInventory.md` (row updated), `VulkanCTSReport
    .md` (investigation section added).
 2. This `agent_thoughts.md` entry.
+
+# Agent thoughts: H21f "take 2" -- landing real progress on H29 (H29a)
+
+The user re-issued the same H21f prompt as before. Since H21f's own text now
+explicitly says "blocked on H29 until that milestone lands," repeating the
+prior turn's scoping-only pass would have added nothing; I treated this as a
+request to make real, landable progress on H29 itself.
+
+## Investigating whether a bigger first slice was feasible
+
+Before settling on a small step, I spent real effort checking whether a much
+bigger slice of H29 was actually reachable this session, since the prior
+turn's scoping found something important: most of `dEQP-VK.pipeline.
+pipeline_library.*`'s 120,483 cases (`stencil` alone is 65,552) are the exact
+same pre-existing pipeline-state test files this ICD's monolithic path
+already implements, merely re-parametrized over `PipelineConstructionType`.
+That means the underlying feature logic doesn't need to change at all --
+only the pipeline-construction/linking mechanism. For a CPU-emulated ICD with
+no real "fast link" vs. "optimized link" tradeoff, a plausible strategy is to
+never attempt genuine partial compilation: accumulate each library part's
+state across "library" pipeline-creation calls, and defer all real
+compilation to the final link call, reusing the existing, unmodified
+`compileGraphicsPipeline` entirely unchanged.
+
+That is a genuinely promising design, but two things ruled out attempting it
+whole this session:
+1. Read CTS's own gate (`vkPipelineConstructionUtil.cpp:212`,
+   `checkPipelineConstructionRequirements`): it checks **device-extension
+   advertisement only**, not the `graphicsPipelineLibrary` feature bit. Every
+   other H21-series sub-milestone (transform feedback) had a safe "wire the
+   entry surface, don't advertise yet" intermediate step because CTS's own
+   gating there tolerated it. Here there is no such safe partial step through
+   the pipeline-creation surface itself: either the extension is advertised
+   (and CTS expects fully correct library construction/linking, functionally
+   tested) or it isn't (and every case stays cleanly `NotSupported`).
+   Landing a real, working, end-to-end merge-and-link implementation in one
+   session, correct enough to flip the feature bit safely, was not realistic
+   to also validate properly (four independent library-flag combinations,
+   VUID-mandated validation for a 52-case dedicated `graphics_library` group,
+   nested "library of libraries" composition, etc.).
+2. Read `/usr/include/vulkan/vulkan_core.h`'s actual struct layouts
+   (`VkGraphicsPipelineLibraryCreateInfoEXT`, `VkPipelineLibraryCreateInfoKHR`,
+   the four `VkGraphicsPipelineLibraryFlagBitsEXT` bits, the features/
+   properties structs) to ground any design in real field names rather than
+   assumption.
+
+## The safe step that *does* exist: one layer up
+
+Feature/properties struct recognition in `vkGetPhysicalDeviceFeatures2`/
+`Properties2` is a genuinely different, independently-gated surface from
+pipeline creation -- CTS's pipeline-construction gate never consults it, and
+this project's own precedent (`VK_EXT_mesh_shader`, `VK_EXT_transform_
+feedback`) already recognizes a feature struct, reporting every bit false,
+well before the extension itself is advertised. I confirmed (reading
+`vkCreateDevice`'s own validation loop in `EntryPoints.cpp`) that recognizing
+this struct carries no risk of an app spuriously enabling the feature: device
+extension enablement is validated by name against `getSupportedDeviceExtensions`
+only, with no separate per-feature-bit enable-time check, so recognizing (and
+reporting false for) a feature struct ahead of advertising its extension is
+exactly as safe here as it was for mesh_shader/transform_feedback.
+
+So H29a = recognize `VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT`/
+`PropertiesEXT`, report every field false, keep the extension unadvertised.
+Small, but real, verified by a new unit test, and it sets up H29b (object
+model for a partial "library" pipeline) and H29c (link-time merge, reuse of
+`compileGraphicsPipeline`, first real advertisement) as the next concrete
+steps -- broken down one lowercase letter deep under H29, per the user's
+standing nesting rule.
+
+## Verification
+
+- `ninja check-feme` (ccache + assertions, `build2/`): full pass, including
+  the new `PhysicalDeviceInfoTest.
+  GraphicsPipelineLibraryIsRecognizedButNotYetImplementedOrAdvertised` case.
+- Real `deqp-vk` re-run against the actual built ICD (`feme_icd.json`
+  manifest path): `dEQP-VK.pipeline.pipeline_library.graphics_library.*`
+  (836 cases) shows the same pre-existing, unrelated `maintenance5`/
+  `spirv.Image` legalization failures this row's change did not touch, and
+  the same 685 `NotSupported` cases gated on the still-unadvertised
+  extension. `dEQP-VK.api.info.*` (10,486 cases) reproduces H21a's own
+  recorded baseline to within a single case each way -- no regression.
+  Both recorded in `VulkanCTSReport.md`'s new "Roadmap H29a: measured
+  impact" section.
+
+## Commits
+
+1. `[feme] H29a: recognize VK_EXT_graphics_pipeline_library's feature/
+   properties structs` -- `EntryPoints.cpp` (new switch cases),
+   `PhysicalDeviceInfoTest.cpp` (new unit test).
+2. `[feme] docs: break H29 into H29a-H29c, close H29a, record measured
+   impact` -- `Roadmap.md`, `VulkanExtensionInventory.md`,
+   `VulkanCTSReport.md`.
+3. `[feme] docs: record H29a's real deqp-vk re-run in VulkanCTSReport.md`
+   -- replaced a "not re-run" placeholder with the actual measured figures
+   above.
+4. This `agent_thoughts.md` entry.
