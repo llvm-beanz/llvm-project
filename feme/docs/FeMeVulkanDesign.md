@@ -2016,27 +2016,44 @@ VulkanCTSReport.md for the real `dEQP-VK.tessellation.winding.*` numbers,
 and roadmap H4j for a distinct, smaller rasterizer-precision defect that
 run surfaced next.
 
-**Status (roadmap H29a/H29b): `VK_EXT_graphics_pipeline_library`
-recognition, still unadvertised.** A `VkGraphicsPipelineCreateInfo` with
+**Status (roadmap H29a-H29c): `VK_EXT_graphics_pipeline_library`
+implemented and advertised.** A `VkGraphicsPipelineCreateInfo` with
 `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` set, plus a chained
 `VkGraphicsPipelineLibraryCreateInfoEXT`, no longer runs the monolithic
 path above at all: `vkCreateGraphicsPipelines` instead produces a
 `GraphicsPipelineLibrary` (`GraphicsPipeline.h`/`.cpp`, a new
 `Pipeline::Kind::GraphicsLibrary` distinct from the table's own
 `VkPipeline` row), which deep-copies each requested
-`VkGraphicsPipelineLibraryFlagBitsEXT` part's own sub-state verbatim --
-not yet interpreted, compiled, or linkable into anything executable.
-`vkGetPhysicalDeviceFeatures2`/`Properties2` likewise recognize this
-extension's feature/properties structs, reporting every field honestly
-unimplemented. The extension itself stays unadvertised throughout:
-unlike this project's usual "wire the surface, advertise once it's
-useful" incremental pattern (e.g. `VK_EXT_transform_feedback`'s H21a/
-H21b), CTS's own device-construction-type gate
-(`vkPipelineConstructionUtil.cpp`) checks only extension advertisement,
-never a feature bit or which pipeline-creation code paths exist, so
-there is no safe intermediate point to advertise before real library
-linking (roadmap H29c) exists and is verified correct. See "Roadmap
-H29a/H29b: measured impact" in `VulkanCTSReport.md`.
+`VkGraphicsPipelineLibraryFlagBitsEXT` part's own sub-state verbatim.
+H29c closed the remaining gap: a non-library `vkCreateGraphicsPipelines`
+call whose `pNext` chain includes a `VkPipelineLibraryCreateInfoKHR`
+naming one or more of these library objects has
+`synthesizeLinkedGraphicsPipelineCreateInfo` (`GraphicsPipeline.cpp`)
+merge each of the four parts from whichever linked library captured it
+(falling back to the call's own directly-supplied state for a
+partially-monolithic/partially-library mix, which the spec permits),
+then reuses the existing, unmodified `compileGraphicsPipeline` above to
+produce a real executable pipeline --
+`PIPELINE_CONSTRUCTION_TYPE_LINK_TIME_OPTIMIZED_LIBRARY` and
+`FAST_LINKED_LIBRARY` are treated identically internally, since a
+CPU-emulated ICD has no genuine fast-vs-optimized-link tradeoff to
+honor. `graphicsPipelineLibrary` is now `VK_TRUE`;
+`graphicsPipelineLibraryFastLinking`/
+`graphicsPipelineLibraryIndependentInterpolationDecoration` remain
+`VK_FALSE` (honestly: no genuinely cheaper link path exists, and no
+interpolation-decoration-independence work has landed). Both
+`VK_KHR_pipeline_library` (a hard dependency) and
+`VK_EXT_graphics_pipeline_library` itself are now advertised. Advertising
+this row's own extension newly exposed a real, unrelated crash: this
+extension's spec text also legalizes a null `VkPipelineShaderStageCreateInfo::module`
+with a chained `VkShaderModuleCreateInfo` in `pNext` for *any* pipeline
+stage (not just a library one), which `compileComputePipeline`
+(`Pipeline.cpp`) dereferenced unconditionally; fixed with the same guard
+`compileGraphicsStage` already had, deferring full inline-shader-module
+support to roadmap H29d. See "Roadmap H29c: measured impact" in
+`VulkanCTSReport.md` for the real before/after `dEQP-VK.pipeline.
+pipeline_library.*` figures and the remaining named gaps (H29d, H29e,
+H29f).
 
 ### Draw commands and vertex data
 

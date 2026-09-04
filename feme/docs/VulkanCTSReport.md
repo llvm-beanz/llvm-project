@@ -23886,3 +23886,77 @@ so a zero CTS delta is the only honest, correct outcome for this row.
 H29c (link-time merge, reuse of `compileGraphicsPipeline`, first real
 feature/extension advertisement, and the CTS re-run that finally moves
 real cases out of `NotSupported`) remains open.
+
+## Roadmap H29c: measured impact (link-time merge, first real advertisement)
+
+**Context.** H29b captured each of the four `VkGraphicsPipelineLibraryFlagBitsEXT`
+parts into a real, deep-copied `GraphicsPipelineLibrary` object, but left it
+unlinkable and the extension unadvertised, so no CTS case could reach it.
+This row closes that gap: recognizing `VkPipelineLibraryCreateInfoKHR::
+pLibraries` on a non-library `vkCreateGraphicsPipelines` call, merging every
+linked library's own captured state (falling back to the call's own directly-
+supplied state for a partially-monolithic/partially-library mix, which the
+spec permits), and reusing the existing, unmodified `compileGraphicsPipeline`
+to produce a real executable pipeline. Only once this passed new unit tests
+did `graphicsPipelineLibrary` flip to `VK_TRUE` and `VK_KHR_pipeline_library`/
+`VK_EXT_graphics_pipeline_library` get advertised.
+
+**Change.** `GraphicsPipeline.cpp` adds `LinkedPipelineStorage` (owns all
+storage a synthesized `VkGraphicsPipelineCreateInfo` points into: shader
+stages, `VkSpecializationInfo`s in a `std::deque` for pointer stability, and
+one instance each of the fixed-function state structs), `addLinkedStage`,
+`findLinkedLibraryForBit`, and `synthesizeLinkedGraphicsPipelineCreateInfo`
+(validates every `pLibraries` handle is actually a `GraphicsLibrary`, then
+merges each of the four parts). `vkCreateGraphicsPipelines` now recognizes
+`VkPipelineLibraryCreateInfoKHR` and, when found, synthesizes merged state
+and passes it to the same `compileGraphicsPipeline` monolithic creation
+already used, unmodified. `EntryPoints.cpp` flips `graphicsPipelineLibrary`
+to `VK_TRUE`; `PhysicalDeviceInfo.cpp` advertises both dependency extensions.
+
+**Verification.** 4 new unit tests in `GraphicsPipelineTest.cpp`: linking all
+four parts into one executable, bindability of the linked result, a
+partially-monolithic/partially-library mix, and rejection of a non-library
+handle passed as a "library." `ninja check-feme` (ccache + assertions,
+`build2/`) passes in full: 2503/2562 (59 pre-existing `Unsupported`, 0
+`Failed`), up 4 tests from H29b's own 2499/2558 baseline, 0 regressions.
+
+A real CTS crash was discovered and fixed as its own separate commit while
+re-running CTS below: `compileComputePipeline` (`Pipeline.cpp`)
+unconditionally dereferenced a null `stage.module`, a path this row's own
+advertisement newly exposed via `dEQP-VK.pipeline.pipeline_library.
+graphics_library.misc.non_graphics.shader_module_info_comp` (a *compute*
+pipeline case gated on `VK_EXT_graphics_pipeline_library` support alone).
+Fixed with the same `!StageInfo.module` guard `compileGraphicsStage` already
+had; full inline-shader-module-creation support deferred to roadmap H29d.
+
+**CTS impact.** Correct ICD confirmed via `vulkaninfo --summary`
+(`deviceName = FeMe CPU Vulkan Device`). `dEQP-VK.pipeline.pipeline_library.
+stencil.*` (58,478 cases) proved too large to re-run in-session (~700
+cases/5min observed, projecting to several hours); `graphics_library.*` (836
+cases) was used instead, matching H29a/H29b's own precedent group, plus a
+second, independent, larger group (`cache.*`, 773 cases) as a broader check:
+
+| Group | Cases | Passed (before -> after) | Failed (before -> after) | NotSupported (before -> after) |
+|---|---|---|---|---|
+| `graphics_library.*` | 836 | 12 -> 81 | 139 -> 467 | 685 -> 288 |
+| `cache.*` | 773 | n/a (previously `NotSupported`) -> 297 | n/a -> 475 | n/a -> 1 |
+
+Both runs completed cleanly with **no crash** after the `Pipeline.cpp` fix
+above. `Passed` rising and `NotSupported` falling sharply confirms real,
+previously-gated-out work is now genuinely attempted rather than silently
+skipped; the rise in `Failed` is expected, since previously-`NotSupported`
+cases now attempt real linking and hit further unimplemented gaps instead
+of being gated out before ever running. Two recurring failure signatures
+were observed: `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_
+FAILED at vkRefUtil.cpp:37` (this ICD's own merge/compile code rejecting
+something, e.g. inline shader modules) and `retcode: VK_ERROR_
+INITIALIZATION_FAILED at vkPipelineConstructionUtil.cpp:176` (a CTS-side
+wrapper failure downstream of the first); a hull-stage-specific gap,
+`feme-cpu-wrap-hull: unsupported hull input system value`, was also
+observed on tessellation-stage `cache.*` cases.
+
+**Disposition.** Roadmap H29c closed (struck through in `Roadmap.md`). Named
+follow-on rows added for the gaps this row's own re-run surfaced: H29d
+(inline shader-module creation), H29e (`feme-cpu-wrap-hull` unsupported
+input system value), and H29f (systematic characterization of the remaining
+unattributed `Failed` cases).
