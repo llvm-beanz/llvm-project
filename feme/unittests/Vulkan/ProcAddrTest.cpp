@@ -71,6 +71,18 @@ TEST(ProcAddr, DeviceProcAddrOnlyResolvesDeviceLevelCommands) {
   EXPECT_EQ(getDeviceProcAddr("vkEnumeratePhysicalDevices"), nullptr);
 }
 
+// Roadmap H10i: `vkAcquireNextImage2KHR` was entirely missing from the
+// generated dispatch table (a null `vkGetDeviceProcAddr` resolution, not
+// a graceful rejection), which meant CTS calling through the resolved
+// (null) function pointer crashed with a genuine `SIGSEGV` rather than
+// ever reaching `Swapchain.cpp`'s own implementation -- a regression this
+// specific assertion (rather than only `SwapchainTest.cpp`'s own
+// behavioral coverage, which links against the real symbol directly and
+// so could never have caught a dispatch-table gap) guards against.
+TEST(ProcAddr, DeviceProcAddrResolvesAcquireNextImage2) {
+  EXPECT_NE(getDeviceProcAddr("vkAcquireNextImage2KHR"), nullptr);
+}
+
 TEST(ProcAddr, PhysicalDeviceProcAddrHasNoUnknownExtensionCommand) {
   // This milestone implements every physical-device command it advertises
   // directly, so there is nothing for the "unknown extension" path to

@@ -138,6 +138,89 @@ TEST_F(SwapchainTest, AcquirePresentRoundTrip) {
   vkDestroySwapchainKHR(Device, Swapchain, nullptr);
 }
 
+TEST_F(SwapchainTest, AcquireNextImage2RoundTrip) {
+  // Roadmap H10i: `vkAcquireNextImage2KHR`'s own `VkAcquireNextImageInfoKHR`
+  // -based acquire, exercised through the same present round trip
+  // `AcquirePresentRoundTrip` above already covers for the base
+  // `vkAcquireNextImageKHR` entry point -- confirms the wrapper correctly
+  // forwards every field, not just the swapchain/timeout ones.
+  VkSwapchainCreateInfoKHR Info = defaultCreateInfo();
+  Info.minImageCount = 2;
+  VkSwapchainKHR Swapchain = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSwapchainKHR(Device, &Info, nullptr, &Swapchain),
+            VK_SUCCESS);
+
+  VkSemaphoreCreateInfo SemInfo{};
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+  VkFenceCreateInfo FenceInfo{};
+  VkFence Fence = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFence(Device, &FenceInfo, nullptr, &Fence), VK_SUCCESS);
+
+  VkAcquireNextImageInfoKHR AcquireInfo{};
+  AcquireInfo.swapchain = Swapchain;
+  AcquireInfo.timeout = UINT64_MAX;
+  AcquireInfo.semaphore = Sem;
+  AcquireInfo.fence = Fence;
+  // This ICD's single physical-device group (roadmap H10c) has exactly
+  // one member at index 0 -- the only legal `deviceMask` an application
+  // can ever pass.
+  AcquireInfo.deviceMask = 0x1;
+
+  uint32_t ImageIndex = UINT32_MAX;
+  ASSERT_EQ(vkAcquireNextImage2KHR(Device, &AcquireInfo, &ImageIndex),
+            VK_SUCCESS);
+  EXPECT_LT(ImageIndex, Info.minImageCount);
+  // Both the semaphore and the fence must have been signaled, exactly
+  // like a base `vkAcquireNextImageKHR` call -- this wrapper must forward
+  // every field, not just `swapchain`/`timeout`.
+  EXPECT_EQ(vkGetFenceStatus(Device, Fence), VK_SUCCESS);
+
+  VkQueue Queue = VK_NULL_HANDLE;
+  vkGetDeviceQueue(Device, 0, 0, &Queue);
+  ASSERT_NE(Queue, VK_NULL_HANDLE);
+
+  VkPresentInfoKHR PresentInfo{};
+  PresentInfo.waitSemaphoreCount = 1;
+  PresentInfo.pWaitSemaphores = &Sem;
+  PresentInfo.swapchainCount = 1;
+  PresentInfo.pSwapchains = &Swapchain;
+  PresentInfo.pImageIndices = &ImageIndex;
+  VkResult PerSwapchainResult = VK_ERROR_UNKNOWN;
+  PresentInfo.pResults = &PerSwapchainResult;
+  EXPECT_EQ(vkQueuePresentKHR(Queue, &PresentInfo), VK_SUCCESS);
+  EXPECT_EQ(PerSwapchainResult, VK_SUCCESS);
+
+  vkDestroyFence(Device, Fence, nullptr);
+  vkDestroySemaphore(Device, Sem, nullptr);
+  vkDestroySwapchainKHR(Device, Swapchain, nullptr);
+}
+
+TEST_F(SwapchainTest, AcquireNextImage2FailsOnceEveryImageIsAcquired) {
+  // Mirrors `AcquireFailsOnceEveryImageIsAcquired` below, through the
+  // `vkAcquireNextImage2KHR` entry point instead -- confirms the wrapper
+  // forwards `VK_TIMEOUT`, not just `VK_SUCCESS`.
+  VkSwapchainCreateInfoKHR Info = defaultCreateInfo();
+  Info.minImageCount = 1;
+  VkSwapchainKHR Swapchain = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSwapchainKHR(Device, &Info, nullptr, &Swapchain),
+            VK_SUCCESS);
+
+  VkAcquireNextImageInfoKHR AcquireInfo{};
+  AcquireInfo.swapchain = Swapchain;
+  AcquireInfo.timeout = UINT64_MAX;
+  AcquireInfo.deviceMask = 0x1;
+
+  uint32_t ImageIndex = UINT32_MAX;
+  ASSERT_EQ(vkAcquireNextImage2KHR(Device, &AcquireInfo, &ImageIndex),
+            VK_SUCCESS);
+  uint32_t Second = UINT32_MAX;
+  EXPECT_EQ(vkAcquireNextImage2KHR(Device, &AcquireInfo, &Second),
+            VK_TIMEOUT);
+
+  vkDestroySwapchainKHR(Device, Swapchain, nullptr);
+}
+
 TEST_F(SwapchainTest, AcquireFailsOnceEveryImageIsAcquired) {
   VkSwapchainCreateInfoKHR Info = defaultCreateInfo();
   Info.minImageCount = 1;
