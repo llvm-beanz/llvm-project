@@ -37,13 +37,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H21e or other prerequisites blocking the H-series milestones?
+Can you work on H21f or other prerequisites blocking the H-series milestones?
 
-> **Multi-stream / geometry-shader-stream transform-feedback capture** (a small
-> minority of the group -- 60 of 133,719 cases per H21a's own scoping -- but a
-> real gap once H21c lands): reuse the existing `GeometryStreamBuilder`
-> (`GeometryStream.cpp`/`GeometryStreamCollection.cpp`, built for
-> geometry-shader multi-stream output routing) to route each stream's captured
-> outputs to its own bound buffer, and support
-> `VkPipelineRasterizationStateStreamCreateInfoEXT`'s rasterization-stream
-> selection for real
+> **`VK_EXT_graphics_pipeline_library`-gated
+> `simple_fast_gpl`/`simple_optimized_gpl` CTS groups** (15,782 of 133,719
+> cases, 12%, per H21a's own scoping): blocked on a separate, unrelated
+> `VK_EXT_graphics_pipeline_library` implementation existing at all -- no
+> transform-feedback work alone can close these regardless of how complete
+> H21c/H21d/H21e become
