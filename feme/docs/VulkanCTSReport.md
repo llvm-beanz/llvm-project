@@ -22693,6 +22693,88 @@ one, so the lit-file-level total is unchanged).
 change needed (a pure SPIR-V-to-LLVM lowering fix, no capability/
 extension surface affected).
 
+## Roadmap H10f: measured impact
+
+Implemented all five SPIR-V matrix-arithmetic ops
+(`spirv.MatrixTimesVector`/`spirv.VectorTimesMatrix`/
+`spirv.MatrixTimesMatrix`/`spirv.MatrixTimesScalar`/`spirv.Transpose`,
+`SPIRVToLLVMPatterns.cpp`), the gap H10d's own re-run found blocking 4 of
+its own 6 previously-blocked `dEQP-VK.wsi.xcb.swapchain.render.*` cases
+(`basic`/`basic2`/`2swapchains`/`2swapchains2`; see H10d's own section
+above). Re-running the exact 4 previously-blocked cases confirms the
+`spirv.MatrixTimesVector` diagnostic is genuinely gone everywhere in this
+group:
+
+```
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.basic'..
+  Pass (Rendering tests succeeded)
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.2swapchains'..
+  Pass (Rendering tests succeeded)
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.basic2'.. (crashes -- see below)
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.2swapchains2'.. (crashes -- see below)
+```
+
+- **`basic`/`2swapchains`** (the two of the four using the
+  already-implemented `vkAcquireNextImageKHR`) now genuinely **`Pass`**:
+  the matrix-arithmetic fix is confirmed real, not just
+  legalization-clean-but-still-broken -- both cases render and present
+  their expected triangle output successfully end to end.
+- **`basic2`/`2swapchains2`** (the other two, using
+  `vkAcquireNextImage2KHR`) also clear pipeline creation and the
+  matrix-arithmetic legalization cleanly (confirmed via
+  `FEME_VULKAN_LOG_CREATION_ERRORS`: no diagnostic logged at all, unlike
+  H10d's own re-run where all four cases shared the exact
+  `spirv.MatrixTimesVector` failure), but crash one layer further in with
+  a `SIGSEGV`. `gdb`'s own backtrace pins this precisely:
+
+  ```
+  Thread 1 "deqp-vk" received signal SIGSEGV, Segmentation fault.
+  0x0000000000000000 in ?? ()
+  #0  0x0000000000000000 in ?? ()
+  #1  0x0000aaaab42fec30 in tcu::TestStatus vkt::wsi::(anonymous namespace)::multiSwapchainRenderTest<vkt::wsi::(anonymous namespace)::AcquireNextImage2Wrapper>(vkt::Context&, vkt::wsi::(anonymous namespace)::MultiSwapchainParams) ()
+  #2  0x0000aaaab2c4b294 in vkt::TestCaseExecutor::iterate(tcu::TestCase*) ()
+  ```
+
+  A call through a null function pointer inside CTS's own
+  `AcquireNextImage2Wrapper`, meaning `vkGetDeviceProcAddr` returns null
+  for `vkAcquireNextImage2KHR` on this ICD (`grep`-confirmed: the entry
+  point does not exist anywhere in `feme/lib/Vulkan/`). Split off as new
+  roadmap row **H10i**.
+
+A real re-run of the whole `dEQP-VK.wsi.xcb.swapchain.render.*` subgroup
+also reconfirms H10g's own still-open `10swapchains`/`10swapchains2`
+gap (`vkCreateSwapchainKHR` itself failing with
+`VK_ERROR_INITIALIZATION_FAILED`, unrelated to this row) is untouched by
+this fix, exactly as H10d's own split predicted.
+
+One environmental observation surfaced while gathering these
+per-case measurements, worth recording even though it is not a `feme`
+code bug: launching many separate, back-to-back `deqp-vk` process
+invocations against the same long-running `Xvfb :99` (as this session's
+own one-case-at-a-time `-n` invocations did, dozens of times in quick
+succession) intermittently produces a genuine `xcb_connection_has_error()
+== XCB_CONN_ERROR` immediately after `xcb_connect` succeeds at the socket
+level, which this ICD's own `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`
+already handles gracefully (falling back to the `{UINT32_MAX,UINT32_MAX}`
+"undefined size" sentinel per spec, which then correctly fails
+`vkCreateSwapchainKHR`'s own extent validation rather than passing through
+a bogus size) -- but this masks real per-case results when measuring one
+case per process. Running a **whole test group in a single `deqp-vk`
+process** (matching how a real CTS run actually invokes it, and how this
+row's own measurements above were ultimately gathered) does not exhibit
+this flakiness anywhere near as often. No `feme` code change is implied;
+this is noted here only so a future session does not mistake this
+process-launch-rate-dependent connection flake for a new ICD bug.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+2455/2514 (59 pre-existing `Unsupported`, 0 `Failed`, up 1 test from this
+row's own new `spirv-to-llvm-matrix-arithmetic.mlir` lit test).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed (a pure core-completeness fix: SPIR-V's `Matrix`
+capability's own type support already existed via H10c/H10d, and no
+Vulkan feature/extension bit gates arithmetic on an already-supported
+type).
+
 ## Roadmap H10c: measured impact
 
 See H10b's own section above for the full crash-to-fix narrative and the
