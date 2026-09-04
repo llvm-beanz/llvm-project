@@ -2470,6 +2470,31 @@ captureLibraryStage(const VkPipelineShaderStageCreateInfo &Stage) {
     const auto *Data = static_cast<const uint8_t *>(Spec->pData);
     Out.SpecData.assign(Data, Data + Spec->dataSize);
   }
+  // (roadmap H29i) A null `Module` may still carry real shader code via
+  // H29d's own inline-shader-module path (a chained
+  // `VkShaderModuleCreateInfo`); that struct's own `pCode` needs deep
+  // copying too, exactly like everything else this function captures,
+  // since `Stage.pNext` need not outlive this call either. Leaving
+  // `InlineModuleWords` empty when no such struct is chained (an
+  // application error either way) lets the existing "null module and no
+  // chained info" diagnostic fire later at link/compile time instead of
+  // duplicating it here.
+  if (!Out.Module) {
+    for (const auto *Header =
+             static_cast<const VkBaseInStructure *>(Stage.pNext);
+         Header; Header = Header->pNext) {
+      if (Header->sType != VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)
+        continue;
+      const auto *Info =
+          reinterpret_cast<const VkShaderModuleCreateInfo *>(Header);
+      if (Info->codeSize != 0 && Info->codeSize % sizeof(uint32_t) == 0) {
+        const auto *Code = static_cast<const uint32_t *>(Info->pCode);
+        Out.InlineModuleWords.assign(Code,
+                                     Code + Info->codeSize / sizeof(uint32_t));
+      }
+      break;
+    }
+  }
   return Out;
 }
 
@@ -2587,6 +2612,13 @@ namespace {
 struct LinkedPipelineStorage {
   SmallVector<VkPipelineShaderStageCreateInfo, 4> Stages;
   std::deque<VkSpecializationInfo> SpecInfos;
+  /// (roadmap H29i) One entry per linked stage that used H29d's own
+  /// inline-shader-module path; `std::deque` for the same
+  /// address-stability reason `SpecInfos` is, since each entry's own
+  /// `pCode` points at the *owning* `GraphicsPipelineLibraryStage`'s
+  /// `InlineModuleWords` (stable for this call's duration) while the
+  /// struct itself is what a `Stages` element's `pNext` points to.
+  std::deque<VkShaderModuleCreateInfo> InlineModuleInfos;
 
   VkPipelineVertexInputStateCreateInfo VertexInputState{};
   VkPipelineInputAssemblyStateCreateInfo InputAssemblyState{};
@@ -2612,6 +2644,20 @@ static void addLinkedStage(LinkedPipelineStorage &Storage,
   Info.stage = Stage.Stage;
   Info.module = Stage.Module;
   Info.pName = Stage.Name.c_str();
+  // (roadmap H29i) A null `Stage.Module` may still carry real shader code
+  // this library part captured from H29d's own inline-shader-module path
+  // (`captureLibraryStage`'s own `InlineModuleWords`); reconstruct the
+  // equivalent chained `VkShaderModuleCreateInfo` so
+  // `resolveShaderStageModule` compiles it exactly as it would have from
+  // the application's own (by now possibly destroyed) original chain.
+  if (!Stage.Module && !Stage.InlineModuleWords.empty()) {
+    VkShaderModuleCreateInfo ModuleInfo{};
+    ModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    ModuleInfo.codeSize = Stage.InlineModuleWords.size() * sizeof(uint32_t);
+    ModuleInfo.pCode = Stage.InlineModuleWords.data();
+    Storage.InlineModuleInfos.push_back(ModuleInfo);
+    Info.pNext = &Storage.InlineModuleInfos.back();
+  }
   if (!Stage.SpecMapEntries.empty()) {
     VkSpecializationInfo Spec{};
     Spec.mapEntryCount = static_cast<uint32_t>(Stage.SpecMapEntries.size());

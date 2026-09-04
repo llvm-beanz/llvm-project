@@ -3744,6 +3744,75 @@ TEST_F(GraphicsPipelineTest, LinksPartiallyMonolithicPartiallyLibraryMix) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap H29i) A `PRE_RASTERIZATION_SHADERS_BIT` library part whose
+/// vertex stage used H29d's own inline-shader-module path (a null
+/// `module` with a chained `VkShaderModuleCreateInfo`, rather than a
+/// separately-created `VkShaderModule`) must still compile correctly once
+/// linked -- `captureGraphicsPipelineLibraryState`'s own deep copy of each
+/// stage (`captureLibraryStage`) must capture the inline module's SPIR-V
+/// words themselves, not just `VkPipelineShaderStageCreateInfo::module`
+/// (null in this case) and drop the chained `VkShaderModuleCreateInfo` the
+/// application's own `pCreateInfos[I]` need not outlive. Reproduces the
+/// exact "pipeline stage has a null VkShaderModule and no chained
+/// VkShaderModuleCreateInfo to compile inline" failure real CTS
+/// `graphics_library.*` `fast.*` cases hit before this fix.
+TEST_F(GraphicsPipelineTest, LinksLibraryWithInlineVertexShaderModule) {
+  std::vector<uint32_t> VertexWords = assembleSPIRV(VertexSource);
+  ASSERT_FALSE(VertexWords.empty());
+  VkShaderModuleCreateInfo InlineVertexModuleInfo{};
+  InlineVertexModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  InlineVertexModuleInfo.codeSize = VertexWords.size() * sizeof(uint32_t);
+  InlineVertexModuleInfo.pCode = VertexWords.data();
+
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(VK_NULL_HANDLE, Fragment);
+  Stages[0].pNext = &InlineVertexModuleInfo;
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+
+  // The originating VkGraphicsPipelineCreateInfo (and everything it
+  // points to, including InlineVertexModuleInfo/VertexWords) need not
+  // outlive vkCreateGraphicsPipelines: dropping Stages[0].pNext here
+  // mirrors the application freeing its own pCreateInfos[I] contents
+  // before this call links the libraries together.
+  Stages[0].pNext = nullptr;
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = Pass;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  ASSERT_NE(Handle, VK_NULL_HANDLE);
+  EXPECT_EQ(fromHandle<Pipeline>(Handle)->kind(), Pipeline::Kind::Graphics);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+}
+
 /// (roadmap H29c) `VkPipelineLibraryCreateInfoKHR::pLibraries` must each
 /// name a real `GraphicsPipelineLibrary` -- naming an already-complete,
 /// non-library `VkPipeline` is a creation-time error, not something the

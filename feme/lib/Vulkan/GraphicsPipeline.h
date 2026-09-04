@@ -505,6 +505,13 @@ struct GraphicsPipelineLibraryStage {
   /// Empty when the application supplied no `pSpecializationInfo`.
   std::vector<VkSpecializationMapEntry> SpecMapEntries;
   std::vector<uint8_t> SpecData;
+  /// (roadmap H29i) When `Module` is `VK_NULL_HANDLE`, this stage used
+  /// H29d's own inline-shader-module path (a null `module` with a chained
+  /// `VkShaderModuleCreateInfo`); its SPIR-V words are deep-copied here
+  /// rather than left to the now-dangling `pNext` chain, since the
+  /// application's own `VkShaderModuleCreateInfo::pCode` need not outlive
+  /// this call either. Empty whenever `Module` is a real handle.
+  std::vector<uint32_t> InlineModuleWords;
 };
 
 /// (roadmap H29b) One `VkGraphicsPipelineLibraryFlagBitsEXT` part's own
