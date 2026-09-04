@@ -24158,3 +24158,59 @@ counting bug, tracked as new roadmap row H21m.
 crediting the real root cause to `DomainWrapper.cpp` rather than the
 originally-filed `HullWrapper.cpp`). New follow-on row H21m added for the
 newly-exposed query-counting gap.
+
+## Roadmap H29f: measured impact
+
+**Goal.** Characterize the remaining `dEQP-VK.pipeline.pipeline_library.
+graphics_library.*`/`cache.*` `Failed` cases beyond H29d/H29e (386 of 467
+`graphics_library.*` and roughly 474 of 475 `cache.*`, per H29e's own
+baseline) by grouping failure messages by signature, producing further
+named, scoped follow-on rows.
+
+**Method.** The CTS-visible wrapper diagnostics (`vk.createGraphicsPipelines
+(...): VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37` and `retcode:
+VK_ERROR_INITIALIZATION_FAILED at vkPipelineConstructionUtil.cpp:176`) carry
+no per-cause detail of their own -- they are generic wrappers around
+whatever this ICD itself returned. `Diagnostics.cpp`'s
+`logCreationFailure` already captures this ICD's own real diagnostic
+message, but only prints it when `FEME_VULKAN_LOG_CREATION_ERRORS=1` is set
+in the environment (previously undiscovered by this project's own re-run
+methodology, which had always run without it) -- with it set, every
+failure's own true cause is recovered directly from `deqp-vk`'s stdout/
+stderr, no reduction needed to categorize (only to root-cause each
+individual row that follows).
+
+**`graphics_library.*` (836 cases, 465 `Failed`) -- signature breakdown:**
+
+| Count | Signature | Sub-group | Row |
+|---|---|---|---|
+| 387 | `"failed to convert spirv dialect module to the llvm dialect"` (an MLIR `spirv.Image`-from-`spirv.SampledImage` legalization failure) | `independent_sets_random.*` (mesh and non-mesh alike) | H29h |
+| 23 | `"pipeline stage has a null VkShaderModule and no chained VkShaderModuleCreateInfo to compile inline"` | `fast.*` (link-time-merged) | H29i |
+| 21 | `"unsupported raised operation: ... is a register-bound resource handle ..."` | `independent_sets_random.*` | pre-existing H6g-b-a-i-a-i family (cross-referenced, not re-filed; a handful of recurring `VulkanBuffer_sl_*` struct-field shapes flagged for that row's own follow-up) |
+| 12 | `"depth testing/writes need a depth attachment in the pipeline's render target"` | `misc.bind_null_descriptor_set.*` | H29j |
+| 6 | real rendering mismatch (`vktIndependentSetsUtil.cpp`'s own IO-buffer/descriptor-contents check, not a creation-time diagnostic) | `independent_sets_random.*` | H29k |
+| 6 | `"fragment stage has no floating-point output of ... components at location ... (SV_TargetN)"` | `misc.other.view_index_from_device_index_in_all_stages*` | H29l |
+| 5 | `"a graphics pipeline needs either a VkRenderPass or a chained VkPipelineRenderingCreateInfo"` | `misc.other.{bad,null}_rendering_create_info` | H29m |
+| 4 | `"a graphics pipeline needs a vertex stage or a mesh stage"` | `fast.0_0*`/`fast.0_1*` | H29n |
+| 2 | single-case, self-explanatory diagnostics (chained `VK_EXT_transform_feedback` + fast-link; "unusual multisample state") | `misc.other.*` | not worth a dedicated row |
+
+**`cache.*` (773 cases, 475 `Failed`) -- signature breakdown:**
+
+| Count | Signature | Row |
+|---|---|---|
+| 257 | hull-stage cross-control-point-read limitation | H29g (already tracked, unchanged) |
+| 217 | `"the geometry stage's declared input primitive class does not match the pipeline's topology/tessellation output primitive"` (`vkQueueSubmit`), reproducing on the group's own plain, non-library `graphics_tests.vertex_stage_geometry_stage_fragment_stage` case | H29o |
+| 1 | `GetPipelineCacheData`'s own size-validation contract (`misc_tests.invalid_size_test`) | CTS-harness assertion, not a real ICD gap; left untracked |
+
+**Verification.** This row is a pure characterization pass: no source changes,
+so `ninja check-feme` is unchanged from H29e's own 2510/2569 baseline (not
+re-run, since nothing in `feme/` changed). Both group totals were
+re-confirmed unchanged from H29e's own baseline before classifying:
+`graphics_library.*` 83/465/288, `cache.*` 297/475/1 (Passed/Failed/
+NotSupported).
+
+**Disposition.** Roadmap H29f closed (struck through in `Roadmap.md`). Nine
+new follow-on rows added: H29h-H29n (all `graphics_library.*`-specific,
+confined to their own named sub-groups) and H29o (a `cache.*`-specific,
+non-library-specific geometry-stage bug, the group's new dominant cause
+after H29g).
