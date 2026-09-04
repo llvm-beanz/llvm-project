@@ -4365,6 +4365,166 @@ TEST(ExecutorTest, GeometryStagePassesThroughATriangleCoveringTheViewport) {
   }
 }
 
+// (Roadmap H21d) A geometry entry point that emits real primitives --
+// `EmitVertex`/`EndPrimitive` calls with a nonzero `max_vertices` budget
+// -- but writes no per-vertex attributes at all, mirroring
+// `VK_EXT_primitives_generated_query`'s own CTS geometry shaders for
+// every input topology but `point_list` (only the `point_list` shape
+// writes `gl_PointSize`; every other shape's geometry entry point calls
+// nothing but `EmitVertex()`/`EndPrimitive()`, per topologyData's own
+// `outputPoints` check in `vktPrimitivesGeneratedQueryTests.cpp`).
+// `EntrySignature::Elements` for this shape reflects identically empty to
+// `EmptyGeometryShaderIR` below (SPIR-V only lists an entry point's *used*
+// interface variables, and this stage uses none), but unlike that shape
+// this one really does emit -- three real vertices, closed with one real
+// `EndPrimitive`, on every invocation. Before this fix, `executeDraws`
+// conflated "empty signature" with "never emits," early-returning as a
+// no-op and reporting `ClippingInvocations`/`GeometryShaderPrimitives`
+// as zero regardless of how many primitives a shape like this one really
+// emitted -- exactly `VK_EXT_primitives_generated_query`'s own
+// `dEQP-VK.transform_feedback.primitives_generated_query.*.geom.*`
+// (every non-`point_list` topology) always reporting `pgqGenerated == 0`.
+constexpr char EmitsRealPrimitivesWithoutAttributesGeometryShaderIR[] = R"(
+  define void @gs_main() #0 {
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.cut(i32 0)
+    ret void
+  }
+  declare void @feme.stage.stream.emit(i32)
+  declare void @feme.stage.stream.cut(i32)
+  attributes #0 = { "feme.shader.stage"="geometry" }
+)";
+
+/// A fragment stage with no inputs at all, writing a constant color --
+/// used instead of `SolidRedFragmentShaderIR` (defined later in this
+/// file) purely to avoid a forward reference.
+constexpr char NoInputSolidRedFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+Expected<GraphicsPipeline>
+buildAttributelessEmittingGeometryPipeline(Context &Ctx,
+                                           uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature GSSig; // Deliberately empty: this stage writes no
+                        // per-vertex attributes, even though it emits.
+  Expected<std::shared_ptr<CompiledStage>> GS = compileStage(
+      Ctx, EmitsRealPrimitivesWithoutAttributesGeometryShaderIR, "gs_main",
+      GSSig, ShaderStage::Geometry);
+  if (!GS)
+    return GS.takeError();
+
+  EntrySignature FSSig; // No inputs: the geometry stage forwards none.
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, NoInputSolidRedFragmentShaderIR, "fs_main", FSSig,
+                  ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  GeometryState Geom;
+  Geom.InputPrimitive = GeometryInputPrimitive::Triangles;
+  Geom.OutputPrimitive = GeometryOutputPrimitive::TriangleStrip;
+  Geom.MaxOutputVertices = 3;
+  Pipeline.setGeometryStage(std::move(*GS), Geom);
+  return Pipeline;
+}
+
+TEST(ExecutorTest,
+    GeometryStageThatEmitsRealPrimitivesWithoutAttributesCountsThem) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildAttributelessEmittingGeometryPipeline(Ctx, /*AttachmentSize=*/4);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // 4 disjoint triangles in one `TriangleList` draw.
+  constexpr uint32_t NumTriangles = 4;
+  std::vector<float> VertexData;
+  for (uint32_t I = 0; I != NumTriangles; ++I) {
+    float Base = -1.0f + I * 0.1f;
+    float V[3][3] = {{Base, -1.0f, 0.0f},
+                      {Base + 0.05f, -1.0f, 0.0f},
+                      {Base, -0.95f, 0.0f}};
+    for (auto &Vert : V) {
+      VertexData.push_back(Vert[0]);
+      VertexData.push_back(Vert[1]);
+      VertexData.push_back(Vert[2]);
+      VertexData.push_back(1.0f);
+      VertexData.push_back(0.0f);
+      VertexData.push_back(0.0f);
+      VertexData.push_back(1.0f);
+    }
+  }
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+  uint32_t Size = 4;
+  std::vector<uint8_t> Storage((size_t)Size * Size * 4, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, Size,
+                       Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = NumTriangles * 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  PreparedDraw::PipelineStatsCounters Stats;
+  Draw.Stats = &Stats;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  // Every one of the 4 input triangles reaches the geometry stage, which
+  // emits exactly one (attribute-less) output triangle per invocation --
+  // this must count as 4 real primitives, not the pre-fix 0.
+  EXPECT_EQ(Stats.GeometryShaderInvocations, 4u);
+  EXPECT_EQ(Stats.GeometryShaderPrimitives, 4u);
+  EXPECT_EQ(Stats.ClippingInvocations, 4u);
+
+  // No real position was ever written, so nothing renders -- the color
+  // attachment stays exactly as it started (all zero).
+  for (uint8_t Byte : Storage)
+    EXPECT_EQ(Byte, 0u);
+}
+
 // (Roadmap H5e-b) A geometry entry point that emits no vertices at all --
 // `dEQP-VK.geometry.emit.*_emit_0_end_0`'s degenerate `void main(void) {}`
 // bodies, which call neither `feme.stage.stream.emit` nor

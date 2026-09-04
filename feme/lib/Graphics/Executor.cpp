@@ -1642,18 +1642,34 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   const EntrySignature &RasterSig =
       MeshSig ? *MeshSig : (GSSig ? *GSSig : PreGeometrySig);
 
-  // (roadmap H5e-b) A geometry stage that emits no vertices at all --
-  // `dEQP-VK.geometry.emit.*_emit_0_end_0`'s degenerate `void main(void)
-  // {}` bodies, which call neither `EmitVertex` nor `EndPrimitive` -- has
-  // an entirely empty signature: SPIR-V only lists an entry point's
-  // *used* interface variables, and this shape uses none at all (mirrors
-  // `GraphicsPipeline.cpp`'s `validateStageInterfaces`'s own
+  // (roadmap H5e-b, narrowed by roadmap H21d) A geometry stage that
+  // *cannot* emit a single vertex -- `dEQP-VK.geometry.emit.*_emit_0_end_0`'s
+  // degenerate `void main(void) {}` bodies, which call neither
+  // `EmitVertex` nor `EndPrimitive` and so also declare `max_vertices =
+  // 0` -- has an entirely empty signature: SPIR-V only lists an entry
+  // point's *used* interface variables, and this shape uses none at all
+  // (mirrors `GraphicsPipeline.cpp`'s `validateStageInterfaces`'s own
   // `GeometryNeverWrites` relaxation, made at pipeline-creation time for
   // the same reason). Such a stage can never contribute a single vertex
   // to the rasterizer on any invocation, for any draw, so every draw
   // command against this pipeline is legally a no-op rather than "the
   // last pre-rasterization stage does not write an SV_Position output".
-  if (GSSig && GSSig->Elements.empty())
+  //
+  // An empty signature alone does *not* imply that, though: a geometry
+  // stage that emits real primitives but writes zero per-vertex
+  // attributes on every one of them (e.g. `VK_EXT_primitives_generated_
+  // query`'s own CTS shaders for every input topology but `point_list`,
+  // which call `EmitVertex()`/`EndPrimitive()` a real, nonzero number of
+  // times per invocation but never touch `gl_Position`/any other output)
+  // reflects identically -- zero signature elements -- while still
+  // needing every one of those emissions counted by `ClippingInvocations`/
+  // `GeometryShaderPrimitives`. `GeometryState::MaxOutputVertices` (the
+  // entry point's own declared `max_vertices`) tells the two apart: zero
+  // only for a body that provably never calls `EmitVertex` at all, since
+  // `EmitVertex` requires a nonzero output-vertex budget to legally write
+  // into.
+  if (GSSig && GSSig->Elements.empty() &&
+      Pipeline.getGeometryState().MaxOutputVertices == 0)
     return Error::success();
 
   // (roadmap H6f) The same relaxation, for a mesh stage: a mesh entry
@@ -1697,12 +1713,26 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       VSClipDistance ? std::min<unsigned>(VSClipDistance->RowCount, 8) : 0;
   unsigned CullDistanceCount =
       VSCullDistance ? std::min<unsigned>(VSCullDistance->RowCount, 8) : 0;
-  if (!VSPosition)
+  // (roadmap H21d) The same "an entirely empty signature is legal, not a
+  // validation failure" relaxation the early-return above already applies
+  // to a geometry stage that can never emit at all (`MaxOutputVertices ==
+  // 0`) extends here to one that *does* emit real primitives but writes
+  // no per-vertex attributes on any of them -- `GSSig->Elements.empty()`
+  // reaching this point (rather than triggering that earlier early
+  // return) already proves `MaxOutputVertices != 0`, i.e. a real,
+  // nonzero-budget `EmitVertex`/`EndPrimitive` user. Such a stage still
+  // needs every emission counted (`RasterizePrimitives`'s own
+  // `ClippingInvocations` increment below runs unconditionally, before
+  // ever reading `VSPosition`), but has no meaningful position to clip or
+  // rasterize with, so `RasterizePrimitives` bails out immediately after
+  // counting rather than dereferencing a null `VSPosition`.
+  bool GSEmitsWithoutAttributes = GSSig && GSSig->Elements.empty();
+  if (!VSPosition && !GSEmitsWithoutAttributes)
     return createStringError(inconvertibleErrorCode(),
                              "the last pre-rasterization stage does not "
                              "write an SV_Position output; the executor "
                              "cannot clip/rasterize without one");
-  if (VSPosition->ComponentCount != 4)
+  if (VSPosition && VSPosition->ComponentCount != 4)
     return createStringError(inconvertibleErrorCode(),
                              "SV_Position output must have 4 components");
 
@@ -2096,6 +2126,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           RasterClass == RasterPrimitiveClass::Point
               ? RasterOutRef.InvocationCount
               : AbsTriIndices.size() + AbsLineIndices.size();
+
+    // (roadmap H21d) No `VSPosition` means the last pre-rasterization
+    // stage is a geometry stage that emits real primitives but writes no
+    // per-vertex attributes at all (see the `GSEmitsWithoutAttributes`
+    // relaxation above) -- there is no meaningful clip-space position to
+    // transform or bin with, so every one of this call's own primitives
+    // has already been counted above and contributes no pixels, exactly
+    // as if it clipped away entirely.
+    if (!VSPosition)
+      return Error::success();
 
     auto vertexAt = [&](uint32_t Flat) {
       RasterVertex V;
