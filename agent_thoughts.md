@@ -59784,3 +59784,129 @@ committing to this design.
    -- `Roadmap.md`, `VulkanExtensionInventory.md`, `VulkanCTSReport.md`,
    `FeMeVulkanDesign.md`.
 3. This `agent_thoughts.md` entry.
+
+# Agent thoughts: H29c -- link-time merge and first real CTS re-run
+
+## Goal
+
+H29b left graphics-pipeline-library parts captured but unlinkable and the
+extension unadvertised. H29c's job: recognize `VkPipelineLibraryCreateInfoKHR::
+pLibraries` on a normal (non-library) `vkCreateGraphicsPipelines` call, merge
+every linked library's own H29b-captured state into one complete
+`VkGraphicsPipelineCreateInfo`-equivalent, reuse the existing
+`compileGraphicsPipeline` unmodified, and only then flip `graphicsPipelineLibrary`
+to `VK_TRUE` and advertise both `VK_KHR_pipeline_library` and
+`VK_EXT_graphics_pipeline_library` -- followed by a real CTS re-run to measure
+actual impact, not just confirm a zero delta the way H29a/H29b's rows did.
+
+## Design: merge, don't recompile per-part
+
+The key insight carried over from reading `compileGraphicsPipeline`'s own
+signature (`const VkGraphicsPipelineCreateInfo &`): if I can synthesize a
+struct of that same shape pointing at the union of state from every linked
+library (plus whatever the final call supplies directly, for a spec-legal
+partially-monolithic/partially-library mix), I get the *entire* existing
+fixed-function-state/shader-compilation pipeline for free, with zero risk of
+subtly diverging behavior between "normal" and "linked" pipelines. This is
+the same "reuse, don't reimplement" instinct H21c's transform-feedback work
+used when it kept `Executor.cpp`'s existing per-vertex loop rather than
+building a parallel one.
+
+The tricky part is lifetime: the synthesized struct's various `pNext`-chained
+sub-state pointers (vertex input, viewport, rasterization, ...) need to
+point at something that outlives the single `compileGraphicsPipeline` call.
+I introduced `LinkedPipelineStorage`, a struct owning all of that storage,
+declared in the *same loop-iteration scope* as the synthesized
+`VkGraphicsPipelineCreateInfo` in `vkCreateGraphicsPipelines`, so there's no
+dangling-pointer risk without any extra copying beyond what was already
+necessary. I deliberately made `synthesizeLinkedGraphicsPipelineCreateInfo`
+take this storage as an out-parameter (`LinkedPipelineStorage &`) rather than
+returning a struct containing self-referential pointers into its own
+members by value -- NRVO isn't guaranteed pre-C++20, and a struct like that
+returned by value risks silently invalidating its own internal pointers on
+copy/move. Worth remembering for any future "build several linked structs
+with internal pointers" code in this codebase.
+
+I also chose `std::deque` over `std::vector` for the per-stage
+`VkSpecializationInfo` storage specifically because appending to a deque
+never invalidates earlier elements' addresses, unlike a vector that might
+reallocate -- and `pSpecializationInfo` pointers get taken one at a time as
+stages are added in a loop.
+
+Rather than re-deep-copying each linked library's own already-owned state a
+second time, I pointed the synthesized info directly into each
+`GraphicsPipelineLibrary` object's own internal storage. This is safe: a
+`VkPipeline` handle being linked against is guaranteed alive for the
+duration of the single `vkCreateGraphicsPipelines` call using it (an app
+destroying a library it's still linking against would be an app bug, not
+this ICD's problem).
+
+## A real crash, found honestly via CTS
+
+Once `graphicsPipelineLibrary` flipped to `VK_TRUE`, the first full
+`graphics_library.*` re-run segfaulted partway through on a *compute*
+pipeline case (`misc.non_graphics.shader_module_info_comp`), gated on
+`VK_EXT_graphics_pipeline_library` support alone even though it exercises an
+unrelated core-Vulkan/GPL-spec capability the extension's spec text
+legalizes universally: a null `VkPipelineShaderStageCreateInfo::module` with
+a chained `VkShaderModuleCreateInfo` in `pNext` (compiling a shader inline
+without a separate `VkShaderModule` object), for *any* pipeline stage, not
+just graphics. `compileComputePipeline` dereferenced the resulting null
+`ShaderModule*` unconditionally -- an asymmetry with `compileGraphicsStage`,
+which already had exactly this guard. This is a textbook example of why
+"advertise honestly, then let CTS find the real gaps" beats trying to
+enumerate every gap in advance: nothing before this row ever combined a null
+compute-stage module with a chained create-info, since nothing had gated
+that path in. Fixed with the same one-line guard `compileGraphicsStage`
+already used, as its own separate commit (a real, tightly-coupled bugfix,
+not folded into the H29c feature commit), deferring full inline-module
+support to a new H29d.
+
+## The `stencil.*` group is too large to re-run in a session
+
+The user's own suggested example group, `dEQP-VK.pipeline.pipeline_library.
+stencil.*`, turned out to be 58,478 cases -- at the observed ~700
+cases/5min throughput, that would take several hours. I abandoned it after
+confirming the size via a dry-run case-list count and used
+`graphics_library.*` (836 cases, the direct H29a/H29b baseline-comparison
+group) as the primary measurement instead, plus `cache.*` (773 cases) as a
+second, independent, larger sample once time allowed -- both complete in
+well under a minute and both confirm the crash-free, real-improvement
+outcome. Lesson for future large-group rows: always dry-run a case-list
+count before committing to a full re-run of a CTS group whose size isn't
+already known from a prior row.
+
+## Measured impact
+
+- `graphics_library.*` (836 cases): 12/139/685 (H29b baseline,
+  Passed/Failed/NotSupported) -> 81/467/288. Passed rose 12->81,
+  NotSupported fell 685->288 (real work now attempted instead of gated
+  out), Failed rose 139->467 (expected: previously-skipped cases now hit
+  further real, distinct gaps rather than being silently skipped).
+- `cache.*` (773 cases, previously entirely `NotSupported`): 297/475/1.
+- Both runs crash-free after the `Pipeline.cpp` fix.
+- Two recurring failure signatures spotted while spot-checking: this ICD's
+  own `VK_ERROR_INITIALIZATION_FAILED` rejections (e.g. inline shader
+  modules), and a CTS-side wrapper failure downstream of the first; plus a
+  hull-stage-specific `feme-cpu-wrap-hull: unsupported hull input system
+  value` on tessellation `cache.*` cases. These are now tracked as their own
+  named rows (H29d, H29e, H29f) rather than attempted in this turn -- H29
+  itself is far too large to close in one row, and characterizing gaps
+  honestly beats declaring premature victory.
+
+## Commits
+
+1. `[feme] H29c: link-time merge of graphics-pipeline-library parts` --
+   `GraphicsPipeline.cpp` (merge/link logic), `EntryPoints.cpp`
+   (`graphicsPipelineLibrary` -> `VK_TRUE`), `PhysicalDeviceInfo.cpp` (both
+   extensions advertised), 4 new tests plus 2 updated pre-existing tests
+   (`GraphicsPipelineTest.cpp`, `PhysicalDeviceInfoTest.cpp`,
+   `DrawTest.cpp`), amended once for `git-clang-format`-scoped formatting.
+2. `[feme] Fix null-module crash in compileComputePipeline exposed by H29c`
+   -- `Pipeline.cpp`, the real crash-fix described above, kept as its own
+   commit since it's a distinct, tightly-coupled bugfix rather than part of
+   the feature work itself.
+3. `[feme] docs: close H29c, add H29d/H29e/H29f follow-ons` -- `Roadmap.md`,
+   `VulkanCTSReport.md`, `VulkanExtensionInventory.md`,
+   `FeMeVulkanDesign.md`.
+4. This `agent_thoughts.md` entry.
