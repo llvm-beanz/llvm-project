@@ -22887,3 +22887,107 @@ Test run totals:
 `ninja check-feme` (assertions-enabled, ccache build) passes in full,
 2513/2513 (59 pre-existing `Unsupported`, 0 `Failed`, up 5 tests from this
 row's own new `EntryPointsTest.cpp`/`SwapchainTest.cpp` coverage).
+
+## Roadmap H10h: measured impact
+
+`dEQP-VK.wsi.xcb.incremental_present.scale_none.fifo.identity.opaque.reference`
+was reduced to a minimal standalone repro rather than debugged live: the
+real fragment shader responsible (`vktWsiIncrementalPresentTests.cpp`'s
+`Programs::init`) calls `bitfieldExtract(x, 0, 1)` on `highp uint` values,
+i.e. `spirv.BitFieldUExtract`. A hand-written
+`spirv.BitFieldUExtract %base, %offset, %count : si32, si32, si32` inside a
+trivial `spirv.func`, run through `feme-opt --feme-convert-spirv-to-llvm`,
+reproduced the exact reported diagnostic:
+```
+error: 'llvm.shl' op operand #1 must be signless integer or LLVM dialect-compatible vector of signless integer, but got 'si32'
+note: see current operation: %4 = "llvm.shl"(%3, %0) <{overflowFlags = 0 : i32}> : (i32, si32) -> i32
+```
+
+Root cause: upstream's `BitFieldInsertPattern`/`BitFieldSExtractPattern`/
+`BitFieldUExtractPattern` (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`)
+build their `llvm.shl`/`llvm.lshr`/`llvm.ashr`/`llvm.and`/`llvm.xor` ops
+from the op's own raw `getBase()`/`getInsert()` accessors, and from
+`processCountOrOffset(op.getOffset()/getCount(), ...)` -- which itself
+takes the raw accessors too -- instead of the pattern's `OpAdaptor`'s
+type-converted ones. `processCountOrOffset`'s own broadcast/truncate-or-
+extend logic is a no-op whenever `Offset`/`Count`'s width already matches
+`Base`'s, which every real SPIR-V `BitField*` op satisfies (the spec
+requires same-width operands), so the stale, pre-conversion `si32`/`ui32`
+value passes straight through into the freshly built `llvm.shl`/`llvm.lshr`
+-- the exact same "raw accessor instead of adaptor" bug class the L18-era
+`BranchConditionalPattern` fix already addressed once, just in a different
+pattern family (`BitField*` rather than `BranchConditional`).
+
+Fixed by adding `BitFieldInsertPattern`/`BitFieldSExtractPattern`/
+`BitFieldUExtractPattern` to `SPIRVToLLVMPatterns.cpp`, registered at
+`FeMeBenefit` so they win over the upstream patterns for the same ops.
+Each mirrors upstream's own mask/shift construction verbatim -- the same
+sequence of `llvm.shl`/`llvm.lshr`/`llvm.ashr`/`llvm.and`/`llvm.xor` ops,
+in the same order, with the same broadcast-then-truncate-or-extend
+handling of a scalar `Offset`/`Count` against a vector `Base` -- but
+sources every operand value (`Base`, `Insert`, `Offset`, `Count`) from the
+adaptor instead of the op's raw accessors. Re-running the same repro (and
+new sign-extract/insert/vector-`Base` variants) after the fix shows clean,
+fully-signless output for all three ops, e.g.:
+```
+llvm.func @bfe_signed(%arg0: i32, %arg1: i32, %arg2: i32) -> i32 {
+  %0 = llvm.mlir.constant(-1 : i32) : i32
+  %1 = llvm.shl %0, %arg2 : i32
+  %2 = llvm.xor %1, %0 : i32
+  %3 = llvm.lshr %arg0, %arg1 : i32
+  %4 = llvm.and %3, %2 : i32
+  llvm.return %4 : i32
+}
+```
+confirming `llvm.lshr` (`BitFieldUExtractPattern`) and `llvm.ashr`
+(`BitFieldSExtractPattern`) are both affected identically to `llvm.shl`,
+answering this row's own question. A vector-`Base`/scalar-`Offset`+`Count`
+repro (`vector<4xui32>`) additionally confirmed the broadcast path (not
+just the scalar truncate/extend path the other three repros exercise)
+produces well-typed output too.
+
+New lit coverage: `spirv-to-llvm-bitfield-signed-argument.mlir`, covering
+all three `BitField*` ops plus the vector-`Base` broadcast case, following
+the existing `spirv-to-llvm-branch-conditional-signed-argument.mlir`'s
+style. `ninja check-feme` (assertions-enabled, ccache build) passes in
+full: 2457/2516 (59 pre-existing `Unsupported`, 0 `Failed`, up 1 test from
+this row's own new lit coverage).
+
+**Real CTS re-run.** The exact reported case now passes reliably:
+```
+Test case 'dEQP-VK.wsi.xcb.incremental_present.scale_none.fifo.identity.opaque.reference'..
+  Pass (Pass)
+
+Test run totals:
+  Passed:        1/1 (100.0%)
+```
+(measured 3/3 across repeated runs; one earlier run against a longer-lived
+`Xvfb` hit the already-documented environmental xcb connection flake
+(H10g's own report) instead, unrelated to this fix). The whole
+`dEQP-VK.wsi.xcb.incremental_present.*` group (360 cases) was re-run
+clean: 1 `Pass`/0 `Fail`/359 `NotSupported` (only the `fifo` present mode
+is implemented by this ICD, matching every other WSI row's own
+present-mode scope -- consistent, not a regression).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this is a pure correctness fix to an already-implemented
+op family (`spirv.BitFieldInsert`/`BitFieldSExtract`/`BitFieldUExtract`),
+not a new capability surface. `FeMeVulkanDesign.md` needed no update
+(no design deviation -- this is an MLIR-conversion-layer bug fix, not a
+Vulkan-API-shape decision).
+
+**New observation, filed as H10j**: two separate attempts at re-running
+the *whole* `dEQP-VK.wsi.xcb.*` group (4,029 cases, a fresh `Xvfb` restart
+between attempts) both crashed with a real `Segmentation fault` shortly
+after `swapchain.render.10swapchains`, at a *different* specific
+subsequent case each time (`10swapchains2` in one run, `2swapchains` in
+the other). Both crash-adjacent cases pass/fail cleanly (no crash) when
+run in isolation, ruling out a single case as the trigger and pointing
+instead at a real, cumulative resource leak across many consecutive WSI
+cases run in the same `deqp-vk` process -- entirely orthogonal to this
+row's own shader-lowering scope, and not the same issue as H10g's own
+(already-closed, and shown to be a *different*, non-crashing) count-
+dependent hypothesis. Recorded as roadmap row H10j for its own future
+investigation rather than folded into this row's closure, since it needs
+its own root-cause investigation (most likely `gdb`/`valgrind`/`ASan`
+against a full-group run) unrelated to the `BitField*` fix above.
