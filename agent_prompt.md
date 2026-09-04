@@ -1,5 +1,5 @@
 ---
-model: claude-sonnet-5
+model: claude-opus-5
 resume: ec2f5570-263a-4b95-917f-6c2230e594cf
 ---
 # Initial Guidelines
@@ -42,7 +42,30 @@ Can you work on H29k or other prerequisites blocking the H-series milestones?
 > **A real rendering-correctness mismatch in `independent_sets_random`'s own
 > IO-buffer/descriptor-contents check** (`vktIndependentSetsUtil.cpp`'s own
 > comparison, not a pipeline-creation-time diagnostic), 6 of H29f's own re-run's
-> `graphics_library.*` failures. Distinct from H29h's own legalization gap
-> (these 6 cases already clear pipeline creation and reach real rendering);
-> needs its own real reduction once H29h unblocks enough of this sub-group's own
-> cases to make one self-contained
+> `graphics_library.*` failures (all `mesh_frag.case_1`/`case_1_io_ssbo_first`,
+> one pair each across `fast_lib`/`monolithic`/`optimized_lib`). ~~Distinct from
+> H29h's own legalization gap (these 6 cases already clear pipeline creation and
+> reach real rendering); needs its own real reduction once H29h unblocks enough
+> of this sub-group's own cases to make one self-contained~~ (partially done:
+> real IR/log reduction found *two* distinct bugs. (1) `Executor.cpp`'s
+> `executeDraws` derived its rasterization extent solely from
+> color/depth-stencil attachments, leaving it stuck at `0x0` -- and every
+> triangle's scissor collapsed to nothing -- for this test's own legal
+> zero-attachment-of-any-kind render pass (a fragment stage kept alive purely
+> for descriptor side effects); fixed by falling back to `Draw.Scissors`'s own
+> union when no attachment supplies an extent, with a new `ExecutorTest.cpp`
+> unit test reproducing and confirming the fix. (2) Even with (1) fixed, this
+> test's mesh shader emits its two triangles via
+> `gl_PrimitiveTriangleIndicesEXT[i] = uvec3(...)`, which has no canonicalized
+> `feme.stage.*` op of its own (see `MeshOutputWrapper.h`'s own file comment,
+> "left open by this row") and is therefore never routed into
+> `FemeMeshArgs::PrimitiveIndices` at all -- every meshlet's own primitive-index
+> slots stay at their zero-initialized default regardless of what the shader
+> writes, so every triangle after the first reads back as `(vertex 0, vertex 0,
+> vertex 0)` (a real reduction confirmed this via direct instrumentation:
+> `M.getPrimitiveIndices(P)` returned `(0, 0, 0)` for *both* of this test's two
+> triangles, not just the ones that "should" alias 0), producing a degenerate
+> zero-area triangle that never rasterizes -- explaining why the fragment
+> shader's own `io_ssbo` writes never happened even after (1)'s fix. (2) is the
+> same, larger, already-documented-but-unfiled gap now tracked as its own row,
+> H29r, and is what actually blocks this row's own closure)
