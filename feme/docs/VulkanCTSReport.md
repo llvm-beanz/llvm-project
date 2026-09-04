@@ -22754,17 +22754,20 @@ invocations against the same long-running `Xvfb :99` (as this session's
 own one-case-at-a-time `-n` invocations did, dozens of times in quick
 succession) intermittently produces a genuine `xcb_connection_has_error()
 == XCB_CONN_ERROR` immediately after `xcb_connect` succeeds at the socket
-level, which this ICD's own `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`
-already handles gracefully (falling back to the `{UINT32_MAX,UINT32_MAX}`
-"undefined size" sentinel per spec, which then correctly fails
-`vkCreateSwapchainKHR`'s own extent validation rather than passing through
-a bogus size) -- but this masks real per-case results when measuring one
-case per process. Running a **whole test group in a single `deqp-vk`
+level. *(Correction, roadmap H10g: the sentence originally here claimed
+this ICD already "handles gracefully" by falling back to the
+`{UINT32_MAX,UINT32_MAX}` sentinel -- H10g's own investigation found that
+fallback was itself the bug: silently reusing headless's "undefined size"
+sentinel for a real Xcb surface's genuine geometry-query failure masked
+the true error as a misleading `VK_SUCCESS`, deferring an unexplained
+`vkCreateSwapchainKHR` rejection to one call later instead of reporting
+`VK_ERROR_SURFACE_LOST_KHR` immediately. See H10g's own section below for
+the fix.)* Running a **whole test group in a single `deqp-vk`
 process** (matching how a real CTS run actually invokes it, and how this
 row's own measurements above were ultimately gathered) does not exhibit
-this flakiness anywhere near as often. No `feme` code change is implied;
-this is noted here only so a future session does not mistake this
-process-launch-rate-dependent connection flake for a new ICD bug.
+this flakiness anywhere near as often. This is noted here only so a
+future session does not mistake this process-launch-rate-dependent
+connection flake for a new ICD bug.
 
 `ninja check-feme` (assertions-enabled, ccache build) passes in full,
 2455/2514 (59 pre-existing `Unsupported`, 0 `Failed`, up 1 test from this
@@ -22774,6 +22777,96 @@ change needed (a pure core-completeness fix: SPIR-V's `Matrix`
 capability's own type support already existed via H10c/H10d, and no
 Vulkan feature/extension bit gates arithmetic on an already-supported
 type).
+
+## Roadmap H10g: measured impact
+
+Investigated H10g's own "count-dependent resource limit" hypothesis for
+why `dEQP-VK.wsi.xcb.swapchain.render.10swapchains`/`10swapchains2` fail
+`vkCreateSwapchainKHR` with an undiagnosed `VK_ERROR_INITIALIZATION_FAILED`
+-- and found it to be wrong. Reading `Swapchain.cpp`/`Surface.cpp`/
+`XcbSurface.cpp` in full turned up no fixed-size table or per-window/
+per-swapchain-count limit anywhere in this ICD's own code. Temporary
+(never-committed) `fprintf` instrumentation instead pinned the real
+sequence:
+
+```
+DEBUGSC: extent reject 4294967295x4294967295 max=4096
+```
+
+`vkCreateSwapchainKHR` was rejecting an `imageExtent` of
+`{UINT32_MAX, UINT32_MAX}` -- the headless "undefined size" sentinel,
+never a real value CTS should ever pass for a genuine `Xcb` surface. Its
+actual source: `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` (`Surface.cpp`)
+calls `currentSurfaceExtent` (`XcbSurface.cpp`) for a live
+`xcb_get_geometry` query of the real window; when that query fails --
+confirmed, with the connection-error state captured directly, to be the
+*same* environmental xcb-connection-establishment flake H10f's own
+section above already recorded as an observation -- `currentSurfaceExtent`
+correctly reports `std::nullopt`, but its caller could not tell that
+apart from a *headless* surface's own, entirely legitimate `nullopt`
+("no fixed size, pick freely"), and silently reported the same
+`{UINT32_MAX, UINT32_MAX}` sentinel with `VK_SUCCESS` either way. CTS's
+own `vktWsiSwapchainTests.cpp` builds `imageExtent = capabilities.
+currentExtent` verbatim for a real platform surface (its
+`SWAPCHAIN_EXTENT_MUST_MATCH_WINDOW_SIZE` path never guards against the
+sentinel, since a genuine windowed surface is never spec-supposed to
+report it), so the bogus sentinel flowed straight into
+`vkCreateSwapchainKHR`'s own `maxImageDimension2D` bounds check and was
+rejected there -- one call after the real failure had already silently
+happened, with nothing left to log at the point CTS's own error message
+pointed to.
+
+Confirming this reproduces the exact `10swapchains`-vs-`2swapchains`
+count-dependence H10g's own report described (more concurrent xcb
+windows/connections one CTS case opens at once, the likelier this
+environmental flake trips) -- a fresh single-case run intermittently
+failed 5 of 6 repeated attempts even against a **freshly-restarted**
+`Xvfb`, while `basic`/`2swapchains` (2-window cases) remained reliable.
+
+Fixed by making `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` distinguish
+the two `nullopt` meanings explicitly instead of conflating them: a
+non-`Xcb`-kind surface still reports the headless sentinel; an
+`Xcb`-kind surface whose live geometry query fails now reports
+`VK_ERROR_SURFACE_LOST_KHR` -- the spec-correct code for a real, lost
+window surface. Re-running the same case after the fix shows the exact
+improvement in diagnosability this row asked for:
+
+```
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.10swapchains'..
+  Fail (vki.getPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &capabilities): VK_ERROR_SURFACE_LOST_KHR at vkWsiUtil.cpp:436)
+```
+
+instead of the old, silent:
+
+```
+Fail (vk.createSwapchainKHR(device, pCreateInfo, pAllocator, &object): VK_ERROR_INITIALIZATION_FAILED at vkRefUtilImpl.inl:578)
+```
+
+`basic`/`2swapchains` were re-verified `Pass` after the fix (no
+regression to the already-working 2-window/headless-sentinel paths);
+`10swapchains` itself still fails intermittently (measured at 1 `Pass`
+in 6 repeated runs against a freshly-restarted `Xvfb`) since the
+underlying connection-establishment flake is environmental, not a
+`feme` code defect -- consistent with H10f's own precedent, this residual
+flake is recorded here as an observation, not filed as a further roadmap
+row, since its root scope (this sandbox specifically vs. `libxcb`/`Xvfb`
+in general) remains unconfirmed.
+
+New deterministic regression coverage: `feme-vulkan-xcb-surface-lost-smoke`
+(a new tiny Vulkan+xcb client alongside `feme-vulkan-xcb-smoke`) creates a
+real xcb window and destroys it before this ICD ever queries its
+geometry, producing a genuine `BadWindow` protocol error deterministically
+-- no timing-sensitive connection flake needed -- and asserts
+`VK_ERROR_SURFACE_LOST_KHR` comes back; wired into a new
+`xcb-surface-lost-smoke.test` lit test (`REQUIRES: system-xcb`, same
+gating as `xcb-surface-smoke.test`), run 3/3 clean. `ninja check-feme`
+(assertions-enabled, ccache build) passes in full: 2456/2515 (59
+pre-existing `Unsupported`, 0 `Failed`, up 1 test from this row's own new
+lit coverage); the pre-existing `SurfaceTest`/`SurfaceObjectModel` unit
+tests and `xcb-surface-smoke.test` were re-verified still passing.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed (a pure diagnosability/correctness fix to an
+already-implemented surface query, no new capability surface).
 
 ## Roadmap H10c: measured impact
 

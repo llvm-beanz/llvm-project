@@ -2126,6 +2126,20 @@ the whole `dEQP-VK.wsi` CTS group against this new backend needs a real
 `deqp-vk` build, which does not exist in this environment -- tracked as
 roadmap H10b.
 
+**Status (roadmap H10g):** the `currentExtent` query above had a gap this
+section did not originally anticipate -- a failed live `xcb_get_geometry`
+query (the same "lost X connection" case `presentToSurface` above already
+reports as `VK_ERROR_SURFACE_LOST_KHR`) was, at capabilities-query time,
+instead silently conflated with a *headless* surface's own unrelated
+"no fixed size" `{UINT32_MAX, UINT32_MAX}` sentinel, reporting `VK_SUCCESS`
+either way. `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` now reports
+`VK_ERROR_SURFACE_LOST_KHR` for this case too, matching
+`presentToSurface`'s own precedent: any real Xcb-surface query that
+depends on a live connection now consistently reports a lost connection
+the same, spec-correct way, rather than only the present-time path doing
+so.
+
+
 ### Mesh shading and ray tracing exposure
 
 Mesh shading (`VK_EXT_mesh_shader`) and ray tracing (`VK_KHR_ray_query`,
