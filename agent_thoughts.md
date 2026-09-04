@@ -58831,3 +58831,129 @@ consistent, since the latter is generated from the former),
 Vulkan14FeatureInventory.md (sparse/protected-memory notes), and
 VulkanCTSReport.md (measured-impact spot check), followed by this
 thoughts entry.
+
+# H21: VK_EXT_transform_feedback, a first reflection-plumbing slice
+
+Same discipline the request text itself asked for: scope with real CTS
+data before landing any code, the way H6/H8c/H10f already did for their
+own oversized groups.
+
+## Scoping
+
+`deqp-vk --deqp-runmode=txt-caselist --deqp-case="dEQP-VK.transform_feedback.*"`,
+filtered to `^TEST:` lines only (the same methodology H12's own session
+established -- `GROUP:` lines inflate the count if not filtered out):
+exactly 133,719 cases, matching H12's/H21's own cited number exactly, so
+no surprise there. Broken down by top-level sub-group:
+`primitives_generated_query` alone is 107,866 (81%) -- an enormous
+majority for what is, underneath, a single query type's counting
+semantics, not the buffer-capture mechanism itself. `simple` (7,899),
+`simple_optimized_gpl` (7,891), and `simple_fast_gpl` (7,891) are next,
+and a quick further breakdown of `simple` shows it is itself mostly
+`query.*` (6,400) and `host.*` (1,000) cases, with genuinely
+multi-stream/geometry-shader-stream-specific cases (`streams`/
+`multistreams`/`multiquery`) totaling only 60 -- confirming single-stream
+(`streamid_0`) capture is the overwhelmingly dominant real shape, not
+multi-stream. `fuzz` is 2,168 and `primitive_restart` a token 4.
+
+One important cross-cutting finding: `simple_optimized_gpl` and
+`simple_fast_gpl` (15,782 cases combined, 12% of the group) both require
+`VK_EXT_graphics_pipeline_library`, which this ICD does not implement and
+which is not one of H12's own promoted groups. This means even a
+*complete* transform-feedback implementation cannot close these two
+specific sub-groups -- they need a separate, unrelated GPL implementation
+first. Recording this now so a future session does not waste time
+re-discovering it while chasing "why are these two still NotSupported
+after H21c/H21d/H21e all land."
+
+## Picking the first slice
+
+Given the sheer size of a full implementation (buffer binding, actual
+per-vertex capture writes, a new query type, multi-stream routing,
+extension advertisement, feature-bit flip, GPL interaction), and this
+project's own established practice of landing the smallest possible
+real, separately-testable step first (H8c's ETC2/EAC decoder with zero
+call sites is the closest precedent), I looked for the natural "first
+brick": something every later row would need regardless of which
+sub-feature gets implemented next, and that could be fully unit-tested
+in isolation without touching pipeline creation, entry points, or the
+executor at all.
+
+`feme::Signature` (`feme/include/feme/Core/Signature.h`) -- the project's
+own "source-independent reflection model," roadmap R17 -- was the
+obvious answer. It already has a `Stream` field for geometry-shader
+multi-stream routing, following exactly this same "add the field,
+document it as reserved, wire it later" pattern (R17's own precedent for
+itself). Adding `XfbBuffer`/`XfbOffset`/`XfbStride` here, and making both
+the SPIR-V decoration writer (`SPIRVToLLVMPatterns.cpp`) and reader
+(`CanonicalizeStage.cpp`) round-trip them, is a complete, independently
+useful, and fully testable step -- and every later row (H21b's entry
+points, H21c's actual capture, H21e's multi-stream routing) will need
+this data to already be present on the signature before it can consume
+it.
+
+A genuinely pleasant surprise while implementing this: MLIR's own SPIR-V
+*deserializer* (`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`,
+lines ~289-303) already generically parses `Offset`(35)/`XfbBuffer`(36)/
+`XfbStride`(37) into plain `IntegerAttr`s on the variable (snake_case
+`offset`/`xfb_buffer`/`xfb_stride`), the exact same generic path that
+already handles `Location`/`Component`/`Index`. This meant zero MLIR
+changes were needed -- only feme's own writer and reader needed new
+lines, mechanically identical in shape to the existing `Location`/
+`Component`/`Index` handling. I double-checked there's no SPIR-V-spec
+ambiguity risk here: `Offset` (decoration code 35) is reused for two
+unrelated meanings in the spec -- struct-member byte offset (via
+`OpMemberDecorate`) versus transform-feedback per-vertex-record byte
+offset (via plain `OpDecorate` on an `Output` variable) -- but
+`buildStageIODecorationsAttr`/`parseSPIRVDecorations` only ever process a
+single variable's own whole-variable decoration list, never
+struct-member decorations, so the two meanings can never collide in this
+code path.
+
+## The blast radius I almost missed
+
+Bumping `SignatureAbiVersion` (4->5) and `NumFixedFieldsPerElement`
+(18->22) is exactly the kind of change that looks trivial in the two
+files that define it, but quietly breaks anything that hand-encodes a
+`!feme.signature` byte blob at the old layout in a lit test. I found 7
+such files by process of elimination: grepping every file under
+`feme/test/`/`feme/unittests/` that references `feme.signature`/
+`parseSignature`/`serializeSignature` for the version-4 marker bytes
+(`\04\00\00\00`), since anything that instead builds an `EntrySignature`
+programmatically and calls `serializeSignature` at test time
+automatically adapts to whatever `SignatureAbiVersion` currently is and
+needs no update at all. Wrote a small throwaway Python script
+(`/tmp/upgrade_sig.py`) that parses each blob's old version-4/18-field
+layout (correctly handling the variable-length semantic-name tail
+embedded inline after field 6) and re-emits it as version-5/22-field,
+appending four zero-valued fields at the very end of each element's
+record -- matching the model's own documented "new fields always append
+at the end" convention (confirmed by reading every prior version's own
+history comment in `Signature.h` before assuming this). Every blob's
+re-encoding self-validated (`assert off == len(old_bytes)`), and a real
+`ninja check-feme` run afterward confirms all 7 files' own tests still
+pass -- I did not want to trust the self-validating assert alone, given
+how easy an off-by-one here would be to miss silently.
+
+## What this row deliberately does not do
+
+No feature bit flips, no extension gets advertised, and no actual
+transform-feedback buffer write happens anywhere yet -- this is
+reflection-plumbing only, and I verified that with a real `deqp-vk
+--deqp-case="dEQP-VK.transform_feedback.*"` re-run showing all 133,719
+cases still exactly `NotSupported`, matching the "expect zero CTS delta"
+prediction rather than assuming it. `dEQP-VK.api.info.*` was re-run too
+as a general regression spot check and reproduced the immediately-prior
+session's own exact figures (5,241/720/4,525), confirming no unrelated
+regression either.
+
+Split the rest of the work into five new one-lowercase-letter-deep rows
+(H21b through H21f) rather than trying to cram it all into this row or
+inventing any further nesting: entry points + pipeline-creation surface
+(H21b), actual single-stream capture + feature bit + extension
+advertisement (H21c, depends on H21b), the dominant
+`primitives_generated_query` query type (H21d, depends on H21c),
+multi-stream capture reusing the existing `GeometryStreamBuilder` (H21e,
+depends on H21c), and the GPL-gated CTS sub-groups that no amount of
+transform-feedback work alone can close (H21f, depends on H21c, mostly
+there to document the dependency rather than imply real near-term work).
