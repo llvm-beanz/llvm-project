@@ -58726,3 +58726,108 @@ Three code+test commits (pipeline/executor fix, clear-attachments fix,
 each with its own regression-tested unit test) plus one docs commit
 (Roadmap.md H11 closure + H20 breakdown, VulkanCTSReport.md measured-
 impact section), followed by this thoughts entry.
+
+# H12: deciding which large optional extension groups stay out of scope
+
+This request differed from every prior H-series row I've handled: the
+user explicitly overrode roadmap H12's own tentative "everything defaults
+to out of scope" framing with a concrete decision -- "Of the listed
+optional groups, video is the only one that should be out of scope for
+this effort." That single sentence turns H12 from an open scoping
+question into a closed decision with a clear, mechanical consequence:
+every other named group (`transform_feedback`, `shader_object`,
+`fragment_shading_rate`, `fragment_shader_interlock`,
+`fragment_shading_barycentric`, `conditional_rendering`,
+`descriptor_indexing`, `sparse_resources`, `protected_memory`) moves from
+"non-goal" to "in scope, not yet implemented." `descriptor_indexing` was
+already in scope before this session (J2/L7's ray-tracing dependency), so
+the real work was the other 8.
+
+**This is a genuinely different shape of H-row than anything before it.**
+Every prior H-row (H1-H11) was a real bug hunt: reproduce a CTS failure,
+reduce it, root-cause it, fix code, add a unit test, measure the CTS
+delta. H12 has none of that -- it's a pure documentation/roadmap decision
+with zero source changes. The closest precedent in this project's own
+history is H8k ("scoping-only, no code change"), which I used as the
+template for both the roadmap-closure wording and the
+VulkanCTSReport.md "measured impact" entry (a spot check confirming the
+null hypothesis -- no regression -- rather than a real before/after CTS
+delta).
+
+**Verifying the CTS case-count methodology mattered more than I first
+expected.** H12's own original text already estimated `transform_feedback`
+at 133,719 cases and `shader_object` at 243,853 -- suspiciously large,
+precise-looking numbers for what should be a rough scoping estimate. I
+used `deqp-vk --deqp-runmode=txt-caselist --deqp-caselist-export-file=...`
+to get real counts per group and initially got wildly inflated numbers
+(`fragment_shading_rate` looked like 859,138) before realizing the export
+file mixes `GROUP:` lines (hierarchy nodes) with `TEST:` lines (actual
+leaf cases) -- `wc -l` on the raw file counts both. Filtering to
+`grep -c "^TEST:"` fixed this, and the two counts I could cross-check
+against H12's own pre-existing numbers (`transform_feedback`,
+`shader_object`) matched **exactly**, which gave me confidence the other
+six real counts I pulled this way (`fragment_shading_rate` = 110,443;
+`fragment_shader_interlock` = 576; `fragment_shading_barycentric` =
+20,991; `conditional_rendering` = 1,030; `sparse_resources` = 19,402;
+`protected_memory` = 6,000) are trustworthy too, not just plausible-
+looking guesses. I recorded all eight real counts directly on the new
+H21-H28 roadmap rows so future sessions don't have to re-derive them.
+
+**`sparse_resources` and `protected_memory` needed different plumbing
+than the other six groups.** The other six are honest-to-goodness
+`VK_EXT_*`/`VK_KHR_*` extension names with their own row in
+`VulkanExtensionInventory.md` and an entry in the
+`PlannedExtensions.txt` generator input that drives it. Sparse resources
+and protected memory are not extensions at all -- they're core Vulkan
+1.0/1.1 *feature bits* (`VkPhysicalDeviceFeatures::sparseBinding` and
+friends, `VkPhysicalDeviceProtectedMemoryFeatures::protectedMemory`),
+tracked instead in `Vulkan14FeatureInventory.md`. That file's generator
+(`vk_gen_feature_inventory.py`) has no notes-input mechanism the way
+`PlannedExtensions.txt` does for the extension inventory -- I grepped the
+script to confirm this before touching anything -- so its per-row notes
+are added by hand, directly on the generated table, the same way every
+other annotated row in that file already works. I added roadmap H27/H28
+cross-references to the 9 `sparse*` rows and the 1 `protectedMemory` row
+this way.
+
+**Regenerating `VulkanExtensionInventory.md` surfaced two unrelated,
+pre-existing things I fixed as a natural side effect rather than as their
+own scope:** (1) a duplicate table-header line (two consecutive
+`| Extension | Status | Note |` rows before the actual separator) that
+simply doesn't exist anymore once the freshly generated table (which has
+only one header line) replaces the stale one wholesale; (2) one extra
+extension, `VK_EXT_cooperative_matrix_maintenance1`, that exists in the
+VK-GL-CTS checkout's own `vk.xml` but didn't exist the last time this
+file was generated -- pure registry drift, unrelated to H12's own scope
+decision, and it lands in "Not implemented" since cooperative
+matrix/vector is still an explicit non-goal. I called both out explicitly
+in the commit message and in the doc's own updated summary rather than
+silently absorbing them into the H12 diff, since neither one is actually
+part of what this row decided.
+
+**Verification, given the "no code change" shape:** I still ran a real
+`deqp-vk` spot check (`dEQP-VK.api.info.*`, 10,486 cases) and
+`ninja check-feme` against the ccache+assertions `build2/` tree, per the
+standing "run CTS/tests after each change" instruction, even though no
+source changed. `check-feme` (2470/2529 passing, 59 pre-existing
+`Unsupported`, 0 `Failed`) confirms no regression to the unit-test
+baseline. The `api.info` spot check doesn't match H8k's own much-earlier
+recorded numbers, but that's expected -- H9/H10/H11's real feature and
+bugfix work landed in between and already moved those figures; the point
+of a spot check on a docs-only row is only to confirm it introduces no
+*further* delta, not to reproduce a now-stale baseline byte for byte.
+Also noticed the primary `build/` tree (as opposed to `build2/`) is
+mid-build and currently fails on an apparently pre-existing,
+session-unrelated `-mno-outline-atomics`/`clang -target unknown`
+mismatch in `FeMeRuntimeCPU.c`'s bitcode-compile step; since `build2/` is
+the tree this project's own CTS-runner scripts already point at and
+builds/tests cleanly end to end, I used it for verification rather than
+chase an unrelated build-environment issue out of scope for this row.
+
+Five commits: Roadmap.md (H12 closure + H21-H28 breakdown + Part 4
+update), FeMeVulkanDesign.md (Non-Goals/V8/V7 cross-references),
+PlannedExtensions.txt + VulkanExtensionInventory.md together (must stay
+consistent, since the latter is generated from the former),
+Vulkan14FeatureInventory.md (sparse/protected-memory notes), and
+VulkanCTSReport.md (measured-impact spot check), followed by this
+thoughts entry.
