@@ -37,23 +37,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H10d or other prerequisites blocking the H-series milestones?
+Can you work on H10f or other prerequisites blocking the H-series milestones?
 
-> **`dEQP-VK.wsi.xcb.swapchain.render.*` fails `vkCreateGraphicsPipelines` with
-> `VK_ERROR_INITIALIZATION_FAILED`**, discovered by H10b's own real,
-> now-non-crashing `dEQP-VK.wsi.xcb.*` re-run (7 of its 8 real failures, every
-> `render.*` sub-case:
-> `basic`/`basic2`/`2swapchains`/`2swapchains2`/`10swapchains`/`10swapchains2`).
-> The real diagnostic (`FEME_VULKAN_LOG_CREATION_ERRORS`-visible) is an MLIR
-> legalization failure: `"failed to legalize operation
-> 'spirv.CompositeConstruct' that was explicitly marked illegal"`, building a
-> `!spirv.matrix<4 x vector<4xf32>>` from four `vector<4xf32>` column operands
-> -- a SPIR-V-to-LLVM lowering gap for matrix-typed `OpCompositeConstruct`,
-> entirely unrelated to WSI/swapchain/device-group; any other real CTS case
-> whose shader constructs a matrix from column vectors (a common GLSL pattern,
-> e.g. `mat4(c0, c1, c2, c3)`) would be expected to hit the same wall. Needs its
-> own real IR reduction of one of these exact cases to confirm whether
-> `SPIRVToLLVMPatterns.cpp` is simply missing a matrix-result
-> `CompositeConstruct` pattern entirely (most likely, given the "explicitly
-> marked illegal" framing) or has one that only handles a subset of operand
-> shapes
+> **`spirv.MatrixTimesVector` (and, by the same root cause, presumably its whole
+> sibling family -- `spirv.VectorTimesMatrix`, `spirv.MatrixTimesMatrix`,
+> `spirv.MatrixTimesScalar`, `spirv.Transpose`) is entirely unimplemented**,
+> discovered by H10d's own real re-run once its `CompositeConstruct` fix let
+> `dEQP-VK.wsi.xcb.swapchain.render.basic`/`basic2`/`2swapchains`/`2swapchains2`
+> clear that legalization gate for the first time: `"failed to legalize
+> operation 'spirv.MatrixTimesVector' that was explicitly marked illegal: ...
+> (!spirv.matrix<4 x vector<4xf32>>, vector<4xf32>) -> vector<4xf32>"` (an
+> ordinary `mat4 * vec4` transform, one of the most common shapes in any real
+> vertex shader). `grep`-confirming zero matches for any of these five op names
+> anywhere in `SPIRVToLLVMPatterns.cpp` before committing to a scope -- this is
+> likely a substantial, multi-op family, not a single-op fix, and needs its own
+> scoping pass (which of the five ops real CTS coverage actually needs first,
+> and whether they share enough lowering shape -- all reduce to a small number
+> of dot-products/column-scalings over the matrix's own `!llvm.array` of column
+> vectors -- to implement together in one pass) before code lands
