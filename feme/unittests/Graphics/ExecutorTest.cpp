@@ -2385,6 +2385,82 @@ TEST(ExecutorTest, RendersWithNoFragmentStage) {
   EXPECT_EQ(PassedSamples, 16u);
 }
 
+// (Roadmap H29k) A draw with *no* attachments at all -- neither color nor
+// depth/stencil, e.g. a fragment stage kept alive purely for descriptor
+// side effects, the exact shape
+// `dEQP-VK.pipeline.pipeline_library.graphics_library.
+// independent_sets_random.*.mesh_frag.*` exercises -- has nothing
+// attachment-shaped to derive a rasterization extent from. Before this
+// roadmap row, `executeDraws`'s `ExtentWidth`/`ExtentHeight` silently
+// stayed `0` in that case, collapsing every triangle's scissor to a
+// degenerate 0x0 rectangle and discarding the whole draw before a single
+// fragment ran -- regardless of `Draw.Scissors` naming a real, non-empty,
+// already-render-area-clipped rectangle. `executeDraws` now falls back to
+// the union of `Draw.Scissors` for its extent whenever no attachment
+// supplies one, so a fully covered triangle still produces exactly as
+// many covered samples as its scissor rectangle's own area.
+TEST(ExecutorTest, RasterizesWithNoAttachmentsAtAllUsingScissorAsExtent) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  constexpr char PositionOnlyVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, PositionOnlyVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  // No fragment stage, and depth testing left disabled: this pipeline has
+  // nothing attachment-shaped at all, exactly the shape this roadmap row
+  // fixes.
+  GraphicsPipeline Pipeline(
+      std::move(*VS), /*FragmentStage=*/nullptr,
+      PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, /*Attachments=*/{}, StencilState{},
+      /*ColorBlends=*/{}, /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  EXPECT_FALSE(Pipeline.hasFragmentStage());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+  Draw.Attachments = {}; // No color attachments at all.
+  // `Scene.prepare()` leaves `BindDepth`/`BindStencil` false by default, so
+  // `Draw.DepthStencil` is already empty too -- this draw truly has no
+  // attachment of any kind, only its own scissor rect (still `{0, 0, 4, 4}`,
+  // set unconditionally by `Scene.prepare()`).
+  uint64_t PassedSamples = 0;
+  Draw.PassedSampleCounter = &PassedSamples;
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+  // Occlusion-query bookkeeping still runs off the rasterizer's own
+  // coverage test, one sample per one of the 16 texels the scissor rect
+  // covers -- proof the draw was not silently discarded by a degenerate
+  // 0x0 extent.
+  EXPECT_EQ(PassedSamples, 16u);
+}
+
 // (Roadmap H21c) `VK_EXT_transform_feedback`'s capture: a vertex-shader-
 // only pipeline (no tessellation/geometry stage) with one `Output`-
 // direction element tagged `XfbBuffer = 0` must, for every vertex

@@ -2044,6 +2044,33 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       ExtentHeight = Draw.DepthStencil.Stencil.Height;
     }
   }
+  // (roadmap H29k) A subpass with *no* attachments at all -- neither color
+  // nor depth/stencil (e.g. a fragment stage kept alive purely for its
+  // descriptor side effects, as `dEQP-VK.pipeline.pipeline_library.
+  // graphics_library.independent_sets_random.*.mesh_frag.*`'s own shape)
+  // -- leaves both loops above empty, so `ExtentWidth`/`ExtentHeight` stay
+  // `0`; every triangle's scissor then got clamped against a degenerate
+  // 0x0 rectangle below, and the tile-binning early-return
+  // (`MinX >= MaxX || MinY >= MaxY`) discarded the entire draw before a
+  // single fragment ran, even though `Draw.Scissors` (already clipped
+  // against the real render area by `CommandBuffer.cpp`'s
+  // `runPreparedDraw`) names a perfectly valid, non-empty rectangle. Fall
+  // back to the union of the already-render-area-clipped scissor rects in
+  // that case: there is nothing attachment-shaped to validate a triangle's
+  // position against, but the render area itself still bounds where a
+  // fragment may legally land.
+  if (ExtentWidth == 0 && ExtentHeight == 0) {
+    for (const ScissorRect &S : Draw.Scissors) {
+      if (S.Width == 0 || S.Height == 0)
+        continue;
+      int64_t Right = int64_t(S.X) + S.Width;
+      int64_t Bottom = int64_t(S.Y) + S.Height;
+      if (Right > 0)
+        ExtentWidth = std::max(ExtentWidth, uint32_t(Right));
+      if (Bottom > 0)
+        ExtentHeight = std::max(ExtentHeight, uint32_t(Bottom));
+    }
+  }
   SmallVector<uint32_t, 4> ColorElemSizes;
   for (const AttachmentView &A : Draw.Attachments) {
     if (A.Data.empty()) {
