@@ -61064,3 +61064,135 @@ One genuinely useful side effect: this makes the advertised
 multiview can be created but cannot read `gl_ViewIndex`. I noted that in
 `Vulkan14FeatureInventory.md` rather than leaving the inventory quietly
 optimistic.
+
+# Roadmap H29m: a dynamic-rendering library merge with no render target
+
+## The premise was wrong again -- and this time it was inverted
+
+The row read: *"a graphics-pipeline-library merge loses its own render-target/
+dynamic-rendering state ... deliberately-negative CTS shapes the library-merge
+path may be validating too early, before every part's own state is merged in"*.
+
+The headline was right. The parenthetical -- the part that would actually have
+directed the work -- was wrong on both of its claims, and wrong in the opposite
+direction from the truth:
+
+- These are not deliberately-negative shapes. `null_rendering_create_info`,
+  `null_rendering_create_info_ptr` and `bad_rendering_create_info` are ordinary
+  **positive** tests that must pass. The "bad"/"null" names describe a
+  `VkPipelineRenderingCreateInfo` chained onto the library parts that do *not*
+  own the render target, which a conformant driver is required to **ignore**.
+- Nothing was being validated too early. Every library part was created
+  successfully; only the final link failed. The check ran at exactly the right
+  moment, on state that had genuinely gone missing before it got there.
+
+That's three rows running whose stated causal story didn't survive contact with
+the source. I noted the pattern last turn; this turn I want to be more precise
+about *why* it keeps happening, because "the rows are sloppy" isn't the useful
+reading. These rows were written during a characterization pass (H29f) that
+grouped hundreds of failures by diagnostic string. At that scale you get the
+diagnostic right and the cause is necessarily a guess, because you have not
+opened the test. The rows are honest and the counts are good; it is specifically
+the *parentheticals* that are speculation, and they read exactly like conclusions.
+
+So the habit that keeps working is cheap and worth stating flatly: **treat a
+row's diagnostic and counts as data, and its explanation as a hypothesis to
+falsify first.** Reading `vktPipelineLibraryTests.cpp` for ten minutes was what
+turned this row around, and it is the same ten minutes that turned around the
+previous two.
+
+## The `0xdeadbeef` pointer is the whole design constraint
+
+`BAD_RENDERING_CREATE_INFO` sets, on the *non*-fragment-output parts:
+
+```cpp
+unusualRenderingInfo.colorAttachmentCount    = 2;
+unusualRenderingInfo.pColorAttachmentFormats = reinterpret_cast<VkFormat *>(0xdeadbeef);
+```
+
+This is a beautifully pointed test. It doesn't check that you ignore the struct
+in some abstract sense; it arranges for a driver that *reads* it to segfault. And
+it pairs with `null_rendering_create_info`, whose zero-filled struct would
+silently give you a zero-attachment render target instead -- so between them, the
+two wrong behaviours (fault, and quietly-wrong) are both caught.
+
+Once I'd seen that, the shape of the fix was fixed for me rather than chosen: the
+capture **must** be gated on
+`VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT`, because that
+bit is what `VkGraphicsPipelineLibraryFlagBitsEXT` uses to say who owns the
+render target's attachment formats. I made a point of writing the gating's own
+negative test (`IgnoresARenderingCreateInfoOnANonOutputLibrary`, junk pointer and
+all) rather than only the positive one, because the gate is load-bearing and a
+future refactor that "simplifies" it to capture unconditionally would otherwise
+look harmless and pass every other test in the file.
+
+## The bug was simpler and larger than the row implied
+
+`captureGraphicsPipelineLibraryState` captured `RenderPass` and `Subpass` and
+stopped. A chained `VkPipelineRenderingCreateInfo` was never captured for any
+part, ever. Dynamic rendering's entire replacement for a render pass was dropped
+by every library merge this ICD has ever done -- not just by the "unusual" ones
+the row named. The five failing cases were simply the five that reached that
+combination; the defect was categorical.
+
+I like that this turned out to be a missing feature rather than a subtle
+mis-merge, because it means the fix is boring, and boring fixes in a merge
+function are the good kind. Capture the struct, deep-copy its format array
+(the application's own need not outlive the call, exactly like every other array
+in that function), re-chain it at link time.
+
+## Scope discipline at the H29q boundary
+
+Setting `Result.pNext` at all brushes against H29q(1), an already-filed row
+saying `synthesizeLinkedGraphicsPipelineCreateInfo` never sets `Result.pNext`, so
+a rendering info chained onto the *linking call* is dropped.
+
+The tempting move was to fix H29q(1) here too -- forward `CreateInfo.pNext`
+wholesale and be done. I didn't, for a concrete reason rather than a procedural
+one: the linking call's own `pNext` chain contains the
+`VkPipelineLibraryCreateInfoKHR` that got us here, and forwarding it verbatim
+into `compileGraphicsPipeline` hands that function a chain it never expected to
+see. And the genuinely interesting question in H29q(1) -- what happens when both
+the linking call *and* a linked part supply a rendering info, which must be
+merged rather than either one silently winning -- is a design decision that
+deserves its own reduction, not a snap judgement made while landing something
+else.
+
+What I did instead was go back and **narrow H29q's own row** to say precisely
+which half of item (1) H29m has absorbed and which half remains. Leaving a stale
+row that overstates its own remaining scope is its own small debt, and it is much
+cheaper to pay while the details are in my head than for whoever picks it up.
+
+## Measuring found more than the row claimed
+
+I diffed the two runs' pass sets case-by-case rather than comparing totals. Two
+things came out of that which totals alone would have hidden:
+
+1. Zero regressions -- exactly five cases moved `Fail` -> `Pass` and none moved
+   the other way. With a change to a shared merge function that is the assurance
+   I actually wanted, and "the total went up by 5" does not provide it (a total
+   can rise while something else quietly breaks).
+2. The row's "confined to `misc.other.{bad,null}_rendering_create_info`"
+   accounted for only three of its own five cases. The other two were
+   `misc.view_mask.{fast,optimized}` -- also dynamic-rendering library builds,
+   fixed by the same change.
+
+That second point is a first for this series: every previous row's real footprint
+turned out to be *smaller* than advertised (fix the diagnostic, discover the
+cases still fail for another reason). This one was larger. Both directions are
+worth measuring for, and only a diff catches either.
+
+I also kept the counterfactual habit from the last two turns -- stash the source
+files, rebuild, watch both new unit tests fail, unstash -- so "these tests
+reproduce the bug" is an observation and not a claim. It cost one rebuild.
+
+## What made this row easy
+
+Three things, none of them clever: the diagnostic string was distinctive enough
+to grep straight to the emitting function; `VkPipelineRenderingCreateInfo` has
+exactly one consumer in the whole ICD, which I checked before assuming (its
+`viewMask` field has none, which meant I could skip a whole plumbing question);
+and the CTS test was small enough to read end to end. When a row's reduction is
+this direct, the right response is to spend the saved time on the *documentation*
+-- correcting the premise in writing so the next reader doesn't re-derive it --
+rather than on expanding the fix's scope.
