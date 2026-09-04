@@ -527,6 +527,19 @@ Error runClearAttachments(const RenderTargetBinding &Binding,
                                  "attachment %u, which is not bound",
                                  Clear.colorAttachment);
       const RenderTargetView &Target = Binding.Colors[Clear.colorAttachment];
+      // (roadmap H11) A present-but-unused color slot (`VK_KHR_
+      // maintenance5`'s `VkRenderingAttachmentInfo::imageView ==
+      // VK_NULL_HANDLE`, `Target.View == nullptr`) still counts against
+      // `Binding.Colors.size()` -- so the range check above does not catch
+      // it -- but a `vkCmdClearAttachments` naming it has nothing to
+      // clear, the same "present but unused" no-op every other attachment
+      // consumer in this codebase already gives it (see e.g.
+      // `CommandBuffer.cpp`'s own load-op-clear skip and
+      // `resolveDrawAttachments`'s render-target-binding loop). CTS's own
+      // `dEQP-VK.renderpasses.*.unused_clear_attachments.*` exercises
+      // exactly this: clearing an attachment it deliberately left unused.
+      if (!Target.View)
+        continue;
       Expected<feme::graphics::AttachmentView> View =
           resolveAttachmentView(Target.View);
       if (!View)
@@ -555,29 +568,43 @@ Error runClearAttachments(const RenderTargetBinding &Binding,
         return createStringError(inconvertibleErrorCode(),
                                  "vkCmdClearAttachments names the depth "
                                  "attachment, which is not bound");
-      feme::cpu::ResourceFormat Format = Binding.Depth->Format;
-      double Depth = Clear.clearValue.depthStencil.depth;
-      if (Error E = clearAttachmentRects(
-              *Binding.Depth, Rects, Binding.ViewMask,
-              [&](MutableArrayRef<uint8_t> Texel) {
-                return feme::graphics::packDepthClear(Format, Depth, Texel);
-              }))
-        return E;
+      // (roadmap H11) Mirrors the color-slot skip above: a depth
+      // attachment can also be present-but-unused (`Binding.Depth` itself
+      // set, but its own `View` null) whenever `VkRenderingAttachmentInfo::
+      // imageView` was `VK_NULL_HANDLE` for the depth aspect specifically
+      // (e.g. a combined depth/stencil `VkClearAttachment` naming both
+      // aspects while only stencil is actually bound this draw). Guarded
+      // by `if`, not `continue`, since a stencil clear on the very same
+      // `VkClearAttachment` entry (below) must still run even when depth
+      // itself has nothing to clear.
+      if (Binding.Depth->View) {
+        feme::cpu::ResourceFormat Format = Binding.Depth->Format;
+        double Depth = Clear.clearValue.depthStencil.depth;
+        if (Error E = clearAttachmentRects(
+                *Binding.Depth, Rects, Binding.ViewMask,
+                [&](MutableArrayRef<uint8_t> Texel) {
+                  return feme::graphics::packDepthClear(Format, Depth, Texel);
+                }))
+          return E;
+      }
     }
     if (WantStencil) {
       if (!Binding.Stencil)
         return createStringError(inconvertibleErrorCode(),
                                  "vkCmdClearAttachments names the stencil "
                                  "attachment, which is not bound");
-      feme::cpu::ResourceFormat Format = Binding.Stencil->Format;
-      uint32_t Stencil = Clear.clearValue.depthStencil.stencil;
-      if (Error E = clearAttachmentRects(
-              *Binding.Stencil, Rects, Binding.ViewMask,
-              [&](MutableArrayRef<uint8_t> Texel) {
-                return feme::graphics::packStencilClear(Format, Stencil,
-                                                        Texel);
-              }))
-        return E;
+      // (roadmap H11) See the matching depth-slot comment above.
+      if (Binding.Stencil->View) {
+        feme::cpu::ResourceFormat Format = Binding.Stencil->Format;
+        uint32_t Stencil = Clear.clearValue.depthStencil.stencil;
+        if (Error E = clearAttachmentRects(
+                *Binding.Stencil, Rects, Binding.ViewMask,
+                [&](MutableArrayRef<uint8_t> Texel) {
+                  return feme::graphics::packStencilClear(Format, Stencil,
+                                                          Texel);
+                }))
+          return E;
+      }
     }
   }
   return Error::success();

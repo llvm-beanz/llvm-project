@@ -3373,6 +3373,135 @@ TEST_F(DrawTest, ClearsAttachmentInsideRenderPass) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (Roadmap H11) `vkCmdClearAttachments` naming a color index that is
+/// present (counts against `colorAttachmentCount`) but backed by a
+/// `VK_NULL_HANDLE` imageView -- the same "present but unused" dynamic-
+/// rendering slot `DynamicRenderingSkipsNullColorAttachment` above already
+/// exercises for a draw -- must be a no-op rather than crash: there is no
+/// real attachment to resolve a view for. Discovered via a real
+/// `dEQP-VK.renderpasses.dynamic_rendering.*.unused_clear_attachments.*`
+/// re-run, whose shared pipeline clears every one of its declared
+/// attachments each draw regardless of which the fragment stage actually
+/// writes.
+TEST_F(DrawTest, ClearAttachmentsSkipsUnusedColorAttachment) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+
+  VkFormat ColorFormats[2] = {VK_FORMAT_R8G8B8A8_UNORM,
+                              VK_FORMAT_R8G8B8A8_UNORM};
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 2;
+  Rendering.pColorAttachmentFormats = ColorFormats;
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  // Two attachments declared, but the fragment stage (RedFragmentSource)
+  // only ever writes location 0 -- legal per (roadmap H11)'s
+  // `validateStageInterfaces` fix above.
+  VkPipelineColorBlendAttachmentState BlendAttachments[2]{};
+  BlendAttachments[0].colorWriteMask = 0xF;
+  BlendAttachments[1].colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 2;
+  Blend.pAttachments = BlendAttachments;
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.pNext = &Rendering;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+
+  VkRenderingAttachmentInfo ColorAttachments[2]{};
+  ColorAttachments[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachments[0].imageView = ColorView;
+  ColorAttachments[0].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  ColorAttachments[0].clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  // Present (counts against `colorAttachmentCount`) but unused.
+  ColorAttachments[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachments[1].imageView = VK_NULL_HANDLE;
+  ColorAttachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  RenderingInfo.renderArea = {{0, 0}, {Extent, Extent}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 2;
+  RenderingInfo.pColorAttachments = ColorAttachments;
+
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+
+  // Clear both the real (0) and unused (1) attachment; the latter must be a
+  // silent no-op rather than an error/crash.
+  VkClearAttachment Clears[2]{};
+  Clears[0].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  Clears[0].colorAttachment = 0;
+  Clears[0].clearValue.color = {{0.0f, 0.0f, 1.0f, 1.0f}};
+  Clears[1].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  Clears[1].colorAttachment = 1;
+  Clears[1].clearValue.color = {{0.0f, 1.0f, 0.0f, 1.0f}};
+  VkClearRect Rect{};
+  Rect.rect = {{0, 0}, {2, 2}};
+  Rect.layerCount = 1;
+  vkCmdClearAttachments(Cmd, 2, Clears, 1, &Rect);
+
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Inside the cleared rectangle: blue (attachment 0's clear); outside it:
+  // the draw's red. No crash from attachment 1's clear.
+  EXPECT_EQ(texel(0, 0)[2], 0xFF);
+  EXPECT_EQ(texel(0, 0)[0], 0x00);
+  EXPECT_EQ(texel(3, 3)[0], 0xFF);
+  EXPECT_EQ(texel(3, 3)[2], 0x00);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// `DepthState::TestEnable`/`WriteEnable`: a nearer draw's depth write
 /// (`CompareOp::Less`) rejects a farther draw covering the same pixels, so
 /// the nearer draw's color survives -- the completion scenario's own "depth"
