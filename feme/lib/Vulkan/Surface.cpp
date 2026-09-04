@@ -17,8 +17,8 @@
 
 #if FEME_VULKAN_HAVE_XCB
 #define VK_USE_PLATFORM_XCB_KHR
-#include <xcb/xcb.h>
 #include <vulkan/vulkan_xcb.h>
+#include <xcb/xcb.h>
 #endif
 
 using namespace feme::vulkan;
@@ -136,12 +136,22 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
   // conventional answer every real headless-surface implementation gives
   // since there is no real window to report a size from. A real xcb
   // window (roadmap H10a) does have a genuine current size, so report
-  // that live instead when one is available.
-  if (std::optional<VkExtent2D> Extent =
-          currentSurfaceExtent(fromHandle<Surface>(surface)))
+  // that live instead -- and (roadmap H10g) a *failure* to query it is a
+  // real, spec-legal `VK_ERROR_SURFACE_LOST_KHR` (e.g. a lost X
+  // connection), never the same "undefined size" sentinel: conflating the
+  // two previously let a real geometry-query failure masquerade as a
+  // successful, plausible-looking capabilities query, silently deferring
+  // the actual failure to a later `vkCreateSwapchainKHR` rejection with no
+  // diagnostic of its own (see `currentSurfaceExtent`'s own comment).
+  Surface *Surf = fromHandle<Surface>(surface);
+  if (Surf->kind() == SurfaceKind::Xcb) {
+    std::optional<VkExtent2D> Extent = currentSurfaceExtent(Surf);
+    if (!Extent)
+      return VK_ERROR_SURFACE_LOST_KHR;
     Caps.currentExtent = *Extent;
-  else
+  } else {
     Caps.currentExtent = {UINT32_MAX, UINT32_MAX};
+  }
   Caps.minImageExtent = {1, 1};
   Caps.maxImageExtent = {Info.Properties.limits.maxImageDimension2D,
                          Info.Properties.limits.maxImageDimension2D};

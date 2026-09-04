@@ -103,13 +103,21 @@ private:
 /// connection), for `vkQueuePresentKHR` to report as
 /// `VK_ERROR_SURFACE_LOST_KHR`.
 bool presentToSurface(Surface *Surf, const void *PixelData, uint32_t Width,
-                     uint32_t Height, bool SwapRedBlue);
+                      uint32_t Height, bool SwapRedBlue);
 
 /// `Surf`'s real backing window's current size, queried live (not
 /// cached) -- used by `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` to report
 /// a real `currentExtent` instead of headless's `{UINT32_MAX, UINT32_MAX}`
-/// sentinel. `std::nullopt` for a non-`Xcb`-kind surface, or if the query
-/// itself fails.
+/// sentinel. `std::nullopt` means two genuinely different things
+/// depending on `Surf->kind()`, which callers must not conflate (roadmap
+/// H10g): for a non-`Xcb`-kind surface it means "not applicable" (headless
+/// has no real window to query, and the caller should report the
+/// `{UINT32_MAX, UINT32_MAX}` sentinel instead); for an `Xcb`-kind surface
+/// it means the live geometry query itself failed (e.g. a lost X
+/// connection) -- a real, spec-legal `VK_ERROR_SURFACE_LOST_KHR` condition
+/// the caller must report as such, *not* silently degrade into the same
+/// headless sentinel (a real window's surface never has an "undefined"
+/// size the way a headless one legitimately does).
 std::optional<VkExtent2D> currentSurfaceExtent(Surface *Surf);
 
 } // namespace feme::vulkan
