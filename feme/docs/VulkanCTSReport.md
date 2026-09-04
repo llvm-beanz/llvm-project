@@ -23817,3 +23817,72 @@ merge, reuse of the existing monolithic `compileGraphicsPipeline`, and
 the first real feature/extension advertisement plus CTS re-run) remain
 open, each depending on the previous, per H29's own now-detailed
 breakdown.
+
+## Roadmap H29b: measured impact (object model for a partial "library" pipeline, no CTS delta expected)
+
+**Context.** H29a recognized `VK_EXT_graphics_pipeline_library`'s
+feature/properties structs one layer above the pipeline-creation surface
+CTS actually gates on. This row is the first step through that surface
+itself: recognizing `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` and a chained
+`VkGraphicsPipelineLibraryCreateInfoEXT` in the real
+`vkCreateGraphicsPipelines` entry point, and capturing (deep-copying) the
+relevant sub-state for whichever of the four
+`VkGraphicsPipelineLibraryFlagBitsEXT` parts a call names, into a new
+`GraphicsPipelineLibrary` object -- not yet compiled or linkable into
+anything executable (that is H29c's own job).
+
+**Change.** `GraphicsPipeline.h` adds `GraphicsPipelineLibraryState` (one
+struct per captured part: shader stages, vertex input, viewport/
+rasterization/tessellation, depth/stencil, color-blend/multisample state,
+each deep-copied with every nested `pNext` chain deliberately nulled
+rather than chased) and `GraphicsPipelineLibrary : public Pipeline`
+(a new `Pipeline::Kind::GraphicsLibrary`). `GraphicsPipeline.cpp`'s
+`captureGraphicsPipelineLibraryState` builds one from a real
+`VkGraphicsPipelineCreateInfo`, and `vkCreateGraphicsPipelines` now
+branches to it whenever `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` is set,
+instead of running the full `compileGraphicsPipeline` path (which
+requires a pipeline's complete state present all at once). Introducing a
+third `Pipeline::Kind` exposed a real, tightly-coupled hazard in
+`CommandBuffer.cpp`'s existing bind-replay code, which assumed only
+`Graphics`/`Compute` could ever reach it -- fixed by having
+`vkCmdBindPipeline` refuse to record a bind of a `GraphicsLibrary` object
+at all (a pipeline library is never a legal bind target per the spec
+regardless; only consumed later via `VkPipelineLibraryCreateInfoKHR::
+pLibraries` at another pipeline's own creation time).
+
+**Verification.** 7 new unit tests in `GraphicsPipelineTest.cpp`: the
+library-vs-pipeline `Kind` distinction, each of the four flag bits'
+own state capture verified independently (confirming no part leaks
+another part's own fields), a deep-copy check (mutating the
+application's own arrays after `vkCreateGraphicsPipelines` returns does
+not perturb the already-captured state), and the new
+`vkCmdBindPipeline` rejection (does not crash, does not record a bind).
+`ninja check-feme` (ccache + assertions, `build2/`) passes in full:
+2499/2558 (59 pre-existing `Unsupported`, 0 `Failed`), up 7 tests from
+H29a's own 2492/2551 baseline, 0 regressions.
+
+**CTS impact.** A real `deqp-vk` re-run (correct ICD confirmed via
+`vulkaninfo --summary`, `deviceName = FeMe CPU Vulkan Device`) confirms
+the expected zero delta directly:
+- `dEQP-VK.pipeline.pipeline_library.graphics_library.*` (836 cases):
+  12 passed / 139 failed / 685 not supported -- identical to H29a's own
+  recorded figures. The extension is still unadvertised, so CTS's own
+  device-construction-type gate continues to reject every case that
+  actually needs `VK_EXT_graphics_pipeline_library`, unchanged by this
+  row's new (but still unreachable from any real application) code path.
+- `dEQP-VK.api.info.*` (10,486 cases): 5,242 passed / 720 failed / 4,524
+  not supported -- identical to H29a's own recorded figures, confirming
+  no regression from this row's own change.
+
+This recognition path is real and reachable through the actual
+`vkCreateGraphicsPipelines` entry point (not hidden behind a
+test-only helper), exactly like H21b's transform-feedback entry points
+before advertisement -- but since `VK_EXT_graphics_pipeline_library`
+itself is still not advertised (H29a), no real application can reach it
+without bypassing `vkCreateDevice`'s own extension-name validation,
+so a zero CTS delta is the only honest, correct outcome for this row.
+
+**Disposition.** Roadmap H29b closed (struck through in `Roadmap.md`);
+H29c (link-time merge, reuse of `compileGraphicsPipeline`, first real
+feature/extension advertisement, and the CTS re-run that finally moves
+real cases out of `NotSupported`) remains open.

@@ -2016,6 +2016,28 @@ VulkanCTSReport.md for the real `dEQP-VK.tessellation.winding.*` numbers,
 and roadmap H4j for a distinct, smaller rasterizer-precision defect that
 run surfaced next.
 
+**Status (roadmap H29a/H29b): `VK_EXT_graphics_pipeline_library`
+recognition, still unadvertised.** A `VkGraphicsPipelineCreateInfo` with
+`VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` set, plus a chained
+`VkGraphicsPipelineLibraryCreateInfoEXT`, no longer runs the monolithic
+path above at all: `vkCreateGraphicsPipelines` instead produces a
+`GraphicsPipelineLibrary` (`GraphicsPipeline.h`/`.cpp`, a new
+`Pipeline::Kind::GraphicsLibrary` distinct from the table's own
+`VkPipeline` row), which deep-copies each requested
+`VkGraphicsPipelineLibraryFlagBitsEXT` part's own sub-state verbatim --
+not yet interpreted, compiled, or linkable into anything executable.
+`vkGetPhysicalDeviceFeatures2`/`Properties2` likewise recognize this
+extension's feature/properties structs, reporting every field honestly
+unimplemented. The extension itself stays unadvertised throughout:
+unlike this project's usual "wire the surface, advertise once it's
+useful" incremental pattern (e.g. `VK_EXT_transform_feedback`'s H21a/
+H21b), CTS's own device-construction-type gate
+(`vkPipelineConstructionUtil.cpp`) checks only extension advertisement,
+never a feature bit or which pipeline-creation code paths exist, so
+there is no safe intermediate point to advertise before real library
+linking (roadmap H29c) exists and is verified correct. See "Roadmap
+H29a/H29b: measured impact" in `VulkanCTSReport.md`.
+
 ### Draw commands and vertex data
 
 The command set from "Command Buffers" grows by:
