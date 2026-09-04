@@ -3822,13 +3822,25 @@ public:
   }
 };
 
-/// Converts a `spirv.ImageSampleImplicitLod` with no modifiers into the
-/// `llvm.spv.resource.sample` intrinsic call LLVM's SPIRV backend selects
-/// `OpSampledImage`+`OpImageSampleImplicitLod` from -- see
-/// `llvm/test/CodeGen/SPIRV/hlsl-resources/Sample.ll`. Bias/gradient/LOD-
-/// clamped/comparison/gather variants (which need additional operands this
-/// pattern does not supply) are not yet covered -- see the "Known gap" note
-/// in the SPIR-V section of feme/docs/Design.md.
+/// Converts a `spirv.ImageSampleImplicitLod` with any combination of `Bias`,
+/// `ConstOffset`, and `MinLod` (a min-LOD clamp, HLSL's `Texture2D::Sample`'s
+/// own optional trailing `clamp` argument) into the
+/// `llvm.spv.resource.sample`/`llvm.spv.resource.samplebias` (or their
+/// `.clamp` siblings, once `MinLod` is present) intrinsic call LLVM's SPIRV
+/// backend selects `OpSampledImage`+`OpImageSampleImplicitLod` from -- see
+/// `llvm/test/CodeGen/SPIRV/hlsl-resources/{Sample,SampleBias}.ll`'s own
+/// `res2`/`res3` cases for the `.clamp` intrinsics' exact operand order
+/// (image, sampler, coord, [bias,] offset, clamp). The backend itself
+/// decides whether to actually emit the `ConstOffset` image operand,
+/// folding it away when the offset constant is all-zero (independently of
+/// whether `MinLod` is also present, see `Sample.ll`'s own `res2` case: a
+/// zero offset with a non-zero clamp still emits `MinLod` alone, not
+/// `ConstOffset|MinLod`), so this pattern can always thread the real
+/// offset/bias/clamp values through uniformly instead of hardcoding a
+/// default only when each operand bit was absent. Roadmap L22: gradient/
+/// comparison/gather variants (which need still more operands this pattern
+/// does not yet supply) remain uncovered -- see the "Known gap" note in
+/// the SPIR-V section of `feme/docs/Design.md`.
 class ImageSampleImplicitLodPattern
     : public mlir::SPIRVToLLVMConversion<
           mlir::spirv::ImageSampleImplicitLodOp> {
@@ -3839,8 +3851,30 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::ImageSampleImplicitLodOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (hasImageOperands(Op.getImageOperands()))
+    std::optional<mlir::spirv::ImageOperands> ImageOperandsAttr =
+        Op.getImageOperands();
+    mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
+    if (ImageOperandsAttr)
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+
+    // `Actual` must be a subset of the three bits this pattern understands
+    // (in any combination, including none of them) -- `bitEnumContainsAll`
+    // checks the first argument contains every bit the second has, so this
+    // checks the reverse of its usual "does X have all of Y" reading:
+    // "does the supported mask have every bit `Actual` itself sets".
+    mlir::spirv::ImageOperands SupportedMask =
+        mlir::spirv::ImageOperands::Bias |
+        mlir::spirv::ImageOperands::ConstOffset |
+        mlir::spirv::ImageOperands::MinLod;
+    if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+
+    bool HasBias = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::Bias);
+    bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::ConstOffset);
+    bool HasMinLod = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::MinLod);
 
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
@@ -3859,13 +3893,38 @@ public:
         CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
                          CoordVecTy.getShape(), Rewriter.getI32Type()))
                    : mlir::cast<mlir::Type>(Rewriter.getI32Type());
-    mlir::Value Offset = mlir::LLVM::ConstantOp::create(
-        Rewriter, Loc, OffsetType, Rewriter.getZeroAttr(OffsetType));
 
-    Rewriter.replaceOp(
-        Op,
-        createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.sample",
-                            ResultType, {Image, Sampler, Coordinate, Offset}));
+    // Positional order follows the fixed SPIR-V Image Operands bit order
+    // (`Bias, Lod, Grad, ConstOffset, Offset, ConstOffsets, Sample,
+    // MinLod, ...`, see `SPIRV_BitEnumAttr<"ImageOperands", ...>`): `Bias`
+    // first, then `ConstOffset`, then `MinLod` last, whichever subset is
+    // actually present.
+    mlir::ValueRange OperandArguments = Adaptor.getOperandArguments();
+    size_t Index = 0;
+    mlir::Value Bias = HasBias ? OperandArguments[Index++] : mlir::Value();
+    mlir::Value Offset =
+        HasConstOffset ? OperandArguments[Index++] : mlir::Value();
+    mlir::Value Clamp = HasMinLod ? OperandArguments[Index++] : mlir::Value();
+    if (!Offset)
+      Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
+                                              Rewriter.getZeroAttr(OffsetType));
+
+    llvm::StringRef IntrinsicName;
+    llvm::SmallVector<mlir::Value, 6> Arguments = {Image, Sampler, Coordinate};
+    if (Bias)
+      Arguments.push_back(Bias);
+    Arguments.push_back(Offset);
+    if (Clamp)
+      Arguments.push_back(Clamp);
+    if (Bias)
+      IntrinsicName = Clamp ? "llvm.spv.resource.samplebias.clamp"
+                            : "llvm.spv.resource.samplebias";
+    else
+      IntrinsicName =
+          Clamp ? "llvm.spv.resource.sample.clamp" : "llvm.spv.resource.sample";
+
+    Rewriter.replaceOp(Op, createIntrinsicCall(Rewriter, Loc, IntrinsicName,
+                                               ResultType, Arguments));
     return mlir::success();
   }
 };
