@@ -163,6 +163,46 @@ TEST(SignatureTest, VerifyAcceptsPatchDirectionWithPerPatchFrequency) {
   EXPECT_TRUE(verifySignature(Sig));
 }
 
+TEST(SignatureTest, VerifyAcceptsAnOutputElementWithTransformFeedbackCapture) {
+  EntrySignature Sig;
+  SignatureElement Elt = validInputElement(0);
+  Elt.Direction = SignatureDirection::Output;
+  Elt.XfbBuffer = 0;
+  Elt.XfbOffset = 0;
+  Elt.XfbStride = 16;
+  Sig.Elements.push_back(Elt);
+  EXPECT_TRUE(verifySignature(Sig));
+}
+
+TEST(SignatureTest,
+    VerifyRejectsTransformFeedbackOffsetWithoutABuffer) {
+  EntrySignature Sig;
+  SignatureElement Elt = validInputElement(0);
+  Elt.Direction = SignatureDirection::Output;
+  Elt.XfbOffset = 4;
+  Sig.Elements.push_back(Elt);
+  EXPECT_FALSE(verifySignature(Sig));
+}
+
+TEST(SignatureTest,
+    VerifyRejectsTransformFeedbackStrideWithoutABuffer) {
+  EntrySignature Sig;
+  SignatureElement Elt = validInputElement(0);
+  Elt.Direction = SignatureDirection::Output;
+  Elt.XfbStride = 16;
+  Sig.Elements.push_back(Elt);
+  EXPECT_FALSE(verifySignature(Sig));
+}
+
+TEST(SignatureTest, VerifyRejectsTransformFeedbackBufferOnANonOutputElement) {
+  EntrySignature Sig;
+  SignatureElement Elt = validInputElement(0);
+  Elt.Direction = SignatureDirection::Input;
+  Elt.XfbBuffer = 0;
+  Sig.Elements.push_back(Elt);
+  EXPECT_FALSE(verifySignature(Sig));
+}
+
 TEST(SignatureTest, VerifyAcceptsTessellationAndDomainSystemValues) {
   EntrySignature Sig;
   // A quad domain's 4 outer tessellation factors, one per-patch element with
@@ -261,6 +301,19 @@ EntrySignature makeRichSignature() {
   InputPatch.FromInputPatch = true;
   Sig.Elements.push_back(InputPatch);
 
+  // (Roadmap H21a) Exercises `XfbBuffer`/`XfbOffset`/`XfbStride`'s round
+  // trip: an ordinary vertex-shader output captured to transform-feedback
+  // buffer 1 at byte offset 16, in a buffer whose vertices are 32 bytes
+  // apart.
+  SignatureElement XfbCaptured = validInputElement(5);
+  XfbCaptured.Direction = SignatureDirection::Output;
+  XfbCaptured.SemanticName = "TEXCOORD";
+  XfbCaptured.SemanticIndex = 1;
+  XfbCaptured.XfbBuffer = 1;
+  XfbCaptured.XfbOffset = 16;
+  XfbCaptured.XfbStride = 32;
+  Sig.Elements.push_back(XfbCaptured);
+
   return Sig;
 }
 
@@ -293,6 +346,9 @@ TEST(SignatureTest, SerializeParseRoundTrips) {
     EXPECT_EQ(Got.Stream, Want.Stream);
     EXPECT_EQ(Got.FromInputPatch, Want.FromInputPatch);
     EXPECT_EQ(Got.RowCountIsVertexArray, Want.RowCountIsVertexArray);
+    EXPECT_EQ(Got.XfbBuffer, Want.XfbBuffer);
+    EXPECT_EQ(Got.XfbOffset, Want.XfbOffset);
+    EXPECT_EQ(Got.XfbStride, Want.XfbStride);
   }
 }
 

@@ -10,8 +10,9 @@
 // "Signature reflection" section of feme/docs/FeMeGraphicsDesign.md: a
 // source-independent record of an entry point's input and output signature
 // elements (element ID, direction, location, semantic, system value,
-// component type, shape, interpolation, frequency, stream), a structural
-// verifier for it, and a versioned byte-layout serialization.
+// component type, shape, interpolation, frequency, stream, transform-
+// feedback capture buffer/offset/stride), a structural verifier for it, and
+// a versioned byte-layout serialization.
 //
 // This is roadmap R17. It intentionally stops at the model itself: DXIL's
 // `!dx.entryPoints` rows and SPIR-V's `Input`/`Output` variables are not yet
@@ -259,6 +260,27 @@ struct SignatureElement {
   /// phase produced. Every other stage's `Input` elements leave this false,
   /// since they have only one input source to begin with.
   bool FromInputPatch = false;
+
+  /// (Roadmap H21a) The `VK_EXT_transform_feedback` buffer index this
+  /// `Output`-direction element captures to (SPIR-V's `XfbBuffer`
+  /// decoration), or `std::nullopt` if the element is not captured at all
+  /// -- the common case for every element until a later roadmap H21 row
+  /// wires actual capture behavior. Only meaningful for `Output`; every
+  /// other direction leaves this `std::nullopt` (see `verifySignature`).
+  std::optional<uint32_t> XfbBuffer;
+  /// The byte offset, within one captured vertex's record in `*XfbBuffer`,
+  /// this element's own captured bytes start at (SPIR-V's plain `Offset`
+  /// decoration, reused here for its transform-feedback meaning rather
+  /// than a struct member's memory layout). Only meaningful when
+  /// `XfbBuffer` has a value.
+  uint32_t XfbOffset = 0;
+  /// The byte stride between consecutive captured vertices' records in
+  /// `*XfbBuffer` (SPIR-V's `XfbStride` decoration) -- the same value for
+  /// every element captured to the same buffer, in a real shader, but
+  /// recorded per-element here rather than per-buffer to match how SPIR-V
+  /// itself repeats the decoration on every one of that buffer's captured
+  /// variables. Only meaningful when `XfbBuffer` has a value.
+  uint32_t XfbStride = 0;
 };
 
 /// One entry point's whole signature: its input, output, patch-input and
@@ -278,9 +300,13 @@ struct EntrySignature {
 ///  - `BitWidth` is one of the widths FeMe's component types support (8,
 ///    16, 32, 64);
 ///  - `SemanticIndex` is 0 when `SemanticName` is empty, since an index
-///    with no accompanying name is not meaningful; and
+///    with no accompanying name is not meaningful;
 ///  - `Direction` and `Frequency` agree: `PatchInput`/`PatchOutput`
-///    elements are `PerPatch`, and `Input`/`Output` elements are not.
+///    elements are `PerPatch`, and `Input`/`Output` elements are not; and
+///  - (Roadmap H21a) `XfbOffset`/`XfbStride` are 0 when `XfbBuffer` is
+///    `std::nullopt`, since neither is meaningful without it, and
+///    `XfbBuffer` is only ever set on an `Output`-direction element (the
+///    only direction `VK_EXT_transform_feedback` ever captures from).
 ///
 /// Every violation found is reported to \p ErrOS (if non-null); returns
 /// whether \p Sig satisfied every one of them.
@@ -293,8 +319,9 @@ bool verifySignature(const EntrySignature &Sig,
 ///
 /// Version 2 appends `SignatureElement::FromInputPatch`. Version 3 appends
 /// `SignatureElement::Index`. Version 4 appends
-/// `SignatureElement::RowCountIsVertexArray`.
-constexpr uint32_t SignatureAbiVersion = 4;
+/// `SignatureElement::RowCountIsVertexArray`. Version 5 appends
+/// `SignatureElement::XfbBuffer`/`XfbOffset`/`XfbStride` (roadmap H21a).
+constexpr uint32_t SignatureAbiVersion = 5;
 
 /// Serializes \p Sig to the byte layout `parseSignature` reads back: a
 /// little-endian `SignatureAbiVersion`, the element count, then each

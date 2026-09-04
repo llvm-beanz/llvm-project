@@ -117,6 +117,32 @@ bool checkDirectionFrequency(const EntrySignature &Sig, raw_ostream *ErrOS) {
   return Ok;
 }
 
+/// (Roadmap H21a) `XfbOffset`/`XfbStride` are only meaningful alongside a
+/// present `XfbBuffer`, and `XfbBuffer` is only ever set on an `Output`
+/// element -- the only direction `VK_EXT_transform_feedback` ever captures
+/// from.
+bool checkXfbCapture(const EntrySignature &Sig, raw_ostream *ErrOS) {
+  bool Ok = true;
+  for (const SignatureElement &Elt : Sig.Elements) {
+    if (!Elt.XfbBuffer) {
+      if (Elt.XfbOffset != 0 || Elt.XfbStride != 0) {
+        report(ErrOS, "element " + Twine(Elt.ElementID) +
+                          ": transform-feedback offset/stride are set "
+                          "without a transform-feedback buffer");
+        Ok = false;
+      }
+      continue;
+    }
+    if (Elt.Direction != SignatureDirection::Output) {
+      report(ErrOS, "element " + Twine(Elt.ElementID) +
+                        ": transform-feedback buffer is only meaningful on "
+                        "an output element");
+      Ok = false;
+    }
+  }
+  return Ok;
+}
+
 } // namespace
 
 bool feme::verifySignature(const EntrySignature &Sig, raw_ostream *ErrOS) {
@@ -129,6 +155,7 @@ bool feme::verifySignature(const EntrySignature &Sig, raw_ostream *ErrOS) {
   Ok = checkBitWidth(Sig, ErrOS) && Ok;
   Ok = checkSemanticIndex(Sig, ErrOS) && Ok;
   Ok = checkDirectionFrequency(Sig, ErrOS) && Ok;
+  Ok = checkXfbCapture(Sig, ErrOS) && Ok;
   return Ok;
 }
 
@@ -138,8 +165,10 @@ bool feme::verifySignature(const EntrySignature &Sig, raw_ostream *ErrOS) {
 /// semantic-name length (the tail's own count), semantic index, system
 /// value, component type, bit width, first component, component count, row
 /// count, interpolation, frequency, stream, from-input-patch flag,
-/// row-count-is-vertex-array flag.
-constexpr size_t NumFixedFieldsPerElement = 18;
+/// row-count-is-vertex-array flag, has-transform-feedback-buffer flag,
+/// transform-feedback buffer, transform-feedback offset, transform-feedback
+/// stride.
+constexpr size_t NumFixedFieldsPerElement = 22;
 
 std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
   size_t TotalSemanticBytes = 0;
@@ -182,6 +211,10 @@ std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
     WriteNext(Elt.Stream);
     WriteNext(Elt.FromInputPatch ? 1u : 0u);
     WriteNext(Elt.RowCountIsVertexArray ? 1u : 0u);
+    WriteNext(Elt.XfbBuffer.has_value() ? 1u : 0u);
+    WriteNext(Elt.XfbBuffer.value_or(0u));
+    WriteNext(Elt.XfbOffset);
+    WriteNext(Elt.XfbStride);
   }
   assert(P == Bytes.data() + Bytes.size() &&
          "computed size did not match bytes actually written");
@@ -357,6 +390,26 @@ Expected<EntrySignature> feme::parseSignature(ArrayRef<uint8_t> Bytes) {
     if (!RowCountIsVertexArray)
       return RowCountIsVertexArray.takeError();
     Elt.RowCountIsVertexArray = *RowCountIsVertexArray != 0;
+
+    Expected<uint32_t> HasXfbBuffer =
+        ReadField("has-transform-feedback-buffer flag");
+    if (!HasXfbBuffer)
+      return HasXfbBuffer.takeError();
+    Expected<uint32_t> XfbBuffer = ReadField("transform-feedback buffer");
+    if (!XfbBuffer)
+      return XfbBuffer.takeError();
+    Elt.XfbBuffer = *HasXfbBuffer != 0 ? std::optional<uint32_t>(*XfbBuffer)
+                                       : std::nullopt;
+
+    Expected<uint32_t> XfbOffset = ReadField("transform-feedback offset");
+    if (!XfbOffset)
+      return XfbOffset.takeError();
+    Elt.XfbOffset = *XfbOffset;
+
+    Expected<uint32_t> XfbStride = ReadField("transform-feedback stride");
+    if (!XfbStride)
+      return XfbStride.takeError();
+    Elt.XfbStride = *XfbStride;
 
     Sig.Elements.push_back(std::move(Elt));
   }
