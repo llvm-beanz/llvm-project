@@ -58957,3 +58957,113 @@ multi-stream capture reusing the existing `GeometryStreamBuilder` (H21e,
 depends on H21c), and the GPL-gated CTS sub-groups that no amount of
 transform-feedback work alone can close (H21f, depends on H21c, mostly
 there to document the dependency rather than imply real near-term work).
+
+# H21b: wiring VK_EXT_transform_feedback's entry points and pipeline surface
+
+Picked this row up as the next real prerequisite in the H-series chain,
+following directly from H21a's already-committed reflection-field
+plumbing. The milestone text was explicit about scope: register six new
+commands and recognize one new pNext struct during pipeline creation,
+but do **not** advertise the extension or implement actual buffer-write
+capture yet -- both deferred to H21c.
+
+**The entry-point/extension-advertisement decoupling was the key design
+question.** `feme`'s dispatch table (`ProcAddr.cpp`'s `findEntry`) is a
+static, unconditional-of-enabled-extensions name lookup built from
+`vk_gen_entrypoints.py`'s generated `VulkanEntrypoints.inc`. Whether a
+command resolves through `vkGetDeviceProcAddr` is controlled entirely by
+`SUPPORTED_EXTENSIONS` (which extensions' commands the generator even
+reads from `vk.xml`) and `ImplementedEntrypoints.txt` (which of those
+get a real function pointer). This is completely separate from
+`feme::vulkan::getSupportedDeviceExtensions()`, which drives
+`vkEnumerateDeviceExtensionProperties` and what `vkCreateDevice` accepts
+as an `enabledExtensionNames` entry. `SUPPORTED_EXTENSIONS`'s own doc
+comment asserts an invariant ("every name here must also appear in
+`getSupportedDeviceExtensions`") that every existing entry upholds --
+but this row's own milestone text explicitly forbids doing that for
+`VK_EXT_transform_feedback` yet. Rather than silently violate the
+invariant, I added `VK_EXT_transform_feedback` to `SUPPORTED_EXTENSIONS`
+with a long, explicit comment documenting the deliberate, temporary
+exception and its own rationale: CTS's `deqp-vk` gates every
+`dEQP-VK.transform_feedback.*` case via `context.requireDeviceFunctionality
+("VK_EXT_transform_feedback")`, which checks
+`vkEnumerateDeviceExtensionProperties`, not whether
+`vkGetDeviceProcAddr` happens to resolve a non-null pointer for some
+command. I didn't just reason through this -- I ran a real
+`dEQP-VK.transform_feedback.*` re-run (133,719 cases) after landing the
+code and confirmed 0 passed / 0 failed / 133,719 not supported, byte-
+for-byte identical to H21a's own baseline. The deviation is safe, not
+just plausible.
+
+**`vkCmdEndTransformFeedbackEXT` always writing 0 to its counter buffers
+is deliberately correct, not a stub.** Since nothing anywhere in this
+ICD yet writes to a transform-feedback buffer (that's H21c's job), the
+truthful captured-byte-count for any active begin/end scope really is
+always 0. This mirrors a pattern I've now seen repeated across H8c/H21a:
+when a feature is genuinely unwired, report the truthful current state
+rather than fake a plausible-looking placeholder value. I added a unit
+test (`TransformFeedbackEndWritesZeroToCounterBuffer`) that seeds a
+counter buffer with a sentinel (`0xDEADBEEF`) before the begin/end scope
+and confirms it reads back as exactly 0 afterward -- this is the kind of
+test that would catch a regression to "leave the buffer untouched"
+just as easily as it confirms the currently-correct "write 0" behavior.
+
+**Field reuse in `RecordedCommand`.** Rather than add a pile of new
+dedicated fields, I followed the codebase's established convention of
+reusing existing same-typed fields across `Kind`s that are never
+simultaneously live. `DrawIndirectByteCount` reuses `InstanceCount`/
+`FirstInstance` from `Draw`, `SrcBuffer`/`DstOffset` from the copy-
+buffer family (distinct from `IndirectBuffer`, which no
+`DrawIndirectByteCount` command touches), `FillData` for
+`counterOffset`, and `DstSize` for `vertexStride` -- each reuse
+documented inline so a future reader isn't left guessing why a
+draw-shaped command touches fields with copy/fill-shaped names. The
+three genuinely new fields (`XfbBuffers`/`XfbBufferOffsets`/
+`XfbBufferSizes`) are shared across `BindTransformFeedbackBuffers`,
+`BeginTransformFeedback`, and `EndTransformFeedback`, since all three
+commands are shaped as "a list of buffers plus offsets" and never
+overlap in a single recorded command.
+
+**A near-miss: I accidentally reverted my own in-progress work.**
+Partway through this session I ran `clang-format -i` across all five
+files I'd changed, expecting it to touch only my new lines. Instead it
+reformatted large unrelated spans in every file (a `.clang-format` /
+clang-format-version mismatch against however the tree was originally
+formatted), which I correctly identified as a violation of "don't
+modify unrelated code" -- so I ran `git checkout --` on all five files
+to undo it. That command reverted *everything* uncommitted in those
+files, not just the clang-format pass, since none of my actual H21b
+edits had been committed yet. I had the full diffs for every file
+visible earlier in this same conversation's tool output, so I was able
+to reconstruct every edit byte-for-byte from those captured diffs
+rather than starting over from the design phase -- but the lesson is
+worth recording plainly: **never run a broad `git checkout --` (or any
+other file-reverting command) on files with real uncommitted work
+without first committing or stashing**, even when the immediate goal is
+just to undo one specific bad command. A targeted `clang-format
+--lines=start:end` restricted to just the new hunks (which I used
+successfully afterward, once I'd confirmed via `git diff -U0`'s hunk
+headers exactly which lines were new) is the safer tool for this
+job, and produced a 2-line diff instead of a 400+-line one.
+
+**Verification.** `ninja check-feme` against the known-good `build2/`
+tree (the primary `build/` tree hit an unrelated, pre-existing
+`-mno-outline-atomics`/`clang -target unknown` build break that a prior
+session had already flagged as out of scope for a `feme`-only row) --
+2482/2541 passing (59 pre-existing `Unsupported`, 0 `Failed`, +7 new
+tests, 0 regressions). Then a real `deqp-vk` re-run of
+`dEQP-VK.transform_feedback.*` (0/0/133719, unchanged) and
+`dEQP-VK.api.info.*` (5241/720/4525, unchanged) confirmed no CTS
+regression from a row that touches command-buffer recording/replay and
+graphics-pipeline creation -- surface area broad enough that a silent
+regression elsewhere felt worth explicitly ruling out rather than
+assuming away.
+
+Four commits: pipeline-creation surface (`Pipeline.h`/
+`GraphicsPipeline.cpp` + its own test), entry points (`CommandBuffer.
+{h,cpp}`/`EntryPoints.h`/`ImplementedEntrypoints.txt`/
+`vk_gen_entrypoints.py` + the lit-test fixture update + their own
+tests -- landed together since the generator change is required for the
+new commands to even appear in the dispatch table), docs (`Roadmap.md`
+closure + `VulkanCTSReport.md` measured-impact section), and this
+thoughts entry.
