@@ -37,30 +37,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H10i or other prerequisites blocking the H-series milestones?
+Can you work on H10e or other prerequisites blocking the H-series milestones?
 
-> **`vkAcquireNextImage2KHR` is entirely unimplemented**, discovered by H10f's
-> own real re-run once its matrix-arithmetic fix let
-> `dEQP-VK.wsi.xcb.swapchain.render.basic2`/`2swapchains2` (and, by the same
-> root cause, `10swapchains2`, already separately blocked at swapchain creation
-> by H10g) clear pipeline creation and reach an acquire call using this entry
-> point for the first time. Not a graceful "unsupported" rejection: `gdb`'s own
-> backtrace shows a genuine `SIGSEGV` at address `0x0`, called directly from
-> `vkt::wsi::multiSwapchainRenderTest<AcquireNextImage2Wrapper>`, meaning this
-> ICD's own `vkGetDeviceProcAddr`/dispatch-table plumbing returns a null
-> function pointer for this entry point rather than a real implementation, and
-> CTS calls through it unconditionally once `VkAcquireNextImageInfoKHR`-based
-> acquire is exercised (this ICD's advertised `apiVersion = VK_API_VERSION_1_4`
-> obligates implementing this core-1.1 command regardless, per the same "every
-> core command this ICD's own version claims must at least be present" precedent
-> H10c's `vkEnumeratePhysicalDeviceGroups` family already established). Needs:
-> (1) implementing `vkAcquireNextImage2KHR` itself (`Swapchain.cpp`, likely a
-> thin wrapper around the existing
-> `vkAcquireNextImageKHR`/`Swapchain::acquireNextImage` logic, since this ICD's
-> single-physical-device-group scope (H10c) makes
-> `VkAcquireNextImageInfoKHR::deviceMask` trivially satisfiable); (2)
-> registering it in `EntryPoints.{h,cpp}`/`ImplementedEntrypoints.txt` so
-> `vkGetDeviceProcAddr` actually resolves it instead of returning null; (3) a
-> real re-run of `basic2`/`2swapchains2` (and `10swapchains2` once H10g's own
-> swapchain-creation gap is separately fixed) to confirm a genuine, non-crashing
-> result
+> **`dEQP-VK.wsi.xcb.swapchain.acquire.too_many` fails**: `"Implementation
+> failed to respond well acquiring too many images with 0 timeout"`, discovered
+> by H10b's own real, now-non-crashing `dEQP-VK.wsi.xcb.*` re-run (the 8th and
+> last of its 8 real failures, and the only one not sharing H10d's own
+> `render.*`-shaped root cause). Needs a real investigation into
+> `vkAcquireNextImageKHR`'s (`Swapchain.cpp`) own handling of a zero-timeout
+> acquire once every swapchain image is already acquired/unavailable -- CTS
+> expects a specific, spec-defined error response (most likely `VK_NOT_READY`,
+> the documented zero-timeout-and-nothing-available result) that this ICD's
+> current logic does not produce
