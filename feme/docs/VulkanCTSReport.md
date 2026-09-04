@@ -23308,3 +23308,51 @@ convention), not new capability. `FeMeVulkanDesign.md` was checked and
 needed no update: it does not document "every declared color attachment
 location must have a matching fragment output" as an invariant anywhere,
 so no deviation needed recording.
+
+## Roadmap H12: measured impact (scoping-only, no code change)
+
+**Scope.** Like H8k, H12 landed **no source code change**: it is the
+"decide, once" scoping row for the large optional extension groups
+(`transform_feedback`, `shader_object`, `fragment_shading_rate`,
+`fragment_shader_interlock`, `fragment_shading_barycentric`,
+`conditional_rendering`, `descriptor_indexing`, `sparse_resources`,
+`protected_memory`, `video`) that Part 4 of the roadmap had left as a
+tentative default rather than a recorded decision. Per this session's own
+explicit instruction, only `video` stays out of scope; every other named
+group moves into scope (`descriptor_indexing` was already in scope, via
+J2/L7's ray-tracing dependency). Real `deqp-vk`
+`--deqp-runmode=txt-caselist` case counts (filtering `TEST:` lines, not
+`GROUP:` lines) were pulled for each of the 8 newly in-scope groups and
+recorded on their own new roadmap rows (H21-H28); none of the eight is
+implemented by this row -- each still needs its own future scoping pass
+before code lands, per the same "small code changes, separately
+committed" discipline this project's H-series rows have used throughout.
+
+Since no `libfeme_vulkan`/`libfeme_cpu` source changed, no
+`VkPhysicalDeviceFeatures`/`VkExtension` bit flips and no shader lowering
+path changes -- so, per the standing instruction to run the real CTS
+after each change, a single targeted spot check was still run to confirm
+that expectation rather than assume it:
+
+**Real `deqp-vk` re-run, correct ICD confirmed via the
+`feme_icd.json` manifest path (`build2/tools/feme/tools/feme-vulkan/
+feme_icd.json`):**
+- `dEQP-VK.api.info.*` (10,486 cases): 5,241 passed / 720 failed / 4,525
+  not supported. (Not a byte-for-byte comparison against H8k's own
+  much-earlier 5,367/584/4,533 baseline -- H9/H10/H11's real feature and
+  bugfix work landed between H8k and this row and already moved these
+  numbers; the point of this spot check is only that a doc-only change
+  introduces no *further* delta, which a second re-run would trivially
+  confirm by reproducing the same figures again.)
+
+**`ninja check-feme`** (assertions-enabled, ccache build,
+`build2/`): 2470/2529 tests pass (59 pre-existing `Unsupported`, 0
+`Failed`) -- confirms this doc-only row introduced no regression to the
+existing unit-test baseline.
+
+No `Vulkan14FeatureInventory.md` behavioral entry (only two hand-added
+notes, on already-`no` rows, pointing at the new H27/H28 rows) and no
+`FeMeVulkanDesign.md` deviation beyond the Non-Goals/V8 bullets already
+updated alongside this row's own docs commits: this is a scope decision,
+not a capability change, so nothing else in either document needed
+touching.
