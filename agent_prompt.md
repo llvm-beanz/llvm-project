@@ -37,19 +37,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29c or other prerequisites blocking the H-series milestones?
+Can you work on H29d or other prerequisites blocking the H-series milestones?
 
-> **Link-time merge and first real CTS re-run**: recognize
-> `VkPipelineLibraryCreateInfoKHR::pLibraries` on a non-library
-> `vkCreateGraphicsPipelines` call, gather every linked library's H29b-stored
-> parts (plus any state provided directly by this call, for a
-> partially-monolithic/partially-library mix), synthesize one complete
-> `VkGraphicsPipelineCreateInfo`-equivalent state, and reuse the existing,
-> unmodified `compileGraphicsPipeline` to produce a real executable pipeline --
-> treating `PIPELINE_CONSTRUCTION_TYPE_LINK_TIME_OPTIMIZED_LIBRARY` and
-> `FAST_LINKED_LIBRARY` identically internally, since a CPU-emulated ICD has no
-> genuine fast-vs-optimized-link tradeoff to honor. Only once this is verified
-> correct does `graphicsPipelineLibrary` flip to `VK_TRUE` and the extension get
-> advertised, followed by a real `dEQP-VK.pipeline.pipeline_library.*` re-run
-> (starting with a large reused-feature sub-group, e.g. `stencil`) to measure
-> actual impact before declaring any part of H29 closed
+> **Inline shader-module creation** (`VkPipelineShaderStageCreateInfo::module ==
+> VK_NULL_HANDLE` with a chained `VkShaderModuleCreateInfo` in `pNext`,
+> legalized for any pipeline stage once `VK_EXT_graphics_pipeline_library` is
+> enabled): not implemented for either the compute (`compileComputePipeline`) or
+> graphics (`compileGraphicsStage`) stage-compilation paths -- both currently
+> reject a null `stage.module` cleanly rather than crashing (the compute-path
+> guard landed as part of H29c's own crash-fix), but neither compiles the inline
+> `VkShaderModuleCreateInfo::pCode` this now-real CTS surface exercises (e.g.
+> `dEQP-VK.pipeline.pipeline_library.graphics_library.misc.non_graphics.shader_module_info_comp`).
+> Needs a shared helper (usable from both the compute and graphics
+> stage-compilation call sites) that, given a `VkPipelineShaderStageCreateInfo`
+> whose `module` is null, walks `pNext` for `VkShaderModuleCreateInfo` and
+> constructs an equivalent in-memory `vulkan::ShaderModule` without requiring a
+> separate `vkCreateShaderModule` call
