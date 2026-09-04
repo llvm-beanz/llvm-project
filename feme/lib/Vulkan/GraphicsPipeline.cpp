@@ -376,7 +376,20 @@ Error validateMeshOrTaskGroupSize(
     const VkPipelineShaderStageCreateInfo &StageInfo,
     llvm::ArrayRef<uint32_t> MaxSize, uint32_t MaxInvocations,
     llvm::StringRef StageName, llvm::StringRef LimitName) {
-  auto *Module = fromHandle<ShaderModule>(StageInfo.module);
+  // (roadmap H29d) `compileGraphicsStage` (called on the same \p StageInfo
+  // before this validation runs) already resolved a null `module` through
+  // an inline `VkShaderModuleCreateInfo` if one was chained; re-resolving
+  // here (rather than threading its already-resolved pointer through) is a
+  // deliberately cheap tradeoff -- an inline module's SPIR-V is small and
+  // copying it twice is harmless, and keeping this function's own
+  // signature independent of that resolution avoids coupling two call
+  // sites that are otherwise unrelated.
+  std::unique_ptr<ShaderModule> InlineModuleStorage;
+  Expected<const ShaderModule *> ModuleOrErr =
+      resolveShaderStageModule(StageInfo, InlineModuleStorage);
+  if (!ModuleOrErr)
+    return ModuleOrErr.takeError();
+  const ShaderModule *Module = *ModuleOrErr;
   std::string EntryPoint = StageInfo.pName ? StageInfo.pName : "main";
   Expected<std::array<uint32_t, 3>> GroupSize =
       resolveComputeGroupSize(Module->words(), EntryPoint, {});
@@ -441,9 +454,6 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
     std::optional<feme::graphics::TessellationState> *OutState = nullptr,
     std::optional<feme::graphics::GeometryState> *OutGeometryState = nullptr,
     std::optional<feme::graphics::MeshState> *OutMeshState = nullptr) {
-  if (!StageInfo.module)
-    return createStringError(inconvertibleErrorCode(),
-                             "graphics pipeline stage has no VkShaderModule");
   // Specialization constants are not resolved for a graphics stage yet: the
   // compute path's own resolution is group-size-specific (GroupSize.h), and
   // nothing here consumes a specialized value. Accepting the structure
@@ -455,7 +465,17 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
                              "specialization constants are not implemented "
                              "for a graphics stage yet");
 
-  auto *Module = fromHandle<ShaderModule>(StageInfo.module);
+  // (roadmap H29d) Resolves `StageInfo.module`, honoring
+  // `VK_EXT_graphics_pipeline_library`'s inline shader-module creation (a
+  // null `module` with a chained `VkShaderModuleCreateInfo`) the same way
+  // the compute path's own `compileComputePipeline` does -- see
+  // `resolveShaderStageModule`'s own comment (Pipeline.h).
+  std::unique_ptr<ShaderModule> InlineModuleStorage;
+  Expected<const ShaderModule *> ModuleOrErr =
+      resolveShaderStageModule(StageInfo, InlineModuleStorage);
+  if (!ModuleOrErr)
+    return ModuleOrErr.takeError();
+  const ShaderModule *Module = *ModuleOrErr;
   std::string DefaultEntryPoint = StageInfo.pName ? StageInfo.pName : "main";
   llvm::StringRef EntryPoint = EntryPointOverride.empty()
                                    ? llvm::StringRef(DefaultEntryPoint)
@@ -2329,7 +2349,13 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   // A cache key needs the whole normalized pipeline description (see
   // "Pipeline Cache" in feme/docs/FeMeVulkanDesign.md): computed here, it
   // can be checked *before* paying for stage compilation, unlike a key
-  // computed from the compiled result.
+  // computed from the compiled result. (roadmap H29d) A stage using inline
+  // shader-module creation (`VkPipelineShaderStageCreateInfo::module ==
+  // VK_NULL_HANDLE`) has no `ShaderModule` handle for `fromHandle` to
+  // resolve, so its `*Module` stays null and the `Cache && ...` condition
+  // below is false for that stage -- caching is simply skipped for such a
+  // pipeline rather than keying on the inline `VkShaderModuleCreateInfo`'s
+  // own bytes, an honest (if not maximally performant) simplification.
   std::optional<PipelineCacheKey> Key;
   if (Cache && (VertexInfo ? VertexModule : MeshModule) &&
       (!FragmentInfo || FragmentModule) &&

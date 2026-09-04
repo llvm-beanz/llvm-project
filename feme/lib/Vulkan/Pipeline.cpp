@@ -115,6 +115,37 @@ findPipelineRobustnessCreateInfo(const void *Next) {
   return nullptr;
 }
 
+/// (roadmap H29d) The `VkShaderModuleCreateInfo` chained onto \p Next, or
+/// `nullptr` if none is -- the same pNext-walk shape `findRequiredSubgroup
+/// Size`/`findPipelineRobustnessCreateInfo` above use. A
+/// `VkPipelineShaderStageCreateInfo` with a null `module` chains this
+/// struct instead once `VK_EXT_graphics_pipeline_library` legalizes
+/// compiling a shader directly at pipeline-creation time.
+const VkShaderModuleCreateInfo *findShaderModuleCreateInfo(const void *Next) {
+  for (const auto *Header = static_cast<const VkBaseInStructure *>(Next);
+       Header; Header = Header->pNext)
+    if (Header->sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)
+      return reinterpret_cast<const VkShaderModuleCreateInfo *>(Header);
+  return nullptr;
+}
+
+/// Validates and copies \p Info's SPIR-V words -- the same check
+/// `vkCreateShaderModule` has always applied (`codeSize` must be nonzero
+/// and a multiple of 4, per the spec's own requirement on that field),
+/// factored out so `resolveShaderStageModule`'s (roadmap H29d) inline-
+/// module path can share it instead of duplicating the copy/validate
+/// logic.
+Expected<std::vector<uint32_t>>
+copyShaderModuleWords(const VkShaderModuleCreateInfo &Info) {
+  if (Info.codeSize == 0 || Info.codeSize % sizeof(uint32_t) != 0)
+    return createStringError(inconvertibleErrorCode(),
+                             "VkShaderModuleCreateInfo::codeSize must be "
+                             "nonzero and a multiple of 4");
+  std::vector<uint32_t> Words(Info.codeSize / sizeof(uint32_t));
+  std::memcpy(Words.data(), Info.pCode, Info.codeSize);
+  return Words;
+}
+
 bool isValidRobustnessBufferBehavior(VkPipelineRobustnessBufferBehavior V) {
   switch (V) {
   case VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT:
@@ -166,6 +197,30 @@ resolvePipelineRobustness(const void *PipelinePNext, const void *StagePNext) {
   Result.VertexInputs = Info->vertexInputs;
   Result.Images = Info->images;
   return Result;
+}
+
+llvm::Expected<const ShaderModule *>
+resolveShaderStageModule(const VkPipelineShaderStageCreateInfo &StageInfo,
+                         std::unique_ptr<ShaderModule> &InlineStorage) {
+  if (StageInfo.module)
+    return fromHandle<ShaderModule>(StageInfo.module);
+
+  // (roadmap H29d) `VK_EXT_graphics_pipeline_library` legalizes a null
+  // `module` with a chained `VkShaderModuleCreateInfo` instead -- compile
+  // it the same way `vkCreateShaderModule` would, but without a separate
+  // `VkShaderModule` object for the application to manage.
+  const VkShaderModuleCreateInfo *Info =
+      findShaderModuleCreateInfo(StageInfo.pNext);
+  if (!Info)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "pipeline stage has a null VkShaderModule and no chained "
+        "VkShaderModuleCreateInfo to compile inline");
+  Expected<std::vector<uint32_t>> Words = copyShaderModuleWords(*Info);
+  if (!Words)
+    return Words.takeError();
+  InlineStorage = std::make_unique<ShaderModule>(std::move(*Words));
+  return InlineStorage.get();
 }
 
 void fillPipelineCreationFeedback(const void *pNext, uint32_t StageCount,
@@ -257,17 +312,15 @@ Expected<feme::Module> importShaderModule(feme::Context &Ctx,
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
     VkDevice, const VkShaderModuleCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkShaderModule *pShaderModule) {
-  if (pCreateInfo->codeSize == 0 ||
-      pCreateInfo->codeSize % sizeof(uint32_t) != 0)
+  Expected<std::vector<uint32_t>> Words = copyShaderModuleWords(*pCreateInfo);
+  if (!Words) {
+    consumeError(Words.takeError());
     return VK_ERROR_INITIALIZATION_FAILED;
-
-  size_t WordCount = pCreateInfo->codeSize / sizeof(uint32_t);
-  std::vector<uint32_t> Words(WordCount);
-  std::memcpy(Words.data(), pCreateInfo->pCode, pCreateInfo->codeSize);
+  }
 
   Allocator Alloc(pAllocator);
   vulkan::ShaderModule *Obj = Alloc.create<vulkan::ShaderModule>(
-      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(Words));
+      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(*Words));
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   *pShaderModule = toHandle<VkShaderModule>(Obj);
@@ -430,26 +483,18 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   if (!CreateInfo.layout)
     return createStringError(inconvertibleErrorCode(),
                              "compute pipeline requires a VkPipelineLayout");
-  // (roadmap H29d) `VK_EXT_graphics_pipeline_library`'s own spec change
-  // legalizes a null `stage.module` with a chained `VkShaderModuleCreate
-  // Info` in `stage.pNext` instead (a shader compiled directly at
-  // pipeline-creation time, with no separate `VkShaderModule` object) --
-  // for *any* pipeline stage, not just a graphics one, once the extension
-  // is enabled. That inline path is not implemented yet (roadmap H29d);
-  // rejecting it cleanly here, the same way `compileGraphicsStage`'s own
-  // `!StageInfo.module` check already does, is a real, tightly-coupled
-  // fix to a crash this ICD's own H29c advertisement newly exposed
-  // (`dEQP-VK.pipeline.pipeline_library.graphics_library.misc.non_
-  // graphics.shader_module_info_comp` -- a *compute* pipeline case gated
-  // on `VK_EXT_graphics_pipeline_library` support alone -- previously
-  // dereferenced this null module unconditionally).
-  if (!CreateInfo.stage.module)
-    return createStringError(
-        inconvertibleErrorCode(),
-        "a null VkPipelineShaderStageCreateInfo::module with an inline "
-        "VkShaderModuleCreateInfo is not implemented yet (roadmap H29d)");
 
-  auto *Module = fromHandle<vulkan::ShaderModule>(CreateInfo.stage.module);
+  // (roadmap H29d) Resolves `stage.module`, honoring
+  // `VK_EXT_graphics_pipeline_library`'s inline shader-module creation
+  // (a null `module` with a chained `VkShaderModuleCreateInfo`) the same
+  // way `compileGraphicsStage`'s own call does -- see that function's
+  // shared helper, `resolveShaderStageModule` (Pipeline.h).
+  std::unique_ptr<vulkan::ShaderModule> InlineModuleStorage;
+  Expected<const vulkan::ShaderModule *> ModuleOrErr =
+      resolveShaderStageModule(CreateInfo.stage, InlineModuleStorage);
+  if (!ModuleOrErr)
+    return ModuleOrErr.takeError();
+  const vulkan::ShaderModule *Module = *ModuleOrErr;
   std::string EntryPoint =
       CreateInfo.stage.pName ? CreateInfo.stage.pName : "main";
 

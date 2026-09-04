@@ -854,6 +854,77 @@ TEST_F(PipelineTest, AcceptsProtectedAccessOnlyCreateFlag) {
   vkDestroyShaderModule(Device, Module, nullptr);
 }
 
+/// (roadmap H29d) `VK_EXT_graphics_pipeline_library` legalizes a null
+/// `VkPipelineShaderStageCreateInfo::module` with a chained
+/// `VkShaderModuleCreateInfo` -- compiling the shader directly from the
+/// stage's own `pNext` chain, with no separate `vkCreateShaderModule` call
+/// at all. Exercises `resolveShaderStageModule`'s inline path through the
+/// real `compileComputePipeline` entry point.
+TEST_F(PipelineTest, CompilesInlineShaderModuleComputePipeline) {
+  std::vector<uint32_t> Words = assembleSPIRV(kEmptyComputeShader);
+  ASSERT_FALSE(Words.empty());
+
+  VkShaderModuleCreateInfo InlineModuleInfo{};
+  InlineModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  InlineModuleInfo.codeSize = Words.size() * sizeof(uint32_t);
+  InlineModuleInfo.pCode = Words.data();
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = VK_NULL_HANDLE;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.stage.pNext = &InlineModuleInfo;
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_NE(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+}
+
+/// A null `module` with no chained `VkShaderModuleCreateInfo` at all (the
+/// pre-`VK_EXT_graphics_pipeline_library` shape) is still rejected cleanly,
+/// not treated as an inline-module request with nothing to compile.
+TEST_F(PipelineTest, RejectsNullModuleWithNoInlineShaderModuleCreateInfo) {
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = VK_NULL_HANDLE;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
+/// An inline `VkShaderModuleCreateInfo` with an invalid `codeSize` (the same
+/// misalignment `ShaderModuleTest.RejectsMisalignedCodeSize` below exercises
+/// for a real `vkCreateShaderModule` call) is rejected the same way through
+/// the inline path, not silently truncated or read out of bounds.
+TEST_F(PipelineTest, RejectsInlineShaderModuleWithMisalignedCodeSize) {
+  uint32_t Code[1] = {0};
+  VkShaderModuleCreateInfo InlineModuleInfo{};
+  InlineModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  InlineModuleInfo.codeSize = 3; // Not a multiple of 4.
+  InlineModuleInfo.pCode = Code;
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = VK_NULL_HANDLE;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.stage.pNext = &InlineModuleInfo;
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
 TEST(ShaderModuleTest, RejectsMisalignedCodeSize) {
   VkShaderModuleCreateInfo CreateInfo{};
   uint32_t Code[1] = {0};

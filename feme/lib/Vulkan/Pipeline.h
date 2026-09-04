@@ -62,6 +62,26 @@ private:
   std::vector<uint32_t> Words;
 };
 
+/// Resolves \p StageInfo's shader module for compilation, honoring
+/// `VK_EXT_graphics_pipeline_library`'s inline shader-module creation
+/// (roadmap H29d): a null `StageInfo.module` with a chained
+/// `VkShaderModuleCreateInfo` in `StageInfo.pNext` compiles an equivalent
+/// in-memory `ShaderModule` without requiring a separate
+/// `vkCreateShaderModule` call, exactly as if the application had made one
+/// -- legal for *any* pipeline stage once the extension is enabled, not
+/// just a graphics-pipeline-library part. On success, returns a pointer to
+/// the resolved module: either \p StageInfo.module's own handle (unowned;
+/// the application's `VkShaderModule` object outlives this call), or
+/// \p InlineStorage (freshly populated and owned by the caller) when the
+/// inline path is taken. Callers must keep \p InlineStorage alive for
+/// exactly as long as the returned pointer is used. Shared by the compute
+/// (`compileComputePipeline`, Pipeline.cpp) and graphics
+/// (`compileGraphicsStage`/`validateMeshOrTaskGroupSize`,
+/// GraphicsPipeline.cpp) stage-compilation paths.
+llvm::Expected<const ShaderModule *>
+resolveShaderStageModule(const VkPipelineShaderStageCreateInfo &StageInfo,
+                         std::unique_ptr<ShaderModule> &InlineStorage);
+
 /// A `VkPipelineLayout`: an ordered list of `VkDescriptorSetLayout`s, plus
 /// the declared push-constant ranges (V3: "map Vulkan push constants onto
 /// [FeMe root constants]", see "Descriptor Model" in

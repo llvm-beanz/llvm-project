@@ -3774,4 +3774,46 @@ TEST_F(GraphicsPipelineTest, RejectsLinkingANonLibraryPipelineHandle) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap H29d) `VK_EXT_graphics_pipeline_library` legalizes a null
+/// `VkPipelineShaderStageCreateInfo::module` with a chained
+/// `VkShaderModuleCreateInfo` for a graphics stage too, not just compute --
+/// exercises `resolveShaderStageModule`'s inline path through
+/// `compileGraphicsStage` (via the real `vkCreateGraphicsPipelines` entry
+/// point), mixed with a normal, separately-created fragment module (the
+/// spec permits mixing inline and handle-based stage modules freely within
+/// one pipeline).
+TEST_F(GraphicsPipelineTest, CompilesInlineShaderModuleVertexStage) {
+  std::vector<uint32_t> VertexWords = assembleSPIRV(VertexSource);
+  ASSERT_FALSE(VertexWords.empty());
+  VkShaderModuleCreateInfo InlineVertexModuleInfo{};
+  InlineVertexModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  InlineVertexModuleInfo.codeSize = VertexWords.size() * sizeof(uint32_t);
+  InlineVertexModuleInfo.pCode = VertexWords.data();
+
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(VK_NULL_HANDLE, Fragment);
+  Stages[0].pNext = &InlineVertexModuleInfo;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_SUCCESS);
+  EXPECT_NE(Handle, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+}
+
+/// A null vertex-stage `module` with no chained `VkShaderModuleCreateInfo`
+/// at all is still rejected cleanly, not treated as an inline-module
+/// request with nothing to compile.
+TEST_F(GraphicsPipelineTest, RejectsNullVertexModuleWithNoInlineShaderInfo) {
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(VK_NULL_HANDLE, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Handle, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+}
+
 } // namespace
