@@ -189,7 +189,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainImagesKHR(
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
-    VkDevice, VkSwapchainKHR swapchain, uint64_t /*timeout*/,
+    VkDevice, VkSwapchainKHR swapchain, uint64_t timeout,
     VkSemaphore semaphore, VkFence fence, uint32_t *pImageIndex) {
   Swapchain *SC = fromHandle<Swapchain>(swapchain);
   if (SC->isRetired())
@@ -200,10 +200,16 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     // No image could ever become available without an intervening
     // `vkQueuePresentKHR` from this same, single calling thread (see
     // Swapchain.h's own comment) -- so, exactly like an unresolvable
-    // semaphore wait in `vkQueueSubmit` (Sync.h), no `timeout` however long
-    // could let this call make progress; report `VK_TIMEOUT` immediately
-    // rather than perform a real, blocking sleep.
-    return VK_TIMEOUT;
+    // semaphore wait in `vkQueueSubmit` (Sync.h), no nonzero `timeout`
+    // however long could let this call make progress; report `VK_TIMEOUT`
+    // immediately rather than perform a real, blocking sleep. A `timeout`
+    // of exactly `0` is a real, spec-distinct case though (roadmap H10e):
+    // it means "poll, don't wait at all", and the spec's own
+    // `vkAcquireNextImageKHR` description reserves `VK_TIMEOUT` for a
+    // *wait* that expired -- a zero-length one never began waiting in the
+    // first place, so it must report `VK_NOT_READY` instead (the
+    // documented "no image is available and waitTime is zero" result).
+    return timeout == 0 ? VK_NOT_READY : VK_TIMEOUT;
 
   *pImageIndex = *Index;
   // Every acquired image is immediately ready: this ICD's queue executes
