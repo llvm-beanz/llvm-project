@@ -217,6 +217,21 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
   return VK_SUCCESS;
 }
 
+// Roadmap H10i: a thin wrapper around `vkAcquireNextImageKHR` above --
+// `pAcquireInfo->deviceMask` is trivially satisfiable, since this ICD's
+// one physical-device group (roadmap H10c) has exactly one member at
+// index 0, so every legal `deviceMask` an application can pass is `0x1`
+// and there is no second, remote device to ever route the acquire to
+// instead.
+VKAPI_ATTR VkResult VKAPI_CALL
+vkAcquireNextImage2KHR(VkDevice device,
+                       const VkAcquireNextImageInfoKHR *pAcquireInfo,
+                       uint32_t *pImageIndex) {
+  return feme::vulkan::vkAcquireNextImageKHR(
+      device, pAcquireInfo->swapchain, pAcquireInfo->timeout,
+      pAcquireInfo->semaphore, pAcquireInfo->fence, pImageIndex);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 vkQueuePresentKHR(VkQueue, const VkPresentInfoKHR *pPresentInfo) {
   // Present's own wait semaphores are consumed the same way

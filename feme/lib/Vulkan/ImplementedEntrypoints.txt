@@ -375,6 +375,9 @@ vkDestroySwapchainKHR
 vkGetSwapchainImagesKHR
 vkAcquireNextImageKHR
 vkQueuePresentKHR
+# Roadmap H10i: vkAcquireNextImageKHR's VkAcquireNextImageInfoKHR-based,
+# device-group-aware sibling (see EntryPoints.h's own comment).
+vkAcquireNextImage2KHR
 # Roadmap H10c: VK_KHR_swapchain's own device-group companion commands
 # (see EntryPoints.h's own comment).
 vkGetDeviceGroupPresentCapabilitiesKHR

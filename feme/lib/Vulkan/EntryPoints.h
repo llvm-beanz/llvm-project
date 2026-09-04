@@ -970,6 +970,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     VkSemaphore semaphore, VkFence fence, uint32_t *pImageIndex);
 VKAPI_ATTR VkResult VKAPI_CALL
 vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo);
+// Roadmap H10i: the `VkAcquireNextImageInfoKHR`-based, device-group-aware
+// sibling of `vkAcquireNextImageKHR` above (promoted to core by Vulkan
+// 1.1) -- discovered missing entirely (a null `vkGetDeviceProcAddr`
+// resolution, not a graceful rejection) by H10f's own real re-run once a
+// real surface let a CTS case reach it for the first time, per the same
+// "every core command this ICD's own advertised version claims must at
+// least be present" precedent `vkEnumeratePhysicalDeviceGroups` above
+// already established.
+VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImage2KHR(
+    VkDevice device, const VkAcquireNextImageInfoKHR *pAcquireInfo,
+    uint32_t *pImageIndex);
 
 // Roadmap H10c: `VK_KHR_swapchain`'s own device-group companion commands
 // (`vk.xml` gates these on VK_KHR_swapchain + VK_VERSION_1_1, both of
