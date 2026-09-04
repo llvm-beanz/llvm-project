@@ -24586,3 +24586,114 @@ not evidence that the fix is inert.
 **Disposition.** Roadmap **H29r closed** (struck through), and **H29k closed**
 with it -- H29r was that row's own sole remaining blocker, and both of H29k's
 root causes are now fixed and measured.
+
+## Roadmap H29l: measured impact
+
+**Row.** *A `graphics-pipeline-library` merge wrongly rejects a fragment stage
+with no color output at all as missing a floating-point output*:
+`"fragment stage has no floating-point output of ... components at location ...
+(SV_Target0)"`, 6 of H29f's own re-run's `graphics_library.*` failures, confined
+to `misc.other.view_index_from_device_index_*`.
+
+**The row's premise was wrong on both counts.** The reduction was a direct read
+of the failing CTS case's own shaders and attachment format
+(`vktPipelineLibraryTests.cpp`'s `VIEW_INDEX_FROM_DEVICE_INDEX` programs):
+
+- The fragment stage is **not** one "with no color output at all". It is
+  `layout(location=0) out uvec4 color;`, written against a
+  `VK_FORMAT_R8G8B8A8_UINT` color attachment -- a fully declared, correctly
+  matched integer pairing.
+- Nothing about it is **graphics-pipeline-library-specific**. The rejecting code
+  (`validateStageInterfaces`, `GraphicsPipeline.cpp`) is not
+  library-merge-aware at all, and the new
+  `GraphicsPipelineTest.AcceptsAnIntegerFragmentOutputForAUintAttachment`
+  reproduces the identical failure on a plain monolithic pipeline.
+
+Nor was it a recurrence of H21j's or H3a's root causes, the row's own two
+suggested family resemblances.
+
+**Two layered bugs.**
+
+1. *The creation-time check was stale relative to H8p.* `validateStageInterfaces`
+   hard-coded `SignatureComponentType::Float` as the only legal fragment-output
+   type at a color location. Roadmap H8p had taught the parallel **draw-time**
+   linkage in `Executor.cpp` to derive the expected type from the attachment's
+   own format (`expectedColorComponentType`), but its creation-time twin was
+   never updated -- so the ICD rejected at creation precisely the shape its own
+   executor had been prepared to draw since H8p.
+
+2. *Deriving the type is not on its own enough.* Fixing only (1) produced a real
+   intermediate CTS re-run in which the diagnostic merely changed wording:
+
+   ```
+   vkCreateGraphicsPipelines: fragment stage has non unsigned-integer output
+   of 1-4 components at location 0 (SV_Target0)
+   ```
+
+   A SPIR-V-sourced stage's signature can never report `UInt` at all. LLVM's
+   integer types are signless, so the SPIR-V -> LLVM conversion drops
+   `OpTypeInt`'s own signedness bit and `CanonicalizeStage.cpp`'s
+   `getComponentType` maps **every** integer to `SInt`; only the DXIL path
+   (`SignatureImport.cpp`, reading a real signature blob) ever distinguishes the
+   two. Exact equality against `expectedColorComponentType`'s `UInt` therefore
+   still rejected every real GLSL/SPIR-V integer-attachment pipeline. H8p's own
+   `ExecutorTest` coverage did not catch this because it hand-builds a `UInt`
+   signature no SPIR-V front end can actually produce.
+
+**Fix**, in two separately-committed steps:
+
+1. *Refactor (no functional change).* Hoisted `expectedColorComponentType` out
+   of `Executor.cpp`'s file scope into `Graphics/Pipeline.h`, next to
+   `AttachmentFormat`, so both check sites share one definition.
+2. *Behavior.* Added `isCompatibleColorComponentType` alongside it, which
+   matches an integer attachment against **either** integer component type while
+   still rejecting a genuine float/integer mismatch (which has no defined
+   reinterpretation), and used it at **both** sites -- the draw-time check had
+   the identical latent bug and would have rejected the same pipeline one step
+   later.
+
+**Unit tests**, one per affected phase of translation:
+
+| Phase | Test |
+|---|---|
+| Draw-time fragment-output linkage | `ExecutorTest.RendersAnSIntFragmentOutputToAUnsignedIntegerAttachment` -- an `SInt` output (the type a *real* SPIR-V stage produces) rendering into an `R16G16_UINT` attachment, complementing H8p's hand-built `UInt` case |
+| Pipeline creation | `GraphicsPipelineTest.AcceptsAnIntegerFragmentOutputForAUintAttachment` |
+| Pipeline creation (negative) | `GraphicsPipelineTest.RejectsAnIntegerFragmentOutputForAUnormAttachment` -- widening must not blind the check to a real float/integer mismatch |
+
+**Regression suite.** `ninja check-feme`: 2578 discovered, 2519 passed, 59
+unsupported, **0 failures**.
+
+**CTS re-run.** (`VK_ICD_FILENAMES` + `FEME_VULKAN_LOG_CREATION_ERRORS=1`)
+
+| Measurement | Before | After |
+|---|---|---|
+| `"fragment stage has no floating-point output ..."` across `graphics_library.*` | 6 | **0** |
+| `misc.other.view_index_from_device_index*` (12 cases) | 6 `Fail` at `vkRefUtil.cpp:37` (creation), 6 not supported | 6 `Fail` at `vkCmdUtil.cpp:338` (**submit**), 6 not supported |
+| `graphics_library.*` (836 cases) | 116/432/288 | 116/432/288 |
+
+The before-figures were measured directly, by stashing only the three changed
+non-test files and relinking `libfeme_vulkan.so`, rather than inferred.
+
+The group's own pass count is deliberately unchanged, and that is the honest
+result: this row's diagnostic is completely eliminated and all 6 cases now clear
+pipeline creation for the first time, but they immediately hit a **distinct and
+larger** gap at draw time --
+
+```
+vkQueueSubmit: vertex/domain stage output -> geometry stage input:
+element 5 has no matching producer element
+```
+
+-- because `gl_ViewIndex` is unimplemented for the tessellation and geometry
+stages entirely. A geometry stage reading it classifies it as an ordinary
+stage-IO input, so `linkStageElements` demands a producer for a value the system
+supplies. Filtering it out of the linkage (as that same call already does for
+`SV_PrimitiveID`/`gl_InvocationID`) is necessary but **not** sufficient and must
+not be done alone: `FemeGeometryInvocation` has no `ViewIndex` field at all, and
+no geometry/hull/domain wrapper lowers a `ViewIndex` input load, so filtering by
+itself would silently return garbage instead of failing loudly. Filed as new row
+**H29s**, with the full chain scoped out.
+
+**Disposition.** Roadmap **H29l closed** (struck through) -- its own named
+diagnostic is fixed, verified by targeted unit tests at both phases and by a
+real CTS re-run. New row **H29s** filed for the gap it uncovered.

@@ -99,7 +99,12 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   tessellation-evaluation stage's own multiview interaction has been
   independently verified yet, roadmap H4's remaining rows;
   `multiviewGeometryShader` itself closed alongside `geometryShader`,
-  roadmap H5e), and a 1.4 conformance claim inherits
+  roadmap H5e -- though roadmap H29l's own CTS re-run has since found that
+  bit over-advertised: a geometry stage can be *created* under multiview,
+  but reading `gl_ViewIndex` inside one fails at draw time, since
+  `FemeGeometryInvocation` carries no `ViewIndex` field and no
+  geometry/hull/domain stage wrapper lowers a `ViewIndex` input load at
+  all, tracked as roadmap H29s), and a 1.4 conformance claim inherits
   every remaining one of them. (`VK_KHR_load_store_op_none`, roadmap
   F13, adds no feature bit of its own -- see its own extension-table row
   below and [VulkanExtensionInventory.md](VulkanExtensionInventory.md).)
