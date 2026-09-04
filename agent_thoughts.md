@@ -61378,3 +61378,71 @@ zero regressions on a case-by-case pass-set diff, against the row's predicted
 the largest single-row gain of the H29 series, from a nine-line change, which
 is a reasonable argument for continuing to spend the reduction effort up front
 rather than pattern-matching a row's own hypothesis into a fix.
+
+# H29g: a hull "cross-control-point read" that was never cross-control-point
+
+This row asked for a design. It said a control point reading a *sibling*
+control point's attributes needs an addressing model the CPU control-point
+phase does not have, and that the fix would have to answer a genuinely hard
+scheduling question about when a sibling's input storage is available. That is
+a real limitation and it really is in `HullWrapper.cpp`. It just was not what
+any of these 257 cases were hitting.
+
+The CTS shader settles it in one read. `basic_tcs` is
+`gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;` and
+`vtxColor[gl_InvocationID] = color[gl_InvocationID];` -- four uses of
+`gl_InvocationID` and not one index that is anything else. So before designing
+anything I instrumented the diagnostic to print the load it was rejecting and
+the self index it was comparing against. `%24` versus `%60`: two different
+lowered reads of the same builtin. SPIR-V loads a builtin once per *use*, and
+`lowerHullStageOps` lowered all of them but kept only the last in a single
+`Value *SelfIndex`. Every attribute load indexed by an earlier read then failed
+a pointer-identity test and was reported as a cross-control-point access.
+
+The diagnostic was not lying about what it checked. It was lying about what
+that check *means*. `ControlPoint == SelfIndex` is a sound test only under an
+assumption nobody wrote down: that a shader reads its invocation ID at most
+once. That assumption is true of hand-written test IR -- including this
+project's own `LowersSelfIndexedStageIOAndBuildsWrapper`, which reads it exactly
+once -- and false of every real shader. The unit test suite had been confirming
+the assumption rather than the behaviour. That is the third time in this series
+a fixture has quietly encoded the bug, after H8p's and H29o's, and it is
+becoming the failure mode I trust least about my own tests.
+
+Worth naming precisely because it is the opposite of the last four rows. Those
+rows offered plausible causes that were wrong. This row offered a *real*
+limitation, correctly described, in the right file, guarding the right code --
+and it was still not the cause, because a second, much dumber bug produced the
+same message. A correct diagnostic string is not evidence that the condition it
+describes occurred. It is only evidence that the predicate the author wrote
+evaluated true.
+
+The second bug is the more interesting one. With the self-index set in place the
+case cleared pipeline creation and died one phase later on a hull-output to
+domain-input shape disagreement. The hull output `vtxColor[3]` had its outer
+array dimension folded into `RowCount`, while the domain input expected the
+single control point it describes. H6j had already found, reasoned about at
+length, and fixed exactly this -- in the same function, twenty lines up, for
+mesh outputs -- and left a comment explaining precisely why an `Output` array
+dimension cannot take the `Input` side's fold-and-flag treatment. Nobody asked
+whether a hull output is the same shape. It is, exactly, and the fix was to
+widen one condition. The lesson I want to keep is that a comment explaining why
+a rule applies to case A is also a specification of every other case the rule
+applies to, and is worth reading as one.
+
+I closed that second bug here rather than filing it. It blocks the same cases,
+it is four lines, and a row whose only content would be "do the obvious thing
+the adjacent comment already argues for" is bookkeeping, not planning. I did
+file H29t, for a pre-existing SIGSEGV inside JIT-compiled code that aborts the
+whole `tessellation.*` run -- I confirmed it reproduces on the pre-fix build
+before filing, because a crash discovered during your own regression sweep is
+guilty until proven innocent. It needs a different technique than everything in
+this series so far: there is no diagnostic string to reduce against, only an
+unsymbolized frame and a corrupt stack.
+
+Measured: `monolithic.cache.*` 516 -> 772 of 774, +256 with zero regressions.
+Together with H29o earlier today that group went 298 -> 772, and its one
+remaining failure is a CTS harness assertion rather than an ICD gap. Both
+sessions' fixes were under ten lines. Both were found by reducing rather than
+by reading, and in both cases the row's own stated hypothesis was the thing
+that would have cost the most time to pursue.
