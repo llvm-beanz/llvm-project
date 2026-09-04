@@ -37,9 +37,17 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H11 or other prerequisites blocking the H-series milestones?
+Can you work on H12 or other prerequisites blocking the H-series milestones?
 
-> **Secondary command buffers inside a render pass**, and the render-pass state
-> inheritance they carry — recorded as part of V7 but independently testable,
-> and a prerequisite for several `renderpasses`/`dynamic_rendering` cases rather
-> than a feature bit of its own
+> **Decide, once, which large optional extension groups stay out of scope**, and
+> record the decision here rather than rediscovering it per run:
+> `transform_feedback` (133,719 cases), `shader_object` (243,853),
+> `fragment_shading_rate`, `fragment_shader_interlock`,
+> `fragment_shading_barycentric`, `conditional_rendering`,
+> `descriptor_indexing`, `sparse_resources`, `protected_memory`, `video`. None
+> is required for a 1.4 submission; `descriptor_indexing` is the one with a real
+> conformance consequence, since J-series ray tracing needs a large part of it
+> (see §1.9.8's J2). Everything else defaults to out of scope, per Part 4
+
+Of the listed optional groups, video is the only one that should be out of scope
+for this effort.
