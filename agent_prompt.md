@@ -37,18 +37,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29b or other prerequisites blocking the H-series milestones?
+Can you work on H29c or other prerequisites blocking the H-series milestones?
 
-> **Object model for a partial ("library") graphics pipeline**: recognize
-> `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` and a chained
-> `VkGraphicsPipelineLibraryCreateInfoEXT` in `vkCreateGraphicsPipelines`, and
-> store each of the four `VkGraphicsPipelineLibraryFlagBitsEXT` parts' (vertex
-> input interface / pre-rasterization shaders / fragment shader / fragment
-> output interface) relevant `VkGraphicsPipelineCreateInfo` sub-state as a real,
-> self-owned (deep-copied, since the app may destroy its own `pCreateInfo`
-> contents once the call returns) partial-pipeline object -- a new
-> `GraphicsPipeline`-adjacent type, not yet linkable into anything executable.
-> Not advertised yet (depends on H29a's own already-flipped-false bits staying
-> false until H29c), so no CTS delta from this row alone; validated by new unit
-> tests calling the recognition path directly (mirroring H21a's own "decoder
-> complete but unwired" precedent)
+> **Link-time merge and first real CTS re-run**: recognize
+> `VkPipelineLibraryCreateInfoKHR::pLibraries` on a non-library
+> `vkCreateGraphicsPipelines` call, gather every linked library's H29b-stored
+> parts (plus any state provided directly by this call, for a
+> partially-monolithic/partially-library mix), synthesize one complete
+> `VkGraphicsPipelineCreateInfo`-equivalent state, and reuse the existing,
+> unmodified `compileGraphicsPipeline` to produce a real executable pipeline --
+> treating `PIPELINE_CONSTRUCTION_TYPE_LINK_TIME_OPTIMIZED_LIBRARY` and
+> `FAST_LINKED_LIBRARY` identically internally, since a CPU-emulated ICD has no
+> genuine fast-vs-optimized-link tradeoff to honor. Only once this is verified
+> correct does `graphicsPipelineLibrary` flip to `VK_TRUE` and the extension get
+> advertised, followed by a real `dEQP-VK.pipeline.pipeline_library.*` re-run
+> (starting with a large reused-feature sub-group, e.g. `stencil`) to measure
+> actual impact before declaring any part of H29 closed
