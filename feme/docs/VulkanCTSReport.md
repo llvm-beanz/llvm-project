@@ -23620,3 +23620,58 @@ topology (`line_list`/`line_list_with_adjacency`/`line_strip`/
 combinations, and both single- and two-draw shapes -- zero regressions,
 zero new failure signatures beyond the two pre-existing, unrelated
 buckets above.
+
+## Roadmap H21e: measured impact (geometry-stage `RasterizationStream` selection and XFB capture)
+
+**Scope.** Generalized `Executor.cpp`'s geometry-stage draw path to real
+N-stream support: a real per-shader `StreamCount` derived from `GSSig`,
+`Combined`/`GeometryResources` sized and constructed with it,
+rasterization consuming `Pipeline.getRasterState().RasterizationStream`
+(`VkPipelineRasterizationStateStreamCreateInfoEXT`, H21b) instead of
+always stream 0, and `VK_EXT_transform_feedback` capture (H21c) extended
+to also run for a geometry stage's own merged, `RasterizationStream`-
+selected output. `geometryStreams` and
+`transformFeedbackRasterizationStreamSelect` both stay `VK_FALSE` --
+neither this row nor any prior one advertises them, so no CTS case can
+legally drive a nonzero `RasterizationStream` or a real multi-stream
+geometry shader today. This is a deliberate scope boundary, not an
+oversight: the MLIR SPIR-V dialect cannot deserialize
+`OpEmitStreamVertex`/`OpEndStreamPrimitive` at all (confirmed via a real
+IR reduction: `spirv-as` a minimal module using either opcode, then
+`feme-translate --import-spirv` on it, reproduces "unhandled opcode
+220"), so no real, CTS-driven multi-stream geometry shader can ever
+reach this code regardless of what feme's own IR-level plumbing
+supports. Broken out as new roadmap row H21l (see below).
+
+**Real `deqp-vk` re-run, correct ICD confirmed via the `feme_icd.json`
+manifest path (`build2/tools/feme/tools/feme-vulkan/feme_icd.json`):**
+- `dEQP-VK.transform_feedback.*` (133,719 cases): **3,162 passed** /
+  1,466 failed / 129,091 not supported -- byte-for-byte identical to the
+  combined H21c/H21d baseline (30 + 3,132 passed; 980 + 486 failed;
+  132,709 - 3,618 not supported, i.e. exactly the 3,618 query cases
+  H21d's own fix newly resolved). **Zero delta**, exactly as predicted:
+  this row's own new code paths (`RasterizationStream` selection,
+  geometry-sourced XFB capture) are unreachable by any case in this
+  group, since every real shader this ICD can currently compile writes
+  `SV_Position` (and everything else) on stream 0 only.
+- `dEQP-VK.api.info.*` (10,486 cases), as a general regression spot
+  check: 5,241 passed / 720 failed / 4,525 not supported -- matches
+  every prior row's own recorded figures exactly, confirming no
+  regression.
+
+**`ninja check-feme`** (assertions-enabled, ccache build, `build2/`):
+2491 passed, 0 failed, 59 pre-existing `Unsupported` -- up 2 tests from
+the prior baseline (`ExecutorTest.cpp`'s
+`RasterizationStreamSelectsGeometryOutputFromANonzeroStream` and
+`CapturesGeometryStageOutputToBoundTransformFeedbackBuffer`, both new
+JIT-executed end-to-end regression tests), 0 regressions. A further,
+lower-level layer of unit coverage (`GeometryStreamCollectionTest.cpp`,
+`GeometryWrapperTest.cpp`, `CompiledStageTest.cpp`) added in the prior
+commit already exercises the N-stream ABI/wrapper/host-replay
+generalization these `Executor.cpp` changes build on, independent of any
+real CTS case ever reaching it.
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update:
+`geometryStreams`/`transformFeedbackRasterizationStreamSelect` remain
+`VK_FALSE` and unadvertised, unchanged from H21b/H21c's own recorded
+state.

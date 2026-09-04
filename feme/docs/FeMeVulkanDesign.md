@@ -3796,13 +3796,27 @@ Depends on G5.
   emits without attributes still has every primitive counted (via the
   shared `RasterizePrimitives` lambda's unconditional `ClippingInvocations`
   increment) but is safely skipped before rasterization, since it has no
-  meaningful clip-space position. Multi-stream/geometry-shader-stream
-  capture (`geometryStreams`) and a real content-mismatch gap in the
-  byte-counter design's "backward dependency" scenario remain open
-  (roadmap H21e/H21i); a multiview draw combined with active transform
-  feedback also currently captures every view's vertices into the same
-  running counter with no per-view separation, an undocumented-until-now
-  interaction nothing in the CTS-dominant shape H21a scoped exercises yet.
+  meaningful clip-space position. **Real N-stream support (ABI/wrapper/
+  host-replay/rasterization-stream-selection) is also done** (roadmap
+  H21e): `FemeGeometryArgs::StreamCount` (a repurposed reserved scalar
+  slot, no ABI version bump), `GeometryWrapper.cpp`'s `lowerGeometry
+  StreamEmit`/`Cut` (per-lane constant stream, `StreamSlot` addressing),
+  `GeometryStreamCollection.cpp`'s host-side replay, and `Executor.cpp`'s
+  geometry-stage draw path (a real per-shader `StreamCount`, rasterizing
+  from `Pipeline.getRasterState().RasterizationStream` instead of always
+  stream 0, and transform-feedback capture extended to a geometry stage's
+  own stream-selected output) all now genuinely support more than one
+  output stream. `geometryStreams`/`transformFeedbackRasterizationStream
+  Select` remain unadvertised, though: the MLIR SPIR-V dialect cannot
+  deserialize `OpEmitStreamVertex`/`OpEndStreamPrimitive` at all (a hard
+  upstream blocker, roadmap H21l), so no real, CTS-driven multi-stream
+  geometry shader can ever reach this now-generalized code regardless of
+  how complete it is. A real content-mismatch gap in the byte-counter
+  design's "backward dependency" scenario remains open (roadmap H21i); a
+  multiview draw combined with active transform feedback also currently
+  captures every view's vertices into the same running counter with no
+  per-view separation, an undocumented-until-now interaction nothing in
+  the CTS-dominant shape H21a scoped exercises yet.
 - Add pipeline-statistics queries and any remaining occlusion-query state
   breadth not already closed by roadmap C5's exact passed-sample counting
   over ordinary draws (for example inherited-render-pass secondary-command-
