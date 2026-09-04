@@ -60794,3 +60794,116 @@ Instead:
 2. `[feme] docs: H29k partially fixed, correct scope, file H29r` --
    `Roadmap.md`, `VulkanCTSReport.md`, `VulkanExtensionInventory.md`.
 3. This `agent_thoughts.md` entry (below, in its own commit).
+
+# Roadmap H29r: mesh primitive-index outputs never reach `FemeMeshArgs::PrimitiveIndices`
+
+## Why this row
+
+The request was H29k, but H29k's own row already recorded that its remaining
+blocker had been split out as H29r. So the real work was H29r.
+
+## The row's premise turned out to be wrong
+
+H29r (inherited from `MeshOutputWrapper.h`'s own file comment, and echoed by
+three comments in `SIMDize.cpp`) asserted that a mesh shader's
+`gl_PrimitiveTriangleIndicesEXT[k] = uvec3(...)` write had **no canonicalized
+`feme.stage.*` op at all**, and proposed inventing one
+(`feme.stage.mesh.store_primitive_indices`).
+
+I nearly implemented that. What stopped me was grepping for existing
+primitive-index handling and finding
+`CanonicalizeStageTest.FoldsConstantVertexIndexIntoPlainVectorArrayOutputStoreWithPadding`
+-- an H6l test that exists *specifically* to get the `[N x <3 x i32>]`
+ABI-padding-versus-packed-offset arithmetic right for exactly these stores.
+That is not a test you write for a shape you don't canonicalize.
+
+So I did the reduction rather than trusting the comment. A minimal module --
+a `BuiltIn 5294`-decorated `[2 x <3 x i32>]` addrspace(8) global stored
+through a constant GEP -- run through
+`feme-opt --llvm -passes=feme-graphics-canonicalize-stage` came out as three
+`feme.stage.output.store.i32(i32 0, i32 0, i32 {0,1,2}, i32 %N, i32 1)` calls
+and no residual `store`. The canonicalization has been there since H6l.
+
+Lesson worth keeping: a stale "left open by this row" comment is a *hypothesis*
+about the present, not a fact about it. The project's own reduction discipline
+exists precisely to catch this, and it did.
+
+## The actual gap
+
+`getSystemValueForBuiltIn` had no cases for 5294/5295/5296, so the element
+came out with `SignatureSystemValue::None`. glslang also does not decorate
+these three globals `PerPrimitiveEXT`, so it did not even get `PerPrimitive`
+frequency. It was therefore indistinguishable from an ordinary per-primitive
+attribute, and `lowerMeshOutputStore` dutifully routed it through
+`computeMeshOutputAddress` into `PrimitiveOutputs`'s structure-of-arrays
+attribute block -- storage nothing downstream ever reads for this purpose.
+
+Meanwhile `FemeMeshArgs::PrimitiveIndices`, which `runMeshWorkgroup` slices
+per primitive into `MeshOutputBuilder::setPrimitiveIndices`, was written by
+*no compiled shape at all* and stayed zero-initialized. Hence every primitive
+reading back as `(0, 0, 0)` -- including primitive 0, whose real value was
+`(0, 1, 2)`. The earlier instrumentation in H29k had already observed exactly
+that, and it is a nice consistency check: if only the "aliasing" primitives
+were wrong, the diagnosis would have been something else entirely.
+
+## Design choices
+
+**One new system value, not three.** A mesh entry declares exactly one of the
+three builtins, matching its `OutputTriangles`/`OutputLinesEXT`/`OutputPoints`
+execution mode. Three enumerators would have bought nothing and cost every
+consumer a three-way switch.
+
+**No `OutputTopology` parameter.** My first sketch threaded
+`FemeMeshArgs::OutputTopology` into the wave body so the lowering could
+compute the primitive-major stride. Then I noticed classification already sets
+`ComponentCount` to 3/2/1 from the declared builtin -- which *is* the
+vertices-per-primitive. That is a compile-time constant in the wrapper pass,
+so the stride needs no runtime value at all. One fewer parameter to thread
+through `EntryWrapper.cpp`'s three separate name-keyed blocks, and one fewer
+opportunity for the two to disagree.
+
+**Frequency forced at classification time, not consumed at lowering time.**
+`MeshOutputWrapper` dispatches on the system value, so strictly it does not
+need the frequency. But `Executor.cpp`'s `flattenMeshRow`/`unflattenMeshRow`
+filter by frequency, and a `PerVertex`-defaulted primitive-index element there
+would be actively wrong. Setting it once, at the point where the builtin's
+meaning is known, keeps every consumer consistent.
+
+**Clamping both operands.** `lowerMeshOutputStore` already clamps its dynamic
+slot defensively; the flat array is just as capable of corrupting host memory,
+and the component index is equally untrusted, so both get clamped.
+
+## Verification
+
+Two commits, one per phase of translation, each with its own unit test:
+`ClassifiesMeshPrimitiveIndexBuiltinsAsPrimitiveIndices` (all three builtins,
+asserting system value, frequency and component count) and
+`LowersPrimitiveIndicesOutputStore` (asserting the GEP lands on
+`mesh_primitive_indices` *and* that `mesh_primitive_outputs` is left entirely
+unused -- the negative half is what actually pins down the routing).
+
+`ninja check-feme`: 2516 passed, 0 failures.
+
+CTS: all 6 targeted `mesh_frag.case_1*` cases now `Pass`; full
+`independent_sets_random.*` moved 36/414/270 -> 42/408/270, a delta of exactly
+those 6. The 3 remaining `task_mesh_frag.*` failures are H29p's separate
+resource-binding gap.
+
+## The control run
+
+`mesh_shader.ext.smoke.*` came out 20/29/18 -- and I could not tell from that
+number alone whether the fix had moved anything, because no prior baseline for
+that group existed in `VulkanCTSReport.md`.
+
+Rather than report an unanchored number, I measured the counterfactual: renamed
+`case 5294:` to an unreachable value, relinked `libfeme_vulkan.so`, re-ran, got
+an identical 20/29/18, then restored. That turns "we don't know" into a real
+finding -- that group's failures are all upstream of this gap and never reach
+mesh primitive-index lowering. Costs one incremental relink; worth it, and I'd
+do it again whenever a re-run has no recorded baseline to compare against.
+
+## Cleanup
+
+The stale comments in `MeshOutputWrapper.h`, `SIMDize.cpp` (three sites) and
+`RuntimeABI.h` were all corrected in the lowering commit. Leaving them would
+have set up the next person to make exactly the mistake I nearly made.
