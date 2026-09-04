@@ -243,6 +243,50 @@ TEST_F(SwapchainTest, AcquireFailsOnceEveryImageIsAcquired) {
   vkDestroySwapchainKHR(Device, Swapchain, nullptr);
 }
 
+// Roadmap H10e: a zero `timeout` is a real, spec-distinct case from a
+// nonzero one -- "poll, don't wait at all" rather than "wait, then give
+// up" -- and must report `VK_NOT_READY`, not `VK_TIMEOUT`, once every
+// image is already acquired (see `vkAcquireNextImageKHR`'s own comment in
+// `Swapchain.cpp` for why `VK_TIMEOUT` is reserved for an actual expired
+// wait).
+TEST_F(SwapchainTest, AcquireWithZeroTimeoutReportsNotReadyOnceEveryImageIsAcquired) {
+  VkSwapchainCreateInfoKHR Info = defaultCreateInfo();
+  Info.minImageCount = 1;
+  VkSwapchainKHR Swapchain = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSwapchainKHR(Device, &Info, nullptr, &Swapchain),
+            VK_SUCCESS);
+
+  uint32_t ImageIndex = UINT32_MAX;
+  ASSERT_EQ(vkAcquireNextImageKHR(Device, Swapchain, UINT64_MAX, VK_NULL_HANDLE,
+                                  VK_NULL_HANDLE, &ImageIndex),
+            VK_SUCCESS);
+  uint32_t Second = UINT32_MAX;
+  EXPECT_EQ(vkAcquireNextImageKHR(Device, Swapchain, /*timeout=*/0,
+                                  VK_NULL_HANDLE, VK_NULL_HANDLE, &Second),
+            VK_NOT_READY);
+
+  vkDestroySwapchainKHR(Device, Swapchain, nullptr);
+}
+
+// A zero `timeout` with an image genuinely available must still succeed
+// normally -- `VK_NOT_READY` is only for the "nothing available" case
+// above, never a blanket override for every zero-timeout acquire.
+TEST_F(SwapchainTest, AcquireWithZeroTimeoutSucceedsWhenAnImageIsAvailable) {
+  VkSwapchainCreateInfoKHR Info = defaultCreateInfo();
+  Info.minImageCount = 1;
+  VkSwapchainKHR Swapchain = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSwapchainKHR(Device, &Info, nullptr, &Swapchain),
+            VK_SUCCESS);
+
+  uint32_t ImageIndex = UINT32_MAX;
+  EXPECT_EQ(vkAcquireNextImageKHR(Device, Swapchain, /*timeout=*/0,
+                                  VK_NULL_HANDLE, VK_NULL_HANDLE, &ImageIndex),
+            VK_SUCCESS);
+  EXPECT_LT(ImageIndex, Info.minImageCount);
+
+  vkDestroySwapchainKHR(Device, Swapchain, nullptr);
+}
+
 TEST_F(SwapchainTest, PresentingAnUnacquiredImageFails) {
   VkSwapchainCreateInfoKHR Info = defaultCreateInfo();
   VkSwapchainKHR Swapchain = VK_NULL_HANDLE;
