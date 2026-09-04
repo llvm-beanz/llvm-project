@@ -24914,3 +24914,79 @@ grouping-by-diagnostic pass can only ever see one of them.
 
 **Disposition.** Roadmap **H29n closed** (struck through). Nested pipeline
 libraries -- previously unimplemented outright -- now work to arbitrary depth.
+
+## Roadmap H29o: measured impact
+
+**Row.** *`vkQueueSubmit` fails a plain (non-library), monolithic
+vertex+geometry+fragment pipeline with `"the geometry stage's declared input
+primitive class does not match the pipeline's topology/tessellation output
+primitive"`*, 217 of H29f's own re-run's `cache.*` failures.
+
+**Reproduction.** `dEQP-VK.pipeline.monolithic.cache.graphics_tests.
+vertex_stage_geometry_stage_fragment_stage`, one case, `Fail` at `vkQueueSubmit`
+(`vkCmdUtil.cpp:338`) with `FEME_VULKAN_LOG_CREATION_ERRORS=1` recovering this
+ICD's own diagnostic. The CTS geometry shader
+(`vktPipelineCacheTests.cpp:425`) declares `layout(triangles) in;` against the
+test's own `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` -- a plain match, exactly as
+the row observed.
+
+**Root cause.** Neither of the row's two hypotheses. `ConvertSPIRVToLLVMPass`
+stamps `feme.geometry.input_primitive` correctly, and `Executor.cpp`'s own
+topology-side mapping table is correct as well. What neither hypothesis covered
+is *whether a compile happened at all*: a pipeline's tessellation, geometry and
+mesh state is **reflected** out of each compiled module's own entry
+`llvm::Function`, which only a real compile ever holds un-JIT-ed. That
+reflection lives entirely inside `compileAndValidateStages`, which
+`compileGraphicsPipeline` guards with `if (!Artifact)` -- i.e. it runs only on a
+pipeline-cache **miss**. A pipeline satisfied from the cache therefore kept
+default-constructed state, and `GeometryState`'s own defaults
+(`InputPrimitive = Points`, `MaxOutputVertices = 0`) are precisely what made the
+diagnostic look impossible. The `cache.*` group name was the real clue: any
+pipeline created without a `VkPipelineCache`, or the first creation with one,
+compiles for real and reflects correctly, so only a *second* identical creation
+misbehaves.
+
+**Fix.** Carry `Tessellation`/`Geometry`/`Mesh` in `GraphicsPipelineArtifact`
+itself. Reflected state is a property of the shader modules alone, so the
+artifact the cache already shares between identical pipelines is its correct
+home. Populated at the end of `compileAndValidateStages` and restored
+immediately after `Result.Artifact` is set -- placed before H4i's own
+domain-origin flip so that flip still applies last. Tessellation and mesh
+carried the identical latent defect and are fixed by the same change;
+tessellation was partly masked because `InputControlPointCount` comes from
+`VkPipelineTessellationStateCreateInfo` and does survive a cache hit, while
+`OutputControlPointCount`, `Domain`, `Partitioning` and `OutputPrimitive` do
+not.
+
+**Tests.** `GraphicsPipelineTest.CachedGeometryPipelineKeepsItsReflectedState`
+and `CachedTessellationPipelineKeepsItsReflectedState` cover the
+pipeline-creation phase, each first asserting a *real* cache hit (both pipelines
+share one compiled stage object) before checking the reflected values. Both were
+confirmed to fail without the fix -- the tessellation one only after being
+strengthened to assert `Partitioning == FractionalOdd`, since
+`TessellationState`'s own defaults (3/3/`TriangleCcw`/`Integer`) coincidentally
+equal every *other* value the test fixtures declare. That is the same
+non-discriminating-fixture trap roadmap H8p's own test fell into.
+`ninja check-feme`: 2584 discovered, 2525 passed, 0 failed.
+
+**Measured CTS impact.** `dEQP-VK.pipeline.monolithic.cache.*`, 774 cases, same
+build before and after (the two source files reverted and `feme_vulkan`
+relinked to capture the baseline):
+
+| | Passed | Failed | NotSupported |
+| --- | --- | --- | --- |
+| Before | 298 | 475 | 1 |
+| After | **516** | **257** | 1 |
+
+A case-by-case pass-set diff shows **+218 gained, 0 regressed** -- matching this
+row's own predicted 217 (218 raw `Fail` lines, one of which H29f noted
+double-counts an `_externally_synchronized` variant). All 256 remaining
+`VK_ERROR_INITIALIZATION_FAILED` failures are H29g's own already-tracked
+hull-stage cross-control-point-read limitation, plus the 1 CTS-harness
+`GetPipelineCacheData` size assertion H29f already declined to file.
+`dEQP-VK.pipeline.pipeline_library.graphics_library.*` re-run unchanged at
+131/417/288, confirming the fix is scoped correctly and, as the row said, is not
+graphics-pipeline-library-specific in either direction.
+
+**Disposition.** Roadmap **H29o closed** (struck through). This is the largest
+single-row CTS gain of the H29 series so far.
