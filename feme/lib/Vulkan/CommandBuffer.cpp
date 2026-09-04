@@ -1081,6 +1081,16 @@ struct GraphicsState {
   std::vector<Buffer *> XfbBuffers;
   std::vector<VkDeviceSize> XfbBufferOffsets;
   std::vector<VkDeviceSize> XfbBufferSizes;
+  /// (roadmap H21c) Running captured-byte count per `XfbBuffers` slot,
+  /// reset to 0 for every currently-bound slot when a
+  /// `vkCmdBeginTransformFeedbackEXT` scope opens (no resume-from-counter-
+  /// buffer semantics yet, matching H21b's own "not yet consumed" design
+  /// for `vkCmdBeginTransformFeedbackEXT`'s own counter-buffer
+  /// arguments), accumulated by every draw in that scope
+  /// (`feme::graphics::executeDraws`'s own transform-feedback capture),
+  /// and read back out by `vkCmdEndTransformFeedbackEXT` to report to its
+  /// own counter buffer.
+  std::vector<uint64_t> XfbCapturedBytes;
   /// (roadmap H21b) Whether a `vkCmdBeginTransformFeedbackEXT`/
   /// `vkCmdEndTransformFeedbackEXT` scope is currently open, matching
   /// `vkCmdBeginQuery`/`vkCmdEndQuery`'s own "no nested scope of the same
@@ -1750,7 +1760,7 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
 /// every `vkCmdDraw*`/`vkCmdDrawMeshTasks*` command funnels through
 /// (roadmap H6f).
 Error runPreparedDraw(const GraphicsPipeline &Pipeline,
-                     const GraphicsState &Gfx,
+                     GraphicsState &Gfx,
                      const ResolvedDrawAttachments &Resolved,
                      llvm::ArrayRef<BoundSetState> BoundSets,
                      llvm::ArrayRef<uint8_t> PushConstants,
@@ -1929,7 +1939,7 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
 /// vertex buffer the pipeline declares (and the index buffer, for an
 /// indexed \p Draw), then hands the result to `runPreparedDraw` -- the
 /// same shared path `runMeshDraw` below uses for a mesh pipeline.
-Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
+Error runDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
               const feme::graphics::DrawCommand &Draw,
               llvm::ArrayRef<BoundSetState> BoundSets,
               llvm::ArrayRef<uint8_t> PushConstants,
@@ -2018,10 +2028,40 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
         static_cast<size_t>(BoundSize));
   }
 
+  // (Roadmap H21c) `VK_EXT_transform_feedback` capture targets: one entry
+  // per currently-bound XFB buffer, resolved to its own writable byte
+  // range (mirroring `VertexBuffers`' own offset/size resolution above)
+  // and a pointer into `Gfx.XfbCapturedBytes`, the running byte counter
+  // `vkCmdEndTransformFeedbackEXT` later reads back out. Left empty
+  // (Executor.cpp's capture is then a no-op) unless a
+  // `vkCmdBeginTransformFeedbackEXT` scope is currently open.
+  std::vector<feme::graphics::PreparedDraw::XfbCaptureBuffer> XfbCaptures;
+  if (Gfx.XfbActive) {
+    XfbCaptures.resize(Gfx.XfbBuffers.size());
+    for (size_t I = 0; I != Gfx.XfbBuffers.size(); ++I) {
+      Buffer *Buf = Gfx.XfbBuffers[I];
+      if (!Buf || !Buf->isBound() || I >= Gfx.XfbCapturedBytes.size())
+        continue;
+      VkDeviceSize Offset = Gfx.XfbBufferOffsets[I];
+      if (Offset > Buf->size())
+        continue;
+      VkDeviceSize Size = Gfx.XfbBufferSizes[I] == VK_WHOLE_SIZE
+                              ? Buf->size() - Offset
+                              : Gfx.XfbBufferSizes[I];
+      if (Offset + Size > Buf->size())
+        Size = Buf->size() - Offset;
+      XfbCaptures[I].Data = llvm::MutableArrayRef<uint8_t>(
+          static_cast<uint8_t *>(Buf->data()) + Offset,
+          static_cast<size_t>(Size));
+      XfbCaptures[I].CapturedBytes = &Gfx.XfbCapturedBytes[I];
+    }
+  }
+
   feme::graphics::PreparedDraw Prepared;
   Prepared.VertexBuffers = VertexBuffers;
   Prepared.IndexBuffer = IndexBinding;
   Prepared.Draws = llvm::ArrayRef<feme::graphics::DrawCommand>(Draw);
+  Prepared.XfbBuffers = XfbCaptures;
   return runPreparedDraw(Pipeline, Gfx, *Resolved, BoundSets, PushConstants,
                         ActiveOcclusionQueries, ActivePipelineStatsQueries,
                         Prepared);
@@ -2038,7 +2078,7 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
 /// `resolveDrawAttachments`/`runPreparedDraw` path `runDraw` does, so a mesh
 /// dispatch's attachments, resources, viewport/scissor and multiview
 /// handling are never duplicated logic of their own.
-Error runMeshDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
+Error runMeshDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
                   const feme::graphics::MeshDrawCommand &MeshDraw,
                   llvm::ArrayRef<BoundSetState> BoundSets,
                   llvm::ArrayRef<uint8_t> PushConstants,
@@ -2139,7 +2179,7 @@ Error validateDrawCounts(const PhysicalDeviceInfo *Info,
 /// direct and indirect draw goes through, so an indirect command's
 /// attacker-controlled arguments are validated exactly like a direct one's.
 Error runValidatedDraw(
-    const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
+    const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
     const feme::graphics::DrawCommand &Draw,
     const PhysicalDeviceInfo *DeviceInfo,
     llvm::ArrayRef<BoundSetState> BoundSets,
@@ -2673,6 +2713,10 @@ Error executeCommandsInto(
                                  "with another transform feedback scope "
                                  "already active");
       Gfx.XfbActive = true;
+      // (Roadmap H21c) Every currently-bound buffer starts a fresh
+      // capture at 0 bytes -- no resume-from-counter-buffer support yet,
+      // matching the comment above.
+      Gfx.XfbCapturedBytes.assign(Gfx.XfbBuffers.size(), 0);
       break;
     case RecordedCommand::Kind::EndTransformFeedback:
       if (!Gfx.XfbActive)
@@ -2680,11 +2724,12 @@ Error executeCommandsInto(
                                  "vkCmdEndTransformFeedbackEXT called with "
                                  "no transform feedback scope active");
       Gfx.XfbActive = false;
-      // (Roadmap H21b) Writes back the real byte count captured since the
-      // matching begin, for every named counter buffer -- always 0 today,
-      // since nothing yet writes to a transform-feedback buffer at all
-      // (roadmap H21c), which is the truthful answer rather than a stub:
-      // zero bytes really were captured.
+      // (Roadmap H21c) Writes back the real byte count captured since
+      // the matching begin, for every named counter buffer -- 0 if
+      // nothing was actually captured to that slot (no buffer bound
+      // there, or the pipeline had a tessellation/geometry stage, which
+      // this row's capture does not yet source from -- see
+      // Executor.cpp's "Transform feedback capture" comment).
       for (size_t I = 0; I != Cmd.XfbBuffers.size(); ++I) {
         Buffer *CounterBuf = Cmd.XfbBuffers[I];
         if (!CounterBuf)
@@ -2698,9 +2743,13 @@ Error executeCommandsInto(
           return createStringError(inconvertibleErrorCode(),
                                    "vkCmdEndTransformFeedbackEXT's counter "
                                    "buffer offset is out of range");
-        uint32_t Zero = 0;
-        std::memcpy(static_cast<uint8_t *>(CounterBuf->data()) + Offset, &Zero,
-                    sizeof(Zero));
+        size_t SlotIdx = Cmd.FirstSet + I;
+        uint32_t Captured =
+            SlotIdx < Gfx.XfbCapturedBytes.size()
+                ? static_cast<uint32_t>(Gfx.XfbCapturedBytes[SlotIdx])
+                : 0;
+        std::memcpy(static_cast<uint8_t *>(CounterBuf->data()) + Offset,
+                    &Captured, sizeof(Captured));
       }
       break;
     case RecordedCommand::Kind::SetViewport:
