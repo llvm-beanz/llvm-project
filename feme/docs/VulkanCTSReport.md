@@ -22587,11 +22587,16 @@ the single-device-group *query* commands a `VK_VERSION_1_1`/
 device-group support, not the separate multi-device-group extension
 itself.
 
-The 8 real failures split into two distinct, unrelated new gaps, each
+The 8 real failures split into three distinct, unrelated new gaps, each
 split off as its own new roadmap row rather than expanding H10b's own
-scope:
+scope. (**Correction**: this section originally miscounted these as two
+gaps totaling 8 cases -- 7 attributed to the `CompositeConstruct` bug
+below plus 1 `acquire.too_many` -- but only 6 cases actually share the
+`CompositeConstruct` root cause; the discrepancy was an uncounted third
+gap, `incremental_present...reference`, corrected below once H10d's own
+re-run made the miscount apparent.)
 
-- **7 failures, one root cause** (`swapchain.render.basic`/`basic2`/
+- **6 failures, one root cause** (`swapchain.render.basic`/`basic2`/
   `2swapchains`/`2swapchains2`/`10swapchains`/`10swapchains2`): all fail
   `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`, and
   `FEME_VULKAN_LOG_CREATION_ERRORS=1` shows the same underlying MLIR
@@ -22610,6 +22615,11 @@ scope:
   respond well acquiring too many images with 0 timeout"` -- a distinct,
   single-case gap in this ICD's zero-timeout too-many-images
   `vkAcquireNextImageKHR` handling. Split off as new roadmap row **H10e**.
+- **1 failure**, `incremental_present.scale_none.fifo.identity.opaque.reference`:
+  `"'llvm.shl' op operand #1 must be signless integer ... but got
+  'si32'"` -- a third, entirely separate MLIR type-legality gap, nothing
+  to do with WSI/`CompositeConstruct`/device-group either. Split off as
+  new roadmap row **H10h**.
 
 Note also that `dEQP-VK.wsi.xcb.swapchain.create.clipped` (an unattributed
 single-case failure noted earlier in this same session, before the full
@@ -22623,6 +22633,65 @@ change needed (no new extension advertised by this row itself; the
 already-advertised `VK_KHR_xcb_surface` (H10a)/`VK_KHR_swapchain` stay
 unchanged, and `VK_KHR_device_group_creation` correctly stays
 unimplemented).
+
+## Roadmap H10d: measured impact
+
+Fixed `CompositeConstructPattern` (`SPIRVToLLVMPatterns.cpp`) to handle a
+matrix-typed result, the gap H10b's own re-run found blocking 6 of its 8
+real `dEQP-VK.wsi.xcb.*` failures (see H10b's own corrected section
+above). Re-running the exact 6 previously-blocked cases confirms the
+`spirv.CompositeConstruct` diagnostic is genuinely gone everywhere in this
+group -- but reveals two further, distinct, previously-masked gaps one
+layer deeper into pipeline/swapchain creation:
+
+```
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.10swapchains'..
+  Fail (vk.createSwapchainKHR(device, pCreateInfo, pAllocator, &object): VK_ERROR_INITIALIZATION_FAILED at vkRefUtilImpl.inl:578)
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.10swapchains2'..
+error: failed to legalize operation 'spirv.MatrixTimesVector' that was explicitly marked illegal: ... (!spirv.matrix<4 x vector<4xf32>>, vector<4xf32>) -> vector<4xf32>
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED at vkRefUtil.cpp:37)
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.2swapchains'.. (same spirv.MatrixTimesVector diagnostic)
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.2swapchains2'.. (same spirv.MatrixTimesVector diagnostic)
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.basic'.. (same spirv.MatrixTimesVector diagnostic)
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.basic2'.. (same spirv.MatrixTimesVector diagnostic)
+
+Test run totals:
+  Passed:        0/8 (0.0%)
+  Failed:        6/8 (75.0%)
+  Not supported: 2/8 (25.0%)
+```
+
+- **4 cases** (`basic`/`basic2`/`2swapchains`/`2swapchains2`) now fail on
+  an ordinary `mat4 * vec4` transform (`spirv.MatrixTimesVector`) --
+  confirmed via `grep` that this ICD implements none of the matrix
+  arithmetic op family at all (`spirv.MatrixTimesVector`,
+  `spirv.VectorTimesMatrix`, `spirv.MatrixTimesMatrix`,
+  `spirv.MatrixTimesScalar`, `spirv.Transpose`). Split off as new roadmap
+  row **H10f**, since it needs its own scoping pass before code lands
+  (likely several ops sharing a small amount of lowering shape, but not
+  yet confirmed).
+- **2 cases** (`10swapchains`/`10swapchains2`) now fail differently
+  still, at `vkCreateSwapchainKHR` itself with no further diagnostic
+  logged -- a real, count-dependent resource-limit-shaped gap only
+  `2swapchains`'s 2-swapchain sibling avoids, suggesting something in
+  this ICD's own xcb window/surface/swapchain creation path caps out
+  around 10 concurrent instances. Split off as new roadmap row **H10g**.
+
+A full re-run of the entire `dEQP-VK.wsi.xcb.*` group confirms the
+overall tally is numerically unchanged at 52 Pass / 8 Fail / 3,969
+NotSupported: this row's own fix moved every one of its 6 affected cases
+to a new, different failure one layer deeper rather than directly to a
+`Pass` -- an expected "peeling one layer of the onion" outcome, since a
+lot of further pipeline-creation machinery still runs after a shader's
+own SPIR-V-to-LLVM legalization succeeds.
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full,
+2513/2513 (59 pre-existing `Unsupported`, 0 `Failed`; the new lit test
+this row adds extends an existing `RUN` file rather than adding a new
+one, so the lit-file-level total is unchanged).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed (a pure SPIR-V-to-LLVM lowering fix, no capability/
+extension surface affected).
 
 ## Roadmap H10c: measured impact
 
