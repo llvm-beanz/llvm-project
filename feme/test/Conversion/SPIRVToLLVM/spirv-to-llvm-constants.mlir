@@ -33,3 +33,24 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %0 : !spirv.array<3 x i32>
   }
 }
+
+// -----
+
+// A `spirv.Constant` of `spirv.matrix` type converts the same way as the
+// array cases above: a matrix converts to the identical target shape, an
+// `!llvm.array` of column vectors (see the `spirv.MatrixType` conversion in
+// populateSPIRVToLLVMTargetTypeConversions), and its value already spells
+// as one flat `DenseElementsAttr` (unlike the array-of-vectors case, no
+// per-column `ArrayAttr` wrapping), so this pattern's own array/matrix type
+// check is the only change needed -- the flattening and re-encoding logic
+// is unchanged. This is the shape a `const static float2x2` HLSL matrix
+// compiles down to.
+
+// CHECK-LABEL: llvm.func @const_matrix
+// CHECK: llvm.mlir.constant(dense<[1.000000e+00, 2.000000e+00, 3.000000e+00, 4.000000e+00]> : tensor<4xf32>) : !llvm.array<2 x vector<2xf32>>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @const_matrix() -> !spirv.matrix<2 x vector<2xf32>> "None" {
+    %0 = spirv.Constant dense<[[1.0, 2.0], [3.0, 4.0]]> : !spirv.matrix<2 x vector<2xf32>>
+    spirv.ReturnValue %0 : !spirv.matrix<2 x vector<2xf32>>
+  }
+}

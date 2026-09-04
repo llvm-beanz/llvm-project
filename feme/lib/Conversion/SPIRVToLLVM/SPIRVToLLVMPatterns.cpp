@@ -3967,19 +3967,23 @@ int64_t getFlatElementCount(mlir::Type Type) {
   return 1;
 }
 
-/// Converts SPIR-V `ConstantOp` with `spirv.array` type -- MLIR's own
-/// `ConstantScalarAndVectorPattern` only matches a scalar or vector `spirv.
-/// Constant` (see its `srcType` check), leaving an array constant illegal,
-/// which is exactly the shape a `const static` HLSL array (e.g. a palette of
-/// `float3`s) compiles down to. `llvm.mlir.constant` has no such
-/// restriction: it accepts one flat `DenseElementsAttr` for a whole
+/// Converts SPIR-V `ConstantOp` with `spirv.array` or `spirv.matrix` type --
+/// MLIR's own `ConstantScalarAndVectorPattern` only matches a scalar or
+/// vector `spirv.Constant` (see its `srcType` check), leaving an array or
+/// matrix constant illegal, which is exactly the shape a `const static` HLSL
+/// array (e.g. a palette of `float3`s) or a `const static float4x4`
+/// compiles down to. `llvm.mlir.constant` has no such restriction: it
+/// accepts one flat `DenseElementsAttr` for a whole
 /// `!llvm.array<... x vector<...>>` so long as its element count and scalar
 /// element type match (see `LLVM::ConstantOp::verify`'s `ElementsAttr`
 /// case), whatever the array's rank or whether its leaves are vectors or
-/// scalars -- so this pattern only has to flatten the SPIR-V constant's
-/// (possibly nested) constituents to match, rather than reproduce its
-/// nesting as `llvm.mlir.constant`'s alternative, structurally-nested
-/// `ArrayAttr` encoding.
+/// scalars -- and a matrix converts to exactly that same shape, an
+/// `!llvm.array` of column vectors (see the `spirv.MatrixType` conversion
+/// in populateSPIRVToLLVMTargetTypeConversions), so it needs no separate
+/// handling here beyond accepting its type up front. This pattern only has
+/// to flatten the SPIR-V constant's (possibly nested) constituents to
+/// match, rather than reproduce its nesting as `llvm.mlir.constant`'s
+/// alternative, structurally-nested `ArrayAttr` encoding.
 class ArrayConstantPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ConstantOp> {
 public:
@@ -3989,8 +3993,9 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::ConstantOp Op, OpAdaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (!mlir::isa<mlir::spirv::ArrayType>(Op.getType()))
-      return Rewriter.notifyMatchFailure(Op, "not an array constant");
+    if (!mlir::isa<mlir::spirv::ArrayType, mlir::spirv::MatrixType>(
+            Op.getType()))
+      return Rewriter.notifyMatchFailure(Op, "not an array/matrix constant");
 
     mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
     if (!DstType)
