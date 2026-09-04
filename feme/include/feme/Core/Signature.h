@@ -127,6 +127,20 @@ enum class SignatureSystemValue : uint8_t {
   /// pre-serialized signature-metadata byte blob, which a renumbering
   /// would silently desync from this enum.
   PointSize,
+  /// (Roadmap H29r) `gl_PrimitiveTriangleIndicesEXT`/
+  /// `gl_PrimitiveLineIndicesEXT`/`gl_PrimitivePointIndicesEXT`: a mesh
+  /// stage's per-primitive *vertex index list*, naming which of the
+  /// workgroup's own emitted vertices each output primitive is built from.
+  /// Unlike every other mesh output, this one does not live in the
+  /// per-vertex/per-primitive attribute storage
+  /// (`FemeMeshArgs::VertexOutputs`/`PrimitiveOutputs`) at all: it has its
+  /// own flat, primitive-major `uint32_t` array
+  /// (`FemeMeshArgs::PrimitiveIndices`), so `MeshOutputWrapperPass` routes
+  /// a store to it by this system value rather than by
+  /// `SignatureElement::Frequency`. `ComponentCount` is the topology's own
+  /// vertices-per-primitive (3 for triangles, 2 for lines, 1 for points).
+  /// Added at the end for the same no-renumbering reason `PointSize` was.
+  PrimitiveIndices,
   // Keep last: the number of system values, for range checks.
   NumSystemValues,
 };

@@ -21,6 +21,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
@@ -2407,6 +2408,59 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenStores, 3u);
   for (Instruction &I : instructions(F))
     EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
+/// (Roadmap H29r) The three `VK_EXT_mesh_shader` primitive-index builtins
+/// (`gl_PrimitiveTriangleIndicesEXT`, SPIR-V `BuiltIn` 5294, plus its line
+/// (5295) and point (5296) siblings) must reflect as
+/// `SignatureSystemValue::PrimitiveIndices` at `PerPrimitive` frequency.
+/// This is what lets `MeshOutputWrapperPass` route the resulting output
+/// store into `FemeMeshArgs::PrimitiveIndices` -- a flat, primitive-major
+/// `uint32_t` array of its own -- rather than into the per-vertex/
+/// per-primitive *attribute* storage every other mesh output uses. Before
+/// this row these three mapped to `None`, so a real
+/// `gl_PrimitiveTriangleIndicesEXT[i] = uvec3(...)` write landed in the
+/// per-vertex attribute block and `PrimitiveIndices` stayed at its
+/// zero-initialized default, degenerating every emitted primitive to
+/// "all vertices are vertex 0" (see `MeshOutputWrapper.h`'s file comment,
+/// whose "left open by this row" note this row closes).
+TEST(CanonicalizeStageTest,
+     ClassifiesMeshPrimitiveIndexBuiltinsAsPrimitiveIndices) {
+  for (auto [BuiltIn, Components] :
+       {std::pair<unsigned, unsigned>{5294, 3}, {5295, 2}, {5296, 1}}) {
+    LLVMContext Ctx;
+    std::string IR = formatv(R"(
+      @gl_prim_indices = external addrspace(8) global [2 x <{0} x i32>], !spirv.Decorations !0
+      define void @main(<{0} x i32> %v) #0 {{
+        %p = getelementptr inbounds [2 x <{0} x i32>], ptr addrspace(8) @gl_prim_indices, i32 0, i32 1
+        store <{0} x i32> %v, ptr addrspace(8) %p
+        ret void
+      }
+      attributes #0 = {{ "feme.shader.stage"="mesh" }
+      !0 = !{{!1}
+      !1 = !{{i32 11, i32 {1}}
+    )",
+                             Components, BuiltIn);
+    std::unique_ptr<Module> M = parseIR(Ctx, IR);
+    ASSERT_TRUE(M) << "BuiltIn " << BuiltIn;
+    EXPECT_TRUE(run(*M)) << "BuiltIn " << BuiltIn;
+    Function *F = M->getFunction("main");
+
+    std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+    ASSERT_TRUE(Sig.has_value()) << "BuiltIn " << BuiltIn;
+    ASSERT_EQ(Sig->Elements.size(), 1u) << "BuiltIn " << BuiltIn;
+    EXPECT_EQ(Sig->Elements[0].SystemValue,
+              SignatureSystemValue::PrimitiveIndices)
+        << "BuiltIn " << BuiltIn;
+    // Per-primitive by definition, even though SPIR-V does not also
+    // decorate these three `PerPrimitiveEXT`.
+    EXPECT_EQ(Sig->Elements[0].Frequency, SignatureFrequency::PerPrimitive)
+        << "BuiltIn " << BuiltIn;
+    // The topology's own vertices-per-primitive: 3/2/1 for triangles/
+    // lines/points.
+    EXPECT_EQ(Sig->Elements[0].ComponentCount, Components)
+        << "BuiltIn " << BuiltIn;
+  }
 }
 
 /// (Roadmap H6m) The exact shape a real

@@ -485,6 +485,21 @@ parseSPIRVMemberDecorations(const MDNode *MD) {
 /// `SignatureSystemValue::PointSize`: the last pre-rasterization stage's
 /// own vertex output the executor's point-topology quad expansion reads
 /// to derive a point primitive's screen-space size (`largePoints`).
+///
+/// (Roadmap H29r) The three `VK_EXT_mesh_shader` primitive-index builtins
+/// (`PrimitiveTriangleIndicesEXT`/`PrimitiveLineIndicesEXT`/
+/// `PrimitivePointIndicesEXT`) all map to
+/// `SignatureSystemValue::PrimitiveIndices`, which the topology already
+/// disambiguates (`FemeMeshArgs::OutputTopology`) -- a mesh entry declares
+/// exactly one of the three, matching its own `OutputTriangles`/
+/// `OutputLinesEXT`/`OutputPoints` execution mode. Before this row these
+/// mapped to `None`, making a real `gl_PrimitiveTriangleIndicesEXT[i] =
+/// uvec3(...)` write an ordinary, `Location`-less output element that
+/// `MeshOutputWrapperPass` then stored into the per-vertex attribute
+/// block instead of `FemeMeshArgs::PrimitiveIndices` -- leaving every
+/// meshlet's real index list at its zero-initialized default, so every
+/// emitted primitive degenerated to "all three vertices are vertex 0" and
+/// never rasterized.
 SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
   switch (BuiltIn) {
   case 0:  // Position
@@ -536,6 +551,10 @@ SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
     return SignatureSystemValue::StencilRef;
   case 4440: // ViewIndex
     return SignatureSystemValue::ViewIndex;
+  case 5294: // PrimitiveTriangleIndicesEXT
+  case 5295: // PrimitiveLineIndicesEXT
+  case 5296: // PrimitivePointIndicesEXT
+    return SignatureSystemValue::PrimitiveIndices;
   default:
     return SignatureSystemValue::None;
   }
@@ -1323,6 +1342,14 @@ SPIRVElementInfo classifySPIRVElement(ShaderStage Stage,
                                   : SignatureFrequency::PerVertex;
   SignatureSystemValue Sys = D.BuiltIn ? getSystemValueForBuiltIn(*D.BuiltIn)
                                        : SignatureSystemValue::None;
+  // (Roadmap H29r) The mesh primitive-index builtins are per-primitive by
+  // definition, whether or not the producing SPIR-V bothered to also
+  // decorate them `PerPrimitiveEXT` (glslang does not for these three).
+  // Nothing may misread this element as per-vertex: it is not attribute
+  // storage at all, but its own flat `FemeMeshArgs::PrimitiveIndices`
+  // array, keyed off this system value by `MeshOutputWrapperPass`.
+  if (Sys == SignatureSystemValue::PrimitiveIndices)
+    Info.Frequency = SignatureFrequency::PerPrimitive;
   if (Stage == ShaderStage::Hull &&
       Phase == SPIRVCanonicalPhase::HullPatchConstant) {
     if (AddrSpace == 7) {
