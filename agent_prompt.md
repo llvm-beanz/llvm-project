@@ -37,19 +37,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H29d or other prerequisites blocking the H-series milestones?
+Can you work on H29e or other prerequisites blocking the H-series milestones?
 
-> **Inline shader-module creation** (`VkPipelineShaderStageCreateInfo::module ==
-> VK_NULL_HANDLE` with a chained `VkShaderModuleCreateInfo` in `pNext`,
-> legalized for any pipeline stage once `VK_EXT_graphics_pipeline_library` is
-> enabled): not implemented for either the compute (`compileComputePipeline`) or
-> graphics (`compileGraphicsStage`) stage-compilation paths -- both currently
-> reject a null `stage.module` cleanly rather than crashing (the compute-path
-> guard landed as part of H29c's own crash-fix), but neither compiles the inline
-> `VkShaderModuleCreateInfo::pCode` this now-real CTS surface exercises (e.g.
-> `dEQP-VK.pipeline.pipeline_library.graphics_library.misc.non_graphics.shader_module_info_comp`).
-> Needs a shared helper (usable from both the compute and graphics
-> stage-compilation call sites) that, given a `VkPipelineShaderStageCreateInfo`
-> whose `module` is null, walks `pNext` for `VkShaderModuleCreateInfo` and
-> constructs an equivalent in-memory `vulkan::ShaderModule` without requiring a
-> separate `vkCreateShaderModule` call
+> **`feme-cpu-wrap-hull: unsupported hull input system value`**, a real
+> crash-free-but-failing gap the H29c `cache.*` re-run surfaced on
+> tessellation-stage cache cases (e.g.
+> `pipeline_from_incomplete_get_data.vertex_stage_tessellation_control_stage_tessellation_evaluation_stage_fragment_stage`):
+> needs its own real IR reduction of one of these cases to identify which
+> hull-stage input system value `feme-cpu-wrap-hull` doesn't yet recognize, the
+> same technique this project's H6/H8/H9-series chains have used throughout
