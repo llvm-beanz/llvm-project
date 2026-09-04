@@ -210,4 +210,7 @@ if config.feme_have_vulkan_loader == "ON":
     # `system-vulkan-cts` already are to each other above.
     if config.feme_have_xcb == "ON" and shutil.which("Xvfb"):
         config.available_features.add("system-xcb")
-        llvm_config.add_tool_substitutions(["feme-vulkan-xcb-smoke"], tool_dirs)
+        llvm_config.add_tool_substitutions(
+            ["feme-vulkan-xcb-smoke", "feme-vulkan-xcb-surface-lost-smoke"],
+            tool_dirs,
+        )

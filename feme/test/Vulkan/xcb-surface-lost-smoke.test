@@ -1,0 +1,18 @@
+// Roadmap H10g's own end-to-end verification (see Surface.cpp's
+// `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` and
+// feme-vulkan-xcb-surface-lost-smoke.cpp's own file comment): a real xcb
+// window, destroyed before this ICD ever queries its geometry, backed by a
+// private Xvfb instance this test starts and tears down itself (mirroring
+// xcb-surface-smoke.test's own "dynamic display number" pattern) --
+// deterministically reproducing a genuine `xcb_get_geometry` failure and
+// confirming it is reported as `VK_ERROR_SURFACE_LOST_KHR`, not silently
+// masked as a headless-style `VK_SUCCESS`.
+//
+// REQUIRES: system-xcb
+// RUN: bash -c 'Xvfb -displayfd 1 -screen 0 128x128x24 >%t.display 2>%t.xvfb.log & \
+// RUN:   XVFB_PID=$!; trap "kill $XVFB_PID 2>/dev/null" EXIT; sleep 1; \
+// RUN:   env VK_DRIVER_FILES=%feme_vulkan_icd_manifest \
+// RUN:     DISPLAY=:$(cat %t.display) feme-vulkan-xcb-surface-lost-smoke' | FileCheck %s
+
+// CHECK: vkGetPhysicalDeviceSurfaceCapabilitiesKHR: VkResult = -1000000000
+// CHECK: PASS
