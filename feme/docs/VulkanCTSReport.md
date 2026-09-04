@@ -22991,3 +22991,63 @@ dependent hypothesis. Recorded as roadmap row H10j for its own future
 investigation rather than folded into this row's closure, since it needs
 its own root-cause investigation (most likely `gdb`/`valgrind`/`ASan`
 against a full-group run) unrelated to the `BitField*` fix above.
+
+## Roadmap H10i: measured impact
+
+`vkAcquireNextImage2KHR` was entirely missing from this ICD's generated
+dispatch table: `vkGetDeviceProcAddr` returned a null function pointer for
+it, so `dEQP-VK.wsi.xcb.swapchain.render.basic2`/`2swapchains2`/
+`10swapchains2` (the three cases using `AcquireNextImage2Wrapper`) crashed
+with a genuine `SIGSEGV` at address `0x0` once H10f's own matrix-
+arithmetic fix let them clear pipeline creation and reach the acquire call
+for the first time -- not a graceful "unsupported" rejection this ICD
+could otherwise report.
+
+Implemented as a thin wrapper (`Swapchain.cpp`) around the existing
+`vkAcquireNextImageKHR`, forwarding `pAcquireInfo->swapchain`/`timeout`/
+`semaphore`/`fence` verbatim: `pAcquireInfo->deviceMask` needs no real
+handling, since this ICD's single physical-device group (H10c) has
+exactly one member at index 0, making every legal `deviceMask` value
+`0x1` with no second, remote device to ever route the acquire to instead.
+Registered in `EntryPoints.h`/`ImplementedEntrypoints.txt` so
+`vkGetDeviceProcAddr` actually resolves it.
+
+New test coverage:
+- `ProcAddrTest.cpp`: a direct assertion that
+  `getDeviceProcAddr("vkAcquireNextImage2KHR")` is non-null -- the actual
+  root symptom this row reported (a null dispatch-table entry), which
+  `SwapchainTest.cpp`'s own behavioral tests (linking against the real
+  symbol directly, bypassing the dispatch table entirely) could never
+  have caught on their own.
+- `SwapchainTest.cpp`: `AcquireNextImage2RoundTrip` (acquire via the new
+  entry point, verifying both the semaphore and fence it signals, then a
+  full present) and `AcquireNextImage2FailsOnceEveryImageIsAcquired`
+  (confirms `VK_TIMEOUT` forwards correctly, not just `VK_SUCCESS`).
+
+`ninja check-feme` (assertions-enabled, ccache build) passes in full:
+2460/2519 (59 pre-existing `Unsupported`, 0 `Failed`, up 3 tests from this
+row's own new coverage).
+
+**Real CTS re-run.** All three previously-crashing cases now pass, with
+no `SIGSEGV`:
+```
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.basic2'..        Pass (Rendering tests succeeded)  (3/3)
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.2swapchains2'..   Pass (Rendering tests succeeded)  (3/3)
+Test case 'dEQP-VK.wsi.xcb.swapchain.render.10swapchains2'..  Pass (Rendering tests succeeded)  (2/3)
+```
+(the one `10swapchains2` failure was the already-documented H10g
+environmental xcb connection flake -- `VK_ERROR_SURFACE_LOST_KHR` from
+`vkGetPhysicalDeviceSurfaceCapabilitiesKHR`, unrelated to this fix, and
+consistent with H10g's own measured ~1-in-6 pass rate for 10-window
+cases). The whole `dEQP-VK.wsi.xcb.swapchain.render.*` group was re-run
+clean: 6/6 supported cases `Pass`, 0 `Fail` (`device_group`/
+`device_group2` remain the pre-existing, correctly-reported
+`NotSupported`, since `VK_KHR_device_group_creation` is out of scope).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed no
+change needed: this implements a command already claimed by this ICD's
+advertised `apiVersion = VK_API_VERSION_1_4` (core-promoted Vulkan 1.1),
+not a new capability. `FeMeVulkanDesign.md` needed no update (no design
+deviation -- a pure completeness fix filling in a missing core command,
+following the exact shape the design already implies for
+single-physical-device-group deployments).
