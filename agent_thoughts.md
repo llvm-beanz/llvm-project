@@ -60284,3 +60284,139 @@ a new H3x-series row, following this same project's own H21k/H29e
 precedent of filing a shared-root-cause discovery under whichever
 milestone's own re-run first surfaced it) rather than nesting under H29o
 itself.
+
+# H29h: spirv.Image legalization gap
+
+## Task
+
+H29f's own characterization pass (previous turn) found the single dominant
+cause of `dEQP-VK.pipeline.pipeline_library.graphics_library.
+independent_sets_random.*`'s real failures (387 of 465): MLIR's
+`ConvertSPIRVToLLVMPass` failing to legalize `spirv.Image` (extracting a
+plain image handle back out of a combined `spirv.SampledImage` value) with
+`"failed to legalize operation 'spirv.Image' that was explicitly marked
+illegal"`. This turn's job was to root-cause and fix it, per the standing
+instruction to do a real IR reduction first to distinguish "no pattern
+exists at all" from "a pattern exists but doesn't cover this operand
+shape" -- the same two hypotheses this project's H6g-b-a-i-a `spirv.All`/
+`spirv.Any` gap once posed.
+
+## Investigation
+
+Read `SPIRVImageOps.td` first to understand `spirv.Image`'s exact shape: a
+`Pure` op taking one `SPIRV_AnySampledImage` operand (ODS argument name
+`sampled_image`, so the adaptor accessor is `getSampledImage()`) and
+producing the corresponding `SPIRV_AnyImage` result. A simple
+struct-field-extraction shape, not a complex operation -- this matched my
+prior expectation that the fix, whichever hypothesis turned out true, would
+be small.
+
+Grepped upstream MLIR's own `mlir/lib/Conversion/SPIRVToLLVM/
+SPIRVToLLVM.cpp` first and found **zero** pattern coverage for any image
+*operation* at all -- only the three image/sampled-image/sampler *type*
+conversions exist upstream. Every actual image op (`ImageFetch`,
+`ImageRead`, `ImageWrite`, `ImageQuerySize`, `ImageSample*Lod`,
+`SampledImage`, `Image`, ...) has no upstream pattern whatsoever. This
+immediately told me the real work had to be entirely in FeMe's own
+out-of-tree pattern file, not upstream MLIR.
+
+Then grepped FeMe's own `SPIRVToLLVMPatterns.cpp` and found it *does*
+implement most other image ops (`ImageFetch`, `ImageRead`, `ImageWrite`,
+`ImageQuerySize`, `ImageSample{Implicit,Explicit}Lod`, `SampledImage`,
+`SubpassLoad`, `ImageTexelPointer`) -- just not `spirv::ImageOp` itself.
+Confirmed via a second grep across the whole pattern-registration list.
+This settled it: hypothesis 1 (no pattern registered anywhere) was correct,
+the same shape as H6g-b-a-i-a, not hypothesis 2 (an existing pattern with
+an operand-shape bug).
+
+The load-bearing design detail was FeMe's own divergence from upstream
+MLIR's `convertSampledImageType`: FeMe converts `spirv::SampledImageType`
+into a literal `!llvm.struct<(ImageHandle, SamplerHandle)>` two-field
+struct (not one combined runner-facing type, because LLVM's SPIRV backend
+sampling intrinsics want the two handles as separate call arguments). This
+meant the value a converted `spirv::ImageOp`'s operand *actually is*, at
+the LLVM-dialect level, is exactly this struct -- so extracting "just the
+image" is a single `llvm.extractvalue` at index 0, the precise mirror of
+`SampledImagePattern`'s own `llvm.insertvalue` pair building the struct.
+`SampledImagePattern` was the direct design template.
+
+## Reduction and fix
+
+Reproduced the failure directly with `feme-opt --feme-convert-spirv-to-
+llvm` on a minimal hand-written `spirv.module`: a combined image+sampler
+global variable, `spirv.SampledImage` combining them, `spirv.Image`
+extracting the image back out, then `spirv.ImageFetch` using it. This hit
+the exact diagnosed error before any fix. I used this project's own
+established `feme-opt` invocation directly on hand-authored SPIR-V dialect
+IR rather than a `spirv-as`+`feme-translate --import-spirv` binary-SPIR-V
+round trip, since it's this pass's own existing lit-test convention
+(`spirv-to-llvm-image-access.mlir` and siblings all use exactly this shape)
+and reproduces the *exact* diagnosed MLIR-level failure directly, with no
+risk of a SPIR-V producer/import layer masking or altering the shape.
+
+Added `ImagePattern` (mirroring `SampledImagePattern`'s structure) and
+registered it in `populateSPIRVToLLVMTargetPatterns` at the same
+`FeMeBenefit`. Added a new lit test file, `spirv-to-llvm-image-op.mlir`,
+with the reduction case above (renamed to a descriptive test name,
+`fetch_from_combined`). I'd originally also added a second test case
+feeding the extracted image into `spirv.ImageQuerySize`, but the SPIR-V
+verifier itself rejected it (`ImageQuerySize` requires an MS-1 or
+Sampled-0/2 image type, and a `spirv.SampledImage`-combinable image is
+always Sampled=1/`NeedSampler` by construction) -- so that shape isn't
+actually reachable from a real combined-image-sampler binding, and I
+dropped it rather than force an artificial, spec-invalid test case.
+
+`git-clang-format --diff` reflowed the whole pattern-registration
+initializer list (adding `ImagePattern,` shifted every subsequent line's
+wrapping) -- applied as-is via `git apply`, consistent with this project's
+"never hand-tune scope, just apply clang-format's own diff" lesson from
+prior turns.
+
+## Build, test, CTS re-run
+
+`ninja check-feme`: 2511/2570 passed, 59 unsupported, 0 unexpected
+failures -- one net-new passing test versus the prior baseline, otherwise
+unchanged.
+
+Rebuilt `feme_vulkan` and re-ran the real targeted group,
+`dEQP-VK.pipeline.pipeline_library.graphics_library.
+independent_sets_random.*` (720 cases), with `FEME_VULKAN_LOG_CREATION_
+ERRORS=1` set. The targeted diagnostic (`spirv.Image` legalization failure)
+dropped from 387 to **0** -- confirmed by grepping the full log for the
+exact "explicitly marked illegal" signature, not just the aggregate
+Passed/Failed counts (aggregate alone wouldn't have distinguished this
+row's own fix from unrelated noise). But the sub-group's own overall pass
+rate barely moved (36/720 passed, 414 failed, 270 not supported) -- the
+classic "next bug waiting underneath" shape this project's H21k/H29e/H29f
+turns have all hit before. Grepped the new failure messages by signature
+and found two new dominant causes, both in FeMe's own CPU-target
+resource-binding normalization (a much later, unrelated stage from the
+MLIR SPIRVToLLVM pass this row targeted): 378 "register-bound resource
+handle ... cannot normalize into a heap access" and 21 an
+`llvm.getelementptr` type mismatch on a struct-wrapped/plain
+`spirv.Image`-target-extension-typed value. Filed both together as a new
+follow-on row, H29p (single-lowercase-letter-deep, per this project's own
+"avoid nesting milestones more than one lowercase letter deep" rule -- H29o
+was the last-used letter, and H29p had been vacated by an earlier turn's
+own renaming of a mistaken "H29p" into "H29o", so it was free to reuse
+here without a gap).
+
+## Documentation
+
+Struck through H29h in `Roadmap.md` with the full root-cause/fix/CTS-delta
+summary, filed the new H29p row. Added a "Roadmap H29h: measured impact"
+section to `VulkanCTSReport.md`. Updated the `VK_EXT_graphics_pipeline_
+library` row in `VulkanExtensionInventory.md` to record H29h's closure and
+H29p's filing. Added a `spirv.Image` row to `Design.md`'s SPIR-V-to-LLVM
+conversion-coverage table (the "FeMe emits" / "MLIR's conversion emits"
+comparison table), since it's no longer an unconverted op; the separate
+prose "Known gap" section a few paragraphs below did not name `spirv.Image`
+specifically, so it needed no correction.
+
+## Commits
+
+1. Code + lit test: the `ImagePattern` addition and its registration, plus
+   `spirv-to-llvm-image-op.mlir`.
+2. Docs: `Roadmap.md`, `VulkanCTSReport.md`, `VulkanExtensionInventory.md`,
+   `Design.md`.
+3. This `agent_thoughts.md` entry (below, in its own commit).
