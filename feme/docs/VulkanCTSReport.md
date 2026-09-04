@@ -23416,3 +23416,57 @@ the new fields and their SPIR-V decoration codes. Remaining
 `VK_EXT_transform_feedback` work (entry points, pipeline creation,
 actual capture, queries, multi-stream, `VK_EXT_graphics_pipeline_library`
 gating) is tracked as new roadmap rows H21b-H21f.
+
+## Roadmap H21b: measured impact (no CTS delta expected -- entry points and pipeline surface only, still unadvertised)
+
+**Scope.** Registers `VK_EXT_transform_feedback`'s six commands
+(`vkCmdBindTransformFeedbackBuffersEXT`, `vkCmdBeginTransformFeedbackEXT`,
+`vkCmdEndTransformFeedbackEXT`, `vkCmdBeginQueryIndexedEXT`,
+`vkCmdEndQueryIndexedEXT`, `vkCmdDrawIndirectByteCountEXT`) in the
+dispatch table and implements them against the existing
+`RecordedCommand`/`GraphicsState` recording-and-replay architecture, and
+recognizes `VkPipelineRasterizationStateStreamCreateInfoEXT` during
+graphics pipeline creation. No `VkPhysicalDeviceFeatures` bit or
+`VkExtension` is advertised yet (deferred to roadmap H21c, once real
+buffer-write capture exists) -- so, per the standing instruction, a real
+CTS re-run was done to confirm the expected zero delta rather than
+assume it:
+
+**Real `deqp-vk` re-run, correct ICD confirmed via the `feme_icd.json`
+manifest path (`build2/tools/feme/tools/feme-vulkan/feme_icd.json`):**
+- `dEQP-VK.transform_feedback.*` (133,719 cases): 0 passed / 0 failed /
+  133,719 not supported -- byte-for-byte identical to H21a's own
+  baseline above. `deqp-vk`'s own `requireDeviceFunctionality` gate
+  checks `vkEnumerateDeviceExtensionProperties`
+  (`getSupportedDeviceExtensions`), not whether `vkGetDeviceProcAddr`
+  happens to resolve a function pointer, so registering these six
+  commands for dispatch-table generation without advertising the
+  extension itself is confirmed safe, not just assumed so from the
+  code's own design.
+- `dEQP-VK.api.info.*` (10,486 cases), as a general regression spot
+  check: 5,241 passed / 720 failed / 4,525 not supported -- matches
+  H21a's own recorded figures exactly, confirming no regression from
+  this row's own code change either.
+
+**`ninja check-feme`** (assertions-enabled, ccache build, `build2/`):
+2482/2541 tests pass (59 pre-existing `Unsupported`, 0 `Failed`), up 7
+tests from H21a's own 2475/2534 baseline (`CommandBufferTest.cpp` x4:
+`TransformFeedbackEndWritesZeroToCounterBuffer`,
+`TransformFeedbackRejectsNestedBegin`,
+`TransformFeedbackRejectsEndWithNoBegin`,
+`QueryIndexedDelegatesToNonIndexedQuery`; `DrawTest.cpp`'s
+`DrawIndirectByteCountComputesVertexCountFromCounterBuffer`;
+`GraphicsPipelineTest.cpp`'s `TranslatesRasterizationStateStream`;
+`ProcAddrTest.cpp`'s `DeviceProcAddrResolvesTransformFeedbackCommands`),
+0 regressions. Also required updating one existing lit test
+(`vk-gen-entrypoints-split-features.test` and its
+`vk-split-features.xml` fixture) to declare and expect
+`VK_EXT_transform_feedback` alongside the eleven extensions it already
+covered, since `vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` now
+lists twelve.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed: confirmed, not assumed, by grepping both -- `VK_EXT_transform_
+feedback`'s `VulkanExtensionInventory.md` row already reads "Planned (in
+scope, not implemented)" from H21's own entry, which remains accurate
+until H21c actually advertises it.
