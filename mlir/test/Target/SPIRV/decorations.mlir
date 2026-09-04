@@ -26,6 +26,16 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
 
 // -----
 
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
+  // The deserializer used to reject this outright with "unhandled
+  // Decoration : 'Centroid'", failing module deserialization before it
+  // ever reached any centroid-interpolated fragment input.
+  // CHECK: centroid
+  spirv.GlobalVariable @var {centroid} : !spirv.ptr<vector<4xf32>, Input>
+}
+
+// -----
+
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], [SPV_KHR_variable_pointers]> {
   // CHECK: aliased
   // CHECK: aliased
