@@ -361,15 +361,15 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_0 | `shaderInt16` | no |  |
 | feature | VK_VERSION_1_0 | `shaderResourceResidency` | no |  |
 | feature | VK_VERSION_1_0 | `shaderResourceMinLod` | no |  |
-| feature | VK_VERSION_1_0 | `sparseBinding` | no |  |
-| feature | VK_VERSION_1_0 | `sparseResidencyBuffer` | no |  |
-| feature | VK_VERSION_1_0 | `sparseResidencyImage2D` | no |  |
-| feature | VK_VERSION_1_0 | `sparseResidencyImage3D` | no |  |
-| feature | VK_VERSION_1_0 | `sparseResidency2Samples` | no |  |
-| feature | VK_VERSION_1_0 | `sparseResidency4Samples` | no |  |
-| feature | VK_VERSION_1_0 | `sparseResidency8Samples` | no |  |
-| feature | VK_VERSION_1_0 | `sparseResidency16Samples` | no |  |
-| feature | VK_VERSION_1_0 | `sparseResidencyAliased` | no |  |
+| feature | VK_VERSION_1_0 | `sparseBinding` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
+| feature | VK_VERSION_1_0 | `sparseResidencyBuffer` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
+| feature | VK_VERSION_1_0 | `sparseResidencyImage2D` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
+| feature | VK_VERSION_1_0 | `sparseResidencyImage3D` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
+| feature | VK_VERSION_1_0 | `sparseResidency2Samples` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
+| feature | VK_VERSION_1_0 | `sparseResidency4Samples` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
+| feature | VK_VERSION_1_0 | `sparseResidency8Samples` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
+| feature | VK_VERSION_1_0 | `sparseResidency16Samples` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
+| feature | VK_VERSION_1_0 | `sparseResidencyAliased` | no | roadmap H27: sparse-resources feature bits move into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
 | feature | VK_VERSION_1_0 | `variableMultisampleRate` | no |  |
 | feature | VK_VERSION_1_0 | `inheritedQueries` | no |  |
 | feature | VK_VERSION_1_1 | `storageBuffer16BitAccess` | no |  |
@@ -381,7 +381,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_1 | `multiviewTessellationShader` | no |  |
 | feature | VK_VERSION_1_1 | `variablePointersStorageBuffer` | no |  |
 | feature | VK_VERSION_1_1 | `variablePointers` | no |  |
-| feature | VK_VERSION_1_1 | `protectedMemory` | no |  |
+| feature | VK_VERSION_1_1 | `protectedMemory` | no | roadmap H28: protected-memory feature bit moves into scope per roadmap H12's own decision (only Vulkan video stays out of scope among the large groups it named); not yet implemented |
 | feature | VK_VERSION_1_1 | `samplerYcbcrConversion` | no |  |
 | feature | VK_VERSION_1_1 | `shaderDrawParameters` | no |  |
 | extension | VK_VERSION_1_1 | `VK_KHR_16bit_storage` | no |  |
