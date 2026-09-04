@@ -37,21 +37,30 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on H10h or other prerequisites blocking the H-series milestones?
+Can you work on H10i or other prerequisites blocking the H-series milestones?
 
-> **`dEQP-VK.wsi.xcb.incremental_present.scale_none.fifo.identity.opaque.reference`
-> fails `vkCreateGraphicsPipelines`**: `"'llvm.shl' op operand #1 must be
-> signless integer or LLVM dialect-compatible vector of signless integer, but
-> got 'si32'"`, discovered by H10b's own real `dEQP-VK.wsi.xcb.*` re-run (one of
-> its original 8 real failures, mistakenly omitted from that row's own closure
-> tally by a counting error -- corrected in H10b's own entry above). An MLIR
-> verifier-level type-legality gap: `llvm.shl`'s second (shift-amount) operand
-> must be a signless integer, but whatever SPIR-V-to-LLVM lowering step produced
-> this particular shift left its operand as a *signed* (`si32`,
-> SPIR-V-dialect-tagged) integer instead of first converting it to LLVM
-> dialect's own signless convention -- entirely unrelated to
-> WSI/CompositeConstruct/matrix-arithmetic (H10d/H10f) or to
-> swapchain/device-group. Needs a real IR reduction of this exact case to find
-> which lowering pattern emits an `llvm.shl` without first stripping/converting
-> its shift-amount operand's SPIR-V signedness, and whether the same gap affects
-> `llvm.lshr`/`llvm.ashr` identically
+> **`vkAcquireNextImage2KHR` is entirely unimplemented**, discovered by H10f's
+> own real re-run once its matrix-arithmetic fix let
+> `dEQP-VK.wsi.xcb.swapchain.render.basic2`/`2swapchains2` (and, by the same
+> root cause, `10swapchains2`, already separately blocked at swapchain creation
+> by H10g) clear pipeline creation and reach an acquire call using this entry
+> point for the first time. Not a graceful "unsupported" rejection: `gdb`'s own
+> backtrace shows a genuine `SIGSEGV` at address `0x0`, called directly from
+> `vkt::wsi::multiSwapchainRenderTest<AcquireNextImage2Wrapper>`, meaning this
+> ICD's own `vkGetDeviceProcAddr`/dispatch-table plumbing returns a null
+> function pointer for this entry point rather than a real implementation, and
+> CTS calls through it unconditionally once `VkAcquireNextImageInfoKHR`-based
+> acquire is exercised (this ICD's advertised `apiVersion = VK_API_VERSION_1_4`
+> obligates implementing this core-1.1 command regardless, per the same "every
+> core command this ICD's own version claims must at least be present" precedent
+> H10c's `vkEnumeratePhysicalDeviceGroups` family already established). Needs:
+> (1) implementing `vkAcquireNextImage2KHR` itself (`Swapchain.cpp`, likely a
+> thin wrapper around the existing
+> `vkAcquireNextImageKHR`/`Swapchain::acquireNextImage` logic, since this ICD's
+> single-physical-device-group scope (H10c) makes
+> `VkAcquireNextImageInfoKHR::deviceMask` trivially satisfiable); (2)
+> registering it in `EntryPoints.{h,cpp}`/`ImplementedEntrypoints.txt` so
+> `vkGetDeviceProcAddr` actually resolves it instead of returning null; (3) a
+> real re-run of `basic2`/`2swapchains2` (and `10swapchains2` once H10g's own
+> swapchain-creation gap is separately fixed) to confirm a genuine, non-crashing
+> result
