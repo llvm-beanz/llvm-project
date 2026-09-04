@@ -3226,7 +3226,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 34u);
+  ASSERT_EQ(Count, 35u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -5640,6 +5640,54 @@ TEST_F(DrawTest, PipelineStatisticsQueryCountsAllElevenCounters) {
   EXPECT_EQ(Results[9], 0u);  // TessEvalShaderInvocations: no tessellation.
   EXPECT_EQ(Results[10], 0u); // ComputeShaderInvocations: this is a draw.
   EXPECT_EQ(Results[11], 1u); // Availability.
+
+  vkDestroyQueryPool(Device, QueryPool, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (Roadmap H21d) `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT`
+/// (`VK_EXT_primitives_generated_query`) wrapped around the same one
+/// ordinary triangle draw as `PipelineStatisticsQueryCountsAllElevenCounters`
+/// above: counts the identical quantity `CLIPPING_INVOCATIONS_BIT` does
+/// (`QueryPool.h`'s file comment) via `vkCmdBeginQueryIndexedEXT`/
+/// `vkCmdEndQueryIndexedEXT` at index 0 (this ICD's only supported stream,
+/// since `primitivesGeneratedQueryWithNonZeroStreams` is not advertised).
+/// Uses the indexed entry points, not plain `vkCmdBeginQuery`/
+/// `vkCmdEndQuery`, matching how `dEQP-VK.transform_feedback.primitives_
+/// generated_query.*` -- the CTS group this row targets -- actually issues
+/// this query type.
+TEST_F(DrawTest, PrimitivesGeneratedQueryCountsOneTriangle) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkQueryPoolCreateInfo QueryInfo{};
+  QueryInfo.queryType = VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT;
+  QueryInfo.queryCount = 1;
+  VkQueryPool QueryPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &QueryInfo, nullptr, &QueryPool),
+            VK_SUCCESS);
+
+  beginRenderPass({{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdResetQueryPool(Cmd, QueryPool, 0, 1);
+  vkCmdBeginQueryIndexedEXT(Cmd, QueryPool, 0, 0, 0);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndQueryIndexedEXT(Cmd, QueryPool, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  uint64_t Results[2] = {0, 0};
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QueryPool, 0, 1, sizeof(Results),
+                                  Results, 2 * sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT |
+                                      VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+            VK_SUCCESS);
+  EXPECT_EQ(Results[0], 1u); // One triangle generated.
+  EXPECT_EQ(Results[1], 1u); // Availability.
 
   vkDestroyQueryPool(Device, QueryPool, nullptr);
   vkDestroyPipeline(Device, Pipe, nullptr);

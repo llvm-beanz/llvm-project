@@ -20,7 +20,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateQueryPool(
     const VkAllocationCallbacks *pAllocator, VkQueryPool *pQueryPool) {
   if (pCreateInfo->queryType != VK_QUERY_TYPE_TIMESTAMP &&
       pCreateInfo->queryType != VK_QUERY_TYPE_OCCLUSION &&
-      pCreateInfo->queryType != VK_QUERY_TYPE_PIPELINE_STATISTICS)
+      pCreateInfo->queryType != VK_QUERY_TYPE_PIPELINE_STATISTICS &&
+      pCreateInfo->queryType != VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT)
     return VK_ERROR_INITIALIZATION_FAILED;
   // (roadmap H9) Every one of the 11 real `VkQueryPipelineStatisticFlagBits`
   // is backed by a real, honestly-computed counter (see `QueryPool.h`'s

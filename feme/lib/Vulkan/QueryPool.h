@@ -9,10 +9,11 @@
 // The V3 `VkQueryPool` object model (see "Command Buffers" in
 // feme/docs/FeMeVulkanDesign.md: "Reset query pool, begin/end query, write
 // timestamp, and copy query results"). `VK_QUERY_TYPE_TIMESTAMP`,
-// `VK_QUERY_TYPE_OCCLUSION`, and (roadmap H9) `VK_QUERY_TYPE_PIPELINE_
-// STATISTICS` are accepted at creation. Timestamp queries still report the
-// value zero: this software device has no wall-clock timestamp counter to
-// sample, and zero is a valid (if maximally coarse)
+// `VK_QUERY_TYPE_OCCLUSION`, (roadmap H9) `VK_QUERY_TYPE_PIPELINE_
+// STATISTICS`, and (roadmap H21d) `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT`
+// are accepted at creation. Timestamp queries still report the value zero:
+// this software device has no wall-clock timestamp counter to sample, and
+// zero is a valid (if maximally coarse)
 // `VkPhysicalDeviceLimits::timestampPeriod`-scaled value no application can
 // mistake for a real measurement. Occlusion queries count the exact number
 // of covered samples whose depth/stencil tests pass across draws executed
@@ -28,6 +29,26 @@
 // path), but every bit's own value is a real, honestly-computed count, never
 // a placeholder zero or an invented value -- see roadmap H9's own row for
 // which sub-cases still want more CTS coverage.
+//
+// (Roadmap H21d) `VK_EXT_primitives_generated_query`'s single query type
+// counts the same quantity as `VK_QUERY_PIPELINE_STATISTIC_CLIPPING_
+// INVOCATIONS_BIT` (the number of primitives entering the shared clip/
+// rasterize stage, regardless of pre-rasterization chain -- see
+// `Executor.cpp`'s `RasterizePrimitives` lambda), except it must report a
+// real, non-zero value even when this pipeline's own `rasterizerDiscard
+// Enable` is set, per the extension's own spec text ("independent from
+// transform feedback ... analogous to OpenGL's GL_PRIMITIVES_GENERATED").
+// Since `rasterizerDiscardEnable` is not itself implemented yet (roadmap
+// H21g: any pipeline requesting it is rejected outright at creation), this
+// distinction is not yet observable -- every query this ICD can currently
+// create already reports the same value `CLIPPING_INVOCATIONS` would.
+// Scoped, like `VK_EXT_transform_feedback`'s own `geometryStreams`
+// (roadmap H21e), to stream 0 only: `primitivesGeneratedQueryWithNonZero
+// Streams` stays false, so `vkCmdBeginQueryIndexedEXT`'s own `index`
+// argument is never anything but 0 for a query of this type in practice
+// (any real CTS case requesting otherwise is skipped by its own
+// `requireDeviceFunctionality`-style feature check before ever reaching
+// this ICD).
 //
 // (Roadmap H2f) Under a multiview render pass instance, `vkCmdBeginQuery`/
 // `vkCmdEndQuery` implicitly span one query index per set bit of the active
@@ -189,6 +210,19 @@ public:
          Bit != static_cast<uint32_t>(PipelineStatisticIndex::Count); ++Bit)
       if (PipelineStatistics & (1u << Bit))
         Values[Query][Slot++] += Counters[Bit];
+  }
+
+  /// (roadmap H21d) Adds one draw's own contribution -- the same
+  /// `PipelineStatsCounters::ClippingInvocations` value
+  /// `accumulatePipelineStatistics` above already receives, computed once
+  /// per draw regardless of which query type(s) are currently active -- to
+  /// `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT` query index \p Query. A
+  /// no-op for any other query type, mirroring `accumulatePipelineStatistics`'s
+  /// own type guard.
+  void accumulatePrimitivesGenerated(uint32_t Query, uint64_t Primitives) {
+    if (Type != VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT || Query >= Values.size())
+      return;
+    Values[Query][0] += Primitives;
   }
 
   bool isAvailable(uint32_t Query) const {

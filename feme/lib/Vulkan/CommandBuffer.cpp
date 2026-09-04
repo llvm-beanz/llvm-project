@@ -783,6 +783,17 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
 /// number of draws and dispatches (occlusion queries never needed to
 /// consider a dispatch at all), each summing its own contribution here in
 /// turn via `QueryPool::accumulatePipelineStatistics`.
+///
+/// (Roadmap H21d) Also carries `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT`
+/// pools: that query type needs exactly the same per-draw computation
+/// (`PipelineStatsCounters::ClippingInvocations`, see `Executor.cpp`'s
+/// `RasterizePrimitives`) a pipeline-statistics query already triggers, so
+/// rather than track a fourth parallel list purely to keep the two query
+/// types' entries apart, both share this one -- `QueryPool::
+/// accumulatePipelineStatistics`/`accumulatePrimitivesGenerated` each
+/// self-gate on their own expected `queryType()`, so an entry of the
+/// "wrong" type for one call is simply a no-op there, never a correctness
+/// hazard.
 struct ActivePipelineStatsQuery {
   QueryPool *Pool = nullptr;
   uint32_t Query = 0;
@@ -794,6 +805,11 @@ struct ActivePipelineStatsQuery {
 /// -ordered shape, then sums the result into every one of \p
 /// ActivePipelineStatsQueries -- shared by every draw path
 /// (`runPreparedDraw`) since all of them fill the same counters struct.
+/// (Roadmap H21d) Also feeds `Stats.ClippingInvocations` to
+/// `accumulatePrimitivesGenerated` for the same list's own
+/// `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT` entries, if any -- see
+/// `ActivePipelineStatsQuery`'s own comment for why both types share one
+/// list.
 void accumulatePipelineStats(
     llvm::ArrayRef<ActivePipelineStatsQuery> ActivePipelineStatsQueries,
     const feme::graphics::PreparedDraw::PipelineStatsCounters &Stats) {
@@ -828,8 +844,11 @@ void accumulatePipelineStats(
   Counters[static_cast<size_t>(
       PipelineStatisticIndex::TessEvalShaderInvocations)] =
       Stats.TessEvalShaderInvocations;
-  for (const ActivePipelineStatsQuery &Query : ActivePipelineStatsQueries)
+  for (const ActivePipelineStatsQuery &Query : ActivePipelineStatsQueries) {
     Query.Pool->accumulatePipelineStatistics(Query.Query, Counters);
+    Query.Pool->accumulatePrimitivesGenerated(Query.Query,
+                                              Stats.ClippingInvocations);
+  }
 }
 
 /// Runs one dispatch: materializes the currently bound descriptor sets'
@@ -2481,10 +2500,11 @@ Error executeCommandsInto(
       // loop reads it), an occlusion query implicitly spans one query
       // index per set view-mask bit, per the Vulkan spec's multiview
       // query rule (`QueryPool.h`'s file comment) -- not the single index
-      // a non-multiview query uses. (Roadmap H9) A pipeline-statistics
-      // query has no such multiview span (`ActivePipelineStatsQuery`'s
-      // own comment), so always spans its single `Cmd.FirstQuery` index
-      // regardless of `Gfx.Binding.ViewMask`.
+      // a non-multiview query uses. (Roadmap H9/H21d) A pipeline-statistics
+      // or `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT` query has no such
+      // multiview span (`ActivePipelineStatsQuery`'s own comment), so
+      // always spans its single `Cmd.FirstQuery` index regardless of
+      // `Gfx.Binding.ViewMask`.
       uint32_t ViewCount =
           Cmd.TargetQueryPool->queryType() == VK_QUERY_TYPE_OCCLUSION &&
                   Gfx.Binding.ViewMask
@@ -2495,7 +2515,16 @@ Error executeCommandsInto(
         ActiveOcclusionQueries.push_back(
             {Cmd.TargetQueryPool, Cmd.FirstQuery, ViewCount});
       else if (Cmd.TargetQueryPool->queryType() ==
-              VK_QUERY_TYPE_PIPELINE_STATISTICS)
+                  VK_QUERY_TYPE_PIPELINE_STATISTICS ||
+              Cmd.TargetQueryPool->queryType() ==
+                  VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT)
+        // (roadmap H21d) A `PRIMITIVES_GENERATED_EXT` pool shares this
+        // same list rather than a fourth parallel one: both query types
+        // need exactly the same per-draw `ClippingInvocations` value
+        // computed (see `accumulatePipelineStats`'s own comment below),
+        // and each `QueryPool::accumulate*` method already self-gates on
+        // its own expected query type, so entries of either type coexist
+        // here safely.
         ActivePipelineStatsQueries.push_back(
             {Cmd.TargetQueryPool, Cmd.FirstQuery});
       break;
