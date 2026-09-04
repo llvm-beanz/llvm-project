@@ -269,6 +269,28 @@ struct PreparedDraw {
     uint64_t TessEvalShaderInvocations = 0;
   };
   PipelineStatsCounters *Stats = nullptr;
+  /// (roadmap H21c) One entry per currently-bound `VK_EXT_transform_
+  /// feedback` buffer (`vkCmdBindTransformFeedbackBuffersEXT`'s own
+  /// binding index, matching `feme::SignatureElement::XfbBuffer`'s
+  /// value): the buffer's own writable byte range, and a pointer to a
+  /// caller-owned running byte counter this draw's own vertex-shader-only
+  /// capture (see "Transform feedback capture" in Executor.cpp)
+  /// accumulates into across every draw in the same
+  /// `vkCmdBeginTransformFeedbackEXT`/`vkCmdEndTransformFeedbackEXT`
+  /// scope -- mirroring `PassedSampleCounter`/`Stats`'s own "null costs
+  /// nothing, non-null names a caller-owned accumulator" pattern.
+  /// `vkCmdEndTransformFeedbackEXT` (`CommandBuffer.cpp`) reads the final
+  /// accumulated value back out to report to its own counter buffer.
+  /// Empty when no transform-feedback scope is currently active (the
+  /// common case for every draw), or for a pipeline with a tessellation/
+  /// geometry stage (roadmap H21c is scoped to a vertex-shader-only
+  /// pipeline's own direct output; a later roadmap H21 row may extend
+  /// capture to source from the domain/geometry stage's output instead).
+  struct XfbCaptureBuffer {
+    llvm::MutableArrayRef<uint8_t> Data;
+    uint64_t *CapturedBytes = nullptr;
+  };
+  llvm::ArrayRef<XfbCaptureBuffer> XfbBuffers;
   /// (roadmap F8) `vkCmdSetRenderingAttachmentLocations`'s current mapping,
   /// in the same shape `VkRenderingAttachmentLocationInfo::
   /// pColorAttachmentLocations` uses: element `Location` names the

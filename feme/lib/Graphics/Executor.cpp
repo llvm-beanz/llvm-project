@@ -3833,6 +3833,86 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     if (Error E = Pipeline.getVertexStage().invokeVertices(PVB))
       return E;
 
+    // --- Transform feedback capture (roadmap H21c). ---
+    //
+    // `VK_EXT_transform_feedback` captures the output of the last vertex-
+    // processing stage before rasterization; scoped here to a vertex-
+    // shader-only pipeline's own direct `VSOutput` (no tessellation or
+    // geometry stage), the CTS-dominant shape roadmap H21a's own scoping
+    // found -- a later roadmap H21 row may extend this to source from the
+    // domain/geometry stage's own output instead. `Draw.XfbBuffers`
+    // is empty unless a `vkCmdBeginTransformFeedbackEXT` scope is
+    // currently active (`CommandBuffer.cpp`'s `runDraw`), so this is a
+    // no-op for every draw before this row, and any non-XFB draw after
+    // it.
+    if (!Draw.XfbBuffers.empty() && !Pipeline.hasTessellationStages() &&
+        !Pipeline.hasGeometryStages()) {
+      // Every `Output`-direction element captured to the same
+      // `XfbBuffer` shares that buffer's own per-vertex record stride (a
+      // real shader repeats SPIR-V's `XfbStride` decoration on every one
+      // of that buffer's captured variables); this draw's own `Total`
+      // newly emitted vertices must advance that buffer's running byte
+      // counter exactly once, not once per element captured to it, so
+      // each buffer's base (already-captured) vertex count is computed
+      // once, from the first such element found, before the per-element
+      // write loop below.
+      struct XfbBufferProgress {
+        uint32_t Stride = 0;
+        uint64_t BaseVertex = 0;
+        bool Seen = false;
+      };
+      llvm::SmallVector<XfbBufferProgress, 4> Progress(
+          Draw.XfbBuffers.size());
+      for (const SignatureElement &Elt : VSSigValue.Elements) {
+        if (Elt.Direction != SignatureDirection::Output || !Elt.XfbBuffer)
+          continue;
+        uint32_t BufIdx = *Elt.XfbBuffer;
+        if (BufIdx >= Draw.XfbBuffers.size() ||
+            !Draw.XfbBuffers[BufIdx].CapturedBytes || Elt.XfbStride == 0)
+          continue;
+        XfbBufferProgress &Prog = Progress[BufIdx];
+        if (Prog.Seen)
+          continue;
+        Prog.Stride = Elt.XfbStride;
+        Prog.BaseVertex =
+            *Draw.XfbBuffers[BufIdx].CapturedBytes / Elt.XfbStride;
+        Prog.Seen = true;
+      }
+      for (const SignatureElement &Elt : VSSigValue.Elements) {
+        if (Elt.Direction != SignatureDirection::Output || !Elt.XfbBuffer)
+          continue;
+        uint32_t BufIdx = *Elt.XfbBuffer;
+        if (BufIdx >= Draw.XfbBuffers.size())
+          continue;
+        const feme::graphics::PreparedDraw::XfbCaptureBuffer &CB =
+            Draw.XfbBuffers[BufIdx];
+        if (!CB.CapturedBytes || Elt.XfbStride == 0)
+          continue;
+        uint64_t BaseVertex = Progress[BufIdx].BaseVertex;
+        for (uint32_t Flat = 0; Flat != Total; ++Flat) {
+          uint64_t RecordStart =
+              (BaseVertex + Flat) * Elt.XfbStride + Elt.XfbOffset;
+          for (uint32_t C = 0; C != Elt.ComponentCount; ++C) {
+            uint64_t Dst = RecordStart + uint64_t(C) * sizeof(uint32_t);
+            // (roadmap F10-style) A destination past the bound buffer's
+            // own byte range is dropped, not fatal -- the same
+            // "clamp/skip rather than fail the whole draw"
+            // out-of-bounds convention `robustBufferAccess` already
+            // uses elsewhere in this file.
+            if (Dst + sizeof(uint32_t) > CB.Data.size())
+              continue;
+            uint32_t Bits = VSOutput->readRaw(Elt.ElementID,
+                                              Elt.FirstComponent + C, Flat);
+            std::memcpy(CB.Data.data() + Dst, &Bits, sizeof(Bits));
+          }
+        }
+      }
+      for (size_t BufIdx = 0; BufIdx != Progress.size(); ++BufIdx)
+        if (Progress[BufIdx].Seen)
+          *Draw.XfbBuffers[BufIdx].CapturedBytes +=
+              uint64_t(Total) * Progress[BufIdx].Stride;
+    }
+
     // --- Tessellation (roadmap H4). ---
     //
     // Each patch of the patch-list draw is run through its own

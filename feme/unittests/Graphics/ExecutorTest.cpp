@@ -2385,6 +2385,161 @@ TEST(ExecutorTest, RendersWithNoFragmentStage) {
   EXPECT_EQ(PassedSamples, 16u);
 }
 
+// (Roadmap H21c) `VK_EXT_transform_feedback`'s capture: a vertex-shader-
+// only pipeline (no tessellation/geometry stage) with one `Output`-
+// direction element tagged `XfbBuffer = 0` must, for every vertex
+// invocation actually drawn, write that element's raw bits into the
+// bound transform-feedback buffer at `vertexIndex * XfbStride +
+// XfbOffset`, and advance `PreparedDraw::XfbCaptureBuffer::CapturedBytes`
+// by exactly `vertexCount * XfbStride` -- the same real behavior
+// `vkCmdEndTransformFeedbackEXT` (`CommandBuffer.cpp`) reads back out to
+// report to its own counter buffer. Mirrors `RendersWithNoFragmentStage`
+// above: no fragment stage at all, matching
+// `dEQP-VK.transform_feedback.simple.basic`'s own vertex-only pipeline
+// shape.
+TEST(ExecutorTest, CapturesVertexShaderOutputToBoundTransformFeedbackBuffer) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Output, 1, /*Location=*/0)};
+  VSSig.Elements[2].XfbBuffer = 0;
+  VSSig.Elements[2].XfbOffset = 0;
+  VSSig.Elements[2].XfbStride = 4;
+  constexpr char XfbVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, XfbVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), /*FragmentStage=*/nullptr, PrimitiveTopology::PointList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, /*Attachments=*/{}, StencilState{},
+      /*ColorBlends=*/{}, /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  ASSERT_FALSE(Pipeline.hasTessellationStages());
+  ASSERT_FALSE(Pipeline.hasGeometryStages());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, // v0: px = 1.0
+      2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, // v1: px = 2.0
+      3.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, // v2: px = 3.0
+  };
+  PreparedDraw Draw = Scene.prepare();
+  Draw.Attachments = {}; // No color attachment at all.
+
+  std::array<uint8_t, 12> XfbStorage{}; // 3 vertices * 4 bytes each.
+  uint64_t CapturedBytes = 0;
+  std::array<PreparedDraw::XfbCaptureBuffer, 1> XfbBuffers = {
+      PreparedDraw::XfbCaptureBuffer{MutableArrayRef(XfbStorage),
+                                    &CapturedBytes}};
+  Draw.XfbBuffers = XfbBuffers;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  float Captured[3];
+  std::memcpy(Captured, XfbStorage.data(), sizeof(Captured));
+  EXPECT_FLOAT_EQ(Captured[0], 1.0f);
+  EXPECT_FLOAT_EQ(Captured[1], 2.0f);
+  EXPECT_FLOAT_EQ(Captured[2], 3.0f);
+  EXPECT_EQ(CapturedBytes, 12u);
+}
+
+// (Roadmap H21c) A second draw within the same transform-feedback scope
+// (modeled here as a second `executeDraws` call sharing the same
+// `CapturedBytes` accumulator, the same way `CommandBuffer.cpp`'s
+// `runDraw` reuses `Gfx.XfbCapturedBytes` across every draw between one
+// `vkCmdBeginTransformFeedbackEXT`/`vkCmdEndTransformFeedbackEXT` pair)
+// appends after the first draw's own captured vertices rather than
+// overwriting them from offset 0.
+TEST(ExecutorTest, TransformFeedbackCaptureAppendsAcrossMultipleDraws) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Output, 1, /*Location=*/0)};
+  VSSig.Elements[2].XfbBuffer = 0;
+  VSSig.Elements[2].XfbOffset = 0;
+  VSSig.Elements[2].XfbStride = 4;
+  constexpr char XfbVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, XfbVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), /*FragmentStage=*/nullptr, PrimitiveTopology::PointList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, /*Attachments=*/{}, StencilState{},
+      /*ColorBlends=*/{}, /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+
+  std::array<uint8_t, 8> XfbStorage{}; // 2 vertices * 4 bytes each.
+  uint64_t CapturedBytes = 0;
+  std::array<PreparedDraw::XfbCaptureBuffer, 1> XfbBuffers = {
+      PreparedDraw::XfbCaptureBuffer{MutableArrayRef(XfbStorage),
+                                    &CapturedBytes}};
+
+  TriangleScene FirstScene;
+  FirstScene.VertexData = {10.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  PreparedDraw FirstDraw = FirstScene.prepare();
+  FirstDraw.Attachments = {};
+  FirstDraw.XfbBuffers = XfbBuffers;
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, FirstDraw), Succeeded());
+  EXPECT_EQ(CapturedBytes, 4u);
+
+  TriangleScene SecondScene;
+  SecondScene.VertexData = {20.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  PreparedDraw SecondDraw = SecondScene.prepare();
+  SecondDraw.Attachments = {};
+  SecondDraw.XfbBuffers = XfbBuffers;
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, SecondDraw), Succeeded());
+  EXPECT_EQ(CapturedBytes, 8u);
+
+  float Captured[2];
+  std::memcpy(Captured, XfbStorage.data(), sizeof(Captured));
+  EXPECT_FLOAT_EQ(Captured[0], 10.0f);
+  EXPECT_FLOAT_EQ(Captured[1], 20.0f);
+}
+
 // Roadmap R33: stencil testing/writes with a real `S8_UINT` attachment.
 TEST(ExecutorTest, StencilTestRejectsMismatchedReference) {
   Context Ctx;
