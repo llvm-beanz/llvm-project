@@ -356,6 +356,7 @@ linkage:
 | Interpolation | Flat, perspective, no-perspective, centroid, sample |
 | Frequency | Per-vertex, per-primitive, per-patch, or per-sample |
 | Stream | Geometry output stream, reserved until that stage is implemented |
+| Transform-feedback capture | `VK_EXT_transform_feedback` buffer/offset/stride an output element captures to, if any (roadmap H21a) |
 
 The core representation should use stable numeric element IDs within one
 entry point. Canonical stage operations refer to those IDs; import metadata
@@ -447,8 +448,9 @@ and the `StageIOGlobalVariablePattern`/`StageIOAddressOfPattern` pair
 (`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`) convert a
 non-builtin `Input`/`Output` `spirv.GlobalVariable` to an ordinary
 `llvm.mlir.global` in the address space (7/8) LLVM's SPIRV backend expects
-that storage class to use, recording its `Location`/`Component`/`Index` and
-boolean interpolation/`Patch`/`PerPrimitiveEXT` decorations as a
+that storage class to use, recording its `Location`/`Component`/`Index`,
+`VK_EXT_transform_feedback`'s `Offset`/`XfbBuffer`/`XfbStride` (roadmap
+H21a), and boolean interpolation/`Patch`/`PerPrimitiveEXT` decorations as a
 `feme.spirv.decorations` MLIR attribute
 (`feme::spirv::getStageIODecorationsAttrName`); once
 `mlir::translateModuleToLLVMIR` has produced a genuine `llvm::Module`,
@@ -588,6 +590,35 @@ and run to completion, landing in the same `Fail (Fail)` image-comparison
 bucket roadmap H2g already tracks, rather than failing earlier at
 `vkCreateGraphicsPipelines`. See "Roadmap H2e: measured impact" in
 VulkanCTSReport.md for the full breakdown.
+
+**Roadmap H21a**: `SignatureElement` gains three new fields --
+`XfbBuffer` (`std::optional<uint32_t>`, unset unless the element captures
+to a `VK_EXT_transform_feedback` buffer), `XfbOffset`, and `XfbStride`
+(both plain `uint32_t`, meaningless -- and required to be `0` by
+`verifySignature`'s new `checkXfbCapture` rule -- unless `XfbBuffer` is
+set) -- mirroring the table's existing "Stream" row's own reserved-until-
+implemented shape. `SignatureAbiVersion` moves 4 to 5 and
+`NumFixedFieldsPerElement` 18 to 22 accordingly, both `serializeSignature`/
+`parseSignature` appending the four new fields at the end of each
+element's record per this model's established versioning convention (every
+prior version bump appends rather than interleaves). The SPIR-V decoration
+codes involved (`Offset` 35, `XfbBuffer` 36, `XfbStride` 37) are already
+generically deserialized by MLIR's own SPIR-V importer exactly like
+`Location`/`Component`/`Index` are (plain `IntegerAttr`s named `offset`/
+`xfb_buffer`/`xfb_stride`), so `buildStageIODecorationsAttr` forwards them
+unconditionally with no new MLIR-side work, and
+`feme::graphics::CanonicalizeStagePass`'s `parseSPIRVDecorations` reads
+them back into the three new fields the same way it already reads
+`Location`/`Component`/`Index`. This is plumbing only: no feature bit,
+extension advertisement, or actual transform-feedback buffer capture
+exists yet (`checkXfbCapture` never runs during real Vulkan traffic, since
+nothing sets `XfbBuffer` outside a SPIR-V module that already carries the
+`TransformFeedback` capability, which this ICD does not yet accept -- see
+"Roadmap H21a: measured impact" in VulkanCTSReport.md, expecting no CTS
+delta). Remaining `VK_EXT_transform_feedback` work -- entry points,
+pipeline creation's `VkPipelineRasterizationStateStreamCreateInfoEXT`,
+actual buffer-write capture, queries, and multi-stream capture -- is
+tracked as roadmap rows H21b through H21f.
 
 ### Canonical stage operations
 

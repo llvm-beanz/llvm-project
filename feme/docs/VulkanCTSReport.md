@@ -23356,3 +23356,63 @@ notes, on already-`no` rows, pointing at the new H27/H28 rows) and no
 updated alongside this row's own docs commits: this is a scope decision,
 not a capability change, so nothing else in either document needed
 touching.
+
+## Roadmap H21a: measured impact (no CTS delta expected -- reflection plumbing only, unwired)
+
+**Scope.** This row's own scoping pass found `VK_EXT_transform_feedback`'s
+133,719 `dEQP-VK.transform_feedback.*` cases dominated by
+`primitives_generated_query` (107,866, 81%) and single-stream usage, with
+the two `*_gpl` sub-groups (15,782, 12%) additionally blocked on the
+unrelated, unimplemented `VK_EXT_graphics_pipeline_library`. Rather than
+attempt the whole extension at once, this pass lands only the smallest
+real first step: `feme::SignatureElement` gains `XfbBuffer`/`XfbOffset`/
+`XfbStride` fields (`SignatureAbiVersion` 4->5), a new `checkXfbCapture`
+verifier rule, and SPIR-V decoration plumbing in both
+`buildStageIODecorationsAttr` (writer) and `CanonicalizeStage.cpp`'s
+`parseSPIRVDecorations` (reader) -- mirroring H8c's own "decoder complete
+but unwired" precedent exactly. No `VkPhysicalDeviceFeatures` bit, no
+`VkExtension`, and no actual transform-feedback buffer-write capture
+exists yet, so, per the standing instruction to run the real CTS after
+each change, a real re-run was done to confirm that expectation rather
+than assume it:
+
+**Real `deqp-vk` re-run, correct ICD confirmed via `vulkaninfo --summary`
+(`deviceName = FeMe CPU Vulkan Device`) and the `feme_icd.json` manifest
+path (`build2/tools/feme/tools/feme-vulkan/feme_icd.json`):**
+- `dEQP-VK.transform_feedback.*` (133,719 cases, the exact group this
+  row's own scoping investigation targeted): 0 passed / 0 failed /
+  133,719 not supported -- unchanged from before this row (the extension
+  is still not advertised; nothing yet sets `XfbBuffer` outside a SPIR-V
+  module carrying the `TransformFeedback` capability, which this ICD
+  does not accept). Confirms the expected zero delta directly rather
+  than assuming it from the code's own unwired shape.
+- `dEQP-VK.api.info.*` (10,486 cases), as a general regression spot
+  check: 5,241 passed / 720 failed / 4,525 not supported -- reproduces
+  the immediately-prior H12 doc-only row's own figures exactly, so no
+  further regression from this row's own code change either.
+
+**`ninja check-feme`** (assertions-enabled, ccache build, `build2/`):
+2475/2534 tests pass (59 pre-existing `Unsupported`, 0 `Failed`), up 5
+tests (this row's own new `SignatureTest.cpp`/`CanonicalizeStageTest.cpp`
+coverage) from H12's own 2470/2529 baseline, 0 regressions. This
+required upgrading 7 lit test files' hand-encoded `!feme.signature` byte
+blobs from the old version-4/18-fixed-field layout to the new
+version-5/22-fixed-field layout (`draw-triangle.test`,
+`draw-vertex-buffer.test`, `draw-indexed.test`,
+`draw-indexed-uint8.test`, `draw-depth.test`,
+`fragment-wrapper-stage-io.ll`, `vertex-wrapper-stage-io.ll`), appending
+four zero-valued fields per element per this model's own established
+"new fields append at the end" versioning convention -- confirmed
+correct by all 7 files' tests passing post-upgrade.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed: no `VkPhysicalDeviceFeatures` bit or `VkExtension` is touched by
+this row (`VK_EXT_transform_feedback` stays unadvertised, matching its
+actual, still-unwired state) -- confirmed, not assumed, by grepping both
+documents for any stale reference this row might need to update.
+`FeMeGraphicsDesign.md`'s "Signature reflection" (R17) section updated
+with a new table row and a **Deviation (roadmap H21a)** note describing
+the new fields and their SPIR-V decoration codes. Remaining
+`VK_EXT_transform_feedback` work (entry points, pipeline creation,
+actual capture, queries, multi-stream, `VK_EXT_graphics_pipeline_library`
+gating) is tracked as new roadmap rows H21b-H21f.
