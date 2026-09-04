@@ -59067,3 +59067,152 @@ tests -- landed together since the generator change is required for the
 new commands to even appear in the dispatch table), docs (`Roadmap.md`
 closure + `VulkanCTSReport.md` measured-impact section), and this
 thoughts entry.
+
+# H21c: actual transform-feedback buffer-write capture
+
+H21b left `VK_EXT_transform_feedback`'s six commands wired but inert:
+`vkCmdEndTransformFeedbackEXT` truthfully wrote zero to every counter
+buffer because nothing captured any bytes, and the extension stayed
+unadvertised. H21c's job was the two things that make it real:
+actually write captured vertex-shader output into the bound buffers,
+then flip the feature bit and advertise the extension.
+
+## Threading state from `CommandBuffer.cpp` into `Executor.cpp`
+
+The existing `PassedSampleCounter`/`Stats` fields on `PreparedDraw`
+were the obvious model: an optional, null-by-default pointer a draw
+call can use to accumulate state across a run, owned by
+`CommandBuffer.cpp`'s longer-lived `GraphicsState`. I added
+`PreparedDraw::XfbCaptureBuffer` (a writable byte range plus a pointer
+to a running byte counter) and an `ArrayRef` of them on `PreparedDraw`,
+then a `GraphicsState::XfbCapturedBytes` vector (one running byte count
+per bound XFB buffer slot) that `vkCmdBeginTransformFeedbackEXT` resets
+and `vkCmdEndTransformFeedbackEXT` reads back for the spec-mandated
+4-byte counter-buffer write.
+
+This required changing `runPreparedDraw`/`runDraw`/`runMeshDraw`/
+`runValidatedDraw` from `const GraphicsState &` to a mutable
+`GraphicsState &`, since a draw needs to advance the running counters.
+Mechanical change, no call-site updates needed -- all nine call sites
+already held `Gfx` as a mutable lvalue inside `executeCommandsInto`.
+
+One naming trap cost a build failure: `executeDraws`'s own parameter
+(in `Executor.cpp`) is named `Draw`, not `Prepared` -- `Prepared` is
+what `CommandBuffer.cpp` (a different file) happens to call the same
+concept at its own call site. Copy-pasted the wrong name once, `sed`
+fixed it once caught.
+
+Also caught myself once editing `CommandBuffer.h`'s `RecordedCommand`
+struct instead of `CommandBuffer.cpp`'s `GraphicsState` -- both have
+near-identically-named `XfbBuffers`/`XfbBufferOffsets`/`XfbBufferSizes`
+fields (one for recorded command arguments, one for current bound
+state at replay time), an easy mix-up worth a comment for next time.
+
+## The capture logic itself
+
+Inserted right after `invokeVertices` succeeds, before the
+tessellation section, gated on no tessellation/geometry stages (H21a's
+scoping found `simple`/`fuzz` overwhelmingly single-stream,
+vertex-shader-only). For each buffer index referenced by an `Output`
+element with `XfbBuffer` set: compute a base vertex count from
+`*CapturedBytes / XfbStride` **once per buffer** (not once per
+element) -- multiple output elements can legitimately share one XFB
+buffer, and computing this per-element would double-advance the shared
+counter. Then write each vertex's raw components via `readRaw` at
+`(baseVertex + Flat) * XfbStride + XfbOffset + component*4`,
+bounds-checked and silently dropped (not fatal) if out of range, and
+advance each referenced buffer's counter once, after all its elements
+are written.
+
+Left one gap fully undocumented until this row's own write-up: a
+multiview draw's per-view loop lives inside `runPreparedDraw`, but
+`XfbBuffers` is set once in `runDraw` before that loop runs -- so a
+multiview XFB draw currently captures every view's vertices into one
+undifferentiated running counter. No real CTS case in H21a's own
+scoping shape exercises multiview+XFB together, so this didn't block
+anything measurable, but it's now written into `FeMeVulkanDesign.md`'s
+V7 section as a known limitation rather than silently sitting only in
+this file.
+
+## Advertising the extension
+
+Modeled on the recent `VK_EXT_mesh_shader` precedent in
+`EntryPoints.cpp`: added the `FEATURES_EXT`/`PROPERTIES_EXT` switch
+cases (`transformFeedback`/`transformFeedbackDraw` true,
+`geometryStreams` false since H21e is unstarted; properties at the
+spec-minimum-safe floor this codebase already uses elsewhere, since
+nothing here enforces a real limit), added the extension name to
+`PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions()`, and
+updated `vk_gen_entrypoints.py`'s comments to stop describing
+`VK_EXT_transform_feedback` as a "deliberate, temporary exception" now
+that it's genuinely reachable end to end.
+
+## The real CTS re-run -- and why I stopped where I did
+
+`dEQP-VK.transform_feedback.*` went from a confirmed 0/0/133719 (H21a,
+H21b) to a genuine 30 passed / 980 failed / 132709 not supported --
+the first real signal this group has ever produced. I didn't stop at
+"good enough" on the pass count without at least understanding the 980
+failures, since the milestone's own text asked for "a real ... re-run
+to confirm a genuine (non-`NotSupported`) result", and a result that's
+980 failures with unknown causes isn't confidently "genuine" yet
+without knowing whether any of them are new regressions this row's own
+code introduced.
+
+Turning on `FEME_VULKAN_LOG_CREATION_ERRORS=1` (an existing opt-in
+diagnostic env var, not something I had to add) and re-running a
+handful of individual failing cases paid off immediately: 973 of the
+980 share one identical cause (`"rasterizer discard is not
+implemented"`, a pre-existing, entirely unrelated gap that transform-
+feedback-only tests happen to trip constantly because they routinely
+disable rasterization outright), 2 share a second, narrower cause
+(`primitiveRestartEnable` validated against a pipeline's static
+topology even when it's dynamic), and only 5 are a real, in-scope
+capture-semantics mismatch in my own new byte-counter logic
+(`backward_dependency`'s family plus `draw_indirect_counter_resubmit`,
+all failing with a real content-mismatch, not a pipeline-creation
+error).
+
+Given the milestone's own explicit scope ("single-stream/vertex-shader
+-only first") and this session's discipline of small, separately
+committed, narrowly-scoped changes, I chose not to chase any of these
+three follow-on gaps in this same commit chain -- especially
+`rasterizerDiscardEnable`, which despite being responsible for 973 of
+the 980 failures is not a transform-feedback-specific bug at all (any
+pipeline requesting it hits the identical rejection) and implementing
+it for real (skipping primitive assembly/rasterization/fragment-stage
+invocation while still running the vertex stage, and interacting
+correctly with occlusion/statistics queries and this row's own new
+capture logic) is its own real feature deserving its own investigation
+and its own real CTS re-run once landed. Recorded all three as new
+roadmap rows (H21g/H21h/H21i) instead, each with the exact failing
+case names and error strings this session's re-run already isolated,
+so a future pass doesn't have to re-discover them.
+
+## Test coverage
+
+Two new `ExecutorTest.cpp` tests: one verifying a single draw's raw
+capture into a bound buffer matches the shader's per-vertex output
+values in order, one verifying two sequential draws sharing one
+counter append rather than overwrite (the actual behavior
+`CommandBuffer.cpp`'s `runDraw` depends on across multiple draws in
+one begin/end scope). Considered adding a full `DrawTest.cpp`-level
+test using real SPIR-V text, but no existing precedent in this
+codebase demonstrates the `XfbBuffer`/`Offset`/`XfbStride` EXT
+decorations expressed in MLIR's SPIR-V dialect textual syntax, and
+`SignatureTest.cpp`/`CanonicalizeStageTest.cpp` from H21a already
+cover real SPIR-V decoration parsing for these exact fields -- judged
+the `ExecutorTest.cpp`-level tests sufficient for the new capture
+logic itself, with `CommandBufferTest.cpp`'s existing H21b tests
+already covering the Begin/End API surface, rather than spend this
+session's effort budget chasing an SPIR-V-dialect syntax research risk
+with no existing precedent to build on.
+
+One collateral fix: `DrawTest.AdvertisesDynamicRenderingExtension`
+hardcodes the exact device extension count (33), which needed bumping
+to 34 now that `VK_EXT_transform_feedback` is genuinely advertised --
+caught immediately by `ninja check-feme`, not missed.
+
+`ninja check-feme`: 2484/2543 passing (59 pre-existing `Unsupported`,
+0 `Failed`, +2 new tests, 0 regressions), assertions-enabled ccache
+build in `build2/`.
