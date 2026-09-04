@@ -3775,14 +3775,34 @@ Depends on G5.
   `GraphicsState::XfbCapturedBytes` tracks a real running byte count per
   bound buffer (reset at `vkCmdBeginTransformFeedbackEXT`, written back at
   `vkCmdEndTransformFeedbackEXT`), and `transformFeedback`/
-  `transformFeedbackDraw` are advertised. Multi-stream/geometry-shader-stream
-  capture (`geometryStreams`), `primitives_generated_query`, and a real
-  content-mismatch gap in the byte-counter design's "backward dependency"
-  scenario remain open (roadmap H21d/H21e/H21i); a multiview draw combined
-  with active transform feedback also currently captures every view's
-  vertices into the same running counter with no per-view separation, an
-  undocumented-until-now interaction nothing in the CTS-dominant shape H21a
-  scoped exercises yet.
+  `transformFeedbackDraw` are advertised. **`primitives_generated_query`
+  counting is also done** (roadmap H21d): the query type reuses the
+  existing pipeline-statistics `QueryPool` infrastructure (query-list
+  reuse), advertising `primitivesGeneratedQuery`
+  (`primitivesGeneratedQueryWithRasterizerDiscard`/`WithNonZeroStreams`
+  stay unadvertised, blocked on H21g/H21e respectively). Landing this
+  counting also surfaced and fixed a pre-existing bug in `executeDraws`'s
+  geometry no-op fast path (roadmap H5e-b): an empty geometry-shader
+  `EntrySignature` does *not* by itself mean a geometry stage never emits
+  a vertex, since SPIR-V only reflects an entry point's *used* interface
+  variables -- a shader that calls `EmitVertex`/`EndPrimitive` a real,
+  nonzero number of times but writes no per-vertex attribute (exactly
+  `primitives_generated_query`'s own CTS geometry shaders for every input
+  topology but `point_list`) reflects identically to a genuine
+  `void main(void) {}` no-op. `GeometryState::MaxOutputVertices` (the
+  entry point's own declared `max_vertices`) is the correct discriminator
+  -- zero only when a body provably never emits -- and the fast path now
+  requires both conditions before treating a draw as a no-op; a stage that
+  emits without attributes still has every primitive counted (via the
+  shared `RasterizePrimitives` lambda's unconditional `ClippingInvocations`
+  increment) but is safely skipped before rasterization, since it has no
+  meaningful clip-space position. Multi-stream/geometry-shader-stream
+  capture (`geometryStreams`) and a real content-mismatch gap in the
+  byte-counter design's "backward dependency" scenario remain open
+  (roadmap H21e/H21i); a multiview draw combined with active transform
+  feedback also currently captures every view's vertices into the same
+  running counter with no per-view separation, an undocumented-until-now
+  interaction nothing in the CTS-dominant shape H21a scoped exercises yet.
 - Add pipeline-statistics queries and any remaining occlusion-query state
   breadth not already closed by roadmap C5's exact passed-sample counting
   over ordinary draws (for example inherited-render-pass secondary-command-

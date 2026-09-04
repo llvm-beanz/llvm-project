@@ -286,7 +286,7 @@ still out of scope (cooperative matrix/vector, per Part 4):**
 | `VK_EXT_present_timing` | Not implemented |  |
 | `VK_EXT_primitive_restart_index` | Not implemented |  |
 | `VK_EXT_primitive_topology_list_restart` | Not implemented |  |
-| `VK_EXT_primitives_generated_query` | Not implemented |  |
+| `VK_EXT_primitives_generated_query` | Advertised | roadmap H21d: real primitive-count query semantics reusing the existing pipeline-statistics `QueryPool` infrastructure; `primitivesGeneratedQuery` feature `VK_TRUE`, `primitivesGeneratedQueryWithRasterizerDiscard`/`WithNonZeroStreams` stay `VK_FALSE` (blocked on roadmap H21g/H21e respectively) |
 | `VK_EXT_private_data` | Advertised |  |
 | `VK_EXT_provoking_vertex` | Not implemented |  |
 | `VK_EXT_queue_family_foreign` | Not implemented |  |

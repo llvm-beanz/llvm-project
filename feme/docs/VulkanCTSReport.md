@@ -23544,3 +23544,79 @@ still-missing `geometryStreams`/`primitives_generated_query` pieces
 (H21d/H21e). No `Vulkan14FeatureInventory.md` update needed: that
 document's own scope is core 1.0-1.4 mandatory features/limits, not
 extension-specific feature-struct bits like `transformFeedback`.
+
+## Roadmap H21d: measured impact (`primitives_generated_query` counting semantics)
+
+**Scope.** `VK_EXT_primitives_generated_query`'s counting semantics
+(primitives written to a transform-feedback buffer, distinct from the
+existing pipeline-statistics `CLIPPING_INVOCATIONS` counter) wired
+through the existing `QueryPool`/`CommandBuffer` infrastructure via
+query-list reuse, plus feature/extension advertisement
+(`primitivesGeneratedQuery` `VK_TRUE`;
+`primitivesGeneratedQueryWithRasterizerDiscard`/
+`WithNonZeroStreams` stay `VK_FALSE`, gated on H21g/H21e respectively).
+
+**First real `deqp-vk` re-run** (972 passed / 2646 failed / 104,248 not
+supported) found 2,160 of the 2,646 failures sharing one exact
+pattern -- `"[Query 0] pgqGenerated == 0, expected N"` -- for **every**
+geometry-shader case whose input topology is `Line`- or `Triangle`-
+shaped (not `point_list`, which passed).
+
+**Root cause.** `Executor.cpp`'s existing "an empty geometry-shader
+`EntrySignature` means the stage never emits, so every draw against it
+is a legal no-op" fast path (added for roadmap H5e-b's
+`dEQP-VK.geometry.emit.*_emit_0_end_0` shapes) conflated "empty
+signature" with "never emits": SPIR-V only reflects an entry point's
+*used* interface variables, so a geometry shader that calls
+`EmitVertex()`/`EndPrimitive()` a real, nonzero number of times but
+writes zero per-vertex attributes (exactly `primitives_generated_
+query`'s own CTS geometry shaders for every input topology but
+`point_list`, which write `gl_PointSize` only when `outputPoints` is
+true) reflects with an identically empty signature to a genuine
+`void main(void) {}` no-op, and was silently dropped as if it were one.
+`GeometryState::MaxOutputVertices` (the entry point's own declared
+`max_vertices`) is the correct discriminator: zero only for a body that
+provably never calls `EmitVertex` at all.
+
+**Fix.** Narrowed the fast path to require `MaxOutputVertices == 0` in
+addition to an empty signature; relaxed the `VSPosition` validation
+error and its `ComponentCount != 4` check to tolerate the "empty
+signature but real emission" case; added an early bail inside
+`RasterizePrimitives` (after its existing unconditional
+`ClippingInvocations` increment, before any `VSPosition` dereference)
+so every primitive is still counted but no null position is ever
+dereferenced. New permanent regression test:
+`ExecutorTest.cpp`'s `GeometryStageThatEmitsRealPrimitivesWithout
+AttributesCountsThem`.
+
+**`ninja check-feme`** (assertions-enabled, ccache build, `build2/`):
+2486/2545 tests pass (59 pre-existing `Unsupported`, 0 `Failed`), 0
+regressions.
+
+**Full re-run of `dEQP-VK.transform_feedback.primitives_generated_
+query.*`** (107,866 cases) after the fix:
+- **Passed: 3,132/107,866 (2.9%)**, up from 972 (+2,160 -- exactly the
+  geometry-shader bucket this row's own fix targeted).
+- **Failed: 486/107,866 (0.5%)**, down from 2,646 (-2,160). The
+  remaining 486 split into exactly the two pre-existing, unrelated
+  buckets `FEME_VULKAN_LOG_CREATION_ERRORS=1` isolates by error string:
+  **324** `"feme-cpu-wrap-fragment: fragment stage wrapper requires
+  attached feme.signature metadata"` (a fragment-stage-wrapper gap, hit
+  by this group's `empty_frag.*` shapes) and **162**
+  `"feme-cpu-wrap-hull: unsupported hull input system value"` (the
+  same tessellation-control gap roadmap H9c already root-caused and
+  closed for a different CTS group -- these `.tese.` cases hit a
+  distinct, still-open input-system-value shape). Neither bucket is
+  transform-feedback-specific or was introduced by this row; both are
+  broken out as new sibling rows H21j (fragment) and H21k (hull) below.
+- **Not supported: 104,248/107,866 (96.6%)**, unchanged from the prior
+  baseline -- confirms the fix touched no gating logic.
+
+This confirms the fix is fully correct and generalizes across every
+topology (`line_list`/`line_list_with_adjacency`/`line_strip`/
+`triangle_list`/`triangle_list_with_adjacency`/`triangle_strip`/
+`triangle_fan`), both 32-bit and 64-bit query result paths, both
+`copy`/`get` and `host_reset`/`queue_reset` result-retrieval
+combinations, and both single- and two-draw shapes -- zero regressions,
+zero new failure signatures beyond the two pre-existing, unrelated
+buckets above.
