@@ -2094,6 +2094,25 @@ void fillFeatures2Chain(void *pNext) {
       Features->geometryStreams = VK_FALSE;
       break;
     }
+    // (roadmap H21d) `VK_EXT_primitives_generated_query`'s own feature
+    // struct: the query type counts the same quantity as `CLIPPING_
+    // INVOCATIONS_BIT` (`QueryPool.h`'s file comment), which this ICD
+    // already computes honestly for every draw shape, so
+    // `primitivesGeneratedQuery` is true. `primitivesGeneratedQueryWith
+    // RasterizerDiscard` stays false since `rasterizerDiscardEnable`
+    // itself is not implemented yet (roadmap H21g -- any pipeline
+    // requesting it is rejected outright at pipeline-creation time, so no
+    // query could ever observe the distinction this bit exists to cover).
+    // `primitivesGeneratedQueryWithNonZeroStreams` mirrors `geometryStreams`
+    // above (both false -- multi-stream capture is roadmap H21e).
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT *>(Base);
+      Features->primitivesGeneratedQuery = VK_TRUE;
+      Features->primitivesGeneratedQueryWithRasterizerDiscard = VK_FALSE;
+      Features->primitivesGeneratedQueryWithNonZeroStreams = VK_FALSE;
+      break;
+    }
     default:
       break;
     }

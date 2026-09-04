@@ -1266,6 +1266,18 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // here too.
       {VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME,
        VK_EXT_TRANSFORM_FEEDBACK_SPEC_VERSION},
+      // (roadmap H21d) `VK_EXT_primitives_generated_query`: its one query
+      // type (`VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT`, `QueryPool.cpp`)
+      // is accepted at `vkCreateQueryPool` and counted for real
+      // (`CommandBuffer.cpp`'s `accumulatePipelineStats`, reusing the
+      // same per-draw `ClippingInvocations` value a pipeline-statistics
+      // query's `CLIPPING_INVOCATIONS_BIT` already computes), and
+      // `primitivesGeneratedQuery` is genuinely advertised
+      // (`EntryPoints.cpp`). `dEQP-VK.transform_feedback.primitives_
+      // generated_query.*` enables this extension by name regardless of
+      // the advertised `apiVersion`, so it must be listed here too.
+      {VK_EXT_PRIMITIVES_GENERATED_QUERY_EXTENSION_NAME,
+       VK_EXT_PRIMITIVES_GENERATED_QUERY_SPEC_VERSION},
   };
   return Extensions;
 }
