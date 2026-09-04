@@ -2240,7 +2240,18 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         Type *ValueTy = GV->getValueType();
         bool RowCountIsVertexArray =
             isPerVertexArrayInputGlobal(GV, UnusedAddrSpace);
-        if (Stage == ShaderStage::Mesh && AddrSpace == 8) {
+        //
+        // (Roadmap H29g) A hull entry's own plain per-control-point
+        // `Output` global (e.g. `layout(location=0) out vec4 vtxColor[];`
+        // against `layout(vertices = N) out;`) is the same shape for the
+        // same reason: its outer array dimension is the output patch's own
+        // control point count, not a matrix row count, and the domain
+        // stage links against it by `Location` expecting the single
+        // control point each of its own inputs describes.
+        bool PerInvocationOutputArray =
+            (Stage == ShaderStage::Mesh || Stage == ShaderStage::Hull) &&
+            AddrSpace == 8;
+        if (PerInvocationOutputArray) {
           if (auto *ArrTy = dyn_cast<ArrayType>(ValueTy))
             ValueTy = ArrTy->getElementType();
           RowCountIsVertexArray = false;

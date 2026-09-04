@@ -2143,6 +2143,43 @@ TEST(CanonicalizeStageTest, MeshStagePeelsPerVertexArrayFromOutputRowCount) {
   EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
 }
 
+/// (Roadmap H29g) A hull entry's own plain (non-block) per-control-point
+/// output varying (e.g. `layout(location=0) out vec4 vtxColor[];` against
+/// `layout(vertices = 3) out;`) takes the same treatment as the mesh shape
+/// above and for the same reason: its outer array dimension is the output
+/// patch's own control point count, not a matrix row count, and the domain
+/// stage links against it by `Location` expecting the single control point
+/// each of its own inputs describes. Before this row's own fix this
+/// element's `RowCount` was wrongly 3, failing at `vkQueueSubmit` with
+/// "hull stage output -> domain stage input: element %u and its producer
+/// element %u disagree on component/row count or type".
+TEST(CanonicalizeStageTest,
+     HullStagePeelsPerControlPointArrayFromOutputRowCount) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_cps = external addrspace(8) global [3 x <4 x float>], !spirv.Decorations !0
+    define void @main(i32 %i, <4 x float> %v) #0 {
+      %p = getelementptr inbounds [3 x <4 x float>], ptr addrspace(8) @out_cps, i32 0, i32 %i
+      store <4 x float> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  std::optional<EntrySignature> Sig =
+      dxil::getEntrySignature(*M->getFunction("main"));
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].Location, 0u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+  EXPECT_FALSE(Sig->Elements[0].RowCountIsVertexArray);
+}
+
 /// (Roadmap H6k) A real `dEQP-VK.mesh_shader.ext.in_out.*` mesh entry's own
 /// per-vertex output store is not always dynamically indexed the way
 /// `MeshStageCanonicalizesOutputArrayStore` above models it -- glslang
