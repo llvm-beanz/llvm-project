@@ -42,18 +42,24 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L25 or other prerequisites blocking the L-series milestones?
+Can you work on L26 or other prerequisites blocking the L-series milestones?
 
-> **2 of L22's own 13 cases
-> (`Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test`) still fail at
-> `vkCreateGraphicsPipelines`, now on a confirmed out-of-scope upstream MLIR
-> deserializer gap**: `"unhandled opcode 89"` (`OpImageSampleDrefImplicitLod`)
-> and `"unhandled opcode 105"` (`OpImageQueryLod`) respectively -- the MLIR
-> SPIR-V dialect's own deserializer has no case for either opcode at all
-> (confirmed via the same `spirv-as`/`feme-translate --import-spirv`
-> real-IR-reduction technique used for H21l's
-> `OpEmitStreamVertex`/`OpEndStreamPrimitive` gap). This is a hard upstream
-> (MLIR, not feme) blocker, mirroring H21l's own precedent exactly: no amount of
-> feme-side legalization work can help until MLIR's SPIR-V dialect gains
-> deserialization support for these two ops (each needs its own new `spirv.*` op
-> plus (de)serialization plumbing)
+> **6 of L22's own 13 cases (`Feature/Textures/{Sample,SampleBias}.test` and
+> their `Vk.SampledTexture2D` YAML siblings) now clear `ImageSampleImplicitLod`
+> legalization but still fail `vkCreateGraphicsPipelines`, `VkResult = -3`, on a
+> distinct, later legalization gap**: `"unsupported raised operation:
+> 'llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_2_0_0_1_0t' is a
+> register-bound resource handle the FeMe CPU target cannot normalize into a
+> heap access or the root-constant block ... express it as a finite, unambiguous
+> traditional binding, bindless ... or the one recognized root-constant
+> binding"` (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`, a real
+> diagnostic these cases were silently swallowing without it). Both failing
+> cases share a `Texture2D<float4>` bound via a plain, finite `[[vk::binding(N,
+> 0)]]` declaration with `MipLevels: 2` in its YAML `OutputProps` -- a genuinely
+> traditional, non-bindless, non-unbounded binding by every appearance, so the
+> CPU target's own resource-handle-normalization pass is likely misclassifying
+> it rather than this being a real unsupported-resource-kind case; needs its own
+> real IR reduction (the same `Sample.test` shape, isolating the exact
+> resource-handle attributes the normalization pass inspects) to confirm whether
+> the multi-mip-level declaration specifically confuses the classifier, or
+> something else about this handle shape does
