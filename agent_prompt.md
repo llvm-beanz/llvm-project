@@ -42,31 +42,26 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L39 or other prerequisites blocking the L-series milestones?
+Can you work on L40 or other prerequisites blocking the L-series milestones?
 
-> **`SimpleAmplification.test` now clears L30's own JIT-symbol fix and reaches
-> `feme-cpu-simdize` for the first time, but `vkCreateGraphicsPipelines` still
-> fails there instead**: `"error: feme-cpu-simdize: function 'main' has a
-> divergent value '' of vector type; only a constant-index insertelement chain,
-> a phi, a select, a shufflevector, elementwise arithmetic/cast, a vector
-> comparison, a homogeneous vectorizable intrinsic call, or a
-> resource/image/ordinary load is supported (roadmap milestone 7 deviation)"`,
-> `gpu-exec: error: Failed to create mesh shader pipeline. (VkResult = -3)`. The
-> amplification shader's own `groupshared Payload gs_payload` write plausibly
-> stores a genuinely vector-typed (not fully scalar-decomposed) value straight
-> into the payload -- unlike an ordinary stage-IO store, whose value always
-> reaches `canonicalizeSPIRVStage` pre-decomposed to a scalar leaf, a task
-> payload write's fallback canonicalization (L30) wraps whatever type the raw
-> SPIR-V-derived store already has, verbatim, which may leave a small vector
-> (e.g. a `float3`/`float4` payload member) unscalarized -- landing on a
-> `SIMDize.cpp` divergent-vector-of-vector-type shape
-> `FunctionWidener::getWidened`'s own generic single-scalar-per-lane widening
-> was never designed to accept (see its own assert, `getWidened does not support
-> a vector-typed value; use getVectorComponents instead`). Needs its own real IR
-> reduction of this exact case (isolating which payload member's own HLSL type
-> triggers this) to confirm whether the fix belongs in
-> `widenMaskedTaskPayloadStore`/`widenStageOp` (routing a vector-typed payload
-> value's operand through `getVectorComponents` the way an ordinary vector-typed
-> store operand already is elsewhere) or further upstream in how
-> `CanonicalizeStage.cpp`'s task-payload fallback itself decomposes a stored
-> value's type before ever reaching this pass
+> **A real CTS re-run of L30's own fix surfaced a distinct, unrelated
+> control-flow-linearization gap**: `dEQP-VK.mesh_shader.ext.misc.payload_read`
+> (task-payload write in the task/amplification stage, read back in the mesh
+> stage -- the exact real-hardware shape L30's own fix targets) fails
+> `vkCreateGraphicsPipelines` with `"feme-cpu-linearize: function 'main': loop
+> at '' has an internal branch in ''; unsupported (roadmap milestone 6
+> deviation)"`, while its sibling `payload_not_accessed` case (which never reads
+> the payload back) passes -- confirming L30's own fix works for a real CTS
+> mesh-shader payload read too, and this is a genuinely separate, later gap.
+> `feme-cpu-linearize`'s own loop-internal-branch rejection is a known family
+> with more than one distinct sub-shape: H19k already fixed one narrow syntactic
+> shape (a redundant `StructurizeCFGPass`-inserted `Flow` block re-deriving an
+> already-decided uniform trip-count check via a phi of two literal constants),
+> but `payload_read`'s own loop evidently has a structurally different
+> internal-branch shape H19k's own narrow, conservative fold does not match (its
+> own precondition -- a `CondBr` fed by a phi of exactly two literal
+> `ConstantInt`s -- is intentionally strict to avoid misfiring on genuine
+> divergent control flow). Needs its own real IR reduction of this exact CTS
+> shader (`glslangValidator`/`feme-translate`/`feme-opt`, mirroring H19k's own
+> reduction technique) to identify the new internal-branch shape and whether it
+> needs its own new fold in `LoopLinearizer` or a genuinely different approach
