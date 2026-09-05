@@ -42,20 +42,17 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L28 or other prerequisites blocking the L-series milestones?
+Can you work on L29 or other prerequisites blocking the L-series milestones?
 
-> **1 of L22's own 13 cases (`Feature/Semantics/InterpolationModifiers.test`)
-> now clears pipeline creation (via L22's own `Centroid`-decoration fix) but
-> fails at `vkQueueSubmit` instead, `VkResult = -3`**, with no diagnostic text
-> emitted even with `-debug-layer` (the failure originates inside
-> `offload-test-suite`'s own `Device.cpp` `"Failed to submit to queue."` wrapper
-> around a real submission-time error feme's own runtime is not yet surfacing a
-> cause for). This case exercises multiple interpolation-modifier combinations
-> (`nointerpolation`, `sample`, `noperspective`, `centroid`) in one pixel
-> shader; feme already has substantial `Centroid`-aware infrastructure
-> (`Executor.cpp`, `FragmentWrapper.cpp`, `ValidateStage.cpp`,
-> `CanonicalizeStage.cpp`), so the newly-reached failure is likely a genuine
-> execution-time gap in one specific modifier combination rather than `Centroid`
-> support being entirely absent; needs its own real reduction, isolating one
-> interpolation-modifier combination at a time, to identify which one crashes
-> submission and why
+> **1 of L22's own 13 cases (`Feature/Semantics/MatrixSemantics.test`) now
+> clears the matrix-constant legalization but fails `vkCreateGraphicsPipelines`
+> on a distinct `feme-graphics-validate-stage` diagnostic**:
+> `"'feme.stage.output.store' in function 'main' row N is out of range for
+> element 2"` for rows 4 through 15 (12 consecutive rows) -- suggesting a matrix
+> output value's own per-row store is being validated against a signature
+> element sized for far fewer rows than the real matrix has, likely an
+> off-by-a-fixed-amount or a signature-construction gap specific to a
+> matrix-typed `SV_Target`-adjacent output rather than the constant-legalization
+> gap L22 already fixed. Needs its own real IR reduction of this exact case to
+> determine whether the patch is in the stage-output signature builder or
+> `ValidateStage.cpp`'s own row-range check
