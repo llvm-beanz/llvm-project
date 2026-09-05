@@ -12,6 +12,7 @@
 #include "llvm/ADT/GenericUniformityImpl.h"
 #include "llvm/Analysis/CycleAnalysis.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/IntrinsicsSPIRV.h"
@@ -100,6 +101,26 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
       }
     }
   }
+
+  // Roadmap L43: a plain, not-yet-lowered `llvm::AtomicRMWInst` needs the
+  // exact same `NeverUniform` treatment as the `feme.cpu.masked.
+  // atomicrmw.*` call form above, and for the identical reason -- but
+  // `feme::cpu::UniformityInfo` is computed once, up front, in
+  // `feme::cpu::LinearizePass::run`, strictly *before* `DiamondFlattener`'s
+  // `applyStageMasks` ever converts a real `atomicrmw` into that masked
+  // call form (see `Transforms/CPU/Linearize.cpp`). So the very first
+  // divergent branch a real CTS shader's own "allocate a unique output
+  // slot" pattern produces is still, at the point this analysis actually
+  // runs, guarding a plain `atomicrmw`'s result, not yet the masked call
+  // -- leaving this case unhandled reintroduces the exact same
+  // wrongly-uniform misclassification the masked-call case above was
+  // added to fix, just one step earlier in the pipeline (a divergent
+  // branch `feme::cpu::DiamondFlattener` then never actually flattens,
+  // instead silently reusing whatever mask was already in scope and
+  // leaving the real branch in place for `feme::cpu::SIMDizePass` to
+  // reject later as an unremoved divergent branch).
+  if (isa<AtomicRMWInst>(V))
+    return ValueUniformity::NeverUniform;
 
   const auto *II = dyn_cast<IntrinsicInst>(V);
   if (!II)
