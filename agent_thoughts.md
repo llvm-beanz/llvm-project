@@ -62015,3 +62015,192 @@ L34 but for the array shape -- filed as L36.
 - `matchImageCall`'s stale-`arg_size()`-check failure mode (silent
   `std::nullopt`, not a build error) is worth remembering as a checklist
   item for any future `ImageCallKind` signature change.
+
+# L27: SIMDize vector-leaf aggregate decomposition, plus filing L37
+
+## Starting point
+
+L27 named a `feme-cpu-simdize` diagnostic (`"a divergent vector value ...
+used outside a supported ... pattern; component decomposition is not yet
+supported for this use (roadmap milestone 7 deviation)"`) hit by two
+`check-hlsl-feme-vk` cases, `Feature/Semantics/{DomainSystemValues,
+HullSystemValues}.test`, discovered once L22's own array-of-struct
+`CompositeConstruct` fix let them progress further into the pipeline.
+
+## Reproducing and reducing
+
+The prior session (before this one's context got compacted) had already
+narrowed the failure to the hull stage's *control-point* function
+(`entry=main`, not the patch-constant function I'd originally have
+guessed given "system values" in the test name), via a temporary
+env-var-gated IR dump added right before `SIMDizePass` runs in
+`Pipeline.cpp`. Getting a clean, *untruncated* diagnostic required
+bypassing `llvm-lit` entirely and invoking `./bin/offloader` directly with
+`VK_ICD_FILENAMES` pointed at the real ICD -- `llvm-lit`'s own captured
+"command stderr" block was silently truncating/dropping the interesting
+part of the debug `errs()` output, which cost real time to notice before
+switching to the direct-invocation technique this project's prior H/L
+rows have used throughout.
+
+A second, narrower temporary tap directly inside
+`checkVectorDecompositionSupported` (right before the final `emitError`,
+printing the exact producer/consumer instruction pair) pinned down two
+*distinct* sub-gaps, discovered one at a time across two rebuild+rerun
+cycles:
+
+1. A whole divergent `<4 x float>` (a patch-input position) inserted as
+   one struct/array leaf via `insertvalue` -- `InsertValueInst` wasn't in
+   the accepted-consumer list for a divergent vector value at all, even
+   though the file's own design comment already aspirationally mentioned
+   "a vector value inserted whole" as supported. It wasn't actually
+   implemented: `isAllScalarAggregateLeaves` rejected any vector-typed
+   leaf outright, so the *producer* side (a divergent aggregate with a
+   vector leaf) never even got as far as checking consumers.
+2. After fixing (1), a vector-typed `extractvalue` reading that same leaf
+   back out, consumed by an ordinary (non-groupshared) `store` -- also not
+   an accepted consumer, even though `widenScalarizedFallback`'s existing
+   per-lane vector-operand reassembly (added for roadmap H6n) already made
+   this mechanically safe. H6n's own test only ever exercised a *uniform*
+   vector *constant* stored through a *divergent address*; this is the
+   mirror image, a *divergent* vector *value* stored through an ordinary
+   (often uniform) address.
+
+Both fixes needed real IR reduction to find, not just code reading: the
+existing "always applicable" scalarized-store fallback already made the
+*mechanics* safe for both shapes, so the actual defect was entirely in the
+strict preflight validator's producer/consumer allowlists, not in any
+widening logic -- a "the checker doesn't yet recognize what the widener
+can already handle" bug, which is a distinct flavor of gap from most of
+this project's prior rows (which more often need *new* widening logic
+too). `getAggregateComponents`, `widenInsertValue`, and `widenExtractValue`
+did need genuinely new vector-leaf branches, mirroring their existing
+sub-aggregate branches; everything else was purely a checker-side fix.
+
+`widenGroupSharedStore` has the identical unfixed gap (widens its value
+operand via a plain scalar `getWidened`, which would build an illegal
+nested vector given a divergent vector operand) -- deliberately left
+unfixed and excluded from the new `StoreInst` acceptance, since no real
+case exercises a divergent vector stored to groupshared memory this way
+yet. Noting it here in case a future case surfaces it.
+
+## Verification
+
+`ninja FeMeTransformsCPUTests` then running the binary directly (not just
+building it) confirmed all 35 `SIMDizeTest.*` cases pass, including the
+new one. `ninja check-feme` initially had exactly one failure -- the
+pre-existing `simdize-vector-unsupported.ll` negative test's `CHECK` line
+had the *old*, now-out-of-date accepted-pattern list baked into its
+expected error string; updated both that string and the test's own
+descriptive file comment (which had similarly gone stale) to match. Full
+suite came back 2533/2592, 0 Failed, after that fix. Reverted both
+temporary debug taps (`Pipeline.cpp`'s env-var IR dump,
+`SIMDize.cpp`'s env-var diagnostic print) before committing -- confirmed
+via `git diff` against a saved `/tmp/*.orig` backup of each that
+`Pipeline.cpp` came back byte-identical to its pre-session state.
+
+## The new diagnostic L27's own fix exposed
+
+Both `HullSystemValues.test` and `DomainSystemValues.test` now clear the
+SIMDize diagnostic entirely (confirmed via direct `offloader` repro before
+committing to closing L27), but neither fully passes: both now hit a new,
+later diagnostic instead, `"feme-cpu-wrap-hull: control-point phase only
+supports a control point reading its own input control point's
+attributes"` -- textually identical to the already-closed **H29g**, which
+briefly worried me into thinking I'd somehow caused a regression there.
+A second real IR reduction (a temporary pre-`HullWrapperPass` dump, same
+env-var-tap technique) showed it's a genuinely distinct root cause:
+
+`HullSystemValues.test`'s hull shader does `patch[i].position` where `i`
+is `SV_OutputControlPointID` -- a plain, direct self-indexed `InputPatch`
+read. But by the time `HullWrapperPass` runs (which is *after*
+`SIMDizePass` in `runPipeline`'s "widening" then "wrapping" order), that
+read has already been lowered by earlier SPIR-V-import/legalization
+passes into 12 separate, purely *constant*-indexed `feme.stage.input.load`
+calls (one per (component, control-point) pair -- component 0..3, control
+point 0..2), which the shader's own code then selects among dynamically
+*after* loading, using the real self-index. This is a legitimate
+"materialize the whole InputPatch, then select" lowering strategy for a
+dynamic index, but it means none of the individual `feme.stage.input.load`
+calls actually carry the dynamic self-index as an argument any more --
+each one's own control-point-index operand is a plain literal (`0`, `1`,
+or `2`).
+
+`HullWrapper.cpp`'s `lowerHullInputLoad` only accepts a control-point-index
+operand that's either a tracked self-index value or the literal `0`
+(mirroring `VertexWrapperPass`'s analogous restriction). Literal `1`/`2`
+get rejected outright, even though I confirmed by reading
+`computeStageStorageAddress` that the checked operand's *value* is never
+actually used to compute the load address at all -- it always addresses
+storage via *this* invocation's own flat index, discarding the checked
+operand entirely once validated. That makes the current restriction
+correct for *output* data (reading a sibling's not-yet-computed output
+would be a real correctness bug if silently allowed) but overly strict for
+*input* data (the whole `InputPatch` is available up front, so a
+literal-constant read of any other control point's input is always safe
+today -- it just isn't *addressed* correctly yet, since the address
+computation would need to target that literal control point's own flat
+invocation index rather than always the current lane's).
+
+This needs a real new addressing-scheme extension (deriving the target
+flat invocation index from the literal control-point-within-patch offset
+plus `HEnv.InputPatchControlPointCount`), which is out of L27's own named
+scope (a SIMDize gap, not a HullWrapper one) and looked substantial enough
+that I didn't want to rush it into this same change. Filed as **L37**
+instead, with the full mechanics written into its Roadmap.md row so a
+future session (or a future me) doesn't have to re-derive them from
+scratch.
+
+## CTS validation
+
+Ran `check-hlsl-feme-vk`-equivalent (`llvm-lit` directly against
+`tools/OffloadTest/test/feme-vk/Feature/Semantics`, since no
+`check-hlsl-feme-vk` ninja target is actually wired into `build2` yet --
+just invoked `llvm-lit` against the build tree's own `feme-vk` lit config,
+which is a real, fully-configured lit test suite against the real
+`/home/dev/dev/offload-test-suite` checkout, `VK_ICD_FILENAMES` pointed at
+the real ICD). Confirmed both L27 cases now fail on L37 instead of L27's
+own diagnostic, and a broader 509-case `Feature`/`Graphics` sweep shows no
+regressions (151 Passed, consistent with the pre-fix baseline, plus the
+one already-known `array_of_matrices.test` XFAIL-staleness artifact from
+L22's own fix).
+
+Also attempted a real `dEQP-VK.tessellation.*` `deqp-vk` sweep per the
+standing instructions, but it turned out to be surprisingly unproductive:
+the full group has at least *three* distinct, unrelated, pre-existing
+crash bugs (an MLIR `getelementptr`-on-array-type verifier error feeding
+into an LLVM `BinaryOperator` type-mismatch assert in
+`matrix_multiplication.*`; an LLVM `Value.cpp` "uses remain when a value
+is destroyed" `UNREACHABLE` in `misc_draw.tess_factor_barrier_bug`; a
+glibc `double free or corruption` in
+`primitive_discard.isolines_equal_spacing_ccw`; plus a segfault in
+`misc_draw.switch_domain_origin_*`/`switch_out_vertices_*`) that abort the
+whole process before it can produce a clean summary, none of which have
+anything to do with hull-stage `InputPatch` addressing or SIMDize's
+aggregate-decomposition path. Chasing each of these down would have been
+a substantial detour with no connection to L27's own actual fix, so I
+documented them in `VulkanCTSReport.md` as known, out-of-scope,
+pre-existing blockers rather than either silently ignoring them or trying
+to fix four unrelated bugs in one sitting -- and relied on the
+`check-hlsl-feme-vk`-equivalent run above as this row's own primary real
+validation instead, since that's the suite that actually discovered and
+named L27 in the first place (via L22's own re-run).
+
+## What I'd flag for whoever picks up L37
+
+- The fix isn't "relax the check to accept any literal constant" -- that
+  would be *wrong* for **output** data (an output-store address really
+  does need to be this invocation's own storage, always), so any fix needs
+  to distinguish `lowerHullInputLoad` (this file, reads -- safe to extend)
+  from wherever the equivalent *output*-store check lives (not yet
+  investigated -- L37's own row doesn't claim to have looked, since only
+  the input-load diagnostic was actually reached by either of L27's two
+  real cases).
+- `HEnv.InputPatchControlPointCount` (already threaded through for
+  `lowerPatchVerticesIn`) is the natural ingredient for computing "this
+  invocation's own patch-relative control-point offset" and thus "this
+  invocation's patch base flat index", but I did not verify whether
+  `getFlatInvocationIndex`'s own flat numbering scheme is guaranteed to
+  keep every patch's control points contiguous (an implicit assumption
+  the fix would depend on) -- worth confirming with its own small reduced
+  test before writing the real fix, not just assuming it from reading the
+  code.
