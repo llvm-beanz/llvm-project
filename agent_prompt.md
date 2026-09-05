@@ -42,20 +42,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L27 or other prerequisites blocking the L-series milestones?
+Can you work on L28 or other prerequisites blocking the L-series milestones?
 
-> **2 of L22's own 13 cases
-> (`Feature/Semantics/{DomainSystemValues,HullSystemValues}.test`) now clear the
-> array-of-struct `CompositeConstruct` legalization but still fail
-> `vkCreateGraphicsPipelines`, `VkResult = -3`, on a distinct, later gap**:
-> `"feme-cpu-simdize: function 'main' has a divergent vector value '' used
-> outside a supported
-> insertelement-chain/resource-store/extractelement/select/shufflevector/phi/elementwise/comparison/reduce/vectorizable-intrinsic
-> pattern; component decomposition is not yet supported for this use (roadmap
-> milestone 7 deviation)"` -- a real, pre-existing `SIMDize.cpp` limitation,
-> explicitly flagged in its own diagnostic as a milestone-7 deviation, now
-> reached for the first time by these two cases once the array-of-struct
-> construct they use stopped failing earlier in the pipeline. Needs its own real
-> IR reduction (most likely `HullSystemValues.test`, the smaller of the two) to
-> identify the exact divergent-vector-producing pattern `SIMDize.cpp`'s
-> component-decomposition path does not yet cover, before designing a fix
+> **1 of L22's own 13 cases (`Feature/Semantics/InterpolationModifiers.test`)
+> now clears pipeline creation (via L22's own `Centroid`-decoration fix) but
+> fails at `vkQueueSubmit` instead, `VkResult = -3`**, with no diagnostic text
+> emitted even with `-debug-layer` (the failure originates inside
+> `offload-test-suite`'s own `Device.cpp` `"Failed to submit to queue."` wrapper
+> around a real submission-time error feme's own runtime is not yet surfacing a
+> cause for). This case exercises multiple interpolation-modifier combinations
+> (`nointerpolation`, `sample`, `noperspective`, `centroid`) in one pixel
+> shader; feme already has substantial `Centroid`-aware infrastructure
+> (`Executor.cpp`, `FragmentWrapper.cpp`, `ValidateStage.cpp`,
+> `CanonicalizeStage.cpp`), so the newly-reached failure is likely a genuine
+> execution-time gap in one specific modifier combination rather than `Centroid`
+> support being entirely absent; needs its own real reduction, isolating one
+> interpolation-modifier combination at a time, to identify which one crashes
+> submission and why
