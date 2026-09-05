@@ -44,49 +44,59 @@ if it already exists, and commit it in its own commit when you're done.
 
 The last session got stuck.
 
-Can you work on L48 or other prerequisites blocking the L-series milestones?
+Can you work on L50 or other prerequisites blocking the L-series milestones?
 
-> **L46's own Plain2D/zero-offset/no-clamp depth-comparison sample slice
-> measurably fixed 2/32 real `dEQP-VK.glsl.texture_functions.texture.*shadow*`
-> cases, but the remaining 13 real failures (plus the entirely-separate 190-case
-> `texturequerylod` group) are still open, split across several distinct,
-> independently-sized gaps** this row exists to break down rather than
-> re-attempt in one pass: (a) **non-`Plain2D` depth-comparison shapes**
-> (`Array2D`/`Cube`/`CubeArray` --
-> `sampler1d{,array}shadow`/`sampler2darrayshadow`/`samplercube{,array}shadow`,
-> 8 of the 13 real failures) need a new
-> `ImageCallKind::SampleCmpArray2D`/`SampleCmpCube`/`SampleCmpCubeArray` plus
-> matching `createSampleCmp*`/`femeCpuImageSampleCmp*F32` runtime entry points,
-> mirroring `createSample2DArray`/`createSampleCube`/`createSampleCubeArray`'s
-> own non-`Plain2D` filtered-sample precedent; (b) **a `Bias` image operand**
-> (`sampler2dshadow_bias_fragment` and siblings, 1 of the 13) fails even
-> earlier, at `ConvertSPIRVToLLVMPass` legalization itself --
+> **L48's own Array2D/Cube/CubeArray depth-comparison sampling slice leaves 5
+> distinct, independently-sized gaps still open**, broken down here rather than
+> re-attempted together, per this project's own established precedent: (a)
+> **`Plain1D`/`Array1D` shadow sampling** (`sampler1d{,array}shadow_*`) has no
+> ordinary (non-comparison) sampled-image path on the CPU target at all yet for
+> either shape -- needs its own new 1D-sampling infrastructure
+> (`ImageCallKind::Sample1D`/`Array1D`-equivalents,
+> `createSample1D`/`createSample1DArray`, matching runtime entry points)
+> *before* a `SampleCmp1D`/`SampleCmpArray1D` counterpart is even possible, a
+> materially bigger prerequisite than any other item in this row; (b) **a `Bias`
+> image operand** (`sampler{2d,cube}shadow_bias_fragment` and siblings) fails at
+> `ConvertSPIRVToLLVMPass` legalization itself, before
+> `SPIRVResourceLowering.cpp` ever sees it --
 > `ImageSampleDrefImplicitLodPattern`'s own `SupportedMask`
-> (`SPIRVToLLVMPatterns.cpp`) only allows `ConstOffset`/`MinLod`, not `Bias`, so
-> needs its own new intrinsic-lowering design (no `llvm.spv.resource.samplecmp*`
-> intrinsic form threads an explicit bias through at all today, unlike the
-> ordinary `spv_resource_samplebias`/`.samplebias_clamp` family already handled
-> for a non-dref sample) before `SPIRVResourceLowering.cpp` could even see it;
-> (c) **`samplecmp_clamp`'s own trailing `MinLod` clamp operand** (not yet
-> confirmed present in any real failing CTS case this session measured, but
-> named in L46's own original report) needs
-> `createSampleCmp2D`/`femeCpuImageSampleCmp2DF32` extended with a `MinLodClamp`
-> parameter, mirroring `createSample2D`'s own roadmap L26 precedent; (d) **a
-> real, nonzero depth-comparison `ConstOffset`** (also not yet confirmed present
-> in a real failing case, named in L46's own original report) needs
-> `createSampleCmp2D` extended with `OffsetX`/`OffsetY` parameters, mirroring
-> the same L26 precedent on the ordinary-sample side; (e) **the entirely
-> separate LOD-query intrinsics**
+> (`SPIRVToLLVMPatterns.cpp`) only allows `ConstOffset`/`MinLod`, not `Bias`,
+> and no `llvm.spv.resource.samplecmp*` intrinsic form threads an explicit bias
+> through today, unlike the ordinary
+> `spv_resource_samplebias`/`.samplebias_clamp` family already handled for a
+> non-dref sample -- needs its own new intrinsic-lowering design; (c)
+> **`samplecmp_clamp`'s own trailing `MinLod` clamp operand** (not yet confirmed
+> present in any real failing CTS case measured so far) needs each
+> `createSampleCmp*` builder extended with a `MinLodClamp` parameter, mirroring
+> `createSample2D`'s own roadmap L26 precedent; (d) **a real, nonzero
+> depth-comparison `ConstOffset`** (also not yet confirmed present in a real
+> failing case) needs `createSampleCmp2D`/`createSampleCmpArray2D` extended with
+> `OffsetX`/`OffsetY` parameters, mirroring the same L26 precedent
+> (`Cube`/`CubeArray` have no `ConstOffset` concept in SPIR-V at all, so need no
+> equivalent); (e) **the entirely separate LOD-query intrinsics**
 > (`spv_resource_calculate_lod`/`.calculate_lod_unclamped`, the 190-case
-> `texturequerylod` group, confirmed via this session's own unaffected 0/190
-> re-run) have no CPU-lowering consumer at all on either the SPIR-V or DXIL
-> frontend (confirmed by L46's own investigation into
-> `DXSAToLLVMIRTranslator.cpp`'s `CalculateLOD` path) and need a genuinely new
-> runtime design: a real screen-space coordinate derivative (`dFdx`/`dFdy`)
-> threaded through to a query call, which no existing CPU-target code path does
-> today, needing its own design pass to confirm where a per-invocation
-> derivative is (or could be made) available in this target's per-lane execution
-> model before any lowering pattern can be written. Each of (a)-(e) should be
-> scoped and fixed as its own small, independently-committed,
-> independently-CTS-measured row rather than attempted together, per this
-> project's own established precedent (L26->L33, L45->L47)
+> `texturequerylod` group, confirmed unaffected at 0/190 by both L48 and this
+> row's own re-runs) have no CPU-lowering consumer at all on either the SPIR-V
+> or DXIL frontend and need a genuinely new runtime design: a real screen-space
+> coordinate derivative (`dFdx`/`dFdy`) threaded through to a query call,
+> needing its own design pass to confirm where a per-invocation derivative is
+> (or could be made) available in this target's per-lane execution model; (f)
+> **a newly-discovered `CubeArray`-shadow rendering bug**
+> (`samplercubearrayshadow_fragment`, found by L48's own CTS re-run):
+> `vkCreateGraphicsPipelines`/rendering both now succeed, but the rendered image
+> mismatches the reference in one localized 32x32-pixel screen-space region
+> (pixel bbox `x:[96,127] y:[0,31]` of a 128x128 image) -- confirmed not a
+> regression of the underlying cube-face-selection or array-layer-rounding math
+> (both independently proven correct by the still-passing ordinary
+> `samplercubearray_{fixed,float}_fragment` and shadow
+> `samplercubeshadow_fragment` CTS cases, which each reuse one but not both of
+> `femeCpuImageSampleCmpCubeArrayF32`'s own code paths), so the bug is specific
+> to some interaction between the two only present in the combined
+> `CubeArray`+dref-compare path; needs a real IR/pixel-level reduction of this
+> exact case to isolate (e.g. a temporary per-pixel debug dump of the selected
+> face/layer/mip-level triple compared against the reference renderer's own, the
+> same technique this project's H6/H8/H9/L-series chains have used throughout).
+> Each of (a)-(f) should be scoped and fixed as its own small,
+> independently-committed, independently-CTS-measured row rather than attempted
+> together, per this project's own established precedent (L26->L33, L45->L47,
+> L46->L48)
