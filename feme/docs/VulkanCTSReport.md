@@ -25429,3 +25429,72 @@ both now hit the same newly-discovered, genuinely distinct **L37**
 instead. No feature/extension bit is touched (an internal CPU-lowering
 completeness fix only); `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` reviewed, no change needed.
+
+## Roadmap L28: closed, no code change (already fixed by L32's depth-format side effect)
+
+**Reproduction attempt found the named case already passing.** L28 was
+filed against `Feature/Semantics/InterpolationModifiers.test`, which L22's
+own triage found clearing pipeline creation but failing `vkQueueSubmit`
+with no diagnostic text (even under `-debug-layer`). Reproducing it fresh
+against `build2` (ccache, assertions) found it **passes reliably** (5x),
+contrary to the roadmap's filed state.
+
+**Bisection.** Diffed every `feme/lib`/`feme/runtime` file changed between
+L22's own closing commit and current `HEAD` (6 files: `Executor.cpp`,
+`ImageCalls.cpp`, `ResourceLowering.cpp`, `SIMDize.cpp`,
+`SPIRVResourceLowering.cpp`, `FeMeRuntimeCPU.c` -- from the since-landed
+L26/L27/L32 sessions). Reverting each file individually (`git checkout
+<commit> -- <file>`, rebuild `feme_vulkan`/`offloader` only) and re-running
+the test isolated the fix to a single file: reverting only `Executor.cpp`
+(L32's `D32_FLOAT_S8X24_UINT` `readDepth`/`writeDepth` support) reproduces
+the failure exactly; every other file, reverted alone or in combination,
+leaves the test passing.
+
+**Real root cause.** With `FEME_VULKAN_LOG_CREATION_ERRORS=1` and a direct
+(non-`llvm-lit`) `offloader` invocation, the pre-L32 error is
+`"vkQueueSubmit: depth attachment format is not yet supported"` -- not an
+interpolation-modifier execution gap at all. `offload-test-suite`'s own
+`Device.cpp` unconditionally builds every "traditional raster"/mesh-shader-
+raster pipeline's render pass and `VkPipelineDepthStencilStateCreateInfo`
+with a hardcoded `Format::D32FloatS8Uint` depth attachment and
+`depthTestEnable`/`depthWriteEnable = VK_TRUE`, regardless of whether the
+test's own `pipeline.yaml` requests a depth attachment at all (this test
+declares none). Every raster test that reaches `vkQueueSubmit` therefore
+exercises this exact depth format; L32's fix (landed for unrelated
+reasons, closing depth/stencil format support for `deqp-vk`'s own
+`d32_sfloat_s8_uint` cases) incidentally cleared this case too. L28's own
+milestone-time diagnosis (a per-interpolation-modifier-combination
+execution bug) was a red herring caused by `llvm-lit`'s own stderr
+truncation hiding the real diagnostic.
+
+**Real `check-hlsl-feme-vk` confirmation.**
+- `Feature/Semantics/*` (13 cases): `InterpolationModifiers.test` now
+  `Passed`; not among the 4 still-failing cases (`ArraySemantics`,
+  `DomainSystemValues`, `HullSystemValues`, `MatrixSemantics`, tracked
+  separately, unrelated to this row).
+- Broader `Feature`+`Graphics` sweep (509 discovered cases): 151 `Passed`,
+  209 `Unsupported`, 23 `Expectedly Failed`, 125 `Failed`, 1
+  `Unexpectedly Passed` (`Feature/PushConstant/array_of_matrices.test`,
+  the same pre-existing, unrelated XFAIL-staleness artifact already noted
+  under L22's own entry) -- identical to the pre-existing baseline, no
+  regression.
+
+**`ninja check-feme`.** 2533/2592 (59 pre-existing unrelated
+`Unsupported`, 0 `Failed`) -- unchanged, since no `feme` source was
+touched by this row.
+
+**Targeted real `deqp-vk` re-run.** `dEQP-VK.glsl.linkage.varying.
+interpolation.*` (3 cases) and `dEQP-VK.glsl.builtin_var.
+fragcoord_msaa_input.*centroid*` (7 cases) re-confirm the same
+pre-existing, unrelated `SIMDize.cpp` divergent-vector-decomposition gap
+already noted under L22's own report entry (1/7 pass on the latter,
+splitting on sample-count support, exactly as before) -- no depth-format
+regression, no new interpolation-modifier gap found anywhere.
+
+**Disposition.** Roadmap **L28 closed** (struck through), with no feme
+source change: the gap this row named never existed as described (a
+`vkQueueSubmit`-time interpolation-modifier bug); the real, sole blocker
+was the pre-existing `D32_FLOAT_S8X24_UINT` depth-format gap, already
+fixed by L32 for unrelated reasons. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, no change needed (no feature or
+extension surface touched, since no code changed).
