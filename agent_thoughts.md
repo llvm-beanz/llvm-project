@@ -62286,3 +62286,121 @@ recorded in place of the original (inaccurate) diagnosis, and
 `VulkanCTSReport.md` gained a matching "Roadmap L28" section. The
 inventories needed no change, since nothing about this row touches a
 feature or extension surface.
+
+# L29: SPIR-V-to-LLVM matrix/array constant shape bug
+
+Roadmap L29 targeted `Feature/Semantics/MatrixSemantics.test`, which L22's
+own triage found failing `vkCreateGraphicsPipelines` with a
+`feme-graphics-validate-stage` diagnostic: `"'feme.stage.output.store' in
+function 'main' row N is out of range for element 2"` for rows 4-15. The
+milestone's own framing suspected either the stage-output signature
+builder or `ValidateStage.cpp`'s row-range check.
+
+I started by reading both of those, and they both looked correct on
+inspection -- `CanonicalizeStage.cpp`'s `getStageIORowShape` walks an
+`ArrayType` of `FixedVectorType` and derives `RowCount` from the
+`ArrayType`'s own size, which should be 4 for a `float4x4`. That mismatch
+between "the logic looks right" and "the diagnostic says otherwise" is
+usually a sign the bug is upstream of where you're looking, not in the
+code that's raising the error -- the validator is often just the first
+place a pre-existing corruption becomes *visible*, not where it's
+introduced.
+
+So I built a manual, minimal IR-reduction pipeline rather than trying to
+debug the real (much larger) shader through the full stack: `dxc -spirv`
+on a tiny vertex shader with just a `float4x4` output, then
+`feme-translate --import-spirv` to get SPIR-V-dialect MLIR,
+`feme-opt --feme-convert-spirv-to-llvm` to get LLVM-dialect MLIR, then
+`feme-translate --mlir-to-llvmir` to get real LLVM IR text. Each stage's
+output looked plausible in isolation -- it was only the *final* LLVM IR
+text that revealed the actual bug: a `store [16 x float] [...]` against a
+global declared as `[4 x <4 x float>]`. A flat 16-element array stored
+into a 4-element array of 4-element vectors. That's the smoking gun: the
+matrix constant lost its real shape somewhere in translation, and
+whatever reads the store's operand type downstream (in this case,
+`CanonicalizeStage.cpp`'s row-count derivation) has no way to know the 16
+scalars were "supposed" to be a 4x4 nested shape instead of a flat 16.
+
+This traced cleanly to `ArrayConstantPattern` in
+`SPIRVToLLVMPatterns.cpp`, which had always built a flat 1-D
+`RankedTensorType` shape for the constant's `DenseElementsAttr`
+regardless of the real destination type's nesting. It passed MLIR
+verification fine, because `LLVM::ConstantOp::verify()` only checks
+total element count -- but upstream MLIR's own `convertDenseElementsAttr`
+(in `ModuleTranslation.cpp`) reconstructs the nested LLVM constant driven
+entirely by the *attribute's own shape*, not the destination type's
+shape. A flat attribute on a nested destination silently produces
+malformed, type-mismatched IR with no verifier catching it at any layer
+in between.
+
+The fix took two iterations, and the second one is the more interesting
+lesson. My first attempt just fixed the shape's dimensionality (building
+`{4,4}` instead of `{16}`) and used the same `RankedTensorType` kind as
+before. This produced a `tensor<4x4xf32>`-shaped attribute in the MLIR,
+which looked right -- but running it through to real LLVM IR crashed with
+an `llvm::ConstantArray::getImpl` assertion, "Wrong type in array element
+initializer". Tracing *why* required actually reading upstream's
+`convertDenseElementsAttr` closely: it computes an `innermostLLVMType` by
+peeling through both `ArrayType` and `VectorType` nesting down to the
+bare scalar type, then dispatches on whether the attribute itself is a
+`TensorType` or `VectorType` to decide *how* to reassemble each
+innermost chunk -- `ConstantDataArray::getRaw` for a tensor, versus
+`ConstantDataVector::getRaw` for a vector. When the real destination
+type's own innermost level is a vector (any matrix, or an array of
+vectors), only the vector-attribute path produces a matching
+`ConstantDataVector`; the tensor-attribute path always produces a
+`ConstantDataArray`, which mismatches a true vector-typed destination
+element even though the total flat element count is identical. So the
+fix needed a second helper (`hasVectorLeaf`) to detect this case and
+switch to building the attribute as an `mlir::VectorType` instead of
+`mlir::RankedTensorType` whenever the destination bottoms out in a
+vector -- purely a plain nested scalar array (no vector anywhere) still
+correctly uses the tensor shape.
+
+The general lesson here: MLIR attribute-to-LLVM-IR translation is driven
+by the attribute's own declared shape and element-type category
+(tensor vs. vector), not by unifying against the destination op's
+declared type at translation time. A conversion pattern that gets away
+with building an attribute shape that's merely *countable*-equivalent to
+the destination (same total element count) rather than *structurally*
+equivalent (same nesting AND same vector-vs-array distinction at every
+level) will pass MLIR's own verifier, but can still produce genuinely
+malformed LLVM IR with no diagnostic pointing at the real cause -- the
+symptom can surface arbitrarily far downstream (in this case, in a
+completely unrelated graphics-stage validation pass reading the store's
+operand type), which is exactly why this needed a from-scratch IR
+reduction rather than debugging forward from the diagnostic site.
+
+One tooling wrinkle I never fully resolved: piping `feme-opt`'s
+`--feme-convert-spirv-to-llvm` output directly into
+`feme-translate --mlir-to-llvmir` (via a shell pipe, with or without
+`--no-implicit-module` on either tool) silently produces an empty LLVM
+module -- no functions, no globals, just module-flags metadata.
+`feme-opt`'s own output is doubly-nested (an outer `builtin.module`
+wrapping the pass's own real output module, which itself carries the
+`llvm.data_layout`/`llvm.target_triple` attributes), and manually
+extracting just the inner module block via `sed` into its own file before
+feeding it to `feme-translate` works correctly every time. I didn't
+chase down why the direct pipe fails since the manual-extraction
+workaround was reliable enough to complete the reduction, but this means
+I couldn't build a true end-to-end lit test that verifies real
+translated LLVM IR text directly through the normal tool pipeline --
+the lit-test coverage I added is at the MLIR-dialect level only
+(`spirv-to-llvm-constants.mlir`'s `@palette`/`@const_matrix` cases,
+verifying the corrected attribute shape), which does pin the exact
+change this fix makes, just one MLIR-translation step short of the real
+bug's final manifestation. Worth a future look if someone wants stronger
+coverage of this exact translation boundary.
+
+While measuring L29's own CTS impact I ran a targeted `deqp-vk` sweep
+(`dEQP-VK.glsl.matrix.add.const.*`, the closest real CTS analogue to a
+matrix-constant fix) and immediately hit a crash on the very first case --
+a different `"FloatAttr does not match expected type of the constant"`
+assertion, clearly a related-but-distinct constant-conversion gap (this
+is GLSL-compiled-via-glslang, not HLSL/DXC, so it's very likely a
+different SPIR-V-to-LLVM conversion pattern than `ArrayConstantPattern`
+entirely). Before assuming I'd introduced a regression, I stashed my
+changes, rebuilt, and re-ran the identical case -- it crashed exactly the
+same way, confirming this is pre-existing and unrelated. Filed as L38
+rather than chased down in this session, since it's out of L29's own
+scope and deserves its own real IR reduction rather than a guess.
