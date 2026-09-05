@@ -62971,3 +62971,130 @@ as new roadmap entries rather than chased indefinitely within the same
 change. Filed as **L42**, keeping the L-series flat (no nested lowercase
 letters) per the standing instruction about H6-style nesting getting out
 of hand.
+
+# L41: JIT-link crash in masked mesh-shader output slot allocation
+
+## The debugging path, in order
+
+This was the first L-series ticket in a while whose symptom was a genuine
+crash (an `assert` inside LLVM's own `JITLink`) rather than a diagnosed
+compiler error or a rendering mismatch, so the usual "reduce the IR by
+hand and read it" workflow didn't apply until much further along. The
+path that actually worked:
+
+1. Reproduce in isolation with a direct `deqp-vk --deqp-case=...`
+   invocation, confirmed deterministic (not merely a side effect of a
+   broader sweep).
+2. `gdb -batch -ex run -ex bt` to get a real backtrace -- this pinned the
+   crash inside `BasicLayout::apply()`, reached through
+   `CompiledStage::create`'s `JIT->lookup(...)`, which told me this was
+   a JIT-time problem, not a codegen-time one, and ruled out a large
+   fraction of the codebase immediately.
+3. Read `JITLinkMemoryManager.cpp`'s `BasicLayout::apply()` to understand
+   *why* the assert fires: a segment's own backing allocation came back
+   null, which only makes sense for a degenerately-sized segment.
+4. Add a temporary, env-gated hook on `LLJIT::getObjTransformLayer()` to
+   dump the raw compiled object right before JITLink processes it --
+   confirmed a 752-byte object whose only defined symbol had a
+   **zero-byte** `.text` section.
+5. Add two more temporary, env-gated dumps (pre-optimizer IR, and
+   post-optimizer/pre-JIT IR) around `OptimizerPipeline::run()` in
+   `CompiledStage.cpp`. This is where I hit my first real snag: all
+   three dumps used one fixed path, silently overwritten across the
+   *multiple* stages a single `mesh_only` pipeline compiles (mesh +
+   fragment) -- I initially "confirmed" a real loop pre-opt and a bare
+   `unreachable` post-opt for what I assumed was the same stage, and
+   only later realized they might not correspond to the same call at
+   all. Refactoring the dump paths to be suffixed by stage name and
+   `wave`/`ref` fixed this and is a pattern worth remembering: **any**
+   temporary debug dump keyed only by a fixed path is unsound the moment
+   the code path it instruments can run more than once per test.
+6. With per-stage dumps, confirmed the *mesh* stage specifically has the
+   empty `.text` section, and that its pre-opt IR has a real,
+   substantial 10-iteration wave loop body -- so something in between
+   folds real code down to nothing.
+7. Rather than keep dumping IR at the `CompiledStage.cpp` level (only
+   two snapshots: before and after the entire `OptimizerPipeline`), I
+   added a similar per-stage dump directly inside `Pipeline.cpp`'s
+   `runAndCheck` lambda -- one dump per CPU-lowering pass
+   (`ResourceLowering`, `Linearize`, `SIMDize`, `WaveLowering`,
+   wrapping). This is what actually let me bisect *inside* feme's own
+   pipeline rather than just inside the generic LLVM `-O2` pipeline, and
+   is a much cheaper/more targeted technique than a full IR reduction
+   for this kind of "where does the real code disappear" question.
+8. Two nested bisections: first, `opt -O2 -print-changed=diff-quiet
+   -filter-print-funcs=<name>` against the exact pre-optimizer IR
+   (captured from step 5, once the per-stage suffixing made it
+   trustworthy) pinpointed `IPSCCPPass` as the specific standard-LLVM
+   pass performing the actual `unreachable` fold, and showed *why*: a
+   real `br i1 poison, ...` already present in the IR feme handed to the
+   optimizer -- IPSCCP legitimately treats branch-on-poison as immediate
+   UB. Second, the per-stage `Pipeline.cpp` dumps (step 7) showed this
+   exact `poison` first appears after the `widening` (SIMDize) stage,
+   not `linearizing` -- so the bug is feme's own, not something
+   `opt -O2` did wrong.
+9. Reading the pre-SIMDize IR at the point the `poison` first appears
+   traced it straight to a `feme.cpu.masked.atomicrmw.i32.as3` call
+   whose scalar result feeds the eventually-poisoned branch. From there
+   it was a short hop to `feme::cpu::FunctionWidener::widenMaskedAtomicRMW`
+   (which unconditionally widens this call into a real per-lane vector
+   result, `Widened[&CI] = Result`) and the final "sever remaining uses
+   of an erased instruction" fallback
+   (`I->replaceAllUsesWith(PoisonValue::get(I->getType()))`) at the end
+   of `widen()`: this only silently substitutes `poison` for a use that
+   was never otherwise resolved during widening, which happens exactly
+   when the *consumer* of a masked-atomicrmw's result was itself
+   classified uniform (so nothing about widening ever touched it).
+
+## The actual root cause and fix
+
+The real bug turned out to be one missing case in
+`feme::cpu::WaveTTIImpl::getValueUniformity`
+(`feme/lib/Analysis/CPU/WaveUniformity.cpp`): `feme.cpu.masked.atomicrmw.*`
+calls were left at the generic, operand-driven default rule. When every
+operand of a specific call site happens to be uniform -- a uniform
+pointer, a uniform value, and an always-true mask, exactly the shape a
+real CTS mesh shader's own "every lane races to increment one shared
+counter to claim a unique output slot" pattern produces -- the generic
+rule concludes the *result* is uniform too. But it isn't: this call
+represents `W` genuinely separate atomic operations, one per lane, each
+observing whatever the shared counter holds at that lane's own turn
+(dispatch here is sequential, one lane at a time, per the existing
+"Dispatch is sequential, not thread-pooled" note in the roadmap), so the
+result is lane-varying by construction regardless of its operands'
+uniformity -- it needed to be a `NeverUniform` divergence *source*, the
+same category as `llvm.dx.thread.id` and friends, not a
+`Default`-classified ordinary value.
+
+The one-line-of-substance fix (classify by callee name, mirroring the
+already-existing `feme.cpu.mask.any` special case right above it in the
+same function, both there for the identical "an ordinary `CallInst`, not
+an `IntrinsicInst`, and `Analysis/CPU` cannot depend on `Transforms/CPU`'s
+`MaskIntrinsics.h`" reason) is a satisfying amount of actual fix for how
+much investigation it took to find -- this is a pattern I'd expect to
+keep seeing in this codebase: FeMe's own CPU-specific intrinsics
+(anything with a `feme.cpu.*`/`feme.stage.*` name, not a real LLVM
+intrinsic ID) are exactly the values `WaveTTIImpl`'s generic intrinsic
+switch can never see, so *every* one of them needs its own explicit,
+by-name classification rule, and a missing one fails silently (wrong
+answer, not a compile error) until something downstream trips over the
+consequence, sometimes many passes later.
+
+## On the newly-surfaced LinearizePass gap (L43)
+
+Fixing the uniformity classification correctly makes `LinearizePass` see
+this branch as divergent for the first time too (both passes share
+`computeWaveUniformity`) -- but `LinearizePass` still doesn't know how to
+turn it into real masked, straight-line code, so the crash is replaced by
+a clean, diagnosed `feme-cpu-simdize` error instead of a passing pipeline.
+This is exactly the same shape of "closing one gap correctly exposes the
+next one" outcome several other L-series/H-series tickets before this one
+have hit (L30->L39/L40, L39->L41, L40->L42), and I made the same call
+those did: fix the crash (this ticket's actual scope, and the thing that
+made 12,340 real CTS cases previously abort the whole test runner instead
+of failing individually), file the newly-visible, structurally distinct
+gap as its own roadmap row (**L43**) rather than chase it inside the same
+change, since it needs its own real IR reduction before a fix can even be
+designed (is the right shape to teach `DiamondFlattener`, or does
+`LoopLinearizer`'s own peel need to learn to see through this?). Kept the
+roadmap flat (no nested lowercase letters) per the standing instruction.
