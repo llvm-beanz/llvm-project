@@ -869,33 +869,47 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L46: a depth-comparison sample (`spv_resource_samplecmp`/
-    // `samplecmplevelzero`) against `Plain2D` only -- `createSampleCmp2D`
-    // has no `Array2D`/`Cube`/`CubeArray` counterpart yet (filed as
-    // roadmap L48, alongside the `samplecmp_clamp`/nonzero-offset
-    // narrowing `isDrefSampleIntrinsic`'s own comment already covers).
+    // Roadmap L48: extended from a `Plain2D`-only depth-comparison sample
+    // (roadmap L46) to also cover `Array2D`/`Cube`/`CubeArray`, each of
+    // which now has its own `createSampleCmpArray2D`/`createSampleCmpCube`/
+    // `createSampleCmpCubeArray` counterpart. `samplecmp_clamp`'s own
+    // trailing `MinLod` clamp operand, a nonzero `ConstOffset`, and
+    // `Plain1D`/`Array1D` shadow sampling (no ordinary, non-comparison
+    // sampled-image path exists for either yet) remain unstarted follow-on
+    // work (see `isDrefSampleIntrinsic`'s own comment).
     bool DrefExplicitLod = false;
     if (isDrefSampleIntrinsic(*CI, DrefExplicitLod)) {
-      if (IsInteger || Shape != ImageShape::Plain2D)
-        return false; // No filtered/dref sample over a non-Plain2D shape.
+      if (IsInteger || Shape == ImageShape::Plain1D ||
+          Shape == ImageShape::Array1D)
+        return false; // No filtered/dref sample over these shapes.
       if (CI->getArgOperand(0) != &Handle)
         return false;
       // SPIR-V's own validation rules give a depth-comparison sample's
       // Coordinate operand one extra component beyond the shape's own
-      // addressing width (3, not `Plain2D`'s usual 2) -- glslang always
-      // emits this for e.g. `texture(sampler2DShadow, vec3(u, v,
-      // compare))`, packing the depth-reference value redundantly
-      // alongside `Dref` itself (a separate operand, still read from its
-      // own fixed index below); only the first two components are ever
-      // read as the real U/V address (see the `C0`/`C1` extraction in
-      // `lowerImageAccesses`).
-      if (!isCoordN(CI->getArgOperand(2), /*N=*/3, /*Float=*/true) ||
+      // ordinary addressing width, capped at SPIR-V's own 4-component
+      // vector ceiling -- glslang always emits this for e.g.
+      // `texture(sampler2DShadow, vec3(u, v, compare))`, packing the
+      // depth-reference value redundantly alongside `Dref` itself (a
+      // separate operand, still read from its own fixed index below);
+      // only the shape's own ordinary components are ever read as the
+      // real address (see the `C0`/`C1`/... extraction in
+      // `lowerImageAccesses`). Confirmed via a real `deqp-vk` SPIR-V
+      // capture of `sampler2darrayshadow`/`samplercube{,array}shadow`
+      // (roadmap L48): `CubeArray`'s own ordinary width (4) is already
+      // this ceiling, so its own Dref sample coordinate stays 4-wide
+      // with no further padding, and its `Dref` arrives as a genuinely
+      // independent operand rather than an echo of the coordinate's own
+      // last component (still read the same way below either way).
+      unsigned DrefCoordWidth =
+          SampleCoordWidth + 1 > 4 ? 4 : SampleCoordWidth + 1;
+      if (!isCoordN(CI->getArgOperand(2), DrefCoordWidth, /*Float=*/true) ||
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
           !isZeroOffset(CI->getArgOperand(DrefSampleOffsetIdx)) ||
           !CI->getType()->isFloatTy())
         return false;
       continue;
     }
+
 
     if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray)
       return false; // No fetch shape exists for Cube/CubeArray.
@@ -2119,10 +2133,11 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         continue;
       }
 
-      // Roadmap L46: a depth-comparison sample
-      // (`spv_resource_samplecmp`/`samplecmplevelzero`) -- always
-      // `Plain2D` (`hasOnlySupportedImageUses` already restricted every
-      // other shape). Both share `createSampleCmp2D`'s own `Lod`
+      // Roadmap L48: a depth-comparison sample
+      // (`spv_resource_samplecmp`/`samplecmplevelzero`), extended from
+      // `Plain2D`-only (roadmap L46) to also cover `Array2D`/`Cube`/
+      // `CubeArray`, mirroring the ordinary-sample `switch (Shape)` just
+      // above. Every shape shares `createSampleCmp2D`'s own `Lod`
       // parameter passed as a constant zero: `samplecmplevelzero` always
       // forces mip level 0 (no LOD operand of its own to read), and
       // `samplecmp`'s implicit LOD already degenerates to the same level
@@ -2143,13 +2158,54 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
         Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *ExplicitLodFlag = Builder.getInt1(DrefExplicitLod);
-        CallInst *NewCall =
-            createSampleCmp2D(Builder, Env, ImageIndex, SamplerIndex, C0, C1,
-                              Lod, ExplicitLodFlag, Dref, Mask, CI->getName());
+        CallInst *NewCall;
+        switch (Shape) {
+        case ImageShape::Plain2D:
+          NewCall = createSampleCmp2D(Builder, Env, ImageIndex, SamplerIndex,
+                                      C0, C1, Lod, ExplicitLodFlag, Dref,
+                                      Mask, CI->getName());
+          break;
+        case ImageShape::Array2D: {
+          Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{2});
+          NewCall = createSampleCmpArray2D(Builder, Env, ImageIndex,
+                                           SamplerIndex, C0, C1, ArrayLayer,
+                                           Lod, ExplicitLodFlag, Dref, Mask,
+                                           CI->getName());
+          break;
+        }
+        case ImageShape::Cube: {
+          Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
+          NewCall = createSampleCmpCube(Builder, Env, ImageIndex,
+                                        SamplerIndex, C0, C1, C2, Lod,
+                                        ExplicitLodFlag, Dref, Mask,
+                                        CI->getName());
+          break;
+        }
+        case ImageShape::CubeArray: {
+          Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
+          Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{3});
+          NewCall = createSampleCmpCubeArray(
+              Builder, Env, ImageIndex, SamplerIndex, C0, C1, C2, ArrayLayer,
+              Lod, ExplicitLodFlag, Dref, Mask, CI->getName());
+          break;
+        }
+        case ImageShape::Plain1D:
+        case ImageShape::Array1D:
+        case ImageShape::Plain3D:
+        case ImageShape::Plain2DMS:
+        case ImageShape::Array2DMS:
+          // `hasOnlySupportedImageUses` already rejects a dref sample
+          // against any of these shapes (roadmap L48's own comment),
+          // so none of them is ever reached here.
+          llvm_unreachable(
+              "hasOnlySupportedImageUses should have rejected a dref "
+              "sample against this shape");
+        }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;
       }
+
 
       // `OpImageFetch`/`OpImageRead`/`OpImageWrite`: a `getpointer` whose
       // result is loaded from and/or (roadmap H19a, `StorageImage2D` only)

@@ -1783,9 +1783,13 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonzeroOffsetAlone) {
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesASampleCmpAgainstArray2DAlone) {
-  // Roadmap L46/L48: `createSampleCmp2D` has no `Array2D` counterpart, so
-  // a `samplecmp` against an array shape is left unlowered.
+TEST(SPIRVResourceLoweringTest, LowersSampleCmpArray2DToImageSampleCmpArray2D) {
+  // Roadmap L48: a `samplecmp` against `Array2D` (`Dim::Dim2D`, `Arrayed
+  // == 1`) with a zero offset now lowers to
+  // `feme.cpu.image.samplecmp.2darray.f32`, extracting the trailing
+  // component of the 4-wide Coordinate as the array layer -- the same
+  // "ordinary width + 1" padding rule `SampleCmp2D` (roadmap L46) already
+  // established for `Plain2D`.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main(<4 x float> %coord, float %dref) {
@@ -1809,9 +1813,128 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpAgainstArray2DAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
+  CallInst *SampleCmp =
+      findImageCall(*F, "feme.cpu.image.samplecmp.2darray.f32");
+  ASSERT_TRUE(SampleCmp);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, array_layer, lod, use_explicit_lod, dref, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 13u);
+  EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(9))->isZero());
+  EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "dref");
+}
+
+TEST(SPIRVResourceLoweringTest, LowersSampleCmpCubeToImageSampleCmpCube) {
+  // Roadmap L48: a `samplecmp` against `Cube` (`Dim::Cube`, `Arrayed ==
+  // 0`) with a zero offset now lowers to
+  // `feme.cpu.image.samplecmp.cube.f32`, the same "ordinary width (3) +
+  // 1" padding rule as `Array2D` above.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<4 x float> %coord, float %dref) {
+      %img = call target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmp(
+          target("spirv.Image", float, 3, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <4 x float> %coord,
+          float %dref, <3 x i32> zeroinitializer)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.cube.f32");
+  ASSERT_TRUE(SampleCmp);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dir_x, dir_y, dir_z, lod, use_explicit_lod, dref, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 13u);
+  EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "dref");
+}
+
+TEST(SPIRVResourceLoweringTest, LowersSampleCmpCubeArrayToImageSampleCmpCubeArray) {
+  // Roadmap L48: a `samplecmp` against `CubeArray` (`Dim::Cube`,
+  // `Arrayed == 1`) with a zero offset now lowers to
+  // `feme.cpu.image.samplecmp.cubearray.f32` -- `CubeArray`'s own
+  // ordinary width (4) is already SPIR-V's per-instruction vector width
+  // ceiling, so its own dref-sample Coordinate stays 4-wide with no
+  // further padding component (confirmed via a real `deqp-vk` capture of
+  // `samplercubearrayshadow_fragment`, see `hasOnlySupportedImageUses`'s
+  // own comment).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<4 x float> %dirandlayer, float %dref) {
+      %img = call target("spirv.Image", float, 3, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmp(
+          target("spirv.Image", float, 3, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <4 x float> %dirandlayer,
+          float %dref, <3 x i32> zeroinitializer)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 3, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *SampleCmp =
+      findImageCall(*F, "feme.cpu.image.samplecmp.cubearray.f32");
+  ASSERT_TRUE(SampleCmp);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dir_x, dir_y, dir_z, array_layer, lod, use_explicit_lod, dref,
+  //  mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 14u);
+  EXPECT_EQ(SampleCmp->getArgOperand(12)->getName(), "dref");
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesASampleCmpAgainstPlain1DAlone) {
+  // Roadmap L48: unlike `Array2D`/`Cube`/`CubeArray` above, `Plain1D` (and
+  // `Array1D`) still has no ordinary, non-comparison sampled-image path
+  // at all (see `ImageCalls.h`'s own header comment), so a `samplecmp`
+  // against either remains unstarted follow-on work and is left entirely
+  // unlowered.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<2 x float> %coord, float %dref) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmp(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord,
+          float %dref, <1 x i32> zeroinitializer)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
+
+
 
 TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonSpecCoordWidthAlone) {
   // Roadmap L46: per SPIR-V's own validation rules, a depth-comparison
