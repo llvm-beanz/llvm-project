@@ -63771,3 +63771,139 @@ Four separate commits, in dependency order: (1) the three new pattern
 classes plus their registration in `SPIRVToLLVMPatterns.cpp`, (2) the two
 new lit test files, (3) the `Roadmap.md`/`Design.md`/`VulkanCTSReport.md`
 documentation updates, and (4) this `agent_thoughts.md` entry.
+
+# L45: uniform-diamond-inside-a-region control-flow gap, plus L47 filed
+
+## Starting point
+
+Roadmap task L45: `feme::cpu::EntryWrapperPass::isLinearChain` was
+diagnosing a real CTS mesh-shader case (`vkCreateGraphicsPipelines`
+failing with "has a barrier inside non-linear control flow") purely
+because a barrier sat in the entry block *before* an entirely unrelated
+uniform diamond (a root-constant-availability check) further down --
+`isLinearChain`'s all-or-nothing straight-chain check declined the whole
+function on sight of any surviving conditional branch, without asking
+whether that branch actually needed to be split at all.
+
+## Investigation: what `outlineChain` actually depends on
+
+Before designing a fix, I wanted to know whether the roadmap task's own
+worst-case guess -- that fixing this would need generalizing
+`outlineChain` from a flat basic-block chain to a real multi-block
+sub-CFG-per-region model -- was actually necessary, since that would be a
+much bigger change than a single small fix. Reading `outlineChain`
+carefully, its `splice`-based extraction only depends on the function's
+own *physical* basic-block list order (walking `for (BasicBlock &BB :
+*WaveBody) { if (BoundaryBlocks.contains(&BB)) ... }`), not on the
+content or order of the `Order`/`Chain` vector passed in as long as
+`Chain.front()`..`Chain.back()` forms one contiguous positional range
+containing exactly the named blocks. Since LLVM lays out structured
+if/else blocks in program order (header, then each arm's blocks, then the
+merge), a diamond fully contained within one barrier-delimited region
+already satisfies this positional-contiguity requirement for free -- no
+change to `outlineChain` or the region-partitioning loop was needed at
+all. This let me scope the fix down to just `isLinearChain` itself,
+confirming the task's own pessimistic estimate wasn't the right shape
+here.
+
+## The fix
+
+Added `walkBarrierFreeArm` (mirrors the existing `walkBranchArm` used by
+`matchBranchShape`, but additionally declines if any block along the arm
+contains a group-sync barrier call) and rewrote `isLinearChain` to
+recognize a "safe diamond": a uniform two-way branch whose both arms are
+barrier-free and reconverge at one merge block. Unlike `matchBranchShape`'s
+own `BranchShape` (which explicitly declines a merge-block phi, since it
+*hoists* the branch condition into the wrapper and splits each arm into
+independently-invoked per-wave functions -- a phi at merge would need
+cross-function value threading that isn't implemented), a merge phi here
+is perfectly safe: the whole diamond, condition and both arms and the
+phi, stays inside one already-outlined region function, so no value ever
+crosses a barrier or a hoisted-branch boundary. A genuinely unsafe diamond
+(barrier inside an arm) still falls through to the pre-existing
+diagnostic unchanged.
+
+## Tests and validation
+
+- Minimal repros: confirmed (via `git stash`) that a hand-written
+  repro (barrier-then-unrelated-diamond-with-merge-phi) reproduced the
+  exact diagnostic on pre-fix code and splits cleanly (2 wave-loop
+  regions + fence, diamond intact) on fixed code; a second repro (barrier
+  moved inside one arm) confirmed the genuinely-unsafe shape is still
+  correctly diagnosed.
+- 2 new lit tests (`entry-wrapper-safe-diamond-after-barrier.ll`,
+  `entry-wrapper-barrier-in-diamond-arm-with-merge-phi-unsupported.ll`)
+  and 2 new `EntryWrapperTest` unit tests
+  (`SplitsAroundSafeDiamondAfterBarrier`,
+  `BarrierInsideDiamondArmWithMergePhiStillDiagnosed`).
+- `ninja check-feme` (ccache, assertions-enabled): 2550/2609 discovered,
+  59 pre-existing `Unsupported`, 0 `Failed` -- up by exactly the 4 new
+  tests, no regressions.
+- Committed in two separate commits: the `EntryWrapper.cpp` fix itself,
+  then the tests.
+
+## Real CTS re-run and the new `task_mesh` blocker
+
+Running the exact 4-case sweep this row was found in
+(`dEQP-VK.mesh_shader.ext.query.no_queries.*.{mesh_only,task_mesh}.*`)
+against the real feme ICD: `mesh_only`'s 2 real feature-supported cases
+now **Pass** (previously diagnosed `Fail`), confirming the fix works.
+`task_mesh`'s 2 real cases no longer hit this row's diagnostic at all, but
+now fail with a distinct, later error: a JIT link-time `"Symbols not
+found: [ spirv_var_20 ]"`.
+
+I added a temporary env-gated IR dump
+(`FEME_DEBUG_DUMP_PRE_JIT_IR` in `CompiledStage.cpp`, right before
+`JIT->addIRModule`) to capture the real pre-JIT module for this case,
+used it once, then reverted it (`git checkout --`) before committing
+anything -- consistent with this project's own established pattern of
+using disposable, uncommitted debug instrumentation for one-off root-cause
+captures rather than leaving debug-only code in the tree. The captured IR
+showed `@spirv_var_20` as an `external`, never-defined `addrspace(14)`
+(`TaskPayloadWorkgroupEXT`) global still referenced by raw per-lane
+`getelementptr`s -- meaning neither `TaskPayloadWrapper.cpp` nor
+`MeshOutputWrapper.cpp` (both of which correctly redirect payload
+access to a real runtime pointer) ever got a chance to run, because the
+call they lower was never created. Grepping the real CTS shader source
+(`vktMeshShaderQueryTestsEXT.cpp`) found the actual pattern:
+`td.branch[gl_LocalInvocationIndex] = ...` -- a per-invocation *dynamic*
+array index into the task payload, which
+`CanonicalizeStage.cpp`'s own task-payload recognition
+(`isTaskPayloadGlobal`/`loadTaskPayloadValue`/`storeTaskPayloadValue`)
+never handles, since it only ever resolves a compile-time-constant byte
+offset. This is a distinct pipeline phase and a materially bigger scope
+(new dynamic-offset call form, new canonicalization pattern, new lowering
+in two wrapper passes) than L45's own, so rather than attempting it in
+this session I filed it as a new roadmap row, **L47**, following this
+project's own established precedent (L43->L44->L45, L31->L46) of not
+letting one row's fix silently absorb the next blocker it exposes.
+
+## Documentation
+
+- **Roadmap.md**: struck through L45 with a done note (fix description,
+  root cause, tests, `ninja check-feme` numbers, CTS re-run results for
+  both `mesh_only` and `task_mesh`); added L47 as a new row (confirmed via
+  grep that L46 was already taken by the prior session's own follow-on,
+  so L47 was the next free ID).
+- **FeMeCPUDesign.md**: extended milestone 9's own Deviation note (which
+  already documented `matchBranchShape`'s narrower "hoisted branch"
+  scope and its two out-of-scope items) with a new paragraph explaining
+  that those two narrowings apply only to a *hoisted* branch, and that a
+  uniform, barrier-free-in-both-arms diamond entirely inside one region
+  is now handled as ordinary intra-region control flow instead, merge
+  phi included.
+- **VulkanCTSReport.md**: appended a full "Roadmap L45: fixed... plus L47
+  filed" section following this project's established format.
+- **Vulkan14FeatureInventory.md**/**VulkanExtensionInventory.md**: checked
+  for any reference to mesh-shader task-payload or entry-wrapper
+  control-flow support -- found none needing a change (this is internal
+  CPU-lowering plumbing for an already-advertised `VK_EXT_mesh_shader`,
+  not a new feature or extension surface).
+
+## Commits
+
+Four separate commits, in dependency order: (1) the `isLinearChain`
+safe-diamond fix in `EntryWrapper.cpp`, (2) the 2 lit tests plus 2 unit
+tests, (3) the `Roadmap.md`/`FeMeCPUDesign.md`/`VulkanCTSReport.md`
+documentation updates (L45 closed, L47 filed), and (4) this
+`agent_thoughts.md` entry.
