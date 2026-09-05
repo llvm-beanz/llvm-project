@@ -74,6 +74,13 @@ bool isStageOpLegalForStage(StageOpKind Kind, ShaderStage Stage) {
     // `StreamEmit`/`StreamCut` above are still unreachable until the
     // geometry stage is validated.
     return Stage == ShaderStage::Amplification;
+  case StageOpKind::TaskPayloadLoad:
+    // (Roadmap L30) The load-side counterpart of `TaskPayloadStore`
+    // above, but on the *mesh* stage instead of the task/amplification
+    // one -- reachable since roadmap H6g-b-c's own fix already wired
+    // `ShaderStage::Mesh` into `ValidateStagePass::run` below, mirroring
+    // `SetMeshOutputs` immediately below.
+    return Stage == ShaderStage::Mesh;
   case StageOpKind::SetMeshOutputs:
     // (Roadmap H6c-a-a-i) Reachable since roadmap H6g-b-c's own fix wired
     // `ShaderStage::Mesh` into `ValidateStagePass::run` below.
@@ -284,11 +291,13 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
   case StageOpKind::StreamCut:
   case StageOpKind::SubpassLoad:
   case StageOpKind::TaskPayloadStore:
+  case StageOpKind::TaskPayloadLoad:
   case StageOpKind::SetMeshOutputs:
   case StageOpKind::EmitMeshTasks:
     // No element/row/component operands to validate: a task payload
     // write (roadmap H6i) addresses raw memory by byte offset, not a
-    // `SignatureElement`, so it has nothing to look up here either; a
+    // `SignatureElement`, so it has nothing to look up here either, and
+    // neither does its own load-side counterpart (roadmap L30); a
     // mesh entry's `SetMeshOutputsEXT` (roadmap H6c-a-a-i) is likewise a
     // workgroup-uniform count pair, not a signature element access, and
     // neither is a task entry's `EmitMeshTasksEXT` (roadmap H6s) --

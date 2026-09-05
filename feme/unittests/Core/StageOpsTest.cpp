@@ -189,6 +189,23 @@ TEST_F(StageOpsTest, TaskPayloadStoreIsVoidAndOverloadedOnValue) {
   EXPECT_EQ(Kind, StageOpKind::TaskPayloadStore);
 }
 
+/// (Roadmap L30) `TaskPayloadLoad` is overloaded on its own *result*, not a
+/// `value` operand -- the default `getOrInsertStageOp` overload-suffix path,
+/// unlike `TaskPayloadStore`'s special-cased one -- and its `offset`
+/// operand round-trips as an ordinary constant `i32` exactly like
+/// `TaskPayloadStore`'s own.
+TEST_F(StageOpsTest, TaskPayloadLoadIsOverloadedOnResult) {
+  CallInst *CI = createStageTaskPayloadLoad(B, B.getFloatTy(), /*Offset=*/12);
+  EXPECT_TRUE(CI->getType()->isFloatTy());
+  EXPECT_EQ(CI->getCalledFunction()->getName(),
+            "feme.stage.task.payload.load.f32");
+  ASSERT_EQ(getStageOpConstantOperand(*CI, 0), 12u);
+
+  StageOpKind Kind;
+  ASSERT_TRUE(isStageOpCall(*CI, &Kind));
+  EXPECT_EQ(Kind, StageOpKind::TaskPayloadLoad);
+}
+
 /// (Roadmap H6c-a-a-i) `SetMeshOutputs` is not overloaded (both operands
 /// are always `i32`, unlike `TaskPayloadStore`'s `value`), so its callee
 /// name carries no type-mangling suffix.

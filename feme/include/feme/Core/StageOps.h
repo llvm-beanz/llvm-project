@@ -145,6 +145,20 @@ enum class StageOpKind : uint8_t {
   /// how a stage-IO store already reaches this pass pre-decomposed to a
   /// scalar/vector leaf, see `storeStageIOValue`).
   TaskPayloadStore,
+  /// `feme.stage.task.payload.load(offset) -> value`: a mesh entry's own
+  /// bounded payload read (roadmap L30), the load-side counterpart of
+  /// `TaskPayloadStore` above -- the same `TaskPayloadWorkgroupEXT`
+  /// address-space-14 global, just read by the mesh workgroup this task
+  /// workgroup's `EmitMeshTasksEXT` dispatched instead of written by the
+  /// task workgroup itself. Like `TaskPayloadStore`, \c offset is a plain
+  /// byte offset into the payload's raw storage, not an
+  /// `ElementID`/`Row`/`Component` triple. Unlike `TaskPayloadStore`,
+  /// whose varying "value" is a (void-returning) operand,
+  /// `TaskPayloadLoad`'s varying value is its own result -- the ordinary,
+  /// default case `getOrInsertStageOp`'s overload-suffix logic already
+  /// handles, needing no special-casing there the way `OutputStore`/
+  /// `TaskPayloadStore` need.
+  TaskPayloadLoad,
   /// `feme.stage.set_mesh_outputs(vertex_count, primitive_count)`: a mesh
   /// entry's `SetMeshOutputsEXT` call (roadmap H6c-a-a-i), declaring the
   /// workgroup's real (`<= OutputVertices`/`OutputPrimitivesEXT`) output
@@ -277,6 +291,14 @@ llvm::CallInst *createStageSubpassLoad(llvm::IRBuilderBase &B,
 /// `StageOpKind::TaskPayloadStore`'s comment).
 llvm::CallInst *createStageTaskPayloadStore(llvm::IRBuilderBase &B,
                                             uint64_t Offset, llvm::Value *Val);
+
+/// `feme.stage.task.payload.load(offset) -> value`, where \p Offset is the
+/// constant byte offset within the task payload this read loads from, and
+/// \p ResultTy is the scalar/vector type read back (see
+/// `StageOpKind::TaskPayloadLoad`'s comment).
+llvm::CallInst *createStageTaskPayloadLoad(llvm::IRBuilderBase &B,
+                                           llvm::Type *ResultTy,
+                                           uint64_t Offset);
 
 /// `feme.stage.set_mesh_outputs(vertex_count, primitive_count)` (see
 /// `StageOpKind::SetMeshOutputs`'s comment).

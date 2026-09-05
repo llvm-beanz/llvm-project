@@ -1558,7 +1558,13 @@ void FunctionWidener::widenStageOp(CallInst &CI, feme::StageOpKind Kind,
       Kind == feme::StageOpKind::InputLoad ||
       Kind == feme::StageOpKind::InterpolateAtCentroid ||
       Kind == feme::StageOpKind::InterpolateAtSample ||
-      Kind == feme::StageOpKind::InterpolateAtOffset;
+      Kind == feme::StageOpKind::InterpolateAtOffset ||
+      // (Roadmap L30) Not literally an `ElementID`, but the same "keep
+      // operand 0 scalar" treatment applies: `TaskPayloadLoad`'s own
+      // `offset` (see `StageOpKind::TaskPayloadLoad`'s comment) is a
+      // compile-time constant byte offset, identical for every lane,
+      // mirroring `widenMaskedTaskPayloadStore`'s own scalar `Offset`.
+      Kind == feme::StageOpKind::TaskPayloadLoad;
   // `SubpassLoad`'s `attachment_index`/`component` operands (0 and 1) are
   // always compile-time constants (baked from the shader's own
   // `InputAttachmentIndex` decoration and the read's component selector),
@@ -3142,6 +3148,7 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       case feme::StageOpKind::InterpolateAtSample:
       case feme::StageOpKind::InterpolateAtOffset:
       case feme::StageOpKind::SubpassLoad:
+      case feme::StageOpKind::TaskPayloadLoad:
         widenStageOp(*CI, StageKind, Builder);
         return true;
       case feme::StageOpKind::OutputStore:
