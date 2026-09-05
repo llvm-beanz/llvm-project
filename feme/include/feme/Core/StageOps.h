@@ -292,6 +292,16 @@ llvm::CallInst *createStageSubpassLoad(llvm::IRBuilderBase &B,
 llvm::CallInst *createStageTaskPayloadStore(llvm::IRBuilderBase &B,
                                             uint64_t Offset, llvm::Value *Val);
 
+/// (Roadmap L47) `feme.stage.task.payload.store(offset, value)`, where
+/// \p Offset is a *dynamic* (not necessarily constant) `i32` byte offset
+/// within the task payload -- e.g. a per-invocation index
+/// (`gl_LocalInvocationIndex`) into one of the payload's own array
+/// members, a shape the constant-only overload above cannot represent.
+/// The constant overload above is implemented in terms of this one.
+llvm::CallInst *createStageTaskPayloadStore(llvm::IRBuilderBase &B,
+                                            llvm::Value *Offset,
+                                            llvm::Value *Val);
+
 /// `feme.stage.task.payload.load(offset) -> value`, where \p Offset is the
 /// constant byte offset within the task payload this read loads from, and
 /// \p ResultTy is the scalar/vector type read back (see
@@ -299,6 +309,15 @@ llvm::CallInst *createStageTaskPayloadStore(llvm::IRBuilderBase &B,
 llvm::CallInst *createStageTaskPayloadLoad(llvm::IRBuilderBase &B,
                                            llvm::Type *ResultTy,
                                            uint64_t Offset);
+
+/// (Roadmap L47) `feme.stage.task.payload.load(offset) -> value`, where
+/// \p Offset is a *dynamic* (not necessarily constant) `i32` byte offset
+/// -- see the dynamic-offset `createStageTaskPayloadStore` overload above
+/// for why this is needed. The constant overload above is implemented in
+/// terms of this one.
+llvm::CallInst *createStageTaskPayloadLoad(llvm::IRBuilderBase &B,
+                                           llvm::Type *ResultTy,
+                                           llvm::Value *Offset);
 
 /// `feme.stage.set_mesh_outputs(vertex_count, primitive_count)` (see
 /// `StageOpKind::SetMeshOutputs`'s comment).

@@ -694,14 +694,28 @@ bool isTaskPayloadGlobal(const GlobalVariable *GV) {
 /// `feme.stage.*` call's own operand/result scalar-only -- the invariant
 /// `feme::cpu::SIMDize.cpp`'s widening is designed around -- rather than
 /// teaching that pass to special-case a vector-typed payload operand.
-llvm::Value *loadTaskPayloadValue(IRBuilderBase &B, Type *Ty, uint64_t Offset,
+///
+/// (Roadmap L47) \p Offset is a `Value*` (always `i32`) rather than a
+/// plain `uint64_t`: a task/mesh payload's own array member can be
+/// addressed by a genuinely dynamic per-invocation index (e.g.
+/// `payload.branch[gl_LocalInvocationIndex]`, see
+/// `getTaskPayloadDynamicOffsetAccess` below), not just the
+/// compile-time-constant offset every caller before this row ever passed.
+/// Every recursive add below goes through `IRBuilder`'s own constant
+/// folder, so a genuinely constant \p Offset (the overwhelmingly common
+/// case) still folds down to a single `ConstantInt` at each step, exactly
+/// as if this were still plain `uint64_t` arithmetic -- only a real
+/// dynamic \p Offset actually emits an `add` instruction.
+llvm::Value *loadTaskPayloadValue(IRBuilderBase &B, Type *Ty, Value *Offset,
                                   const DataLayout &DL) {
   if (auto *ST = dyn_cast<StructType>(Ty)) {
     const StructLayout *SL = DL.getStructLayout(ST);
     Value *New = PoisonValue::get(ST);
     for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I) {
-      Value *MemberVal = loadTaskPayloadValue(
-          B, ST->getElementType(I), Offset + SL->getElementOffset(I), DL);
+      Value *MemberOffset =
+          B.CreateAdd(Offset, B.getInt32(SL->getElementOffset(I)));
+      Value *MemberVal =
+          loadTaskPayloadValue(B, ST->getElementType(I), MemberOffset, DL);
       New = B.CreateInsertValue(New, MemberVal, I);
     }
     return New;
@@ -710,8 +724,9 @@ llvm::Value *loadTaskPayloadValue(IRBuilderBase &B, Type *Ty, uint64_t Offset,
     uint64_t ElemSize = DL.getTypeAllocSize(ArrTy->getElementType());
     Value *New = PoisonValue::get(ArrTy);
     for (unsigned I = 0, E = ArrTy->getNumElements(); I != E; ++I) {
-      Value *ElemVal = loadTaskPayloadValue(
-          B, ArrTy->getElementType(), Offset + I * ElemSize, DL);
+      Value *ElemOffset = B.CreateAdd(Offset, B.getInt32(I * ElemSize));
+      Value *ElemVal =
+          loadTaskPayloadValue(B, ArrTy->getElementType(), ElemOffset, DL);
       New = B.CreateInsertValue(New, ElemVal, I);
     }
     return New;
@@ -720,8 +735,9 @@ llvm::Value *loadTaskPayloadValue(IRBuilderBase &B, Type *Ty, uint64_t Offset,
     uint64_t ElemSize = DL.getTypeAllocSize(VecTy->getElementType());
     Value *New = PoisonValue::get(VecTy);
     for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I) {
-      Value *ElemVal = loadTaskPayloadValue(
-          B, VecTy->getElementType(), Offset + I * ElemSize, DL);
+      Value *ElemOffset = B.CreateAdd(Offset, B.getInt32(I * ElemSize));
+      Value *ElemVal =
+          loadTaskPayloadValue(B, VecTy->getElementType(), ElemOffset, DL);
       New = B.CreateInsertElement(New, ElemVal, I);
     }
     return New;
@@ -736,31 +752,37 @@ llvm::Value *loadTaskPayloadValue(IRBuilderBase &B, Type *Ty, uint64_t Offset,
 /// `extractelement` instead of `insertvalue`/`insertelement`), addressed
 /// by a plain byte \p Offset rather than (ElementID, Row, Component). See
 /// `loadTaskPayloadValue`'s own comment for why this decomposition
-/// happens here rather than in `feme::cpu::SIMDize.cpp`.
+/// happens here rather than in `feme::cpu::SIMDize.cpp`. (Roadmap L47)
+/// \p Offset is a `Value*` for the same reason `loadTaskPayloadValue`'s
+/// own \p Offset is -- see its comment.
 void storeTaskPayloadValue(IRBuilderBase &B, Value *Val, Type *Ty,
-                           uint64_t Offset, const DataLayout &DL) {
+                           Value *Offset, const DataLayout &DL) {
   if (auto *ST = dyn_cast<StructType>(Ty)) {
     const StructLayout *SL = DL.getStructLayout(ST);
-    for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I)
+    for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I) {
+      Value *MemberOffset =
+          B.CreateAdd(Offset, B.getInt32(SL->getElementOffset(I)));
       storeTaskPayloadValue(B, B.CreateExtractValue(Val, I),
-                            ST->getElementType(I),
-                            Offset + SL->getElementOffset(I), DL);
+                            ST->getElementType(I), MemberOffset, DL);
+    }
     return;
   }
   if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
     uint64_t ElemSize = DL.getTypeAllocSize(ArrTy->getElementType());
-    for (unsigned I = 0, E = ArrTy->getNumElements(); I != E; ++I)
+    for (unsigned I = 0, E = ArrTy->getNumElements(); I != E; ++I) {
+      Value *ElemOffset = B.CreateAdd(Offset, B.getInt32(I * ElemSize));
       storeTaskPayloadValue(B, B.CreateExtractValue(Val, I),
-                            ArrTy->getElementType(), Offset + I * ElemSize,
-                            DL);
+                            ArrTy->getElementType(), ElemOffset, DL);
+    }
     return;
   }
   if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
     uint64_t ElemSize = DL.getTypeAllocSize(VecTy->getElementType());
-    for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
+    for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I) {
+      Value *ElemOffset = B.CreateAdd(Offset, B.getInt32(I * ElemSize));
       storeTaskPayloadValue(B, B.CreateExtractElement(Val, I),
-                            VecTy->getElementType(), Offset + I * ElemSize,
-                            DL);
+                            VecTy->getElementType(), ElemOffset, DL);
+    }
     return;
   }
   createStageTaskPayloadStore(B, Offset, Val);
@@ -1318,6 +1340,92 @@ getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL) {
   if (!RowIndex)
     return std::nullopt;
   return std::make_tuple(GV, Member, RowIndex);
+}
+
+/// (Roadmap L47) A task/mesh entry's own bounded payload
+/// (`TaskPayloadWorkgroupEXT`, address space 14, see `isTaskPayloadGlobal`)
+/// accessed through a genuinely dynamic index into one of its own array
+/// members -- e.g. `payload.branch[gl_LocalInvocationIndex]`, the shape a
+/// real `dEQP-VK.mesh_shader.ext.query.*.task_mesh.*` CTS case's own
+/// per-invocation payload write takes -- rather than the
+/// compile-time-constant offset `getStageIOBaseAndOffset` resolves. Mirrors
+/// `getDynamicRowIndexedAccess`'s own shape (a `GetElementPtrInst` rooted
+/// at the global, first index constant zero, every index up to one final
+/// array dimension constant, and exactly that one final index
+/// non-constant, which must be the last index of the GEP) but, unlike
+/// that function, computes a real dynamic *byte* offset `Value*` directly
+/// instead of returning a (global, member, index) tuple: a task payload
+/// has no per-member `ElementIDs` slice of its own to select into the way
+/// an ordinary stage-IO block does -- `loadTaskPayloadValue`/
+/// `storeTaskPayloadValue` address it by plain byte offset alone (see
+/// their own comments), so the byte offset is what every caller actually
+/// needs. \p B is used to build the (constant-folding, when every operand
+/// happens to be constant) multiply/add math this needs -- it is expected
+/// to be positioned at the load/store instruction that will consume the
+/// result, which the GEP \p Ptr resolves through always dominates.
+/// Returns `std::nullopt` if \p Ptr is not this exact shape (not a
+/// task-payload global at all, has more than one non-constant index, or
+/// that index is not the array-selecting one / not the final index).
+std::optional<std::pair<GlobalVariable *, Value *>>
+getTaskPayloadDynamicOffsetAccess(IRBuilderBase &B, Value *Ptr,
+                                  const DataLayout &DL) {
+  auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
+  if (!GEP)
+    return std::nullopt;
+  auto *GV = dyn_cast<GlobalVariable>(GEP->getPointerOperand());
+  if (!isTaskPayloadGlobal(GV))
+    return std::nullopt;
+
+  auto IdxIt = GEP->idx_begin();
+  auto *OuterIdx = dyn_cast<ConstantInt>(*IdxIt);
+  if (!OuterIdx || !OuterIdx->isZero())
+    return std::nullopt;
+
+  // The resulting byte offset is always `i32`, matching every other
+  // `feme.stage.task.payload.{load,store}` offset operand's own
+  // convention (`createStageTaskPayloadLoad`/`Store`'s constant-offset
+  // overloads build an `i32` too) -- computing directly in `i32` here,
+  // rather than round-tripping through the GEP's own (possibly wider)
+  // pointer index type, keeps the emitted `mul`/`add` chain minimal (no
+  // otherwise-unnecessary intermediate `zext`/`trunc` obscuring it).
+  Type *CurTy = GV->getValueType();
+  uint64_t ConstOffset = 0;
+  Value *DynamicOffset = nullptr;
+  for (++IdxIt; IdxIt != GEP->idx_end(); ++IdxIt) {
+    if (auto *CI = dyn_cast<ConstantInt>(*IdxIt)) {
+      uint64_t Idx = CI->getZExtValue();
+      if (auto *ST = dyn_cast<StructType>(CurTy)) {
+        const StructLayout *SL = DL.getStructLayout(ST);
+        ConstOffset += SL->getElementOffset(Idx);
+        CurTy = ST->getElementType(Idx);
+        continue;
+      }
+      if (auto *ArrTy = dyn_cast<ArrayType>(CurTy)) {
+        ConstOffset += Idx * DL.getTypeAllocSize(ArrTy->getElementType());
+        CurTy = ArrTy->getElementType();
+        continue;
+      }
+      return std::nullopt;
+    }
+    // The one non-constant index: must directly select an element within
+    // an array, and must be the final index -- a component-level index
+    // after it is not modeled (matching `getDynamicRowIndexedAccess`'s own
+    // narrowing).
+    if (DynamicOffset || !isa<ArrayType>(CurTy) ||
+        std::next(IdxIt) != GEP->idx_end())
+      return std::nullopt;
+    auto *ArrTy = cast<ArrayType>(CurTy);
+    uint64_t ElemSize = DL.getTypeAllocSize(ArrTy->getElementType());
+    Value *Index = B.CreateZExtOrTrunc(*IdxIt, B.getInt32Ty());
+    DynamicOffset = B.CreateMul(Index, B.getInt32(ElemSize));
+    CurTy = ArrTy->getElementType();
+  }
+  if (!DynamicOffset)
+    return std::nullopt;
+  Value *ByteOffset = DynamicOffset;
+  if (ConstOffset)
+    ByteOffset = B.CreateAdd(ByteOffset, B.getInt32(ConstOffset));
+  return std::make_pair(GV, ByteOffset);
 }
 
 /// The stage-IO global \p Ptr addresses, trying
@@ -2414,16 +2522,28 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // typed read (e.g. a `float3`/`float4` payload member) into one
         // scalar load per leaf first, matching every other `feme.stage.*`
         // call's scalar-only operand/result convention -- see its own
-        // comment for why.
+        // comment for why. (Roadmap L47) A payload read through one
+        // dynamically-indexed array member (e.g.
+        // `payload.branch[gl_LocalInvocationIndex]`) resolves no constant
+        // offset either -- `getTaskPayloadDynamicOffsetAccess` recognizes
+        // that one additional shape instead, computing a real dynamic
+        // byte-offset `Value*` in its place.
         if (auto BaseAndOffset =
                 getStageIOBaseAndOffset(LI->getPointerOperand(), DL)) {
           if (isTaskPayloadGlobal(BaseAndOffset->first)) {
-            Value *New = loadTaskPayloadValue(B, LI->getType(),
-                                              BaseAndOffset->second, DL);
+            Value *New =
+                loadTaskPayloadValue(B, LI->getType(),
+                                     B.getInt32(BaseAndOffset->second), DL);
             LI->replaceAllUsesWith(New);
             LI->eraseFromParent();
             Changed = true;
           }
+        } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(
+                       B, LI->getPointerOperand(), DL)) {
+          Value *New = loadTaskPayloadValue(B, LI->getType(), Dyn->second, DL);
+          LI->replaceAllUsesWith(New);
+          LI->eraseFromParent();
+          Changed = true;
         }
         continue;
       }
@@ -2474,15 +2594,28 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // typed write (e.g. a `float3`/`float4` payload member) into one
         // scalar store per leaf first, matching every other
         // `feme.stage.*` call's scalar-only operand/result convention --
-        // see its own comment for why.
+        // see its own comment for why. (Roadmap L47) A payload write
+        // through one dynamically-indexed array member (e.g.
+        // `payload.branch[gl_LocalInvocationIndex] = ...`) resolves no
+        // constant offset either -- `getTaskPayloadDynamicOffsetAccess`
+        // recognizes that one additional shape instead, computing a real
+        // dynamic byte-offset `Value*` in its place. This is the exact
+        // shape that used to leave the raw `addrspace(14)` store on the
+        // imported global entirely unconverted, surviving all the way to
+        // JIT link time as an unresolved external symbol reference.
         if (auto BaseAndOffset =
                 getStageIOBaseAndOffset(SI->getPointerOperand(), DL)) {
           if (isTaskPayloadGlobal(BaseAndOffset->first)) {
             storeTaskPayloadValue(B, Val, Val->getType(),
-                                  BaseAndOffset->second, DL);
+                                  B.getInt32(BaseAndOffset->second), DL);
             SI->eraseFromParent();
             Changed = true;
           }
+        } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(
+                       B, SI->getPointerOperand(), DL)) {
+          storeTaskPayloadValue(B, Val, Val->getType(), Dyn->second, DL);
+          SI->eraseFromParent();
+          Changed = true;
         }
         continue;
       }

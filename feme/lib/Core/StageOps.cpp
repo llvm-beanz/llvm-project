@@ -251,15 +251,25 @@ CallInst *feme::createStageSubpassLoad(IRBuilderBase &B,
 
 CallInst *feme::createStageTaskPayloadStore(IRBuilderBase &B, uint64_t Offset,
                                             Value *Val) {
-  Value *OffsetVal = ConstantInt::get(B.getInt32Ty(), Offset);
+  return createStageTaskPayloadStore(
+      B, ConstantInt::get(B.getInt32Ty(), Offset), Val);
+}
+
+CallInst *feme::createStageTaskPayloadStore(IRBuilderBase &B, Value *Offset,
+                                            Value *Val) {
   return createCall(B, StageOpKind::TaskPayloadStore, B.getVoidTy(),
-                    {OffsetVal, Val});
+                    {Offset, Val});
 }
 
 CallInst *feme::createStageTaskPayloadLoad(IRBuilderBase &B, Type *ResultTy,
                                            uint64_t Offset) {
-  Value *OffsetVal = ConstantInt::get(B.getInt32Ty(), Offset);
-  return createCall(B, StageOpKind::TaskPayloadLoad, ResultTy, {OffsetVal});
+  return createStageTaskPayloadLoad(
+      B, ResultTy, ConstantInt::get(B.getInt32Ty(), Offset));
+}
+
+CallInst *feme::createStageTaskPayloadLoad(IRBuilderBase &B, Type *ResultTy,
+                                           Value *Offset) {
+  return createCall(B, StageOpKind::TaskPayloadLoad, ResultTy, {Offset});
 }
 
 CallInst *feme::createStageSetMeshOutputs(IRBuilderBase &B, Value *VertexCount,

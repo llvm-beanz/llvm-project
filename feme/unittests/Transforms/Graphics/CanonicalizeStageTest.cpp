@@ -2757,4 +2757,146 @@ TEST(CanonicalizeStageTest, MeshStageDecomposesVectorTaskPayloadLoad) {
     EXPECT_FALSE(isa<LoadInst>(&I));
 }
 
+/// (Roadmap L47) A task entry's own payload write through a genuinely
+/// *dynamic* index into one of its own array members -- e.g.
+/// `payload.branch[gl_LocalInvocationIndex] = ...`, the exact shape a
+/// real `dEQP-VK.mesh_shader.ext.query.*.task_mesh.*` CTS case's own
+/// source (`vktMeshShaderQueryTestsEXT.cpp`) compiles into -- unlike
+/// `AmplificationStageCanonicalizesTaskPayloadStore` above, whose access
+/// is always a compile-time-constant offset. Before this row,
+/// `getStageIOBaseAndOffset`'s `stripAndAccumulateConstantOffsets` walk
+/// could not fold the non-constant array index at all, so it stopped at
+/// (and returned) the GEP itself rather than the `@payload` global,
+/// leaving this store entirely unrewritten -- the raw `addrspace(14)`
+/// store on the imported global survived all the way to
+/// `feme::cpu::SIMDizePass`'s widening and then JIT link time, where the
+/// global (never meant to survive this far) had no definition anywhere
+/// for the JIT to resolve (`"JIT session error: Symbols not found"`).
+/// `getTaskPayloadDynamicOffsetAccess` now recognizes this one additional
+/// shape, computing a real dynamic *byte* offset `Value*` (the index
+/// multiplied by the array element's own byte size) in its place.
+TEST(CanonicalizeStageTest,
+    AmplificationStageCanonicalizesDynamicTaskPayloadStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @payload = external addrspace(14) global { [4 x i32], i32 }
+    define void @main(i32 %v, i32 %idx) #0 {
+      %addr = getelementptr { [4 x i32], i32 }, ptr addrspace(14) @payload, i32 0, i32 0, i32 %idx
+      store i32 %v, ptr addrspace(14) %addr
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="amplification" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *VArg = F->getArg(0);
+  Argument *IdxArg = F->getArg(1);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) ||
+        Kind != StageOpKind::TaskPayloadStore)
+      continue;
+    ++SeenStores;
+    // The offset operand is not a constant -- it depends on %idx -- so
+    // `getStageOpConstantOperand` (which only ever recognizes a literal
+    // `ConstantInt`) correctly reports it as unresolvable at compile time.
+    EXPECT_FALSE(getStageOpConstantOperand(*CI, /*Offset=*/0).has_value());
+    auto *Mul = dyn_cast<BinaryOperator>(CI->getArgOperand(0));
+    ASSERT_TRUE(Mul);
+    EXPECT_EQ(Mul->getOpcode(), Instruction::Mul);
+    EXPECT_EQ(Mul->getOperand(0), IdxArg);
+    EXPECT_EQ(cast<ConstantInt>(Mul->getOperand(1))->getZExtValue(), 4u);
+    EXPECT_EQ(CI->getArgOperand(1), VArg);
+  }
+  EXPECT_EQ(SeenStores, 1u);
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
+/// (Roadmap L47) The load-side mirror of
+/// `AmplificationStageCanonicalizesDynamicTaskPayloadStore` above -- a
+/// mesh entry's own payload read through the same dynamically-indexed
+/// array-member shape.
+TEST(CanonicalizeStageTest, MeshStageCanonicalizesDynamicTaskPayloadLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @payload = external addrspace(14) global { [4 x i32], i32 }
+    define i32 @main(i32 %idx) #0 {
+      %addr = getelementptr { [4 x i32], i32 }, ptr addrspace(14) @payload, i32 0, i32 0, i32 %idx
+      %v = load i32, ptr addrspace(14) %addr
+      ret i32 %v
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IdxArg = F->getArg(0);
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) ||
+        Kind != StageOpKind::TaskPayloadLoad)
+      continue;
+    ++SeenLoads;
+    EXPECT_TRUE(CI->getType()->isIntegerTy(32));
+    EXPECT_FALSE(getStageOpConstantOperand(*CI, /*Offset=*/0).has_value());
+    auto *Mul = dyn_cast<BinaryOperator>(CI->getArgOperand(0));
+    ASSERT_TRUE(Mul);
+    EXPECT_EQ(Mul->getOpcode(), Instruction::Mul);
+    EXPECT_EQ(Mul->getOperand(0), IdxArg);
+    EXPECT_EQ(cast<ConstantInt>(Mul->getOperand(1))->getZExtValue(), 4u);
+  }
+  EXPECT_EQ(SeenLoads, 1u);
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<LoadInst>(&I));
+}
+
+/// (Roadmap L47) A dynamic index that is *not* the final GEP index (e.g.
+/// a per-invocation-indexed struct member selector before a further
+/// constant component index) is not this shape --
+/// `getTaskPayloadDynamicOffsetAccess` only recognizes the array-final-
+/// index case real CTS shaders take (matching
+/// `getDynamicRowIndexedAccess`'s identical restriction for ordinary
+/// stage-IO globals) -- so this store is correctly left unrewritten for
+/// `feme::graphics::ValidateStagePass` to diagnose, the same as any other
+/// genuinely unsupported shape.
+TEST(CanonicalizeStageTest,
+    LeavesNonFinalDynamicTaskPayloadIndexUnrewritten) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @payload = external addrspace(14) global { [4 x [2 x i32]], i32 }
+    define void @main(i32 %v, i32 %idx) #0 {
+      %addr = getelementptr { [4 x [2 x i32]], i32 }, ptr addrspace(14) @payload, i32 0, i32 0, i32 %idx, i32 1
+      store i32 %v, ptr addrspace(14) %addr
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="amplification" }
+  )");
+  ASSERT_TRUE(M);
+  // Nothing in the module is rewritten at all -- this GEP shape is not
+  // recognized by any canonicalization path.
+  EXPECT_FALSE(run(*M));
+  Function *F = M->getFunction("main");
+
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    EXPECT_FALSE(CI && isStageOpCall(*CI, &Kind) &&
+                (Kind == StageOpKind::TaskPayloadStore ||
+                 Kind == StageOpKind::TaskPayloadLoad));
+  }
+  bool SawStore = false;
+  for (Instruction &I : instructions(F))
+    if (isa<StoreInst>(&I))
+      SawStore = true;
+  EXPECT_TRUE(SawStore);
+}
+
 } // namespace
