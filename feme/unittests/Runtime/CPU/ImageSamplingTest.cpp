@@ -183,6 +183,27 @@ using SampleCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                    const FemeSamplerDescriptor *, uint32_t,
                                    uint32_t, uint32_t, float, float, float,
                                    float, float, bool, bool, void *);
+/// The roadmap L48 `Texture2DArray` counterpart of `SampleCmpFn`, adding
+/// a float `ArrayLayer` coordinate before `Lod` -- mirroring
+/// `SampleArrayFn`'s relationship to `SampleFn`.
+using SampleCmpArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                  const FemeSamplerDescriptor *, uint32_t,
+                                  uint32_t, uint32_t, float, float, float,
+                                  float, bool, float, bool, void *);
+/// The roadmap L48 `TextureCube` counterpart of `SampleCmpFn`: a
+/// direction-vector coordinate (`DirX`, `DirY`, `DirZ`) instead of `(U,
+/// V)`, mirroring `SampleCubeFn`'s relationship to `SampleFn` (but with
+/// no `MinLodClamp` operand, matching `SampleCmp2D`'s own shape).
+using SampleCmpCubeFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                 const FemeSamplerDescriptor *, uint32_t,
+                                 uint32_t, uint32_t, float, float, float,
+                                 float, bool, float, bool, void *);
+/// The roadmap L48 `TextureCubeArray` counterpart of `SampleCmpCubeFn`,
+/// adding a float `ArrayLayer` coordinate before `Lod`.
+using SampleCmpCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                      const FemeSamplerDescriptor *, uint32_t,
+                                      uint32_t, uint32_t, float, float, float,
+                                      float, float, bool, float, bool, void *);
 
 /// A real, ABI-matching 4-lane vector type (unlike four separate scalar
 /// parameters, which the x86-64 SysV convention would place in four
@@ -2552,6 +2573,107 @@ TEST_F(ImageSamplingTest, SampleCubeArraySelectsRequestedCubeElement) {
   EXPECT_FLOAT_EQ(Out1[0], 100.0f);
 }
 
+// Roadmap L48: `feme.cpu.image.samplecmp.2darray.f32`/`.cube.f32`/
+// `.cubearray.f32` -- the `Array2D`/`Cube`/`CubeArray` counterparts of
+// `feme.cpu.image.samplecmp.2d.f32` (tested above by
+// `ComparisonSamplingLessEqualPasses`), isolating exactly the new
+// `Layer`/face-selection addressing this milestone adds to the
+// depth-comparison path, mirroring `Sample2DArrayReadsRequestedLayer`/
+// `SampleCubeSelectsEachFaceByDirection`/
+// `SampleCubeArraySelectsRequestedCubeElement`'s own per-layer/per-face
+// texel values above (each layer/face's own depth texel equal to its own
+// index, scaled to `[0, 1)` so `GreaterEqual` cleanly separates them).
+
+TEST_F(ImageSamplingTest, SampleCmpArray2DComparesRequestedLayer) {
+  float Storage[3][1][1][4] = {
+      {{{0.0f, 0, 0, 0}}}, {{{0.5f, 0, 0, 0}}}, {{{0.9f, 0, 0, 0}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 1, 1, 3,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                       FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::GreaterEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpArrayFn Fn = resolve<SampleCmpArrayFn>(addWrapper(
+      "samplecmp_array2d", "feme.cpu.image.samplecmp.2darray.f32"));
+  float Result = 0.0f;
+  // Ref (0.5) >= layer 1's own texel (0.5): pass.
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/1.0f, 0.0f,
+     true, /*Dref=*/0.5f, true, &Result);
+  EXPECT_FLOAT_EQ(Result, 1.0f);
+  // Ref (0.5) >= layer 2's own texel (0.9): fail.
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/2.0f, 0.0f,
+     true, /*Dref=*/0.5f, true, &Result);
+  EXPECT_FLOAT_EQ(Result, 0.0f);
+}
+
+TEST_F(ImageSamplingTest, SampleCmpCubeSelectsEachFaceByDirection) {
+  float Storage[6][1][1][4] = {{{{0.0f, 0, 0, 0}}}, {{{0.2f, 0, 0, 0}}},
+                               {{{0.4f, 0, 0, 0}}}, {{{0.6f, 0, 0, 0}}},
+                               {{{0.8f, 0, 0, 0}}}, {{{0.9f, 0, 0, 0}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 1, 1, 6,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                       FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::Repeat);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::GreaterEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpCubeFn Fn = resolve<SampleCmpCubeFn>(
+      addWrapper("samplecmp_cube", "feme.cpu.image.samplecmp.cube.f32"));
+  // Face 0 (+X) reads 0.0: a 0.5 reference (Dref >= Texel) passes
+  // GreaterEqual.
+  float Pass = 0.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, true,
+     /*Dref=*/0.5f, true, &Pass);
+  EXPECT_FLOAT_EQ(Pass, 1.0f);
+  // Face 5 (-Z) reads 0.9: a 0.5 reference fails GreaterEqual.
+  float Fail = 1.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.0f, 0.0f, -1.0f, 0.0f, true,
+     /*Dref=*/0.5f, true, &Fail);
+  EXPECT_FLOAT_EQ(Fail, 0.0f);
+}
+
+TEST_F(ImageSamplingTest, SampleCmpCubeArraySelectsRequestedCubeElement) {
+  float Storage[12][1][1][4];
+  for (unsigned I = 0; I < 6; ++I)
+    for (unsigned C = 0; C < 4; ++C) {
+      Storage[I][0][0][C] = 0.1f;
+      Storage[I + 6][0][0][C] = 0.9f;
+    }
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 1, 1, 12,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                       FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::Repeat);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::GreaterEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpCubeArrayFn Fn = resolve<SampleCmpCubeArrayFn>(addWrapper(
+      "samplecmp_cubearray", "feme.cpu.image.samplecmp.cubearray.f32"));
+  float Element0 = 0.0f, Element1 = 1.0f;
+  // Element 0's own texel (0.1) passes a 0.5 reference (Dref >= Texel).
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f,
+     /*ArrayLayer=*/0.0f, 0.0f, true, /*Dref=*/0.5f, true, &Element0);
+  EXPECT_FLOAT_EQ(Element0, 1.0f);
+  // Element 1's own texel (0.9) fails the same reference.
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f,
+     /*ArrayLayer=*/1.0f, 0.0f, true, /*Dref=*/0.5f, true, &Element1);
+  EXPECT_FLOAT_EQ(Element1, 0.0f);
+}
 
 // Roadmap H19a: `feme.cpu.image.store.2d.v4f32`/`.v4i32`, the write-side
 // counterpart of `feme.cpu.image.load.2d.*` for a plain, non-arrayed,
