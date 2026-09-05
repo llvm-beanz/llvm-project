@@ -745,10 +745,20 @@ called out inline where it's discussed, and summarized here:
   resource load/store decomposition (roadmap L20) produces once
   reassembled through `feme::cpu::LinearizePass`, confirmed by reducing a
   real `Feature/StructuredBuffer/packed.test` failure. Every leaf this
-  decomposition reaches must itself be a genuine scalar, never a nested
-  vector (no real case has needed one: every vector-typed field seen
-  inside a divergent aggregate so far is already fully scalar-decomposed
-  by the time it reaches this pass); a divergent aggregate built any
+  decomposition reaches must itself be either a genuine scalar or (roadmap
+  L27) a `FixedVectorType` (flattened into that vector's own element count
+  worth of flat component slots, since `insertvalue`/`extractvalue` can
+  never themselves descend *into* a vector leaf -- only `insertelement`/
+  `extractelement` can -- so a whole vector inserted/extracted as one
+  struct/array leaf is the smallest granularity `insertvalue`/`extractvalue`
+  alone can express for it; `isSupportedAggregateLeafType`/
+  `countAggregateLeafScalars`/`flattenAggregateLeafScalarTypes`/
+  `getAggregateComponents`/`widenInsertValue`/`widenExtractValue` in
+  SIMDize.cpp, confirmed by reducing a real `Feature/Semantics/
+  HullSystemValues.test` failure whose hull-stage `InputPatch` control-point
+  array holds `float4` leaves), never a nested *aggregate*-of-vector or
+  vector-of-aggregate shape (no real case has needed either); a divergent
+  aggregate built any
   other way (e.g. an ordinary `LoadInst` of aggregate type, or a
   `PHINode` of aggregate type -- unlike a vector `phi`, no real case has
   needed one yet, since `LinearizePass` fully scalarizes every field of a
@@ -756,7 +766,13 @@ called out inline where it's discussed, and summarized here:
   ever rebuilding the struct itself) remains diagnosed rather than
   attempting to build an illegal type; generalizing either further is a
   substantial follow-up of its own, not yet scheduled against a specific
-  future milestone.
+  future milestone. A divergent vector value read back out of such a leaf
+  (a vector-typed `extractvalue`) may in turn feed another `insertvalue`'s
+  inserted-value operand or an ordinary, non-groupshared `store`'s
+  value operand (roadmap L27; `widenGroupSharedStore`'s own analogous
+  value-operand widening remains unfixed and is deliberately excluded, as
+  no real case yet exercises a divergent vector stored to groupshared
+  memory this way).
 - **A divergent call to a homogeneous, single-overload-type math intrinsic
   widens directly to its vector-typed overload**, rather than being
   rejected: this covers both `llvm::isTriviallyVectorizable`'s

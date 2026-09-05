@@ -25321,3 +25321,111 @@ depth-stencil format and a sampling operand combination were already
 claimed as supported; these are correctness fixes restoring that claim to
 be true).  `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 reviewed, no change needed.
+
+## Roadmap L27: measured impact (SIMDize vector-leaf aggregate decomposition), plus L37 filed
+
+**Fix.** `feme::cpu::SIMDizePass`'s `checkVectorDecompositionSupported`
+preflight validator (`SIMDize.cpp`) rejected a divergent aggregate whose
+leaf was itself a `FixedVectorType` (e.g. a `float4` inserted whole as one
+struct/array field via `insertvalue`), and separately rejected both an
+`InsertValueInst` and an ordinary (non-groupshared) `StoreInst` as valid
+consumers of a divergent vector value -- two distinct gaps discovered
+iteratively via a real IR reduction of `HullSystemValues.test`'s pre-widen
+hull-stage IR (captured through a temporary env-var-gated dump, since
+`llvm-lit`'s own captured stderr silently truncated the diagnostic text).
+Extended the existing L21 aggregate-decomposition scheme
+(`isSupportedAggregateLeafType`/`countAggregateLeafScalars`/
+`flattenAggregateLeafScalarTypes`/`getAggregateComponents`/
+`widenInsertValue`/`widenExtractValue`) to flatten a `FixedVectorType` leaf
+into its element count's worth of flat component slots, and added both
+`InsertValueInst` (inserted-value operand) and ordinary `StoreInst`
+(stored-value operand) to the preflight check's accepted-consumer list --
+`widenScalarizedFallback`'s existing per-lane vector-operand reassembly
+(added for roadmap H6n) was already mechanically capable of both shapes;
+the gap was entirely in the strict preflight validator, not the widener.
+`widenGroupSharedStore`'s own analogous, unfixed gap is deliberately
+excluded from the new `StoreInst` acceptance (it widens its value operand
+via a plain scalar `getWidened`, which would build an illegal nested
+vector type given a divergent vector operand) since no real case
+currently exercises it -- a candidate for a future row if one is found.
+
+**Unit/lit tests.** New lit test `simdize-aggregate-vector-leaf.ll`
+(manually verified via `feme-opt --llvm -passes=feme-cpu-simdize`, then
+via `llvm-lit`); new unit test
+`SIMDizeTest.DecomposesInsertValueVectorLeafIntoOrdinaryStore`; existing
+negative test `simdize-vector-unsupported.ll` updated for the new (longer)
+accepted-pattern list now in the error string, and its file comment
+extended to describe the two new shapes.
+
+**`ninja check-feme`.** Full suite, assertions-enabled ccache build:
+2533/2592 passed (59 pre-existing unrelated `Unsupported`, **0 `Failed`**,
+no regressions).
+
+**Real `check-hlsl-feme-vk` re-run** (`llvm-lit` against
+`tools/OffloadTest/test/feme-vk/Feature/Semantics`, `VK_ICD_FILENAMES`
+pointed at the real `feme_icd.json`):
+- Both of this row's own named cases, `Feature/Semantics/
+  HullSystemValues.test` and `Feature/Semantics/DomainSystemValues.test`,
+  now clear the named `feme-cpu-simdize` divergent-vector diagnostic
+  entirely (confirmed via a direct `offloader` repro of each, both before
+  and after the fix) -- **the gap this row named is fully closed**.
+- Neither fully passes yet: both now fail at a new, later,
+  `feme-cpu-wrap-hull`-emitted diagnostic instead
+  (`"control-point phase only supports a control point reading its own
+  input control point's attributes"`), confirmed via a second real IR
+  reduction (a temporary pre-`HullWrapperPass` IR dump) to be a genuinely
+  distinct root cause from the already-closed **H29g** despite sharing the
+  same diagnostic text -- this shader's own `patch[i].position` (`i` =
+  `SV_OutputControlPointID`) lowers, by the time `SIMDizePass` finishes,
+  into 12 purely *constant*-indexed `feme.stage.input.load` calls (one per
+  (component, control-point) pair) that get selected among *after*
+  loading, rather than a single call carrying the dynamic self-index --
+  and `HullWrapper.cpp`'s self-index-or-zero check rejects the non-zero
+  *literal* control-point-index operands (`1`, `2`) outright, even though
+  `computeStageStorageAddress` never actually uses that checked operand's
+  value (a literal-constant **input**-patch read of another control
+  point is always legal and always available, unlike the same
+  restriction on **output** data, which has a genuine same-invocation-only
+  correctness reason). Filed as **L37**, since it's a real, separate
+  `HullWrapper.cpp` addressing-scheme gap this row's own scope never
+  claimed.
+- Broader `Feature`/`Graphics` sweep (509 discovered cases): 151 Passed,
+  209 pre-existing `Unsupported`, 23 `XFAIL`, 125 `Failed`, 1
+  `Unexpectedly Passed` (`Feature/PushConstant/array_of_matrices.test`, a
+  pre-existing, unrelated upstream XFAIL-staleness artifact already noted
+  under L22's own entry above) -- consistent with the pre-fix baseline,
+  confirming no regression anywhere else in the suite.
+
+**Real `deqp-vk` tessellation sweep attempted, but not completed clean.**
+A `dEQP-VK.tessellation.*` re-run (1114 cases) hit three *distinct*,
+unrelated, pre-existing crashes that abort the whole `deqp-vk` process
+before it can finish (each confirmed independent of this row's own fix,
+since none touches hull-stage `InputPatch` addressing or SIMDize's
+aggregate-decomposition path at all): an MLIR
+`'llvm.getelementptr' op operand #0 must be LLVM pointer type` error
+immediately followed by an LLVM `BinaryOperator::Create` type-mismatch
+assertion in `dEQP-VK.tessellation.matrix_multiplication.*`; an LLVM
+`Value.cpp` "Uses remain when a value is destroyed!" `UNREACHABLE` in
+`dEQP-VK.tessellation.misc_draw.tess_factor_barrier_bug`; and a
+`double free or corruption` glibc abort in
+`dEQP-VK.tessellation.primitive_discard.isolines_equal_spacing_ccw` (a
+fourth, `dEQP-VK.tessellation.misc_draw.switch_domain_origin_*`/
+`switch_out_vertices_*`, segfaults instead). None of these is in this
+row's own scope to fix (each is a distinct, pre-existing bug in an
+unrelated code path -- matrix composite-construct-into-array legalization,
+barrier-region liveness, and primitive-discard buffer lifetime,
+respectively); tracking these is deferred to a future gap-inventory pass
+rather than invented as new rows here without a real reduction backing
+each one. The `check-hlsl-feme-vk`-based validation above is this row's
+own primary real-world evidence instead, since that suite (not `deqp-vk`)
+is the one whose own re-run originally discovered and named this gap
+(L22 -> L27).
+
+**Disposition.** Roadmap **L27 closed** (struck through) -- the named
+`feme-cpu-simdize` divergent-vector-decomposition gap is fixed and
+confirmed via unit tests, lit tests, and a real `check-hlsl-feme-vk`
+re-run of both originally-named cases. Neither case fully passes yet;
+both now hit the same newly-discovered, genuinely distinct **L37**
+instead. No feature/extension bit is touched (an internal CPU-lowering
+completeness fix only); `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, no change needed.
