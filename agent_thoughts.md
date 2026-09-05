@@ -64057,3 +64057,123 @@ tests plus a new negative test for the coordinate-width mistake, and
 (5) the `Roadmap.md`/`VulkanCTSReport.md` documentation updates (L46
 closed, L48 filed). This `agent_thoughts.md` entry is committed
 separately as a sixth and final commit.
+
+# Session: L47 (dynamic task-payload offset canonicalization)
+
+## Task
+
+Continuing the L-series milestone chain. L47's own report: the previous
+session's L45 fix cleared a `feme-cpu-wrap-entry` uniform-diamond
+diagnostic for `dEQP-VK.mesh_shader.ext.query.no_queries...task_mesh.*`,
+but the same 2 real cases now fail later with `"JIT session error:
+Symbols not found: [ spirv_var_20 ]"` -- an unresolved external
+`addrspace(14)` (`TaskPayloadWorkgroupEXT`) global surviving all the way
+to JIT link time, because a real CTS shader's per-invocation dynamic
+payload index (`td.branch[gl_LocalInvocationIndex] = ...`) was never
+recognized by `CanonicalizeStagePass`'s task-payload canonicalization at
+all (only a compile-time-constant offset was ever handled).
+
+## Investigation
+
+Read through the full task-payload call chain: `CanonicalizeStage.cpp`
+(canonicalizes a raw global access into a `feme.stage.task.payload.*`
+call) -> `Linearize.cpp` (masks it into
+`feme.cpu.masked.task.payload.store`) -> `SIMDize.cpp` (widens value/mask
+operands to `<W x T>`, deliberately keeps the offset scalar) ->
+`StageMaskCalls.cpp` (declares the masked call's `FunctionType`, offset
+hard-coded scalar `i32`) -> `TaskPayloadWrapper.cpp`/
+`MeshOutputWrapper.cpp` (the real CPU lowering, `cast<ConstantInt>`s the
+offset unconditionally). Found a directly-applicable precedent already
+in the codebase: `getDynamicRowIndexedAccess` (roadmap H7w) handles the
+exact same "one final non-constant array index" shape for ordinary
+stage-IO globals (address space 7/8), just never extended to task
+payload (address space 14).
+
+Every downstream phase past `CanonicalizeStagePass` hard-assumes the
+offset is a single compile-time constant, identical for every lane --
+making it genuinely dynamic all the way through would require widening
+support in every one of those phases, exactly matching this row's own
+prediction of being a materially bigger, multi-part scope.
+
+## Decision: incremental, honestly-scoped fix
+
+Rather than attempt the entire multi-file generalization in one pass (and
+risk an unreviewable, half-tested mega-change), I implemented and fully
+tested only the `CanonicalizeStagePass`-side recognition first (the phase
+explicitly named as never having converted the raw global access at all),
+then used a **temporary, reverted-before-committing** investigative unit
+test (mirroring `TaskPayloadWrapperTest`'s own real-pipeline test harness)
+to confirm *exactly* what happens downstream once a genuinely dynamic
+offset can reach those phases, rather than guessing. This confirmed a
+fatal `cast<ConstantInt>` assertion failure in
+`TaskPayloadWrapper.cpp`'s `lowerTaskPayloadStore` -- precisely the
+predicted failure mode, and a strictly *earlier*, more severe failure
+than the original JIT-link symptom (the process now aborts during
+`TaskPayloadWrapperPass`, before ever reaching JIT link time).
+
+This matches the project's own established, repeatedly-used pattern for
+scope discovery: implement the well-understood, independently-testable
+first phase, confirm the remaining scope with a real (if temporary and
+reverted) repro rather than speculation, then file the rest as its own
+tracked roadmap row (L49) rather than rushing an unreviewed mega-fix or
+leaving the remaining scope undocumented.
+
+## Implementation notes
+
+- `getTaskPayloadDynamicOffsetAccess` computes the dynamic offset
+  entirely in `i32` from the start. An earlier draft round-tripped
+  through `DL.getIndexType(Ptr->getType())` (typically `i64`) before
+  truncating back to `i32`, which produced a final `TruncInst` instead of
+  exposing the `Mul` instruction directly as the call's offset operand --
+  broke a test asserting `dyn_cast<BinaryOperator>` succeeds. Fixed by
+  avoiding the wider-type round-trip entirely.
+- `CanonicalizeStageTest.cpp`'s `run()` helper returns
+  `!PA.areAllPreserved()`, i.e. `true` only if something actually
+  changed. The negative test (confirming a non-final dynamic index is
+  correctly left alone) needed `EXPECT_FALSE(run(*M))`, not
+  `EXPECT_TRUE` -- caught by checking the existing
+  `LeavesNonGraphicsStagesAlone` test's own convention.
+- Generalizing `loadTaskPayloadValue`/`storeTaskPayloadValue`'s `Offset`
+  parameter from `uint64_t` to `Value*` is safe for every pre-existing
+  constant-offset call site because `IRBuilder`'s default `ConstantFolder`
+  folds `Constant + Constant`/`Constant * Constant` immediately at build
+  time -- confirmed byte-for-byte identical IR via all pre-existing unit
+  tests passing unchanged.
+
+## Validation
+
+`ninja check-feme`: 2561/2620 discovered, 59 pre-existing `Unsupported`,
+0 `Failed` (up by exactly the 3 new tests this session's fix adds, no
+regressions). `FeMeTransformsGraphicsTests` (66/66), `FeMeCoreTests`
+(78/78), `FeMeTransformsCPUTests` (306/306) all pass directly. A real
+`deqp-vk` re-run of the 2 named `task_mesh` cases was deliberately *not*
+attempted this session, since the fix is known in advance to be
+incomplete (the temporary investigative test already confirmed the
+process would still abort, just via an earlier assertion rather than the
+original JIT-link error) -- re-running is deferred to L49, once the
+downstream widening/lowering generalization lands.
+
+## Roadmap/report updates
+
+- `Roadmap.md`: L47 **not** struck through (the real CTS case still
+  cannot succeed end to end) -- annotated in place with this session's
+  partial progress and a pointer to the new **L49** row, which breaks
+  down the remaining `Linearize.cpp`/`SIMDize.cpp`/
+  `StageMaskCalls.{h,cpp}`/`TaskPayloadWrapper.cpp`/
+  `MeshOutputWrapper.cpp` generalization into (a)-(f) prose items (one
+  row, no nested-letter sub-rows, per the standing "no more than one
+  lowercase letter deep" instruction and the existing L48 row's own
+  precedent for this exact style).
+- `VulkanCTSReport.md`: new "Roadmap L47: partially fixed..." section
+  documenting the fix, tests, the investigative-test confirmation of the
+  remaining scope, and the disposition (not closed, L49 filed).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed,
+  no change needed (internal canonicalization-phase plumbing, no
+  feature/extension bit touched).
+
+## Commits this session
+
+1. `ff2d04492e8d` -- "feme: canonicalize dynamically-indexed task-payload
+   accesses (L47)" (already committed before this write-up).
+2. Roadmap/report doc updates (this commit).
+3. This `agent_thoughts.md` entry (its own final commit).
