@@ -298,6 +298,116 @@ TEST(EntryWrapperTest, BranchMergePhiIsDiagnosed) {
   EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
 }
 
+// Roadmap L45 (feme/docs/Roadmap.md): a uniform two-way branch whose arms
+// are each barrier-free and reconverge at a merge block with its own phi
+// -- entirely outside every `..._with_group_sync` barrier's own region --
+// is kept intact inside whichever region contains it rather than being
+// diagnosed by `isLinearChain`'s straight-chain check, since it can never
+// itself need a region split. Here the single barrier sits before the
+// branch, so the whole diamond (condition, both arms, and the merge phi)
+// lands in the function's own final region (`main` itself, reused for the
+// last region -- see `splitAtGroupSyncBarriers`'s doc comment).
+TEST(EntryWrapperTest, SplitsAroundSafeDiamondAfterBarrier) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %cond = icmp eq i32 %gid, 0
+      br i1 %cond, label %a, label %b
+    a:
+      %vala = add i32 %gid, 10
+      br label %exit
+    b:
+      br label %exit
+    exit:
+      %val = phi i32 [ %vala, %a ], [ 0, %b ]
+      %doubled = mul i32 %val, 2
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  EXPECT_TRUE(M->getFunction("main.region0"));
+  Function *Body = M->getFunction("main");
+  ASSERT_TRUE(Body);
+  bool FoundCondBr = false, FoundPhi = false;
+  for (Instruction &I : instructions(Body)) {
+    if (isa<CondBrInst>(&I))
+      FoundCondBr = true;
+    if (isa<PHINode>(&I))
+      FoundPhi = true;
+  }
+  EXPECT_TRUE(FoundCondBr);
+  EXPECT_TRUE(FoundPhi);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  unsigned NumWaveLoopHeaders = 0;
+  bool FoundFence = false;
+  for (BasicBlock &BB : *Wrapper) {
+    if (BB.getName().starts_with("wave.loop.header"))
+      ++NumWaveLoopHeaders;
+    for (Instruction &I : BB)
+      if (isa<FenceInst>(&I))
+        FoundFence = true;
+  }
+  EXPECT_EQ(NumWaveLoopHeaders, 2u);
+  EXPECT_TRUE(FoundFence);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap L45: a genuinely unsafe diamond -- one whose arm itself
+// contains a `..._with_group_sync` barrier, *and* whose merge block has a
+// phi -- is still diagnosed: `matchBranchShape` declines it (a merge phi
+// needs threading a value across the wrapper's own scalar branch choice,
+// see `BranchMergePhiIsDiagnosed` above), and `isLinearChain`'s own new
+// "safe diamond" case declines it too, since the arm containing the
+// barrier is not itself barrier-free (`walkBarrierFreeArm`) -- so this
+// case correctly falls through to the pre-existing diagnostic rather
+// than being (unsoundly) accepted as if it were the safe shape above.
+TEST(EntryWrapperTest, BarrierInsideDiamondArmWithMergePhiStillDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %cond = icmp eq i32 %gid, 0
+      br i1 %cond, label %a, label %b
+    a:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %vala = add i32 %gid, 10
+      br label %exit
+    b:
+      br label %exit
+    exit:
+      %val = phi i32 [ %vala, %a ], [ 0, %b ]
+      %doubled = mul i32 %val, 2
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
+}
+
 // Roadmap step R5 (feme/docs/Roadmap.md): a divergent (per-lane) value
 // computed before a `..._with_group_sync` barrier and used after it is
 // spilled to a per-wave context array rather than being diagnosed -- see
