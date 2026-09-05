@@ -93,6 +93,55 @@ TEST(TaskPayloadWrapperTest, LowersPayloadStore) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// (Roadmap L39) A task entry's own payload *read* -- e.g. the whole-struct
+// self-copy DXC/SPIRV-Tools emits for `DispatchMesh`'s own payload
+// argument, which `CanonicalizeStage.cpp`'s task-payload fallback now
+// fully decomposes into scalar leaves -- lowers into an ordinary load off
+// `task_payload`, the store-side counterpart of `LowersPayloadStore`
+// above. Before this test's own fix, `TaskPayloadWrapperPass` had no case
+// for `TaskPayloadLoad` at all (only the mesh stage's own
+// `MeshOutputWrapperPass` did), so a task/amplification entry reading its
+// own payload back diagnosed "unexpected stage op left for the task
+// payload wrapper" instead.
+TEST(TaskPayloadWrapperTest, LowersPayloadLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @as_main() #0 {
+      %v = call float @feme.stage.task.payload.load.f32(i32 4)
+      call void @feme.stage.task.payload.store.f32(i32 4, float %v)
+      ret void
+    }
+    declare float @feme.stage.task.payload.load.f32(i32)
+    declare void @feme.stage.task.payload.store.f32(i32, float)
+    attributes #0 = { "feme.shader.stage"="amplification" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  TaskPayloadWrapperPass().run(*M, MAM);
+
+  Function *Body = M->getFunction("as_main");
+  ASSERT_TRUE(Body);
+  bool SawPayload = false;
+  for (const Argument &Arg : Body->args())
+    SawPayload |= Arg.getName() == "task_payload";
+  EXPECT_TRUE(SawPayload);
+
+  for (const Instruction &I : instructions(*Body))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  bool SawLoad = false;
+  for (const Instruction &I : instructions(*Body))
+    SawLoad |= isa<LoadInst>(I);
+  EXPECT_TRUE(SawLoad);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // A task entry with no payload store at all is left completely alone
 // besides this pass's own unconditional trailing params -- mirroring
 // `MeshOutputWrapperTest.AppendsParamsEvenWithNoOutputStore`'s own

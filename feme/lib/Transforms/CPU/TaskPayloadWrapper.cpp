@@ -262,13 +262,54 @@ Value *lowerTaskInputLoad(CallInst &CI, const WaveBodyEnv &WEnv,
   return Result;
 }
 
+/// Lowers one `feme.stage.task.payload.load` call (roadmap L39): a task/
+/// amplification entry's own bounded payload *read*, the store-side
+/// counterpart of `lowerTaskPayloadStore` above -- newly reachable once
+/// `CanonicalizeStage.cpp`'s task-payload fallback started fully
+/// decomposing an aggregate-typed payload access into scalar leaves,
+/// which surfaces a genuine `TaskPayloadLoad` here for the first time
+/// whenever a task/amplification entry's own payload variable is read
+/// back within the same invocation (e.g. `DispatchMesh`'s own payload
+/// argument, which DXC/SPIRV-Tools passes by first reading the whole
+/// payload struct back into a temporary and copying it into itself,
+/// rather than the mesh-stage-only read this pass had never needed to
+/// support before). Like `MeshOutputWrapper.cpp`'s own
+/// `lowerMeshTaskPayloadLoad`, a task payload is workgroup-shared, not
+/// per-lane data -- every lane reads the identical byte range `Offset`
+/// selects -- so this reads `Env.Payload + Offset` once and broadcasts
+/// that single scalar to every active lane's own result slot, mirroring
+/// that function's shape exactly (just against this stage's own
+/// `WaveBodyEnv`/`TaskPayloadStageEnv` pair instead of
+/// `MeshOutputStageEnv`).
+Value *lowerTaskPayloadLoad(CallInst &CI, const WaveBodyEnv &WEnv,
+                            const TaskPayloadStageEnv &Env) {
+  uint64_t Offset = cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
+  IRBuilder<> Builder(&CI);
+  Value *Addr = Builder.CreateGEP(Builder.getInt8Ty(), Env.Payload,
+                                  Builder.getInt64(Offset));
+  Value *Scalar = Builder.CreateLoad(ScalarTy, Addr);
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *LaneResult =
+        Builder.CreateSelect(Active, Scalar, Constant::getNullValue(ScalarTy));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
 /// Lowers every masked task payload store, `emit_mesh_tasks` call, and
 /// `gl_DrawID` input load in \p F, or diagnoses and returns false if \p F
 /// uses a `feme.stage.*` op this pass does not support (any op other than
-/// `TaskPayloadStore`/`EmitMeshTasks`/an `InputLoad` of `gl_DrawID` --
-/// roadmap H6t found that, mirroring `MeshOutputWrapper.cpp`'s own H6p
-/// finding, a task entry point *does* have one legitimate ordinary
-/// stage-IO input to read after all).
+/// `TaskPayloadStore`/`TaskPayloadLoad`/`EmitMeshTasks`/an `InputLoad` of
+/// `gl_DrawID` -- roadmap H6t found that, mirroring
+/// `MeshOutputWrapper.cpp`'s own H6p finding, a task entry point *does*
+/// have one legitimate ordinary stage-IO input to read after all; roadmap
+/// L39 found that it also needs to support reading its own payload back).
 bool lowerTaskPayloadStageOps(Function &F, const WaveBodyEnv &WEnv,
                               const DataLayout &DL) {
   bool UsesStageOps = false;
@@ -326,6 +367,12 @@ bool lowerTaskPayloadStageOps(Function &F, const WaveBodyEnv &WEnv,
         return false;
       }
       Value *Result = lowerTaskInputLoad(*CI, WEnv, *Env);
+      CI->replaceAllUsesWith(Result);
+      CI->eraseFromParent();
+      continue;
+    }
+    if (isStageOpCall(*CI, &Kind) && Kind == StageOpKind::TaskPayloadLoad) {
+      Value *Result = lowerTaskPayloadLoad(*CI, WEnv, *Env);
       CI->replaceAllUsesWith(Result);
       CI->eraseFromParent();
       continue;
