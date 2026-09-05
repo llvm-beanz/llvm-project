@@ -63236,3 +63236,154 @@ loop-linearizer section already describes the general shape ("only a
 genuine loop-control edge is left to `LoopLinearizer`") without
 prescribing chain-vs-region algorithmic detail. No new roadmap row filed:
 this case's next blocker is already tracked under the existing L41 row.
+
+# L43: raw AtomicRMWInst uniformity classification gap
+
+## Task
+
+Fix `dEQP-VK.mesh_shader.ext.query.no_queries.*.mesh_only.*` (both real
+feature-supported cases), which L41's own fix left failing at
+`vkCreateGraphicsPipelines` with `"feme-cpu-simdize: function 'main' has a
+divergent branch; the divergence transform (feme::cpu::LinearizePass) did
+not remove it, or produced a shape this pass cannot widen"`.
+
+## Investigation
+
+Cleaned up stale L42-prefixed SQL todos left over from a prior
+compaction, then set up fresh `l43-*` rows. Reviewed
+`feme/.instructions.md` again (no new constraints beyond what previous
+sessions already internalized).
+
+Reproduced the exact diagnostic using the by-now-standard
+`FEME_DEBUG_DUMP_PIPELINE_STAGE_IR` env-gated debug hook in
+`feme/lib/Target/CPU/Pipeline.cpp` (dumps the module right before
+`LinearizePass` runs; always temporary, reverted before any commit).
+Ran the cited CTS case against the built ICD, captured the real
+pre-`LinearizePass` IR.
+
+Root-caused by manually running `feme-opt --llvm -passes=feme-cpu-linearize
+-S` on the captured IR: the real branch (`icmp ult i32 %atomicrmw_result,
+32` guarding whether this lane got one of the first N output slots) was
+left completely untouched -- the real `br i1` survived, with the
+downstream block's stage ops simply converted to masked-call form but
+using the wrong (unnarrowed, outer) mask. Traced into
+`DiamondFlattener::flatten`: it calls `UI.isDivergentTerminator(Br)` to
+choose between the uniform (phi-merging, branch-preserving) and divergent
+(select-merging, branch-eliminating) paths, and was taking the uniform
+path -- meaning `UniformityInfo` itself misclassified the branch.
+
+Key insight, and the actual root cause: `UniformityInfo` is computed once,
+up front, in `LinearizePass::run`, strictly *before* `DiamondFlattener`'s
+own `applyStageMasks` ever converts a plain `atomicrmw` into the
+`feme.cpu.masked.atomicrmw.*` *call* form L41's fix special-cased. At
+uniformity-computation time the value is still a raw `llvm::AtomicRMWInst`,
+which `WaveTTIImpl::getValueUniformity` never handled at all -- it fell
+through to the generic operand-driven `Default` rule, which wrongly
+concluded uniform (every operand -- a uniform pointer and value -- is
+uniform, even though the atomic's own per-lane fetch-and-add result
+genuinely differs). This is the exact same conceptual bug L41 already
+fixed for the call form, recurring one step earlier in the pipeline for
+the raw-instruction form -- an instance of the general "an analysis
+computed before some pass-internal lowering step can't see a shape that
+lowering step later introduces" pattern this whole L-series has been
+running into repeatedly (L39/L40/L42 were all variations on this same
+underlying theme applied to different passes).
+
+## Fix
+
+Added `isa<AtomicRMWInst>(V) -> NeverUniform` to
+`WaveTTIImpl::getValueUniformity` in `WaveUniformity.cpp`, placed right
+after the existing masked-atomicrmw-call check, with a comment explaining
+the timing issue and cross-referencing L41/L43. Confirmed via direct
+`feme-opt` re-run on the captured IR that the branch is now fully
+flattened (no `br i1` survives; the block's content is now masked with a
+properly narrowed, `select`-derived mask), and that a subsequent
+`feme-cpu-simdize` run on the same IR produces no divergence diagnostics.
+
+## Tests
+
+Added `atomicrmw_is_divergent` to `feme/test/Analysis/CPU/uniformity.ll`
+(unit-level: confirms the raw-instruction classification directly,
+mirroring L41's existing `masked_atomicrmw_is_divergent` test). Added a
+new file, `feme/test/Transforms/CPU/Linearize/
+atomicrmw-guarded-branch-divergent.ll`, an end-to-end regression
+reproducing the real CTS shape through the actual `feme-cpu-linearize`
+pass. One surprise while writing the latter: the atomicrmw itself
+legitimately stays a *plain*, unmasked `atomicrmw` in the final output
+(not the masked-call form) in this exact shape, because
+`applyStageMasks`'s `AtomicRMWInst` handling only converts to the masked
+form when its governing mask is *not* a compile-time constant -- an
+atomicrmw that runs unconditionally (mask is literal `true`) has no
+semantic need for masking. Confirmed this is correct, expected behavior
+(not a bug) and adjusted the test's CHECK lines accordingly.
+
+Ran `llvm-lit` on `Transforms/CPU/Linearize/`, `Analysis/CPU/`, and
+`Transforms/CPU/` (SIMDize tests live flat there, not in a `SIMDize/`
+subdirectory) -- 165 tests, all passed. Ran `ninja check-feme`: 2543/2602
+discovered (up by exactly the 2 new tests), 59 pre-existing `Unsupported`,
+0 `Failed`.
+
+## Real CTS validation, and a new blocker found
+
+Re-ran the exact cited CTS case: confirmed the original
+`feme-cpu-simdize` divergent-branch diagnostic is gone. However, the case
+now fails with a new, distinct, *fatal* error --
+`"LLVM ERROR: unsupported calling convention"` -- that aborts the whole
+`deqp-vk` process rather than reporting a diagnosed pipeline-creation
+failure. Swept the wider `dEQP-VK.mesh_shader.ext.query.no_queries.*`
+group: `multi_view` variants correctly report
+`NotSupported (multiviewMeshShader not supported)` as expected; the
+`single_view` case (one of only 2 real feature-supported cases in this
+whole 12,340-case sweep, confirmed across L41/L42/L43) hits the new fatal
+crash consistently.
+
+Root-caused this new blocker far enough to scope and file, not fix, this
+session: the captured pre-`LinearizePass` IR contains
+`declare spir_func void @_Z22__spirv_ControlBarrieriii(i32, i32, i32)` --
+a leftover external declaration with `CallingConv::SPIR_FUNC` and no
+runtime-provided definition anywhere. This mangled name is the same one
+roadmap H4b's own `isSPIRVGroupSyncBarrier`
+(`CanonicalizeStage.cpp`) already recognizes, but only for finding a
+tessellation-control entry's own patch-constant split point -- an
+entirely different purpose. The actual barrier-erasure/fence-replacement
+logic every stage-specific CPU wrapper pass relies on,
+`feme::cpu::matchBarrierCall` (`BarrierCalls.cpp`), only recognizes the
+DXIL/HLSL intrinsic barrier forms (`llvm.dx.group_memory_barrier*`,
+`llvm.spv.group_memory_barrier*`), never this mangled call form -- so for
+a real SPIR-V-imported mesh shader (which compiles its own
+`OpControlBarrier` to this call via MLIR's default upstream
+`ControlBarrierPattern`, since `feme::spirv::
+populateSPIRVToLLVMTargetPatterns` installs no override for
+`spirv::ControlBarrierOp`), the call survives, completely unrecognized
+and un-lowered, all the way to X86 JIT codegen -- which has no lowering
+whatsoever for `CallingConv::SPIR_FUNC` (confirmed via a source grep
+finding zero references to `SPIR_FUNC`/`CallingConv::SPIR` anywhere under
+`llvm/lib/Target/X86/`). This crash is genuinely unrelated to L43's own
+scope (masked-atomicrmw-guarded-branch flattening) -- it lives entirely
+in barrier-call recognition, not uniformity analysis or
+`DiamondFlattener` -- so rather than attempt it within this session
+(which would risk an under-scoped, rushed fix to an area not yet
+touched), I filed it as a new roadmap row, **L44**, with the root-cause
+narrative above plus the next concrete step (a real backtrace to confirm
+the exact X86 lowering path that aborts -- a `X86ISelLowering.cpp`
+trampoline-lowering `llvm_unreachable` matching the exact error wording
+was found via source grep but not yet confirmed against a live stack --
+and a fix most likely extending `matchBarrierCall` to also recognize this
+mangled call form by name, mirroring `isSPIRVGroupSyncBarrier`).
+
+## Documentation
+
+Struck L43 on the roadmap, recording the real root cause (a raw,
+not-yet-lowered `AtomicRMWInst` never getting the same `NeverUniform`
+treatment `WaveTTIImpl` already gives its later masked-call form) and
+fix. Filed L44 for the newly-discovered calling-convention blocker.
+Appended a matching Repro/Root cause/Fix/Measured impact/Disposition
+section to `VulkanCTSReport.md`, including the L44 filing. Extended
+`FeMeCPUDesign.md`'s Phase 2 uniformity-analysis section to also describe
+the raw-`AtomicRMWInst` divergence-source rule (previously only
+documented the masked-call form from L41), since this is a genuine
+addition to the analysis's own documented behavior, not just an
+implementation detail. No feature/extension bit touched -- an internal
+CPU uniformity-analysis correctness fix only -- so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` needed no
+changes.
