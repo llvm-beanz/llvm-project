@@ -608,7 +608,7 @@ dialect can then name the backend's intrinsics directly, as
 | `spirv.ImageRead`/`spirv.ImageWrite`/`spirv.ImageFetch` (no modifiers) | `llvm.spv.resource.getpointer` + `llvm.load`/`llvm.store` | *(no pattern; fails to legalize)* |
 | `spirv.ImageFetch` with a lone `Lod` operand (`Texture2D<T>::Load`, which `dxc` always gives an explicit mip) | `llvm.spv.resource.load.level` | *(no pattern; fails to legalize)* |
 | `spirv.ImageQuerySize` | `llvm.spv.resource.getdimensions.{x,xy,xyz}` | *(no pattern; fails to legalize)* |
-| `spirv.SampledImage` + `spirv.ImageSampleImplicitLod` (no modifiers, or any combination of `Bias`/`ConstOffset`/`MinLod`) | `llvm.spv.resource.sample`/`llvm.spv.resource.samplebias` (or their `.clamp` siblings, once `MinLod` is present) (roadmap L22 threads the real offset/bias/clamp operands through in every case; the backend itself folds away an all-zero `ConstOffset`) | *(folds both handles into one combined runner-facing type; no sampling op pattern at all)* |
+| `spirv.SampledImage` + `spirv.ImageSampleImplicitLod` (no modifiers, or any combination of `Bias`/`ConstOffset`/`MinLod`) | `llvm.spv.resource.sample`/`llvm.spv.resource.samplebias` (or their `.clamp` siblings, once `MinLod` is present) (roadmap L22 threads the real offset/bias/clamp operands through in every case; the backend itself folds away an all-zero `ConstOffset`; roadmap L26 closed the matching CPU-backend gap, which had rejected a real nonzero offset/clamp outright -- see the "Known gap (closed)" note below) | *(folds both handles into one combined runner-facing type; no sampling op pattern at all)* |
 | `spirv.Image` (extracting a plain image handle back out of a combined `!spirv.sampled_image` value, e.g. so a combined-image-sampler binding can still feed `spirv.ImageFetch`/`spirv.ImageQuerySize`) | `llvm.extractvalue` reading field 0 of that same image/sampler struct (roadmap H29h) | *(no pattern; fails to legalize)* |
 | `spirv.ImageSampleExplicitLod` with a lone `Lod` operand | `llvm.spv.resource.samplelevel` | *(no pattern; fails to legalize)* |
 | `spirv.ImageSampleDrefImplicitLod`/`spirv.ImageSampleDrefExplicitLod`/`spirv.ImageQueryLod` (roadmap L25: added to the upstream MLIR SPIR-V dialect itself -- opcodes 89, 90, and 105 respectively had no `spirv.*` op or deserializer case at all before this row) | *(no pattern yet; fails to legalize -- see the "Known gap" note below, roadmap L31)* | *(no pattern for any of these three either)* |
@@ -1042,6 +1042,75 @@ regressions (224/225, the same single pre-existing unrelated H8h gap).
 Unlike H8v/H8w, no `VkFormatFeatureFlagBits` bit is gated by this fix --
 an ordinary SSBO atomic is core Vulkan 1.0 functionality, not tied to any
 format's own feature flags.
+
+#### Known gap (closed): CPU-side sample lowering rejected a real, MLIR-legal offset/clamp
+
+Found by roadmap **L26** re-running `Feature/Textures/{Sample,SampleBias}.test`
+(and their `Vk.SampledTexture2D` YAML siblings) after L22 closed the
+*MLIR-conversion-layer* half of this gap (the `llvm.spv.resource.sample`/
+`.samplebias`/`.samplelevel`/`.clamp` intrinsics L22 emits already thread a
+real `ConstOffset`/`MinLod` operand through from `spirv.ImageSampleImplicitLod`
+etc., see the table above) -- `vkCreateGraphicsPipelines` still failed with
+`"unsupported raised operation:
+'llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_2_0_0_1_0t' is a
+register-bound resource handle the FeMe CPU target cannot normalize..."`,
+confirmed (via `FEME_VULKAN_LOG_CREATION_ERRORS=1`, a real diagnostic these
+cases were silently swallowing without it) to be a distinct, CPU-backend-only
+gap: `SPIRVResourceLowering.cpp`'s `collectHandles` rejects a *whole*
+function's handle normalization the moment any one of its
+`llvm.spv.resource.handlefrombinding` uses is not "fully supported" --
+and neither a nonzero-`ConstOffset` sample nor a `spv_resource_sample_clamp`
+call was recognized as supported at all, for *any* image shape, even though
+both are ordinary, real, non-degenerate operand shapes a compliant SPIR-V
+consumer must accept.
+
+Closed by extending `hasOnlySupportedImageUses`/`isSampleIntrinsic`/
+`lowerImageAccesses` to recognize `spv_resource_sample_clamp` (a new,
+3rd `isSampleIntrinsic` shape, alongside the pre-existing plain-sample and
+explicit-`samplelevel` shapes) and to thread a real, nonzero texel offset
+through for the `Plain2D` shape specifically (matching the shape both
+`Feature/Textures/Sample.test`'s and its `Vk.SampledTexture2D` sibling's real
+CTS-equivalent cases actually exercise) -- `createSample2D`/`createSampleCube`
+(`ImageCalls.h/.cpp`) grew `OffsetX`/`OffsetY`/`MinLodClamp` (Plain2D) and
+`MinLodClamp` (Cube; SPIR-V forbids `ConstOffset` against a cube image
+entirely, so no offset param was added there) trailing parameters, threaded
+down to two new runtime parameters on `femeCpuImageSample2DV4F32`/
+`femeCpuImageSampleCubeV4F32` (`FeMeRuntimeCPU.c`) and a real integer-offset/
+floor-clamp implementation in `femeRTSamplePoint2D`/`femeRTSampleLinear2D`/
+`femeRTComputeClampedLod`. The DXIL lowering path (`ResourceLowering.cpp`)
+has no offset/clamp source operand to thread at all (DXIL's own
+`llvm.dx.resource.sample` intrinsic has neither), so its two call sites pass
+a `0`/`0`/`-inf` (no-op) sentinel unconditionally -- a real, deliberate
+platform difference, not an oversight.
+
+Nonzero offset support is intentionally scoped to `Plain2D` only for now;
+`Array2D` (and any other still-unlisted shape) continues to reject a
+nonzero `ConstOffset` exactly as before, tracked as roadmap **L33**. Clamp
+support is scoped to `Plain2D`/`Cube` only, matching the two shapes this
+row's own failing cases actually needed; any other shape combined with
+`spv_resource_sample_clamp` is still rejected today (no CTS case is yet
+known to need it). Fixing this gap exposed two further, genuinely unrelated
+gaps in the same real repro, both filed as their own roadmap rows rather
+than folded into L26's own scope: **L32** (closed alongside this row --
+`Executor.cpp`'s `readDepth`/`writeDepth`/`readStencil`/`writeStencil` had no
+`D32_FLOAT_S8X24_UINT` case at all, despite every other layer of the codebase
+-- `ImageFixture.cpp`, `Vulkan/Format.cpp`, `Vulkan/RenderPass.cpp` --
+already supporting it) and **L34** (not yet fixed -- `TextureCube` sampling
+never computes a real implicit LOD from screen-space derivatives the way
+`Texture2D` sampling does, always defaulting to mip 0 regardless of real
+minification).
+
+A second, unrelated lesson from this row: `feme::cpu::ImageCalls.cpp`'s
+`matchImageCall` (the reverse-direction matcher `SIMDize.cpp` depends on) had
+its own stale, hardcoded `arg_size()` checks for `Sample2D`/`SampleCube`
+(15/12) that silently fell out of sync the moment this row's fix grew both
+call kinds' real signatures (to 18/13) -- manifesting not as a build error
+but as a confusing, unrelated-looking `feme-cpu-simdize: ... has a divergent
+value` diagnostic instead of a clear "unrecognized call shape" one. As
+roadmap H19l's own precedent already warned, growing an `ImageCallKind`'s
+`FunctionType` always requires auditing `matchImageCall`'s corresponding
+`case` for both its `arg_size()` check and every fixed-index
+`getArgOperand()` call that follows it.
 
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 

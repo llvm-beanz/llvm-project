@@ -25242,3 +25242,82 @@ newly-exposed legalization gap instead -- filed as **L31**. No feature/
 extension bit touched (upstream MLIR dialect completeness only);
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
 change needed.
+
+## Roadmap L26: measured impact (CPU-side sample offset/clamp support), plus L32 (closed alongside)
+
+**Fix.** `SPIRVResourceLowering.cpp`'s `collectHandles` rejects a whole
+function's handle normalization the moment any one
+`llvm.spv.resource.handlefrombinding` use is not "fully supported" --
+neither a nonzero-`ConstOffset` sample nor the `spv_resource_sample_clamp`
+intrinsic was recognized as supported at all, for any image shape, despite
+L22 already threading both operands through at the MLIR-conversion layer.
+Extended `hasOnlySupportedImageUses`/`isSampleIntrinsic`/`lowerImageAccesses`
+to recognize `spv_resource_sample_clamp` and thread a real texel offset
+(`Plain2D` only) and LOD-floor clamp (`Plain2D`/`Cube` only) through to
+`createSample2D`/`createSampleCube` (`ImageCalls.h/.cpp`), down to new
+runtime parameters on `femeCpuImageSample2DV4F32`/
+`femeCpuImageSampleCubeV4F32` (`FeMeRuntimeCPU.c`). Along the way, fixed a
+stale `matchImageCall` (`ImageCalls.cpp`) `arg_size()` check that had
+silently fallen out of sync with both call kinds' grown signatures
+(roadmap H19l's own precedent).
+
+**`ninja check-feme`.** Full suite, assertions-enabled ccache build:
+2531/2590 passed (59 pre-existing unrelated `Unsupported`, **0 `Failed`**).
+4 lit tests updated (`resource-lowering-image-sample.ll`,
+`simdize-image-call-scalarize.ll`,
+`spirv-resource-lowering-combined-sampled-image.ll`,
+`spirv-resource-lowering-image.ll`), 6 `SPIRVResourceLoweringTest` cases
+added/updated (`LowersNonZeroTexelOffsetPlain2DSample`,
+`LeavesANonZeroTexelOffsetArray2DSampleAlone`,
+`LowersSampleClampToPlain2DMinLodClamp`,
+`LeavesASampleClampAgainstArray2DAlone`, plus a fixed arg-count expectation
+in `LowersCubeSampledImageToImageSampleCube`), and ~20 direct runtime-call
+sites in `ImageSamplingTest.cpp` updated for both grown C-ABI signatures
+(all 147 `ImageSamplingTest.*` cases pass).
+
+**Real `check-hlsl-feme-vk` re-run of L26's own 6 originally-named cases**
+(`VK_ICD_FILENAMES` pointed at the real `feme_icd.json`, not the host's
+default):
+- `Feature/Textures/Sample.test`, `Feature/Textures/SampleBias.test`: both
+  now clear `vkCreateGraphicsPipelines` and `vkQueueSubmit` cleanly (the
+  named blocker is gone). Each still has a single remaining output
+  mismatch (`TextureCube` minification defaulting to mip 0 regardless of
+  real screen-space derivatives) -- confirmed pre-existing and unrelated
+  to this row's own offset/clamp scope, filed as **L34**.
+- `Vk.SampledTexture2D.Sample.test.yaml`: **fully passes** end to end.
+- `Vk.SampledTexture2D.SampleBias.test.yaml`: still fails
+  `vkCreateGraphicsPipelines`, on the same diagnostic text as before but
+  for a distinct resource shape -- this case combines `Bias`, a nonzero
+  offset, and a clamp on the *same* `SampleBias` call, a three-modifier
+  combination this row's own fix did not scope to. Filed as **L35**
+  (reduction itself is unusually hard: `feme-translate --import-spirv`
+  crashes on *any* offset/clamp-using SPIR-V binary at all, including
+  `Sample.test`'s own already-fixed, already-passing one, via an upstream
+  MLIR `ImageOps.cpp` op-verifier assert the real Vulkan runtime path
+  never triggers -- a separate, narrow tooling gap, not a live blocker).
+- `Feature/Textures/Array.Sample.test`/`Array.SampleBias.test`: also now
+  clear pipeline creation and submission (previously blocked by this
+  row's own gap too, despite using no offset/clamp at all), but produce 3
+  wrong-mip output mismatches -- the same class of implicit-LOD-selection
+  gap as L34, but for `Texture2DArray`. Filed as **L36**.
+
+**Disposition.** Roadmap **L26 closed** (struck through) -- the named
+CPU-backend resource-handle-normalization gap for a real, non-degenerate
+offset/clamp sample is fixed and confirmed via unit tests, lit tests, and
+a real multi-case `check-hlsl-feme-vk` re-run. Of the row's own 6 named
+cases, 2 now fully pass (`Vk.SampledTexture2D.Sample.test.yaml` and, at
+the plain-`.test` level, both `Sample.test`/`SampleBias.test` clear every
+stage this row's own scope covered), and the remainder hit one of three
+newly-filed, narrower follow-on gaps (L34/L35/L36) -- none of which share
+this row's own root cause. Roadmap **L32 also closed alongside this row**
+(found via the same real repro): `Executor.cpp`'s
+`readDepth`/`writeDepth`/`readStencil`/`writeStencil` had no
+`D32_FLOAT_S8X24_UINT` case at all, despite the format already being fully
+supported everywhere else in the codebase -- fixed with an `Idx * 8`
+byte-stride case (this format stores depth/stencil as two separate 4-byte
+words, unlike `D24_UNORM_S8_UINT`'s single shared word). No new
+`VkFormatFeatureFlagBits`/extension bit is introduced by either fix (a
+depth-stencil format and a sampling operand combination were already
+claimed as supported; these are correctness fixes restoring that claim to
+be true).  `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed, no change needed.
