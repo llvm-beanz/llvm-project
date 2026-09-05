@@ -26492,3 +26492,121 @@ dynamic-offset call form, plus corresponding lowering support in
 bit touched by this row's own fix (`EntryWrapperPass` control-flow
 plumbing only); `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 reviewed, no change needed.
+
+## Roadmap L46: fixed (Plain2D depth-comparison sampling wired up, with a real coordinate-width correction), plus L48 filed
+
+**Starting point.** L31's own SPIR-V-to-LLVM legalization fix for
+`spirv.ImageSampleDrefImplicitLod`/`ImageSampleDrefExplicitLod`/
+`ImageQueryLod` cleared the earlier legalization gap, but a real
+`dEQP-VK.glsl.texture_functions.{query.texturequerylod.*,texture.*shadow*}`
+re-run (222 cases, 190 + 32) still failed every one of the 205 real,
+running cases, now at `SPIRVResourceLowering.cpp`'s own end-of-pipeline
+`"unsupported raised operation: 'llvm.spv.resource.handlefrombinding...'"`
+diagnostic: `isSampleIntrinsic`/`hasOnlySupportedImageUses` recognized
+only `spv_resource_sample`/`.sample_clamp`/`samplelevel`, not any of the
+five newly-legalized sample/LOD-query intrinsics.
+
+**Investigation.** Before writing any code, found that
+`feme/lib/Transforms/CPU/ImageCalls.{h,cpp}` already define a complete
+`ImageCallKind::SampleCmp2D`/`createSampleCmp2D` helper, and
+`feme/runtime/CPU/FeMeRuntimeCPU.c` already implements a complete
+`femeCpuImageSampleCmp2DF32`/`femeRTSampleCmp2DAtLevel`/
+`femeRTApplyCompare` (percentage-closer-filtering depth comparison) --
+both fully implemented but with **zero callers anywhere** in the
+codebase. The DXIL-side `CalculateLOD` path
+(`DXSAToLLVMIRTranslator.cpp`'s `translateSample`) was confirmed to have
+no CPU-lowering consumer either, confirming LOD-query support is a
+genuinely new gap on both frontends. Given the scope named in the
+roadmap row, this session deliberately scoped down to a first, real,
+testable slice: `spv_resource_samplecmp`/`.samplecmplevelzero` against
+`Plain2D` only, zero `ConstOffset` only, no `MinLod` clamp -- reusing
+`createSampleCmp2D` exactly as it exists today, deferring
+`samplecmp_clamp`, non-`Plain2D` shapes, a real nonzero offset, and the
+LOD-query intrinsics to a new roadmap row (**L48**).
+
+**Fix (first commit).** Added `isDrefSampleIntrinsic` (recognizing
+`spv_resource_samplecmp`/`samplecmplevelzero`, both sharing a fixed
+`(image, sampler, coord, dref, offset)` operand order with no
+`ExplicitLod`-dependent index shift), extended
+`hasOnlySupportedImageUses`/`hasOnlySupportedSamplerUses` to accept them
+against `Plain2D` only, and extended `lowerImageAccesses` to route a
+matching call into `createSampleCmp2D` with a constant-zero `Lod` (both
+variants degenerate to mip level 0 -- `samplecmplevelzero` by
+definition, `samplecmp`'s implicit LOD because
+`femeCpuImageSampleCmp2DF32` has no derivative inputs of its own, a
+pre-existing narrowing this row does not change). New lit tests
+(`spirv-resource-lowering-image-samplecmp{,-unsupported}.ll`) and 6 new
+`SPIRVResourceLoweringTest` unit tests all passed against a `<2 x float>`
+coordinate.
+
+**Real CTS re-run found the first commit's own coordinate width was
+wrong.** A direct `dEQP-VK.glsl.texture_functions.texture.
+sampler2dshadow_fragment` re-run (`VK_ICD_FILENAMES` pointed at the real
+`feme` ICD, `FEME_VULKAN_LOG_CREATION_ERRORS=1`) still hit the same
+`handlefrombinding` diagnostic. A temporary `FEME_DEBUG_DUMP_TMP`-gated
+dump added right after `SPIRVResourceLoweringPass` in
+`feme/lib/Target/CPU/Pipeline.cpp` (reverted before committing) captured
+the real post-legalization IR for this exact case:
+`@llvm.spv.resource.samplecmp(..., <3 x float> %coord, float %dref, <3 x
+i32> zeroinitializer)` -- a **3-component** `Coordinate`, not the 2
+this row's own first commit assumed. Confirmed against SPIR-V's own
+validation rules: a depth-comparison sample's `Coordinate` operand is
+always one component wider than its shape's ordinary addressing width
+(glslang always emits this for `texture(sampler2DShadow, vec3(u, v,
+compare))`, redundantly packing the depth-reference value alongside the
+separate `Dref` operand). Fixed in a second commit
+(`isCoordN(..., /*N=*/3, ...)`); the offset operand's own width needed
+no change (`isZeroOffset`'s null-value check is width-agnostic). Updated
+both lit tests and the unit tests to use the real, spec-correct
+3-component coordinate, and added a new negative unit test
+(`LeavesASampleCmpWithNonSpecCoordWidthAlone`) confirming a
+non-spec-conformant 2-wide coordinate is still declined.
+
+**`ninja check-feme`.** 2558/2617 discovered, 59 pre-existing unrelated
+`Unsupported`, 0 `Failed`, no regressions (up by exactly the 6 new test
+cases this row adds across its two fix commits).
+
+**Real `deqp-vk` re-run (feme ICD).**
+`dEQP-VK.glsl.texture_functions.texture.*shadow*` (32 cases, same group
+L31's own report measured): **2/32 now Pass**
+(`sampler2dshadow_{fragment,vertex}`, up from 0/32 before this row), 13/32
+still `Fail` (11 non-`Plain2D` shadow shapes -- `sampler1d{,array}shadow`,
+`sampler2darrayshadow`, `samplercube{,array}shadow` -- plus
+`sampler2dshadow_bias_fragment`, which fails even earlier at SPIR-V
+legalization itself, since `ImageSampleDrefImplicitLodPattern`'s own
+`SupportedMask` doesn't yet include a `Bias` image operand), 17/32
+unaffected pre-existing `NotSupported` (unrelated format/extension gaps).
+`dEQP-VK.glsl.texture_functions.query.texturequerylod.*` (190 cases):
+unaffected at 0/190, exactly as expected, since the LOD-query intrinsics
+are a distinct, deliberately-deferred family this row never touches.
+
+**`check-hlsl-feme-vk` not re-run this session.** Unlike several prior
+L-series rows, this environment currently has no persisted
+offload-test-suite build (`ninja -t targets` in both this project's
+build directories found no `check-hlsl-feme-vk`/`check-hlsl` target
+configured), and standing this build up from scratch is a full
+`HLSL.cmake`+`OffloadTest.cmake` superproject reconfiguration, judged out
+of scope for this session's time budget. The real `deqp-vk` sweep above
+is this session's primary, measured evidence instead, consistent with
+L31/L45's own precedent of leading with a `deqp-vk` CTS measurement.
+`Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test`'s own exact
+pass/fail status against this row's fix remains unconfirmed pending a
+future session standing up that build.
+
+**Disposition.** Roadmap **L46 closed** (struck through) -- the
+Plain2D/zero-offset/no-clamp depth-comparison sampling slice this row
+scoped is fixed and confirmed via lit tests, unit tests, and a real
+32-case CTS re-run (2/32 now Pass, up from 0). The remaining scope --
+non-`Plain2D` depth-comparison shapes, the `Bias` image-operand
+legalization gap, `samplecmp_clamp`, a real nonzero offset, and the
+entirely separate LOD-query intrinsics -- is filed as **L48**, broken
+into 5 independently-sized sub-parts (a)-(e) per this project's own
+established precedent of splitting out genuinely-distinct remaining
+scope rather than attempting everything in one row. No feature/extension
+bit touched by this row's own fix (already-advertised depth-comparison
+sampling support, internal CPU-lowering plumbing only);
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
+change needed. `FeMeCPUDesign.md`/`FeMeGraphicsDesign.md` reviewed: no
+deviation to record (the design doc's existing `samplecmp.2d.f32`
+mention does not describe a scope this fix's `Plain2D`-only narrowing
+would contradict).
