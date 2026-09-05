@@ -42,29 +42,39 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L41 or other prerequisites blocking the L-series milestones?
+Can you work on L42 or other prerequisites blocking the L-series milestones?
 
-> **A real `dEQP-VK.mesh_shader.ext.*` sweep, run while validating L39's own
-> fix, incidentally found an unrelated, pre-existing JIT-link crash**:
-> `dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.mesh_only.inside_rp.single_view.only_primary`
-> (and likely other `mesh_only` cases in the same `query.*` group) aborts the
-> whole `deqp-vk` process with `"deqp-vk:
-> llvm/include/llvm/ExecutionEngine/JITLink/JITLink.h:285: void
-> llvm::jitlink::Block::setMutableContent(MutableArrayRef<char>): Assertion
-> `MutableContent.data() && \"Setting null content\"' failed."` -- confirmed
-> reproducible in isolation (a single-case run hits it deterministically, not
-> merely a byproduct of the broader sweep) and confirmed unrelated to L39's own
-> task-payload fixes by reverting
-> `CanonicalizeStage.cpp`/`TaskPayloadWrapper.cpp` to their pre-L39 state and
-> reproducing the identical assertion (unsurprising, since this case's own
-> shader has no task/amplification stage or payload access at all -- `mesh_only`
-> in its own case name). A JIT-link crash rather than a diagnosed failure or
-> ordinary rendering mismatch suggests a genuinely different class of bug than
-> this project's usual legalization gaps -- likely a real object emitted with a
-> null/empty section JITLink chokes on, possibly specific to this query-tests
-> group's own pipeline statistics/timestamp query instrumentation around a
-> mesh-only dispatch, or an interaction between mesh shading and
-> `VK_EXT_mesh_shader`'s own draw-count/query machinery -- needs its own scoping
-> pass (confirm how many `query.*.mesh_only.*` cases are affected, and whether a
-> real IR/JIT reduction of this exact case narrows it to a specific
-> instrumentation feature) before a fix can be designed
+> **L40's own fix reaches `dEQP-VK.mesh_shader.ext.misc.payload_read`'s
+> verification loop successfully, but the case still fails, now on a distinct,
+> later `feme-cpu-linearize` diagnostic**: `"loop at '' has an internal branch
+> in '' that does not reach the loop's exit block; unsupported (roadmap
+> milestone 6 deviation)"`. Root-caused (via a real captured pre-`LinearizePass`
+> IR dump of this exact shader): `DiamondFlattener` runs *before*
+> `LoopLinearizer` inside `LinearizePass::run`, and
+> `DiamondFlattener::isLoopControlEdge` only recognizes a block's own branch as
+> loop control flow when one of its two successors is literally the cycle's
+> header (a backedge) or one of `CycleInfo::getExitBlocks`'s own exit blocks --
+> it has no visibility into a block whose branch is not *directly* a
+> loop-control edge but still feeds, indirectly, into the loop's own real exit
+> decision downstream (e.g. by routing a literal constant into a separate merge
+> block's own condition `phi`, the exact `Flow`-fusion shape L40's own
+> `peelConstantFlowPredecessors` targets). For this real CTS shader (unlike
+> L40's own simpler hand-reduced repro), `DiamondFlattener` flattens this loop's
+> own plain uniform trip-count check via its own `select`-based masking before
+> `LoopLinearizer` ever sees it, replacing the literal-constant incoming value
+> L40's own peel logic requires (`isa<ConstantInt>`) with a non-constant
+> `select`-derived expression instead -- defeating the peel entirely, so
+> `LoopLinearizer` again sees two unclassifiable `OtherCondBrBlocks` entries,
+> just a structurally different shape of the same underlying problem L40 fixed
+> one instance of. Needs its own real IR reduction of this exact shader's
+> captured pre-`LinearizePass` IR (`/tmp/l40_real_pre_linearize.ll`, captured
+> but not yet committed anywhere -- a future session should re-capture it via
+> the same env-gated dump technique documented in this row,
+> `feme/lib/Target/CPU/Pipeline.cpp`, right before `LinearizePass` runs) to
+> design a fix: either teach `DiamondFlattener::isLoopControlEdge` to also
+> recognize this indirect shape (leaving such a diamond unflattened for
+> `LoopLinearizer`'s own peel to handle instead), or teach `LoopLinearizer` to
+> see through a `select`-derived (not just a literal constant) condition once it
+> can prove -- the same way `peelConstantFlowPredecessors` already does for a
+> literal constant -- that a given incoming value is compile-time equivalent to
+> one of the loop's own known trip-count outcomes
