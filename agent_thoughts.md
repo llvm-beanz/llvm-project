@@ -62204,3 +62204,85 @@ named L27 in the first place (via L22's own re-run).
   the fix would depend on) -- worth confirming with its own small reduced
   test before writing the real fix, not just assuming it from reading the
   code.
+
+# L28: a red-herring diagnosis, closed by L32's own side effect
+
+L28 was filed from L22's own triage: `Feature/Semantics/
+InterpolationModifiers.test` cleared pipeline creation (via L22's own
+`Centroid`-decoration fix) but failed `vkQueueSubmit` with no diagnostic
+text, even under `-debug-layer`. The milestone's own framing was
+plausible on its face -- the shader exercises several interpolation-
+modifier combinations in one pixel shader, feme already has substantial
+but perhaps incomplete `Centroid`-aware machinery, so a genuine per-
+combination execution gap seemed like the natural next thing to reduce
+and fix.
+
+The very first repro step undercut that framing entirely: a fresh build
+of the named test passed cleanly, five times in a row. That's the kind
+of result that could mean a lot of different things -- a flaky test, a
+stale `.tmp` artifact from a previous run, an unrelated fix elsewhere in
+the tree that happened to also clear this path, or (least likely, but
+worth ruling out) the milestone having been filed against a build that
+was itself in some transient broken state. Rather than assume any one of
+these, I went for the most mechanical way to actually *know* which of the
+six files that changed since L22's own close was responsible: revert one
+file at a time (via `git checkout <older-commit> -- <file>`), rebuild
+just the affected libraries (fast, since ccache plus these are static
+libs, no full LLVM rebuild), and re-run the test. This is a bisection by
+content rather than by commit range, which matters here because several
+of the changed files came from logically separate sessions (L26, L27,
+L32) that all happened to land in between -- a commit-range git-bisect
+would conflate all of them together and require a full rebuild at every
+step, whereas file-by-file reverts let me isolate exactly one file's
+contribution per rebuild.
+
+The result was unambiguous: reverting only `Executor.cpp` (L32's
+`D32_FLOAT_S8X24_UINT` depth/stencil format support) reproduced the
+failure exactly as L28 described. Every other file, alone or combined,
+left the test passing. That's a strong, mechanical signal, not a guess.
+
+The real diagnostic -- recovered the same way as in the prior L27
+session, by setting `FEME_VULKAN_LOG_CREATION_ERRORS=1` and invoking
+`offloader` directly instead of through `llvm-lit` (whose own stderr
+capture silently truncates this one) -- was `"vkQueueSubmit: depth
+attachment format is not yet supported"`. That's surprising on its own:
+the test's own `pipeline.yaml` never declares a depth attachment at all.
+Tracing into `offload-test-suite`'s own `Device.cpp` (external repo,
+should not be touched) explained it: its generic "traditional raster"/
+mesh-shader-raster pipeline-creation path unconditionally builds a
+`D32FloatS8Uint`-format depth attachment and enables depth test/write on
+*every* pipeline it creates, regardless of what the test itself asked
+for. This is spec-legal (a driver is meant to ignore depth-stencil state
+when the subpass has no depth attachment), and real hardware ICDs
+tolerate it silently -- but feme's own CPU executor was, at the time L28
+was filed, still missing support for reading/writing that exact depth
+format at all, so *any* raster test reaching `vkQueueSubmit` would have
+hit this same error, independent of interpolation modifiers entirely.
+L32's fix (added for entirely different reasons -- closing a real
+`deqp-vk` gap around this same format) incidentally cleared every other
+test that happened to reach this same code path, including this one.
+
+This is a useful reminder about a hazard specific to this project's own
+working style: when a milestone is filed from one CTS/lit re-run's
+snapshot, and later milestones land unrelated fixes in between, a later
+session picking up an earlier-filed row needs to actually re-verify the
+named failure still reproduces *before* trusting the milestone's own
+causal story, rather than assuming the diagnosis (however plausible-
+sounding) is still accurate. Skipping that check here would have wasted
+significant effort hunting for a specific-interpolation-modifier
+execution bug that was never real -- the "bug" was purely a downstream
+symptom of a format-support gap already fixed elsewhere.
+
+No feme source change was needed for L28 itself. All the work this
+session was: reproduce, bisect, root-cause, and document -- confirmed via
+a real `check-hlsl-feme-vk` re-run (the named case now `Passed`, a
+broader 509-case sweep unchanged at the pre-existing 151/509 baseline),
+`ninja check-feme` (2533/2592, 0 `Failed`, unchanged), and a targeted
+`deqp-vk` re-run of the interpolation/centroid groups most directly
+related to this row's own scope (confirming only the pre-existing,
+unrelated `SIMDize.cpp` divergent-vector gap, no depth-format regression).
+Roadmap L28 is struck through with the corrected root-cause story
+recorded in place of the original (inaccurate) diagnosis, and
+`VulkanCTSReport.md` gained a matching "Roadmap L28" section. The
+inventories needed no change, since nothing about this row touches a
+feature or extension surface.
