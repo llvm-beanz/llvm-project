@@ -62800,3 +62800,174 @@ rather than asserting it from code-reading alone. Filed as roadmap L41,
 scoped only as far as "reproducible, unrelated, needs its own scoping
 pass" -- deliberately not chasing a fix for an unrelated crash discovered
 as a side effect of validating a different ticket.
+
+# Session: L40 - `feme-cpu-linearize` "internal branch" fix, a self-introduced crash, and a new ordering gap (L42)
+
+## Picking up the `PeeledFrom` redesign
+
+I resumed mid-way through a redesign of `feme-cpu-linearize`'s
+classification logic. The prior session (before this one was compacted)
+had already worked out *why* the naive approach -- using
+`UniformityInfo::isDivergentTerminator` to tell a loop's own genuinely
+divergent exit check apart from a separate, merely-uniform "pass-through"
+check fused into the same merge block -- was fundamentally unsound: once
+*any* real divergence exists anywhere in a loop, the loop's own induction
+variable becomes divergent too (different lanes really do complete a
+different number of iterations in the not-yet-linearized structured CFG),
+so *every* later use of it, including an entirely ordinary, unrelated
+trip-count comparison, is *correctly* reported as divergent by
+`UniformityInfo`'s flow-insensitive, per-value model. That model has no
+way to single out "the" real decision from a downstream user entangled
+with it. The fix had to be structural, not uniformity-based: track,
+explicitly, which blocks get proven redundant by a peel
+(`PeeledFrom`), and trust that over `UniformityInfo` wherever it applies.
+
+I finished implementing `peelConstantFlowPredecessors` (peeling a single
+constant-valued predecessor off a merge block's own condition `phi`,
+walking backward to find the real "origin" block whose decision is now
+structurally proven redundant) and its cycle-driver
+`peelConstantFlowPredecessorsInCycle`, then reworked the
+`OtherCondBrBlocks` classification loop in `linearizeCycle` to trust
+`PeeledFrom` membership over `isDivergentTerminator`.
+
+## A verifier failure, and a genuinely latent bug
+
+Testing against a hand-reduced repro (`/tmp/l40repro/repro.ll`,
+`spirv-dis`-confirmed faithful to a real `payload_read`-shaped
+verification loop) initially produced `"PHI node entries do not match
+predecessors!"` -- an invalid-module verifier failure, not a diagnostic.
+I added a temporary, env-gated IR dump to `feme-opt.cpp` to catch the
+malformed module right as it happened, and found: once `linearizeCycle`
+converts a loop's real check block from a genuine `CondBr` targeting the
+loop's shared exit block into an unconditional "always continue, masked"
+branch, the vanished edge left the exit block's own `phi`s with a stale,
+now-invalid incoming-block reference. This was a genuinely pre-existing
+gap in the surrounding code, just never *reached* before, since no
+earlier shape had this exact block be a *direct* (not relay-based)
+predecessor of the exit block. Fixed with `BasicBlock::removePredecessor`
+immediately after erasing the vanished edge's own terminator -- syntactic,
+minimal, and it lets LLVM auto-simplify any `phi` left with one incoming
+value.
+
+All 20 pre-existing `Linearize` lit tests passed, a new one modeling this
+exact shape passed, and a full `ninja check-feme` showed 2540/2599 (0
+`Failed`). I committed the core fix and the new lit test as two separate
+commits, per the standing "small, separately committed changes" rule.
+
+## Real CTS validation surfaces a second, distinct diagnostic
+
+Per the standing instruction to re-run the real Vulkan CTS after each
+change, I captured the actual pre-`LinearizePass` IR of
+`dEQP-VK.mesh_shader.ext.misc.payload_read`'s mesh-stage function (via a
+temporary, env-gated dump in `Pipeline.cpp`, reverted after use) and ran
+the real case against the rebuilt ICD. The originally-targeted diagnostic
+was confirmed gone -- but a *new* one fired instead: `"has an internal
+branch...that does not reach the loop's exit block"`. Comparing the real
+shader's captured IR against my simpler hand-reduced repro, I found the
+real shader has a more complex shape (an extra divergent inner check,
+nested Flow9/Flow10 merges). Root-causing this (via temporary,
+env-gated debug prints in `Linearize.cpp`, also reverted after use) showed
+`DiamondFlattener` -- which runs *before* `LoopLinearizer` in
+`LinearizePass::run` -- was flattening the loop's own uniform trip-count
+check via its own `select`-based masking *before* `LoopLinearizer` ever
+saw it, because `DiamondFlattener::isLoopControlEdge` only recognizes a
+*direct* loop-control edge (a backedge or a literal exit-block edge), not
+a block whose branch merely feeds, indirectly, into the loop's own real
+exit decision downstream. This replaces the literal-constant incoming
+value my peel logic needs with a non-constant `select`-derived expression,
+defeating the peel entirely. I confirmed no regression on the sibling
+`payload_not_accessed` case (still passes) and set this aside as a
+genuinely distinct, deeper gap -- not something to chase further within
+this same ticket's scope, since it needs its own real IR reduction and
+possibly a redesign of the interaction between the two passes.
+
+## Finding (and fixing) a crash I introduced myself
+
+Before considering the row done, I ran a broader
+`dEQP-VK.mesh_shader.ext.misc.*` sweep (114 cases) to gauge the fix's
+wider impact -- and hit a genuine process-aborting crash on an entirely
+unrelated, nested-loop case, `maximize_primitives`:
+`BasicBlock::getTerminator`'s own "non-well-formed block" assertion. This
+worried me more than an ordinary diagnostic failure would have, since a
+crash (rather than a clean diagnosed rejection) is a much bigger
+regression risk. Rather than assume it was pre-existing, I did what this
+project's own established methodology calls for: a direct bisection.
+I temporarily restored the pre-L40 version of `Linearize.cpp` (via `git
+show <pre-fix-commit>:...` into the working tree, careful *not* to use a
+full `git worktree` checkout since that would have meant a very slow
+from-scratch rebuild of the whole project rather than a fast incremental
+one), rebuilt just the affected libraries, and re-ran the exact same case:
+no crash, just the same pre-existing, unrelated "Result does not match
+reference" failure. Restoring my fix and re-running confirmed the crash
+was real and caused by something in my own change.
+
+I captured the real crashing shader's own pre-`LinearizePass` IR (same
+temporary dump technique as before) and reduced the search directly
+against it with `feme-opt --passes=feme-cpu-linearize`, which reproduced
+the crash standalone -- much faster to iterate on than going through the
+full CTS harness each time. A backtrace (via `gdb -batch -ex run -ex bt`)
+pinpointed the crash inside `computeWaveUniformity`, called from inside
+`linearizeCycle`, itself called (per the crash's own stack) while
+processing the case's *inner* (leaf) loop. The root cause: my own
+`linearizeCycle` recomputed a "fresh" `UniformityInfo` per cycle, right
+after its own peel/fold logic had already mutated -- and, for a fully
+redundant "Flow" block, *deleted* -- blocks belonging to the cycle
+currently being linearized. But it reused the *same*, already-mutated
+`CycleInfo` to do so. `CycleInfo` is computed once, up front, for the
+*whole* function, before any cycle is linearized; this real shader has
+two genuinely nested loops, and the *outer* one's own cached cycle
+structure still referenced the just-deleted "Flow" block (a member of the
+*inner* loop, itself nested inside the outer one's body) by pointer.
+`GenericUniformityInfo`'s own cycle-traversal construction (invoked
+inside my "fresh" recompute) walks *every* cycle in the `CycleInfo` it's
+given, not just the one currently being linearized -- so it dereferenced
+that now-dangling pointer belonging to the outer, not-yet-processed
+cycle, crashing.
+
+The fix, once diagnosed, was simple and actually a *simplification*
+rather than added complexity: the "fresh" recompute was never actually
+necessary in the first place. Re-reading my own reasoning from earlier in
+this same design, `PeeledFrom` -- not `UniformityInfo` -- is what
+disambiguates a peeled pass-through block from a genuine divergent check;
+and no block this pass ever queries `UniformityInfo` for (the header, the
+latch, or a genuine `OtherCondBrBlocks` entry) is itself ever folded or
+peeled away. So the pre-mutation `UniformityInfo`, computed exactly once
+before *any* cycle in the function is linearized -- the same architecture
+the pre-L40 code already had, before I added the per-cycle recompute --
+remains perfectly valid for every classification this pass needs. I
+restored that architecture: `LoopLinearizer` now takes a `UniformityInfo &`
+at construction again (computed once in `LinearizePass::run`, right after
+`CI2` and before any cycle is processed), and `linearizeCycle` no longer
+recomputes its own. This is a strict simplification of my own earlier
+change, not a new mechanism.
+
+Verified: all `Linearize` lit tests and a full `ninja check-feme` still
+pass identically (2541/2600, 0 `Failed` -- one more pass than the
+original pre-crash-fix run, from the earlier commit's own new lit test).
+`maximize_primitives` no longer crashes (back to the same pre-existing,
+unrelated failure baseline already had). A full
+`dEQP-VK.mesh_shader.ext.misc.*` sweep (114 cases) completes cleanly with
+no crash anywhere in it. `payload_read`/`payload_not_accessed` re-verified
+unchanged from the findings above. Committed as its own, separate commit
+from the original L40 fix, with a commit message explaining the root
+cause in full, since a future reader hitting a similar crash elsewhere in
+this pass family should be able to recognize the same "recomputing an
+analysis against an already-mutated sibling structure" pattern quickly.
+
+## On not over-scoping this ticket
+
+I made a deliberate choice not to attempt a fix for the newly-discovered
+`DiamondFlattener`-vs-`LoopLinearizer` ordering gap within this same
+session/ticket. It's a genuinely distinct, deeper problem (an interaction
+between two separate passes, not a further refinement of the peel logic
+this ticket was about), it needs its own real IR reduction before a
+design can even be proposed (two plausible fixes exist -- teaching
+`DiamondFlattener` to recognize the indirect shape, or teaching
+`LoopLinearizer`'s peel to see through a `select`-derived condition -- and
+picking between them needs more data than I have from just this one real
+shader), and the standing instructions are explicit that when a
+requested fix uncovers further, distinct work, that work should be filed
+as new roadmap entries rather than chased indefinitely within the same
+change. Filed as **L42**, keeping the L-series flat (no nested lowercase
+letters) per the standing instruction about H6-style nesting getting out
+of hand.
