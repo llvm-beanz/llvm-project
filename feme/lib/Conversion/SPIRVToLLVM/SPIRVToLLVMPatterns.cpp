@@ -411,6 +411,73 @@ public:
   }
 };
 
+/// Converts `spirv.ControlBarrier` -- a real SPIR-V import's own
+/// `OpControlBarrier` (as opposed to the `llvm.{dx,spv}.*_memory_barrier
+/// [_with_group_sync]` intrinsic shape a DXIL/HLSL `GroupMemoryBarrier
+/// WithGroupSync()`-family call already produces, via `feme::dxil::
+/// OpRaisingPass::raiseBarrierCall`/its SPIR-V counterpart, long before
+/// this pattern ever runs) -- directly into one of the three
+/// `llvm.spv.*_memory_barrier_with_group_sync` intrinsics
+/// `feme::cpu::matchBarrierCall` (`feme/lib/Transforms/CPU/
+/// BarrierCalls.cpp`) already recognizes, rather than letting it fall
+/// through to upstream's own default `ControlBarrierPattern`
+/// (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`), which lowers it to
+/// a call to a mangled external declaration
+/// (`_Z22__spirv_ControlBarrieriii`, `CallingConv::SPIR_FUNC`) with no
+/// runtime-provided definition and no lowering for that calling
+/// convention on this project's CPU target at all -- an unresolved
+/// external call that survives, unmodified, all the way to X86 JIT
+/// codegen, which aborts the whole process with a fatal
+/// `"unsupported calling convention"` error (roadmap L44, root-caused via
+/// a real captured pre-`LinearizePass` IR dump of a real
+/// `dEQP-VK.mesh_shader.ext.query.no_queries.*.mesh_only.*` CTS case).
+///
+/// `OpControlBarrier` always requires every invocation within its own
+/// `execution_scope` to reach this point before any proceeds (per the
+/// SPIR-V spec: "All invocations of this module within Execution scope
+/// must reach this point of execution before any invocation will proceed
+/// beyond it") -- unconditionally true regardless of `memory_semantics`,
+/// unlike `spirv.MemoryBarrier`, which never implies convergence -- so
+/// this always picks one of the three `_with_group_sync` (convergence
+/// *and* fence) intrinsics, never a plain memory-only one. Which of the
+/// three is chosen is decided by `memory_scope` alone (`Workgroup` maps to
+/// the narrowest, `group`, intrinsic; every broader scope -- `Device`,
+/// `CrossDevice`, `QueueFamily`, and the sub-group-shaped `Subgroup`/
+/// `Invocation`, none of which this milestone's whole-group barrier
+/// support distinguishes further -- conservatively maps to the widest,
+/// `all`, intrinsic, a safe superset fence in every case): `memory_
+/// semantics`'s own individual ordering/memory-class bits are not parsed
+/// further, mirroring roadmap H4b's own `isSPIRVGroupSyncBarrier`, which
+/// already treats every control barrier as the one splitting point it
+/// cares about "regardless of its own execution/memory scope operands".
+/// If `memory_semantics` is `None` (per spec, "Memory is ignored" in that
+/// case -- a convergence-only barrier with no memory-ordering
+/// requirement at all), the narrowest `group` intrinsic is still emitted:
+/// harmless, since a fence stronger than the (here, absent) requirement
+/// is never a correctness problem, only unneeded work no real CTS case
+/// exercises today.
+class ControlBarrierConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ControlBarrierOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ControlBarrierOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ControlBarrierOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    llvm::StringRef Intrinsic =
+        Op.getMemoryScope() == mlir::spirv::Scope::Workgroup
+            ? "llvm.spv.group.memory.barrier.with.group.sync"
+            : "llvm.spv.all.memory.barrier.with.group.sync";
+    mlir::LLVM::CallIntrinsicOp::create(
+        Rewriter, Op.getLoc(),
+        mlir::StringAttr::get(Rewriter.getContext(), Intrinsic),
+        mlir::ValueRange{});
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.KHR.AssumeTrue` (roadmap F4, `VK_KHR_shader_expect_assume`
 /// / `shaderExpectAssume`) directly into the `llvm.assume` intrinsic: both
 /// take a single `i1` condition and produce no result, an exact match
@@ -5772,6 +5839,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BranchConditionalPattern, BuiltInAddressOfPattern,
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
       BlockAccessChainPattern, CompositeConstructPattern,
+      ControlBarrierConversionPattern,
       DemoteToHelperInvocationConversionPattern, DotConversionPattern,
       EmitVertexConversionPattern, EndPrimitiveConversionPattern,
       ExecutionModePattern, ExecutionModeIdPattern, ExpectConversionPattern,
