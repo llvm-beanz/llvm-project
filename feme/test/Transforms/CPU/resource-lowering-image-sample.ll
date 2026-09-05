@@ -12,7 +12,13 @@
 ; `feme.shader.stage`="fragment" attribute, roadmap H7i's four new
 ; screen-space-derivative operands (inserted between the `v` coordinate and
 ; `lod`) are always the zero constants `getOrSynthesizeSample2DDerivatives`
-; falls back to outside the Fragment stage.
+; falls back to outside the Fragment stage. Roadmap L26's own new
+; `OffsetX`/`OffsetY`/`MinLodClamp` trailing operands (see
+; `createSample2D`'s doc in ImageCalls.h) are always the zero/zero/negative-
+; infinity "no-op" constants on this DXIL path, which does not yet thread a
+; real offset or clamp through (see `isSupportedOffset`'s DXIL-side
+; sibling, `isZeroOffset`, still gating this pass's own `sample_with_
+; offset_unsupported` case below unchanged).
 
 target datalayout = "e-m:e-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-pc-shadermodel6.6-compute"
@@ -55,7 +61,7 @@ define <4 x float> @sample_2d(i32 %idx, i32 %sampidx, float %u, float %v) {
   ; CHECK-SAME: ptr %sampler_heap, i32 %sampler_heap_count,
   ; CHECK-SAME: i32 %idx, i32 %sampidx, float [[U]], float [[V]],
   ; CHECK-SAME: float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00,
-  ; CHECK-SAME: float 0.000000e+00, i1 false, i1 true)
+  ; CHECK-SAME: float 0.000000e+00, i1 false, i32 0, i32 0, float -inf, i1 true)
   %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx, i1 false)
   %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx, i1 false)
   %coord0 = insertelement <2 x float> poison, float %u, i32 0
@@ -69,7 +75,7 @@ define <4 x float> @sample_2d(i32 %idx, i32 %sampidx, float %u, float %v) {
 ; CHECK-LABEL: define <4 x float> @samplelevel_2d(
 define <4 x float> @samplelevel_2d(i32 %idx, i32 %sampidx, float %u, float %v, float %lod) {
   ; CHECK: call <4 x float> @feme.cpu.image.sample.2d.v4f32(
-  ; CHECK-SAME: {{.*}}, float %lod, i1 true, i1 true)
+  ; CHECK-SAME: {{.*}}, float %lod, i1 true, i32 0, i32 0, float {{.*}}, i1 true)
   %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx, i1 false)
   %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx, i1 false)
   %coord0 = insertelement <2 x float> poison, float %u, i32 0

@@ -481,9 +481,19 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
                                                        0.0),
                                       ConstantFP::get(Builder.getFloatTy(),
                                                        0.0)};
+      // DXIL's own `Texture2D::Sample` offset/clamp overloads are not
+      // threaded through this pass yet (the `isZeroOffset` gate above
+      // already requires the offset operand to be compile-time zero
+      // before reaching here) -- pass zero offset and a negative-infinity
+      // (no-op) `MinLodClamp` constant, matching roadmap L26's SPIR-V-only
+      // scope so far.
+      Value *ZeroOffset = Builder.getInt32(0);
+      Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                     /*Negative=*/true);
       NewCall = createSample2D(Builder, Env, ImageIndex, SamplerIndex, U, V,
                                D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod,
-                               UseExplicitLod, Mask, CI->getName());
+                               UseExplicitLod, ZeroOffset, ZeroOffset,
+                               NoMinLodClamp, Mask, CI->getName());
       break;
     }
     case ImageShape::Array2D: {
@@ -499,8 +509,15 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
       Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
       Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
+      // DXIL's own `TextureCube::Sample` clamp overload is not threaded
+      // through this pass yet -- pass a negative-infinity (no-op)
+      // `MinLodClamp` constant, matching roadmap L26's SPIR-V-only scope
+      // so far.
+      Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                     /*Negative=*/true);
       NewCall = createSampleCube(Builder, Env, ImageIndex, SamplerIndex, X, Y,
-                                 Z, Lod, UseExplicitLod, Mask, CI->getName());
+                                 Z, Lod, UseExplicitLod, NoMinLodClamp, Mask,
+                                 CI->getName());
       break;
     }
     case ImageShape::CubeArray: {

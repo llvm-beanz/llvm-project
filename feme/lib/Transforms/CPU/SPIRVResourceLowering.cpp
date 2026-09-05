@@ -651,20 +651,54 @@ classifySamplerHandle(const CallInst &Handle) {
   return HandleClassification{HandleKind::Sampler, 0, nullptr, nullptr};
 }
 
-/// Whether \p CI is one of the two SPIR-V sample intrinsics this pass
-/// lowers, setting \p ExplicitLod for `samplelevel`.
-bool isSampleIntrinsic(const CallInst &CI, bool &ExplicitLod) {
+/// Whether \p CI is one of the three SPIR-V sample intrinsics this pass
+/// lowers, setting \p ExplicitLod for `samplelevel` and \p HasMinLodClamp
+/// for `sample.clamp` (roadmap L26: SPIR-V's own `ConstOffset`+`MinLod`
+/// image-operand combination, HLSL's `Texture2D::Sample`'s trailing
+/// `clamp` overload -- always an implicit-LOD sample, see
+/// `ImageSampleImplicitLodPattern`'s own comment, so `ExplicitLod` and
+/// `HasMinLodClamp` are never both set). Every recognized shape's own
+/// operand order is `(image, sampler, coord, [lod,] offset, [clamp])`
+/// (`spv_resource_sample`'s own `offset` is the last operand;
+/// `spv_resource_samplelevel` inserts `lod` before it;
+/// `spv_resource_sample_clamp` appends `clamp` after it instead) --
+/// `getSampleOffsetIdx`/`getSampleClampIdx` below derive each operand's
+/// own index from this same `ExplicitLod`/`HasMinLodClamp` pair rather
+/// than every caller re-deriving it.
+bool isSampleIntrinsic(const CallInst &CI, bool &ExplicitLod,
+                      bool &HasMinLodClamp) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
   if (ID == Intrinsic::spv_resource_sample) {
     ExplicitLod = false;
+    HasMinLodClamp = false;
+    return true;
+  }
+  if (ID == Intrinsic::spv_resource_sample_clamp) {
+    ExplicitLod = false;
+    HasMinLodClamp = true;
     return true;
   }
   if (ID == Intrinsic::spv_resource_samplelevel) {
     ExplicitLod = true;
+    HasMinLodClamp = false;
     return true;
   }
   return false;
 }
+
+/// The index of a sample intrinsic's own offset operand, given
+/// `isSampleIntrinsic`'s own `ExplicitLod` output: `spv_resource_sample`/
+/// `spv_resource_sample_clamp` are `(image, sampler, coord, offset,
+/// [clamp])` (offset at index 3); `spv_resource_samplelevel` inserts
+/// `lod` before it, `(image, sampler, coord, lod, offset)` (offset at
+/// index 4).
+unsigned getSampleOffsetIdx(bool ExplicitLod) { return ExplicitLod ? 4 : 3; }
+
+/// The index of a `spv_resource_sample_clamp` call's own trailing `clamp`
+/// operand, immediately after its offset operand
+/// (`getSampleOffsetIdx(/*ExplicitLod=*/false) + 1`); meaningless (never
+/// called) for any other sample intrinsic, which has no such operand.
+unsigned getSampleClampIdx() { return getSampleOffsetIdx(false) + 1; }
 
 /// Whether \p Ty is `<N x ElemTy>`.
 bool isVectorOf(const Type *Ty, unsigned N, bool (Type::*Is)() const) {
@@ -719,6 +753,25 @@ bool isZeroOffset(const Value *Offset) {
   return C && C->isNullValue();
 }
 
+/// Whether \p Offset is an acceptable texel offset for a sample against
+/// \p Shape. `Plain2D` (roadmap L26) accepts any compile-time-constant
+/// `<2 x i32>` -- SPIR-V's own `ConstOffset` image operand, which
+/// `lowerImageAccesses` below applies to every fetched texel's own integer
+/// address before the sampler's addressing mode
+/// (`femeRTComputeBilinearSupport`/`femeRTSamplePoint2D`), matching the
+/// design doc's own "the backend itself folds away an all-zero
+/// `ConstOffset`" note -- a real, nonzero offset is now threaded through
+/// rather than rejecting the whole handle outright. Every other shape
+/// still requires the trivial always-zero case: `Cube`/`CubeArray` can
+/// never carry a real one (SPIR-V disallows `ConstOffset` against a cube
+/// image), and `Array2D`'s own offset lowering remains future work (see
+/// roadmap L33).
+bool isSupportedOffset(const Value *Offset, ImageShape Shape) {
+  if (Shape != ImageShape::Plain2D)
+    return isZeroOffset(Offset);
+  return isa<Constant>(Offset) && isCoordN(Offset, 2, /*Float=*/false);
+}
+
 /// Checks that every use of a sampled-image handle is one this pass can
 /// rewrite: the image operand of an `llvm.spv.resource.sample`/
 /// `samplelevel` whose coordinate, offset and result shapes the CPU
@@ -752,14 +805,25 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       return false;
 
     bool ExplicitLod = false;
-    if (isSampleIntrinsic(*CI, ExplicitLod)) {
+    bool HasMinLodClamp = false;
+    if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp)) {
       if (IsInteger)
         return false; // No filtered sample over an integer-channel image.
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      unsigned OffsetIdx = ExplicitLod ? 4 : 3;
+      // Roadmap L26: `lowerImageAccesses` only threads a `MinLod` clamp
+      // through `Plain2D`'s and `Cube`'s own `createSample2D`/
+      // `createSampleCube` calls -- `Array2D`/`CubeArray` each go through
+      // a distinct helper (`createSample2DArray`/`createSampleCubeArray`)
+      // with no clamp operand of its own, so a `sample.clamp` against
+      // either of those shapes is left unlowered rather than silently
+      // dropping the clamp.
+      if (HasMinLodClamp && Shape != ImageShape::Plain2D &&
+          Shape != ImageShape::Cube)
+        return false;
+      unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod);
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
-          !isZeroOffset(CI->getArgOperand(OffsetIdx)) ||
+          !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape) ||
           !isV4F32(CI->getType()))
         return false;
       continue;
@@ -890,7 +954,8 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
     bool ExplicitLod = false;
-    if (!CI || !isSampleIntrinsic(*CI, ExplicitLod))
+    bool HasMinLodClamp = false;
+    if (!CI || !isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp))
       return false;
     if (CI->getArgOperand(1) != &Handle)
       return false;
@@ -1867,7 +1932,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
     for (User *U : llvm::make_early_inc_range(Handle->users())) {
       auto *CI = cast<CallInst>(U);
       bool ExplicitLod = false;
-      if (isSampleIntrinsic(*CI, ExplicitLod)) {
+      bool HasMinLodClamp = false;
+      if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp)) {
         // A sample is reached twice -- once from its image handle, once
         // from its sampler handle -- so only rewrite it from the image
         // side, where both descriptor indices are already resolvable.
@@ -1904,9 +1970,29 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
                                                       0.0),
                                      ConstantFP::get(Builder.getFloatTy(),
                                                       0.0)};
+          // Roadmap L26: SPIR-V's own `ConstOffset` image operand -- a
+          // compile-time-constant `<2 x i32>` `hasOnlySupportedImageUses`
+          // already validated via `isSupportedOffset` -- is a real,
+          // possibly-nonzero texel offset now, not always the trivial
+          // zero case; split its two components the same way `Coord`'s
+          // own `C0`/`C1` are.
+          Value *Offset = CI->getArgOperand(getSampleOffsetIdx(ExplicitLod));
+          Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+          Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+          // Roadmap L26: SPIR-V's own `MinLod` image operand
+          // (`spv_resource_sample_clamp`'s trailing `clamp` operand,
+          // `hasOnlySupportedImageUses` already restricted to `Plain2D`)
+          // -- negative infinity (a no-op floor) for every other sample
+          // intrinsic, which has no such operand of its own.
+          Value *MinLodClamp =
+              HasMinLodClamp
+                  ? CI->getArgOperand(getSampleClampIdx())
+                  : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                            /*Negative=*/true);
           NewCall = createSample2D(Builder, Env, ImageIndex, SamplerIndex, C0,
                                    C1, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod,
-                                   ExplicitLodFlag, Mask, CI->getName());
+                                   ExplicitLodFlag, OffsetX, OffsetY,
+                                   MinLodClamp, Mask, CI->getName());
           break;
         }
         case ImageShape::Array2D: {
@@ -1918,9 +2004,19 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         }
         case ImageShape::Cube: {
           Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
+          // Roadmap L26: unlike `Plain2D`, `Cube` never has a real offset
+          // operand to extract (SPIR-V forbids `ConstOffset` against
+          // `Dim::Cube`, see `isSupportedOffset`'s own comment) -- but it
+          // can still carry a `MinLod` clamp, since `Dim` has no bearing
+          // on that operand's own legality.
+          Value *MinLodClamp =
+              HasMinLodClamp
+                  ? CI->getArgOperand(getSampleClampIdx())
+                  : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                            /*Negative=*/true);
           NewCall = createSampleCube(Builder, Env, ImageIndex, SamplerIndex,
-                                     C0, C1, C2, Lod, ExplicitLodFlag, Mask,
-                                     CI->getName());
+                                     C0, C1, C2, Lod, ExplicitLodFlag,
+                                     MinLodClamp, Mask, CI->getName());
           break;
         }
         case ImageShape::CubeArray: {

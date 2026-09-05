@@ -367,6 +367,19 @@ struct MatchedImageCall {
   llvm::Value *UseExplicitLod = nullptr;
   /// `SampleCmp2D` only: the depth-comparison reference value.
   llvm::Value *Dref = nullptr;
+  /// `Sample2D` only (roadmap L26): the integer `<ConstOffset>` texel
+  /// offset's X/Y components (see `createSample2D`'s doc); null for every
+  /// other kind, including every non-`Plain2D` sampled kind (SPIR-V
+  /// forbids a real `ConstOffset` against any of those shapes -- see
+  /// `isSupportedOffset`'s comment in `SPIRVResourceLowering.cpp`).
+  llvm::Value *OffsetX = nullptr;
+  llvm::Value *OffsetY = nullptr;
+  /// `Sample2D`/`SampleCube` only (roadmap L26): the `MinLod` clamp floor
+  /// on the implicit LOD (see `createSample2D`'s doc); null for every
+  /// other kind, including `SampleCmp2D`/`Sample2DArray`/`SampleCubeArray`,
+  /// which `lowerImageAccesses` never threads a real clamp value through
+  /// (see its own `HasMinLodClamp` shape restriction).
+  llvm::Value *MinLodClamp = nullptr;
   /// `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32` only (roadmap
   /// F8c/H19g/H19m): the multisample index a `subpassLoad`'s
   /// explicit-sample form (`Load2D`) or a plain or arrayed multisampled
@@ -413,14 +426,25 @@ llvm::Function *getOrInsertImageCall(llvm::Module &M, ImageCallKind Kind);
 /// anisotropic filtering, a multi-tap anisotropic footprint) instead of
 /// always reading mip level 0 -- pass zero constants for a caller with none
 /// to give (a non-fragment stage, or an explicit-LOD sample, where they are
-/// ignored either way).
+/// ignored either way). \p OffsetX/\p OffsetY (roadmap L26) are SPIR-V's
+/// own compile-time-constant `ConstOffset` image operand, an integer texel
+/// offset added to every fetched texel's own address before the sampler's
+/// addressing mode is applied -- pass zero constants for a caller with
+/// none to give (DXIL's own `Texture2D::Sample`, which does not thread a
+/// real offset through this pass yet). \p MinLodClamp (roadmap L26) is
+/// SPIR-V's own `MinLod` image operand (HLSL's `Texture2D::Sample`'s
+/// trailing `clamp` argument), an additional floor on the implicit LOD
+/// alongside the sampler's own `minLod` -- pass negative infinity (a
+/// no-op floor) for a caller with none to give.
 llvm::CallInst *createSample2D(llvm::IRBuilderBase &Builder,
                                const ImageCallEnv &Env, llvm::Value *ImageIndex,
                                llvm::Value *SamplerIndex, llvm::Value *U,
                                llvm::Value *V, llvm::Value *DUdX,
                                llvm::Value *DUdY, llvm::Value *DVdX,
                                llvm::Value *DVdY, llvm::Value *Lod,
-                               llvm::Value *UseExplicitLod, llvm::Value *Mask,
+                               llvm::Value *UseExplicitLod,
+                               llvm::Value *OffsetX, llvm::Value *OffsetY,
+                               llvm::Value *MinLodClamp, llvm::Value *Mask,
                                const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.2d.f32` call.
@@ -561,14 +585,19 @@ llvm::CallInst *createLoad2DArrayI32(llvm::IRBuilderBase &Builder,
                                     const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.cube.v4f32` call (roadmap H7b-a). \p
-/// DirX/\p DirY/\p DirZ are the sample direction vector's components.
+/// DirX/\p DirY/\p DirZ are the sample direction vector's components. \p
+/// MinLodClamp (roadmap L26) is the same `MinLod` clamp `createSample2D`
+/// documents -- a cube sample can carry one too (SPIR-V's `MinLod` image
+/// operand is legal against any dimensionality, unlike `ConstOffset`,
+/// which `Dim::Cube` forbids) -- pass negative infinity (a no-op floor)
+/// for a caller with none to give.
 llvm::CallInst *createSampleCube(llvm::IRBuilderBase &Builder,
                                  const ImageCallEnv &Env,
                                  llvm::Value *ImageIndex,
                                  llvm::Value *SamplerIndex, llvm::Value *DirX,
                                  llvm::Value *DirY, llvm::Value *DirZ,
                                  llvm::Value *Lod, llvm::Value *UseExplicitLod,
-                                 llvm::Value *Mask,
+                                 llvm::Value *MinLodClamp, llvm::Value *Mask,
                                  const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.cubearray.v4f32` call (roadmap H7b-a).
