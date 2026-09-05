@@ -63555,3 +63555,219 @@ to the still-true subset (plain `spv.*MemoryBarrier`-shaped ops still
 have no SPIR-V raising). No feature/extension bit touched -- a
 lowering-correctness fix only -- so `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` needed no changes.
+
+# L31: SPIR-V->LLVM legalization patterns for dref sample and query-LOD ops
+
+## Starting point
+
+Resumed after a prior session that got stuck mid-investigation on L31.
+Found the repo tree completely clean at session start (no leftover
+uncommitted changes), with 11 pending `l31-*` todos already recorded from
+that stuck session. Re-did the investigation and design work from scratch
+rather than trusting stale in-memory context, since none of it had been
+committed anywhere I could recover it from directly.
+
+L31 asked for three new SPIR-V-to-LLVM conversion patterns:
+`spirv.ImageSampleDrefImplicitLod`, `spirv.ImageSampleDrefExplicitLod`, and
+`spirv.ImageQueryLod` -- all three ops L25 (a prior milestone) had just
+taught MLIR's own SPIR-V dialect to deserialize, but which `feme`'s own
+`SPIRVToLLVMPatterns.cpp` had no legalization pattern for at all, so
+`vkCreateGraphicsPipelines` failed immediately with "failed to legalize
+operation ... that was explicitly marked illegal" on any real
+depth-comparison-sampling or LOD-query shader.
+
+## Investigation
+
+Reproduced the exact diagnostic with a minimal hand-written `.mlir` repro
+through `feme-opt --feme-convert-spirv-to-llvm`. Then read three things in
+parallel to design the fix:
+
+1. The three ops' own ODS definitions
+   (`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVImageOps.td`), to know their
+   exact argument/result shapes and verifier constraints (e.g.
+   `ImageSampleDrefExplicitLod` requires either `Lod` or `Grad` present).
+2. LLVM's own SPIRV backend target intrinsics
+   (`llvm/test/CodeGen/SPIRV/hlsl-resources/{SampleCmp,SampleCmpLevelZero,
+   CalculateLevelOfDetail}.ll`), to know exactly what call shape each op
+   needs to produce. This is where I hit (and caught, having been bitten by
+   it once already in a prior L44 session) the underscore-vs-dot gotcha:
+   `IntrinsicsSPIRV.td`'s own TableGen def names use underscores
+   (`int_spv_resource_calculate_lod`), but the *real*, post-TableGen LLVM
+   intrinsic name uses dots (`llvm.spv.resource.calculate.lod`) -- always
+   confirmed against an actual `.ll` file's `call`/`declare` line, never
+   trusted from the TableGen spelling alone.
+3. The existing sibling patterns (`ImageSampleImplicitLodPattern`,
+   `ImageSampleExplicitLodPattern`) as structural templates, plus the
+   already-established `getConstantMemberIndex`-style technique for
+   checking a *pre-conversion* operand for a compile-time SPIR-V constant
+   (safe because `ConversionPatternRewriter` defers erasing a converted
+   op's uses until the whole conversion finishes, so `Value::getDefiningOp()`
+   on the original, unconverted operand still resolves correctly mid-flight).
+
+A `grep` across `IntrinsicsSPIRV.td` confirmed there is **no**
+`samplecmpbias`/`samplecmpbias.clamp` intrinsic at all -- so unlike the
+plain (non-`Dref`) implicit-LOD sample pattern, which supports `Bias`, the
+new dref pattern cannot: any `Bias` operand has no known mapping and must
+be rejected cleanly via `notifyMatchFailure`.
+
+## Design and implementation
+
+Three new pattern classes, inserted into `SPIRVToLLVMPatterns.cpp` right
+after `ImageSampleExplicitLodPattern`'s own definition:
+
+- **`ImageSampleDrefImplicitLodPattern`**: supports `None`/`ConstOffset`/
+  `MinLod` (any combination), mirroring the plain implicit-LOD pattern's
+  own fixed-bit-order operand extraction and "always emit an offset,
+  defaulting to zero" convention. Emits `llvm.spv.resource.samplecmp` or
+  `.samplecmp.clamp` depending on whether `MinLod` (a "clamp" operand) is
+  present. Rejects `Bias` via `notifyMatchFailure`.
+- **`ImageSampleDrefExplicitLodPattern`**: only supports a *literal,
+  compile-time-constant* `Lod = 0.0` (optionally combined with
+  `ConstOffset`), since `llvm.spv.resource.samplecmplevelzero` has no LOD
+  operand in its own signature at all -- it implicitly always samples mip
+  level zero. Checks the pre-conversion `Lod` operand for a
+  `spirv.Constant` `FloatAttr` whose value `isZero()` (covers both signs);
+  any non-constant or nonzero `Lod`, or any `Grad`-based sample, is
+  rejected cleanly.
+- **`ImageQueryLodPattern`**: builds a `vector<2xf32>` result from two
+  separate scalar intrinsic calls, `llvm.spv.resource.calculate.lod`
+  (lane 0, clamped) and `.calculate.lod.unclamped` (lane 1, unclamped) --
+  the exact reverse direction of LLVM's own SPIRV backend codegen, which
+  *decomposes* one `OpImageQueryLod` result into these same two calls.
+  Combined via a `PoisonOp` base plus two `InsertElementOp`s with `i64`
+  constant indices, the same idiom every other vector-building pattern in
+  this file already uses.
+
+All three registered alongside the other "plain" (no extra constructor
+argument) image patterns in `populateSPIRVToLLVMTargetPatterns`.
+
+Built cleanly on the first attempt (`ninja libfeme_vulkan.so feme-opt
+feme-translate`) -- the accessor-name assumptions from the design phase
+(`getOperandArguments()`, `getDref()`, `getSampledImage()`, etc.) all held.
+Re-ran the original minimal repro plus two new ones (for the explicit-lod
+and query-lod ops) directly through `feme-opt`: all three now convert
+cleanly.
+
+## Tests
+
+Two new lit test files, split by convention (this codebase's own
+established pattern keeps `CHECK`-based positive-case files and
+`--verify-diagnostics`-based rejected-case files separate, rather than
+mixing them, since `--split-input-file` applies per-`RUN`-line to the
+*whole* file):
+
+- `spirv-to-llvm-sample-dref-and-query-lod.mlir`: 5 supported-shape cases
+  (dref-implicit-lod unmodified and `ConstOffset|MinLod`; dref-explicit-lod
+  with literal-zero `Lod` alone and combined with `ConstOffset`;
+  query-lod).
+- `spirv-to-llvm-sample-dref-invalid.mlir`: 4 rejected-shape cases (`Bias`
+  on a dref-implicit-lod sample; a non-constant `Lod`; a literal-but-nonzero
+  `Lod`; `Grad` on a dref-explicit-lod sample).
+
+Both pass. `ninja check-feme`: 2546/2605 discovered, 59 pre-existing
+`Unsupported`, 0 `Failed` -- no regressions, plus the 9 new lit test cases
+across both new files.
+
+## CTS validation and the next blocker
+
+Ran the two originally-named `check-hlsl-feme-vk` cases
+(`Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test`) directly
+through `offloader` (bypassing `llvm-lit`'s own environment-variable
+allowlist, which strips `FEME_VULKAN_LOG_CREATION_ERRORS`) with
+`VK_ICD_FILENAMES` pointed at the real `feme` ICD. Both still fail
+`vkCreateGraphicsPipelines`, but now on a *different*, later diagnostic:
+`"unsupported raised operation: 'llvm.spv.resource.handlefrombinding...'
+is a register-bound resource handle the FeMe CPU target cannot normalize
+..."` (from `UnsupportedOps.cpp`'s end-of-pipeline catch-all pass).
+
+This confirms this row's own legalization gap is fully closed, and that
+the "further blocker" its own report predicted is real:
+`SPIRVResourceLowering.cpp`'s `isSampleIntrinsic`/`hasOnlySupportedImageUses`
+only recognize `spv_resource_sample`/`spv_resource_sample_clamp`/
+`spv_resource_samplelevel` -- none of the five newly-legalized intrinsics
+(`samplecmp`/`.samplecmp_clamp`/`samplecmplevelzero`/`calculate_lod`/
+`calculate_lod_unclamped`) -- so a sampled-image handle whose only uses are
+one of these new intrinsics is rejected as "not fully supported" and left
+entirely unlowered.
+
+Ran a real `deqp-vk` sweep of the same two CTS groups L25's own report
+used, against the real `feme` ICD:
+`dEQP-VK.glsl.texture_functions.query.texturequerylod.*` (190 cases, all
+190 fail) and `dEQP-VK.glsl.texture_functions.texture.*shadow*` (32 cases,
+17 pre-existing unrelated `NotSupported`, 15 running, all 15 fail). All
+running cases fail identically on the same `handlefrombinding`
+normalization diagnostic. This confirms the CPU-runtime lowering gap is
+the sole remaining blocker for every one of these 205 real, running CTS
+cases, and that this row's own fix -- while necessary and now fully
+tested -- does not by itself move any CTS pass count.
+
+## Scope decision: filed as L46 rather than attempted this session
+
+Peeked at `SPIRVResourceLowering.cpp` (2588 lines) and
+`FeMeRuntimeCPU.c`'s existing sampling implementation (~5,400 lines) to
+gauge whether the CPU-runtime lowering gap was small enough to close in
+this same session. It is not: unlike the legalization-pattern work above
+(pure operand-shape plumbing, reusing an already-established set of
+helpers and idioms), CPU-runtime lowering for these five intrinsics needs
+genuinely new *semantic* implementation:
+
+- A depth-comparison sample (`samplecmp`/`samplecmplevelzero`) needs each
+  of the (up to 4, for bilinear filtering) sampled texels compared against
+  the caller's reference value and blended per the sampler's own
+  `ComparisonOp`, rather than simply averaged -- the existing bilinear
+  helpers (`femeRTSamplePoint2D`/`femeRTComputeBilinearSupport`) cannot be
+  reused as-is.
+- A LOD query (`calculate_lod`/`.unclamped`) needs a real screen-space
+  coordinate derivative (`dFdx`/`dFdy`) to compute a mip level from -- no
+  existing CPU-target code path currently threads a per-invocation
+  derivative through to a sample/query call at all, so this needs its own
+  design pass just to figure out where (or whether) one is available in
+  this CPU target's per-lane execution model, before any lowering code can
+  even be written.
+
+This mirrors the established multi-session decomposition pattern this
+project has used throughout (L43->L44->L45, H43->H44, etc.): file the
+newly-confirmed, substantial, distinct blocker as its own roadmap row
+(**L46**) with a concrete breakdown of what it needs, rather than either
+attempting a rushed, under-tested partial implementation in the time
+remaining, or leaving the gap as a vague, un-scoped note. L46's own
+roadmap entry records all four things a future session (or future me)
+will need: the two gating-helper-function extensions, the new
+runtime-entry-point design work (including the derivative-availability
+open question), the new lit/unit test coverage this will need, and the
+concrete CTS re-run to measure it against.
+
+## Documentation updates
+
+- **Roadmap.md**: struck through L31 with a full "done" note (the pattern
+  designs, the test coverage, the `ninja check-feme` numbers, and the real
+  CTS re-run confirming the new L46 blocker); added L46 as a new row
+  (next available L-series number was L46, not L32 -- L32 already exists,
+  a prior, unrelated, already-closed row about depth-attachment-format
+  support that happened to reuse a number I'd expected to be free; always
+  grep the actual table before picking the next ID rather than assuming
+  sequential availability).
+- **Design.md**: updated the SPIR-V dialect conversion-coverage table's
+  row for these three ops from "no pattern yet" to the real target
+  intrinsics now implemented, and updated the accompanying prose note
+  (which had explicitly named L31 as the still-open tracking row) to
+  record that L31 has since landed and point the CPU-lowering follow-on
+  at L46 instead.
+- **VulkanCTSReport.md**: appended a full "Roadmap L31: measured impact"
+  section following this project's own established format (fix summary,
+  `ninja check-feme` numbers, minimal-repro confirmation, real
+  `check-hlsl-feme-vk` re-run of both originally-named cases, real
+  `deqp-vk` sweep of the same 222 cases L25's own report used, and a
+  disposition note pointing at L46).
+- **Vulkan14FeatureInventory.md**/**VulkanExtensionInventory.md**: checked
+  for any reference to depth-comparison sampling, LOD queries, or either
+  of these two roadmap rows -- found none, confirmed no change needed
+  (this is SPIR-V-to-LLVM legalization plumbing for an existing HLSL
+  language feature, not a new Vulkan feature or extension surface).
+
+## Commits
+
+Four separate commits, in dependency order: (1) the three new pattern
+classes plus their registration in `SPIRVToLLVMPatterns.cpp`, (2) the two
+new lit test files, (3) the `Roadmap.md`/`Design.md`/`VulkanCTSReport.md`
+documentation updates, and (4) this `agent_thoughts.md` entry.
