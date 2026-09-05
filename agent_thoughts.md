@@ -62657,3 +62657,146 @@ roadmap work, so neither `Vulkan14FeatureInventory.md` nor
 `VulkanExtensionInventory.md` needed a change -- this fix is purely an
 internal completeness gap within an already-advertised extension, not a new
 feature surface.
+
+# L39: Task-payload load/store aggregate decomposition
+
+The ticket picked up exactly where L30 left off: `SimpleAmplification.test`
+now cleared the JIT-symbol bug, but failed at `feme-cpu-simdize` with
+`"has a divergent value '' of vector type"`. The ticket's own writeup
+already had a strong, specific hypothesis (a real `float3`/`float4`
+payload member reaching `TaskPayloadStore` unscalarized), which matched
+exactly what I'd flagged as an open question at the end of the L30
+session. This time I could skip straight to confirming it.
+
+## Confirming the hypothesis without an IR reduction
+
+Rather than reaching for `spirv-dis`/`feme-translate --import-spirv`
+immediately, I first just read `CanonicalizeStage.cpp`'s task-payload
+store fallback closely, since the ticket's own hypothesis was precise
+enough to check directly against the code. Sure enough:
+`createStageTaskPayloadStore(B, BaseAndOffset->second, Val)` passes `Val`
+-- the store's raw value operand, whatever type it happens to be --
+straight through with zero decomposition, unlike every ordinary stage-IO
+store, which always goes through `storeStageIOValue`'s own recursive
+struct/array/vector decomposition first. This alone confirmed the
+hypothesis and pinpointed the fix location (upstream of `SIMDize.cpp`, not
+inside it, matching the ticket's own second alternative) without needing
+to actually reduce a real IR case first -- a nice case of the codebase's
+own existing precedent (the load-side fallback added in L30, which I'd
+written myself) making the bug obvious once I knew where to look.
+
+## Designing the decomposition helpers
+
+I wrote `loadTaskPayloadValue`/`storeTaskPayloadValue` as close mirrors of
+`loadStageIOValue`/`storeStageIOValue`, reusing the exact same
+struct/array/vector recursion shape (`extractvalue`/`extractelement` down,
+`insertvalue`/`insertelement` back up) but swapping the addressing scheme:
+ordinary stage-IO values are addressed by (ElementID, Row, Component)
+because they map onto a real `EntrySignature` element; a task payload has
+no signature element at all (it's raw task-defined memory), so byte offset
+is the only addressing concept that makes sense here, computed via
+`DataLayout::getStructLayout`'s per-member offsets for structs and
+`getTypeAllocSize` for array/vector strides. I deliberately did *not*
+reuse `getPackedMeshElementSize`'s "tightly packed, not ABI-padded" stride
+convention from roadmap H6l -- that convention exists specifically because
+a mesh entry's per-vertex/per-primitive *array* stride is baked into a GEP
+by the SPIR-V-to-LLVM conversion using SPIR-V's own (tightly packed)
+notion of array stride, which can disagree with LLVM's ABI-padded
+`getTypeAllocSize` of the *same* element type. That mismatch is specific
+to array-of-struct addressing computed by a different part of the
+pipeline; decomposing *within* one already-typed LLVM value (a struct or
+vector *value*, not a memory access through a separately-computed GEP) has
+no equivalent gap -- `extractvalue`/`insertvalue`'s own struct-member
+indexing and `DataLayout::getStructLayout`'s offsets are, by construction,
+the same layout convention LLVM itself uses for that type everywhere, so
+using the ordinary (non-packed) `DataLayout` queries here is correct and
+consistent, not a shortcut.
+
+## Verifying incrementally, and finding the second bug
+
+After building and testing the first commit in isolation (`ninja
+check-feme` clean, all 63 `FeMeTransformsGraphicsTests` cases pass), I
+went straight to a direct `llvm-lit -v` re-run of `SimpleAmplification.test`
+rather than assuming the ticket's own root cause was the *only* gap. Good
+thing I did: the `feme-cpu-simdize` diagnostic was indeed gone, but a new
+one appeared -- `"feme-cpu-wrap-task-payload: unexpected stage op left for
+the task payload wrapper"`. I added a temporary debug string to that exact
+diagnostic (printing the stage op's own name via `getStageOpName`) to
+avoid guessing, rebuilt, and reran once to get `DEBUGKIND=feme.stage.task.
+payload.load` printed directly -- a much faster and more reliable way to
+pin down which stage op was unhandled than trying to reason about it
+purely from reading the pass's dispatch logic, and I reverted the debug
+string immediately after confirming it.
+
+## Why a task/amplification stage suddenly needed to lower a *load*
+
+This made sense once I looked at the real SPIR-V via `spirv-dis`: the
+amplification shader's own compiled SPIR-V contains
+`%1 = OpLoad %Payload %gs_payload` immediately followed by `OpStore
+%gs_payload %1` -- a whole-struct self-copy of the payload variable onto
+itself, right before `OpEmitMeshTasksEXT`. This is DXC/SPIRV-Tools' own
+lowering of `DispatchMesh`'s payload argument (which is passed by
+reference in HLSL source but apparently gets read back into a value and
+re-stored as part of however the compiler threads it to the dispatch
+instruction). Before my first commit, this whole-struct load fell through
+`CanonicalizeStage.cpp`'s `LoadInst` branch with no fallback matching it
+at all in the *store*-only-aware old code path (actually it did canonicalize
+via L30's already-existing load fallback, but into a single whole-struct-
+typed `TaskPayloadLoad`, which is the same "unscalarized aggregate" problem
+this whole ticket is about) -- and once decomposed into scalar leaf loads
+by my new `loadTaskPayloadValue`, those loads are genuine
+`StageOpKind::TaskPayloadLoad` calls appearing in the task/amplification
+stage for the first time ever. `TaskPayloadWrapper.cpp` (the task stage's
+own wrapper pass, distinct from `MeshOutputWrapper.cpp`) had simply never
+needed a case for `TaskPayloadLoad` before, since a task stage only ever
+*writes* its payload in every previously-tested shape -- reading it back
+within the same invocation is a new, real shape this self-copy pattern
+introduces.
+
+The fix was a direct mirror of `MeshOutputWrapper.cpp`'s own
+`lowerMeshTaskPayloadLoad` (added in L30): read the payload once per wave
+(broadcasting to every active lane, since a task payload is
+workgroup-shared, not per-lane-divergent data) rather than treating it
+like an ordinary per-lane stage-IO load.
+
+## Confirming the remaining failure is out of scope, not a new bug
+
+After both fixes, the direct `llvm-lit -v` re-run showed yet another new
+error: `"LLVM ERROR: unsupported calling convention"`. Rather than assume
+this was a third bug in my own changes, I noticed the amplification
+shader's own SPIR-V contains an explicit `OpControlBarrier` (DXC's
+lowering of the implicit payload-visibility barrier `DispatchMesh` needs),
+and recalled seeing "unsupported calling convention" mentioned in
+`VulkanCTSReport.md` before, attached to an already-filed roadmap row
+(H19p) about exactly this shape: "a `..._with_group_sync` barrier reached
+through a Function whose calling convention the CPU back end rejects
+aborts the whole process". I confirmed this directly by running
+`dEQP-VK.compute.pipeline.basic.branch_past_barrier` (an entirely
+unrelated compute test with no task/mesh/payload involvement at all)
+against the same feme ICD build and getting the byte-for-byte identical
+abort message. This confirmed the remaining failure is H19p's own
+already-tracked, unrelated pre-existing gap, reached for the first time
+in this particular test only because L30 and L39 together now let it get
+that far -- not a new bug I introduced. I did not attempt to fix H19p
+itself; it's already filed and explicitly out of this ticket's scope.
+
+## The incidental JIT-link crash, and being careful about attribution
+
+While running a broader real `dEQP-VK.mesh_shader.ext.*` sweep (beyond
+just the closest `misc.payload*` cases) to gauge this fix's own CTS
+impact, I hit a process-aborting assertion in an entirely different,
+unrelated case (`query.no_queries...mesh_only...`, no task stage at all).
+Before filing this as a new roadmap row, I deliberately verified it
+wasn't something my own changes caused: I reproduced it in isolation
+(ruling out sweep-order-dependent state), then temporarily `git checkout`ed
+`CanonicalizeStage.cpp`/`TaskPayloadWrapper.cpp` back to their pre-L39
+state, rebuilt the ICD, and reproduced the identical assertion again
+before restoring my own fix. Given the affected case's own name
+(`mesh_only`) confirms it has no task/amplification stage or payload
+access whatsoever, my task-payload-specific changes couldn't plausibly be
+involved regardless, but I wanted the same standard of verification this
+project already holds every other "is this pre-existing?" claim to,
+rather than asserting it from code-reading alone. Filed as roadmap L41,
+scoped only as far as "reproducible, unrelated, needs its own scoping
+pass" -- deliberately not chasing a fix for an unrelated crash discovered
+as a side effect of validating a different ticket.
