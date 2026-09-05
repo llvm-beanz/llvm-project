@@ -42,6 +42,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
+The last session got stuck.
+
 Can you work on L31 or other prerequisites blocking the L-series milestones?
 
 > **L25's own two cases
