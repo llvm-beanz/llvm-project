@@ -700,6 +700,46 @@ unsigned getSampleOffsetIdx(bool ExplicitLod) { return ExplicitLod ? 4 : 3; }
 /// called) for any other sample intrinsic, which has no such operand.
 unsigned getSampleClampIdx() { return getSampleOffsetIdx(false) + 1; }
 
+/// Whether \p CI is one of the two SPIR-V depth-comparison sample
+/// intrinsics this pass lowers today (roadmap L46), setting \p ExplicitLod
+/// for `samplecmplevelzero` (always forces mip level 0 -- this intrinsic
+/// has no LOD operand of its own at all, unlike `samplelevel`) and
+/// leaving it false for `samplecmp` (implicit LOD; `femeCpuImageSampleCmp2DF32`
+/// itself degenerates this to level 0 too today, having no screen-space
+/// derivative inputs the way `Sample2D`'s implicit-LOD path does -- a
+/// pre-existing narrowing this row does not change). Both share the same
+/// `(image, sampler, coord, dref, offset)` operand order (see
+/// `llvm/test/CodeGen/SPIRV/hlsl-resources/SampleCmp{,LevelZero}.ll`);
+/// `spv_resource_samplecmp_clamp`'s own trailing `clamp` operand is
+/// deliberately NOT recognized here, since neither `createSampleCmp2D`
+/// nor `femeCpuImageSampleCmp2DF32` thread a `MinLod` clamp through the
+/// way their `Sample2D` counterparts do -- filed as roadmap L48.
+bool isDrefSampleIntrinsic(const CallInst &CI, bool &ExplicitLod) {
+  Intrinsic::ID ID = getIntrinsicID(&CI);
+  if (ID == Intrinsic::spv_resource_samplecmp) {
+    ExplicitLod = false;
+    return true;
+  }
+  if (ID == Intrinsic::spv_resource_samplecmplevelzero) {
+    ExplicitLod = true;
+    return true;
+  }
+  return false;
+}
+
+/// The fixed operand index of a `spv_resource_samplecmp`/
+/// `samplecmplevelzero` call's own depth-comparison reference value --
+/// both share the identical `(image, sampler, coord, dref, offset)` shape
+/// (unlike `isSampleIntrinsic`'s own family, whose offset index shifts
+/// with `ExplicitLod`), so this is a fixed constant rather than a
+/// function of anything.
+constexpr unsigned DrefSampleDrefIdx = 3;
+
+/// The fixed operand index of a `spv_resource_samplecmp`/
+/// `samplecmplevelzero` call's own `ConstOffset` operand, immediately
+/// after its dref operand.
+constexpr unsigned DrefSampleOffsetIdx = DrefSampleDrefIdx + 1;
+
 /// Whether \p Ty is `<N x ElemTy>`.
 bool isVectorOf(const Type *Ty, unsigned N, bool (Type::*Is)() const) {
   const auto *VecTy = dyn_cast<FixedVectorType>(Ty);
@@ -829,6 +869,25 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
+    // Roadmap L46: a depth-comparison sample (`spv_resource_samplecmp`/
+    // `samplecmplevelzero`) against `Plain2D` only -- `createSampleCmp2D`
+    // has no `Array2D`/`Cube`/`CubeArray` counterpart yet (filed as
+    // roadmap L48, alongside the `samplecmp_clamp`/nonzero-offset
+    // narrowing `isDrefSampleIntrinsic`'s own comment already covers).
+    bool DrefExplicitLod = false;
+    if (isDrefSampleIntrinsic(*CI, DrefExplicitLod)) {
+      if (IsInteger || Shape != ImageShape::Plain2D)
+        return false; // No filtered/dref sample over a non-Plain2D shape.
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      if (!isCoordN(CI->getArgOperand(2), /*N=*/2, /*Float=*/true) ||
+          !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
+          !isZeroOffset(CI->getArgOperand(DrefSampleOffsetIdx)) ||
+          !CI->getType()->isFloatTy())
+        return false;
+      continue;
+    }
+
     if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray)
       return false; // No fetch shape exists for Cube/CubeArray.
     if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
@@ -948,14 +1007,17 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
 }
 
 /// Checks that every use of a sampler handle is the sampler operand of a
-/// sample intrinsic. A sampler has no accesses of its own -- it only ever
-/// pairs with an image -- so there is nothing else it can legitimately be.
+/// sample intrinsic (`isSampleIntrinsic`) or a depth-comparison sample
+/// intrinsic (`isDrefSampleIntrinsic`, roadmap L46). A sampler has no
+/// accesses of its own -- it only ever pairs with an image -- so there is
+/// nothing else it can legitimately be.
 bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
     bool ExplicitLod = false;
     bool HasMinLodClamp = false;
-    if (!CI || !isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp))
+    if (!CI || !(isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp) ||
+                 isDrefSampleIntrinsic(*CI, ExplicitLod)))
       return false;
     if (CI->getArgOperand(1) != &Handle)
       return false;
@@ -2043,6 +2105,38 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
               "no sampled-image shape produces Plain1D/Array1D/Plain3D/"
               "Plain2DMS/Array2DMS");
         }
+        CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
+
+      // Roadmap L46: a depth-comparison sample
+      // (`spv_resource_samplecmp`/`samplecmplevelzero`) -- always
+      // `Plain2D` (`hasOnlySupportedImageUses` already restricted every
+      // other shape). Both share `createSampleCmp2D`'s own `Lod`
+      // parameter passed as a constant zero: `samplecmplevelzero` always
+      // forces mip level 0 (no LOD operand of its own to read), and
+      // `samplecmp`'s implicit LOD already degenerates to the same level
+      // 0 today (`femeCpuImageSampleCmp2DF32` has no screen-space
+      // derivative inputs the way `Sample2D`'s implicit-LOD path does,
+      // see `isDrefSampleIntrinsic`'s own comment) -- only
+      // `UseExplicitLod` itself differs between the two.
+      bool DrefExplicitLod = false;
+      if (isDrefSampleIntrinsic(*CI, DrefExplicitLod)) {
+        if (CI->getArgOperand(0) != Handle)
+          continue;
+        IRBuilder<> Builder(CI);
+        Value *Coord = CI->getArgOperand(2);
+        Value *Dref = CI->getArgOperand(DrefSampleDrefIdx);
+        Value *SamplerIndex =
+            HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
+        Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
+        Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
+        Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+        Value *ExplicitLodFlag = Builder.getInt1(DrefExplicitLod);
+        CallInst *NewCall =
+            createSampleCmp2D(Builder, Env, ImageIndex, SamplerIndex, C0, C1,
+                              Lod, ExplicitLodFlag, Dref, Mask, CI->getName());
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;
