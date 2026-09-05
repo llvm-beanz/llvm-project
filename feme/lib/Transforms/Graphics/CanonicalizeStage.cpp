@@ -675,6 +675,97 @@ bool isTaskPayloadGlobal(const GlobalVariable *GV) {
   return GV && GV->getAddressSpace() == 14;
 }
 
+/// (Roadmap L39) The load-side mirror of `storeTaskPayloadValue` just
+/// below: decomposes a task-payload read's own \p Ty into one scalar
+/// `feme.stage.task.payload.load` per (struct member, array index, vector
+/// lane), rebuilt with `insertvalue`/`insertelement` -- the same shape
+/// `loadStageIOValue` already decomposes an ordinary stage-IO element
+/// into, but addressed by a plain byte \p Offset (via \p DL) rather than
+/// (ElementID, Row, Component), since a task payload carries no signature
+/// element of its own. A task-payload load's/store's value previously
+/// reached `feme.stage.task.payload.load`/`.store` with its real,
+/// possibly-aggregate SPIR-V-derived type wrapped verbatim (unlike an
+/// ordinary stage-IO access, which is always pre-decomposed to a scalar
+/// leaf before reaching any `feme.stage.*` call) -- a shape
+/// `feme::cpu::SIMDizePass`'s own generic per-lane widening was never
+/// designed to accept (its `FunctionWidener::getWidened` asserts against
+/// a vector-typed operand). Decomposing here, at the same boundary every
+/// other stage-IO access is already decomposed at, keeps every
+/// `feme.stage.*` call's own operand/result scalar-only -- the invariant
+/// `feme::cpu::SIMDize.cpp`'s widening is designed around -- rather than
+/// teaching that pass to special-case a vector-typed payload operand.
+llvm::Value *loadTaskPayloadValue(IRBuilderBase &B, Type *Ty, uint64_t Offset,
+                                  const DataLayout &DL) {
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    const StructLayout *SL = DL.getStructLayout(ST);
+    Value *New = PoisonValue::get(ST);
+    for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I) {
+      Value *MemberVal = loadTaskPayloadValue(
+          B, ST->getElementType(I), Offset + SL->getElementOffset(I), DL);
+      New = B.CreateInsertValue(New, MemberVal, I);
+    }
+    return New;
+  }
+  if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
+    uint64_t ElemSize = DL.getTypeAllocSize(ArrTy->getElementType());
+    Value *New = PoisonValue::get(ArrTy);
+    for (unsigned I = 0, E = ArrTy->getNumElements(); I != E; ++I) {
+      Value *ElemVal = loadTaskPayloadValue(
+          B, ArrTy->getElementType(), Offset + I * ElemSize, DL);
+      New = B.CreateInsertValue(New, ElemVal, I);
+    }
+    return New;
+  }
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
+    uint64_t ElemSize = DL.getTypeAllocSize(VecTy->getElementType());
+    Value *New = PoisonValue::get(VecTy);
+    for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I) {
+      Value *ElemVal = loadTaskPayloadValue(
+          B, VecTy->getElementType(), Offset + I * ElemSize, DL);
+      New = B.CreateInsertElement(New, ElemVal, I);
+    }
+    return New;
+  }
+  return createStageTaskPayloadLoad(B, Ty, Offset);
+}
+
+/// (Roadmap L39) The store-side mirror of `loadTaskPayloadValue` above:
+/// decomposes \p Val (of type \p Ty) into one scalar
+/// `feme.stage.task.payload.store` per (struct member, array index,
+/// vector lane), the same recursion in reverse (`extractvalue`/
+/// `extractelement` instead of `insertvalue`/`insertelement`), addressed
+/// by a plain byte \p Offset rather than (ElementID, Row, Component). See
+/// `loadTaskPayloadValue`'s own comment for why this decomposition
+/// happens here rather than in `feme::cpu::SIMDize.cpp`.
+void storeTaskPayloadValue(IRBuilderBase &B, Value *Val, Type *Ty,
+                           uint64_t Offset, const DataLayout &DL) {
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    const StructLayout *SL = DL.getStructLayout(ST);
+    for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I)
+      storeTaskPayloadValue(B, B.CreateExtractValue(Val, I),
+                            ST->getElementType(I),
+                            Offset + SL->getElementOffset(I), DL);
+    return;
+  }
+  if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
+    uint64_t ElemSize = DL.getTypeAllocSize(ArrTy->getElementType());
+    for (unsigned I = 0, E = ArrTy->getNumElements(); I != E; ++I)
+      storeTaskPayloadValue(B, B.CreateExtractValue(Val, I),
+                            ArrTy->getElementType(), Offset + I * ElemSize,
+                            DL);
+    return;
+  }
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
+    uint64_t ElemSize = DL.getTypeAllocSize(VecTy->getElementType());
+    for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
+      storeTaskPayloadValue(B, B.CreateExtractElement(Val, I),
+                            VecTy->getElementType(), Offset + I * ElemSize,
+                            DL);
+    return;
+  }
+  createStageTaskPayloadStore(B, Offset, Val);
+}
+
 /// (Roadmap H2e) Tracks, per (`ElementID`, `Row`, `Component`) leaf scalar
 /// of an `Output`-direction stage-IO element, the shadow `AllocaInst` its
 /// stores and read-back loads are redirected through. Unlike DXIL's
@@ -2318,12 +2409,17 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // `feme.stage.task.payload.load` by that offset directly, rather
         // than being left an unrewritten raw load referencing a SPIR-V-
         // derived global name feme's own host runtime never defines (the
-        // JIT-link failure this fixes).
+        // JIT-link failure this fixes). (Roadmap L39)
+        // `loadTaskPayloadValue` fully decomposes a struct/array/vector-
+        // typed read (e.g. a `float3`/`float4` payload member) into one
+        // scalar load per leaf first, matching every other `feme.stage.*`
+        // call's scalar-only operand/result convention -- see its own
+        // comment for why.
         if (auto BaseAndOffset =
                 getStageIOBaseAndOffset(LI->getPointerOperand(), DL)) {
           if (isTaskPayloadGlobal(BaseAndOffset->first)) {
-            Value *New = createStageTaskPayloadLoad(B, LI->getType(),
-                                                     BaseAndOffset->second);
+            Value *New = loadTaskPayloadValue(B, LI->getType(),
+                                              BaseAndOffset->second, DL);
             LI->replaceAllUsesWith(New);
             LI->eraseFromParent();
             Changed = true;
@@ -2373,11 +2469,17 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // byte offset, letting it canonicalize into
         // `feme.stage.task.payload.store` by that offset directly, rather
         // than being left an unrewritten raw store the way a genuinely
-        // unresolvable stage-IO access is.
+        // unresolvable stage-IO access is. (Roadmap L39)
+        // `storeTaskPayloadValue` fully decomposes a struct/array/vector-
+        // typed write (e.g. a `float3`/`float4` payload member) into one
+        // scalar store per leaf first, matching every other
+        // `feme.stage.*` call's scalar-only operand/result convention --
+        // see its own comment for why.
         if (auto BaseAndOffset =
                 getStageIOBaseAndOffset(SI->getPointerOperand(), DL)) {
           if (isTaskPayloadGlobal(BaseAndOffset->first)) {
-            createStageTaskPayloadStore(B, BaseAndOffset->second, Val);
+            storeTaskPayloadValue(B, Val, Val->getType(),
+                                  BaseAndOffset->second, DL);
             SI->eraseFromParent();
             Changed = true;
           }

@@ -2669,4 +2669,92 @@ TEST(CanonicalizeStageTest, MeshStageCanonicalizesTaskPayloadLoad) {
     EXPECT_FALSE(isa<LoadInst>(&I));
 }
 
+/// (Roadmap L39) A vector-typed task-payload write -- e.g. a real
+/// `float3`/`float4` payload member, unlike the plain scalar `float`
+/// `AmplificationStageCanonicalizesTaskPayloadStore` above already covers
+/// -- decomposes into one scalar `feme.stage.task.payload.store` per
+/// vector lane at consecutive byte offsets, rather than reaching
+/// `feme.stage.task.payload.store` with the whole `<3 x float>` wrapped
+/// verbatim as its `value` operand (the shape that made
+/// `feme::cpu::SIMDizePass`'s own generic per-lane widening fail with
+/// "has a divergent value '' of vector type", since every other
+/// `feme.stage.*` call's operands are always scalar).
+TEST(CanonicalizeStageTest, AmplificationStageDecomposesVectorTaskPayloadStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @payload = external addrspace(14) global { <3 x float> }
+    define void @main(<3 x float> %v) #0 {
+      store <3 x float> %v, ptr addrspace(14) @payload
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="amplification" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *VArg = F->getArg(0);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) ||
+        Kind != StageOpKind::TaskPayloadStore)
+      continue;
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Offset=*/0), SeenStores * 4);
+    Value *Val = CI->getArgOperand(1);
+    EXPECT_TRUE(Val->getType()->isFloatTy());
+    auto *EEI = dyn_cast<ExtractElementInst>(Val);
+    ASSERT_TRUE(EEI);
+    EXPECT_EQ(EEI->getVectorOperand(), VArg);
+    EXPECT_EQ(cast<ConstantInt>(EEI->getIndexOperand())->getZExtValue(),
+              SeenStores);
+    ++SeenStores;
+  }
+  EXPECT_EQ(SeenStores, 3u);
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
+/// (Roadmap L39) The load-side mirror of
+/// `AmplificationStageDecomposesVectorTaskPayloadStore` above: a
+/// vector-typed task-payload read decomposes into one scalar
+/// `feme.stage.task.payload.load` per vector lane at consecutive byte
+/// offsets, rebuilt with `insertelement` into the original `<3 x float>`
+/// result, rather than reaching `feme.stage.task.payload.load` with a
+/// whole-vector result type.
+TEST(CanonicalizeStageTest, MeshStageDecomposesVectorTaskPayloadLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @payload = external addrspace(14) global { <3 x float> }
+    define <3 x float> @main() #0 {
+      %v = load <3 x float>, ptr addrspace(14) @payload
+      ret <3 x float> %v
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) ||
+        Kind != StageOpKind::TaskPayloadLoad)
+      continue;
+    EXPECT_TRUE(CI->getType()->isFloatTy());
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Offset=*/0), SeenLoads * 4);
+    ++SeenLoads;
+  }
+  EXPECT_EQ(SeenLoads, 3u);
+
+  auto *Ret = cast<ReturnInst>(F->back().getTerminator());
+  Value *RetVal = Ret->getReturnValue();
+  EXPECT_TRUE(RetVal->getType()->isVectorTy());
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<LoadInst>(&I));
+}
+
 } // namespace
