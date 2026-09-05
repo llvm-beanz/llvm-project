@@ -3606,6 +3606,36 @@ lane, rather than reading a genuinely different value per lane the way
 `lowerMeshInputLoad` does for real per-vertex/per-primitive input data. See
 Roadmap.md's L30 row (and its L39/L40 follow-ons) for the full breakdown.
 
+Roadmap L39 has since found and closed a gap in how that same task-payload
+fallback (both the H6i store side and the L30 load side above) handles an
+*aggregate*-typed access: it previously wrapped whatever struct/array/
+vector type the raw SPIR-V-derived load/store instruction already had
+verbatim into a single `feme.stage.task.payload.load`/`.store` call,
+unlike every ordinary stage-IO access, which `loadStageIOValue`/
+`storeStageIOValue`'s own recursion always pre-decomposes to a scalar leaf
+first. A real `float3`/`float4`-shaped `groupshared` payload member (or a
+DXC-emitted whole-struct self-copy of a payload variable, the shape
+`DispatchMesh`'s own payload argument lowers to) reaching
+`feme::cpu::SIMDizePass` with that aggregate type intact tripped
+`FunctionWidener::getWidened`'s own assert against a vector-typed operand,
+since every other `feme.stage.*` call's operands/results are scalar by
+construction. New `loadTaskPayloadValue`/`storeTaskPayloadValue`
+(`CanonicalizeStage.cpp`) mirror `loadStageIOValue`/`storeStageIOValue`'s
+own struct/array/vector recursion, but addressed by a plain byte offset
+(via `DataLayout`) rather than (ElementID, Row, Component), since a task
+payload carries no signature element of its own -- keeping every
+`feme.stage.*` call's own operand/result scalar-only, the invariant
+`SIMDize.cpp`'s widening is designed around, rather than teaching that
+pass to special-case a vector-typed payload operand. This in turn surfaced
+a genuine `TaskPayloadLoad` in the *task/amplification* stage for the
+first time (a payload self-copy decomposes into per-component loads
+there too, not just in the mesh stage L30 above already handled), which
+`TaskPayloadWrapper.cpp` gained its own `lowerTaskPayloadLoad` for,
+mirroring `MeshOutputWrapper.cpp`'s `lowerMeshTaskPayloadLoad` exactly.
+See Roadmap.md's L39 row (and its L41 follow-on, an unrelated pre-existing
+JIT-link crash found incidentally while validating this fix) for the full
+breakdown.
+
 ### G7: Ray-query and traversal foundations
 
 - Define canonical acceleration structures, deterministic builders, and

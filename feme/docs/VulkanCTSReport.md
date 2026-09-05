@@ -25804,3 +25804,102 @@ roadmap rows filed: **L39** (SIMDize divergent-vector gap in the payload
 *store* side, discovered via `offload-test-suite`) and **L40**
 (`feme-cpu-linearize` internal-branch gap, discovered via a real
 `dEQP-VK.mesh_shader.ext.misc.payload_read` re-run).
+
+## Roadmap L39: fixed (task-payload load/store aggregate decomposition), plus L41 filed
+
+**Bug.** `offload-test-suite`'s `SimpleAmplification.test`, unblocked by
+roadmap L30's own JIT-symbol fix, reached `feme-cpu-simdize` for the first
+time and failed there instead: `"function 'main' has a divergent value ''
+of vector type; only a constant-index insertelement chain, ... is
+supported"`. The amplification shader's `groupshared Payload gs_payload`
+declares a single `float3 color` member; its whole-vector write
+(`gs_payload.color = float3(1.0, 0.5, 1.0)`) reached `feme.stage.task.
+payload.store` with that `<3 x float>` type wrapped verbatim.
+
+**Root cause.** Confirmed directly via code inspection (no separate IR
+reduction needed): `CanonicalizeStage.cpp`'s task-payload store fallback
+(roadmap H6i) read `SI->getValueOperand()->getType()` and passed it
+through to `createStageTaskPayloadStore` completely unmodified, unlike
+every ordinary stage-IO store, which `storeStageIOValue`'s own recursion
+always pre-decomposes to a scalar leaf before ever reaching a
+`feme.stage.*` call. `SIMDize.cpp`'s `FunctionWidener::getWidened` asserts
+against a vector-typed operand precisely because every other caller
+already guarantees scalar inputs -- the task-payload fallback was the one
+exception.
+
+**Fix (two separately-committed steps).**
+1. `be61f41ac018`: added `loadTaskPayloadValue`/`storeTaskPayloadValue`
+   (`CanonicalizeStage.cpp`), mirroring `loadStageIOValue`/
+   `storeStageIOValue`'s own struct/array/vector type recursion, but
+   addressed by a plain byte offset (via `DataLayout`) rather than
+   (ElementID, Row, Component), since a task payload carries no signature
+   element of its own. Wired both the load-side (roadmap L30) and
+   store-side (roadmap H6i) fallback sites in `canonicalizeSPIRVStage`
+   through these instead of calling `createStageTaskPayloadLoad`/`Store`
+   directly on the whole aggregate. New unit tests
+   `CanonicalizeStageTest.AmplificationStageDecomposesVectorTaskPayloadStore`/
+   `MeshStageDecomposesVectorTaskPayloadLoad` cover a `<3 x float>`
+   payload member end to end.
+2. `6fe921b15bad`: this decomposition surfaced a second, closely related
+   gap once tested against the real reproducer -- the amplification
+   shader's own SPIR-V (`spirv-dis`-confirmed) contains a whole-struct
+   self-copy of `gs_payload` (`%1 = OpLoad %Payload %gs_payload; OpStore
+   %gs_payload %1`) immediately ahead of `OpEmitMeshTasksEXT`, which
+   DXC/SPIRV-Tools emits as part of lowering `DispatchMesh`'s payload
+   argument. The new load-side decomposition canonicalizes this into a
+   genuine `TaskPayloadLoad` in the *task/amplification* stage for the
+   first time (previously only the *mesh* stage ever produced one, per
+   roadmap L30) -- but `TaskPayloadWrapper.cpp`'s `lowerTaskPayloadStageOps`
+   had no case for it at all (only `TaskPayloadStore`/`EmitMeshTasks`/an
+   `InputLoad` of `gl_DrawID`), diagnosing `"unexpected stage op left for
+   the task payload wrapper"`. Added `lowerTaskPayloadLoad`, mirroring
+   `MeshOutputWrapper.cpp`'s own `lowerMeshTaskPayloadLoad` exactly: reads
+   `Env.Payload + Offset` once (a task payload is workgroup-shared, not
+   per-lane data) and broadcasts that scalar to every active lane. New
+   unit test `TaskPayloadWrapperTest.LowersPayloadLoad` covers the
+   load+store-back shape.
+
+**`ninja check-feme`.** 2540/2599 discovered tests pass (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`, no regressions). All 63
+`FeMeTransformsGraphicsTests` (61 pre-existing + 2 new) and all 298
+`FeMeTransformsCPUTests` (297 pre-existing + 1 new) cases pass.
+
+**Real `offload-test-suite` re-run.** A direct `llvm-lit -v` re-run of
+`SimpleAmplification.test` after each commit confirms: after commit 1, the
+row's own targeted `feme-cpu-simdize` diagnostic is gone, replaced by the
+`"unexpected stage op left"` diagnostic described above; after commit 2,
+that diagnostic is gone too. The test still fails overall, but now on a
+distinct, already-tracked, unrelated pre-existing gap: `"LLVM ERROR:
+unsupported calling convention"`, an abort at a
+`GroupMemoryBarrierWithGroupSync`-equivalent control barrier
+DXC/SPIRV-Tools inserts ahead of `DispatchMesh` (visible as
+`OpControlBarrier` in the amplification shader's own SPIR-V) -- confirmed
+identical, byte-for-byte, to roadmap H19p's own already-documented abort
+via a real `dEQP-VK.compute.pipeline.basic.branch_past_barrier` re-run
+(an entirely unrelated compute shader, no task/mesh/payload involvement
+at all) hitting the exact same message.
+
+**Real `deqp-vk` re-run.**
+- `dEQP-VK.mesh_shader.ext.misc.payload_read` (this row's own closest
+  real CTS coverage, the same case roadmap L30's own CTS section
+  measured): the row's own targeted `feme-cpu-simdize` diagnostic is
+  confirmed gone; the case still fails, but on the already-filed,
+  unrelated roadmap L40 `feme-cpu-linearize` gap instead, exactly as L30's
+  own CTS section already found -- consistent, no regression.
+- `dEQP-VK.mesh_shader.ext.misc.*` (114 cases): completed cleanly with no
+  crash and no regression: 10 Pass, 61 Fail (all on already-tracked gaps),
+  43 `NotSupported` (disabled features).
+- A broader `dEQP-VK.mesh_shader.ext.*` sweep incidentally found an
+  unrelated, pre-existing JIT-link crash in a `mesh_only` (no task stage
+  at all) query-tests case -- confirmed both reproducible in isolation and
+  unaffected by this row's own fix (identical crash with
+  `CanonicalizeStage.cpp`/`TaskPayloadWrapper.cpp` reverted to their
+  pre-L39 state). Filed as new roadmap row **L41** (needs its own scoping
+  pass before a fix can be designed).
+
+**Disposition.** Roadmap **L39 closed** (struck through). No feature or
+extension bit touched (internal CPU-lowering completeness fix only);
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
+change needed. One new roadmap row filed: **L41** (pre-existing JIT-link
+crash in a mesh-only query-tests case, unrelated to task-payload work,
+found incidentally while validating this row's own real CTS impact).
