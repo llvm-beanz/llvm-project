@@ -42,44 +42,41 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L44 or other prerequisites blocking the L-series milestones?
+Can you work on L31 or other prerequisites blocking the L-series milestones?
 
-> **L43's own fix clears the `feme-cpu-simdize` divergent-branch diagnostic, but
-> `dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.mesh_only.inside_rp.single_view.only_primary`
-> still fails, now with a fatal `"LLVM ERROR: unsupported calling convention"`
-> abort during JIT codegen (not a diagnosed `vkCreateGraphicsPipelines` failure
-> -- the whole `deqp-vk` process aborts)**. Root-caused far enough to scope, not
-> yet fully fixed: a real SPIR-V-imported mesh shader's own `OpControlBarrier`
-> -- confirmed via the same captured pre-`LinearizePass` IR L43 used --
-> compiles, via MLIR upstream's own default `ControlBarrierPattern`
-> (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`, since
-> `feme::spirv::populateSPIRVToLLVMTargetPatterns` installs no pattern of its
-> own for `spirv::ControlBarrierOp`), to a call to a mangled external
-> declaration, `declare spir_func void @_Z22__spirv_ControlBarrieriii(i32, i32,
-> i32)` -- the exact same call form roadmap H4b's own `isSPIRVGroupSyncBarrier`
-> (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`) already recognizes by
-> name for a *different* purpose (finding a tessellation-control entry's own
-> patch-constant split point). `feme::cpu::matchBarrierCall`
-> (`feme/lib/Transforms/CPU/BarrierCalls.cpp`) -- the function every
-> stage-specific CPU wrapper pass (`EntryWrapper.cpp`, `GeometryWrapper.cpp`,
-> `HullWrapper.cpp`, `DomainWrapper.cpp`, `PatchConstantWrapper.cpp`) actually
-> calls to find and erase/fence-replace a real barrier before codegen -- only
-> recognizes the DXIL/HLSL intrinsic forms
-> (`llvm.dx.group_memory_barrier_with_group_sync` etc.), never this mangled call
-> form, so for a mesh shader (unlike tessellation-control, which already has its
-> own separate `isSPIRVGroupSyncBarrier` check, just for a different reason) the
-> call survives completely unmodified -- still declared `spir_func`, with no
-> real function body anywhere in the linked module -- all the way to X86 JIT
-> codegen, which has no lowering at all for `CallingConv::SPIR_FUNC` and hits a
-> `llvm_unreachable`-turned-fatal-error (`X86ISelLowering.cpp`'s
-> trampoline-lowering `switch (CC)`, though the actual failing call site needs
-> its own confirmation via a real backtrace, not yet captured). Needs: (1) a
-> real `gdb`/backtrace confirmation of exactly which X86 lowering path aborts
-> (the trampoline-`switch` `llvm_unreachable` found via a source grep is a
-> strong candidate given the exact wording, but unconfirmed against a live
-> stack), and (2) a fix most likely extending `feme::cpu::matchBarrierCall` (or
-> a caller-side helper it can share with `isSPIRVGroupSyncBarrier`) to also
-> recognize `_Z22__spirv_ControlBarrieriii` by name, the same way
-> `isSPIRVGroupSyncBarrier` already does, so `EntryWrapper.cpp`'s existing
-> barrier-erasure/fence-replacement logic actually reaches a mesh shader's own
-> real barrier instead of leaving it as an unresolved external call
+> **L25's own two cases
+> (`Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test`) now clear MLIR
+> SPIR-V import but still fail `vkCreateGraphicsPipelines`, on the expected
+> next-stage legalization gap**: `"failed to legalize operation
+> 'spirv.ImageSampleDrefImplicitLod'/'spirv.ImageSampleDrefExplicitLod'/'spirv.ImageQueryLod'
+> that was explicitly marked illegal"` -- `feme`'s own `SPIRVToLLVMPatterns.cpp`
+> has no conversion pattern for any of the three ops L25 just taught MLIR's
+> SPIR-V dialect to deserialize, confirmed both by a minimal `feme-opt
+> --feme-convert-spirv-to-llvm` repro and at real CTS scale (every one of
+> `dEQP-VK.glsl.texture_functions.{query.texturequerylod.*,texture.*shadow*}`'s
+> 190 + 32 cases fails identically once run against the real `feme` ICD, not
+> just this row's 2 named cases). LLVM's own SPIRV backend intrinsics to target
+> are already known from
+> `llvm/test/CodeGen/SPIRV/hlsl-resources/{SampleCmp,SampleCmpLevelZero,CalculateLevelOfDetail}.ll`:
+> `llvm.spv.resource.samplecmp`/`.samplecmp.clamp` (implicit-LOD dref, mirroring
+> `ImageSampleImplicitLodPattern`'s own `None`/`ConstOffset`/`MinLod`
+> operand-combination handling), `llvm.spv.resource.samplecmplevelzero`
+> (explicit-LOD dref, but only for a literal `Lod = 0.0` constant -- the
+> intrinsic itself has no LOD operand at all, unlike
+> `ImageSampleExplicitLodPattern`'s `samplelevel`, so a nonzero explicit LOD
+> dref sample has no known mapping and should `notifyMatchFailure`), and
+> `llvm.spv.resource.calculate_lod`/`.calculate_lod_unclamped`
+> (`ImageQueryLod`'s clamped/unclamped mip level, needing **two** intrinsic
+> calls combined into one `vector<2xf32>` result via two `llvm.insertelement`s,
+> the reverse direction of the `.ll` file's own
+> single-`OpImageQueryLod`-from-two-calls-lowering, since `feme` converts SPIR-V
+> *into* LLVM IR rather than the other way around). Once these three
+> legalization patterns land, they will very likely expose a *further* blocker:
+> `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp` (the pass that actually
+> implements CPU-side resource-intrinsic semantics) only recognizes
+> `spv_resource_sample`/`spv_resource_samplelevel` today, not any of
+> `spv_resource_samplecmp{,_clamp}`/`spv_resource_samplecmplevelzero`/`spv_resource_calculate_lod{,_unclamped}`
+> -- so real depth-comparison sampling and LOD-query CPU emulation semantics
+> (not just legalization plumbing) remain a substantial follow-on scope of their
+> own, likely needing its own further breakdown once the legalization patterns
+> above are in place and this next blocker is confirmed for real
