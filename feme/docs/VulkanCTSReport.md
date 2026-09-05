@@ -26014,3 +26014,71 @@ feature or extension bit touched (internal CPU-lowering completeness fix
 only); `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 reviewed, no change needed. One new roadmap row filed: **L42** (the
 `DiamondFlattener`-vs-`LoopLinearizer` ordering gap described above).
+
+## Roadmap L41: fixed (masked-atomicrmw uniformity classification), plus L43 filed
+
+**Repro.** `dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.mesh_only.inside_rp.single_view.only_primary`
+(a `mesh_only` case with no task/amplification stage or payload access at
+all) aborted the whole `deqp-vk` process:
+`"deqp-vk: llvm/include/llvm/ExecutionEngine/JITLink/JITLink.h:285: void
+llvm::jitlink::Block::setMutableContent(MutableArrayRef<char>): Assertion
+`MutableContent.data() && \"Setting null content\"' failed."`, reached via
+`vkCreateGraphicsPipelines` -> `CompiledStage::create` -> ORC's `LLJIT`
+compile+link pipeline -> `BasicLayout::apply()`.
+
+**Root cause.** Confirmed via a real `gdb` backtrace, then a per-stage,
+env-gated debug-dump technique added temporarily to `Pipeline.cpp`/
+`CompiledStage.cpp` (reverted before committing) to capture this case's own
+mesh-stage IR at every pipeline phase. The compiled mesh-stage object's
+`.text` section is zero bytes: `opt -O2 -print-changed=diff-quiet` bisection
+showed `IPSCCPPass` legitimately folding a real `br i1 poison, ...` down to
+`unreachable`, given a genuinely poison operand already present in the
+pre-optimizer IR (`icmp ult i32 poison, 32`). Traced further back through
+each CPU-lowering pipeline phase's own dumped IR: `feme::cpu::WaveTTIImpl::
+getValueUniformity` (`feme/lib/Analysis/CPU/WaveUniformity.cpp`) left
+`feme.cpu.masked.atomicrmw.*` calls (this shader's own atomic "allocate a
+unique output slot" counter increment) at the default operand-driven
+uniformity rule. With every operand uniform (a uniform pointer, value and
+always-true mask -- exactly this case's own shape), the call's genuinely
+per-lane-divergent result was wrongly classified uniform, so a real
+consumer branch (deciding whether *this* lane is one of the first `N` to
+get a slot) was never widened by `feme::cpu::FunctionWidener::widen`; its
+final "sever remaining uses of an erased instruction" fallback then
+silently substituted `poison` for the read, which `IPSCCPPass` later
+legitimately folds into `unreachable`, producing an empty compiled function
+that crashes JITLink instead of failing to compile cleanly.
+
+**Fix.** Classify `feme.cpu.masked.atomicrmw.*` calls `NeverUniform` by
+name in `WaveTTIImpl::getValueUniformity`, mirroring the existing
+`feme.cpu.mask.any` special case (this call is an ordinary `CallInst`, not
+an `IntrinsicInst`, and `Analysis/CPU` cannot depend on `Transforms/CPU`'s
+`MaskIntrinsics.h` without an include cycle). New lit test
+`masked_atomicrmw_is_divergent` in `feme/test/Analysis/CPU/uniformity.ll`.
+`ninja check-feme` passes in full (2541/2600 discovered, 59 pre-existing
+`Unsupported`, 0 `Failed`, up by exactly the 1 new lit test this row adds).
+
+**Measured impact.** A direct re-run of the cited case confirms the crash
+is gone, replaced by a clean, diagnosed
+`"feme-cpu-simdize: function 'main' has a divergent branch; the divergence
+transform (feme::cpu::LinearizePass) did not remove it, or produced a shape
+this pass cannot widen"` error at `vkCreateGraphicsPipelines` (`Fail`, not a
+crash). A broader real sweep of the entire
+`dEQP-VK.mesh_shader.ext.query.*mesh_only*` group -- 12,340 cases, the full
+scope this row's own scoping question asked -- confirms the fix at scale:
+the sweep completes cleanly end to end with zero crashes (was: aborted the
+whole `deqp-vk` process partway through); 12,338 `NotSupported` (an
+unrelated, pre-existing `meshShaderQueries not supported` gap in this
+environment's own feature reporting) and exactly 2 `Failed`, both on the
+new, already-triaged L43 `feme-cpu-linearize` diagnostic above rather than a
+crash.
+
+**Disposition.** Roadmap **L41 closed** (struck through). No feature or
+extension bit touched (an internal CPU uniformity-analysis correctness fix
+only, restoring already-documented divergence-source intent -- see
+`FeMeCPUDesign.md`'s "Phase 2: Uniformity Analysis" section, updated with
+this call's own divergence-source rule); `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, no change needed. One new roadmap
+row filed: **L43** (the `feme-cpu-linearize` gap this fix newly surfaces --
+`LinearizePass` still does not know how to turn a branch depending on a
+masked-atomicrmw's own per-lane result into real masked, straight-line
+code).
