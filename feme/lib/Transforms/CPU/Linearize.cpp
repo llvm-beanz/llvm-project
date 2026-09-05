@@ -703,7 +703,8 @@ bool DiamondFlattener::run() {
 /// really branching away.
 class LoopLinearizer {
 public:
-  LoopLinearizer(Function &F, CycleInfo &CI) : F(F), CI(CI) {}
+  LoopLinearizer(Function &F, CycleInfo &CI, UniformityInfo &UI)
+      : F(F), CI(CI), UI(UI) {}
 
   /// Validates and linearizes every leaf cycle in \p F matching the shape
   /// this pass supports. Returns whether \p F was changed.
@@ -712,6 +713,28 @@ public:
 private:
   Function &F;
   CycleInfo &CI;
+
+  /// Roadmap L40: computed once, before any cycle in \p F is linearized
+  /// (see `LinearizePass::run`), and deliberately *not* recomputed per
+  /// cycle -- `foldRedundantFlowBlocksInCycle`/
+  /// `peelConstantFlowPredecessorsInCycle` below mutate (and, for a fully
+  /// redundant "Flow" block, delete) blocks belonging to whichever cycle
+  /// is currently being linearized, which would leave `CI` (and any
+  /// `UniformityInfo` built from it afterward) holding dangling
+  /// `BasicBlock` pointers for any *other*, not-yet-processed cycle that
+  /// still structurally contains one of those now-deleted blocks (e.g. an
+  /// outer loop whose body contains the leaf cycle currently being
+  /// linearized) -- recomputing a "fresh" `UniformityInfo` against the
+  /// same, already-mutated `CI` here previously crashed
+  /// `GenericUniformityInfo`'s own cycle traversal exactly this way on a
+  /// real, nested-loop `dEQP-VK.mesh_shader.ext.misc.maximize_primitives`
+  /// shader. The original, pre-mutation `UI` remains valid for every
+  /// block this pass still cares about below (`Header`/`Latch` are never
+  /// peeled or folded away, and `PeeledFrom` -- not `UI` -- is what
+  /// disambiguates a peeled pass-through block from a genuine divergent
+  /// check; see `chainToleratingUniformExits`'s own comment) -- so there
+  /// is no need to recompute it at all.
+  UniformityInfo &UI;
 
   /// The exit-check shape a single loop block can have: a conditional
   /// branch where exactly one successor is the loop's shared exit block and
@@ -1246,9 +1269,9 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // decision as "the" original source and `check`'s as merely a
   // downstream user of a value entangled with it -- `PeeledFrom` (a
   // structural, not a uniformity-based, proof) is what actually
-  // distinguishes them below.
-  DominatorTree FreshDT(F);
-  UniformityInfo FreshUI = computeWaveUniformity(F, FreshDT, CI);
+  // distinguishes them below. See this class's own `UI` member comment
+  // for why that pre-mutation `UniformityInfo` (not a fresh recompute
+  // against this cycle's now-mutated `CI`) is exactly what is needed here.
 
   LLVMContext &Ctx = F.getContext();
   Type *I1Ty = Type::getInt1Ty(Ctx);
@@ -1308,7 +1331,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
 
     std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
-    if (!HeaderExit || !FreshUI.isDivergentTerminator(HeaderExit->Br))
+    if (!HeaderExit || !UI.isDivergentTerminator(HeaderExit->Br))
       return false; // No divergence: leave this real uniform loop alone.
 
     MaskPair Masks = makeActivePNPair();
@@ -1327,8 +1350,8 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
 
   std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
   std::optional<ExitCheck> LatchExit = matchExitCheck(*Latch, ExitBlock);
-  bool HeaderDivergent = HeaderExit && FreshUI.isDivergentTerminator(HeaderExit->Br);
-  bool LatchDivergent = LatchExit && FreshUI.isDivergentTerminator(LatchExit->Br);
+  bool HeaderDivergent = HeaderExit && UI.isDivergentTerminator(HeaderExit->Br);
+  bool LatchDivergent = LatchExit && UI.isDivergentTerminator(LatchExit->Br);
 
   // Every other cycle block, if any, must instead be the single "Flow
   // merge" exit-check block described above (see the file comment).
@@ -1374,7 +1397,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // above), tolerated (left completely untouched) by
     // `chainToleratingUniformExits` below rather than treated as this
     // cycle's own real check. `PeeledFrom` (see above) always wins this
-    // classification over `FreshUI.isDivergentTerminator` when it applies:
+    // classification over `UI.isDivergentTerminator` when it applies:
     // a block already structurally proven redundant by the peel is never
     // a pass-through/real-check ambiguity `UniformityInfo` needs to
     // resolve.
@@ -1389,7 +1412,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                         "unsupported (roadmap milestone 6 deviation)");
         return false;
       }
-      if (PeeledFrom.contains(BB) || !FreshUI.isDivergentTerminator(EC->Br))
+      if (PeeledFrom.contains(BB) || !UI.isDivergentTerminator(EC->Br))
         continue; // A separate, genuine uniform check: a pass-through.
       if (CheckBlock) {
         diagnose(F, "loop at '" + Header->getName() +
@@ -1405,11 +1428,11 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       return false; // No divergence anywhere here either: leave alone.
 
     std::optional<SmallVector<BasicBlock *, 4>> PreChain =
-        chainToleratingUniformExits(Header, CheckBlock, ExitBlock, FreshUI,
+        chainToleratingUniformExits(Header, CheckBlock, ExitBlock, UI,
                                     PeeledFrom);
     std::optional<SmallVector<BasicBlock *, 4>> PostChain =
         chainToleratingUniformExits(CheckExit->StayInLoop, Latch, ExitBlock,
-                                    FreshUI, PeeledFrom);
+                                    UI, PeeledFrom);
     if (!PreChain || !PostChain) {
       diagnose(F, "loop at '" + Header->getName() +
                       "' has an internal branch in '" + CheckBlock->getName() +
@@ -1545,14 +1568,17 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     // invalidated `DT`/`CI`; `PostDominatorTree` was already block-scoped
     // above). Loops are structurally untouched by it, but recompute fresh
     // regardless, since it is cheap next to getting this wrong.
-    // Roadmap L40: `LoopLinearizer` no longer takes a `UniformityInfo` at
-    // construction -- it recomputes one internally, per cycle, right
-    // after any of its own CFG-simplifying folds run (see
-    // `linearizeCycle`'s own comment on why a single, whole-function
-    // `UniformityInfo` computed up front can go stale partway through).
+    // Roadmap L40: `LoopLinearizer` takes this single, whole-function
+    // `UniformityInfo` (computed once here, before any cycle is
+    // linearized) and deliberately never recomputes its own -- see the
+    // `UI` member's own comment on why recomputing one per cycle, against
+    // that cycle's own already-mutated `CycleInfo`, is unsound (it
+    // previously crashed on a real, nested-loop shader).
+    DominatorTree DT2(F);
     CycleInfo CI2;
     CI2.compute(F);
-    Changed |= LoopLinearizer(F, CI2).run();
+    UniformityInfo UI2 = computeWaveUniformity(F, DT2, CI2);
+    Changed |= LoopLinearizer(F, CI2, UI2).run();
 
     // `DiamondFlattener`/`LoopLinearizer` only lower a `feme.stage.discard`/
     // `.demote`/`.is_helper` call inside the divergent-diamond and
