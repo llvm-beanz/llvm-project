@@ -42,37 +42,44 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L43 or other prerequisites blocking the L-series milestones?
+Can you work on L44 or other prerequisites blocking the L-series milestones?
 
-> **L41's own fix correctly surfaces a real CTS mesh shader's atomic "allocate a
-> unique output slot" branch as divergent for the first time, but
-> `vkCreateGraphicsPipelines` still fails at `feme-cpu-simdize` instead of
-> `feme-cpu-linearize` ever converting it**:
-> `dEQP-VK.mesh_shader.ext.query.no_queries.*.mesh_only.*` (both of the 2 real,
-> feature-supported cases in the 12,340-case `query.*.mesh_only.*` sweep L41
-> ran) now fail cleanly (no more JIT-link crash) with `"error: feme-cpu-simdize:
-> function 'main' has a divergent branch; the divergence transform
-> (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass
-> cannot widen"` at `vkCreateGraphicsPipelines`. The branch in question guards
-> this shader's own per-lane use of a `feme.cpu.masked.atomicrmw.*` result
-> (`icmp ult i32 %old, 32` deciding whether *this* lane is one of the first `N`
-> to get an output slot, per L41's own root-cause) -- before L41's fix,
-> `feme::cpu::WaveTTIImpl` wrongly classified this branch uniform, so
-> `feme::cpu::LinearizePass`'s own `DiamondFlattener`/`LoopLinearizer` never
-> even attempted to linearize it (nothing to do for a "uniform" branch); now
-> that it is correctly seen as divergent by both passes, `LinearizePass` still
-> does not turn it into real masked, straight-line code the way it already does
-> for an ordinary divergent `if`, since a branch depending on a
-> masked-atomicrmw's own per-lane result is a shape neither `DiamondFlattener`
-> nor `LoopLinearizer` has an existing case for (this branch's own two arms do
-> not themselves contain another masked atomicrmw, a stage-IO store or any other
-> op `DiamondFlattener`'s existing masking rules were written against). Needs
-> its own real IR reduction of this exact case's pre-`LinearizePass` IR
-> (captured once already via the env-gated `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`
-> technique documented in L41 and L42's own rows,
-> `feme/lib/Target/CPU/Pipeline.cpp`, but not committed anywhere) to design a
-> fix: most likely a new `DiamondFlattener` case recognizing a branch whose
-> condition depends on (transitively) a `feme.cpu.masked.atomicrmw.*` call as an
-> ordinary divergent `if` to mask-flatten, mirroring how it already handles
-> other divergent conditions, rather than something specific to the atomicrmw
-> call itself
+> **L43's own fix clears the `feme-cpu-simdize` divergent-branch diagnostic, but
+> `dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.mesh_only.inside_rp.single_view.only_primary`
+> still fails, now with a fatal `"LLVM ERROR: unsupported calling convention"`
+> abort during JIT codegen (not a diagnosed `vkCreateGraphicsPipelines` failure
+> -- the whole `deqp-vk` process aborts)**. Root-caused far enough to scope, not
+> yet fully fixed: a real SPIR-V-imported mesh shader's own `OpControlBarrier`
+> -- confirmed via the same captured pre-`LinearizePass` IR L43 used --
+> compiles, via MLIR upstream's own default `ControlBarrierPattern`
+> (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`, since
+> `feme::spirv::populateSPIRVToLLVMTargetPatterns` installs no pattern of its
+> own for `spirv::ControlBarrierOp`), to a call to a mangled external
+> declaration, `declare spir_func void @_Z22__spirv_ControlBarrieriii(i32, i32,
+> i32)` -- the exact same call form roadmap H4b's own `isSPIRVGroupSyncBarrier`
+> (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`) already recognizes by
+> name for a *different* purpose (finding a tessellation-control entry's own
+> patch-constant split point). `feme::cpu::matchBarrierCall`
+> (`feme/lib/Transforms/CPU/BarrierCalls.cpp`) -- the function every
+> stage-specific CPU wrapper pass (`EntryWrapper.cpp`, `GeometryWrapper.cpp`,
+> `HullWrapper.cpp`, `DomainWrapper.cpp`, `PatchConstantWrapper.cpp`) actually
+> calls to find and erase/fence-replace a real barrier before codegen -- only
+> recognizes the DXIL/HLSL intrinsic forms
+> (`llvm.dx.group_memory_barrier_with_group_sync` etc.), never this mangled call
+> form, so for a mesh shader (unlike tessellation-control, which already has its
+> own separate `isSPIRVGroupSyncBarrier` check, just for a different reason) the
+> call survives completely unmodified -- still declared `spir_func`, with no
+> real function body anywhere in the linked module -- all the way to X86 JIT
+> codegen, which has no lowering at all for `CallingConv::SPIR_FUNC` and hits a
+> `llvm_unreachable`-turned-fatal-error (`X86ISelLowering.cpp`'s
+> trampoline-lowering `switch (CC)`, though the actual failing call site needs
+> its own confirmation via a real backtrace, not yet captured). Needs: (1) a
+> real `gdb`/backtrace confirmation of exactly which X86 lowering path aborts
+> (the trampoline-`switch` `llvm_unreachable` found via a source grep is a
+> strong candidate given the exact wording, but unconfirmed against a live
+> stack), and (2) a fix most likely extending `feme::cpu::matchBarrierCall` (or
+> a caller-side helper it can share with `isSPIRVGroupSyncBarrier`) to also
+> recognize `_Z22__spirv_ControlBarrieriii` by name, the same way
+> `isSPIRVGroupSyncBarrier` already does, so `EntryWrapper.cpp`'s existing
+> barrier-erasure/fence-replacement logic actually reaches a mesh shader's own
+> real barrier instead of leaving it as an unresolved external call
