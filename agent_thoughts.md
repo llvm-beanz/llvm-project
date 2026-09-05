@@ -63098,3 +63098,141 @@ change, since it needs its own real IR reduction before a fix can even be
 designed (is the right shape to teach `DiamondFlattener`, or does
 `LoopLinearizer`'s own peel need to learn to see through this?). Kept the
 roadmap flat (no nested lowercase letters) per the standing instruction.
+
+# L42: LoopLinearizer nested-uniform-diamond pass-through region
+
+## Task
+
+Work on L42 (or other prerequisites blocking the L-series milestones): fix
+`dEQP-VK.mesh_shader.ext.misc.payload_read`'s `vkCreateGraphicsPipelines`
+failure, `"feme-cpu-linearize: function 'main': loop at '' has an internal
+branch in '' that does not reach the loop's exit block; unsupported
+(roadmap milestone 6 deviation)"`.
+
+## Investigation
+
+The roadmap row's own hypothesis was that `DiamondFlattener` flattens the
+loop's plain uniform trip-count check via a `select`-based masking,
+defeating `peelConstantFlowPredecessors`'s literal-constant precondition
+(`isa<ConstantInt>`). I set out to confirm this with a real captured
+pre-`LinearizePass` IR dump of the exact CTS shader (left over from the
+prior L40/L41 sessions, `/tmp/l42_real_pre_linearize.ll`), running
+`feme-opt --llvm -passes='print<feme-cpu-uniformity>' -S` on it.
+
+This immediately disproved the hypothesis: the loop's own blocks (header,
+trip-count check, per-iteration compare, merge/exit decision) are **all
+uniform** -- zero divergent values anywhere inside the loop. The only
+divergent values in the whole function (18 of them) are in later blocks
+reading the task payload via the real `feme.stage.task.payload.load.f32`
+stage-op call, which is explicitly `NeverUniform` per
+`WaveTTIImpl::getValueUniformity`. The loop's own per-iteration compare
+instead reads a raw `addrspace(14)` load -- not that stage-op call -- so
+it falls through to the generic, purely structural `Default` uniformity
+rule, which correctly finds it uniform (no divergence source feeds it,
+directly or transitively).
+
+Given a loop with literally no divergence anywhere in it, the only
+correct linearization outcome is to leave the whole loop completely
+untouched -- so the actual bug had to be in how `LoopLinearizer` classified
+`OtherCondBrBlocks`, not in `DiamondFlattener`'s own flattening scope. I
+re-read `matchExitCheckWithRelay`/`straightChain`/`chainToleratingUniformExits`
+in full and confirmed: the old classification loop required *every*
+non-Header/Latch `CondBr` block to itself independently pass
+`matchExitCheckWithRelay` up front, with no path for "this block is a
+genuine, uniform pass-through that isn't related to the exit block at all,
+because its own real destination downstream is a nested uniform check's
+own merge block, not the loop's exit block." A loop with zero divergent
+`CondBr` blocks at all still needed at least one to identify as the "exit
+check" under the old model, so it had nothing to fall back on and
+diagnosed instead of leaving the loop alone.
+
+## Design and implementation
+
+Replaced the linear one-relay-hop-per-step chain tolerance
+(`chainToleratingUniformExits`) with a full recursive region walk,
+`collectUniformPassThroughRegion(From, To, ExitBlock, C, UI, PeeledFrom)`:
+a worklist BFS that treats `UncondBr` as a pure relay and `CondBr` as a
+branching region (following both successors) as long as the block isn't
+genuinely divergent (or is in `PeeledFrom`), stopping cleanly at `To` or
+at `ExitBlock`, and failing if it escapes the cycle or hits an
+unrecognized terminator shape.
+
+Rewrote `OtherCondBrBlocks` classification to be divergence-first: (1)
+scan for genuinely divergent blocks via `UI.isDivergentTerminator`
+(excluding anything `peelConstantFlowPredecessorsInCycle` already peeled),
+diagnosing ">1 divergent exit check" if more than one, returning "leave
+alone" if zero; (2) `matchExitCheckWithRelay` on the single identified
+check block; (3) two `collectUniformPassThroughRegion` calls (header to
+check block; check's stay-in-loop arm to latch); (4) a final pass
+confirming every `OtherCondBrBlocks` entry is covered by the check block
+or one of the two regions.
+
+Iterating on this took three rounds against the existing lit suite:
+
+1. First attempt deferred classification entirely to whether a block could
+   be matched by *something* downstream, which silently left a genuinely
+   divergent single `OtherCondBrBlocks` entry untouched instead of
+   diagnosing it -- a real regression on
+   `unsupported-loop-internal-branch.ll`. Fixed by switching to the
+   divergence-first design above (identify the divergent candidate set
+   *before* attempting any relay/region match, not after a match attempt
+   fails).
+2. Second, `loop-uniform-check-fused-with-divergent-exit.ll` (the L40
+   test, encoding the same shape one nesting level shallower) still failed,
+   with `collectUniformPassThroughRegion`'s header-to-check-block walk
+   escaping the cycle at the loop's exit-guard block instead of stopping
+   cleanly at the check block. Two rounds of hand-tracing the post-prepare
+   IR predicted success and were wrong both times; I only found the real
+   cause once I added instrumented `errs()` prints directly in the region
+   walk and the call sites, confirming the walk's escape happened inside
+   the *first* (`Pre`) region call specifically. Re-reading
+   `peelConstantFlowPredecessors`'s own comment and implementation clarified
+   why: it redirects a peeled predecessor's edge to skip the check block
+   entirely and land straight on whichever of the check block's own
+   successors its constant selects -- which, for the "exit now" arm, is the
+   loop's real exit block itself, not the check block. So a valid
+   pass-through region can legitimately terminate at the exit block
+   directly, not only at the identified check block.
+3. Added an `ExitBlock` parameter to `collectUniformPassThroughRegion` and
+   accepted either terminus. That was the actual fix -- all 21 pre-existing
+   Linearize lit tests then passed.
+
+I removed all temporary debug `errs()` prints before committing, per this
+project's established convention.
+
+## Validation
+
+- Added a new lit test, `loop-nested-uniform-diamond-pass-through.ll`,
+  specifically exercising the two-level nesting the existing L40 test
+  doesn't (its own region only needs one nested check, not two) --
+  confirms `collectUniformPassThroughRegion`'s branching-region capability
+  is actually needed and actually works, not just coincidentally
+  sufficient for the single-relay-hop shape alone.
+- Full Linearize lit suite (22 tests, including the new one): all pass.
+- `ninja check-feme`: 2541/2600 discovered, 59 pre-existing `Unsupported`,
+  0 `Failed` (no change in pass/fail counts besides the 1 new lit test
+  this change adds).
+- Direct re-run of `dEQP-VK.mesh_shader.ext.misc.payload_read` against the
+  fix confirms the `feme-cpu-linearize` diagnostic is gone: pipeline
+  creation now succeeds and compilation reaches actual JIT compilation
+  (SPIR-V/IR present in the log). It then hits the pre-existing,
+  already-triaged L41 JIT-link crash (this shader was simply never far
+  enough along to reach that crash before this fix landed) -- not a new
+  gap, and out of this change's own scope, since L41 already tracks and
+  root-causes it.
+
+## Documentation
+
+Struck L42 on the roadmap, recording the real root cause (an
+`OtherCondBrBlocks` classification gap in `LoopLinearizer`, not a
+`DiamondFlattener` gap as originally hypothesized) and fix. Appended a
+matching section to `VulkanCTSReport.md`. No feature/extension bit
+touched -- an internal CPU divergence-linearization correctness fix only --
+so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` needed no
+changes, and `FeMeCPUDesign.md` was left as-is too, consistent with how
+L40's own chain-tolerance fix (a comparable implementation-detail-level
+change to the same pass) was handled: the design doc's existing
+loop-linearizer section already describes the general shape ("only a
+genuine loop-control edge is left to `LoopLinearizer`") without
+prescribing chain-vs-region algorithmic detail. No new roadmap row filed:
+this case's next blocker is already tracked under the existing L41 row.
