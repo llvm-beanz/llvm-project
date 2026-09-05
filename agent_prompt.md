@@ -42,22 +42,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L22 or other prerequisites blocking the L-series milestones?
+Can you work on L25 or other prerequisites blocking the L-series milestones?
 
-> **13 of L3's own 35 cases still fail at `vkCreateGraphicsPipelines` (or the
-> mesh-shader-pipeline equivalent), now with `VkResult = -3`
-> (`VK_ERROR_INITIALIZATION_FAILED`) instead of a render-pass rejection**: a
-> `Feature/Textures/*`-dominated sub-bucket (`Sample`, `SampleBias`,
-> `SampleCmp`, `CalculateLevelOfDetail`, and their `Vk.SampledTexture2D`
-> YAML-generated siblings -- 8 of the 13), plus
-> `Feature/Semantics/{DomainSystemValues,HullSystemValues,InterpolationModifiers,MatrixSemantics}.test`
-> and `Graphics/MeshShaders/SimpleAmplification.test`. One case
-> (`Feature/Textures/Sample.test`) was reduced far enough during L3's own
-> investigation to identify its real cause as `"failed to legalize operation
-> 'spirv.ImageSampleImplicitLod' that was explicitly marked illegal"` -- a
-> `ConstOffset`-image-operand variant of image sampling
-> `SPIRVToLLVMPatterns.cpp` does not yet cover -- but this has not been
-> confirmed as the shared cause for the other 7 texture cases, nor investigated
-> at all for the 5 non-texture cases, which look unrelated by name
-> (tessellation-domain/hull system values, matrix semantics, mesh-shader
-> amplification) and likely need their own separate reductions
+> **2 of L22's own 13 cases
+> (`Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test`) still fail at
+> `vkCreateGraphicsPipelines`, now on a confirmed out-of-scope upstream MLIR
+> deserializer gap**: `"unhandled opcode 89"` (`OpImageSampleDrefImplicitLod`)
+> and `"unhandled opcode 105"` (`OpImageQueryLod`) respectively -- the MLIR
+> SPIR-V dialect's own deserializer has no case for either opcode at all
+> (confirmed via the same `spirv-as`/`feme-translate --import-spirv`
+> real-IR-reduction technique used for H21l's
+> `OpEmitStreamVertex`/`OpEndStreamPrimitive` gap). This is a hard upstream
+> (MLIR, not feme) blocker, mirroring H21l's own precedent exactly: no amount of
+> feme-side legalization work can help until MLIR's SPIR-V dialect gains
+> deserialization support for these two ops (each needs its own new `spirv.*` op
+> plus (de)serialization plumbing)
