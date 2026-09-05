@@ -26826,3 +26826,86 @@ change needed. `FeMeGraphicsDesign.md`'s existing `samplecmp`/
 `SampleCmp` narrative mention reviewed: no deviation to record (describes
 the CPU-lowering call convention generically, not a `Plain2D`-only scope
 this row's widening would contradict).
+
+## Roadmap L50: sub-item (f) investigated, root cause narrowed and re-filed as L51
+
+**Scope.** L50 broke L48's 5 remaining depth-comparison-sampling gaps
+(a)-(e) plus a newly-discovered `CubeArray`-shadow rendering bug (f) into
+6 independently-sized rows. This session scoped down to sub-item (f)
+alone -- the `samplercubearrayshadow_fragment` 32x32-pixel rendering
+mismatch -- since (a)/(b)/(e) need brand-new infrastructure/design work
+and (c)/(d) are not yet confirmed present in a real CTS failure.
+
+**Investigation.** Reproduced the failure via a real `deqp-vk` re-run
+against the real `feme` ICD (`Fail (Image mismatch)`, confirmed via
+`vulkaninfo --summary` showing `FeMe CPU Vulkan Device`). Extracted and
+pixel-diffed the actual `Result`/`Reference`/`ErrorMask` PNGs from the
+`.qpa` log (base64-decoded via Python + Pillow), confirming a solid,
+uniformly-oriented 32x32-pixel block at `x:[96,127] y:[0,31]` (1024
+pixels), consistent with a value-level error rather than a boundary/
+roundoff artifact. Read VK-GL-CTS's own reference-renderer source
+(`vktShaderRenderTextureFunctionTests.cpp`, `tcuTexture.cpp`) in detail:
+
+- Confirmed `texCubeArrayMipmapShadow`'s per-array-element fill scales
+  its stored depth values by a `layerCorr` factor (`1.0` for array
+  element 0, `0.5` for element 1 in this 2-element test) that has no
+  analogue in the passing `Cube`-shadow (single-element) sibling --
+  initially the most promising lead for a real, CubeArray-specific bug.
+- Added a temporary, `FEME_DEBUG_CUBEARRAY_CMP`-env-var-gated `fprintf`
+  to `femeCpuImageSampleCmpCubeArrayF32`/`femeRTSampleCmp2DAtLevel`
+  (`FeMeRuntimeCPU.c`, reverted before committing -- no functional code
+  changed this session) and re-ran the exact failing CTS case, capturing
+  17,408 real per-invocation samples (face, array-layer, computed
+  `CubeIndex`/`Layer`, UV, mip level(s)/blend fraction, fetched texel
+  value, `Dref`, and comparison result).
+- Cross-checked every logged quantity against VK-GL-CTS's own reference
+  formulas: (1) `femeRTSelectCubeFace`/`femeRTRoundClampLayer`'s
+  `Layer = CubeIndex*6 + Face` matches `TextureCubeArrayView::
+  selectLayer`/`getCubeArrayFaceIndex` (`tcuTexture.cpp`) exactly; (2)
+  hand-derived this case's own real `computeLodFromDerivates` value from
+  its `Vec4(-1,-1,1.01,-0.5)`..`Vec4(1,1,1.01,1.5)` coordinate range and
+  the array's 64x64 face size -- it comes out *negative* (a magnifying,
+  not minifying, footprint), so the real reference renderer clamps to
+  mip level 0 the same way this dref-sample path's hardcoded `Lod=0`
+  does; this is a coincidental no-op here, *not* a re-confirmation of the
+  "hardcoded Lod=0" limitation named in sub-item (e) (already-passing
+  `samplercubeshadow_fragment` computes a real, sizeable *positive* LOD
+  for its own 256x256 face and still passes, ruling out "always Lod=0"
+  as this row's own cause); (3) independently reimplemented VK-GL-CTS's
+  own `fillWithGrid`/`layerCorr`/forced-identical-corner-texel fill
+  algorithm in Python and compared every one of the 17,408 logged
+  fetched texel values against it bit-for-bit -- only 4 apparent
+  "mismatches" appeared, and all 4 were exactly the deliberate
+  forced-identical-corner-texel special case (not real errors),
+  confirming the fetched texture content is completely correct; (4)
+  `femeRTApplyCompare`'s `VkCompareOp` mapping is the same shared,
+  already-proven-correct helper `samplercubeshadow_fragment` (passing)
+  uses.
+
+**Disposition.** With face/layer selection, LOD clamping, texel-fetch
+content, and depth-compare application all independently proven correct
+against the real reference formulas, sub-item (f) is **not fixed this
+session** -- but its root-cause search space is now precisely narrowed:
+the remaining candidate lies *outside* `femeCpuImageSampleCmpCubeArrayF32`
+entirely, most likely in rasterizer/vertex-attribute interpolation of
+this test's 4-wide `texCoord` (whose `w` component doubles as both the
+array-layer selector and the depth-compare reference value, a
+combination unique to this one case in the `*shadow*` CTS group), given
+the mismatch's shape (a solid quadrant, consistent with a
+triangle-diagonal-aligned interpolation discrepancy, not a thin
+boundary-only artifact a sampling-math bug would produce). Filed as a
+new roadmap row, **L51**, since this is a materially different,
+cross-cutting scope (rasterization/attribute interpolation) from L50's
+own remaining sub-items (a)-(e) (all real `SPIRVResourceLowering.cpp`/
+runtime image-sampling gaps). `Roadmap.md`'s L50 sub-item (f) text
+updated in place with these findings (not struck through, since the
+underlying bug is still open); L51 added with the next concrete
+investigation step. `ninja check-feme`: 2568/2568 supported discovered
+tests pass, 59 pre-existing `Unsupported`, 0 `Failed` -- confirmed after
+reverting all temporary debug instrumentation, so this is a pure
+investigation session with no functional code change. `samplercubearrayshadow_fragment`
+re-confirmed still `Fail (Image mismatch)` post-revert (expected, no
+functional change). No feature/extension bit touched;
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
+change needed. `FeMeGraphicsDesign.md` reviewed, no deviation to record
+(no design decision made or changed this session, only an investigation).
