@@ -42,39 +42,37 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L42 or other prerequisites blocking the L-series milestones?
+Can you work on L43 or other prerequisites blocking the L-series milestones?
 
-> **L40's own fix reaches `dEQP-VK.mesh_shader.ext.misc.payload_read`'s
-> verification loop successfully, but the case still fails, now on a distinct,
-> later `feme-cpu-linearize` diagnostic**: `"loop at '' has an internal branch
-> in '' that does not reach the loop's exit block; unsupported (roadmap
-> milestone 6 deviation)"`. Root-caused (via a real captured pre-`LinearizePass`
-> IR dump of this exact shader): `DiamondFlattener` runs *before*
-> `LoopLinearizer` inside `LinearizePass::run`, and
-> `DiamondFlattener::isLoopControlEdge` only recognizes a block's own branch as
-> loop control flow when one of its two successors is literally the cycle's
-> header (a backedge) or one of `CycleInfo::getExitBlocks`'s own exit blocks --
-> it has no visibility into a block whose branch is not *directly* a
-> loop-control edge but still feeds, indirectly, into the loop's own real exit
-> decision downstream (e.g. by routing a literal constant into a separate merge
-> block's own condition `phi`, the exact `Flow`-fusion shape L40's own
-> `peelConstantFlowPredecessors` targets). For this real CTS shader (unlike
-> L40's own simpler hand-reduced repro), `DiamondFlattener` flattens this loop's
-> own plain uniform trip-count check via its own `select`-based masking before
-> `LoopLinearizer` ever sees it, replacing the literal-constant incoming value
-> L40's own peel logic requires (`isa<ConstantInt>`) with a non-constant
-> `select`-derived expression instead -- defeating the peel entirely, so
-> `LoopLinearizer` again sees two unclassifiable `OtherCondBrBlocks` entries,
-> just a structurally different shape of the same underlying problem L40 fixed
-> one instance of. Needs its own real IR reduction of this exact shader's
-> captured pre-`LinearizePass` IR (`/tmp/l40_real_pre_linearize.ll`, captured
-> but not yet committed anywhere -- a future session should re-capture it via
-> the same env-gated dump technique documented in this row,
-> `feme/lib/Target/CPU/Pipeline.cpp`, right before `LinearizePass` runs) to
-> design a fix: either teach `DiamondFlattener::isLoopControlEdge` to also
-> recognize this indirect shape (leaving such a diamond unflattened for
-> `LoopLinearizer`'s own peel to handle instead), or teach `LoopLinearizer` to
-> see through a `select`-derived (not just a literal constant) condition once it
-> can prove -- the same way `peelConstantFlowPredecessors` already does for a
-> literal constant -- that a given incoming value is compile-time equivalent to
-> one of the loop's own known trip-count outcomes
+> **L41's own fix correctly surfaces a real CTS mesh shader's atomic "allocate a
+> unique output slot" branch as divergent for the first time, but
+> `vkCreateGraphicsPipelines` still fails at `feme-cpu-simdize` instead of
+> `feme-cpu-linearize` ever converting it**:
+> `dEQP-VK.mesh_shader.ext.query.no_queries.*.mesh_only.*` (both of the 2 real,
+> feature-supported cases in the 12,340-case `query.*.mesh_only.*` sweep L41
+> ran) now fail cleanly (no more JIT-link crash) with `"error: feme-cpu-simdize:
+> function 'main' has a divergent branch; the divergence transform
+> (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass
+> cannot widen"` at `vkCreateGraphicsPipelines`. The branch in question guards
+> this shader's own per-lane use of a `feme.cpu.masked.atomicrmw.*` result
+> (`icmp ult i32 %old, 32` deciding whether *this* lane is one of the first `N`
+> to get an output slot, per L41's own root-cause) -- before L41's fix,
+> `feme::cpu::WaveTTIImpl` wrongly classified this branch uniform, so
+> `feme::cpu::LinearizePass`'s own `DiamondFlattener`/`LoopLinearizer` never
+> even attempted to linearize it (nothing to do for a "uniform" branch); now
+> that it is correctly seen as divergent by both passes, `LinearizePass` still
+> does not turn it into real masked, straight-line code the way it already does
+> for an ordinary divergent `if`, since a branch depending on a
+> masked-atomicrmw's own per-lane result is a shape neither `DiamondFlattener`
+> nor `LoopLinearizer` has an existing case for (this branch's own two arms do
+> not themselves contain another masked atomicrmw, a stage-IO store or any other
+> op `DiamondFlattener`'s existing masking rules were written against). Needs
+> its own real IR reduction of this exact case's pre-`LinearizePass` IR
+> (captured once already via the env-gated `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`
+> technique documented in L41 and L42's own rows,
+> `feme/lib/Target/CPU/Pipeline.cpp`, but not committed anywhere) to design a
+> fix: most likely a new `DiamondFlattener` case recognizing a branch whose
+> condition depends on (transitively) a `feme.cpu.masked.atomicrmw.*` call as an
+> ordinary divergent `if` to mask-flatten, mirroring how it already handles
+> other divergent conditions, rather than something specific to the atomicrmw
+> call itself
