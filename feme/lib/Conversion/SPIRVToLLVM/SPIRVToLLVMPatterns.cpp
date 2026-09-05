@@ -4026,23 +4026,79 @@ int64_t getFlatElementCount(mlir::Type Type) {
   return 1;
 }
 
+/// Appends \p Type's own `!llvm.array`/`vector` nesting sizes to \p Shape,
+/// e.g. `{4, 4}` for `!llvm.array<4 x vector<4xf32>>` (a matrix, see the
+/// `spirv.MatrixType` conversion) or `{8}` for a plain `!llvm.array<8 x
+/// f32>`. `ArrayConstantPattern` needs this (not merely `getFlatElementCount`'s
+/// own flat product) because upstream MLIR's own LLVM IR translation of an
+/// `llvm.mlir.constant` `DenseElementsAttr`
+/// (`convertDenseElementsAttr`, `mlir/lib/Target/LLVMIR/ModuleTranslation.cpp`)
+/// reassembles the nested `!llvm.array<... x vector<...>>` constant from the
+/// attribute's own tensor *shape*, not from the constant op's declared
+/// result type: a fully-flattened, one-dimensional attribute (this
+/// function's caller's prior behavior) reassembles into a flat
+/// `!llvm.array<N x T>` of scalar leaves instead of the intended nested
+/// array-of-vectors shape, silently producing a `llvm.mlir.constant`/
+/// `llvm.store` pair whose real LLVM IR types disagree with the global's own
+/// declared type -- exactly the roadmap L29 bug (a matrix-typed vertex
+/// output's per-row `feme.stage.output.store` calls, built from that
+/// mismatched store's operand type, ended up with 16 rows instead of the
+/// real 4, since the flattened `[16 x float]` store operand has no vector
+/// leaf for `CanonicalizeStagePass`'s `getStageIORowShape` to recognize).
+void getFlatElementShape(mlir::Type Type,
+                         llvm::SmallVectorImpl<int64_t> &Shape) {
+  if (auto Array = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Type)) {
+    Shape.push_back(Array.getNumElements());
+    getFlatElementShape(Array.getElementType(), Shape);
+    return;
+  }
+  if (auto Vector = mlir::dyn_cast<mlir::VectorType>(Type))
+    Shape.push_back(Vector.getNumElements());
+}
+
+/// Whether \p Type's `!llvm.array` nesting bottoms out in a `vector<...>`
+/// (e.g. `!llvm.array<4 x vector<4xf32>>`, a matrix) rather than a plain
+/// scalar (e.g. `!llvm.array<2 x array<3 x f32>>`). `ArrayConstantPattern`
+/// needs this to decide which `ShapedType` upstream MLIR's own
+/// `convertDenseElementsAttr` (`mlir/lib/Target/LLVMIR/
+/// ModuleTranslation.cpp`) expects for \p Type's own innermost dimension:
+/// a `mlir::VectorType` shape when it bottoms out in a real vector (so that
+/// function's own `isa<VectorType>(type)` branch builds each chunk as a
+/// `ConstantDataVector` matching the vector leaf), or a plain
+/// `mlir::RankedTensorType` shape otherwise (so its `isa<TensorType>`/
+/// `!vectorElementType` branch builds each chunk as a `ConstantDataArray`
+/// matching the scalar leaf) -- getting this wrong silently reassembles the
+/// wrong LLVM IR constant shape (see `getFlatElementShape`'s own comment).
+bool hasVectorLeaf(mlir::Type Type) {
+  while (auto Array = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Type))
+    Type = Array.getElementType();
+  return mlir::isa<mlir::VectorType>(Type);
+}
+
 /// Converts SPIR-V `ConstantOp` with `spirv.array` or `spirv.matrix` type --
 /// MLIR's own `ConstantScalarAndVectorPattern` only matches a scalar or
 /// vector `spirv.Constant` (see its `srcType` check), leaving an array or
 /// matrix constant illegal, which is exactly the shape a `const static` HLSL
 /// array (e.g. a palette of `float3`s) or a `const static float4x4`
 /// compiles down to. `llvm.mlir.constant` has no such restriction: it
-/// accepts one flat `DenseElementsAttr` for a whole
-/// `!llvm.array<... x vector<...>>` so long as its element count and scalar
-/// element type match (see `LLVM::ConstantOp::verify`'s `ElementsAttr`
-/// case), whatever the array's rank or whether its leaves are vectors or
-/// scalars -- and a matrix converts to exactly that same shape, an
-/// `!llvm.array` of column vectors (see the `spirv.MatrixType` conversion
-/// in populateSPIRVToLLVMTargetTypeConversions), so it needs no separate
-/// handling here beyond accepting its type up front. This pattern only has
-/// to flatten the SPIR-V constant's (possibly nested) constituents to
-/// match, rather than reproduce its nesting as `llvm.mlir.constant`'s
-/// alternative, structurally-nested `ArrayAttr` encoding.
+/// accepts a `DenseElementsAttr` for a whole `!llvm.array<... x
+/// vector<...>>` so long as its element count and scalar element type match
+/// (see `LLVM::ConstantOp::verify`'s `ElementsAttr` case), whatever the
+/// array's rank or whether its leaves are vectors or scalars -- and a
+/// matrix converts to exactly that same shape, an `!llvm.array` of column
+/// vectors (see the `spirv.MatrixType` conversion in
+/// populateSPIRVToLLVMTargetTypeConversions), so it needs no separate
+/// handling here beyond accepting its type up front. This pattern flattens
+/// the SPIR-V constant's (possibly nested) constituents into a single list,
+/// but (roadmap L29) must still shape the resulting `DenseElementsAttr`'s
+/// own tensor to mirror `DstType`'s real array/vector nesting (via
+/// `getFlatElementShape`), rather than a single flat dimension: upstream
+/// MLIR's own LLVM IR translation of this constant
+/// (`convertDenseElementsAttr`, `mlir/lib/Target/LLVMIR/
+/// ModuleTranslation.cpp`) reassembles the nested LLVM constant from the
+/// attribute's own tensor shape, not from `DstType` itself, so a flat
+/// one-dimensional attribute silently produces a flat `!llvm.array<N x T>`
+/// LLVM IR constant instead of the intended nested one.
 class ArrayConstantPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ConstantOp> {
 public:
@@ -4085,8 +4141,25 @@ public:
             LeafType, mlir::cast<mlir::IntegerAttr>(Element).getValue());
     }
 
-    auto ShapeType = mlir::RankedTensorType::get(
-        static_cast<int64_t>(Elements.size()), LeafType);
+    // Build the multi-dimensional shape matching `DstType`'s own
+    // `!llvm.array`/`vector` nesting (see `getFlatElementShape`'s own
+    // comment above), not merely a flat one-dimensional element count: the
+    // real LLVM IR translation of this constant reassembles its nesting
+    // from this attribute's own shape, not from `DstType` itself. That
+    // translation (`convertDenseElementsAttr`) also distinguishes a
+    // `mlir::VectorType`-shaped attribute (each chunk built as a
+    // `ConstantDataVector`) from a `mlir::RankedTensorType`-shaped one
+    // (each chunk built as a `ConstantDataArray`) when reassembling the
+    // innermost dimension, so a matrix/array-of-vectors' shape (see
+    // `hasVectorLeaf`) must use the former, or the innermost chunk it
+    // builds mismatches the vector leaf's own real LLVM type.
+    llvm::SmallVector<int64_t, 4> Shape;
+    getFlatElementShape(DstType, Shape);
+    mlir::ShapedType ShapeType =
+        hasVectorLeaf(DstType)
+            ? mlir::cast<mlir::ShapedType>(mlir::VectorType::get(Shape, LeafType))
+            : mlir::cast<mlir::ShapedType>(
+                  mlir::RankedTensorType::get(Shape, LeafType));
     auto FlatAttr = mlir::DenseElementsAttr::get(ShapeType, Elements);
     Rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(Op, DstType, FlatAttr);
     return mlir::success();
