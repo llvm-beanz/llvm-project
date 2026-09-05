@@ -25130,3 +25130,56 @@ failures), **L24** (11 cases, real rendering-correctness mismatches) -- none
 yet reduced beyond the one case (`Feature/Textures/Sample.test`, filed under
 L22) whose `spirv.ImageSampleImplicitLod`/`ConstOffset` legalization gap was
 identified incidentally during this row's own investigation.
+
+## Roadmap L22: measured impact (four SPIR-V-to-LLVM legalization/import fixes)
+
+**Fixes.** (1) `ImageSampleImplicitLodPattern` extended to legalize all 8
+combinations of `Bias`/`ConstOffset`/`MinLod` image operands (previously only
+a bare, no-operand sample). (2) Upstream MLIR's SPIR-V (de)serializer taught
+to handle the `Centroid` decoration. (3) `ArrayConstantPattern` extended to
+accept `spirv.matrix`-typed constants alongside `spirv.array`. (4)
+`CompositeConstructPattern` given a new `convertArray` method for
+array-of-whole-element `OpCompositeConstruct`.
+
+**`ninja check-feme`.** 2528/2587 passed (59 pre-existing unrelated
+`Unsupported`, 0 `Failed`), no regressions.
+
+**`check-hlsl-feme-vk` (offload-test-suite).** 141 -> **150** `Passed` (+9),
+178 `Failed` (down from 187, -9), plus 1 case (`Feature/PushConstant/
+array_of_matrices.test`) now `Unexpectedly Passed` -- an unrelated upstream
+`offload-test-suite` XFAIL-staleness side effect of the matrix-constant fix.
+**None of L22's own originally-named 13 cases are among the 9 newly-passing
+cases** -- each now fails at a new, later, distinct diagnostic instead (see
+Roadmap.md's L22 entry and its six follow-on rows, L25-L30, for the
+per-case breakdown).
+
+**Targeted real `deqp-vk` sweep.** Ran `dEQP-VK.texture.mipmap.2d.bias.*`
+(18 cases, mostly pre-existing unrelated gaps: `"unhandled opcode 103"` for
+the compute-shader variants, a graphics-side failure with no diagnostic
+text for the rest -- neither caused or fixed by this row) and
+`dEQP-VK.glsl.linkage.varying.interpolation.*`/`dEQP-VK.glsl.builtin_var.
+fragcoord_msaa_input.*centroid*` (10 cases). Notably, **`dEQP-VK.glsl.
+linkage.varying.interpolation.{centroid,flat,smooth}` all fail identically**
+with `feme-cpu-simdize`'s own divergent-vector-decomposition diagnostic --
+confirming this is a real, broad, pre-existing `SIMDize.cpp` limitation
+unrelated to interpolation qualifier at all (not something the `Centroid`
+decoration fix alone could clear), corroborating **L27**'s own scope from
+an independent angle. The `fragcoord_msaa_input` cases split pass/fail on
+sample-count support, unrelated to this row's fixes.
+
+**Disposition.** Roadmap **L22 closed** (struck through) -- every import/
+legalization gap this row itself named is fixed and confirmed via lit
+tests and `ninja check-feme`, but none of its 13 real-world cases reach a
+full CTS pass yet, since each now surfaces a newly-exposed, distinct
+failure. Six follow-on rows filed: **L25** (2 cases, confirmed out-of-scope
+upstream MLIR deserializer gap, mirrors H21l), **L26** (6 cases, a resource-
+handle-normalization gap for register-bound texture bindings), **L27** (2
+cases plus independent `deqp-vk` corroboration above, `SIMDize.cpp`'s
+divergent-vector-decomposition gap), **L28** (1 case, a `vkQueueSubmit`-time
+gap in one interpolation-modifier combination), **L29** (1 case, a
+stage-output-store row-range validation gap for matrix outputs), **L30** (1
+case, unchanged, a pre-existing mesh-shader amplification-payload gap). No
+feature/extension bit touched by any of the four fixes (internal SPIR-V-to-
+LLVM legalization and MLIR import/export correctness only);
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
+change needed.
