@@ -26166,3 +26166,86 @@ correctness fix only); `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` reviewed, no change needed. No new roadmap
 row filed: this case's next blocker (the L41 JIT-link crash) is already
 tracked under that existing row, not a new gap.
+
+## Roadmap L43: fixed (raw AtomicRMWInst uniformity classification), plus L44 filed
+
+**Repro.** After L41's own fix, `dEQP-VK.mesh_shader.ext.query.no_queries.*.
+mesh_only.*` (both of the 2 real, feature-supported cases in the
+12,340-case `query.*.mesh_only.*` sweep L41 ran) failed cleanly (no more
+JIT-link crash) at `vkCreateGraphicsPipelines` with `"error:
+feme-cpu-simdize: function 'main' has a divergent branch; the divergence
+transform (feme::cpu::LinearizePass) did not remove it, or produced a
+shape this pass cannot widen"`.
+
+**Root cause.** Confirmed via a real captured pre-`LinearizePass` IR dump
+of the exact CTS case (env-gated `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`
+technique, temporary, reverted before committing) and by manually
+re-running just `feme-cpu-linearize` on it: the real divergent branch (an
+`icmp`/`br` deciding whether *this* lane is one of the first `N` to get an
+output slot, fed directly by a plain, not-yet-lowered `atomicrmw`'s own
+result) was left completely unflattened by `DiamondFlattener`. Not because
+`DiamondFlattener` lacked a structural case for it -- an ordinary two-arm
+diamond with a clean reconvergence point -- but because
+`DiamondFlattener::flatten`'s own `!UI.isDivergentTerminator(Br)` check
+took the *uniform* branch path instead: `feme::cpu::UniformityInfo` itself
+misclassified this branch uniform.
+
+`feme::cpu::UniformityInfo` is computed once, up front, in
+`feme::cpu::LinearizePass::run`, strictly *before* `DiamondFlattener`'s
+own `applyStageMasks` ever converts a real `atomicrmw` into the
+`feme.cpu.masked.atomicrmw.*` *call* form roadmap L41 already classifies
+`NeverUniform`. So at the point this analysis actually runs, the
+atomicrmw is still a plain `llvm::AtomicRMWInst`, which
+`feme::cpu::WaveTTIImpl::getValueUniformity` never special-cased at all --
+falling through to the generic operand-driven `Default` rule, wrongly
+uniform, since every one of its own operands (a uniform pointer and
+value) is, even though the atomic's own per-lane result genuinely
+differs by construction (the exact same reasoning L41 already applied to
+the masked-call form, just one pipeline step earlier).
+
+**Fix.** Classify a plain `llvm::AtomicRMWInst` `NeverUniform` too in
+`WaveTTIImpl::getValueUniformity`, mirroring the existing masked-call-form
+case. New lit tests: `atomicrmw_is_divergent` in
+`feme/test/Analysis/CPU/uniformity.ll` (confirms the value/branch
+classification), and `atomicrmw-guarded-branch-divergent.ll` in
+`feme/test/Transforms/CPU/Linearize/` (confirms `DiamondFlattener` now
+actually flattens the branch, not just that the value is classified
+correctly). `ninja check-feme` passes in full (2543/2602 discovered, 59
+pre-existing `Unsupported`, 0 `Failed`, up by exactly the 2 new lit tests
+this row adds).
+
+**Measured impact.** A direct re-run of the cited CTS case confirms the
+`feme-cpu-simdize` divergent-branch diagnostic is gone -- pipeline
+creation now clears both `feme-cpu-linearize` and `feme-cpu-simdize` --
+but the case still fails, now with a fatal `"LLVM ERROR: unsupported
+calling convention"` abort during JIT codegen (the whole `deqp-vk`
+process aborts, not a diagnosed pipeline-creation failure). Root-caused
+far enough to scope: a real SPIR-V-imported mesh shader's own
+`OpControlBarrier` compiles, via MLIR upstream's own default
+`ControlBarrierPattern` (since `feme::spirv::
+populateSPIRVToLLVMTargetPatterns` installs no pattern of its own for
+`spirv::ControlBarrierOp`), to a call to a mangled external declaration
+(`declare spir_func void @_Z22__spirv_ControlBarrieriii(i32, i32, i32)`)
+-- the exact same call form roadmap H4b's own `isSPIRVGroupSyncBarrier`
+(`CanonicalizeStage.cpp`) already recognizes by name, but only for a
+different purpose (finding a tessellation-control entry's own
+patch-constant split point). `feme::cpu::matchBarrierCall`
+(`BarrierCalls.cpp`) -- the function every stage-specific CPU wrapper
+pass actually calls to erase/fence-replace a real barrier before codegen
+-- only recognizes the DXIL/HLSL intrinsic forms, never this mangled call
+form, so for a mesh shader the call survives completely unmodified all
+the way to X86 JIT codegen, which has no lowering for
+`CallingConv::SPIR_FUNC`. Filed as new roadmap row **L44** (needs a real
+backtrace to confirm the exact X86 lowering path that aborts, plus a fix
+most likely extending `matchBarrierCall` to also recognize this call form
+by name).
+
+**Disposition.** Roadmap **L43 closed** (struck through). No feature or
+extension bit touched (an internal CPU uniformity-analysis correctness
+fix only, extending already-documented divergence-source intent --
+`FeMeCPUDesign.md`'s "Phase 2: Uniformity Analysis" section already
+documents the masked-call-form rule this mirrors, so no update needed
+there beyond what L41 already added); `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, no change needed. One new roadmap
+row filed: **L44** (the `_Z22__spirv_ControlBarrieriii` mangled-call-form
+barrier-recognition gap this fix newly surfaces).
