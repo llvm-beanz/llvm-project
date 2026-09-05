@@ -61870,3 +61870,148 @@ even-later blocker already anticipated in L31's own text: `feme`'s CPU
 resource-lowering pass (`SPIRVResourceLowering.cpp`) doesn't recognize any
 of these intrinsics yet either, so real CPU-side depth-comparison/LOD-query
 semantics remain unimplemented beyond just the legalization plumbing.
+
+# Roadmap L26: CPU-side sample offset/clamp support, and its own fallout chain
+
+## Starting point
+
+L22's own re-run had already found and fixed the *MLIR-conversion-layer*
+half of texel-offset/LOD-clamp support: `SPIRVToLLVMPatterns.cpp` now
+threads a real `ConstOffset`/`MinLod` operand through from
+`spirv.ImageSampleImplicitLod` into `llvm.spv.resource.sample`/`.clamp`.
+This row (`Vk.SampledTexture2D.Sample.test.yaml`/`SampleBias.test.yaml`
+plus their plain `Feature/Textures/{Sample,SampleBias}.test` counterparts)
+found that this MLIR-layer fix alone wasn't enough: `vkCreateGraphicsPipelines`
+still failed with `"unsupported raised operation:
+'llvm.spv.resource.handlefrombinding...' is a register-bound resource
+handle the FeMe CPU target cannot normalize..."`, a diagnostic that reads
+like a resource-*kind* classification problem but that a real IR
+reduction quickly showed was something else entirely.
+
+## The actual root cause, and its own cascading fallout
+
+`SPIRVResourceLowering.cpp`'s `collectHandles` has an all-or-nothing
+contract: the moment any single use of a handle is deemed "not fully
+supported", the *entire function's* handle normalization is rejected --
+not just that one use. `hasOnlySupportedImageUses` simply never
+recognized a nonzero `ConstOffset` sample, nor the `spv_resource_sample_clamp`
+intrinsic, as supported at all, for *any* image shape. Since the real
+failing shader uses both (an offset sample and a clamped sample in the
+same function), fixing the first exposed the second immediately.
+
+Fixing offset+clamp for `Plain2D` still wasn't enough: the same shader
+also calls `TexCube.Sample(Samp1, CubeMag, 0.0f)` -- a Cube-shape sample
+with clamp -- which I'd initially scoped clamp support to `Plain2D` only.
+Extended `createSampleCube`/`ImageCalls.h/.cpp`/the runtime entry point to
+accept clamp too.
+
+Rebuilding after *that* hit a completely different, much more confusing
+error: `feme-cpu-simdize: ... has a divergent value ... roadmap milestone
+7 deviation`. This is the pass's own genuine "I don't know how to handle
+this producer" diagnostic, and it took a moment to realize it was a false
+alarm: `ImageCalls.cpp`'s `matchImageCall` (the reverse-direction matcher
+`SIMDize.cpp` uses to re-interpret an already-built `feme.cpu.image.sample.*`
+call) had stale, hardcoded `arg_size()` checks (15 for `Sample2D`, 12 for
+`SampleCube`) that silently stopped matching the moment I grew both
+functions' real signatures to 18 and 13 args. A stale `arg_size()` check
+doesn't fail to compile -- it just makes `matchImageCall` return
+`std::nullopt`, which `SIMDize.cpp` then reports as an unrecognized,
+divergent value with no hint at all that the real problem is one call
+site away. This is exactly the same class of gap roadmap H19l warned
+about: growing an `ImageCallKind`'s `FunctionType` always requires
+auditing `matchImageCall`'s corresponding case for both the arg-count
+check *and* every fixed-index `getArgOperand()` call after it. I'll keep
+this in mind as a checklist item any time I touch one of these call
+shapes again.
+
+Once that was fixed and the pipeline finally built, `vkQueueSubmit` itself
+failed with a wholly unrelated diagnostic: `"depth attachment format is
+not yet supported (mechanical, added on demand)"` for
+`D32_FLOAT_S8X24_UINT` -- the offloader's own default depth-stencil
+format. `ImageFixture.cpp` already handled this format correctly
+elsewhere in the codebase, which made the fix easy once I found it:
+`Executor.cpp`'s `readDepth`/`writeDepth`/`readStencil`/`writeStencil`
+just never had a case for it. The one subtlety: this format's own byte
+layout is *not* the same shape as `D24_UNORM_S8_UINT`'s single packed
+4-byte word -- it's two entirely separate 4-byte words (confirmed via
+`getFormatInfo`'s component/byte-size fields), so the new case needs an
+`Idx * 8` stride, not the `Idx * 4` every other format here uses. Filed
+this as its own row, L32, since it shares no code path with the
+sampling fix and would have blocked *any* depth/stencil test, not just
+this row's own texture-sampling one.
+
+With all of that in place, the real repro finally got all the way to a
+real, near-matching output buffer -- except one single float (index 29,
+a "Cube +X minified -> mip 1" case). Root-caused this to a genuinely
+separate, pre-existing bug: `femeRTComputeClampedLod`'s implicit-LOD path
+always defaults to mip 0 unless the caller has already computed a real
+LOD from screen-space derivatives and re-invoked explicitly -- which is
+exactly what the 2D sampling path does via `femeRTPlanImplicitLod`, but
+the Cube sampling path never does. This is unrelated to offset/clamp
+support and clearly pre-existing (not something my own changes could have
+caused, since it's about LOD *selection*, not offset/clamp threading at
+all). Filed as L34, left unfixed -- it needs its own real design for
+cube-direction-vector screen-space derivatives, out of scope for this row.
+
+## Verification
+
+Fixed all the fallout this row's own fix caused inside `check-feme`
+itself: 4 lit tests with stale `CHECK` lines (verified against real
+`feme-opt` output rather than guessed, since `-inf` prints literally as
+`float -inf` in textual LLVM IR, not a hex constant), 2 stale
+`SPIRVResourceLoweringTest.cpp` expectations plus 4 new tests covering the
+newly-supported (and still-rejected) shapes, and ~20 direct C-ABI call
+sites in `ImageSamplingTest.cpp` that were silently producing garbage
+(`1.4e-45`-style) results by calling through a stale function-pointer type
+with too few parameters -- this doesn't fail to build (the call is
+JIT-resolved by symbol name, not checked against a real declaration), so
+it would have been very easy to miss without actually reading each
+failing test's numeric output. `ninja check-feme` (assertions-enabled,
+ccache build) now passes in full: 2531/2590, 0 `Failed`, 59 pre-existing
+unrelated `Unsupported`.
+
+## Real CTS-equivalent re-run and disposition
+
+Ran the real `check-hlsl-feme-vk` cases this row named, plus their
+`Array.*` siblings, against the actual `feme` ICD
+(`VK_ICD_FILENAMES` pointed at `feme_icd.json`). Both plain
+`Feature/Textures/{Sample,SampleBias}.test` and
+`Vk.SampledTexture2D.Sample.test.yaml` now clear this row's own named
+blocker completely (the first two only fail on the separately-filed L34
+gap; the third fully passes). `Vk.SampledTexture2D.SampleBias.test.yaml`
+still fails -- but a real reduction found this is a genuinely distinct
+resource shape (`Bias`+`Offset`+`Clamp` combined on one call, a
+three-modifier combination this row's fix didn't scope to), filed as L35.
+Reducing it directly turned out to be its own small rabbit hole:
+`feme-translate --import-spirv` crashes on *any* SPIR-V binary using
+`ConstOffset`/`MinLod` at all -- I confirmed this by running it against
+`Feature/Textures/Sample.test`'s own already-fixed, already-passing `.o`
+and getting the identical crash, an upstream MLIR `ImageOps.cpp` op
+verifier assert (`// TODO: Add the validation rules for the following
+Image Operands`) that the real Vulkan runtime path apparently never
+triggers (since `Sample.test` itself builds and runs fine through the
+real ICD). This means `feme-translate`'s own import path is stricter than
+the runtime's, a real but narrow pre-existing tooling gap I noted in L35's
+own text rather than trying to fix here. Also found, via the same
+`Array.Sample.test`/`Array.SampleBias.test` re-run (neither of which uses
+any offset/clamp at all, ruling out this row's own scope), a third
+class of pre-existing gap: `Texture2DArray` implicit-LOD sampling picks
+the wrong mip in 3 of its own output elements, the same class of bug as
+L34 but for the array shape -- filed as L36.
+
+## Design decisions worth remembering
+
+- Offset support is `Plain2D`-only, clamp support is `Plain2D`/`Cube`-only
+  -- deliberately narrow, matching exactly what the real failing CTS-
+  equivalent cases needed, not a speculative "support everywhere" pass.
+  Both `Array2D` (offset) and every other shape (clamp) still reject their
+  respective unsupported operand outright, by design, rather than
+  silently mis-lowering.
+- The DXIL lowering path has no offset/clamp source operand at all (DXIL's
+  own resource-sample intrinsic doesn't have one), so its two call sites
+  pass a `0`/`0`/`-inf` no-op sentinel unconditionally -- a real platform
+  difference between DXIL and SPIR-V lowering, not an oversight, and
+  documented as such in the lit test's own file header comment.
+- `matchImageCall`'s stale-`arg_size()`-check failure mode (silent
+  `std::nullopt`, not a build error) is worth remembering as a checklist
+  item for any future `ImageCallKind` signature change.
