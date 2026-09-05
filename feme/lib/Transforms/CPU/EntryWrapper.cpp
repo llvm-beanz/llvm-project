@@ -654,10 +654,53 @@ appendTrailingParam(Function &F, Type *ExtraType, const Twine &ExtraName) {
   return {NewF, Extra};
 }
 
+/// Walks from \p Start following only single-successor unconditional
+/// branches, appending every block visited to \p Order, stopping as soon
+/// as a block with more than one predecessor is reached (an arm's
+/// reconvergence point) -- returned without being added to \p Order -- or
+/// returning nullptr (not a shape `isLinearChain`'s "safe diamond" case
+/// below can use) if a cycle is found first, the chain ends in anything
+/// other than an unconditional branch before reconverging, or any block
+/// visited contains a `..._with_group_sync` barrier call: such a barrier
+/// would need its own region split *inside* this one arm, which this
+/// milestone's flat, whole-region `outlineChain` has no way to represent
+/// (see "Barrier inside a surviving branch" in the file comment above).
+BasicBlock *walkBarrierFreeArm(BasicBlock *Start,
+                               SmallVectorImpl<BasicBlock *> &Order) {
+  SmallPtrSet<BasicBlock *, 8> Visited;
+  BasicBlock *BB = Start;
+  while (true) {
+    if (BB->hasNPredecessorsOrMore(2))
+      return BB;
+    if (!Visited.insert(BB).second)
+      return nullptr;
+    for (Instruction &I : *BB)
+      if (auto *CI = dyn_cast<CallInst>(&I))
+        if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+            Matched && Matched->GroupSync)
+          return nullptr;
+    auto *Br = dyn_cast<UncondBrInst>(BB->getTerminator());
+    if (!Br)
+      return nullptr;
+    Order.push_back(BB);
+    BB = Br->getSuccessor(0);
+  }
+}
+
 /// Whether \p F's control flow is a single straight chain from its entry
-/// block to a `ret` -- no branch, no loop -- filling \p Order with its
-/// blocks in that order if so. This milestone's region splitting (see the
-/// file comment above) only supports this shape.
+/// block to a `ret`, filling \p Order with its blocks in that order if
+/// so -- with one exception (roadmap L45): a uniform two-way branch whose
+/// arms are each a barrier-free straight chain (`walkBarrierFreeArm`)
+/// reconverging at one common merge block is also accepted, its header
+/// and both arms appended to \p Order in turn before the walk continues
+/// linearly from the merge block, since such a diamond can never itself
+/// need a region split -- it can only ever land entirely inside whichever
+/// single region contains it. A branch that does not form this shape (in
+/// particular, one whose arm contains a barrier of its own, needing a
+/// region split *inside* the branch that this milestone's flat, whole-
+/// region `outlineChain` has no way to represent) is still rejected, same
+/// as before this exception -- see `matchBranchShape`'s `BranchShape` for
+/// the (structurally different, disjoint) shape that case needs instead.
 bool isLinearChain(Function &F, SmallVectorImpl<BasicBlock *> &Order) {
   SmallPtrSet<BasicBlock *, 8> Visited;
   BasicBlock *BB = &F.getEntryBlock();
@@ -668,10 +711,30 @@ bool isLinearChain(Function &F, SmallVectorImpl<BasicBlock *> &Order) {
     Instruction *Term = BB->getTerminator();
     if (isa<ReturnInst>(Term))
       break;
-    auto *Br = dyn_cast<UncondBrInst>(Term);
-    if (!Br)
-      return false; // A surviving conditional branch (or something else).
-    BB = Br->getSuccessor(0);
+    if (auto *Br = dyn_cast<UncondBrInst>(Term)) {
+      BB = Br->getSuccessor(0);
+      continue;
+    }
+    auto *CondBr = dyn_cast<CondBrInst>(Term);
+    if (!CondBr)
+      return false; // Something other than a branch or a `ret`.
+
+    SmallVector<BasicBlock *, 4> TrueOrder, FalseOrder;
+    BasicBlock *TrueMerge =
+        walkBarrierFreeArm(CondBr->getSuccessor(0), TrueOrder);
+    BasicBlock *FalseMerge =
+        walkBarrierFreeArm(CondBr->getSuccessor(1), FalseOrder);
+    if (!TrueMerge || !FalseMerge || TrueMerge != FalseMerge)
+      return false; // Not a safe diamond: fall back to diagnosing.
+    for (BasicBlock *Arm : TrueOrder)
+      if (!Visited.insert(Arm).second)
+        return false; // An arm block reachable from elsewhere too.
+    for (BasicBlock *Arm : FalseOrder)
+      if (!Visited.insert(Arm).second)
+        return false;
+    Order.append(TrueOrder.begin(), TrueOrder.end());
+    Order.append(FalseOrder.begin(), FalseOrder.end());
+    BB = TrueMerge;
   }
   // Every block reached by exactly one step from the last: if some block
   // was never visited, it either merges into this chain from elsewhere (a
