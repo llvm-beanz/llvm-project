@@ -25589,3 +25589,118 @@ extension bit touched (internal SPIR-V-to-LLVM constant-conversion
 correctness fix only); `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` reviewed, no change needed. New row **L38**
 filed for the newly-discovered, pre-existing GLSL-matrix-constant crash.
+
+## Roadmap L38: fixed (upstream MLIR `extractCompositeElement` matrix-constant fold bug)
+
+**Root cause.** Not feme code -- an upstream MLIR bug in
+`extractCompositeElement` (`mlir/lib/Dialect/SPIRV/IR/
+SPIRVCanonicalization.cpp`), the static helper `spirv::CompositeExtractOp::
+fold` uses to constant-fold a `spirv.CompositeExtract`. It treated every
+`ElementsAttr` composite -- both plain vector constants and `spirv.matrix`
+constants alike -- as a flat linear buffer addressed by a single scalar
+index: correct for a rank-1 vector constant, but wrong for a matrix
+constant, where a single index must select a whole column (`numRows`
+consecutive elements), not one scalar. This fold runs as an
+alternative-to-patterns legalization path inside MLIR's own dialect
+conversion driver (`OperationLegalizer::legalizeWithFold`, reached via
+feme's `ConvertSPIRVToLLVMPass`'s `applyPartialConversion`), which means it
+silently bypasses feme's own, already-correct `MatrixCompositeExtractPattern`
+entirely for any matrix `CompositeExtract` whose container operand folds to
+a constant -- the pattern is only ever reached for a *non*-constant matrix
+(e.g. a function argument), which is exactly what feme's own pre-existing
+`spirv-to-llvm-matrix-composite.mlir` test exercises, and exactly why this
+bug was invisible to it.
+
+**Reduction methodology (new this session): qpa-log-based SPIR-V
+extraction.** No standalone `glslangValidator` binary is built in this
+environment (glslang is only linked into `deqp-vk` itself, compiling GLSL
+shaders internally with no command-line flag to dump SPIR-V to a file).
+Worked around this by running the failing case with
+`--deqp-log-shader-sources=enable --deqp-log-decompiled-spirv=enable
+--deqp-log-filename=<path>`: even though the crash happens deep in
+pipeline creation (well after shader compilation succeeds) and prevents
+the qpa log from being closed/finalized normally, each already-compiled
+shader stage's `<SpirVAssemblySource>` block is written to the log file
+before that point, and can be extracted with a bit of `grep`/`sed`
+(stripping the XML wrapper tags and unescaping `&quot;`), reassembled with
+`spirv-as --target-env vulkan1.0`, then run through `feme-translate
+--import-spirv` and `feme-opt --feme-convert-spirv-to-llvm` exactly as
+prior sessions' DXC-based reductions did.
+
+**Two distinct symptoms, one root cause.** (1) The originally-reported
+square-matrix case (`highp_mat2_float_fragment`) reduced to a `spirv.
+CompositeExtract %cst[0]` on a `!spirv.matrix<2 x vector<2xf32>>`
+constant folding to a scalar `FloatAttr` wrapped in a `vector<2xf32>`-typed
+`llvm.mlir.constant` -- a type/attribute mismatch LLVM IR translation
+rejected. A first fix attempt (generically consuming the attribute's own
+declared `[numRows, numColumns]` shape one dimension at a time) fixed this
+case, since `numRows == numColumns` for a 2x2 matrix hides the deeper bug.
+(2) Re-running the broader `dEQP-VK.glsl.matrix.add.const.*` group (72
+cases) with that first fix found a *new* failure,
+`mediump_mat4x3_float_vertex`: `"'llvm.mlir.constant' op type and
+attribute have a different number of elements: 3 vs. 4"`. Reducing this
+non-square case (same qpa-log technique) traced the real cause: the SPIR-V
+deserializer's `processConstantComposite` flattens a matrix constant's
+column constituents in genuinely column-major order (`numRows` elements
+per column) while declaring the resulting attribute's shape as `MatrixType
+::getShape()` = `[numRows, numColumns]` -- a real mismatch between
+declared shape and true flat data layout, invisible only when `numRows ==
+numColumns` (as in case 1), and exposed as soon as they differ.
+
+**Fix.** Special-case `spirv::MatrixType` composites in
+`extractCompositeElement`: use `MatrixType::getNumRows()`/`getNumColumns()`
+directly (never the attribute's own possibly-mismatched declared shape) to
+compute a column's offset (`columnIndex * numRows`) and length (`numRows`)
+against the *raw flat value list* (`getValues<Attribute>()`, whose linear
+iteration order is the true underlying storage order regardless of any
+shape-annotation mismatch) -- for both a single index (whole column,
+rebuilt as its own `mlir::VectorType`-shaped `DenseElementsAttr`) and a
+second index (one scalar row within that already-selected column). This is
+entirely self-contained within `extractCompositeElement`; no change to the
+deserializer's own shape/layout mismatch was needed (or made -- documented
+in case a future change elsewhere ever reads this attribute's own declared
+shape and assumes it matches the flat layout).
+
+**Per the L25 precedent**, fixed directly upstream in
+`mlir/lib/Dialect/SPIRV/IR/SPIRVCanonicalization.cpp` rather than worked
+around in feme's own code, since this is a genuine, generally-applicable
+MLIR SPIR-V dialect bug (affecting any consumer of SPIR-V matrix
+constants), not something feme-specific.
+
+**New lit tests.**
+- `mlir/test/Dialect/SPIRV/Transforms/canonicalize.mlir`: three new cases
+  -- `extract_matrix_column` (square 2x2, single-index whole-column fold),
+  `extract_matrix_column_non_square` (4x3, confirming the column offset
+  uses `numRows` not `numColumns`), and `extract_matrix_element` (two-index
+  column-then-row scalar fold).
+- `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-matrix-constant-extract.mlir`
+  (new file): the same three shapes through the full `--feme-convert-
+  spirv-to-llvm` pipeline, since a matrix *constant*'s `CompositeExtract`
+  only ever reaches the fold path documented above, never `Matrix
+  CompositeExtractPattern` (already covered, for the non-constant case
+  only, by the pre-existing `spirv-to-llvm-matrix-composite.mlir`).
+
+**`ninja check-feme`.** All discovered tests pass: 2534/2593 (59
+pre-existing, unrelated `Unsupported`, 0 `Failed`, no regressions).
+
+**Real `deqp-vk` re-run.**
+- `dEQP-VK.glsl.matrix.add.const.*` (72 cases, the group the roadmap row
+  itself was discovered in): improved from crash-on-first-case to
+  **72/72 (100%) Passed**.
+- Full `dEQP-VK.glsl.matrix.*.const.*` (covers `add`/`sub`/`mul`/`div`, not
+  just `add`, 432 cases total): **432/432 (100%) Passed** -- confirms the
+  roadmap row's own "likely every other case under the
+  `dEQP-VK.glsl.matrix.*.const.*` groups" prediction was correct, and this
+  one upstream fix resolves the entire family, not just `add`.
+- The broader, non-`const` `dEQP-VK.glsl.matrix.*` group (1764 cases) still
+  has many unrelated failures (e.g. `unary_addition.*`, `VK_ERROR_
+  INITIALIZATION_FAILED` at `vkQueueSubmit`) -- out of this row's own
+  scope (these do not exercise a matrix *constant*'s `CompositeExtract`
+  fold at all), left untouched and not investigated further here.
+
+**Disposition.** Roadmap **L38 closed** (struck through). No feature or
+extension bit touched (internal MLIR SPIR-V dialect correctness fix only);
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
+change needed. No new roadmap row filed -- this fix's own scope (matrix
+constant `CompositeExtract` folding) is now fully resolved with no
+remaining known gap.
