@@ -63907,3 +63907,153 @@ safe-diamond fix in `EntryWrapper.cpp`, (2) the 2 lit tests plus 2 unit
 tests, (3) the `Roadmap.md`/`FeMeCPUDesign.md`/`VulkanCTSReport.md`
 documentation updates (L45 closed, L47 filed), and (4) this
 `agent_thoughts.md` entry.
+
+# L46: Plain2D depth-comparison sampling wired up, with a real coordinate-width correction, plus L48 filed
+
+## Task
+
+Continue the L-series milestone chain. L46's own row: after L31's
+SPIR-V-to-LLVM legalization fix for
+`spirv.ImageSampleDrefImplicitLod`/`ImageSampleDrefExplicitLod`/
+`ImageQueryLod`, `vkCreateGraphicsPipelines` still failed a real
+`Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test` re-run at
+`SPIRVResourceLowering.cpp`'s own end-of-pipeline "unsupported raised
+operation" catch-all: `isSampleIntrinsic`/`hasOnlySupportedImageUses`
+recognized only `spv_resource_sample`/`.sample_clamp`/`samplelevel`, not
+any of the five newly-legalized `samplecmp`/`samplecmplevelzero`/
+`calculate_lod` family intrinsics.
+
+## Investigation
+
+Before writing any code, grepped for existing infrastructure and found
+`feme/lib/Transforms/CPU/ImageCalls.{h,cpp}`'s `createSampleCmp2D` and
+`feme/runtime/CPU/FeMeRuntimeCPU.c`'s `femeCpuImageSampleCmp2DF32`/
+`femeRTSampleCmp2DAtLevel`/`femeRTApplyCompare` were already fully
+implemented -- a real percentage-closer-filtering depth comparison --
+but had **zero callers anywhere**. This materially narrowed the task: no
+new runtime code needed for the `Plain2D` case, only SPIR-V-side
+recognition/dispatch logic. Also confirmed (via
+`DXSAToLLVMIRTranslator.cpp`) that the DXIL-side `CalculateLOD` path has
+no CPU-lowering consumer either -- LOD-query support is a wholly
+separate, unstarted gap on both frontends, not just this one.
+
+Given the row's full named scope (5 different intrinsics, multiple
+image shapes, an LOD-query family needing new runtime design), I
+deliberately narrowed this session's own target to the smallest real,
+independently-testable-and-measurable slice: `spv_resource_samplecmp`/
+`.samplecmplevelzero` against `Plain2D` only, zero `ConstOffset`, no
+`MinLod` clamp -- planning to defer the rest to a new roadmap row filed
+at the end, rather than attempt everything and risk a large, harder-to
+-review, harder-to-bisect change.
+
+## Implementation, and a real mid-session bug
+
+First commit: `isDrefSampleIntrinsic` recognizing the two dref-sample
+intrinsic names, extended `hasOnlySupportedImageUses`/
+`hasOnlySupportedSamplerUses`/`lowerImageAccesses` to validate and route
+a matching call into `createSampleCmp2D`. Wrote lit tests and 6 unit
+tests, all against a `<2 x float>` coordinate (matching this session's
+initial, as it turned out incorrect, assumption about depth-comparison
+sample operand shapes). Also hit and fixed, mid-implementation, an
+accidental whole-file `clang-format -i` over-reformatting -- recovered
+by reverting via `git checkout --` and re-applying the intended edits
+manually, then using `clang-format-diff.py` restricted to only the
+diff's changed lines for final formatting, rather than whole-file
+formatting (this codebase has pre-existing style drift against the
+installed clang-format version that a whole-file run would needlessly
+touch).
+
+Everything built and passed locally (unit tests, lit tests, full
+`check-feme`). But a real CTS re-run of `dEQP-VK.glsl.texture_functions.
+texture.sampler2dshadow_fragment` against the actual `feme` ICD **still
+failed the same diagnostic** -- a clear signal the local tests were
+testing the wrong shape, not that the fix was incomplete. Added a
+temporary `FEME_DEBUG_DUMP_TMP`-gated `M.print` right after
+`SPIRVResourceLoweringPass` in `Pipeline.cpp`, rebuilt, and re-ran the
+single failing case with the dump enabled. The captured real IR showed
+`<3 x float>` coordinate and `<3 x i32>` offset, not the assumed 2-wide
+shapes. Confirmed via a web search of SPIR-V's own validation rules:
+a depth-comparison sample's `Coordinate` operand is always one component
+wider than its shape's ordinary addressing width, because glslang always
+packs the depth-reference value redundantly into `Coordinate` alongside
+the separately-extracted `Dref` operand (e.g. `texture(sampler2DShadow,
+vec3(u, v, compare))`). This is a good example of why this project's own
+established "confirm with a real CTS re-run after each change" practice
+matters even for a change that looks locally complete and fully tested:
+the tests I wrote were self-consistently *wrong*, since I invented both
+the fix and its own tests from the same incorrect assumption, and no
+amount of local unit/lit-test passing could have caught that on its own.
+
+Fixed the coordinate-width check (`N=2` -> `N=3`) in a second commit,
+reverted the temporary debug-dump instrumentation, and updated both lit
+tests and all 6 unit tests to the correct 3-wide coordinate, adding a
+7th (well, 6th replacing a slot, see commit) negative unit test
+confirming a non-spec-conformant 2-wide coordinate is still declined --
+turning what could have been a silent gap in test coverage into an
+explicit regression guard for the exact mistake this session made.
+
+## Validation
+
+- `ninja FeMeTransformsCPUTests feme-opt`: all unit tests (306 total,
+  6 new) and lit tests (2 new) pass.
+- `ninja check-feme` (ccache + assertions build): 2558/2617 discovered,
+  59 pre-existing unrelated `Unsupported`, 0 `Failed`, no regressions.
+- Real `deqp-vk` CTS re-run against the actual `feme` ICD (`VK_ICD_
+  FILENAMES` pointed at `build2`'s own `feme_icd.json`,
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1` to surface the ICD's own
+  diagnostic text): `dEQP-VK.glsl.texture_functions.texture.*shadow*`
+  (32 cases) went from 0/32 to **2/32 Pass**
+  (`sampler2dshadow_{fragment,vertex}`), with the remaining 13 failures
+  all attributable to already-scoped-out gaps (non-`Plain2D` shapes, a
+  `Bias` image-operand legalization gap discovered along the way).
+  `dEQP-VK.glsl.texture_functions.query.texturequerylod.*` (190 cases)
+  correctly remained 0/190, unaffected, since LOD-query support was
+  never in this row's own scope.
+- `check-hlsl-feme-vk`/offload-test-suite was **not** re-run this
+  session: this environment has no persisted offload-test-suite build
+  in either build directory, and standing one up requires a full
+  `HLSL.cmake`+`OffloadTest.cmake` superproject reconfigure, judged too
+  large an undertaking to fit this session alongside the rest of the
+  work. Documented this explicitly in `VulkanCTSReport.md` rather than
+  silently skipping it, consistent with how this project treats any
+  other unmeasured/deferred validation.
+
+## Documentation
+
+- **Roadmap.md**: struck through L46 with a done note covering the full
+  fix narrative (including the coordinate-width bug/correction) and its
+  measured CTS impact. Filed a new **L48** row breaking the remaining
+  scope into 5 independently-sized sub-parts: (a) non-`Plain2D`
+  depth-comparison shapes, (b) the `Bias` image-operand legalization
+  gap (a different pipeline phase, `SPIRVToLLVMPatterns.cpp`, not
+  `SPIRVResourceLowering.cpp` -- folded into the same row rather than a
+  separate one, since it's part of the same "finish depth-comparison
+  sampling for real" milestone, but called out as its own lettered
+  sub-item so it isn't lost or conflated with the others), (c)
+  `samplecmp_clamp`, (d) a real nonzero offset, and (e) the LOD-query
+  intrinsics. Kept the milestone-letter nesting flat (a single lowercase
+  letter, no further nesting), per this session's own standing
+  instruction to avoid the H6-series' past over-nesting mistake.
+- **VulkanCTSReport.md**: appended a full "Roadmap L46: fixed... plus
+  L48 filed" section following this project's established format,
+  including the offload-test-suite build-availability note.
+- **Vulkan14FeatureInventory.md**/**VulkanExtensionInventory.md**:
+  grepped for any existing reference to depth-comparison sampling or
+  shadow-sampler support -- found none, confirming no change needed
+  (this is internal CPU-lowering plumbing for an already-advertised
+  feature, not a new feature/extension surface).
+- **FeMeCPUDesign.md**/**FeMeGraphicsDesign.md**: reviewed the existing
+  `samplecmp.2d.f32` mention in `FeMeGraphicsDesign.md` -- it's already
+  generic enough not to contradict this fix's `Plain2D`-only narrowing,
+  so no design-doc deviation to record.
+
+## Commits
+
+Five separate commits, in dependency order: (1) the initial (2-wide,
+later found incorrect) `SPIRVResourceLowering.cpp` fix, (2) the initial
+lit/unit tests for that fix, (3) the coordinate-width correction
+(`N=2` -> `N=3`) in `SPIRVResourceLowering.cpp`, (4) updated lit/unit
+tests plus a new negative test for the coordinate-width mistake, and
+(5) the `Roadmap.md`/`VulkanCTSReport.md` documentation updates (L46
+closed, L48 filed). This `agent_thoughts.md` entry is committed
+separately as a sixth and final commit.
