@@ -59,6 +59,13 @@ constexpr StringLiteral DrawIDParamName = "mesh_draw_id";
 /// lowered `SignatureSystemValue::PrimitiveIndices` output store writes
 /// through -- see `lowerMeshPrimitiveIndicesStore`.
 constexpr StringLiteral PrimitiveIndicesParamName = "mesh_primitive_indices";
+/// (Roadmap L30) `FemeMeshArgs::Payload`, the read-only byte buffer
+/// holding the bound task stage's own payload (or null if no task stage is
+/// bound), threaded through unchanged from `EntryWrapper.cpp`'s own
+/// `Env.MeshPayload` -- the load-side counterpart of
+/// `TaskPayloadWrapper.cpp`'s own `PayloadParamName`, just read-only here
+/// since only a task entry ever writes it.
+constexpr StringLiteral PayloadParamName = "mesh_payload";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -91,6 +98,10 @@ struct MeshOutputStageEnv {
   Value *DrawID = nullptr;
   /// (Roadmap H29r) `FemeMeshArgs::PrimitiveIndices`.
   Value *PrimitiveIndices = nullptr;
+  /// (Roadmap L30) `FemeMeshArgs::Payload`, the bound task stage's own
+  /// payload bytes this mesh entry's own `feme.stage.task.payload.load`
+  /// calls read through -- see `PayloadParamName`'s own comment.
+  Value *Payload = nullptr;
 };
 
 std::optional<MeshOutputStageEnv> getMeshOutputStageEnv(Function &F) {
@@ -117,6 +128,8 @@ std::optional<MeshOutputStageEnv> getMeshOutputStageEnv(Function &F) {
       Env.DrawID = &Arg, Found = true;
     else if (Arg.getName() == PrimitiveIndicesParamName)
       Env.PrimitiveIndices = &Arg, Found = true;
+    else if (Arg.getName() == PayloadParamName)
+      Env.Payload = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -133,7 +146,8 @@ Function *appendMeshOutputParams(Function &F) {
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Type *, 8> ParamTypes(F.getFunctionType()->params());
   ParamTypes.append(
-      {PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, PtrTy, PtrTy, I32Ty, PtrTy});
+      {PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, PtrTy, PtrTy, I32Ty, PtrTy,
+       PtrTy});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -163,6 +177,7 @@ Function *appendMeshOutputParams(Function &F) {
   (&*ArgIt++)->setName(ActualPrimitiveCountParamName);
   (&*ArgIt++)->setName(DrawIDParamName);
   (&*ArgIt++)->setName(PrimitiveIndicesParamName);
+  (&*ArgIt++)->setName(PayloadParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -408,10 +423,42 @@ Value *lowerMeshInputLoad(CallInst &CI, const WaveBodyEnv &WEnv,
   return Result;
 }
 
+/// Lowers `feme.stage.task.payload.load` (roadmap L30): a mesh entry's own
+/// bounded payload read, the load-side counterpart of
+/// `TaskPayloadWrapper.cpp`'s masked payload store. Unlike a masked output
+/// store, a task payload is workgroup-shared, not per-lane data -- every
+/// lane reads the identical byte range `Offset` selects -- so this reads
+/// `MEnv.Payload + Offset` once and broadcasts that single scalar to every
+/// active lane's own result slot, mirroring `lowerMeshInputLoad`'s own
+/// per-lane broadcast shape immediately above exactly, just reading
+/// through the payload buffer instead of `MEnv.DrawID`.
+Value *lowerMeshTaskPayloadLoad(CallInst &CI, const WaveBodyEnv &WEnv,
+                                const MeshOutputStageEnv &MEnv) {
+  uint64_t Offset =
+      cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
+  IRBuilder<> Builder(&CI);
+  Value *Addr = Builder.CreateGEP(Builder.getInt8Ty(), MEnv.Payload,
+                                  Builder.getInt64(Offset));
+  Value *Scalar = Builder.CreateLoad(ScalarTy, Addr);
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *LaneResult =
+        Builder.CreateSelect(Active, Scalar, Constant::getNullValue(ScalarTy));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
 /// Lowers every masked mesh output store and `set_mesh_outputs` call in
 /// \p F, or diagnoses and returns false if \p F uses a `feme.stage.*` op
 /// this pass does not support (anything other than `OutputStore`/
-/// `SetMeshOutputs`/an `InputLoad` of `gl_DrawID` -- `EmitMeshTasksEXT`
+/// `SetMeshOutputs`/an `InputLoad` of `gl_DrawID`/a `TaskPayloadLoad`
+/// (roadmap L30) -- `EmitMeshTasksEXT`
 /// (canonicalized as of roadmap H6s) belongs to the *task* stage, not the
 /// mesh stage, so `TaskPayloadWrapperPass` lowers it instead, never this
 /// pass; roadmap H6p found that a mesh entry point *does* have one
@@ -488,6 +535,12 @@ bool lowerMeshStageOps(Function &F, const WaveBodyEnv &WEnv) {
         return false;
       }
       Value *Result = lowerMeshInputLoad(*CI, WEnv, *MEnv);
+      CI->replaceAllUsesWith(Result);
+      CI->eraseFromParent();
+      continue;
+    }
+    if (isStageOpCall(*CI, &Kind) && Kind == StageOpKind::TaskPayloadLoad) {
+      Value *Result = lowerMeshTaskPayloadLoad(*CI, WEnv, *MEnv);
       CI->replaceAllUsesWith(Result);
       CI->eraseFromParent();
       continue;

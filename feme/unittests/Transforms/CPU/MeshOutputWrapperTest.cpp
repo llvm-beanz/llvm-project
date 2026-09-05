@@ -482,7 +482,66 @@ TEST(MeshOutputWrapperTest, LowersDrawIDInputLoad) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
-// Every other `feme.stage.input.load` system value reaching a mesh entry
+// (Roadmap L30) A mesh entry's own bounded payload read
+// (`feme.stage.task.payload.load`, canonicalized from an ordinary load
+// through the task payload's own address-space-14 global by
+// `CanonicalizeStage.cpp`) lowers into a load off the new `mesh_payload`
+// trailing parameter at the call's own constant byte offset, broadcasting
+// that single scalar to every active lane -- mirroring
+// `LowersDrawIDInputLoad` above exactly, just reading through the payload
+// buffer instead of a workgroup-uniform builtin.
+TEST(MeshOutputWrapperTest, LowersTaskPayloadLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ms_main() #0 {
+      %v = call float @feme.stage.task.payload.load.f32(i32 4)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %v, i32 0)
+      ret void
+    }
+    declare float @feme.stage.task.payload.load.f32(i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="mesh" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  Sig.Elements = {
+      makeOutputElement(1, SignatureFrequency::PerVertex),
+  };
+  dxil::setEntrySignature(*M->getFunction("ms_main"), Sig);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  MeshOutputWrapperPass().run(*M, MAM);
+  EXPECT_FALSE(SawError);
+
+  Function *Body = M->getFunction("ms_main");
+  ASSERT_TRUE(Body);
+  Argument *PayloadArg = nullptr;
+  for (Argument &Arg : Body->args())
+    if (Arg.getName() == "mesh_payload")
+      PayloadArg = &Arg;
+  ASSERT_TRUE(PayloadArg);
+  EXPECT_FALSE(PayloadArg->use_empty());
+
+  for (const Instruction &I : instructions(*Body))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+
 // (i.e. anything but `gl_DrawID`) still gets a diagnostic -- a narrower one
 // than the pass's generic "unexpected stage op" catch-all, distinguishing
 // "recognized as an input load, but an unsupported system value" from
