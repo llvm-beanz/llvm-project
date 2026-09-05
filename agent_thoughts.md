@@ -62498,3 +62498,162 @@ dialect bug with no feme-specific angle to it.
 Given the fix is fully self-contained and verified with no remaining known
 gap in its own scope, I did not file a new roadmap row this session -- L38
 is simply closed.
+
+# L30: Mesh-stage task-payload load canonicalization
+
+The ticket handed me a JIT session error from `offload-test-suite`'s
+`SimpleAmplification.test`: `"Symbols not found: [ in.var.payload ]"` at
+mesh-shader pipeline creation. No SPIR-V opcode name, no obviously missing
+feature -- just a dangling symbol reference the JIT never resolved. This is
+exactly the shape of bug the H-series/L-series chains have taught me to
+distrust at face value: a missing *symbol* usually means something upstream
+never lowered a real value into that symbol's place, not that the symbol
+itself needs some special-cased definition.
+
+## Reproducing and reducing
+
+I pulled `spirv-dis` output for `SimpleAmplification.test`'s own mesh shader
+and ran it through `feme-translate --import-spirv` to get real MLIR, then
+`feme-opt` stage by stage to see exactly where `in.var.payload` (an LLVM
+global, not a SPIR-V-level name -- so it originates somewhere in the
+SPIR-V-to-LLVM conversion or a canonicalization pass afterward) stopped
+being a normal value and became a bare unresolved global reference. This
+narrowed it to `CanonicalizeStagePass`: a task-payload *write* (from the
+amplification/task stage) was already being canonicalized into a real
+`feme.stage.task.payload.store` call, but the mesh stage's own task-payload
+*read* was not being canonicalized into anything at all -- it just stayed a
+raw `LoadInst` against the same never-defined global, which is exactly the
+kind of reference nothing later ever defines, hence the JIT's dangling
+symbol.
+
+## Confirming the asymmetry before touching code
+
+Before writing anything, I read `CanonicalizeStage.cpp`'s `StoreInst`
+branch closely and found its own task-payload fallback: it checks
+`getStageIOBaseAndOffset` failing (meaning this isn't an ordinary
+stage-IO-signature store) plus `isTaskPayloadGlobal` (address-space-14,
+from H6h's own SPIR-V import work), and if both hold, builds
+`TaskPayloadStore` instead of leaving the raw store alone. The `LoadInst`
+branch had the identical `getStageIOBaseAndOffset`-failure check for other
+purposes but no equivalent `isTaskPayloadGlobal` fallback at all. This
+confirmed the fix shape immediately: add a symmetric `TaskPayloadLoad`
+fallback to the load branch, mirroring the store branch line for line.
+
+## The overloaded-on-result subtlety
+
+`getOrInsertStageOp`'s memoization is keyed differently depending on
+whether an op's defining characteristic is its *result* type or one of its
+*operands*. `OutputStore`/`TaskPayloadStore` need special-casing because
+their meaningful "value" is an operand (two stores of the same value type
+but different offsets must not collide). A *load*, by contrast, is already
+naturally overloaded on its own result type by the existing generic path --
+its addressing operand (`offset`) is the only differentiator besides
+result type, and two different offsets naturally produce two different
+calls already. So `TaskPayloadLoad` needed no special-casing at all in
+`getOrInsertStageOp`, just a table entry and a builder. I added a small
+unit test (`TaskPayloadLoadIsOverloadedOnResult`) specifically asserting
+this, since it's the one design point that's easy to get wrong silently
+(forgetting a special case would look identical in the common case and
+only misbehave if two different result types were ever loaded from the
+same offset, which nothing in today's test suite happens to exercise).
+
+## Finding every switch that needed a new case
+
+Adding a new `StageOpKind` enumerator is exactly the kind of change that
+silently fails to compile in one file and silently misbehaves at runtime in
+another, depending on whether a given `switch` over the enum has a
+`default:`. I grepped every `case.*StageOpKind::` site across the codebase
+and checked each file's switch for a `default:`/`llvm_unreachable`
+fallback. Three files had none (would not compile without a new case):
+`WaveUniformity.cpp`, `SIMDize.cpp`'s widening dispatch, and
+`ValidateStage.cpp`'s two switches. Every wrapper-pass file
+(`GeometryWrapper.cpp`, `FragmentWrapper.cpp`, `HullWrapper.cpp`,
+`DomainWrapper.cpp`, `VertexWrapper.cpp`, `PatchConstantWrapper.cpp`,
+`ReferenceLowering.cpp`, `WaveLowering.cpp`, `Linearize.cpp`) has a
+`default:` and needed nothing, since none of those stages ever see a
+`TaskPayloadLoad`/`TaskPayloadStore` call regardless (`ValidateStage.cpp`'s
+own legality switch is what actually enforces that). I did this inventory
+*before* writing the load-canonicalization fix itself, precisely so the
+build wouldn't surprise me midway through with a compile error in an
+unrelated file.
+
+## The getWidened assert as a design confirmation
+
+One thing that gave me real pause: `TaskPayloadStore`'s own existing
+comment reads ambiguously about whether its value operand could be a
+genuine vector. I found `SIMDize.cpp`'s `getWidened` helper asserts its
+input is never already a vector type, and that this assert had apparently
+never fired for `TaskPayloadStore` in any real test to date. I took this as
+strong (if indirect) evidence that in practice, payload store/load values
+reaching these ops are always scalar -- mirroring how ordinary stage-IO
+values are always pre-scalarized by `storeStageIOValue`/`loadStageIOValue`'s
+own recursion before ever reaching a `feme.stage.*` call. I designed
+`TaskPayloadLoad` on that assumption (scalar result, `offset` operand kept
+scalar during widening via `FirstOperandIsElementID`), matching
+`TaskPayloadStore`'s own existing treatment, rather than trying to support a
+genuine vector-typed payload load/store from the start.
+
+This assumption turned out to matter for what I found next.
+
+## Verifying the fix, and finding L39
+
+After the three commits (`StageOps.h`/`.cpp` + switches; the load-side
+canonicalization fallback; the `MeshOutputWrapper.cpp`/`EntryWrapper.cpp`
+payload-pointer threading), `ninja check-feme` passed clean, and a direct
+`llvm-lit -v` re-run of `SimpleAmplification.test` showed the offloader's
+own stdout reaching "Mesh Shader Pipeline created." and "Cleanup complete."
+-- the exact named JIT symbol error is gone. But the test still fails
+overall: it now hits a distinct `feme-cpu-simdize` divergent-vector error,
+this time on the *store* side, in the task/amplification stage. Given the
+`getWidened` assert observation above, my working hypothesis is that this
+particular payload's own HLSL member type is a genuine small vector (e.g.
+`float3`), and the task-payload fallback path -- unlike ordinary stage-IO
+stores -- never runs it through any scalar-decomposition step before
+wrapping it in `TaskPayloadStore`, so a real vector value reaches
+`widenMaskedTaskPayloadStore`'s `getWidened` call for the first time and
+trips exactly the assert I'd been trusting as "never happens in practice."
+I did not chase this further this session (no IR reduction done yet); I
+filed it as roadmap L39 with this hypothesis explicitly flagged as
+unconfirmed, since it's a genuinely separate bug from L30's own JIT-symbol
+scope, matching this project's established one-bug-per-session discipline.
+
+## Real CTS impact, and finding L40
+
+Since this ticket's own reproducer was HLSL/`offload-test-suite`-sourced
+rather than `dEQP-VK`-sourced, I searched the CTS case list for the closest
+real coverage of a mesh-stage task-payload *load* specifically and found
+`dEQP-VK.mesh_shader.ext.misc.{payload_not_accessed,payload_read}`.
+`payload_not_accessed` already passed before and after (it never reads the
+payload back, so it never exercised this bug's own code path either way).
+`payload_read` -- which does write in the task stage and read back in the
+mesh stage, the exact real-hardware shape this fix targets -- confirmed the
+fix works (no more JIT symbol error) but surfaced yet another, unrelated
+gap: `feme-cpu-linearize`'s `"loop ... has an internal branch ...
+unsupported"` diagnostic, the same family H19k already partially fixed for
+a different loop shape (a redundant `StructurizeCFGPass`-inserted `Flow`
+block re-deriving an already-decided phi-of-constants check).
+`payload_read`'s own loop evidently has some other internal-branch shape
+H19k's own deliberately narrow, conservative fold doesn't match. I filed
+this as roadmap L40, again without chasing an IR reduction this session --
+both L39 and L40 are real, separate, well-scoped follow-on bugs, and L30
+itself (the JIT symbol error asked for) is genuinely fixed and verified
+both via the original `offload-test-suite` reproducer and a real CTS
+payload-read case.
+
+## Docs
+
+Updated `Roadmap.md` (L30 struck through with the full resolution; L39/L40
+filed immediately after, each with `Depends: L30` since both are direct
+consequences of this fix newly reaching previously-unreached code paths),
+`VulkanCTSReport.md` (new L30 section covering the CanonicalizeStage
+asymmetry root cause, the three commits, `ninja check-feme` numbers, the
+`offload-test-suite` stdout verification, and the real `deqp-vk` mesh
+payload re-run), and `FeMeGraphicsDesign.md` (a short note under the
+existing H6-series mesh/task narrative, mirroring H6i's own store-side
+paragraph, describing the load-side fix and why a task payload's load is
+broadcast-per-wave rather than read-per-lane like ordinary per-vertex
+input). Confirmed `VK_EXT_mesh_shader` was already advertised from earlier
+roadmap work, so neither `Vulkan14FeatureInventory.md` nor
+`VulkanExtensionInventory.md` needed a change -- this fix is purely an
+internal completeness gap within an already-advertised extension, not a new
+feature surface.
