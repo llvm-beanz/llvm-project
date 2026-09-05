@@ -54,6 +54,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CycleAnalysis.h"
 #include "llvm/Analysis/PostDominators.h"
@@ -732,8 +733,8 @@ private:
   /// block this pass still cares about below (`Header`/`Latch` are never
   /// peeled or folded away, and `PeeledFrom` -- not `UI` -- is what
   /// disambiguates a peeled pass-through block from a genuine divergent
-  /// check; see `chainToleratingUniformExits`'s own comment) -- so there
-  /// is no need to recompute it at all.
+  /// check; see `collectUniformPassThroughRegion`'s own comment) -- so
+  /// there is no need to recompute it at all.
   UniformityInfo &UI;
 
   /// The exit-check shape a single loop block can have: a conditional
@@ -761,24 +762,41 @@ private:
   std::optional<ExitCheck> matchExitCheckWithRelay(BasicBlock &BB,
                                                    BasicBlock *ExitBlock);
 
-  /// Roadmap L40: generalizes `straightChain` to additionally tolerate a
-  /// "pass-through" block along the way from \p From to \p To: one whose
-  /// own terminator is a conditional branch, provided it is itself a
-  /// genuine, *non-divergent* exit check reaching \p ExitBlock (matched
-  /// via `matchExitCheckWithRelay`) via its other arm -- left completely
-  /// untouched, exactly the way `linearizeCycle` already tolerates such a
-  /// check sitting directly in the header or the latch. A real
-  /// `dEQP-VK.mesh_shader.ext.misc.payload_read`-shaped loop's own plain,
-  /// uniform `for` trip-count check can end up as exactly such a
-  /// "pass-through" block once `UnifyLoopExits`/`StructurizeCFG` have run
-  /// -- see the `linearizeCycle` file comment and
-  /// `peelConstantFlowPredecessors`'s own comment for the mechanism that
-  /// first decouples it from the separate divergent check's own merge
-  /// block.
-  std::optional<SmallVector<BasicBlock *, 4>>
-  chainToleratingUniformExits(BasicBlock *From, BasicBlock *To,
-                             BasicBlock *ExitBlock, UniformityInfo &UI,
-                             const SmallPtrSetImpl<BasicBlock *> &PeeledFrom);
+  /// Roadmap L42: generalizes the "pass-through" tolerance from a *chain*
+  /// that tolerated at most one relayed pass-through block per step (an
+  /// earlier, now-removed `chainToleratingUniformExits`) to a full uniform
+  /// *subregion* between \p From (inclusive) and \p To (exclusive),
+  /// tolerating a genuinely branching (not just chained) nested diamond of
+  /// further uniform checks along the way. A real
+  /// `dEQP-VK.mesh_shader.ext.misc.payload_read` shader's own
+  /// verification loop nests exactly two such checks: its outer, uniform
+  /// `for`-style trip-count check's own "skip the body" arm rejoins the
+  /// real divergent check's own `StructurizeCFG`-built merge block
+  /// directly, rather than reaching it only via a single straight,
+  /// singly-entered relay chain the narrower chain-based model required --
+  /// so neither of that outer check's own two arms ever reaches \p To that
+  /// way, even though every block along the way remains provably uniform.
+  /// A walk may also legitimately end at \p ExitBlock directly rather than
+  /// \p To: `peelConstantFlowPredecessors`'s own redirect (see its
+  /// comment) rewires a peeled predecessor straight to whichever of \p
+  /// To's own successors its constant selects, which is \p ExitBlock
+  /// itself whenever that predecessor's own peeled decision was the
+  /// "exit now" arm -- bypassing \p To entirely on that path, the same
+  /// way `matchExitCheckWithRelay`'s own relay tolerates it. Returns
+  /// every block visited (order not significant: each is masked with the
+  /// same, still-unnarrowed `MaskPair` regardless of which of this
+  /// region's own arms a given lane's real, uniform control flow actually
+  /// takes -- see `applyStageMasks`'s own per-block application at the
+  /// call site), or `std::nullopt` if the region cannot be shown to reach
+  /// \p To (or \p ExitBlock) this way: escaping \p C's own cycle, ending
+  /// in anything but an `UnCondBr`/`CondBr` terminator, or a `CondBr`
+  /// that is itself genuinely divergent (only \p To's own check may be
+  /// that).
+  std::optional<SmallPtrSet<BasicBlock *, 8>>
+  collectUniformPassThroughRegion(BasicBlock *From, BasicBlock *To,
+                                  BasicBlock *ExitBlock, CycleRef C,
+                                  UniformityInfo &UI,
+                                  const SmallPtrSetImpl<BasicBlock *> &PeeledFrom);
 
   /// Finalizes \p Latch's backedge once its loop-carried masks are fully
   /// known (\p MasksAtLatch), returning the resulting backedge condition:
@@ -1141,34 +1159,38 @@ LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
   return Result;
 }
 
-std::optional<SmallVector<BasicBlock *, 4>>
-LoopLinearizer::chainToleratingUniformExits(
-    BasicBlock *From, BasicBlock *To, BasicBlock *ExitBlock,
+std::optional<SmallPtrSet<BasicBlock *, 8>>
+LoopLinearizer::collectUniformPassThroughRegion(
+    BasicBlock *From, BasicBlock *To, BasicBlock *ExitBlock, CycleRef C,
     UniformityInfo &UI, const SmallPtrSetImpl<BasicBlock *> &PeeledFrom) {
-  SmallVector<BasicBlock *, 4> Chain;
-  BasicBlock *Cur = From;
-  while (Cur != To) {
-    if (Cur != From && Cur->getUniquePredecessor() == nullptr)
-      return std::nullopt;
-    Chain.push_back(Cur);
+  SmallPtrSet<BasicBlock *, 8> Visited;
+  SmallVector<BasicBlock *, 8> Worklist{From};
+  while (!Worklist.empty()) {
+    BasicBlock *Cur = Worklist.pop_back_val();
+    if (Cur == To || Cur == ExitBlock)
+      continue;
+    if (!Visited.insert(Cur).second)
+      continue; // Already queued/visited via another arm.
+    if (!CI.contains(C, Cur))
+      return std::nullopt; // Escaped the cycle without ever reaching `To`.
     if (auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator())) {
-      Cur = UBr->getSuccessor(0);
+      Worklist.push_back(UBr->getSuccessor(0));
       continue;
     }
-    // Not a plain relay: only a genuinely separate, non-divergent exit
-    // check reaching `ExitBlock` via its other arm is tolerated here (see
-    // this function's own comment) -- anything else, including a second
-    // genuinely divergent check, fails the chain. `PeeledFrom` (see
-    // `linearizeCycle`'s own comment) always wins over
-    // `UI.isDivergentTerminator` here too, for the same reason.
-    std::optional<ExitCheck> PassThrough =
-        matchExitCheckWithRelay(*Cur, ExitBlock);
-    if (!PassThrough ||
-        (!PeeledFrom.contains(Cur) && UI.isDivergentTerminator(PassThrough->Br)))
+    auto *CBr = dyn_cast<CondBrInst>(Cur->getTerminator());
+    if (!CBr)
+      return std::nullopt; // Not a shape this milestone understands.
+    // A further, genuinely divergent branch strictly *inside* this
+    // region (rather than being `To` itself) is the two-divergent-check
+    // shape this milestone does not yet support -- `PeeledFrom` wins the
+    // same way it does everywhere else in this pass (see
+    // `linearizeCycle`'s own comment).
+    if (!PeeledFrom.contains(Cur) && UI.isDivergentTerminator(CBr))
       return std::nullopt;
-    Cur = PassThrough->StayInLoop;
+    Worklist.push_back(CBr->getSuccessor(0));
+    Worklist.push_back(CBr->getSuccessor(1));
   }
-  return Chain;
+  return Visited;
 }
 
 Value *LoopLinearizer::closeLatch(BasicBlock *Latch, BasicBlock *Header,
@@ -1245,11 +1267,12 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // reaching a merge block of its own) -- see
   // `peelConstantFlowPredecessors`'s own comment. Decouples that so the
   // uniform check can be recognized as its own "pass-through" block below
-  // (see `chainToleratingUniformExits`) rather than an unrecognized second
-  // `OtherCondBrBlocks` entry. `PeeledFrom` records every such uniform
-  // check's own block: `UniformityInfo` cannot be trusted to (re-)classify
-  // it as non-divergent even after this peel (see the next comment), so
-  // the classification below trusts this explicit, structural proof
+  // (see `collectUniformPassThroughRegion`) rather than an unrecognized
+  // second `OtherCondBrBlocks` entry. `PeeledFrom` records every such
+  // uniform check's own block: `UniformityInfo` cannot be trusted to
+  // (re-)classify it as non-divergent even after this peel (see the next
+  // comment), so the classification below trusts this explicit, structural
+  // proof
   // instead wherever it applies.
   SmallPtrSet<BasicBlock *, 2> PeeledFrom;
   peelConstantFlowPredecessorsInCycle(CI, C, Header, Latch, PeeledFrom);
@@ -1391,59 +1414,86 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       return false;
     }
 
-    // Find the single, genuinely divergent exit check among
-    // `OtherCondBrBlocks` -- any other entry here must instead be its own
-    // separate, non-divergent "pass-through" check (like `Header`/`Latch`
-    // above), tolerated (left completely untouched) by
-    // `chainToleratingUniformExits` below rather than treated as this
+    // Find the single, genuinely divergent block among
+    // `OtherCondBrBlocks` -- any other entry here must instead be a
+    // separate, non-divergent "pass-through" block (like `Header`/
+    // `Latch` above), tolerated (left completely untouched) by
+    // `collectUniformPassThroughRegion` below rather than treated as this
     // cycle's own real check. `PeeledFrom` (see above) always wins this
-    // classification over `UI.isDivergentTerminator` when it applies:
-    // a block already structurally proven redundant by the peel is never
-    // a pass-through/real-check ambiguity `UniformityInfo` needs to
+    // classification over `UI.isDivergentTerminator` when it applies: a
+    // block already structurally proven redundant by the peel is never a
+    // pass-through/real-check ambiguity `UniformityInfo` needs to
     // resolve.
-    BasicBlock *CheckBlock = nullptr;
-    std::optional<ExitCheck> CheckExit;
-    for (BasicBlock *BB : OtherCondBrBlocks) {
-      std::optional<ExitCheck> EC = matchExitCheckWithRelay(*BB, ExitBlock);
-      if (!EC) {
-        diagnose(F, "loop at '" + Header->getName() +
-                        "' has an internal branch in '" + BB->getName() +
-                        "' that does not reach the loop's exit block; "
-                        "unsupported (roadmap milestone 6 deviation)");
-        return false;
-      }
-      if (PeeledFrom.contains(BB) || !UI.isDivergentTerminator(EC->Br))
-        continue; // A separate, genuine uniform check: a pass-through.
-      if (CheckBlock) {
-        diagnose(F, "loop at '" + Header->getName() +
-                        "' has more than one divergent exit check ('" +
-                        CheckBlock->getName() + "' and '" + BB->getName() +
-                        "'); unsupported (roadmap milestone 6 deviation)");
-        return false;
-      }
-      CheckBlock = BB;
-      CheckExit = EC;
+    //
+    // Roadmap L42: classification here is driven by actual divergence
+    // (`UI.isDivergentTerminator`), not by whether a block happens to
+    // match `matchExitCheckWithRelay`'s narrower shape -- a genuinely
+    // uniform pass-through block (like the outer, uniform trip-count
+    // check in a real `dEQP-VK.mesh_shader.ext.misc.payload_read`
+    // shader's own verification loop) need not itself look anything like
+    // an exit check at all: its own "skip the body" arm can rejoin the
+    // real divergent check's own `StructurizeCFG`-built merge block
+    // directly, never reaching `ExitBlock` via any straight or singly-
+    // relayed chain -- see `collectUniformPassThroughRegion`'s own
+    // comment for the region walk that recognizes it instead.
+    SmallVector<BasicBlock *, 2> DivergentCandidates;
+    for (BasicBlock *BB : OtherCondBrBlocks)
+      if (!PeeledFrom.contains(BB) && UI.isDivergentTerminator(BB->getTerminator()))
+        DivergentCandidates.push_back(BB);
+
+    if (DivergentCandidates.size() > 1) {
+      diagnose(F, "loop at '" + Header->getName() +
+                      "' has more than one divergent exit check ('" +
+                      DivergentCandidates[0]->getName() + "' and '" +
+                      DivergentCandidates[1]->getName() +
+                      "'); unsupported (roadmap milestone 6 deviation)");
+      return false;
     }
-    if (!CheckBlock)
+    if (DivergentCandidates.empty())
       return false; // No divergence anywhere here either: leave alone.
 
-    std::optional<SmallVector<BasicBlock *, 4>> PreChain =
-        chainToleratingUniformExits(Header, CheckBlock, ExitBlock, UI,
-                                    PeeledFrom);
-    std::optional<SmallVector<BasicBlock *, 4>> PostChain =
-        chainToleratingUniformExits(CheckExit->StayInLoop, Latch, ExitBlock,
-                                    UI, PeeledFrom);
-    if (!PreChain || !PostChain) {
+    BasicBlock *CheckBlock = DivergentCandidates.front();
+    std::optional<ExitCheck> CheckExit =
+        matchExitCheckWithRelay(*CheckBlock, ExitBlock);
+    if (!CheckExit) {
       diagnose(F, "loop at '" + Header->getName() +
                       "' has an internal branch in '" + CheckBlock->getName() +
-                      "'; only a straight-line chain to/from the exit "
-                      "check is supported yet (roadmap milestone 6 "
+                      "' that does not reach the loop's exit block; "
+                      "unsupported (roadmap milestone 6 deviation)");
+      return false;
+    }
+
+    std::optional<SmallPtrSet<BasicBlock *, 8>> PreRegion =
+        collectUniformPassThroughRegion(Header, CheckBlock, ExitBlock, C, UI,
+                                        PeeledFrom);
+    std::optional<SmallPtrSet<BasicBlock *, 8>> PostRegion =
+        collectUniformPassThroughRegion(CheckExit->StayInLoop, Latch,
+                                        ExitBlock, C, UI, PeeledFrom);
+    if (!PreRegion || !PostRegion) {
+      diagnose(F, "loop at '" + Header->getName() +
+                      "' has an internal branch in '" + CheckBlock->getName() +
+                      "'; only a uniform pass-through region to/from the "
+                      "exit check is supported yet (roadmap milestone 6 "
                       "deviation)");
+      return false;
+    }
+    // Every other `OtherCondBrBlocks` entry must be accounted for by one
+    // of these two regions -- anything left over is a genuinely
+    // unsupported shape (e.g. a second real internal branch that is
+    // neither a uniform pass-through nor this cycle's own check).
+    for (BasicBlock *BB : OtherCondBrBlocks) {
+      if (BB == CheckBlock || PreRegion->contains(BB) ||
+          PostRegion->contains(BB))
+        continue;
+      diagnose(F, "loop at '" + Header->getName() +
+                      "' has an internal branch in '" + BB->getName() +
+                      "' that does not reach the loop's exit block; "
+                      "unsupported (roadmap milestone 6 deviation)");
       return false;
     }
 
     MaskPair Masks = makeActivePNPair();
-    for (BasicBlock *BB : *PreChain)
+    for (BasicBlock *BB : *PreRegion)
       applyStageMasks(*BB, Masks);
     applyStageMasks(*CheckBlock, Masks);
 
@@ -1470,7 +1520,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     UncondBrInst::Create(CheckExit->StayInLoop, CheckExit->Br->getIterator());
     CheckExit->Br->eraseFromParent();
 
-    for (BasicBlock *BB : *PostChain)
+    for (BasicBlock *BB : *PostRegion)
       applyStageMasks(*BB, MasksAfterCheck);
     applyStageMasks(*Latch, MasksAfterCheck);
 
