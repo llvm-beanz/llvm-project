@@ -64330,3 +64330,136 @@ row, for a future session's real IR/pixel-level reduction.
    (`ImageSamplingTest.cpp`).
 4. `Roadmap.md`/`VulkanCTSReport.md` doc updates.
 5. This `agent_thoughts.md` entry (its own final commit).
+
+# Session: L50 sub-item (f) investigation (CubeArray-shadow rendering bug)
+
+## Task
+
+Requested work on L50 or other prerequisites blocking the L-series
+milestones. L50 broke L48's remaining depth-comparison-sampling scope
+into 6 sub-items (a)-(f). I scoped this session to sub-item (f) alone: a
+newly-discovered `samplercubearrayshadow_fragment` CTS rendering bug (a
+localized 32x32-pixel mismatch), since it was the most concretely
+described, self-contained item -- (a)/(b)/(e) need brand-new
+infrastructure/design decisions of their own, and (c)/(d) weren't even
+confirmed present in a real CTS failure yet.
+
+## Methodology
+
+1. Reproduced the failure with a real `deqp-vk` run against the real
+   `feme` ICD (not a synthetic/unit-test repro) -- confirmed
+   `Fail (Image mismatch)`.
+2. Extracted and pixel-diffed the actual `Result`/`Reference`/
+   `ErrorMask` PNGs embedded in the `.qpa` log (base64-decoded via a
+   small Python + Pillow script) to get the mismatch's *exact* pixel
+   extent (`x:[96,127] y:[0,31]`, a solid 1024-pixel block, uniformly
+   wrong in the same direction) -- this precision mattered: a solid,
+   uniformly-oriented block is a very different signature (points to a
+   value-level error) than a scattered/boundary-only mismatch (would
+   point to a roundoff or addressing-alignment error), and shaped my
+   whole subsequent investigation.
+3. Read VK-GL-CTS's own test and reference-renderer source in detail
+   (`vktShaderRenderTextureFunctionTests.cpp`, `tcuTexture.cpp`) rather
+   than guessing at its behavior -- this surfaced the `layerCorr`
+   per-array-element depth-value scaling (a real, CubeArray-specific
+   difference from the passing `Cube`-shadow sibling) as an initially
+   very promising lead, and also gave me the *exact* reference formulas
+   (`selectLayer`, `fillWithGrid`, `computeLodFromDerivates`) needed to
+   mechanically verify our own implementation against, rather than just
+   eyeballing plausibility.
+4. Added temporary, environment-variable-gated debug instrumentation
+   (`FEME_DEBUG_CUBEARRAY_CMP`, a pattern directly modeled on a prior
+   session's own `FEME_DEBUG_DUMP_PRE_JIT_IR` precedent) to the two
+   runtime functions under suspicion, rebuilt just the runtime bitcode
+   (`ninja feme_vulkan`, fast -- a C file, no full LLVM rebuild needed),
+   and re-ran the exact failing CTS case to capture real per-invocation
+   data (17,408 samples) -- this is the same "real IR/pixel-level
+   reduction" technique the task's own guidance and this project's prior
+   H6/H8/H9/L-series sessions have used throughout, just applied to a
+   runtime-level debug dump instead of an IR dump, since the suspected
+   bug was in runtime sampling math, not IR shape.
+5. Independently reimplemented VK-GL-CTS's own texture-fill algorithm in
+   Python (`fillWithGrid`'s checkerboard-parity formula, `layerCorr`
+   scaling, and the forced-identical-corner-texel special case) and
+   cross-checked it against every one of the 17,408 logged fetched texel
+   values, rather than trusting my own mental model of "should the
+   values match" -- this is what let me conclusively rule out texture
+   content/fetch as the bug (only 4 "mismatches", and all 4 turned out to
+   be the deliberate corner-forcing rule I'd initially missed, not real
+   errors) instead of leaving it as an untested hypothesis.
+6. Hand-derived the real reference LOD value for both the passing
+   `Cube`-shadow test and the failing `CubeArray`-shadow test from their
+   own coordinate ranges and face sizes, specifically to check whether my
+   initial "hardcoded Lod=0" hypothesis (a real, already-documented,
+   pre-existing limitation) could actually explain *this* failure. It
+   couldn't: the `CubeArray` case's own real LOD is negative (clamps to
+   level 0 on both sides, a coincidental no-op), while the *passing*
+   `Cube`-shadow case's own real LOD is a sizeable positive value (and it
+   still passes) -- so "always Lod=0" is not this row's cause, even
+   though it's a real, independently-tracked limitation elsewhere (filed
+   under L50 sub-item (e)). I want to flag this explicitly: it would have
+   been easy to declare victory on the first plausible-sounding
+   hypothesis without doing this arithmetic, and it would have been
+   wrong.
+
+## Finding
+
+All four pieces of `femeCpuImageSampleCmpCubeArrayF32`'s own sampling
+math -- face/layer selection, LOD/mip-level clamping, texel-fetch
+content, and depth-compare application -- are now proven correct against
+VK-GL-CTS's own real reference formulas, via real captured data, not
+static code reading alone. None of them is this bug's cause. The
+remaining, now much more narrowly scoped, candidate is *outside* the
+image-sampling runtime entirely: most likely a rasterizer/vertex-
+attribute-interpolation discrepancy specific to this test's 4-wide
+`texCoord` (whose `w` component doubles as both the array-layer selector
+*and* the depth-compare reference value -- a combination no other
+shadow-sampling case in this CTS group exercises), and the mismatch's own
+shape (a solid quadrant, not a thin boundary strip) is consistent with a
+triangle-diagonal-aligned interpolation discrepancy rather than a
+sampling-math bug.
+
+## Disposition
+
+Sub-item (f) is **not fixed this session** -- no functional code was
+changed (the debug instrumentation was fully reverted before committing,
+confirmed via `git diff`/`git checkout` and a clean `ninja check-feme`
+re-run: 2568/2568 supported tests still pass). Per the task's own
+instruction to add roadmap entries breaking down remaining work when a
+milestone isn't completed, I updated `Roadmap.md`'s L50 sub-item (f) text
+in place with these findings (kept un-struck-through, since still open)
+and filed a new row, **L51**, precisely scoping the next concrete
+investigation step (a targeted rasterizer/attribute-interpolation
+reduction), rather than leaving (f)'s original, now-superseded framing
+("needs its own real IR/pixel-level reduction... to isolate whether X or
+Y") in place unchanged. `VulkanCTSReport.md` updated with a full writeup
+of the investigation and its evidence. No feature/extension bit touched;
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`/
+`FeMeGraphicsDesign.md` reviewed, no change needed (no design decision
+made or changed, only an investigation).
+
+## Why no code fix this session
+
+I want to be candid about this rather than force a fix: the evidence
+gathered this session is unusually strong for *ruling out* causes
+(cross-checked against real reference formulas with real captured data,
+not just plausible-sounding reasoning), but it does not yet *confirm* a
+positive root cause, since the remaining candidate (rasterizer/attribute
+interpolation) sits in a different part of the pipeline than where this
+session's own instrumentation was placed. Attempting a speculative fix in
+an unconfirmed area risked either no effect or a regression elsewhere,
+which the task's own standing "verify before considering done" guidance
+argues against. The next session should start directly with L51's
+described reduction (a debug dump placed in the rasterizer/attribute-
+interpolation code path, not the image-sampling runtime this session
+already exhaustively cleared), rather than re-treading this session's own
+now-settled ground.
+
+## Commits this session
+
+1. `Roadmap.md`/`VulkanCTSReport.md` doc updates (L50 sub-item (f) findings,
+   L51 filed).
+2. This `agent_thoughts.md` entry (its own final commit).
+
+No other commits: the debug instrumentation used for investigation was
+temporary and fully reverted, never committed.
