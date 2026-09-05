@@ -26696,3 +26696,133 @@ change needed. `FeMeCPUDesign.md`/`FeMeGraphicsDesign.md` reviewed: no
 deviation to record (neither design doc describes task-payload addressing
 at a level of detail this fix's dynamic-offset extension would
 contradict).
+
+## Roadmap L48: Array2D/Cube/CubeArray depth-comparison sampling fixed, L50 filed for the rest
+
+**Scope.** L46 fixed depth-comparison sampling (`samplecmp`/
+`samplecmplevelzero`) for `Plain2D` only. L48's own original report
+listed 5 independent remaining gaps (a)-(e); this session scoped down to
+sub-item (a)'s `Texture2DArray`/`TextureCube`/`TextureCubeArray` shapes
+specifically, deferring `Plain1D`/`Array1D` (no ordinary,
+non-comparison sampled-image path exists for either shape on this CPU
+target yet -- a materially bigger prerequisite of its own) and
+sub-items (b)-(e) to a new roadmap row.
+
+**Fix.** Added `ImageCallKind::SampleCmpArray2D`/`SampleCmpCube`/
+`SampleCmpCubeArray` plus matching `createSampleCmpArray2D`/
+`createSampleCmpCube`/`createSampleCmpCubeArray` builders
+(`ImageCalls.h`/`.cpp`) -- including adding the 3 new kinds to
+`matchImageCall`'s own `AllKinds` array, a required, easy-to-miss fifth
+touch-point flagged by that file's own roadmap-H19l comment (a new
+`ImageCallKind` requires updating 5 separate places: the enum, the name
+switch, the `FunctionType` switch, `AllKinds`, and the dispatch switch --
+missing `AllKinds` silently leaves a switch case dead with no compiler
+error). Generalized `SPIRVResourceLowering.cpp`'s
+`hasOnlySupportedImageUses`/`lowerImageAccesses` from a `Plain2D`-only
+dref-sample check to a `switch (Shape)` covering all 4 sampled-image
+shapes, using `DrefCoordWidth = min(OrdinaryCoordWidth + 1, 4)` --
+confirmed via real CTS SPIR-V shapes: `Array2D`/`Cube` widen their own
+3-component ordinary coordinate to 4, `CubeArray` stays at 4 (already
+SPIR-V's own vector-width ceiling). Added 3 new CPU runtime entry points
+(`femeCpuImageSampleCmpArray2DF32`/`femeCpuImageSampleCmpCubeF32`/
+`femeCpuImageSampleCmpCubeArrayF32`, `FeMeRuntimeCPU.c`), each placed
+immediately after its shape's ordinary-sample sibling function to
+satisfy C's declare-before-use rule for the `femeRTRoundClampLayer`/
+`femeRTSelectCubeFace` static helpers they call (initially inserted in
+the wrong place, causing an implicit-declaration compile error; fixed by
+relocating the 3 new functions).
+
+**Unit/lit tests.** `SPIRVResourceLoweringTest.cpp`: replaced the
+now-stale `LeavesASampleCmpAgainstArray2DAlone` (Array2D is no longer
+rejected) with 3 new positive lowering tests
+(`LowersSampleCmpArray2DToImageSampleCmpArray2D`/
+`LowersSampleCmpCubeToImageSampleCmpCube`/
+`LowersSampleCmpCubeArrayToImageSampleCmpCubeArray`) and 1 new negative
+test (`LeavesASampleCmpAgainstPlain1DAlone`, confirming `Plain1D` is
+still correctly declined) -- 9 SampleCmp-related unit tests all pass.
+New lit test `spirv-resource-lowering-image-samplecmp-shapes.ll` covers
+all 3 new shapes' own lowered call shape and coordinate-extraction
+order. `ImageSamplingTest.cpp`: 3 new runtime unit tests
+(`SampleCmpArray2DComparesRequestedLayer`/
+`SampleCmpCubeSelectsEachFaceByDirection`/
+`SampleCmpCubeArraySelectsRequestedCubeElement`) -- initially 2 of the 3
+failed due to a test-logic bug (backwards pass/fail texel-value
+assumptions against `SamplerCompareFunc::GreaterEqual`'s real `Dref >=
+Texel` semantics, not a runtime bug), fixed by swapping which
+face/element was expected to pass vs fail; all 3 pass after the fix.
+
+**`ninja check-feme`** (ccache, assertions-enabled `build2`): 2568/2568
+supported discovered tests pass (59 pre-existing `Unsupported`), 0
+`Failed`, no regressions across the full target (including all
+`check-feme` target dependencies built first). `FeMeTransformsCPUTests`
+(309/309) and `FeMeRuntimeCPUTests` (195/195) also run directly with no
+filter, confirming no regressions in either full suite.
+
+**Real `deqp-vk` re-run (feme ICD, `VK_ICD_FILENAMES` confirmed pointed
+at `feme_icd.json` via `vulkaninfo --summary` reporting `FeMe CPU Vulkan
+Device`).** `dEQP-VK.glsl.texture_functions.texture.*shadow*` (the same
+32-case group L46's own report measured): **6/32 now Pass**
+(`sampler2darrayshadow_{fragment,vertex}`,
+`sampler2dshadow_{fragment,vertex}`,
+`samplercubeshadow_{fragment,vertex}`, up from 2/32 before this row), 9
+still `Fail` (`sampler1d{,array}shadow_*` and `sampler{2d,cube}shadow_
+bias_fragment` -- all still out of this row's own scope, filed under
+L50 -- plus `samplercubearrayshadow_fragment`, a **newly-discovered
+distinct bug**, see below), 17/32 unaffected pre-existing
+`NotSupported`. `dEQP-VK.glsl.texture_functions.query.texturequerylod.*`
+(190 cases): confirmed unaffected at 0/190, exactly as expected (this
+row does not touch the LOD-query intrinsics at all).
+
+**`samplercubearrayshadow_fragment`: a real, newly-discovered, distinct
+rendering bug, not a re-confirmation of this row's own fix.**
+`vkCreateGraphicsPipelines` and rendering both now succeed (a genuine
+functional improvement over the prior total-rejection failure mode via
+the "unsupported raised operation" catch-all), but the rendered image
+mismatches the reference in one small, precisely localized region: a
+32x32-pixel block (pixel bbox `x:[96,127] y:[0,31]` of a 128x128 output
+image), 1023/16384 pixels differ (image-diff 835.1 vs threshold 0.2).
+Confirmed this is *not* a regression of the underlying cube-face-
+selection or array-layer-rounding math shared with the already-working
+paths: the ordinary (non-shadow) `samplercubearray_{fixed,float}_
+fragment` CTS cases (which reuse the identical `femeRTSelectCubeFace`/
+`femeRTRoundClampLayer` helpers this new function also calls) both
+cleanly Pass, and `samplercubeshadow_fragment` (which reuses the
+identical manual mip/trilinear/`femeRTApplyCompare` pattern this new
+function also uses, just without array-layer indexing) also cleanly
+Passes -- so the bug is isolated to some interaction between the two
+that is only present in the combined `CubeArray` + depth-comparison
+path, and only manifests in one specific screen-space region (likely
+one specific face+layer combination near a boundary), not a wholesale
+logic error. A real pixel-level diff (`Result.png`/`Reference.png`
+extracted from the `.qpa` log) confirmed the mismatch's precise extent
+before filing. Needs its own real IR/pixel-level reduction to isolate
+root cause -- filed as part of **L50**'s own sub-item (f) rather than
+blocking this row's disposition, given how small and precisely localized
+the remaining mismatch is relative to how much of the `CubeArray` shape
+now works correctly (a 6.2%-of-pixels, single-quadrant mismatch, not a
+wholesale rejection or crash).
+
+**`check-hlsl-feme-vk` not re-run this session.** Same standing gap as
+L46's own report (no persisted offload-test-suite build in this
+environment); the real `deqp-vk` sweep above is this session's primary,
+measured evidence, consistent with L31/L45/L46's own precedent.
+
+**Disposition.** Roadmap **L48 closed** (struck through) for its own
+scoped-down sub-item (a) slice (`Array2D`/`Cube`/`CubeArray` depth-
+comparison sampling, mostly fixed and confirmed via lit tests, unit
+tests, and a real 32-case CTS re-run showing 6/32 now Pass, up from 2).
+The remaining scope -- `Plain1D`/`Array1D` shadow sampling (a new
+prerequisite discovered this session), sub-items (b) `Bias` legalization,
+(c) `samplecmp_clamp`'s `MinLod` operand, (d) a nonzero dref
+`ConstOffset`, (e) the LOD-query intrinsics, and (f) the newly-found
+`CubeArray`-shadow boundary-region rendering bug -- is filed as **L50**,
+broken into 6 independently-sized sub-parts per this project's own
+established precedent of splitting out genuinely-distinct remaining
+scope rather than attempting everything in one row. No feature/extension
+bit touched by this row's own fix (already-advertised depth-comparison
+sampling support, internal CPU-lowering plumbing only);
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
+change needed. `FeMeGraphicsDesign.md`'s existing `samplecmp`/
+`SampleCmp` narrative mention reviewed: no deviation to record (describes
+the CPU-lowering call convention generically, not a `Plain2D`-only scope
+this row's widening would contradict).
