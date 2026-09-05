@@ -62404,3 +62404,97 @@ changes, rebuilt, and re-ran the identical case -- it crashed exactly the
 same way, confirming this is pre-existing and unrelated. Filed as L38
 rather than chased down in this session, since it's out of L29's own
 scope and deserves its own real IR reduction rather than a guess.
+
+# L38: upstream MLIR matrix-constant `CompositeExtract` fold bug
+
+Picked up L38, filed at the end of the L29 session: a GLSL-path (not
+HLSL/DXC) crash, `dEQP-VK.glsl.matrix.add.const.highp_mat2_float_fragment`,
+`"error: FloatAttr does not match expected type of the constant"` followed
+by an `llvm::dyn_cast` assertion.
+
+**First problem: how do I even reduce a GLSL case without a standalone
+`glslangValidator`?** This environment only links glslang into `deqp-vk`
+itself; there's no way to hand it a `.frag` file directly and get SPIR-V
+out. I almost gave up on a real IR reduction and considered just writing my
+own synthetic MLIR reproducing my *guess* at the bug shape, but that felt
+like exactly the kind of "confirmed via reasoning, not reduction" shortcut
+the project's own conventions (and every prior H/L-series row) explicitly
+avoid. Instead I found that `deqp-vk` has `--deqp-log-shader-sources=enable
+--deqp-log-decompiled-spirv=enable --deqp-log-filename=<path>`, which logs
+each shader's SPIR-V disassembly to the qpa XML log as each stage compiles
+-- and since the crash happens well *after* shader compilation (deep in
+pipeline creation), the log still captures a real, complete SPIR-V
+disassembly for the exact failing shader even though the log file itself
+never gets a clean close. A few `grep`/`sed` passes to find the right
+`<SpirVAssemblySource>` block, strip the XML wrapper tags, unescape
+`&quot;`, and it's a normal `spirv-as`-ready `.spvasm`. This is now my
+go-to technique for GLSL-path CTS failures going forward, and I recorded it
+in both technical-details and the CTS report for future sessions to reuse.
+
+**Reducing to the actual bug.** Reassembling and running through
+`feme-translate --import-spirv` + `feme-opt --feme-convert-spirv-to-llvm`
+reproduced the exact crash shape in isolation almost immediately: a
+`spirv.CompositeExtract %matrix_const[0]` was folding to a bare scalar
+`FloatAttr` but getting wrapped in a `vector<2xf32>`-typed
+`llvm.mlir.constant`. Tracing *why* took longer than the reduction itself
+-- I initially assumed feme's own `MatrixCompositeExtractPattern`
+(SPIRVToLLVMPatterns.cpp) must have a bug, since that's the pattern I'd
+expect to handle this. It doesn't have a bug. The actual problem is that it
+never runs at all for a *constant* matrix: MLIR's dialect conversion driver
+tries the op's own native `fold()` as an alternative-to-patterns
+legalization path before ever consulting the pattern set, and
+`spirv::CompositeExtractOp::fold` (upstream, in
+`SPIRVCanonicalization.cpp`) has its own bug -- `extractCompositeElement`
+treats any `ElementsAttr` composite as a flat linear buffer, correct for a
+plain vector constant but wrong for a matrix constant, where one index
+should pick a whole column. This took reading `DialectConversion.cpp`'s
+`OperationLegalizer::legalizeWithFold` pretty carefully to actually
+confirm, rather than just patching the symptom I could see.
+
+**The part that made me redo the fix once.** My first attempt made
+`extractCompositeElement` generically consume the attribute's own declared
+shape (`MatrixType::getShape()` = `[numRows, numColumns]`) one dimension at
+a time for any rank>1 `ElementsAttr`. It fixed the reported 2x2 case
+cleanly. I could have stopped there, called it done, and moved on to docs
+-- the ticket was "just" about the one reported case. But the roadmap row's
+own wording flagged "likely every other case under the 1,764-case
+`dEQP-VK.glsl.matrix.*.const.*` groups", so I ran the broader 72-case
+`add.const` group before declaring victory, and found a second failure on
+a *non-square* matrix (`mediump_mat4x3_float_vertex`) with a completely
+different error (`"type and attribute have a different number of
+elements: 3 vs. 4"`). Reducing that one separately showed my first fix's
+assumption was actually wrong in general: the SPIR-V deserializer's
+`processConstantComposite` flattens a matrix's columns in genuinely
+column-major order but declares the resulting attribute's shape as
+`[numRows, numColumns]` -- a real mismatch that's silently invisible for a
+square matrix (where consuming shape dimensions in either order gives the
+same grouping) and only exposed once rows != columns. Rather than also
+patching the deserializer to fix the shape/layout mismatch at its source
+(a bigger, riskier change touching a different, unrelated subsystem), I
+rewrote `extractCompositeElement` to special-case `spirv::MatrixType`
+directly, computing offsets from `MatrixType::getNumRows()`/
+`getNumColumns()` against the raw flat buffer rather than trusting the
+attribute's own (possibly mismatched) declared shape at all. This felt like
+the right level of surgical: fully sidesteps the deserializer's own
+mismatch without needing to reason about whether fixing it might affect
+some other consumer I haven't found yet.
+
+**Verification.** Confirmed via CTS: 432/432 (100%) across the *entire*
+`dEQP-VK.glsl.matrix.*.const.*` family (add/sub/mul/div), not just the
+originally-reported `add` subset -- matching the roadmap row's own
+prediction. `ninja check-feme` clean (2534/2593, same 59 pre-existing
+`Unsupported` as before, 0 `Failed`). Added lit tests both at the MLIR
+level (`canonicalize.mlir`, covering square, non-square, and two-index
+scalar extraction) and at the feme level (a new
+`spirv-to-llvm-matrix-constant-extract.mlir`), since the existing
+`spirv-to-llvm-matrix-composite.mlir` test only exercises the *non*-constant
+path (a function argument) and would never have caught this bug.
+
+**Per the established L25 precedent**, fixed directly upstream in
+`mlir/lib/Dialect/SPIRV/IR/SPIRVCanonicalization.cpp` rather than working
+around it feme-side, since this is a genuine, general-purpose MLIR SPIR-V
+dialect bug with no feme-specific angle to it.
+
+Given the fix is fully self-contained and verified with no remaining known
+gap in its own scope, I did not file a new roadmap row this session -- L38
+is simply closed.
