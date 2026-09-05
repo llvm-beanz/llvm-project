@@ -2307,8 +2307,30 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       std::optional<StageIOAccess> Access =
           resolveStageIOAccess(LI->getPointerOperand(), LI->getType(), DL,
                                ElementIDs, OutputGlobalSet, Stage);
-      if (!Access)
+      if (!Access) {
+        // (Roadmap L30) A mesh entry's bounded payload read -- the
+        // load-side counterpart of the task entry's own payload write
+        // fallback below -- an ordinary load through a (possibly GEP'd)
+        // address-space-14 global resolves no `StageIOAccess` either, for
+        // the same reason (it is raw task-defined memory, not a signature
+        // element). `getStageIOBaseAndOffset` still recovers its constant
+        // byte offset, letting it canonicalize into
+        // `feme.stage.task.payload.load` by that offset directly, rather
+        // than being left an unrewritten raw load referencing a SPIR-V-
+        // derived global name feme's own host runtime never defines (the
+        // JIT-link failure this fixes).
+        if (auto BaseAndOffset =
+                getStageIOBaseAndOffset(LI->getPointerOperand(), DL)) {
+          if (isTaskPayloadGlobal(BaseAndOffset->first)) {
+            Value *New = createStageTaskPayloadLoad(B, LI->getType(),
+                                                     BaseAndOffset->second);
+            LI->replaceAllUsesWith(New);
+            LI->eraseFromParent();
+            Changed = true;
+          }
+        }
         continue;
+      }
       // A scalar interface variable is one `feme.stage.input.load`; a
       // vector/matrix/single-member-struct-wrapped one is decomposed one
       // scalar at a time and rebuilt with `insertelement`/`insertvalue`,

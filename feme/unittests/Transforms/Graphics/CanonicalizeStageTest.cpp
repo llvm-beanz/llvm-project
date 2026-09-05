@@ -2622,4 +2622,51 @@ TEST(CanonicalizeStageTest, AmplificationStageCanonicalizesTaskPayloadStore) {
     EXPECT_FALSE(isa<StoreInst>(&I));
 }
 
+/// (Roadmap L30) A mesh entry's own bounded payload read -- the load-side
+/// counterpart of `AmplificationStageCanonicalizesTaskPayloadStore` above,
+/// through the very same `TaskPayloadGlobalVariablePattern` address-space-14
+/// global import shape, just read by the mesh workgroup a task workgroup's
+/// `EmitMeshTasksEXT` dispatched instead of written by the task workgroup
+/// itself -- canonicalizes into `feme.stage.task.payload.load` by its
+/// resolved constant byte offset, now that `canonicalizeSPIRVStage`'s
+/// `LoadInst` branch has a fallback mirroring its `StoreInst` branch's own.
+/// Like the store side, this carries no `SignatureElement` at all.
+TEST(CanonicalizeStageTest, MeshStageCanonicalizesTaskPayloadLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @payload = external addrspace(14) global { i32, [4 x float] }
+    define float @main() #0 {
+      %tag = load i32, ptr addrspace(14) @payload
+      %v = load float, ptr addrspace(14) getelementptr inbounds nuw (i8, ptr addrspace(14) @payload, i64 4)
+      ret float %v
+    }
+    attributes #0 = { "feme.shader.stage"="mesh" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  EXPECT_FALSE(dxil::getEntrySignature(*F).has_value());
+
+  unsigned SeenLoads = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) ||
+        Kind != StageOpKind::TaskPayloadLoad)
+      continue;
+    if (SeenLoads == 0) {
+      EXPECT_TRUE(CI->getType()->isIntegerTy(32));
+      EXPECT_EQ(getStageOpConstantOperand(*CI, /*Offset=*/0), 0u);
+    } else {
+      EXPECT_TRUE(CI->getType()->isFloatTy());
+      EXPECT_EQ(getStageOpConstantOperand(*CI, /*Offset=*/0), 4u);
+    }
+    ++SeenLoads;
+  }
+  EXPECT_EQ(SeenLoads, 2u);
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<LoadInst>(&I));
+}
+
 } // namespace
