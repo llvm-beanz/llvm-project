@@ -205,3 +205,39 @@ exit:
   ret void
 }
 declare i1 @feme.cpu.mask.any(i1)
+
+; feme.cpu.masked.atomicrmw.* (roadmap milestone L41) is always divergent,
+; even when every one of its own operands is uniform: it stands in for one
+; genuine, real per-lane atomic read-modify-write (see
+; `feme::cpu::FunctionWidener::widenMaskedAtomicRMW`, Transforms/CPU/
+; SIMDize.cpp), whose result differs by lane by construction -- e.g. every
+; lane racing to increment one shared counter via a uniform pointer,
+; uniform value and uniform (always-true) mask still gets a genuinely
+; different pre-increment value back. Before this fix, an all-uniform-
+; operand call site like this one was wrongly classified `Default` (hence
+; uniform), which left a real, load-bearing consumer branch (deciding
+; whether *this* lane is one of the first `N` to get a slot -- the exact
+; shape a real CTS mesh-shader "allocate a unique output slot" pattern
+; hits) unwidened too, so `feme::cpu::FunctionWidener::widen`'s final
+; "sever remaining uses of an erased instruction" fallback silently
+; substituted `poison` for the read instead of a real per-lane value.
+; CHECK-LABEL: WaveUniformityInfo for function 'masked_atomicrmw_is_divergent':
+define void @masked_atomicrmw_is_divergent() {
+  ; CHECK: DIVERGENT:{{.*}}%old = call i32 @feme.cpu.masked.atomicrmw.i32
+  %old = call i32 @feme.cpu.masked.atomicrmw.i32(i32 1, ptr @g, i32 1, i32 4, i1 true)
+  ; CHECK: DIVERGENT:{{.*}}%cond = icmp
+  %cond = icmp ult i32 %old, 32
+  ; CHECK: DIVERGENT:{{.*}}br i1 %cond
+  br i1 %cond, label %if_true, label %if_false
+
+if_true:
+  br label %exit
+
+if_false:
+  br label %exit
+
+exit:
+  ret void
+}
+@g = global i32 0
+declare i32 @feme.cpu.masked.atomicrmw.i32(i32, ptr, i32, i32, i1)
