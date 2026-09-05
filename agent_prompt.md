@@ -42,22 +42,17 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L38 or other prerequisites blocking the L-series milestones?
+Can you work on L30 or other prerequisites blocking the L-series milestones?
 
-> **A pre-existing, GLSL-path (not HLSL/DXC) crash discovered while measuring
-> L29's own CTS impact**:
-> `dEQP-VK.glsl.matrix.add.const.highp_mat2_float_fragment` (and, unconfirmed,
-> likely every other case under the 1,764-case `dEQP-VK.glsl.matrix.*.const.*`
-> groups) aborts with `"error: FloatAttr does not match expected type of the
-> constant"` immediately followed by an `llvm::dyn_cast` assertion
-> (`Casting.h:656`, "dyn_cast on a non-existent value") -- confirmed
-> pre-existing and unrelated to L29's own fix via a stash/rebuild bisection
-> reproducing the identical crash before that row's change landed. Likely a
-> distinct SPIR-V-constant-conversion gap in a different pattern than
-> `ArrayConstantPattern` (glslang's own `OpConstantComposite`/`OpSpecConstant*`
-> lowering for a scalar or per-component GLSL matrix constant probably takes a
-> different MLIR conversion path than DXC's matrix constants do), needing its
-> own real IR reduction (glslangValidator or `dxc`-equivalent on a minimal GLSL
-> fragment shader adding a `const mat2` to a `float`) to identify which
-> conversion pattern emits a `FloatAttr` whose type upstream's constant-building
-> code doesn't expect
+> **1 of L22's own 13 cases (`Graphics/MeshShaders/SimpleAmplification.test`) is
+> unaffected by any of L22's own fixes and still fails identically**: `"JIT
+> session error: Symbols not found: [ in.var.payload ]"`, `gpu-exec: error:
+> Failed to create mesh shader pipeline. (VkResult = -3)` -- a pre-existing gap
+> in mesh-shader amplification-stage payload plumbing (the payload symbol an
+> amplification shader's task-to-mesh handoff relies on is never defined),
+> unrelated to texture sampling, decorations, matrix constants, or composite
+> construction. Needs its own scoping pass to determine how much of
+> amplification-shader payload support is missing before a real fix can be
+> designed -- likely a substantial, multi-part gap (payload ABI,
+> task-shader-to-mesh-shader data handoff, JIT symbol registration) rather than
+> a small legalization fix
