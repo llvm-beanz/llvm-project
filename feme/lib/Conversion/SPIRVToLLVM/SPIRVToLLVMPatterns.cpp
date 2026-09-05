@@ -4049,6 +4049,237 @@ public:
     return mlir::success();
   }
 };
+
+/// Converts a `spirv.ImageSampleDrefImplicitLod` with any combination of
+/// `ConstOffset` and `MinLod` (no `Bias`: LLVM's SPIRV backend has no
+/// depth-comparison sampling intrinsic combining a bias with a comparison
+/// -- only the two variants below exist, unlike the four
+/// (`sample`/`.clamp`/`samplebias`/`samplebias.clamp`) implicit-LOD
+/// sampling supports, see `llvm/include/llvm/IR/IntrinsicsSPIRV.td`'s own
+/// `int_spv_resource_samplecmp{,_clamp}`) into the `llvm.spv.resource.
+/// samplecmp`/`.samplecmp.clamp` intrinsic call LLVM's SPIRV backend
+/// selects `OpSampledImage`+`OpImageSampleDrefImplicitLod` from -- see
+/// `llvm/test/CodeGen/SPIRV/hlsl-resources/SampleCmp.ll`'s own operand
+/// order (image, sampler, coord, dref, offset[, clamp]), mirroring
+/// `ImageSampleImplicitLodPattern` above. This is the depth-comparison
+/// sibling HLSL's `Texture*::SampleCmp` compiles down to (roadmap L25).
+class ImageSampleDrefImplicitLodPattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::ImageSampleDrefImplicitLodOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageSampleDrefImplicitLodOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageSampleDrefImplicitLodOp Op,
+                  OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    std::optional<mlir::spirv::ImageOperands> ImageOperandsAttr =
+        Op.getImageOperands();
+    mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
+    if (ImageOperandsAttr)
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+
+    mlir::spirv::ImageOperands SupportedMask =
+        mlir::spirv::ImageOperands::ConstOffset |
+        mlir::spirv::ImageOperands::MinLod;
+    if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
+      return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+
+    bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::ConstOffset);
+    bool HasMinLod = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::MinLod);
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value SampledImage = Adaptor.getSampledImage();
+    mlir::Value Image = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{0});
+    mlir::Value Sampler = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{1});
+    mlir::Value Dref = Adaptor.getDref();
+
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    mlir::Type OffsetType =
+        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
+                         CoordVecTy.getShape(), Rewriter.getI32Type()))
+                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+
+    // Same fixed Image Operands bit order as `ImageSampleImplicitLodPattern`
+    // above (`ConstOffset` before `MinLod`), whichever subset is present.
+    mlir::ValueRange OperandArguments = Adaptor.getOperandArguments();
+    size_t Index = 0;
+    mlir::Value Offset =
+        HasConstOffset ? OperandArguments[Index++] : mlir::Value();
+    mlir::Value Clamp = HasMinLod ? OperandArguments[Index++] : mlir::Value();
+    if (!Offset)
+      Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
+                                              Rewriter.getZeroAttr(OffsetType));
+
+    llvm::SmallVector<mlir::Value, 6> Arguments = {Image, Sampler, Coordinate,
+                                                    Dref, Offset};
+    if (Clamp)
+      Arguments.push_back(Clamp);
+    llvm::StringRef IntrinsicName = Clamp
+                                        ? "llvm.spv.resource.samplecmp.clamp"
+                                        : "llvm.spv.resource.samplecmp";
+
+    Rewriter.replaceOp(Op, createIntrinsicCall(Rewriter, Loc, IntrinsicName,
+                                               ResultType, Arguments));
+    return mlir::success();
+  }
+};
+
+/// Converts a `spirv.ImageSampleDrefExplicitLod` with a literal `Lod = 0.0`
+/// image operand (optionally combined with `ConstOffset`; a `Grad` operand,
+/// or any other `Lod` value, has no supported mapping and is rejected) into
+/// the `llvm.spv.resource.samplecmplevelzero` intrinsic call LLVM's SPIRV
+/// backend selects `OpSampledImage`+`OpImageSampleDrefExplicitLod` from --
+/// this intrinsic has no LOD operand at all (unlike
+/// `ImageSampleExplicitLodPattern`'s own `samplelevel`, which threads an
+/// arbitrary explicit LOD through): it always implicitly samples mip level
+/// zero, so only a literal-zero `Lod` operand has a supported mapping. This
+/// is the exact shape HLSL's `Texture*::SampleCmpLevelZero` always compiles
+/// down to (roadmap L25; see `llvm/test/CodeGen/SPIRV/hlsl-resources/
+/// SampleCmpLevelZero.ll`'s own operand order, image, sampler, coord, dref,
+/// offset).
+class ImageSampleDrefExplicitLodPattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::ImageSampleDrefExplicitLodOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageSampleDrefExplicitLodOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageSampleDrefExplicitLodOp Op,
+                  OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::spirv::ImageOperands Actual =
+        mlir::spirv::bitEnumClear(Op.getImageOperands(), NontemporalBit);
+    mlir::spirv::ImageOperands SupportedMask =
+        mlir::spirv::ImageOperands::Lod |
+        mlir::spirv::ImageOperands::ConstOffset;
+    if (!mlir::spirv::bitEnumContainsAny(Actual,
+                                        mlir::spirv::ImageOperands::Lod) ||
+        !mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
+      return Rewriter.notifyMatchFailure(
+          Op, "only a literal-zero Lod, optionally with ConstOffset, is "
+              "supported");
+
+    bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::ConstOffset);
+
+    // Image Operands are laid out in the SPIR-V spec's own fixed bit order
+    // (`Lod` before `ConstOffset`); the pre-conversion operand (not
+    // `Adaptor`'s, which may already have been converted to an
+    // `llvm.mlir.constant`) is checked for a literal zero, mirroring
+    // `getConstantMemberIndex`'s own pre-conversion constant check above.
+    mlir::Value Lod = Op.getOperandArguments()[0];
+    auto LodConstant = Lod.getDefiningOp<mlir::spirv::ConstantOp>();
+    if (!LodConstant)
+      return Rewriter.notifyMatchFailure(Op, "Lod is not a constant");
+    auto LodFloat = mlir::dyn_cast<mlir::FloatAttr>(LodConstant.getValue());
+    if (!LodFloat || !LodFloat.getValue().isZero())
+      return Rewriter.notifyMatchFailure(Op, "Lod is not a literal zero");
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value SampledImage = Adaptor.getSampledImage();
+    mlir::Value Image = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{0});
+    mlir::Value Sampler = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{1});
+    mlir::Value Dref = Adaptor.getDref();
+
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    mlir::Type OffsetType =
+        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
+                         CoordVecTy.getShape(), Rewriter.getI32Type()))
+                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+    mlir::Value Offset =
+        HasConstOffset ? Adaptor.getOperandArguments()[1] : mlir::Value();
+    if (!Offset)
+      Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
+                                              Rewriter.getZeroAttr(OffsetType));
+
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc,
+                                "llvm.spv.resource.samplecmplevelzero",
+                                ResultType,
+                                {Image, Sampler, Coordinate, Dref, Offset}));
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.ImageQueryLod` into two `llvm.spv.resource.calculate.
+/// lod`/`.calculate.lod.unclamped` intrinsic calls (LLVM's SPIRV backend's
+/// own `OpImageQueryLod` selection runs the reverse direction, building one
+/// two-component result *from* these same two intrinsics -- see
+/// `llvm/test/CodeGen/SPIRV/hlsl-resources/CalculateLevelOfDetail.ll`),
+/// combined into one `vector<2xf32>` result via two `llvm.insertelement`s:
+/// lane 0 (per the op's own result convention -- SPIR-V's spec: "The first
+/// component ... contains the mipmap array layer[; t]he second component
+/// ... contains the implicit level of detail" -- this converter's single
+/// supported image shape is always non-arrayed, so lane 0 is always the
+/// clamped LOD) from `calculate.lod`, lane 1 (the unclamped LOD) from
+/// `calculate.lod.unclamped`. This is the instruction HLSL's
+/// `Texture*::CalculateLevelOfDetail`/`CalculateLevelOfDetailUnclamped`
+/// both compile down to (roadmap L25); both lanes are always computed
+/// regardless of which one a given HLSL call actually reads, since SPIR-V's
+/// `OpImageQueryLod` itself has no way to request only one.
+class ImageQueryLodPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageQueryLodOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageQueryLodOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageQueryLodOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    auto ResultVecTy = mlir::dyn_cast_or_null<mlir::VectorType>(ResultType);
+    if (!ResultVecTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Type ElementType = ResultVecTy.getElementType();
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value SampledImage = Adaptor.getSampledImage();
+    mlir::Value Image = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{0});
+    mlir::Value Sampler = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{1});
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+
+    mlir::Value Clamped = createIntrinsicCall(
+        Rewriter, Loc, "llvm.spv.resource.calculate.lod", ElementType,
+        {Image, Sampler, Coordinate});
+    mlir::Value Unclamped = createIntrinsicCall(
+        Rewriter, Loc, "llvm.spv.resource.calculate.lod.unclamped",
+        ElementType, {Image, Sampler, Coordinate});
+
+    mlir::Value Zero = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(0));
+    mlir::Value One = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(1));
+    mlir::Value Result =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultVecTy);
+    Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
+                                                 Clamped, Zero);
+    Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
+                                                 Unclamped, One);
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
 /// array is nested.
 void flattenConstantElements(mlir::Attribute Value,
                              llvm::SmallVectorImpl<mlir::Attribute> &Out) {
@@ -5844,7 +6075,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       EmitVertexConversionPattern, EndPrimitiveConversionPattern,
       ExecutionModePattern, ExecutionModeIdPattern, ExpectConversionPattern,
       ImageFetchPattern, ImageFetchLodPattern, ImagePattern,
-      ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
+      ImageQueryLodPattern, ImageSampleDrefExplicitLodPattern,
+      ImageSampleDrefImplicitLodPattern, ImageSampleExplicitLodPattern,
+      ImageSampleImplicitLodPattern,
       ImageQuerySizePattern, ImageReadPattern, ImageTexelPointerPattern,
       ImageWritePattern,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIAddOp>,
