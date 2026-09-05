@@ -26402,3 +26402,93 @@ sampling and LOD-derivative computation). No feature/extension bit
 touched by this row's own fix (legalization plumbing only);
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
 change needed.
+
+## Roadmap L45: fixed (uniform-diamond-inside-a-region control-flow gap), plus L47 filed
+
+**Fix summary.** `feme::cpu::EntryWrapperPass::isLinearChain`
+(`EntryWrapper.cpp`) used to reject a wave body outright the moment it met
+any surviving conditional branch, even a genuinely safe one: a uniform
+two-way branch whose arms are each barrier-free and reconverge at a
+common merge block, entirely contained within whichever single
+barrier-delimited region already contains it, and so never itself needing
+a region split. A new `walkBarrierFreeArm` helper walks each arm the same
+way `matchBranchShape`'s own `walkBranchArm` does, but additionally
+declines if any block along the arm contains a `..._with_group_sync`
+barrier call; `isLinearChain` now recognizes this "safe diamond" shape and
+folds the whole diamond (header, both arms, and any merge-block phi) into
+its own linear walk rather than declining on sight. A genuinely unsafe
+diamond (a barrier inside one arm) is still declined exactly as before,
+falling through to the pre-existing diagnostic.
+
+**Tests.** 2 new lit tests
+(`entry-wrapper-safe-diamond-after-barrier.ll`,
+`entry-wrapper-barrier-in-diamond-arm-with-merge-phi-unsupported.ll`) and
+2 new `EntryWrapperTest` unit tests
+(`SplitsAroundSafeDiamondAfterBarrier`,
+`BarrierInsideDiamondArmWithMergePhiStillDiagnosed`), covering the fixed
+positive shape and confirming the genuinely-unsafe shape is still
+diagnosed. `ninja check-feme` (ccache, assertions-enabled build): 2550/2609
+discovered, 59 pre-existing `Unsupported`, 0 `Failed` -- up by exactly the
+4 new test cases this fix adds, no regressions.
+
+**Minimal-repro confirmation.** Before the fix, a hand-written repro
+(single barrier in the entry block, an unrelated uniform diamond with a
+merge phi further down) reproduced this row's exact diagnostic verbatim
+via `feme-opt --llvm -passes=feme-cpu-simdize,feme-cpu-lower-wave,feme-cpu-wrap-entry`;
+after the fix, the same repro splits cleanly into two wave-loop regions
+with a fence in between, the diamond (condition, both arms, and the merge
+phi) kept intact inside the second region. A second repro (barrier moved
+*inside* one arm, keeping the merge phi) confirms the genuinely-unsafe
+shape is still correctly diagnosed rather than silently mis-accepted.
+
+**Real `deqp-vk` re-run (feme ICD), the exact 4-case sweep this row was
+found in.** `dEQP-VK.mesh_shader.ext.query.no_queries.*.mesh_only.*`: the
+2 real feature-supported cases (`inside_rp.single_view.{only_primary,
+with_secondary}`) now **Pass** (previously diagnosed `Fail` on this row's
+own `feme-cpu-wrap-entry` error); the 2 `multi_view` cases correctly
+report `NotSupported (multiviewMeshShader not supported)`, unaffected.
+`dEQP-VK.mesh_shader.ext.query.no_queries.*.task_mesh.*`: the 2
+`multi_view` cases are unaffected (`NotSupported`); the 2 real
+feature-supported cases (`inside_rp.single_view.{only_primary,
+with_secondary}`) no longer hit this row's own diagnostic at all, but now
+fail on a distinct, later blocker -- `"JIT session error: Symbols not
+found: [ spirv_var_20 ]"`, an ORC JIT link-time failure rather than a
+diagnosed `vkCreateGraphicsPipelines` gap.
+
+**Investigating the new `task_mesh` blocker.** A temporary
+`FEME_DEBUG_DUMP_PRE_JIT_IR`-gated dump added to
+`feme/lib/Target/CPU/CompiledStage.cpp` right before `JIT->addIRModule`
+(reverted before committing) captured the real pre-JIT module: the
+unresolved `@spirv_var_20` is an `external`, never-defined `addrspace(14)`
+(`TaskPayloadWorkgroupEXT`) global of the payload's own declared type
+(`{ [24 x i32], i32 }`), still referenced directly by a handful of
+per-lane-suffixed `getelementptr`s -- confirming neither
+`TaskPayloadWrapper.cpp`'s `lowerTaskPayloadStore` nor
+`MeshOutputWrapper.cpp`'s `lowerMeshTaskPayloadLoad` (both of which
+properly resolve to a real runtime `Payload` pointer) ever got a chance
+to run, because the call they lower was never created in the first
+place. Traced to the real CTS shader's own source
+(`vktMeshShaderQueryTestsEXT.cpp`): `td.branch[gl_LocalInvocationIndex] =
+...`, a per-invocation *dynamic* array index into the payload, which
+`feme::graphics::CanonicalizeStagePass`'s own task-payload
+canonicalization (`isTaskPayloadGlobal`/`loadTaskPayloadValue`/
+`storeTaskPayloadValue`) never recognizes -- it only ever resolves a
+payload access to a literal, compile-time-constant byte offset -- leaving
+the raw `addrspace(14)` load/store on the imported global completely
+unconverted all the way through `SIMDizePass`'s widening to JIT link
+time, where the global (never meant to survive this far) has no
+definition anywhere.
+
+**Disposition.** Roadmap **L45 closed** (struck through) -- the
+uniform-diamond-inside-a-region control-flow gap this row named is fixed
+and confirmed via lit tests, unit tests, minimal repros, and a real
+4-case CTS re-run (2 of 4 real cases now `Pass`, up from 0). The remaining
+2 real `task_mesh` cases hit a distinct, unrelated blocker (a
+`CanonicalizeStage.cpp`-level payload-canonicalization gap, not an
+`EntryWrapperPass` control-flow one) filed as **L47**
+(`CanonicalizeStage.cpp`'s task-payload access recognition needs a new
+dynamic-offset call form, plus corresponding lowering support in
+`TaskPayloadWrapper.cpp`/`MeshOutputWrapper.cpp`). No feature/extension
+bit touched by this row's own fix (`EntryWrapperPass` control-flow
+plumbing only); `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed, no change needed.

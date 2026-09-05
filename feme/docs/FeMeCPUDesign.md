@@ -874,7 +874,18 @@ the first two's own remaining narrowings):
   barrier-split independently, and `feme::cpu::EntryWrapperPass` allocates
   only one `barrier_spill` buffer per wrapper, which two independently
   split arms cannot safely share) -- both are diagnosed rather than
-  mis-compiled.
+  mis-compiled. (Roadmap L45) These two narrowings apply only to a branch
+  `matchBranchShape` chooses to *hoist* out of the region (its own
+  condition cloned into the wrapper and run once for the whole group); a
+  uniform branch that is instead *barrier-free in both arms*, entirely
+  contained within whichever single barrier-delimited region already
+  contains it, is left as ordinary intra-region control flow -- condition,
+  both arms, and any merge-block phi included, since none of it ever
+  needs to be threaded across a barrier or a hoisted branch choice.
+  `feme::cpu::isLinearChain`'s own `walkBarrierFreeArm` recognizes this
+  "safe diamond" shape and keeps it inside its region rather than
+  declining outright on any surviving conditional branch, the way it did
+  before this roadmap step.
 - **A wave body carrying a parameter this pass cannot supply is
   diagnosed, not `llvm_unreachable`'d.** A shader entry point takes no
   parameters of its own -- its inputs arrive through stage-IO or resource
