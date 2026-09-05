@@ -42,24 +42,20 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L26 or other prerequisites blocking the L-series milestones?
+Can you work on L27 or other prerequisites blocking the L-series milestones?
 
-> **6 of L22's own 13 cases (`Feature/Textures/{Sample,SampleBias}.test` and
-> their `Vk.SampledTexture2D` YAML siblings) now clear `ImageSampleImplicitLod`
-> legalization but still fail `vkCreateGraphicsPipelines`, `VkResult = -3`, on a
-> distinct, later legalization gap**: `"unsupported raised operation:
-> 'llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_2_0_0_1_0t' is a
-> register-bound resource handle the FeMe CPU target cannot normalize into a
-> heap access or the root-constant block ... express it as a finite, unambiguous
-> traditional binding, bindless ... or the one recognized root-constant
-> binding"` (confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`, a real
-> diagnostic these cases were silently swallowing without it). Both failing
-> cases share a `Texture2D<float4>` bound via a plain, finite `[[vk::binding(N,
-> 0)]]` declaration with `MipLevels: 2` in its YAML `OutputProps` -- a genuinely
-> traditional, non-bindless, non-unbounded binding by every appearance, so the
-> CPU target's own resource-handle-normalization pass is likely misclassifying
-> it rather than this being a real unsupported-resource-kind case; needs its own
-> real IR reduction (the same `Sample.test` shape, isolating the exact
-> resource-handle attributes the normalization pass inspects) to confirm whether
-> the multi-mip-level declaration specifically confuses the classifier, or
-> something else about this handle shape does
+> **2 of L22's own 13 cases
+> (`Feature/Semantics/{DomainSystemValues,HullSystemValues}.test`) now clear the
+> array-of-struct `CompositeConstruct` legalization but still fail
+> `vkCreateGraphicsPipelines`, `VkResult = -3`, on a distinct, later gap**:
+> `"feme-cpu-simdize: function 'main' has a divergent vector value '' used
+> outside a supported
+> insertelement-chain/resource-store/extractelement/select/shufflevector/phi/elementwise/comparison/reduce/vectorizable-intrinsic
+> pattern; component decomposition is not yet supported for this use (roadmap
+> milestone 7 deviation)"` -- a real, pre-existing `SIMDize.cpp` limitation,
+> explicitly flagged in its own diagnostic as a milestone-7 deviation, now
+> reached for the first time by these two cases once the array-of-struct
+> construct they use stopped failing earlier in the pipeline. Needs its own real
+> IR reduction (most likely `HullSystemValues.test`, the smaller of the two) to
+> identify the exact divergent-vector-producing pattern `SIMDize.cpp`'s
+> component-decomposition path does not yet cover, before designing a fix
