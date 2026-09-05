@@ -368,10 +368,31 @@ LogicalResult spirv::ImageQuerySizeOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.ImageQueryLod
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::ImageQueryLodOp::verify() {
+  // The type constraints (SPIRV_AnySampledImage, Dim of the underlying image,
+  // MS/Sampled operand validity) are already checked at the SPIR-V API/client
+  // level; nothing further to check structurally beyond what ODS's own
+  // TypesMatchWith/argument-type constraints already enforce.
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.ImageSampleImplicitLod
 //===----------------------------------------------------------------------===//
 
 LogicalResult spirv::ImageSampleImplicitLodOp::verify() {
+  return verifyImageOperands(getOperation(), getImageOperandsAttr(),
+                             getOperandArguments());
+}
+
+//===----------------------------------------------------------------------===//
+// spirv.ImageSampleDrefImplicitLod
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::ImageSampleDrefImplicitLodOp::verify() {
   return verifyImageOperands(getOperation(), getImageOperandsAttr(),
                              getOperandArguments());
 }
@@ -384,6 +405,15 @@ LogicalResult spirv::ImageSampleExplicitLodOp::verify() {
   // TODO: It should be verified somewhere that: "Unless the Kernel capability
   // is declared, it [Coordinate] must be floating point."
 
+  return verifyImageOperands(getOperation(), getImageOperandsAttr(),
+                             getOperandArguments());
+}
+
+//===----------------------------------------------------------------------===//
+// spirv.ImageSampleDrefExplicitLod
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::ImageSampleDrefExplicitLodOp::verify() {
   return verifyImageOperands(getOperation(), getImageOperandsAttr(),
                              getOperandArguments());
 }
