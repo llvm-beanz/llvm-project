@@ -900,6 +900,17 @@ Expected<float> readDepth(const AttachmentView &Depth, uint32_t SampleCount,
       return std::move(E);
     return static_cast<float>(D);
   }
+  case cpu::ResourceFormat::D32_FLOAT_S8X24_UINT: {
+    // (Roadmap L32) Unlike `D24_UNORM_S8_UINT`'s single shared 4-byte
+    // word, this format's depth and stencil aspects are two entirely
+    // separate 4-byte words (see `packDepthClear`'s own comment) -- an
+    // 8-byte-per-texel stride, not 4.
+    double D;
+    if (Error E = unpackDepth(
+            Depth.Format, ArrayRef<uint8_t>(Depth.Data.data() + Idx * 8, 8), D))
+      return std::move(E);
+    return static_cast<float>(D);
+  }
   default:
     return createStringError(inconvertibleErrorCode(),
                              "depth attachment format is not yet supported "
@@ -927,6 +938,14 @@ Error writeDepth(AttachmentView &Depth, uint32_t SampleCount, int32_t PX,
     return packDepthClear(
         Depth.Format, Value,
         MutableArrayRef<uint8_t>(Depth.Data.data() + Idx * 4, 4));
+  case cpu::ResourceFormat::D32_FLOAT_S8X24_UINT:
+    // (Roadmap L32) See `readDepth`'s own comment: an 8-byte-per-texel
+    // stride, not 4 -- `packDepthClear` only ever touches this format's
+    // own first (depth) word, so this is a plain write, not a
+    // read-modify-write, despite passing the full 8-byte texel through.
+    return packDepthClear(
+        Depth.Format, Value,
+        MutableArrayRef<uint8_t>(Depth.Data.data() + Idx * 8, 8));
   default:
     return createStringError(inconvertibleErrorCode(),
                              "depth attachment format is not yet supported "
@@ -980,6 +999,16 @@ Expected<uint8_t> readStencil(const AttachmentView &Stencil,
       return std::move(E);
     return static_cast<uint8_t>(S);
   }
+  case cpu::ResourceFormat::D32_FLOAT_S8X24_UINT: {
+    // (Roadmap L32) See `readDepth`'s own comment: an 8-byte-per-texel
+    // stride, not 4.
+    uint32_t S;
+    if (Error E = unpackStencil(
+            Stencil.Format, ArrayRef<uint8_t>(Stencil.Data.data() + Idx * 8, 8),
+            S))
+      return std::move(E);
+    return static_cast<uint8_t>(S);
+  }
   default:
     return createStringError(inconvertibleErrorCode(),
                              "stencil attachment format is not yet "
@@ -1000,6 +1029,12 @@ Error writeStencil(AttachmentView &Stencil, uint32_t SampleCount, int32_t PX,
     return packStencilClear(
         Stencil.Format, Value,
         MutableArrayRef<uint8_t>(Stencil.Data.data() + Idx * 4, 4));
+  case cpu::ResourceFormat::D32_FLOAT_S8X24_UINT:
+    // (Roadmap L32) See `readDepth`'s own comment: an 8-byte-per-texel
+    // stride, not 4.
+    return packStencilClear(
+        Stencil.Format, Value,
+        MutableArrayRef<uint8_t>(Stencil.Data.data() + Idx * 8, 8));
   default:
     return createStringError(inconvertibleErrorCode(),
                              "stencil attachment format is not yet "
