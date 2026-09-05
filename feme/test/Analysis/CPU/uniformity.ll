@@ -241,3 +241,39 @@ exit:
 }
 @g = global i32 0
 declare i32 @feme.cpu.masked.atomicrmw.i32(i32, ptr, i32, i32, i1)
+
+; Roadmap L43: a plain, real (not-yet-lowered) `atomicrmw` -- the shape
+; `feme::cpu::UniformityInfo` actually sees, since it is computed once, up
+; front, in `feme::cpu::LinearizePass::run`, strictly before
+; `feme::cpu::DiamondFlattener`'s own `applyStageMasks` ever converts a real
+; `atomicrmw` into the `feme.cpu.masked.atomicrmw.*` call form
+; `masked_atomicrmw_is_divergent` above already covers -- needs the exact
+; same `NeverUniform` treatment, and for the same reason: every one of its
+; own operands can be uniform (a uniform pointer, value, and unconditional
+; reach) while its own per-lane result still genuinely differs by
+; construction. Before this fix, a plain `atomicrmw` fell through to
+; `Default` (uniform, since every operand is), leaving a real, load-bearing
+; consumer branch -- e.g. a real CTS mesh shader's own "allocate a unique
+; output slot" `icmp`/`br` -- wrongly classified uniform too, so
+; `feme::cpu::DiamondFlattener` never attempted to flatten it at all,
+; leaving the genuine divergent branch in place for `feme::cpu::SIMDizePass`
+; to reject later as an unremoved divergent branch (roadmap milestone L43).
+; CHECK-LABEL: WaveUniformityInfo for function 'atomicrmw_is_divergent':
+define void @atomicrmw_is_divergent() {
+  ; CHECK: DIVERGENT:{{.*}}%old = atomicrmw add ptr @g2, i32 1
+  %old = atomicrmw add ptr @g2, i32 1 seq_cst
+  ; CHECK: DIVERGENT:{{.*}}%cond = icmp
+  %cond = icmp ult i32 %old, 32
+  ; CHECK: DIVERGENT:{{.*}}br i1 %cond
+  br i1 %cond, label %if_true, label %if_false
+
+if_true:
+  br label %exit
+
+if_false:
+  br label %exit
+
+exit:
+  ret void
+}
+@g2 = global i32 0
