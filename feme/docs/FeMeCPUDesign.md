@@ -938,12 +938,30 @@ the first two's own remaining narrowings):
   distinction between them, to be sound. A `Group`-only barrier gets
   `SyncScope::SingleThread` instead, since every wave of one group already
   runs on the same host thread in program order.
-- **No SPIR-V raising produces any of the six barrier intrinsics yet**
-  (`feme::cpu::matchBarrierCall` recognizes both spellings, matching every
-  other raised-op classification in this target, but nothing raises the
-  `spv.*` ones today) -- the same "Raised IR prerequisites" gap milestone
-  3's deviation note already flagged for SPIR-V's descriptor-heap
-  extension.
+- **A real SPIR-V import's own `spirv.ControlBarrier` now converts
+  directly to one of the two `_with_group_sync` `llvm.spv.*` intrinsics**
+  (`feme::(anonymous namespace)::ControlBarrierConversionPattern`,
+  `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, roadmap
+  L44) -- rather than falling through to MLIR upstream's own default
+  `ControlBarrierPattern`, which lowers it to a call to a mangled,
+  `spir_func`-calling-convention external declaration
+  (`_Z22__spirv_ControlBarrieriii`) this target has no runtime symbol or
+  calling-convention support for at all, aborting the whole JIT process.
+  Which of the two intrinsics is picked is decided by `memory_scope`
+  alone (`Workgroup` -> `group`, everything broader -> `all`, per the
+  bullet above); `memory_semantics`'s own individual ordering bits are
+  not parsed further, mirroring roadmap H4b's own
+  `isSPIRVGroupSyncBarrier`. This resolves (for `spirv.ControlBarrier`
+  specifically) the "No SPIR-V raising produces any of the six barrier
+  intrinsics yet" gap the next bullet still describes for every other
+  SPIR-V barrier-shaped op.
+- **No other SPIR-V raising produces any of the six barrier intrinsics
+  yet** (`feme::cpu::matchBarrierCall` recognizes both spellings, matching
+  every other raised-op classification in this target, but nothing raises
+  the plain `spv.*MemoryBarrier`-shaped ones today, only
+  `spirv.ControlBarrier` per the bullet above) -- the same "Raised IR
+  prerequisites" gap milestone 3's deviation note already flagged for
+  SPIR-V's descriptor-heap extension.
 
 ## Summary
 

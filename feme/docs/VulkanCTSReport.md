@@ -26249,3 +26249,89 @@ there beyond what L41 already added); `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` reviewed, no change needed. One new roadmap
 row filed: **L44** (the `_Z22__spirv_ControlBarrieriii` mangled-call-form
 barrier-recognition gap this fix newly surfaces).
+
+## Roadmap L44: fixed (control-barrier SPIR-V->LLVM lowering gap), plus L45 filed
+
+**Repro.** After L43's own fix, `dEQP-VK.mesh_shader.ext.query.no_queries.
+lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.
+mesh_only.inside_rp.single_view.only_primary` still failed, now aborting
+the whole `deqp-vk` process with a fatal `"LLVM ERROR: unsupported
+calling convention"` during JIT codegen, rather than a diagnosed
+`vkCreateGraphicsPipelines` failure.
+
+**Root cause.** Confirmed via the same captured pre-`LinearizePass` IR
+technique L43 used: a real SPIR-V-imported mesh shader's own
+`OpControlBarrier` lowers, via MLIR upstream's own default
+`ControlBarrierPattern` (registered by `mlir::
+populateSPIRVToLLVMConversionPatterns`, since `feme::spirv::
+populateSPIRVToLLVMTargetPatterns` -- which always registers its own
+overrides at a higher `FeMeBenefit`, winning wherever it registers one --
+installed no override at all for `spirv::ControlBarrierOp`), to a call to
+a mangled external declaration, `declare spir_func void
+@_Z22__spirv_ControlBarrieriii(i32, i32, i32)`. This is correct for
+MLIR's own upstream SPIR-V target (which really does provide a runtime
+`__spirv_ControlBarrier` symbol with that calling convention) but this
+project's X86 JIT target has no lowering at all for
+`CallingConv::SPIR_FUNC` and no runtime symbol for this mangled name
+either -- so the call survives, completely unresolved, all the way to
+X86 JIT codegen, which aborts the whole process. This same mangled name
+is also recognized by roadmap H4b's own `isSPIRVGroupSyncBarrier`
+(`CanonicalizeStage.cpp`), but only for an unrelated purpose (finding a
+tessellation-control entry's own patch-constant split point) -- it does
+not lower or replace the call itself.
+
+**Fix.** Added a new `FeMeBenefit`-registered override pattern,
+`ControlBarrierConversionPattern`, for `spirv::ControlBarrierOp` in
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, converting it
+directly to one of the two `llvm.spv.{group,all}.memory.barrier.with.
+group.sync` intrinsics `feme::cpu::matchBarrierCall`
+(`BarrierCalls.cpp`) already recognizes -- so the mangled,
+un-lowerable call is never emitted in the first place, and no change to
+`BarrierCalls.cpp` or any stage wrapper pass was needed after all
+(contrary to this row's original guess). Which of the two intrinsics is
+picked is decided by the op's own `memory_scope` attribute (`Workgroup`
+picks the narrowest `group` intrinsic; everything broader -- `Device`,
+`CrossDevice`, `QueueFamily`, `Subgroup`, `Invocation` -- picks the
+widest `all` intrinsic, a safe superset fence in every case, matching
+`feme::cpu::BarrierMemoryScope`'s own precedent of not distinguishing
+`Device` from `All` any further); `memory_semantics`'s own individual
+bits are not parsed, mirroring roadmap H4b's own `isSPIRVGroupSyncBarrier`
+("every control barrier is the one splitting point this pass cares about
+regardless of its own execution/memory scope operands"). New lit test:
+`feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-control-barrier.mlir`,
+covering a `Workgroup`-scope barrier, a broader `Device`-scope barrier,
+and a `memory_semantics = None` barrier. `ninja check-feme` passes in
+full (2544/2603 discovered, 59 pre-existing `Unsupported`, 0 `Failed`,
+up by exactly the 1 new test file this row adds).
+
+**Measured impact.** A direct re-run of the cited CTS case confirms the
+fatal calling-convention abort is gone. A broader
+`dEQP-VK.mesh_shader.ext.query.no_queries.*` sweep (8 cases: 4
+`multi_view` + 4 `single_view`, split across `mesh_only`/`task_mesh`)
+now completes cleanly end to end for the first time -- it previously
+halted at the first crashing case; the 4 `multi_view` cases correctly
+report `NotSupported (multiviewMeshShader not supported)`, and the 4
+`single_view` cases (the real, feature-supported ones) all now fail
+cleanly on a new, later, diagnosed error instead of crashing:
+`"feme-cpu-wrap-entry: function 'main' has a barrier inside non-linear
+control flow ..."`. Root-caused far enough to scope via a real captured
+pre-`EntryWrapperPass` IR dump: this shader's single barrier sits safely
+in the entry block, entirely before an unrelated, ordinary uniform
+diamond further down (a root-constant bounds check) that itself contains
+no barrier and never spans the barrier boundary -- but
+`feme::cpu::EntryWrapperPass::isLinearChain`'s all-or-nothing check
+cannot distinguish this safe shape from a genuinely unsafe one (a branch
+whose two arms land in different barrier regions), and
+`outlineChain`'s current flat-block-list design has no way to represent
+a real sub-CFG within one region anyway. Filed as new roadmap row
+**L45** (likely a materially bigger, multi-part fix than L43/L44's own
+scope, generalizing `outlineChain` to support a real sub-CFG per region
+rather than a flat chain).
+
+**Disposition.** Roadmap **L44 closed** (struck through). No feature or
+extension bit touched (a SPIR-V->LLVM lowering-correctness fix for an
+op every real SPIR-V-imported barrier compiles through, not a new
+feature); `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed, no change needed. One new roadmap row filed: **L45** (the
+`isLinearChain`/`outlineChain` region-splitting gap this fix newly
+surfaces).
