@@ -61522,3 +61522,200 @@ Filed the three newly-exposed buckets as new top-level rows L22/L23/L24
 (not nested under L3) per the flat-numbering convention this series already
 uses, categorized here by their new diagnostic and case list but not yet
 reduced further -- that's real follow-on work for another session.
+
+# Agent thoughts: Roadmap L22 (four SPIR-V-to-LLVM legalization/import fixes)
+
+This records the reasoning behind closing out roadmap milestone L22, one of
+the three follow-on buckets L3's own render-pass-format fix split into: "13
+of L3's own 35 cases still fail at `vkCreateGraphicsPipelines` ... with
+`VkResult = -3`".
+
+## Environment fragility (recurring)
+
+Before touching any code, I re-confirmed `offload-test-suite`'s own `feme`
+branch (checked out at `/home/dev/dev/offload-test-suite`) was still at the
+expected commit -- this branch has reverted to stale `main` content between
+sessions before, and the fix each time is the same: `git fetch beanz feme &&
+git reset --hard beanz/feme`, then re-run `cmake .` in `build2` so the
+generated `check-hlsl-feme-vk` targets pick the branch's own additions back
+up. Worth calling out again since this is now the third or fourth session
+this exact reset has been needed.
+
+## Categorizing L22's 13 cases
+
+L22's own bucket split cleanly along its own diagnostic text once I ran each
+case with `-debug-layer` (and, where that alone printed nothing,
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` -- a real env var this ICD's own
+`Diagnostics.cpp` already supports, which I'd forgotten was available until
+grepping for how creation-time diagnostics are normally surfaced): 4
+`spirv.ImageSampleImplicitLod` legalization failures split further into
+`ConstOffset`/`Bias` variants, 2 `unhandled opcode 89`
+(`OpImageSampleDrefImplicitLod`) and 2 `unhandled opcode 105`
+(`OpImageQueryLod`) cases (both confirmed, via the same `spirv-as`/
+`feme-translate --import-spirv` real-IR-reduction technique H21l's own
+`OpEmitStreamVertex` investigation used, to be genuine upstream MLIR
+deserializer gaps -- no feme-side fix is possible until MLIR's own SPIR-V
+dialect grows deserialization support for these opcodes), plus 5 non-texture
+cases needing individual reductions: `HullSystemValues`/`DomainSystemValues`
+(an array-of-struct `OpCompositeConstruct`), `MatrixSemantics` (a matrix-typed
+`spirv.Constant`), `InterpolationModifiers` (`unhandled Decoration :
+'Centroid'`), and `Graphics/MeshShaders/SimpleAmplification` (a mesh-payload
+symbol gap that looked, even before reducing it, like a much larger
+amplification-shader-payload-plumbing gap rather than a small legalization
+fix -- I deliberately did not attempt this one this session, filing it as
+its own follow-on row (L30) instead, since fixing it properly needs its own
+scoping pass to size the real work).
+
+## The Centroid decoration fix, and why I patched upstream MLIR directly
+
+`InterpolationModifiers.test`'s failure was a flat `"unhandled Decoration :
+'Centroid'"` at SPIR-V import time -- not a feme-specific legalization gap at
+all, but MLIR's own SPIR-V (de)serializer never having been taught this
+decoration. Before writing a fix, I checked whether patching upstream MLIR
+files directly (rather than working around the gap entirely inside feme, e.g.
+by pre-processing the SPIR-V binary to strip the decoration) was an
+established pattern in this codebase's own history, and found exactly the
+precedent I needed: commit `f9fb1449e5b9`, "[mlir][SPIRV] Handle
+PerPrimitiveEXT decoration in (de)serialization" -- same two-file
+(`Deserializer.cpp`/`Serializer.cpp`) shape, same "just add it to the
+zero-operand unit-attribute switch case group" fix, authored under this
+environment's own persona from an earlier session. `Centroid` is exactly the
+same shape (a decoration with no operands, purely a marker), so I followed
+the same template: one line in each switch, a round-trip lit test in
+`decorations.mlir` mirroring the existing `flat` case immediately above
+where I added `centroid`.
+
+## The matrix-constant and array-composite-construct fixes: recognizing "this is already handled for X, just widen the check"
+
+Both `MatrixSemantics.test` (a matrix-typed `spirv.Constant`) and
+`HullSystemValues.test`/`DomainSystemValues.test` (an array-of-struct
+`OpCompositeConstruct`) turned out to be small, surgical fixes once I looked
+at what already existed nearby:
+
+- `ArrayConstantPattern` already flattened an array-typed constant into
+  LLVM's flat `ElementsAttr` encoding. I checked `TypeConverter`'s own
+  comment on how `spirv.MatrixType` converts, and confirmed it produces the
+  *exact same* target shape as an array-of-vectors (`!llvm.array<N x
+  vector<...>>`) -- so the fix was genuinely just widening the pattern's
+  `isa<>` type check from `ArrayType` to `ArrayType, MatrixType`, no new
+  flattening logic needed at all.
+- `CompositeConstructPattern` already had a `convertMatrix` method for
+  exactly this "one whole-element constituent per output slot, no
+  contiguous-subset reassembly" shape, for the matrix case. The array case
+  turned out to need the identical logic (per the SPIR-V spec's own
+  `OpCompositeConstruct` "Array type" validation rule: exactly one
+  constituent per element, already of the element type), so I added a
+  `convertArray` method that is essentially `convertMatrix` renamed, with an
+  `LLVMArrayType` result instead of `LLVMStructType`... actually an
+  `LLVMArrayType` in both directions really, since a matrix already lowers to
+  `!llvm.array` too -- but keeping them as separate methods/dispatch arms
+  still felt right for clarity and to keep each one's own doc comment
+  targeted at its own real-world HLSL shape (a `float4x4` vs. a
+  tessellation-control shader's own `HSInput[3]`).
+
+Both fixes needed only one or two new lit test cases each, since neither
+touched any pre-existing legalization path's actual behavior -- purely
+additive type-check widening.
+
+## The ImageSampleImplicitLod fix: two rounds, and a real lesson about trusting stale categorization
+
+This was the largest and most iterated-on fix. My first pass (from an
+earlier compacted part of this session) handled `None`/`Bias`/`ConstOffset`/
+`Bias|ConstOffset` -- covering what I'd assumed, from an earlier
+categorization pass over a stale log, was `Feature/Textures/Sample.test`'s
+entire operand-combination surface. After landing that and re-running the
+*actual* `check-hlsl-feme-vk` suite fresh (not just re-checking the stale
+log), `Sample.test` still failed, now on a *different* combination:
+`ConstOffset|MinLod`. Digging into why revealed the real lesson: DXC's own
+`Texture2D::Sample(sampler, coord, offset, clamp)` 4-argument overload emits
+both bits together, and I'd simply never exercised that specific overload in
+my first reduction. **The concrete takeaway I want to remember going
+forward: always re-verify against a fresh, real run of the actual failing
+case after a fix, rather than trusting an earlier categorization -- compiling
+fresh HLSL can and did reveal a strictly larger operand combination than
+initially assumed.**
+
+The second round rewrote the pattern to handle all 8 combinations of
+`Bias`/`ConstOffset`/`MinLod` uniformly, using LLVM's own
+`bitEnumContainsAll`/`bitEnumContainsAny` helpers. I made (and caught before
+building) one real mistake here: my first attempt tried to test for "is bit X
+present, possibly combined with others" using `hasExactImageOperands(Ops,
+Bit)` called once per bit -- but that helper checks *exact* equality (after
+masking `Nontemporal`), not subset containment, so it only matches when a
+single bit is the *only* one set. Re-reading `ImageOps.cpp`'s own definition
+of the helper caught this before I wasted a build/test cycle on it.
+
+I also discovered, while designing the "reject anything outside the
+supported mask" branch, that MLIR's own `verifyImageOperands` has a
+partially-unimplemented `noSupportOperands` set (`ConstOffset`, `Offset`,
+`ConstOffsets`, `MinLod`, `MakeTexelAvailable`, `MakeTexelVisible`,
+`SignExtend`, `ZeroExtend`) that *asserts* rather than gracefully failing if
+MLIR's own `verify()` is ever called on IR using them. Since feme's real
+SPIR-V import path (`SPIRVImporter.cpp`) never calls `mlir::verify()` at all
+(confirmed via grep -- zero hits), this assert is unreachable in production,
+but very reachable in a lit test that parses textual MLIR assembly (which
+*does* call the verifier by default). This is why every new/updated test
+case in `spirv-to-llvm-sampling.mlir` and
+`spirv-to-llvm-image-access-invalid.mlir` needs
+`--mlir-very-unsafe-disable-verifier-on-parsing` -- it makes the *test*
+faithfully mirror the *real* production code path instead of hitting an
+artificial verifier-only restriction that production code never sees.
+
+## The "newly-supported combo breaks an existing negative test" pattern
+
+Every time I extended the supported-operand set, `spirv-to-llvm-image-access-
+invalid.mlir`'s own "this combination should fail to legalize" test broke,
+since its previously-invalid combination had just become valid. This
+happened twice in one session (`Bias|Nontemporal` -> now legal; then
+`Bias|MinLod|Nontemporal` -> now legal too), and I expect it to recur any
+time this pattern's supported set grows further. I settled on `Offset` (a
+dynamic, non-constant per-texel offset, structurally distinct from
+`ConstOffset` and not in this pattern's scope at all) as the final "still
+genuinely unsupported" modifier for this round, but noted this explicitly in
+the roadmap's L22 entry so a future session extending this pattern further
+knows to expect (and re-target) this same test again.
+
+I also tried `Grad` as an alternative "still unsupported" modifier at one
+point, and discovered it's rejected by MLIR's own verifier as *structurally*
+invalid for an implicit-LOD sample op ("Grad is only valid with explicit-lod
+instructions") -- a parse-time verification failure, not the legalization
+failure the test is actually trying to assert. Good reminder that "still
+unsupported" and "still legal to write down" are different properties to
+check for when picking a negative-test modifier.
+
+## Real CTS validation, and what it told me about scope
+
+A real `check-hlsl-feme-vk` re-run confirmed 141 -> 150 Passed (+9), but --
+notably -- **none of L22's own originally-named 13 cases are among the 9
+newly-passing ones**. Every one of the 13 now fails at a *different*, later,
+newly-exposed diagnostic instead of the one L22 itself named. This is
+exactly the same pattern this project's H-series/L-series chains have hit
+repeatedly: fixing the diagnosed blocker just moves each case one stage
+further into the pipeline, onto whatever the next real bug is. I filed each
+of these six newly-exposed buckets as its own flat, non-nested follow-on row
+(L25 through L30) rather than trying to fix all of them in this same
+session -- several (the resource-handle-normalization gap behind L26, the
+`SIMDize.cpp` divergent-vector gap behind L27, the mesh-shader
+amplification-payload gap behind L30) look substantial enough to deserve
+their own real IR reduction and design work, not a same-session tack-on fix.
+
+A real, independent `deqp-vk` sweep of `dEQP-VK.glsl.linkage.varying.
+interpolation.*` turned up a nice corroborating data point for L27: *all
+three* interpolation qualifiers (`centroid`, `flat`, `smooth`) hit the exact
+same `feme-cpu-simdize` divergent-vector diagnostic, confirming this is a
+real, broad, pre-existing `SIMDize.cpp` limitation entirely unrelated to
+interpolation qualifier -- not something the `Centroid`-decoration import fix
+alone could ever have cleared, and useful independent confirmation of L27's
+own scope from a completely different angle (a plain built-in-var test, not
+one of L22's own HLSL-driven cases).
+
+## What I did not touch
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed, no
+change needed -- every fix this session is an internal SPIR-V-to-LLVM
+legalization/import correctness fix, not new Vulkan feature or extension
+surface. `Graphics/MeshShaders/SimpleAmplification.test`'s own payload gap:
+deliberately left unfixed and filed as L30 rather than attempted, since even
+a first look at it (a JIT-unresolved `in.var.payload` symbol) suggested
+amplification-shader task-to-mesh payload handoff is entirely unimplemented,
+a multi-part design effort rather than a small legalization patch.
