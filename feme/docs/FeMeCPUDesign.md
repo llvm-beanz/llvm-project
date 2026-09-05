@@ -1396,7 +1396,17 @@ Divergence sources are the lane-varying builtins FeMe already raises:
 op whose result is per-lane (`WavePrefix*`, `WaveReadLaneFirst` is *uniform*,
 etc.). Group ids and constants are uniform. A load through a uniform address
 is uniform only when the memory value is proven invariant across the wave;
-otherwise it remains lane-observable and is scalarized in Phase 4.
+otherwise it remains lane-observable and is scalarized in Phase 4. A
+`feme.cpu.masked.atomicrmw.*` call (`feme::cpu::MaskIntrinsics`) is likewise
+always a divergence source, *even when every one of its own operands is
+uniform*: it stands in for one genuine, real per-lane atomic
+read-modify-write (Phase 4's `widenMaskedAtomicRMW`), whose result differs
+by lane by construction (e.g. every lane racing to increment one shared
+counter via a uniform pointer, value and mask still gets a genuinely
+different pre-increment value back) -- the ordinary operand-driven default
+rule would otherwise call it uniform whenever its operands happen to be,
+leaving a real consumer branch unwidened and silently reading `poison`
+(roadmap milestone L41's JIT-link crash).
 
 This result guides Phase 3 but is not retained across that pass: CFG
 linearization replaces phis, creates masks and rewrites calls, invalidating
