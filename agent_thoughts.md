@@ -63387,3 +63387,171 @@ implementation detail. No feature/extension bit touched -- an internal
 CPU uniformity-analysis correctness fix only -- so
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` needed no
 changes.
+
+# L44: control-barrier SPIR-V->LLVM lowering gap
+
+## Task
+
+Fix `dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.
+no_wait.draw.32bit.no_availability.multiple_blocks.mesh_only.inside_rp.
+single_view.only_primary`, which L43's own fix left aborting the whole
+`deqp-vk` process with a fatal `"LLVM ERROR: unsupported calling
+convention"` during JIT codegen.
+
+## Investigation
+
+Set up fresh `l44-*` SQL todos, reviewed `feme/.instructions.md` again (no
+new constraints). Started from where the prior session's root-cause
+already pointed: the captured pre-`LinearizePass` IR from L43 contains
+`declare spir_func void @_Z22__spirv_ControlBarrieriii(i32, i32, i32)` --
+a leftover, unresolved external declaration with `CallingConv::SPIR_FUNC`.
+
+Traced `feme::cpu::matchBarrierCall`'s callers (`EntryWrapper.cpp`,
+`GeometryWrapper.cpp`, `HullWrapper.cpp`, `DomainWrapper.cpp`,
+`PatchConstantWrapper.cpp`) and confirmed none of them recognize this
+mangled name -- only the DXIL/HLSL intrinsic forms. The natural fix
+looked like extending `matchBarrierCall` itself (as the prior session's
+filing guessed), but before doing that, traced *where* this mangled call
+actually comes from: MLIR upstream's own `ControlBarrierPattern`
+(`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`), the *only* pattern
+ever registered for `spirv::ControlBarrierOp` at all (confirmed
+`feme::spirv::populateSPIRVToLLVMTargetPatterns` installs no override of
+its own for this op, unlike a long list of other ops it does override at
+`FeMeBenefit` to win over the upstream default). This upstream pattern's
+own three integer operands (`ExecutionScope`, `MemoryScope`,
+`MemorySemantics`) are compile-time SPIR-V `Scope`/`MemorySemantics`
+*attributes* on the op itself (confirmed via `SPIRVBarrierOps.td`'s
+`arguments` list -- `SPIRV_ScopeAttr`/`SPIRV_MemorySemanticsAttr`, not
+runtime SSA operands), meaning the real information needed to classify
+this barrier is available at MLIR-conversion time, well before it ever
+gets baked into a call to an unresolvable external symbol.
+
+This reframed the fix: rather than trying to recognize and replace an
+already-emitted, information-erased mangled call downstream in
+`BarrierCalls.cpp`, it is both simpler and strictly more correct to add
+feme's own override pattern for `spirv::ControlBarrierOp` at the
+SPIR-V-to-LLVM conversion stage itself -- converting it directly to one
+of the two `llvm.spv.{group,all}.memory.barrier.with.group.sync`
+intrinsics `matchBarrierCall` already knows how to recognize downstream,
+mirroring several existing override patterns in the same file
+(`DemoteToHelperInvocationConversionPattern`, `TerminateInvocationConversionPattern`)
+that already convert a SPIR-V-imported op straight to one of these
+`llvm.spv.*` intrinsics rather than letting an unhelpful upstream default
+run.
+
+## Design
+
+`OpControlBarrier`'s own spec text ("All invocations ... within Execution
+scope must reach this point of execution before any invocation will
+proceed beyond it") means it always requires convergence, unconditionally
+-- so this always picks one of the `_with_group_sync` intrinsic variants,
+never a plain memory-only one. Which of the three (`group`/`device`/`all`)
+to pick is decided from the op's own `memory_scope` attribute:
+`Workgroup` maps to the narrowest `group` intrinsic; every broader scope
+(`Device`, `CrossDevice`, `QueueFamily`, and the sub-group-shaped
+`Subgroup`/`Invocation`, none of which this milestone's whole-group
+barrier support distinguishes further) conservatively maps to the widest
+`all` intrinsic -- a safe superset fence in every case. `memory_semantics`'s
+own individual ordering/memory-class bits are deliberately *not* parsed
+further, mirroring roadmap H4b's own `isSPIRVGroupSyncBarrier` precedent
+("every control barrier is the one splitting point this pass cares about
+regardless of its own execution/memory scope operands"); a
+`memory_semantics = None` barrier (spec: "Memory is ignored" in that
+case) still gets the narrowest `group` intrinsic -- harmless, since a
+fence stronger than an (here, absent) requirement is never a correctness
+problem, only unneeded work no real CTS case exercises today.
+
+## Implementation
+
+Added `ControlBarrierConversionPattern` (a `mlir::SPIRVToLLVMConversion<
+spirv::ControlBarrierOp>` matching the existing file's established
+pattern-class style) to `feme/lib/Conversion/SPIRVToLLVM/
+SPIRVToLLVMPatterns.cpp`, registered at the file's own `FeMeBenefit`
+(already higher than upstream's default benefit, so it always wins for
+this exact op -- no extra `+1` needed since no other feme pattern
+competes for `spirv::ControlBarrierOp`).
+
+One subtlety hit while validating: my first attempt used
+underscore-spelled intrinsic name strings
+(`"llvm.spv.group_memory_barrier_with_group_sync"`), copying the
+`int_spv_*` TableGen def name directly -- this failed at runtime with
+`"could not find LLVM intrinsic"`, since LLVM's actual generated
+intrinsic name always replaces every underscore with a dot after the
+target prefix (confirmed by grepping an existing LLVM codegen test,
+`llvm/test/CodeGen/SPIRV/hlsl-intrinsics/
+group_memory_barrier_with_group_sync.ll`, which calls
+`@llvm.spv.group.memory.barrier.with.group.sync()`). Fixed the string
+spelling and rebuilt; confirmed a direct CTS re-run got past this call
+correctly recognized as a barrier this time.
+
+## Tests
+
+Added `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-control-barrier.mlir`,
+mirroring the existing `spirv-to-llvm-demote-to-helper-invocation.mlir`
+test's style (`feme-opt --feme-convert-spirv-to-llvm --split-input-file`),
+covering three cases in one file: a `Workgroup`-scope barrier (expects
+the `group` intrinsic), a `Device`-scope barrier (expects the `all`
+intrinsic), and a `memory_semantics = None` barrier (still expects the
+`group` intrinsic). All three pass. Ran the full `Conversion/SPIRVToLLVM/`
+suite (60 tests, all pass, no regressions), the CPU/DXIL/Graphics
+transform suites (195 tests, all pass), and `ninja check-feme` in full:
+2544/2603 discovered (up by exactly the 1 new test file), 59
+pre-existing `Unsupported`, 0 `Failed`.
+
+## Real CTS validation, and a new blocker found
+
+Re-ran the exact cited CTS case: confirmed the fatal calling-convention
+abort is completely gone; the case now reports a real, diagnosed `Fail`
+instead. Swept the broader `dEQP-VK.mesh_shader.ext.query.no_queries.*`
+group (8 cases): completed cleanly end to end for the first time
+(previously halted at the first crashing case) -- 4 `multi_view` variants
+correctly report `NotSupported`, and all 4 real, feature-supported
+`single_view` cases (2 `mesh_only` + 2 `task_mesh`) now fail on a new,
+distinct, diagnosed error instead: `"feme-cpu-wrap-entry: function 'main'
+has a barrier inside non-linear control flow ..."`.
+
+Root-caused this new blocker far enough to file (not fix) this session:
+captured the pre-`EntryWrapperPass` IR via the same env-gated debug-dump
+technique (added temporarily to `Pipeline.cpp`'s mesh-stage case,
+reverted before committing) and confirmed the actual shape:
+`feme::cpu::EntryWrapperPass::splitAtGroupSyncBarriers` first tries
+`matchLoopShape` (declines cleanly, no loop here), then falls back to
+`isLinearChain`, which requires the *entire* function to be one
+branch-free chain -- and rejects this real shader, even though its own
+single barrier sits safely in the entry block, entirely before an
+unrelated, ordinary uniform diamond further down (a root-constant bounds
+check with no barrier of its own, never spanning the barrier boundary in
+either arm). `isLinearChain`'s all-or-nothing check has no way to tell
+this safe shape (a uniform branch fully contained within one
+barrier-delimited region) apart from a genuinely unsafe one (a branch
+whose two arms would land in different barrier regions) -- and even if
+it could, `outlineChain`'s current design (a flat
+`SmallVector<BasicBlock *>` chain, assuming an unconditional-branch-only
+interior) has no way to outline a real sub-CFG per region anyway. This is
+a materially bigger gap than L43/L44's own scope -- generalizing
+`outlineChain` to support an arbitrary (uniform-only) sub-CFG per barrier
+region is a real design/implementation task in its own right, not a
+one-line tweak -- so I filed it as a new roadmap row, **L45**, with this
+root-cause narrative and the concrete next steps (confirm this is the
+only shape via more real CTS cases; decide the actual fix's shape) rather
+than attempting it in this same session.
+
+## Documentation
+
+Struck L44 on the roadmap, recording the real root cause (MLIR upstream's
+own default `ControlBarrierPattern` is the only pattern ever registered
+for `spirv::ControlBarrierOp`, always producing an un-lowerable mangled
+call on this target) and fix (a new feme-side override pattern converting
+directly to an already-recognized `llvm.spv.*` intrinsic, no
+`BarrierCalls.cpp`/wrapper-pass change needed after all, contrary to the
+original filing's guess). Filed L45 for the newly-discovered
+`isLinearChain`/`outlineChain` region-splitting gap. Appended a matching
+Repro/Root cause/Fix/Measured impact/Disposition section to
+`VulkanCTSReport.md`, including the L45 filing. Updated
+`FeMeCPUDesign.md`'s Phase 6 barrier section, replacing the now-stale "no
+SPIR-V raising produces any of the six barrier intrinsics yet" bullet
+with one documenting the new pattern, and narrowing the remaining bullet
+to the still-true subset (plain `spv.*MemoryBarrier`-shaped ops still
+have no SPIR-V raising). No feature/extension bit touched -- a
+lowering-correctness fix only -- so `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` needed no changes.
