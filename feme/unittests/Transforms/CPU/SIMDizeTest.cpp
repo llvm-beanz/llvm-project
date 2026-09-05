@@ -448,6 +448,86 @@ TEST(SIMDizeTest, DecomposesInsertValueChainIntoResourceStore) {
   EXPECT_EQ(StoreCallCount, 3u * 4u);
 }
 
+// Roadmap L27: a divergent, whole *vector*-typed value inserted as a single
+// struct-field leaf via `insertvalue` (rather than each scalar component
+// individually, the only shape roadmap L21 supported), then read back out
+// via a constant-index `extractvalue` and stored through an ordinary,
+// non-groupshared alloca -- the exact shape reduced from a real
+// `Feature/Semantics/HullSystemValues.test` failure, whose `PatchConstants`
+// function builds a local per-control-point `float4 Position` scratch array
+// (one per-control-point struct field holding a whole position vector)
+// before indexing back into it by its own `SV_OutputControlPointID`. Two
+// gaps closed together: `isSupportedAggregateLeafType` now accepts a whole
+// `FixedVectorType` leaf (flattened into its own `N` component slots rather
+// than a single flat slot), and `checkVectorDecomposition Supported`'s own
+// consumer-shape check now accepts both an `insertvalue`'s inserted-value
+// operand and an ordinary (non-groupshared) `store`'s value operand as
+// valid users of a divergent vector value.
+TEST(SIMDizeTest, DecomposesInsertValueVectorLeafIntoOrdinaryStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %scratch) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %off = zext i32 %tid to i64
+      %off1 = add i64 %off, 4
+
+      %e0 = call float @feme.cpu.resource.load.raw.f32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off, i1 true)
+      %e1 = call float @feme.cpu.resource.load.raw.f32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off1, i1 true)
+      %v.0 = insertelement <2 x float> poison, float %e0, i64 0
+      %v = insertelement <2 x float> %v.0, float %e1, i64 1
+
+      %s = insertvalue { <2 x float> } poison, <2 x float> %v, 0
+
+      %leaf = extractvalue { <2 x float> } %s, 0
+      store <2 x float> %leaf, ptr %scratch, align 8
+
+      %r = load <2 x float>, ptr %scratch, align 8
+      %r0 = extractelement <2 x float> %r, i64 0
+      %r1 = extractelement <2 x float> %r, i64 1
+      call void @feme.cpu.resource.store.raw.f32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off, float %r0, i1 true)
+      call void @feme.cpu.resource.store.raw.f32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off1, float %r1, i1 true)
+      ret void
+    }
+    declare float @feme.cpu.resource.load.raw.f32(ptr, i32, i32, i64, i1)
+    declare void @feme.cpu.resource.store.raw.f32(ptr, i32, i32, i64, float, i1)
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Decomposition never builds an illegal `<4 x <2 x float>>` nested
+  // vector: every widened `store`'s own value operand stays a genuine
+  // `<2 x float>`, one per lane, and every aggregate-typed intermediate
+  // (`%s`) is erased rather than surviving into the widened function.
+  unsigned StoreInstCount = 0, ResourceStoreCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isAggregateType());
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      ++StoreInstCount;
+      EXPECT_TRUE(SI->getValueOperand()->getType()->isVectorTy());
+      EXPECT_FALSE(
+          cast<VectorType>(SI->getValueOperand()->getType())->getElementType()->isVectorTy());
+      continue;
+    }
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    if (CI->getCalledFunction()->getName() == "feme.cpu.resource.store.raw.f32")
+      ++ResourceStoreCallCount;
+  }
+  EXPECT_EQ(StoreInstCount, 4u);
+  EXPECT_EQ(ResourceStoreCallCount, 2u * 4u);
+}
+
 TEST(SIMDizeTest, WidensMaskedLoadStoreToGatherScatter) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
