@@ -26610,3 +26610,89 @@ change needed. `FeMeCPUDesign.md`/`FeMeGraphicsDesign.md` reviewed: no
 deviation to record (the design doc's existing `samplecmp.2d.f32`
 mention does not describe a scope this fix's `Plain2D`-only narrowing
 would contradict).
+
+## Roadmap L47: partially fixed (dynamic task-payload offset canonicalized), plus L49 filed
+
+**Fix summary.** `feme::graphics::CanonicalizeStagePass`'s task-payload
+recognition (`isTaskPayloadGlobal`/`loadTaskPayloadValue`/
+`storeTaskPayloadValue`, `CanonicalizeStage.cpp`) only ever resolved a
+payload access's address to a literal, compile-time-constant `uint64_t`
+byte offset. A real CTS shader's own per-invocation dynamic array index
+(`td.branch[gl_LocalInvocationIndex] = ...`) was therefore never
+recognized at all, leaving the raw `addrspace(14)` load/store on the
+imported `TaskPayloadWorkgroupEXT` global completely unconverted. Added a
+new `getTaskPayloadDynamicOffsetAccess` helper mirroring the existing
+`getDynamicRowIndexedAccess`'s (roadmap H7w) restricted GEP shape --
+constant-zero first index, every index up to one final array dimension
+constant, and exactly that one final index non-constant -- but computing
+a real dynamic `i32` byte offset `Value*` directly (via `CreateMul`/
+`CreateAdd`, entirely in `i32` with no wider-type round-trip) rather than
+a signature-element tuple, since a task payload has no per-member
+`ElementIDs` slice. Generalized `loadTaskPayloadValue`/
+`storeTaskPayloadValue`'s `Offset` parameter from `uint64_t` to `Value*`
+(using `IRBuilder::CreateAdd` for recursive offset accumulation --
+`IRBuilder`'s own constant folder keeps every already-passing
+constant-offset call site byte-for-byte identical, confirmed via all
+pre-existing unit tests passing unchanged), and wired the new helper into
+both the load- and store-handling fallback branches as an `else if` after
+`getStageIOBaseAndOffset` fails. Added matching `Value*`-offset overloads
+of `createStageTaskPayloadStore`/`createStageTaskPayloadLoad`
+(`StageOps.h`/`.cpp`; the pre-existing `uint64_t`-offset overloads now
+delegate to them via `ConstantInt::get`).
+
+**Tests.** 3 new `CanonicalizeStageTest` unit tests:
+`AmplificationStageCanonicalizesDynamicTaskPayloadStore` and
+`MeshStageCanonicalizesDynamicTaskPayloadLoad` (both positive, confirming
+a `Mul` instruction feeds the offset operand, matching the real
+`payload.branch[gl_LocalInvocationIndex]` CTS shape), and
+`LeavesNonFinalDynamicTaskPayloadIndexUnrewritten` (negative, confirming
+a non-*final* dynamic index is still correctly declined, matching
+`getDynamicRowIndexedAccess`'s own precedent restriction). `ninja
+check-feme` (ccache, assertions-enabled build): 2561/2620 discovered, 59
+pre-existing `Unsupported`, 0 `Failed` -- up by exactly the 3 new test
+cases this fix adds, no regressions. Also ran `FeMeTransformsGraphicsTests`
+(66/66), `FeMeCoreTests` (78/78), and `FeMeTransformsCPUTests` (306/306)
+directly to confirm the `StageOps.{h,cpp}` overload additions caused no
+regressions elsewhere.
+
+**Confirming the fix's own real scope via a temporary investigative
+test.** A temporary test appended to `TaskPayloadWrapperTest.cpp`
+(mirroring the existing `LowersPayloadStore`'s own real-pipeline harness,
+reverted before committing) fed a genuinely divergent offset (`mul i32
+%tid, 4`, `%tid` from `llvm.dx.thread.id`) through the real
+`LinearizePass`->`SIMDizePass`->`WaveLoweringPass`->
+`TaskPayloadWrapperPass` pipeline. Result: a fatal `cast<ConstantInt>`
+assertion failure in `TaskPayloadWrapper.cpp`'s `lowerTaskPayloadStore`
+(`Assertion 'isa<To>(Val) && "cast<Ty>() argument of incompatible
+type!"' failed`), confirming this row's own original prediction exactly
+-- every wave-body-lowering phase between `CanonicalizeStagePass` and
+`TaskPayloadWrapperPass` (`Linearize.cpp`, `SIMDize.cpp`,
+`StageMaskCalls.{h,cpp}`, `TaskPayloadWrapper.cpp`,
+`MeshOutputWrapper.cpp`) still hard-assumes the offset is a single
+compile-time constant, identical for every lane. This is a materially
+larger, multi-file, multi-phase generalization (per-lane address
+computation, not simple canonicalization plumbing); filed as its own new
+roadmap row, **L49**, per this project's own established
+L26->L33/L45->L47/L46->L48 precedent, rather than attempted in this same
+session.
+
+**Disposition.** Roadmap **L47 not yet closed** -- only the
+`CanonicalizeStagePass`-side half of this row's own fix (recognizing a
+dynamically-indexed task-payload access) is done and tested; the real
+`dEQP-VK.mesh_shader.ext.query.no_queries...task_mesh.*` CTS cases this
+row names still cannot succeed (confirmed via the temporary investigative
+test's own assertion failure, a strictly earlier and more severe failure
+mode than this row's original "JIT session error" symptom -- the process
+now aborts during `TaskPayloadWrapperPass` before ever reaching JIT link
+time at all). A real `deqp-vk` re-run of the 2 named cases was not
+attempted this session, since the fix is known, in advance, to be
+incomplete (the assertion failure would abort the whole `deqp-vk`
+process, same as before this row's own fix, just earlier and via a
+different mechanism) -- re-running is deferred until **L49**'s own
+downstream generalization lands. No feature/extension bit touched by this
+partial fix (internal canonicalization-phase plumbing only);
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
+change needed. `FeMeCPUDesign.md`/`FeMeGraphicsDesign.md` reviewed: no
+deviation to record (neither design doc describes task-payload addressing
+at a level of detail this fix's dynamic-offset extension would
+contradict).
