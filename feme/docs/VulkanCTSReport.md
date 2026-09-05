@@ -26335,3 +26335,70 @@ feature); `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 reviewed, no change needed. One new roadmap row filed: **L45** (the
 `isLinearChain`/`outlineChain` region-splitting gap this fix newly
 surfaces).
+
+## Roadmap L31: measured impact (SPIR-V->LLVM dref-sample/query-LOD legalization patterns), plus L46 filed
+
+**Fix.** Added three `feme`-side `SPIRVToLLVMPatterns.cpp` conversion
+patterns for the ops roadmap L25 taught MLIR's SPIR-V dialect to
+deserialize but which had no legalization pattern at all:
+`ImageSampleDrefImplicitLodPattern` (`None`/`ConstOffset`/`MinLod`, no
+`Bias` -- no matching intrinsic exists -- emitting
+`llvm.spv.resource.samplecmp`/`.samplecmp.clamp`), `ImageSampleDrefExplicitLodPattern`
+(only a literal, compile-time `Lod = 0.0`, optionally with `ConstOffset`;
+any other `Lod` or a `Grad`-based sample is rejected via
+`notifyMatchFailure`, emitting `llvm.spv.resource.samplecmplevelzero`),
+and `ImageQueryLodPattern` (building a `vector<2xf32>` from two scalar
+`llvm.spv.resource.calculate.lod`/`.calculate.lod.unclamped` calls
+combined via `llvm.insertelement`).
+
+**`ninja check-feme`.** 2546/2605 passed (59 pre-existing unrelated
+`Unsupported`, 0 `Failed`), no regressions. Two new lit test files added:
+`spirv-to-llvm-sample-dref-and-query-lod.mlir` (5 supported-shape cases)
+and `spirv-to-llvm-sample-dref-invalid.mlir` (4 rejected-shape cases,
+`--verify-diagnostics`), both passing.
+
+**Minimal `feme-opt` repro.** The exact minimal repro this row's own
+report named (`spirv.ImageSampleDrefImplicitLod` with no image operands)
+now converts cleanly; two further minimal repros (`ImageSampleDrefExplicitLod`
+with a literal-zero `Lod`, and `ImageQueryLod`) also confirmed to convert
+cleanly, all via `feme-opt --feme-convert-spirv-to-llvm`.
+
+**Real `check-hlsl-feme-vk` re-run (the two originally-named cases).**
+`Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test`, run directly
+through `offloader` (with `VK_ICD_FILENAMES` pointed at the real `feme`
+ICD and `FEME_VULKAN_LOG_CREATION_ERRORS=1` to recover the underlying
+diagnostic): both still fail `vkCreateGraphicsPipelines`, but now on a
+*different*, later diagnostic than the one this row named -- confirming
+this row's own legalization gap is fully closed and exposing the
+predicted "further blocker" instead: `"unsupported raised operation:
+'llvm.spv.resource.handlefrombinding.tspirv.Image_f32_1_2_0_0_1_0t' is a
+register-bound resource handle the FeMe CPU target cannot normalize into
+a heap access or the root-constant block ..."` (`UnsupportedOps.cpp`'s
+end-of-pipeline catch-all).
+
+**Targeted real `deqp-vk` sweep (feme ICD), same 190 + 32 cases as L25's
+own sweep.** `dEQP-VK.glsl.texture_functions.query.texturequerylod.*`:
+0/190 Passed, 190/190 Failed (100%) -- every case still fails
+`vkCreateGraphicsPipelines`, now on the same `handlefrombinding`
+normalization diagnostic above (confirmed on a sample case via the
+`check-hlsl-feme-vk` repro above; the `deqp-vk` harness itself does not
+surface ICD stderr into its own `.qpa` log). `dEQP-VK.glsl.texture_functions.texture.*shadow*`:
+0/32 Passed, 15/32 Failed, 17/32 Not Supported (pre-existing, unrelated
+format/extension gaps) -- the 15 running cases fail identically. This
+confirms `SPIRVResourceLowering.cpp`'s own gap (not yet implemented) is
+the sole remaining blocker for all 205 real, running cases across both
+groups, and that this row's own legalization fix, while necessary, does
+not by itself move any CTS pass count -- exactly as this row's own report
+predicted.
+
+**Disposition.** Roadmap **L31 closed** (struck through) -- the
+SPIR-V->LLVM legalization gap this row named is fixed and confirmed via
+lit tests, minimal repros, and a real 222-case CTS/offloader sweep. Zero
+of those cases pass yet, since the CPU-runtime lowering gap this row's
+own report anticipated is now confirmed for real; filed as **L46**
+(`SPIRVResourceLowering.cpp`'s `isSampleIntrinsic`/`hasOnlySupportedImageUses`
+plus new `FeMeRuntimeCPU.c` runtime entry points for depth-comparison
+sampling and LOD-derivative computation). No feature/extension bit
+touched by this row's own fix (legalization plumbing only);
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
+change needed.
