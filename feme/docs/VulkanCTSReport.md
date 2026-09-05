@@ -25903,3 +25903,114 @@ extension bit touched (internal CPU-lowering completeness fix only);
 change needed. One new roadmap row filed: **L41** (pre-existing JIT-link
 crash in a mesh-only query-tests case, unrelated to task-payload work,
 found incidentally while validating this row's own real CTS impact).
+
+## Roadmap L40: fixed (loop-uniform-check-fused-with-divergent-exit classification), plus follow-up crash fix and L42 filed
+
+**Diagnostic fixed.** `feme-cpu-linearize` diagnosed a real
+`dEQP-VK.mesh_shader.ext.misc.payload_read`-shaped verification loop's own
+plain, uniform trip-count check (`for (i...)`) as an unsupported "internal
+branch", because its own "exit" arm and a separate, genuinely divergent
+inner `break` check's own "exit" arm both end up feeding the *same* shared
+"Flow" merge block (`StructurizeCFG`'s own general merge scheme) as two
+different incoming values of its condition `phi` -- a *partial*-constant
+fusion neither roadmap H19k's own fold (which requires *every* incoming
+value to be a literal constant) nor plain `UniformityInfo` (which
+correctly, but unhelpfully, reports *both* blocks as divergent once any
+real divergence exists anywhere in the loop) can disambiguate on its own.
+
+**Fix.** Added `peelConstantFlowPredecessors`/
+`peelConstantFlowPredecessorsInCycle` (`Linearize.cpp`): peels away only
+the merge block's own constant-valued incoming predecessor(s), redirecting
+each straight to whichever of the merge block's own two successors that
+constant selects (bypassing the merge block on that path entirely), and
+records the peeled predecessor's own real origin block into a new
+`PeeledFrom` set -- a structural, not uniformity-based, proof that
+`LoopLinearizer`'s own `OtherCondBrBlocks` classification now trusts over
+`UniformityInfo::isDivergentTerminator` wherever it applies.
+`chainToleratingUniformExits` (generalizing H19k's own straight-chain walk)
+tolerates exactly one such genuine, separate, non-divergent exit check
+sitting along the way from the header to the loop's own real divergent
+check, exactly the way the header/latch themselves are already tolerated.
+
+Fixing this success path exposed a latent, pre-existing bug: once a
+block recognized as the cycle's own real check has its edge to the loop's
+shared exit block converted from a real `CondBr` into an unconditional
+"always continue, masked" branch, the exit block's own `phi`s were left
+with a stale, now-invalid incoming-block entry for it. Fixed with a
+`BasicBlock::removePredecessor` call immediately after erasing the
+vanished edge's own terminator.
+
+**Unit/lit tests.** All 20 pre-existing `Linearize` lit tests pass;
+added a new one, `loop-uniform-check-fused-with-divergent-exit.ll`,
+directly modeling the real shape (`spirv-dis`-confirmed faithful) via a
+hand-reduced repro. `ninja check-feme`: 2541/2600 pass, 0 `Failed`, 59
+pre-existing `Unsupported`.
+
+**Real `deqp-vk` re-run (initial).**
+- `dEQP-VK.mesh_shader.ext.misc.payload_read`: this row's own originally
+  targeted diagnostic (`"has an internal branch...; unsupported"`) is
+  confirmed gone.
+- `dEQP-VK.mesh_shader.ext.misc.payload_not_accessed` (sibling, never
+  reads the payload back): still passes, unaffected -- no regression.
+
+**Follow-up crash found and fixed.** A broader
+`dEQP-VK.mesh_shader.ext.misc.*` sweep (114 cases), run to gauge this
+fix's wider impact, hit a genuine crash on the unrelated, nested-loop
+`dEQP-VK.mesh_shader.ext.misc.maximize_primitives` case:
+`BasicBlock::getTerminator` `"cannot get terminator of non-well-formed
+block"` assertion. Confirmed **not** present in the pre-L40 baseline via
+a stash/rebuild bisection (baseline instead produces the same pre-existing
+`"Result does not match reference"` failure this case already had).
+Root-caused: `linearizeCycle` recomputed a "fresh" `UniformityInfo` per
+cycle, right after its own peel/fold logic had already mutated (and, for
+a fully redundant "Flow" block, deleted) blocks belonging to the cycle
+being linearized -- but reused the *same*, already-mutated `CycleInfo` to
+do so. Since `CycleInfo` is computed once, up front, for the whole
+function, any *other*, not-yet-processed cycle (e.g. this case's own
+outer loop, containing the leaf inner loop actually being linearized)
+that structurally contained one of those just-deleted blocks was left
+holding dangling `BasicBlock` pointers to it, which
+`GenericUniformityInfo`'s own cycle traversal (inside the "fresh"
+recompute) then dereferenced. Fixed by restoring the pre-L40 architecture
+of computing `UniformityInfo` exactly once, before any cycle in the
+function is linearized, and passing it into `LoopLinearizer`'s
+constructor instead of recomputing it per cycle (the recompute was never
+actually necessary: `PeeledFrom`, not `UniformityInfo`, is what
+disambiguates a peeled pass-through block, and no block this pass queries
+`UniformityInfo` for is ever itself folded or peeled away). Verified: all
+`Linearize` lit tests and a full `ninja check-feme` still pass identically
+(2541/2600, 0 `Failed`); `maximize_primitives` no longer crashes (back to
+the same pre-existing `"Result does not match reference"` failure as
+baseline); a full `dEQP-VK.mesh_shader.ext.misc.*` sweep (114 cases)
+completes with no crash; `payload_read`/`payload_not_accessed` re-verified
+unchanged from the findings above.
+
+**New gap found, filed as L42.** Once this row's own originally targeted
+diagnostic clears, `dEQP-VK.mesh_shader.ext.misc.payload_read` still fails
+-- now on a distinct, later `feme-cpu-linearize` diagnostic: `"loop at ''
+has an internal branch in '' that does not reach the loop's exit block;
+unsupported (roadmap milestone 6 deviation)"`. Root-caused (via a real
+captured pre-`LinearizePass` IR dump of this exact shader, temporarily
+instrumented and reverted): `DiamondFlattener` runs *before*
+`LoopLinearizer` inside `LinearizePass::run`, and its own
+`isLoopControlEdge` check has no visibility into a block whose branch,
+while not *directly* a loop-control edge, still feeds indirectly into the
+loop's own real exit decision downstream (exactly the `Flow`-fusion shape
+this row's own peel logic targets) -- so for this real shader (unlike
+this row's own simpler hand-reduced repro), `DiamondFlattener` flattens
+the loop's own plain uniform trip-count check via `select`-based masking
+before `LoopLinearizer` ever sees it, replacing the literal-constant
+incoming value this row's own peel logic requires with a non-constant
+`select`-derived expression instead, defeating the peel. Filed as new
+roadmap row **L42** (needs its own real IR reduction before a fix can be
+designed: either teach `DiamondFlattener` to recognize this indirect
+shape, or teach `LoopLinearizer`'s own peel to see through a
+`select`-derived condition the same way it already does for a literal
+constant).
+
+**Disposition.** Roadmap **L40 closed** (struck through; both the
+follow-up crash and this session's own findings recorded on its row). No
+feature or extension bit touched (internal CPU-lowering completeness fix
+only); `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed, no change needed. One new roadmap row filed: **L42** (the
+`DiamondFlattener`-vs-`LoopLinearizer` ordering gap described above).
