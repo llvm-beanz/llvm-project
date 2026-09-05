@@ -64177,3 +64177,156 @@ downstream widening/lowering generalization lands.
    accesses (L47)" (already committed before this write-up).
 2. Roadmap/report doc updates (this commit).
 3. This `agent_thoughts.md` entry (its own final commit).
+
+# Session: Roadmap L48 (Array2D/Cube/CubeArray depth-comparison sampling)
+
+## Starting point
+
+Picked up L48 (filed by L46's own session, breaking depth-comparison
+sampling's remaining gap into 5 independent sub-parts (a)-(e)). Scoped
+this session down to sub-item (a)'s `Texture2DArray`/`TextureCube`/
+`TextureCubeArray` shapes only, deferring `Plain1D`/`Array1D` (no
+ordinary, non-comparison sampled-image path exists for either shape on
+this CPU target yet -- a materially bigger prerequisite) and sub-items
+(b)-(e) (`Bias`, `MinLod` clamp, nonzero `ConstOffset`, LOD-query
+intrinsics) to a follow-on row.
+
+## Implementation path
+
+1. **`ImageCalls.h`/`.cpp`**: added `SampleCmpArray2D`/`SampleCmpCube`/
+   `SampleCmpCubeArray` to the `ImageCallKind` enum plus 3 new
+   `create*` builders. Nearly missed a required fifth touch-point:
+   `matchImageCall`'s own `AllKinds` array (used to pattern-match an
+   *existing* call back into its operand fields) has its own explicit
+   roadmap-H19l comment warning that a missing entry here silently
+   leaves a switch case dead, with no compiler error. A new
+   `ImageCallKind` needs updating in 5 places, not 3: the enum, the
+   name switch, the `FunctionType` switch, `AllKinds`, and the dispatch
+   switch.
+
+2. **`SPIRVResourceLowering.cpp`**: generalized `hasOnlySupportedImageUses`
+   and `lowerImageAccesses`'s dref-sample handling from a hardcoded
+   `Plain2D`-only branch to a `switch (Shape)` mirroring the existing
+   ordinary-sample dispatch, using `DrefCoordWidth = min(OrdinaryCoordWidth
+   + 1, 4)` -- the formula already established (and empirically confirmed
+   against real CTS SPIR-V) by the prior L46 session, this time also
+   confirmed to hold for `Array2D`/`Cube` (3->4) and `CubeArray` (4,
+   already the ceiling).
+
+3. **`FeMeRuntimeCPU.c`**: added 3 new runtime entry points. Hit a real
+   C-language gotcha: the file is compiled as freestanding C, so a
+   `static` helper must be *defined*, not just declared, before any call
+   site -- `femeRTSelectCubeFace`/`femeRTRoundClampLayer` are defined much
+   later in this 5600+-line file than my first insertion point, causing
+   what would have been an implicit-declaration error. Fixed by placing
+   each new function immediately after its shape's existing ordinary-
+   sample sibling (which already has the needed helper in scope by
+   construction). General lesson for this file: always check where a
+   shape's own addressing helpers are defined before inserting new code
+   that depends on them.
+
+4. **Runtime unit tests** (`ImageSamplingTest.cpp`): wrote 3 new tests,
+   2 initially failed. Root-caused to a test-logic bug, not a runtime
+   bug: I had the Cube/CubeArray tests' pass/fail texel-value
+   assumptions backwards against `SamplerCompareFunc::GreaterEqual`'s
+   real `Dref >= Texel` semantics (confirmed by tracing
+   `femeRTApplyCompare`'s call sites). Fixed by swapping which
+   face/element was expected to pass vs fail in both tests.
+
+5. **Lit test** (`spirv-resource-lowering-image-samplecmp-shapes.ll`):
+   hit a real pass crash (`UNREACHABLE ... Use still stuck around after
+   Def is destroyed`) when all 3 new shapes' test functions in one module
+   shared the same `(set=0, binding=0/1)` pair across functions. Traced
+   to `lowerImageAccesses`'s own two-phase design (per-handle user
+   rewriting, then a second pass erasing every handle) interacting badly
+   with cross-function binding reuse in a way the existing single-shape
+   samplecmp lit test never exercised (it only ever declared one image +
+   one sampler total). Fixed by giving each of the 3 test functions its
+   own distinct `(set=0, binding=N)` pair instead of debugging the
+   cross-function-conflict machinery itself (out of this row's own
+   scope) -- a pragmatic workaround, not a claim that the underlying
+   mechanism is bug-free for a genuinely shared-binding multi-function
+   module (not a shape this project's own existing tests, or any real
+   CTS case, appear to exercise).
+
+## Validation
+
+- `FeMeTransformsCPUTests`: 309/309 (no filter). `FeMeRuntimeCPUTests`:
+  195/195 (no filter). `check-feme-transforms-cpu` (lit): 169/169.
+- `ninja check-feme` (ccache, assertions-enabled `build2`, full target
+  with all test dependencies built first): 2568/2568 supported discovered
+  tests pass, 59 pre-existing `Unsupported`, 0 `Failed`, no regressions.
+- Real `deqp-vk` re-run (feme ICD confirmed via `vulkaninfo --summary`
+  reporting `FeMe CPU Vulkan Device`) of
+  `dEQP-VK.glsl.texture_functions.texture.*shadow*` (32 cases): **6/32
+  now Pass**, up from 2/32 before this row --
+  `sampler2darrayshadow_{fragment,vertex}`,
+  `sampler2dshadow_{fragment,vertex}`,
+  `samplercubeshadow_{fragment,vertex}`.
+  `dEQP-VK.glsl.texture_functions.query.texturequerylod.*` (190 cases):
+  confirmed unaffected at 0/190, as expected.
+
+## A real, newly-discovered bug found by this session's own CTS re-run
+
+`samplercubearrayshadow_fragment` now clears pipeline creation and
+rendering (a genuine improvement -- previously rejected outright at
+"unsupported raised operation"), but the rendered image mismatches the
+reference in one small, precisely localized 32x32-pixel screen-space
+block (bbox `x:[96,127] y:[0,31]` of a 128x128 image; 1023/16384 pixels
+differ). Extracted and diffed the actual `Result.png`/`Reference.png`
+from the `.qpa` log (base64-decoded, compared pixel-by-pixel with
+Pillow) to get this precise bounding box rather than guessing from the
+summary "image comparison failed: difference = 835.108" line alone.
+
+Confirmed via two isolating CTS re-runs that this is *not* a regression
+of shared logic: `samplercubearray_{fixed,float}_fragment` (ordinary,
+non-shadow CubeArray sampling, sharing `femeRTSelectCubeFace`/
+`femeRTRoundClampLayer` with my new function) both cleanly Pass, and
+`samplercubeshadow_fragment` (Cube shadow sampling, sharing the same
+manual mip/trilinear/`femeRTApplyCompare` pattern minus array-layer
+indexing) also cleanly Passes. So both halves of
+`femeCpuImageSampleCmpCubeArrayF32` are independently proven correct;
+the bug is some interaction only present when combined, isolated to one
+specific screen-space region (likely one specific face+layer combination
+near a boundary). Time-boxed a bounded root-cause attempt (checked
+argument order between `createSampleCmpCubeArray`'s call site and the
+runtime function's `FunctionType`/parameter list -- both correct;
+checked `femeRTRoundClampLayer`'s own rounding boundary logic -- shared,
+proven code) but did not fully isolate the interaction bug itself before
+time ran out. Rather than leaving this undocumented or blocking this
+row's otherwise-solid disposition, filed it precisely (with the exact
+pixel bbox and diff magnitude) as its own sub-item of the new **L50**
+row, for a future session's real IR/pixel-level reduction.
+
+## Roadmap/report updates
+
+- `Roadmap.md`: **L48 struck through** (closed) for its own scoped-down
+  `Array2D`/`Cube`/`CubeArray` slice, with a "(partially fixed: ...)"
+  annotation appended outside the strikethrough describing exactly what
+  was done, the real CTS numbers, and the newly-discovered
+  `CubeArray`-shadow bug. New **L50** row filed, breaking the remaining
+  scope into (a)-(f) prose items (one row, no nested-letter sub-rows,
+  per the standing "no more than one lowercase letter deep" instruction).
+- `VulkanCTSReport.md`: new "Roadmap L48: ..." section with the full
+  fix narrative, test results, the real CTS re-run numbers, and a
+  detailed writeup of the newly-discovered `CubeArray`-shadow bug
+  (including the exact pixel bbox/diff-magnitude evidence).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: reviewed
+  (grepped for `samplecmp`/`shadow`/`depth-comparison` mentions -- none
+  found), no change needed, consistent with L46's own precedent for
+  internal CPU-lowering plumbing.
+- `FeMeGraphicsDesign.md`: reviewed its existing `samplecmp.2d.f32`
+  narrative mention (~line 2415) -- it describes the CPU-lowering call
+  convention generically (using `.2d.f32` as one example, not a scope
+  claim), no deviation to record.
+
+## Commits this session
+
+1. `ImageCalls.h`/`.cpp`: `SampleCmpArray2D`/`SampleCmpCube`/
+   `SampleCmpCubeArray` builder infrastructure.
+2. `SPIRVResourceLowering.cpp` dispatch/validation generalization, plus
+   its unit tests (`SPIRVResourceLoweringTest.cpp`) and the new lit test.
+3. `FeMeRuntimeCPU.c` runtime entry points, plus their unit tests
+   (`ImageSamplingTest.cpp`).
+4. `Roadmap.md`/`VulkanCTSReport.md` doc updates.
+5. This `agent_thoughts.md` entry (its own final commit).
