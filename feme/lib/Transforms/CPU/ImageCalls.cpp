@@ -102,6 +102,12 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.atomic.exchange.2d.i32";
   case ImageCallKind::AtomicCompareExchange2D:
     return "feme.cpu.image.atomic.compare_exchange.2d.i32";
+  case ImageCallKind::SampleCmpArray2D:
+    return "feme.cpu.image.samplecmp.2darray.f32";
+  case ImageCallKind::SampleCmpCube:
+    return "feme.cpu.image.samplecmp.cube.f32";
+  case ImageCallKind::SampleCmpCubeArray:
+    return "feme.cpu.image.samplecmp.cubearray.f32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -396,6 +402,39 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
         {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
         /*isVarArg=*/false);
     break;
+  case ImageCallKind::SampleCmpArray2D:
+    // Same as SampleCmp2D, plus a float array_layer operand before lod
+    // (roadmap L48, mirroring Sample2DArray's own relationship to
+    // Sample2D).
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, u, v, array_layer, lod,
+    //  use_explicit_lod, dref, mask) -> float
+    FTy = FunctionType::get(F32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  case ImageCallKind::SampleCmpCube:
+    // Same as SampleCmp2D, but (u, v) becomes a 3-component direction
+    // vector (dir_x, dir_y, dir_z), mirroring SampleCube's own
+    // relationship to Sample2D (roadmap L48).
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, dir_x, dir_y, dir_z, lod,
+    //  use_explicit_lod, dref, mask) -> float
+    FTy = FunctionType::get(F32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
+  case ImageCallKind::SampleCmpCubeArray:
+    // Same as SampleCmpCube, plus a float array_layer operand before lod,
+    // mirroring SampleCubeArray's own relationship to SampleCube (roadmap
+    // L48).
+    FTy = FunctionType::get(F32Ty,
+                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
+                             F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, I1Ty},
+                            /*isVarArg=*/false);
+    break;
   }
 
   StringRef Name = getImageCallName(Kind);
@@ -678,6 +717,51 @@ CallInst *feme::cpu::createSampleCubeArray(
       {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
        Env.SamplerHeapCount, ImageIndex, SamplerIndex, DirX, DirY, DirZ,
        ArrayLayer, Lod, UseExplicitLod, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createSampleCmpArray2D(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *SamplerIndex, Value *U, Value *V, Value *ArrayLayer, Value *Lod,
+    Value *UseExplicitLod, Value *Dref, Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmpArray2D);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+                             Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
+                             V, ArrayLayer, Lod, UseExplicitLod, Dref, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createSampleCmpCube(IRBuilderBase &Builder,
+                                        const ImageCallEnv &Env,
+                                        Value *ImageIndex, Value *SamplerIndex,
+                                        Value *DirX, Value *DirY, Value *DirZ,
+                                        Value *Lod, Value *UseExplicitLod,
+                                        Value *Dref, Value *Mask,
+                                        const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmpCube);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+                             Env.SamplerHeapCount, ImageIndex, SamplerIndex,
+                             DirX, DirY, DirZ, Lod, UseExplicitLod, Dref,
+                             Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createSampleCmpCubeArray(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *SamplerIndex, Value *DirX, Value *DirY, Value *DirZ,
+    Value *ArrayLayer, Value *Lod, Value *UseExplicitLod, Value *Dref,
+    Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmpCubeArray);
+  return Builder.CreateCall(
+      F,
+      {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+       Env.SamplerHeapCount, ImageIndex, SamplerIndex, DirX, DirY, DirZ,
+       ArrayLayer, Lod, UseExplicitLod, Dref, Mask},
       Name);
 }
 
@@ -976,7 +1060,9 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::AtomicOr2D, ImageCallKind::AtomicXor2D,
       ImageCallKind::AtomicSMax2D, ImageCallKind::AtomicSMin2D,
       ImageCallKind::AtomicUMax2D, ImageCallKind::AtomicUMin2D,
-      ImageCallKind::AtomicExchange2D, ImageCallKind::AtomicCompareExchange2D};
+      ImageCallKind::AtomicExchange2D, ImageCallKind::AtomicCompareExchange2D,
+      ImageCallKind::SampleCmpArray2D, ImageCallKind::SampleCmpCube,
+      ImageCallKind::SampleCmpCubeArray};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -1321,6 +1407,58 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Comparator = CI.getArgOperand(5);
     Result.AtomicValue = CI.getArgOperand(6);
     Result.Mask = CI.getArgOperand(7);
+    break;
+  case ImageCallKind::SampleCmpArray2D:
+    if (CI.arg_size() != 13)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.ArrayLayer = CI.getArgOperand(8);
+    Result.Lod = CI.getArgOperand(9);
+    Result.UseExplicitLod = CI.getArgOperand(10);
+    Result.Dref = CI.getArgOperand(11);
+    Result.Mask = CI.getArgOperand(12);
+    break;
+  case ImageCallKind::SampleCmpCube:
+    if (CI.arg_size() != 13)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.W = CI.getArgOperand(8);
+    Result.Lod = CI.getArgOperand(9);
+    Result.UseExplicitLod = CI.getArgOperand(10);
+    Result.Dref = CI.getArgOperand(11);
+    Result.Mask = CI.getArgOperand(12);
+    break;
+  case ImageCallKind::SampleCmpCubeArray:
+    if (CI.arg_size() != 14)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.W = CI.getArgOperand(8);
+    Result.ArrayLayer = CI.getArgOperand(9);
+    Result.Lod = CI.getArgOperand(10);
+    Result.UseExplicitLod = CI.getArgOperand(11);
+    Result.Dref = CI.getArgOperand(12);
+    Result.Mask = CI.getArgOperand(13);
     break;
   }
   return Result;

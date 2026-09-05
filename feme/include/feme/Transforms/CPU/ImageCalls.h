@@ -102,6 +102,37 @@
 // operand to `Store2D`'s own shape, mirroring `Store2DMS`/`Store2DMSI32`'s
 // relationship to `Store2D` but for an arrayed image.
 //
+// Update (roadmap L48): three new kinds, `SampleCmpArray2D`/`SampleCmpCube`/
+// `SampleCmpCubeArray`, extend `SampleCmp2D`'s depth-comparison sample
+// (roadmap L46, `Plain2D` only) to the same three non-`Plain2D` shapes
+// `Sample2DArray`/`SampleCube`/`SampleCubeArray` already cover for an
+// ordinary filtered sample -- an arrayed and/or cube shadow sampler, per
+// SPIR-V's own `OpImageSampleDrefImplicitLod`/`ExplicitLod`. Confirmed via
+// a real `deqp-vk` SPIR-V capture (`--deqp-log-decompiled-spirv=enable`)
+// of `dEQP-VK.glsl.texture_functions.texture.{sampler2darrayshadow,
+// samplercube{,array}shadow}_fragment`: glslang always pads a
+// depth-comparison sample's own `Coordinate` operand with one extra,
+// redundant trailing component (echoing `Dref`, itself always read from
+// its own separate operand, never this echo) beyond the shape's ordinary
+// addressing width -- `SampleCmp2D`'s own precedent (roadmap L46) already
+// established this for `Plain2D` (2 -> 3); `Array2D`/`Cube` (3 -> 4)
+// follow identically. `CubeArray`'s own ordinary width (4, a direction
+// vector plus a float array layer) is already SPIR-V's per-instruction
+// vector width ceiling, so its own dref coordinate stays 4-wide with no
+// further padding -- `Dref` is read as a genuinely independent value in
+// this case, not an echo of the coordinate's own last component (both
+// happen to share one ultimate GLSL source expression in the CTS case
+// this was confirmed against, `texture(sampler, coord, coord.w)`, but that
+// is user-shader coincidence, not a property this pass may rely on).
+// `sampler1d{,array}shadow` (a genuinely 1D shadow sampler) remain
+// unstarted follow-on work: unlike every shape here, no ordinary
+// (non-comparison) `Sample1D`/`Sample1DArray` sampled-image infrastructure
+// exists yet at all (`Load1D`/`Load1DArray`, roadmap H19c/H19e, are
+// storage-image-only kinds) -- filed as its own roadmap row rather than
+// folded into this update, since it needs new ordinary-sample plumbing
+// built first, not just a depth-comparison counterpart of existing
+// plumbing the way this update's three new kinds are.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_IMAGECALLS_H
@@ -289,6 +320,18 @@ enum class ImageCallKind : uint8_t {
   /// value returned is always the pre-op value either way, matching
   /// `OpAtomicCompareExchange`'s own result semantics.
   AtomicCompareExchange2D,
+  /// `feme.cpu.image.samplecmp.2darray.f32` (roadmap L48): the
+  /// `Texture2DArray` counterpart of `SampleCmp2D`, adding the same float
+  /// array-layer coordinate `Sample2DArray` adds to `Sample2D`.
+  SampleCmpArray2D,
+  /// `feme.cpu.image.samplecmp.cube.f32` (roadmap L48): the `TextureCube`
+  /// counterpart of `SampleCmp2D`, taking the same 3-component direction
+  /// vector `SampleCube` does.
+  SampleCmpCube,
+  /// `feme.cpu.image.samplecmp.cubearray.f32` (roadmap L48): the
+  /// `TextureCubeArray` counterpart of `SampleCmp2D`, adding the same
+  /// float array-layer coordinate `SampleCubeArray` adds to `SampleCube`.
+  SampleCmpCubeArray,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -607,6 +650,38 @@ llvm::CallInst *createSampleCubeArray(
     llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *ArrayLayer,
     llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Mask,
     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.samplecmp.2darray.f32` call (roadmap L48), the
+/// `Texture2DArray` counterpart of `createSampleCmp2D`.
+llvm::CallInst *createSampleCmpArray2D(llvm::IRBuilderBase &Builder,
+                                      const ImageCallEnv &Env,
+                                      llvm::Value *ImageIndex,
+                                      llvm::Value *SamplerIndex, llvm::Value *U,
+                                      llvm::Value *V, llvm::Value *ArrayLayer,
+                                      llvm::Value *Lod,
+                                      llvm::Value *UseExplicitLod,
+                                      llvm::Value *Dref, llvm::Value *Mask,
+                                      const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.samplecmp.cube.f32` call (roadmap L48), the
+/// `TextureCube` counterpart of `createSampleCmp2D`.
+llvm::CallInst *createSampleCmpCube(llvm::IRBuilderBase &Builder,
+                                   const ImageCallEnv &Env,
+                                   llvm::Value *ImageIndex,
+                                   llvm::Value *SamplerIndex, llvm::Value *DirX,
+                                   llvm::Value *DirY, llvm::Value *DirZ,
+                                   llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                                   llvm::Value *Dref, llvm::Value *Mask,
+                                   const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.samplecmp.cubearray.f32` call (roadmap L48),
+/// the `TextureCubeArray` counterpart of `createSampleCmp2D`.
+llvm::CallInst *createSampleCmpCubeArray(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *DirX,
+    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *ArrayLayer,
+    llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Dref,
+    llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.1d.v4f32` call (roadmap H19c). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.
