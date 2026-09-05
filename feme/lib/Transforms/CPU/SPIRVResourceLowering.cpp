@@ -880,7 +880,16 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
         return false; // No filtered/dref sample over a non-Plain2D shape.
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      if (!isCoordN(CI->getArgOperand(2), /*N=*/2, /*Float=*/true) ||
+      // SPIR-V's own validation rules give a depth-comparison sample's
+      // Coordinate operand one extra component beyond the shape's own
+      // addressing width (3, not `Plain2D`'s usual 2) -- glslang always
+      // emits this for e.g. `texture(sampler2DShadow, vec3(u, v,
+      // compare))`, packing the depth-reference value redundantly
+      // alongside `Dref` itself (a separate operand, still read from its
+      // own fixed index below); only the first two components are ever
+      // read as the real U/V address (see the `C0`/`C1` extraction in
+      // `lowerImageAccesses`).
+      if (!isCoordN(CI->getArgOperand(2), /*N=*/3, /*Float=*/true) ||
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
           !isZeroOffset(CI->getArgOperand(DrefSampleOffsetIdx)) ||
           !CI->getType()->isFloatTy())
