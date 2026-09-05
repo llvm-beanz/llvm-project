@@ -42,26 +42,29 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L40 or other prerequisites blocking the L-series milestones?
+Can you work on L41 or other prerequisites blocking the L-series milestones?
 
-> **A real CTS re-run of L30's own fix surfaced a distinct, unrelated
-> control-flow-linearization gap**: `dEQP-VK.mesh_shader.ext.misc.payload_read`
-> (task-payload write in the task/amplification stage, read back in the mesh
-> stage -- the exact real-hardware shape L30's own fix targets) fails
-> `vkCreateGraphicsPipelines` with `"feme-cpu-linearize: function 'main': loop
-> at '' has an internal branch in ''; unsupported (roadmap milestone 6
-> deviation)"`, while its sibling `payload_not_accessed` case (which never reads
-> the payload back) passes -- confirming L30's own fix works for a real CTS
-> mesh-shader payload read too, and this is a genuinely separate, later gap.
-> `feme-cpu-linearize`'s own loop-internal-branch rejection is a known family
-> with more than one distinct sub-shape: H19k already fixed one narrow syntactic
-> shape (a redundant `StructurizeCFGPass`-inserted `Flow` block re-deriving an
-> already-decided uniform trip-count check via a phi of two literal constants),
-> but `payload_read`'s own loop evidently has a structurally different
-> internal-branch shape H19k's own narrow, conservative fold does not match (its
-> own precondition -- a `CondBr` fed by a phi of exactly two literal
-> `ConstantInt`s -- is intentionally strict to avoid misfiring on genuine
-> divergent control flow). Needs its own real IR reduction of this exact CTS
-> shader (`glslangValidator`/`feme-translate`/`feme-opt`, mirroring H19k's own
-> reduction technique) to identify the new internal-branch shape and whether it
-> needs its own new fold in `LoopLinearizer` or a genuinely different approach
+> **A real `dEQP-VK.mesh_shader.ext.*` sweep, run while validating L39's own
+> fix, incidentally found an unrelated, pre-existing JIT-link crash**:
+> `dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.mesh_only.inside_rp.single_view.only_primary`
+> (and likely other `mesh_only` cases in the same `query.*` group) aborts the
+> whole `deqp-vk` process with `"deqp-vk:
+> llvm/include/llvm/ExecutionEngine/JITLink/JITLink.h:285: void
+> llvm::jitlink::Block::setMutableContent(MutableArrayRef<char>): Assertion
+> `MutableContent.data() && \"Setting null content\"' failed."` -- confirmed
+> reproducible in isolation (a single-case run hits it deterministically, not
+> merely a byproduct of the broader sweep) and confirmed unrelated to L39's own
+> task-payload fixes by reverting
+> `CanonicalizeStage.cpp`/`TaskPayloadWrapper.cpp` to their pre-L39 state and
+> reproducing the identical assertion (unsurprising, since this case's own
+> shader has no task/amplification stage or payload access at all -- `mesh_only`
+> in its own case name). A JIT-link crash rather than a diagnosed failure or
+> ordinary rendering mismatch suggests a genuinely different class of bug than
+> this project's usual legalization gaps -- likely a real object emitted with a
+> null/empty section JITLink chokes on, possibly specific to this query-tests
+> group's own pipeline statistics/timestamp query instrumentation around a
+> mesh-only dispatch, or an interaction between mesh shading and
+> `VK_EXT_mesh_shader`'s own draw-count/query machinery -- needs its own scoping
+> pass (confirm how many `query.*.mesh_only.*` cases are affected, and whether a
+> real IR/JIT reduction of this exact case narrows it to a specific
+> instrumentation feature) before a fix can be designed
