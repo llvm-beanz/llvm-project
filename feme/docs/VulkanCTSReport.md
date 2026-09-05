@@ -26082,3 +26082,87 @@ row filed: **L43** (the `feme-cpu-linearize` gap this fix newly surfaces --
 `LinearizePass` still does not know how to turn a branch depending on a
 masked-atomicrmw's own per-lane result into real masked, straight-line
 code).
+
+## Roadmap L42: fixed (LoopLinearizer nested-uniform-diamond classification)
+
+**Repro.** `dEQP-VK.mesh_shader.ext.misc.payload_read` (task-payload write
+in the task/amplification stage, read back and verified in a loop in the
+mesh stage -- the exact shape L40's own fix targets one nesting level
+shallower) reached L40's own verification loop successfully but still
+failed `vkCreateGraphicsPipelines` on a later, distinct diagnostic:
+`"feme-cpu-linearize: function 'main': loop at '' has an internal branch
+in '' that does not reach the loop's exit block; unsupported (roadmap
+milestone 6 deviation)"`.
+
+**Root cause.** Confirmed via `print<feme-cpu-uniformity>` on the real
+captured pre-`LinearizePass` IR (`/tmp/l42_real_pre_linearize.ll`): this
+loop has **zero divergent values anywhere within it**. Its per-iteration
+comparison reads a raw `addrspace(14)` load rather than going through the
+`feme.stage.task.payload.load.f32` stage-op call, so it is not pre-seeded
+`NeverUniform` by `WaveTTIImpl::getValueUniformity` the way L39/L40's own
+hand-reduced repros are, and falls through to the generic, purely
+structural `ValueUniformity::Default` rule -- which finds it, correctly,
+entirely uniform. This directly disproves the roadmap row's own original
+hypothesis (that `DiamondFlattener` fuses the trip-count check via
+`select`, defeating `peelConstantFlowPredecessors`): `DiamondFlattener`
+correctly flattens any divergent diamond that is not itself a loop-control
+edge, at any nesting depth, and never touches this loop's own uniform
+trip-count check at all, since there is no divergence anywhere in the loop
+for it to flatten in the first place.
+
+The real bug was in `LoopLinearizer::linearizeCycle`'s own
+`OtherCondBrBlocks` classification, which historically required *every*
+non-Header/Latch `CondBr` block to itself pass `matchExitCheckWithRelay`
+(reach the loop's real exit block directly, or via a single relay hop) --
+correct for L40's own single-nesting-level repro (one uniform check whose
+"skip" arm reaches the exit block via exactly one `BreakCriticalEdges`
+relay), but too narrow for this CTS shape's own two-nesting-level nested
+diamond, where an outer uniform check's own "skip" arm rejoins a *nested*
+uniform check's own merge block rather than the exit block itself.
+
+**Fix.** Replaced the old linear-chain tolerance
+(`LoopLinearizer::chainToleratingUniformExits`, removed) with a full
+recursive region walk, `LoopLinearizer::collectUniformPassThroughRegion`,
+that follows a genuinely branching (not just chained) nested diamond of
+further uniform checks between `Header`↔`CheckBlock` and
+`CheckBlock`'s stay-in-loop arm↔`Latch`. Also redesigned
+`OtherCondBrBlocks` classification to be divergence-first: it now
+identifies the single genuinely divergent exit check via
+`UI.isDivergentTerminator` (excluding blocks already accounted for by
+`peelConstantFlowPredecessorsInCycle`'s own `PeeledFrom` set) before ever
+attempting a relay/region match, rather than deferring entirely to match
+success -- this correctly leaves a loop with *no* genuine divergence
+anywhere in `OtherCondBrBlocks` untouched (this CTS case's own shape)
+instead of misdiagnosing it, and fixed a regression an earlier iteration
+of this classification change introduced in the pre-existing
+`unsupported-loop-internal-branch.ll` regression-guard lit test (a
+genuinely divergent internal branch was being silently left untouched
+rather than diagnosed). Also discovered and accounted for:
+`peelConstantFlowPredecessors`'s own redirect can bypass `CheckBlock`
+entirely, rewiring a peeled predecessor's edge straight onto the loop's
+real exit block rather than onto `CheckBlock` itself --
+`collectUniformPassThroughRegion` now accepts either as a valid region
+terminus, mirroring `matchExitCheckWithRelay`'s own existing tolerance for
+the same shape (this was needed to keep the pre-existing L40 lit test,
+`loop-uniform-check-fused-with-divergent-exit.ll`, passing against the new
+region-walk classification).
+
+`ninja check-feme` passes in full (2541/2600 discovered, 59 pre-existing
+`Unsupported`, 0 `Failed`), including both `unsupported-loop-internal-
+branch.ll` and `loop-uniform-check-fused-with-divergent-exit.ll`.
+
+**Measured impact.** A direct re-run of the cited case confirms the
+`feme-cpu-linearize` diagnostic is gone: pipeline creation now succeeds and
+compilation reaches actual JIT compilation (SPIR-V/IR dumped in the log),
+where it now hits the pre-existing, already-triaged L41 JIT-link crash
+instead. This case's own shader was simply never far enough along the
+pipeline to reach that crash before this fix landed; it is not a new gap
+and is out of this row's own scope (already tracked and root-caused under
+L41).
+
+**Disposition.** Roadmap **L42 closed** (struck through). No feature or
+extension bit touched (an internal CPU divergence-linearization
+correctness fix only); `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, no change needed. No new roadmap
+row filed: this case's next blocker (the L41 JIT-link crash) is already
+tracked under that existing row, not a new gap.
