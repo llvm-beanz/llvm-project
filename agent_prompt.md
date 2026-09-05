@@ -44,43 +44,44 @@ if it already exists, and commit it in its own commit when you're done.
 
 The last session got stuck.
 
-Can you work on L45 or other prerequisites blocking the L-series milestones?
+Can you work on L46 or other prerequisites blocking the L-series milestones?
 
-> **L44's own fix clears the fatal `"LLVM ERROR: unsupported calling
-> convention"` abort, but
-> `dEQP-VK.mesh_shader.ext.query.no_queries.*.mesh_only.*`/`.task_mesh.*` (all 4
-> real, feature-supported cases in the sweep L44 ran) now fail cleanly at
-> `vkCreateGraphicsPipelines` with a distinct, later, diagnosed error**:
-> `"feme-cpu-wrap-entry: function 'main' has a barrier inside non-linear control
-> flow (a surviving branch not part of a supported loop); region splitting only
-> supports a straight-line wave body or a single uniform loop (roadmap milestone
-> 9 deviation)"`. Root-caused via a real captured pre-`EntryWrapperPass` IR dump
-> of the exact CTS case (same env-gated `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`
-> technique, temporary, reverted before committing):
-> `feme::cpu::EntryWrapperPass::splitAtGroupSyncBarriers` first tries
-> `matchLoopShape` (the "barrier inside a uniform loop" shape), which correctly
-> declines without diagnosing (this function has no loop at all), then falls
-> back to `isLinearChain`, which requires the *entire* function to be one
-> branch-free, loop-free straight chain from entry to `ret` -- and rejects this
-> real shader outright, since its own single barrier sits in the entry block,
-> safely *before* an entirely unrelated, ordinary uniform diamond further down
-> (`%push_const.inbounds = icmp ule i32 4, %root_constant_size` deciding whether
-> to load a real root-constant value or default to 0 -- itself containing no
-> further barrier, and never spanning the barrier boundary in either arm).
-> `isLinearChain`'s all-or-nothing check cannot distinguish this safe case (a
-> uniform branch entirely contained within one barrier-delimited region) from a
-> genuinely unsafe one (a branch whose two arms would land in *different*
-> barrier regions, which `outlineChain`'s current flat-block-list design has no
-> way to represent as two still-connected region functions). Needs: (1)
-> confirmation (via further real CTS cases) of whether every occurrence of this
-> diagnostic is this same "uniform diamond fully outside every barrier region"
-> shape, or whether a genuinely barrier-spanning branch also occurs somewhere in
-> the wild, and (2) a real design decision on the fix's shape -- most likely
-> teaching `isLinearChain`/`splitAtGroupSyncBarriers` to first identify each
-> barrier's own region boundary and permit an arbitrary (uniform-only,
-> side-effect-free-enough) sub-CFG *within* a single region, only rejecting a
-> branch that actually straddles one, which would require generalizing
-> `outlineChain` (currently a flat `SmallVector<BasicBlock *>` chain, assuming
-> an unconditional-branch-only interior) to outline a real multi-block sub-CFG
-> per region instead -- a materially bigger change than L43/L44's own scope,
-> likely its own multi-part milestone rather than a single small fix
+> **L31's own fix clears the SPIR-V-to-LLVM legalization gap for
+> `spirv.ImageSampleDrefImplicitLod`/`ImageSampleDrefExplicitLod`/`ImageQueryLod`,
+> but `vkCreateGraphicsPipelines` still fails on a real
+> `Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test` re-run**:
+> `"unsupported raised operation: 'llvm.spv.resource.handlefrombinding...' is a
+> register-bound resource handle the FeMe CPU target cannot normalize..."`
+> (`UnsupportedOps.cpp`'s end-of-pipeline catch-all) --
+> `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`'s own
+> `isSampleIntrinsic`/`hasOnlySupportedImageUses` only recognize
+> `spv_resource_sample`/`spv_resource_sample_clamp`/`spv_resource_samplelevel`
+> today, so a sampled-image handle whose only uses are one of the five
+> newly-legalized intrinsics
+> (`spv_resource_samplecmp`/`.samplecmp_clamp`/`samplecmplevelzero`/`calculate_lod`/`calculate_lod_unclamped`)
+> is rejected as "not fully supported" and left entirely unlowered, so its
+> `handlefrombinding` call survives, unconsumed, all the way to this pass. This
+> is a substantial, cross-cutting scope of its own (real CPU emulation
+> semantics, not legalization plumbing): needs (1) extending
+> `isSampleIntrinsic`/`hasOnlySupportedImageUses`/`getSampleOffsetIdx`-style
+> helpers to recognize all five new intrinsics and validate their own
+> coordinate/offset/clamp/dref operand shapes the same way the existing three
+> are validated; (2) new `feme.cpu.image.*` runtime entry points in
+> `feme/runtime/CPU/FeMeRuntimeCPU.c` alongside the existing
+> `femeRTSamplePoint2D`/`femeRTComputeBilinearSupport` -- a depth-comparison
+> sample (`samplecmp`/`samplecmplevelzero`) needs each of the (up to 4,
+> bilinear) sampled texels compared against the reference value and blended per
+> the sampler's own `ComparisonOp`, rather than just averaged, so the existing
+> bilinear helpers cannot be reused as-is; a LOD query
+> (`calculate_lod`/`_unclamped`) needs a real screen-space coordinate derivative
+> (`dFdx`/`dFdy`) to compute a mip level from, which no existing CPU-target code
+> path currently threads through to a sample/query call at all -- needs its own
+> design pass to confirm where a per-invocation derivative is (or could be made)
+> available in this CPU target's per-lane execution model; (3) new lit coverage
+> in `feme/test/Transforms/CPU/` (mirroring the existing
+> `resource-lowering-image-sample.ll`) plus new `FeMeRuntimeCPUTests` unit tests
+> for each new runtime entry point; (4) a real `check-hlsl-feme-vk`/`deqp-vk`
+> re-run of `Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test` and the
+> `dEQP-VK.glsl.texture_functions.{query.texturequerylod.*,texture.*shadow*}`
+> CTS groups (190 + 32 cases) to confirm the fix at scale, since this row's own
+> scope was discovered by, but not yet measured against, that real CTS surface
