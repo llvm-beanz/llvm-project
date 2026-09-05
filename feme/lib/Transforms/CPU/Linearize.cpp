@@ -66,6 +66,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Transforms/Utils/SSAUpdater.h"
 
 using namespace llvm;
 using namespace feme::cpu;
@@ -702,8 +703,7 @@ bool DiamondFlattener::run() {
 /// really branching away.
 class LoopLinearizer {
 public:
-  LoopLinearizer(Function &F, CycleInfo &CI, UniformityInfo &UI)
-      : F(F), CI(CI), UI(UI) {}
+  LoopLinearizer(Function &F, CycleInfo &CI) : F(F), CI(CI) {}
 
   /// Validates and linearizes every leaf cycle in \p F matching the shape
   /// this pass supports. Returns whether \p F was changed.
@@ -712,7 +712,6 @@ public:
 private:
   Function &F;
   CycleInfo &CI;
-  UniformityInfo &UI;
 
   /// The exit-check shape a single loop block can have: a conditional
   /// branch where exactly one successor is the loop's shared exit block and
@@ -728,6 +727,35 @@ private:
   /// or `std::nullopt` if it isn't a conditional branch to/from it at all.
   std::optional<ExitCheck> matchExitCheck(BasicBlock &BB,
                                           BasicBlock *ExitBlock);
+
+  /// Roadmap H19k: like `matchExitCheck`, but additionally tries each of
+  /// \p BB's own two successors as a candidate "exit" arm reaching \p
+  /// ExitBlock only through a plain, single-predecessor straight chain
+  /// (see `straightChain`) when neither successor literally *is* \p
+  /// ExitBlock -- `BreakCriticalEdges`'s own relay trampoline is the
+  /// common real-world case left behind once `foldRedundantFlowBlock`/
+  /// `peelConstantFlowPredecessors` bypass a redundant re-derivation.
+  std::optional<ExitCheck> matchExitCheckWithRelay(BasicBlock &BB,
+                                                   BasicBlock *ExitBlock);
+
+  /// Roadmap L40: generalizes `straightChain` to additionally tolerate a
+  /// "pass-through" block along the way from \p From to \p To: one whose
+  /// own terminator is a conditional branch, provided it is itself a
+  /// genuine, *non-divergent* exit check reaching \p ExitBlock (matched
+  /// via `matchExitCheckWithRelay`) via its other arm -- left completely
+  /// untouched, exactly the way `linearizeCycle` already tolerates such a
+  /// check sitting directly in the header or the latch. A real
+  /// `dEQP-VK.mesh_shader.ext.misc.payload_read`-shaped loop's own plain,
+  /// uniform `for` trip-count check can end up as exactly such a
+  /// "pass-through" block once `UnifyLoopExits`/`StructurizeCFG` have run
+  /// -- see the `linearizeCycle` file comment and
+  /// `peelConstantFlowPredecessors`'s own comment for the mechanism that
+  /// first decouples it from the separate divergent check's own merge
+  /// block.
+  std::optional<SmallVector<BasicBlock *, 4>>
+  chainToleratingUniformExits(BasicBlock *From, BasicBlock *To,
+                             BasicBlock *ExitBlock, UniformityInfo &UI,
+                             const SmallPtrSetImpl<BasicBlock *> &PeeledFrom);
 
   /// Finalizes \p Latch's backedge once its loop-carried masks are fully
   /// known (\p MasksAtLatch), returning the resulting backedge condition:
@@ -906,6 +934,147 @@ bool foldRedundantFlowBlocksInCycle(CycleInfo &CI, CycleRef C,
   return Changed;
 }
 
+/// Roadmap L40: `foldRedundantFlowBlock` above requires *every* incoming
+/// value of \p BB's own condition `phi` to be a literal constant before
+/// touching it at all -- correctly conservative, since eliminating \p BB
+/// entirely only makes sense once none of its predecessors carries a
+/// genuinely divergent decision. A real `dEQP-VK.mesh_shader.ext.misc.
+/// payload_read`-shaped loop's own verification `for (i...) { if
+/// (payload[i] != expected) break; }` combines a plain, uniform trip-count
+/// check (`i < N`, in its own block) with a separate, genuinely divergent
+/// inner `break` check (`payload[i]` is a task-payload read, unconditionally
+/// `NeverUniform` per `WaveUniformity.cpp`) -- once `UnifyLoopExits`/
+/// `StructurizeCFG` restructure this, the trip-count check's own "exit" arm
+/// ends up feeding a *literal-constant* incoming value into the very same
+/// "Flow" merge block the divergent break check's own decision also feeds,
+/// rather than reaching a merge block of its own the way
+/// `foldRedundantFlowBlock`'s narrower, fully-constant shape expects.
+///
+/// Peels away only \p BB's constant-valued predecessor(s) whose own
+/// terminator is a plain, single-successor unconditional branch into \p BB
+/// (never one with its own side effects to reorder), redirecting each
+/// straight to whichever of \p BB's own two successors that predecessor's
+/// own constant selects -- bypassing \p BB entirely on that path -- while
+/// leaving \p BB itself standing, still holding the genuinely divergent
+/// decision for whichever predecessor(s) remain. Every one of \p BB's own
+/// `phi`s may still be used beyond it (directly, relying on \p BB's
+/// dominance, since \p BB used to be its only predecessor, or via an
+/// existing downstream `phi`) -- `SSAUpdater` repairs any such use once the
+/// peeled predecessor's edge no longer runs through \p BB. Returns whether
+/// anything was peeled.
+///
+/// Deliberately narrower than a general jump-threading pass: it never
+/// touches a predecessor with side-effecting instructions of its own
+/// (besides its terminator), and only ever peels a predecessor whose
+/// contribution to \p BB's *own* condition `phi` is a literal constant --
+/// so, like `foldRedundantFlowBlock`, it can never mistake a genuine
+/// divergent decision for a redundant one, only bypass a compile-time-
+/// provable one.
+bool peelConstantFlowPredecessors(BasicBlock *BB,
+                                  SmallPtrSetImpl<BasicBlock *> &PeeledFrom) {
+  auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
+  if (!Br)
+    return false;
+  auto *CondPN = dyn_cast<PHINode>(Br->getCondition());
+  if (!CondPN || CondPN->getParent() != BB)
+    return false;
+
+  // Collect every incoming index whose value is a literal constant --
+  // candidates to peel. If none are, there is nothing to do here; if
+  // *every* one is, `foldRedundantFlowBlock` above already fully replaces
+  // `BB`, more thoroughly, so leave that shape to it instead.
+  SmallVector<unsigned, 2> PeelIndices;
+  for (unsigned I = 0, E = CondPN->getNumIncomingValues(); I != E; ++I)
+    if (isa<ConstantInt>(CondPN->getIncomingValue(I)))
+      PeelIndices.push_back(I);
+  if (PeelIndices.empty() || PeelIndices.size() == CondPN->getNumIncomingValues())
+    return false;
+
+  bool Changed = false;
+  // Walk in reverse so removing an incoming value along the way never
+  // invalidates a later index still to be processed.
+  for (unsigned I : llvm::reverse(PeelIndices)) {
+    BasicBlock *Pred = CondPN->getIncomingBlock(I);
+    auto *PredBr = dyn_cast<UncondBrInst>(Pred->getTerminator());
+    if (!PredBr || PredBr->getSuccessor(0) != BB)
+      continue; // Not a plain, single-successor relay into `BB`.
+
+    auto *K = cast<ConstantInt>(CondPN->getIncomingValue(I));
+    BasicBlock *Target = K->isOne() ? Br->getSuccessor(0) : Br->getSuccessor(1);
+
+    // Capture every one of `BB`'s own phi values along this predecessor's
+    // edge before retargeting it, so `SSAUpdater` still has both the
+    // original (`BB`'s phi) and the newly-available (this constant)
+    // values to reconcile once the edge no longer runs through `BB`.
+    SmallVector<std::pair<PHINode *, Value *>, 4> Incoming;
+    for (PHINode &PN : BB->phis())
+      Incoming.emplace_back(&PN, PN.getIncomingValueForBlock(Pred));
+
+    // Roadmap L40: `Pred` is expected to be a plain, single-predecessor
+    // critical-edge relay (`BreakCriticalEdges`'s own trampoline for the
+    // edge a `CondBrInst` used to have straight into `BB`) rather than a
+    // genuine decision of its own -- walk back to that real `CondBrInst`
+    // origin (ordinarily just one hop) and record it: its own exit
+    // decision is now *proven*, by this very peel, to be a compile-time-
+    // redundant re-derivation of `BB`'s constant-selected outcome for this
+    // predecessor, so callers should treat it as a "pass-through" check
+    // rather than a candidate for `BB`'s own remaining, genuinely
+    // divergent decision -- regardless of what `UniformityInfo` reports
+    // for it (see `linearizeCycle`'s own comment on why that can still
+    // conservatively call it divergent: it is fed, downstream, by a value
+    // this same divergent join produces).
+    BasicBlock *Origin = Pred;
+    while (BasicBlock *Unique = Origin->getUniquePredecessor()) {
+      if (isa<CondBrInst>(Origin->getTerminator()))
+        break;
+      Origin = Unique;
+    }
+    PeeledFrom.insert(Origin);
+
+    PredBr->setSuccessor(0, Target);
+    Changed = true;
+
+    for (auto &Pair : Incoming) {
+      PHINode *PN = Pair.first;
+      Value *V = Pair.second;
+      SSAUpdater Updater;
+      Updater.Initialize(PN->getType(), PN->getName());
+      Updater.AddAvailableValue(BB, PN);
+      Updater.AddAvailableValue(Pred, V);
+      for (Use &U : llvm::make_early_inc_range(PN->uses()))
+        Updater.RewriteUse(U);
+    }
+    for (PHINode &PN : BB->phis())
+      PN.removeIncomingValue(Pred, /*DeletePHIIfEmpty=*/false);
+  }
+  return Changed;
+}
+
+/// Repeatedly applies `peelConstantFlowPredecessors` to every block \p C
+/// contains besides \p Header/\p Latch until none match, collecting every
+/// "pass-through" origin block discovered along the way into \p PeeledFrom.
+/// Roadmap L40. See `foldRedundantFlowBlocksInCycle`'s comment; the two
+/// folds are complementary (a block with every incoming value constant is
+/// fully eliminated by that one instead) and safely order-independent.
+bool peelConstantFlowPredecessorsInCycle(CycleInfo &CI, CycleRef C,
+                                         BasicBlock *Header, BasicBlock *Latch,
+                                         SmallPtrSetImpl<BasicBlock *> &PeeledFrom) {
+  bool Changed = false;
+  bool PeeledThisPass = true;
+  while (PeeledThisPass) {
+    PeeledThisPass = false;
+    for (BasicBlock &BB : *Header->getParent()) {
+      if (!CI.contains(C, &BB) || &BB == Header || &BB == Latch)
+        continue;
+      if (peelConstantFlowPredecessors(&BB, PeeledFrom)) {
+        Changed = PeeledThisPass = true;
+        break; // A predecessor edge changed; restart the scan to be safe.
+      }
+    }
+  }
+  return Changed;
+}
+
 std::optional<LoopLinearizer::ExitCheck>
 LoopLinearizer::matchExitCheck(BasicBlock &BB, BasicBlock *ExitBlock) {
   auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
@@ -921,6 +1090,62 @@ LoopLinearizer::matchExitCheck(BasicBlock &BB, BasicBlock *ExitBlock) {
   Result.StayInLoop =
       Result.ExitOnTrue ? Br->getSuccessor(1) : Br->getSuccessor(0);
   return Result;
+}
+
+std::optional<LoopLinearizer::ExitCheck>
+LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
+                                        BasicBlock *ExitBlock) {
+  if (std::optional<ExitCheck> Direct = matchExitCheck(BB, ExitBlock))
+    return Direct;
+  auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
+  if (!Br)
+    return std::nullopt;
+
+  std::optional<ExitCheck> Result;
+  for (unsigned I = 0; I != 2; ++I) {
+    BasicBlock *Candidate = Br->getSuccessor(I);
+    if (!straightChain(Candidate, ExitBlock))
+      continue;
+    if (Result)
+      return std::nullopt; // Both arms reach it: ambiguous.
+    ExitCheck EC;
+    EC.Br = Br;
+    EC.Cond = Br->getCondition();
+    EC.ExitOnTrue = (I == 0);
+    EC.StayInLoop = Br->getSuccessor(1 - I);
+    Result = EC;
+  }
+  return Result;
+}
+
+std::optional<SmallVector<BasicBlock *, 4>>
+LoopLinearizer::chainToleratingUniformExits(
+    BasicBlock *From, BasicBlock *To, BasicBlock *ExitBlock,
+    UniformityInfo &UI, const SmallPtrSetImpl<BasicBlock *> &PeeledFrom) {
+  SmallVector<BasicBlock *, 4> Chain;
+  BasicBlock *Cur = From;
+  while (Cur != To) {
+    if (Cur != From && Cur->getUniquePredecessor() == nullptr)
+      return std::nullopt;
+    Chain.push_back(Cur);
+    if (auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator())) {
+      Cur = UBr->getSuccessor(0);
+      continue;
+    }
+    // Not a plain relay: only a genuinely separate, non-divergent exit
+    // check reaching `ExitBlock` via its other arm is tolerated here (see
+    // this function's own comment) -- anything else, including a second
+    // genuinely divergent check, fails the chain. `PeeledFrom` (see
+    // `linearizeCycle`'s own comment) always wins over
+    // `UI.isDivergentTerminator` here too, for the same reason.
+    std::optional<ExitCheck> PassThrough =
+        matchExitCheckWithRelay(*Cur, ExitBlock);
+    if (!PassThrough ||
+        (!PeeledFrom.contains(Cur) && UI.isDivergentTerminator(PassThrough->Br)))
+      return std::nullopt;
+    Cur = PassThrough->StayInLoop;
+  }
+  return Chain;
 }
 
 Value *LoopLinearizer::closeLatch(BasicBlock *Latch, BasicBlock *Header,
@@ -990,6 +1215,41 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // `phi`) completely untouched.
   foldRedundantFlowBlocksInCycle(CI, C, Header, Latch);
 
+  // Roadmap L40: a separate, plain uniform check's own "exit" arm can
+  // instead end up fused into another, genuinely divergent check's own
+  // merge block as just one of its `phi`'s incoming values (rather than
+  // being fully redundant, like the shape H19k's fold above targets, or
+  // reaching a merge block of its own) -- see
+  // `peelConstantFlowPredecessors`'s own comment. Decouples that so the
+  // uniform check can be recognized as its own "pass-through" block below
+  // (see `chainToleratingUniformExits`) rather than an unrecognized second
+  // `OtherCondBrBlocks` entry. `PeeledFrom` records every such uniform
+  // check's own block: `UniformityInfo` cannot be trusted to (re-)classify
+  // it as non-divergent even after this peel (see the next comment), so
+  // the classification below trusts this explicit, structural proof
+  // instead wherever it applies.
+  SmallPtrSet<BasicBlock *, 2> PeeledFrom;
+  peelConstantFlowPredecessorsInCycle(CI, C, Header, Latch, PeeledFrom);
+
+  // Roadmap L40: `UniformityInfo` (recomputed fresh below, now that
+  // peeling has already happened) still, correctly, reports a "pass-
+  // through" block like `check` (peeled from above) as divergent: once a
+  // loop has *any* genuinely divergent exit at all, its own induction
+  // variable becomes divergent too (different lanes really do complete a
+  // different number of iterations in the current, not-yet-linearized
+  // structured CFG -- linearization is precisely what removes that real
+  // divergence, by continuing every lane's iteration count uniformly
+  // instead), so *every* later use of it -- including an entirely
+  // ordinary, separate `i < N` trip-count comparison -- is genuinely,
+  // correctly divergent by `UniformityInfo`'s own flow-insensitive,
+  // per-value model. That model has no way to single out `Flow`'s own
+  // decision as "the" original source and `check`'s as merely a
+  // downstream user of a value entangled with it -- `PeeledFrom` (a
+  // structural, not a uniformity-based, proof) is what actually
+  // distinguishes them below.
+  DominatorTree FreshDT(F);
+  UniformityInfo FreshUI = computeWaveUniformity(F, FreshDT, CI);
+
   LLVMContext &Ctx = F.getContext();
   Type *I1Ty = Type::getInt1Ty(Ctx);
   // Two loop-carried phis (see `MaskPair`) instead of one: `feme.stage.
@@ -1048,7 +1308,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
 
     std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
-    if (!HeaderExit || !UI.isDivergentTerminator(HeaderExit->Br))
+    if (!HeaderExit || !FreshUI.isDivergentTerminator(HeaderExit->Br))
       return false; // No divergence: leave this real uniform loop alone.
 
     MaskPair Masks = makeActivePNPair();
@@ -1067,8 +1327,8 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
 
   std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
   std::optional<ExitCheck> LatchExit = matchExitCheck(*Latch, ExitBlock);
-  bool HeaderDivergent = HeaderExit && UI.isDivergentTerminator(HeaderExit->Br);
-  bool LatchDivergent = LatchExit && UI.isDivergentTerminator(LatchExit->Br);
+  bool HeaderDivergent = HeaderExit && FreshUI.isDivergentTerminator(HeaderExit->Br);
+  bool LatchDivergent = LatchExit && FreshUI.isDivergentTerminator(LatchExit->Br);
 
   // Every other cycle block, if any, must instead be the single "Flow
   // merge" exit-check block described above (see the file comment).
@@ -1079,56 +1339,77 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       OtherCondBrBlocks.push_back(&BB);
 
   if (!OtherCondBrBlocks.empty()) {
-    if (OtherCondBrBlocks.size() != 1 || HeaderExit || LatchExit) {
+    // Roadmap L40: a real, uniform exit check already sitting in the
+    // header and/or the latch (an ordinary `for`/`while` trip-count test,
+    // left completely untouched below exactly as the whole-uniform-loop
+    // case at the bottom of this function leaves one) may legitimately
+    // coexist with a single, separate divergent exit check elsewhere in
+    // the loop body -- a real `dEQP-VK.mesh_shader.ext.misc.payload_read`
+    // shader's own `for (i...) { if (payload[i] != expected) break; }`
+    // verification loop takes exactly this shape: `payload[i]` is a task-
+    // payload read, unconditionally `NeverUniform` per
+    // `WaveTTIImpl::getValueUniformity` (see WaveUniformity.cpp), so the
+    // `if`'s own break check is always treated as divergent regardless of
+    // whether every lane's data agrees in practice, while the loop's own
+    // `i < N` trip count is a plain, genuinely uniform comparison in a
+    // separate block -- one that, after `StructurizeCFG`/`UnifyLoopExits`
+    // restructure the loop, can itself land among `OtherCondBrBlocks`
+    // rather than in `Header`/`Latch` directly (see
+    // `peelConstantFlowPredecessors`'s own comment on why its own "exit"
+    // arm needs decoupling first). Only a *divergent* header/latch exit
+    // check coexisting with another divergent check elsewhere is the
+    // genuinely harder two-divergent-exit shape this milestone does not
+    // yet support.
+    if (HeaderDivergent || LatchDivergent) {
       diagnose(F, "loop at '" + Header->getName() +
                       "' has an internal branch in '" +
                       OtherCondBrBlocks.front()->getName() +
                       "'; unsupported (roadmap milestone 6 deviation)");
       return false;
     }
-    BasicBlock *CheckBlock = OtherCondBrBlocks.front();
-    std::optional<ExitCheck> CheckExit = matchExitCheck(*CheckBlock, ExitBlock);
-    if (!CheckExit) {
-      // Roadmap H19k: `foldRedundantFlowBlock` above may have left
-      // `CheckBlock`'s own "exit" arm reaching `ExitBlock` only through a
-      // `BreakCriticalEdges` relay (a pure, single-predecessor trampoline
-      // with no `phi`s of its own, left behind by breaking the critical
-      // edge a redundant "Flow" block's own exit arm used to be) rather
-      // than directly -- try each of `CheckBlock`'s two successors as a
-      // candidate "exit" arm reaching `ExitBlock` via such a straight
-      // chain before giving up. The relay itself is left as dead code:
-      // `CheckExit->Br` below is always replaced with an unconditional
-      // branch to `CheckExit->StayInLoop` (a real divergent exit
-      // deactivates lanes rather than truly branching away, see below),
-      // so nothing ever reaches it at runtime once linearized.
-      auto *Br = cast<CondBrInst>(CheckBlock->getTerminator());
-      for (unsigned I = 0; I != 2; ++I) {
-        BasicBlock *Candidate = Br->getSuccessor(I);
-        if (!straightChain(Candidate, ExitBlock))
-          continue;
-        ExitCheck EC;
-        EC.Br = Br;
-        EC.Cond = Br->getCondition();
-        EC.ExitOnTrue = (I == 0);
-        EC.StayInLoop = Br->getSuccessor(1 - I);
-        if (CheckExit) {
-          CheckExit = std::nullopt; // Both arms reach it: ambiguous.
-          break;
-        }
-        CheckExit = EC;
+
+    // Find the single, genuinely divergent exit check among
+    // `OtherCondBrBlocks` -- any other entry here must instead be its own
+    // separate, non-divergent "pass-through" check (like `Header`/`Latch`
+    // above), tolerated (left completely untouched) by
+    // `chainToleratingUniformExits` below rather than treated as this
+    // cycle's own real check. `PeeledFrom` (see above) always wins this
+    // classification over `FreshUI.isDivergentTerminator` when it applies:
+    // a block already structurally proven redundant by the peel is never
+    // a pass-through/real-check ambiguity `UniformityInfo` needs to
+    // resolve.
+    BasicBlock *CheckBlock = nullptr;
+    std::optional<ExitCheck> CheckExit;
+    for (BasicBlock *BB : OtherCondBrBlocks) {
+      std::optional<ExitCheck> EC = matchExitCheckWithRelay(*BB, ExitBlock);
+      if (!EC) {
+        diagnose(F, "loop at '" + Header->getName() +
+                        "' has an internal branch in '" + BB->getName() +
+                        "' that does not reach the loop's exit block; "
+                        "unsupported (roadmap milestone 6 deviation)");
+        return false;
       }
+      if (PeeledFrom.contains(BB) || !FreshUI.isDivergentTerminator(EC->Br))
+        continue; // A separate, genuine uniform check: a pass-through.
+      if (CheckBlock) {
+        diagnose(F, "loop at '" + Header->getName() +
+                        "' has more than one divergent exit check ('" +
+                        CheckBlock->getName() + "' and '" + BB->getName() +
+                        "'); unsupported (roadmap milestone 6 deviation)");
+        return false;
+      }
+      CheckBlock = BB;
+      CheckExit = EC;
     }
-    if (!CheckExit) {
-      diagnose(F, "loop at '" + Header->getName() +
-                      "' has an internal branch in '" + CheckBlock->getName() +
-                      "' that does not reach the loop's exit block; "
-                      "unsupported (roadmap milestone 6 deviation)");
-      return false;
-    }
+    if (!CheckBlock)
+      return false; // No divergence anywhere here either: leave alone.
+
     std::optional<SmallVector<BasicBlock *, 4>> PreChain =
-        straightChain(Header, CheckBlock);
+        chainToleratingUniformExits(Header, CheckBlock, ExitBlock, FreshUI,
+                                    PeeledFrom);
     std::optional<SmallVector<BasicBlock *, 4>> PostChain =
-        straightChain(CheckExit->StayInLoop, Latch);
+        chainToleratingUniformExits(CheckExit->StayInLoop, Latch, ExitBlock,
+                                    FreshUI, PeeledFrom);
     if (!PreChain || !PostChain) {
       diagnose(F, "loop at '" + Header->getName() +
                       "' has an internal branch in '" + CheckBlock->getName() +
@@ -1137,8 +1418,6 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                       "deviation)");
       return false;
     }
-    if (!UI.isDivergentTerminator(CheckExit->Br))
-      return false; // No divergence: leave this real uniform loop alone.
 
     MaskPair Masks = makeActivePNPair();
     for (BasicBlock *BB : *PreChain)
@@ -1154,6 +1433,17 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // Never really exit here: always continue toward the latch, letting an
     // inactive lane's iterations become no-ops instead (see "Loops with a
     // divergent exit" below).
+    // Roadmap L40: `CheckExit`'s own edge to `ExitBlock` (when matched
+    // directly rather than via a relay -- see `matchExitCheck`) has just
+    // vanished from the CFG entirely (the lane that would have taken it
+    // instead continues, masked, toward the latch): repair any of
+    // `ExitBlock`'s own phis that still list `CheckBlock` as an incoming
+    // block accordingly. A no-op when the match was instead via a relay
+    // (see `matchExitCheckWithRelay`), since then `CheckBlock` itself was
+    // never really one of `ExitBlock`'s own listed predecessors to begin
+    // with -- the (now merely dead, but still syntactically valid) relay
+    // chain's own last hop was.
+    ExitBlock->removePredecessor(CheckBlock);
     UncondBrInst::Create(CheckExit->StayInLoop, CheckExit->Br->getIterator());
     CheckExit->Br->eraseFromParent();
 
@@ -1181,6 +1471,11 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // Never really exit here: always continue toward the latch, letting an
     // inactive lane's iterations become no-ops instead (see the file
     // comment above).
+    // Roadmap L40: see the identical `CheckBlock` case's own comment above
+    // -- `Header`'s own edge straight to `ExitBlock` has just vanished
+    // from the CFG the same way; repair any of `ExitBlock`'s own phis
+    // that still list it as an incoming block accordingly.
+    ExitBlock->removePredecessor(Header);
     UncondBrInst::Create(HeaderExit->StayInLoop, HeaderExit->Br->getIterator());
     HeaderExit->Br->eraseFromParent();
   }
@@ -1247,15 +1542,17 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     }
 
     // The diamond flattening pass above may have changed the CFG (and thus
-    // invalidated `DT`/`CI`/`UI`; `PostDominatorTree` was already
-    // block-scoped above). Loops are structurally untouched by it, but
-    // recompute everything fresh regardless, since it is cheap next to
-    // getting this wrong.
-    DominatorTree DT2(F);
+    // invalidated `DT`/`CI`; `PostDominatorTree` was already block-scoped
+    // above). Loops are structurally untouched by it, but recompute fresh
+    // regardless, since it is cheap next to getting this wrong.
+    // Roadmap L40: `LoopLinearizer` no longer takes a `UniformityInfo` at
+    // construction -- it recomputes one internally, per cycle, right
+    // after any of its own CFG-simplifying folds run (see
+    // `linearizeCycle`'s own comment on why a single, whole-function
+    // `UniformityInfo` computed up front can go stale partway through).
     CycleInfo CI2;
     CI2.compute(F);
-    UniformityInfo UI2 = computeWaveUniformity(F, DT2, CI2);
-    Changed |= LoopLinearizer(F, CI2, UI2).run();
+    Changed |= LoopLinearizer(F, CI2).run();
 
     // `DiamondFlattener`/`LoopLinearizer` only lower a `feme.stage.discard`/
     // `.demote`/`.is_helper` call inside the divergent-diamond and
