@@ -74,6 +74,50 @@ static Attribute extractCompositeElement(Attribute composite,
     return composite;
 
   if (auto vector = dyn_cast<ElementsAttr>(composite)) {
+    // A `spirv.matrix` constant's whole value is one combined
+    // `ElementsAttr` (unlike every other composite kind here, which nests
+    // one `ArrayAttr` level per dimension instead via the `ArrayAttr`
+    // branch below) built one whole column at a time (see the SPIR-V
+    // deserializer's own `processConstantComposite`, which concatenates
+    // each column's own already-flattened values in column order) --
+    // i.e. its raw flat storage is genuinely column-major, `numRows`
+    // elements per column, regardless of `MatrixType::getShape()`'s own
+    // `[numRows, numColumns]` ordering (which does not itself describe
+    // this flat layout, only the type's own row/column extents).
+    // `spirv.CompositeExtract`'s first index always selects a whole
+    // column here (never a row), so it must consume `numRows` consecutive
+    // flat elements starting at `index * numRows`, not a single flat
+    // element as a plain vector's single index would (the previous,
+    // pre-fix behavior below, applied unconditionally to any `ElementsAttr`
+    // including a matrix's, silently extracted the wrong element for any
+    // matrix with more than one row).
+    if (auto matrixType = dyn_cast<spirv::MatrixType>(vector.getType())) {
+      int64_t numRows = matrixType.getNumRows();
+      int64_t numColumns = matrixType.getNumColumns();
+      if (indices[0] >= static_cast<unsigned>(numColumns))
+        return {};
+      int64_t offset = static_cast<int64_t>(indices[0]) * numRows;
+      auto denseElements = dyn_cast<DenseElementsAttr>(vector);
+      if (!denseElements)
+        return {};
+      auto allValues = llvm::to_vector(denseElements.getValues<Attribute>());
+      if (indices.size() == 1) {
+        // A whole column selected: rebuild it as its own
+        // `mlir::VectorType`-shaped `DenseElementsAttr`, matching
+        // `spirv.CompositeExtract`'s own inferred result type (the
+        // matrix's column type) for a single matrix index.
+        ArrayRef<Attribute> columnValues =
+            ArrayRef(allValues).slice(offset, numRows);
+        auto columnType =
+            VectorType::get({numRows}, matrixType.getElementType());
+        return DenseElementsAttr::get(columnType, columnValues);
+      }
+      // A second index selects one scalar row within that column.
+      if (indices[1] >= static_cast<unsigned>(numRows))
+        return {};
+      return allValues[offset + indices[1]];
+    }
+
     assert(indices.size() == 1 && "must have exactly one index for a vector");
     return vector.getValues<Attribute>()[indices[0]];
   }

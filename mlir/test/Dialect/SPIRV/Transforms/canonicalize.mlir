@@ -128,6 +128,57 @@ func.func @extract_vector() -> (i32, i32, i32) {
 
 // -----
 
+// A single index on a matrix constant must select a whole column (not a
+// single flat scalar as it would for a plain vector constant above), since a
+// matrix constant's `DenseElementsAttr` stores its columns concatenated one
+// after another (its own single `ElementsAttr`, unlike a `spirv.array`
+// composite's nested `ArrayAttr`s), regardless of the square shape here
+// possibly obscuring a row-vs-column mixup.
+// CHECK-LABEL: extract_matrix_column
+func.func @extract_matrix_column() -> (vector<2xf32>, vector<2xf32>) {
+  // CHECK-DAG: spirv.Constant dense<[-2.000000e-01, 0.000000e+00]> : vector<2xf32>
+  // CHECK-DAG: spirv.Constant dense<[-1.000000e-01, 1.000000e+00]> : vector<2xf32>
+  %0 = spirv.Constant dense<[[-0.1, 1.0], [-0.2, 0.0]]> : !spirv.matrix<2 x vector<2xf32>>
+  %1 = spirv.CompositeExtract %0[0 : i32] : !spirv.matrix<2 x vector<2xf32>>
+  %2 = spirv.CompositeExtract %0[1 : i32] : !spirv.matrix<2 x vector<2xf32>>
+  return %1, %2 : vector<2xf32>, vector<2xf32>
+}
+
+// -----
+
+// A non-square matrix (more columns than rows per column) is the case that
+// exposes a column-offset computed from the wrong dimension: using
+// `numColumns` (this matrix's declared shape's fastest-varying dimension)
+// instead of `numRows` (each column's own true element count) as the
+// per-column stride would extract the wrong elements here, since the two
+// differ (4 vs. 3).
+// CHECK-LABEL: extract_matrix_column_non_square
+func.func @extract_matrix_column_non_square() -> (vector<3xf32>, vector<3xf32>) {
+  // CHECK-DAG: spirv.Constant dense<[-0.899999976, 0.000000e+00, 6.000000e-01]> : vector<3xf32>
+  // CHECK-DAG: spirv.Constant dense<[2.000000e-01, 0.899999976, -1.000000e-01]> : vector<3xf32>
+  %0 = spirv.Constant dense<[[-0.9, 0.0, 0.6, 0.2], [0.9, -0.1, -0.3, -0.7], [-0.1, 0.1, 1.0, 0.0]]> : !spirv.matrix<4 x vector<3xf32>>
+  %1 = spirv.CompositeExtract %0[0 : i32] : !spirv.matrix<4 x vector<3xf32>>
+  %2 = spirv.CompositeExtract %0[1 : i32] : !spirv.matrix<4 x vector<3xf32>>
+  return %1, %2 : vector<3xf32>, vector<3xf32>
+}
+
+// -----
+
+// A two-index extract on a matrix constant selects a single scalar: the
+// first index picks the column (per the two tests above), the second then
+// picks one scalar row within that already-selected column.
+// CHECK-LABEL: extract_matrix_element
+func.func @extract_matrix_element() -> (f32, f32) {
+  // CHECK-DAG: spirv.Constant -2.000000e-01 : f32
+  // CHECK-DAG: spirv.Constant 1.000000e+00 : f32
+  %0 = spirv.Constant dense<[[-0.1, 1.0], [-0.2, 0.0]]> : !spirv.matrix<2 x vector<2xf32>>
+  %1 = spirv.CompositeExtract %0[0 : i32, 1 : i32] : !spirv.matrix<2 x vector<2xf32>>
+  %2 = spirv.CompositeExtract %0[1 : i32, 0 : i32] : !spirv.matrix<2 x vector<2xf32>>
+  return %1, %2 : f32, f32
+}
+
+// -----
+
 // CHECK-LABEL: extract_array_final
 func.func @extract_array_final() -> (i32, i32) {
   // CHECK-DAG: spirv.Constant -5 : i32
