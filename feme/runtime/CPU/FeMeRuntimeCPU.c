@@ -3952,10 +3952,19 @@ femeRTStoreTexel3DI32(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
 // LOD they are looking at.
 __attribute__((always_inline)) static float
 femeRTComputeClampedLod(float Lod, _Bool UseExplicitLod,
-                        const FemeRTSamplerDescriptor *Samp) {
+                        const FemeRTSamplerDescriptor *Samp,
+                        float InstructionMinLod) {
   float L = UseExplicitLod ? Lod : 0.0f;
   L += Samp->LodBias;
-  return __builtin_fmaxf(Samp->MinLod, __builtin_fminf(L, Samp->MaxLod));
+  // Roadmap L26: SPIR-V's own per-instruction `MinLod` image operand
+  // (HLSL's `Texture2D::Sample`'s trailing `clamp` argument) is an
+  // additional floor alongside the sampler's own `minLod`
+  // (`VkSamplerCreateInfo::minLod`) -- the greater of the two wins, same
+  // as any other pair of independent minimums. `InstructionMinLod` is
+  // `-INFINITY` (a no-op `fmaxf` operand) for every sample with no
+  // `MinLod` image operand of its own.
+  float MinLod = __builtin_fmaxf(Samp->MinLod, InstructionMinLod);
+  return __builtin_fmaxf(MinLod, __builtin_fminf(L, Samp->MaxLod));
 }
 
 // (Roadmap H17) The two adjacent integer mip levels a real trilinear
@@ -4084,7 +4093,8 @@ typedef struct {
 __attribute__((always_inline)) static FemeRTImplicitLodPlan
 femeRTPlanImplicitLod(const FemeRTImageDescriptor *Img,
                      const FemeRTSamplerDescriptor *Samp, float DUdX,
-                     float DUdY, float DVdX, float DVdY) {
+                     float DUdY, float DVdX, float DVdY,
+                     float InstructionMinLod) {
   float Ux = DUdX * (float)Img->Width, Uy = DUdY * (float)Img->Width;
   float Vx = DVdX * (float)Img->Height, Vy = DVdY * (float)Img->Height;
   float Px = __builtin_sqrtf(Ux * Ux + Vx * Vx);
@@ -4129,7 +4139,8 @@ femeRTPlanImplicitLod(const FemeRTImageDescriptor *Img,
     }
   }
 
-  Plan.ClampedLod = femeRTComputeClampedLod(Lod, /*UseExplicitLod=*/1, Samp);
+  Plan.ClampedLod =
+      femeRTComputeClampedLod(Lod, /*UseExplicitLod=*/1, Samp, InstructionMinLod);
   return Plan;
 }
 
@@ -4146,15 +4157,16 @@ typedef struct {
 __attribute__((always_inline)) static FemeRTBilinearSupport
 femeRTComputeBilinearSupport(const FemeRTImageDescriptor *Img, float U, float V,
                              const FemeRTSamplerDescriptor *Samp,
-                             uint32_t Level) {
+                             uint32_t Level, int32_t OffsetX,
+                             int32_t OffsetY) {
   uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
   uint32_t LevelHeight = femeRTMipExtent(Img->Height, Level);
   float TexelU = U * (float)LevelWidth - 0.5f;
   float TexelV = V * (float)LevelHeight - 0.5f;
   float FloorU = __builtin_floorf(TexelU);
   float FloorV = __builtin_floorf(TexelV);
-  int32_t BaseX = (int32_t)FloorU;
-  int32_t BaseY = (int32_t)FloorV;
+  int32_t BaseX = (int32_t)FloorU + OffsetX;
+  int32_t BaseY = (int32_t)FloorV + OffsetY;
 
   FemeRTBilinearSupport S;
   S.Wx = TexelU - FloorU;
@@ -4176,11 +4188,12 @@ femeRTComputeBilinearSupport(const FemeRTImageDescriptor *Img, float U, float V,
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSamplePoint2D(const FemeRTImageDescriptor *Img,
                     const FemeRTSamplerDescriptor *Samp, float U, float V,
-                    uint32_t Level, uint32_t Layer) {
+                    uint32_t Level, uint32_t Layer, int32_t OffsetX,
+                    int32_t OffsetY) {
   uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
   uint32_t LevelHeight = femeRTMipExtent(Img->Height, Level);
-  int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
-  int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight);
+  int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth) + OffsetX;
+  int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight) + OffsetY;
   _Bool BorderX = 0, BorderY = 0;
   int32_t AddrX =
       femeRTApplyAddressMode(X, (int32_t)LevelWidth, Samp->AddressU, &BorderX);
@@ -4196,9 +4209,10 @@ femeRTSamplePoint2D(const FemeRTImageDescriptor *Img,
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSampleLinear2D(const FemeRTImageDescriptor *Img,
                      const FemeRTSamplerDescriptor *Samp, float U, float V,
-                     uint32_t Level, uint32_t Layer) {
+                     uint32_t Level, uint32_t Layer, int32_t OffsetX,
+                     int32_t OffsetY) {
   FemeRTBilinearSupport S =
-      femeRTComputeBilinearSupport(Img, U, V, Samp, Level);
+      femeRTComputeBilinearSupport(Img, U, V, Samp, Level, OffsetX, OffsetY);
   FemeRTv4f32 T00 = femeRTFetchTexel2D(
       Img, Level, Layer, S.X0, S.Y0, /*Sample=*/0, S.BorderX0 || S.BorderY0,
       Samp->BorderColor);
@@ -4232,19 +4246,24 @@ femeRTSampleLinear2D(const FemeRTImageDescriptor *Img,
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSampleFiltered2D(const FemeRTImageDescriptor *Img,
                        const FemeRTSamplerDescriptor *Samp, float U, float V,
-                       uint32_t Layer, float ClampedLod) {
+                       uint32_t Layer, float ClampedLod, int32_t OffsetX,
+                       int32_t OffsetY) {
   _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, Samp);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(Img, ClampedLod);
   _Bool Trilinear = Samp->MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
   uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
-  FemeRTv4f32 Lo = UseLinear
-                       ? femeRTSampleLinear2D(Img, Samp, U, V, Level0, Layer)
-                       : femeRTSamplePoint2D(Img, Samp, U, V, Level0, Layer);
+  FemeRTv4f32 Lo =
+      UseLinear ? femeRTSampleLinear2D(Img, Samp, U, V, Level0, Layer,
+                                       OffsetX, OffsetY)
+               : femeRTSamplePoint2D(Img, Samp, U, V, Level0, Layer, OffsetX,
+                                     OffsetY);
   if (!Trilinear)
     return Lo;
   FemeRTv4f32 Hi =
-      UseLinear ? femeRTSampleLinear2D(Img, Samp, U, V, MipPlan.Level1, Layer)
-                : femeRTSamplePoint2D(Img, Samp, U, V, MipPlan.Level1, Layer);
+      UseLinear ? femeRTSampleLinear2D(Img, Samp, U, V, MipPlan.Level1, Layer,
+                                       OffsetX, OffsetY)
+               : femeRTSamplePoint2D(Img, Samp, U, V, MipPlan.Level1, Layer,
+                                     OffsetX, OffsetY);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
@@ -4296,6 +4315,7 @@ FemeRTv4f32 femeCpuImageSample2DV4F32(
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float DUdX,
     float DUdY, float DVdX, float DVdY, float Lod, _Bool UseExplicitLod,
+    int32_t OffsetX, int32_t OffsetY, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.2d.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
@@ -4303,7 +4323,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float DUdX,
     float DUdY, float DVdX, float DVdY, float Lod, _Bool UseExplicitLod,
-    _Bool Mask) {
+    int32_t OffsetX, int32_t OffsetY, float MinLodClamp, _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -4315,20 +4335,27 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
 
   if (UseExplicitLod) {
-    float ClampedLod =
-        femeRTComputeClampedLod(Lod, /*UseExplicitLod=*/1, &Samp);
-    return femeRTSampleFiltered2D(&Img, &Samp, U, V, /*Layer=*/0, ClampedLod);
+    // SPIR-V's `MinLod` image operand only ever combines with an
+    // implicit-LOD sample (see `ImageSampleImplicitLodPattern`'s own
+    // comment) -- `MinLodClamp` is always `-INFINITY` (a no-op) whenever
+    // `UseExplicitLod` is set.
+    float ClampedLod = femeRTComputeClampedLod(Lod, /*UseExplicitLod=*/1,
+                                               &Samp, MinLodClamp);
+    return femeRTSampleFiltered2D(&Img, &Samp, U, V, /*Layer=*/0, ClampedLod,
+                                  OffsetX, OffsetY);
   }
 
   FemeRTImplicitLodPlan Plan =
-      femeRTPlanImplicitLod(&Img, &Samp, DUdX, DUdY, DVdX, DVdY);
+      femeRTPlanImplicitLod(&Img, &Samp, DUdX, DUdY, DVdX, DVdY, MinLodClamp);
   if (Plan.TapCount <= 1)
     return femeRTSampleFiltered2D(&Img, &Samp, U, V, /*Layer=*/0,
-                                  Plan.ClampedLod);
+                                  Plan.ClampedLod, OffsetX, OffsetY);
 
   // Anisotropic footprint: average `Plan.TapCount` same-level taps spread
   // symmetrically along the major axis, centered on `(U, V)` so the mean
-  // sample point is exactly the original coordinate.
+  // sample point is exactly the original coordinate. The same
+  // `(OffsetX, OffsetY)` constant texel offset (roadmap L26) applies to
+  // every tap uniformly, exactly as it does to the single-tap case above.
   FemeRTv4f32 Sum = {0.0f, 0.0f, 0.0f, 0.0f};
   float FirstOffset = -0.5f * (float)(Plan.TapCount - 1);
   for (uint32_t Tap = 0; Tap != Plan.TapCount; ++Tap) {
@@ -4336,7 +4363,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
     float TapU = U + Offset * Plan.StepU;
     float TapV = V + Offset * Plan.StepV;
     Sum += femeRTSampleFiltered2D(&Img, &Samp, TapU, TapV, /*Layer=*/0,
-                                  Plan.ClampedLod);
+                                  Plan.ClampedLod, OffsetX, OffsetY);
   }
   return Sum * (1.0f / (float)Plan.TapCount);
 }
@@ -4372,7 +4399,8 @@ femeRTSampleCmp2DAtLevel(const FemeRTImageDescriptor *Img,
   }
 
   FemeRTBilinearSupport S =
-      femeRTComputeBilinearSupport(Img, U, V, Samp, Level);
+      femeRTComputeBilinearSupport(Img, U, V, Samp, Level, /*OffsetX=*/0,
+                                  /*OffsetY=*/0);
   FemeRTv4f32 T00 =
       femeRTFetchTexel2D(Img, Level, /*Layer=*/0, S.X0, S.Y0, /*Sample=*/0,
                          S.BorderX0 || S.BorderY0, Samp->BorderColor);
@@ -4414,7 +4442,8 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
     return 0.0f;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp);
+  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
+                                            /*InstructionMinLod=*/-__builtin_inff());
   _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, &Samp);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   _Bool Trilinear = Samp.MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
@@ -5220,9 +5249,11 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp);
+  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
+                                            /*InstructionMinLod=*/-__builtin_inff());
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
-  return femeRTSampleFiltered2D(&Img, &Samp, U, V, Layer, ClampedLod);
+  return femeRTSampleFiltered2D(&Img, &Samp, U, V, Layer, ClampedLod, /*OffsetX=*/0,
+                              /*OffsetY=*/0);
 }
 
 // `feme.cpu.image.load.2darray.v4f32` (roadmap H7b-a): the
@@ -5359,14 +5390,15 @@ FemeRTv4f32 femeCpuImageSampleCubeV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float Lod, _Bool UseExplicitLod,
+    float DirZ, float Lod, _Bool UseExplicitLod, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.cube.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float Lod, _Bool UseExplicitLod, _Bool Mask) {
+    float DirZ, float Lod, _Bool UseExplicitLod, float MinLodClamp,
+    _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -5378,9 +5410,11 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
   Samp.AddressU = 2; // ClampToEdge -- see comment above.
   Samp.AddressV = 2;
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp);
+  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
+                                            /*InstructionMinLod=*/MinLodClamp);
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
-  return femeRTSampleFiltered2D(&Img, &Samp, CF.U, CF.V, CF.Face, ClampedLod);
+  return femeRTSampleFiltered2D(&Img, &Samp, CF.U, CF.V, CF.Face, ClampedLod,
+                              /*OffsetX=*/0, /*OffsetY=*/0);
 }
 
 // `feme.cpu.image.sample.cubearray.v4f32` (roadmap H7b-a): the
@@ -5416,10 +5450,12 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
   Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageSampleCubeV4F32.
   Samp.AddressV = 2;
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp);
+  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
+                                            /*InstructionMinLod=*/-__builtin_inff());
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   uint32_t NumCubes = Img.ArrayLayers / 6;
   uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);
   uint32_t Layer = CubeIndex * 6 + CF.Face;
-  return femeRTSampleFiltered2D(&Img, &Samp, CF.U, CF.V, Layer, ClampedLod);
+  return femeRTSampleFiltered2D(&Img, &Samp, CF.U, CF.V, Layer, ClampedLod,
+                              /*OffsetX=*/0, /*OffsetY=*/0);
 }
