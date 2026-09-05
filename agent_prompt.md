@@ -42,17 +42,22 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L29 or other prerequisites blocking the L-series milestones?
+Can you work on L38 or other prerequisites blocking the L-series milestones?
 
-> **1 of L22's own 13 cases (`Feature/Semantics/MatrixSemantics.test`) now
-> clears the matrix-constant legalization but fails `vkCreateGraphicsPipelines`
-> on a distinct `feme-graphics-validate-stage` diagnostic**:
-> `"'feme.stage.output.store' in function 'main' row N is out of range for
-> element 2"` for rows 4 through 15 (12 consecutive rows) -- suggesting a matrix
-> output value's own per-row store is being validated against a signature
-> element sized for far fewer rows than the real matrix has, likely an
-> off-by-a-fixed-amount or a signature-construction gap specific to a
-> matrix-typed `SV_Target`-adjacent output rather than the constant-legalization
-> gap L22 already fixed. Needs its own real IR reduction of this exact case to
-> determine whether the patch is in the stage-output signature builder or
-> `ValidateStage.cpp`'s own row-range check
+> **A pre-existing, GLSL-path (not HLSL/DXC) crash discovered while measuring
+> L29's own CTS impact**:
+> `dEQP-VK.glsl.matrix.add.const.highp_mat2_float_fragment` (and, unconfirmed,
+> likely every other case under the 1,764-case `dEQP-VK.glsl.matrix.*.const.*`
+> groups) aborts with `"error: FloatAttr does not match expected type of the
+> constant"` immediately followed by an `llvm::dyn_cast` assertion
+> (`Casting.h:656`, "dyn_cast on a non-existent value") -- confirmed
+> pre-existing and unrelated to L29's own fix via a stash/rebuild bisection
+> reproducing the identical crash before that row's change landed. Likely a
+> distinct SPIR-V-constant-conversion gap in a different pattern than
+> `ArrayConstantPattern` (glslang's own `OpConstantComposite`/`OpSpecConstant*`
+> lowering for a scalar or per-component GLSL matrix constant probably takes a
+> different MLIR conversion path than DXC's matrix constants do), needing its
+> own real IR reduction (glslangValidator or `dxc`-equivalent on a minimal GLSL
+> fragment shader adding a `const mat2` to a `float`) to identify which
+> conversion pattern emits a `FloatAttr` whose type upstream's constant-building
+> code doesn't expect
