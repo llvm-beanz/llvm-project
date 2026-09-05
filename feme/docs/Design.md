@@ -611,6 +611,7 @@ dialect can then name the backend's intrinsics directly, as
 | `spirv.SampledImage` + `spirv.ImageSampleImplicitLod` (no modifiers, or any combination of `Bias`/`ConstOffset`/`MinLod`) | `llvm.spv.resource.sample`/`llvm.spv.resource.samplebias` (or their `.clamp` siblings, once `MinLod` is present) (roadmap L22 threads the real offset/bias/clamp operands through in every case; the backend itself folds away an all-zero `ConstOffset`) | *(folds both handles into one combined runner-facing type; no sampling op pattern at all)* |
 | `spirv.Image` (extracting a plain image handle back out of a combined `!spirv.sampled_image` value, e.g. so a combined-image-sampler binding can still feed `spirv.ImageFetch`/`spirv.ImageQuerySize`) | `llvm.extractvalue` reading field 0 of that same image/sampler struct (roadmap H29h) | *(no pattern; fails to legalize)* |
 | `spirv.ImageSampleExplicitLod` with a lone `Lod` operand | `llvm.spv.resource.samplelevel` | *(no pattern; fails to legalize)* |
+| `spirv.ImageSampleDrefImplicitLod`/`spirv.ImageSampleDrefExplicitLod`/`spirv.ImageQueryLod` (roadmap L25: added to the upstream MLIR SPIR-V dialect itself -- opcodes 89, 90, and 105 respectively had no `spirv.*` op or deserializer case at all before this row) | *(no pattern yet; fails to legalize -- see the "Known gap" note below, roadmap L31)* | *(no pattern for any of these three either)* |
 | `spirv.Switch` | `llvm.switch`, case literals rebuilt against the (post-conversion, signless) selector type | *(no pattern; fails to legalize -- see "`spirv.Switch` op is not supported at the moment" in `mlir::populateSPIRVToLLVMConversionPatterns`)* |
 | `spirv.Dot` | a per-lane `llvm.intr.fmuladd` chain, mirroring `feme::dxil::expandFDot`'s expansion of the analogous (post-raising) `llvm.dx.fdot` intrinsic | *(no pattern; fails to legalize)* |
 | `StorageBuffer` block variable (`RWStructuredBuffer<T>`/`StructuredBuffer<T>`) and `spirv.AccessChain` into it | `llvm.spv.resource.handlefrombinding` to a `target("spirv.VulkanBuffer", ...)` handle, `llvm.spv.resource.getpointer` for the buffer index plus an ordinary `llvm.getelementptr` for any further field indices | an `llvm.mlir.global` in the pointer's storage class's address space (memory nothing binds to for the SPIRV backend's consumer) |
@@ -766,7 +767,28 @@ What is still missing is breadth rather than a structural gap:
   defined in upstream `SPIRVImageOps.td`); this bullet is purely a missing
   `feme`-side `SPIRVToLLVMPatterns.cpp` conversion pattern, not an upstream
   MLIR gap at all. Tracked as part of roadmap L7's own untriaged list
-  (`spirv.ImageDrefGather` is named there explicitly).
+  (`spirv.ImageDrefGather` is named there explicitly). Roadmap L25 added
+  three of these depth-comparison/query variants that did not even exist as
+  `spirv.*` ops upstream before this row -- `spirv.ImageSampleDrefImplicitLod`
+  (opcode 89, HLSL's `Texture*::SampleCmp`), `spirv.ImageSampleDrefExplicitLod`
+  (opcode 90, `Texture*::SampleCmpLevelZero`), and `spirv.ImageQueryLod`
+  (opcode 105, `Texture*::CalculateLevelOfDetail(Unclamped)`) -- to
+  `mlir/include/mlir/Dialect/SPIRV/IR/{SPIRVBase,SPIRVImageOps}.td` plus their
+  `verify()` implementations in `ImageOps.cpp` (every `SPIRV_Op` needs a
+  hand-written `verify()` unless it opts out with `let hasVerifier = 0`,
+  confirmed by the `ImageOps.cpp` sibling ops for the same reason); import
+  now succeeds (confirmed both via a real IR reduction of the two named
+  `check-hlsl-feme-vk` cases and, at CTS scale, via
+  `dEQP-VK.glsl.texture_functions.{texture.*shadow*,query.texturequerylod.*}`),
+  but legalizing any of the three still fails (`"failed to legalize
+  operation 'spirv.ImageSampleDrefImplicitLod'/... that was explicitly
+  marked illegal"`), tracked as roadmap L31 (their own dedicated `feme`-side
+  legalization patterns, targeting the LLVM SPIRV backend's
+  `llvm.spv.resource.samplecmp`/`.samplecmp.clamp`/`.samplecmplevelzero`/
+  `.calculate_lod`/`.calculate_lod_unclamped` intrinsics -- which will in
+  turn need their own CPU-runtime lowering in
+  `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`, since that pass only
+  recognizes `spv_resource_sample`/`spv_resource_samplelevel` today).
 
 Roadmap step V3 closed what used to be a second bullet here,
 **`Uniform`-storage-class buffer blocks** (`cbuffer`/`ConstantBuffer<T>`):
