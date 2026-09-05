@@ -1657,15 +1657,15 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpToImageSampleCmp) {
   // passing a constant-zero `Lod` and `use_explicit_lod = false`.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define float @main(<2 x float> %coord, float %dref) {
+    define float @main(<3 x float> %coord, float %dref) {
       %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %samp = call target("spirv.Sampler")
           @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
       %r = call float @llvm.spv.resource.samplecmp(
           target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, <2 x float> %coord,
-          float %dref, <2 x i32> zeroinitializer)
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, <3 x i32> zeroinitializer)
       ret float %r
     }
     declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
@@ -1694,15 +1694,15 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpLevelZeroToImageSampleCmp) {
   // `feme.cpu.image.samplecmp.2d.f32`, but with `use_explicit_lod = true`.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define float @main(<2 x float> %coord, float %dref) {
+    define float @main(<3 x float> %coord, float %dref) {
       %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %samp = call target("spirv.Sampler")
           @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
       %r = call float @llvm.spv.resource.samplecmplevelzero(
           target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, <2 x float> %coord,
-          float %dref, <2 x i32> zeroinitializer)
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, <3 x i32> zeroinitializer)
       ret float %r
     }
     declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
@@ -1727,15 +1727,15 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpClampAlone) {
   // as roadmap L48 -- so it is left entirely unlowered.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define float @main(<2 x float> %coord, float %dref, float %clamp) {
+    define float @main(<3 x float> %coord, float %dref, float %clamp) {
       %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %samp = call target("spirv.Sampler")
           @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
       %r = call float @llvm.spv.resource.samplecmp.clamp(
           target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, <2 x float> %coord,
-          float %dref, <2 x i32> zeroinitializer, float %clamp)
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, <3 x i32> zeroinitializer, float %clamp)
       ret float %r
     }
     declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
@@ -1758,15 +1758,15 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonzeroOffsetAlone) {
   // rather than silently dropping the offset.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define float @main(<2 x float> %coord, float %dref) {
+    define float @main(<3 x float> %coord, float %dref) {
       %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %samp = call target("spirv.Sampler")
           @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
       %r = call float @llvm.spv.resource.samplecmp(
           target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, <2 x float> %coord,
-          float %dref, <2 x i32> <i32 -1, i32 -1>)
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, <3 x i32> <i32 -1, i32 -1, i32 -1>)
       ret float %r
     }
     declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
@@ -1788,18 +1788,54 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpAgainstArray2DAlone) {
   // a `samplecmp` against an array shape is left unlowered.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define float @main(<3 x float> %coord, float %dref) {
+    define float @main(<4 x float> %coord, float %dref) {
       %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %samp = call target("spirv.Sampler")
           @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
       %r = call float @llvm.spv.resource.samplecmp(
           target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img,
-          target("spirv.Sampler") %samp, <3 x float> %coord,
-          float %dref, <2 x i32> zeroinitializer)
+          target("spirv.Sampler") %samp, <4 x float> %coord,
+          float %dref, <3 x i32> zeroinitializer)
       ret float %r
     }
     declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonSpecCoordWidthAlone) {
+  // Roadmap L46: per SPIR-V's own validation rules, a depth-comparison
+  // sample's Coordinate operand is always one component wider than its
+  // shape's ordinary addressing width (`<3 x float>` for `Plain2D`,
+  // packing the depth-reference value redundantly alongside the
+  // separate `Dref` operand -- see `isDrefSampleIntrinsic`'s comment). A
+  // plain `<2 x float>` coordinate, lacking that extra component, is not
+  // a real shape this pass ever sees from a spec-conformant producer, so
+  // it is left unlowered rather than assumed valid.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<2 x float> %coord, float %dref) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmp(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord,
+          float %dref, <2 x i32> zeroinitializer)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
         @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
     declare target("spirv.Sampler")
         @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
