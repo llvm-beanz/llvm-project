@@ -41,6 +41,36 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
     if (Callee && Callee->getName() == "feme.cpu.mask.any")
       return ValueUniformity::AlwaysUniform;
 
+    // `feme.cpu.masked.atomicrmw.*` (see `feme::cpu::matchMaskedAtomicRMW`,
+    // Transforms/CPU/MaskIntrinsics.h -- again matched by name, for the
+    // same include-cycle reason as `feme.cpu.mask.any` above) stands in
+    // for one genuine, per-lane atomic read-modify-write: unlike an
+    // ordinary call, whose result is uniform whenever every operand is
+    // (this call's own operands -- a uniform pointer, value and mask are
+    // the common case, e.g. every lane racing to increment one shared
+    // counter) its result is a *different* value on every lane by
+    // construction, since each lane's real atomic op observes whatever the
+    // memory location holds at that lane's own turn (dispatch is
+    // sequential -- see "Dispatch is sequential, not thread-pooled" in
+    // feme/docs/Roadmap.md's §1.6), not one shared answer every lane
+    // agrees on. Leaving this at `Default` let the generic operand-driven
+    // rule conclude "uniform" whenever every operand happened to be
+    // (exactly the case a real CTS mesh-shader "allocate a unique output
+    // slot via an atomic increment" pattern hits), which left this call's
+    // *consumers* -- e.g. an `icmp`/`br` deciding whether *this* lane is
+    // one of the first `N` to get a slot -- unwidened too, so
+    // `feme::cpu::FunctionWidener` never gave them a real per-lane value
+    // to read and its final "sever remaining uses of an erased
+    // instruction" fallback silently substituted `poison` for the read
+    // instead (`FunctionWidener::widen`'s last loop) -- a real, load-
+    // bearing branch condition that is later provably always `poison`,
+    // which one of this pipeline's own middle-end passes (`IPSCCPPass`)
+    // then legitimately folds down to `unreachable`, producing a compiled
+    // stage with no code at all (roadmap milestone L41's JIT-link crash).
+    if (Callee &&
+        Callee->getName().starts_with("feme.cpu.masked.atomicrmw."))
+      return ValueUniformity::NeverUniform;
+
     StageOpKind Kind;
     if (Callee && feme::isStageOpCall(*CI, &Kind)) {
       switch (Kind) {
