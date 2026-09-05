@@ -25498,3 +25498,94 @@ was the pre-existing `D32_FLOAT_S8X24_UINT` depth-format gap, already
 fixed by L32 for unrelated reasons. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` reviewed, no change needed (no feature or
 extension surface touched, since no code changed).
+
+## Roadmap L29: measured impact (SPIR-V-to-LLVM matrix/array constant shape fix), plus L38 filed
+
+**Reduction methodology.** Reproduced `Feature/Semantics/MatrixSemantics.test`
+(a `float4x4 mat : MY_MATRIX` vertex-shader output, read back in the pixel
+shader) against a fresh `build2`, confirming the exact roadmap-filed
+diagnostic (`"'feme.stage.output.store' in function 'main' row N is out
+of range for element 2"`, rows 4-15). Built a minimal repro vertex shader
+with the same shape and ran it through a manual multi-tool IR pipeline:
+`dxc -spirv` -> `feme-translate --import-spirv` (SPIR-V binary -> `spirv`
+dialect MLIR) -> `feme-opt --feme-convert-spirv-to-llvm` (`spirv` -> `llvm`
+dialect) -> `feme-translate --mlir-to-llvmir` (manually extracting the
+inner module text, since piping `feme-opt`'s doubly-wrapped module output
+directly into this last step -- with or without `--no-implicit-module` --
+silently produces an empty module; unresolved tooling quirk, not pursued
+further since the manual extraction reliably works). This surfaced the
+real bug directly in the translated LLVM IR text: a `store [16 x float]
+[...], ptr addrspace(8) @out.var.MY_MATRIX`, mismatched against the
+global's own declared type `[4 x <4 x float>]`.
+
+**Root cause.** `ArrayConstantPattern` (`SPIRVToLLVMPatterns.cpp`),
+converting a `spirv.Constant` of array/matrix type into an
+`llvm.mlir.constant`, flattened every constituent into a single flat 1-D
+`RankedTensorType`-shaped `DenseElementsAttr` (`tensor<16xf32>`),
+regardless of the real destination type's nesting
+(`!llvm.array<4 x vector<4xf32>>`). `LLVM::ConstantOp::verify()` only
+checks total element count, so this passed MLIR verification, but
+upstream MLIR's own `convertDenseElementsAttr`
+(`mlir/lib/Target/LLVMIR/ModuleTranslation.cpp`) reconstructs the nested
+LLVM constant from the *attribute's own shape*, not the destination type
+-- silently producing a flat, type-mismatched LLVM IR constant.
+`CanonicalizeStagePass`'s row-count derivation (reading the store's own
+operand type) then misread this as 16 rows instead of 4, tripping
+`ValidateStagePass`'s row-range check. Neither the stage-output signature
+builder nor `ValidateStage.cpp`'s row check -- the two candidates the
+roadmap row itself named -- were actually at fault; both were already
+correct.
+
+**Fix (two parts).** (1) `getFlatElementShape` builds a real
+multi-dimensional shape (`{4,4}`, not `{16}`) matching the destination's
+real array/vector nesting -- necessary but, on its own, insufficient (a
+first fix attempt with only this change hit a fresh `llvm::ConstantArray::
+getImpl` assertion, "Wrong type in array element initializer"). (2)
+`hasVectorLeaf` detects when that nesting bottoms out in a `VectorType`
+(any matrix or array-of-vectors) and, only then, builds the attribute as
+an `mlir::VectorType` (`vector<4x4xf32>`) rather than `mlir::
+RankedTensorType` (`tensor<4x4xf32>`) -- because upstream's
+`innermostLLVMType` peels through *both* `ArrayType` and `VectorType` down
+to the bare scalar, and only its `isa<VectorType>(type)` branch correctly
+reassembles each innermost chunk via `ConstantDataVector::getRaw`
+(matching a true vector leaf) instead of `ConstantDataArray::getRaw`
+(which mismatches a vector leaf, the exact cause of the first attempt's
+assertion). A plain nested scalar array with no vector leaf anywhere
+still correctly uses `RankedTensorType` (confirmed via the pre-existing,
+untouched `@intarray` lit test case -- reasoned through, not empirically
+exercised by any real HLSL case in this codebase today).
+
+**Real `check-hlsl-feme-vk` confirmation.**
+- `Feature/Semantics/*` (13 cases): `MatrixSemantics.test` now `Passed`;
+  down to 3 still-failing cases (`ArraySemantics`, `DomainSystemValues`,
+  `HullSystemValues`, tracked separately, unrelated to this row).
+- Broader `Feature`+`Graphics` sweep (509 discovered cases): **151 -> 153**
+  `Passed`, **125 -> 123** `Failed` (2 net new passes -- confirms this
+  general SPIR-V-to-LLVM constant-conversion fix benefits at least one
+  other case beyond `MatrixSemantics.test` itself), 209 `Unsupported`, 23
+  `Expectedly Failed`, 1 `Unexpectedly Passed` unchanged -- no regression.
+
+**`ninja check-feme`.** 2533/2592 (59 pre-existing unrelated
+`Unsupported`, 0 `Failed`, no regressions). Updated the existing
+`spirv-to-llvm-constants.mlir` lit test's `@palette` (array-of-vectors)
+and `@const_matrix` (matrix) `CHECK` lines from the old, incorrect flat
+`tensor<Nxf32>` shape to the now-correct `vector<NxNxf32>` shape.
+
+**Targeted real `deqp-vk` re-run.** `dEQP-VK.glsl.matrix.add.const.*`
+(the closest real CTS analogue to this fix's own scope: a GLSL matrix
+constant added to a scalar/matrix and written to a vertex/fragment
+output) surfaced a **pre-existing, unrelated** crash on its very first
+case (`highp_mat2_float_fragment`): `"error: FloatAttr does not match
+expected type of the constant"` followed by an `llvm::dyn_cast`
+assertion. Confirmed pre-existing (not a regression from this row's own
+fix) via a `git stash`/rebuild/re-run bisection reproducing the identical
+crash *before* this change landed. Filed separately as **L38** (a
+distinct SPIR-V-constant-conversion gap, likely in glslang's own
+`OpConstantComposite`/`OpSpecConstant*` lowering path rather than
+`ArrayConstantPattern`, unconfirmed and un-reduced as of this session).
+
+**Disposition.** Roadmap **L29 closed** (struck through). No feature or
+extension bit touched (internal SPIR-V-to-LLVM constant-conversion
+correctness fix only); `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, no change needed. New row **L38**
+filed for the newly-discovered, pre-existing GLSL-matrix-constant crash.
