@@ -44,44 +44,54 @@ if it already exists, and commit it in its own commit when you're done.
 
 The last session got stuck.
 
-Can you work on L46 or other prerequisites blocking the L-series milestones?
+Can you work on L47 or other prerequisites blocking the L-series milestones?
 
-> **L31's own fix clears the SPIR-V-to-LLVM legalization gap for
-> `spirv.ImageSampleDrefImplicitLod`/`ImageSampleDrefExplicitLod`/`ImageQueryLod`,
-> but `vkCreateGraphicsPipelines` still fails on a real
-> `Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test` re-run**:
-> `"unsupported raised operation: 'llvm.spv.resource.handlefrombinding...' is a
-> register-bound resource handle the FeMe CPU target cannot normalize..."`
-> (`UnsupportedOps.cpp`'s end-of-pipeline catch-all) --
-> `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`'s own
-> `isSampleIntrinsic`/`hasOnlySupportedImageUses` only recognize
-> `spv_resource_sample`/`spv_resource_sample_clamp`/`spv_resource_samplelevel`
-> today, so a sampled-image handle whose only uses are one of the five
-> newly-legalized intrinsics
-> (`spv_resource_samplecmp`/`.samplecmp_clamp`/`samplecmplevelzero`/`calculate_lod`/`calculate_lod_unclamped`)
-> is rejected as "not fully supported" and left entirely unlowered, so its
-> `handlefrombinding` call survives, unconsumed, all the way to this pass. This
-> is a substantial, cross-cutting scope of its own (real CPU emulation
-> semantics, not legalization plumbing): needs (1) extending
-> `isSampleIntrinsic`/`hasOnlySupportedImageUses`/`getSampleOffsetIdx`-style
-> helpers to recognize all five new intrinsics and validate their own
-> coordinate/offset/clamp/dref operand shapes the same way the existing three
-> are validated; (2) new `feme.cpu.image.*` runtime entry points in
-> `feme/runtime/CPU/FeMeRuntimeCPU.c` alongside the existing
-> `femeRTSamplePoint2D`/`femeRTComputeBilinearSupport` -- a depth-comparison
-> sample (`samplecmp`/`samplecmplevelzero`) needs each of the (up to 4,
-> bilinear) sampled texels compared against the reference value and blended per
-> the sampler's own `ComparisonOp`, rather than just averaged, so the existing
-> bilinear helpers cannot be reused as-is; a LOD query
-> (`calculate_lod`/`_unclamped`) needs a real screen-space coordinate derivative
-> (`dFdx`/`dFdy`) to compute a mip level from, which no existing CPU-target code
-> path currently threads through to a sample/query call at all -- needs its own
-> design pass to confirm where a per-invocation derivative is (or could be made)
-> available in this CPU target's per-lane execution model; (3) new lit coverage
-> in `feme/test/Transforms/CPU/` (mirroring the existing
-> `resource-lowering-image-sample.ll`) plus new `FeMeRuntimeCPUTests` unit tests
-> for each new runtime entry point; (4) a real `check-hlsl-feme-vk`/`deqp-vk`
-> re-run of `Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test` and the
-> `dEQP-VK.glsl.texture_functions.{query.texturequerylod.*,texture.*shadow*}`
-> CTS groups (190 + 32 cases) to confirm the fix at scale, since this row's own
-> scope was discovered by, but not yet measured against, that real CTS surface
+> **L45's own fix clears the uniform-diamond-inside-a-region diagnostic, but the
+> real `task_mesh` cases in the same CTS sweep L45 just fixed the `mesh_only`
+> half of now fail on a distinct, later blocker**: `"JIT session error: Symbols
+> not found: [ spirv_var_20 ]"` for
+> `dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.task_mesh.inside_rp.single_view.{only_primary,with_secondary}`
+> -- an ORC JIT link-time failure (not a diagnosed `vkCreateGraphicsPipelines`
+> gap), confirmed via a real pre-JIT IR capture (a temporary
+> `FEME_DEBUG_DUMP_PRE_JIT_IR`-gated dump added to
+> `feme/lib/Target/CPU/CompiledStage.cpp` right before `JIT->addIRModule`,
+> reverted before committing): `@spirv_var_20` is an `external` (never-defined)
+> `addrspace(14)` (`TaskPayloadWorkgroupEXT`) global of the payload's own
+> declared type, `{ [24 x i32], i32 }`, still referenced directly by a handful
+> of per-lane-suffixed (`.lane4.i`/`.lane6.i`/`.lane8.i`/`.lane10.i`)
+> `getelementptr`s -- the `SIMDizePass`-widened, post-inlining shape of a masked
+> per-lane memory op, never converted into a
+> `feme.stage.task.payload.load`/`.store` call at all (both of which properly
+> resolve to a real runtime `Payload` pointer via
+> `feme::cpu::TaskPayloadWrapper.cpp`'s
+> `lowerTaskPayloadStore`/`feme::cpu::MeshOutputWrapper.cpp`'s
+> `lowerMeshTaskPayloadLoad` -- neither is the culprit; the call these two lower
+> never got created here in the first place). Root-caused to the real CTS
+> shader's own source (`vktMeshShaderQueryTestsEXT.cpp`):
+> `td.branch[gl_LocalInvocationIndex] = ...`, a **per-invocation dynamic** array
+> index into the payload, not the compile-time-constant offset every existing
+> task-payload code path assumes -- `feme::graphics::CanonicalizeStagePass`'s
+> own `isTaskPayloadGlobal`/`loadTaskPayloadValue`/`storeTaskPayloadValue`
+> (`CanonicalizeStage.cpp`) only ever resolves a payload access's address to a
+> literal `uint64_t Offset` (see their own doc comments), so a `getelementptr`
+> chain with one dynamically-indexed component is never recognized at all,
+> leaving the raw `addrspace(14)` load/store on the imported global completely
+> untouched all the way through `SIMDizePass`'s widening to JIT link time, where
+> the global -- never intended to survive this far, always meant to be fully
+> virtualized away into a real `Payload` buffer -- has no definition anywhere
+> for the JIT to resolve. Needs its own real design/implementation pass,
+> materially bigger than L45's own scope (a genuinely different pipeline phase,
+> `CanonicalizeStage.cpp`, not `EntryWrapper.cpp`): (1) a new dynamic-offset
+> `feme.stage.task.payload.load`/`.store` call form taking a runtime `Value`
+> byte offset (today's form only takes a literal `uint64_t`), (2) teaching
+> `CanonicalizeStage.cpp`'s own `BaseAndOffset`-style GEP-chain resolution to
+> recognize a chain with exactly one dynamically-indexed array component feeding
+> a task-payload access and emit this new call form instead of declining, (3)
+> new lowering support for the dynamic-offset call form in both
+> `TaskPayloadWrapper.cpp` (store side) and `MeshOutputWrapper.cpp` (load side,
+> generalizing `lowerMeshTaskPayloadLoad`'s current
+> single-scalar-broadcast-from-a-constant-offset shape to a per-lane
+> potentially-different dynamic offset instead), (4) new lit/unit test coverage
+> per phase touched, and (5) a real `deqp-vk` re-run of the 2 named `task_mesh`
+> cases (and a broader sweep of any other CTS case using a
+> per-invocation-indexed task payload) to confirm the fix
