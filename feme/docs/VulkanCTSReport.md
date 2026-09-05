@@ -25704,3 +25704,103 @@ extension bit touched (internal MLIR SPIR-V dialect correctness fix only);
 change needed. No new roadmap row filed -- this fix's own scope (matrix
 constant `CompositeExtract` folding) is now fully resolved with no
 remaining known gap.
+
+## Roadmap L30: fixed (mesh-stage task-payload load canonicalization), plus L39/L40 filed
+
+**Bug.** `offload-test-suite`'s `Graphics/MeshShaders/SimpleAmplification.test`
+failed mesh-shader pipeline creation with a JIT session error, `"Symbols not
+found: [ in.var.payload ]"` -- the mesh entry point's own wave-body function
+referenced a global variable for its task payload input that was never
+defined, because nothing threaded a real payload value into it.
+
+**Root cause.** `CanonicalizeStage.cpp`'s `StoreInst` branch already had a
+fallback recognizing an unresolved address-space-14 (task payload) global
+store and rewriting it into `feme.stage.task.payload.store`, but the sibling
+`LoadInst` branch had no equivalent fallback for a payload *read* -- so a
+mesh shader's own task-payload load survived canonicalization as a bare,
+never-defined global load, which the CPU backend's JIT never resolves a
+symbol for. Confirmed via a real SPIR-V-disassembly IR reduction of
+`SimpleAmplification.test`'s own mesh shader (the same `spirv-dis`/
+`feme-translate --import-spirv` technique used throughout the H-series/
+L-series chains).
+
+**Fix (three separately-committed steps).**
+1. `ebaf83c9acf4`: added `StageOpKind::TaskPayloadLoad` (`StageOps.h`/`.cpp`:
+   enum, table entry, `createStageTaskPayloadLoad` builder -- overloaded on
+   its own result type, no special-casing needed since, unlike
+   `OutputStore`/`TaskPayloadStore`, its "value" is not an operand). Wired
+   into every exhaustive `StageOpKind` switch found via
+   `grep -rln "case.*StageOpKind::"` and checked for a `default:` case:
+   `WaveUniformity.cpp` (`NeverUniform`, mirroring `InputLoad`),
+   `SIMDize.cpp` (widening dispatch + kept its `offset` operand scalar via
+   `FirstOperandIsElementID`), `ValidateStage.cpp` (both switches: legal
+   only on `ShaderStage::Mesh`, no element/row/component operands to
+   validate). New unit test `StageOpsTest.TaskPayloadLoadIsOverloadedOnResult`.
+2. `8badb89cb59d`: added the load-side fallback in `CanonicalizeStage.cpp`'s
+   `LoadInst` branch, symmetric to the pre-existing store-side fallback.
+   New unit test `CanonicalizeStageTest.MeshStageCanonicalizesTaskPayloadLoad`.
+3. `3262575b34b2`: threaded a real payload pointer through to the mesh
+   entry's wave body -- `MeshOutputWrapper.cpp` gained a new trailing
+   `mesh_payload` parameter, an `Env.Payload` field, and a new
+   `lowerMeshTaskPayloadLoad` function (mirroring `lowerMeshInputLoad`'s
+   per-lane broadcast shape: a single scalar `GEP`+`Load` off the payload
+   pointer, broadcast to every active lane via a per-lane `select`+
+   `insertelement` loop gated by the entry mask, since a task payload is
+   workgroup-shared data, not per-lane-divergent). `EntryWrapper.cpp` gained
+   `Env.MeshPayload` (loaded from `MeshArgsFieldPayload`), added to
+   `isKnownWaveBodyParameter`'s `Known` list and `buildWaveLoop`'s call-site
+   dispatch as `"mesh_payload"`. New unit test
+   `MeshOutputWrapperTest.LowersTaskPayloadLoad`; this step's own
+   `EntryWrapper.cpp` half was confirmed necessary by observing the
+   pre-existing `MeshOutputWrapperTest.ChainsIntoEntryWrapperPass` test fail
+   ("unsupported parameter 'mesh_payload'") before it was added.
+
+**`ninja check-feme`.** 2537/2596 discovered tests pass (59 pre-existing,
+unrelated `Unsupported`, 0 `Failed`, no regressions).
+
+**Real `offload-test-suite` re-run (`check-hlsl-vk-graphics-meshshaders`,
+`VK_ICD_FILENAMES` exported).** `SimpleAmplification.test`'s own stdout now
+reaches `"Mesh Shader Pipeline created."` and `"Cleanup complete."` --
+definitive confirmation the JIT symbol error is gone. The test still fails
+overall, but now at a distinct, later `feme-cpu-simdize` divergent-vector
+error in the payload *store* side (task/amplification stage), filed as new
+roadmap row **L39** (hypothesis: a real HLSL payload member of vector type,
+e.g. `float3`, may reach `TaskPayloadStore` without having been
+scalar-decomposed first, unlike ordinary stage-IO stores which are always
+pre-scalarized by `storeStageIOValue`'s own recursion before reaching any
+`feme.stage.*` call -- not yet confirmed by IR reduction).
+`SimpleLines.test`/`SimpleTriangle.test` are unaffected, still failing
+identically at the pre-existing, out-of-scope `imgdiff` empty-
+`goldenimage_dir` issue.
+
+**Real `deqp-vk` re-run.** `dEQP-VK.mesh_shader.ext.misc.payload*` (2 cases,
+the closest real CTS coverage of a mesh-stage task-payload *load*, which is
+this row's own exact scope):
+- `payload_not_accessed` (never reads the payload back): **Pass**,
+  unaffected either way.
+- `payload_read` (writes the payload in the task stage, reads it back in
+  the mesh stage -- the exact real-hardware shape this row's own fix
+  targets): still **Fails** `vkCreateGraphicsPipelines`, but now on a
+  distinct, unrelated error --
+  `"feme-cpu-linearize: function 'main': loop at '' has an internal branch
+  in ''; unsupported (roadmap milestone 6 deviation)"` -- confirming this
+  row's own fix does work for a real CTS payload-read shader too (the
+  previous JIT-symbol error is gone here as well), but a separate,
+  pre-existing control-flow-linearization gap in `feme-cpu-linearize` now
+  blocks this exact case from actually passing. `feme-cpu-linearize`'s own
+  loop-internal-branch rejection is a known family (H19k already fixed one
+  narrow syntactic sub-shape); `payload_read`'s own loop has a
+  structurally different shape not covered by H19k's own conservative
+  fold. Filed as new roadmap row **L40** (needs its own IR reduction before
+  a fix can be designed).
+
+**Disposition.** Roadmap **L30 closed** (struck through). No feature or
+extension bit touched (internal CPU-lowering completeness fix only, no new
+Vulkan feature/extension surface); `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, no change needed (mesh shading
+(`VK_EXT_mesh_shader`) was already enabled by earlier roadmap work; this
+fix only closes an internal payload-plumbing gap within it). Two new
+roadmap rows filed: **L39** (SIMDize divergent-vector gap in the payload
+*store* side, discovered via `offload-test-suite`) and **L40**
+(`feme-cpu-linearize` internal-branch gap, discovered via a real
+`dEQP-VK.mesh_shader.ext.misc.payload_read` re-run).

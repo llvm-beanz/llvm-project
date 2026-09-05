@@ -3586,6 +3586,26 @@ in-memory representation of a shader-visible `bool`), so `StageStorage`
 itself needed no change at all. See
 Roadmap.md's H6a-H6m rows for the full remaining breakdown.
 
+Roadmap L30 has since found and closed a gap on the *load* side of that
+same payload plumbing, symmetric to H6i's own store-side canonicalization
+above: `CanonicalizeStage.cpp`'s `LoadInst` branch had no fallback for an
+unresolved address-space-14 (task payload) global read, so a mesh entry's
+own task-payload load survived canonicalization as a bare, never-defined
+global load, unresolved at JIT time (`"Symbols not found: [ in.var.payload
+]"`). A new `TaskPayloadLoad` `feme.stage.*` op
+(`feme.stage.task.payload.load(offset)`, mirroring `TaskPayloadStore`'s own
+shape, overloaded on its result type since a load's "value" is not an
+operand) closes the load side the same way `TaskPayloadStore` closed the
+store side. Unlike an ordinary stage-IO value, a task payload is
+workgroup-shared data rather than per-lane-divergent, so
+`MeshOutputWrapper.cpp`'s new `lowerMeshTaskPayloadLoad` reads it once per
+wave (a single scalar `GEP`+`Load` off a real payload pointer, newly
+threaded in from `EntryWrapper.cpp`'s wave-body call as a trailing
+`mesh_payload` parameter) and broadcasts that one value to every active
+lane, rather than reading a genuinely different value per lane the way
+`lowerMeshInputLoad` does for real per-vertex/per-primitive input data. See
+Roadmap.md's L30 row (and its L39/L40 follow-ons) for the full breakdown.
+
 ### G7: Ray-query and traversal foundations
 
 - Define canonical acceleration structures, deterministic builders, and
