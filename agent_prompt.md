@@ -44,54 +44,49 @@ if it already exists, and commit it in its own commit when you're done.
 
 The last session got stuck.
 
-Can you work on L47 or other prerequisites blocking the L-series milestones?
+Can you work on L48 or other prerequisites blocking the L-series milestones?
 
-> **L45's own fix clears the uniform-diamond-inside-a-region diagnostic, but the
-> real `task_mesh` cases in the same CTS sweep L45 just fixed the `mesh_only`
-> half of now fail on a distinct, later blocker**: `"JIT session error: Symbols
-> not found: [ spirv_var_20 ]"` for
-> `dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.task_mesh.inside_rp.single_view.{only_primary,with_secondary}`
-> -- an ORC JIT link-time failure (not a diagnosed `vkCreateGraphicsPipelines`
-> gap), confirmed via a real pre-JIT IR capture (a temporary
-> `FEME_DEBUG_DUMP_PRE_JIT_IR`-gated dump added to
-> `feme/lib/Target/CPU/CompiledStage.cpp` right before `JIT->addIRModule`,
-> reverted before committing): `@spirv_var_20` is an `external` (never-defined)
-> `addrspace(14)` (`TaskPayloadWorkgroupEXT`) global of the payload's own
-> declared type, `{ [24 x i32], i32 }`, still referenced directly by a handful
-> of per-lane-suffixed (`.lane4.i`/`.lane6.i`/`.lane8.i`/`.lane10.i`)
-> `getelementptr`s -- the `SIMDizePass`-widened, post-inlining shape of a masked
-> per-lane memory op, never converted into a
-> `feme.stage.task.payload.load`/`.store` call at all (both of which properly
-> resolve to a real runtime `Payload` pointer via
-> `feme::cpu::TaskPayloadWrapper.cpp`'s
-> `lowerTaskPayloadStore`/`feme::cpu::MeshOutputWrapper.cpp`'s
-> `lowerMeshTaskPayloadLoad` -- neither is the culprit; the call these two lower
-> never got created here in the first place). Root-caused to the real CTS
-> shader's own source (`vktMeshShaderQueryTestsEXT.cpp`):
-> `td.branch[gl_LocalInvocationIndex] = ...`, a **per-invocation dynamic** array
-> index into the payload, not the compile-time-constant offset every existing
-> task-payload code path assumes -- `feme::graphics::CanonicalizeStagePass`'s
-> own `isTaskPayloadGlobal`/`loadTaskPayloadValue`/`storeTaskPayloadValue`
-> (`CanonicalizeStage.cpp`) only ever resolves a payload access's address to a
-> literal `uint64_t Offset` (see their own doc comments), so a `getelementptr`
-> chain with one dynamically-indexed component is never recognized at all,
-> leaving the raw `addrspace(14)` load/store on the imported global completely
-> untouched all the way through `SIMDizePass`'s widening to JIT link time, where
-> the global -- never intended to survive this far, always meant to be fully
-> virtualized away into a real `Payload` buffer -- has no definition anywhere
-> for the JIT to resolve. Needs its own real design/implementation pass,
-> materially bigger than L45's own scope (a genuinely different pipeline phase,
-> `CanonicalizeStage.cpp`, not `EntryWrapper.cpp`): (1) a new dynamic-offset
-> `feme.stage.task.payload.load`/`.store` call form taking a runtime `Value`
-> byte offset (today's form only takes a literal `uint64_t`), (2) teaching
-> `CanonicalizeStage.cpp`'s own `BaseAndOffset`-style GEP-chain resolution to
-> recognize a chain with exactly one dynamically-indexed array component feeding
-> a task-payload access and emit this new call form instead of declining, (3)
-> new lowering support for the dynamic-offset call form in both
-> `TaskPayloadWrapper.cpp` (store side) and `MeshOutputWrapper.cpp` (load side,
-> generalizing `lowerMeshTaskPayloadLoad`'s current
-> single-scalar-broadcast-from-a-constant-offset shape to a per-lane
-> potentially-different dynamic offset instead), (4) new lit/unit test coverage
-> per phase touched, and (5) a real `deqp-vk` re-run of the 2 named `task_mesh`
-> cases (and a broader sweep of any other CTS case using a
-> per-invocation-indexed task payload) to confirm the fix
+> **L46's own Plain2D/zero-offset/no-clamp depth-comparison sample slice
+> measurably fixed 2/32 real `dEQP-VK.glsl.texture_functions.texture.*shadow*`
+> cases, but the remaining 13 real failures (plus the entirely-separate 190-case
+> `texturequerylod` group) are still open, split across several distinct,
+> independently-sized gaps** this row exists to break down rather than
+> re-attempt in one pass: (a) **non-`Plain2D` depth-comparison shapes**
+> (`Array2D`/`Cube`/`CubeArray` --
+> `sampler1d{,array}shadow`/`sampler2darrayshadow`/`samplercube{,array}shadow`,
+> 8 of the 13 real failures) need a new
+> `ImageCallKind::SampleCmpArray2D`/`SampleCmpCube`/`SampleCmpCubeArray` plus
+> matching `createSampleCmp*`/`femeCpuImageSampleCmp*F32` runtime entry points,
+> mirroring `createSample2DArray`/`createSampleCube`/`createSampleCubeArray`'s
+> own non-`Plain2D` filtered-sample precedent; (b) **a `Bias` image operand**
+> (`sampler2dshadow_bias_fragment` and siblings, 1 of the 13) fails even
+> earlier, at `ConvertSPIRVToLLVMPass` legalization itself --
+> `ImageSampleDrefImplicitLodPattern`'s own `SupportedMask`
+> (`SPIRVToLLVMPatterns.cpp`) only allows `ConstOffset`/`MinLod`, not `Bias`, so
+> needs its own new intrinsic-lowering design (no `llvm.spv.resource.samplecmp*`
+> intrinsic form threads an explicit bias through at all today, unlike the
+> ordinary `spv_resource_samplebias`/`.samplebias_clamp` family already handled
+> for a non-dref sample) before `SPIRVResourceLowering.cpp` could even see it;
+> (c) **`samplecmp_clamp`'s own trailing `MinLod` clamp operand** (not yet
+> confirmed present in any real failing CTS case this session measured, but
+> named in L46's own original report) needs
+> `createSampleCmp2D`/`femeCpuImageSampleCmp2DF32` extended with a `MinLodClamp`
+> parameter, mirroring `createSample2D`'s own roadmap L26 precedent; (d) **a
+> real, nonzero depth-comparison `ConstOffset`** (also not yet confirmed present
+> in a real failing case, named in L46's own original report) needs
+> `createSampleCmp2D` extended with `OffsetX`/`OffsetY` parameters, mirroring
+> the same L26 precedent on the ordinary-sample side; (e) **the entirely
+> separate LOD-query intrinsics**
+> (`spv_resource_calculate_lod`/`.calculate_lod_unclamped`, the 190-case
+> `texturequerylod` group, confirmed via this session's own unaffected 0/190
+> re-run) have no CPU-lowering consumer at all on either the SPIR-V or DXIL
+> frontend (confirmed by L46's own investigation into
+> `DXSAToLLVMIRTranslator.cpp`'s `CalculateLOD` path) and need a genuinely new
+> runtime design: a real screen-space coordinate derivative (`dFdx`/`dFdy`)
+> threaded through to a query call, which no existing CPU-target code path does
+> today, needing its own design pass to confirm where a per-invocation
+> derivative is (or could be made) available in this target's per-lane execution
+> model before any lowering pattern can be written. Each of (a)-(e) should be
+> scoped and fixed as its own small, independently-committed,
+> independently-CTS-measured row rather than attempted together, per this
+> project's own established precedent (L26->L33, L45->L47)
