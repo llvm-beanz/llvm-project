@@ -44,41 +44,43 @@ if it already exists, and commit it in its own commit when you're done.
 
 The last session got stuck.
 
-Can you work on L31 or other prerequisites blocking the L-series milestones?
+Can you work on L45 or other prerequisites blocking the L-series milestones?
 
-> **L25's own two cases
-> (`Feature/Textures/{SampleCmp,CalculateLevelOfDetail}.test`) now clear MLIR
-> SPIR-V import but still fail `vkCreateGraphicsPipelines`, on the expected
-> next-stage legalization gap**: `"failed to legalize operation
-> 'spirv.ImageSampleDrefImplicitLod'/'spirv.ImageSampleDrefExplicitLod'/'spirv.ImageQueryLod'
-> that was explicitly marked illegal"` -- `feme`'s own `SPIRVToLLVMPatterns.cpp`
-> has no conversion pattern for any of the three ops L25 just taught MLIR's
-> SPIR-V dialect to deserialize, confirmed both by a minimal `feme-opt
-> --feme-convert-spirv-to-llvm` repro and at real CTS scale (every one of
-> `dEQP-VK.glsl.texture_functions.{query.texturequerylod.*,texture.*shadow*}`'s
-> 190 + 32 cases fails identically once run against the real `feme` ICD, not
-> just this row's 2 named cases). LLVM's own SPIRV backend intrinsics to target
-> are already known from
-> `llvm/test/CodeGen/SPIRV/hlsl-resources/{SampleCmp,SampleCmpLevelZero,CalculateLevelOfDetail}.ll`:
-> `llvm.spv.resource.samplecmp`/`.samplecmp.clamp` (implicit-LOD dref, mirroring
-> `ImageSampleImplicitLodPattern`'s own `None`/`ConstOffset`/`MinLod`
-> operand-combination handling), `llvm.spv.resource.samplecmplevelzero`
-> (explicit-LOD dref, but only for a literal `Lod = 0.0` constant -- the
-> intrinsic itself has no LOD operand at all, unlike
-> `ImageSampleExplicitLodPattern`'s `samplelevel`, so a nonzero explicit LOD
-> dref sample has no known mapping and should `notifyMatchFailure`), and
-> `llvm.spv.resource.calculate_lod`/`.calculate_lod_unclamped`
-> (`ImageQueryLod`'s clamped/unclamped mip level, needing **two** intrinsic
-> calls combined into one `vector<2xf32>` result via two `llvm.insertelement`s,
-> the reverse direction of the `.ll` file's own
-> single-`OpImageQueryLod`-from-two-calls-lowering, since `feme` converts SPIR-V
-> *into* LLVM IR rather than the other way around). Once these three
-> legalization patterns land, they will very likely expose a *further* blocker:
-> `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp` (the pass that actually
-> implements CPU-side resource-intrinsic semantics) only recognizes
-> `spv_resource_sample`/`spv_resource_samplelevel` today, not any of
-> `spv_resource_samplecmp{,_clamp}`/`spv_resource_samplecmplevelzero`/`spv_resource_calculate_lod{,_unclamped}`
-> -- so real depth-comparison sampling and LOD-query CPU emulation semantics
-> (not just legalization plumbing) remain a substantial follow-on scope of their
-> own, likely needing its own further breakdown once the legalization patterns
-> above are in place and this next blocker is confirmed for real
+> **L44's own fix clears the fatal `"LLVM ERROR: unsupported calling
+> convention"` abort, but
+> `dEQP-VK.mesh_shader.ext.query.no_queries.*.mesh_only.*`/`.task_mesh.*` (all 4
+> real, feature-supported cases in the sweep L44 ran) now fail cleanly at
+> `vkCreateGraphicsPipelines` with a distinct, later, diagnosed error**:
+> `"feme-cpu-wrap-entry: function 'main' has a barrier inside non-linear control
+> flow (a surviving branch not part of a supported loop); region splitting only
+> supports a straight-line wave body or a single uniform loop (roadmap milestone
+> 9 deviation)"`. Root-caused via a real captured pre-`EntryWrapperPass` IR dump
+> of the exact CTS case (same env-gated `FEME_DEBUG_DUMP_PIPELINE_STAGE_IR`
+> technique, temporary, reverted before committing):
+> `feme::cpu::EntryWrapperPass::splitAtGroupSyncBarriers` first tries
+> `matchLoopShape` (the "barrier inside a uniform loop" shape), which correctly
+> declines without diagnosing (this function has no loop at all), then falls
+> back to `isLinearChain`, which requires the *entire* function to be one
+> branch-free, loop-free straight chain from entry to `ret` -- and rejects this
+> real shader outright, since its own single barrier sits in the entry block,
+> safely *before* an entirely unrelated, ordinary uniform diamond further down
+> (`%push_const.inbounds = icmp ule i32 4, %root_constant_size` deciding whether
+> to load a real root-constant value or default to 0 -- itself containing no
+> further barrier, and never spanning the barrier boundary in either arm).
+> `isLinearChain`'s all-or-nothing check cannot distinguish this safe case (a
+> uniform branch entirely contained within one barrier-delimited region) from a
+> genuinely unsafe one (a branch whose two arms would land in *different*
+> barrier regions, which `outlineChain`'s current flat-block-list design has no
+> way to represent as two still-connected region functions). Needs: (1)
+> confirmation (via further real CTS cases) of whether every occurrence of this
+> diagnostic is this same "uniform diamond fully outside every barrier region"
+> shape, or whether a genuinely barrier-spanning branch also occurs somewhere in
+> the wild, and (2) a real design decision on the fix's shape -- most likely
+> teaching `isLinearChain`/`splitAtGroupSyncBarriers` to first identify each
+> barrier's own region boundary and permit an arbitrary (uniform-only,
+> side-effect-free-enough) sub-CFG *within* a single region, only rejecting a
+> branch that actually straddles one, which would require generalizing
+> `outlineChain` (currently a flat `SmallVector<BasicBlock *>` chain, assuming
+> an unconditional-branch-only interior) to outline a real multi-block sub-CFG
+> per region instead -- a materially bigger change than L43/L44's own scope,
+> likely its own multi-part milestone rather than a single small fix
