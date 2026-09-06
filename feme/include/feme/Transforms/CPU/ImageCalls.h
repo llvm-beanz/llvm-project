@@ -526,11 +526,13 @@ struct MatchedImageCall {
   /// `isSupportedOffset`'s comment in `SPIRVResourceLowering.cpp`).
   llvm::Value *OffsetX = nullptr;
   llvm::Value *OffsetY = nullptr;
-  /// `Sample2D`/`SampleCube`/`SampleCubeArray`/`Sample2DArray` (roadmap
-  /// L26/L60(a)): the `MinLod` clamp floor on the implicit LOD (see
-  /// `createSample2D`'s doc); null for every other kind, including
-  /// `SampleCmp2D`, which `lowerImageAccesses` never threads a real clamp
-  /// value through (see its own `HasMinLodClamp` shape restriction).
+  /// `Sample2D`/`SampleCube`/`SampleCubeArray`/`Sample2DArray`/
+  /// `SampleCmp2D`/`SampleCmpArray2D`/`SampleCmpCube`/`SampleCmpCubeArray`
+  /// (roadmap L26/L60(a)/L52(c)): the `MinLod` clamp floor on the implicit
+  /// LOD (see `createSample2D`'s doc); null for every other kind,
+  /// including `SampleCmp1D`/`SampleCmpArray1D`, which `lowerImageAccesses`
+  /// never threads a real clamp value through (see its own
+  /// `HasMinLodClamp` shape restriction).
   llvm::Value *MinLodClamp = nullptr;
   /// `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32` only (roadmap
   /// F8c/H19g/H19m): the multisample index a `subpassLoad`'s
@@ -610,14 +612,20 @@ llvm::CallInst *createSample2D(llvm::IRBuilderBase &Builder,
 /// `Plain2D` can carry a real, possibly-nonzero one too (SPIR-V's
 /// `ConstOffset` image operand is equally legal against
 /// `OpImageSampleDrefImplicitLod`/`OpImageSampleDrefExplicitLod`) -- pass
-/// zero constants for a caller with none to give.
+/// zero constants for a caller with none to give. \p MinLodClamp (roadmap
+/// L52(c)) is the same `MinLod` image operand `createSample2D` documents
+/// (`spv_resource_samplecmp_clamp`'s own trailing `clamp` operand,
+/// legalized upstream by `ImageSampleDrefImplicitLodPattern` alongside
+/// `ConstOffset` today) -- pass negative infinity (a no-op floor) for a
+/// caller with none to give.
 llvm::CallInst *
 createSampleCmp2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
                   llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
                   llvm::Value *U, llvm::Value *V, llvm::Value *Lod,
                   llvm::Value *UseExplicitLod, llvm::Value *Dref,
                   llvm::Value *OffsetX, llvm::Value *OffsetY,
-                  llvm::Value *Mask, const llvm::Twine &Name = "");
+                  llvm::Value *MinLodClamp, llvm::Value *Mask,
+                  const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.2d.v4f32` call. \p Sample (roadmap F8c)
 /// selects which sample of a multisampled image to read; pass a constant
@@ -806,7 +814,8 @@ llvm::CallInst *createSampleCubeArray(
 /// Builds a `feme.cpu.image.samplecmp.2darray.f32` call (roadmap L48), the
 /// `Texture2DArray` counterpart of `createSampleCmp2D`. \p OffsetX/\p
 /// OffsetY (roadmap L50d) mirror `createSampleCmp2D`'s own new
-/// `ConstOffset` parameters.
+/// `ConstOffset` parameters. \p MinLodClamp (roadmap L52(c)) mirrors
+/// `createSampleCmp2D`'s own new `MinLod` clamp parameter.
 llvm::CallInst *createSampleCmpArray2D(llvm::IRBuilderBase &Builder,
                                       const ImageCallEnv &Env,
                                       llvm::Value *ImageIndex,
@@ -815,28 +824,37 @@ llvm::CallInst *createSampleCmpArray2D(llvm::IRBuilderBase &Builder,
                                       llvm::Value *Lod,
                                       llvm::Value *UseExplicitLod,
                                       llvm::Value *Dref, llvm::Value *OffsetX,
-                                      llvm::Value *OffsetY, llvm::Value *Mask,
+                                      llvm::Value *OffsetY,
+                                      llvm::Value *MinLodClamp,
+                                      llvm::Value *Mask,
                                       const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.cube.f32` call (roadmap L48), the
-/// `TextureCube` counterpart of `createSampleCmp2D`.
+/// `TextureCube` counterpart of `createSampleCmp2D`. \p MinLodClamp
+/// (roadmap L52(c)) mirrors `createSampleCmp2D`'s own new `MinLod` clamp
+/// parameter -- a cube depth-comparison sample can carry one too (SPIR-V's
+/// `MinLod` image operand is legal against any dimensionality, unlike
+/// `ConstOffset`, which `Dim::Cube` forbids).
 llvm::CallInst *createSampleCmpCube(llvm::IRBuilderBase &Builder,
                                    const ImageCallEnv &Env,
                                    llvm::Value *ImageIndex,
                                    llvm::Value *SamplerIndex, llvm::Value *DirX,
                                    llvm::Value *DirY, llvm::Value *DirZ,
                                    llvm::Value *Lod, llvm::Value *UseExplicitLod,
-                                   llvm::Value *Dref, llvm::Value *Mask,
+                                   llvm::Value *Dref, llvm::Value *MinLodClamp,
+                                   llvm::Value *Mask,
                                    const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.cubearray.f32` call (roadmap L48),
-/// the `TextureCubeArray` counterpart of `createSampleCmp2D`.
+/// the `TextureCubeArray` counterpart of `createSampleCmp2D`. \p
+/// MinLodClamp (roadmap L52(c)) mirrors `createSampleCmpCube`'s own new
+/// `MinLod` clamp parameter.
 llvm::CallInst *createSampleCmpCubeArray(
     llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *DirX,
     llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *ArrayLayer,
     llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Dref,
-    llvm::Value *Mask, const llvm::Twine &Name = "");
+    llvm::Value *MinLodClamp, llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.1d.v4f32` call (roadmap L52a). \p U is
 /// the single normalized coordinate -- see `ImageCallKind::Sample1D`'s own

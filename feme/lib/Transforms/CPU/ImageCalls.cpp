@@ -165,10 +165,13 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // Same as Sample2D's own (image_heap..v) prefix, plus a trailing
     // `dref`, `offset_x`/`offset_y` (roadmap L50d; SPIR-V's own
     // `ConstOffset` image operand, mirroring Sample2D's own operand of
-    // the same name), and `mask`; returns `float`.
+    // the same name), `min_lod_clamp` (roadmap L52(c); SPIR-V's own
+    // `MinLod` image operand, mirroring Sample2D's own operand of the
+    // same name), and `mask`; returns `float`.
     FTy = FunctionType::get(F32Ty,
                             {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
-                             F32Ty, F32Ty, I1Ty, F32Ty, I32Ty, I32Ty, I1Ty},
+                             F32Ty, F32Ty, I1Ty, F32Ty, I32Ty, I32Ty, F32Ty,
+                             I1Ty},
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::Load2D:
@@ -444,23 +447,26 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // Sample2D).
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
     //  image_index, sampler_index, u, v, array_layer, lod,
-    //  use_explicit_lod, dref, offset_x, offset_y, mask) -> float
+    //  use_explicit_lod, dref, offset_x, offset_y, min_lod_clamp, mask)
+    // -> float
     FTy = FunctionType::get(F32Ty,
                             {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
                              F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, I32Ty, I32Ty,
-                             I1Ty},
+                             F32Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::SampleCmpCube:
     // Same as SampleCmp2D, but (u, v) becomes a 3-component direction
     // vector (dir_x, dir_y, dir_z), mirroring SampleCube's own
-    // relationship to Sample2D (roadmap L48).
+    // relationship to Sample2D (roadmap L48); no offset (SPIR-V forbids
+    // `ConstOffset` against `Dim::Cube`), but `min_lod_clamp` (roadmap
+    // L52(c)) is still legal.
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
     //  image_index, sampler_index, dir_x, dir_y, dir_z, lod,
-    //  use_explicit_lod, dref, mask) -> float
+    //  use_explicit_lod, dref, min_lod_clamp, mask) -> float
     FTy = FunctionType::get(F32Ty,
                             {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
-                             F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, I1Ty},
+                             F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, F32Ty, I1Ty},
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::SampleCmpCubeArray:
@@ -469,7 +475,8 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // L48).
     FTy = FunctionType::get(F32Ty,
                             {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
-                             F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, I1Ty},
+                             F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, F32Ty,
+                             I1Ty},
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::Sample1D:
@@ -599,14 +606,15 @@ CallInst *feme::cpu::createSampleCmp2D(IRBuilderBase &Builder,
                                        Value *U, Value *V, Value *Lod,
                                        Value *UseExplicitLod, Value *Dref,
                                        Value *OffsetX, Value *OffsetY,
-                                       Value *Mask, const Twine &Name) {
+                                       Value *MinLodClamp, Value *Mask,
+                                       const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmp2D);
   return Builder.CreateCall(F,
                             {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
                              Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
                              V, Lod, UseExplicitLod, Dref, OffsetX, OffsetY,
-                             Mask},
+                             MinLodClamp, Mask},
                             Name);
 }
 
@@ -821,14 +829,14 @@ CallInst *feme::cpu::createSampleCmpArray2D(
     IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
     Value *SamplerIndex, Value *U, Value *V, Value *ArrayLayer, Value *Lod,
     Value *UseExplicitLod, Value *Dref, Value *OffsetX, Value *OffsetY,
-    Value *Mask, const Twine &Name) {
+    Value *MinLodClamp, Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmpArray2D);
   return Builder.CreateCall(F,
                             {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
                              Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
                              V, ArrayLayer, Lod, UseExplicitLod, Dref, OffsetX,
-                             OffsetY, Mask},
+                             OffsetY, MinLodClamp, Mask},
                             Name);
 }
 
@@ -837,15 +845,15 @@ CallInst *feme::cpu::createSampleCmpCube(IRBuilderBase &Builder,
                                         Value *ImageIndex, Value *SamplerIndex,
                                         Value *DirX, Value *DirY, Value *DirZ,
                                         Value *Lod, Value *UseExplicitLod,
-                                        Value *Dref, Value *Mask,
-                                        const Twine &Name) {
+                                        Value *Dref, Value *MinLodClamp,
+                                        Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmpCube);
   return Builder.CreateCall(F,
                             {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
                              Env.SamplerHeapCount, ImageIndex, SamplerIndex,
                              DirX, DirY, DirZ, Lod, UseExplicitLod, Dref,
-                             Mask},
+                             MinLodClamp, Mask},
                             Name);
 }
 
@@ -853,14 +861,14 @@ CallInst *feme::cpu::createSampleCmpCubeArray(
     IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
     Value *SamplerIndex, Value *DirX, Value *DirY, Value *DirZ,
     Value *ArrayLayer, Value *Lod, Value *UseExplicitLod, Value *Dref,
-    Value *Mask, const Twine &Name) {
+    Value *MinLodClamp, Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmpCubeArray);
   return Builder.CreateCall(
       F,
       {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
        Env.SamplerHeapCount, ImageIndex, SamplerIndex, DirX, DirY, DirZ,
-       ArrayLayer, Lod, UseExplicitLod, Dref, Mask},
+       ArrayLayer, Lod, UseExplicitLod, Dref, MinLodClamp, Mask},
       Name);
 }
 
@@ -1279,7 +1287,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(18);
     break;
   case ImageCallKind::SampleCmp2D:
-    if (CI.arg_size() != 14)
+    if (CI.arg_size() != 15)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1294,7 +1302,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Dref = CI.getArgOperand(10);
     Result.OffsetX = CI.getArgOperand(11);
     Result.OffsetY = CI.getArgOperand(12);
-    Result.Mask = CI.getArgOperand(13);
+    Result.MinLodClamp = CI.getArgOperand(13);
+    Result.Mask = CI.getArgOperand(14);
     break;
   case ImageCallKind::Load2D:
     if (CI.arg_size() != 8)
@@ -1607,7 +1616,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(7);
     break;
   case ImageCallKind::SampleCmpArray2D:
-    if (CI.arg_size() != 15)
+    if (CI.arg_size() != 16)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1623,10 +1632,11 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Dref = CI.getArgOperand(11);
     Result.OffsetX = CI.getArgOperand(12);
     Result.OffsetY = CI.getArgOperand(13);
-    Result.Mask = CI.getArgOperand(14);
+    Result.MinLodClamp = CI.getArgOperand(14);
+    Result.Mask = CI.getArgOperand(15);
     break;
   case ImageCallKind::SampleCmpCube:
-    if (CI.arg_size() != 13)
+    if (CI.arg_size() != 14)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1640,10 +1650,11 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Lod = CI.getArgOperand(9);
     Result.UseExplicitLod = CI.getArgOperand(10);
     Result.Dref = CI.getArgOperand(11);
-    Result.Mask = CI.getArgOperand(12);
+    Result.MinLodClamp = CI.getArgOperand(12);
+    Result.Mask = CI.getArgOperand(13);
     break;
   case ImageCallKind::SampleCmpCubeArray:
-    if (CI.arg_size() != 14)
+    if (CI.arg_size() != 15)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1658,7 +1669,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Lod = CI.getArgOperand(10);
     Result.UseExplicitLod = CI.getArgOperand(11);
     Result.Dref = CI.getArgOperand(12);
-    Result.Mask = CI.getArgOperand(13);
+    Result.MinLodClamp = CI.getArgOperand(13);
+    Result.Mask = CI.getArgOperand(14);
     break;
   case ImageCallKind::Sample1D:
     if (CI.arg_size() != 10)
