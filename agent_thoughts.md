@@ -64463,3 +64463,138 @@ now-settled ground.
 
 No other commits: the debug instrumentation used for investigation was
 temporary and fully reverted, never committed.
+
+# Session: L49 - a genuinely divergent task-payload offset
+
+## Starting point
+
+The prompt asked me to work on L47 or other prerequisites blocking the
+L-series milestones, quoting a report describing L47 as "partially fixed"
+with L49 filed for the remaining scope. First thing I did was check
+whether that quoted report actually still matched the live state of the
+repo, since these prompts sometimes describe a *target* state rather than
+a confirmed-current one. `git log`/`git status` showed a clean tree with
+L47's actual fix commits already present, and the quoted text matched
+`Roadmap.md`'s existing L47 row byte-for-byte, including its own
+already-filed L49 row. So L47 needed no further work this session --
+the real task was L49, exactly as the report's own framing anticipated.
+Worth calling out because it would have been easy to start "re-fixing"
+something already done based on the prompt's framing alone; checking the
+actual repo state first avoided wasted work.
+
+## Understanding L49's scope
+
+L49's own roadmap text broke the remaining work into sub-items (a)-(f),
+explicitly noting that (a)-(d) are "tightly coupled stages of a single
+data flow" that should land together as one change, unlike L48's more
+independent sub-item split. I read all 5 affected files in full before
+writing any code, since a change spanning `Linearize.cpp`, `SIMDize.cpp`,
+`StageMaskCalls.{h,cpp}`, `StageOps.cpp`, `TaskPayloadWrapper.cpp`, and
+`MeshOutputWrapper.cpp` really benefits from understanding the whole data
+flow first rather than fixing one file at a time and discovering a
+downstream inconsistency later.
+
+Two things stood out during that reading pass:
+
+1. **The `SIMDize.cpp` bug is a validity bug, not an optimization gap.**
+   `FunctionWidener` builds a brand new `Function`. A `Constant` is safe
+   to reference unchanged from any function (it isn't tied to one), which
+   is exactly why the old code's "keep the offset scalar" logic was safe
+   *when the offset really was always a constant*. Once L47 allows a
+   genuinely dynamic (non-`Constant`) offset, referencing that raw
+   pre-widened-function `Value` from inside the new widened function
+   isn't just suboptimal, it's invalid IR -- the value was never
+   cloned/widened into the new function's value space. This reframing
+   made the fix obvious: route any non-`Constant` offset through
+   `FunctionWidener::getWidened`, the same mechanism every other per-lane
+   operand already uses.
+
+2. **A previously-latent name-mangling collision, not called out in the
+   roadmap's own text.** The codebase's established convention for
+   masked/widened stage-op callee names is "mangle by exactly the one
+   type that varies between the scalar and widened forms" -- safe before
+   L47 because every "varying" operand widened in lockstep with the whole
+   function, while a task-payload offset was always a genuine constant.
+   L49 breaks that invariant: the offset can now independently be
+   `i32` (constant) or `<W x i32>` (widened) regardless of whether the
+   call's Value/Mask/Result are widened. Two call sites with identical
+   `ValueTy`/`ResultTy` but different offset-constant-ness would collide
+   under the old mangling scheme. I added the offset's own type as an
+   additional, independent mangling dimension to both
+   `getOrInsertMaskedTaskPayloadStore` (`StageMaskCalls.cpp`) and
+   `getOrInsertStageOp`'s `TaskPayloadLoad` case (`StageOps.cpp`) --
+   catching this before it could ever manifest as a real bug, since I
+   found it by reasoning about the type-safety invariant, not by hitting
+   a crash. I flagged this clearly in both `Roadmap.md` and
+   `VulkanCTSReport.md` as going slightly beyond the roadmap's original
+   wording, since it's the kind of thing a reviewer would want called out
+   explicitly rather than buried in a diff.
+
+## Implementing the fix
+
+With the design worked out, the actual changes were mechanical:
+
+- `Linearize.cpp`: fixed a stale comment only (the offset was already
+  passed through generically).
+- `SIMDize.cpp`: `widenStageOp` and `widenMaskedTaskPayloadStore` now
+  check `isa<Constant>(Offset)` and only skip widening in that case.
+- `StageMaskCalls.{h,cpp}`/`StageOps.cpp`: added the new `OffsetTy`
+  mangling dimension described above.
+- `TaskPayloadWrapper.cpp`/`MeshOutputWrapper.cpp`: each of
+  `lowerTaskPayloadStore`, `lowerTaskPayloadLoad`, and
+  `lowerMeshTaskPayloadLoad` keeps its existing hoisted/broadcast fast
+  path for a real constant offset (byte-for-byte unchanged, confirmed by
+  existing tests continuing to pass unmodified), and falls back to a
+  genuine per-lane addressing loop otherwise, reusing the existing
+  `extractLaneOrScalar` helper (no new helper needed).
+
+## Testing
+
+Added 5 new unit tests, each running the real
+`LinearizePass -> SIMDizePass -> WaveLoweringPass -> wrapper pass`
+pipeline end to end from a raw `feme.stage.task.payload.*` call with a
+genuinely divergent offset (`mul i32 %tid, 4`, mirroring the pattern the
+L47 session's own temporary investigative test used, but made permanent
+here). One pre-existing test's expectation changed
+(`StageOpsTest.TaskPayloadLoadIsOverloadedOnResult`'s expected callee
+name now includes the new mangling suffix) -- this was an expected,
+correct fallout of the new mangling scheme, not a regression, and I
+updated its comment to explain why the suffix is unconditional even for
+that test's own ordinary constant-offset case.
+
+`ninja check-feme`: 2632/2632 supported discovered tests pass, up by
+exactly the 5 new tests, 0 regressions.
+
+## CTS verification
+
+Both of L47's own named `task_mesh` cases now pass for real:
+`...task_mesh.inside_rp.single_view.{only_primary,with_secondary}`. A
+broader sweep of the same CTS group (12,340 cases) confirms exactly 2/2
+real cases pass with 0 failures -- everything else in that group is
+`NotSupported` for an unrelated, already-known reason (missing
+`meshShaderQueries` support). I also ran the full `dEQP-VK.mesh_shader.*`
+group (28,044 cases) as a broader regression check per the task's "sweep
+for other CTS cases using a per-invocation-indexed task payload"
+instruction; it shows 78 passed / 361 failed / rest not-supported, with
+no new failures compared to what prior sessions' reports already
+document as pre-existing, differently-scoped gaps (e.g.
+`misc.payload_read`'s own already-known divergent-branch diagnostic).
+I didn't chase those 361 pre-existing failures further, since they're
+each already tracked by their own roadmap rows and are out of scope for
+this one.
+
+## Commits this session
+
+1. `feme: support a genuinely divergent task-payload offset (L49)` --
+   the coupled (a)-(d) fix across all 5 files plus its own 5 new/updated
+   unit tests, landed together as one commit per the roadmap's own
+   explicit guidance that these are tightly coupled stages of a single
+   data flow.
+2. `feme: document L49 fix in Roadmap/VulkanCTSReport` -- struck through
+   L49's roadmap row with a summary of what landed, and appended a new
+   `VulkanCTSReport.md` section with the real CTS numbers.
+3. This `agent_thoughts.md` entry (its own final commit).
+
+No feature/extension bit changed this session (internal wave-body-
+lowering plumbing only); `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, no update needed.
