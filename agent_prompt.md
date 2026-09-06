@@ -42,94 +42,44 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L50 or other prerequisites blocking the L-series milestones?
+Can you work on L51 or other prerequisites blocking the L-series milestones?
 
-> **L48's own Array2D/Cube/CubeArray depth-comparison sampling slice leaves 5
-> distinct, independently-sized gaps still open**, broken down here rather than
-> re-attempted together, per this project's own established precedent: (a)
-> **`Plain1D`/`Array1D` shadow sampling** (`sampler1d{,array}shadow_*`) has no
-> ordinary (non-comparison) sampled-image path on the CPU target at all yet for
-> either shape -- needs its own new 1D-sampling infrastructure
-> (`ImageCallKind::Sample1D`/`Array1D`-equivalents,
-> `createSample1D`/`createSample1DArray`, matching runtime entry points)
-> *before* a `SampleCmp1D`/`SampleCmpArray1D` counterpart is even possible, a
-> materially bigger prerequisite than any other item in this row; (b) **a `Bias`
-> image operand** (`sampler{2d,cube}shadow_bias_fragment` and siblings) fails at
-> `ConvertSPIRVToLLVMPass` legalization itself, before
-> `SPIRVResourceLowering.cpp` ever sees it --
-> `ImageSampleDrefImplicitLodPattern`'s own `SupportedMask`
-> (`SPIRVToLLVMPatterns.cpp`) only allows `ConstOffset`/`MinLod`, not `Bias`,
-> and no `llvm.spv.resource.samplecmp*` intrinsic form threads an explicit bias
-> through today, unlike the ordinary
-> `spv_resource_samplebias`/`.samplebias_clamp` family already handled for a
-> non-dref sample -- needs its own new intrinsic-lowering design; (c)
-> **`samplecmp_clamp`'s own trailing `MinLod` clamp operand** (not yet confirmed
-> present in any real failing CTS case measured so far) needs each
-> `createSampleCmp*` builder extended with a `MinLodClamp` parameter, mirroring
-> `createSample2D`'s own roadmap L26 precedent; (d) **a real, nonzero
-> depth-comparison `ConstOffset`** (also not yet confirmed present in a real
-> failing case) needs `createSampleCmp2D`/`createSampleCmpArray2D` extended with
-> `OffsetX`/`OffsetY` parameters, mirroring the same L26 precedent
-> (`Cube`/`CubeArray` have no `ConstOffset` concept in SPIR-V at all, so need no
-> equivalent); (e) **the entirely separate LOD-query intrinsics**
-> (`spv_resource_calculate_lod`/`.calculate_lod_unclamped`, the 190-case
-> `texturequerylod` group, confirmed unaffected at 0/190 by both L48 and this
-> row's own re-runs) have no CPU-lowering consumer at all on either the SPIR-V
-> or DXIL frontend and need a genuinely new runtime design: a real screen-space
-> coordinate derivative (`dFdx`/`dFdy`) threaded through to a query call,
-> needing its own design pass to confirm where a per-invocation derivative is
-> (or could be made) available in this target's per-lane execution model; (f)
-> **a newly-discovered `CubeArray`-shadow rendering bug**
-> (`samplercubearrayshadow_fragment`, found by L48's own CTS re-run):
-> `vkCreateGraphicsPipelines`/rendering both now succeed, but the rendered image
-> mismatches the reference in one localized 32x32-pixel screen-space region
-> (pixel bbox `x:[96,127] y:[0,31]` of a 128x128 image) -- confirmed not a
-> regression of the underlying cube-face-selection or array-layer-rounding math
-> (both independently proven correct by the still-passing ordinary
-> `samplercubearray_{fixed,float}_fragment` and shadow
-> `samplercubeshadow_fragment` CTS cases, which each reuse one but not both of
-> `femeCpuImageSampleCmpCubeArrayF32`'s own code paths), so the bug is specific
-> to some interaction between the two only present in the combined
-> `CubeArray`+dref-compare path; needs a real IR/pixel-level reduction of this
-> exact case to isolate (e.g. a temporary per-pixel debug dump of the selected
-> face/layer/mip-level triple compared against the reference renderer's own, the
-> same technique this project's H6/H8/H9/L-series chains have used throughout).
-> **Update (this session):** performed exactly that real per-sample debug-dump
-> reduction (a temporary `FEME_DEBUG_CUBEARRAY_CMP`-gated `fprintf` in
-> `femeCpuImageSampleCmpCubeArrayF32`/`femeRTSampleCmp2DAtLevel`, reverted
-> before committing) against a real re-run of this exact CTS case, and it
-> conclusively **rules out every part of `femeCpuImageSampleCmpCubeArrayF32`'s
-> own sampling math as the cause**: (i) face/layer selection
-> (`femeRTSelectCubeFace`/`femeRTRoundClampLayer`) matches VK-GL-CTS's own
-> `TextureCubeArrayView::selectLayer`/`getCubeArrayFaceIndex` formulas exactly
-> (confirmed by independent reading of `tcuTexture.cpp`); (ii) the implicit LOD
-> is always clamped to level 0 on *both* sides (this CTS case's own real
-> `computeLodFromDerivates` value, hand-derived from its
-> `Vec4(-1,-1,1.01,-0.5)`..`Vec4(1,1,1.01,1.5)` coordinate range and the array's
-> 64x64 face size, comes out *negative* -- a magnifying, not minifying,
-> footprint -- so the real reference renderer clamps to level 0 the same way our
-> own hardcoded-`Lod=0` dref-sample path does; this is *not* the same "hardcoded
-> Lod=0" limitation named in sub-item (e), since it happens to be a no-op here
-> on both sides); (iii) the fetched texel content is bit-for-bit correct at
-> every one of 17,408 real logged samples against an independent Python
-> re-implementation of VK-GL-CTS's own `fillWithGrid`/`layerCorr`/corner-forcing
-> fill algorithm (the only 4 apparent "mismatches" were the deliberate
-> forced-identical-corner-texel special case, not real errors); (iv) the
-> depth-compare (`femeRTApplyCompare`, `VkCompareOp::LESS` here) is the same
-> shared, already-proven-correct helper `samplercubeshadow_fragment` (passing)
-> uses. Since every piece of the *sampling* math is now proven correct against
-> the real reference formulas, the remaining, now much more precisely scoped,
-> candidate is **outside this function entirely**: most likely a
-> rasterizer/vertex-attribute-interpolation discrepancy specific to this test's
-> 4-wide `texCoord` (whose `w` component doubles as both the array-layer
-> selector *and* the depth-compare reference value, a combination no other
-> shadow-sampling CTS case in this group exercises), localized to one of the
-> full-screen quad's two triangles. This is a materially different,
-> cross-cutting scope (attribute interpolation/rasterization, not
-> `SPIRVResourceLowering.cpp`/`FeMeRuntimeCPU.c`'s image-sampling code) from
-> anything named in this row, so it is broken out as its own row, **L51**,
-> below, rather than continuing to file it under this already-large (a)-(f)
-> breakdown. Each of (a)-(f) should be scoped and fixed as its own small,
-> independently-committed, independently-CTS-measured row rather than attempted
-> together, per this project's own established precedent (L26->L33, L45->L47,
-> L46->L48)
+> **L50 sub-item (f)'s own real per-sample debug-dump reduction (this session)
+> rules out `femeCpuImageSampleCmpCubeArrayF32`'s own face/layer selection, LOD
+> clamping, texel-fetch content, and depth-compare application as the cause of
+> `samplercubearrayshadow_fragment`'s localized 32x32-pixel (`x:[96,127]
+> y:[0,31]` of 128x128) rendering mismatch** -- every one of those four pieces
+> was independently proven correct against VK-GL-CTS's own reference formulas
+> (`tcuTexture.cpp`'s
+> `TextureCubeArrayView::selectLayer`/`getCubeArrayFaceIndex`, a hand-derived
+> real `computeLodFromDerivates` value, an independent Python re-implementation
+> of `fillWithGrid`/`layerCorr`/corner-forcing, and the already-proven-correct
+> `femeRTApplyCompare` shared with the passing `samplercubeshadow_fragment`
+> case). The remaining, now precisely-scoped candidate lies **outside the
+> image-sampling runtime entirely**: this CTS case's 4-wide `texCoord` attribute
+> has its `w` component doing double duty as both the array-layer selector and
+> the depth-compare reference value (`texture(u_sampler, v_texCoord,
+> v_texCoord.w)`) -- a combination unique to this one case in the `*shadow*`
+> group -- and the mismatch's exact alignment with the full-screen quad's own
+> triangle-diagonal split (the mismatch region is a full quadrant, not a thin
+> boundary strip) makes a rasterizer/vertex-attribute-interpolation discrepancy
+> (not a `SPIRVResourceLowering.cpp`/`FeMeRuntimeCPU.c` image-sampling bug) the
+> most likely remaining explanation. Needs: (1) a real, targeted reduction of
+> the rasterizer's own 4-component attribute interpolation specifically at/near
+> the quad's triangle-diagonal boundary (e.g. a temporary per-fragment debug
+> dump of the interpolated `texCoord.w` alongside its exact
+> barycentric/triangle-index provenance, mirroring this session's own
+> `FEME_DEBUG_CUBEARRAY_CMP` technique but placed in the
+> rasterizer/attribute-interpolation code instead of the image-sampling runtime)
+> to confirm whether the interpolated `w` value itself is wrong in the
+> mismatched region, or whether the true root cause lies elsewhere still; (2)
+> once isolated, a real fix plus new unit test coverage for whichever phase is
+> actually at fault (rasterizer attribute interpolation, if confirmed, has no
+> existing per-phase unit test suite in `feme/unittests/` today and would need
+> one added); (3) a real `deqp-vk` re-run of `samplercubearrayshadow_fragment`
+> (and a broader sweep of any other CTS case combining a 4-wide
+> dynamically-dual-purposed vertex attribute with a full-screen quad, to check
+> whether this is an isolated case or a wider-reaching rasterizer gap) to
+> confirm the fix. This is a materially different, cross-cutting scope from L50
+> sub-items (a)-(e) (all real `SPIRVResourceLowering.cpp`/runtime image-sampling
+> gaps), so it is filed as its own row rather than folded into that breakdown.
