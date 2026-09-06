@@ -44,6 +44,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 Can you work on L52 or other prerequisites blocking the L-series milestones?
 
+
 > **L50's own (a)-(f) breakdown leaves 4 sub-items open after this session's (d)
 > fix and L51's own further split-out of (f)**: (a) **`Plain1D`/`Array1D` shadow
 > sampling** (`sampler1d{,array}shadow_*`) has no ordinary (non-comparison)
