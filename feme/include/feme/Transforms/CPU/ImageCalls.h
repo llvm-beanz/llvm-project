@@ -332,6 +332,19 @@ enum class ImageCallKind : uint8_t {
   /// `TextureCubeArray` counterpart of `SampleCmp2D`, adding the same
   /// float array-layer coordinate `SampleCubeArray` adds to `SampleCube`.
   SampleCmpCubeArray,
+  /// `feme.cpu.image.sample.1d.v4f32` (roadmap L52a): the ordinary
+  /// (non-comparison) `Texture1D` counterpart of `Sample2D` -- a single
+  /// `U` coordinate instead of `(U, V)`, no screen-space
+  /// derivatives/`ConstOffset`/`MinLod` clamp (mirroring `Sample2DArray`'s
+  /// own simpler scope rather than `Sample2D`'s richer roadmap H7i/L26
+  /// additions, deferred here to keep this first pass minimal). The
+  /// depth-comparison counterpart (`SampleCmp1D`) does not exist yet --
+  /// filed as its own follow-on roadmap row.
+  Sample1D,
+  /// `feme.cpu.image.sample.1darray.v4f32` (roadmap L52a): the
+  /// `Texture1DArray` counterpart of `Sample1D`, adding the same float
+  /// array-layer coordinate `Sample2DArray` adds to `Sample2D`.
+  Sample1DArray,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -371,6 +384,9 @@ struct MatchedImageCall {
   /// `Load1D`'s own `U` -- `V` is likewise null for these four kinds (the
   /// array layer is carried separately, in `Layer` below, same as
   /// `Load2DArray`'s own convention).
+  /// `Sample1D`/`Sample1DArray` (roadmap L52a): the single normalized `U`
+  /// coordinate, same shape as `Load1D`'s own `U` -- `V` is null for these
+  /// two kinds too.
   llvm::Value *U = nullptr;
   llvm::Value *V = nullptr;
   /// `Sample2D` only (roadmap H7i): the caller's own screen-space partial
@@ -387,6 +403,8 @@ struct MatchedImageCall {
   /// coordinate (rounded to nearest, clamped, at the runtime); null for
   /// every other kind, including the integer-coordinate `Load2DArray`/
   /// `Load2DArrayI32`, which instead use `Layer` below.
+  /// `Sample1DArray` (roadmap L52a) also uses this, same convention as
+  /// `Sample2DArray`.
   llvm::Value *ArrayLayer = nullptr;
   /// `Load2DArray`/`Load2DArrayI32`/`Store2DArray`/`Store2DArrayI32`
   /// (roadmap H19b), `Load1DArray`/`Load1DArrayI32`/`Store1DArray`/
@@ -693,6 +711,28 @@ llvm::CallInst *createSampleCmpCubeArray(
     llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *ArrayLayer,
     llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Dref,
     llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.1d.v4f32` call (roadmap L52a). \p U is
+/// the single normalized coordinate -- see `ImageCallKind::Sample1D`'s own
+/// doc for why this shape carries no derivatives/`ConstOffset`/`MinLod`
+/// clamp.
+llvm::CallInst *createSample1D(llvm::IRBuilderBase &Builder,
+                               const ImageCallEnv &Env,
+                               llvm::Value *ImageIndex,
+                               llvm::Value *SamplerIndex, llvm::Value *U,
+                               llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                               llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.1darray.v4f32` call (roadmap L52a), the
+/// `Texture1DArray` counterpart of `createSample1D`.
+llvm::CallInst *createSample1DArray(llvm::IRBuilderBase &Builder,
+                                    const ImageCallEnv &Env,
+                                    llvm::Value *ImageIndex,
+                                    llvm::Value *SamplerIndex, llvm::Value *U,
+                                    llvm::Value *ArrayLayer, llvm::Value *Lod,
+                                    llvm::Value *UseExplicitLod,
+                                    llvm::Value *Mask,
+                                    const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.1d.v4f32` call (roadmap H19c). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.
