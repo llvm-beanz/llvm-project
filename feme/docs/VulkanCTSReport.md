@@ -29181,3 +29181,84 @@ because `shaderResourceMinLod` is still advertised as `VK_FALSE`.
 reviewed: no deviation or update needed. `Grad` sampling is core SPIR-V gated by
 no feature bit, and this is a legalization-only fix behind an already-advertised
 capability.
+
+## Roadmap L65/L66: `shaderResourceMinLod` flip re-run, and Plain1D/Array1D Grad
+
+Following up on last session's own closing note ("re-running the
+`shaderResourceMinLod` flip/measure/revert experiment is now the highest-value
+target"), this session temporarily forced `Info.Features.shaderResourceMinLod
+= VK_TRUE` (reverted after measurement) and re-ran `textureclamp`/
+`texturegradclamp`/`textureoffsetclamp`/`textureoffsetgradclamp` in full.
+
+### What the flip revealed
+
+The `VulkanBuffer` framing every prior session (including this feature bit's
+own comment in `PhysicalDeviceInfo.cpp`) used to describe the remaining
+blockers was **already disproven by roadmap L64**, but the comment itself and
+several real remaining blockers had not been re-measured since. This session's
+real per-case data:
+
+- `textureclamp` (50 cases): 16 Pass / 16 Fail / 18 NotSupported. Every fail is
+  either an integer-sampler (`isampler`/`usampler`, 14 cases -- by design, not a
+  real gap) or `sampler3d_bias_{fixed,float}` (2 cases -- `Plain3D` has no
+  ordinary sampled-image infrastructure at all, confirmed separately below).
+- `texturegradclamp` (52 cases): 8 Pass / 25 Fail / 19 NotSupported. Fails:
+  14 integer-sampler, 4 `sampler1d{,array}_{fixed,float}` (fixed by roadmap
+  L65 below), 2 `sampler3d_{fixed,float}`, and 5 `Dref`+`Grad` shadow-sampler
+  cases (`sampler{1d,1darray,2d,2darray,cube}shadow`).
+- `textureoffsetclamp` (180 cases): 15 Pass / 100 Fail / 65 NotSupported.
+  Fails: every `sampler1d`/`sampler1darray`/`sampler2darray`/`sampler3d_bias`
+  case across all 5 wrap modes (90 cases) plus the same 10 integer-sampler
+  cases for `sampler2d`. Root cause confirmed distinct from `MinLod`:
+  `isSupportedOffset` only accepts a real, nonzero `ConstOffset` for
+  `Plain2D`; every other shape still requires the always-zero case
+  regardless of `Bias`/`MinLodClamp` support (a real, pre-existing,
+  unrelated gap -- `Plain2D`'s own identical `Bias`+`MinLodClamp`+`Offset`
+  combination passes both `textureclamp` and `textureoffsetclamp` fully).
+- A direct `texture.sampler3d_*` re-run (8 cases, no flip needed) confirms
+  `Plain3D` fails `vkCreateGraphicsPipelines` outright even for a plain,
+  non-`Bias`, non-`Grad` sample: 0/8 Pass, 6/8 Fail, 2/8 NotSupported.
+  `createSample3D` does not exist anywhere in `ImageCalls.cpp`/`.h`.
+
+This is a materially more complete, more accurate picture than any prior
+session's -- filed as roadmap L66's (a)-(e) breakdown, correcting the stale
+`VulkanBuffer` comment in `PhysicalDeviceInfo.cpp` in the same commit.
+
+### The one gap fixed this session (roadmap L65)
+
+`Plain1D`/`Array1D` rejected an explicit `Grad` sample outright, even though
+`createSample1D`/`createSample1DArray` (roadmap L63) already carry a real
+`DUdX`/`DUdY` derivative-operand pair -- only `hasOnlySupportedImageUses`'s
+shape guard, not any missing lowering infrastructure, stood in the way (unlike
+`Plain3D`, above). Fixed by widening that guard and threading the caller's own
+`dPdx`/`dPdy` through in place of a synthesized-or-zeroed value, exactly
+mirroring `Plain2D`'s own `HasGrad` handling. Both shapes' single addressed
+coordinate component is a bare scalar float, so their `Grad` derivative is a
+bare scalar too -- no vector unpacking needed.
+
+`check-feme`: 2645/2645 pass (up 4 from this session's new tests), 0 fail, 59
+unsupported.
+
+Real CTS, `texturegrad` group (156 cases, no `shaderResourceMinLod` flip
+needed -- plain `Grad` sampling is core SPIR-V, gated by no feature bit):
+16 -> 24 Pass, 83 -> 75 Fail, 57 NotSupported unchanged. Per-case diff:
+exactly `sampler1d{,array}_{fixed,float}_{fragment,vertex}` (8 cases), 0
+regressions. A 1,004-case `dEQP-VK.glsl.texture_functions.*.sampler1d{,array}_*`
+sweep with a real before/after comparison against the pre-session tree
+confirms the same 8 cases and no others changed, 0 regressions: 20 -> 28
+Pass, 528 -> 520 Fail, 456 NotSupported unchanged.
+
+### A newly discovered, unrelated crash (not fixed this session)
+
+While isolating the `Plain1D`/`Array1D` fix in a multi-function lit test, two
+functions declaring a resource handle at an identical binding number for two
+*different* image shapes crashed `SPIRVResourceLoweringPass` with a real
+use-after-free (`Instruction::eraseFromParent` on a sampler handle still
+referenced by a live sample call in the other function). Reproduced with a
+minimal **ordinary, non-`Grad`** sample too, confirming it is unrelated to
+this session's own fix. Filed as roadmap L66(e); not yet root-caused.
+
+`FeMeGraphicsDesign.md`/`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed: no deviation or update needed. `shaderResourceMinLod` remains
+correctly advertised as `VK_FALSE`; `Grad` sampling itself is core SPIR-V
+gated by no feature bit.

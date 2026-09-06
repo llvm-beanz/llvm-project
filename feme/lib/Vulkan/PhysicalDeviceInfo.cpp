@@ -844,15 +844,21 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // re-run.
   Info.Features.shaderStorageImageReadWithoutFormat = VK_TRUE;
   Info.Features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-  // `shaderResourceMinLod` is still not advertised: roadmap L60(d)'s own
-  // flip/measure/revert experiment (most recently re-run alongside
-  // roadmap L63) confirms `Array2D`'s own `Grad`-blocking `VulkanBuffer`
-  // register-bound-resource-handle gap, `Plain3D`'s identical gap, the
-  // integer-sampler restriction, and (until this session) `Plain1D`'s/
-  // `Array1D`'s own hardcoded-`Lod=0` bug all still regress a real
-  // `textureclamp`/`texturegradclamp` majority of cases from
-  // `NotSupported` to actual `Fail` today -- see VulkanCTSReport.md's own
-  // `shaderResourceMinLod` section for the current per-shape breakdown.
+  // `shaderResourceMinLod` is still not advertised: roadmap L65's own
+  // flip/measure/revert experiment (this session) confirms the
+  // `VulkanBuffer` framing prior sessions used here never described a
+  // real gap (roadmap L64 disproved it) -- the current, real per-shape
+  // blocker set, measured directly with the feature bit temporarily
+  // forced on, is `Plain3D`'s still-nonexistent ordinary sampled-image
+  // infrastructure (a materially bigger prerequisite than any other
+  // shape's own gap here), the by-design integer-sampler filtered-sample
+  // exclusion (not a real gap), a still-unimplemented `Dref`+`Grad`
+  // depth-comparison intrinsic (`texturegradclamp`'s 5 shadow-sampler
+  // cases), and `isSupportedOffset`'s pre-existing, unrelated
+  // `Plain2D`-only `ConstOffset` restriction (`textureoffsetclamp`
+  // regresses every other shape). See VulkanCTSReport.md's own
+  // `shaderResourceMinLod` section for the current per-shape breakdown
+  // and Roadmap.md's L65 row for the full sub-item list.
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
