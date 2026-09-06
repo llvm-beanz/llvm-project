@@ -515,8 +515,24 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       // so far.
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
                                                      /*Negative=*/true);
+      // Roadmap L56: mirror Plain2D's own implicit-vs-explicit-LOD
+      // derivative gating above, but for the raw direction vector (X, Y,
+      // Z) rather than an already-face-local 2D coordinate -- see
+      // `getOrSynthesizeSampleCubeDerivatives`'s doc.
+      CubeDirectionDerivatives CD =
+          IsSample ? getOrSynthesizeSampleCubeDerivatives(
+                        Builder, *CI->getFunction(), X, Y, Z)
+                   : CubeDirectionDerivatives{
+                        ConstantFP::get(Builder.getFloatTy(), 0.0),
+                        ConstantFP::get(Builder.getFloatTy(), 0.0),
+                        ConstantFP::get(Builder.getFloatTy(), 0.0),
+                        ConstantFP::get(Builder.getFloatTy(), 0.0),
+                        ConstantFP::get(Builder.getFloatTy(), 0.0),
+                        ConstantFP::get(Builder.getFloatTy(), 0.0)};
       NewCall = createSampleCube(Builder, Env, ImageIndex, SamplerIndex, X, Y,
-                                 Z, Lod, UseExplicitLod, NoMinLodClamp, Mask,
+                                 Z, CD.DDirXdX, CD.DDirXdY, CD.DDirYdX,
+                                 CD.DDirYdY, CD.DDirZdX, CD.DDirZdY, Lod,
+                                 UseExplicitLod, NoMinLodClamp, Mask,
                                  CI->getName());
       break;
     }
@@ -525,8 +541,21 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
       Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
       Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{3});
+      // Roadmap L56: same derivative synthesis as Cube above.
+      CubeDirectionDerivatives CD =
+          IsSample ? getOrSynthesizeSampleCubeDerivatives(
+                        Builder, *CI->getFunction(), X, Y, Z)
+                   : CubeDirectionDerivatives{
+                        ConstantFP::get(Builder.getFloatTy(), 0.0),
+                        ConstantFP::get(Builder.getFloatTy(), 0.0),
+                        ConstantFP::get(Builder.getFloatTy(), 0.0),
+                        ConstantFP::get(Builder.getFloatTy(), 0.0),
+                        ConstantFP::get(Builder.getFloatTy(), 0.0),
+                        ConstantFP::get(Builder.getFloatTy(), 0.0)};
       NewCall = createSampleCubeArray(Builder, Env, ImageIndex, SamplerIndex,
-                                      X, Y, Z, Layer, Lod, UseExplicitLod,
+                                      X, Y, Z, CD.DDirXdX, CD.DDirXdY,
+                                      CD.DDirYdX, CD.DDirYdY, CD.DDirZdX,
+                                      CD.DDirZdY, Layer, Lod, UseExplicitLod,
                                       Mask, CI->getName());
       break;
     }

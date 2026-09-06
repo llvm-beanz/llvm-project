@@ -48,6 +48,18 @@
 // `SampleCube`/`SampleCubeArray` still resolve every implicit sample to
 // mip level 0, a pre-existing limitation this update does not change.
 //
+// Update (roadmap L56): `SampleCube`/`SampleCubeArray` gain their own
+// six extra operands, `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/
+// `DDirZdY` (see `CubeDirectionDerivatives`'s own doc) -- the always-mip-0
+// limitation the H7i update above left in place for these two shapes was
+// confirmed (via a real `dEQP-VK.texture.filtering.cube.combinations.
+// linear_mipmap_linear.*` re-run, roadmap L56) to be an outright
+// correctness bug, not just missing anisotropic-filtering polish the way
+// it is for `Sample2DArray`: a real trilinear-filtering CTS case exercises
+// these two shapes and needs a real, non-always-zero implicit LOD to pass
+// at all. `Sample2DArray` still resolves every implicit sample to mip
+// level 0 -- no real CTS case has yet motivated extending it too.
+//
 // Update (roadmap H19a): two new, write-only kinds, `Store2D`/`Store2DI32`,
 // give a storage image (a `spirv.Image`/`spirv.SignedImage` handle used
 // without a sampler, `Sampled == 2`) somewhere to lower `OpImageWrite` to
@@ -411,6 +423,17 @@ struct MatchedImageCall {
   /// `SampleCube`/`SampleCubeArray` only: the direction vector's Z
   /// component; null for every other kind.
   llvm::Value *W = nullptr;
+  /// `SampleCube`/`SampleCubeArray` only (roadmap L56): the caller's own
+  /// screen-space partial derivatives of the direction vector's `X`/`Y`/
+  /// `Z` components (`U`/`V`/`W` above), consulted only for an
+  /// implicit-LOD sample -- see `getOrSynthesizeSampleCubeDerivatives`'s
+  /// doc; null for every other kind.
+  llvm::Value *DDirXdX = nullptr;
+  llvm::Value *DDirXdY = nullptr;
+  llvm::Value *DDirYdX = nullptr;
+  llvm::Value *DDirYdY = nullptr;
+  llvm::Value *DDirZdX = nullptr;
+  llvm::Value *DDirZdY = nullptr;
   /// `Sample2DArray`/`SampleCubeArray` only: the float array-layer
   /// coordinate (rounded to nearest, clamped, at the runtime); null for
   /// every other kind, including the integer-coordinate `Load2DArray`/
@@ -670,25 +693,37 @@ llvm::CallInst *createLoad2DArrayI32(llvm::IRBuilderBase &Builder,
 
 /// Builds a `feme.cpu.image.sample.cube.v4f32` call (roadmap H7b-a). \p
 /// DirX/\p DirY/\p DirZ are the sample direction vector's components. \p
-/// MinLodClamp (roadmap L26) is the same `MinLod` clamp `createSample2D`
-/// documents -- a cube sample can carry one too (SPIR-V's `MinLod` image
-/// operand is legal against any dimensionality, unlike `ConstOffset`,
-/// which `Dim::Cube` forbids) -- pass negative infinity (a no-op floor)
-/// for a caller with none to give.
+/// DDirXdX/\p DDirXdY/\p DDirYdX/\p DDirYdY/\p DDirZdX/\p DDirZdY (roadmap
+/// L56) are the caller's own screen-space partial derivatives of \p DirX/
+/// \p DirY/\p DirZ, consulted only for an implicit-LOD sample (see
+/// `getOrSynthesizeSampleCubeDerivatives`'s doc); a caller with none to
+/// give (a non-fragment stage, or an explicit-LOD sample) passes six zero
+/// constants. \p MinLodClamp (roadmap L26) is the same `MinLod` clamp
+/// `createSample2D` documents -- a cube sample can carry one too (SPIR-V's
+/// `MinLod` image operand is legal against any dimensionality, unlike
+/// `ConstOffset`, which `Dim::Cube` forbids) -- pass negative infinity (a
+/// no-op floor) for a caller with none to give.
 llvm::CallInst *createSampleCube(llvm::IRBuilderBase &Builder,
                                  const ImageCallEnv &Env,
                                  llvm::Value *ImageIndex,
                                  llvm::Value *SamplerIndex, llvm::Value *DirX,
                                  llvm::Value *DirY, llvm::Value *DirZ,
+                                 llvm::Value *DDirXdX, llvm::Value *DDirXdY,
+                                 llvm::Value *DDirYdX, llvm::Value *DDirYdY,
+                                 llvm::Value *DDirZdX, llvm::Value *DDirZdY,
                                  llvm::Value *Lod, llvm::Value *UseExplicitLod,
                                  llvm::Value *MinLodClamp, llvm::Value *Mask,
                                  const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.cubearray.v4f32` call (roadmap H7b-a).
+/// \p DDirXdX/\p DDirXdY/\p DDirYdX/\p DDirYdY/\p DDirZdX/\p DDirZdY
+/// (roadmap L56) mirror `createSampleCube`'s own new derivative operands.
 llvm::CallInst *createSampleCubeArray(
     llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *DirX,
-    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *ArrayLayer,
+    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *DDirXdX,
+    llvm::Value *DDirXdY, llvm::Value *DDirYdX, llvm::Value *DDirYdY,
+    llvm::Value *DDirZdX, llvm::Value *DDirZdY, llvm::Value *ArrayLayer,
     llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Mask,
     const llvm::Twine &Name = "");
 
@@ -1003,6 +1038,44 @@ SampleDerivatives getOrSynthesizeSample2DDerivatives(llvm::IRBuilderBase &B,
                                                      llvm::Function &Caller,
                                                      llvm::Value *U,
                                                      llvm::Value *V);
+
+/// (Roadmap L56) The six screen-space partial-derivative operands
+/// `createSampleCube`/`createSampleCubeArray`'s implicit-LOD path
+/// consults: the direction vector's own `X`/`Y`/`Z` components' partial
+/// derivatives with respect to the screen-space X axis
+/// (`DDirXdX`/`DDirYdX`/`DDirZdX`), then with respect to Y
+/// (`DDirXdY`/`DDirYdY`/`DDirZdY`) -- the `Cube`/`CubeArray` counterpart
+/// of `SampleDerivatives` above, differentiating the whole 3-component
+/// direction vector itself rather than an already-face-local 2D
+/// coordinate, since which face is selected (and therefore what the
+/// face-local coordinate even means) isn't known until the runtime sees
+/// concrete `(DirX, DirY, DirZ)` values -- see
+/// `femeRTComputeCubeUVDerivatives` (`FeMeRuntimeCPU.c`), which turns
+/// these back into a face-local `(DUdX, DUdY, DVdX, DVdY)` once a face
+/// has actually been selected.
+struct CubeDirectionDerivatives {
+  llvm::Value *DDirXdX;
+  llvm::Value *DDirXdY;
+  llvm::Value *DDirYdX;
+  llvm::Value *DDirYdY;
+  llvm::Value *DDirZdX;
+  llvm::Value *DDirZdY;
+};
+
+/// Returns the six screen-space partial derivatives of \p DirX/\p DirY/
+/// \p DirZ an implicit-LOD `SampleCube`/`SampleCubeArray` call should pass
+/// to `createSampleCube`/`createSampleCubeArray`, mirroring
+/// `getOrSynthesizeSample2DDerivatives`'s own `Caller`-stage-gated
+/// real-derivatives-or-zero-constants behavior (real derivatives only ever
+/// apply in the `Fragment` stage; every other caller gets six zero
+/// constants, leaving that sample's own implicit level resolved to mip 0
+/// exactly as before this row -- the same pre-L56 behavior, not a
+/// regression, for any caller not in a position to synthesize a real
+/// derivative).
+CubeDirectionDerivatives
+getOrSynthesizeSampleCubeDerivatives(llvm::IRBuilderBase &B,
+                                    llvm::Function &Caller, llvm::Value *DirX,
+                                    llvm::Value *DirY, llvm::Value *DirZ);
 
 } // namespace feme::cpu
 

@@ -214,21 +214,31 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // Same shape as Sample2D, but (u, v) becomes a 3-component direction
     // vector (dir_x, dir_y, dir_z), and there is no offset (SPIR-V
     // forbids `ConstOffset` against `Dim::Cube`, see
-    // `isSupportedOffset`'s own comment).
+    // `isSupportedOffset`'s own comment). Roadmap L56: gains its own six
+    // screen-space partial-derivative operands, mirroring Sample2D's own
+    // `dudx`/`dudy`/`dvdx`/`dvdy` (roadmap H7i) but for all three
+    // direction-vector components, since which face (and therefore which
+    // face-local 2D coordinate) a given direction resolves to isn't known
+    // until the runtime sees concrete values -- see
+    // `getOrSynthesizeSampleCubeDerivatives`'s doc.
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
-    //  image_index, sampler_index, dir_x, dir_y, dir_z, lod,
-    //  use_explicit_lod, min_lod_clamp, mask) -> <4 x float>
-    FTy = FunctionType::get(V4F32Ty,
-                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
-                             F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, I1Ty},
-                            /*isVarArg=*/false);
+    //  image_index, sampler_index, dir_x, dir_y, dir_z, ddirxdx, ddirxdy,
+    //  ddirydx, ddirydy, ddirzdx, ddirzdy, lod, use_explicit_lod,
+    //  min_lod_clamp, mask) -> <4 x float>
+    FTy = FunctionType::get(
+        V4F32Ty,
+        {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
+         F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, I1Ty},
+        /*isVarArg=*/false);
     break;
   case ImageCallKind::SampleCubeArray:
-    // Same as SampleCube, plus a float array_layer operand before lod.
-    FTy = FunctionType::get(V4F32Ty,
-                            {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty,
-                             F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, I1Ty},
-                            /*isVarArg=*/false);
+    // Same as SampleCube (including its own roadmap L56 derivative
+    // operands), plus a float array_layer operand before lod.
+    FTy = FunctionType::get(
+        V4F32Ty,
+        {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
+         F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, I1Ty},
+        /*isVarArg=*/false);
     break;
   case ImageCallKind::Store2D:
     // (image_heap, image_heap_count, image_index, x, y, value, mask)
@@ -741,19 +751,19 @@ CallInst *feme::cpu::createLoad2DArrayI32(IRBuilderBase &Builder,
                             Name);
 }
 
-CallInst *feme::cpu::createSampleCube(IRBuilderBase &Builder,
-                                      const ImageCallEnv &Env,
-                                      Value *ImageIndex, Value *SamplerIndex,
-                                      Value *DirX, Value *DirY, Value *DirZ,
-                                      Value *Lod, Value *UseExplicitLod,
-                                      Value *MinLodClamp, Value *Mask,
-                                      const Twine &Name) {
+CallInst *feme::cpu::createSampleCube(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *SamplerIndex, Value *DirX, Value *DirY, Value *DirZ,
+    Value *DDirXdX, Value *DDirXdY, Value *DDirYdX, Value *DDirYdY,
+    Value *DDirZdX, Value *DDirZdY, Value *Lod, Value *UseExplicitLod,
+    Value *MinLodClamp, Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCube);
   return Builder.CreateCall(F,
                             {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
                              Env.SamplerHeapCount, ImageIndex, SamplerIndex,
-                             DirX, DirY, DirZ, Lod, UseExplicitLod,
+                             DirX, DirY, DirZ, DDirXdX, DDirXdY, DDirYdX,
+                             DDirYdY, DDirZdX, DDirZdY, Lod, UseExplicitLod,
                              MinLodClamp, Mask},
                             Name);
 }
@@ -761,15 +771,17 @@ CallInst *feme::cpu::createSampleCube(IRBuilderBase &Builder,
 CallInst *feme::cpu::createSampleCubeArray(
     IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
     Value *SamplerIndex, Value *DirX, Value *DirY, Value *DirZ,
-    Value *ArrayLayer, Value *Lod, Value *UseExplicitLod, Value *Mask,
-    const Twine &Name) {
+    Value *DDirXdX, Value *DDirXdY, Value *DDirYdX, Value *DDirYdY,
+    Value *DDirZdX, Value *DDirZdY, Value *ArrayLayer, Value *Lod,
+    Value *UseExplicitLod, Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCubeArray);
   return Builder.CreateCall(
       F,
       {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
        Env.SamplerHeapCount, ImageIndex, SamplerIndex, DirX, DirY, DirZ,
-       ArrayLayer, Lod, UseExplicitLod, Mask},
+       DDirXdX, DDirXdY, DDirYdX, DDirYdY, DDirZdX, DDirZdY, ArrayLayer, Lod,
+       UseExplicitLod, Mask},
       Name);
 }
 
@@ -1303,7 +1315,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(8);
     break;
   case ImageCallKind::SampleCube:
-    if (CI.arg_size() != 13)
+    if (CI.arg_size() != 19)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1314,13 +1326,19 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.U = CI.getArgOperand(6);
     Result.V = CI.getArgOperand(7);
     Result.W = CI.getArgOperand(8);
-    Result.Lod = CI.getArgOperand(9);
-    Result.UseExplicitLod = CI.getArgOperand(10);
-    Result.MinLodClamp = CI.getArgOperand(11);
-    Result.Mask = CI.getArgOperand(12);
+    Result.DDirXdX = CI.getArgOperand(9);
+    Result.DDirXdY = CI.getArgOperand(10);
+    Result.DDirYdX = CI.getArgOperand(11);
+    Result.DDirYdY = CI.getArgOperand(12);
+    Result.DDirZdX = CI.getArgOperand(13);
+    Result.DDirZdY = CI.getArgOperand(14);
+    Result.Lod = CI.getArgOperand(15);
+    Result.UseExplicitLod = CI.getArgOperand(16);
+    Result.MinLodClamp = CI.getArgOperand(17);
+    Result.Mask = CI.getArgOperand(18);
     break;
   case ImageCallKind::SampleCubeArray:
-    if (CI.arg_size() != 13)
+    if (CI.arg_size() != 19)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1331,10 +1349,16 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.U = CI.getArgOperand(6);
     Result.V = CI.getArgOperand(7);
     Result.W = CI.getArgOperand(8);
-    Result.ArrayLayer = CI.getArgOperand(9);
-    Result.Lod = CI.getArgOperand(10);
-    Result.UseExplicitLod = CI.getArgOperand(11);
-    Result.Mask = CI.getArgOperand(12);
+    Result.DDirXdX = CI.getArgOperand(9);
+    Result.DDirXdY = CI.getArgOperand(10);
+    Result.DDirYdX = CI.getArgOperand(11);
+    Result.DDirYdY = CI.getArgOperand(12);
+    Result.DDirZdX = CI.getArgOperand(13);
+    Result.DDirZdY = CI.getArgOperand(14);
+    Result.ArrayLayer = CI.getArgOperand(15);
+    Result.Lod = CI.getArgOperand(16);
+    Result.UseExplicitLod = CI.getArgOperand(17);
+    Result.Mask = CI.getArgOperand(18);
     break;
   case ImageCallKind::Store2D:
   case ImageCallKind::Store2DI32:
@@ -1661,3 +1685,26 @@ feme::cpu::getOrSynthesizeSample2DDerivatives(IRBuilderBase &B,
           feme::createStageDerivative(B, feme::StageOpKind::DerivativeYCoarse,
                                       V)};
 }
+
+CubeDirectionDerivatives feme::cpu::getOrSynthesizeSampleCubeDerivatives(
+    IRBuilderBase &B, Function &Caller, Value *DirX, Value *DirY,
+    Value *DirZ) {
+  std::optional<feme::ShaderStage> Stage = feme::getShaderStage(Caller);
+  if (Stage != feme::ShaderStage::Fragment) {
+    Value *Zero = ConstantFP::get(B.getFloatTy(), 0.0);
+    return {Zero, Zero, Zero, Zero, Zero, Zero};
+  }
+  return {feme::createStageDerivative(B, feme::StageOpKind::DerivativeXCoarse,
+                                      DirX),
+          feme::createStageDerivative(B, feme::StageOpKind::DerivativeYCoarse,
+                                      DirX),
+          feme::createStageDerivative(B, feme::StageOpKind::DerivativeXCoarse,
+                                      DirY),
+          feme::createStageDerivative(B, feme::StageOpKind::DerivativeYCoarse,
+                                      DirY),
+          feme::createStageDerivative(B, feme::StageOpKind::DerivativeXCoarse,
+                                      DirZ),
+          feme::createStageDerivative(B, feme::StageOpKind::DerivativeYCoarse,
+                                      DirZ)};
+}
+

@@ -5696,6 +5696,14 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DArrayV4I32(
 typedef struct {
   uint32_t Face;
   float U, V;
+  // (Roadmap L56) The un-normalized numerator/denominator this face's own
+  // (U, V) division came from, before the final `0.5f * (./Major + 1.0f)`
+  // remap below -- exposed only so `femeRTComputeCubeUVDerivatives` can
+  // apply the same quotient-rule chain to a caller's own per-invocation
+  // direction-vector derivatives that this function applies to the
+  // direction vector's own raw (X, Y, Z) components. `RawMajor` is
+  // already clamped away from zero the same way `Major` below is.
+  float RawU, RawV, RawMajor;
 } FemeRTCubeFace;
 
 __attribute__((always_inline)) static FemeRTCubeFace
@@ -5740,9 +5748,109 @@ femeRTSelectCubeFace(float X, float Y, float Z) {
   }
   if (Major == 0.0f)
     Major = 1.0f; // Degenerate direction: avoid a division by zero.
+  R.RawU = U;
+  R.RawV = V;
+  R.RawMajor = Major;
   R.U = 0.5f * (U / Major + 1.0f);
   R.V = 0.5f * (V / Major + 1.0f);
   return R;
+}
+
+// (Roadmap L56) The screen-space partial derivatives of the face-local
+// `(U, V)` coordinate `femeRTSelectCubeFace` computed for `Face`, given
+// the caller's own per-invocation screen-space partial derivatives of the
+// direction vector's raw `(X, Y, Z)` components -- `DXdX`/`DYdX`/`DZdX`
+// with respect to the screen-space X axis, `DXdY`/`DYdY`/`DZdY` with
+// respect to Y (the same quad-based finite differences
+// `getOrSynthesizeSample2DDerivatives` already synthesizes for a `Plain2D`
+// sample's own `(DUdX, DUdY, DVdX, DVdY)`, applied here to the direction
+// vector's three components instead of two already-face-local
+// coordinates). This is what lets `femeRTPlanImplicitLod` -- otherwise
+// unmodified, and already exhaustively tested against `Plain2D`'s own
+// anisotropic-filtering CTS group -- compute a real, non-always-zero
+// implicit LOD for a `Cube`/`CubeArray` sample: previously, every
+// implicit-LOD cube sample resolved to mip level 0 unconditionally (no
+// derivative of any kind was ever threaded through), which a real
+// `dEQP-VK.texture.filtering.cube.combinations.linear_mipmap_linear.*`
+// re-run confirmed was the actual root cause of that whole CTS group's
+// 0/25 failure, not a bug in the trilinear blend arithmetic itself.
+//
+// Each face's own `(U, V) = (RawU, RawV) / RawMajor` is a ratio of two
+// signed direction-vector components (or their negation, which the
+// quotient rule handles identically since `d(-f)/dp == -df/dp`), so the
+// same per-face sign/axis-selection table `femeRTSelectCubeFace` uses for
+// `X`/`Y`/`Z` themselves applies unchanged to their derivatives; the
+// ordinary calculus quotient rule, `d(N/M)/dp = (dN/dp*M - N*dM/dp)/M^2`,
+// then turns those into `d(U)/dp`/`d(V)/dp` (the outer `0.5f*(./Major+1)`
+// remap's own derivative is just that result scaled by 0.5, since the
+// `+1.0f` term is constant).
+typedef struct {
+  float DUdX, DUdY, DVdX, DVdY;
+} FemeRTCubeUVDerivatives;
+
+__attribute__((always_inline)) static FemeRTCubeUVDerivatives
+femeRTComputeCubeUVDerivatives(uint32_t Face, float RawU, float RawV,
+                               float RawMajor, float DXdX, float DXdY,
+                               float DYdX, float DYdY, float DZdX,
+                               float DZdY) {
+  float DRawUdX, DRawUdY, DRawVdX, DRawVdY, DRawMajordX, DRawMajordY;
+  switch (Face) {
+  case 0: // +X: U=-Z, V=-Y, Major=X.
+    DRawUdX = -DZdX;
+    DRawUdY = -DZdY;
+    DRawVdX = -DYdX;
+    DRawVdY = -DYdY;
+    DRawMajordX = DXdX;
+    DRawMajordY = DXdY;
+    break;
+  case 1: // -X: U=Z, V=-Y, Major=-X.
+    DRawUdX = DZdX;
+    DRawUdY = DZdY;
+    DRawVdX = -DYdX;
+    DRawVdY = -DYdY;
+    DRawMajordX = -DXdX;
+    DRawMajordY = -DXdY;
+    break;
+  case 2: // +Y: U=X, V=Z, Major=Y.
+    DRawUdX = DXdX;
+    DRawUdY = DXdY;
+    DRawVdX = DZdX;
+    DRawVdY = DZdY;
+    DRawMajordX = DYdX;
+    DRawMajordY = DYdY;
+    break;
+  case 3: // -Y: U=X, V=-Z, Major=-Y.
+    DRawUdX = DXdX;
+    DRawUdY = DXdY;
+    DRawVdX = -DZdX;
+    DRawVdY = -DZdY;
+    DRawMajordX = -DYdX;
+    DRawMajordY = -DYdY;
+    break;
+  case 4: // +Z: U=X, V=-Y, Major=Z.
+    DRawUdX = DXdX;
+    DRawUdY = DXdY;
+    DRawVdX = -DYdX;
+    DRawVdY = -DYdY;
+    DRawMajordX = DZdX;
+    DRawMajordY = DZdY;
+    break;
+  default: // 5, -Z: U=-X, V=-Y, Major=-Z.
+    DRawUdX = -DXdX;
+    DRawUdY = -DXdY;
+    DRawVdX = -DYdX;
+    DRawVdY = -DYdY;
+    DRawMajordX = -DZdX;
+    DRawMajordY = -DZdY;
+    break;
+  }
+  float InvMajorSq = 1.0f / (RawMajor * RawMajor);
+  FemeRTCubeUVDerivatives D;
+  D.DUdX = 0.5f * (DRawUdX * RawMajor - RawU * DRawMajordX) * InvMajorSq;
+  D.DUdY = 0.5f * (DRawUdY * RawMajor - RawU * DRawMajordY) * InvMajorSq;
+  D.DVdX = 0.5f * (DRawVdX * RawMajor - RawV * DRawMajordX) * InvMajorSq;
+  D.DVdY = 0.5f * (DRawVdY * RawMajor - RawV * DRawMajordY) * InvMajorSq;
+  return D;
 }
 
 // (Roadmap L53) Vulkan's own spec-mandated default cube-map filtering
@@ -6075,6 +6183,41 @@ femeRTSampleCmpCubeAtLevel(const FemeRTImageDescriptor *Img,
   return Top + (Bottom - Top) * S.Wy;
 }
 
+// (Roadmap L56) Shared by both `femeCpuImageSampleCubeV4F32` and
+// `femeCpuImageSampleCubeArrayV4F32` below: an explicit-LOD sample's
+// `ClampedLod` is the same simple bias-and-clamp `femeRTComputeClampedLod`
+// already computes for every other shape; an implicit-LOD sample instead
+// needs a real, non-always-zero LOD derived from this sample's own
+// screen-space footprint -- computed by turning the caller's own raw
+// direction-vector derivatives into face-local `(U, V)` derivatives
+// (`femeRTComputeCubeUVDerivatives`) and feeding those into the same
+// `femeRTPlanImplicitLod` a `Plain2D` implicit sample already uses
+// unmodified. Before this fix, every implicit-LOD cube(-array) sample
+// used the `UseExplicitLod=0` branch of `femeRTComputeClampedLod` alone,
+// which always resolves to `Lod=0` (mip level 0) regardless of any real
+// minification -- the actual root cause of
+// `dEQP-VK.texture.filtering.cube.combinations.linear_mipmap_linear.*`'s
+// 0/25 failure (confirmed via a real `deqp-vk` capture showing this
+// sample path never receives the fragment stage's own screen-space
+// derivatives at all, unlike `Plain2D`'s roadmap H7i path).
+__attribute__((always_inline)) static float
+femeRTComputeCubeClampedLod(const FemeRTImageDescriptor *Img,
+                           const FemeRTSamplerDescriptor *Samp,
+                           FemeRTCubeFace CF, float Lod, _Bool UseExplicitLod,
+                           float DDirXdX, float DDirXdY, float DDirYdX,
+                           float DDirYdY, float DDirZdX, float DDirZdY,
+                           float MinLodClamp) {
+  if (UseExplicitLod)
+    return femeRTComputeClampedLod(Lod, /*UseExplicitLod=*/1, Samp,
+                                   MinLodClamp);
+  FemeRTCubeUVDerivatives D = femeRTComputeCubeUVDerivatives(
+      CF.Face, CF.RawU, CF.RawV, CF.RawMajor, DDirXdX, DDirXdY, DDirYdX,
+      DDirYdY, DDirZdX, DDirZdY);
+  return femeRTPlanImplicitLod(Img, Samp, D.DUdX, D.DUdY, D.DVdX, D.DVdY,
+                              MinLodClamp)
+      .ClampedLod;
+}
+
 // `feme.cpu.image.sample.cube.v4f32` (roadmap H7b-a): samples a
 // `TextureCube` sampled image at direction vector `(DirX, DirY, DirZ)`,
 // converted to a face index (addressed as `femeRTSamplePoint2D`/
@@ -6088,19 +6231,27 @@ femeRTSampleCmpCubeAtLevel(const FemeRTImageDescriptor *Img,
 // across the shared cube edge instead, matching Vulkan's own
 // spec-mandated default seamless cube-map filtering behaviour (see that
 // function's own comment, and `femeRTRemapCubeEdgeCoords` above it).
+// `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY` (roadmap
+// L56) are the caller's own screen-space partial derivatives of the
+// direction vector's three components, consulted only for an
+// implicit-LOD sample (`femeRTComputeCubeClampedLod` above); a caller
+// with none to give (a non-fragment stage, or an explicit-LOD sample)
+// passes zero constants.
 FemeRTv4f32 femeCpuImageSampleCubeV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float Lod, _Bool UseExplicitLod, float MinLodClamp,
-    _Bool Mask) asm("feme.cpu.image.sample.cube.v4f32");
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float Lod, _Bool UseExplicitLod,
+    float MinLodClamp, _Bool Mask) asm("feme.cpu.image.sample.cube.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float Lod, _Bool UseExplicitLod, float MinLodClamp,
-    _Bool Mask) {
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float Lod, _Bool UseExplicitLod,
+    float MinLodClamp, _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -6112,9 +6263,10 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
   Samp.AddressU = 2; // ClampToEdge -- see comment above.
   Samp.AddressV = 2;
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
-                                            /*InstructionMinLod=*/MinLodClamp);
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  float ClampedLod = femeRTComputeCubeClampedLod(
+      &Img, &Samp, CF, Lod, UseExplicitLod, DDirXdX, DDirXdY, DDirYdX,
+      DDirYdY, DDirZdX, DDirZdY, MinLodClamp);
   return femeRTSampleFilteredCube(&Img, &Samp, CF.U, CF.V, /*LayerBase=*/0,
                                 CF.Face, ClampedLod);
 }
@@ -6132,15 +6284,17 @@ FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float ArrayLayer, float Lod, _Bool UseExplicitLod,
-    _Bool Mask) asm("feme.cpu.image.sample.cubearray.v4f32");
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float ArrayLayer, float Lod,
+    _Bool UseExplicitLod, _Bool Mask) asm("feme.cpu.image.sample.cubearray.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float ArrayLayer, float Lod, _Bool UseExplicitLod,
-    _Bool Mask) {
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float ArrayLayer, float Lod,
+    _Bool UseExplicitLod, _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -6152,9 +6306,10 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
   Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageSampleCubeV4F32.
   Samp.AddressV = 2;
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
-                                            /*InstructionMinLod=*/-__builtin_inff());
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
+  float ClampedLod = femeRTComputeCubeClampedLod(
+      &Img, &Samp, CF, Lod, UseExplicitLod, DDirXdX, DDirXdY, DDirYdX,
+      DDirYdY, DDirZdX, DDirZdY, /*MinLodClamp=*/-__builtin_inff());
   uint32_t NumCubes = Img.ArrayLayers / 6;
   uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);
   return femeRTSampleFilteredCube(&Img, &Samp, CF.U, CF.V,
