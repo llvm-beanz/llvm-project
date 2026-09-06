@@ -497,14 +497,16 @@ constexpr unsigned SPIRVDim3D = 2;
 constexpr unsigned SPIRVDimCube = 3;
 
 /// Returns \p Handle's classification if its type is a single-sampled,
-/// floating-point or 32-bit-integer 2D or Cube `spirv.Image`/
+/// floating-point or 32-bit-integer 1D, 2D, or Cube `spirv.Image`/
 /// `spirv.SignedImage` handle used *with* a sampler -- the shapes
 /// `runtime/CPU`'s sampling/fetch helpers implement (see ImageCalls.h's own
 /// scope note; roadmap H7b-a widened this beyond plain, non-arrayed 2D to
-/// also cover `Texture2DArray`/`TextureCube`/`TextureCubeArray`, recorded in
-/// the returned classification's own `Shape`). Every other dimension, a
-/// multisampled image, and a storage image (`Sampled == 2`, handled
-/// instead by `classifyStorageImage2DHandle` below, roadmap H19a) return
+/// also cover `Texture2DArray`/`TextureCube`/`TextureCubeArray`, and
+/// roadmap L52a further widened it to cover
+/// `Texture1D`/`Texture1DArray`, recorded in the returned classification's
+/// own `Shape`). Every other dimension, a multisampled image, and a
+/// storage image (`Sampled == 2`, handled instead by
+/// `classifyStorageImage2DHandle` below, roadmap H19a) return
 /// `std::nullopt`. An integer-channel handle is classified the same as a
 /// float one here -- `hasOnlySupportedImageUses` (roadmap E26) is what
 /// narrows its *uses* to fetch only, since SPIR-V never legalizes a
@@ -519,7 +521,7 @@ classifySampledImage2DHandle(const CallInst &Handle) {
       HandleTy->getNumIntParameters() != 6)
     return std::nullopt;
   unsigned Dim = HandleTy->getIntParameter(0);
-  if (Dim != SPIRVDim2D && Dim != SPIRVDimCube)
+  if (Dim != SPIRVDim1D && Dim != SPIRVDim2D && Dim != SPIRVDimCube)
     return std::nullopt;
   // [Dim, Depth, Arrayed, MS, Sampled, Format]: a multisampled image needs
   // a per-sample coordinate the runtime's sampling/fetch helpers do not
@@ -534,7 +536,9 @@ classifySampledImage2DHandle(const CallInst &Handle) {
   if (!ChannelType->isFloatTy() && !ChannelType->isIntegerTy(32))
     return std::nullopt; // No other channel shape is decodable today.
   ImageShape Shape;
-  if (Dim == SPIRVDim2D)
+  if (Dim == SPIRVDim1D)
+    Shape = Arrayed ? ImageShape::Array1D : ImageShape::Plain1D;
+  else if (Dim == SPIRVDim2D)
     Shape = Arrayed ? ImageShape::Array2D : ImageShape::Plain2D;
   else
     Shape = Arrayed ? ImageShape::CubeArray : ImageShape::Cube;
@@ -854,11 +858,20 @@ bool isSupportedOffset(const Value *Offset, ImageShape Shape,
 /// (the array layer as its own float/integer third component); `Cube`
 /// samples a 3-component direction vector; `CubeArray` samples a
 /// 4-component one (direction plus a float array-layer 4th component).
+/// Roadmap L52a: `Plain1D` samples a bare scalar (1-component, no vector
+/// wrapping -- see `isCoordN`'s own comment); `Array1D` samples a
+/// 2-component one (the array layer as its own float second component).
+/// Neither shape's own `OpImageFetch` (`getpointer`) path is accepted yet
+/// below -- only its ordinary sample intrinsic is -- since this session's
+/// own real CTS-driven scope is ordinary sampling only (no real failing
+/// case exercises a 1D `texelFetch` today); a future row can lift this
+/// restriction the same way `Array2D`'s own fetch path already works.
 bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                                ImageShape Shape) {
   unsigned SampleCoordWidth =
-      Shape == ImageShape::CubeArray ? 4
+      Shape == ImageShape::CubeArray                               ? 4
       : (Shape == ImageShape::Array2D || Shape == ImageShape::Cube) ? 3
+      : Shape == ImageShape::Plain1D                                ? 1
                                                                      : 2;
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
@@ -938,8 +951,10 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     }
 
 
-    if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray)
-      return false; // No fetch shape exists for Cube/CubeArray.
+    if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray ||
+        Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D)
+      return false; // No fetch shape exists for Cube/CubeArray/Plain1D/
+                    // Array1D yet (roadmap L52a: ordinary sampling only).
     if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
       return false;
     unsigned FetchCoordWidth = Shape == ImageShape::Array2D ? 3 : 2;
@@ -2058,6 +2073,29 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         Value *ExplicitLodFlag = Builder.getInt1(ExplicitLod);
         Value *SamplerIndex =
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
+        // Roadmap L52a: `Plain1D`/`Array1D` are handled separately, before
+        // the generic `C0`/`C1` extraction below, since `Plain1D`'s own
+        // coordinate is a bare scalar float (see `isCoordN`'s own comment
+        // on why SPIR-V never vector-wraps a single-component coordinate),
+        // not a vector `CreateExtractElement` could be applied to.
+        if (Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D) {
+          CallInst *NewSample1DCall;
+          if (Shape == ImageShape::Plain1D) {
+            NewSample1DCall =
+                createSample1D(Builder, Env, ImageIndex, SamplerIndex, Coord,
+                              Lod, ExplicitLodFlag, Mask, CI->getName());
+          } else {
+            Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
+            Value *ArrayLayer =
+                Builder.CreateExtractElement(Coord, uint64_t{1});
+            NewSample1DCall = createSample1DArray(
+                Builder, Env, ImageIndex, SamplerIndex, U, ArrayLayer, Lod,
+                ExplicitLodFlag, Mask, CI->getName());
+          }
+          CI->replaceAllUsesWith(NewSample1DCall);
+          CI->eraseFromParent();
+          continue;
+        }
         Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
         Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
         CallInst *NewCall;
@@ -2142,18 +2180,21 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         }
         case ImageShape::Plain1D:
         case ImageShape::Array1D:
+          // Unreachable: handled by the early `continue` above, before
+          // this switch is ever entered.
+          llvm_unreachable("Plain1D/Array1D handled before this switch");
         case ImageShape::Plain3D:
         case ImageShape::Plain2DMS:
         case ImageShape::Array2DMS:
           // None of these shapes is ever reached here:
           // `classifySampledImage2DHandle` (unlike
           // `classifyStorageImage2DHandle`, roadmap H19c/H19e/H19g/H19m)
-          // never produces a `Plain1D`/`Array1D`/`Plain3D`/`Plain2DMS`/
-          // `Array2DMS` shape for a *sampled* image handle -- only a
-          // storage-image handle can be 1D/3D/multisampled today.
+          // never produces a `Plain3D`/`Plain2DMS`/`Array2DMS` shape for a
+          // *sampled* image handle -- only a storage-image handle can be
+          // 3D or multisampled today.
           llvm_unreachable(
-              "no sampled-image shape produces Plain1D/Array1D/Plain3D/"
-              "Plain2DMS/Array2DMS");
+              "no sampled-image shape produces Plain3D/Plain2DMS/"
+              "Array2DMS");
         }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
