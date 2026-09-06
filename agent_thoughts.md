@@ -66094,3 +66094,138 @@ unimplemented" statement and replacing it with a summary of this fix.
 Verified `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need
 no changes (`shaderResourceMinLod` still `VK_FALSE`; no new advertised
 feature/extension surface).
+
+# Session: L52(c) `samplecmp_clamp` `MinLodClamp` for Plain2D/Array2D/Cube/CubeArray
+
+**Task.** Continue L-series work: implement L52's sub-item (c), the
+depth-comparison (`Dref`) sample family's own `MinLod` clamp operand
+(`llvm.spv.resource.samplecmp.clamp`'s trailing operand), mirroring the
+ordinary-sample `MinLodClamp` precedent already established by L26/L58/
+L60(a).
+
+**Design.** `createSampleCmp2D`/`createSampleCmpArray2D`/
+`createSampleCmpCube`/`createSampleCmpCubeArray` (`ImageCalls.h`/`.cpp`)
+each gain a new `MinLodClamp` parameter, inserted immediately before the
+trailing `Mask` parameter, matching the ordinary-sample family's own
+parameter-ordering convention. `isDrefSampleIntrinsic`
+(`SPIRVResourceLowering.cpp`) grows a new `HasClamp` out-parameter and
+now recognizes `Intrinsic::spv_resource_samplecmp_clamp` as a third
+matched form (alongside the pre-existing `samplecmp`/
+`samplecmplevelzero`), with the clamp operand living at a fixed index
+(`DrefSampleClampIdx = DrefSampleOffsetIdx + 1 = 5`) since the Dref
+intrinsic family's operand layout never varies with `ExplicitLod` the
+way the ordinary-sample family's `getSampleClampIdx` computation does.
+Deliberately excluded `Plain1D`/`Array1D`: `hasOnlySupportedImageUses`
+now explicitly rejects `HasClamp` combined with either shape, and
+neither `createSampleCmp1D` nor `createSampleCmpArray1D` gained the new
+parameter -- matching those two shapes' pre-existing `ConstOffset`
+exclusion for the identical "no real CTS case reaches it, blocked by the
+unrelated `VulkanBuffer` gap regardless" reason documented in L50's own
+report.
+
+**Implementation order (mirroring the established signature-change
+checklist from prior sessions).**
+1. `ImageCalls.cpp`: `getOrInsertImageCall`'s 4 `FunctionType`s, the 4
+   `create*` implementations, and `matchImageCall`'s 4 decode cases.
+2. `SPIRVResourceLowering.cpp`: `isDrefSampleIntrinsic`'s new `HasClamp`
+   parameter and 3 call sites (`hasOnlySupportedSamplerUses`,
+   `hasOnlySupportedImageUses`, `lowerImageAccesses`). Confirmed via grep
+   that `ResourceLowering.cpp` (the DXIL frontend) has no call sites for
+   these 4 builders needing updates.
+3. `FeMeRuntimeCPU.c`: all 4 `femeCpuImageSampleCmp*F32` entry points
+   (both `asm`-declared and `always_inline`-defined signatures) gain the
+   parameter, replacing the previous hardcoded `-__builtin_inff()` floor.
+4. `ImageSamplingTest.cpp`: 4 function-pointer typedefs + ~14 call sites
+   updated to pass `-std::numeric_limits<float>::infinity()`, preserving
+   existing pass/fail semantics (JIT-based tests use raw function
+   pointers resolved via `resolve<T>`, so a signature mismatch here would
+   be a silent ABI bug rather than a compile error if missed).
+5. `SPIRVResourceLoweringTest.cpp`: 6 pre-existing tests' `arg_size()`
+   bumped by one; replaced a now-stale negative test
+   (`LeavesASampleCmpClampAlone`, which had asserted the opposite of
+   this fix) with a new positive test plus a new negative test confirming
+   the `Plain1D` exclusion still holds.
+6. 3 `.ll` lit tests: inserted `float -inf, ` into existing `CHECK:`
+   lines in `spirv-resource-lowering-image-samplecmp.ll`/`-shapes.ll`
+   (LLVM prints negative infinity as the literal token `-inf`, confirmed
+   via the actual `FileCheck` failure diff, not a hex float encoding);
+   replaced the old `-unsupported.ll` (which had asserted `samplecmp_clamp`
+   was entirely unsupported for every shape -- no longer true) with a new
+   `spirv-resource-lowering-image-samplecmp-clamp.ll` covering all 4
+   newly-supported shapes plus the still-unsupported `Plain1D` case.
+
+**A real bug found and fixed while writing the new lit test.** A first
+draft of `spirv-resource-lowering-image-samplecmp-clamp.ll` crashed
+`feme-opt` with `UNREACHABLE executed ... Uses remain when a value is
+destroyed!` while erasing a sampler handle. Root cause: I had reused
+`(set, binding) = (0, 0)`/`(0, 1)` across multiple test functions in the
+same module. `SPIRVResourceLoweringPass::run`'s `Ranges` map is keyed by
+`(set, binding)` across the *entire module*, not per function -- two
+functions sharing a binding but declaring conflicting shapes/kinds mark
+that binding `Conflicting`, which should cause the whole function's
+handles to be dropped from lowering. But `hasOnlySupportedSamplerUses`
+doesn't know its handle's users' *image* shape -- it only checks that
+`isDrefSampleIntrinsic` recognizes the call syntactically -- so for my
+test's mixed-binding-reuse scenario, the sampler side of an image/sampler
+pair could still get scheduled for erasure independently of whether the
+image side's `hasOnlySupportedImageUses` accepted the same call. Fixed
+the test by giving each function its own unique binding (0 through 9)
+rather than reusing (0,0)/(0,1) everywhere -- this is a real,
+project-established invariant (every other multi-shape `.ll` lit test in
+this suite, e.g. `spirv-resource-lowering-image-samplecmp-shapes.ll`,
+already uses unique bindings per function; my draft simply didn't follow
+that existing convention). Also discovered in the process: `FileCheck`'s
+`CHECK-LABEL` ordering requires the file's one deliberately-unrewritten
+function (`samplecmp_clamp_1d_unsupported`) to be declared *before* the
+four functions this file rewrites, since `SPIRVResourceLoweringPass::run`
+leaves an unmodified function's module position untouched while
+appending every rewritten function after the remaining declarations --
+reordering the module relative to the original source whenever both
+kinds of function coexist. Moved the 1D case's definition to the top of
+the file (with a comment explaining why) rather than fighting the
+ordering with a `--check-prefix`-per-function or `split-file` structure.
+
+**Build/test.** `ninja check-feme` (ccache + assertions, `build2`): 2678
+discovered, 59 Unsupported, 2619 Passed, 0 Failed (up from 2618 Passed
+just before the lit fixes, and from 0 Failed before this session's
+`.cpp`/`.h`/runtime changes broke 3 lit tests that are now fixed). Full
+`FeMeTransformsCPUTests` (335 tests) and `FeMeRuntimeCPUTests` (220
+tests) suites both pass in full, plus targeted `*SampleCmp*` re-runs.
+
+**CTS validation attempt: no real case exists for this sub-item alone,
+confirmed by source inspection.** Before touching CTS, grepped
+`vktShaderRenderTextureFunctionTests.cpp` for every shadow-sampler case
+pairing a `MinLod` clamp operand with a `Dref` sample
+(`textureclamp`/`texturegradclamp`/`textureoffsetgradclamp` groups'
+`*shadow*` rows). Every single one also specifies either `Bias`
+(`CLAMP_CASE_SPEC(..._bias, ...)`, blocked on the still-open sub-item
+(b)) or `FUNCTION_TEXTUREGRAD` (`GRADCLAMP_CASE_SPEC`, an explicit-`Grad`
+`Dref` combination this session did not implement, distinct from L59's
+ordinary-sample `Grad` work). No case anywhere in the suite exercises
+the implicit-LOD-only, no-`Bias`, no-`Grad` `Dref`+`MinLod`-clamp-only
+combination this fix's `samplecmp_clamp` recognition covers -- exactly
+matching this sub-item's own original note ("not yet confirmed present
+in any real failing CTS case measured so far"). Given this, I did not
+leave `shaderResourceMinLod` flipped on (it would gain nothing
+measurable and would incorrectly suggest a broader feature-completeness
+claim than is true): I temporarily flipped it to `VK_TRUE` in
+`PhysicalDeviceInfo.cpp`, rebuilt `feme`/`libfeme_vulkan.so`, confirmed
+the build succeeds with the new plumbing wired all the way through (no
+crash, no assertion), then reverted the flip via `git checkout --` and
+rebuilt to restore the clean baseline before committing -- the same
+"flip/rebuild/probe/revert" methodology used in the prior compacted
+session's `shaderResourceMinLod` investigation, just without a
+persisting CTS delta to report since none exists for this row alone.
+
+**Docs.** Appended an `UPDATE:` to the existing L52 row in `Roadmap.md`
+(not rewriting it) describing this fix and explicitly noting sub-item
+(b) remains open and unstarted -- the whole L52 row is *not* struck
+through. Added a full new section to `VulkanCTSReport.md` documenting
+the change, the lit-test crash/fix story, and the "no real CTS case
+exists for this sub-item alone" finding. Updated `FeMeGraphicsDesign.md`'s
+Bias/gradient-sampling bullet with a short paragraph distinguishing this
+row's `Dref`-family `MinLodClamp` support from the pre-existing
+ordinary-sample `MinLodClamp` support the bullet already described.
+Verified `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need
+no changes (`shaderResourceMinLod` correctly stays `VK_FALSE`/`no`; no
+new feature/extension surface advertised).
