@@ -184,6 +184,17 @@ using Sample1DArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                  uint32_t, uint32_t, float, float, float,
                                  float, float, bool, float, float, bool,
                                  void *);
+/// Roadmap L66(a): the `Texture3D` counterpart of `Sample1DFn` -- a real
+/// `(U, V, W)` coordinate plus its own screen-space derivative triple
+/// (`DUdX`/`DUdY`, `DVdX`/`DVdY`, `DWdX`/`DWdY`), still no `Bias`/
+/// `MinLodClamp`/`ConstOffset` operand (see `ImageCallKind::Sample3D`'s
+/// own doc for why -- ordinary sampling only, mirroring `Sample1DFn`'s
+/// own original scope before roadmap L61(c) grew a `Bias`/`MinLodClamp`
+/// pair for that shape).
+using Sample3DFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                            const FemeSamplerDescriptor *, uint32_t, uint32_t,
+                            uint32_t, float, float, float, float, float, float,
+                            float, float, float, float, bool, bool, void *);
 /// Roadmap L54: the depth-comparison counterpart of `Sample1DFn`,
 /// mirroring `SampleCmpFn`'s relationship to `SampleFn` -- a single `U`
 /// coordinate, and no `ConstOffset` (see `ImageCallKind::SampleCmp1D`'s
@@ -2942,6 +2953,95 @@ TEST_F(ImageSamplingTest, Sample1DArrayMinLodClampRaisesImplicitLevel) {
      /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false,
      /*Bias=*/0.0f, /*MinLodClamp=*/1.0f, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
+}
+
+// Roadmap L66(a): ordinary (non-comparison) `Texture3D` sampling --
+// isolating the new `Sample3D` filtering path (`femeRTSampleFiltered3D`
+// and friends) independent of the already-tested 1D/2D filtering/
+// addressing math above.
+
+TEST_F(ImageSamplingTest, Sample3DPointSampleReadsExactTexel) {
+  // Point-sampling the corner texel (1,1,1) of a 2x2x2 volume (normalized
+  // U=V=W=0.75) must read that texel exactly, with no blending from any
+  // neighbor -- mirroring `Sample1DPointSampleReadsExactTexel`'s own
+  // precedent, extended to a third axis.
+  float Storage[2][2][2][4] = {
+      {{{0, 0, 0, 0}, {0, 0, 0, 0}}, {{0, 0, 0, 0}, {0, 0, 0, 0}}},
+      {{{0, 0, 0, 0}, {0, 0, 0, 0}}, {{0, 0, 0, 0}, {9, 9, 9, 9}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage3D(Storage, sizeof(Storage), 2, 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample3DFn Fn = resolve<Sample3DFn>(
+      addWrapper("sample_3d", "feme.cpu.image.sample.3d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, 0.75f, 0.75f, /*DUdX=*/0.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
+     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Mask=*/true,
+     Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
+  EXPECT_FLOAT_EQ(Out[1], 9.0f);
+  EXPECT_FLOAT_EQ(Out[2], 9.0f);
+  EXPECT_FLOAT_EQ(Out[3], 9.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample3DLinearBlendsEightTexels) {
+  // Sampling exactly at the shared corner of all 8 texels of a 2x2x2
+  // volume must average all 8 equally -- the real trilinear counterpart
+  // of `LinearSampleBlendsFourTexels`'s own bilinear precedent, exercising
+  // `femeRTSampleLinear3D`'s full 8-corner blend (two bilinear blends at
+  // Z0/Z1, then a final blend along W) rather than just its 2D halves.
+  float Storage[2][2][2][4] = {
+      {{{0, 0, 0, 0}, {2, 2, 2, 2}}, {{4, 4, 4, 4}, {6, 6, 6, 6}}},
+      {{{8, 8, 8, 8}, {10, 10, 10, 10}}, {{12, 12, 12, 12}, {14, 14, 14, 14}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage3D(Storage, sizeof(Storage), 2, 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample3DFn Fn = resolve<Sample3DFn>(
+      addWrapper("sample_3d", "feme.cpu.image.sample.3d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.5f, /*DUdX=*/0.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
+     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Mask=*/true,
+     Out);
+  // Average of 0,2,4,6,8,10,12,14 is 7.
+  EXPECT_FLOAT_EQ(Out[0], 7.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample3DInactiveLaneReadsZero) {
+  // Mirrors `Sample1DInactiveLaneReadsZero`'s own `Mask=false` convention.
+  float Storage[1][1][1][4] = {{{{1, 2, 3, 4}}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage3D(Storage, sizeof(Storage), 1, 1, 1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample3DFn Fn = resolve<Sample3DFn>(
+      addWrapper("sample_3d", "feme.cpu.image.sample.3d.v4f32"));
+  float Out[4] = {9, 9, 9, 9};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.5f, /*DUdX=*/0.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
+     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true,
+     /*Mask=*/false, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 0.0f);
 }
 
 // Roadmap L54: depth-comparison `Texture1D`/`Texture1DArray` sampling --
