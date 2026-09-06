@@ -335,7 +335,6 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(NumStores, 4u);
 }
 
-
 // Roadmap H6g-b-a-i-a-i: glslang can spell a storage buffer block directly
 // as a fixed-layout struct whose members are fixed-size arrays/vectors,
 // rather than `dxc`'s one-member runtime-array wrapper. Once
@@ -995,7 +994,8 @@ TEST(SPIRVResourceLoweringTest, LowersScalarF32TexelBufferToScalarTypedCalls) {
   EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesUnsupportedTexelElementVectorWidthUnchanged) {
+TEST(SPIRVResourceLoweringTest,
+     LeavesUnsupportedTexelElementVectorWidthUnchanged) {
   // Only a scalar or a full <4 x T> are supported (see
   // `isSupportedTexelElementType`'s comment) -- neither `dxc` nor glslang
   // ever emits a <2 x T>/<3 x T> texel-buffer access, but a partial vector
@@ -1115,8 +1115,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampledImageAndSamplerPairToImageSample) {
     EXPECT_FALSE(isa<InsertValueInst>(&I) || isa<ExtractValueInst>(&I));
 }
 
-TEST(SPIRVResourceLoweringTest,
-     LowersCombinedSampledImageHandleToImageSample) {
+TEST(SPIRVResourceLoweringTest, LowersCombinedSampledImageHandleToImageSample) {
   // Roadmap H13d: the shape `ResourceAddressOfPattern` produces for an
   // ordinary GLSL `uniform sampler2D` declaration -- a single
   // `handlefrombinding` call whose own result type is already the combined
@@ -1160,7 +1159,7 @@ TEST(SPIRVResourceLoweringTest,
     if (auto *CI = dyn_cast<CallInst>(&I))
       if (Function *Callee = CI->getCalledFunction())
         EXPECT_NE(Callee->getIntrinsicID(),
-                 Intrinsic::spv_resource_handlefrombinding);
+                  Intrinsic::spv_resource_handlefrombinding);
   }
 }
 
@@ -1470,8 +1469,9 @@ TEST(SPIRVResourceLoweringTest, LowersCubeSampledImageToImageSampleCube) {
     EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(ArgNo))->isZero());
 }
 
-TEST(SPIRVResourceLoweringTest,
-     LowersCubeSampledImageToImageSampleCubeWithRealDerivativesInFragmentStage) {
+TEST(
+    SPIRVResourceLoweringTest,
+    LowersCubeSampledImageToImageSampleCubeWithRealDerivativesInFragmentStage) {
   // Roadmap L56: the same shape as `LowersCubeSampledImageToImageSampleCube`
   // above, but `main` now carries a real `feme.shader.stage` `Fragment`
   // attribute -- the one stage GLSL/HLSL's own implicit `texture()`/
@@ -1519,7 +1519,8 @@ TEST(SPIRVResourceLoweringTest,
   }
 }
 
-TEST(SPIRVResourceLoweringTest, LowersCubeArraySampledImageToImageSampleCubeArray) {
+TEST(SPIRVResourceLoweringTest,
+     LowersCubeArraySampledImageToImageSampleCubeArray) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(<4 x float> %dirandlayer) {
@@ -1542,8 +1543,7 @@ TEST(SPIRVResourceLoweringTest, LowersCubeArraySampledImageToImageSampleCubeArra
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  CallInst *Sample =
-      findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32");
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
   //  dir_x, dir_y, dir_z, ddirxdx, ddirxdy, ddirydx, ddirydy, ddirzdx,
@@ -1908,7 +1908,6 @@ TEST(SPIRVResourceLoweringTest, LowersSampleClampToPlain2DMinLodClamp) {
   EXPECT_EQ(Sample->getArgOperand(17)->getName(), "clamp");
 }
 
-
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasToPlain2DBias) {
   // Roadmap L58: `llvm.spv.resource.samplebias` (SPIR-V's own ordinary,
   // non-comparison `Bias` image operand) lowers the same as a plain
@@ -2069,11 +2068,16 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToCubeDerivatives) {
     return dyn_cast<ExtractElementInst>(V);
   };
   const ExtractElementInst *DDirXdX = GetExtractIndex(Sample->getArgOperand(9));
-  const ExtractElementInst *DDirXdY = GetExtractIndex(Sample->getArgOperand(10));
-  const ExtractElementInst *DDirYdX = GetExtractIndex(Sample->getArgOperand(11));
-  const ExtractElementInst *DDirYdY = GetExtractIndex(Sample->getArgOperand(12));
-  const ExtractElementInst *DDirZdX = GetExtractIndex(Sample->getArgOperand(13));
-  const ExtractElementInst *DDirZdY = GetExtractIndex(Sample->getArgOperand(14));
+  const ExtractElementInst *DDirXdY =
+      GetExtractIndex(Sample->getArgOperand(10));
+  const ExtractElementInst *DDirYdX =
+      GetExtractIndex(Sample->getArgOperand(11));
+  const ExtractElementInst *DDirYdY =
+      GetExtractIndex(Sample->getArgOperand(12));
+  const ExtractElementInst *DDirZdX =
+      GetExtractIndex(Sample->getArgOperand(13));
+  const ExtractElementInst *DDirZdY =
+      GetExtractIndex(Sample->getArgOperand(14));
   ASSERT_TRUE(DDirXdX && DDirXdY && DDirYdX && DDirYdY && DDirZdX && DDirZdY);
   EXPECT_EQ(DDirXdX->getVectorOperand()->getName(), "dpdx");
   EXPECT_EQ(cast<ConstantInt>(DDirXdX->getIndexOperand())->getZExtValue(), 0u);
@@ -2283,6 +2287,122 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2d.v4f32"));
 }
 
+TEST(SPIRVResourceLoweringTest, LowersSampleGradToPlain1DDerivatives) {
+  // Roadmap L65: `llvm.spv.resource.samplegrad` against a `Plain1D`
+  // handle now lowers a real (dPdx, dPdy) derivative pair through to
+  // `createSample1D`'s own `DUdX`/`DUdY` operands (added by roadmap L63
+  // for synthesized implicit-LOD derivatives), mirroring `Plain2D`'s own
+  // `LowersSampleGradToPlain2DDerivatives` precedent -- `Plain1D`'s
+  // single addressed coordinate component is a bare scalar float (see
+  // `isCoordN`'s own comment), so its `Grad` derivative is too; no
+  // `ExtractElementInst` unpacking is needed the way `Plain2D`'s 2-wide
+  // vector derivatives require. Previously `hasOnlySupportedImageUses`
+  // rejected `Grad` against this shape outright.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(float %u, float %dpdx, float %dpdy) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp1d(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplegrad(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %u, float %dpdx,
+          float %dpdy, <1 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp1d(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4f32");
+  ASSERT_TRUE(Sample);
+  ASSERT_EQ(Sample->arg_size(), 14u);
+  EXPECT_EQ(Sample->getArgOperand(7)->getName(), "dpdx");
+  EXPECT_EQ(Sample->getArgOperand(8)->getName(), "dpdy");
+  // A `Grad` sample is never an explicit-LOD sample of its own; the
+  // unused `Lod` operand stays the usual `0.0` placeholder.
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(10))->isZero());
+}
+
+TEST(SPIRVResourceLoweringTest, LowersSampleGradToArray1DDerivatives) {
+  // Roadmap L65: the `Array1D` counterpart immediately above. Roadmap
+  // L64's own `GradDerivativeWidth` computation gives an arrayed shape a
+  // derivative one component narrower than its own sample coordinate --
+  // `Array1D`'s 2-component `(U, ArrayLayer)` coordinate therefore pairs
+  // with a 1-component (bare scalar) derivative, identical in shape to
+  // `Plain1D`'s own, since neither ever differentiates the array layer.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x float> %uandlayer, float %dpdx, float %dpdy) {
+      %img = call target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1darr(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp1darr(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplegrad(
+          target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %uandlayer, float %dpdx,
+          float %dpdy, <1 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1darr(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp1darr(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32");
+  ASSERT_TRUE(Sample);
+  ASSERT_EQ(Sample->arg_size(), 15u);
+  EXPECT_EQ(Sample->getArgOperand(8)->getName(), "dpdx");
+  EXPECT_EQ(Sample->getArgOperand(9)->getName(), "dpdy");
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LeavesAPlain1DSampleGradWithVectorDerivativesAlone) {
+  // Roadmap L65: the negative counterpart of
+  // `LowersSampleGradToPlain1DDerivatives` above. `Plain1D`'s own
+  // single addressed coordinate component is a bare scalar float (SPIR-V
+  // never vector-wraps a 1-component coordinate, per `isCoordN`'s own
+  // comment); a `Grad` derivative that is instead a 1-element *vector*
+  // must still be rejected, since `isCoordN(N=1)` checks the scalar type
+  // directly rather than unwrapping a `FixedVectorType`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(float %u, <1 x float> %dpdx, <1 x float> %dpdy) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp1d(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplegrad(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %u, <1 x float> %dpdx,
+          <1 x float> %dpdy, <1 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp1d(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1d.v4f32"));
+}
+
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasToCubeArrayBias) {
   // Roadmap L60(a): the same `Bias` operand also lowers against
   // `CubeArray`, widening `Bias`'s own roadmap L58 `Plain2D`/`Cube`-only
@@ -2314,8 +2434,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasToCubeArrayBias) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  CallInst *Sample =
-      findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32");
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32");
   ASSERT_TRUE(Sample);
   ASSERT_EQ(Sample->arg_size(), 21u);
   EXPECT_EQ(Sample->getArgOperand(18)->getName(), "bias");
@@ -2348,8 +2467,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleClampToCubeArrayMinLodClamp) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  CallInst *Sample =
-      findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32");
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32");
   ASSERT_TRUE(Sample);
   ASSERT_EQ(Sample->arg_size(), 21u);
   EXPECT_EQ(Sample->getArgOperand(19)->getName(), "clamp");
@@ -2389,19 +2507,23 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToCubeArrayDerivatives) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  CallInst *Sample =
-      findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32");
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32");
   ASSERT_TRUE(Sample);
   ASSERT_EQ(Sample->arg_size(), 21u);
   auto GetExtractIndex = [](Value *V) -> const ExtractElementInst * {
     return dyn_cast<ExtractElementInst>(V);
   };
   const ExtractElementInst *DDirXdX = GetExtractIndex(Sample->getArgOperand(9));
-  const ExtractElementInst *DDirXdY = GetExtractIndex(Sample->getArgOperand(10));
-  const ExtractElementInst *DDirYdX = GetExtractIndex(Sample->getArgOperand(11));
-  const ExtractElementInst *DDirYdY = GetExtractIndex(Sample->getArgOperand(12));
-  const ExtractElementInst *DDirZdX = GetExtractIndex(Sample->getArgOperand(13));
-  const ExtractElementInst *DDirZdY = GetExtractIndex(Sample->getArgOperand(14));
+  const ExtractElementInst *DDirXdY =
+      GetExtractIndex(Sample->getArgOperand(10));
+  const ExtractElementInst *DDirYdX =
+      GetExtractIndex(Sample->getArgOperand(11));
+  const ExtractElementInst *DDirYdY =
+      GetExtractIndex(Sample->getArgOperand(12));
+  const ExtractElementInst *DDirZdX =
+      GetExtractIndex(Sample->getArgOperand(13));
+  const ExtractElementInst *DDirZdY =
+      GetExtractIndex(Sample->getArgOperand(14));
   ASSERT_TRUE(DDirXdX && DDirXdY && DDirYdX && DDirYdY && DDirZdX && DDirZdY);
   EXPECT_EQ(DDirXdX->getVectorOperand()->getName(), "dpdx");
   EXPECT_EQ(cast<ConstantInt>(DDirXdX->getIndexOperand())->getZExtValue(), 0u);
@@ -2500,7 +2622,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpLevelZeroToImageSampleCmp) {
   EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(9))->isOne());
 }
 
-TEST(SPIRVResourceLoweringTest, LowersSampleCmpClampToImageSampleCmpWithMinLodClamp) {
+TEST(SPIRVResourceLoweringTest,
+     LowersSampleCmpClampToImageSampleCmpWithMinLodClamp) {
   // Roadmap L52(c): `spv_resource_samplecmp_clamp`'s own trailing `clamp`
   // operand is now recognized by `isDrefSampleIntrinsic`, mirroring
   // `isSampleIntrinsic`'s own `HasMinLodClamp` precedent for an ordinary
@@ -2749,7 +2872,8 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(SampleCmp->getArgOperand(12)->getName(), "clamp");
 }
 
-TEST(SPIRVResourceLoweringTest, LowersSampleCmpWithNonzeroOffsetToImageSampleCmp) {
+TEST(SPIRVResourceLoweringTest,
+     LowersSampleCmpWithNonzeroOffsetToImageSampleCmp) {
   // Roadmap L50d: `createSampleCmp2D` now has a real `OffsetX`/`OffsetY`
   // pair, mirroring `createSample2D`'s own roadmap L26 support -- a
   // `samplecmp` with a real, nonzero `ConstOffset` against `Plain2D` now
@@ -2785,8 +2909,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpWithNonzeroOffsetToImageSampleCmp
             -1);
 }
 
-TEST(SPIRVResourceLoweringTest,
-    LeavesASampleCmpCubeWithNonzeroOffsetAlone) {
+TEST(SPIRVResourceLoweringTest, LeavesASampleCmpCubeWithNonzeroOffsetAlone) {
   // Roadmap L50d: unlike `Plain2D`/`Array2D`, `Cube` can never carry a
   // real `ConstOffset` at all (SPIR-V forbids it against `Dim::Cube`, see
   // `isSupportedOffset`'s own comment) -- so a `samplecmp` against `Cube`
@@ -2866,7 +2989,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpArray2DToImageSampleCmpArray2D) {
 }
 
 TEST(SPIRVResourceLoweringTest,
-    LowersSampleCmpArray2DWithNonzeroOffsetToImageSampleCmpArray2D) {
+     LowersSampleCmpArray2DWithNonzeroOffsetToImageSampleCmpArray2D) {
   // Roadmap L50d: `createSampleCmpArray2D` now has a real `OffsetX`/
   // `OffsetY` pair too, mirroring `createSampleCmp2D`'s own new support
   // -- a `samplecmp` against `Array2D` with a real, nonzero `ConstOffset`
@@ -2940,7 +3063,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpCubeToImageSampleCmpCube) {
   EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "dref");
 }
 
-TEST(SPIRVResourceLoweringTest, LowersSampleCmpCubeArrayToImageSampleCmpCubeArray) {
+TEST(SPIRVResourceLoweringTest,
+     LowersSampleCmpCubeArrayToImageSampleCmpCubeArray) {
   // Roadmap L48: a `samplecmp` against `CubeArray` (`Dim::Cube`,
   // `Arrayed == 1`) with a zero offset now lowers to
   // `feme.cpu.image.samplecmp.cubearray.f32` -- `CubeArray`'s own
@@ -3063,7 +3187,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpArray1DToImageSampleCmpArray1D) {
   EXPECT_EQ(SampleCmp->getArgOperand(10)->getName(), "dref");
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesASampleCmpAgainstPlain1DWithWrongCoordWidthAlone) {
+TEST(SPIRVResourceLoweringTest,
+     LeavesASampleCmpAgainstPlain1DWithWrongCoordWidthAlone) {
   // Roadmap L54: unlike the test above, a `samplecmp` against `Plain1D`
   // whose Coordinate is *not* the real, capture-confirmed 3-wide vector
   // (e.g. a 2-wide one, the naive "ordinary width + 1" guess this session
@@ -3095,8 +3220,6 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpAgainstPlain1DWithWrongCoordWidt
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.1d.f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
-
-
 
 TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonSpecCoordWidthAlone) {
   // Roadmap L46: per SPIR-V's own validation rules, a depth-comparison
@@ -3239,7 +3362,8 @@ TEST(SPIRVResourceLoweringTest, LowersStorageImageWriteToImageStore) {
   EXPECT_EQ(mdInt(Resources->getOperand(0), 2), 0u);
 }
 
-TEST(SPIRVResourceLoweringTest, LowersIntegerStorageImageWriteToImageStoreV4I32) {
+TEST(SPIRVResourceLoweringTest,
+     LowersIntegerStorageImageWriteToImageStoreV4I32) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main(<2 x i32> %coord, <4 x i32> %texel) {
@@ -3293,7 +3417,8 @@ TEST(SPIRVResourceLoweringTest, LowersStorageImageLoadStoreToBothCalls) {
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2d.v4f32"));
 }
 
-TEST(SPIRVResourceLoweringTest, LowersArrayedStorageImageWriteToImageStoreArray) {
+TEST(SPIRVResourceLoweringTest,
+     LowersArrayedStorageImageWriteToImageStoreArray) {
   // Roadmap H19b: an arrayed (`Arrayed == 1`) storage image handle
   // (`Sampled == 2`) now classifies as `HandleKind::StorageImage2D` with
   // `ImageShape::Array2D`, and its `OpImageWrite` (a `store` through
@@ -3349,8 +3474,7 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darray.v4i32"));
 }
 
-TEST(SPIRVResourceLoweringTest,
-     LowersArrayedStorageImageLoadStoreToBothCalls) {
+TEST(SPIRVResourceLoweringTest, LowersArrayedStorageImageLoadStoreToBothCalls) {
   // An arrayed storage image handle used for both a load (`OpImageRead`)
   // and a store (`OpImageWrite`) lowers each independently to the arrayed
   // helper pair.
@@ -3413,8 +3537,9 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.2darrayms.v4f32"));
 }
 
-TEST(SPIRVResourceLoweringTest,
-     LowersIntegerArrayedMultisampledStorageImageWriteToImageStoreArrayMSV4I32) {
+TEST(
+    SPIRVResourceLoweringTest,
+    LowersIntegerArrayedMultisampledStorageImageWriteToImageStoreArrayMSV4I32) {
   // The integer-format counterpart: `OpTypeImage` with an integer sampled
   // type lowers to `feme.cpu.image.store.2darrayms.v4i32` instead.
   LLVMContext Ctx;
@@ -3640,7 +3765,8 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.1d.v4i32"));
 }
 
-TEST(SPIRVResourceLoweringTest, LowersArray1DStorageImageWriteToImageStoreArray) {
+TEST(SPIRVResourceLoweringTest,
+     LowersArray1DStorageImageWriteToImageStoreArray) {
   // Roadmap H19e: an arrayed 1D storage image handle (`Dim == Dim1D == 0`,
   // `Arrayed == 1`) now classifies as `HandleKind::StorageImage2D` with
   // `ImageShape::Array1D`, and its `OpImageWrite` (a `store` through
@@ -4006,7 +4132,8 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesAMultisampledCubeStorageImageHandleAlone) {
+TEST(SPIRVResourceLoweringTest,
+     LeavesAMultisampledCubeStorageImageHandleAlone) {
   // A multisampled cube storage image is still rejected -- H19d only
   // widens the `Dim` axis to accept `DimCube`, not `MS` (roadmap H19g's
   // scope).
@@ -4087,9 +4214,9 @@ TEST(SPIRVResourceLoweringTest,
     if (auto *CI = dyn_cast<CallInst>(&I)) {
       if (Function *Callee = CI->getCalledFunction()) {
         EXPECT_NE(Callee->getIntrinsicID(),
-                 Intrinsic::spv_resource_calculate_lod);
+                  Intrinsic::spv_resource_calculate_lod);
         EXPECT_NE(Callee->getIntrinsicID(),
-                 Intrinsic::spv_resource_calculate_lod_unclamped);
+                  Intrinsic::spv_resource_calculate_lod_unclamped);
         if (Callee->getName() == "feme.cpu.image.querylod.2d.v2f32") {
           ++NumQueryLodCalls;
           // (image_heap, count, sampler_heap, count, image_index,
@@ -4198,5 +4325,3 @@ TEST(SPIRVResourceLoweringTest, LeavesAnArrayedQueryLodHandleAlone) {
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.querylod.2d.v2f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
-
-

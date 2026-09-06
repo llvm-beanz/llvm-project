@@ -169,7 +169,7 @@ bool isTexelHandleKind(HandleKind Kind) {
 /// buffer kind) rather than `feme.cpu.image.*`.
 bool isBufferHandleKind(HandleKind Kind) {
   return Kind != HandleKind::SampledImage2D && Kind != HandleKind::Sampler &&
-        Kind != HandleKind::StorageImage2D;
+         Kind != HandleKind::StorageImage2D;
 }
 
 /// The heap \p Kind's descriptors are assigned slots in.
@@ -697,7 +697,7 @@ classifySamplerHandle(const CallInst &Handle) {
 /// same `ExplicitLod`/`HasBias`/`HasGrad`/`HasMinLodClamp` quadruple
 /// rather than every caller re-deriving it.
 bool isSampleIntrinsic(const CallInst &CI, bool &ExplicitLod,
-                      bool &HasMinLodClamp, bool &HasBias, bool &HasGrad) {
+                       bool &HasMinLodClamp, bool &HasBias, bool &HasGrad) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
   if (ID == Intrinsic::spv_resource_sample) {
     ExplicitLod = false;
@@ -794,7 +794,7 @@ unsigned getSampleClampIdx(bool ExplicitLod, bool HasBias, bool HasGrad) {
 /// hlsl-resources/SampleCmp{,LevelZero}.ll`), with `samplecmp_clamp`
 /// appending one more scalar (the clamp) after `offset`.
 bool isDrefSampleIntrinsic(const CallInst &CI, bool &ExplicitLod,
-                          bool &HasClamp, bool &HasBias) {
+                           bool &HasClamp, bool &HasBias) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
   ExplicitLod = false;
   HasClamp = false;
@@ -956,7 +956,7 @@ bool isZeroOffset(const Value *Offset) {
 /// `Plain2D`, 4-wide for `Array2D`), so a single fixed width would reject
 /// one of the two callers.
 bool isSupportedOffset(const Value *Offset, ImageShape Shape,
-                      bool AllowArray2D = false) {
+                       bool AllowArray2D = false) {
   if (Shape != ImageShape::Plain2D &&
       !(AllowArray2D && Shape == ImageShape::Array2D))
     return isZeroOffset(Offset);
@@ -964,7 +964,7 @@ bool isSupportedOffset(const Value *Offset, ImageShape Shape,
     return false;
   const auto *VecTy = dyn_cast<FixedVectorType>(Offset->getType());
   return VecTy && VecTy->getNumElements() >= 2 &&
-        VecTy->getElementType()->isIntegerTy(32);
+         VecTy->getElementType()->isIntegerTy(32);
 }
 
 /// Checks that every use of a sampled-image handle is one this pass can
@@ -999,10 +999,10 @@ bool isSupportedOffset(const Value *Offset, ImageShape Shape,
 bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                                ImageShape Shape) {
   unsigned SampleCoordWidth =
-      Shape == ImageShape::CubeArray                               ? 4
+      Shape == ImageShape::CubeArray                                ? 4
       : (Shape == ImageShape::Array2D || Shape == ImageShape::Cube) ? 3
       : Shape == ImageShape::Plain1D                                ? 1
-                                                                     : 2;
+                                                                    : 2;
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
     if (!CI)
@@ -1012,8 +1012,7 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     bool HasMinLodClamp = false;
     bool HasBias = false;
     bool HasGrad = false;
-    if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias,
-                         HasGrad)) {
+    if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias, HasGrad)) {
       if (IsInteger)
         return false; // No filtered sample over an integer-channel image.
       if (CI->getArgOperand(0) != &Handle)
@@ -1044,7 +1043,7 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
           Shape != ImageShape::Array2D && Shape != ImageShape::Plain1D &&
           Shape != ImageShape::Array1D)
         return false;
-      // Roadmap L59/L60(a): same restriction for `Grad`, mirroring
+      // Roadmap L59/L60(a)/L65: same restriction for `Grad`, mirroring
       // `HasBias` immediately above -- `Plain2D`'s/`Cube`'s/`CubeArray`'s/
       // `Array2D`'s own `createSample2D`/`createSampleCube`/
       // `createSampleCubeArray`/`createSample2DArray` calls all have a
@@ -1054,10 +1053,17 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // `DDirXdX`/... operands `getOrSynthesizeSample2DDerivatives`/
       // `getOrSynthesizeSampleCubeDerivatives` already populate for an
       // implicit-LOD sample, just with the caller's own real values
-      // instead of a synthesized or zeroed one).
+      // instead of a synthesized or zeroed one). Roadmap L65: `Plain1D`/
+      // `Array1D`'s own `createSample1D`/`createSample1DArray` calls
+      // already carry the identical `DUdX`/`DUdY` derivative pair (added
+      // by roadmap L63 for synthesized implicit-LOD derivatives), so a
+      // caller-supplied `Grad` reuses that same pair -- these two shapes
+      // are not a materially bigger prerequisite the way `Plain3D`'s own
+      // still-nonexistent ordinary-sampling infrastructure is.
       if (HasGrad && Shape != ImageShape::Plain2D &&
           Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
-          Shape != ImageShape::Array2D)
+          Shape != ImageShape::Array2D && Shape != ImageShape::Plain1D &&
+          Shape != ImageShape::Array1D)
         return false;
       unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
       // Roadmap L59/L64: `Grad`'s own `dPdx`/`dPdy` operands (indices 3,
@@ -1149,11 +1155,10 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // capture technique against `sampler1darrayshadow_fragment`), but
       // that already matches the generic "+1" rule (`SampleCoordWidth`
       // 2 + 1), so only `Plain1D` needs an explicit override here.
-      unsigned DrefCoordWidth = Shape == ImageShape::Plain1D
-                                  ? 3
-                                  : (SampleCoordWidth + 1 > 4
-                                        ? 4
-                                        : SampleCoordWidth + 1);
+      unsigned DrefCoordWidth =
+          Shape == ImageShape::Plain1D
+              ? 3
+              : (SampleCoordWidth + 1 > 4 ? 4 : SampleCoordWidth + 1);
       if (!isCoordN(CI->getArgOperand(2), DrefCoordWidth, /*Float=*/true) ||
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
           !isSupportedOffset(
@@ -1161,10 +1166,10 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
               /*AllowArray2D=*/true) ||
           (DrefHasBias &&
            !CI->getArgOperand(DrefSampleBiasIdx)->getType()->isFloatTy()) ||
-          (DrefHasClamp && !CI->getArgOperand(getDrefSampleClampIdx(
-                                  DrefHasBias))
-                                ->getType()
-                                ->isFloatTy()) ||
+          (DrefHasClamp &&
+           !CI->getArgOperand(getDrefSampleClampIdx(DrefHasBias))
+                ->getType()
+                ->isFloatTy()) ||
           !CI->getType()->isFloatTy())
         return false;
       continue;
@@ -1190,7 +1195,6 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
         return false;
       continue;
     }
-
 
     if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray ||
         Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D)
@@ -1229,13 +1233,13 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
 /// `Plain2D`'s `(x, y)`, so both fall into the same `else` branch below.
 bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
                                       ImageShape Shape) {
-  unsigned CoordWidth = Shape == ImageShape::Plain1D             ? 1
-                       : Shape == ImageShape::Array2DMS          ? 4
-                       : (Shape == ImageShape::Array2D ||
-                          Shape == ImageShape::Plain3D ||
-                          Shape == ImageShape::Plain2DMS)
-                           ? 3
-                           : 2;
+  unsigned CoordWidth =
+      Shape == ImageShape::Plain1D     ? 1
+      : Shape == ImageShape::Array2DMS ? 4
+      : (Shape == ImageShape::Array2D || Shape == ImageShape::Plain3D ||
+         Shape == ImageShape::Plain2DMS)
+          ? 3
+          : 2;
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
     if (!CI || getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
@@ -1503,8 +1507,8 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
   // `HandleKind::Uniform`/`UniformArray`'s always-read-only-ness (`Writable`
   // above) differs, not this shape itself.
   bool AllowGEPs = Kind == HandleKind::Storage ||
-                  Kind == HandleKind::StorageStruct ||
-                  Kind == HandleKind::Uniform;
+                   Kind == HandleKind::StorageStruct ||
+                   Kind == HandleKind::Uniform;
   const DataLayout &DL = Handle.getModule()->getDataLayout();
   for (const User *U : Handle.users()) {
     const auto *GetPtr = dyn_cast<CallInst>(U);
@@ -1720,11 +1724,10 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
     RangeKey Key{static_cast<uint32_t>(SetC->getZExtValue()),
                  static_cast<uint32_t>(BindingC->getZExtValue()),
                  getResourceClass(Classification->Kind)};
-    Handles.push_back(BoundHandle{CI, Key, Classification->Kind,
-                                  Classification->Stride,
-                                  Classification->ElementStruct,
-                                  Classification->TexelElementType, RangeSize,
-                                  Classification->Shape});
+    Handles.push_back(BoundHandle{
+        CI, Key, Classification->Kind, Classification->Stride,
+        Classification->ElementStruct, Classification->TexelElementType,
+        RangeSize, Classification->Shape});
   }
   return Handles;
 }
@@ -1923,11 +1926,9 @@ Value *lowerRawLoad(IRBuilderBase &Builder, const ResourceCallEnv &Env,
     Value *Result = PoisonValue::get(StructTy);
     for (unsigned I = 0, E = StructTy->getNumElements(); I != E; ++I) {
       Value *FieldOffset = Builder.CreateAdd(
-          Offset,
-          ConstantInt::get(Offset->getType(), SL->getElementOffset(I)));
-      Value *Field =
-          lowerRawLoad(Builder, Env, DescriptorIndex, FieldOffset, Mask,
-                      StructTy->getElementType(I), DL, "");
+          Offset, ConstantInt::get(Offset->getType(), SL->getElementOffset(I)));
+      Value *Field = lowerRawLoad(Builder, Env, DescriptorIndex, FieldOffset,
+                                  Mask, StructTy->getElementType(I), DL, "");
       Result = Builder.CreateInsertValue(Result, Field, I);
     }
     return Result;
@@ -1959,11 +1960,10 @@ void lowerRawStore(IRBuilderBase &Builder, const ResourceCallEnv &Env,
     const StructLayout *SL = DL.getStructLayout(StructTy);
     for (unsigned I = 0, E = StructTy->getNumElements(); I != E; ++I) {
       Value *FieldOffset = Builder.CreateAdd(
-          Offset,
-          ConstantInt::get(Offset->getType(), SL->getElementOffset(I)));
+          Offset, ConstantInt::get(Offset->getType(), SL->getElementOffset(I)));
       Value *Field = Builder.CreateExtractValue(Val, I);
       lowerRawStore(Builder, Env, DescriptorIndex, FieldOffset, Field, Mask,
-                   DL);
+                    DL);
     }
     return;
   }
@@ -1974,8 +1974,7 @@ void lowerRawStore(IRBuilderBase &Builder, const ResourceCallEnv &Env,
       Value *ElemOffset = Builder.CreateAdd(
           Offset, ConstantInt::get(Offset->getType(), I * ElemSize));
       Value *Elem = Builder.CreateExtractValue(Val, I);
-      lowerRawStore(Builder, Env, DescriptorIndex, ElemOffset, Elem, Mask,
-                   DL);
+      lowerRawStore(Builder, Env, DescriptorIndex, ElemOffset, Elem, Mask, DL);
     }
     return;
   }
@@ -2004,8 +2003,8 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
   for (User *U : llvm::make_early_inc_range(Ptr->users())) {
     if (auto *LI = dyn_cast<LoadInst>(U)) {
       IRBuilder<> Builder(LI);
-      Value *Loaded = lowerRawLoad(Builder, Env, DescriptorIndex, Offset,
-                                   Mask, LI->getType(), DL, LI->getName());
+      Value *Loaded = lowerRawLoad(Builder, Env, DescriptorIndex, Offset, Mask,
+                                   LI->getType(), DL, LI->getName());
       LI->replaceAllUsesWith(Loaded);
       LI->eraseFromParent();
       continue;
@@ -2013,7 +2012,7 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
     if (auto *SI = dyn_cast<StoreInst>(U)) {
       IRBuilder<> Builder(SI);
       lowerRawStore(Builder, Env, DescriptorIndex, Offset,
-                   SI->getValueOperand(), Mask, DL);
+                    SI->getValueOperand(), Mask, DL);
       SI->eraseFromParent();
       continue;
     }
@@ -2098,7 +2097,6 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
     GEP->eraseFromParent();
   }
 }
-
 
 /// Rewrites every access through \p BH.Handle -- a `getpointer` call
 /// followed by a load or store, or, for a structured storage block, a GEP
@@ -2194,7 +2192,7 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
           switch (RMW->getOperation()) {
           case AtomicRMWInst::Add:
             Old = createAtomicAddTyped(AtomicBuilder, Env, DescriptorIndex,
-                                      ElementIndex, Val, Mask, RMW->getName());
+                                       ElementIndex, Val, Mask, RMW->getName());
             break;
           case AtomicRMWInst::Sub:
             Old = createAtomicSubTyped(AtomicBuilder, Env, DescriptorIndex,
@@ -2213,24 +2211,24 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
                                        ElementIndex, Val, Mask, RMW->getName());
             break;
           case AtomicRMWInst::Max:
-            Old = createAtomicSMaxTyped(AtomicBuilder, Env, DescriptorIndex,
-                                        ElementIndex, Val, Mask,
-                                        RMW->getName());
+            Old =
+                createAtomicSMaxTyped(AtomicBuilder, Env, DescriptorIndex,
+                                      ElementIndex, Val, Mask, RMW->getName());
             break;
           case AtomicRMWInst::Min:
-            Old = createAtomicSMinTyped(AtomicBuilder, Env, DescriptorIndex,
-                                        ElementIndex, Val, Mask,
-                                        RMW->getName());
+            Old =
+                createAtomicSMinTyped(AtomicBuilder, Env, DescriptorIndex,
+                                      ElementIndex, Val, Mask, RMW->getName());
             break;
           case AtomicRMWInst::UMax:
-            Old = createAtomicUMaxTyped(AtomicBuilder, Env, DescriptorIndex,
-                                        ElementIndex, Val, Mask,
-                                        RMW->getName());
+            Old =
+                createAtomicUMaxTyped(AtomicBuilder, Env, DescriptorIndex,
+                                      ElementIndex, Val, Mask, RMW->getName());
             break;
           case AtomicRMWInst::UMin:
-            Old = createAtomicUMinTyped(AtomicBuilder, Env, DescriptorIndex,
-                                        ElementIndex, Val, Mask,
-                                        RMW->getName());
+            Old =
+                createAtomicUMinTyped(AtomicBuilder, Env, DescriptorIndex,
+                                      ElementIndex, Val, Mask, RMW->getName());
             break;
           case AtomicRMWInst::Xchg:
             Old = createAtomicExchangeTyped(AtomicBuilder, Env, DescriptorIndex,
@@ -2296,8 +2294,9 @@ struct ImageHeapEntry {
 /// guaranteed at collection time that every use is one of these shapes, so
 /// there is no partially-rewritten state to worry about: either the whole
 /// function was accepted, or none of it was.
-void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices,
-                        const ImageCallEnv &Env) {
+void lowerImageAccesses(
+    const MapVector<CallInst *, ImageHeapEntry> &HeapIndices,
+    const ImageCallEnv &Env) {
   LLVMContext &Ctx = Env.ImageHeap->getContext();
   Value *Mask = ConstantInt::getTrue(Ctx);
 
@@ -2311,7 +2310,7 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
       bool HasBias = false;
       bool HasGrad = false;
       if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias,
-                           HasGrad)) {
+                            HasGrad)) {
         // A sample is reached twice -- once from its image handle, once
         // from its sampler handle -- so only rewrite it from the image
         // side, where both descriptor indices are already resolvable.
@@ -2358,54 +2357,58 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // already being true (see `hasOnlySupportedImageUses`'s own
           // updated restriction just above).
           Value *MinLodClamp =
-              HasMinLodClamp
-                  ? CI->getArgOperand(
-                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
-                  : ConstantFP::getInfinity(Builder.getFloatTy(),
-                                            /*Negative=*/true);
-          // Roadmap L63: an implicit-LOD `Plain1D`/`Array1D` sample's
-          // real mip level now needs this sample's own screen-space
+              HasMinLodClamp ? CI->getArgOperand(getSampleClampIdx(
+                                   ExplicitLod, HasBias, HasGrad))
+                             : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                       /*Negative=*/true);
+          // Roadmap L63/L65: an implicit-LOD `Plain1D`/`Array1D` sample's
+          // real mip level needs this sample's own screen-space
           // derivative of its single addressed coordinate component,
-          // synthesized only in the fragment stage, mirroring
-          // `Plain2D`'s own `getOrSynthesizeSample2DDerivatives` handling
-          // above -- an explicit-LOD `textureLod()` ignores them, so zero
-          // constants (no extra IR) are passed instead. `Plain1D`/
-          // `Array1D` never reach this branch with `HasGrad` set (see
-          // `hasOnlySupportedImageUses`'s own restriction), so there is
-          // no caller-supplied-`Grad` case to handle here, unlike
-          // `Plain2D`'s. Computed separately per shape below (not once,
-          // unconditionally, up here) since `Coord` itself is `Array1D`'s
-          // own 2-component `(U, ArrayLayer)` vector, not a bare scalar --
-          // differentiating it directly here (as this code used to)
-          // synthesized a stray, unused, mistyped derivative of the whole
-          // vector for every `Array1D` sample, alongside the real
-          // scalar-`U` one `ArrayD` below already computes correctly.
+          // synthesized only in the fragment stage, mirroring `Plain2D`'s
+          // own `getOrSynthesizeSample2DDerivatives` handling above -- an
+          // explicit-LOD `textureLod()` ignores them, so zero constants
+          // (no extra IR) are passed instead. Roadmap L65: a `Grad`
+          // sample instead supplies its own real derivative directly,
+          // mirroring `Plain2D`'s own `HasGrad` handling -- `GradDPdx`/
+          // `GradDPdy` are already bare scalar floats here (roadmap L64's
+          // `GradDerivativeWidth` computation gives both `Plain1D` and
+          // the arrayed `Array1D` a 1-wide derivative, since neither
+          // shape's own single addressed coordinate component is a
+          // vector `hasOnlySupportedImageUses`'s `isCoordN` would need to
+          // unpack), so no `CreateExtractElement` is needed the way
+          // `Plain2D`'s 2-wide derivative vectors require. Computed
+          // separately per shape below (not once, unconditionally, up
+          // here) since `Coord` itself is `Array1D`'s own 2-component
+          // `(U, ArrayLayer)` vector, not a bare scalar -- differentiating
+          // it directly here (as this code used to) synthesized a stray,
+          // unused, mistyped derivative of the whole vector for every
+          // `Array1D` sample, alongside the real scalar-`U` one `ArrayD`
+          // below already computes correctly.
           CallInst *NewSample1DCall;
           if (Shape == ImageShape::Plain1D) {
             SampleDerivatives1D D =
-                !ExplicitLod
+                HasGrad ? SampleDerivatives1D{GradDPdx, GradDPdy}
+                : !ExplicitLod
                     ? getOrSynthesizeSample1DDerivatives(
                           Builder, *CI->getFunction(), Coord)
-                    : SampleDerivatives1D{ConstantFP::get(
-                                             Builder.getFloatTy(), 0.0),
-                                         ConstantFP::get(
-                                             Builder.getFloatTy(), 0.0)};
+                    : SampleDerivatives1D{
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0)};
             NewSample1DCall = createSample1D(
-                Builder, Env, ImageIndex, SamplerIndex, Coord, D.DUdX,
-                D.DUdY, Lod, ExplicitLodFlag, Bias, MinLodClamp, Mask,
-                CI->getName());
+                Builder, Env, ImageIndex, SamplerIndex, Coord, D.DUdX, D.DUdY,
+                Lod, ExplicitLodFlag, Bias, MinLodClamp, Mask, CI->getName());
           } else {
             Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
             Value *ArrayLayer =
                 Builder.CreateExtractElement(Coord, uint64_t{1});
             SampleDerivatives1D ArrayD =
-                !ExplicitLod
-                    ? getOrSynthesizeSample1DDerivatives(
-                          Builder, *CI->getFunction(), U)
-                    : SampleDerivatives1D{ConstantFP::get(
-                                             Builder.getFloatTy(), 0.0),
-                                         ConstantFP::get(
-                                             Builder.getFloatTy(), 0.0)};
+                HasGrad ? SampleDerivatives1D{GradDPdx, GradDPdy}
+                : !ExplicitLod
+                    ? getOrSynthesizeSample1DDerivatives(Builder,
+                                                         *CI->getFunction(), U)
+                    : SampleDerivatives1D{
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0)};
             NewSample1DCall = createSample1DArray(
                 Builder, Env, ImageIndex, SamplerIndex, U, ArrayLayer,
                 ArrayD.DUdX, ArrayD.DUdY, Lod, ExplicitLodFlag, Bias,
@@ -2434,30 +2437,29 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // `Coord`'s own `C0`/`C1` are.
           SampleDerivatives D =
               HasGrad
-                  ? SampleDerivatives{
-                        Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
-                        Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
-                        Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
-                        Builder.CreateExtractElement(GradDPdy, uint64_t{1})}
-              : !ExplicitLod
-                  ? getOrSynthesizeSample2DDerivatives(
-                        Builder, *CI->getFunction(), C0, C1)
-                  : SampleDerivatives{ConstantFP::get(Builder.getFloatTy(),
-                                                      0.0),
-                                     ConstantFP::get(Builder.getFloatTy(),
-                                                      0.0),
-                                     ConstantFP::get(Builder.getFloatTy(),
-                                                      0.0),
-                                     ConstantFP::get(Builder.getFloatTy(),
-                                                      0.0)};
+                  ? SampleDerivatives{Builder.CreateExtractElement(GradDPdx,
+                                                                   uint64_t{0}),
+                                      Builder.CreateExtractElement(GradDPdy,
+                                                                   uint64_t{0}),
+                                      Builder.CreateExtractElement(GradDPdx,
+                                                                   uint64_t{1}),
+                                      Builder.CreateExtractElement(GradDPdy,
+                                                                   uint64_t{1})}
+              : !ExplicitLod ? getOrSynthesizeSample2DDerivatives(
+                                   Builder, *CI->getFunction(), C0, C1)
+                             : SampleDerivatives{
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0)};
           // Roadmap L26: SPIR-V's own `ConstOffset` image operand -- a
           // compile-time-constant `<2 x i32>` `hasOnlySupportedImageUses`
           // already validated via `isSupportedOffset` -- is a real,
           // possibly-nonzero texel offset now, not always the trivial
           // zero case; split its two components the same way `Coord`'s
           // own `C0`/`C1` are.
-          Value *Offset =
-              CI->getArgOperand(getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
+          Value *Offset = CI->getArgOperand(
+              getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
           Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
           Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
           // Roadmap L26: SPIR-V's own `MinLod` image operand
@@ -2466,11 +2468,10 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // -- negative infinity (a no-op floor) for every other sample
           // intrinsic, which has no such operand of its own.
           Value *MinLodClamp =
-              HasMinLodClamp
-                  ? CI->getArgOperand(
-                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
-                  : ConstantFP::getInfinity(Builder.getFloatTy(),
-                                            /*Negative=*/true);
+              HasMinLodClamp ? CI->getArgOperand(getSampleClampIdx(
+                                   ExplicitLod, HasBias, HasGrad))
+                             : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                       /*Negative=*/true);
           NewCall = createSample2D(Builder, Env, ImageIndex, SamplerIndex, C0,
                                    C1, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod,
                                    ExplicitLodFlag, Bias, OffsetX, OffsetY,
@@ -2491,32 +2492,30 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // L33).
           SampleDerivatives D =
               HasGrad
-                  ? SampleDerivatives{
-                        Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
-                        Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
-                        Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
-                        Builder.CreateExtractElement(GradDPdy, uint64_t{1})}
-              : !ExplicitLod
-                  ? getOrSynthesizeSample2DDerivatives(
-                        Builder, *CI->getFunction(), C0, C1)
-                  : SampleDerivatives{ConstantFP::get(Builder.getFloatTy(),
-                                                      0.0),
-                                     ConstantFP::get(Builder.getFloatTy(),
-                                                      0.0),
-                                     ConstantFP::get(Builder.getFloatTy(),
-                                                      0.0),
-                                     ConstantFP::get(Builder.getFloatTy(),
-                                                      0.0)};
+                  ? SampleDerivatives{Builder.CreateExtractElement(GradDPdx,
+                                                                   uint64_t{0}),
+                                      Builder.CreateExtractElement(GradDPdy,
+                                                                   uint64_t{0}),
+                                      Builder.CreateExtractElement(GradDPdx,
+                                                                   uint64_t{1}),
+                                      Builder.CreateExtractElement(GradDPdy,
+                                                                   uint64_t{1})}
+              : !ExplicitLod ? getOrSynthesizeSample2DDerivatives(
+                                   Builder, *CI->getFunction(), C0, C1)
+                             : SampleDerivatives{
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0)};
           Value *MinLodClamp =
-              HasMinLodClamp
-                  ? CI->getArgOperand(
-                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
-                  : ConstantFP::getInfinity(Builder.getFloatTy(),
-                                            /*Negative=*/true);
-          NewCall = createSample2DArray(
-              Builder, Env, ImageIndex, SamplerIndex, C0, C1, ArrayLayer,
-              D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod, ExplicitLodFlag, Bias,
-              MinLodClamp, Mask, CI->getName());
+              HasMinLodClamp ? CI->getArgOperand(getSampleClampIdx(
+                                   ExplicitLod, HasBias, HasGrad))
+                             : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                       /*Negative=*/true);
+          NewCall = createSample2DArray(Builder, Env, ImageIndex, SamplerIndex,
+                                        C0, C1, ArrayLayer, D.DUdX, D.DUdY,
+                                        D.DVdX, D.DVdY, Lod, ExplicitLodFlag,
+                                        Bias, MinLodClamp, Mask, CI->getName());
           break;
         }
         case ImageShape::Cube: {
@@ -2527,11 +2526,10 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // can still carry a `MinLod` clamp, since `Dim` has no bearing
           // on that operand's own legality.
           Value *MinLodClamp =
-              HasMinLodClamp
-                  ? CI->getArgOperand(
-                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
-                  : ConstantFP::getInfinity(Builder.getFloatTy(),
-                                            /*Negative=*/true);
+              HasMinLodClamp ? CI->getArgOperand(getSampleClampIdx(
+                                   ExplicitLod, HasBias, HasGrad))
+                             : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                       /*Negative=*/true);
           // Roadmap L56: an implicit-LOD cube sample's real mip level
           // needs the caller's own screen-space derivatives of the raw
           // direction vector (C0, C1, C2) -- unlike Plain2D, the
@@ -2546,24 +2544,27 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // 3-component direction-derivative vectors directly, mirroring
           // Plain2D's own `HasGrad` handling above.
           CubeDirectionDerivatives CD =
-              HasGrad
-                  ? CubeDirectionDerivatives{
-                        Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
-                        Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
-                        Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
-                        Builder.CreateExtractElement(GradDPdy, uint64_t{1}),
-                        Builder.CreateExtractElement(GradDPdx, uint64_t{2}),
-                        Builder.CreateExtractElement(GradDPdy, uint64_t{2})}
-              : !ExplicitLod
-                  ? getOrSynthesizeSampleCubeDerivatives(
-                        Builder, *CI->getFunction(), C0, C1, C2)
-                  : CubeDirectionDerivatives{
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0)};
+              HasGrad ? CubeDirectionDerivatives{Builder.CreateExtractElement(
+                                                     GradDPdx, uint64_t{0}),
+                                                 Builder.CreateExtractElement(
+                                                     GradDPdy, uint64_t{0}),
+                                                 Builder.CreateExtractElement(
+                                                     GradDPdx, uint64_t{1}),
+                                                 Builder.CreateExtractElement(
+                                                     GradDPdy, uint64_t{1}),
+                                                 Builder.CreateExtractElement(
+                                                     GradDPdx, uint64_t{2}),
+                                                 Builder.CreateExtractElement(
+                                                     GradDPdy, uint64_t{2})}
+              : !ExplicitLod ? getOrSynthesizeSampleCubeDerivatives(
+                                   Builder, *CI->getFunction(), C0, C1, C2)
+                             : CubeDirectionDerivatives{
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0)};
           NewCall = createSampleCube(
               Builder, Env, ImageIndex, SamplerIndex, C0, C1, C2, CD.DDirXdX,
               CD.DDirXdY, CD.DDirYdX, CD.DDirYdY, CD.DDirZdX, CD.DDirZdY, Lod,
@@ -2578,34 +2579,36 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // rationale (SPIR-V's `MinLod` image operand has no
           // dimensionality restriction).
           Value *MinLodClamp =
-              HasMinLodClamp
-                  ? CI->getArgOperand(
-                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
-                  : ConstantFP::getInfinity(Builder.getFloatTy(),
-                                            /*Negative=*/true);
+              HasMinLodClamp ? CI->getArgOperand(getSampleClampIdx(
+                                   ExplicitLod, HasBias, HasGrad))
+                             : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                       /*Negative=*/true);
           // Roadmap L56: same derivative synthesis as Cube above.
           // Roadmap L60(a): a `Grad` sample instead supplies its own real
           // 3-component direction-derivative vectors directly, mirroring
           // Cube's own `HasGrad` handling above.
           CubeDirectionDerivatives CD =
-              HasGrad
-                  ? CubeDirectionDerivatives{
-                        Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
-                        Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
-                        Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
-                        Builder.CreateExtractElement(GradDPdy, uint64_t{1}),
-                        Builder.CreateExtractElement(GradDPdx, uint64_t{2}),
-                        Builder.CreateExtractElement(GradDPdy, uint64_t{2})}
-              : !ExplicitLod
-                  ? getOrSynthesizeSampleCubeDerivatives(
-                        Builder, *CI->getFunction(), C0, C1, C2)
-                  : CubeDirectionDerivatives{
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0)};
+              HasGrad ? CubeDirectionDerivatives{Builder.CreateExtractElement(
+                                                     GradDPdx, uint64_t{0}),
+                                                 Builder.CreateExtractElement(
+                                                     GradDPdy, uint64_t{0}),
+                                                 Builder.CreateExtractElement(
+                                                     GradDPdx, uint64_t{1}),
+                                                 Builder.CreateExtractElement(
+                                                     GradDPdy, uint64_t{1}),
+                                                 Builder.CreateExtractElement(
+                                                     GradDPdx, uint64_t{2}),
+                                                 Builder.CreateExtractElement(
+                                                     GradDPdy, uint64_t{2})}
+              : !ExplicitLod ? getOrSynthesizeSampleCubeDerivatives(
+                                   Builder, *CI->getFunction(), C0, C1, C2)
+                             : CubeDirectionDerivatives{
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0)};
           NewCall = createSampleCubeArray(
               Builder, Env, ImageIndex, SamplerIndex, C0, C1, C2, CD.DDirXdX,
               CD.DDirXdY, CD.DDirYdX, CD.DDirYdY, CD.DDirZdX, CD.DDirZdY,
@@ -2627,9 +2630,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // never produces a `Plain3D`/`Plain2DMS`/`Array2DMS` shape for a
           // *sampled* image handle -- only a storage-image handle can be
           // 3D or multisampled today.
-          llvm_unreachable(
-              "no sampled-image shape produces Plain3D/Plain2DMS/"
-              "Array2DMS");
+          llvm_unreachable("no sampled-image shape produces Plain3D/Plain2DMS/"
+                           "Array2DMS");
         }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
@@ -2672,10 +2674,9 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         // such operand of their own, mirroring the ordinary-sample
         // `MinLodClamp` fallback above.
         Value *MinLodClamp =
-            DrefHasClamp
-                ? CI->getArgOperand(getDrefSampleClampIdx(DrefHasBias))
-                : ConstantFP::getInfinity(Builder.getFloatTy(),
-                                          /*Negative=*/true);
+            DrefHasClamp ? CI->getArgOperand(getDrefSampleClampIdx(DrefHasBias))
+                         : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                   /*Negative=*/true);
         // Roadmap L52(b): SPIR-V's own `Bias` image operand
         // (`spv_resource_samplecmpbias{,_clamp}`'s bias operand, which
         // `hasOnlySupportedImageUses` already restricted to the same four
@@ -2693,17 +2694,16 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         // (SPIR-V forbids `ConstOffset` against `Dim::Cube`, see
         // `isSupportedOffset`'s own comment), so their own `switch` arms
         // below still pass zero constants directly instead.
-        Value *Offset =
-            CI->getArgOperand(getDrefSampleOffsetIdx(DrefHasBias));
+        Value *Offset = CI->getArgOperand(getDrefSampleOffsetIdx(DrefHasBias));
         Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
         Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
         CallInst *NewCall;
         switch (Shape) {
         case ImageShape::Plain2D:
-          NewCall = createSampleCmp2D(Builder, Env, ImageIndex, SamplerIndex,
-                                      C0, C1, Lod, ExplicitLodFlag, Dref, Bias,
-                                      OffsetX, OffsetY, MinLodClamp, Mask,
-                                      CI->getName());
+          NewCall =
+              createSampleCmp2D(Builder, Env, ImageIndex, SamplerIndex, C0, C1,
+                                Lod, ExplicitLodFlag, Dref, Bias, OffsetX,
+                                OffsetY, MinLodClamp, Mask, CI->getName());
           break;
         case ImageShape::Array2D: {
           Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{2});
@@ -2717,8 +2717,7 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
           NewCall = createSampleCmpCube(Builder, Env, ImageIndex, SamplerIndex,
                                         C0, C1, C2, Lod, ExplicitLodFlag, Dref,
-                                        Bias, MinLodClamp, Mask,
-                                        CI->getName());
+                                        Bias, MinLodClamp, Mask, CI->getName());
           break;
         }
         case ImageShape::CubeArray: {
@@ -2813,7 +2812,6 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         continue;
       }
 
-
       // result is loaded from and/or (roadmap H19a, `StorageImage2D` only)
       // stored to. `hasOnlySupportedImageUses` already rejected this
       // branch for `Cube`/`CubeArray` (no fetch shape exists for either),
@@ -2825,14 +2823,14 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
       // vector to extract from, so `X` is `Coord` itself and there is no
       // `Y`/third component to extract at all.
       Value *X = Shape == ImageShape::Plain1D
-                    ? Coord
-                    : Builder.CreateExtractElement(Coord, uint64_t{0});
+                     ? Coord
+                     : Builder.CreateExtractElement(Coord, uint64_t{0});
       // `Array1D` (roadmap H19e) has no spatial `Y` component at all --
       // its 2-component coordinate is `(x, layer)`, not `(x, y)` -- so `Y`
       // stays null for it too, just like `Plain1D`.
       Value *Y = (Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D)
-                    ? nullptr
-                    : Builder.CreateExtractElement(Coord, uint64_t{1});
+                     ? nullptr
+                     : Builder.CreateExtractElement(Coord, uint64_t{1});
       // The coordinate's own array-layer/depth-slice/sample component: an
       // array layer for `Array1D` (roadmap H19e, the coordinate's 2nd
       // component), `Array2D` (roadmap H19b, the coordinate's 3rd
@@ -2846,14 +2844,13 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
       // never returns a shape that is both arrayed and 3D, nor an
       // ordinary-vs-multisample distinction at this same component;
       // `Array2DMS` alone needs a 4th component too, see `C3` below).
-      Value *C2 = Shape == ImageShape::Array1D
-                     ? Builder.CreateExtractElement(Coord, uint64_t{1})
-                 : (Shape == ImageShape::Array2D ||
-                    Shape == ImageShape::Plain3D ||
-                    Shape == ImageShape::Plain2DMS ||
-                    Shape == ImageShape::Array2DMS)
-                     ? Builder.CreateExtractElement(Coord, uint64_t{2})
-                     : nullptr;
+      Value *C2 =
+          Shape == ImageShape::Array1D
+              ? Builder.CreateExtractElement(Coord, uint64_t{1})
+          : (Shape == ImageShape::Array2D || Shape == ImageShape::Plain3D ||
+             Shape == ImageShape::Plain2DMS || Shape == ImageShape::Array2DMS)
+              ? Builder.CreateExtractElement(Coord, uint64_t{2})
+              : nullptr;
       // `Array2DMS`'s own 4th coordinate component (roadmap H19m): the
       // multisample index, the same concept `Plain2DMS`'s own `C2`
       // carries for the non-arrayed case -- `Array2DMS`'s coordinate is
@@ -2861,8 +2858,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
       // shape's own coordinate, since it is the only shape combining an
       // array layer and a multisample index at once.
       Value *C3 = Shape == ImageShape::Array2DMS
-                     ? Builder.CreateExtractElement(Coord, uint64_t{3})
-                     : nullptr;
+                      ? Builder.CreateExtractElement(Coord, uint64_t{3})
+                      : nullptr;
       for (User *PU : llvm::make_early_inc_range(CI->users())) {
         // `HandleKind::StorageImage2D` (roadmap H19a/H19b/H19c) accepts a
         // `StoreInst` user here too -- `hasOnlySupportedStorageImageUses`
@@ -2883,8 +2880,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
             break;
           case ImageShape::Array1D:
             if (IsInteger)
-              createStore1DArrayI32(StoreBuilder, Env, ImageIndex, X, C2,
-                                    Texel, Mask);
+              createStore1DArrayI32(StoreBuilder, Env, ImageIndex, X, C2, Texel,
+                                    Mask);
             else
               createStore1DArray(StoreBuilder, Env, ImageIndex, X, C2, Texel,
                                  Mask);
@@ -2901,8 +2898,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
               createStore2DArrayI32(StoreBuilder, Env, ImageIndex, X, Y, C2,
                                     Texel, Mask);
             else
-              createStore2DArray(StoreBuilder, Env, ImageIndex, X, Y, C2,
-                                 Texel, Mask);
+              createStore2DArray(StoreBuilder, Env, ImageIndex, X, Y, C2, Texel,
+                                 Mask);
             break;
           case ImageShape::Plain3D:
             if (IsInteger)
@@ -2918,8 +2915,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
             // write-side counterparts of `createLoad2D`/`I32`'s own
             // `Sample` operand.
             if (IsInteger)
-              createStore2DMSI32(StoreBuilder, Env, ImageIndex, X, Y, C2,
-                                 Texel, Mask);
+              createStore2DMSI32(StoreBuilder, Env, ImageIndex, X, Y, C2, Texel,
+                                 Mask);
             else
               createStore2DMS(StoreBuilder, Env, ImageIndex, X, Y, C2, Texel,
                               Mask);
@@ -2932,15 +2929,14 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
             // slot for the other axis.
             if (IsInteger)
               createStore2DArrayMSI32(StoreBuilder, Env, ImageIndex, X, Y, C2,
-                                     C3, Texel, Mask);
+                                      C3, Texel, Mask);
             else
               createStore2DArrayMS(StoreBuilder, Env, ImageIndex, X, Y, C2, C3,
-                                  Texel, Mask);
+                                   Texel, Mask);
             break;
           case ImageShape::Cube:
           case ImageShape::CubeArray:
-            llvm_unreachable(
-                "no storage-image write shape for Cube/CubeArray");
+            llvm_unreachable("no storage-image write shape for Cube/CubeArray");
           }
           SI->eraseFromParent();
           continue;
@@ -2977,20 +2973,20 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
                                     Mask, RMW->getName());
             break;
           case AtomicRMWInst::Max:
-            Old = createAtomicSMax2D(AtomicBuilder, Env, ImageIndex, X, Y,
-                                     Val, Mask, RMW->getName());
+            Old = createAtomicSMax2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
+                                     Mask, RMW->getName());
             break;
           case AtomicRMWInst::Min:
-            Old = createAtomicSMin2D(AtomicBuilder, Env, ImageIndex, X, Y,
-                                     Val, Mask, RMW->getName());
+            Old = createAtomicSMin2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
+                                     Mask, RMW->getName());
             break;
           case AtomicRMWInst::UMax:
-            Old = createAtomicUMax2D(AtomicBuilder, Env, ImageIndex, X, Y,
-                                     Val, Mask, RMW->getName());
+            Old = createAtomicUMax2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
+                                     Mask, RMW->getName());
             break;
           case AtomicRMWInst::UMin:
-            Old = createAtomicUMin2D(AtomicBuilder, Env, ImageIndex, X, Y,
-                                     Val, Mask, RMW->getName());
+            Old = createAtomicUMin2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
+                                     Mask, RMW->getName());
             break;
           case AtomicRMWInst::Xchg:
             Old = createAtomicExchange2D(AtomicBuilder, Env, ImageIndex, X, Y,
@@ -3041,58 +3037,53 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         CallInst *Loaded;
         switch (Shape) {
         case ImageShape::Plain1D:
-          Loaded = IsInteger
-                      ? createLoad1DI32(LoadBuilder, Env, ImageIndex, X,
-                                       LoadBuilder.getInt32(0), Mask,
-                                       LI->getName())
-                      : createLoad1D(LoadBuilder, Env, ImageIndex, X,
-                                    LoadBuilder.getInt32(0),
-                                    LoadBuilder.getInt32(0), Mask,
-                                    LI->getName());
+          Loaded = IsInteger ? createLoad1DI32(LoadBuilder, Env, ImageIndex, X,
+                                               LoadBuilder.getInt32(0), Mask,
+                                               LI->getName())
+                             : createLoad1D(LoadBuilder, Env, ImageIndex, X,
+                                            LoadBuilder.getInt32(0),
+                                            LoadBuilder.getInt32(0), Mask,
+                                            LI->getName());
           break;
         case ImageShape::Array1D:
-          Loaded =
-              IsInteger
-                  ? createLoad1DArrayI32(LoadBuilder, Env, ImageIndex, X, C2,
-                                        LoadBuilder.getInt32(0), Mask,
-                                        LI->getName())
-                  : createLoad1DArray(LoadBuilder, Env, ImageIndex, X, C2,
-                                     LoadBuilder.getInt32(0),
-                                     LoadBuilder.getInt32(0), Mask,
-                                     LI->getName());
+          Loaded = IsInteger
+                       ? createLoad1DArrayI32(LoadBuilder, Env, ImageIndex, X,
+                                              C2, LoadBuilder.getInt32(0), Mask,
+                                              LI->getName())
+                       : createLoad1DArray(LoadBuilder, Env, ImageIndex, X, C2,
+                                           LoadBuilder.getInt32(0),
+                                           LoadBuilder.getInt32(0), Mask,
+                                           LI->getName());
           break;
         case ImageShape::Plain2D:
-          Loaded = IsInteger
-                      ? createLoad2DI32(LoadBuilder, Env, ImageIndex, X, Y,
-                                       LoadBuilder.getInt32(0),
-                                       LoadBuilder.getInt32(0), Mask,
-                                       LI->getName())
-                      : createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
-                                    LoadBuilder.getInt32(0),
-                                    LoadBuilder.getInt32(0), Mask,
-                                    LI->getName());
+          Loaded = IsInteger ? createLoad2DI32(LoadBuilder, Env, ImageIndex, X,
+                                               Y, LoadBuilder.getInt32(0),
+                                               LoadBuilder.getInt32(0), Mask,
+                                               LI->getName())
+                             : createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
+                                            LoadBuilder.getInt32(0),
+                                            LoadBuilder.getInt32(0), Mask,
+                                            LI->getName());
           break;
         case ImageShape::Array2D:
-          Loaded =
-              IsInteger
-                  ? createLoad2DArrayI32(LoadBuilder, Env, ImageIndex, X, Y,
-                                        C2, LoadBuilder.getInt32(0),
-                                        LoadBuilder.getInt32(0), Mask,
-                                        LI->getName())
-                  : createLoad2DArray(LoadBuilder, Env, ImageIndex, X, Y,
-                                      C2, LoadBuilder.getInt32(0),
-                                      LoadBuilder.getInt32(0), Mask,
-                                      LI->getName());
+          Loaded = IsInteger
+                       ? createLoad2DArrayI32(LoadBuilder, Env, ImageIndex, X,
+                                              Y, C2, LoadBuilder.getInt32(0),
+                                              LoadBuilder.getInt32(0), Mask,
+                                              LI->getName())
+                       : createLoad2DArray(LoadBuilder, Env, ImageIndex, X, Y,
+                                           C2, LoadBuilder.getInt32(0),
+                                           LoadBuilder.getInt32(0), Mask,
+                                           LI->getName());
           break;
         case ImageShape::Plain3D:
-          Loaded =
-              IsInteger
-                  ? createLoad3DI32(LoadBuilder, Env, ImageIndex, X, Y, C2,
-                                   LoadBuilder.getInt32(0), Mask,
-                                   LI->getName())
-                  : createLoad3D(LoadBuilder, Env, ImageIndex, X, Y, C2,
-                                LoadBuilder.getInt32(0),
-                                LoadBuilder.getInt32(0), Mask, LI->getName());
+          Loaded = IsInteger ? createLoad3DI32(LoadBuilder, Env, ImageIndex, X,
+                                               Y, C2, LoadBuilder.getInt32(0),
+                                               Mask, LI->getName())
+                             : createLoad3D(LoadBuilder, Env, ImageIndex, X, Y,
+                                            C2, LoadBuilder.getInt32(0),
+                                            LoadBuilder.getInt32(0), Mask,
+                                            LI->getName());
           break;
         case ImageShape::Plain2DMS:
           // Roadmap H19g: `C2` is the real multisample index here, unlike
@@ -3100,13 +3091,12 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // -- `Load2D`/`Load2DI32` already accept a `Sample` operand
           // (roadmap F8c added it to `Load2D` for `subpassLoad`'s
           // explicit-sample form; this row widens `Load2DI32` to match).
-          Loaded = IsInteger
-                      ? createLoad2DI32(LoadBuilder, Env, ImageIndex, X, Y,
-                                       LoadBuilder.getInt32(0), C2, Mask,
-                                       LI->getName())
-                      : createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
-                                    LoadBuilder.getInt32(0), C2, Mask,
-                                    LI->getName());
+          Loaded = IsInteger ? createLoad2DI32(LoadBuilder, Env, ImageIndex, X,
+                                               Y, LoadBuilder.getInt32(0), C2,
+                                               Mask, LI->getName())
+                             : createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
+                                            LoadBuilder.getInt32(0), C2, Mask,
+                                            LI->getName());
           break;
         case ImageShape::Array2DMS:
           // Roadmap H19m: `C2` is the array layer and `C3` is the real
@@ -3118,12 +3108,12 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // `Load2DArray` already had, mirroring how roadmap H19g widened
           // `Load2DI32` to match `Load2D`.
           Loaded = IsInteger
-                      ? createLoad2DArrayI32(LoadBuilder, Env, ImageIndex, X,
-                                            Y, C2, LoadBuilder.getInt32(0),
-                                            C3, Mask, LI->getName())
-                      : createLoad2DArray(LoadBuilder, Env, ImageIndex, X, Y,
-                                         C2, LoadBuilder.getInt32(0), C3,
-                                         Mask, LI->getName());
+                       ? createLoad2DArrayI32(LoadBuilder, Env, ImageIndex, X,
+                                              Y, C2, LoadBuilder.getInt32(0),
+                                              C3, Mask, LI->getName())
+                       : createLoad2DArray(LoadBuilder, Env, ImageIndex, X, Y,
+                                           C2, LoadBuilder.getInt32(0), C3,
+                                           Mask, LI->getName());
           break;
         case ImageShape::Cube:
         case ImageShape::CubeArray:
@@ -3295,8 +3285,8 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
       }
       UsesSamplerHeap |= BH.Kind == HandleKind::Sampler;
       IRBuilder<> Builder(BH.Handle);
-      Value *Index = computeClampedIndex(
-          Builder, BH.Handle->getArgOperand(3), Entry.HeapBase, BH.RangeSize);
+      Value *Index = computeClampedIndex(Builder, BH.Handle->getArgOperand(3),
+                                         Entry.HeapBase, BH.RangeSize);
       ImageHeapIndices[BH.Handle] = ImageHeapEntry{Index, BH.Shape};
     }
     if (!RewroteAny)
