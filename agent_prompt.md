@@ -1,5 +1,5 @@
 ---
-model: claude-sonnet-5
+model: claude-opus-5
 resume: ec2f5570-263a-4b95-917f-6c2230e594cf
 ---
 # Initial Guidelines
