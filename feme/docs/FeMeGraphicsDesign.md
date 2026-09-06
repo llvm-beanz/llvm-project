@@ -2532,7 +2532,9 @@ fields. This is scoped to the plain `Sample2D` shape only -- the one the
 real `dEQP-VK.texture.filtering.2d.*anisotropy*` CTS cases exercise --
 `Sample2DArray`/`SampleCube`/`SampleCubeArray` implicit samples are
 unchanged, still always resolving to mip level 0, a known, pre-existing,
-unrelated limitation left for a later increment. A real
+unrelated limitation left for a later increment (`SampleCube`/
+`SampleCubeArray`'s own share of this limitation was later closed by
+roadmap L56, below; `Sample2DArray`'s remains open). A real
 `dEQP-VK.texture.filtering_anisotropy.*` CTS re-run, however, found this
 filter kernel is never actually reached: every graphics-pipeline case in
 that group (0/128), and in the broader, unrelated
@@ -2554,6 +2556,27 @@ cases, the other 64 honestly `NotSupported` for an unrelated
 compute-format gap). `PhysicalDeviceInfo.cpp` now advertises
 `samplerAnisotropy` (`maxSamplerAnisotropy` raised to `16.0f`, the value
 real GPU drivers typically report).
+
+**Update (roadmap L56, closed):** `SampleCube`/`SampleCubeArray`'s own
+share of the "still always resolving to mip level 0" limitation noted
+just above is now closed too. Since cube face selection
+(`femeRTSelectCubeFace`) is itself a runtime decision -- depending on
+concrete direction-vector values, not known at IR-lowering time --
+face-local UV derivatives can't be synthesized at the IR level the way
+`Plain2D`'s screen-space derivatives are. Instead, a new
+`getOrSynthesizeSampleCubeDerivatives` helper differentiates the raw
+direction vector (`DirX`/`DirY`/`DirZ`) at the IR level (via the same
+`feme.stage.derivative.*` machinery, Fragment-stage-gated identically to
+the `Plain2D` helper), threading 6 new derivatives through
+`createSampleCube`/`createSampleCubeArray`'s new operands into the
+runtime. There, once `femeRTSelectCubeFace` has resolved which face's
+`RawU`/`RawV`/`RawMajor` triple applies, a new
+`femeRTComputeCubeUVDerivatives` helper applies the quotient rule
+(`d(N/M)/dp = (dN/dp*M - N*dM/dp)/M^2`) to produce ordinary face-local
+`dU/dp`/`dV/dp` derivatives, which a new `femeRTComputeCubeClampedLod`
+helper feeds into the already-existing, unmodified
+`femeRTPlanImplicitLod`. `Sample2DArray`'s own share of this limitation
+remains open.
 
 **Update (roadmap H19a, closed):** a storage image (`Sampled == 2`) can now
 be read *and* written, for the plain, non-arrayed, non-multisampled 2D

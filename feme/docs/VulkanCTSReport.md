@@ -27768,3 +27768,132 @@ sweep). L52's own sub-items (b) `Bias`, (c) `samplecmp_clamp`'s `MinLod`
 operand, and (e) the LOD-query derivative intrinsics, and L56's own
 incidentally-discovered trilinear/mipmap cube-filtering bug, all remain
 open, unaffected by this row.
+
+## Roadmap L56: missing implicit-LOD mip selection for `Cube`/`CubeArray` sampling
+
+**Investigated by reading `lowerImageAccesses` directly, not by
+re-testing blend arithmetic.** L53's own incidental discovery left this
+row with a leading hypothesis: a bug in cube-specific trilinear
+(cross-mip-level) blending, or in mip-level selection for a
+`Cube`/`CubeArray` image. That hypothesis was never validated by a real
+reduction and turned out to be wrong.
+
+**Root cause.** `femeCpuImageSampleCubeV4F32`/`CubeArrayV4F32`
+(`FeMeRuntimeCPU.c`) unconditionally hardcoded `Lod = 0.0f` for every
+implicit-LOD sample. Unlike `Plain2D` (roadmap H7i, which synthesizes
+real screen-space derivatives at IR-lowering time via
+`getOrSynthesizeSample2DDerivatives` and threads them through to
+`femeRTPlanImplicitLod`), no derivative-based mip selection existed at
+all for `Cube`/`CubeArray` -- a gap already flagged in `ImageCalls.h`'s
+own doc comment ("Sample2DArray/SampleCube/SampleCubeArray still
+resolve every implicit sample to mip level 0") but never fixed until
+now. With `Lod` pinned to 0, a `linear_mipmap_linear` sampler could
+never select any mip level but the base one, so
+`femeRTSampleFilteredCube`'s own `Trilinear`/`MipPlan.Frac` blend logic
+-- which was correct all along -- never received a nonzero LOD to blend
+across. This affects every `Cube`/`CubeArray` implicit-LOD sample, not
+just the `combinations.linear_mipmap_linear.*` CTS group; that group
+simply happens to be the one whose reference image is sensitive enough
+to base-vs-mip-level content to visibly fail.
+
+**Why `Plain2D`'s approach can't be reused directly.** Cube face
+selection (`femeRTSelectCubeFace`) is itself a runtime decision --
+which of the 6 faces applies depends on the concrete direction-vector
+values at each invocation, not something knowable at IR-lowering time.
+Face-local UV derivatives therefore can't be synthesized at the IR
+level the way `Plain2D`'s screen-space `(u, v)` derivatives are.
+
+**Fix.** Split across IR-lowering and runtime:
+
+- IR level: a new `getOrSynthesizeSampleCubeDerivatives` helper
+  (`ImageCalls.cpp`, Fragment-stage-gated, mirroring the existing 2D
+  helper) differentiates the raw direction vector
+  (`DirX`/`DirY`/`DirZ`) via `feme.stage.derivative.*` calls, producing
+  6 derivatives (`DDirXdX`, `DDirXdY`, `DDirYdX`, `DDirYdY`, `DDirZdX`,
+  `DDirZdY`). `createSampleCube`/`createSampleCubeArray` gained 6 new
+  operands to carry these through (inserted immediately after the
+  direction vector, mirroring `Sample2D`'s own
+  `(u, v, dudx, dudy, dvdx, dvdy, lod, ...)` ordering convention).
+  `lowerImageAccesses` (`SPIRVResourceLowering.cpp`, the Vulkan/SPIR-V
+  frontend) synthesizes real derivatives for an implicit-LOD sample, or
+  passes zero constants for an explicit-LOD sample. A second caller,
+  `ResourceLowering.cpp` (the DXIL frontend), needed the identical
+  update -- discovered mid-session via a build failure after only the
+  SPIR-V frontend was updated first, gated on the existing
+  `IsSample`/`IsSampleLevel` distinction there.
+- Runtime level: `FemeRTCubeFace` (`FeMeRuntimeCPU.c`) gained `RawU`/
+  `RawV`/`RawMajor` fields (the pre-division face-local numerator/
+  denominator triple `femeRTSelectCubeFace` already computed
+  internally, now exposed). A new `femeRTComputeCubeUVDerivatives`
+  helper applies the quotient rule
+  (`d(N/M)/dp = (dN/dp*M - N*dM/dp)/M^2`) to convert the direction-
+  vector derivatives into face-local `dU/dp`/`dV/dp` derivatives, once
+  the face has already been resolved. A new
+  `femeRTComputeCubeClampedLod` helper feeds these into the
+  already-existing, unmodified `femeRTPlanImplicitLod` (previously
+  proven correct against `Plain2D`'s own anisotropic filtering, H7i).
+  `femeCpuImageSampleCubeV4F32`/`CubeArrayV4F32` gained 6 new
+  derivative float parameters each to receive the IR-synthesized
+  values. `SampleCubeArray` has no `MinLodClamp` operand (a
+  pre-existing, intentional asymmetry vs. `SampleCube`); its
+  `femeRTComputeCubeClampedLod` call site passes a hardcoded `-inf`,
+  unaffected by this fix.
+
+**New tests.** 2 `ImageSamplingTest` runtime unit tests:
+`SampleCubeImplicitLodWithNoDerivativesReadsBaseLevel` (zero
+derivatives must still read level 0, confirming no regression) and
+`SampleCubeImplicitLodSelectsCoarserMipFromDerivatives` (a real nonzero
+`DDirYdX` derivative resolves an LOD past the midpoint and reads the
+coarser 1x1 mip -- the core proof the fix works end-to-end). 1 new
+`SPIRVResourceLoweringTest` lowering unit test,
+`LowersCubeSampledImageToImageSampleCubeWithRealDerivativesInFragmentStage`,
+confirming a Fragment-stage caller synthesizes real
+`feme.stage.derivative.*` calls rather than zero constants; the 2
+existing `LowersCube{,Array}SampledImageToImageSampleCube{,Array}`
+tests gained zero-constant assertions for the new operands.
+
+**`ninja check-feme`** (ccache + assertions, `build2`): 2658/2658
+discovered, 59 pre-existing `Unsupported`, 0 `Failed` -- no regressions
+(up by exactly the 3 new tests this row adds).
+
+**Real `deqp-vk` re-run.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.texture.filtering.cube.combinations.linear_mipmap_linear.linear.*.*.seamless" \
+  --deqp-log-filename=l56_mipmap.qpa
+```
+
+**Result: 25/25 Pass** (this row's own motivating group, up from 0/25
+before this fix). A broader sweep of all 4 mip-filter combinations,
+`cube.combinations.*_mipmap_*.*.*.*.seamless` (200 cases), confirms no
+regressions across the wider mipmap-filtering space: **200/200 Pass, 0
+Fail**. Additional spot-checks confirm no regression to unrelated cube
+paths: L53's own single-level (non-mipmap) `linear.linear.repeat.*.
+seamless` group stays **5/5 Pass**; L55's own motivating
+`samplercubearrayshadow_fragment` and the ordinary `samplercube{,array}
+_{fixed,float}_{fragment,vertex}` cases all stay **Pass**. The
+`*_bias_fragment` and `usamplercubearray*` failures observed in the
+same sweep are unaffected pre-existing gaps: the former is roadmap L52
+sub-item (b)'s still-open `Bias`-operand legalization gap; the latter
+fails at `vkCreateGraphicsPipelines` itself (before any runtime sampling
+code ever runs), a separate, unrelated integer-cube-array-format
+pipeline-creation gap not previously filed and out of scope for this
+row.
+
+**Design docs / inventories.** `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md`
+reviewed: no deviation to record (neither document ever claimed
+`Cube`/`CubeArray` already had implicit-LOD mip selection).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed (an internal CPU-lowering/runtime correctness fix, no new
+feature/extension surface advertised).
+
+**Disposition.** Roadmap **L56 struck through** (root cause found and
+fixed, directly validated via the real motivating CTS group flipping
+from 0/25 to 25/25 with no regressions in the broader mipmap-filtering
+and cube-sampling sweeps). L52's own sub-items (b) `Bias`, (c)
+`samplecmp_clamp`'s `MinLod` operand, and (e) the LOD-query derivative
+intrinsics, and the newly-noticed `usamplercubearray*` pipeline-creation
+gap (not yet filed as its own row), all remain open, unaffected by this
+row.
