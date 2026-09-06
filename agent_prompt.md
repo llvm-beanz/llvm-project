@@ -42,31 +42,26 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L55 or other prerequisites blocking the L-series milestones?
+Can you work on L56 or other prerequisites blocking the L-series milestones?
 
-> **L53's own real `deqp-vk` validation disproves L51's own root-cause
-> hypothesis for `samplercubearrayshadow_fragment`'s 32x32-pixel rendering
-> mismatch**: that CTS case's own sampler (`samplerShadowNoMipmap`,
-> `vktShaderRenderTextureFunctionTests.cpp`) uses plain `NEAREST`/`NEAREST`
-> filtering, not `LINEAR` -- so L53's own new seamless cross-face bilinear
-> blending (a `LINEAR`-only fix, matching spec) cannot possibly be the cause,
-> and indeed left this exact case's own image-diff bit-for-bit unchanged
-> (835.108, before and after). The real root cause is once again genuinely
-> unknown and needs a fresh investigation from scratch, most likely following
-> the same real per-sample debug-dump reduction technique L50/L51 already used
-> once for this same case's own varying-interpolation hypothesis (already
-> disproven; the fed-in `v_texCoord` was confirmed bit-for-bit correct against
-> VK-GL-CTS's own analytic reference formula). Candidate hypotheses not yet
-> investigated: (a) a `NEAREST`-specific bug in `femeRTSelectCubeFace`'s own
-> major-axis tie-breaking or face-local UV-to-integer-texel rounding, distinct
-> from L53's own `LINEAR`-only bilinear-tap logic; (b) a bug specific to the
-> depth-comparison (`CmpCubeArray`) path's own layer/Dref extraction from the
-> dual-purpose `v_texCoord.w` component, not yet directly probed with real
-> captured values on this specific mismatched pixel range; (c) a
-> rasterizer/interpolation edge case not covered by L51's own
-> single-pixel-center probe (e.g. multisampling, or a provoking-vertex
-> convention difference) despite L51's own broader 1,088-fragment capture
-> finding no discrepancy. Needs its own real IR/data reduction of this exact
-> case before attempting a fix, per this project's own established
-> L6-series/H6-series/H8-series/H9-series/L45-series precedent, rather than
-> another unvalidated hypothesis.
+> **L53's own real `deqp-vk` sweep of VK-GL-CTS's own dedicated cube-filtering
+> combinations group incidentally discovers a distinct, pre-existing (confirmed
+> via `git stash` to already fail identically before L53's own change landed)
+> trilinear/mipmap cube-filtering bug**:
+> `dEQP-VK.texture.filtering.cube.combinations.linear_mipmap_linear.linear.*.*.seamless`
+> fails 0/25 (`Fail (Image verification failed)`), both with and without L53's
+> own single-level seamless-blending fix -- meaning the bug lies somewhere in
+> cube-specific trilinear (cross-mip-level) blending itself, or in mip-level
+> selection for a `Cube`/`CubeArray` image specifically, not in the single-level
+> bilinear seamless-edge logic L53 just added (which is only ever invoked once
+> per mip level inside `femeRTSampleFilteredCube`'s own `Trilinear` branch,
+> itself unmodified by L53 beyond its two `femeRTSampleCubeLinearAtLevel` call
+> sites). Needs its own real IR/data reduction of one of these 25 failing cases
+> (e.g.
+> `dEQP-VK.texture.filtering.cube.combinations.linear_mipmap_linear.linear.repeat.repeat.seamless`,
+> confirmed failing) to isolate whether the bug is in `femeRTSelectMipLevels`'s
+> own cube-specific LOD/mip-level-count computation,
+> `femeRTSampleFilteredCube`'s own `Trilinear`/`MipPlan.Frac` blend arithmetic,
+> or some other cube-specific mip-chain layout assumption (e.g.
+> `femeRTMipExtent`'s own square-face sizing per level) not yet reviewed against
+> a real failing case's own captured mip-level/LOD values.
