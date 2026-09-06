@@ -66833,3 +66833,121 @@ L64 closes the last shape-related blocker L60(a) named, so re-running the
 `shaderResourceMinLod` flip/measure/revert experiment is now the highest-value
 target -- the reason that bit stayed off may no longer hold. Separately, the
 dref-path implicit-LOD gap from last session is still real and still unfiled.
+
+# Session: Roadmap L65/L66 -- re-running the `shaderResourceMinLod` experiment
+
+## Starting point and why
+
+Last session ended by explicitly recommending "re-running the
+`shaderResourceMinLod` flip/measure/revert experiment" as the highest-value
+next target, since roadmap L64 had just closed the last shape-related
+blocker its own stale documentation named. I took that at face value and
+actually ran it, rather than trusting the existing doc comment's framing of
+what was still blocking the bit.
+
+That turned out to be the right call: the doc comment (in
+`PhysicalDeviceInfo.cpp`, right above where `shaderResourceMinLod` is left
+`VK_FALSE`) still described the blocker as a `VulkanBuffer`
+register-bound-resource-handle gap -- language that L64 itself had already
+disproven in `Roadmap.md`/`VulkanCTSReport.md`, but which nobody had gone
+back to fix in the *code comment* specifically. Lesson worth remembering:
+when a session "corrects the record" on a stale claim, it needs to grep for
+that claim across code comments too, not just the prose docs it's actively
+editing -- a disproven claim can easily survive in a place nobody thought to
+look.
+
+## Running the real experiment
+
+Flipped `Info.Features.shaderResourceMinLod` to `VK_TRUE` temporarily,
+rebuilt `feme_vulkan`, and ran `textureclamp`/`texturegradclamp`/
+`textureoffsetclamp`/`textureoffsetgradclamp` in full. Parsed the `.qpa`
+failure logs by shape via a quick Python/regex pass rather than eyeballing
+CTS's own summary counts, since the real value here was *which* shapes were
+still failing, not just an aggregate pass rate.
+
+This produced a genuinely much more complete picture than any prior
+session's stale text: `Plain3D` has *zero* ordinary sampled-image
+infrastructure at all (no `createSample3D` exists anywhere -- confirmed by
+grep, and by a real `texture.sampler3d_*` CTS re-run showing 0/8 Pass even
+for a plain, non-`Bias` sample, no flip needed). Integer-sampler exclusion
+turned out to be by design, not a gap (GLSL/HLSL integer samplers are
+unfiltered `texelFetch`-shaped to begin with -- `hasOnlySupportedImageUses`
+rejects any filtered sample over an integer format uniformly, matching every
+other shape). `textureoffsetclamp`'s broad failures traced cleanly to a
+*different*, pre-existing, unrelated gap: `isSupportedOffset`'s hard-coded
+`Plain2D`-only allowance for a real, nonzero `ConstOffset` -- nothing to do
+with `MinLod` at all, confirmed by `Plain2D`'s own identical
+`Bias`+`MinLodClamp`+`Offset` combination passing both `textureclamp` and
+`textureoffsetclamp` fully while every other shape fails only the
+offset-bearing group.
+
+## The one gap that was actually small enough to fix this session
+
+Buried in the `texturegradclamp` failures was a real surprise:
+`sampler1d{,array}_{fixed,float}` failing non-integer, non-offset cases.
+Investigating turned out to be the best kind of gap to find -- small,
+self-contained, and already half-built. `createSample1D`/
+`createSample1DArray` (added for roadmap L63's synthesized derivatives)
+*already* carry a real `DUdX`/`DUdY` operand pair; `hasOnlySupportedImageUses`
+just never allowed these two shapes through its `HasGrad` guard, so the
+existing derivative-operand plumbing was permanently unreachable. This
+mirrors L64's own "the lowering was already right, only the guard
+disagreed" pattern almost exactly -- worth calling out as a recurring shape
+of gap in this project: extending a shape's *guard* is often a much smaller
+job than extending its *lowering*, and it's worth checking which one is
+actually missing before assuming a fix needs new lowering code.
+
+Fixed by widening the guard and threading the caller's real `dPdx`/`dPdy`
+through, mirroring `Plain2D`'s own `HasGrad` handling exactly. Both shapes'
+single coordinate component made this even simpler than `Plain2D`'s case --
+their `Grad` derivative is a bare scalar float, not a 2-wide vector, so no
+`ExtractElementInst` unpacking was needed at all.
+
+Real CTS confirms cleanly: `texturegrad` group 16 -> 24 Pass (0 regressions),
+and a dedicated 1,004-case `sampler1d*`/`sampler1darray*` sweep with a real
+`git stash`-based before/after diff confirms exactly the same 8 cases
+changed and nothing else moved, in either direction.
+
+## An incidental crash discovery, and why I didn't fix it
+
+While writing the lit test for this fix, reusing identical binding numbers
+across two functions in the same module (one Plain1D, one Array1D) crashed
+`SPIRVResourceLoweringPass` with a real use-after-free -- a sampler handle
+erased in one function's cleanup while a live call in the *other* function
+still referenced it. I built a minimal repro and confirmed it happens with
+an entirely ordinary, non-`Grad` sample too, proving it's unrelated to this
+session's own change and clearly pre-existing.
+
+I deliberately did not investigate or fix this further this session. The
+project's own "small, separately-committed changes" discipline argues
+against opportunistically fixing an unrelated cross-cutting bug discovered
+mid-flight on a different task, especially one whose root cause (something
+in heap-index assignment or a canonicalization pass conflating identically-
+shaped calls across function boundaries) isn't yet understood. Worked around
+it in the new lit test using distinct bindings (matching the precedent an
+earlier L64 test file had already established for the same reason), and
+filed it as roadmap L66(e) instead, to be picked up as its own row.
+
+## What's next
+
+Filed roadmap L66(a)-(e) as the real, CTS-measured breakdown of everything
+still blocking `shaderResourceMinLod`:
+- (a) `Plain3D`'s total lack of ordinary sampled-image infrastructure -- by
+  far the biggest of the five, comparable in scope to what `Array2D` needed
+  before L60(a)'s own predecessor work, and the natural next target since it
+  blocks the *most* real cases across every one of `textureclamp`/
+  `texturegradclamp`/`textureoffsetclamp`.
+- (b) integer-sampler exclusion -- correctly by-design, named for
+  completeness, not itself actionable.
+- (c) `Dref`+`Grad` shadow sampling -- needs a new intrinsic, not yet
+  designed.
+- (d) `isSupportedOffset`'s `Plain2D`-only `ConstOffset` restriction --
+  pre-existing, unrelated, already implicitly roadmap L33's scope; just
+  newly confirmed as the actual root cause of `textureoffsetclamp`'s broad
+  failures rather than anything `MinLod`-specific.
+- (e) the cross-function same-binding crash discovered above.
+
+Given the CTS-measured impact, `Plain3D` (L66(a)) looks like the highest-
+value next target for a future session, followed by the offset restriction
+(L66(d)) given how many cases it currently blocks across every shape it
+touches.
