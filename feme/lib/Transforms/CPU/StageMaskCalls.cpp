@@ -149,14 +149,23 @@ bool feme::cpu::isReturnMasksCall(const CallInst &CI) {
 }
 
 FunctionCallee feme::cpu::getOrInsertMaskedTaskPayloadStore(Module &M,
+                                                            Type *OffsetTy,
                                                             Type *ValueTy,
                                                             Type *MaskTy) {
   SmallString<64> Name(MaskedTaskPayloadStorePrefix);
   Name.push_back('.');
+  // (Roadmap L49) `OffsetTy` is mangled as its own, independent suffix --
+  // unlike `ValueTy`/`MaskTy`, which always vary in lockstep with whether
+  // this whole call has been widened, `OffsetTy` can independently stay
+  // scalar `i32` (a real compile-time-constant offset) even inside an
+  // otherwise-widened call, so two declarations sharing the same `ValueTy`
+  // but different `OffsetTy` must not collide under one mangled name.
+  appendTypeSuffix(Name, OffsetTy);
+  Name.push_back('.');
   appendTypeSuffix(Name, ValueTy);
-  FunctionType *FTy = FunctionType::get(
-      Type::getVoidTy(M.getContext()),
-      {Type::getInt32Ty(M.getContext()), ValueTy, MaskTy}, /*isVarArg=*/false);
+  FunctionType *FTy = FunctionType::get(Type::getVoidTy(M.getContext()),
+                                       {OffsetTy, ValueTy, MaskTy},
+                                       /*isVarArg=*/false);
   return M.getOrInsertFunction(Name, FTy);
 }
 
@@ -164,8 +173,8 @@ CallInst *feme::cpu::createMaskedTaskPayloadStore(IRBuilderBase &B,
                                                   Value *Offset, Value *Val,
                                                   Value *Mask) {
   Module *M = B.GetInsertBlock()->getModule();
-  FunctionCallee Callee =
-      getOrInsertMaskedTaskPayloadStore(*M, Val->getType(), Mask->getType());
+  FunctionCallee Callee = getOrInsertMaskedTaskPayloadStore(
+      *M, Offset->getType(), Val->getType(), Mask->getType());
   return B.CreateCall(Callee, {Offset, Val, Mask});
 }
 

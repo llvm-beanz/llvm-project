@@ -1684,5 +1684,107 @@ TEST(SIMDizeTest, ScalarizesDivergentVectorStoreOperandWithoutCrashing) {
   EXPECT_EQ(StoreCount, 4u);
 }
 
+// (Roadmap L49) A genuinely dynamic (per-invocation) task-payload store
+// offset -- here, the per-lane thread ID itself, standing in for a real
+// shader's `gl_LocalInvocationIndex`-indexed payload access once
+// `CanonicalizeStagePass` (roadmap L47) has resolved it -- must be widened
+// into a real `<4 x i32>` vector by `widenMaskedTaskPayloadStore`, not kept
+// scalar: before this fix, a non-`Constant` `Offset` was passed through
+// unchanged, which is not even a valid reference once `SIMDizePass` has
+// built an entirely new, widened function (the raw `Value` was never
+// cloned/widened into it).
+TEST(SIMDizeTest, WidensDynamicTaskPayloadStoreOffset) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = uitofp i32 %tid to float
+      call void @feme.stage.task.payload.store.f32(i32 %tid, float %tidf)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.stage.task.payload.store.f32(i32, float)
+    attributes #0 = { "hlsl.shader"="amplification" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWidenedStore = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    if (!CI->getCalledFunction()->getName().starts_with(
+            "feme.cpu.masked.task.payload.store"))
+      continue;
+    FoundWidenedStore = true;
+    Value *Offset = CI->getArgOperand(0);
+    ASSERT_TRUE(isa<FixedVectorType>(Offset->getType()));
+    EXPECT_EQ(cast<FixedVectorType>(Offset->getType())->getNumElements(), 4u);
+    EXPECT_EQ(CI->getCalledFunction()->getName(),
+              "feme.cpu.masked.task.payload.store.v4i32.v4f32");
+  }
+  EXPECT_TRUE(FoundWidenedStore);
+}
+
+// (Roadmap L49) The load-side counterpart of
+// `WidensDynamicTaskPayloadStoreOffset` above: `widenStageOp`'s own
+// `TaskPayloadLoad` handling must likewise only keep `offset` scalar when
+// it really is a compile-time `Constant`, widening it into a real
+// `<4 x i32>` vector otherwise (and mangling the resulting callee name by
+// both the (unwidened) result type and the (widened) offset type
+// independently, per `getOrInsertStageOp`'s own new `TaskPayloadLoad`
+// special case).
+TEST(SIMDizeTest, WidensDynamicTaskPayloadLoadOffset) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %v = call float @feme.stage.task.payload.load.f32(i32 %tid)
+      call void @feme.stage.task.payload.store.f32(i32 0, float %v)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare float @feme.stage.task.payload.load.f32(i32)
+    declare void @feme.stage.task.payload.store.f32(i32, float)
+    attributes #0 = { "hlsl.shader"="amplification" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWidenedLoad = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    if (!CI->getCalledFunction()->getName().starts_with(
+            "feme.stage.task.payload.load"))
+      continue;
+    FoundWidenedLoad = true;
+    Value *Offset = CI->getArgOperand(0);
+    ASSERT_TRUE(isa<FixedVectorType>(Offset->getType()));
+    EXPECT_EQ(cast<FixedVectorType>(Offset->getType())->getNumElements(), 4u);
+    ASSERT_TRUE(isa<FixedVectorType>(CI->getType()));
+    EXPECT_EQ(CI->getCalledFunction()->getName(),
+              "feme.stage.task.payload.load.v4f32.v4i32");
+  }
+  EXPECT_TRUE(FoundWidenedLoad);
+}
+
 } // namespace
+
 

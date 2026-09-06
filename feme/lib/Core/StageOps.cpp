@@ -140,6 +140,20 @@ FunctionCallee feme::getOrInsertStageOp(Module &M, StageOpKind Kind,
     else if (Kind == StageOpKind::TaskPayloadStore)
       OverloadTy = ArgTys[1];
     appendTypeSuffix(Name, OverloadTy);
+    // (Roadmap L49) `TaskPayloadLoad`'s own `offset` operand (`ArgTys[0]`)
+    // needs its own *additional* mangled suffix, independent of the
+    // `ResultTy`-based one above: unlike every other overloaded op here,
+    // whose only varying operand tracks the same widened-or-not state as
+    // its result, `TaskPayloadLoad`'s `Offset` can independently stay
+    // scalar `i32` (a real compile-time constant) even when its own result
+    // has been widened into a vector, so two declarations sharing the same
+    // `ResultTy` but different `Offset` shapes must not collide under one
+    // mangled name (mirroring `getOrInsertMaskedTaskPayloadStore`'s own
+    // identical, independent `OffsetTy` mangling in `StageMaskCalls.cpp`).
+    if (Kind == StageOpKind::TaskPayloadLoad) {
+      Name.push_back('.');
+      appendTypeSuffix(Name, ArgTys[0]);
+    }
   }
   FunctionType *FTy = FunctionType::get(ResultTy, ArgTys, /*isVarArg=*/false);
   return M.getOrInsertFunction(Name, FTy);

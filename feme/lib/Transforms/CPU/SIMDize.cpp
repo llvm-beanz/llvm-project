@@ -1558,13 +1558,24 @@ void FunctionWidener::widenStageOp(CallInst &CI, feme::StageOpKind Kind,
       Kind == feme::StageOpKind::InputLoad ||
       Kind == feme::StageOpKind::InterpolateAtCentroid ||
       Kind == feme::StageOpKind::InterpolateAtSample ||
-      Kind == feme::StageOpKind::InterpolateAtOffset ||
-      // (Roadmap L30) Not literally an `ElementID`, but the same "keep
-      // operand 0 scalar" treatment applies: `TaskPayloadLoad`'s own
-      // `offset` (see `StageOpKind::TaskPayloadLoad`'s comment) is a
-      // compile-time constant byte offset, identical for every lane,
-      // mirroring `widenMaskedTaskPayloadStore`'s own scalar `Offset`.
-      Kind == feme::StageOpKind::TaskPayloadLoad;
+      Kind == feme::StageOpKind::InterpolateAtOffset;
+  // (Roadmap L49) Not literally an `ElementID`, and unlike
+  // `FirstOperandIsElementID`'s own operands above: `TaskPayloadLoad`'s
+  // `offset` (see `StageOpKind::TaskPayloadLoad`'s comment) *used* to be
+  // always a compile-time constant byte offset, identical for every lane,
+  // but roadmap L47's `CanonicalizeStagePass` fix now also recognizes a
+  // genuinely dynamic (per-invocation) payload index -- so, unlike a real
+  // `ElementID` (always an IR `Constant`, spec-guaranteed identical for
+  // every invocation), keep operand 0 scalar only when it really is a
+  // `Constant` (safe to reference unchanged from this new, widened
+  // function); a non-`Constant` `Value` from the *old* function is not
+  // even a valid reference here at all, and must be widened into a real
+  // per-lane `<W x i32>` vector like any other divergent operand instead
+  // (mirroring `widenMaskedTaskPayloadStore`'s own identical treatment of
+  // its own `Offset` operand).
+  bool FirstOperandIsConstantTaskPayloadOffset =
+      Kind == feme::StageOpKind::TaskPayloadLoad &&
+      isa<Constant>(CI.getArgOperand(0));
   // `SubpassLoad`'s `attachment_index`/`component` operands (0 and 1) are
   // always compile-time constants (baked from the shader's own
   // `InputAttachmentIndex` decoration and the read's component selector),
@@ -1580,7 +1591,8 @@ void FunctionWidener::widenStageOp(CallInst &CI, feme::StageOpKind Kind,
   bool FirstTwoOperandsAreConstantIDs =
       Kind == feme::StageOpKind::SubpassLoad;
   for (unsigned I = 0, E = CI.arg_size(); I != E; ++I) {
-    bool KeepScalar = (I == 0 && FirstOperandIsElementID) ||
+    bool KeepScalar = (I == 0 && (FirstOperandIsElementID ||
+                                 FirstOperandIsConstantTaskPayloadOffset)) ||
                       (I <= 1 && FirstTwoOperandsAreConstantIDs);
     Value *Arg =
         KeepScalar ? CI.getArgOperand(I) : getWidened(CI.getArgOperand(I), Builder);
@@ -1637,22 +1649,27 @@ void FunctionWidener::widenMaskedStreamCut(CallInst &CI, IRBuilder<> &Builder) {
   ToErase.push_back(&CI);
 }
 
-// (Roadmap H6c-a-b) `Offset` (operand 0) stays scalar -- it is the same
-// compile-time constant byte offset for every lane of this call, unlike
-// `widenMaskedOutputStore`'s per-lane `Row`/`Component`/`Vertex` -- only
-// `Value` (operand 1) is widened, mirroring `widenMaskedOutputStore`'s own
-// treatment of its `Element` operand.
+// (Roadmap H6c-a-b) `Offset` (operand 0) stays scalar when it is a real
+// compile-time constant byte offset (the common case, identical for every
+// lane of this call, unlike `widenMaskedOutputStore`'s per-lane
+// `Row`/`Component`/`Vertex`) -- but (roadmap L49) `CanonicalizeStagePass`
+// (roadmap L47) can also produce a genuinely dynamic (per-invocation, not
+// a `Constant`) `Offset`, which must be widened into a real per-lane
+// `<W x i32>` vector exactly like `Value` (operand 1) already is: a raw
+// non-`Constant` `Value` from the *old* (pre-widened) function is not even
+// a valid reference in this new, widened function at all.
 void FunctionWidener::widenMaskedTaskPayloadStore(CallInst &CI,
                                                   IRBuilder<> &Builder) {
   Module *M = NewF->getParent();
-  Value *Offset = CI.getArgOperand(0);
+  Value *OffsetArg = CI.getArgOperand(0);
+  Value *Offset = isa<Constant>(OffsetArg) ? OffsetArg
+                                           : getWidened(OffsetArg, Builder);
   Value *ValueArg = getWidened(CI.getArgOperand(1), Builder);
   Value *Mask = Builder.CreateAnd(Env.SideEffectMask,
                                   getWidened(CI.getArgOperand(2), Builder),
                                   "task.payload.store.mask");
-  FunctionCallee Callee =
-      getOrInsertMaskedTaskPayloadStore(*M, ValueArg->getType(),
-                                        Mask->getType());
+  FunctionCallee Callee = getOrInsertMaskedTaskPayloadStore(
+      *M, Offset->getType(), ValueArg->getType(), Mask->getType());
   Builder.CreateCall(Callee, {Offset, ValueArg, Mask});
   ToErase.push_back(&CI);
 }

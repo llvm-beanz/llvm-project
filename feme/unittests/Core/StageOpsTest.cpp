@@ -193,12 +193,19 @@ TEST_F(StageOpsTest, TaskPayloadStoreIsVoidAndOverloadedOnValue) {
 /// `value` operand -- the default `getOrInsertStageOp` overload-suffix path,
 /// unlike `TaskPayloadStore`'s special-cased one -- and its `offset`
 /// operand round-trips as an ordinary constant `i32` exactly like
-/// `TaskPayloadStore`'s own.
+/// `TaskPayloadStore`'s own. (Roadmap L49) The callee name also carries an
+/// extra, independent `.i32` suffix for `offset`'s own type -- unconditional
+/// even for this ordinary constant-offset case, since a widened
+/// `TaskPayloadLoad` call's `offset` can independently become a vector
+/// (see `SIMDizeTest`'s own dynamic-offset coverage) while its result stays
+/// whatever type it already was, so the two dimensions must always be
+/// mangled independently to avoid a same-name/different-`FunctionType`
+/// collision once both can vary.
 TEST_F(StageOpsTest, TaskPayloadLoadIsOverloadedOnResult) {
   CallInst *CI = createStageTaskPayloadLoad(B, B.getFloatTy(), /*Offset=*/12);
   EXPECT_TRUE(CI->getType()->isFloatTy());
   EXPECT_EQ(CI->getCalledFunction()->getName(),
-            "feme.stage.task.payload.load.f32");
+            "feme.stage.task.payload.load.f32.i32");
   ASSERT_EQ(getStageOpConstantOperand(*CI, 0), 12u);
 
   StageOpKind Kind;

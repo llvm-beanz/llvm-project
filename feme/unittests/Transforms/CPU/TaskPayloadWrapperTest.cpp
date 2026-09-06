@@ -218,6 +218,110 @@ TEST(TaskPayloadWrapperTest, LowersMultiplePayloadStoresAtDistinctOffsets) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// (Roadmap L49) A genuinely dynamic (per-invocation) payload store offset
+// -- here, the per-lane thread ID itself, standing in for a real shader's
+// `gl_LocalInvocationIndex`-indexed payload access once
+// `CanonicalizeStagePass` (roadmap L47) has resolved it -- must lower into
+// a real per-lane addressing loop, one distinct `getelementptr` per lane,
+// rather than `lowerTaskPayloadStore`'s pre-L49 hoisted-single-address
+// fast path (which only a real compile-time-constant offset may still
+// use). Before this fix, a non-`ConstantInt` `Offset` here hit a fatal
+// `cast<ConstantInt>` assertion.
+TEST(TaskPayloadWrapperTest, LowersPayloadStoreWithDynamicOffset) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @as_main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = uitofp i32 %tid to float
+      %offset = mul i32 %tid, 4
+      call void @feme.stage.task.payload.store.f32(i32 %offset, float %tidf)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.stage.task.payload.store.f32(i32, float)
+    attributes #0 = { "feme.shader.stage"="amplification" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  TaskPayloadWrapperPass().run(*M, MAM);
+
+  Function *Body = M->getFunction("as_main");
+  ASSERT_TRUE(Body);
+  for (const Instruction &I : instructions(*Body))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  // Every one of the 4 lanes must compute its own address off
+  // `task_payload` (a divergent offset can put each lane's own store at a
+  // completely different byte range), not just one shared address.
+  unsigned NumStores = 0, NumGEPs = 0;
+  for (const Instruction &I : instructions(*Body)) {
+    if (isa<StoreInst>(I))
+      ++NumStores;
+    if (const auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      if (GEP->getPointerOperand()->getName() == "task_payload")
+        ++NumGEPs;
+  }
+  EXPECT_EQ(NumStores, 4u);
+  EXPECT_EQ(NumGEPs, 4u);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// (Roadmap L49) The load-side counterpart of
+// `LowersPayloadStoreWithDynamicOffset` above: a genuinely dynamic payload
+// *read* offset must likewise lower into a real per-lane addressing loop
+// in `lowerTaskPayloadLoad`, not broadcast a single shared scalar read to
+// every lane (only valid when `Offset` really is a compile-time constant).
+TEST(TaskPayloadWrapperTest, LowersPayloadLoadWithDynamicOffset) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @as_main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %offset = mul i32 %tid, 4
+      %v = call float @feme.stage.task.payload.load.f32(i32 %offset)
+      call void @feme.stage.task.payload.store.f32(i32 0, float %v)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare float @feme.stage.task.payload.load.f32(i32)
+    declare void @feme.stage.task.payload.store.f32(i32, float)
+    attributes #0 = { "feme.shader.stage"="amplification" "hlsl.numthreads"="4,1,1" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  TaskPayloadWrapperPass().run(*M, MAM);
+
+  Function *Body = M->getFunction("as_main");
+  ASSERT_TRUE(Body);
+  for (const Instruction &I : instructions(*Body))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  // At least 4 loads (one per lane) must come from `task_payload` -- there
+  // may be more than exactly 4, since the trailing constant-offset store's
+  // own read-modify-write fallback (its mask is not provably all-ones) can
+  // also legitimately load through the same buffer.
+  unsigned NumLoadsFromPayload = 0;
+  for (const Instruction &I : instructions(*Body))
+    if (const auto *LI = dyn_cast<LoadInst>(&I))
+      if (const auto *GEP =
+              dyn_cast<GetElementPtrInst>(LI->getPointerOperand()))
+        if (GEP->getPointerOperand()->getName() == "task_payload")
+          ++NumLoadsFromPayload;
+  EXPECT_GE(NumLoadsFromPayload, 4u);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // End-to-end: `TaskPayloadWrapperPass` followed by `EntryWrapperPass` (the
 // same order `feme::cpu::buildPipeline` -- Pipeline.cpp -- chains them in
 // for `ShaderStage::Amplification`) builds a real `feme_cpu_entry_as_main`

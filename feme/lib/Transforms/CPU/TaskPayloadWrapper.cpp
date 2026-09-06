@@ -140,15 +140,24 @@ Value *extractLaneOrScalar(IRBuilder<> &Builder, Value *V, unsigned Lane) {
 }
 
 /// Lowers one `feme.cpu.masked.task.payload.store` call: every active lane
-/// stores its own value at the same `Env.Payload + Offset` address every
-/// lane of this call shares (`Offset` is a single compile-time constant,
-/// per `StageOpKind::TaskPayloadStore`'s own comment -- not a per-lane
-/// value the way a mesh output store's `Vertex` operand is), the same
+/// stores its own value at `Env.Payload + Offset`. `Offset` is usually a
+/// single compile-time constant shared by every lane of this call (per
+/// `StageOpKind::TaskPayloadStore`'s own comment -- not a per-lane value
+/// the way a mesh output store's `Vertex` operand is), the same
 /// "every lane may write, the mask decides whose value survives" shape
 /// `MeshOutputWrapper.cpp`'s `lowerMeshOutputStore` already uses, just
-/// against one fixed address instead of one address per output slot.
+/// against one fixed address instead of one address per output slot. But
+/// (roadmap L47/L49) `Offset` can also be a genuinely dynamic
+/// per-invocation `Value` (e.g. `CanonicalizeStage.cpp`'s
+/// `getTaskPayloadDynamicOffsetAccess`, for a shader indexing its payload
+/// by `gl_LocalInvocationIndex`), in which case each lane may address a
+/// completely different payload byte range -- this function keeps the
+/// original shared-address fast path when `Offset` really is a
+/// `ConstantInt` (byte-for-byte identical to its pre-L49 behavior), but
+/// falls back to computing a fresh per-lane address/bounds check inside
+/// the loop otherwise.
 ///
-/// Defensively skips the store entirely (leaving `Env.Payload` at that
+/// Defensively skips a store entirely (leaving `Env.Payload` at that
 /// offset untouched) if `Offset` plus this value's own byte size would
 /// exceed `Env.MaxPayloadBytes`: `Offset` is resolved against the
 /// *shader's* own declared payload type at canonicalization time (roadmap
@@ -161,7 +170,7 @@ Value *extractLaneOrScalar(IRBuilder<> &Builder, Value *V, unsigned Lane) {
 void lowerTaskPayloadStore(CallInst &CI, const TaskPayloadStageEnv &Env,
                           const DataLayout &DL) {
   IRBuilder<> Builder(&CI);
-  uint64_t Offset = cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
+  Value *OffsetArg = CI.getArgOperand(0);
   Value *ValueArg = CI.getArgOperand(1);
   Value *MaskArg = CI.getArgOperand(2);
 
@@ -170,15 +179,36 @@ void lowerTaskPayloadStore(CallInst &CI, const TaskPayloadStageEnv &Env,
   Type *ScalarTy = WideTy ? WideTy->getElementType() : ValueArg->getType();
   uint64_t ByteSize = DL.getTypeStoreSize(ScalarTy).getFixedValue();
 
-  Value *End =
-      Builder.getInt32(static_cast<uint32_t>(Offset + ByteSize));
-  Value *InBounds =
-      Builder.CreateICmpULE(End, Env.MaxPayloadBytes, "payload.inbounds");
-  Value *Addr = Builder.CreateInBoundsGEP(
-      Builder.getInt8Ty(), Env.Payload,
-      Builder.getInt32(static_cast<uint32_t>(Offset)), "payload.addr");
+  auto *OffsetConst = dyn_cast<ConstantInt>(OffsetArg);
+  Value *SharedAddr = nullptr, *SharedInBounds = nullptr;
+  if (OffsetConst) {
+    uint64_t Offset = OffsetConst->getZExtValue();
+    Value *End = Builder.getInt32(static_cast<uint32_t>(Offset + ByteSize));
+    SharedInBounds =
+        Builder.CreateICmpULE(End, Env.MaxPayloadBytes, "payload.inbounds");
+    SharedAddr = Builder.CreateInBoundsGEP(
+        Builder.getInt8Ty(), Env.Payload,
+        Builder.getInt32(static_cast<uint32_t>(Offset)), "payload.addr");
+  }
 
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Addr = SharedAddr;
+    Value *InBounds = SharedInBounds;
+    if (!OffsetConst) {
+      // (Roadmap L49) A genuinely dynamic, potentially per-lane-divergent
+      // `Offset`: unlike the shared-address fast path above, each lane may
+      // address a completely different payload byte range, so recompute a
+      // fresh address/bounds check per lane rather than hoisting one
+      // shared pair.
+      Value *LaneOffset = extractLaneOrScalar(Builder, OffsetArg, Lane);
+      Value *End = Builder.CreateAdd(
+          LaneOffset, Builder.getInt32(static_cast<uint32_t>(ByteSize)));
+      InBounds =
+          Builder.CreateICmpULE(End, Env.MaxPayloadBytes, "payload.inbounds");
+      Addr = Builder.CreateInBoundsGEP(Builder.getInt8Ty(), Env.Payload,
+                                       LaneOffset, "payload.addr");
+    }
+
     Value *Mask = extractLaneOrScalar(Builder, MaskArg, Lane);
     Value *EffectiveMask = Builder.CreateAnd(Mask, InBounds, "payload.mask");
     auto *MaskConst = dyn_cast<ConstantInt>(EffectiveMask);
@@ -273,29 +303,52 @@ Value *lowerTaskInputLoad(CallInst &CI, const WaveBodyEnv &WEnv,
 /// argument, which DXC/SPIRV-Tools passes by first reading the whole
 /// payload struct back into a temporary and copying it into itself,
 /// rather than the mesh-stage-only read this pass had never needed to
-/// support before). Like `MeshOutputWrapper.cpp`'s own
-/// `lowerMeshTaskPayloadLoad`, a task payload is workgroup-shared, not
-/// per-lane data -- every lane reads the identical byte range `Offset`
-/// selects -- so this reads `Env.Payload + Offset` once and broadcasts
-/// that single scalar to every active lane's own result slot, mirroring
-/// that function's shape exactly (just against this stage's own
-/// `WaveBodyEnv`/`TaskPayloadStageEnv` pair instead of
-/// `MeshOutputStageEnv`).
+/// support before). Usually (`Offset` a real compile-time constant), a
+/// task payload is workgroup-shared, not per-lane data -- every lane reads
+/// the identical byte range `Offset` selects -- so this reads
+/// `Env.Payload + Offset` once and broadcasts that single scalar to every
+/// active lane's own result slot, mirroring
+/// `MeshOutputWrapper.cpp`'s own `lowerMeshTaskPayloadLoad` shape exactly
+/// (just against this stage's own `WaveBodyEnv`/`TaskPayloadStageEnv` pair
+/// instead of `MeshOutputStageEnv`). But (roadmap L47/L49) `Offset` can
+/// also be a genuinely dynamic per-invocation `Value`, in which case each
+/// lane may read a completely different payload byte range instead of one
+/// shared broadcast value -- this function keeps the shared-broadcast
+/// fast path when `Offset` really is a `ConstantInt` (byte-for-byte
+/// identical to its pre-L49 behavior), but reads a fresh per-lane scalar
+/// otherwise.
 Value *lowerTaskPayloadLoad(CallInst &CI, const WaveBodyEnv &WEnv,
                             const TaskPayloadStageEnv &Env) {
-  uint64_t Offset = cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
+  Value *OffsetArg = CI.getArgOperand(0);
   unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
   Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
   IRBuilder<> Builder(&CI);
-  Value *Addr = Builder.CreateGEP(Builder.getInt8Ty(), Env.Payload,
-                                  Builder.getInt64(Offset));
-  Value *Scalar = Builder.CreateLoad(ScalarTy, Addr);
+
+  auto *OffsetConst = dyn_cast<ConstantInt>(OffsetArg);
+  Value *SharedScalar = nullptr;
+  if (OffsetConst) {
+    Value *Addr = Builder.CreateGEP(
+        Builder.getInt8Ty(), Env.Payload,
+        Builder.getInt64(OffsetConst->getZExtValue()));
+    SharedScalar = Builder.CreateLoad(ScalarTy, Addr);
+  }
+
   Value *Result = PoisonValue::get(CI.getType());
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Value *Active =
         Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
-    Value *LaneResult =
-        Builder.CreateSelect(Active, Scalar, Constant::getNullValue(ScalarTy));
+    Value *LaneScalar = SharedScalar;
+    if (!OffsetConst) {
+      // (Roadmap L49) A genuinely dynamic per-invocation `Offset`: each
+      // lane may read a completely different payload byte range, so read
+      // a fresh scalar per lane rather than broadcasting one shared read.
+      Value *LaneOffset = extractLaneOrScalar(Builder, OffsetArg, Lane);
+      Value *Addr =
+          Builder.CreateGEP(Builder.getInt8Ty(), Env.Payload, LaneOffset);
+      LaneScalar = Builder.CreateLoad(ScalarTy, Addr);
+    }
+    Value *LaneResult = Builder.CreateSelect(
+        Active, LaneScalar, Constant::getNullValue(ScalarTy));
     Result =
         Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
   }

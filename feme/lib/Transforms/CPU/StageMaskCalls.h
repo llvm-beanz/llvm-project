@@ -103,11 +103,22 @@ llvm::FunctionCallee getOrInsertReturnMasks(llvm::Module &M, llvm::Type *LiveTy,
 llvm::CallInst *createReturnMasks(llvm::IRBuilderBase &B, llvm::Value *Live,
                                   llvm::Value *SideEffect);
 
-/// `feme.cpu.masked.task.payload.store(offset, value, mask)`: \p Offset is
-/// the constant byte offset `StageOpKind::TaskPayloadStore`'s own comment
-/// documents, carried through unchanged (mirroring `Element` in
-/// `createMaskedOutputStore`, also never widened).
+/// `feme.cpu.masked.task.payload.store(offset, value, mask)`: \p OffsetTy is
+/// the type of the store's own byte-offset operand -- `i32` for the common
+/// compile-time-constant-offset case (identical for every lane, carried
+/// through unchanged, mirroring `Element` in `createMaskedOutputStore`,
+/// also never widened), or (roadmap L49) a widened `<W x i32>` vector when
+/// `feme::graphics::CanonicalizeStagePass` (roadmap L47) has resolved a
+/// genuinely dynamic (per-invocation) payload index instead. Unlike every
+/// other masked call in this file, whose only possibly-varying type
+/// (`ValueTy` here) always tracks whether the *whole* call has been
+/// widened, `OffsetTy` can vary independently of `ValueTy`/`MaskTy` (a
+/// widened function may still keep a real compile-time-constant `Offset`
+/// scalar even though `Value`/`Mask` are always widened) -- so it must be
+/// mangled into the name separately, or two declarations with the same
+/// `ValueTy` but different `Offset` shapes would collide.
 llvm::FunctionCallee getOrInsertMaskedTaskPayloadStore(llvm::Module &M,
+                                                       llvm::Type *OffsetTy,
                                                        llvm::Type *ValueTy,
                                                        llvm::Type *MaskTy);
 

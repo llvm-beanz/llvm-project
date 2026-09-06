@@ -192,9 +192,16 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
           Call->eraseFromParent();
           continue;
         case feme::StageOpKind::TaskPayloadStore:
-          // (Roadmap H6c-a-b) `offset` (operand 0) stays a plain constant,
-          // mirroring `OutputStore`'s own `ElementID` above; only `value`
-          // (operand 1) is a genuine per-lane value.
+          // (Roadmap H6c-a-b) `offset` (operand 0) is passed through
+          // unchanged here regardless of whether it happens to be a plain
+          // compile-time constant (the common case, mirroring
+          // `OutputStore`'s own `ElementID` above) or (roadmap L47/L49) a
+          // genuinely dynamic per-invocation `Value` --
+          // `createMaskedTaskPayloadStore` mangles its own callee purely
+          // off `Offset`'s actual type, so either shape is handled
+          // generically at this phase; only `SIMDize.cpp`'s later widening
+          // needs to treat the two cases differently. `value` (operand 1)
+          // is always a genuine per-lane value.
           createMaskedTaskPayloadStore(B, Call->getArgOperand(0),
                                       Call->getArgOperand(1),
                                       Masks.SideEffect);

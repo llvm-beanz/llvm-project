@@ -425,29 +425,53 @@ Value *lowerMeshInputLoad(CallInst &CI, const WaveBodyEnv &WEnv,
 
 /// Lowers `feme.stage.task.payload.load` (roadmap L30): a mesh entry's own
 /// bounded payload read, the load-side counterpart of
-/// `TaskPayloadWrapper.cpp`'s masked payload store. Unlike a masked output
-/// store, a task payload is workgroup-shared, not per-lane data -- every
-/// lane reads the identical byte range `Offset` selects -- so this reads
-/// `MEnv.Payload + Offset` once and broadcasts that single scalar to every
-/// active lane's own result slot, mirroring `lowerMeshInputLoad`'s own
-/// per-lane broadcast shape immediately above exactly, just reading
-/// through the payload buffer instead of `MEnv.DrawID`.
+/// `TaskPayloadWrapper.cpp`'s masked payload store. Usually (`Offset` a
+/// real compile-time constant) a task payload is workgroup-shared, not
+/// per-lane data -- every lane reads the identical byte range `Offset`
+/// selects -- so this reads `MEnv.Payload + Offset` once and broadcasts
+/// that single scalar to every active lane's own result slot, mirroring
+/// `lowerMeshInputLoad`'s own per-lane broadcast shape immediately above
+/// exactly, just reading through the payload buffer instead of
+/// `MEnv.DrawID`. But (roadmap L47/L49) `Offset` can also be a genuinely
+/// dynamic per-invocation `Value` (mirroring
+/// `TaskPayloadWrapper.cpp`'s own `lowerTaskPayloadLoad`'s identical
+/// generalization), in which case each lane may read a completely
+/// different payload byte range instead of one shared broadcast value --
+/// this function keeps the shared-broadcast fast path when `Offset`
+/// really is a `ConstantInt` (byte-for-byte identical to its pre-L49
+/// behavior), but reads a fresh per-lane scalar otherwise.
 Value *lowerMeshTaskPayloadLoad(CallInst &CI, const WaveBodyEnv &WEnv,
                                 const MeshOutputStageEnv &MEnv) {
-  uint64_t Offset =
-      cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
+  Value *OffsetArg = CI.getArgOperand(0);
   unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
   Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
   IRBuilder<> Builder(&CI);
-  Value *Addr = Builder.CreateGEP(Builder.getInt8Ty(), MEnv.Payload,
-                                  Builder.getInt64(Offset));
-  Value *Scalar = Builder.CreateLoad(ScalarTy, Addr);
+
+  auto *OffsetConst = dyn_cast<ConstantInt>(OffsetArg);
+  Value *SharedScalar = nullptr;
+  if (OffsetConst) {
+    Value *Addr = Builder.CreateGEP(
+        Builder.getInt8Ty(), MEnv.Payload,
+        Builder.getInt64(OffsetConst->getZExtValue()));
+    SharedScalar = Builder.CreateLoad(ScalarTy, Addr);
+  }
+
   Value *Result = PoisonValue::get(CI.getType());
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Value *Active =
         Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
-    Value *LaneResult =
-        Builder.CreateSelect(Active, Scalar, Constant::getNullValue(ScalarTy));
+    Value *LaneScalar = SharedScalar;
+    if (!OffsetConst) {
+      // (Roadmap L49) A genuinely dynamic per-invocation `Offset`: each
+      // lane may read a completely different payload byte range, so read
+      // a fresh scalar per lane rather than broadcasting one shared read.
+      Value *LaneOffset = extractLaneOrScalar(Builder, OffsetArg, Lane);
+      Value *Addr =
+          Builder.CreateGEP(Builder.getInt8Ty(), MEnv.Payload, LaneOffset);
+      LaneScalar = Builder.CreateLoad(ScalarTy, Addr);
+    }
+    Value *LaneResult = Builder.CreateSelect(
+        Active, LaneScalar, Constant::getNullValue(ScalarTy));
     Result =
         Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
   }
