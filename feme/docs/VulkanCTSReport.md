@@ -27040,3 +27040,26 @@ wave-body-lowering plumbing only); `Vulkan14FeatureInventory.md`/
 record (neither design doc described a task-payload offset's own
 addressing model at a level of detail this fix's dynamic-offset
 generalization would contradict).
+
+## Roadmap L47: now fully resolved (its own blocker, L49, is fixed)
+
+**Follow-up.** A prior session left L47 as "partially fixed": its
+`CanonicalizeStagePass`-side canonicalization of a dynamically-indexed
+task-payload access landed and was tested, but the real
+`dEQP-VK.mesh_shader.ext.query...task_mesh.*.{only_primary,with_secondary}`
+cases this row named still could not succeed, since every wave-body-
+lowering phase downstream still hard-assumed a task-payload offset was a
+single compile-time constant -- filed as roadmap L49.
+
+This session confirmed L49 landed in a prior session (see its own
+`VulkanCTSReport.md` section above) and, critically, that its own real
+`deqp-vk` re-run already covered the *exact two cases* L47's own report
+named -- both now `Pass`. No new code change was needed this session:
+L47's row is struck through in `Roadmap.md` with a pointer to L49's own
+fix and CTS evidence, since re-running the same two cases again would
+simply reconfirm what L49's own session already measured.
+
+**Disposition.** Roadmap **L47 fixed** (via L49). No feature/extension
+bit touched by this documentation-only follow-up;
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
+change needed. No design-doc deviation to record.
