@@ -42,107 +42,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L52 or other prerequisites blocking the L-series milestones?
+Can you work on L55 or other prerequisites blocking the L-series milestones?
 
-
-> **L50's own (a)-(f) breakdown leaves 4 sub-items open after this session's (d)
-> fix and L51's own further split-out of (f)**: (a) **`Plain1D`/`Array1D` shadow
-> sampling** (`sampler1d{,array}shadow_*`) has no ordinary (non-comparison)
-> sampled-image path on the CPU target at all yet for either shape -- needs its
-> own new 1D-sampling infrastructure
-> (`ImageCallKind::Sample1D`/`Array1D`-equivalents,
-> `createSample1D`/`createSample1DArray`, matching runtime entry points)
-> *before* a `SampleCmp1D`/`SampleCmpArray1D` counterpart is even possible, a
-> materially bigger prerequisite than any other item in this row; (b) **a `Bias`
-> image operand** (`sampler{2d,cube}shadow_bias_fragment` and siblings, 5 real
-> confirmed-failing CTS cases per this session's own re-run) fails at
-> `ConvertSPIRVToLLVMPass` legalization itself, before
-> `SPIRVResourceLowering.cpp` ever sees it --
-> `ImageSampleDrefImplicitLodPattern`'s own `SupportedMask`
-> (`SPIRVToLLVMPatterns.cpp`) only allows `ConstOffset`/`MinLod`, not `Bias`,
-> and no `llvm.spv.resource.samplecmp*` intrinsic form threads an explicit bias
-> through today, unlike the ordinary
-> `spv_resource_samplebias`/`.samplebias_clamp` family already handled for a
-> non-dref sample -- needs its own new intrinsic-lowering design (a genuinely
-> bigger, cross-cutting scope touching real LLVM SPIR-V backend intrinsic
-> definitions, not just feme-internal code, per this session's own investigation
-> into why (b) was deferred in favor of (d)); (c) **`samplecmp_clamp`'s own
-> trailing `MinLod` clamp operand** (not yet confirmed present in any real
-> failing CTS case measured so far) needs each `createSampleCmp*` builder
-> extended with a `MinLodClamp` parameter, mirroring `createSample2D`'s own
-> roadmap L26 precedent; (e) **the entirely separate LOD-query intrinsics**
-> (`spv_resource_calculate_lod`/`.calculate_lod_unclamped`, the 190-case
-> `texturequerylod` group, confirmed unaffected at 0/190 by every L48/L50 re-run
-> so far) have no CPU-lowering consumer at all on either the SPIR-V or DXIL
-> frontend and need a genuinely new runtime design: a real screen-space
-> coordinate derivative (`dFdx`/`dFdy`) threaded through to a query call,
-> needing its own design pass to confirm where a per-invocation derivative is
-> (or could be made) available in this target's per-lane execution model.
-> (`Cube`/`CubeArray`'s own real, nonzero `ConstOffset` sub-item (d) named in
-> L50's own original report does not exist -- SPIR-V forbids `ConstOffset`
-> against `Dim::Cube` outright, confirmed again by this session's own
-> `isSupportedOffset` review, so there is no remaining `(d)`-shaped gap to file
-> here; `(f)`'s `CubeArray`-shadow rendering bug is already its own row,
-> **L51**, not re-listed here.) Each of (a), (b), (c), (e) should be scoped and
-> fixed as its own small, independently-committed, independently-CTS-measured
-> row rather than attempted together, per this project's own established
-> (partially fixed: sub-item (a)'s ordinary, non-comparison Plain1D/Array1D
-> sampling is done and tested -- this was the highest-value, most tractable
-> target this session (8 real confirmed-failing CTS cases,
-> sampler1d{,array}_{fixed,float}_{fragment,vertex}, versus (c)'s zero confirmed
-> cases and (b)/(e)'s much larger cross-cutting scope, per this session's own
-> real deqp-vk probe). New ImageCallKind::Sample1D/Sample1DArray entries
-> (ImageCalls.h/.cpp) mirror Sample2DArray's own simpler shape (no screen-space
-> derivatives/ConstOffset/MinLod clamp, unlike Sample2D's richer roadmap H7i/L26
-> additions) rather than attempting a richer first pass; new
-> createSample1D/createSample1DArray builders and
-> femeCpuImageSample1DV4F32/Sample1DArrayV4F32 runtime entry points
-> (FeMeRuntimeCPU.c, new femeRTSamplePoint1D/Linear1D/Filtered1D filtering
-> helpers reusing every existing dimension-agnostic addressing/mip helper) round
-> out the new path. classifySampledImage2DHandle (SPIRVResourceLowering.cpp) now
-> recognizes Dim::1D (previously never checked at all, unlike the storage-image
-> classifier, which already did) for both plain and arrayed shapes;
-> hasOnlySupportedImageUses's SampleCoordWidth formula gained
-> Plain1D=1/Array1D=2 cases; lowerImageAccesses's ordinary-sample switch gained
-> an early special case for Plain1D's bare-scalar coordinate (per SPIR-V's own
-> scalar, non-vector-wrapped convention for a 1-component coordinate -- see
-> isCoordN's own comment) and Array1D's 2-component (u, layer) vector, ahead of
-> the generic CreateExtractElement(Coord, 0/1) every other shape shares (which
-> would otherwise crash on Plain1D's scalar). The pre-existing
-> dref/depth-comparison rejection of Plain1D/Array1D
-> (hasOnlySupportedImageUses's own IsInteger || Shape == ImageShape::Plain1D ||
-> Shape == ImageShape::Array1D branch) is deliberately left untouched --
-> SampleCmp1D/SampleCmpArray1D (the 4 real
-> sampler1d{,array}shadow_{fragment,vertex} cases) remain unstarted follow-on
-> work, filed as its own row, L54, below, per this project's own established
-> splitting precedent, rather than attempted together with the ordinary-sampling
-> infrastructure this session added. Also deliberately left unstarted this
-> session (out of scope, no real CTS case exercises it): a real 1D
-> OpImageFetch/texelFetch(sampler1D, ...) path -- hasOnlySupportedImageUses's
-> own fetch-shape branch now explicitly rejects Plain1D/Array1D there too,
-> rather than silently miscomputing a fetch coordinate width, until a real CTS
-> case motivates adding it. New tests: 3 SPIRVResourceLoweringTest unit tests (2
-> positive, Plain1D/Array1D classification+lowering; 1 negative, confirming a
-> Plain1D OpImageFetch is still left unlowered), 4 ImageSamplingTest runtime
-> unit tests (linear/point filtering, array-layer selection, inactive-lane
-> masking), reusing the already-existing makeImage1D/makeImage1DArray helpers
-> (roadmap H19c/H19e). ninja check-feme: 2584/2643 discovered, 59 pre-existing
-> Unsupported, 0 Failed (up by exactly the 7 new tests this phase adds); no
-> regressions. Real
-> dEQP-VK.glsl.texture_functions.texture.sampler1d{,array}_{fixed,float}_{fragment,vertex}
-> re-run: 8/8 now Pass, up from 0/8 before this fix; a broader sampler1d* sweep
-> (24 cases) confirms exactly the expected side-effect-free outcome: 8 Pass
-> (this fix), 10 Fail (unchanged -- 4 _bias_fragment blocked by sub-item (b), 4
-> *shadow_{fragment,vertex} blocked by the still-open
-> SampleCmp1D/SampleCmpArray1D counterpart filed as L54), 6 NotSupported
-> (unchanged -- _compute/shadow _compute, an unrelated
-> VK_KHR_compute_shader_derivatives gap). FeMeGraphicsDesign.md/FeMeCPUDesign.md
-> reviewed: no deviation to record (neither ever scoped sampled-image support to
-> 2D/Cube shapes only in a way this widening contradicts).
-> Vulkan14FeatureInventory.md/VulkanExtensionInventory.md reviewed: no change
-> needed (internal CPU-lowering plumbing only, no new feature/extension surface
-> advertised). Sub-items (b) Bias, (c) samplecmp_clamp's MinLod operand, and (e)
-> the LOD-query intrinsics remain open under this same row; the deferred
-> SampleCmp1D/SampleCmpArray1D counterpart is re-filed as L54, below, per this
-> project's own established L26->L33/L45->L47/L46->L48/L48->L50/L50->L51
-> precedent)
+> **L53's own real `deqp-vk` validation disproves L51's own root-cause
+> hypothesis for `samplercubearrayshadow_fragment`'s 32x32-pixel rendering
+> mismatch**: that CTS case's own sampler (`samplerShadowNoMipmap`,
+> `vktShaderRenderTextureFunctionTests.cpp`) uses plain `NEAREST`/`NEAREST`
+> filtering, not `LINEAR` -- so L53's own new seamless cross-face bilinear
+> blending (a `LINEAR`-only fix, matching spec) cannot possibly be the cause,
+> and indeed left this exact case's own image-diff bit-for-bit unchanged
+> (835.108, before and after). The real root cause is once again genuinely
+> unknown and needs a fresh investigation from scratch, most likely following
+> the same real per-sample debug-dump reduction technique L50/L51 already used
+> once for this same case's own varying-interpolation hypothesis (already
+> disproven; the fed-in `v_texCoord` was confirmed bit-for-bit correct against
+> VK-GL-CTS's own analytic reference formula). Candidate hypotheses not yet
+> investigated: (a) a `NEAREST`-specific bug in `femeRTSelectCubeFace`'s own
+> major-axis tie-breaking or face-local UV-to-integer-texel rounding, distinct
+> from L53's own `LINEAR`-only bilinear-tap logic; (b) a bug specific to the
+> depth-comparison (`CmpCubeArray`) path's own layer/Dref extraction from the
+> dual-purpose `v_texCoord.w` component, not yet directly probed with real
+> captured values on this specific mismatched pixel range; (c) a
+> rasterizer/interpolation edge case not covered by L51's own
+> single-pixel-center probe (e.g. multisampling, or a provoking-vertex
+> convention difference) despite L51's own broader 1,088-fragment capture
+> finding no discrepancy. Needs its own real IR/data reduction of this exact
+> case before attempting a fix, per this project's own established
+> L6-series/H6-series/H8-series/H9-series/L45-series precedent, rather than
+> another unvalidated hypothesis.
