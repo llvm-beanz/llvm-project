@@ -153,4 +153,14 @@ Can you work on L52 or other prerequisites blocking the L-series milestones?
 > That fix is filed and measured as its own row, **L58**, below, per this
 > project's own established splitting precedent; sub-item (b)'s own literal
 > `Dref`+`Bias` gap (needing a new LLVM core intrinsic before
-> `SPIRVResourceLowering.cpp` can even see it) remains open and unstarted.)
+> `SPIRVResourceLowering.cpp` can even see it) remains open and unstarted.
+> UPDATE: a later session re-investigating sub-items (b)/(c) confirmed both are
+> still unchanged (zero standalone real CTS cases for (c); (b) still needs a new
+> LLVM core intrinsic), but that same investigation found a much larger,
+> previously-unknown gap while probing the `shaderResourceMinLod`-gated CTS
+> groups (b)/(c) touch: explicit-`Grad` sampling has zero implementation
+> anywhere in feme at all (459 real failing cases just in the non-clamp
+> `texturegrad`/`texturegradoffset` groups). That gap is filed and partially
+> fixed as its own row, **L59**, below, per this project's own established
+> splitting precedent; sub-items (b) and (c) here remain exactly as open as
+> before.)
