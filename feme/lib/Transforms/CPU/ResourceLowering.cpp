@@ -486,14 +486,18 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       // already requires the offset operand to be compile-time zero
       // before reaching here) -- pass zero offset and a negative-infinity
       // (no-op) `MinLodClamp` constant, matching roadmap L26's SPIR-V-only
-      // scope so far.
+      // scope so far. DXIL's own `Texture2D::SampleBias` is not threaded
+      // through this pass yet either (roadmap L58 is SPIR-V-only so far)
+      // -- pass a zero `Bias` constant.
       Value *ZeroOffset = Builder.getInt32(0);
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
                                                      /*Negative=*/true);
+      Value *ZeroBias = ConstantFP::get(Builder.getFloatTy(), 0.0);
       NewCall = createSample2D(Builder, Env, ImageIndex, SamplerIndex, U, V,
                                D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod,
-                               UseExplicitLod, ZeroOffset, ZeroOffset,
-                               NoMinLodClamp, Mask, CI->getName());
+                               UseExplicitLod, ZeroBias, ZeroOffset,
+                               ZeroOffset, NoMinLodClamp, Mask,
+                               CI->getName());
       break;
     }
     case ImageShape::Array2D: {
@@ -515,6 +519,10 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       // so far.
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
                                                      /*Negative=*/true);
+      // DXIL's own `TextureCube::SampleBias` is not threaded through this
+      // pass yet (roadmap L58 is SPIR-V-only so far) -- pass a zero
+      // `Bias` constant.
+      Value *ZeroBias = ConstantFP::get(Builder.getFloatTy(), 0.0);
       // Roadmap L56: mirror Plain2D's own implicit-vs-explicit-LOD
       // derivative gating above, but for the raw direction vector (X, Y,
       // Z) rather than an already-face-local 2D coordinate -- see
@@ -532,7 +540,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       NewCall = createSampleCube(Builder, Env, ImageIndex, SamplerIndex, X, Y,
                                  Z, CD.DDirXdX, CD.DDirXdY, CD.DDirYdX,
                                  CD.DDirYdY, CD.DDirZdX, CD.DDirZdY, Lod,
-                                 UseExplicitLod, NoMinLodClamp, Mask,
+                                 UseExplicitLod, ZeroBias, NoMinLodClamp, Mask,
                                  CI->getName());
       break;
     }

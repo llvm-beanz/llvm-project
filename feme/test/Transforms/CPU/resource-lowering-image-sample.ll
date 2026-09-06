@@ -61,7 +61,7 @@ define <4 x float> @sample_2d(i32 %idx, i32 %sampidx, float %u, float %v) {
   ; CHECK-SAME: ptr %sampler_heap, i32 %sampler_heap_count,
   ; CHECK-SAME: i32 %idx, i32 %sampidx, float [[U]], float [[V]],
   ; CHECK-SAME: float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00,
-  ; CHECK-SAME: float 0.000000e+00, i1 false, i32 0, i32 0, float -inf, i1 true)
+  ; CHECK-SAME: float 0.000000e+00, i1 false, float 0.000000e+00, i32 0, i32 0, float -inf, i1 true)
   %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx, i1 false)
   %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx, i1 false)
   %coord0 = insertelement <2 x float> poison, float %u, i32 0
@@ -75,7 +75,7 @@ define <4 x float> @sample_2d(i32 %idx, i32 %sampidx, float %u, float %v) {
 ; CHECK-LABEL: define <4 x float> @samplelevel_2d(
 define <4 x float> @samplelevel_2d(i32 %idx, i32 %sampidx, float %u, float %v, float %lod) {
   ; CHECK: call <4 x float> @feme.cpu.image.sample.2d.v4f32(
-  ; CHECK-SAME: {{.*}}, float %lod, i1 true, i32 0, i32 0, float {{.*}}, i1 true)
+  ; CHECK-SAME: {{.*}}, float %lod, i1 true, float 0.000000e+00, i32 0, i32 0, float {{.*}}, i1 true)
   %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx, i1 false)
   %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 %sampidx, i1 false)
   %coord0 = insertelement <2 x float> poison, float %u, i32 0

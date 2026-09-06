@@ -60,6 +60,22 @@
 // at all. `Sample2DArray` still resolves every implicit sample to mip
 // level 0 -- no real CTS case has yet motivated extending it too.
 //
+// Update (roadmap L58): `Sample2D`/`SampleCube` gain a new `Bias` operand,
+// SPIR-V's own `Bias` image operand (GLSL's `texture(sampler, coord,
+// bias)`/HLSL's `Texture2D::SampleBias`'s explicit bias argument) -- an
+// additional term added to the implicit-LOD footprint's own raw LOD
+// before the sampler's `mipLodBias`/`minLod`/`maxLod` clamp runs (see
+// `femeRTComputeClampedLod`'s own updated doc), never combined with an
+// explicit LOD (SPIR-V forbids `Bias` alongside `Lod`, mirroring `MinLod`'s
+// own identical restriction). Scoped to `Sample2D`/`SampleCube` only, the
+// two shapes with a real, non-always-zero implicit-LOD footprint to add a
+// bias to (`Sample2DArray`/`SampleCubeArray` still resolve every implicit
+// sample to a hardcoded mip level 0 regardless of any real footprint or
+// bias, an existing limitation this update does not change; `Plain1D`/
+// `Array1D`/`Plain3D` are left for a future row too). A caller with no
+// `Bias` operand of its own (e.g. an explicit-LOD sample, or a shape whose
+// intrinsic form has no `Bias` bit set) passes a zero constant.
+//
 // Update (roadmap H19a): two new, write-only kinds, `Store2D`/`Store2DI32`,
 // give a storage image (a `spirv.Image`/`spirv.SignedImage` handle used
 // without a sampler, `Sampled == 2`) somewhere to lower `OpImageWrite` to
@@ -492,6 +508,14 @@ struct MatchedImageCall {
   /// null for `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32`, which
   /// always name their mip explicitly.
   llvm::Value *UseExplicitLod = nullptr;
+  /// `Sample2D`/`SampleCube` only (roadmap L58): SPIR-V's own `Bias` image
+  /// operand, an additional term added to the implicit-LOD footprint's
+  /// own raw LOD before the sampler's own bias/clamp runs (see
+  /// `createSample2D`'s doc); null for every other kind, including
+  /// `Sample2DArray`/`SampleCubeArray`, which have no real implicit-LOD
+  /// footprint of their own to add a bias to (a pre-existing limitation
+  /// this row does not change).
+  llvm::Value *Bias = nullptr;
   /// `SampleCmp2D`/`SampleCmpArray2D`/`SampleCmpCube`/`SampleCmpCubeArray`/
   /// `SampleCmp1D`/`SampleCmpArray1D` (roadmap L54) only: the
   /// depth-comparison reference value.
@@ -556,7 +580,12 @@ llvm::Function *getOrInsertImageCall(llvm::Module &M, ImageCallKind Kind);
 /// anisotropic filtering, a multi-tap anisotropic footprint) instead of
 /// always reading mip level 0 -- pass zero constants for a caller with none
 /// to give (a non-fragment stage, or an explicit-LOD sample, where they are
-/// ignored either way). \p OffsetX/\p OffsetY (roadmap L26) are SPIR-V's
+/// ignored either way). \p Bias (roadmap L58) is SPIR-V's own `Bias` image
+/// operand, added to the raw implicit LOD before the sampler's own
+/// bias/clamp runs, never combined with an explicit LOD -- pass a zero
+/// constant for a caller with none to give (including every explicit-LOD
+/// sample, where SPIR-V forbids `Bias` outright). \p OffsetX/\p OffsetY
+/// (roadmap L26) are SPIR-V's
 /// own compile-time-constant `ConstOffset` image operand, an integer texel
 /// offset added to every fetched texel's own address before the sampler's
 /// addressing mode is applied -- pass zero constants for a caller with
@@ -572,7 +601,7 @@ llvm::CallInst *createSample2D(llvm::IRBuilderBase &Builder,
                                llvm::Value *V, llvm::Value *DUdX,
                                llvm::Value *DUdY, llvm::Value *DVdX,
                                llvm::Value *DVdY, llvm::Value *Lod,
-                               llvm::Value *UseExplicitLod,
+                               llvm::Value *UseExplicitLod, llvm::Value *Bias,
                                llvm::Value *OffsetX, llvm::Value *OffsetY,
                                llvm::Value *MinLodClamp, llvm::Value *Mask,
                                const llvm::Twine &Name = "");
@@ -728,7 +757,9 @@ llvm::CallInst *createLoad2DArrayI32(llvm::IRBuilderBase &Builder,
 /// \p DirY/\p DirZ, consulted only for an implicit-LOD sample (see
 /// `getOrSynthesizeSampleCubeDerivatives`'s doc); a caller with none to
 /// give (a non-fragment stage, or an explicit-LOD sample) passes six zero
-/// constants. \p MinLodClamp (roadmap L26) is the same `MinLod` clamp
+/// constants. \p Bias (roadmap L58) is the same `Bias` image operand
+/// `createSample2D` documents -- pass a zero constant for a caller with
+/// none to give. \p MinLodClamp (roadmap L26) is the same `MinLod` clamp
 /// `createSample2D` documents -- a cube sample can carry one too (SPIR-V's
 /// `MinLod` image operand is legal against any dimensionality, unlike
 /// `ConstOffset`, which `Dim::Cube` forbids) -- pass negative infinity (a
@@ -742,7 +773,8 @@ llvm::CallInst *createSampleCube(llvm::IRBuilderBase &Builder,
                                  llvm::Value *DDirYdX, llvm::Value *DDirYdY,
                                  llvm::Value *DDirZdX, llvm::Value *DDirZdY,
                                  llvm::Value *Lod, llvm::Value *UseExplicitLod,
-                                 llvm::Value *MinLodClamp, llvm::Value *Mask,
+                                 llvm::Value *Bias, llvm::Value *MinLodClamp,
+                                 llvm::Value *Mask,
                                  const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.cubearray.v4f32` call (roadmap H7b-a).

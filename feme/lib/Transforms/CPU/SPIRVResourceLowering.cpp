@@ -655,54 +655,83 @@ classifySamplerHandle(const CallInst &Handle) {
   return HandleClassification{HandleKind::Sampler, 0, nullptr, nullptr};
 }
 
-/// Whether \p CI is one of the three SPIR-V sample intrinsics this pass
-/// lowers, setting \p ExplicitLod for `samplelevel` and \p HasMinLodClamp
-/// for `sample.clamp` (roadmap L26: SPIR-V's own `ConstOffset`+`MinLod`
-/// image-operand combination, HLSL's `Texture2D::Sample`'s trailing
-/// `clamp` overload -- always an implicit-LOD sample, see
-/// `ImageSampleImplicitLodPattern`'s own comment, so `ExplicitLod` and
-/// `HasMinLodClamp` are never both set). Every recognized shape's own
-/// operand order is `(image, sampler, coord, [lod,] offset, [clamp])`
-/// (`spv_resource_sample`'s own `offset` is the last operand;
-/// `spv_resource_samplelevel` inserts `lod` before it;
-/// `spv_resource_sample_clamp` appends `clamp` after it instead) --
-/// `getSampleOffsetIdx`/`getSampleClampIdx` below derive each operand's
-/// own index from this same `ExplicitLod`/`HasMinLodClamp` pair rather
-/// than every caller re-deriving it.
+/// Whether \p CI is one of the five SPIR-V sample intrinsics this pass
+/// lowers, setting \p ExplicitLod for `samplelevel`, \p HasMinLodClamp
+/// for `sample.clamp`/`samplebias.clamp` (roadmap L26/L58: SPIR-V's own
+/// `ConstOffset`+`MinLod` image-operand combination, HLSL's
+/// `Texture2D::Sample`'s trailing `clamp` overload -- always an
+/// implicit-LOD sample, see `ImageSampleImplicitLodPattern`'s own
+/// comment, so `ExplicitLod` and `HasMinLodClamp` are never both set),
+/// and \p HasBias for `samplebias`/`samplebias.clamp` (roadmap L58:
+/// SPIR-V's own `Bias` image operand, GLSL's `texture(sampler, coord,
+/// bias)` -- like `MinLod`, never combined with an explicit LOD, so
+/// `ExplicitLod` and `HasBias` are never both set either). Every
+/// recognized shape's own operand order is `(image, sampler, coord,
+/// [lod|bias,] offset, [clamp])` (`spv_resource_sample`'s own `offset` is
+/// the last operand; `spv_resource_samplelevel`/`samplebias` each insert
+/// an extra scalar -- `lod`/`bias` respectively -- before it;
+/// `spv_resource_sample_clamp`/`samplebias_clamp` each append `clamp`
+/// after it instead) -- `getSampleOffsetIdx`/`getSampleClampIdx` below
+/// derive each operand's own index from this same
+/// `ExplicitLod`/`HasBias`/`HasMinLodClamp` triple rather than every
+/// caller re-deriving it.
 bool isSampleIntrinsic(const CallInst &CI, bool &ExplicitLod,
-                      bool &HasMinLodClamp) {
+                      bool &HasMinLodClamp, bool &HasBias) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
   if (ID == Intrinsic::spv_resource_sample) {
     ExplicitLod = false;
     HasMinLodClamp = false;
+    HasBias = false;
     return true;
   }
   if (ID == Intrinsic::spv_resource_sample_clamp) {
     ExplicitLod = false;
     HasMinLodClamp = true;
+    HasBias = false;
     return true;
   }
   if (ID == Intrinsic::spv_resource_samplelevel) {
     ExplicitLod = true;
     HasMinLodClamp = false;
+    HasBias = false;
+    return true;
+  }
+  if (ID == Intrinsic::spv_resource_samplebias) {
+    ExplicitLod = false;
+    HasMinLodClamp = false;
+    HasBias = true;
+    return true;
+  }
+  if (ID == Intrinsic::spv_resource_samplebias_clamp) {
+    ExplicitLod = false;
+    HasMinLodClamp = true;
+    HasBias = true;
     return true;
   }
   return false;
 }
 
 /// The index of a sample intrinsic's own offset operand, given
-/// `isSampleIntrinsic`'s own `ExplicitLod` output: `spv_resource_sample`/
-/// `spv_resource_sample_clamp` are `(image, sampler, coord, offset,
-/// [clamp])` (offset at index 3); `spv_resource_samplelevel` inserts
-/// `lod` before it, `(image, sampler, coord, lod, offset)` (offset at
-/// index 4).
-unsigned getSampleOffsetIdx(bool ExplicitLod) { return ExplicitLod ? 4 : 3; }
+/// `isSampleIntrinsic`'s own `ExplicitLod`/`HasBias` outputs:
+/// `spv_resource_sample`/`spv_resource_sample_clamp` are `(image,
+/// sampler, coord, offset, [clamp])` (offset at index 3);
+/// `spv_resource_samplelevel`/`samplebias`/`samplebias_clamp` each insert
+/// an extra scalar (`lod`/`bias` respectively) before it, `(image,
+/// sampler, coord, lod|bias, offset, [clamp])` (offset at index 4) --
+/// `ExplicitLod` and `HasBias` are mutually exclusive (SPIR-V forbids
+/// `Bias` alongside `Lod`), but either alone shifts the offset the same
+/// way.
+unsigned getSampleOffsetIdx(bool ExplicitLod, bool HasBias) {
+  return (ExplicitLod || HasBias) ? 4 : 3;
+}
 
-/// The index of a `spv_resource_sample_clamp` call's own trailing `clamp`
-/// operand, immediately after its offset operand
-/// (`getSampleOffsetIdx(/*ExplicitLod=*/false) + 1`); meaningless (never
-/// called) for any other sample intrinsic, which has no such operand.
-unsigned getSampleClampIdx() { return getSampleOffsetIdx(false) + 1; }
+/// The index of a `spv_resource_sample_clamp`/`samplebias_clamp` call's
+/// own trailing `clamp` operand, immediately after its offset operand;
+/// meaningless (never called) for any other sample intrinsic, which has
+/// no such operand.
+unsigned getSampleClampIdx(bool ExplicitLod, bool HasBias) {
+  return getSampleOffsetIdx(ExplicitLod, HasBias) + 1;
+}
 
 /// Whether \p CI is one of the two SPIR-V depth-comparison sample
 /// intrinsics this pass lowers today (roadmap L46), setting \p ExplicitLod
@@ -903,7 +932,8 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
 
     bool ExplicitLod = false;
     bool HasMinLodClamp = false;
-    if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp)) {
+    bool HasBias = false;
+    if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias)) {
       if (IsInteger)
         return false; // No filtered sample over an integer-channel image.
       if (CI->getArgOperand(0) != &Handle)
@@ -918,7 +948,16 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       if (HasMinLodClamp && Shape != ImageShape::Plain2D &&
           Shape != ImageShape::Cube)
         return false;
-      unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod);
+      // Roadmap L58: same restriction for `Bias`, mirroring
+      // `HasMinLodClamp` immediately above -- only `Plain2D`'s and
+      // `Cube`'s own `createSample2D`/`createSampleCube` calls thread a
+      // real `Bias` operand through `lowerImageAccesses`; every other
+      // shape (`Array2D`/`CubeArray`/`Plain1D`/`Array1D`, none of which
+      // have a real implicit-LOD footprint of their own to add a bias
+      // to) is left unlowered rather than silently dropping the bias.
+      if (HasBias && Shape != ImageShape::Plain2D && Shape != ImageShape::Cube)
+        return false;
+      unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod, HasBias);
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
           !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape) ||
           !isV4F32(CI->getType()))
@@ -1144,8 +1183,9 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
     const auto *CI = dyn_cast<CallInst>(U);
     bool ExplicitLod = false;
     bool HasMinLodClamp = false;
+    bool HasBias = false;
     bool Unclamped = false;
-    if (!CI || !(isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp) ||
+    if (!CI || !(isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias) ||
                  isDrefSampleIntrinsic(*CI, ExplicitLod) ||
                  isQueryLodIntrinsic(*CI, Unclamped)))
       return false;
@@ -2125,7 +2165,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
       auto *CI = cast<CallInst>(U);
       bool ExplicitLod = false;
       bool HasMinLodClamp = false;
-      if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp)) {
+      bool HasBias = false;
+      if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias)) {
         // A sample is reached twice -- once from its image handle, once
         // from its sampler handle -- so only rewrite it from the image
         // side, where both descriptor indices are already resolvable.
@@ -2135,6 +2176,13 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         Value *Coord = CI->getArgOperand(2);
         Value *Lod = ExplicitLod ? CI->getArgOperand(3)
                                  : ConstantFP::get(Builder.getFloatTy(), 0.0);
+        // Roadmap L58: SPIR-V's own `Bias` image operand shares the same
+        // fixed operand index 3 `Lod` occupies for an explicit-LOD
+        // sample -- `ExplicitLod` and `HasBias` are mutually exclusive
+        // (SPIR-V forbids `Bias` alongside `Lod`), so there is no
+        // ambiguity about which one index 3 holds for a given call.
+        Value *Bias = HasBias ? CI->getArgOperand(3)
+                              : ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *ExplicitLodFlag = Builder.getInt1(ExplicitLod);
         Value *SamplerIndex =
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
@@ -2191,7 +2239,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // possibly-nonzero texel offset now, not always the trivial
           // zero case; split its two components the same way `Coord`'s
           // own `C0`/`C1` are.
-          Value *Offset = CI->getArgOperand(getSampleOffsetIdx(ExplicitLod));
+          Value *Offset =
+              CI->getArgOperand(getSampleOffsetIdx(ExplicitLod, HasBias));
           Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
           Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
           // Roadmap L26: SPIR-V's own `MinLod` image operand
@@ -2201,12 +2250,12 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // intrinsic, which has no such operand of its own.
           Value *MinLodClamp =
               HasMinLodClamp
-                  ? CI->getArgOperand(getSampleClampIdx())
+                  ? CI->getArgOperand(getSampleClampIdx(ExplicitLod, HasBias))
                   : ConstantFP::getInfinity(Builder.getFloatTy(),
                                             /*Negative=*/true);
           NewCall = createSample2D(Builder, Env, ImageIndex, SamplerIndex, C0,
                                    C1, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod,
-                                   ExplicitLodFlag, OffsetX, OffsetY,
+                                   ExplicitLodFlag, Bias, OffsetX, OffsetY,
                                    MinLodClamp, Mask, CI->getName());
           break;
         }
@@ -2226,7 +2275,7 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // on that operand's own legality.
           Value *MinLodClamp =
               HasMinLodClamp
-                  ? CI->getArgOperand(getSampleClampIdx())
+                  ? CI->getArgOperand(getSampleClampIdx(ExplicitLod, HasBias))
                   : ConstantFP::getInfinity(Builder.getFloatTy(),
                                             /*Negative=*/true);
           // Roadmap L56: an implicit-LOD cube sample's real mip level
@@ -2253,7 +2302,7 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           NewCall = createSampleCube(
               Builder, Env, ImageIndex, SamplerIndex, C0, C1, C2, CD.DDirXdX,
               CD.DDirXdY, CD.DDirYdX, CD.DDirYdY, CD.DDirZdX, CD.DDirZdY, Lod,
-              ExplicitLodFlag, MinLodClamp, Mask, CI->getName());
+              ExplicitLodFlag, Bias, MinLodClamp, Mask, CI->getName());
           break;
         }
         case ImageShape::CubeArray: {

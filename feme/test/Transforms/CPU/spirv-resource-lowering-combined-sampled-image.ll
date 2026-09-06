@@ -28,7 +28,7 @@ define <4 x float> @sample(<2 x float> %coord) {
   %s = extractvalue %sampled_image %h, 1
   ; CHECK: %[[U:.*]] = extractelement <2 x float> %coord, i64 0
   ; CHECK: %[[V:.*]] = extractelement <2 x float> %coord, i64 1
-  ; CHECK: call <4 x float> @feme.cpu.image.sample.2d.v4f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %[[U]], float %[[V]], float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, i1 false, i32 0, i32 0, float -inf, i1 true)
+  ; CHECK: call <4 x float> @feme.cpu.image.sample.2d.v4f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %[[U]], float %[[V]], float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, i1 false, float 0.000000e+00, i32 0, i32 0, float -inf, i1 true)
   %r = call <4 x float> @llvm.spv.resource.sample(
       target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %i,
       target("spirv.Sampler") %s, <2 x float> %coord, <2 x i32> zeroinitializer)
