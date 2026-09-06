@@ -28412,3 +28412,138 @@ derivative-operand infrastructure to build on today (unlike
 sub-items (b)-(f) are unchanged by this session. The newly-discovered
 `texturegrad`-group `VulkanBuffer` resource-handle gap (see above) is
 also unfiled and left for a future session.
+
+## Roadmap L60(a) (complete): `Array2D` `Bias`/`MinLodClamp`/`Grad` sampling
+
+**Context.** The prior session's L60(a) entry fixed `CubeArray`'s own
+`Bias`/`MinLodClamp`/`Grad` support by reusing its existing roadmap L56
+six-operand screen-space-derivative infrastructure, but left `Array2D`
+entirely unstarted: unlike `CubeArray`, `createSample2DArray` had zero
+derivative-operand infrastructure of its own to build on, a materially
+bigger prerequisite. This session adds that infrastructure and wires it
+through, completing L60(a) for both shapes.
+
+**Fix.** `createSample2DArray`'s signature (`ImageCalls.h`/`.cpp`) was
+extended from 12 to 18 arguments, adding real `DUdX`/`DUdY`/`DVdX`/
+`DVdY` screen-space derivatives, `Bias`, and `MinLodClamp`, mirroring
+`createSample2D`'s own shape but deliberately *without* an `OffsetX`/
+`OffsetY` `ConstOffset` pair (ordinary, non-`Dref` `Array2D` sampling's
+own `ConstOffset` support remains separately-scoped future work under
+roadmap L33, confirmed via `isSupportedOffset`'s own doc comment).
+`femeCpuImageSample2DArrayV4F32` (`FeMeRuntimeCPU.c`) was rewritten from
+its previous always-single-tap `femeRTComputeClampedLod`-only body to
+the same `femeRTPlanImplicitLod`-based anisotropic multi-tap
+implementation `femeCpuImageSample2DV4F32` already used, reading a fixed
+array layer for every tap -- a genuine behavioral upgrade beyond just
+adding `Bias`/`Grad` support: `Array2D` sampling now gets real
+anisotropic filtering when a sampler enables it, which it never did
+before. `hasOnlySupportedImageUses`'s `HasMinLodClamp`/`HasBias`/
+`HasGrad` shape checks (`SPIRVResourceLowering.cpp`) were widened to
+also allow `Array2D`; `lowerImageAccesses`'s `Array2D` case (ordinary,
+non-`Dref` sample path) was rewritten to extract real derivatives via
+the existing `getOrSynthesizeSample2DDerivatives` helper (`Plain2D`
+already uses it -- an arrayed sample's face-local (U, V) coordinate
+differentiates identically), added a `HasGrad` branch extracting the
+real `dPdx`/`dPdy` first-two-components, and added `MinLodClamp`
+extraction, mirroring `Cube`'s handling. A second `createSample2DArray`
+call site in `ResourceLowering.cpp` (the DXIL-frontend path) needed the
+same fix -- synthesizing derivatives and passing `ZeroBias`/
+`NoMinLodClamp` no-op constants, since DXIL doesn't thread real
+bias/clamp through yet -- matching the exact same "easy to miss second
+call site" pattern the prior `CubeArray` session also hit.
+
+**New tests.** `ImageSamplingTest.cpp`'s `SampleArrayFn` typedef and its
+2 existing call sites (`Sample2DArrayReadsRequestedLayer`,
+`Sample2DArrayRoundsLayerToNearest`) were updated for the 6 new
+parameters (zero derivatives, `Bias=0.0f`, `MinLodClamp=-infinity`, no
+behavioral change). `SPIRVResourceLoweringTest.cpp`:
+`LowersSampledImageArrayToImageSampleArray`'s `arg_size()` assertion was
+fixed (12u -> 18u); two now-obsolete negative tests asserting an
+`Array2D` `samplebias`/`sample.clamp` was left unlowered
+(`LeavesASampleBiasAgainstArray2DAlone`,
+`LeavesASampleClampAgainstArray2DAlone`) were removed, and the
+also-obsolete `LeavesASampleGradAgainstArray2DAlone` negative test was
+replaced, with 3 new positive tests: `LowersSampleBiasToArray2DBias`,
+`LowersSampleClampToArray2DMinLodClamp`,
+`LowersSampleGradToArray2DDerivatives`, mirroring the `CubeArray` test
+patterns the prior session added, using a 3-component `(u, v, layer)`
+coordinate and a 3-wide `dpdx`/`dpdy` for the `Grad` test (matching
+`Array2D`'s `SampleCoordWidth = 3`).
+
+**`ninja check-feme` (ccache + assertions, `build2`).** 2677 total
+discovered (up from 2674 by a net +3: the 3 new
+`SPIRVResourceLoweringTest` positive tests, minus the 2 removed
+already-obsolete negative tests, plus the 1 replaced obsolete negative
+test becoming 1 of the 3 new positive tests -- net effect is +3 tests
+relative to before this session, +2 relative to the immediately prior
+count of 1 pre-existing `Array2D`-shape test), 59 pre-existing
+`Unsupported`, 0 `Failed` -- no regressions.
+
+**Real CTS impact.**
+`dEQP-VK.glsl.texture_functions.texture.sampler2darray_bias_{fixed,float}_fragment`:
+2/2 now Pass, up from 0/2 before this fix (both previously failed at
+`vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`,
+matching `Bias`'s own general pre-fix failure mode for any
+theretofore-unsupported shape). A broader `texture.*bias*` sweep (50
+cases, same group as the prior `CubeArray`/`Plain2D`/`Cube` sessions
+measured) now shows 8 Pass total (up from 6 after the `CubeArray` fix,
+4 after the original L58 `Plain2D`/`Cube` fix), 24 Fail (down from 26,
+by exactly these 2 newly-passing cases -- every remaining failure is an
+integer-sampler (`isampler`/`usampler`), shadow/`Dref`, `Plain1D`, or
+`Plain3D` case this row does not touch), 18 NotSupported (unchanged --
+sparse-residency variants, gated by unrelated format-support gaps).
+
+A real `git stash`-based before/after comparison of the full
+`dEQP-VK.glsl.texture_functions.*.sampler2darray_*` group (312 cases,
+covering every texture-function group against this one shape) confirms
+a strictly monotonic improvement with zero regressions: 10 Pass after
+this fix vs. 8 Pass before (up by exactly the 2 `Bias` cases above), 156
+Fail after vs. 158 before (down by exactly 2), 146 NotSupported
+unchanged in both runs.
+
+`Array2D`'s own `Grad` counterpart
+(`dEQP-VK.glsl.texture_functions.texturegrad.sampler2darray_*`, 6 cases
+across `fixed`/`float` x `compute`/`fragment`/`vertex`) remains blocked
+by the exact same pre-existing, unrelated `VulkanBuffer`
+register-bound-resource-handle gap already confirmed blocking
+`CubeArray`'s own `Grad` path in the prior session's entry above --
+confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`:
+
+```
+vkCreateGraphicsPipelines: unsupported raised operation: 'llvm.spv.resource.handlefrombinding.tspirv.VulkanBuffer_sl_v4f32s_2_0t'
+is a register-bound resource handle the FeMe CPU target cannot normalize into a heap access or the root-constant block
+(an unbounded range, a conflicting re-declaration, or an unsupported resource kind); express it as a finite, unambiguous
+traditional binding, bindless (ResourceDescriptorHeap/SamplerDescriptorHeap) access, or the one recognized root-constant binding
+```
+
+`vkCreateGraphicsPipelines`/`vkCreateComputePipelines` both fail before
+`Grad` lowering is ever reached, for `fragment`/`vertex` and `compute`
+stages alike -- this is not a regression and not this row's own scope
+to fix. `Array2D`'s own `MinLodClamp` counterpart
+(`texturegradclamp.sampler2darray_{fixed,float}_fragment`) remains
+equally unconfirmable by real CTS, both cases correctly reporting
+`NotSupported (ShaderResourceMinLod feature not supported.)` since
+`shaderResourceMinLod` remains disabled.
+
+**Design docs.** `FeMeGraphicsDesign.md`'s Bias/gradient-sampling bullet
+updated in place: `Array2D` gradient/bias/clamp sampling is no longer
+"entirely unimplemented" -- both `CubeArray` and `Array2D` now have
+full `Bias`/`MinLodClamp`/`Grad`-operand-lowering parity with
+`Plain2D`/`Cube`. `FeMeCPUDesign.md`/`Design.md` reviewed: no further
+deviation to record.
+
+**Feature/extension inventories.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed: no change needed --
+`shaderResourceMinLod` remains correctly `VK_FALSE`; internal
+CPU-lowering plumbing only, no new feature/extension surface
+advertised.
+
+**Roadmap update.** L60(a) is now complete for both shapes named in its
+own title ("`Array2D`/`CubeArray` `Grad` sampling") and struck through
+in `Roadmap.md`, with a detailed `UPDATE:` addendum describing this
+session's `Array2D` fix appended to the existing entry (following this
+project's established append-in-place precedent for multi-session
+rows) rather than rewriting the row from scratch. L60's sub-items
+(b)-(f) are unchanged by this session. The shared `VulkanBuffer`
+resource-handle gap blocking both shapes' `Grad` CTS cases remains
+unfiled and left for a future session, as before.

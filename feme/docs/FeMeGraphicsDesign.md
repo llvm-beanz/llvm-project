@@ -2477,7 +2477,22 @@ documented reason rather than an oversight:
   operands unchanged, mirroring `Cube`'s own L58/L59 precedent exactly;
   `Array2D` gradient/bias/clamp sampling remains entirely unimplemented,
   since (unlike `CubeArray`) `createSample2DArray` has no
-  derivative-operand infrastructure to build on yet.
+  derivative-operand infrastructure to build on yet. Update (roadmap
+  L60(a), complete): `Array2D`'s own `Bias`/`MinLodClamp`/`Grad` sampling
+  is now also implemented on the SPIR-V import side, extending
+  `createSample2DArray` with the same six operands `createSample2D`
+  already has (real screen-space derivatives, `Bias`, `MinLodClamp`),
+  deliberately without a `ConstOffset` pair (still roadmap L33 scope);
+  `femeCpuImageSample2DArrayV4F32` was upgraded in the same change from
+  an always-single-tap implementation to the same
+  `femeRTPlanImplicitLod`-based anisotropic multi-tap implementation
+  every other implicit-LOD sample entry point uses. Both `CubeArray` and
+  `Array2D` now have full `Bias`/`MinLodClamp`/`Grad`-operand-lowering
+  parity with `Plain2D`/`Cube`; a shared, unrelated `VulkanBuffer`
+  register-bound-resource-handle gap (not this row's own scope) still
+  blocks a passing real `texturegrad` CTS case for either arrayed shape,
+  and `shaderResourceMinLod` remaining disabled still blocks a real
+  `MinLodClamp` CTS case for any shape.
 - **1D and 3D/cube sampling**, and on the SPIR-V side an arrayed or
   multisampled storage image, or a non-mandatory-format/format-agnostic
   storage image (roadmap H19a closed the non-arrayed, non-multisampled,
