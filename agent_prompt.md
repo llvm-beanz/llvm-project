@@ -44,6 +44,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 Can you work on L60 or other prerequisites blocking the L-series milestones?
 
+The last session reported:
+
+> That `VulkanBuffer` gap now appears in the roadmap as a blocker for L60(a),
+> L60's `Grad` sub-items, and the feature flip alike — it is doing a lot of work
+> for something never filed as its own row, and is probably the single
+> highest-value next target in this series.
+
+Which seems like the right place to start.
+
 > **L59's own `Plain2D`/`Cube`, `fixed`/`float`, `fragment`/`vertex`
 > explicit-`Grad` slice leaves several distinct, independently-sized gaps still
 > open, broken down here rather than re-attempted together, per this project's
