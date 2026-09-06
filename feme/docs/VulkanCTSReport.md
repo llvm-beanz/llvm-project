@@ -27897,3 +27897,136 @@ and cube-sampling sweeps). L52's own sub-items (b) `Bias`, (c)
 intrinsics, and the newly-noticed `usamplercubearray*` pipeline-creation
 gap (not yet filed as its own row), all remain open, unaffected by this
 row.
+
+## Roadmap L57: `textureQueryLod` / `OpImageQueryLod` support for `Plain2D`
+
+**Context.** L52's own (a)-(f) breakdown left sub-item (e) -- the
+LOD-query intrinsics (`spv_resource_calculate_lod`/
+`.calculate_lod_unclamped`, legalized from `OpImageQueryLod`) -- as
+having no CPU-lowering consumer at all, blocking the entire 190-case
+`dEQP-VK.glsl.texture_functions.query.texturequerylod.*` group. Of
+L52's three remaining open sub-items ((b) `Bias`, (c) `samplecmp_clamp`
+`MinLod`, (e) LOD-query), (e) was chosen: (a) and L54 were already
+done in prior sessions; (c) has zero confirmed real failing CTS cases
+so far; (b) is a materially larger, cross-cutting scope touching real
+LLVM SPIR-V backend intrinsic definitions. (e) has by far the largest
+real, confirmed CTS impact (30 failing `sampler2d_*` cases in the
+190-case group) and reuses existing derivative-synthesis
+infrastructure, making it the highest-value, most tractable target.
+Scoped narrowly to `Plain2D` (non-integer, non-array, non-cube) only,
+per this project's own established narrow-first-slice precedent.
+
+**Root cause.** `OpImageQueryLod` legalizes (via the upstream MLIR
+`ImageQueryLodPattern`) into a pair of scalar-returning intrinsic calls,
+`llvm.spv.resource.calculate.lod`/`.calculate_lod.unclamped`, sharing
+identical `(image, sampler, coord)` operands. Neither intrinsic had any
+recognition at all in `SPIRVResourceLowering.cpp`'s classification or
+lowering logic, so any shader calling `textureQueryLod` failed
+`hasOnlySupportedImageUses`'s all-or-nothing handle-normalization check
+and the whole function's resource handles were left unlowered,
+ultimately failing pipeline creation.
+
+**Fix.**
+- `feme/include/feme/Transforms/CPU/ImageCalls.h` /
+  `feme/lib/Transforms/CPU/ImageCalls.cpp`: new
+  `ImageCallKind::QueryLod2D` and `createQueryLod2D` builder. The
+  runtime call returns a `<2 x float>` (`{ClampedLevel, UnclampedLod}`)
+  and deliberately omits `U`/`V` coordinate operands entirely -- the
+  LOD-only calculation only ever needs derivatives and image extent,
+  never the sampled coordinate itself.
+- `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`: new
+  `isQueryLodIntrinsic` helper recognizing both intrinsics (confirmed
+  via the generated `IntrinsicsSPIRV.h`); `hasOnlySupportedImageUses`/
+  `hasOnlySupportedSamplerUses` extended to accept the pair for
+  `Plain2D` non-integer images only; new `lowerImageAccesses` branch
+  extracts `(U,V)`, synthesizes real derivatives via the pre-existing
+  `getOrSynthesizeSample2DDerivatives` (Fragment-stage-gated,
+  degenerating to zero constants elsewhere, matching every other
+  implicit-LOD sample path's own convention), and replaces each of the
+  two always-paired intrinsic calls with its own independent
+  `createQueryLod2D` call.
+  - **Design decision**: deliberately *not* CSE'd into one shared call
+    across the pair. `Handle->users()` iteration order is not
+    guaranteed to match program order, so caching the first-visited
+    call's result at its IR position risked failing to dominate a
+    program-order-earlier second use site. Chose correctness over
+    micro-optimization (redundant, side-effect-free computation),
+    matching this pass's own no-cross-call-CSE convention everywhere
+    else; a later optimization pass could still fold the duplicate
+    calls.
+- `feme/runtime/CPU/FeMeRuntimeCPU.c`: new static helpers
+  `femeRTComputeUnclampedQueryLod` (reuses `femeRTPlanImplicitLod`'s own
+  `Ux`/`Uy`/`Vx`/`Vy`/`Pmax`/`femeRTFastLog2` math, with an explicit
+  `-INFINITY` for the zero-footprint case per `OpImageQueryLod`'s own
+  spec-mandated `-Inf` convention, diverging from
+  `femeRTPlanImplicitLod`'s own `0.0f` convention used elsewhere) and
+  `femeRTComputeClampedQueryLevel` (mip-count-clamped level, rounded via
+  `floor(Level+0.5)` for a `NEAREST` `MipFilter`, left fractional for
+  `LINEAR`, matching VK-GL-CTS's own `computeLevelFromLod` reference
+  oracle in `vktShaderRenderTextureFunctionTests.cpp`), plus the new
+  entry point `femeCpuImageQueryLod2DV2F32`.
+
+**Tests.** 3 new `SPIRVResourceLoweringTest` unit tests
+(`LowersQueryLodToImageQueryLodWithZeroDerivativesOutsideFragment`,
+`FragmentStageQueryLodSynthesizesRealDerivatives`,
+`LeavesAnArrayedQueryLodHandleAlone`) and 5 new `ImageSamplingTest`
+runtime unit tests
+(`QueryLod2DZeroDerivativesReportUnclampedNegativeInfinity`,
+`QueryLod2DReportsRawLodFromDerivatives`,
+`QueryLod2DClampedLevelRoundsForNearestMipFilter`,
+`QueryLod2DClampedLevelStaysFractionalForLinearMipFilter`,
+`QueryLod2DInactiveLaneReadsZero`).
+
+While writing the runtime tests, discovered that `femeRTFastLog2`'s own
+doc comment overclaims exactness at powers of two: it in fact carries a
+small, constant, real additive bias (`+0.05730496`, confirmed via an
+exact Python reimplementation of its own bit-trick) even at an exact
+power of two. The new tests compute their own expected values via a
+matching test-local `expectedFastLog2` helper rather than assuming
+idealized `log2` semantics. `femeRTFastLog2` itself is deliberately left
+unchanged -- it is reused unmodified by ordinary implicit-LOD sampling
+elsewhere, and fixing its approximation bias is a larger, unrelated,
+out-of-scope change.
+
+**`ninja check-feme`** (ccache + assertions, `build2`): 2607/2666
+discovered, 59 pre-existing `Unsupported`, 0 `Failed` -- no regressions
+(up by exactly the 8 new tests this row adds).
+
+**Real `deqp-vk` re-run.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-case="dEQP-VK.glsl.texture_functions.query.texturequerylod.sampler2d_*" \
+  --deqp-log-filename=l57_querylod.qpa
+```
+
+**Result: 30/30 Pass** (this row's own motivating group, up from 0/30
+before this fix). A broader sweep of the full 190-case
+`texturequerylod.*` group confirms **35/190 Pass** (the 30 cases above
+plus a bonus 5 `sampler2dshadow_*` cases, since `OpImageQueryLod` has no
+comparison operand at all and this row's own `Plain2D`-non-integer gate
+does not exclude a depth-format image), 155 still `Fail` -- entirely
+pre-existing, unrelated, out-of-scope gaps: `*_bias_fragment` (L52
+sub-item (b)'s still-open `Bias`-operand legalization gap), every
+`Cube`/`CubeArray`/`Array2D`/`Plain1D`/`Array1D` shape (this row's own
+deliberately narrow `Plain2D`-only scope), and `usamplercube{,array}*`
+(a separate, unrelated integer-format `vkCreateGraphicsPipelines`
+failure, not previously filed and out of scope for this row).
+
+**Design docs / inventories.** `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md`
+reviewed: no deviation to record (neither document ever scoped
+implicit-LOD-adjacent query support away from a plain 2D sampled
+image). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed: no change needed (internal CPU-lowering plumbing only, no new
+feature/extension surface advertised).
+
+**Disposition.** Roadmap **L57 struck through** (root cause understood,
+fix implemented and directly validated via the real motivating CTS
+group flipping from 0/30 to 30/30 with a bonus 5-case improvement and no
+regressions in the broader 190-case sweep). L52's own sub-items (b)
+`Bias` and (c) `samplecmp_clamp`'s `MinLod` operand remain the only
+still-open L52 sub-items. `Plain1D`/`Array1D`/`Cube`/`CubeArray`
+LOD-query support and the pre-existing `usamplercube{,array}*`
+pipeline-creation gap are each their own future row if a real CTS case
+motivates one.
