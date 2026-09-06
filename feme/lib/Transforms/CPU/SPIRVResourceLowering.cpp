@@ -655,82 +655,112 @@ classifySamplerHandle(const CallInst &Handle) {
   return HandleClassification{HandleKind::Sampler, 0, nullptr, nullptr};
 }
 
-/// Whether \p CI is one of the five SPIR-V sample intrinsics this pass
+/// Whether \p CI is one of the seven SPIR-V sample intrinsics this pass
 /// lowers, setting \p ExplicitLod for `samplelevel`, \p HasMinLodClamp
-/// for `sample.clamp`/`samplebias.clamp` (roadmap L26/L58: SPIR-V's own
-/// `ConstOffset`+`MinLod` image-operand combination, HLSL's
-/// `Texture2D::Sample`'s trailing `clamp` overload -- always an
-/// implicit-LOD sample, see `ImageSampleImplicitLodPattern`'s own
-/// comment, so `ExplicitLod` and `HasMinLodClamp` are never both set),
-/// and \p HasBias for `samplebias`/`samplebias.clamp` (roadmap L58:
+/// for `sample.clamp`/`samplebias.clamp`/`samplegrad.clamp` (roadmap
+/// L26/L58/L59: SPIR-V's own `ConstOffset`+`MinLod` image-operand
+/// combination, HLSL's `Texture2D::Sample`'s trailing `clamp` overload --
+/// always an implicit-LOD sample, see `ImageSampleImplicitLodPattern`'s
+/// own comment, so `ExplicitLod` and `HasMinLodClamp` are never both
+/// set), \p HasBias for `samplebias`/`samplebias.clamp` (roadmap L58:
 /// SPIR-V's own `Bias` image operand, GLSL's `texture(sampler, coord,
 /// bias)` -- like `MinLod`, never combined with an explicit LOD, so
-/// `ExplicitLod` and `HasBias` are never both set either). Every
-/// recognized shape's own operand order is `(image, sampler, coord,
-/// [lod|bias,] offset, [clamp])` (`spv_resource_sample`'s own `offset` is
-/// the last operand; `spv_resource_samplelevel`/`samplebias` each insert
-/// an extra scalar -- `lod`/`bias` respectively -- before it;
-/// `spv_resource_sample_clamp`/`samplebias_clamp` each append `clamp`
-/// after it instead) -- `getSampleOffsetIdx`/`getSampleClampIdx` below
-/// derive each operand's own index from this same
-/// `ExplicitLod`/`HasBias`/`HasMinLodClamp` triple rather than every
-/// caller re-deriving it.
+/// `ExplicitLod` and `HasBias` are never both set either), and \p HasGrad
+/// for `samplegrad`/`samplegrad.clamp` (roadmap L59: SPIR-V's own `Grad`
+/// image operand, GLSL's `textureGrad()`/`textureGradOffset()` -- an
+/// explicit pair of screen-space partial-derivative vectors, mutually
+/// exclusive with both `ExplicitLod` and `HasBias`, see
+/// `ImageSampleGradPattern`'s own doc in `SPIRVToLLVMPatterns.cpp`).
+/// Every recognized shape's own operand order is `(image, sampler,
+/// coord, [lod|bias,] [dPdx, dPdy,] offset, [clamp])`
+/// (`spv_resource_sample`'s own `offset` is the last operand;
+/// `spv_resource_samplelevel`/`samplebias` each insert an extra scalar --
+/// `lod`/`bias` respectively -- before it; `spv_resource_samplegrad`
+/// inserts two vector operands -- `dPdx`, `dPdy` -- before it instead;
+/// `spv_resource_sample_clamp`/`samplebias_clamp`/`samplegrad_clamp`
+/// each append `clamp` after it instead) -- `getSampleOffsetIdx`/
+/// `getSampleClampIdx` below derive each operand's own index from this
+/// same `ExplicitLod`/`HasBias`/`HasGrad`/`HasMinLodClamp` quadruple
+/// rather than every caller re-deriving it.
 bool isSampleIntrinsic(const CallInst &CI, bool &ExplicitLod,
-                      bool &HasMinLodClamp, bool &HasBias) {
+                      bool &HasMinLodClamp, bool &HasBias, bool &HasGrad) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
   if (ID == Intrinsic::spv_resource_sample) {
     ExplicitLod = false;
     HasMinLodClamp = false;
     HasBias = false;
+    HasGrad = false;
     return true;
   }
   if (ID == Intrinsic::spv_resource_sample_clamp) {
     ExplicitLod = false;
     HasMinLodClamp = true;
     HasBias = false;
+    HasGrad = false;
     return true;
   }
   if (ID == Intrinsic::spv_resource_samplelevel) {
     ExplicitLod = true;
     HasMinLodClamp = false;
     HasBias = false;
+    HasGrad = false;
     return true;
   }
   if (ID == Intrinsic::spv_resource_samplebias) {
     ExplicitLod = false;
     HasMinLodClamp = false;
     HasBias = true;
+    HasGrad = false;
     return true;
   }
   if (ID == Intrinsic::spv_resource_samplebias_clamp) {
     ExplicitLod = false;
     HasMinLodClamp = true;
     HasBias = true;
+    HasGrad = false;
+    return true;
+  }
+  if (ID == Intrinsic::spv_resource_samplegrad) {
+    ExplicitLod = false;
+    HasMinLodClamp = false;
+    HasBias = false;
+    HasGrad = true;
+    return true;
+  }
+  if (ID == Intrinsic::spv_resource_samplegrad_clamp) {
+    ExplicitLod = false;
+    HasMinLodClamp = true;
+    HasBias = false;
+    HasGrad = true;
     return true;
   }
   return false;
 }
 
 /// The index of a sample intrinsic's own offset operand, given
-/// `isSampleIntrinsic`'s own `ExplicitLod`/`HasBias` outputs:
+/// `isSampleIntrinsic`'s own `ExplicitLod`/`HasBias`/`HasGrad` outputs:
 /// `spv_resource_sample`/`spv_resource_sample_clamp` are `(image,
 /// sampler, coord, offset, [clamp])` (offset at index 3);
 /// `spv_resource_samplelevel`/`samplebias`/`samplebias_clamp` each insert
 /// an extra scalar (`lod`/`bias` respectively) before it, `(image,
-/// sampler, coord, lod|bias, offset, [clamp])` (offset at index 4) --
-/// `ExplicitLod` and `HasBias` are mutually exclusive (SPIR-V forbids
-/// `Bias` alongside `Lod`), but either alone shifts the offset the same
-/// way.
-unsigned getSampleOffsetIdx(bool ExplicitLod, bool HasBias) {
+/// sampler, coord, lod|bias, offset, [clamp])` (offset at index 4);
+/// `spv_resource_samplegrad`/`samplegrad_clamp` instead insert two vector
+/// operands (`dPdx`, `dPdy`), `(image, sampler, coord, dPdx, dPdy,
+/// offset, [clamp])` (offset at index 5) -- `ExplicitLod`, `HasBias`, and
+/// `HasGrad` are pairwise mutually exclusive (SPIR-V forbids combining
+/// `Lod`/`Bias`/`Grad`), so at most one ever shifts the offset.
+unsigned getSampleOffsetIdx(bool ExplicitLod, bool HasBias, bool HasGrad) {
+  if (HasGrad)
+    return 5;
   return (ExplicitLod || HasBias) ? 4 : 3;
 }
 
-/// The index of a `spv_resource_sample_clamp`/`samplebias_clamp` call's
-/// own trailing `clamp` operand, immediately after its offset operand;
-/// meaningless (never called) for any other sample intrinsic, which has
-/// no such operand.
-unsigned getSampleClampIdx(bool ExplicitLod, bool HasBias) {
-  return getSampleOffsetIdx(ExplicitLod, HasBias) + 1;
+/// The index of a `spv_resource_sample_clamp`/`samplebias_clamp`/
+/// `samplegrad_clamp` call's own trailing `clamp` operand, immediately
+/// after its offset operand; meaningless (never called) for any other
+/// sample intrinsic, which has no such operand.
+unsigned getSampleClampIdx(bool ExplicitLod, bool HasBias, bool HasGrad) {
+  return getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad) + 1;
 }
 
 /// Whether \p CI is one of the two SPIR-V depth-comparison sample
@@ -933,7 +963,9 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     bool ExplicitLod = false;
     bool HasMinLodClamp = false;
     bool HasBias = false;
-    if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias)) {
+    bool HasGrad = false;
+    if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias,
+                         HasGrad)) {
       if (IsInteger)
         return false; // No filtered sample over an integer-channel image.
       if (CI->getArgOperand(0) != &Handle)
@@ -957,7 +989,28 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // to) is left unlowered rather than silently dropping the bias.
       if (HasBias && Shape != ImageShape::Plain2D && Shape != ImageShape::Cube)
         return false;
-      unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod, HasBias);
+      // Roadmap L59: same restriction for `Grad`, mirroring `HasBias`
+      // immediately above -- only `Plain2D`'s and `Cube`'s own
+      // `createSample2D`/`createSampleCube` calls have a real screen-space
+      // derivative pair to feed a caller-supplied `Grad` into (see
+      // `lowerImageAccesses`'s own `HasGrad` handling below, which reuses
+      // exactly the same `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DDirXdX`/... operands
+      // `getOrSynthesizeSample2DDerivatives`/
+      // `getOrSynthesizeSampleCubeDerivatives` already populate for an
+      // implicit-LOD sample, just with the caller's own real values
+      // instead of a synthesized or zeroed one).
+      if (HasGrad && Shape != ImageShape::Plain2D && Shape != ImageShape::Cube)
+        return false;
+      unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
+      // Roadmap L59: `Grad`'s own `dPdx`/`dPdy` operands (indices 3, 4)
+      // are each a full coordinate-shaped vector -- one screen-space
+      // partial derivative per addressed component, same width as
+      // `Coord` itself (`SampleCoordWidth`) -- unlike `Bias`'s single
+      // scalar at the same index.
+      if (HasGrad &&
+          (!isCoordN(CI->getArgOperand(3), SampleCoordWidth, /*Float=*/true) ||
+           !isCoordN(CI->getArgOperand(4), SampleCoordWidth, /*Float=*/true)))
+        return false;
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
           !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape) ||
           !isV4F32(CI->getType()))
@@ -1184,8 +1237,10 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
     bool ExplicitLod = false;
     bool HasMinLodClamp = false;
     bool HasBias = false;
+    bool HasGrad = false;
     bool Unclamped = false;
-    if (!CI || !(isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias) ||
+    if (!CI || !(isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias,
+                                   HasGrad) ||
                  isDrefSampleIntrinsic(*CI, ExplicitLod) ||
                  isQueryLodIntrinsic(*CI, Unclamped)))
       return false;
@@ -2166,7 +2221,9 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
       bool ExplicitLod = false;
       bool HasMinLodClamp = false;
       bool HasBias = false;
-      if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias)) {
+      bool HasGrad = false;
+      if (isSampleIntrinsic(*CI, ExplicitLod, HasMinLodClamp, HasBias,
+                           HasGrad)) {
         // A sample is reached twice -- once from its image handle, once
         // from its sampler handle -- so only rewrite it from the image
         // side, where both descriptor indices are already resolvable.
@@ -2183,6 +2240,19 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         // ambiguity about which one index 3 holds for a given call.
         Value *Bias = HasBias ? CI->getArgOperand(3)
                               : ConstantFP::get(Builder.getFloatTy(), 0.0);
+        // Roadmap L59: `Grad`'s own `dPdx`/`dPdy` operands (indices 3, 4)
+        // are the caller's own real screen-space partial-derivative
+        // vectors of `Coord` -- unpacked into scalar components below,
+        // per-shape, alongside `C0`/`C1`/`C2`, and fed directly into
+        // `createSample2D`/`createSampleCube` in place of
+        // `getOrSynthesizeSample2DDerivatives`/
+        // `getOrSynthesizeSampleCubeDerivatives`'s own synthesized or
+        // zeroed values -- the runtime's own implicit-LOD mip/anisotropy
+        // math (`femeRTPlanImplicitLod`) is agnostic to whether a
+        // derivative was synthesized from `feme.stage.derivative.*` or
+        // supplied explicitly by the shader itself via `Grad`.
+        Value *GradDPdx = HasGrad ? CI->getArgOperand(3) : nullptr;
+        Value *GradDPdy = HasGrad ? CI->getArgOperand(4) : nullptr;
         Value *ExplicitLodFlag = Builder.getInt1(ExplicitLod);
         Value *SamplerIndex =
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
@@ -2220,9 +2290,20 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // the fragment stage -- the only stage GLSL's implicit
           // `texture()` is ever legal from; an explicit-LOD
           // `textureLod()` ignores them, so zero constants (no extra IR)
-          // are passed instead.
+          // are passed instead. Roadmap L59: a `Grad` sample instead
+          // supplies its own real (dPdx, dPdy) vectors directly -- no
+          // synthesis needed (or possible: `Grad` sampling is legal from
+          // any shader stage, unlike GLSL's stage-restricted implicit
+          // `texture()`), so its two components are unpacked the same way
+          // `Coord`'s own `C0`/`C1` are.
           SampleDerivatives D =
-              !ExplicitLod
+              HasGrad
+                  ? SampleDerivatives{
+                        Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
+                        Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
+                        Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
+                        Builder.CreateExtractElement(GradDPdy, uint64_t{1})}
+              : !ExplicitLod
                   ? getOrSynthesizeSample2DDerivatives(
                         Builder, *CI->getFunction(), C0, C1)
                   : SampleDerivatives{ConstantFP::get(Builder.getFloatTy(),
@@ -2240,7 +2321,7 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // zero case; split its two components the same way `Coord`'s
           // own `C0`/`C1` are.
           Value *Offset =
-              CI->getArgOperand(getSampleOffsetIdx(ExplicitLod, HasBias));
+              CI->getArgOperand(getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
           Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
           Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
           // Roadmap L26: SPIR-V's own `MinLod` image operand
@@ -2250,7 +2331,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // intrinsic, which has no such operand of its own.
           Value *MinLodClamp =
               HasMinLodClamp
-                  ? CI->getArgOperand(getSampleClampIdx(ExplicitLod, HasBias))
+                  ? CI->getArgOperand(
+                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
                   : ConstantFP::getInfinity(Builder.getFloatTy(),
                                             /*Negative=*/true);
           NewCall = createSample2D(Builder, Env, ImageIndex, SamplerIndex, C0,
@@ -2275,7 +2357,8 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // on that operand's own legality.
           Value *MinLodClamp =
               HasMinLodClamp
-                  ? CI->getArgOperand(getSampleClampIdx(ExplicitLod, HasBias))
+                  ? CI->getArgOperand(
+                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
                   : ConstantFP::getInfinity(Builder.getFloatTy(),
                                             /*Negative=*/true);
           // Roadmap L56: an implicit-LOD cube sample's real mip level
@@ -2288,8 +2371,19 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // `getOrSynthesizeSampleCubeDerivatives`'s doc. An explicit-LOD
           // `textureLod()` ignores them, so zero constants are passed
           // instead, mirroring Plain2D's own `ExplicitLod` gating above.
+          // Roadmap L59: a `Grad` sample instead supplies its own real
+          // 3-component direction-derivative vectors directly, mirroring
+          // Plain2D's own `HasGrad` handling above.
           CubeDirectionDerivatives CD =
-              !ExplicitLod
+              HasGrad
+                  ? CubeDirectionDerivatives{
+                        Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
+                        Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
+                        Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
+                        Builder.CreateExtractElement(GradDPdy, uint64_t{1}),
+                        Builder.CreateExtractElement(GradDPdx, uint64_t{2}),
+                        Builder.CreateExtractElement(GradDPdy, uint64_t{2})}
+              : !ExplicitLod
                   ? getOrSynthesizeSampleCubeDerivatives(
                         Builder, *CI->getFunction(), C0, C1, C2)
                   : CubeDirectionDerivatives{
