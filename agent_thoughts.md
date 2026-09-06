@@ -65979,3 +65979,118 @@ changes: `shaderResourceMinLod` correctly remains `VK_FALSE` (confirmed
 directly by this session's own revert), and no new feature/extension
 surface is advertised by this purely-internal CPU-lowering plumbing
 change.
+
+# Session: L60(a) `Array2D` `Bias`/`MinLodClamp`/`Grad` sampling (completing the row)
+
+**Starting point.** The prior session completed `CubeArray`'s half of L60(a)
+("`Array2D`/`CubeArray` `Grad` sampling") by reusing `createSampleCubeArray`'s
+existing roadmap L56 six-operand screen-space-derivative infrastructure.
+`Array2D`'s own half was flagged as "a materially bigger prerequisite" since
+`createSample2DArray` had zero derivative-operand infrastructure at all to
+build on -- this session's task was to add that infrastructure from scratch
+and wire it through the same way `Cube`/`CubeArray`/`Plain2D` already were.
+
+**Design decisions.**
+- Extended `createSample2DArray`'s signature from 12 to 18 args, adding
+  `DUdX`/`DUdY`/`DVdX`/`DVdY`/`Bias`/`MinLodClamp` -- mirroring
+  `createSample2D`'s own operand shape, but deliberately *not* adding an
+  `OffsetX`/`OffsetY` `ConstOffset` pair. I double-checked
+  `isSupportedOffset`'s own doc comment first to confirm ordinary
+  (non-`Dref`) `Array2D` `ConstOffset` support is separately scoped as
+  roadmap L33 and shouldn't be folded into this fix, even though it would
+  have been easy to add "while I'm in here."
+- While rewriting `femeCpuImageSample2DArrayV4F32`, I noticed the *existing*
+  implementation (before this session) was a simpler always-single-tap
+  `femeRTComputeClampedLod`-only body, unlike `femeCpuImageSample2DV4F32`'s
+  richer `femeRTPlanImplicitLod`-based anisotropic multi-tap implementation.
+  Since I was already rewriting this function's signature and body to add
+  `Grad` support (which requires the fuller implicit-LOD planning path
+  anyway, since a `Grad`-supplied derivative needs the same anisotropy math
+  a synthesized one gets), I upgraded the whole function to match
+  `femeCpuImageSample2DV4F32`'s structure rather than bolting the new
+  parameters onto the old simpler shape. This is a genuine behavioral
+  upgrade beyond the letter of this row's own scope (real anisotropic
+  filtering for `Array2D` when a sampler enables it, previously absent) --
+  but it's a strict improvement with no plausible regression risk (the
+  multi-tap path already exists and is well-tested for `Plain2D`; only the
+  fixed-array-layer read differs per tap), so I did it rather than leave a
+  second, inconsistent single-tap implementation lying around.
+- Found the same "two call sites" pitfall the prior `CubeArray` session
+  documented: `ResourceLowering.cpp` (the DXIL-frontend counterpart pass)
+  has its own `Array2D` case calling `createSample2DArray`, which the first
+  build attempt missed. Fixed identically to the SPIR-V-frontend case
+  (synthesize derivatives, pass `ZeroBias`/`NoMinLodClamp` no-op constants
+  since DXIL doesn't thread real bias/clamp through yet).
+
+**A mid-session self-correction.** After writing the 3 new positive
+`SPIRVResourceLoweringTest` cases (`LowersSampleBiasToArray2DBias`,
+`LowersSampleClampToArray2DMinLodClamp`,
+`LowersSampleGradToArray2DDerivatives`), I remembered the prior session's
+`CubeArray` fix replaced exactly one obsolete negative test
+(`LeavesASampleGradAgainstArray2DAlone` -- misleadingly named, since it
+tests `Array2D`, not `CubeArray`, but was written when this fix didn't
+exist yet). Before rebuilding, I grepped for *other* now-stale
+`Array2D`-shape negative tests and found two more I hadn't noticed yet:
+`LeavesASampleBiasAgainstArray2DAlone` and
+`LeavesASampleClampAgainstArray2DAlone` -- both asserting the exact
+lowering my fix now performs. Removed both as redundant with the 2
+corresponding new positive tests. This was a useful reminder to
+double-check for *all* stale negative tests referencing a shape whose
+support is being widened, not just the one the original bug report
+happened to name.
+
+**A self-inflicted syntax error.** My first `edit` call replacing the
+obsolete `LeavesASampleGradAgainstArray2DAlone` test's body with the 3 new
+`Array2D` positive tests accidentally consumed the `TEST(...)` opening line
+of the *next* test in the file (`LowersSampleBiasToCubeArrayBias`) as part
+of `old_str`'s trailing context, but I didn't include that same opening
+line in `new_str`. The build failed with a batch of "expected unqualified-id"
+errors around what looked like an orphaned test body with no enclosing
+`TEST()` macro. Diagnosed by viewing the surrounding lines directly (rather
+than trusting the compiler's error location, which pointed deep inside a
+gtest macro expansion) and confirmed the missing `TEST(SPIRVResourceLoweringTest,
+LowersSampleBiasToCubeArrayBias) {` line was the actual culprit. Re-inserted
+it and the build succeeded. Lesson: when an `edit`'s `old_str` spans a
+boundary between two logical units (here, two back-to-back `TEST()` blocks),
+double-check that `new_str` preserves *all* boundary lines the `old_str`
+consumed, not just the ones that look like they belong to the block being
+replaced.
+
+**Validation.**
+- `ninja FeMeTransformsCPUTests FeMeRuntimeCPUTests`: builds clean after the
+  fixes above; all 6 `*Array2D*`-filtered `SPIRVResourceLoweringTest` cases
+  pass, both `*Sample2DArray*`-filtered `ImageSamplingTest` runtime tests
+  pass unchanged (zero-derivative/zero-bias/-infinity-clamp call sites,
+  confirming no behavioral change to the pre-existing coverage).
+- `ninja check-feme`: 2677 total discovered, 59 `Unsupported`, 0 `Failed`
+  -- no regressions.
+- Real CTS: `sampler2darray_bias_{fixed,float}_fragment` now 2/2 Pass (was
+  0/2). Broader `texture.*bias*` sweep (50 cases): 8 Pass (up from 6), 24
+  Fail (down from 26), 18 NotSupported (unchanged). Full
+  `dEQP-VK.glsl.texture_functions.*.sampler2darray_*` sweep (312 cases) with
+  a real `git stash`-based before/after comparison: 10 Pass after vs. 8
+  before, 156 Fail after vs. 158 before, 146 NotSupported unchanged in
+  both -- strictly monotonic, no regressions.
+- `Array2D`'s own `Grad` CTS cases remain blocked by the exact same
+  pre-existing `VulkanBuffer` register-bound-resource-handle gap the prior
+  session found blocking `CubeArray`'s `Grad` path -- confirmed via
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1` that this fails at pipeline creation
+  before `Grad` lowering is ever reached, for both shapes alike. Not this
+  row's scope to fix; still unfiled as its own roadmap row (left for a
+  future session, as the prior session also chose to do).
+- `Array2D`'s own `MinLodClamp` CTS cases remain unconfirmable, correctly
+  reporting `NotSupported` since `shaderResourceMinLod` stays disabled.
+
+**Docs.** Updated roadmap L60(a) in place with a detailed `UPDATE:`
+addendum (not rewriting the row) describing this session's `Array2D` fix,
+noting the sub-item is now complete for both shapes named in its own title
+modulo the shared `VulkanBuffer` gap and `shaderResourceMinLod` still being
+globally disabled -- L60's overall row (sub-items (b)-(f)) is *not* struck
+through, since only (a) is addressed. Updated `VulkanCTSReport.md` with a
+full write-up mirroring the `CubeArray` section's format. Updated
+`FeMeGraphicsDesign.md`'s Bias/gradient-sampling bullet, removing the
+now-stale "`Array2D` gradient/bias/clamp sampling remains entirely
+unimplemented" statement and replacing it with a summary of this fix.
+Verified `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need
+no changes (`shaderResourceMinLod` still `VK_FALSE`; no new advertised
+feature/extension surface).
