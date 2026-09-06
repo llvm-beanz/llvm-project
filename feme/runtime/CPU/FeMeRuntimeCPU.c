@@ -5754,20 +5754,21 @@ femeRTSampleCmp1DAtLevel(const FemeRTImageDescriptor *Img,
 // `feme.cpu.image.samplecmp.2d.f32`'s own trilinear-blend body above
 // (`femeRTSampleCmp2DAtLevel`) but reusing `femeRTSampleCmp1DAtLevel`
 // instead -- a single `U` coordinate instead of `(U, V)`, no
-// `ConstOffset`/`MinLod` clamp (see `femeRTSampleCmp1DAtLevel`'s own
-// comment).
+// `ConstOffset` (see `femeRTSampleCmp1DAtLevel`'s own comment), but a
+// real `Bias`/`MinLodClamp` pair as of roadmap L62.
 float femeCpuImageSampleCmp1DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float Lod,
-    _Bool UseExplicitLod, float Dref,
+    _Bool UseExplicitLod, float Dref, float Bias, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.samplecmp.1d.f32");
 
 __attribute__((always_inline)) float femeCpuImageSampleCmp1DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float Lod,
-    _Bool UseExplicitLod, float Dref, _Bool Mask) {
+    _Bool UseExplicitLod, float Dref, float Bias, float MinLodClamp,
+    _Bool Mask) {
   if (!Mask)
     return 0.0f;
   FemeRTImageDescriptor Img =
@@ -5777,8 +5778,8 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp1DF32(
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
   float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
-                                            /*InstructionMinLod=*/-__builtin_inff(),
-                                            /*InstructionBias=*/0.0f);
+                                             /*InstructionMinLod=*/MinLodClamp,
+                                             /*InstructionBias=*/Bias);
   _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, &Samp);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   _Bool Trilinear = Samp.MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
@@ -5800,14 +5801,15 @@ float femeCpuImageSampleCmpArray1DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
-    float Lod, _Bool UseExplicitLod, float Dref,
+    float Lod, _Bool UseExplicitLod, float Dref, float Bias, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.samplecmp.1darray.f32");
 
 __attribute__((always_inline)) float femeCpuImageSampleCmpArray1DF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
-    float Lod, _Bool UseExplicitLod, float Dref, _Bool Mask) {
+    float Lod, _Bool UseExplicitLod, float Dref, float Bias, float MinLodClamp,
+    _Bool Mask) {
   if (!Mask)
     return 0.0f;
   FemeRTImageDescriptor Img =
@@ -5817,8 +5819,8 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpArray1DF32(
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
   float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
-                                            /*InstructionMinLod=*/-__builtin_inff(),
-                                            /*InstructionBias=*/0.0f);
+                                             /*InstructionMinLod=*/MinLodClamp,
+                                             /*InstructionBias=*/Bias);
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
   _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, &Samp);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
