@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 resume: ec2f5570-263a-4b95-917f-6c2230e594cf
 ---
 # Initial Guidelines
@@ -42,162 +42,132 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L52 or other prerequisites blocking the L-series milestones?
+Can you work on L60 or other prerequisites blocking the L-series milestones?
 
-> **L50's own (a)-(f) breakdown leaves 4 sub-items open after this session's (d)
-> fix and L51's own further split-out of (f)**: (a) **`Plain1D`/`Array1D` shadow
-> sampling** (`sampler1d{,array}shadow_*`) has no ordinary (non-comparison)
-> sampled-image path on the CPU target at all yet for either shape -- needs its
-> own new 1D-sampling infrastructure
-> (`ImageCallKind::Sample1D`/`Array1D`-equivalents,
-> `createSample1D`/`createSample1DArray`, matching runtime entry points)
-> *before* a `SampleCmp1D`/`SampleCmpArray1D` counterpart is even possible, a
-> materially bigger prerequisite than any other item in this row; (b) **a `Bias`
-> image operand** (`sampler{2d,cube}shadow_bias_fragment` and siblings, 5 real
-> confirmed-failing CTS cases per this session's own re-run) fails at
-> `ConvertSPIRVToLLVMPass` legalization itself, before
-> `SPIRVResourceLowering.cpp` ever sees it --
-> `ImageSampleDrefImplicitLodPattern`'s own `SupportedMask`
-> (`SPIRVToLLVMPatterns.cpp`) only allows `ConstOffset`/`MinLod`, not `Bias`,
-> and no `llvm.spv.resource.samplecmp*` intrinsic form threads an explicit bias
-> through today, unlike the ordinary
-> `spv_resource_samplebias`/`.samplebias_clamp` family already handled for a
-> non-dref sample -- needs its own new intrinsic-lowering design (a genuinely
-> bigger, cross-cutting scope touching real LLVM SPIR-V backend intrinsic
-> definitions, not just feme-internal code, per this session's own investigation
-> into why (b) was deferred in favor of (d)); (c) **`samplecmp_clamp`'s own
-> trailing `MinLod` clamp operand** (not yet confirmed present in any real
-> failing CTS case measured so far) needs each `createSampleCmp*` builder
-> extended with a `MinLodClamp` parameter, mirroring `createSample2D`'s own
-> roadmap L26 precedent; (e) **the entirely separate LOD-query intrinsics**
-> (`spv_resource_calculate_lod`/`.calculate_lod_unclamped`, the 190-case
-> `texturequerylod` group, confirmed unaffected at 0/190 by every L48/L50 re-run
-> so far) have no CPU-lowering consumer at all on either the SPIR-V or DXIL
-> frontend and need a genuinely new runtime design: a real screen-space
-> coordinate derivative (`dFdx`/`dFdy`) threaded through to a query call,
-> needing its own design pass to confirm where a per-invocation derivative is
-> (or could be made) available in this target's per-lane execution model.
-> (`Cube`/`CubeArray`'s own real, nonzero `ConstOffset` sub-item (d) named in
-> L50's own original report does not exist -- SPIR-V forbids `ConstOffset`
-> against `Dim::Cube` outright, confirmed again by this session's own
-> `isSupportedOffset` review, so there is no remaining `(d)`-shaped gap to file
-> here; `(f)`'s `CubeArray`-shadow rendering bug is already its own row,
-> **L51**, not re-listed here.) Each of (a), (b), (c), (e) should be scoped and
-> fixed as its own small, independently-committed, independently-CTS-measured
-> row rather than attempted together, per this project's own established
-> (partially fixed: sub-item (a)'s ordinary, non-comparison Plain1D/Array1D
-> sampling is done and tested -- this was the highest-value, most tractable
-> target this session (8 real confirmed-failing CTS cases,
-> sampler1d{,array}_{fixed,float}_{fragment,vertex}, versus (c)'s zero confirmed
-> cases and (b)/(e)'s much larger cross-cutting scope, per this session's own
-> real deqp-vk probe). New ImageCallKind::Sample1D/Sample1DArray entries
-> (ImageCalls.h/.cpp) mirror Sample2DArray's own simpler shape (no screen-space
-> derivatives/ConstOffset/MinLod clamp, unlike Sample2D's richer roadmap H7i/L26
-> additions) rather than attempting a richer first pass; new
-> createSample1D/createSample1DArray builders and
-> femeCpuImageSample1DV4F32/Sample1DArrayV4F32 runtime entry points
-> (FeMeRuntimeCPU.c, new femeRTSamplePoint1D/Linear1D/Filtered1D filtering
-> helpers reusing every existing dimension-agnostic addressing/mip helper) round
-> out the new path. classifySampledImage2DHandle (SPIRVResourceLowering.cpp) now
-> recognizes Dim::1D (previously never checked at all, unlike the storage-image
-> classifier, which already did) for both plain and arrayed shapes;
-> hasOnlySupportedImageUses's SampleCoordWidth formula gained
-> Plain1D=1/Array1D=2 cases; lowerImageAccesses's ordinary-sample switch gained
-> an early special case for Plain1D's bare-scalar coordinate (per SPIR-V's own
-> scalar, non-vector-wrapped convention for a 1-component coordinate -- see
-> isCoordN's own comment) and Array1D's 2-component (u, layer) vector, ahead of
-> the generic CreateExtractElement(Coord, 0/1) every other shape shares (which
-> would otherwise crash on Plain1D's scalar). The pre-existing
-> dref/depth-comparison rejection of Plain1D/Array1D
-> (hasOnlySupportedImageUses's own IsInteger || Shape == ImageShape::Plain1D ||
-> Shape == ImageShape::Array1D branch) is deliberately left untouched --
-> SampleCmp1D/SampleCmpArray1D (the 4 real
-> sampler1d{,array}shadow_{fragment,vertex} cases) remain unstarted follow-on
-> work, filed as its own row, L54, below, per this project's own established
-> splitting precedent, rather than attempted together with the ordinary-sampling
-> infrastructure this session added. Also deliberately left unstarted this
-> session (out of scope, no real CTS case exercises it): a real 1D
-> OpImageFetch/texelFetch(sampler1D, ...) path -- hasOnlySupportedImageUses's
-> own fetch-shape branch now explicitly rejects Plain1D/Array1D there too,
-> rather than silently miscomputing a fetch coordinate width, until a real CTS
-> case motivates adding it. New tests: 3 SPIRVResourceLoweringTest unit tests (2
-> positive, Plain1D/Array1D classification+lowering; 1 negative, confirming a
-> Plain1D OpImageFetch is still left unlowered), 4 ImageSamplingTest runtime
-> unit tests (linear/point filtering, array-layer selection, inactive-lane
-> masking), reusing the already-existing makeImage1D/makeImage1DArray helpers
-> (roadmap H19c/H19e). ninja check-feme: 2584/2643 discovered, 59 pre-existing
-> Unsupported, 0 Failed (up by exactly the 7 new tests this phase adds); no
-> regressions. Real
-> dEQP-VK.glsl.texture_functions.texture.sampler1d{,array}_{fixed,float}_{fragment,vertex}
-> re-run: 8/8 now Pass, up from 0/8 before this fix; a broader sampler1d* sweep
-> (24 cases) confirms exactly the expected side-effect-free outcome: 8 Pass
-> (this fix), 10 Fail (unchanged -- 4 _bias_fragment blocked by sub-item (b), 4
-> *shadow_{fragment,vertex} blocked by the still-open
-> SampleCmp1D/SampleCmpArray1D counterpart filed as L54), 6 NotSupported
-> (unchanged -- _compute/shadow _compute, an unrelated
-> VK_KHR_compute_shader_derivatives gap). FeMeGraphicsDesign.md/FeMeCPUDesign.md
-> reviewed: no deviation to record (neither ever scoped sampled-image support to
-> 2D/Cube shapes only in a way this widening contradicts).
-> Vulkan14FeatureInventory.md/VulkanExtensionInventory.md reviewed: no change
-> needed (internal CPU-lowering plumbing only, no new feature/extension surface
-> advertised). Sub-items (b) Bias and (c) samplecmp_clamp's MinLod operand
-> remain open under this same row; the deferred SampleCmp1D/SampleCmpArray1D
-> counterpart is re-filed as L54, below, and sub-item (e)'s LOD-query intrinsics
-> are now done and re-filed as L57, below, per this project's own established
-> L26->L33/L45->L47/L46->L48/L48->L50/L50->L51 precedent. UPDATE: a later
-> session investigating this same sub-item (b) found and fixed a distinct, more
-> tractable gap -- ordinary (non-`Dref`) `Bias` sampling against
-> `Plain2D`/`Cube` had zero recognition in `SPIRVResourceLowering.cpp` at all
-> (not just the literal `Dref`+`Bias` combination this sub-item names), despite
-> already being fully legalized upstream by `ImageSampleImplicitLodPattern`.
-> That fix is filed and measured as its own row, **L58**, below, per this
-> project's own established splitting precedent; sub-item (b)'s own literal
-> `Dref`+`Bias` gap (needing a new LLVM core intrinsic before
-> `SPIRVResourceLowering.cpp` can even see it) remains open and unstarted.
-> UPDATE: a later session re-investigating sub-items (b)/(c) confirmed both are
-> still unchanged (zero standalone real CTS cases for (c); (b) still needs a new
-> LLVM core intrinsic), but that same investigation found a much larger,
-> previously-unknown gap while probing the `shaderResourceMinLod`-gated CTS
-> groups (b)/(c) touch: explicit-`Grad` sampling has zero implementation
-> anywhere in feme at all (459 real failing cases just in the non-clamp
-> `texturegrad`/`texturegradoffset` groups). That gap is filed and partially
-> fixed as its own row, **L59**, below, per this project's own established
-> splitting precedent; sub-items (b) and (c) here remain exactly as open as
-> before.) UPDATE: a later session implemented sub-item (c) --
-> `createSampleCmp2D`/`createSampleCmpArray2D`/`createSampleCmpCube`/`createSampleCmpCubeArray`
-> (`ImageCalls.h`/`.cpp`) each gained a real `MinLodClamp` parameter, mirroring
-> the ordinary-sample `createSample2D`-family's own roadmap L26/L58/L60(a)
-> precedent; `isDrefSampleIntrinsic` (`SPIRVResourceLowering.cpp`) now
-> recognizes `llvm.spv.resource.samplecmp.clamp` as a third intrinsic form (a
-> new `HasClamp` out-parameter alongside `samplecmp`/`samplecmplevelzero`),
-> threading the real clamp operand (`DrefSampleClampIdx`, fixed at index 5)
-> through for `Plain2D`/`Array2D`/`Cube`/`CubeArray`, while `Plain1D`/`Array1D`
-> continue to reject a `samplecmp_clamp` use entirely (no
-> `createSampleCmp1D`/`createSampleCmpArray1D` counterpart added), matching
-> those two shapes' pre-existing `ConstOffset` exclusion. `FeMeRuntimeCPU.c`'s 4
-> `femeCpuImageSampleCmp*F32` entry points thread the same parameter through in
-> place of the previous hardcoded `-inf` floor. New/updated tests:
-> `ImageSamplingTest.cpp`'s 4 `SampleCmp*` typedefs and ~14 call sites;
-> `SPIRVResourceLoweringTest.cpp` gained a positive
-> `LowersSampleCmpClampToImageSampleCmpWithMinLodClamp` test and a negative
-> `LeavesASampleCmpClampAgainstPlain1DAlone` test (replacing a now-stale
-> `LeavesASampleCmpClampAlone` that had asserted the opposite of this fix), plus
-> `arg_size()` bumps across the other 6 `SampleCmp*` tests; 3 `.ll` lit tests
-> updated (`spirv-resource-lowering-image-samplecmp.ll`, `-shapes.ll`) and the
-> old `-unsupported.ll` replaced with a new
-> `spirv-resource-lowering-image-samplecmp-clamp.ll` (a `samplecmp_clamp` use is
-> no longer entirely unsupported for these 4 shapes, only for `Plain1D`). `ninja
-> check-feme`: 2678 discovered, 59 Unsupported, 2619 Passed, 0 Failed (up by
-> exactly 1 test net of the file-rename/split). A real `deqp-vk` grep of the
-> CTS's own `textureclamp`/`texturegradclamp`/`textureoffsetgradclamp` groups'
-> source (`vktShaderRenderTextureFunctionTests.cpp`) confirms sub-item (c)'s own
-> note was correct: every shadow-sampler case in those groups pairs its `MinLod`
-> clamp with either `Bias` (blocked on the still-open sub-item (b)) or an
-> explicit `Grad` (a distinct dref+Grad gap, not yet implemented, unrelated to
-> L59's ordinary-sample `Grad` work) -- no real CTS case exercises the
-> implicit-LOD-only, no-bias, no-grad `Dref`+`MinLod`-clamp combination this
-> row's `samplecmp_clamp` recognizes, so `shaderResourceMinLod` is deliberately
-> left at its existing `VK_FALSE`/unstarted state and no CTS group newly passes;
-> this row's own value is the completed builder/lowering precedent sub-item
-> (b)'s own future fix can build on directly. Sub-item (b) remains open and
-> unstarted.)
+> **L59's own `Plain2D`/`Cube`, `fixed`/`float`, `fragment`/`vertex`
+> explicit-`Grad` slice leaves several distinct, independently-sized gaps still
+> open, broken down here rather than re-attempted together, per this project's
+> own established splitting precedent**: (a) **`Array2D`/`CubeArray` `Grad`
+> sampling** -- `createSample2DArray`/`createSampleCubeArray` have no
+> `Bias`/`Grad`-shaped derivative or clamp operand of their own today (same
+> restriction `HasBias`'s own roadmap L58 scope already hit), needing those
+> builders extended first (partially fixed: `CubeArray`'s own
+> `Bias`/`MinLodClamp`/`Grad` support is now done and tested this session,
+> reusing `createSampleCubeArray`'s existing roadmap L56 six-operand
+> screen-space-derivative infrastructure -- `hasOnlySupportedImageUses`'s
+> `HasMinLodClamp`/`HasBias`/`HasGrad` shape checks now also allow `CubeArray`,
+> and `lowerImageAccesses`'s `CubeArray` case extracts a real `MinLodClamp`
+> operand and, when a `Grad` image operand is present, the real `dPdx`/`dPdy`
+> direction derivatives, mirroring `Cube`'s own handling exactly. Real CTS
+> re-run of the non-`shaderResourceMinLod`-gated `Bias` cases confirms this:
+> `dEQP-VK.glsl.texture_functions.texture.samplercubearray_bias_{fixed,float}_fragment`
+> are now 2/2 Pass, up from 0/2; a broader `texture.*bias*` sweep (50 cases)
+> confirms 6 Pass (up from 4, the pre-existing L58 `Plain2D`/`Cube` passes), 26
+> Fail (unchanged in aggregate -- `Array2D`'s own `Bias` cases still fail, since
+> `createSample2DArray` itself was not touched this session), 18 NotSupported
+> (unchanged). `MinLodClamp`'s own `CubeArray` counterpart remains unconfirmed
+> by real CTS -- every `textureclamp`/`texturegradclamp` case is still gated
+> behind the still-disabled `shaderResourceMinLod` feature bit regardless of
+> shape, so this sub-item's fix is a prerequisite for safely flipping that bit
+> on, not something with its own currently-reachable passing case (a repeat
+> `shaderResourceMinLod`-enabled experiment this session,
+> `feme/lib/Vulkan/PhysicalDeviceInfo.cpp` temporarily set to `VK_TRUE` then
+> reverted, confirmed `Array2D`'s own remaining gap is what still blocks safely
+> enabling it: `textureclamp`/`textureoffsetclamp`/`texturegradclamp` each still
+> regress a majority of their cases from `NotSupported` to real `Fail` today).
+> `CubeArray`'s own `Grad` counterpart is separately blocked in the
+> `texturegrad` CTS group by a distinct, pre-existing, unrelated gap confirmed
+> present both before and after this session's fix (unaffected by it either
+> way): `llvm.spv.resource.handlefrombinding` rejects a register-bound
+> `VulkanBuffer` resource handle that this specific shader form's array-layer
+> uniform buffer produces, for both `CubeArray` and `Array2D` alike -- out of
+> scope for this row, not yet filed as its own line. `Array2D`'s own
+> `Bias`/`MinLodClamp`/`Grad` support remains entirely unstarted -- unlike
+> `CubeArray`, `createSample2DArray` has zero derivative-operand infrastructure
+> to build on today, a materially bigger prerequisite than `CubeArray`'s was,
+> and should be scoped as its own follow-on row rather than attempted together
+> with anything else. UPDATE: a later session added this missing
+> derivative-operand infrastructure to `createSample2DArray` itself (extending
+> its signature from 12 to 18 args with real
+> `DUdX`/`DUdY`/`DVdX`/`DVdY`/`Bias`/`MinLodClamp` operands, deliberately still
+> without an `OffsetX`/`OffsetY` `ConstOffset` pair, per `isSupportedOffset`'s
+> own doc comment scoping ordinary-sample `ConstOffset` against `Array2D` to
+> roadmap L33, not this row), and rewrote `femeCpuImageSample2DArrayV4F32` from
+> its previous always-single-tap `femeRTComputeClampedLod`-only body to the same
+> `femeRTPlanImplicitLod`-based anisotropic multi-tap implementation
+> `femeCpuImageSample2DV4F32` already used, reading a fixed array layer for
+> every tap -- a genuine behavioral upgrade (`Array2D` sampling now gets real
+> anisotropic filtering when a sampler enables it, which it never did before).
+> `hasOnlySupportedImageUses`'s three shape checks and `lowerImageAccesses`'s
+> `Array2D` case were widened identically to `CubeArray`'s own prior fix,
+> reusing the same `getOrSynthesizeSample2DDerivatives` helper `Plain2D` already
+> used (an arrayed sample's face-local (U, V) coordinate differentiates
+> identically). Real CTS re-run confirms both `Array2D`'s own
+> `sampler2darray_bias_{fixed,float}_fragment` cases are now 2/2 Pass, up from
+> 0/2 before this fix; the broader `texture.*bias*` sweep (50 cases) now shows 8
+> Pass total (up from 6 after the `CubeArray` fix), 24 Fail (down from 26, by
+> exactly these 2 newly-passing cases -- every remaining failure is an
+> integer-sampler, shadow/`Dref`, or `Plain1D`/`Plain3D` case this row does not
+> touch), 18 NotSupported (unchanged); a
+> `dEQP-VK.glsl.texture_functions.*.sampler2darray_*` sweep (312 cases, covering
+> every texture-function group against this one shape) confirms a strictly
+> monotonic before/after improvement with a real `git stash`-based before/after
+> comparison: 10 Pass after this fix vs. 8 Pass before (up by exactly these same
+> 2 cases), 156 Fail after vs. 158 before (down by exactly 2), 146 NotSupported
+> unchanged in both -- no regressions anywhere in this shape's own CTS
+> footprint. `Array2D`'s own `Grad` counterpart remains blocked in the
+> `texturegrad` CTS group by the exact same pre-existing, unrelated
+> `VulkanBuffer` register-bound-resource-handle gap already confirmed blocking
+> `CubeArray`'s own `Grad` path above (confirmed via
+> `FEME_VULKAN_LOG_CREATION_ERRORS=1`: `vkCreateGraphicsPipelines` fails before
+> `Grad` lowering is ever reached, for both `fragment`/`vertex` stages and the
+> `compute` stage alike) -- out of scope for this row, same as `CubeArray`'s.
+> `Array2D`'s own `MinLodClamp` counterpart remains equally unconfirmable by
+> real CTS today, gated behind the same disabled `shaderResourceMinLod` feature
+> bit as every other shape's clamp variant (`texturegradclamp.sampler2darray_*`
+> confirmed `NotSupported` for this exact reason this session). With this fix,
+> sub-item (a) is now fully done for both `CubeArray` and `Array2D`'s own
+> `Bias`/`MinLodClamp` (mod `shaderResourceMinLod` still being globally
+> disabled) and `Grad`-operand-lowering halves; only the shared, unrelated
+> `VulkanBuffer` handle gap stands between either shape and a passing
+> `texturegrad` case, which is not this sub-item's own scope to fix.); (b)
+> **integer-channel (`isampler`/`usampler`) `Grad` sampling** --
+> `hasOnlySupportedImageUses` already rejects any filtered sample (`Grad`
+> included) over an integer format outright (`IsInteger` check), matching every
+> other filtered-sample restriction, so this is arguably not a real gap
+> (GLSL/HLSL's own integer-sampler intrinsics are unfiltered
+> `texelFetch`-shaped, not `Grad`-shaped, in the first place) but is named here
+> for completeness, per this session's own real CTS sweep showing
+> `isampler*`/`usampler*` `texturegrad` cases still failing; (c)
+> **`compute`-stage `Grad` sampling** -- confirmed by this session's own re-run
+> to still fail identically to `fragment`/`vertex`'s own pre-fix failure, but
+> for a distinct, unrelated reason (`vkCreateComputePipelines` itself fails, not
+> a `Grad`-specific legalization gap) -- likely the same
+> `VK_KHR_compute_shader_derivatives`-shaped gap prior sessions already
+> identified blocking other compute-stage sampling groups, not a new one this
+> row introduces; (d) **`Grad`+`MinLod` clamp**
+> (`texturegradclamp`/`textureoffsetgradclamp`, gated by the still-disabled
+> `shaderResourceMinLod` feature bit L52 first found) -- L59's own
+> `ImageSampleGradPattern`/`SPIRVResourceLowering.cpp` changes already thread a
+> real `MinLod` clamp through for `Plain2D`/`Cube` (mirroring `HasMinLodClamp`'s
+> existing `sample.clamp`/`samplebias.clamp` precedent), so this sub-item may
+> already be functionally correct -- it remains unconfirmed by real CTS only
+> because `shaderResourceMinLod` is not yet advertised as `VK_TRUE` (flipping it
+> also requires the `textureclamp`/`textureoffsetclamp` `Bias`+`MinLod` subset
+> L58 already covers to be re-confirmed together, since Vulkan features are
+> monolithic on/off switches, not per-test-group); (e) **`Dref`+`Grad`
+> depth-comparison sampling** (a `sampler2DShadow`/`samplerCubeShadow` variant
+> of `textureGrad()`, not yet confirmed present in the CTS corpus by any
+> session's own probe so far -- needs a dedicated case-listing sweep to confirm
+> real coverage exists before scoping a fix) -- would need its own new
+> `llvm.spv.resource.samplecmpgrad`-shaped intrinsic (does not appear to exist
+> in `IntrinsicsSPIRV.td` today, unlike `Grad`'s own non-comparison intrinsics
+> L59 already consumes), a genuinely bigger, cross-cutting scope mirroring L52
+> sub-item (b)'s own `Dref`+`Bias` gap; (f) **sparse-residency `Grad` sampling**
+> (`sparse_sampler2d_*`/`sparse_samplercube_*`, the
+> `SparseShaderTextureFunctionInstance` CTS variant) -- not yet investigated by
+> any session's own probe; likely follows the same residency-feedback
+> infrastructure other sparse sampling already uses, but unconfirmed. Each of
+> (a)-(f) should be scoped and fixed (or confirmed already fixed, for (d)) as
+> its own small, independently-committed, independently-CTS-measured row rather
+> than attempted together.
