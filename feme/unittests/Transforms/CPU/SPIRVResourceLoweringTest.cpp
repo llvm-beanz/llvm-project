@@ -1489,6 +1489,108 @@ TEST(SPIRVResourceLoweringTest, LowersCubeArraySampledImageToImageSampleCubeArra
   EXPECT_EQ(Sample->arg_size(), 13u);
 }
 
+TEST(SPIRVResourceLoweringTest, LowersPlain1DSampledImageToImageSample1D) {
+  // Roadmap L52a: `classifySampledImage2DHandle` now recognizes `Dim::1D`
+  // (previously never checked at all -- see its own comment), and its
+  // scalar (non-vector) coordinate is handled by `lowerImageAccesses`'s
+  // own early `Plain1D`/`Array1D` special case (see its comment) rather
+  // than the generic `CreateExtractElement(Coord, 0/1)` every other shape
+  // shares.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(float %u) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp1d(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %u, <1 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp1d(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4f32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, lod, use_explicit_lod, mask).
+  EXPECT_EQ(Sample->arg_size(), 10u);
+}
+
+TEST(SPIRVResourceLoweringTest, LowersArray1DSampledImageToImageSample1DArray) {
+  // Roadmap L52a: the `Texture1DArray` counterpart of the test above --
+  // `Array1D`'s own 2-component `(u, layer)` coordinate is a real vector
+  // this time, unlike `Plain1D`'s bare scalar, so it goes through the
+  // early special case's own `CreateExtractElement` branch instead.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x float> %uandlayer) {
+      %img = call target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1darr(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp1darr(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %uandlayer,
+          <1 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1darr(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp1darr(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, array_layer, lod, use_explicit_lod, mask).
+  EXPECT_EQ(Sample->arg_size(), 11u);
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesAPlain1DImageFetchAlone) {
+  // Roadmap L52a: unlike `Array2D`, `Plain1D`'s own `OpImageFetch`
+  // (`getpointer`) path is deliberately left unlowered this session (see
+  // `hasOnlySupportedImageUses`'s own comment) -- only its ordinary
+  // sample intrinsic is handled above -- so a real `texelFetch(sampler1D,
+  // ...)` (legal SPIR-V, unlike a Cube fetch) must still leave the whole
+  // handle alone rather than half-lowering it.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(i32 %x) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1dfetch(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg1dfetch(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img, i32 %x)
+      %v = load <4 x float>, ptr %p
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1dfetch(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg1dfetch(
+        target("spirv.Image", float, 0, 0, 0, 0, 1, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.load.1d.v4f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
 TEST(SPIRVResourceLoweringTest, LeavesACubeImageFetchAlone) {
   // `OpImageFetch` is illegal against `Dim::Cube` in SPIR-V -- no real
   // shader can produce this, but this pass still must not silently accept

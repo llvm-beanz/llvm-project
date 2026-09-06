@@ -141,6 +141,20 @@ using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
                              const FemeSamplerDescriptor *, uint32_t, uint32_t,
                              uint32_t, float, float, float, bool, float,
                              int32_t, int32_t, bool, void *);
+/// Roadmap L52a: the ordinary (non-comparison) `Texture1D` counterpart of
+/// `SampleFn` -- a single `U` coordinate, no derivatives/offset/
+/// `MinLodClamp` (mirroring `SampleArrayFn`'s own simpler scope, see
+/// `ImageCallKind::Sample1D`'s own doc for why).
+using Sample1DFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                            const FemeSamplerDescriptor *, uint32_t, uint32_t,
+                            uint32_t, float, float, bool, bool, void *);
+/// Roadmap L52a: the `Texture1DArray` counterpart of `Sample1DFn`, adding
+/// a float `ArrayLayer` coordinate before `Lod`, mirroring
+/// `SampleArrayFn`'s relationship to `SampleFn`.
+using Sample1DArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                 const FemeSamplerDescriptor *, uint32_t,
+                                 uint32_t, uint32_t, float, float, float,
+                                 bool, bool, void *);
 using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                         int32_t, int32_t, uint32_t, uint32_t, bool, void *);
 /// The `feme.cpu.image.load.2d.v4i32` (roadmap E26) counterpart of `LoadFn`,
@@ -2462,6 +2476,99 @@ TEST_F(ImageSamplingTest, Sample2DArrayRoundsLayerToNearest) {
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/0.6f, 0.0f,
      true, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
+}
+
+// Roadmap L52a: ordinary (non-comparison) `Texture1D`/`Texture1DArray`
+// sampling -- isolating the new `Sample1D`/`Sample1DArray` filtering path
+// (`femeRTSampleFiltered1D` and friends) independent of the already-tested
+// 2D filtering/addressing math above.
+
+TEST_F(ImageSamplingTest, Sample1DLinearBlendsTwoTexels) {
+  // Sampling exactly at the shared boundary of a 2-texel 1D image must
+  // average both texels equally, mirroring `LinearSampleBlendsFourTexels`
+  // above but along a single axis.
+  float Storage[2][4] = {{0, 0, 0, 0}, {4, 4, 4, 4}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1D(
+      Storage, sizeof(Storage), 2, ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample1DFn Fn = resolve<Sample1DFn>(
+      addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.0f, true, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 2.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample1DPointSampleReadsExactTexel) {
+  // Point-sampling texel 1's center (normalized U = 0.75 of a 2-wide 1D
+  // image) must read that texel exactly, with no blending from its
+  // neighbor -- mirroring `PointSampleIdentityFormat` above.
+  float Storage[2][4] = {{1, 2, 3, 4}, {5, 6, 7, 8}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1D(
+      Storage, sizeof(Storage), 2, ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample1DFn Fn = resolve<Sample1DFn>(
+      addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, 0.0f, true, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 5.0f);
+  EXPECT_FLOAT_EQ(Out[1], 6.0f);
+  EXPECT_FLOAT_EQ(Out[2], 7.0f);
+  EXPECT_FLOAT_EQ(Out[3], 8.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample1DArrayReadsRequestedLayer) {
+  // Mirrors `Sample2DArrayReadsRequestedLayer` above, narrowed to a
+  // single spatial axis.
+  float Storage[3][1][4] = {{{0, 0, 0, 0}}, {{1, 1, 1, 1}}, {{2, 2, 2, 2}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1DArray(
+      Storage, sizeof(Storage), 1, 3, ResourceFormat::R32G32B32A32_FLOAT,
+      Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample1DArrayFn Fn = resolve<Sample1DArrayFn>(
+      addWrapper("sample_1d_array", "feme.cpu.image.sample.1darray.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/2.0f, 0.0f, true,
+     true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 2.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample1DInactiveLaneReadsZero) {
+  // Mirrors the existing `Load*InactiveLaneReadsZero` tests' own
+  // `Mask=false` convention.
+  float Storage[1][4] = {{1, 2, 3, 4}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1D(
+      Storage, sizeof(Storage), 1, ResourceFormat::R32G32B32A32_FLOAT,
+      Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample1DFn Fn = resolve<Sample1DFn>(
+      addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
+  float Out[4] = {9, 9, 9, 9};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.0f, true, /*Mask=*/false,
+     Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 0.0f);
 }
 
 TEST_F(ImageSamplingTest, Load2DArrayReadsRequestedLayer) {
