@@ -65432,3 +65432,128 @@ broad `*cube*` sweep -- clearly unrelated (fails before any runtime
 sampling code runs at all), out of scope for this row, and not yet
 tracked as its own roadmap entry; a future session should decide
 whether it's worth filing.
+
+# L57: textureQueryLod / OpImageQueryLod support for Plain2D
+
+## Choosing among L52's three open sub-items
+
+L52's own (a)-(f) breakdown left three sub-items open after prior
+sessions: (b) a `Bias` image operand on `samplecmp` (5 confirmed-failing
+CTS cases, but the fix is a genuinely bigger, cross-cutting scope
+touching real LLVM SPIR-V backend intrinsic definitions, not just
+feme-internal code); (c) `samplecmp_clamp`'s trailing `MinLod` clamp
+operand (zero confirmed real failing CTS cases so far -- nothing to
+validate a fix against); (e) the LOD-query intrinsics
+(`spv_resource_calculate_lod`/`.calculate_lod_unclamped`, legalized from
+`OpImageQueryLod`), which had zero CPU-lowering consumer at all,
+blocking the entire 190-case
+`dEQP-VK.glsl.texture_functions.query.texturequerylod.*` group.
+
+I picked (e): it has by far the largest real, confirmed CTS impact (30
+failing cases in the narrowly-scoped `Plain2D` slice alone, more once
+I actually ran it), and the fix reuses existing derivative-synthesis
+infrastructure (`getOrSynthesizeSample2DDerivatives`, already built for
+ordinary `Sample2D`), so the marginal new code needed was small and
+well-understood before I started. (c)'s zero-case status made it hard
+to even validate a fix, and (b)'s cross-cutting LLVM-intrinsic scope
+felt like its own separate effort deserving a dedicated session, not a
+sub-item squeezed in alongside two others.
+
+## Reading the CTS reference oracle first
+
+Before writing any code, I read `TextureQueryLodInstance` in
+VK-GL-CTS's `vktShaderRenderTextureFunctionTests.cpp` to understand the
+exact expected semantics of `textureQueryLod`'s two return components:
+the raw/unclamped LOD (component `.y` in GLSL, `UnclampedLod` here) is a
+continuous function of texel-footprint derivatives with no mip-count
+clamping at all; the clamped/accessed level (component `.x`,
+`ClampedLevel` here) additionally clamps to `[0, MipLevels-1]` and,
+critically, *rounds* to the nearest whole level when the sampler's
+`mipmapMode` is `NEAREST`, but stays fractional for `LINEAR`. This
+distinction (`computeLevelFromLod`'s own rounding-vs-not behavior) is
+the crux of the whole feature and shaped the runtime helper design
+directly -- I wrote `femeRTComputeClampedQueryLevel` to branch on
+`Samp->MipFilter` exactly the way the reference oracle does, rather
+than guessing at behavior from the SPIR-V spec text alone (which is far
+less precise about the exact rounding rule than the CTS's own reference
+implementation).
+
+## The `femeRTFastLog2` approximation-bias discovery
+
+While writing the runtime unit tests, I initially assumed
+`femeRTFastLog2` behaved like true mathematical `log2` (its own doc
+comment claims it's "exact at each power of two"). My first-draft tests
+asserted things like "a footprint of exactly `1.0` produces an
+unclamped LOD of `0.0`" -- and they failed. A quick Python
+reimplementation of the function's own bit-trick formula
+(`Y = bitcast<uint32>(X) as float / 8388608.0 - 126.94269504`) confirmed
+a real, constant additive bias of about `+0.05730496` present even at
+exact powers of two (e.g. `femeRTFastLog2(1.0) ~= 0.0573`, not `0.0`).
+This is a pre-existing characteristic of the approximation, not
+something this session's changes introduced, and it's shared by every
+other caller of `femeRTFastLog2` (ordinary implicit-LOD mip selection
+uses it too) -- so "fixing" the bias would be a much larger, unrelated,
+out-of-scope change with its own regression risk across every existing
+sampling path. Instead I added a small test-local helper,
+`expectedFastLog2`, that exactly reimplements the same bit-trick in the
+test file, so the new tests compare against the function's *actual*
+behavior rather than an idealized assumption. This is a good example of
+why testing against a real implementation detail (even an
+approximation with a known bias) beats testing against an idealized
+mental model of what the function "should" do -- the tests exist to
+catch regressions in the real behavior, not to enforce a spec the
+implementation was never trying to meet exactly.
+
+A related small test bug I caught along the way: my mip-filter-rounding
+tests initially relied on `makeSampler`'s own default `MipFilter`
+staying `Linear` for the "stays fractional" test -- but `makeSampler`
+actually always defaults `MipFilter` to `Nearest` regardless of its
+`MagFilter` parameter (confirmed by reading the helper directly), so my
+test was silently exercising the wrong code path and only "passed"
+because I hadn't yet fixed the `expectedFastLog2` assertion values (both
+paths happened to produce `1.0` for different, unrelated reasons once
+combined with the earlier bug). Fixed by explicitly overriding
+`Samp.MipFilter = SamplerFilter::Linear` in that test, rather than
+relying on an assumed default.
+
+## Design decision: no CSE across `OpImageQueryLod`'s two intrinsic halves
+
+`OpImageQueryLod` always legalizes into a *pair* of scalar-returning
+intrinsic calls (`calculate_lod`/`calculate_lod_unclamped`) sharing
+identical `(image, sampler, coord)` operands. My first implementation
+attempt tried to cache one shared `createQueryLod2D` call per
+`(SamplerHandle, Coord)` pair, keyed by pointer identity, to avoid
+computing the same result twice. I reverted this after realizing a real
+dominance-correctness risk: `Handle->users()`'s iteration order is not
+guaranteed to match the IR's own program order, so if the cached call
+were inserted at the position of whichever intrinsic call happens to be
+visited *first* by the iterator, and that intrinsic call happens to
+occur *later* in program order than the other one, the cached call
+would not dominate the earlier use site -- a real miscompilation, not
+just a missed optimization. I settled on the simpler, unconditionally
+correct design: each intrinsic call independently lowers to its own
+`createQueryLod2D` call, computing the same result redundantly. This
+matches the rest of `SPIRVResourceLowering.cpp`, which does no
+cross-call CSE anywhere else either; a later LLVM optimization pass
+(GVN/EarlyCSE) can still fold the two identical, side-effect-free calls
+if the surrounding code makes that legal.
+
+## Scope and results
+
+Scoped strictly to `Plain2D` (non-integer, non-array, non-cube) per
+this project's own narrow-first-slice precedent. `ninja check-feme`:
+2607/2666 discovered, 59 pre-existing `Unsupported`, 0 `Failed`, up by
+exactly the 8 new tests this row adds (3 `SPIRVResourceLoweringTest`, 5
+`ImageSamplingTest`). Real `deqp-vk` re-run of the named 30-case
+`sampler2d_*` group: 30/30 Pass, up from 0/30. A broader 190-case sweep
+found a pleasant surprise: 35/190 Pass, not 30 -- the extra 5 are
+`sampler2dshadow_*` cases, which pass "for free" because
+`OpImageQueryLod` has no depth-comparison operand at all (there's
+nothing to compare against for a LOD query), so this row's
+`Plain2D`-non-integer gate doesn't need to special-case shadow samplers
+away; they're just an ordinary `Plain2D` non-integer image from this
+pass's point of view. The remaining 155 failures are all pre-existing,
+unrelated, out-of-scope gaps (Bias, non-`Plain2D` shapes, and a
+separate integer-cube-array pipeline-creation failure). Roadmap **L57
+struck through**; L52's sub-items (b) and (c) remain the only open
+items under that row.
