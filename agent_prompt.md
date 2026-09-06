@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 resume: ec2f5570-263a-4b95-917f-6c2230e594cf
 ---
 # Initial Guidelines
@@ -46,10 +46,10 @@ Can you work on L60 or other prerequisites blocking the L-series milestones?
 
 The last session reported:
 
-> That `VulkanBuffer` gap now appears in the roadmap as a blocker for L60(a),
-> L60's `Grad` sub-items, and the feature flip alike — it is doing a lot of work
-> for something never filed as its own row, and is probably the single
-> highest-value next target in this series.
+> L64 closes the last shape-related blocker L60(a) named, so re-running the
+> `shaderResourceMinLod` flip/measure/revert experiment is now the highest-value
+> target -- the reason that bit stayed off may no longer hold. Separately, the
+> dref-path implicit-LOD gap from last session is still real and still unfiled.
 
 Which seems like the right place to start.
 
