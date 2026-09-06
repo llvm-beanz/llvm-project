@@ -65127,3 +65127,100 @@ surface or design-doc deviation). L52's own remaining sub-items (b)
 `Bias`, (c) `samplecmp_clamp`'s `MinLod` operand, (e) LOD-query
 intrinsics, and L53's seamless cube-map filtering gap remain the open
 prerequisites for a future L-series session.
+
+# Session: L53 (seamless cube-map filtering) implemented, L51's own root cause hypothesis disproven
+
+Picked L53 as the next real prerequisite after confirming (via `git log`)
+that the previous turn's request (L52/L54) was already fully committed
+work -- a duplicate ask for the second consecutive turn. L53 was the
+next well-scoped, concretely-described gap: Vulkan's own spec-mandated
+default "seamless cube map filtering," entirely missing from all four of
+`FeMeRuntimeCPU.c`'s cube sample entry points.
+
+**Design decisions:**
+- Re-derived the face-adjacency/coordinate-remap formulas from scratch
+  against feme's own `femeRTSelectCubeFace` face order (`0=+X,1=-X,
+  2=+Y,3=-Y,4=+Z,5=-Z`) rather than reusing VK-GL-CTS's own
+  `remapCubeEdgeCoords` tables verbatim, since CTS's own internal
+  `CubeFace` enum uses a different order/sign convention. Verified the
+  derivation by hand for several axes before writing any code, then
+  independently re-verified it again via two new unit tests whose
+  expected numeric results I worked out by hand in advance
+  (`SampleCubeSeamlessBlendsAcrossFaceEdge`'s `~90.0`,
+  `SampleCubeSeamlessCornerAveragesThreeFaces`'s `~88.3`) -- both tests
+  passed on the first real build, which gave me real confidence the
+  derivation (not just the code) was correct, not merely that the code
+  matched itself.
+- Decided *not* to add a new per-sampler "seamless" descriptor bit
+  despite this row's own original roadmap text calling for one: Vulkan's
+  only opt-out (`VK_EXT_non_seamless_cube_map`) is confirmed `Not
+  implemented`, so there is no way for this row's own new bit to ever be
+  cleared in practice. Applying seamless filtering unconditionally is
+  simpler and behaviorally identical for every real workload this target
+  can run. This kind of "the roadmap's own original plan included a knob
+  nothing can ever actually turn" simplification has come up a few times
+  now (L52(a)'s scope narrowing was similar) and seems worth watching for
+  as a recurring pattern: a roadmap row written *before* investigation
+  sometimes over-scopes for generality a currently-`Not implemented`
+  feature would need, when investigation later shows that generality is
+  unreachable anyway.
+- For the depth-comparison path, was careful to apply the compare
+  function to each of the 4 raw taps *before* averaging for the ambiguous
+  corner case, not average the raw depth values and compare once --
+  confirmed this exact ordering against VK-GL-CTS's own
+  `sampleCubeSeamlessLinearCompare` reference before writing any code,
+  since compare functions (e.g. `LessEqual`) are not linear and the two
+  orderings are not equivalent.
+
+**The most important finding this session, though, was a negative
+result, and I think it's the right kind of thing to write down here.**
+After implementing and unit-testing the fix, I ran the real
+`samplercubearrayshadow_fragment` CTS case that L51 (a prior session)
+had root-caused to this exact gap -- and its image-diff came back
+bit-for-bit identical to before the fix (835.108, unchanged). My first
+instinct was mild alarm that the fix didn't do anything; the second,
+more useful instinct was to go check *why*, rather than just declare the
+fix broken or, worse, silently claim victory anyway because the
+implementation "looked right" and passed its own unit tests. Checking
+that CTS case's own sampler definition in
+`vktShaderRenderTextureFunctionTests.cpp` turned up the actual
+explanation immediately: it uses `NEAREST`/`NEAREST` filtering, not
+`LINEAR` -- and seamless cube filtering is, by spec, a `LINEAR`-only
+concept (a single `NEAREST` texel never straddles a face edge). So the
+fix is doing exactly what it should; it's L51's own prior-session
+root-cause hypothesis that was wrong, not this session's fix. The
+"closest to a face edge among 16 grid cells" correlation L51 found was
+real, but coincidental rather than causal.
+
+This changes what "done" means for this session in an important way: I
+can't honestly claim L53 fixes `samplercubearrayshadow_fragment`,
+because it demonstrably doesn't. What I *can* honestly claim is that
+seamless cube filtering itself is now correctly implemented and tested
+-- and I went looking for a way to prove that independently of the
+now-disproven motivating case, rather than declaring the whole row a
+wash. VK-GL-CTS turned out to have its own dedicated CTS group built
+exactly for this
+(`dEQP-VK.texture.filtering.cube.combinations.*.*.*.*.{seamless,
+non_seamless}`), which I hadn't noticed until searching for it directly.
+Running the relevant `linear.linear.*.*.seamless` slice gave a clean
+24/24 pass, which is real, direct, on-target validation of the actual
+feature this row implements -- a much better proof point than the
+original (now-invalidated) motivating case would have been anyway.
+
+Re-filed the real, still-unsolved `samplercubearrayshadow_fragment`
+mismatch as its own new row (L55), explicitly noting L51's hypothesis is
+now disproven rather than silently dropping the connection, so a future
+session doesn't have to re-discover this dead end from scratch. Also
+filed a second new row (L56) for a genuinely separate, pre-existing
+trilinear/mipmap cube-filtering bug discovered incidentally while
+sweeping the CTS group above (confirmed via `git stash` to already fail
+identically before this session's own change, so explicitly not a
+regression) -- resisted the temptation to either fix it opportunistically
+(materially different scope, no design work done yet) or to ignore it
+now that it's been found.
+
+Net effect: L53 struck through as genuinely done (implemented, unit
+tested, and validated against the right real CTS group), but with an
+honest correction recorded against L51's own prior conclusion, and two
+new, accurately-scoped roadmap rows (L55, L56) rather than one
+overclaimed "fixed" row that would have misled a future session.
