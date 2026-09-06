@@ -28665,3 +28665,157 @@ entry in `Roadmap.md` (following this project's established
 append-in-place precedent), rather than striking the whole L52 row --
 sub-item (b) (the literal `Dref`+`Bias` combination, needing a new LLVM
 core intrinsic) remains open and unstarted.
+
+## Roadmap L61: `shaderResourceMinLod` blocker investigation; `Plain1D`/`Array1D` `Bias`/`MinLodClamp` sampling fixed
+
+**Motivation.** With L52(c)/L58/L59/L60(a) each having closed a
+separately-scoped `Bias`/`Grad`/`MinLodClamp` builder-level gap, this
+session investigated whether `shaderResourceMinLod` can now safely be
+advertised as `VK_TRUE` at all, rather than continuing to pick off
+individual named sub-items in isolation.
+
+**Method.** A temporary `Info.Features.shaderResourceMinLod = VK_TRUE`
+experiment (`feme/lib/Vulkan/PhysicalDeviceInfo.cpp`, flipped back off
+before any commit, per this project's established flip/measure/revert
+methodology) let a real `deqp-vk` sweep of the three CTS groups this
+feature bit gates run to completion instead of universally reporting
+`NotSupported`: `textureclamp.*` (50 cases: 8 Pass / 24 Fail / 18
+NotSupported), `texturegradclamp.*` (52 cases: 4 Pass / 29 Fail / 19
+NotSupported), `texturegradoffsetclamp{,_pcoffset}.*` (380 cases: 10
+Pass / 110 Fail / 260 NotSupported, the `_pcoffset` half uniformly
+`NotSupported` for an unrelated `VK_KHR_maintenance8` gap). Every real
+`Fail` was individually triaged via `FEME_VULKAN_LOG_CREATION_ERRORS=1`.
+
+**`textureclamp`'s own 24 fails, triaged.** 14 `isampler`/`usampler`
+`_bias_*` cases and 2 `sampler3d_bias_*` cases are **not** newly relevant
+gaps at all: a plain, non-bias `isampler2d_fragment`/`sampler3d_fixed_fragment`
+baseline (no clamp, no bias, nothing to do with `shaderResourceMinLod`)
+already fails identically today, confirming `hasOnlySupportedImageUses`'s
+pre-existing `IsInteger` restriction and `Plain3D`'s total lack of
+ordinary-sampling infrastructure are each independent, much larger,
+separately-scoped gaps, not something this investigation should attempt
+to fix. 4 `sampler{1d,1darray,2d,cube}shadow_bias_*` cases reproduce
+L52(b)'s already-filed `Dref`+`Bias` legalization gap
+(`ImageSampleDrefImplicitLodPattern`'s `SupportedMask` rejects `Bias`)
+identically regardless of shape -- no new information, still open. The
+remaining 4 `sampler1d_bias_{fixed,float}_fragment`/
+`sampler1darray_bias_{fixed,float}_fragment` cases were a real,
+previously-unfiled, tractable gap: `createSample1D`/`createSample1DArray`
+never gained a `Bias`/`MinLodClamp` operand pair the way
+`createSample2D`/`createSampleCube`/`createSampleCubeArray`/
+`createSample2DArray` all eventually did (L26/L58/L59/L60(a)) --
+`hasOnlySupportedImageUses` rejected the whole handle (and, per its own
+all-or-nothing per-function `collectHandles` bailout, silently rejected
+any otherwise-fine buffer handle sharing the same function too), leaving
+the function's raw SPIR-V intrinsics unrewritten.
+
+**The fix.** `createSample1D`/`createSample1DArray`
+(`ImageCalls.h`/`.cpp`) each gained real `Bias`/`MinLodClamp` parameters,
+mirroring `createSample2D`'s own identically-named trailing operands
+(deliberately still without a screen-space-derivative/`Grad` pair or a
+`ConstOffset` -- no real CTS case exercises either against
+`Plain1D`/`Array1D` yet, filed as its own future follow-on rather than
+attempted here). `hasOnlySupportedImageUses`'s `HasMinLodClamp`/`HasBias`
+shape checks now also allow `Plain1D`/`Array1D`, and
+`lowerImageAccesses`'s own early `Plain1D`/`Array1D` special case now
+extracts a real `Bias` (already generically available at that point) and
+`MinLodClamp` (mirroring `Plain2D`'s own `getSampleClampIdx`-indexed
+extraction), threading both through. `FeMeRuntimeCPU.c`'s
+`femeCpuImageSample1DV4F32`/`Sample1DArrayV4F32` thread the same two
+parameters into `femeRTComputeClampedLod` in place of the previous
+hardcoded `0.0f`/`-inf` no-op values.
+
+**A second, independent latent bug caught along the way.**
+`ImageCalls.cpp`'s own `matchImageCall` -- the reverse-direction call
+`feme::cpu::FunctionWidener`'s divergence/widening logic uses, distinct
+from `SPIRVResourceLowering.cpp`'s forward-direction `createSample1D`/
+`Array1D` builders -- still hardcoded `Sample1D`/`Sample1DArray`'s
+*pre*-this-row `arg_size()` (10/11). The exact same "arg-count table not
+kept in sync with a real operand addition" shape roadmap H19l previously
+caught for `Store2DMS`/`Store2DMSI32`: once `hasOnlySupportedImageUses`
+started accepting `Bias`/`MinLodClamp` for these shapes and the call's
+own arg count grew to 12/13, `matchImageCall` silently returned
+`std::nullopt` for it, which made `feme-cpu-simdize`'s own
+`IsSupportedProducer` check misclassify a perfectly legal
+`feme.cpu.image.sample.1d.v4f32` call as an unsupported divergent
+producer -- caught by this row's own first real CTS re-run attempt
+(`feme-cpu-simdize: function 'main' has a divergent value '' of vector
+type; ... (roadmap milestone 7 deviation)`), not by any existing unit
+test: no `ImageCallsTest.cpp` coverage exercised `matchImageCall`'s
+`Sample1D`/`Sample1DArray` cases at all before this row. Fixed by
+updating both cases' `arg_size()` guards and adding
+`Result.Bias`/`Result.MinLodClamp` extraction.
+
+**New/updated tests.** `SPIRVResourceLoweringTest.cpp`'s two existing
+`Sample1D`/`Sample1DArray` positive tests' `arg_size()` assertions bumped
+(10->12, 11->13); two new positive tests added
+(`LowersSampleBiasToPlain1DBias`, exercising
+`llvm.spv.resource.samplebias` against `Plain1D`;
+`LowersSampleBiasClampToArray1DWithMinLodClamp`, exercising
+`llvm.spv.resource.samplebias.clamp` against `Array1D`).
+`ImageSamplingTest.cpp`'s `Sample1DFn`/`Sample1DArrayFn` typedefs and all
+4 existing call sites gained the same two trailing parameters (neutral
+`Bias=0.0`/`MinLodClamp=-inf` values preserving prior behavior in the
+unmodified tests), plus two new runtime tests
+(`Sample1DBiasSelectsCoarserMipLevel`,
+`Sample1DArrayMinLodClampRaisesImplicitLevel`) confirming the new
+parameters actually reach `femeRTComputeClampedLod` and shift the
+resolved mip level as expected. `ImageCallsTest.cpp` gained two new
+regression tests (`MatchesSample1DCallWithBiasAndMinLodClamp`,
+`MatchesSample1DArrayCallWithBiasAndMinLodClamp`) that would have caught
+the `matchImageCall` arg-count bug above by construction; `makeEnv` was
+extended to also populate `SamplerHeap`/`SamplerHeapCount`, needed by any
+sampler-carrying call these two new tests are the first in this file to
+exercise.
+
+**`ninja check-feme` (ccache + assertions, `build2`).** 2682 total
+discovered, 59 `Unsupported`, 2623 `Passed`, 0 `Failed` -- no
+regressions (net +4 relative to the prior 2678-discovered/2619-Passed
+baseline: 2 new `SPIRVResourceLoweringTest` cases, 2 new `ImageCallsTest`
+cases, 2 new `ImageSamplingTest` runtime cases, minus the 2 pre-existing
+`Sample1D`/`Sample1DArray` `arg_size()`-only edits which add no new test
+count).
+
+**Real CTS impact.** `dEQP-VK.glsl.texture_functions.texture.
+sampler1d_bias_{fixed,float}_fragment`/`sampler1darray_bias_{fixed,float}
+_fragment` are now 4/4 Pass, up from 0/4 `Fail` before this fix -- and
+notably this needed **no** `shaderResourceMinLod` feature-bit flip at
+all, since a plain `Bias` (unlike `MinLodClamp`) is not gated by that
+feature; this is an immediately shippable win in the current baseline
+configuration. A broader `sampler1d*`/`sampler1darray*` sweep (12 cases,
+including every non-bias baseline case) confirms zero regressions
+elsewhere.
+
+**Design docs.** `FeMeGraphicsDesign.md` reviewed: no deviation to
+record -- it never scoped `Plain1D`/`Array1D` `Bias`/`MinLodClamp` out on
+purpose, `createSample1D`'s own original L52a doc comment simply noted
+it was "deferred here to keep this first pass minimal," and this row is
+exactly that deferred follow-on.
+
+**Feature/extension inventories.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed: no change needed --
+`shaderResourceMinLod` remains correctly advertised as `no`; this row is
+internal CPU-lowering plumbing only, not a feature-bit flip. (The
+temporary `VK_TRUE` experiment used to drive this investigation's own
+CTS sweep was reverted before any commit, confirmed via `git diff
+--stat` showing a clean `PhysicalDeviceInfo.cpp`.)
+
+**Still blocking a safe `shaderResourceMinLod = VK_TRUE` flip, confirmed
+out of this row's own scope** (named here so a future session does not
+re-discover them from scratch): (a) integer-channel (`isampler`/
+`usampler`) ordinary implicit-LOD sampling has no support at all -- a
+materially bigger, separately-scoped gap than anything `Bias`/`Grad`/
+`MinLodClamp`-specific; (b) `Plain3D` ordinary sampling has no support at
+all either, matching `FeMeGraphicsDesign.md`'s long-standing scoping
+note; (c) L52(b)'s own `Dref`+`Bias` legalization gap remains open and
+unstarted; (d) L60(a)'s own still-unconfirmed `VulkanBuffer`
+register-bound-resource-handle gap (blocking `Array2D`/`CubeArray`'s own
+`Grad` CTS cases) was not re-investigated this session, still not yet
+filed as its own line. This row's roadmap entry (**L61**) records all
+four as its own sub-items, matching this project's established
+splitting precedent.
+
+**Roadmap update.** A new **L61** row is added to `Roadmap.md`,
+documenting this investigation's findings, the fix, and sub-items
+(a)-(d) above as the remaining blockers to a safe `shaderResourceMinLod`
+flip.
