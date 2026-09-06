@@ -4154,18 +4154,19 @@ public:
 };
 
 /// Converts a `spirv.ImageSampleDrefImplicitLod` with any combination of
-/// `ConstOffset` and `MinLod` (no `Bias`: LLVM's SPIRV backend has no
-/// depth-comparison sampling intrinsic combining a bias with a comparison
-/// -- only the two variants below exist, unlike the four
-/// (`sample`/`.clamp`/`samplebias`/`samplebias.clamp`) implicit-LOD
-/// sampling supports, see `llvm/include/llvm/IR/IntrinsicsSPIRV.td`'s own
-/// `int_spv_resource_samplecmp{,_clamp}`) into the `llvm.spv.resource.
-/// samplecmp`/`.samplecmp.clamp` intrinsic call LLVM's SPIRV backend
-/// selects `OpSampledImage`+`OpImageSampleDrefImplicitLod` from -- see
+/// `Bias`, `ConstOffset`, and `MinLod` into the corresponding one of the
+/// four `llvm.spv.resource.samplecmp`/`.samplecmp.clamp`/`.samplecmpbias`/
+/// `.samplecmpbias.clamp` intrinsic calls LLVM's SPIRV backend selects
+/// `OpSampledImage`+`OpImageSampleDrefImplicitLod` from -- see
 /// `llvm/test/CodeGen/SPIRV/hlsl-resources/SampleCmp.ll`'s own operand
-/// order (image, sampler, coord, dref, offset[, clamp]), mirroring
-/// `ImageSampleImplicitLodPattern` above. This is the depth-comparison
-/// sibling HLSL's `Texture*::SampleCmp` compiles down to (roadmap L25).
+/// order (image, sampler, coord, dref, [bias,] offset[, clamp]),
+/// mirroring `ImageSampleImplicitLodPattern` above. The non-bias pair is
+/// the depth-comparison sibling HLSL's `Texture*::SampleCmp` compiles
+/// down to (roadmap L25); the `samplecmpbias` pair (roadmap L52(b)) has
+/// no HLSL spelling but is what GLSL's own
+/// `texture(sampler2DShadow, coord, bias)` emits, so a real SPIR-V module
+/// imported from GLSL reaches it where an HLSL-originated one never
+/// would.
 class ImageSampleDrefImplicitLodPattern
     : public mlir::SPIRVToLLVMConversion<
           mlir::spirv::ImageSampleDrefImplicitLodOp> {
@@ -4184,11 +4185,14 @@ public:
       Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
 
     mlir::spirv::ImageOperands SupportedMask =
+        mlir::spirv::ImageOperands::Bias |
         mlir::spirv::ImageOperands::ConstOffset |
         mlir::spirv::ImageOperands::MinLod;
     if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
 
+    bool HasBias = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::Bias);
     bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
         Actual, mlir::spirv::ImageOperands::ConstOffset);
     bool HasMinLod = mlir::spirv::bitEnumContainsAny(
@@ -4214,9 +4218,11 @@ public:
                    : mlir::cast<mlir::Type>(Rewriter.getI32Type());
 
     // Same fixed Image Operands bit order as `ImageSampleImplicitLodPattern`
-    // above (`ConstOffset` before `MinLod`), whichever subset is present.
+    // above (`Bias` before `ConstOffset` before `MinLod`), whichever subset
+    // is present.
     mlir::ValueRange OperandArguments = Adaptor.getOperandArguments();
     size_t Index = 0;
+    mlir::Value Bias = HasBias ? OperandArguments[Index++] : mlir::Value();
     mlir::Value Offset =
         HasConstOffset ? OperandArguments[Index++] : mlir::Value();
     mlir::Value Clamp = HasMinLod ? OperandArguments[Index++] : mlir::Value();
@@ -4224,13 +4230,21 @@ public:
       Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
                                               Rewriter.getZeroAttr(OffsetType));
 
-    llvm::SmallVector<mlir::Value, 6> Arguments = {Image, Sampler, Coordinate,
-                                                    Dref, Offset};
+    llvm::SmallVector<mlir::Value, 7> Arguments = {Image, Sampler, Coordinate,
+                                                   Dref};
+    if (Bias)
+      Arguments.push_back(Bias);
+    Arguments.push_back(Offset);
     if (Clamp)
       Arguments.push_back(Clamp);
-    llvm::StringRef IntrinsicName = Clamp
-                                        ? "llvm.spv.resource.samplecmp.clamp"
-                                        : "llvm.spv.resource.samplecmp";
+
+    llvm::StringRef IntrinsicName;
+    if (Bias)
+      IntrinsicName = Clamp ? "llvm.spv.resource.samplecmpbias.clamp"
+                            : "llvm.spv.resource.samplecmpbias";
+    else
+      IntrinsicName = Clamp ? "llvm.spv.resource.samplecmp.clamp"
+                            : "llvm.spv.resource.samplecmp";
 
     Rewriter.replaceOp(Op, createIntrinsicCall(Rewriter, Loc, IntrinsicName,
                                                ResultType, Arguments));

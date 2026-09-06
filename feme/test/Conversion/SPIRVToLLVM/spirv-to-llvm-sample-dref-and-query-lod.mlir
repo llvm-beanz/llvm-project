@@ -34,9 +34,8 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // real offset and clamp value through instead of the defaulted zero offset
 // the unmodified case above uses -- mirroring
 // `spirv-to-llvm-sampling.mlir`'s own `sample_const_offset_minlod` case for
-// the non-`Dref` sibling pattern. `Bias` is not supported here (unlike the
-// non-`Dref` sibling): LLVM's SPIRV backend has no depth-comparison
-// sampling intrinsic combining a bias with a comparison at all.
+// the non-`Dref` sibling pattern. A `Bias` operand selects a different
+// intrinsic pair entirely -- see the two `samplecmpbias` cases below.
 
 // CHECK-LABEL: llvm.func @samplecmp_const_offset_minlod
 // CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
@@ -56,6 +55,61 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   }
 }
 
+// -----
+
+// Roadmap L52(b): `spirv.ImageSampleDrefImplicitLod` with a `Bias` operand
+// converts to `llvm.spv.resource.samplecmpbias`, the depth-comparison
+// counterpart of the non-`Dref` sibling pattern's own
+// `llvm.spv.resource.samplebias`. The bias operand lands immediately after
+// the dref operand and ahead of the (here defaulted-to-zero) offset,
+// matching SPIR-V's own fixed Image Operands bit order. This is what
+// GLSL's `texture(sampler2DShadow, coord, bias)` emits; HLSL has no
+// spelling for it, so no `llvm/test/CodeGen/SPIRV/hlsl-resources` case
+// covers this intrinsic.
+
+// CHECK-LABEL: llvm.func @samplecmp_bias
+// CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[SAMP:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.samplecmpbias"(%[[IMG]], %[[SAMP]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @samplecmp_bias(%coord : vector<2xf32>, %dref : f32, %bias : f32) -> f32 "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %3 = spirv.Load "UniformConstant" %2 : !spirv.sampler
+    %4 = spirv.SampledImage %1, %3 : !spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %5 = spirv.ImageSampleDrefImplicitLod %4, %coord, %dref ["Bias"], %bias : !spirv.sampled_image<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32, f32 -> f32
+    spirv.ReturnValue %5 : f32
+  }
+}
+
+// -----
+
+// Roadmap L52(b): `Bias|ConstOffset|MinLod` all together converts to
+// `llvm.spv.resource.samplecmpbias.clamp`, threading every real operand
+// through in SPIR-V's own fixed bit order (bias, offset, clamp) after the
+// dref -- the depth-comparison counterpart of the non-`Dref` sibling
+// pattern's `llvm.spv.resource.samplebias.clamp`.
+
+// CHECK-LABEL: llvm.func @samplecmp_bias_const_offset_minlod
+// CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[SAMP:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.samplecmpbias.clamp"(%[[IMG]], %[[SAMP]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @samplecmp_bias_const_offset_minlod(%coord : vector<2xf32>, %dref : f32, %bias : f32, %offset : vector<2xsi32>, %clamp : f32) -> f32 "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %3 = spirv.Load "UniformConstant" %2 : !spirv.sampler
+    %4 = spirv.SampledImage %1, %3 : !spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %5 = spirv.ImageSampleDrefImplicitLod %4, %coord, %dref ["Bias|ConstOffset|MinLod"], %bias, %offset, %clamp : !spirv.sampled_image<!spirv.image<f32, Dim2D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32, f32, vector<2xsi32>, f32 -> f32
+    spirv.ReturnValue %5 : f32
+  }
+}
 // -----
 
 // Roadmap L31: `spirv.ImageSampleDrefExplicitLod` with a literal `Lod =
