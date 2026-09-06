@@ -29080,3 +29080,104 @@ reviewed: no deviation or update needed. This is internal CPU-lowering and
 runtime plumbing behind an already-advertised core SPIR-V capability; `Bias` on
 a depth-comparison sample is gated by no Vulkan feature bit, and
 `shaderResourceMinLod` is unchanged.
+
+## Roadmap L64: arrayed `Grad` sampling, and the `VulkanBuffer` misattribution
+
+Several earlier rows in this document and in `Roadmap.md` recorded a
+"distinct, pre-existing, unrelated `VulkanBuffer` register-bound-resource-handle
+gap" blocking every arrayed `textureGrad()` case, named as a blocker for roadmap
+L60(a), for L60's `Grad` sub-items, and for the `shaderResourceMinLod` flip
+alike. **There is no `VulkanBuffer` defect.** That framing was a misattribution,
+and this row removes it.
+
+### What was actually wrong
+
+`hasOnlySupportedImageUses` required a `samplegrad`'s `dPdx`/`dPdy` operands to
+be exactly as wide as the sample coordinate. That is only correct for a
+non-arrayed shape. SPIR-V gives a `Grad` derivative one component per image
+dimension *not counting* the array layer — a layer index selects a discrete
+slice rather than addressing a filtered axis, so it has no derivative at all:
+
+| Shape | Coordinate | `Grad` derivative |
+| --- | --- | --- |
+| `Plain2D` | 2 (`U, V`) | 2 |
+| `Cube` | 3 (`X, Y, Z`) | 3 |
+| `Array2D` | 3 (`U, V, Layer`) | **2** |
+| `CubeArray` | 4 (`X, Y, Z, Layer`) | **3** |
+
+So every real arrayed `textureGrad()` shader had its sample rejected.
+
+### Why it was reported against a uniform block
+
+An unsupported *use* makes the whole resource handle un-normalizable, which
+leaves the entire function unlowered. `checkSupportedRaisedOps` then reports
+whichever `handlefrombinding` declaration comes first in the module — which was
+the scale/bias uniform block (`spirv.VulkanBuffer_sl_v4f32s_2_0t`) that every
+`texture_functions` shader declares, not the sample that actually failed.
+
+An IR capture of a real failing case
+(`texturegrad.sampler2darray_fixed_fragment`) and of an already-*passing* case
+(`texture.sampler2darray_bias_fixed_fragment`) showed **byte-identical**
+`VulkanBuffer` handles, disproving the framing outright. Running the captured
+module through `feme-opt -passes=feme-cpu-lower-spirv-resources` confirmed the
+pass left every handle in the function untouched, including both uniform blocks.
+
+This diagnostic is actively misleading in exactly this way whenever a function
+mixes resource kinds, and is worth recognizing on sight: it names a *handle*,
+but the cause is almost always an unsupported *use* elsewhere in the same
+function.
+
+### The fix
+
+| Change | Phase |
+| --- | --- |
+| New `isArrayedShape` helper; `hasOnlySupportedImageUses` computes `GradDerivativeWidth` as the sample coordinate width less one for an arrayed shape | Legalization |
+| *(none needed)* — `lowerImageAccesses` already read exactly the correct narrower widths (elements 0/1 for `Array2D`, 0/1/2 for `CubeArray`) | Lowering |
+
+Only that one check ever disagreed with the lowering it guards.
+
+| Tests | Before | After |
+| --- | --- | --- |
+| `check-feme` | 2637 Pass / 0 Fail / 59 Unsupported | **2640 Pass** / 0 Fail / 59 Unsupported |
+
+The two existing arrayed `Grad` lowering unit tests passed coordinate-width
+derivatives that no real shader emits — they had been written against the buggy
+check rather than against SPIR-V — and are corrected here. Two new negative
+tests pin that the width was narrowed to exactly the legal value rather than
+relaxed: a coordinate-width derivative against `Array2D` and a narrowed one
+against non-arrayed `Plain2D` are both still rejected. New lit coverage was
+added at the SPIR-V→LLVM conversion phase and at the IR-lowering phase, the
+latter reduced directly from the real failing CTS shader including the uniform
+blocks that were being misreported.
+
+### Real `deqp-vk` results
+
+Full `dEQP-VK.glsl.texture_functions.texturegrad.*` group (156 cases):
+
+| | Before | After |
+| --- | --- | --- |
+| Pass | 8 | **16** |
+| Fail | 91 | **83** |
+| NotSupported | 57 | 57 |
+
+The 8 newly-passing cases are exactly the `sampler2darray`/`samplercubearray` ×
+`fixed`/`float` × `fragment`/`vertex` matrix, with a per-case diff confirming 0
+regressions.
+
+A wider `dEQP-VK.glsl.texture_functions.*array*` sweep (2,234 cases, covering
+every texture function against every arrayed shape) confirms exactly 8 cases
+changed state — the same 8 — with no regressions anywhere: 46 → 54 Pass,
+844 → 836 Fail, 1,344 NotSupported unchanged.
+
+Both before-sides were measured by checking the parent commit's `feme/lib` back
+out and relinking `libfeme_vulkan.so`; note that a plain `git stash` is a no-op
+for already-committed work.
+
+This closes the last shape-related blocker that L60(a) named. `Array2D`'s and
+`CubeArray`'s `MinLodClamp` counterparts remain unconfirmable by real CTS only
+because `shaderResourceMinLod` is still advertised as `VK_FALSE`.
+
+`FeMeGraphicsDesign.md`/`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed: no deviation or update needed. `Grad` sampling is core SPIR-V gated by
+no feature bit, and this is a legalization-only fix behind an already-advertised
+capability.
