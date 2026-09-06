@@ -29262,3 +29262,47 @@ this session's own fix. Filed as roadmap L66(e); not yet root-caused.
 reviewed: no deviation or update needed. `shaderResourceMinLod` remains
 correctly advertised as `VK_FALSE`; `Grad` sampling itself is core SPIR-V
 gated by no feature bit.
+
+## Session: roadmap L66(a) -- `Plain3D` ordinary sampled-image infrastructure
+
+`Plain3D` (`Texture3D`) previously had zero sampled-image support of any
+kind: `classifySampledImage2DHandle` rejected `SPIRVDim3D` outright, and
+`createSample3D` did not exist. This session adds real ordinary sampling --
+a genuine `(U, V, W)` coordinate, real screen-space-derivative-driven
+implicit LOD (`femeRTPlanImplicitLod3D`, deliberately isotropic-only,
+mirroring `Sample1D`'s own precedent -- no CTS case exercises anisotropic
+filtering against a volume texture), and real trilinear/point mip filtering
+(`femeRTSampleLinear3D`'s full 8-corner blend). Deliberately scoped to
+ordinary sampling only: no `Bias`/`MinLodClamp`/`ConstOffset`/`Grad` operand
+yet, each filed as its own roadmap L67 follow-on sub-item.
+
+`check-feme`: 2652/2711 pass (up from 2645), 0 fail, 59 unsupported (10 new
+tests added across `ImageCallsTest.cpp`, `SPIRVResourceLoweringTest.cpp`,
+`ImageSamplingTest.cpp`, plus a new IR-lowering-phase lit test).
+
+Real CTS, direct re-run of `texture.sampler3d_{fixed,float}_{fragment,vertex,
+compute}` (8 cases, no `shaderResourceMinLod` flip needed -- ordinary `Plain3D`
+sampling is core SPIR-V gated by no feature bit): 4/8 Pass, up from 0/8
+(exactly the `_fragment`/`_vertex` cases, matching this row's ordinary-
+sampling-only scope); the remaining 2 `_bias` Fails (out of scope, filed as
+L67(a)) and 2 `_compute` NotSupported (the same pre-existing, unrelated
+`VK_KHR_compute_shader_derivatives` gap other compute-stage sampling groups
+already hit) are unaffected by this fix. A broader
+`dEQP-VK.glsl.texture_functions.*.sampler3d_*` sweep (502 cases, every
+texture-function group against this one shape) confirms 8 Pass total (up
+from 0, since `Plain3D` had no sampled-image infrastructure of any kind
+before this session -- no case in this sweep could have passed previously),
+266 Fail, 228 NotSupported.
+
+Also confirmed still-failing this session (both filed as roadmap L67, not
+fixed here): `texture.sampler3d_bias_{fixed,float}_fragment` (2/2 Fail --
+`Bias`, roadmap L67(a)) and `texturegrad.sampler3d_{fixed,float}_
+{fragment,vertex,compute}` (6/6 Fail -- explicit `Grad`, roadmap L67(b); the
+`_compute` cases fail `vkCreateComputePipelines` itself, the same
+pre-existing gap other compute-stage sampling hits).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+deviation or update needed -- `Plain3D` sampling is core SPIR-V/Vulkan with
+no gating feature bit or extension, and `shaderResourceMinLod` remains
+correctly advertised as `VK_FALSE` (unaffected by this row, per roadmap L66's
+own still-open scope).
