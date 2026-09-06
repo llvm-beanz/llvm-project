@@ -1008,8 +1008,9 @@ bool isSupportedOffset(const Value *Offset, ImageShape Shape,
 /// coordinate, same width as `Array2D`'s own arrayed one -- its own
 /// `OpImageFetch` path is likewise not accepted yet (this row's own scope
 /// is ordinary sampling only, mirroring `Plain1D`/`Array1D`'s identical
-/// decision above), and neither is `Bias`/`MinLodClamp`/`Grad` (each its
-/// own follow-on roadmap L66 sub-item, see the checks below).
+/// decision above), and `Grad` is not yet accepted either (its own
+/// follow-on roadmap L67(b) sub-item). Roadmap L67(a) adds real
+/// `Bias`/`MinLodClamp` support for `Plain3D` (see the checks below).
 bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                                ImageShape Shape) {
   unsigned SampleCoordWidth =
@@ -1033,31 +1034,31 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
         return false; // No filtered sample over an integer-channel image.
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      // Roadmap L26/L60(a)/L61(c): `lowerImageAccesses` threads a
+      // Roadmap L26/L60(a)/L61(c)/L67(a): `lowerImageAccesses` threads a
       // `MinLod` clamp through `Plain2D`'s/`Cube`'s/`CubeArray`'s/
       // `Array2D`'s own `createSample2D`/`createSampleCube`/
-      // `createSampleCubeArray`/`createSample2DArray` calls, and (roadmap
-      // L61(c)) `Plain1D`'s/`Array1D`'s own `createSample1D`/
-      // `createSample1DArray` calls too -- only `Plain3D` is left
-      // unlowered rather than silently dropping the clamp.
+      // `createSampleCubeArray`/`createSample2DArray` calls, `Plain1D`'s/
+      // `Array1D`'s own `createSample1D`/`createSample1DArray` calls
+      // (roadmap L61(c)), and `Plain3D`'s own `createSample3D` call
+      // (roadmap L67(a)) -- every ordinary-sampling shape now threads a
+      // real clamp rather than silently dropping it.
       if (HasMinLodClamp && Shape != ImageShape::Plain2D &&
           Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
           Shape != ImageShape::Array2D && Shape != ImageShape::Plain1D &&
-          Shape != ImageShape::Array1D)
+          Shape != ImageShape::Array1D && Shape != ImageShape::Plain3D)
         return false;
-      // Roadmap L58/L60(a)/L61(c): same restriction for `Bias`, mirroring
-      // `HasMinLodClamp` immediately above -- `Plain2D`'s/`Cube`'s/
-      // `CubeArray`'s/`Array2D`'s own `createSample2D`/`createSampleCube`/
-      // `createSampleCubeArray`/`createSample2DArray` calls all thread a
-      // real `Bias` operand through `lowerImageAccesses`, and (roadmap
-      // L61(c)) `Plain1D`'s/`Array1D`'s own `createSample1D`/
-      // `createSample1DArray` calls now do too; only `Plain3D` (no
-      // ordinary sampling infrastructure of its own at all yet) is left
-      // unlowered rather than silently dropping the bias.
+      // Roadmap L58/L60(a)/L61(c)/L67(a): same restriction for `Bias`,
+      // mirroring `HasMinLodClamp` immediately above -- `Plain2D`'s/
+      // `Cube`'s/`CubeArray`'s/`Array2D`'s own `createSample2D`/
+      // `createSampleCube`/`createSampleCubeArray`/`createSample2DArray`
+      // calls all thread a real `Bias` operand through
+      // `lowerImageAccesses`, `Plain1D`'s/`Array1D`'s own `createSample1D`/
+      // `createSample1DArray` calls do too (roadmap L61(c)), and so does
+      // `Plain3D`'s own `createSample3D` call now (roadmap L67(a)).
       if (HasBias && Shape != ImageShape::Plain2D &&
           Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
           Shape != ImageShape::Array2D && Shape != ImageShape::Plain1D &&
-          Shape != ImageShape::Array1D)
+          Shape != ImageShape::Array1D && Shape != ImageShape::Plain3D)
         return false;
       // Roadmap L59/L60(a)/L65: same restriction for `Grad`, mirroring
       // `HasBias` immediately above -- `Plain2D`'s/`Cube`'s/`CubeArray`'s/
@@ -2437,19 +2438,20 @@ void lowerImageAccesses(
           CI->eraseFromParent();
           continue;
         }
-        // Roadmap L66(a): `Plain3D` is handled separately too, alongside
-        // `Plain1D`/`Array1D` above -- it has no `Bias`/`MinLodClamp`/
-        // `Grad` support at all yet (`hasOnlySupportedImageUses` already
-        // guarantees `HasBias`/`HasMinLodClamp`/`HasGrad` are all false by
-        // the time a `Plain3D` sample reaches here), so this is
-        // deliberately simpler than the generic `C0`/`C1`-based switch
-        // below: a real 3-component `(U, V, W)` coordinate, its own
-        // per-axis synthesized screen-space derivatives (reusing
+        // Roadmap L66(a)/L67(a): `Plain3D` is handled separately too,
+        // alongside `Plain1D`/`Array1D` above -- it has no `Grad` support
+        // yet (`hasOnlySupportedImageUses` already guarantees `HasGrad`
+        // is false by the time a `Plain3D` sample reaches here; its own
+        // follow-on roadmap L67(b) sub-item), so this is deliberately
+        // simpler than the generic `C0`/`C1`-based switch below: a real
+        // 3-component `(U, V, W)` coordinate, its own per-axis synthesized
+        // screen-space derivatives (reusing
         // `getOrSynthesizeSample1DDerivatives` three times, once per
         // axis -- there is no dedicated 3D derivative synthesis helper,
         // since each axis differentiates independently the same way
-        // `Plain1D`'s own single axis does), and a direct
-        // `createSample3D` call.
+        // `Plain1D`'s own single axis does), a real `Bias`/`MinLodClamp`
+        // pair (roadmap L67(a), mirroring `Plain1D`'s own extraction
+        // immediately above), and a direct `createSample3D` call.
         if (Shape == ImageShape::Plain3D) {
           Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
           Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
@@ -2467,10 +2469,16 @@ void lowerImageAccesses(
               !ExplicitLod ? getOrSynthesizeSample1DDerivatives(
                                  Builder, *CI->getFunction(), W)
                            : SampleDerivatives1D{ZeroF, ZeroF};
+          Value *MinLodClamp =
+              HasMinLodClamp
+                  ? CI->getArgOperand(
+                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
+                  : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                            /*Negative=*/true);
           CallInst *NewSample3DCall = createSample3D(
               Builder, Env, ImageIndex, SamplerIndex, U, V, W, UD.DUdX,
               UD.DUdY, VD.DUdX, VD.DUdY, WD.DUdX, WD.DUdY, Lod,
-              ExplicitLodFlag, Mask, CI->getName());
+              ExplicitLodFlag, Bias, MinLodClamp, Mask, CI->getName());
           CI->replaceAllUsesWith(NewSample3DCall);
           CI->eraseFromParent();
           continue;
