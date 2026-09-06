@@ -27644,3 +27644,127 @@ incidentally-discovered, pre-existing trilinear/mipmap cube-filtering
 bug). L52's own sub-items (b) `Bias`, (c) `samplecmp_clamp`'s `MinLod`
 operand, and (e) the LOD-query derivative intrinsics remain open,
 unaffected by this row.
+
+## Roadmap L55: fixed-point depth-compare clamping (`femeRTApplyCompare`)
+
+**A third re-investigation of `samplercubearrayshadow_fragment`'s own
+32x32-pixel mismatch.** L51 disproved a vertex-interpolation hypothesis
+(the fed-in `v_texCoord` was bit-for-bit correct against VK-GL-CTS's own
+analytic reference formula); L53 disproved a seamless-cube-filtering
+hypothesis (this CTS case's own sampler uses `NEAREST`, which per spec
+never needs cross-face blending -- L53's own `LINEAR`-only fix left this
+exact case's own image-diff bit-for-bit unchanged). This session
+re-investigated from scratch rather than attempting another
+unvalidated guess.
+
+**Methodology.** Re-decoded the `Result`/`Reference`/`ErrorMask` PNGs
+from a captured `.qpa` log to confirm the mismatch is a genuine binary
+flip (every mismatched pixel: `Result=(255,0,0)`/compare-pass=1 vs.
+`Reference=(0,0,0)`/compare-fail=0 -- not a rounding artifact), isolated
+to a solid `x:[96,127] y:[0,31]` block (1023/16384 pixels). Read the
+captured fragment shader source/SPIR-V from the same log:
+`texture(u_sampler, v_texCoord, v_texCoord.w)` -- confirming
+`v_texCoord.w` doubles as *both* the cube-array layer selector and the
+explicit depth-compare `Dref`, an unusual dual-purpose coordinate unique
+to this test in the whole `*shadow*` CTS group (per L50/L51's own prior
+notes). Using L51's own previously-derived analytic per-pixel coordinate
+formulas (`x'=2sx-1`, `y'=2sy-1`, `z'=1.01`, `w'=-sx+sy+0.5`), hand-derived
+the actual `Dref` values across the mismatched block's corners:
+**`Dref` is negative throughout this entire block**
+(`w' in [-0.4921875, -0.0078125]`), while the stored `GL_DEPTH_COMPONENT16`
+texture data is always in `[0, 1]`.
+
+**Root cause, found by reading VK-GL-CTS's own reference oracle
+(`framework/common/tcuTexture.cpp`) directly**, rather than re-testing
+feme's own already-proven-correct sub-pieces (face selection, layer
+mapping, LOD clamping, texel-fetch content, and the compare-function
+*mapping* itself were all cross-checked against 17,408 real samples by
+L50 and are not the bug). Traced the dispatch for `samplerCubeArrayShadow`
++ `NEAREST`: `TextureCubeArrayView::sampleCompare` ->
+`sampleCubeArraySeamlessCompare` -> `sampleCubeSeamlessNearestCompare`
+(an ordinary single-face clamped nearest fetch + compare, confirming
+`NEAREST` truly never needs seamless handling -- consistent with L53).
+The actual bug is in `execCompare` (~line 2464): for a **fixed-point**
+(normalized) depth format, both the compare reference (`Dref`) and the
+fetched texel are clamped to `[0, 1]` **before** comparing
+(`isFixedPointDepth`-gated, per Vulkan spec 16.5 "Depth Compare
+Operation"). `GL_DEPTH_COMPONENT16` -> `D16_UNORM`, a fixed-point format,
+so this clamping applies. For this block's negative `Dref` compared
+against a texel that happens to sit exactly at `0.0` (this face/layer's
+own checkerboard-fill cell, per `fillWithGrid`): **unclamped**,
+`Dref(negative) < texel(0)` is always true (a pass); **clamped**,
+`Ref=clamp(negative,0,1)=0`, so `0 < 0` is false (a fail) -- exactly
+matching the observed `Result=pass(feme, buggy)`/`Reference=fail(real)`
+discrepancy. `feme`'s own `femeRTApplyCompare` had no clamping logic at
+all, for any format -- a real, previously-undiscovered spec-conformance
+gap affecting *every* shadow-sampling shape (2D/Array2D/1D/Array1D/
+Cube/CubeArray) against a `D16_UNORM` depth image, not a
+Cube/CubeArray-specific bug despite this row being filed against a
+CubeArray-shaped test case. This specific test is simply the first one
+whose own coordinate formula happens to produce an out-of-`[0,1]`
+`Dref` landing on a texel sitting exactly at the clamp boundary.
+
+**Fix.** New `femeRTIsFixedPointDepthFormat(uint32_t Format)` helper in
+`FeMeRuntimeCPU.c` (`true` only for `D16_UNORM`, format code 31;
+`D32_FLOAT`, code 32, correctly stays unclamped, matching CTS's own
+`isFixedPointDepth` false case for floating-point formats -- these are
+feme's only two currently-supported depth formats, per roadmap F8b).
+`femeRTApplyCompare` gained a new `_Bool IsFixedPointDepth` parameter,
+clamping both `Ref` and `Texel` to `[0, 1]` before the existing
+`switch (Func)` comparison when set. All 3 shadow-sampling callers
+updated to compute and thread through `IsFixedPointDepth`:
+`femeRTSampleCmp2DAtLevel` (2D/Array2D), `femeRTSampleCmp1DAtLevel`
+(1D/Array1D, roadmap L54), and `femeRTSampleCmpCubeAtLevel`
+(Cube/CubeArray -- the function actually responsible for this row's own
+motivating mismatch).
+
+**New tests.** 3 `ImageSamplingTest` unit tests:
+`SampleCmp2DClampsFixedPointDepthReference` (a `D16_UNORM` `0.0` texel
+compared `Less` against a `-0.5` `Dref` must fail once clamped, not
+incorrectly pass as it did pre-fix), `SampleCmp2DDoesNotClampFloatDepthReference`
+(the `D32_FLOAT` no-regression counterpart, confirming a floating-point
+depth format is never clamped), and
+`SampleCmpCubeArrayClampsFixedPointDepthReference` (the
+`TextureCubeArray` counterpart via `femeRTSampleCmpCubeAtLevel` directly
+-- the function this row's own real CTS case actually exercises).
+
+**`ninja check-feme`** (ccache + assertions, `build2`): 2655 discovered
+tests, 59 pre-existing `Unsupported`, 0 `Failed` -- no regressions (up
+by exactly the 3 new tests this row adds). `FeMeRuntimeCPUTests`
+separately confirmed 211/211 passing (up from 208).
+
+**Real `deqp-vk` re-run.**
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_DRIVER_FILES=<build2>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  deqp-vk --deqp-case="dEQP-VK.glsl.texture_functions.texture.samplercubearrayshadow_fragment" \
+  --deqp-log-filename=l55_cubearrayshadow.qpa
+```
+
+**Result: 1/1 Pass** (up from `Fail` before this fix -- this row's own
+motivating case). A broader `*shadow*` sweep
+(`dEQP-VK.glsl.texture_functions.texture.*shadow*`, 32 cases) confirms
+no regressions: **11 Pass** (up from 10, the 1 new pass from this fix),
+**4 Fail** (unchanged -- all `*shadow_bias_fragment`, `VK_ERROR_
+INITIALIZATION_FAILED` at pipeline creation, blocked by roadmap L52
+sub-item (b)'s still-open `Bias`-operand legalization gap, entirely
+unrelated to this fix), **17 NotSupported** (unchanged -- `_compute`/
+`sparse_*` cases, unrelated pre-existing `VK_KHR_compute_shader_
+derivatives`/format-support gaps).
+
+**Design docs / inventories.** `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md`
+reviewed: no deviation to record (neither document previously specified
+depth-compare clamping behavior one way or the other -- this fix simply
+makes existing, undocumented behavior spec-conformant).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed (an internal CPU-runtime correctness fix, no new
+feature/extension surface advertised).
+
+**Disposition.** Roadmap **L55 struck through** (root cause found and
+fixed, directly validated via the real motivating CTS case flipping
+from `Fail` to `Pass` with no regressions in the broader shadow-sampling
+sweep). L52's own sub-items (b) `Bias`, (c) `samplecmp_clamp`'s `MinLod`
+operand, and (e) the LOD-query derivative intrinsics, and L56's own
+incidentally-discovered trilinear/mipmap cube-filtering bug, all remain
+open, unaffected by this row.
