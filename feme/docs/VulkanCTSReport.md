@@ -28819,3 +28819,77 @@ splitting precedent.
 documenting this investigation's findings, the fix, and sub-items
 (a)-(d) above as the remaining blockers to a safe `shaderResourceMinLod`
 flip.
+
+## Roadmap L52(b): `Dref`+`Bias` implicit-LOD sampling for `Plain2D`/`Array2D`/`Cube`/`CubeArray`
+
+Closes the last open sub-item of roadmap L52. A depth-comparison sample
+carrying SPIR-V's own `Bias` image operand (GLSL's
+`texture(sampler2DShadow, coord, bias)`) previously failed at
+`ConvertSPIRVToLLVMPass` legalization itself, because
+`ImageSampleDrefImplicitLodPattern`'s `SupportedMask` allowed only
+`ConstOffset`/`MinLod`, and no `llvm.spv.resource.samplecmp*` intrinsic form
+carried a bias at all.
+
+Earlier sessions deferred this as needing "a genuinely bigger, cross-cutting
+scope touching real LLVM SPIR-V backend intrinsic definitions". That turned
+out not to hold: feme only *consumes* these intrinsics (the importer
+direction), so no `SPIRVInstructionSelector` work is required, and this
+branch's own commit `7d0194736f2d` is direct precedent for a `.td`-only core
+addition.
+
+### Change
+
+| Phase | Change |
+| --- | --- |
+| Core intrinsics | `int_spv_resource_samplecmpbias{,_clamp}` added to `IntrinsicsSPIRV.td` |
+| SPIR-V -> LLVM | `ImageSampleDrefImplicitLodPattern` accepts `ImageOperands::Bias` and selects among four intrinsic names |
+| CPU lowering | `createSampleCmp{2D,Array2D,Cube,CubeArray}` gained a `Bias` parameter; `isDrefSampleIntrinsic` gained a `HasBias` out-parameter; the fixed offset/clamp operand indices became `getDrefSampleOffsetIdx()`/`getDrefSampleClampIdx()` helpers |
+| Runtime | The 4 `femeCpuImageSampleCmp*F32` entry points thread `Bias` into `femeRTComputeClampedLod`'s existing `InstructionBias` parameter |
+
+`Plain1D`/`Array1D` still reject a biased `Dref` sample, matching their
+pre-existing `ConstOffset`/`MinLod`-clamp exclusion; that half is filed as
+roadmap **L62**.
+
+### `check-feme`
+
+| | Before | After |
+| --- | --- | --- |
+| Discovered | 2684 | 2689 |
+| Passed | 2625 | 2630 |
+| Unsupported | 59 | 59 |
+| Failed | 0 | 0 |
+
+The 5 new tests are 3 `SPIRVResourceLoweringTest` cases, 1
+`ImageSamplingTest` runtime case
+(`ComparisonSamplingBiasSelectsCoarserMipLevel`), and 1 new lit test
+(`spirv-resource-lowering-image-samplecmp-bias.ll`). Two further lit cases
+were added to an existing `.mlir` file and one stale negative case removed.
+
+### Real `deqp-vk` results
+
+The four cases this sub-item names, before and after:
+
+| Case | Before | After |
+| --- | --- | --- |
+| `dEQP-VK.glsl.texture_functions.texture.sampler2dshadow_bias_fragment` | Fail | **Pass** |
+| `dEQP-VK.glsl.texture_functions.texture.samplercubeshadow_bias_fragment` | Fail | **Pass** |
+| `dEQP-VK.glsl.texture_functions.texture.sampler1dshadow_bias_fragment` | Fail | Fail (L62) |
+| `dEQP-VK.glsl.texture_functions.texture.sampler1darrayshadow_bias_fragment` | Fail | Fail (L62) |
+
+(`sampler2darrayshadow_bias_fragment`, named by L52's own original report, is
+not a real CTS case name -- a `deqp-vk` run of it reports 0/0, not a failure.)
+
+A broader regression sweep of
+`dEQP-VK.glsl.texture_functions.texture.*shadow*` (32 cases) confirms the
+change is otherwise side-effect free:
+
+| | Before | After |
+| --- | --- | --- |
+| Passed | 11 | **13** |
+| Failed | 4 | **2** |
+| Not supported | 17 | 17 |
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no change: a
+`Bias` image operand is core SPIR-V and is gated by no feature bit, unlike
+`MinLod`'s own `shaderResourceMinLod`, which remains `VK_FALSE` (see roadmap
+L61).
