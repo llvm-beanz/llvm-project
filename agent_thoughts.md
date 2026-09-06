@@ -64867,3 +64867,159 @@ rebuild or re-run beyond the real `deqp-vk` re-run described above,
 which reused the existing `build2` `feme_vulkan` binary already built as
 part of the investigation, and the earlier debug-instrumented binary was
 never itself committed or left in the tree).
+
+# Session: Roadmap L52(a) — ordinary Plain1D/Array1D sampling infrastructure
+
+## Task
+
+The user asked me to work on roadmap **L52** or other prerequisites
+blocking the L-series milestones. L52 is a 4-sub-item breakdown of L50's
+remaining work: (a) `Plain1D`/`Array1D` shadow sampling (needs its own
+new 1D-sampling infrastructure *before* a depth-comparison counterpart
+is even possible -- the biggest prerequisite in the row), (b) a `Bias`
+image operand (needs real LLVM SPIR-V backend intrinsic changes), (c)
+`samplecmp_clamp`'s trailing `MinLod` clamp operand (small, mechanical,
+but not yet confirmed present in any real failing CTS case), (e) the
+LOD-query derivative intrinsics (needs a new runtime design for
+screen-space derivatives).
+
+## Investigation and scope decision
+
+I started with (c), since it looked smallest. I found
+`spv_resource_samplecmp_clamp` is already a real, pre-existing LLVM
+SPIR-V intrinsic, and the frontend (`ImageSampleDrefImplicitLodPattern`
+in `SPIRVToLLVMPatterns.cpp`) already correctly recognizes `MinLod` and
+emits it -- so the legalization side is already done, and only the
+backend (`SPIRVResourceLowering.cpp`'s `isDrefSampleIntrinsic`, the
+runtime `createSampleCmp*` helpers) has a gap. I then searched VK-GL-CTS
+exhaustively for a real case combining a shadow sampler with a `MinLod`
+clamp but no `Bias`, and found none: every `CLAMP_CASE_SPEC` shadow case
+in `vktShaderRenderTextureFunctionTests.cpp` always pairs `useBias=true`
+with the clamp. So (c) has **zero real confirmed failing CTS cases**
+today, matching the milestone's own caveat.
+
+I then investigated (a) by running a real `deqp-vk` probe against
+`dEQP-VK.glsl.texture_functions.texture.sampler1d*` (24 cases): 0
+currently passing, breaking down as 4 `_bias_fragment` (blocked by (b),
+unrelated), 6 `NotSupported` (an unrelated `VK_KHR_compute_shader_derivatives`
+gap), 8 real ordinary (non-shadow, non-bias) failures, and 4 real
+shadow (non-bias) failures. Root-caused the failure to
+`classifySampledImage2DHandle` (`SPIRVResourceLowering.cpp`) never
+checking for `SPIRVDim1D` at all -- the constant was defined but unused
+for sampled-image classification (only the storage-image classifier
+used it). Given (b)/(e)'s much bigger cross-cutting scope and (c)'s zero
+real impact, I chose to implement **(a)'s ordinary (non-comparison) half
+only** (the 8 real failing cases), explicitly deferring the
+depth-comparison `SampleCmp1D`/`SampleCmpArray1D` counterpart as its own
+follow-on roadmap row (L54), per this project's established
+L26->L33/L45->L47/L46->L48/L48->L50/L50->L51 splitting precedent, and
+exactly matching how the milestone's own text framed (a) as a two-phase
+prerequisite.
+
+## Design decisions
+
+I modeled `Sample1D`/`Sample1DArray` after `Sample2DArray`'s own
+*simpler* shape (no screen-space derivatives, no `ConstOffset`, no
+`MinLod` clamp) rather than `Sample2D`'s richer roadmap H7i/L26
+additions, to keep this first pass minimal and consistent with how
+`Sample2DArray`/`SampleCubeArray` already resolve every implicit sample
+to mip level 0 without derivative-based anisotropic planning -- a known,
+documented, pre-existing limitation this project hasn't fixed for those
+shapes either.
+
+The trickiest part was `Plain1D`'s own coordinate shape: per SPIR-V's
+own convention (already documented in this file's `isCoordN` comment,
+originally written for the *storage*-image 1D fetch case), a
+1-component coordinate is a bare scalar float, not a 1-element vector --
+unlike every other shape this pass handles. The existing
+`lowerImageAccesses` sample-lowering switch unconditionally extracts
+`C0`/`C1` via `CreateExtractElement(Coord, 0/1)` *before* the
+shape-specific switch even runs, which would crash on a scalar `Coord`.
+I handled this by adding an early special case for `Plain1D`/`Array1D`,
+right after computing `SamplerIndex` but before the generic `C0`/`C1`
+extraction, that builds the new `Sample1D`/`Sample1DArray` call directly
+and `continue`s -- leaving the generic extraction and the big shape
+switch untouched for every other (vector-coordinate) shape.
+
+I deliberately left the existing dref-sample rejection of `Plain1D`/
+`Array1D` untouched (it already explicitly rejects both shapes with a
+comment saying no filtered/dref sample exists for them) -- this
+documents that the shadow counterpart is real, deliberate future work,
+not an oversight, matching the L54 follow-on row I filed.
+
+I also deliberately did *not* add a 1D `OpImageFetch`/`texelFetch`
+path this session: SPIR-V does allow `OpImageFetch` against `Dim::1D`
+(unlike `Dim::Cube`, which forbids it outright), but no real CTS case in
+this session's own scope exercises it, and the existing fetch-coordinate-
+width formula (`Array2D ? 3 : 2`) would have silently computed the wrong
+width (2 instead of 1) for a `Plain1D` fetch had one ever reached it. I
+added an explicit early rejection for `Plain1D`/`Array1D` in that branch
+instead, with a comment explaining this is deferred future work, and a
+negative unit test (`LeavesAPlain1DImageFetchAlone`) confirming the
+rejection actually holds.
+
+I checked whether `FunctionWidener::widenImageCall`
+(`lib/Transforms/CPU/SIMDize.cpp`) has any per-`ImageCallKind` switch
+that would need new cases -- it doesn't; it operates generically over
+`MatchedImageCall`, so no SIMDize.cpp changes were needed.
+
+## Implementation
+
+- `include/feme/Transforms/CPU/ImageCalls.h`: new `Sample1D`/
+  `Sample1DArray` `ImageCallKind` enum entries, `createSample1D`/
+  `createSample1DArray` builder declarations, doc updates to
+  `MatchedImageCall`'s `U`/`ArrayLayer` field comments.
+- `lib/Transforms/CPU/ImageCalls.cpp`: `getImageCallName` cases,
+  `getOrInsertImageCall` `FunctionType` cases, the two builder
+  definitions, `matchImageCall`'s `AllKinds` array + decode-switch
+  cases.
+- `runtime/CPU/FeMeRuntimeCPU.c`: new `femeRTSamplePoint1D`/
+  `Linear1D`/`Filtered1D` static filtering helpers (dropping the V axis
+  from their 2D counterparts, reusing every existing dimension-agnostic
+  helper), and new `femeCpuImageSample1DV4F32`/`Sample1DArrayV4F32`
+  public entry points mirroring `femeCpuImageSample2DArrayV4F32`'s own
+  implicit-LOD handling.
+- `lib/Transforms/CPU/SPIRVResourceLowering.cpp`:
+  `classifySampledImage2DHandle` now accepts `SPIRVDim1D`;
+  `hasOnlySupportedImageUses`'s `SampleCoordWidth` formula gained
+  `Plain1D=1`/`Array1D=2`, and its fetch-shape branch now explicitly
+  rejects `Plain1D`/`Array1D`; `lowerImageAccesses` gained the early
+  `Plain1D`/`Array1D` special case described above.
+
+## Tests
+
+3 new `SPIRVResourceLoweringTest` unit tests (2 positive classification+
+lowering, 1 negative fetch-rejection), 4 new `ImageSamplingTest` runtime
+unit tests (linear/point filtering, array-layer selection, inactive-lane
+masking), reusing the already-existing `makeImage1D`/`makeImage1DArray`
+helpers from the earlier H19c/H19e storage-image work. All pass; full
+`ninja check-feme` run: 2584/2643 discovered, 59 pre-existing
+`Unsupported`, 0 `Failed` (up by exactly the 7 new tests).
+
+## CTS verification
+
+Targeted re-run of the 8 cases this fix addresses
+(`sampler1d{,array}_{fixed,float}_{fragment,vertex}`): **8/8 Pass**, up
+from 0/8. Broader `sampler1d*` sweep (24 cases): 8 Pass, 10 Fail
+(unchanged -- 4 bias-blocked, 4 shadow-blocked/now-L54), 6 NotSupported
+(unchanged, unrelated compute-derivatives gap) -- confirming exactly the
+expected, side-effect-free outcome.
+
+## Docs
+
+Reviewed `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md`: no deviation to
+record. Reviewed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+no change needed (internal CPU-lowering plumbing only). Updated
+`Roadmap.md` (L52 left un-struck since sub-items (b)/(c)/(e) remain
+open, appended an in-place update describing what was fixed and filing
+the new L54 row) and `VulkanCTSReport.md` (new section documenting the
+investigation, fix, and CTS results).
+
+## Commits this session
+
+1. `ImageCalls.h`/`.cpp`: new `Sample1D`/`Sample1DArray` infrastructure.
+2. `SPIRVResourceLowering.cpp`: `Dim::1D` classification + lowering.
+3. `FeMeRuntimeCPU.c`: new 1D filtering helpers + entry points.
+4. Unit tests (`SPIRVResourceLoweringTest.cpp`, `ImageSamplingTest.cpp`).
+5. `Roadmap.md`/`VulkanCTSReport.md` updates.
+6. This `agent_thoughts.md` entry (its own final commit).
