@@ -184,17 +184,17 @@ using Sample1DArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                  uint32_t, uint32_t, float, float, float,
                                  float, float, bool, float, float, bool,
                                  void *);
-/// Roadmap L66(a): the `Texture3D` counterpart of `Sample1DFn` -- a real
+/// Roadmap L66(a), extended with a real `Bias`/`MinLodClamp` pair by
+/// roadmap L67(a): the `Texture3D` counterpart of `Sample1DFn` -- a real
 /// `(U, V, W)` coordinate plus its own screen-space derivative triple
-/// (`DUdX`/`DUdY`, `DVdX`/`DVdY`, `DWdX`/`DWdY`), still no `Bias`/
-/// `MinLodClamp`/`ConstOffset` operand (see `ImageCallKind::Sample3D`'s
-/// own doc for why -- ordinary sampling only, mirroring `Sample1DFn`'s
-/// own original scope before roadmap L61(c) grew a `Bias`/`MinLodClamp`
-/// pair for that shape).
+/// (`DUdX`/`DUdY`, `DVdX`/`DVdY`, `DWdX`/`DWdY`) and a real `Bias`/
+/// `MinLodClamp` pair, still no `ConstOffset` operand (see
+/// `ImageCallKind::Sample3D`'s own doc for why).
 using Sample3DFn = void (*)(const FemeImageDescriptor *, uint32_t,
                             const FemeSamplerDescriptor *, uint32_t, uint32_t,
                             uint32_t, float, float, float, float, float, float,
-                            float, float, float, float, bool, bool, void *);
+                            float, float, float, float, bool, float, float,
+                            bool, void *);
 /// Roadmap L54: the depth-comparison counterpart of `Sample1DFn`,
 /// mirroring `SampleCmpFn`'s relationship to `SampleFn` -- a single `U`
 /// coordinate, and no `ConstOffset` (see `ImageCallKind::SampleCmp1D`'s
@@ -2982,8 +2982,8 @@ TEST_F(ImageSamplingTest, Sample3DPointSampleReadsExactTexel) {
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, 0.75f, 0.75f, /*DUdX=*/0.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
-     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Mask=*/true,
-     Out);
+     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     -std::numeric_limits<float>::infinity(), /*Mask=*/true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
   EXPECT_FLOAT_EQ(Out[1], 9.0f);
   EXPECT_FLOAT_EQ(Out[2], 9.0f);
@@ -3013,8 +3013,8 @@ TEST_F(ImageSamplingTest, Sample3DLinearBlendsEightTexels) {
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.5f, /*DUdX=*/0.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
-     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Mask=*/true,
-     Out);
+     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     -std::numeric_limits<float>::infinity(), /*Mask=*/true, Out);
   // Average of 0,2,4,6,8,10,12,14 is 7.
   EXPECT_FLOAT_EQ(Out[0], 7.0f);
 }
@@ -3036,12 +3036,67 @@ TEST_F(ImageSamplingTest, Sample3DInactiveLaneReadsZero) {
   float Out[4] = {9, 9, 9, 9};
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.5f, /*DUdX=*/0.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
-     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true,
-     /*Mask=*/false, Out);
+     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     -std::numeric_limits<float>::infinity(), /*Mask=*/false, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
   EXPECT_FLOAT_EQ(Out[3], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample3DBiasSelectsCoarserMipLevel) {
+  // Roadmap L67(a): the `Bias`/`MinLodClamp` pair `createSample3D`/
+  // `femeCpuImageSample3DV4F32` just gained -- mirroring
+  // `Sample1DBiasSelectsCoarserMipLevel`'s own `Plain1D` precedent,
+  // extended to a third axis. With zero screen-space derivatives (no
+  // measurable minification of its own), a `Bias` of exactly `1.0` must
+  // select mip level 1 outright (`MipFilter=Nearest` rounds `0 + 1.0` up
+  // to level 1) of a 2x2x2 -> 1x1x1 volume.
+  float Level0[2][2][2][4] = {
+      {{{1, 1, 1, 1}, {1, 1, 1, 1}}, {{1, 1, 1, 1}, {1, 1, 1, 1}}},
+      {{{1, 1, 1, 1}, {1, 1, 1, 1}}, {{1, 1, 1, 1}, {1, 1, 1, 1}}}};
+  float Level1[1][1][1][4] = {{{{9, 9, 9, 9}}}};
+  struct {
+    float L0[2][2][2][4];
+    float L1[1][1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/2 * 2 * 4 * sizeof(float), /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/1 * 1 * 4 * sizeof(float), /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture3D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 2;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample3DFn Fn = resolve<Sample3DFn>(
+      addWrapper("sample_3d", "feme.cpu.image.sample.3d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.5f, /*DUdX=*/0.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*DWdX=*/0.0f,
+     /*DWdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/1.0f,
+     -std::numeric_limits<float>::infinity(), /*Mask=*/true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
 // Roadmap L54: depth-comparison `Texture1D`/`Texture1DArray` sampling --
