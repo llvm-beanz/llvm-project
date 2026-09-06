@@ -2467,10 +2467,17 @@ documented reason rather than an oversight:
   unchanged (the runtime's own implicit-LOD mip/anisotropy math is
   agnostic to whether a derivative was synthesized, zeroed, or supplied
   explicitly), so no new runtime entry point was needed. DXIL's own
-  gradient sampling, `Array2D`/`CubeArray`/other-shape SPIR-V gradient
-  sampling, integer-channel/`compute`-stage/sparse-residency SPIR-V
-  gradient sampling, and a `Dref`+`Grad` depth-comparison combination all
-  remain unimplemented (see roadmap L60).
+  gradient sampling, `Array2D`/other-shape SPIR-V gradient sampling,
+  integer-channel/`compute`-stage/sparse-residency SPIR-V gradient
+  sampling, and a `Dref`+`Grad` depth-comparison combination all remain
+  unimplemented (see roadmap L60). Update (roadmap L60(a), partial):
+  `CubeArray`'s own `Bias`/`MinLodClamp`/`Grad` sampling is now also
+  implemented on the SPIR-V import side, reusing
+  `createSampleCubeArray`'s existing roadmap L56 screen-space-derivative
+  operands unchanged, mirroring `Cube`'s own L58/L59 precedent exactly;
+  `Array2D` gradient/bias/clamp sampling remains entirely unimplemented,
+  since (unlike `CubeArray`) `createSample2DArray` has no
+  derivative-operand infrastructure to build on yet.
 - **1D and 3D/cube sampling**, and on the SPIR-V side an arrayed or
   multisampled storage image, or a non-mandatory-format/format-agnostic
   storage image (roadmap H19a closed the non-arrayed, non-multisampled,

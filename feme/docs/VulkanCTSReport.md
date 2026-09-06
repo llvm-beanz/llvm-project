@@ -28305,3 +28305,110 @@ depth-comparison sampling (not yet confirmed present in the CTS corpus;
 would need a new `llvm.spv.resource.samplecmpgrad`-shaped intrinsic
 that does not exist today); (f) sparse-residency `Grad` sampling (not
 yet investigated).
+
+## Roadmap L60(a) (partial): `CubeArray` `Bias`/`MinLodClamp`/`Grad` sampling
+
+**Context.** L59 filed roadmap L60 to break down the remaining gaps
+left after L58 (`Bias`) and L59 (`Grad`) each scoped their fixes to
+`Plain2D`/`Cube` only. This session first investigated whether the
+still-disabled `shaderResourceMinLod` feature bit (gating 295 CTS
+cases across `textureclamp`/`textureoffsetclamp`/`texturegradclamp`/
+`textureoffsetgradclamp`) could now be safely enabled, since L58/L59
+had already covered `Plain2D`/`Cube`. A temporary experiment (setting
+`Info.Features.shaderResourceMinLod = VK_TRUE` in
+`PhysicalDeviceInfo.cpp`, rebuilding, re-running the gated groups, then
+reverting) confirmed it could not: `textureclamp` regressed to 28/50
+real `Fail` (up from `NotSupported`), `textureoffsetclamp` to 105/180
+`Fail`, `texturegradclamp` to 29/52 `Fail` -- all against shapes
+(`Array2D`, `CubeArray`, `1D`, `3D`, `Dref`+`Bias`) that still have no
+`Bias`/`Grad`/`MinLodClamp` support at all. This confirmed the actual
+blocker is shape coverage, not the feature bit itself.
+
+**Root cause / fix.** Of the still-unsupported shapes, `CubeArray` was
+the most tractable: `createSampleCubeArray`/
+`femeCpuImageSampleCubeArrayV4F32` already had all six screen-space
+derivative operands wired from roadmap L56 (added for real
+implicit-LOD mip selection against `TextureCubeArray`), but
+hardcoded `Bias=0.0f`/`MinLodClamp=-inf` as no-ops and had zero
+`HasGrad` handling in `SPIRVResourceLowering.cpp`'s
+`lowerImageAccesses` (it called `getOrSynthesizeSampleCubeDerivatives`
+unconditionally, never checking a real `Grad` operand). This session
+extended `createSampleCubeArray`'s signature with real `Bias`/
+`MinLodClamp` parameters (`ImageCalls.h`/`.cpp`, 19->21 args),
+threaded them through `femeCpuImageSampleCubeArrayV4F32`
+(`FeMeRuntimeCPU.c`) into the existing `femeRTComputeCubeClampedLod`
+call (previously only reachable from `Cube`), widened
+`hasOnlySupportedImageUses`'s `HasMinLodClamp`/`HasBias`/`HasGrad`
+shape checks to also allow `CubeArray`, and extended
+`lowerImageAccesses`'s `CubeArray` case with a real `MinLodClamp`
+extraction and a `HasGrad` branch that extracts the real `dPdx`/
+`dPdy` 3-component direction derivatives, mirroring `Cube`'s handling
+exactly (`SPIRVResourceLowering.cpp`). A second, easy-to-overlook
+`createSampleCubeArray` call site in the DXIL-frontend counterpart
+(`ResourceLowering.cpp`) was also fixed to pass zero/no-op constants,
+since DXIL doesn't thread real bias/clamp values through yet.
+
+**Tests.** 3 new `SPIRVResourceLoweringTest` unit tests
+(`LowersSampleBiasToCubeArrayBias`, `LowersSampleClampToCubeArrayMinLodClamp`,
+`LowersSampleGradToCubeArrayDerivatives`), plus fixes to 1 existing
+test's stale `arg_size()` assertion and `ImageSamplingTest.cpp`'s
+`SampleCubeArrayFn` typedef/call site for the 2 new parameters.
+`ninja check-feme`: 2618/2677 discovered, 59 pre-existing
+`Unsupported`, 0 `Failed` -- up by exactly the 3 new tests, no
+regressions.
+
+**Real CTS impact.**
+`dEQP-VK.glsl.texture_functions.texture.samplercubearray_bias_{fixed,float}_fragment`:
+2/2 now `Pass`, up from 0/2. A broader `texture.*bias*` sweep (50
+cases) confirms: 6 `Pass` (up from 4 -- the 2 new `CubeArray` passes,
+plus the pre-existing 4 `Plain2D`/`Cube` passes from L58, unchanged),
+26 `Fail` (unchanged in aggregate -- `Array2D`'s own `Bias` cases still
+fail identically, `createSample2DArray` itself untouched this
+session), 18 `NotSupported` (unchanged). `MinLodClamp`'s own `CubeArray`
+counterpart remains unconfirmed by any currently-reachable real case,
+since every `textureclamp`/`texturegradclamp` case is gated behind
+`shaderResourceMinLod` regardless of shape -- this fix is a
+prerequisite for eventually enabling that bit, not something with its
+own passing case today.
+
+`texturegrad`'s own `CubeArray` cases
+(`dEQP-VK.glsl.texture_functions.texturegrad.samplercubearray_fixed_fragment`
+and siblings) were separately investigated and found to still `Fail`
+at pipeline-creation time, both before and after this session's fix (a
+`git stash`-based before/after comparison confirmed the failure is
+identical either way, i.e. not a regression introduced here): a
+distinct, pre-existing, unrelated gap where
+`llvm.spv.resource.handlefrombinding.tspirv.VulkanBuffer_sl_v4f32s_2_0t`
+is rejected as an unsupported register-bound resource handle. The same
+error occurs identically for `sampler2darray_fixed_fragment` in the
+same CTS group, confirming this is an `Array2D`/`CubeArray`-shared,
+`texturegrad`-group-specific resource-binding limitation (likely tied
+to how that test's array-layer index is passed via a uniform buffer),
+entirely unrelated to this session's `Bias`/`MinLodClamp`/`Grad`
+lowering fix. Not yet filed as its own roadmap row (out of scope for
+this session); a future session should investigate and file it.
+
+**Design docs.** `FeMeGraphicsDesign.md` updated: the "Bias/gradient
+sampling and gather" bullet's L59 update paragraph now notes
+`CubeArray`'s `Bias`/`MinLodClamp`/`Grad` support is implemented,
+reusing `createSampleCubeArray`'s existing L56 derivative operands
+unchanged, mirroring `Cube`'s own L58/L59 precedent; `Array2D` remains
+entirely unimplemented. `FeMeCPUDesign.md`/`Design.md` reviewed: no
+further deviation to record.
+
+**Feature/extension inventories.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed: no change needed --
+`shaderResourceMinLod` remains correctly `VK_FALSE` (confirmed by the
+reverted experiment above); internal CPU-lowering plumbing only, no
+new feature/extension surface advertised.
+
+**Remaining work.** Roadmap L60(a) updated in place (not struck
+through, since only the `CubeArray` half of "`Array2D`/`CubeArray`
+`Grad` sampling" is done): `Array2D`'s own `Bias`/`MinLodClamp`/`Grad`
+sampling remains entirely unstarted and is a materially bigger task
+than `CubeArray`'s was, since `createSample2DArray` has zero
+derivative-operand infrastructure to build on today (unlike
+`CubeArray`, which already had L56's six operands wired). L60's other
+sub-items (b)-(f) are unchanged by this session. The newly-discovered
+`texturegrad`-group `VulkanBuffer` resource-handle gap (see above) is
+also unfiled and left for a future session.
