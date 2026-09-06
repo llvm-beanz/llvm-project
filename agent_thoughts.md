@@ -65224,3 +65224,70 @@ tested, and validated against the right real CTS group), but with an
 honest correction recorded against L51's own prior conclusion, and two
 new, accurately-scoped roadmap rows (L55, L56) rather than one
 overclaimed "fixed" row that would have misled a future session.
+
+# L55: fixed-point depth-compare clamping (the third re-investigation)
+
+This session picked up `samplercubearrayshadow_fragment`'s own
+32x32-pixel rendering mismatch for a third time. Two prior sessions had
+each proposed and then disproven a hypothesis: L51 thought it was a
+vertex-interpolation bug (disproven -- the interpolated coordinate was
+bit-for-bit correct); L53 thought it was missing seamless cube-map
+filtering (disproven -- this specific CTS case uses `NEAREST` filtering,
+which never touches seamless blending at all). By the time this session
+started, the temptation was to propose a *fourth* hypothesis and go test
+it. I deliberately didn't do that first.
+
+Instead, the first real step was to stop guessing and *compute the
+actual numbers*. Both L50 and L51 had already derived analytic formulas
+for this test's own per-pixel coordinates (`x'=2sx-1`, etc.), but as far
+as I can tell, nobody had actually plugged the mismatched block's own
+pixel range into those formulas and looked at what came out. Doing that
+by hand immediately surfaced something interesting: `Dref` (fed through
+this test's own unusual dual-purpose `v_texCoord.w` component) is
+*negative* across the entire mismatched region. That's not a subtle
+floating-point discrepancy -- a negative depth-compare reference is
+outside the normal `[0, 1]` range a depth texture's own contents live in,
+which is a strong hint that whatever's going on involves how an
+out-of-range reference gets handled, not some rounding/interpolation
+detail.
+
+That hint sent me to VK-GL-CTS's own reference implementation directly
+(`tcuTexture.cpp`'s `execCompare`), rather than back into feme's own
+code to re-test pieces that two previous sessions had already
+exhaustively cross-checked against real captured samples. And there it
+was: `execCompare` clamps both the compare reference and the fetched
+texel to `[0, 1]` before comparing, but *only* for a fixed-point
+(normalized) depth format -- a distinction feme's own
+`femeRTApplyCompare` had never made at all. Once I had that, working
+out why *this* test hits it and not others was easy: this test's own
+checkerboard-filled depth texture happens to place a `0.0`-valued texel
+exactly where the negative-`Dref` region samples, and `0.0` is exactly
+the clamp boundary where clamping changes the comparison's outcome.
+
+The methodological lesson I want to record here, because I think it
+generalizes past this one bug: when a hypothesis has been disproven
+twice already by rigorous, verified investigation (not sloppy guessing
+-- L50/L51/L53's own work was genuinely careful), the productive move
+isn't to propose hypothesis #3 about feme's own code and go testing it
+piece by piece again. It's to go find the actual numbers the bug
+produces (however tedious deriving them by hand is) and use *those* to
+figure out which external reference the numbers should be checked
+against. Here that was VK-GL-CTS's own source, which is authoritative
+and directly readable -- and it had the answer sitting in a single,
+clearly-commented function. This wasn't a feme-side logic bug in the
+sense of "wrong formula, wrong branch" that repeated re-testing would
+ever have found; it was a *missing* piece of behavior that no amount of
+re-verifying existing code paths could reveal, because the code that
+was there was correct as far as it went -- it just didn't do enough.
+
+A secondary point worth recording: this bug was filed against a
+CubeArray-shaped test case (this row's own origin), and it would have
+been easy to scope the fix narrowly to `femeRTSampleCmpCubeAtLevel`
+alone and call it done. But the actual gap was in the shared
+`femeRTApplyCompare` helper, used identically by the 2D, Array2D, 1D,
+Array1D, Cube, and CubeArray shadow-sampling paths alike -- so the fix
+(and its test coverage) needed to cover all of them, even though only
+one shape had a CTS case currently proving the bug. Tying a fix's scope
+to "the one shape that happens to have a failing test" rather than "the
+actual code path the root cause lives in" would have left an identical,
+un-caught latent bug in five other sampling shapes.
