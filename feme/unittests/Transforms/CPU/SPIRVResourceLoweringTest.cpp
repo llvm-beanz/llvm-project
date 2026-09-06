@@ -2250,13 +2250,21 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpToImageSampleCmp) {
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, v, lod, use_explicit_lod, dref, offset_x, offset_y, mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 14u);
+  //  u, v, lod, use_explicit_lod, dref, offset_x, offset_y,
+  //  min_lod_clamp, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 15u);
   EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(8))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(9))->isZero());
   EXPECT_EQ(SampleCmp->getArgOperand(10)->getName(), "dref");
   EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(11))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(12))->isZero());
+  // No `MinLod` clamp operand on this plain `samplecmp` -- negative
+  // infinity (a no-op floor), matching `createSample2D`'s own fallback
+  // for an ordinary sample with no `MinLod` clamp (roadmap L52(c)).
+  EXPECT_TRUE(
+      cast<ConstantFP>(SampleCmp->getArgOperand(13))->isNegative());
+  EXPECT_TRUE(
+      cast<ConstantFP>(SampleCmp->getArgOperand(13))->getValue().isInfinity());
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleCmpLevelZeroToImageSampleCmp) {
@@ -2292,10 +2300,13 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpLevelZeroToImageSampleCmp) {
   EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(9))->isOne());
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesASampleCmpClampAlone) {
-  // Roadmap L46/L48: `spv_resource_samplecmp_clamp`'s own trailing
-  // `clamp` operand isn't recognized by `isDrefSampleIntrinsic` -- filed
-  // as roadmap L48 -- so it is left entirely unlowered.
+TEST(SPIRVResourceLoweringTest, LowersSampleCmpClampToImageSampleCmpWithMinLodClamp) {
+  // Roadmap L52(c): `spv_resource_samplecmp_clamp`'s own trailing `clamp`
+  // operand is now recognized by `isDrefSampleIntrinsic`, mirroring
+  // `isSampleIntrinsic`'s own `HasMinLodClamp` precedent for an ordinary
+  // sample -- a `samplecmp_clamp` against `Plain2D` now lowers to
+  // `feme.cpu.image.samplecmp.2d.f32` with a real `MinLodClamp` value
+  // threaded through, instead of being left entirely unlowered.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main(<3 x float> %coord, float %dref, float %clamp) {
@@ -2319,7 +2330,44 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpClampAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32"));
+  CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
+  ASSERT_TRUE(SampleCmp);
+  ASSERT_EQ(SampleCmp->arg_size(), 15u);
+  EXPECT_EQ(SampleCmp->getArgOperand(10)->getName(), "dref");
+  EXPECT_EQ(SampleCmp->getArgOperand(13)->getName(), "clamp");
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesASampleCmpClampAgainstPlain1DAlone) {
+  // Roadmap L52(c): `Plain1D`/`Array1D` deliberately do not support a
+  // `MinLod` clamp yet (neither `createSampleCmp1D` nor
+  // `createSampleCmpArray1D` threads one through, matching those two
+  // shapes' pre-existing `ConstOffset` exclusion) -- so a
+  // `samplecmp_clamp` against `Plain1D` is still left entirely
+  // unlowered, unlike the same intrinsic against `Plain2D` above.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<3 x float> %coord, float %dref, float %clamp) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call float @llvm.spv.resource.samplecmp.clamp(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          float %dref, <3 x i32> zeroinitializer, float %clamp)
+      ret float %r
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.1d.f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
@@ -2353,7 +2401,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpWithNonzeroOffsetToImageSampleCmp
   ASSERT_TRUE(F);
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.2d.f32");
   ASSERT_TRUE(SampleCmp);
-  ASSERT_EQ(SampleCmp->arg_size(), 14u);
+  ASSERT_EQ(SampleCmp->arg_size(), 15u);
   EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(11))->getSExtValue(),
            1);
   EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(12))->getSExtValue(),
@@ -2431,8 +2479,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpArray2DToImageSampleCmpArray2D) {
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
   //  u, v, array_layer, lod, use_explicit_lod, dref, offset_x, offset_y,
-  //  mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 15u);
+  //  min_lod_clamp, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 16u);
   EXPECT_TRUE(cast<ConstantFP>(SampleCmp->getArgOperand(9))->isZero());
   EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "dref");
   EXPECT_TRUE(cast<ConstantInt>(SampleCmp->getArgOperand(12))->isZero());
@@ -2471,7 +2519,7 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *SampleCmp =
       findImageCall(*F, "feme.cpu.image.samplecmp.2darray.f32");
   ASSERT_TRUE(SampleCmp);
-  ASSERT_EQ(SampleCmp->arg_size(), 15u);
+  ASSERT_EQ(SampleCmp->arg_size(), 16u);
   EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(12))->getSExtValue(),
            1);
   EXPECT_EQ(cast<ConstantInt>(SampleCmp->getArgOperand(13))->getSExtValue(),
@@ -2509,8 +2557,9 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpCubeToImageSampleCmpCube) {
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.cube.f32");
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  dir_x, dir_y, dir_z, lod, use_explicit_lod, dref, mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 13u);
+  //  dir_x, dir_y, dir_z, lod, use_explicit_lod, dref, min_lod_clamp,
+  //  mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 14u);
   EXPECT_EQ(SampleCmp->getArgOperand(11)->getName(), "dref");
 }
 
@@ -2551,8 +2600,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpCubeArrayToImageSampleCmpCubeArra
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
   //  dir_x, dir_y, dir_z, array_layer, lod, use_explicit_lod, dref,
-  //  mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 14u);
+  //  min_lod_clamp, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 15u);
   EXPECT_EQ(SampleCmp->getArgOperand(12)->getName(), "dref");
 }
 

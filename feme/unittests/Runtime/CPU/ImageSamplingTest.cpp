@@ -159,7 +159,7 @@ using SampleFn = void (*)(const FemeImageDescriptor *, uint32_t,
 using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
                              const FemeSamplerDescriptor *, uint32_t, uint32_t,
                              uint32_t, float, float, float, bool, float,
-                             int32_t, int32_t, bool, void *);
+                             int32_t, int32_t, float, bool, void *);
 /// Roadmap L52a: the ordinary (non-comparison) `Texture1D` counterpart of
 /// `SampleFn` -- a single `U` coordinate, no derivatives/offset/
 /// `MinLodClamp` (mirroring `SampleArrayFn`'s own simpler scope, see
@@ -260,26 +260,33 @@ using SampleCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
 
 /// The roadmap L48 `Texture2DArray` counterpart of `SampleCmpFn`, adding
 /// a float `ArrayLayer` coordinate before `Lod` -- mirroring
-/// `SampleArrayFn`'s relationship to `SampleFn`.
+/// `SampleArrayFn`'s relationship to `SampleFn`. Also gains (roadmap
+/// L52(c)) its own trailing float `MinLodClamp`, mirroring
+/// `SampleCmpFn`'s own new operand above.
 using SampleCmpArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                   const FemeSamplerDescriptor *, uint32_t,
                                   uint32_t, uint32_t, float, float, float,
-                                  float, bool, float, int32_t, int32_t, bool,
-                                  void *);
+                                  float, bool, float, int32_t, int32_t, float,
+                                  bool, void *);
 /// The roadmap L48 `TextureCube` counterpart of `SampleCmpFn`: a
 /// direction-vector coordinate (`DirX`, `DirY`, `DirZ`) instead of `(U,
-/// V)`, mirroring `SampleCubeFn`'s relationship to `SampleFn` (but with
-/// no `MinLodClamp` operand, matching `SampleCmp2D`'s own shape).
+/// V)`, mirroring `SampleCubeFn`'s relationship to `SampleFn`. Also gains
+/// (roadmap L52(c)) its own trailing float `MinLodClamp`, matching
+/// `SampleCmp2D`'s own new operand (unlike SPIR-V's `ConstOffset`, which
+/// forbids `Dim::Cube`, `MinLod` is legal against any dimensionality).
 using SampleCmpCubeFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                  const FemeSamplerDescriptor *, uint32_t,
                                  uint32_t, uint32_t, float, float, float,
-                                 float, bool, float, bool, void *);
+                                 float, bool, float, float, bool, void *);
 /// The roadmap L48 `TextureCubeArray` counterpart of `SampleCmpCubeFn`,
-/// adding a float `ArrayLayer` coordinate before `Lod`.
+/// adding a float `ArrayLayer` coordinate before `Lod`. Also gains
+/// (roadmap L52(c)) its own trailing float `MinLodClamp`, mirroring
+/// `SampleCmpCubeFn`'s own new operand above.
 using SampleCmpCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                       const FemeSamplerDescriptor *, uint32_t,
                                       uint32_t, uint32_t, float, float, float,
-                                      float, float, bool, float, bool, void *);
+                                      float, float, bool, float, float, bool,
+                                      void *);
 
 /// A real, ABI-matching 4-lane vector type (unlike four separate scalar
 /// parameters, which the x86-64 SysV convention would place in four
@@ -1382,11 +1389,11 @@ TEST_F(ImageSamplingTest, ComparisonSamplingLessEqualPasses) {
   float PassResult = 0.0f, FailResult = 1.0f;
   // Ref (0.4) <= Texel (0.5): pass.
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true, 0.4f, 0, 0,
-     true, &PassResult);
+     -std::numeric_limits<float>::infinity(), true, &PassResult);
   EXPECT_FLOAT_EQ(PassResult, 1.0f);
   // Ref (0.6) <= Texel (0.5): fail.
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true, 0.6f, 0, 0,
-     true, &FailResult);
+     -std::numeric_limits<float>::infinity(), true, &FailResult);
   EXPECT_FLOAT_EQ(FailResult, 0.0f);
 }
 
@@ -1417,13 +1424,13 @@ TEST_F(ImageSamplingTest, ComparisonSamplingNonzeroOffsetShiftsFetchedTexel) {
   // No offset: (0.25, 0.5) reads texel 0 (0.4). Ref (0.5) <= 0.4: fail.
   float NoOffsetResult = 1.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.5f, 0.0f, true, 0.5f, 0, 0,
-     true, &NoOffsetResult);
+     -std::numeric_limits<float>::infinity(), true, &NoOffsetResult);
   EXPECT_FLOAT_EQ(NoOffsetResult, 0.0f);
   // A `(+1, 0)` offset shifts the same (0.25, 0.5) coordinate's own
   // fetched texel to texel 1 (0.6). Ref (0.5) <= 0.6: pass.
   float OffsetResult = 0.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.5f, 0.0f, true, 0.5f, 1, 0,
-     true, &OffsetResult);
+     -std::numeric_limits<float>::infinity(), true, &OffsetResult);
   EXPECT_FLOAT_EQ(OffsetResult, 1.0f);
 }
 
@@ -3160,11 +3167,13 @@ TEST_F(ImageSamplingTest, SampleCmpArray2DComparesRequestedLayer) {
   float Result = 0.0f;
   // Ref (0.5) >= layer 1's own texel (0.5): pass.
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/1.0f, 0.0f,
-     true, /*Dref=*/0.5f, 0, 0, true, &Result);
+     true, /*Dref=*/0.5f, 0, 0, -std::numeric_limits<float>::infinity(), true,
+     &Result);
   EXPECT_FLOAT_EQ(Result, 1.0f);
   // Ref (0.5) >= layer 2's own texel (0.9): fail.
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/2.0f, 0.0f,
-     true, /*Dref=*/0.5f, 0, 0, true, &Result);
+     true, /*Dref=*/0.5f, 0, 0, -std::numeric_limits<float>::infinity(), true,
+     &Result);
   EXPECT_FLOAT_EQ(Result, 0.0f);
 }
 
@@ -3193,13 +3202,15 @@ TEST_F(ImageSamplingTest,
   // No offset: (0.25, 0.5) reads texel 0 (0.4). Ref (0.5) <= 0.4: fail.
   float NoOffsetResult = 1.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.5f, /*ArrayLayer=*/0.0f,
-     0.0f, true, /*Dref=*/0.5f, 0, 0, true, &NoOffsetResult);
+     0.0f, true, /*Dref=*/0.5f, 0, 0,
+     -std::numeric_limits<float>::infinity(), true, &NoOffsetResult);
   EXPECT_FLOAT_EQ(NoOffsetResult, 0.0f);
   // A `(+1, 0)` offset shifts the same coordinate's own fetched texel to
   // texel 1 (0.6). Ref (0.5) <= 0.6: pass.
   float OffsetResult = 0.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.5f, /*ArrayLayer=*/0.0f,
-     0.0f, true, /*Dref=*/0.5f, 1, 0, true, &OffsetResult);
+     0.0f, true, /*Dref=*/0.5f, 1, 0,
+     -std::numeric_limits<float>::infinity(), true, &OffsetResult);
   EXPECT_FLOAT_EQ(OffsetResult, 1.0f);
 }
 
@@ -3225,12 +3236,12 @@ TEST_F(ImageSamplingTest, SampleCmpCubeSelectsEachFaceByDirection) {
   // GreaterEqual.
   float Pass = 0.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, true,
-     /*Dref=*/0.5f, true, &Pass);
+     /*Dref=*/0.5f, -std::numeric_limits<float>::infinity(), true, &Pass);
   EXPECT_FLOAT_EQ(Pass, 1.0f);
   // Face 5 (-Z) reads 0.9: a 0.5 reference fails GreaterEqual.
   float Fail = 1.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.0f, 0.0f, -1.0f, 0.0f, true,
-     /*Dref=*/0.5f, true, &Fail);
+     /*Dref=*/0.5f, -std::numeric_limits<float>::infinity(), true, &Fail);
   EXPECT_FLOAT_EQ(Fail, 0.0f);
 }
 
@@ -3258,11 +3269,13 @@ TEST_F(ImageSamplingTest, SampleCmpCubeArraySelectsRequestedCubeElement) {
   float Element0 = 0.0f, Element1 = 1.0f;
   // Element 0's own texel (0.1) passes a 0.5 reference (Dref >= Texel).
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f,
-     /*ArrayLayer=*/0.0f, 0.0f, true, /*Dref=*/0.5f, true, &Element0);
+     /*ArrayLayer=*/0.0f, 0.0f, true, /*Dref=*/0.5f,
+     -std::numeric_limits<float>::infinity(), true, &Element0);
   EXPECT_FLOAT_EQ(Element0, 1.0f);
   // Element 1's own texel (0.9) fails the same reference.
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f,
-     /*ArrayLayer=*/1.0f, 0.0f, true, /*Dref=*/0.5f, true, &Element1);
+     /*ArrayLayer=*/1.0f, 0.0f, true, /*Dref=*/0.5f,
+     -std::numeric_limits<float>::infinity(), true, &Element1);
   EXPECT_FLOAT_EQ(Element1, 0.0f);
 }
 
@@ -3299,7 +3312,8 @@ TEST_F(ImageSamplingTest, SampleCmp2DClampsFixedPointDepthReference) {
       addWrapper("samplecmp", "feme.cpu.image.samplecmp.2d.f32"));
   float Result = 1.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true,
-     /*Dref=*/-0.5f, 0, 0, true, &Result);
+     /*Dref=*/-0.5f, 0, 0, -std::numeric_limits<float>::infinity(), true,
+     &Result);
   EXPECT_FLOAT_EQ(Result, 0.0f);
 }
 
@@ -3325,7 +3339,8 @@ TEST_F(ImageSamplingTest, SampleCmp2DDoesNotClampFloatDepthReference) {
       addWrapper("samplecmp", "feme.cpu.image.samplecmp.2d.f32"));
   float Result = 0.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true,
-     /*Dref=*/-0.5f, 0, 0, true, &Result);
+     /*Dref=*/-0.5f, 0, 0, -std::numeric_limits<float>::infinity(), true,
+     &Result);
   EXPECT_FLOAT_EQ(Result, 1.0f);
 }
 
@@ -3352,7 +3367,8 @@ TEST_F(ImageSamplingTest, SampleCmpCubeArrayClampsFixedPointDepthReference) {
   float Result = 1.0f;
   // Face 0 (+X) of element 0, texel 0.0, compared Less against -0.5.
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f,
-     /*ArrayLayer=*/0.0f, 0.0f, true, /*Dref=*/-0.5f, true, &Result);
+     /*ArrayLayer=*/0.0f, 0.0f, true, /*Dref=*/-0.5f,
+     -std::numeric_limits<float>::infinity(), true, &Result);
   EXPECT_FLOAT_EQ(Result, 0.0f);
 }
 
@@ -3665,7 +3681,8 @@ TEST_F(ImageSamplingTest, SampleCmpCubeSeamlessBlendsAcrossFaceEdge) {
       "samplecmp_cube_seamless", "feme.cpu.image.samplecmp.cube.f32"));
   float Out = 9.0f;
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
-     /*DirZ=*/0.6f, 0.0f, true, /*Dref=*/0.5f, true, &Out);
+     /*DirZ=*/0.6f, 0.0f, true, /*Dref=*/0.5f,
+     -std::numeric_limits<float>::infinity(), true, &Out);
   EXPECT_GT(Out, 0.0f) << "expected a nonzero contribution from face 4's "
                           "own passing texel";
   EXPECT_LT(Out, 1.0f) << "expected face 0's own failing taps to still "
