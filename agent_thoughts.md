@@ -66229,3 +66229,110 @@ ordinary-sample `MinLodClamp` support the bullet already described.
 Verified `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need
 no changes (`shaderResourceMinLod` correctly stays `VK_FALSE`/`no`; no
 new feature/extension surface advertised).
+
+# Agent thoughts: Roadmap L61 -- `shaderResourceMinLod` blocker investigation; `Plain1D`/`Array1D` `Bias`/`MinLodClamp` fixed
+
+## Framing
+
+The request was to keep working on L52 (or other prerequisites blocking the
+L-series milestones). By this point in the project L52(c) had already landed
+(a prior segment of this same session), and L52's own remaining named
+sub-item, (b) (the literal `Dref`+`Bias` combination), needs a genuinely new
+LLVM core intrinsic before `SPIRVResourceLowering.cpp` can even see it -- a
+bigger, cross-cutting scope than a single session should attempt in isolation.
+Rather than stall on (b), I stepped back and asked the bigger question this
+whole L52/L58/L59/L60 chain has been building toward without ever asking
+directly: with all of L52(c)/L58/L59/L60(a)'s individual builder-level gaps
+now closed, is `shaderResourceMinLod` actually safe to advertise as `VK_TRUE`
+yet? If yes, that's a much bigger unlock than any one more shape/operand
+combination. If no, finding out exactly *why not* turns "keep chipping at L52"
+into a concrete, scoped list of what's left -- which is itself useful roadmap
+information even if it isn't a full fix.
+
+## Method: flip, measure, revert
+
+I temporarily set `Info.Features.shaderResourceMinLod = VK_TRUE` in
+`PhysicalDeviceInfo.cpp` (uncommitted, purely a measurement tool) so the three
+CTS groups this feature bit gates (`textureclamp`, `texturegradclamp`,
+`texturegradoffsetclamp{,_pcoffset}`) would actually run instead of
+universally reporting `NotSupported`. This is the same technique used for
+several earlier rows in this chain -- it's cheap, it's reversible, and it
+turns "will this feature bit even work" from a guess into real data. I made
+sure to revert it (`git checkout --`) before doing anything else, so as not to
+accidentally ship a half-validated feature-bit flip.
+
+## Triage discipline
+
+`textureclamp`'s 24 real fails could easily have looked like "24 things to
+fix." The key discipline was: for every failing case, first ask "does the
+*same* image shape/format fail even without the clamp/bias operand this group
+adds?" That single check cleanly separated 16 of the 24 fails (14
+integer-sampler, 2 `Plain3D`) into "pre-existing, unrelated, out of scope" --
+they were never going to be fixed by anything in this clamp/bias epic, because
+they fail for reasons that have nothing to do with `MinLod` clamping or
+`Bias` at all. Only the remaining 8 (4 shadow-bias, already known as L52(b);
+4 `sampler1d`/`1darray`-bias, previously unfiled) were actually informative
+about *this* investigation's scope. I think this "does the baseline fail too?"
+check is the single most useful triage technique this whole L-series chain has
+used, and I want to keep applying it before assuming a CTS fail is new.
+
+## The fix itself, and a bug I almost shipped
+
+The `Plain1D`/`Array1D` `Bias`/`MinLodClamp` fix itself followed the by-now
+well-established `createSampleN` pattern from L58/L59/L60(a): add the
+parameter to the builder, add it to the `FunctionType` registration, extract
+it in `lowerImageAccesses`, thread it through the CPU runtime. I built it,
+ran the unit tests, they passed -- and then the *first* real CTS re-run
+failed with a completely unrelated-looking error:
+`feme-cpu-simdize: function 'main' has a divergent value '' of vector type`.
+
+This was a good reminder that unit tests passing is necessary but not
+sufficient -- `SPIRVResourceLoweringTest.cpp`'s tests only exercise the
+forward direction (`createSample1D` builder call itself), not
+`ImageCalls.cpp`'s separate reverse-direction `matchImageCall`, which
+`feme::cpu::FunctionWidener`'s SIMDize pass uses independently to recognize
+"this call is a supported image-sample producer, don't treat it as opaque and
+divergent." `matchImageCall`'s `Sample1D`/`Sample1DArray` cases had their own
+hardcoded `arg_size()` check (10/11) that I hadn't touched, and once the real
+arg count grew to 12/13 it started returning `std::nullopt` -- silently, with
+no build error, since the code still type-checks fine either way. Only a real
+CTS run exercising the actual SIMDize path caught this.
+
+I recognized the shape immediately because it matches roadmap H19l almost
+exactly (a missing `Store2DMS`/`Store2DMSI32` entry in a different table
+elsewhere in the same file) -- this is clearly a recurring failure mode
+specific to this file's design: any time a `create*` builder's signature
+changes, there are (at least) three places that must be updated in lockstep
+(the builder itself, the `FunctionType` registration, and `matchImageCall`'s
+reverse-parsing switch), and nothing enforces that they stay in sync except
+discipline and, now, two new regression tests I added specifically to catch
+this by construction (`MatchesSample1DCallWithBiasAndMinLodClamp` and its
+Array1D sibling). I think a good future improvement (out of scope for this
+session, but worth a roadmap note somewhere) would be a build-time or
+unit-test-time invariant check that every builder's arg count matches its
+`matchImageCall` counterpart automatically, rather than relying on each
+session remembering this by hand -- but two hand-written regression tests
+covering the exact case I hit are a reasonable stopgap for now.
+
+## What's actually done vs. still open
+
+The concrete, shippable win this session produced is real and immediately
+useful even without ever flipping `shaderResourceMinLod`: plain `Bias`
+sampling against `Plain1D`/`Array1D` was simply never implemented before, and
+now it is, with 4 real CTS cases going from Fail to Pass and zero regressions.
+The `MinLodClamp` half of the same fix is implemented and unit-tested but not
+yet CTS-confirmed, since it's still gated behind the same disabled feature
+bit as every other shape's clamp variant -- it's ready the moment that bit
+can safely flip, which is a real (if modest) step toward that goal, without
+overstating what got fixed.
+
+The bigger `shaderResourceMinLod` question itself remains open, and I was
+careful in both the roadmap and the CTS report to list its remaining blockers
+explicitly (integer-sampler support, `Plain3D` support, L52(b)'s `Dref`+`Bias`
+gap, and L60(a)'s still-unconfirmed `VulkanBuffer` register-bound-handle
+hypothesis) rather than let the roadmap row imply more was resolved than
+actually was. I did not re-investigate the `VulkanBuffer` hypothesis this
+session -- it's a materially different area (register-bound resource handles
+for `Array2D`/`CubeArray` `Grad`, not `Plain1D`/`Array1D` `Bias`) and chasing
+it alongside this fix would have made the change harder to review and land
+in one clean, testable, independently-committed piece.
