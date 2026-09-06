@@ -15,10 +15,9 @@
 ; glslang always emits this for e.g. `texture(sampler2DShadow, vec3(u, v,
 ; compare))`, redundantly packing the depth-reference value alongside
 ; `Dref` itself (a separate operand); only the first two components are
-; ever read as the real U/V address. `samplecmp_clamp` and every
-; non-`Plain2D`/`Array2D` shape remain unsupported today -- see
-; spirv-resource-lowering-image-samplecmp-unsupported.ll (filed as roadmap
-; L48). A nonzero `ConstOffset` is exercised by
+; ever read as the real U/V address. `samplecmp_clamp`'s own trailing
+; `MinLod` clamp operand is now covered by roadmap L52(c) -- see
+; spirv-resource-lowering-image-samplecmp-clamp.ll. A nonzero `ConstOffset` is exercised by
 ; spirv-resource-lowering-image-samplecmp-shapes.ll's own
 ; `samplecmp_offset` case instead (roadmap L50d); this file's own two
 ; cases below both pass an all-zero `<3 x i32>` offset, lowered to a
@@ -41,7 +40,7 @@ define float @samplecmp(<3 x float> %coord, float %dref) {
       @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
   ; CHECK: %[[U:.*]] = extractelement <3 x float> %coord, i64 0
   ; CHECK: %[[V:.*]] = extractelement <3 x float> %coord, i64 1
-  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %[[U]], float %[[V]], float 0.000000e+00, i1 false, float %dref, i32 0, i32 0, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %[[U]], float %[[V]], float 0.000000e+00, i1 false, float %dref, i32 0, i32 0, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmp(
       target("spirv.Image", float, 1, 2, 0, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
@@ -60,7 +59,7 @@ define float @samplecmplevelzero(<3 x float> %coord, float %dref) {
       @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
-  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 true, float %dref, i32 0, i32 0, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 true, float %dref, i32 0, i32 0, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmplevelzero(
       target("spirv.Image", float, 1, 2, 0, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
@@ -85,7 +84,7 @@ define float @samplecmp_offset(<3 x float> %coord, float %dref) {
       @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
   %samp = call target("spirv.Sampler")
       @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
-  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 false, float %dref, i32 1, i32 -1, i1 true)
+  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %{{.*}}, float %{{.*}}, float 0.000000e+00, i1 false, float %dref, i32 1, i32 -1, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmp(
       target("spirv.Image", float, 1, 2, 0, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
