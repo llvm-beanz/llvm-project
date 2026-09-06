@@ -27379,3 +27379,123 @@ feature/extension surface advertised).
 (e) remain open under the same row; only sub-item (a)'s ordinary-sampling
 half is done). Its deferred depth-comparison counterpart is filed as new
 roadmap row **L54**.
+
+## Roadmap L54: `SampleCmp1D`/`SampleCmpArray1D` depth-comparison sampling fixed
+
+**Scope.** L52(a) left this row's own `SampleCmp1D`/`SampleCmpArray1D`
+counterpart (`sampler1d{,array}shadow_{fragment,vertex}`, 4 real
+confirmed-failing CTS cases) as explicitly deferred follow-on work, since
+`hasOnlySupportedImageUses`'s pre-existing dref-rejection of `Plain1D`/
+`Array1D` was deliberately left untouched by that session. This session
+picks it up as the natural next prerequisite for the H-series/L-series
+milestones once L52 and L53 had no smaller remaining item.
+
+**Real SPIR-V capture disproves this row's own opening speculation.**
+Before implementing, a real `deqp-vk` capture (`--deqp-log-decompiled-
+spirv=enable` against both `sampler1dshadow_fragment` and
+`sampler1darrayshadow_fragment`, via `VK_DRIVER_FILES` pointed at the
+already-built `feme_icd.json`) was used to confirm the exact SPIR-V shape
+before writing any lowering code -- following this project's own
+established "real IR reduction before design" precedent. The capture
+showed `%10 = OpTypeImage %6 1D 1 0 0 1 Unknown` (Dim=1D, Depth=1, i.e.
+shadow) with its coordinate input variable typed `OpTypeVector %6 3` (a
+genuine **vec3**), and `OpImageSampleDrefImplicitLod` consuming the *full*
+3-wide vector as its Coordinate operand (with `Dref` separately extracted
+via `OpCompositeExtract ... 2`, i.e. `P.z`) -- for *both* `Plain1D` and
+`Array1D` shapes identically. This directly contradicts this row's own
+original text, which speculated "`Plain1D`'s coordinate stays a bare
+scalar even once a `Dref` operand is added, unlike every other shape's
+vector-wrapped dref coordinate" (reasoning by analogy from L52(a)'s own
+*ordinary*-sample scalar-coordinate special case, which does not apply
+here). The real shape instead matches GLSL's own spec table for
+`sampler1DShadow`/`sampler1DArrayShadow`: `P` is always `vec3`, with
+`P.z` as the compare reference (`P.y` unused for `Plain1D`, `P.y` = array
+layer for `Array1D`).
+
+**Consequence: a simpler fix than originally scoped.** Because
+`ImageSampleDrefImplicitLodPattern` (`SPIRVToLLVMPatterns.cpp`) forwards
+`Adaptor.getCoordinate()` unmodified into the `llvm.spv.resource.
+samplecmp` intrinsic call, the intrinsic's own Coordinate argument for a
+`Plain1D`/`Array1D` dref sample is *also* always a genuine 3-wide vector
+-- meaning `lowerImageAccesses`'s dref-sample switch can reuse the
+already-existing generic `C0`/`C1 = CreateExtractElement(Coord, 0/1)`
+extraction every other shape shares, with **no early scalar-coordinate
+special case needed at all** (unlike L52(a)'s own ordinary-sample path,
+which genuinely does need one, since GLSL's non-shadow
+`texture(sampler1D, float)` really does pass a bare scalar). The only
+formula actually needing a correction was `DrefCoordWidth`'s "+1 padding"
+heuristic (`SampleCoordWidth + 1`, correct for every 2D-family shape):
+for `Plain1D`, `SampleCoordWidth=1` would give `2`, but the real width is
+`3`, requiring an explicit override; `Array1D` (`SampleCoordWidth=2`,
+`2+1=3`) needs no override, since the generic formula happens to already
+produce the correct answer for it.
+
+**Fix.** New `ImageCallKind::SampleCmp1D`/`SampleCmpArray1D` entries
+(`ImageCalls.h`/`.cpp`) mirror `SampleCmpArray2D`'s own simpler shape (no
+offset/`MinLod` clamp, matching L52(a)'s own `Sample1D`/`Sample1DArray`
+scope decision), with new `createSampleCmp1D`/`createSampleCmpArray1D`
+builders (11-arg/12-arg signatures, the latter inserting `array_layer`
+before `lod`). `hasOnlySupportedImageUses`'s dref-rejection condition
+narrowed from `IsInteger || Shape == ImageShape::Plain1D || Shape ==
+ImageShape::Array1D` to just `IsInteger` (the `Plain1D`/`Array1D`
+disjuncts removed entirely). `DrefCoordWidth`'s computation gained an
+explicit `Plain1D`-specific override of `3`, documented with the real
+capture finding above. `lowerImageAccesses`'s dref-sample switch gained
+`Plain1D`/`Array1D` cases (reusing the generic `C0`/`C1` extraction,
+calling the two new builders), and both shapes were removed from the
+`llvm_unreachable` case list (only `Plain3D`/`Plain2DMS`/`Array2DMS`
+remain unreachable there). New runtime entry points
+`femeCpuImageSampleCmp1DF32`/`SampleCmpArray1DF32` (`FeMeRuntimeCPU.c`)
+mirror `femeCpuImageSampleCmp2DF32`'s own trilinear-blend body, backed by
+a new `femeRTSampleCmp1DAtLevel` static helper (single-level body
+mirroring `femeRTSampleCmp2DAtLevel`, reusing the pre-existing
+`femeRTFetchTexel1DArray`/`femeRTApplyAddressMode`/`femeRTApplyCompare`
+helpers, no `OffsetX` parameter per this row's own no-offset scope).
+
+**Tests.** 3 new `SPIRVResourceLoweringTest` unit tests
+(`LowersSampleCmp1DToImageSampleCmp1D`,
+`LowersSampleCmpArray1DToImageSampleCmpArray1D` -- positive
+classification+lowering using the real capture-confirmed 3-wide
+coordinate; `LeavesASampleCmpAgainstPlain1DWithWrongCoordWidthAlone` --
+negative, confirming a 2-wide coordinate is still left unlowered,
+replacing the now-stale `LeavesASampleCmpAgainstPlain1DAlone` test that
+assumed the disproven 2-wide/scalar shape). 3 new `ImageSamplingTest`
+runtime unit tests (`SampleCmp1DLessEqualPasses`,
+`SampleCmpArray1DReadsRequestedLayer`, `SampleCmp1DInactiveLaneReadsZero`),
+reusing the existing `makeImage1D`/`makeImage1DArray` helpers'
+`FEME_IMAGE_DEPTH` flag. `ninja -C build2 check-feme`: 2648 discovered,
+59 pre-existing `Unsupported`, 0 `Failed` (up by exactly the 6 new tests
+this row adds relative to L52(a)'s own 2642-discovered baseline). The
+`FeMeRuntimeCPUTests` suite separately confirmed **204/204** passing (up
+from 201, +3 new runtime tests), and the full `FeMeTransformsCPUTests`
+suite confirmed **321/321** (net +2 from L52(a)'s own baseline of 319:
++3 new, -1 stale test replaced -- this row's own tests were already
+counted in that total from the prior session).
+
+**Real `deqp-vk` re-run.** The 4 targeted cases
+(`dEQP-VK.glsl.texture_functions.texture.sampler1d{,array}shadow_
+{fragment,vertex}`): **4/4 now Pass**, up from 0/4 before this fix. A
+broader `sampler1d*` sweep (24 cases, same caselist as L52(a)'s own)
+confirms exactly the expected outcome: **12 Pass** (up from 8 -- the 4
+new passes from this fix), **6 Fail** (down from 10 -- all `_bias_
+fragment`/`_bias_vertex`-adjacent cases: `sampler1d{,array}_bias_
+{fixed,float}_fragment` plus `sampler1d{,array}shadow_bias_fragment`,
+still blocked by L52's own still-open sub-item (b) `Bias`-operand gap,
+entirely unaffected by this fix), **6 NotSupported** (unchanged --
+`_compute`/shadow `_compute`, the unrelated `VK_KHR_compute_shader_
+derivatives` gap).
+
+**Design docs / inventories.** `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md`
+reviewed: no deviation to record (neither document ever scoped depth-
+comparison sampling to 2D/Cube shapes only in a way this widening
+contradicts). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed: no change needed (internal CPU-lowering plumbing only, no new
+feature/extension surface advertised).
+
+**Disposition.** Roadmap **L54 struck through** (fully fixed and tested,
+per the note above about the real-capture-driven correction to this
+row's own original scalar-coordinate speculation). L52's own sub-items
+(b) `Bias`, (c) `samplecmp_clamp`'s `MinLod` operand, and (e) the
+LOD-query derivative intrinsics remain open, unaffected by this row, as
+does L53's seamless cube-map filtering gap -- these remain the next
+prerequisites blocking the L-series milestones.
