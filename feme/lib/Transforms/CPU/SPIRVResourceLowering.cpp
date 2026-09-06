@@ -535,12 +535,15 @@ classifySampledImage2DHandle(const CallInst &Handle) {
       HandleTy->getNumIntParameters() != 6)
     return std::nullopt;
   unsigned Dim = HandleTy->getIntParameter(0);
-  if (Dim != SPIRVDim1D && Dim != SPIRVDim2D && Dim != SPIRVDimCube)
+  if (Dim != SPIRVDim1D && Dim != SPIRVDim2D && Dim != SPIRVDim3D &&
+      Dim != SPIRVDimCube)
     return std::nullopt;
   // [Dim, Depth, Arrayed, MS, Sampled, Format]: a multisampled image needs
   // a per-sample coordinate the runtime's sampling/fetch helpers do not
   // take (no `feme.cpu.image.*` entry point for MSAA sampling exists).
   bool Arrayed = HandleTy->getIntParameter(2) != 0;
+  if (Dim == SPIRVDim3D && Arrayed)
+    return std::nullopt; // Arrayed 3D is illegal in SPIR-V.
   if (HandleTy->getIntParameter(3) != 0)
     return std::nullopt;
   if (HandleTy->getIntParameter(4) != SPIRVSampledWithSampler)
@@ -554,6 +557,11 @@ classifySampledImage2DHandle(const CallInst &Handle) {
     Shape = Arrayed ? ImageShape::Array1D : ImageShape::Plain1D;
   else if (Dim == SPIRVDim2D)
     Shape = Arrayed ? ImageShape::Array2D : ImageShape::Plain2D;
+  else if (Dim == SPIRVDim3D)
+    // Roadmap L66(a): a plain, ordinary sampled `Plain3D` volume texture --
+    // SPIR-V disallows an arrayed `Dim::3D` image outright (rejected
+    // above), so there is no `Array3D` counterpart to give a shape to.
+    Shape = ImageShape::Plain3D;
   else
     Shape = Arrayed ? ImageShape::CubeArray : ImageShape::Cube;
   return HandleClassification{HandleKind::SampledImage2D, 0, nullptr,
@@ -996,13 +1004,21 @@ bool isSupportedOffset(const Value *Offset, ImageShape Shape,
 /// own real CTS-driven scope is ordinary sampling only (no real failing
 /// case exercises a 1D `texelFetch` today); a future row can lift this
 /// restriction the same way `Array2D`'s own fetch path already works.
+/// Roadmap L66(a): `Plain3D` samples a real 3-component `(U, V, W)`
+/// coordinate, same width as `Array2D`'s own arrayed one -- its own
+/// `OpImageFetch` path is likewise not accepted yet (this row's own scope
+/// is ordinary sampling only, mirroring `Plain1D`/`Array1D`'s identical
+/// decision above), and neither is `Bias`/`MinLodClamp`/`Grad` (each its
+/// own follow-on roadmap L66 sub-item, see the checks below).
 bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                                ImageShape Shape) {
   unsigned SampleCoordWidth =
-      Shape == ImageShape::CubeArray                                ? 4
-      : (Shape == ImageShape::Array2D || Shape == ImageShape::Cube) ? 3
-      : Shape == ImageShape::Plain1D                                ? 1
-                                                                    : 2;
+      Shape == ImageShape::CubeArray ? 4
+      : (Shape == ImageShape::Array2D || Shape == ImageShape::Cube ||
+         Shape == ImageShape::Plain3D)
+          ? 3
+      : Shape == ImageShape::Plain1D ? 1
+                                     : 2;
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
     if (!CI)
@@ -1197,9 +1213,12 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     }
 
     if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray ||
-        Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D)
+        Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D ||
+        Shape == ImageShape::Plain3D)
       return false; // No fetch shape exists for Cube/CubeArray/Plain1D/
-                    // Array1D yet (roadmap L52a: ordinary sampling only).
+                    // Array1D yet (roadmap L52a: ordinary sampling only),
+                    // nor for a sampled `Plain3D` handle's own `OpImageFetch`
+                    // (roadmap L66(a): ordinary *sample* only this row).
     if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
       return false;
     unsigned FetchCoordWidth = Shape == ImageShape::Array2D ? 3 : 2;
@@ -2418,6 +2437,44 @@ void lowerImageAccesses(
           CI->eraseFromParent();
           continue;
         }
+        // Roadmap L66(a): `Plain3D` is handled separately too, alongside
+        // `Plain1D`/`Array1D` above -- it has no `Bias`/`MinLodClamp`/
+        // `Grad` support at all yet (`hasOnlySupportedImageUses` already
+        // guarantees `HasBias`/`HasMinLodClamp`/`HasGrad` are all false by
+        // the time a `Plain3D` sample reaches here), so this is
+        // deliberately simpler than the generic `C0`/`C1`-based switch
+        // below: a real 3-component `(U, V, W)` coordinate, its own
+        // per-axis synthesized screen-space derivatives (reusing
+        // `getOrSynthesizeSample1DDerivatives` three times, once per
+        // axis -- there is no dedicated 3D derivative synthesis helper,
+        // since each axis differentiates independently the same way
+        // `Plain1D`'s own single axis does), and a direct
+        // `createSample3D` call.
+        if (Shape == ImageShape::Plain3D) {
+          Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
+          Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
+          Value *W = Builder.CreateExtractElement(Coord, uint64_t{2});
+          Value *ZeroF = ConstantFP::get(Builder.getFloatTy(), 0.0);
+          SampleDerivatives1D UD =
+              !ExplicitLod ? getOrSynthesizeSample1DDerivatives(
+                                 Builder, *CI->getFunction(), U)
+                           : SampleDerivatives1D{ZeroF, ZeroF};
+          SampleDerivatives1D VD =
+              !ExplicitLod ? getOrSynthesizeSample1DDerivatives(
+                                 Builder, *CI->getFunction(), V)
+                           : SampleDerivatives1D{ZeroF, ZeroF};
+          SampleDerivatives1D WD =
+              !ExplicitLod ? getOrSynthesizeSample1DDerivatives(
+                                 Builder, *CI->getFunction(), W)
+                           : SampleDerivatives1D{ZeroF, ZeroF};
+          CallInst *NewSample3DCall = createSample3D(
+              Builder, Env, ImageIndex, SamplerIndex, U, V, W, UD.DUdX,
+              UD.DUdY, VD.DUdX, VD.DUdY, WD.DUdX, WD.DUdY, Lod,
+              ExplicitLodFlag, Mask, CI->getName());
+          CI->replaceAllUsesWith(NewSample3DCall);
+          CI->eraseFromParent();
+          continue;
+        }
         Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
         Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
         CallInst *NewCall;
@@ -2622,16 +2679,20 @@ void lowerImageAccesses(
           // this switch is ever entered.
           llvm_unreachable("Plain1D/Array1D handled before this switch");
         case ImageShape::Plain3D:
+          // Unreachable: roadmap L66(a) added its own early `continue`
+          // above too, mirroring `Plain1D`/`Array1D`'s identical
+          // precedent -- `classifySampledImage2DHandle` does now produce
+          // this shape for a real, real-CTS-reachable sampled 3D volume
+          // texture, unlike the two genuinely-unreachable shapes below.
+          llvm_unreachable("Plain3D handled before this switch");
         case ImageShape::Plain2DMS:
         case ImageShape::Array2DMS:
-          // None of these shapes is ever reached here:
-          // `classifySampledImage2DHandle` (unlike
-          // `classifyStorageImage2DHandle`, roadmap H19c/H19e/H19g/H19m)
-          // never produces a `Plain3D`/`Plain2DMS`/`Array2DMS` shape for a
-          // *sampled* image handle -- only a storage-image handle can be
-          // 3D or multisampled today.
-          llvm_unreachable("no sampled-image shape produces Plain3D/Plain2DMS/"
-                           "Array2DMS");
+          // Neither of these shapes is ever reached here:
+          // `classifySampledImage2DHandle` never produces a
+          // `Plain2DMS`/`Array2DMS` shape for a *sampled* image handle --
+          // only a storage-image handle can be multisampled today.
+          llvm_unreachable(
+              "no sampled-image shape produces Plain2DMS/Array2DMS");
         }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();

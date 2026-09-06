@@ -2403,6 +2403,75 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1d.v4f32"));
 }
 
+TEST(SPIRVResourceLoweringTest, LowersPlain3DSampledImageToImageSample3D) {
+  // Roadmap L66(a): `classifySampledImage2DHandle` now recognizes
+  // `Dim::3D` (`SPIRVDim3D == 2`, previously always rejected outright),
+  // and `lowerImageAccesses`'s own early `Plain3D` special case (mirroring
+  // `Plain1D`/`Array1D`'s identical precedent) extracts a real 3-component
+  // `(U, V, W)` coordinate and calls `createSample3D`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x float> %coord) {
+      %img = call target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg3d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp3d(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord, <3 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg3d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp3d(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.3d.v4f32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, w, du_dx, du_dy, dv_dx, dv_dy, dw_dx, dw_dy, lod,
+  //  use_explicit_lod, mask).
+  EXPECT_EQ(Sample->arg_size(), 18u);
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesAPlain3DSampleBiasAlone) {
+  // Roadmap L66(a)'s own negative counterpart: `Plain3D` has no `Bias`
+  // support at all yet (unlike `Plain1D`/`Array1D`, roadmap L61(c)) --
+  // `hasOnlySupportedImageUses`'s `HasBias` restriction still rejects
+  // this shape, so a `samplebias` against it must leave the handle (and
+  // its `sample` call) entirely unlowered rather than silently dropping
+  // the bias.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x float> %coord, float %bias) {
+      %img = call target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg3d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp3d(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplebias(
+          target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord, float %bias,
+          <3 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg3d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp3d(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.3d.v4f32"));
+}
+
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasToCubeArrayBias) {
   // Roadmap L60(a): the same `Bias` operand also lowers against
   // `CubeArray`, widening `Bias`'s own roadmap L58 `Plain2D`/`Cube`-only
