@@ -27168,3 +27168,97 @@ this widening does not contradict any existing design-doc text).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
 change needed (internal CPU-lowering plumbing only, no new
 feature/extension surface advertised).
+
+## Roadmap L51: root-caused to a missing seamless cube-map filtering feature, re-filed as L53
+
+**Task.** L51 asked for a real reduction of `samplercubearrayshadow_
+fragment`'s own localized 32x32-pixel (`x:[96,127] y:[0,31]` of a
+128x128 image) rendering mismatch, previously narrowed to "somewhere
+outside `femeCpuImageSampleCmpCubeArrayF32`'s own sampling math," with a
+prior-session hypothesis pointing at a rasterizer/vertex-attribute-
+interpolation bug (since this test's `v_texCoord.w` doubles as both the
+array-layer selector and the depth-compare reference value).
+
+**Rasterizer hypothesis disproved.** A temporary, env-var-gated debug
+dump (`FEME_DEBUG_FRAG_INTERP`, an `#ifdef`-gated `fprintf` inserted into
+`feme/lib/Graphics/Executor.cpp`'s FS-input varying-interpolation loop,
+reverted before committing, mirroring this project's own established
+`FEME_DEBUG_CUBEARRAY_CMP`/`FEME_DEBUG_DUMP_PRE_JIT_IR` technique) was
+built into `feme_vulkan` and run against a real `deqp-vk` re-run of this
+exact case, capturing every fragment's own interpolated `v_texCoord`
+value, triangle index, and barycentric weights inside the mismatch bbox
+(1,088 logged fragments across exactly 2 triangles, as expected for one
+`QuadGrid` cell). Independently deriving VK-GL-CTS's own analytic
+reference formula from the real `CASE_SPEC(samplercubearrayshadow, ...,
+Vec4(-1.0f, -1.0f, 1.01f, -0.5f), Vec4(1.0f, 1.0f, 1.01f, 1.5f), ...)`
+found in `vktShaderRenderTextureFunctionTests.cpp` and
+`ShaderTextureFunctionInstance`'s own `baseCoordTrans` construction
+(`vktShaderRenderTextureFunctionTests.cpp`) yields, for this test's
+`min`/`max` coordinate range, `w' = -sx + sy + 0.5` as the exact affine
+formula for the dual-purpose `texCoord.w` component. Evaluating this at
+pixel `(96, 0)`'s center (`sx = 96.5/128`, `sy = 0.5/128`) gives exactly
+`-0.25` -- bit-for-bit identical to the real logged interpolated value at
+that pixel. Every one of the 1,088 logged fragments matched this same
+affine formula exactly (min `-0.4921875`, max `-0.0078125`, all mapping
+to array layer 0 via `femeRTRoundClampLayer`'s `floor(w'+0.5)`, nowhere
+near the `0.5` rounding boundary). **This conclusively disproves L51's
+own rasterizer/interpolation hypothesis**: the fed-in coordinate is
+exactly correct on this target.
+
+**Real root cause: missing seamless cube-map filtering.** Cross-checking
+the other 3 texcoord components the same way (`x' = 2sx-1` in
+`[0.508, 0.992]`, `y' = 2sy-1` in `[-0.992, -0.508]`, `z' = 1.01`
+constant) shows the sample direction vector's dominant axis is `+Z`
+(`|z'| = 1.01` vs. `max(|x'|, |y'|) = 0.992`) throughout this cell --
+unambiguous face selection on both sides, but with a magnitude ratio
+(`0.992 / 1.01 ~= 0.98`) closer to the `+Z` face's own edge than any of
+this test's other 15 grid cells. Vulkan's own spec makes cube (array)
+sampling **seamless by default** (adjacent-face edge/corner texels
+blended for `LINEAR` filtering), disabled only by the opt-in
+`VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT` flag/
+`VK_EXT_non_seamless_cube_map` extension (confirmed via VK-GL-CTS's own
+`mapVkSampler`, `vkImageUtil.cpp`: `sampler.seamlessCubeMap =
+!(flags & VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT)`, and
+`TextureCubeArrayView::sampleCompare`'s own dispatch to
+`sampleCubeArraySeamlessCompare` whenever that flag is set, `tcuTexture.
+cpp`), which none of this CTS group's samplers ever set. But
+`femeCpuImageSampleCubeV4F32`/`CubeArrayV4F32`/`femeCpuImageSampleCmpCubeF32`/
+`CmpCubeArrayF32` (`feme/runtime/CPU/FeMeRuntimeCPU.c`) all
+unconditionally hard-code `Samp.AddressU = Samp.AddressV = 2` (plain
+`ClampToEdge`) against a single selected face, with **no** cross-face
+edge/corner blending at all -- a real, confirmed spec-conformance gap.
+This mismatched grid cell is exactly the one whose sample footprint
+comes closest to a face edge among this test's 16 cells, so it is the
+only one whose `LINEAR`-filter footprint visibly differs between a real
+seamless blend and this target's single-face clamp -- consistent with
+every *other* passing Cube/CubeArray CTS case sampling comfortably
+face-interior.
+
+**Disposition.** Roadmap **L51 struck through** (root-caused, but not
+fixed -- implementing real cross-face seamless filtering, plus a new
+per-sampler seamless bit and new unit test coverage, is a materially
+bigger new-feature scope than a small bug fix). Filed as new roadmap row
+**L53**, breaking down: (1) a `remapCubeEdgeCoords`-equivalent cross-face
+remapping helper (including the special both-axes-out-of-bounds corner
+case); (2) wiring it into a new seamless-aware bilinear fetch path for
+both ordinary and depth-comparison Cube/CubeArray sampling, gated on a
+new per-sampler seamless descriptor bit (defaulting on, per spec); (3)
+`NEAREST` needs no change (a single face's own nearest edge texel is
+already spec-correct); (4) new unit test coverage with a synthetic
+multi-face marker-texel image; (5) a real `deqp-vk` re-run of
+`samplercubearrayshadow_fragment` plus a broader `sampler{cube,
+cubearray}*` sweep to confirm the fix and check for any other
+previously-passing case silently relying on non-seamless behavior by
+coincidence. No code changes landed this session (the temporary
+`FEME_DEBUG_FRAG_INTERP` instrumentation was reverted before committing);
+`ninja check-feme` therefore unaffected (0 new `Failed`/regressions).
+`FeMeGraphicsDesign.md`/`FeMeCPUDesign.md` reviewed: no deviation to
+record yet (neither document claims seamless cube filtering is
+implemented; L53's own future fix will need a new design-doc section
+once landed). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed: `VK_EXT_non_seamless_cube_map` was already correctly listed as
+"Not implemented" (unrelated to this gap -- that extension is about
+*disabling* the default seamless behavior, which we don't yet support
+either way); no inventory change needed since seamless cube filtering
+itself has no dedicated feature/extension bit of its own to track (it is
+part of core `VkSamplerCreateInfo`'s always-on default behavior).
