@@ -300,6 +300,26 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
                                llvm_float_ty, llvm_any_ty, llvm_float_ty],
                               [IntrReadMem]>;
 
+  // The depth-comparison counterparts of int_spv_resource_samplebias and
+  // int_spv_resource_samplebias_clamp: an OpImageSampleDrefImplicitLod
+  // carrying a Bias image operand, which int_spv_resource_samplecmp has no
+  // way to represent (it has no bias operand at all). The dref operand
+  // keeps int_spv_resource_samplecmp's position, and the bias operand
+  // follows it, ahead of the offset, matching SPIR-V's own fixed Image
+  // Operands bit order (Bias before ConstOffset before MinLod).
+  def int_spv_resource_samplecmpbias
+      : DefaultAttrsIntrinsic<[llvm_any_ty],
+                              [llvm_any_ty, llvm_any_ty, llvm_any_ty,
+                               llvm_float_ty, llvm_float_ty, llvm_any_ty],
+                              [IntrReadMem]>;
+
+  def int_spv_resource_samplecmpbias_clamp
+      : DefaultAttrsIntrinsic<[llvm_any_ty],
+                              [llvm_any_ty, llvm_any_ty, llvm_any_ty,
+                               llvm_float_ty, llvm_float_ty, llvm_any_ty,
+                               llvm_float_ty],
+                              [IntrReadMem]>;
+
   def int_spv_resource_samplecmplevelzero
       : DefaultAttrsIntrinsic<[llvm_any_ty],
                               [llvm_any_ty, llvm_any_ty, llvm_any_ty,
