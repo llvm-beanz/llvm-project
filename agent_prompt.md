@@ -144,4 +144,13 @@ Can you work on L52 or other prerequisites blocking the L-series milestones?
 > remain open under this same row; the deferred SampleCmp1D/SampleCmpArray1D
 > counterpart is re-filed as L54, below, and sub-item (e)'s LOD-query intrinsics
 > are now done and re-filed as L57, below, per this project's own established
-> L26->L33/L45->L47/L46->L48/L48->L50/L50->L51 precedent)
+> L26->L33/L45->L47/L46->L48/L48->L50/L50->L51 precedent. UPDATE: a later
+> session investigating this same sub-item (b) found and fixed a distinct, more
+> tractable gap -- ordinary (non-`Dref`) `Bias` sampling against
+> `Plain2D`/`Cube` had zero recognition in `SPIRVResourceLowering.cpp` at all
+> (not just the literal `Dref`+`Bias` combination this sub-item names), despite
+> already being fully legalized upstream by `ImageSampleImplicitLodPattern`.
+> That fix is filed and measured as its own row, **L58**, below, per this
+> project's own established splitting precedent; sub-item (b)'s own literal
+> `Dref`+`Bias` gap (needing a new LLVM core intrinsic before
+> `SPIRVResourceLowering.cpp` can even see it) remains open and unstarted.)
