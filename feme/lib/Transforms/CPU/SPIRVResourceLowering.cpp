@@ -2340,18 +2340,53 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
                         getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
                   : ConstantFP::getInfinity(Builder.getFloatTy(),
                                             /*Negative=*/true);
+          // Roadmap L63: an implicit-LOD `Plain1D`/`Array1D` sample's
+          // real mip level now needs this sample's own screen-space
+          // derivative of its single addressed coordinate component,
+          // synthesized only in the fragment stage, mirroring
+          // `Plain2D`'s own `getOrSynthesizeSample2DDerivatives` handling
+          // above -- an explicit-LOD `textureLod()` ignores them, so zero
+          // constants (no extra IR) are passed instead. `Plain1D`/
+          // `Array1D` never reach this branch with `HasGrad` set (see
+          // `hasOnlySupportedImageUses`'s own restriction), so there is
+          // no caller-supplied-`Grad` case to handle here, unlike
+          // `Plain2D`'s. Computed separately per shape below (not once,
+          // unconditionally, up here) since `Coord` itself is `Array1D`'s
+          // own 2-component `(U, ArrayLayer)` vector, not a bare scalar --
+          // differentiating it directly here (as this code used to)
+          // synthesized a stray, unused, mistyped derivative of the whole
+          // vector for every `Array1D` sample, alongside the real
+          // scalar-`U` one `ArrayD` below already computes correctly.
           CallInst *NewSample1DCall;
           if (Shape == ImageShape::Plain1D) {
+            SampleDerivatives1D D =
+                !ExplicitLod
+                    ? getOrSynthesizeSample1DDerivatives(
+                          Builder, *CI->getFunction(), Coord)
+                    : SampleDerivatives1D{ConstantFP::get(
+                                             Builder.getFloatTy(), 0.0),
+                                         ConstantFP::get(
+                                             Builder.getFloatTy(), 0.0)};
             NewSample1DCall = createSample1D(
-                Builder, Env, ImageIndex, SamplerIndex, Coord, Lod,
-                ExplicitLodFlag, Bias, MinLodClamp, Mask, CI->getName());
+                Builder, Env, ImageIndex, SamplerIndex, Coord, D.DUdX,
+                D.DUdY, Lod, ExplicitLodFlag, Bias, MinLodClamp, Mask,
+                CI->getName());
           } else {
             Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
             Value *ArrayLayer =
                 Builder.CreateExtractElement(Coord, uint64_t{1});
+            SampleDerivatives1D ArrayD =
+                !ExplicitLod
+                    ? getOrSynthesizeSample1DDerivatives(
+                          Builder, *CI->getFunction(), U)
+                    : SampleDerivatives1D{ConstantFP::get(
+                                             Builder.getFloatTy(), 0.0),
+                                         ConstantFP::get(
+                                             Builder.getFloatTy(), 0.0)};
             NewSample1DCall = createSample1DArray(
-                Builder, Env, ImageIndex, SamplerIndex, U, ArrayLayer, Lod,
-                ExplicitLodFlag, Bias, MinLodClamp, Mask, CI->getName());
+                Builder, Env, ImageIndex, SamplerIndex, U, ArrayLayer,
+                ArrayD.DUdX, ArrayD.DUdY, Lod, ExplicitLodFlag, Bias,
+                MinLodClamp, Mask, CI->getName());
           }
           CI->replaceAllUsesWith(NewSample1DCall);
           CI->eraseFromParent();

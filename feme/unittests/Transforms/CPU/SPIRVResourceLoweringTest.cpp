@@ -1585,8 +1585,8 @@ TEST(SPIRVResourceLoweringTest, LowersPlain1DSampledImageToImageSample1D) {
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4f32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, lod, use_explicit_lod, bias, min_lod_clamp, mask).
-  EXPECT_EQ(Sample->arg_size(), 12u);
+  //  u, du_dx, du_dy, lod, use_explicit_lod, bias, min_lod_clamp, mask).
+  EXPECT_EQ(Sample->arg_size(), 14u);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersArray1DSampledImageToImageSample1DArray) {
@@ -1620,8 +1620,9 @@ TEST(SPIRVResourceLoweringTest, LowersArray1DSampledImageToImageSample1DArray) {
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, array_layer, lod, use_explicit_lod, bias, min_lod_clamp, mask).
-  EXPECT_EQ(Sample->arg_size(), 13u);
+  //  u, array_layer, du_dx, du_dy, lod, use_explicit_lod, bias,
+  //  min_lod_clamp, mask).
+  EXPECT_EQ(Sample->arg_size(), 15u);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasToPlain1DBias) {
@@ -1658,8 +1659,56 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasToPlain1DBias) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 12u);
-  EXPECT_EQ(Sample->getArgOperand(9)->getName(), "bias");
+  ASSERT_EQ(Sample->arg_size(), 14u);
+  EXPECT_EQ(Sample->getArgOperand(11)->getName(), "bias");
+}
+
+TEST(SPIRVResourceLoweringTest,
+     FragmentStageImplicitSample1DSynthesizesRealDerivatives) {
+  // Roadmap L63: the `Plain1D` counterpart of
+  // `FragmentStageImplicitSampleSynthesizesRealDerivatives`'s own
+  // `Plain2D` coverage above -- `main` carries a real
+  // `feme.shader.stage`="fragment" attribute, so its implicit-LOD
+  // `llvm.spv.resource.sample` against a `Plain1D` handle must get real
+  // `feme.stage.derivative.*` calls synthesized as its new `DUdX`/`DUdY`
+  // operands, not zero constants.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(float %u) #0 {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp1d(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %u,
+          <1 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp1d(i32, i32, i32, i32, ptr)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4f32");
+  ASSERT_TRUE(Sample);
+  // Argument operands 7-8 are (du_dx, du_dy); neither may be a plain zero
+  // constant now that a real derivative can be synthesized.
+  for (unsigned ArgNo : {7, 8}) {
+    Value *Deriv = Sample->getArgOperand(ArgNo);
+    EXPECT_FALSE(isa<ConstantFP>(Deriv));
+    auto *DerivCall = dyn_cast<CallInst>(Deriv);
+    ASSERT_TRUE(DerivCall);
+    Function *Callee = DerivCall->getCalledFunction();
+    ASSERT_TRUE(Callee);
+    EXPECT_TRUE(Callee->getName().starts_with("feme.stage.derivative."));
+  }
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasClampToArray1DWithMinLodClamp) {
@@ -1694,9 +1743,9 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasClampToArray1DWithMinLodClamp) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 13u);
-  EXPECT_EQ(Sample->getArgOperand(10)->getName(), "bias");
-  EXPECT_EQ(Sample->getArgOperand(11)->getName(), "clamp");
+  ASSERT_EQ(Sample->arg_size(), 15u);
+  EXPECT_EQ(Sample->getArgOperand(12)->getName(), "bias");
+  EXPECT_EQ(Sample->getArgOperand(13)->getName(), "clamp");
 }
 
 TEST(SPIRVResourceLoweringTest, LeavesAPlain1DImageFetchAlone) {
