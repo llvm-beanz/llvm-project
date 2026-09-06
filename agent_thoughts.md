@@ -64598,3 +64598,69 @@ this one.
 No feature/extension bit changed this session (internal wave-body-
 lowering plumbing only); `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` reviewed, no update needed.
+
+# Session: L47 follow-up (resolved via L49's own fix, no new code needed)
+
+## Starting point
+
+This session's prompt asked me to work on L47 or other prerequisites
+blocking the L-series milestones, quoting the *exact same* L47 report
+text a previous session's prompt had already quoted. Before doing
+anything, I checked `git log`: the previous session's work (implementing
+L49, the materially larger scope L47's own report had filed as its
+remaining blocker) was already committed and the tree was clean. Since
+L49's own real `deqp-vk` re-run had already covered the *exact two named
+cases* L47's report calls out
+(`...task_mesh.inside_rp.single_view.{only_primary,with_secondary}`) and
+confirmed both now pass, L47 itself needed no further code changes --
+just recognizing that its blocker is gone and updating the roadmap to
+reflect that.
+
+I re-confirmed by running both named cases again directly (not just
+trusting the prior session's own report) before touching any docs, since
+"verify before considering done" is a standing instruction and I hadn't
+personally observed this pass in *this* session yet. Both passed cleanly.
+
+I also went back through the session's stale SQL todo table -- it still
+had the previous session's `l49-*` todos sitting in `pending`/
+`in_progress` state despite that work being fully committed. Marked them
+all `done` rather than leaving misleading state behind for whichever
+session reads the table next.
+
+## Cleanup: also struck through L47 in the roadmap
+
+L47's own row had been deliberately left *not* struck through by the
+prior session, since it correctly described itself as only partially
+fixed pending L49. Now that L49 is done and verified against L47's own
+named cases, I struck through L47's row too, with a short note pointing
+at L49's own fix and re-confirmed CTS evidence rather than duplicating
+the full writeup. Added a short `VulkanCTSReport.md` follow-up section
+doing the same. No source code changed this session; `ninja check-feme`
+re-run anyway to confirm 2632/2632 supported tests still pass (no change
+expected, and none found).
+
+## Why I didn't pick up L50/L51 this session
+
+The prompt says "L47 or other prerequisites blocking the L-series
+milestones." L47 is now closed. L50/L51 are the current open frontier
+of the L-series (a `TextureCubeArray` depth-comparison rendering
+mismatch investigation), but neither is a *prerequisite blocking* other
+L-series work the way L49 blocked L47 -- they're independently scoped,
+already-filed rows with their own tracked next steps (L51's own text
+describes exactly what its next investigation step should be: a
+targeted rasterizer/attribute-interpolation debug dump). I looked at the
+relevant CTS test source
+(`vktShaderRenderTextureFunctionTests.cpp`'s `evalTextureCubeArrayShadow`,
+which does confirm `texCoord.w` is read for both the depth-compare
+`Ref` and the array-layer index, matching L51's own diagnosis) and at
+`Executor.cpp`'s fragment-input perspective-correct interpolation code,
+enough to sanity-check that L51's own framing is still accurate, but did
+not attempt the deeper reduction itself this session, since that is a
+genuinely separate, large investigative task with no dependency
+relationship to what this session's prompt asked me to unblock.
+
+## Commits this session
+
+1. `feme: strike through L47 (resolved by L49's own fix)` --
+   `Roadmap.md`/`VulkanCTSReport.md` updates only, no source change.
+2. This `agent_thoughts.md` entry (its own final commit).
