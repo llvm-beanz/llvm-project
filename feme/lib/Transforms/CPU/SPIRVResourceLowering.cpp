@@ -906,21 +906,23 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // Roadmap L48: extended from a `Plain2D`-only depth-comparison sample
     // (roadmap L46) to also cover `Array2D`/`Cube`/`CubeArray`, each of
     // which now has its own `createSampleCmpArray2D`/`createSampleCmpCube`/
-    // `createSampleCmpCubeArray` counterpart. `samplecmp_clamp`'s own
-    // trailing `MinLod` clamp operand and `Plain1D`/`Array1D` shadow
-    // sampling (no ordinary, non-comparison sampled-image path exists for
-    // either yet) remain unstarted follow-on work (see
+    // `createSampleCmpCubeArray` counterpart. Roadmap L54 further extends
+    // this to `Plain1D`/`Array1D` (`SampleCmp1D`/`SampleCmpArray1D`), now
+    // that L52a's own ordinary `Sample1D`/`Sample1DArray` infrastructure
+    // exists as a prerequisite. `samplecmp_clamp`'s own trailing `MinLod`
+    // clamp operand remains unstarted follow-on work (see
     // `isDrefSampleIntrinsic`'s own comment); a nonzero `ConstOffset`
     // (roadmap L50d) is now accepted for `Plain2D`/`Array2D`, mirroring
     // `isSupportedOffset`'s identical `Plain2D`-only precedent for an
-    // ordinary sample -- `Cube`/`CubeArray` still require the trivial
-    // always-zero case, since SPIR-V forbids a real `ConstOffset` against
-    // either (see `isSupportedOffset`'s own comment).
+    // ordinary sample -- `Cube`/`CubeArray`/`Plain1D`/`Array1D` still
+    // require the trivial always-zero case, since SPIR-V forbids a real
+    // `ConstOffset` against `Cube`/`CubeArray` at all, and no real CTS
+    // case exercises one against `Plain1D`/`Array1D` yet (see
+    // `isSupportedOffset`'s own comment).
     bool DrefExplicitLod = false;
     if (isDrefSampleIntrinsic(*CI, DrefExplicitLod)) {
-      if (IsInteger || Shape == ImageShape::Plain1D ||
-          Shape == ImageShape::Array1D)
-        return false; // No filtered/dref sample over these shapes.
+      if (IsInteger)
+        return false; // No filtered/dref sample over an integer format.
       if (CI->getArgOperand(0) != &Handle)
         return false;
       // SPIR-V's own validation rules give a depth-comparison sample's
@@ -939,8 +941,24 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // with no further padding, and its `Dref` arrives as a genuinely
       // independent operand rather than an echo of the coordinate's own
       // last component (still read the same way below either way).
-      unsigned DrefCoordWidth =
-          SampleCoordWidth + 1 > 4 ? 4 : SampleCoordWidth + 1;
+      // `Plain1D` is the one shape where this "+1" rule does not hold:
+      // a real `deqp-vk` SPIR-V capture (roadmap L54, `--deqp-log-
+      // decompiled-spirv=enable` against `sampler1dshadow_fragment`)
+      // shows glslang always emits a fixed 3-component coordinate for a
+      // 1D shadow sampler, mirroring GLSL's own `sampler1DShadow`
+      // combined-coordinate convention (`vec3(u, <unused>, compare)`,
+      // per the GLSL spec's own "Combined Texture and Shadow Samplers"
+      // table) rather than padding `Plain1D`'s own bare-scalar ordinary
+      // width (1) by one. `Array1D`'s own dref coordinate is genuinely
+      // 3-wide too (`vec3(u, layer, compare)`, confirmed by the same
+      // capture technique against `sampler1darrayshadow_fragment`), but
+      // that already matches the generic "+1" rule (`SampleCoordWidth`
+      // 2 + 1), so only `Plain1D` needs an explicit override here.
+      unsigned DrefCoordWidth = Shape == ImageShape::Plain1D
+                                  ? 3
+                                  : (SampleCoordWidth + 1 > 4
+                                        ? 4
+                                        : SampleCoordWidth + 1);
       if (!isCoordN(CI->getArgOperand(2), DrefCoordWidth, /*Float=*/true) ||
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
           !isSupportedOffset(CI->getArgOperand(DrefSampleOffsetIdx), Shape,
@@ -2270,7 +2288,26 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           break;
         }
         case ImageShape::Plain1D:
+          // Roadmap L54: unlike the ordinary-sample path (see the early
+          // Plain1D/Array1D special case above), a real deqp-vk SPIR-V
+          // capture confirms a 1D shadow sampler's own Coordinate operand
+          // is already a genuine 3-component vector (`vec3(u, <unused>,
+          // compare)`, GLSL's own `sampler1DShadow` convention), not a
+          // bare scalar -- so the shared `C0`/`C1` extraction above
+          // already works unmodified; only `C0` (the real `u`) is used.
+          NewCall = createSampleCmp1D(Builder, Env, ImageIndex, SamplerIndex,
+                                      C0, Lod, ExplicitLodFlag, Dref, Mask,
+                                      CI->getName());
+          break;
         case ImageShape::Array1D:
+          // Same real-capture-confirmed shape as Plain1D just above, but
+          // `vec3(u, layer, compare)` -- both `C0` (u) and `C1` (layer)
+          // are real, meaningful components here.
+          NewCall = createSampleCmpArray1D(Builder, Env, ImageIndex,
+                                           SamplerIndex, C0, C1, Lod,
+                                           ExplicitLodFlag, Dref, Mask,
+                                           CI->getName());
+          break;
         case ImageShape::Plain3D:
         case ImageShape::Plain2DMS:
         case ImageShape::Array2DMS:
