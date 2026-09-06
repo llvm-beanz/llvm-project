@@ -67103,3 +67103,131 @@ independent and could be done in either order. L66(c)/(d)/(e) (the
 `Plain2D`-only restriction, and the cross-function same-binding crash) all
 remain open from the prior session and are still unrelated to anything this
 session touched.
+
+# Session: roadmap L67(a) -- `Plain3D` `Bias`/`MinLodClamp` sampling
+
+The prior session's own summary pointed squarely at roadmap L67(a) as the
+natural next step (it directly unblocks re-measuring the
+`shaderResourceMinLod` flip experiment's own `sampler3d_*` cases the same
+way `Array2D`'s equivalent fix did earlier in this same chain), so I started
+there rather than re-scoping.
+
+## Approach: mirror `Sample1D`'s roadmap L61(c) extension exactly
+
+`createSample1D` already has a real `Bias`/`MinLodClamp` operand pair, added
+in roadmap L61(c). Since `createSample3D` is structurally the closest
+sibling (both are "plain, non-arrayed, non-cube, non-comparison" sample
+builders), I used `createSample1D`'s own operand ordering
+(`..., Lod, UseExplicitLod, Bias, MinLodClamp, Mask`) as the template
+verbatim rather than inventing a new convention. This kept the change
+mechanical across all three layers (`ImageCalls.h`/`.cpp`,
+`SPIRVResourceLowering.cpp`, `FeMeRuntimeCPU.c`) and made diffing against
+`Sample1D`'s own prior commits an easy sanity check at every step.
+
+`getSampleClampIdx(ExplicitLod, HasBias, HasGrad)` — the shape-agnostic
+helper that computes a `spv_resource_sample_clamp`/`samplebias_clamp`/
+`samplegrad_clamp` intrinsic call's trailing clamp operand index — worked
+for `Plain3D` with zero modification, since it operates on the *original*
+SPIR-V intrinsic call's operand layout (which is shape-independent: a fixed
+coordinate width followed by an offset then an optional clamp), not on
+`createSample3D`'s own operand layout. This confirms the same reasoning
+prior sessions already established for `Plain1D`/`Array1D` extends cleanly
+to a third shape without any new special-casing.
+
+## Incidental fix: stale `MatchedImageCall` doc comment
+
+While updating the `Bias`/`MinLodClamp` field doc comments in
+`MatchedImageCall` to add `Sample3D`, I noticed they never listed
+`Sample1D`/`Sample1DArray` either, despite roadmap L61(c) having added real
+support for those shapes several sessions ago. Folded this fix in since it
+was the exact same doc text being touched for the exact same reason — not
+a new investigation, just an omission caught by proximity. I did *not*
+attempt a broader audit of this file's other doc staleness (e.g.
+`SampleCmp1D`'s own `MinLodClamp` field doc technically over-claims
+"null for every other kind" when it's actually populated with a no-op
+constant — pre-existing, unrelated, out of scope for this row).
+
+## Test-file breakage was the bulk of the actual work
+
+Widening `createSample3D`'s signature (18→20 args) and
+`femeCpuImageSample3DV4F32`'s runtime signature (20→22 params) broke three
+existing test files that called the old signatures directly:
+
+- `SPIRVResourceLoweringTest.cpp` had a negative test,
+  `LeavesAPlain3DSampleBiasAlone`, added by the *prior* L66(a) session,
+  asserting that `Bias` against `Plain3D` must NOT lower. This assertion
+  became false the moment this session's fix landed. Rather than just
+  deleting it (losing negative-test coverage for this shape entirely), I
+  converted it into a new positive test
+  (`LowersSampleBiasClampToPlain3DWithMinLodClamp`, mirroring the existing
+  `LowersSampleBiasClampToArray1DWithMinLodClamp` precedent test) and added
+  a *fresh* negative test, `LeavesAPlain3DSampleGradAlone`, so `Plain3D`
+  still has a real negative case on file (now naming `Grad`, the one
+  operand this row deliberately does not touch, filed as L67(b)).
+- `ImageSamplingTest.cpp`'s `Sample3DFn` typedef and its three existing
+  `Sample3D*` tests needed their call sites updated with no-op
+  `Bias=0.0f`/`MinLodClamp=-inf` values to preserve prior expected
+  behavior — plus I added a new `Sample3DBiasSelectsCoarserMipLevel` test
+  (mirroring `Sample1DBiasSelectsCoarserMipLevel`) so this row has real
+  runtime-level correctness coverage of the new operand, not just a
+  compile-fix disguised as done.
+- The lit test `spirv-resource-lowering-image-sample-3d.ll` didn't need any
+  existing CHECK line changed (the ordinary-sample case doesn't touch
+  `Bias`/`MinLodClamp` at all), but I added a new `sample_3d_bias_clamp`
+  test function exercising `llvm.spv.resource.samplebias.clamp` against a
+  `Dim3D` handle, using a distinct binding number (1, not 0) from the
+  first test function specifically to avoid the still-open roadmap L66(e)
+  cross-function same-binding crash, which is unrelated to this row but
+  would otherwise have silently invalidated the new test case.
+
+## Validation
+
+- `ninja -C build2 FeMeTransformsCPU FeMeRuntimeCPU` — clean, ccache +
+  assertions build (existing `build2` config).
+- `ninja -C build2 FeMeTransformsCPUTests FeMeRuntimeCPUTests` — clean
+  build after all four test-file fixes; ran both filtered
+  (`--gtest_filter="*Sample3D*:*Plain3D*"` and `*Sample3D*` respectively):
+  7/7 and 4/4 pass.
+- `ninja -C build2 check-feme` — 2654/2713 pass (up from 2652/2711 before
+  this session), 0 fail, 59 unsupported (unchanged unsupported count, +2
+  net new tests from the negative→positive test conversion plus the new
+  Bias runtime test).
+- Real CTS (`deqp-vk`, `VK_ICD_FILENAMES` pointed at `build2`'s
+  `feme_icd.json`, `VK_ICD_FILENAME` singular unset): direct re-run of
+  `texture.sampler3d_bias_{fixed,float}_fragment` — **2/2 Pass, up from 2/2
+  Fail**. Broader `*.sampler3d_*` sweep (502 cases, every texture-function
+  group against this shape): **10 Pass (up from 8), 264 Fail (down from
+  266), 228 NotSupported (unchanged)** — exactly the expected +2 delta, 0
+  regressions. Also spot-checked `textureclamp`/`texturegradclamp`/
+  `textureoffsetclamp`'s own `sampler3d_*` cases remain `NotSupported`
+  (`ShaderResourceMinLod feature not supported`), confirming this fix does
+  not itself flip `shaderResourceMinLod` (roadmap L66's own still-open
+  scope; it only removes one of several blockers to safely re-measuring
+  that flip).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+  update needed — `Bias`/`MinLodClamp` sampling is core SPIR-V with no
+  gating feature bit, and `shaderResourceMinLod` remains correctly `VK_FALSE`.
+
+## Roadmap/report updates
+
+Struck through roadmap L67(a) with a completion note in the same
+parenthetical style used for L66(a) previously. Added a new
+`VulkanCTSReport.md` session section with this session's real CTS numbers.
+L67(b)/(c)/(d) remain open, unstruck, unchanged from the prior session's
+text.
+
+## What's next
+
+L67(b) (explicit `Grad` sampling for `Plain3D`) is the natural next small
+step in this same chain — independent of (a), could be done in either
+order per the prior session's own note, and now has a real negative test
+(`LeavesAPlain3DSampleGradAlone`, added this session) that will need
+converting to a positive test the same way `LeavesAPlain3DSampleBiasAlone`
+was converted here, once that operand gets real support. L67(c) (blocked
+on the pre-existing `isSupportedOffset` `Plain2D`-only restriction,
+roadmap L33's own scope) and L67(d) (integer-format rejection, correct by
+design) remain out of scope for any single-shape row. L66(c)/(d)/(e) — the
+`Dref`+`Grad` shadow-sampling intrinsic gap, the same `isSupportedOffset`
+restriction from the `shaderResourceMinLod` flip's own perspective, and the
+cross-function same-binding crash — all remain open and untouched this
+session.
