@@ -140,8 +140,8 @@ Can you work on L52 or other prerequisites blocking the L-series milestones?
 > 2D/Cube shapes only in a way this widening contradicts).
 > Vulkan14FeatureInventory.md/VulkanExtensionInventory.md reviewed: no change
 > needed (internal CPU-lowering plumbing only, no new feature/extension surface
-> advertised). Sub-items (b) Bias, (c) samplecmp_clamp's MinLod operand, and (e)
-> the LOD-query intrinsics remain open under this same row; the deferred
-> SampleCmp1D/SampleCmpArray1D counterpart is re-filed as L54, below, per this
-> project's own established L26->L33/L45->L47/L46->L48/L48->L50/L50->L51
-> precedent)
+> advertised). Sub-items (b) Bias and (c) samplecmp_clamp's MinLod operand
+> remain open under this same row; the deferred SampleCmp1D/SampleCmpArray1D
+> counterpart is re-filed as L54, below, and sub-item (e)'s LOD-query intrinsics
+> are now done and re-filed as L57, below, per this project's own established
+> L26->L33/L45->L47/L46->L48/L48->L50/L50->L51 precedent)
