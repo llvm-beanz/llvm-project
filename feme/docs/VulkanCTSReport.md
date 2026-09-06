@@ -27063,3 +27063,108 @@ simply reconfirm what L49's own session already measured.
 bit touched by this documentation-only follow-up;
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
 change needed. No design-doc deviation to record.
+
+## Roadmap L50d: real, nonzero depth-comparison `ConstOffset` for `Plain2D`/`Array2D`
+
+Picked L50 sub-item (d) as this session's scope, in preference to (b)
+(`Bias`, needs a genuinely new real LLVM SPIR-V backend intrinsic --
+`llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`'s own
+`selectSampleCmpIntrinsic`/`selectSampleCmpLevelZeroIntrinsic` already
+select real `llvm.spv.resource.samplecmp{,.clamp}` codegen for genuine
+HLSL-resource-intrinsic lowering, not a feme-internal pseudo-op, so a
+combined `Bias`+`Dref` intrinsic form is a materially bigger, real
+backend change out of scope for one session) since (d) is purely
+feme-internal: `SPIRVToLLVMPatterns.cpp`'s
+`ImageSampleDrefImplicitLodPattern` already threads a `ConstOffset`
+image operand through unconditionally into the
+`llvm.spv.resource.samplecmp`/`.samplecmp.clamp` call; the entire gap
+was in feme's own `SPIRVResourceLowering.cpp` (`isSupportedOffset`
+rejected any nonzero offset for a dref sample outright) and
+`ImageCalls.cpp`/`FeMeRuntimeCPU.c` (no offset parameters existed on
+`createSampleCmp2D`/`createSampleCmpArray2D` or their runtime entry
+points).
+
+**Fix.** `isSupportedOffset` extended with a new `bool AllowArray2D =
+false` parameter (default preserves the existing ordinary-sample call
+site's unchanged behavior -- an *ordinary*, non-comparison `Array2D`
+sample's own offset support remains roadmap L33 future work); the
+depth-comparison call site in `hasOnlySupportedImageUses`/
+`lowerImageAccesses` now passes `true`, accepting a real,
+compile-time-constant offset for `Plain2D` and `Array2D` alike (`Cube`/
+`CubeArray` still require the trivial always-zero case, since SPIR-V
+forbids a real `ConstOffset` against `Dim::Cube`). `createSampleCmp2D`/
+`createSampleCmpArray2D` (`ImageCalls.h`/`.cpp`) and
+`femeCpuImageSampleCmp2DF32`/`femeCpuImageSampleCmpArray2DF32`/
+`femeRTSampleCmp2DAtLevel` (`FeMeRuntimeCPU.c`) all gained a real
+`OffsetX`/`OffsetY` pair, mirroring `createSample2D`'s own roadmap L26
+precedent; `Cube`/`CubeArray` callers of the shared
+`femeRTSampleCmp2DAtLevel` body now pass explicit zero constants.
+
+Along the way, found and fixed a width-checking bug in the first
+implementation attempt: an ordinary (non-dref) sample's own `Offset`
+operand is always 2-wide (matching its own 2-wide `Plain2D` coordinate,
+per `ImageSampleImplicitLodPattern`'s own `OffsetType`), but a
+depth-comparison sample's own `Offset` operand instead mirrors its
+*Dref*-widened coordinate (`ImageSampleDrefImplicitLodPattern`'s own
+`OffsetType` -- 3-wide for `Plain2D`, 4-wide for `Array2D`), so a single
+fixed-width `isCoordN(Offset, 2, ...)` check (correct for the ordinary
+case) incorrectly rejected every real dref offset. Fixed by relaxing the
+width check to "at least 2 elements" (only the first two are ever read
+via `CreateExtractElement(Offset, 0/1)` regardless of shape).
+
+**Tests.** 2 new `ImageSamplingTest` runtime unit tests
+(`ComparisonSamplingNonzeroOffsetShiftsFetchedTexel`,
+`SampleCmpArray2DNonzeroOffsetShiftsFetchedTexel`); 3
+`SPIRVResourceLoweringTest` unit tests
+(`LowersSampleCmpWithNonzeroOffsetToImageSampleCmp`,
+`LowersSampleCmpArray2DWithNonzeroOffsetToImageSampleCmpArray2D`, and a
+new negative `LeavesASampleCmpCubeWithNonzeroOffsetAlone`, replacing the
+now-stale `LeavesASampleCmpWithNonzeroOffsetAlone` whose own premise --
+that a nonzero offset is always rejected -- is no longer true for
+`Plain2D`); 2 new lit tests (`samplecmp_offset`/
+`samplecmp_array2d_offset` in `spirv-resource-lowering-image-samplecmp
+{,-shapes}.ll`). `ninja check-feme` (ccache + assertions, `build2`):
+2577/2636 discovered tests pass, 59 pre-existing `Unsupported`, 0
+`Failed` -- no regressions.
+
+**Real `deqp-vk` re-run.** Ran the full non-`bias` `textureoffset`
+depth-comparison group:
+
+```
+cd /home/dev/dev/VK-GL-CTS/run
+VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+  --deqp-case="dEQP-VK.glsl.texture_functions.textureoffset.*sampler2d*shadow*" \
+  --deqp-log-filename=l50d_offset.qpa
+```
+
+**Result: 20/70 Pass** (up from 0/70 before this fix -- every one of
+these 20 previously left its whole containing function's resource
+handles entirely unrecognized by `collectHandles`, since
+`isSupportedOffset` rejected the nonzero offset outright regardless of
+shape, silently leaving the function's SPIR-V-shaped intrinsics
+unconverted all the way to the CPU JIT rather than failing loudly at
+legalization). All 20 passing cases are `sampler2d{,array}shadow_
+{fragment,vertex}` across all three addressing modes
+(`clamp_to_border`/`clamp_to_edge`/`mirrored{,_repeat}`/`repeat`) --
+exactly the shapes/uses sub-item (d) targets. **5 Fail**: exactly the
+`*_bias_fragment`/`sparse_*_bias_fragment` cases (sub-item (b), a `Bias`
+image operand, deliberately untouched by this fix -- confirmed via this
+same re-run's own `ConvertSPIRVToLLVMPass` legalization error naming the
+real `Bias|ConstOffset` combination as unsupported). **45 NotSupported**,
+for reasons entirely unrelated to this fix: an unadvertised
+depth/stencil image format (`sparse_*` cases and most `*_compute`
+cases), or `VK_KHR_compute_shader_derivatives` not being advertised
+(every remaining `*_compute` case).
+
+**Disposition.** Roadmap **L50 sub-item (d) fixed**, struck through in
+`Roadmap.md` with the remaining sub-items (a), (b), (c), (e) re-filed as
+new roadmap row **L52** (sub-item (f) was already further broken out as
+its own row, L51, in a prior session). `FeMeGraphicsDesign.md` reviewed:
+no deviation to record (`isSupportedOffset`'s own doc comment already
+generically described a `ConstOffset` as "the backend itself folds away
+an all-zero `ConstOffset`" without narrowing this to `Plain2D` only, so
+this widening does not contradict any existing design-doc text).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+change needed (internal CPU-lowering plumbing only, no new
+feature/extension surface advertised).
