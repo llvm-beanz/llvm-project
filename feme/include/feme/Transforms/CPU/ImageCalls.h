@@ -508,13 +508,11 @@ struct MatchedImageCall {
   /// null for `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32`, which
   /// always name their mip explicitly.
   llvm::Value *UseExplicitLod = nullptr;
-  /// `Sample2D`/`SampleCube`/`SampleCubeArray` (roadmap L58/L60(a)): SPIR-V's
-  /// own `Bias` image operand, an additional term added to the
-  /// implicit-LOD footprint's own raw LOD before the sampler's own
-  /// bias/clamp runs (see `createSample2D`'s doc); null for every other
-  /// kind, including `Sample2DArray`, which has no real implicit-LOD
-  /// footprint of its own to add a bias to (a pre-existing limitation this
-  /// row does not change).
+  /// `Sample2D`/`SampleCube`/`SampleCubeArray`/`Sample2DArray` (roadmap
+  /// L58/L60(a)): SPIR-V's own `Bias` image operand, an additional term
+  /// added to the implicit-LOD footprint's own raw LOD before the
+  /// sampler's own bias/clamp runs (see `createSample2D`'s doc); null for
+  /// every other kind.
   llvm::Value *Bias = nullptr;
   /// `SampleCmp2D`/`SampleCmpArray2D`/`SampleCmpCube`/`SampleCmpCubeArray`/
   /// `SampleCmp1D`/`SampleCmpArray1D` (roadmap L54) only: the
@@ -528,12 +526,11 @@ struct MatchedImageCall {
   /// `isSupportedOffset`'s comment in `SPIRVResourceLowering.cpp`).
   llvm::Value *OffsetX = nullptr;
   llvm::Value *OffsetY = nullptr;
-  /// `Sample2D`/`SampleCube`/`SampleCubeArray` (roadmap L26/L60(a)): the
-  /// `MinLod` clamp floor on the implicit LOD (see `createSample2D`'s
-  /// doc); null for every other kind, including
-  /// `SampleCmp2D`/`Sample2DArray`, which `lowerImageAccesses` never
-  /// threads a real clamp value through (see its own `HasMinLodClamp`
-  /// shape restriction).
+  /// `Sample2D`/`SampleCube`/`SampleCubeArray`/`Sample2DArray` (roadmap
+  /// L26/L60(a)): the `MinLod` clamp floor on the implicit LOD (see
+  /// `createSample2D`'s doc); null for every other kind, including
+  /// `SampleCmp2D`, which `lowerImageAccesses` never threads a real clamp
+  /// value through (see its own `HasMinLodClamp` shape restriction).
   llvm::Value *MinLodClamp = nullptr;
   /// `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32` only (roadmap
   /// F8c/H19g/H19m): the multisample index a `subpassLoad`'s
@@ -720,13 +717,25 @@ llvm::CallInst *createStore2DArrayMSI32(llvm::IRBuilderBase &Builder,
                                         llvm::Value *Texel, llvm::Value *Mask,
                                         const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.sample.2darray.v4f32` call (roadmap H7b-a).
+/// Builds a `feme.cpu.image.sample.2darray.v4f32` call (roadmap H7b-a). \p
+/// DUdX/\p DUdY/\p DVdX/\p DVdY (roadmap L60(a)) mirror `createSample2D`'s
+/// own screen-space partial-derivative operands -- pass zero constants for
+/// a caller with none to give (a non-fragment stage, or an explicit-LOD
+/// sample). \p Bias/\p MinLodClamp (roadmap L60(a)) mirror
+/// `createSample2D`'s own `Bias`/`MinLodClamp` parameters -- pass a zero
+/// constant/negative infinity, respectively, for a caller with neither to
+/// give. Unlike `createSample2D`, there is no `ConstOffset` operand here --
+/// an ordinary (non-comparison) `Array2D` sample's own offset lowering
+/// remains future work (roadmap L33).
 llvm::CallInst *
 createSample2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
                     llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
                     llvm::Value *U, llvm::Value *V, llvm::Value *ArrayLayer,
-                    llvm::Value *Lod, llvm::Value *UseExplicitLod,
-                    llvm::Value *Mask, const llvm::Twine &Name = "");
+                    llvm::Value *DUdX, llvm::Value *DUdY, llvm::Value *DVdX,
+                    llvm::Value *DVdY, llvm::Value *Lod,
+                    llvm::Value *UseExplicitLod, llvm::Value *Bias,
+                    llvm::Value *MinLodClamp, llvm::Value *Mask,
+                    const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.2darray.v4f32` call (roadmap H7b-a). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.

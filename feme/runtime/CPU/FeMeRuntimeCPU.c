@@ -5483,21 +5483,31 @@ femeRTRoundClampLayer(uint32_t Count, float Value) {
 
 // `feme.cpu.image.sample.2darray.v4f32` (roadmap H7b-a): the
 // `Texture2DArray` counterpart of `feme.cpu.image.sample.2d.v4f32` above
-// -- identical (U, V) filtering, plus `ArrayLayer` (SPIR-V's own arrayed-
-// sample coordinate convention: a float, rounded to nearest and clamped
-// to a valid layer by `femeRTRoundClampLayer` above).
+// -- identical (U, V) filtering (roadmap L60(a): now including
+// `femeCpuImageSample2DV4F32`'s own screen-space derivative/anisotropic-
+// footprint math via `femeRTPlanImplicitLod`, and its `Bias`/`MinLodClamp`
+// operands, unlike this function's own pre-L60(a) `femeRTComputeClampedLod`-
+// only, always-single-tap implementation), plus `ArrayLayer` (SPIR-V's own
+// arrayed-sample coordinate convention: a float, rounded to nearest and
+// clamped to a valid layer by `femeRTRoundClampLayer` above). Unlike
+// `femeCpuImageSample2DV4F32`, there is no `ConstOffset` operand here (an
+// ordinary Array2D sample's own offset lowering remains future work,
+// roadmap L33) -- every tap always reads at a zero texel offset.
 FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
-    float ArrayLayer, float Lod, _Bool UseExplicitLod,
+    float ArrayLayer, float DUdX, float DUdY, float DVdX, float DVdY,
+    float Lod, _Bool UseExplicitLod, float Bias, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.2darray.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
-    float ArrayLayer, float Lod, _Bool UseExplicitLod, _Bool Mask) {
+    float ArrayLayer, float DUdX, float DUdY, float DVdX, float DVdY,
+    float Lod, _Bool UseExplicitLod, float Bias, float MinLodClamp,
+    _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -5507,12 +5517,37 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
-                                            /*InstructionMinLod=*/-__builtin_inff(),
-                                            /*InstructionBias=*/0.0f);
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
-  return femeRTSampleFiltered2D(&Img, &Samp, U, V, Layer, ClampedLod, /*OffsetX=*/0,
-                              /*OffsetY=*/0);
+
+  if (UseExplicitLod) {
+    // Mirrors `femeCpuImageSample2DV4F32`'s own explicit-LOD case:
+    // `MinLodClamp`/`Bias` are always no-ops (`-INFINITY`/`0.0f`)
+    // whenever `UseExplicitLod` is set.
+    float ClampedLod = femeRTComputeClampedLod(Lod, /*UseExplicitLod=*/1,
+                                               &Samp, MinLodClamp, Bias);
+    return femeRTSampleFiltered2D(&Img, &Samp, U, V, Layer, ClampedLod,
+                                  /*OffsetX=*/0, /*OffsetY=*/0);
+  }
+
+  FemeRTImplicitLodPlan Plan = femeRTPlanImplicitLod(
+      &Img, &Samp, DUdX, DUdY, DVdX, DVdY, MinLodClamp, Bias);
+  if (Plan.TapCount <= 1)
+    return femeRTSampleFiltered2D(&Img, &Samp, U, V, Layer, Plan.ClampedLod,
+                                  /*OffsetX=*/0, /*OffsetY=*/0);
+
+  // Anisotropic footprint: mirrors `femeCpuImageSample2DV4F32`'s own
+  // multi-tap loop, but reading the same array `Layer` for every tap.
+  FemeRTv4f32 Sum = {0.0f, 0.0f, 0.0f, 0.0f};
+  float FirstOffset = -0.5f * (float)(Plan.TapCount - 1);
+  for (uint32_t Tap = 0; Tap != Plan.TapCount; ++Tap) {
+    float Offset = FirstOffset + (float)Tap;
+    float TapU = U + Offset * Plan.StepU;
+    float TapV = V + Offset * Plan.StepV;
+    Sum += femeRTSampleFiltered2D(&Img, &Samp, TapU, TapV, Layer,
+                                  Plan.ClampedLod, /*OffsetX=*/0,
+                                  /*OffsetY=*/0);
+  }
+  return Sum * (1.0f / (float)Plan.TapCount);
 }
 
 // `feme.cpu.image.sample.1d.v4f32` (roadmap L52a): the ordinary

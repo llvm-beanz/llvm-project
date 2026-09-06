@@ -504,9 +504,32 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
       Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
       Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
+      // Roadmap L60(a): mirror Plain2D's own derivative synthesis above
+      // -- Array2D now threads a real screen-space derivative pair
+      // through too.
+      SampleDerivatives D =
+          IsSample ? getOrSynthesizeSample2DDerivatives(
+                        Builder, *CI->getFunction(), U, V)
+                   : SampleDerivatives{ConstantFP::get(Builder.getFloatTy(),
+                                                       0.0),
+                                      ConstantFP::get(Builder.getFloatTy(),
+                                                       0.0),
+                                      ConstantFP::get(Builder.getFloatTy(),
+                                                       0.0),
+                                      ConstantFP::get(Builder.getFloatTy(),
+                                                       0.0)};
+      // DXIL's own `Texture2DArray::SampleBias`/clamp overloads are not
+      // threaded through this pass yet (roadmap L60(a) is SPIR-V-only so
+      // far) -- pass a zero `Bias` constant and a negative-infinity
+      // (no-op) `MinLodClamp` constant, mirroring Plain2D's own no-op
+      // constants above.
+      Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                     /*Negative=*/true);
+      Value *ZeroBias = ConstantFP::get(Builder.getFloatTy(), 0.0);
       NewCall = createSample2DArray(Builder, Env, ImageIndex, SamplerIndex, U,
-                                    V, Layer, Lod, UseExplicitLod, Mask,
-                                    CI->getName());
+                                    V, Layer, D.DUdX, D.DUdY, D.DVdX, D.DVdY,
+                                    Lod, UseExplicitLod, ZeroBias,
+                                    NoMinLodClamp, Mask, CI->getName());
       break;
     }
     case ImageShape::Cube: {

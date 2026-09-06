@@ -970,40 +970,42 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
         return false; // No filtered sample over an integer-channel image.
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      // Roadmap L26/L60(a): `lowerImageAccesses` only threads a `MinLod`
-      // clamp through `Plain2D`'s/`Cube`'s/`CubeArray`'s own
-      // `createSample2D`/`createSampleCube`/`createSampleCubeArray`
-      // calls -- `Array2D` goes through a distinct helper
-      // (`createSample2DArray`) with no clamp operand of its own, so a
-      // `sample.clamp` against that shape is left unlowered rather than
-      // silently dropping the clamp.
+      // Roadmap L26/L60(a): `lowerImageAccesses` threads a `MinLod`
+      // clamp through `Plain2D`'s/`Cube`'s/`CubeArray`'s/`Array2D`'s own
+      // `createSample2D`/`createSampleCube`/`createSampleCubeArray`/
+      // `createSample2DArray` calls -- every other shape (`Plain1D`/
+      // `Array1D`/`Plain3D`) is left unlowered rather than silently
+      // dropping the clamp.
       if (HasMinLodClamp && Shape != ImageShape::Plain2D &&
-          Shape != ImageShape::Cube && Shape != ImageShape::CubeArray)
+          Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
+          Shape != ImageShape::Array2D)
         return false;
       // Roadmap L58/L60(a): same restriction for `Bias`, mirroring
-      // `HasMinLodClamp` immediately above -- only `Plain2D`'s/`Cube`'s/
-      // `CubeArray`'s own `createSample2D`/`createSampleCube`/
-      // `createSampleCubeArray` calls thread a real `Bias` operand
-      // through `lowerImageAccesses`; `Array2D`/`Plain1D`/`Array1D` (none
-      // of which have a real implicit-LOD footprint of their own to add
-      // a bias to) are left unlowered rather than silently dropping the
-      // bias.
+      // `HasMinLodClamp` immediately above -- `Plain2D`'s/`Cube`'s/
+      // `CubeArray`'s/`Array2D`'s own `createSample2D`/`createSampleCube`/
+      // `createSampleCubeArray`/`createSample2DArray` calls all thread a
+      // real `Bias` operand through `lowerImageAccesses`; `Plain1D`/
+      // `Array1D` (neither of which have a real implicit-LOD footprint of
+      // their own to add a bias to) are left unlowered rather than
+      // silently dropping the bias.
       if (HasBias && Shape != ImageShape::Plain2D &&
-          Shape != ImageShape::Cube && Shape != ImageShape::CubeArray)
+          Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
+          Shape != ImageShape::Array2D)
         return false;
       // Roadmap L59/L60(a): same restriction for `Grad`, mirroring
-      // `HasBias` immediately above -- only `Plain2D`'s/`Cube`'s/
-      // `CubeArray`'s own `createSample2D`/`createSampleCube`/
-      // `createSampleCubeArray` calls have a real screen-space
-      // derivative pair to feed a caller-supplied `Grad` into (see
-      // `lowerImageAccesses`'s own `HasGrad` handling below, which reuses
-      // exactly the same `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DDirXdX`/... operands
-      // `getOrSynthesizeSample2DDerivatives`/
+      // `HasBias` immediately above -- `Plain2D`'s/`Cube`'s/`CubeArray`'s/
+      // `Array2D`'s own `createSample2D`/`createSampleCube`/
+      // `createSampleCubeArray`/`createSample2DArray` calls all have a
+      // real screen-space derivative pair to feed a caller-supplied
+      // `Grad` into (see `lowerImageAccesses`'s own `HasGrad` handling
+      // below, which reuses exactly the same `DUdX`/`DUdY`/`DVdX`/`DVdY`/
+      // `DDirXdX`/... operands `getOrSynthesizeSample2DDerivatives`/
       // `getOrSynthesizeSampleCubeDerivatives` already populate for an
       // implicit-LOD sample, just with the caller's own real values
       // instead of a synthesized or zeroed one).
       if (HasGrad && Shape != ImageShape::Plain2D &&
-          Shape != ImageShape::Cube && Shape != ImageShape::CubeArray)
+          Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
+          Shape != ImageShape::Array2D)
         return false;
       unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
       // Roadmap L59: `Grad`'s own `dPdx`/`dPdy` operands (indices 3, 4)
@@ -2347,9 +2349,44 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         }
         case ImageShape::Array2D: {
           Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{2});
-          NewCall = createSample2DArray(Builder, Env, ImageIndex, SamplerIndex,
-                                       C0, C1, ArrayLayer, Lod,
-                                       ExplicitLodFlag, Mask, CI->getName());
+          // Roadmap L60(a): same derivative/Bias/MinLodClamp handling as
+          // Plain2D above, reusing the same `getOrSynthesizeSample2D
+          // Derivatives` helper (an arrayed sample's own (C0, C1)
+          // face-local coordinate is differentiated identically to a
+          // non-arrayed one -- the array layer itself is never
+          // differentiated, mirroring CubeArray's own layer-agnostic
+          // derivative handling). Unlike Plain2D, there is no real
+          // `ConstOffset` operand to extract yet (an ordinary Array2D
+          // sample's own offset lowering remains future work, roadmap
+          // L33).
+          SampleDerivatives D =
+              HasGrad
+                  ? SampleDerivatives{
+                        Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
+                        Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
+                        Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
+                        Builder.CreateExtractElement(GradDPdy, uint64_t{1})}
+              : !ExplicitLod
+                  ? getOrSynthesizeSample2DDerivatives(
+                        Builder, *CI->getFunction(), C0, C1)
+                  : SampleDerivatives{ConstantFP::get(Builder.getFloatTy(),
+                                                      0.0),
+                                     ConstantFP::get(Builder.getFloatTy(),
+                                                      0.0),
+                                     ConstantFP::get(Builder.getFloatTy(),
+                                                      0.0),
+                                     ConstantFP::get(Builder.getFloatTy(),
+                                                      0.0)};
+          Value *MinLodClamp =
+              HasMinLodClamp
+                  ? CI->getArgOperand(
+                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
+                  : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                            /*Negative=*/true);
+          NewCall = createSample2DArray(
+              Builder, Env, ImageIndex, SamplerIndex, C0, C1, ArrayLayer,
+              D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod, ExplicitLodFlag, Bias,
+              MinLodClamp, Mask, CI->getName());
           break;
         }
         case ImageShape::Cube: {
