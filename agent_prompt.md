@@ -42,98 +42,94 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you work on L47 or other prerequisites blocking the L-series milestones?
+Can you work on L50 or other prerequisites blocking the L-series milestones?
 
-> **L45's own fix clears the uniform-diamond-inside-a-region diagnostic, but the
-> real `task_mesh` cases in the same CTS sweep L45 just fixed the `mesh_only`
-> half of now fail on a distinct, later blocker**: `"JIT session error: Symbols
-> not found: [ spirv_var_20 ]"` for
-> `dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.task_mesh.inside_rp.single_view.{only_primary,with_secondary}`
-> -- an ORC JIT link-time failure (not a diagnosed `vkCreateGraphicsPipelines`
-> gap), confirmed via a real pre-JIT IR capture (a temporary
-> `FEME_DEBUG_DUMP_PRE_JIT_IR`-gated dump added to
-> `feme/lib/Target/CPU/CompiledStage.cpp` right before `JIT->addIRModule`,
-> reverted before committing): `@spirv_var_20` is an `external` (never-defined)
-> `addrspace(14)` (`TaskPayloadWorkgroupEXT`) global of the payload's own
-> declared type, `{ [24 x i32], i32 }`, still referenced directly by a handful
-> of per-lane-suffixed (`.lane4.i`/`.lane6.i`/`.lane8.i`/`.lane10.i`)
-> `getelementptr`s -- the `SIMDizePass`-widened, post-inlining shape of a masked
-> per-lane memory op, never converted into a
-> `feme.stage.task.payload.load`/`.store` call at all (both of which properly
-> resolve to a real runtime `Payload` pointer via
-> `feme::cpu::TaskPayloadWrapper.cpp`'s
-> `lowerTaskPayloadStore`/`feme::cpu::MeshOutputWrapper.cpp`'s
-> `lowerMeshTaskPayloadLoad` -- neither is the culprit; the call these two lower
-> never got created here in the first place). Root-caused to the real CTS
-> shader's own source (`vktMeshShaderQueryTestsEXT.cpp`):
-> `td.branch[gl_LocalInvocationIndex] = ...`, a **per-invocation dynamic** array
-> index into the payload, not the compile-time-constant offset every existing
-> task-payload code path assumes -- `feme::graphics::CanonicalizeStagePass`'s
-> own `isTaskPayloadGlobal`/`loadTaskPayloadValue`/`storeTaskPayloadValue`
-> (`CanonicalizeStage.cpp`) only ever resolves a payload access's address to a
-> literal `uint64_t Offset` (see their own doc comments), so a `getelementptr`
-> chain with one dynamically-indexed component is never recognized at all,
-> leaving the raw `addrspace(14)` load/store on the imported global completely
-> untouched all the way through `SIMDizePass`'s widening to JIT link time, where
-> the global -- never intended to survive this far, always meant to be fully
-> virtualized away into a real `Payload` buffer -- has no definition anywhere
-> for the JIT to resolve. Needs its own real design/implementation pass,
-> materially bigger than L45's own scope (a genuinely different pipeline phase,
-> `CanonicalizeStage.cpp`, not `EntryWrapper.cpp`): (1) a new dynamic-offset
-> `feme.stage.task.payload.load`/`.store` call form taking a runtime `Value`
-> byte offset (today's form only takes a literal `uint64_t`), (2) teaching
-> `CanonicalizeStage.cpp`'s own `BaseAndOffset`-style GEP-chain resolution to
-> recognize a chain with exactly one dynamically-indexed array component feeding
-> a task-payload access and emit this new call form instead of declining, (3)
-> new lowering support for the dynamic-offset call form in both
-> `TaskPayloadWrapper.cpp` (store side) and `MeshOutputWrapper.cpp` (load side,
-> generalizing `lowerMeshTaskPayloadLoad`'s current
-> single-scalar-broadcast-from-a-constant-offset shape to a per-lane
-> potentially-different dynamic offset instead), (4) new lit/unit test coverage
-> per phase touched, and (5) a real `deqp-vk` re-run of the 2 named `task_mesh`
-> cases (and a broader sweep of any other CTS case using a
-> per-invocation-indexed task payload) to confirm the fix  (partially fixed: the
-> `CanonicalizeStagePass`-side half of this row's own fix is done and tested --
-> `feme::graphics::CanonicalizeStagePass`'s
-> `isTaskPayloadGlobal`/`loadTaskPayloadValue`/`storeTaskPayloadValue`
-> (`CanonicalizeStage.cpp`) now recognize a dynamically-indexed task-payload
-> access (a new `getTaskPayloadDynamicOffsetAccess` helper, mirroring the
-> existing `getDynamicRowIndexedAccess`'s (roadmap H7w) restricted GEP shape --
-> constant zero first index, all-but-one-final index constant, exactly one final
-> non-constant array-selecting index -- but computing a real dynamic `i32` byte
-> offset `Value*` directly rather than a signature-element tuple, since a task
-> payload has no per-member `ElementIDs` slice), lowering both load and store
-> sides into a new `Value*`-offset overload of
-> `createStageTaskPayloadLoad`/`Store` (`StageOps.h`/`.cpp`; the pre-existing
-> `uint64_t`-offset overloads now delegate to these, confirmed byte-for-byte
-> identical for every already-passing constant-offset case via `IRBuilder`'s own
-> constant folder). 3 new `CanonicalizeStageTest` unit tests (2 positive:
-> dynamic store/load; 1 negative, confirming a non-*final* dynamic index is
-> still correctly declined, matching `getDynamicRowIndexedAccess`'s own
-> precedent restriction). `ninja check-feme`: 2561/2620 discovered, 59
-> pre-existing `Unsupported`, 0 `Failed` (up by exactly the 3 new tests this
-> phase adds); `FeMeTransformsGraphicsTests` (66/66), `FeMeCoreTests` (78/78),
-> and `FeMeTransformsCPUTests` (306/306) all pass with no regressions. This
-> alone does **not** yet fix the real CTS case: a direct, temporary
-> investigative unit test (mirroring `TaskPayloadWrapperTest`'s own
-> `LowersPayloadStore`, run through the real
-> `LinearizePass`->`SIMDizePass`->`WaveLoweringPass`->`TaskPayloadWrapperPass`
-> pipeline with a genuinely divergent offset fed by `llvm.dx.thread.id`,
-> reverted before committing) confirms this row's own prediction exactly:
-> `TaskPayloadWrapper.cpp`'s `lowerTaskPayloadStore` still hits a fatal
-> `cast<ConstantInt>` assertion failure once a real dynamic offset reaches it,
-> since every downstream wave-body-lowering phase between
-> `CanonicalizeStagePass` and this point (`Linearize.cpp`, `SIMDize.cpp`,
-> `StageMaskCalls.{h,cpp}`, `TaskPayloadWrapper.cpp`, `MeshOutputWrapper.cpp`)
-> still hard-assumes a task-payload offset is a single compile-time constant,
-> identical for every lane -- confirmed via code inspection of each phase's own
-> offset-handling (`SIMDize.cpp`'s
-> `widenMaskedTaskPayloadStore`/`widenStageOp`'s `FirstOperandIsElementID` keep
-> the offset operand deliberately unwidened; `StageMaskCalls.cpp`'s
-> `getOrInsertMaskedTaskPayloadStore` hard-codes the offset parameter's
-> `FunctionType` as scalar `i32`;
-> `TaskPayloadWrapper.cpp`/`MeshOutputWrapper.cpp` both unconditionally
-> `cast<ConstantInt>` it). Filed the remaining, materially larger,
-> genuinely-per-lane-divergent-offset widening/lowering scope as a new roadmap
-> row, **L49**, per this project's own established L26->L33/L45->L47/L46->L48
-> precedent, rather than attempting it in this same row)
+> **L48's own Array2D/Cube/CubeArray depth-comparison sampling slice leaves 5
+> distinct, independently-sized gaps still open**, broken down here rather than
+> re-attempted together, per this project's own established precedent: (a)
+> **`Plain1D`/`Array1D` shadow sampling** (`sampler1d{,array}shadow_*`) has no
+> ordinary (non-comparison) sampled-image path on the CPU target at all yet for
+> either shape -- needs its own new 1D-sampling infrastructure
+> (`ImageCallKind::Sample1D`/`Array1D`-equivalents,
+> `createSample1D`/`createSample1DArray`, matching runtime entry points)
+> *before* a `SampleCmp1D`/`SampleCmpArray1D` counterpart is even possible, a
+> materially bigger prerequisite than any other item in this row; (b) **a `Bias`
+> image operand** (`sampler{2d,cube}shadow_bias_fragment` and siblings) fails at
+> `ConvertSPIRVToLLVMPass` legalization itself, before
+> `SPIRVResourceLowering.cpp` ever sees it --
+> `ImageSampleDrefImplicitLodPattern`'s own `SupportedMask`
+> (`SPIRVToLLVMPatterns.cpp`) only allows `ConstOffset`/`MinLod`, not `Bias`,
+> and no `llvm.spv.resource.samplecmp*` intrinsic form threads an explicit bias
+> through today, unlike the ordinary
+> `spv_resource_samplebias`/`.samplebias_clamp` family already handled for a
+> non-dref sample -- needs its own new intrinsic-lowering design; (c)
+> **`samplecmp_clamp`'s own trailing `MinLod` clamp operand** (not yet confirmed
+> present in any real failing CTS case measured so far) needs each
+> `createSampleCmp*` builder extended with a `MinLodClamp` parameter, mirroring
+> `createSample2D`'s own roadmap L26 precedent; (d) **a real, nonzero
+> depth-comparison `ConstOffset`** (also not yet confirmed present in a real
+> failing case) needs `createSampleCmp2D`/`createSampleCmpArray2D` extended with
+> `OffsetX`/`OffsetY` parameters, mirroring the same L26 precedent
+> (`Cube`/`CubeArray` have no `ConstOffset` concept in SPIR-V at all, so need no
+> equivalent); (e) **the entirely separate LOD-query intrinsics**
+> (`spv_resource_calculate_lod`/`.calculate_lod_unclamped`, the 190-case
+> `texturequerylod` group, confirmed unaffected at 0/190 by both L48 and this
+> row's own re-runs) have no CPU-lowering consumer at all on either the SPIR-V
+> or DXIL frontend and need a genuinely new runtime design: a real screen-space
+> coordinate derivative (`dFdx`/`dFdy`) threaded through to a query call,
+> needing its own design pass to confirm where a per-invocation derivative is
+> (or could be made) available in this target's per-lane execution model; (f)
+> **a newly-discovered `CubeArray`-shadow rendering bug**
+> (`samplercubearrayshadow_fragment`, found by L48's own CTS re-run):
+> `vkCreateGraphicsPipelines`/rendering both now succeed, but the rendered image
+> mismatches the reference in one localized 32x32-pixel screen-space region
+> (pixel bbox `x:[96,127] y:[0,31]` of a 128x128 image) -- confirmed not a
+> regression of the underlying cube-face-selection or array-layer-rounding math
+> (both independently proven correct by the still-passing ordinary
+> `samplercubearray_{fixed,float}_fragment` and shadow
+> `samplercubeshadow_fragment` CTS cases, which each reuse one but not both of
+> `femeCpuImageSampleCmpCubeArrayF32`'s own code paths), so the bug is specific
+> to some interaction between the two only present in the combined
+> `CubeArray`+dref-compare path; needs a real IR/pixel-level reduction of this
+> exact case to isolate (e.g. a temporary per-pixel debug dump of the selected
+> face/layer/mip-level triple compared against the reference renderer's own, the
+> same technique this project's H6/H8/H9/L-series chains have used throughout).
+> **Update (this session):** performed exactly that real per-sample debug-dump
+> reduction (a temporary `FEME_DEBUG_CUBEARRAY_CMP`-gated `fprintf` in
+> `femeCpuImageSampleCmpCubeArrayF32`/`femeRTSampleCmp2DAtLevel`, reverted
+> before committing) against a real re-run of this exact CTS case, and it
+> conclusively **rules out every part of `femeCpuImageSampleCmpCubeArrayF32`'s
+> own sampling math as the cause**: (i) face/layer selection
+> (`femeRTSelectCubeFace`/`femeRTRoundClampLayer`) matches VK-GL-CTS's own
+> `TextureCubeArrayView::selectLayer`/`getCubeArrayFaceIndex` formulas exactly
+> (confirmed by independent reading of `tcuTexture.cpp`); (ii) the implicit LOD
+> is always clamped to level 0 on *both* sides (this CTS case's own real
+> `computeLodFromDerivates` value, hand-derived from its
+> `Vec4(-1,-1,1.01,-0.5)`..`Vec4(1,1,1.01,1.5)` coordinate range and the array's
+> 64x64 face size, comes out *negative* -- a magnifying, not minifying,
+> footprint -- so the real reference renderer clamps to level 0 the same way our
+> own hardcoded-`Lod=0` dref-sample path does; this is *not* the same "hardcoded
+> Lod=0" limitation named in sub-item (e), since it happens to be a no-op here
+> on both sides); (iii) the fetched texel content is bit-for-bit correct at
+> every one of 17,408 real logged samples against an independent Python
+> re-implementation of VK-GL-CTS's own `fillWithGrid`/`layerCorr`/corner-forcing
+> fill algorithm (the only 4 apparent "mismatches" were the deliberate
+> forced-identical-corner-texel special case, not real errors); (iv) the
+> depth-compare (`femeRTApplyCompare`, `VkCompareOp::LESS` here) is the same
+> shared, already-proven-correct helper `samplercubeshadow_fragment` (passing)
+> uses. Since every piece of the *sampling* math is now proven correct against
+> the real reference formulas, the remaining, now much more precisely scoped,
+> candidate is **outside this function entirely**: most likely a
+> rasterizer/vertex-attribute-interpolation discrepancy specific to this test's
+> 4-wide `texCoord` (whose `w` component doubles as both the array-layer
+> selector *and* the depth-compare reference value, a combination no other
+> shadow-sampling CTS case in this group exercises), localized to one of the
+> full-screen quad's two triangles. This is a materially different,
+> cross-cutting scope (attribute interpolation/rasterization, not
+> `SPIRVResourceLowering.cpp`/`FeMeRuntimeCPU.c`'s image-sampling code) from
+> anything named in this row, so it is broken out as its own row, **L51**,
+> below, rather than continuing to file it under this already-large (a)-(f)
+> breakdown. Each of (a)-(f) should be scoped and fixed as its own small,
+> independently-committed, independently-CTS-measured row rather than attempted
+> together, per this project's own established precedent (L26->L33, L45->L47,
+> L46->L48)
