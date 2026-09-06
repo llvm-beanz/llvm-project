@@ -5714,15 +5714,348 @@ femeRTSelectCubeFace(float X, float Y, float Z) {
   return R;
 }
 
+// (Roadmap L53) Vulkan's own spec-mandated default cube-map filtering
+// behaviour ("seamless cube map filtering," 16.3.3) blends a `LINEAR`
+// bilinear tap that falls just outside a face's own `[0, size)` bounds
+// with its true geometric neighbor -- the adjacent face across that
+// shared cube edge -- rather than clamping it back onto the same face's
+// own edge texel the way a plain 2D image's `ClampToEdge` address mode
+// would. This project has no way to opt out (`VK_EXT_non_seamless_cube_map`,
+// the only spec-defined opt-out, is `Not implemented` per
+// `VulkanExtensionInventory.md`), so seamless filtering is applied
+// unconditionally below, with no new per-sampler descriptor bit needed.
+//
+// `femeRTRemapCubeEdgeCoords` mirrors VK-GL-CTS's own reference oracle
+// (`tcuTexture.cpp`'s `remapCubeEdgeCoords`), re-derived here against
+// `femeRTSelectCubeFace`'s own face numbering (Vulkan's `+X,-X,+Y,-Y,
+// +Z,-Z` cube-array-layer order, faces 0-5) and `U`/`V` sign convention,
+// rather than reused verbatim (`tcuTexture.cpp`'s own internal
+// `CubeFace` enum uses a different face order and per-face sign
+// convention). Given a face and an integer texel coordinate that may
+// fall outside `[0, Size)` in one or both axes (always by exactly one
+// texel in each axis here, since a bilinear tap is never more than one
+// texel beyond a face's own bounds and `ConstOffset` is never present
+// against a `Cube`/`CubeArray` image -- SPIR-V forbids it outright, see
+// roadmap L52's own review), this resolves the correct neighboring face
+// and remapped in-bounds coordinate. If both axes are out of bounds --
+// a tap that falls off the corner of the cube, shared by three faces
+// with no single unique neighbor -- `Ambiguous` is set and `Face`/`X`/`Y`
+// are left unspecified; the caller resolves that corner tap by averaging
+// the other three, mirroring VK-GL-CTS's own recommended (not
+// spec-required) behaviour.
+//
+// The face-to-canonical-3D-coordinate mapping below (`Cx`/`Cy`/`Cz`,
+// each spanning `[0, Size)` when in-bounds, one axis always pinned to
+// `0` or `Size - 1` per face) is derived directly from
+// `femeRTSelectCubeFace`'s own forward formulas above (e.g. face `0`
+// (`+X`)'s `U = -Z / Major`, `V = -Y / Major` inverts to `Cz = Size - 1
+// - X`, `Cy = Size - 1 - Y`, with `Cx` pinned to `Size - 1`), then
+// re-inverted for whichever neighboring face's own canonical formula the
+// single out-of-bounds axis identifies.
+typedef struct {
+  uint32_t Face;
+  int32_t X, Y;
+  _Bool Ambiguous;
+} FemeRTCubeEdgeCoords;
+
+__attribute__((always_inline)) static FemeRTCubeEdgeCoords
+femeRTRemapCubeEdgeCoords(uint32_t Face, int32_t X, int32_t Y, int32_t Size) {
+  _Bool XIn = X >= 0 && X < Size;
+  _Bool YIn = Y >= 0 && Y < Size;
+  FemeRTCubeEdgeCoords R;
+  if (XIn && YIn) {
+    R.Face = Face;
+    R.X = X;
+    R.Y = Y;
+    R.Ambiguous = 0;
+    return R;
+  }
+  if (!XIn && !YIn) {
+    R.Face = Face;
+    R.X = 0;
+    R.Y = 0;
+    R.Ambiguous = 1;
+    return R;
+  }
+  R.Ambiguous = 0;
+  int32_t Cx = 0, Cy = 0, Cz = 0;
+  switch (Face) {
+  case 0: // +X.
+    Cx = Size - 1;
+    Cy = Size - 1 - Y;
+    Cz = Size - 1 - X;
+    break;
+  case 1: // -X.
+    Cx = 0;
+    Cy = Size - 1 - Y;
+    Cz = X;
+    break;
+  case 2: // +Y.
+    Cy = Size - 1;
+    Cx = X;
+    Cz = Y;
+    break;
+  case 3: // -Y.
+    Cy = 0;
+    Cx = X;
+    Cz = Size - 1 - Y;
+    break;
+  case 4: // +Z.
+    Cz = Size - 1;
+    Cx = X;
+    Cy = Size - 1 - Y;
+    break;
+  default: // -Z (5).
+    Cz = 0;
+    Cx = Size - 1 - X;
+    Cy = Size - 1 - Y;
+    break;
+  }
+  if (Cx == -1) {
+    R.Face = 1; // -X.
+    R.Y = Size - 1 - Cy;
+    R.X = Cz;
+  } else if (Cx == Size) {
+    R.Face = 0; // +X.
+    R.Y = Size - 1 - Cy;
+    R.X = Size - 1 - Cz;
+  } else if (Cy == -1) {
+    R.Face = 3; // -Y.
+    R.X = Cx;
+    R.Y = Size - 1 - Cz;
+  } else if (Cy == Size) {
+    R.Face = 2; // +Y.
+    R.X = Cx;
+    R.Y = Cz;
+  } else if (Cz == -1) {
+    R.Face = 5; // -Z.
+    R.X = Size - 1 - Cx;
+    R.Y = Size - 1 - Cy;
+  } else { // Cz == Size (the only remaining case for a single
+           // out-of-bounds axis).
+    R.Face = 4; // +Z.
+    R.X = Cx;
+    R.Y = Size - 1 - Cy;
+  }
+  return R;
+}
+
+// Fetches one of the (up to) four texels a seamless cube bilinear tap
+// blends, remapping across a face edge via `femeRTRemapCubeEdgeCoords`
+// above when `(X, Y)` falls outside `BaseFace`'s own bounds. `LayerBase`
+// is `0` for a plain `Cube` image, or `CubeIndex * 6` for a `CubeArray`
+// element (mirroring `femeCpuImageSampleCubeArrayV4F32`'s own `Layer`
+// computation), so the remapped face's own array layer stays within the
+// same cube array element. Sets `*Ambiguous` and returns an unspecified
+// value for the corner (both-axes-out-of-bounds) case; the caller
+// resolves it afterward.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTFetchCubeSeamlessTexel(const FemeRTImageDescriptor *Img, uint32_t Level,
+                             uint32_t LayerBase, uint32_t BaseFace, int32_t X,
+                             int32_t Y, int32_t Size, _Bool *Ambiguous) {
+  FemeRTCubeEdgeCoords C = femeRTRemapCubeEdgeCoords(BaseFace, X, Y, Size);
+  if (C.Ambiguous) {
+    *Ambiguous = 1;
+    FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+    return Zero;
+  }
+  *Ambiguous = 0;
+  static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  return femeRTFetchTexel2D(Img, Level, LayerBase + C.Face, C.X, C.Y,
+                           /*Sample=*/0, /*UseBorder=*/0, NoBorder);
+}
+
+// The four raw (unblended) integer texel coordinates and fractional
+// bilinear weights a seamless cube tap at normalized `(U, V)` needs --
+// deliberately *not* reusing `femeRTComputeBilinearSupport` above, since
+// that helper's own `X0`/`X1`/`Y0`/`Y1` are already address-mode-resolved
+// (clamped/wrapped) by `femeRTApplyAddressMode`, leaving no way to tell
+// whether a corner was originally out of `[0, Size)` bounds -- exactly
+// the information `femeRTRemapCubeEdgeCoords` above needs.
+typedef struct {
+  int32_t X0, X1, Y0, Y1;
+  float Wx, Wy;
+} FemeRTCubeBilinearSupport;
+
+__attribute__((always_inline)) static FemeRTCubeBilinearSupport
+femeRTComputeCubeBilinearSupport(const FemeRTImageDescriptor *Img, float U,
+                                 float V, uint32_t Level, int32_t *OutSize) {
+  uint32_t LevelSize = femeRTMipExtent(Img->Width, Level); // Square faces.
+  float TexelU = U * (float)LevelSize - 0.5f;
+  float TexelV = V * (float)LevelSize - 0.5f;
+  float FloorU = __builtin_floorf(TexelU);
+  float FloorV = __builtin_floorf(TexelV);
+  FemeRTCubeBilinearSupport S;
+  S.Wx = TexelU - FloorU;
+  S.Wy = TexelV - FloorV;
+  S.X0 = (int32_t)FloorU;
+  S.X1 = S.X0 + 1;
+  S.Y0 = (int32_t)FloorV;
+  S.Y1 = S.Y0 + 1;
+  *OutSize = (int32_t)LevelSize;
+  return S;
+}
+
+// Seamlessly bilinear-filters a cube(-array) image at `(U, V)` against a
+// single mip level, the `LINEAR`-filter counterpart of
+// `femeRTSamplePoint2D` used for `NEAREST` (which needs no seamless
+// handling at all -- see `femeRTSampleFilteredCube`'s own comment).
+// Mirrors `femeRTSampleLinear2D`'s own four-tap blend shape, but each tap
+// remaps across a face edge via `femeRTFetchCubeSeamlessTexel` instead of
+// clamping in place, and the (at most one) doubly-out-of-bounds corner
+// tap is resolved by averaging the other three raw texel colors,
+// mirroring VK-GL-CTS's own `getCubeLinearSamples`.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTSampleCubeLinearAtLevel(const FemeRTImageDescriptor *Img, uint32_t Level,
+                             uint32_t LayerBase, uint32_t BaseFace, float U,
+                             float V) {
+  int32_t Size;
+  FemeRTCubeBilinearSupport S =
+      femeRTComputeCubeBilinearSupport(Img, U, V, Level, &Size);
+  _Bool Amb00 = 0, Amb10 = 0, Amb01 = 0, Amb11 = 0;
+  FemeRTv4f32 T00 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
+                                                BaseFace, S.X0, S.Y0, Size,
+                                                &Amb00);
+  FemeRTv4f32 T10 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
+                                                BaseFace, S.X1, S.Y0, Size,
+                                                &Amb10);
+  FemeRTv4f32 T01 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
+                                                BaseFace, S.X0, S.Y1, Size,
+                                                &Amb01);
+  FemeRTv4f32 T11 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
+                                                BaseFace, S.X1, S.Y1, Size,
+                                                &Amb11);
+  // At most one of the four taps can ever be the doubly-out-of-bounds
+  // corner (a bilinear footprint spans at most a 2x2 texel square, which
+  // can straddle at most one cube corner at a time).
+  if (Amb00)
+    T00 = (T10 + T01 + T11) * (1.0f / 3.0f);
+  else if (Amb10)
+    T10 = (T00 + T01 + T11) * (1.0f / 3.0f);
+  else if (Amb01)
+    T01 = (T00 + T10 + T11) * (1.0f / 3.0f);
+  else if (Amb11)
+    T11 = (T00 + T10 + T01) * (1.0f / 3.0f);
+  FemeRTv4f32 Top = T00 + (T10 - T00) * S.Wx;
+  FemeRTv4f32 Bottom = T01 + (T11 - T01) * S.Wx;
+  return Top + (Bottom - Top) * S.Wy;
+}
+
+// The cube(-array) counterpart of `femeRTSampleFiltered2D` above,
+// dispatching to the seamless `femeRTSampleCubeLinearAtLevel` for a
+// `LINEAR` filter, or the ordinary (non-seamless) `femeRTSamplePoint2D`
+// for `NEAREST` -- a single face's own nearest edge texel is already
+// spec-correct with no cross-face blending needed (Vulkan's `NEAREST`
+// filter never has a fractional footprint that could straddle a face
+// edge), mirroring VK-GL-CTS's own `sampleCubeSeamlessNearest`
+// short-circuit. `Samp` must already have `AddressU`/`AddressV` forced to
+// `ClampToEdge` by the caller (see `femeCpuImageSampleCubeV4F32`'s own
+// comment) for the `NEAREST` path's own `femeRTApplyAddressMode` call;
+// the `LINEAR` path never consults `Samp->AddressU`/`AddressV` at all,
+// since seamless filtering's own cross-face remapping entirely replaces
+// ordinary address-mode clamping at a cube face's edge.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTSampleFilteredCube(const FemeRTImageDescriptor *Img,
+                         const FemeRTSamplerDescriptor *Samp, float U, float V,
+                         uint32_t LayerBase, uint32_t BaseFace,
+                         float ClampedLod) {
+  _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, Samp);
+  FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(Img, ClampedLod);
+  _Bool Trilinear = Samp->MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
+  uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
+  FemeRTv4f32 Lo =
+      UseLinear
+          ? femeRTSampleCubeLinearAtLevel(Img, Level0, LayerBase, BaseFace, U,
+                                         V)
+          : femeRTSamplePoint2D(Img, Samp, U, V, Level0, LayerBase + BaseFace,
+                                /*OffsetX=*/0, /*OffsetY=*/0);
+  if (!Trilinear)
+    return Lo;
+  FemeRTv4f32 Hi =
+      UseLinear ? femeRTSampleCubeLinearAtLevel(Img, MipPlan.Level1, LayerBase,
+                                              BaseFace, U, V)
+               : femeRTSamplePoint2D(Img, Samp, U, V, MipPlan.Level1,
+                                     LayerBase + BaseFace, /*OffsetX=*/0,
+                                     /*OffsetY=*/0);
+  return Lo + (Hi - Lo) * MipPlan.Frac;
+}
+
+// The depth-comparison counterpart of `femeRTSampleFilteredCube` above --
+// mirrors `femeRTSampleCmp2DAtLevel`'s own point/bilinear split, but the
+// `LINEAR` branch remaps each of the four taps across a face edge the
+// same way `femeRTSampleCubeLinearAtLevel` does, applying `Samp`'s
+// `CompareFunc` to each in-bounds tap *before* blending (matching
+// VK-GL-CTS's own `sampleCubeSeamlessLinearCompare`, which compares each
+// tap first and only then averages the three known per-tap compare
+// results for a doubly-out-of-bounds corner -- not equivalent to
+// averaging raw depth values and comparing once, since the compare
+// function need not be linear).
+__attribute__((always_inline)) static float
+femeRTSampleCmpCubeAtLevel(const FemeRTImageDescriptor *Img,
+                          const FemeRTSamplerDescriptor *Samp, float U,
+                          float V, uint32_t LayerBase, uint32_t BaseFace,
+                          uint32_t Level, float Dref, _Bool UseLinear) {
+  if (!UseLinear) { // Point (nearest): no seamless handling needed.
+    uint32_t LevelSize = femeRTMipExtent(Img->Width, Level);
+    int32_t X = (int32_t)__builtin_floorf(U * (float)LevelSize);
+    int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelSize);
+    _Bool BorderX = 0, BorderY = 0;
+    int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelSize,
+                                           Samp->AddressU, &BorderX);
+    int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelSize,
+                                           Samp->AddressV, &BorderY);
+    FemeRTv4f32 T = femeRTFetchTexel2D(Img, Level, LayerBase + BaseFace,
+                                      AddrX, AddrY, /*Sample=*/0,
+                                      BorderX || BorderY, Samp->BorderColor);
+    return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0]);
+  }
+
+  int32_t Size;
+  FemeRTCubeBilinearSupport S =
+      femeRTComputeCubeBilinearSupport(Img, U, V, Level, &Size);
+  _Bool Amb00 = 0, Amb10 = 0, Amb01 = 0, Amb11 = 0;
+  FemeRTv4f32 T00 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
+                                                BaseFace, S.X0, S.Y0, Size,
+                                                &Amb00);
+  FemeRTv4f32 T10 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
+                                                BaseFace, S.X1, S.Y0, Size,
+                                                &Amb10);
+  FemeRTv4f32 T01 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
+                                                BaseFace, S.X0, S.Y1, Size,
+                                                &Amb01);
+  FemeRTv4f32 T11 = femeRTFetchCubeSeamlessTexel(Img, Level, LayerBase,
+                                                BaseFace, S.X1, S.Y1, Size,
+                                                &Amb11);
+  float C00 = femeRTApplyCompare(Samp->CompareFunc, Dref, T00[0]);
+  float C10 = femeRTApplyCompare(Samp->CompareFunc, Dref, T10[0]);
+  float C01 = femeRTApplyCompare(Samp->CompareFunc, Dref, T01[0]);
+  float C11 = femeRTApplyCompare(Samp->CompareFunc, Dref, T11[0]);
+  if (Amb00)
+    C00 = (C10 + C01 + C11) * (1.0f / 3.0f);
+  else if (Amb10)
+    C10 = (C00 + C01 + C11) * (1.0f / 3.0f);
+  else if (Amb01)
+    C01 = (C00 + C10 + C11) * (1.0f / 3.0f);
+  else if (Amb11)
+    C11 = (C00 + C10 + C01) * (1.0f / 3.0f);
+  float Top = C00 + (C10 - C00) * S.Wx;
+  float Bottom = C01 + (C11 - C01) * S.Wx;
+  return Top + (Bottom - Top) * S.Wy;
+}
+
 // `feme.cpu.image.sample.cube.v4f32` (roadmap H7b-a): samples a
 // `TextureCube` sampled image at direction vector `(DirX, DirY, DirZ)`,
 // converted to a face index (addressed as `femeRTSamplePoint2D`/
 // `femeRTSampleLinear2D`'s own `Layer` parameter) and 2D UV by
-// `femeRTSelectCubeFace` above. A cube face's own edges are always
-// clamped, regardless of the bound sampler's own address mode: Vulkan,
-// Direct3D, and OpenGL alike never wrap or mirror across a cube face
-// boundary the way a plain 2D image's row/column wraps -- there is no
-// "next" face along a U/V axis.
+// `femeRTSelectCubeFace` above. A cube face's own edges never wrap or
+// mirror across a face boundary the way a plain 2D image's row/column
+// wraps -- there is no "next" face along a U/V axis -- but (roadmap L53)
+// a `LINEAR`-filtered tap that falls just outside a face's own bounds
+// does *not* simply clamp back onto that face's own edge texel either:
+// `femeRTSampleFilteredCube` blends it with its true geometric neighbor
+// across the shared cube edge instead, matching Vulkan's own
+// spec-mandated default seamless cube-map filtering behaviour (see that
+// function's own comment, and `femeRTRemapCubeEdgeCoords` above it).
 FemeRTv4f32 femeCpuImageSampleCubeV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
@@ -5750,8 +6083,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
   float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
                                             /*InstructionMinLod=*/MinLodClamp);
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
-  return femeRTSampleFiltered2D(&Img, &Samp, CF.U, CF.V, CF.Face, ClampedLod,
-                              /*OffsetX=*/0, /*OffsetY=*/0);
+  return femeRTSampleFilteredCube(&Img, &Samp, CF.U, CF.V, /*LayerBase=*/0,
+                                CF.Face, ClampedLod);
 }
 
 // `feme.cpu.image.sample.cubearray.v4f32` (roadmap H7b-a): the
@@ -5792,18 +6125,19 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   uint32_t NumCubes = Img.ArrayLayers / 6;
   uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);
-  uint32_t Layer = CubeIndex * 6 + CF.Face;
-  return femeRTSampleFiltered2D(&Img, &Samp, CF.U, CF.V, Layer, ClampedLod,
-                              /*OffsetX=*/0, /*OffsetY=*/0);
+  return femeRTSampleFilteredCube(&Img, &Samp, CF.U, CF.V,
+                                /*LayerBase=*/CubeIndex * 6, CF.Face,
+                                ClampedLod);
 }
 // `feme.cpu.image.samplecmp.cube.f32` (roadmap L48): the `TextureCube`
 // counterpart of `feme.cpu.image.samplecmp.2d.f32` above, converting the
 // direction vector `(DirX, DirY, DirZ)` to a face index and 2D UV via
 // `femeRTSelectCubeFace` (below `femeCpuImageSampleCubeV4F32`, reused
 // verbatim -- a shadow sampler's own cube-face selection has no
-// depth-comparison-specific twist) and forcing clamp-to-edge addressing
-// the same way `femeCpuImageSampleCubeV4F32` does, for the same reason (a
-// cube face's own edges never wrap/mirror).
+// depth-comparison-specific twist). `femeRTSampleCmpCubeAtLevel` (roadmap
+// L53) applies the same seamless cross-face blending to a `LINEAR`
+// comparison tap that `femeRTSampleFilteredCube` applies to an ordinary
+// color one -- see that function's own comment.
 float femeCpuImageSampleCmpCubeF32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
@@ -5833,14 +6167,14 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpCubeF32(
   _Bool Trilinear = Samp.MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
   uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
-  float Lo = femeRTSampleCmp2DAtLevel(&Img, &Samp, CF.U, CF.V, CF.Face, Level0,
-                                     Dref, UseLinear, /*OffsetX=*/0,
-                                     /*OffsetY=*/0);
+  float Lo = femeRTSampleCmpCubeAtLevel(&Img, &Samp, CF.U, CF.V,
+                                       /*LayerBase=*/0, CF.Face, Level0, Dref,
+                                       UseLinear);
   if (!Trilinear)
     return Lo;
-  float Hi = femeRTSampleCmp2DAtLevel(&Img, &Samp, CF.U, CF.V, CF.Face,
-                                      MipPlan.Level1, Dref, UseLinear,
-                                      /*OffsetX=*/0, /*OffsetY=*/0);
+  float Hi = femeRTSampleCmpCubeAtLevel(&Img, &Samp, CF.U, CF.V,
+                                       /*LayerBase=*/0, CF.Face,
+                                       MipPlan.Level1, Dref, UseLinear);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
@@ -5880,15 +6214,14 @@ __attribute__((always_inline)) float femeCpuImageSampleCmpCubeArrayF32(
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   uint32_t NumCubes = Img.ArrayLayers / 6;
   uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);
-  uint32_t Layer = CubeIndex * 6 + CF.Face;
-  float Lo = femeRTSampleCmp2DAtLevel(&Img, &Samp, CF.U, CF.V, Layer, Level0,
-                                     Dref, UseLinear, /*OffsetX=*/0,
-                                     /*OffsetY=*/0);
+  float Lo = femeRTSampleCmpCubeAtLevel(&Img, &Samp, CF.U, CF.V,
+                                       /*LayerBase=*/CubeIndex * 6, CF.Face,
+                                       Level0, Dref, UseLinear);
   if (!Trilinear)
     return Lo;
-  float Hi = femeRTSampleCmp2DAtLevel(&Img, &Samp, CF.U, CF.V, Layer,
-                                      MipPlan.Level1, Dref, UseLinear,
-                                      /*OffsetX=*/0, /*OffsetY=*/0);
+  float Hi = femeRTSampleCmpCubeAtLevel(&Img, &Samp, CF.U, CF.V,
+                                       /*LayerBase=*/CubeIndex * 6, CF.Face,
+                                       MipPlan.Level1, Dref, UseLinear);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
