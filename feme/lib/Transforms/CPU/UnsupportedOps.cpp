@@ -88,6 +88,17 @@ Error checkSupportedRaisedOps(const Module &M) {
       // resource: bindless (ResourceDescriptorHeap/SamplerDescriptorHeap)
       // access, a finite, unambiguous traditional binding, or that one
       // root-constant binding, are the only forms it accepts.
+      //
+      // Roadmap L64: the trailing hint matters. A resource lowering pass
+      // that rejects one unsupported *use* leaves every handle in that
+      // function unlowered, so the handle named here is whichever
+      // declaration happens to come first in the module -- frequently an
+      // innocent bystander rather than the resource whose use actually
+      // failed. Reading this diagnostic literally cost several sessions,
+      // which mis-filed an over-strict `Grad` derivative-width check
+      // against arrayed image samples as an unrelated `spirv.VulkanBuffer`
+      // uniform-block defect, purely because a scale/bias uniform block
+      // was declared ahead of the image it accompanied.
       return createStringError(
           inconvertibleErrorCode(),
           "unsupported raised operation: '%s' is a register-bound resource "
@@ -96,7 +107,11 @@ Error checkSupportedRaisedOps(const Module &M) {
           "re-declaration, or an unsupported resource kind); express it as "
           "a finite, unambiguous traditional binding, bindless "
           "(ResourceDescriptorHeap/SamplerDescriptorHeap) access, or the "
-          "one recognized root-constant binding",
+          "one recognized root-constant binding. Note that an unsupported "
+          "use of any *other* resource in the same function (for example an "
+          "image sampled in a way this target cannot lower) also prevents "
+          "every handle in that function from being normalized, so this "
+          "handle may be an unrelated bystander rather than the real cause",
           F.getName().str().c_str());
     }
     default:

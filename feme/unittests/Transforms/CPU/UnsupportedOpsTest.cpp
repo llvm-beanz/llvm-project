@@ -220,4 +220,43 @@ TEST(UnsupportedOpsTest, RejectsTwoDistinctRootConstantBindings) {
                         testing::HasSubstr("register-bound resource handle"))));
 }
 
+TEST(UnsupportedOpsTest, RegisterBoundHandleDiagnosticWarnsAboutBystanders) {
+  // Roadmap L64: this diagnostic names a handle, but the real cause is
+  // frequently an unsupported *use* of some other resource in the same
+  // function -- one rejected use leaves every handle in that function
+  // unlowered, and whichever declaration comes first in the module is
+  // what gets reported. Taking the name literally cost several sessions,
+  // which mis-filed an over-strict `Grad` derivative-width check against
+  // arrayed image samples as an unrelated `spirv.VulkanBuffer`
+  // uniform-block defect. The message must say so explicitly.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() {
+      %h0 = call target("dx.CBuffer", [16 x i8])
+          @llvm.dx.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %h1 = call target("dx.CBuffer", [16 x i8])
+          @llvm.dx.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %v0 = call {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
+          target("dx.CBuffer", [16 x i8]) %h0, i32 0)
+      %v1 = call {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
+          target("dx.CBuffer", [16 x i8]) %h1, i32 0)
+      ret void
+    }
+    declare target("dx.CBuffer", [16 x i8])
+        @llvm.dx.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
+        target("dx.CBuffer", [16 x i8]), i32)
+  )");
+  ASSERT_TRUE(M);
+  Error E = checkSupportedRaisedOps(*M);
+  EXPECT_THAT_ERROR(
+      std::move(E),
+      Failed<StringError>(testing::Property(
+          &StringError::getMessage,
+          testing::AllOf(
+              testing::HasSubstr("register-bound resource handle"),
+              testing::HasSubstr("unrelated bystander rather than the real "
+                                 "cause")))));
+}
+
 } // namespace
