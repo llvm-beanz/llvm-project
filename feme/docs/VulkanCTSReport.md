@@ -29001,3 +29001,82 @@ all still block safely flipping it on.
 `FeMeGraphicsDesign.md`/`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 reviewed: no deviation or update needed (internal CPU-lowering plumbing only,
 no new feature/extension bit).
+
+## Roadmap L62: `Bias`/`MinLod` clamp on a `Plain1D`/`Array1D` depth-comparison sample
+
+The deferred half of roadmap L52(b)/(c). `hasOnlySupportedImageUses` carried an
+explicit early return rejecting any `llvm.spv.resource.samplecmpbias{,.clamp}`
+or `llvm.spv.resource.samplecmp.clamp` whose image shape was `Plain1D` or
+`Array1D`, left there purely because `createSampleCmp1D`/`createSampleCmpArray1D`
+had no `Bias`/`MinLodClamp` operand to lower into.
+
+Because the gate rejected the *use*, it also made the whole resource handle
+un-normalizable, so both named CTS cases failed all the way back at
+`vkCreateGraphicsPipelines` with `'llvm.spv.resource.handlefrombinding...' is a
+register-bound resource handle the FeMe CPU target cannot normalize`, never
+reaching the sample itself — the same "a rejected use surfaces as a handle
+error" symptom several earlier rows in this document hit.
+
+| Change | Phase |
+| --- | --- |
+| `createSampleCmp1D`/`createSampleCmpArray1D` gain a `Bias`/`MinLodClamp` pair immediately after `Dref` (11→13 and 12→14 args), mirroring `createSampleCmpCube`'s operand order; `matchImageCall`'s guards and extraction updated in the same commit | Builder / match table |
+| `hasOnlySupportedImageUses`'s `(DrefHasClamp \|\| DrefHasBias) && (Plain1D \|\| Array1D)` early return removed; the two lowering arms pass the already-computed operands | Legalization / lowering |
+| `femeCpuImageSampleCmp{1D,Array1D}F32` replace their hardcoded `-inf`/`0.0f` `femeRTComputeClampedLod` arguments with the real operands | Runtime |
+
+`UseExplicitLod` is deliberately passed through unchanged, unlike roadmap L63's
+ordinary-sample counterpart which had to force it on: no shape's
+depth-comparison path computes a caller-derived implicit LOD from screen-space
+derivatives today (`femeCpuImageSampleCmp2DF32` passes the flag straight
+through too). That missing dref-path derivative computation is a real but
+separate, still-unfiled gap. The pre-existing `ConstOffset` exclusion for both
+shapes is untouched — `isSupportedOffset` still requires a zero offset, which
+every real shader of this form supplies.
+
+| Tests | Before | After |
+| --- | --- | --- |
+| `check-feme` | 2632 Pass / 0 Fail / 59 Unsupported | **2637 Pass** / 0 Fail / 59 Unsupported |
+
+Five new unit tests (2 `ImageCallsTest` match-table regressions, 3 lowering) and
+2 new runtime tests, plus 3 unit/lit tests that previously pinned the old
+rejection inverted rather than deleted, so the newly-supported behavior is
+covered by exactly the cases that documented its absence.
+
+Real `deqp-vk` results for the two cases roadmap L62 named:
+
+| Case | Before | After |
+| --- | --- | --- |
+| `dEQP-VK.glsl.texture_functions.texture.sampler1dshadow_bias_fragment` | Fail | **Pass** |
+| `dEQP-VK.glsl.texture_functions.texture.sampler1darrayshadow_bias_fragment` | Fail | **Pass** |
+
+Both also confirmed passing together in a single `deqp-vk` process (the pairing
+that exposed a latent bug in an earlier row), 2/2 Pass, up from 0/2.
+
+A before/after sweep of every `dEQP-VK.glsl.texture_functions.*.sampler1d*`
+case (1,355 cases) confirms a strictly monotonic improvement with no
+regressions. The "before" side was measured by checking the pre-session tree's
+`feme/lib`, `feme/include` and `feme/runtime` back out and relinking
+`libfeme_vulkan.so` — note that a plain `git stash` is a no-op here, since this
+row's changes were already committed:
+
+| | Before | After |
+| --- | --- | --- |
+| Pass | 24 | **26** |
+| Fail | 708 | **706** |
+| NotSupported | 623 | 623 |
+
+A per-case diff of the two logs confirms exactly two cases changed state —
+the two named above — and no others regressed. (These absolute totals are not
+comparable with roadmap L63's own sweep of the same case set, which was
+measured with `shaderResourceMinLod` temporarily flipped to `VK_TRUE`; both
+sides here were measured with it at its shipping `VK_FALSE`.)
+
+`shaderResourceMinLod` remains correctly advertised as `VK_FALSE`. This row
+closes one of the named blockers on flipping it (roadmap L60(d)); the
+`Array2D`/`Plain3D` `VulkanBuffer` register-bound-resource-handle gap (roadmap
+L60(a)) and the integer-sampler restriction still stand.
+
+`FeMeGraphicsDesign.md`/`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed: no deviation or update needed. This is internal CPU-lowering and
+runtime plumbing behind an already-advertised core SPIR-V capability; `Bias` on
+a depth-comparison sample is gated by no Vulkan feature bit, and
+`shaderResourceMinLod` is unchanged.
