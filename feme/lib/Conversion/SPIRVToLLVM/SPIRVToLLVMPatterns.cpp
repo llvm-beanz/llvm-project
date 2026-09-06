@@ -4002,9 +4002,14 @@ public:
 /// `ImageSampleImplicitLodPattern` above but threading the explicit LOD
 /// operand through instead of defaulting it (see roadmap R30, "SPIR-V
 /// (including Design.md's §1.2 sampling variants)"). A `Grad` (gradient)
-/// operand -- `ImageSampleExplicitLod`'s other legal modifier -- is not yet
-/// covered, since it needs a `llvm.spv.resource.samplegrad` call with two
-/// additional operands this pattern does not build.
+/// operand -- `ImageSampleExplicitLod`'s other legal modifier -- is handled
+/// by the separate `ImageSampleGradPattern` below instead, since it needs
+/// an entirely different intrinsic/operand shape and SPIR-V forbids
+/// combining `Lod` and `Grad` on the same instruction; this pattern's own
+/// exact `Lod`-only check below simply fails to match a `Grad` call,
+/// letting the greedy pattern rewriter try `ImageSampleGradPattern` next
+/// (both are registered against the same `ImageSampleExplicitLodOp` type,
+/// see `populateSPIRVToLLVMTargetPatterns`).
 class ImageSampleExplicitLodPattern
     : public mlir::SPIRVToLLVMConversion<
           mlir::spirv::ImageSampleExplicitLodOp> {
@@ -4046,6 +4051,104 @@ public:
         Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.samplelevel",
                                 ResultType,
                                 {Image, Sampler, Coordinate, Lod, Offset}));
+    return mlir::success();
+  }
+};
+
+/// Converts a `spirv.ImageSampleExplicitLod` with the `Grad` image operand
+/// (an explicit pair of screen-space partial-derivative vectors, GLSL's
+/// `textureGrad()`/`textureGradOffset()`, HLSL's `Texture2D::SampleGrad`),
+/// optionally combined with `ConstOffset` and/or `MinLod`, into the
+/// `llvm.spv.resource.samplegrad`/`.samplegrad.clamp` intrinsic call --
+/// mirroring `ImageSampleImplicitLodPattern`'s own combinatorial handling
+/// of `Bias`/`ConstOffset`/`MinLod` above, but for `Grad`'s two vector
+/// operands instead of a single scalar `Bias`. Per the fixed SPIR-V Image
+/// Operands bit order (`Bias, Lod, Grad, ConstOffset, Offset,
+/// ConstOffsets, Sample, MinLod, ...`), `Grad`'s own pair -- `dPdx` then
+/// `dPdy` -- precedes `ConstOffset`, which itself precedes `MinLod`,
+/// exactly as `int_spv_resource_samplegrad{,_clamp}`'s own operand list
+/// expects (`llvm/include/llvm/IR/IntrinsicsSPIRV.td`: `(image, sampler,
+/// coord, dPdx, dPdy, offset[, clamp])`). Unlike `ImageSampleImplicitLodPattern`,
+/// there is no bare `Grad`-less `.clamp`/non-`.clamp` pair to also cover
+/// here -- `Grad` is this pattern's own mandatory operand, not an optional
+/// modifier of some other base intrinsic -- so a missing `Grad` bit simply
+/// fails to match, falling through to `ImageSampleExplicitLodPattern`
+/// above for a plain `Lod` operand instead (see its own updated doc).
+class ImageSampleGradPattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::ImageSampleExplicitLodOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageSampleExplicitLodOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageSampleExplicitLodOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    std::optional<mlir::spirv::ImageOperands> ImageOperandsAttr =
+        Op.getImageOperands();
+    mlir::spirv::ImageOperands Actual = mlir::spirv::ImageOperands::None;
+    if (ImageOperandsAttr)
+      Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, NontemporalBit);
+
+    if (!mlir::spirv::bitEnumContainsAny(Actual,
+                                         mlir::spirv::ImageOperands::Grad))
+      return Rewriter.notifyMatchFailure(Op, "no Grad image operand");
+
+    mlir::spirv::ImageOperands SupportedMask =
+        mlir::spirv::ImageOperands::Grad |
+        mlir::spirv::ImageOperands::ConstOffset |
+        mlir::spirv::ImageOperands::MinLod;
+    if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
+      return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+
+    bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::ConstOffset);
+    bool HasMinLod = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::MinLod);
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value SampledImage = Adaptor.getSampledImage();
+    mlir::Value Image = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{0});
+    mlir::Value Sampler = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{1});
+
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    mlir::Type OffsetType =
+        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
+                         CoordVecTy.getShape(), Rewriter.getI32Type()))
+                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+
+    // `Grad`'s own pair (`dPdx` then `dPdy`) always comes first -- it is
+    // this pattern's own mandatory operand, unlike `ImageSampleImplicitLodPattern`'s
+    // optional `Bias` -- followed by `ConstOffset`, then `MinLod`,
+    // whichever of the latter two subset is actually present.
+    mlir::ValueRange OperandArguments = Adaptor.getOperandArguments();
+    size_t Index = 0;
+    mlir::Value DPdx = OperandArguments[Index++];
+    mlir::Value DPdy = OperandArguments[Index++];
+    mlir::Value Offset =
+        HasConstOffset ? OperandArguments[Index++] : mlir::Value();
+    mlir::Value Clamp = HasMinLod ? OperandArguments[Index++] : mlir::Value();
+    if (!Offset)
+      Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
+                                              Rewriter.getZeroAttr(OffsetType));
+
+    llvm::SmallVector<mlir::Value, 7> Arguments = {Image, Sampler, Coordinate,
+                                                    DPdx, DPdy, Offset};
+    if (Clamp)
+      Arguments.push_back(Clamp);
+    llvm::StringRef IntrinsicName = Clamp
+                                        ? "llvm.spv.resource.samplegrad.clamp"
+                                        : "llvm.spv.resource.samplegrad";
+
+    Rewriter.replaceOp(Op, createIntrinsicCall(Rewriter, Loc, IntrinsicName,
+                                               ResultType, Arguments));
     return mlir::success();
   }
 };
@@ -6077,7 +6180,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       ImageFetchPattern, ImageFetchLodPattern, ImagePattern,
       ImageQueryLodPattern, ImageSampleDrefExplicitLodPattern,
       ImageSampleDrefImplicitLodPattern, ImageSampleExplicitLodPattern,
-      ImageSampleImplicitLodPattern,
+      ImageSampleGradPattern, ImageSampleImplicitLodPattern,
       ImageQuerySizePattern, ImageReadPattern, ImageTexelPointerPattern,
       ImageWritePattern,
       IntegerGroupNonUniformReducePattern<mlir::spirv::GroupNonUniformIAddOp>,
