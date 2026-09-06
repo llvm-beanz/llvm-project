@@ -1455,9 +1455,9 @@ TEST(SPIRVResourceLoweringTest, LowersCubeSampledImageToImageSampleCube) {
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
   //  dir_x, dir_y, dir_z, ddirxdx, ddirxdy, ddirydx, ddirydy, ddirzdx,
-  //  ddirzdy, lod, use_explicit_lod, min_lod_clamp, mask). Roadmap L56
-  //  adds the six derivative operands.
-  EXPECT_EQ(Sample->arg_size(), 19u);
+  //  ddirzdy, lod, use_explicit_lod, bias, min_lod_clamp, mask). Roadmap
+  //  L56 adds the six derivative operands; roadmap L58 adds `bias`.
+  EXPECT_EQ(Sample->arg_size(), 20u);
   // `main` here carries no `feme.shader.stage` attribute (i.e. it is not
   // recognized as a Fragment-stage entry point), so this implicit cube
   // sample gets six zero-constant derivatives rather than a real
@@ -1504,7 +1504,7 @@ TEST(SPIRVResourceLoweringTest,
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cube.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 19u);
+  ASSERT_EQ(Sample->arg_size(), 20u);
   // None of the six derivative operands (arg 9-14) is a zero constant --
   // each is a real `feme.stage.derivative.*` call result instead.
   for (unsigned ArgNo : {9, 10, 11, 12, 13, 14}) {
@@ -1710,11 +1710,11 @@ TEST(SPIRVResourceLoweringTest, LowersNonZeroTexelOffsetPlain2DSample) {
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4f32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index, u,
-  //  v, dudx, dudy, dvdx, dvdy, lod, use_explicit_lod, offset_x, offset_y,
-  //  min_lod_clamp, mask).
-  ASSERT_EQ(Sample->arg_size(), 18u);
-  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(14))->getSExtValue(), 1);
-  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(15))->getSExtValue(), -1);
+  //  v, dudx, dudy, dvdx, dvdy, lod, use_explicit_lod, bias, offset_x,
+  //  offset_y, min_lod_clamp, mask). Roadmap L58 adds `bias`.
+  ASSERT_EQ(Sample->arg_size(), 19u);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(15))->getSExtValue(), 1);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(16))->getSExtValue(), -1);
 }
 
 TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetArray2DSampleAlone) {
@@ -1778,8 +1778,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleClampToPlain2DMinLodClamp) {
   ASSERT_TRUE(F);
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4f32");
   ASSERT_TRUE(Sample);
-  ASSERT_EQ(Sample->arg_size(), 18u);
-  EXPECT_EQ(Sample->getArgOperand(16)->getName(), "clamp");
+  ASSERT_EQ(Sample->arg_size(), 19u);
+  EXPECT_EQ(Sample->getArgOperand(17)->getName(), "clamp");
 }
 
 TEST(SPIRVResourceLoweringTest, LeavesASampleClampAgainstArray2DAlone) {
@@ -1799,6 +1799,105 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleClampAgainstArray2DAlone) {
           target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, <3 x float> %coord,
           <2 x i32> zeroinitializer, float %clamp)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersSampleBiasToPlain2DBias) {
+  // Roadmap L58: `llvm.spv.resource.samplebias` (SPIR-V's own ordinary,
+  // non-comparison `Bias` image operand) lowers the same as a plain
+  // implicit-LOD sample, plus a real `Bias` operand threaded through
+  // instead of the `0.0` no-op default every other implicit-LOD sample
+  // uses.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x float> %coord, float %bias) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplebias(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord, float %bias,
+          <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4f32");
+  ASSERT_TRUE(Sample);
+  ASSERT_EQ(Sample->arg_size(), 19u);
+  EXPECT_EQ(Sample->getArgOperand(14)->getName(), "bias");
+}
+
+TEST(SPIRVResourceLoweringTest, LowersSampleBiasToCubeBias) {
+  // Roadmap L58: the same `Bias` operand also lowers against `Cube`,
+  // matching the `MinLodClamp` (roadmap L26) precedent's scope.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x float> %coord, float %bias) {
+      %img = call target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplebias(
+          target("spirv.Image", float, 3, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord, float %bias,
+          <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cube.v4f32");
+  ASSERT_TRUE(Sample);
+  ASSERT_EQ(Sample->arg_size(), 20u);
+  EXPECT_EQ(Sample->getArgOperand(17)->getName(), "bias");
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesASampleBiasAgainstArray2DAlone) {
+  // Roadmap L58: `lowerImageAccesses` only threads a `Bias` operand
+  // through `Plain2D`'s and `Cube`'s own helpers (mirroring `MinLodClamp`'s
+  // own roadmap L26 scope) -- a `samplebias` against `Array2D` is left
+  // unlowered rather than silently dropping the bias.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x float> %coord, float %bias) {
+      %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplebias(
+          target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord, float %bias,
+          <2 x i32> zeroinitializer)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)

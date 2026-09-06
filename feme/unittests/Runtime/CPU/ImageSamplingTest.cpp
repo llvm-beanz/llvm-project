@@ -146,14 +146,15 @@ protected:
 /// heaps and descriptor indices, `(U, V)`, the four screen-space partial
 /// derivatives of `(U, V)` an implicit-LOD sample's real mip/anisotropy
 /// selection consults (roadmap H7i; ignored, but still present, for an
-/// explicit-LOD sample), `Lod`/`UseExplicitLod`, the integer `(OffsetX,
+/// explicit-LOD sample), `Lod`/`UseExplicitLod`, a float `Bias` (roadmap
+/// L58), the integer `(OffsetX,
 /// OffsetY)` texel offset and float `MinLodClamp` floor roadmap L26 added,
 /// an active-lane mask, and the `<4 x float>` result written through the
 /// trailing `out` pointer.
 using SampleFn = void (*)(const FemeImageDescriptor *, uint32_t,
                           const FemeSamplerDescriptor *, uint32_t, uint32_t,
                           uint32_t, float, float, float, float, float, float,
-                          float, bool, int32_t, int32_t, float, bool,
+                          float, bool, float, int32_t, int32_t, float, bool,
                           void *);
 using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
                              const FemeSamplerDescriptor *, uint32_t, uint32_t,
@@ -229,15 +230,16 @@ using LoadArrayI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
 /// followed (roadmap L56) by six screen-space partial-derivative operands
 /// of that direction vector (`DDirXdX`, `DDirXdY`, `DDirYdX`, `DDirYdY`,
 /// `DDirZdX`, `DDirZdY`, consulted only for an implicit-LOD sample -- see
-/// `femeRTComputeCubeUVDerivatives`'s doc, `FeMeRuntimeCPU.c`), and
-/// (roadmap L26) a trailing float `MinLodClamp` floor before the mask --
+/// `femeRTComputeCubeUVDerivatives`'s doc, `FeMeRuntimeCPU.c`), a float
+/// `Bias` (roadmap L58), and (roadmap L26)
+/// a trailing float `MinLodClamp` floor before the mask --
 /// but no integer texel offset, unlike `SampleFn` (SPIR-V forbids
 /// `ConstOffset` against a cube image; see `isSupportedOffset`'s comment).
 using SampleCubeFn = void (*)(const FemeImageDescriptor *, uint32_t,
                               const FemeSamplerDescriptor *, uint32_t,
                               uint32_t, uint32_t, float, float, float, float,
                               float, float, float, float, float, float, bool,
-                              float, bool, void *);
+                              float, float, bool, void *);
 /// The roadmap H7b-a `TextureCubeArray` counterpart of `SampleCubeFn`,
 /// adding a float `ArrayLayer` coordinate (selecting a six-layer cube
 /// element) before `Lod`; also gains its own roadmap L56
@@ -573,7 +575,7 @@ TEST_F(ImageSamplingTest, PointSampleIdentityFormat) {
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   // Texel (1, 0)'s center is at normalized coordinates (0.75, 0.25).
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 5.0f);
   EXPECT_FLOAT_EQ(Out[1], 6.0f);
   EXPECT_FLOAT_EQ(Out[2], 7.0f);
@@ -597,7 +599,7 @@ TEST_F(ImageSamplingTest, LinearSampleBlendsFourTexels) {
   SampleFn Fn =
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
   EXPECT_FLOAT_EQ(Out[1], 2.0f);
 }
@@ -630,7 +632,7 @@ TEST_F(ImageSamplingTest, ExplicitLodMinifyingUsesMinFilterNotMagFilter) {
   float Out[4];
   // `Lod=1.0` (explicit, minifying: `ClampedLod > 0`).
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
-     /*Lod=*/1.0f, /*UseExplicitLod=*/true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*Lod=*/1.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
   EXPECT_FLOAT_EQ(Out[1], 2.0f);
 }
@@ -660,7 +662,7 @@ TEST_F(ImageSamplingTest, ExplicitLodMagnifyingUsesMagFilterNotMinFilter) {
   float Out[4];
   // `Lod=-1.0` (explicit, magnifying: `ClampedLod <= 0`).
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
-     /*Lod=*/-1.0f, /*UseExplicitLod=*/true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*Lod=*/-1.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 4.0f);
   EXPECT_FLOAT_EQ(Out[1], 4.0f);
 }
@@ -691,7 +693,7 @@ TEST_F(ImageSamplingTest, ImplicitLodMinifyingUsesMinFilterNotMagFilter) {
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/1.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*UseExplicitLod=*/false, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
   EXPECT_FLOAT_EQ(Out[1], 2.0f);
 }
@@ -745,7 +747,7 @@ TEST_F(ImageSamplingTest, ExplicitLodTrilinearBlendsBetweenTwoMipLevels) {
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
-     /*Lod=*/0.5f, /*UseExplicitLod=*/true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*Lod=*/0.5f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 5.0f);
 }
 
@@ -797,7 +799,7 @@ TEST_F(ImageSamplingTest, ExplicitLodNearestMipFilterStillRoundsToOneLevel) {
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
-     /*Lod=*/0.5f, /*UseExplicitLod=*/true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*Lod=*/0.5f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
@@ -857,7 +859,7 @@ TEST_F(ImageSamplingTest, ImplicitLodTrilinearBlendsBetweenTwoMipLevels) {
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/0.70710678f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*UseExplicitLod=*/false, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_GT(Out[0], 1.0f);
   EXPECT_LT(Out[0], 9.0f);
 }
@@ -879,7 +881,7 @@ TEST_F(ImageSamplingTest, RepeatAddressingWrapsCoordinate) {
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   // 1.25 wraps to 0.25, texel 0's center: reads the first (value-1) texel.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.25f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.25f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
 }
 
@@ -901,7 +903,7 @@ TEST_F(ImageSamplingTest, ClampToBorderReadsBorderColor) {
   SampleFn Fn =
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 2.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 2.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.1f);
   EXPECT_FLOAT_EQ(Out[1], 0.2f);
   EXPECT_FLOAT_EQ(Out[2], 0.3f);
@@ -926,7 +928,7 @@ TEST_F(ImageSamplingTest, SRGBDecodeOnSample) {
   SampleFn Fn =
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_NEAR(Out[0], 0.5f, 0.01f);
   EXPECT_NEAR(Out[1], 0.5f, 0.01f);
   EXPECT_NEAR(Out[2], 0.5f, 0.01f);
@@ -976,7 +978,7 @@ TEST_F(ImageSamplingTest, ExplicitLodSelectsMipLevel) {
   SampleFn Fn =
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
@@ -1027,8 +1029,64 @@ TEST_F(ImageSamplingTest, ImplicitLodWithNoDerivativesReadsBaseLevel) {
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
-     /*Lod=*/0.0f, /*UseExplicitLod=*/false,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, ImplicitLodBiasSelectsCoarserMipLevel) {
+  // Roadmap L58: a nonzero `Bias` operand (SPIR-V's own ordinary,
+  // non-comparison `Bias` image operand, e.g. HLSL's
+  // `Texture2D::Sample`'s trailing `bias` argument) is added directly
+  // into the resolved LOD alongside the sampler's own static `LodBias`
+  // and any screen-space-derivative contribution. With zero screen-space
+  // derivatives (no measurable minification of its own), a `Bias` of
+  // exactly `1.0` must select mip level 1 outright (`MipFilter=Nearest`
+  // rounds `0 + 1.0` up to level 1), unlike
+  // `ImplicitLodWithNoDerivativesReadsBaseLevel`'s own zero-bias case,
+  // which reads level 0 in the same configuration.
+  float Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                           {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  float Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    float L0[2][2][4];
+    float L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/1.0f, 0, 0,
+     -std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
 TEST_F(ImageSamplingTest, ImplicitLodSelectsCoarserMipFromDerivatives) {
@@ -1078,7 +1136,7 @@ TEST_F(ImageSamplingTest, ImplicitLodSelectsCoarserMipFromDerivatives) {
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/1.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*UseExplicitLod=*/false, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
@@ -1135,7 +1193,7 @@ TEST_F(ImageSamplingTest, MaxLodClampsImplicitSampleToBaseLevel) {
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/1.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*UseExplicitLod=*/false, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
 }
 
@@ -1187,7 +1245,7 @@ TEST_F(ImageSamplingTest, MinLodClampsExplicitSampleAboveBaseLevel) {
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
-     /*Lod=*/0.0f, /*UseExplicitLod=*/true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
@@ -1237,7 +1295,7 @@ TEST_F(ImageSamplingTest, LodBiasShiftsSelectedLevel) {
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
-     /*Lod=*/0.0f, /*UseExplicitLod=*/true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+     /*Lod=*/0.0f, /*UseExplicitLod=*/true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
@@ -1279,13 +1337,13 @@ TEST_F(ImageSamplingTest, AnisotropicSampleDiffersFromIsotropicSample) {
   float IsotropicOut[4];
   Fn(ImageHeap, 1, IsotropicHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/0.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.5f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false,0,0,-std::numeric_limits<float>::infinity(), true, IsotropicOut);
+     /*UseExplicitLod=*/false, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, IsotropicOut);
 
   FemeSamplerDescriptor AnisotropicHeap[1] = {Anisotropic};
   float AnisotropicOut[4];
   Fn(ImageHeap, 1, AnisotropicHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/0.0f,
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.5f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false,0,0,-std::numeric_limits<float>::infinity(), true, AnisotropicOut);
+     /*UseExplicitLod=*/false, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, AnisotropicOut);
 
   // The isotropic sample reads exactly one texel (row 4); the anisotropic
   // one averages four taps spread across rows 2-5, a measurably different
@@ -1491,7 +1549,7 @@ TEST_F(ImageSamplingTest, SRGBDecodeOnSampleBGRA8) {
   SampleFn Fn =
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,0,0,-std::numeric_limits<float>::infinity(), true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_NEAR(Out[0], 0.5f, 0.01f);
   EXPECT_NEAR(Out[1], 0.5f, 0.01f);
   EXPECT_NEAR(Out[2], 0.5f, 0.01f);
@@ -2139,7 +2197,7 @@ TEST_F(ImageSamplingTest, InactiveLaneReadsZero) {
       resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4] = {9, 9, 9, 9};
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
-     0.0f, true,0,0,-std::numeric_limits<float>::infinity(), /*Mask=*/false, Out);
+     0.0f, true, /*Bias=*/0.0f,0,0,-std::numeric_limits<float>::infinity(), /*Mask=*/false, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
 }
@@ -3020,7 +3078,7 @@ TEST_F(ImageSamplingTest, SampleCubeSelectsEachFaceByDirection) {
   for (auto &C : Cases) {
     float Out[4];
     Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, C.X, C.Y, C.Z, 0.0f, 0.0f, 0.0f,
-       0.0f, 0.0f, 0.0f, 0.0f, true, -std::numeric_limits<float>::infinity(),
+       0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(),
        true, Out);
     EXPECT_FLOAT_EQ(Out[0], C.Expected)
         << "direction (" << C.X << ", " << C.Y << ", " << C.Z << ")";
@@ -3321,7 +3379,7 @@ TEST_F(ImageSamplingTest, SampleCubeSeamlessBlendsAcrossFaceEdge) {
   // low tap one texel below `u == 0`, remapping to face 4 (+Z).
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
-     /*DirZ=*/0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,
+     /*DirZ=*/0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,
      -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_LT(Out[0], 99.0f) << "expected a blended value pulling below face "
                              "0's own uniform 100.0, not a clamped 100.0";
@@ -3357,7 +3415,7 @@ TEST_F(ImageSamplingTest, SampleCubeNearestDoesNotBlendAcrossFaceEdge) {
       addWrapper("sample_cube_nearest", "feme.cpu.image.sample.cube.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
-     /*DirZ=*/0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,
+     /*DirZ=*/0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,
      -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 100.0f);
 }
@@ -3425,9 +3483,69 @@ TEST_F(ImageSamplingTest, SampleCubeImplicitLodWithNoDerivativesReadsBaseLevel) 
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
      /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/0.0f,
      /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false, -std::numeric_limits<float>::infinity(), true,
+     /*UseExplicitLod=*/false, /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(), true,
      Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, SampleCubeImplicitLodBiasSelectsCoarserMipLevel) {
+  // Roadmap L58: the same `Bias` operand also lowers against `Cube`,
+  // mirroring `ImplicitLodBiasSelectsCoarserMipLevel`'s own `Plain2D`
+  // proof -- with zero screen-space derivatives, a `Bias` of exactly
+  // `1.0` must select mip level 1 outright.
+  float Level0[6][2][2][4];
+  float Level1[6][1][1][4];
+  for (unsigned Face = 0; Face < 6; ++Face) {
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Level0[Face][Y][X][C] = 1.0f;
+    for (unsigned C = 0; C < 4; ++C)
+      Level1[Face][0][0][C] = 9.0f;
+  }
+  struct {
+    float L0[6][2][2][4];
+    float L1[6][1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/2 * 2 * 4 * sizeof(float), /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/1 * 1 * 4 * sizeof(float), /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 6;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MipFilter = static_cast<uint32_t>(SamplerFilter::Nearest);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeFn Fn = resolve<SampleCubeFn>(
+      addWrapper("sample_cube_bias", "feme.cpu.image.sample.cube.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/0.0f,
+     /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, /*Bias=*/1.0f,
+     -std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
 // Roadmap L56: the core proof of this row's own fix -- an implicit-LOD
@@ -3497,7 +3615,7 @@ TEST_F(ImageSamplingTest, SampleCubeImplicitLodSelectsCoarserMipFromDerivatives)
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
      /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/4.0f,
      /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false, -std::numeric_limits<float>::infinity(), true,
+     /*UseExplicitLod=*/false, /*Bias=*/0.0f, -std::numeric_limits<float>::infinity(), true,
      Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
@@ -3582,7 +3700,7 @@ TEST_F(ImageSamplingTest, SampleCubeSeamlessCornerAveragesThreeFaces) {
   // the `(X0, Y0)` tap straddles the corner shared by faces 0, 2, and 4.
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.6f,
-     /*DirZ=*/0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,
+     /*DirZ=*/0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true, /*Bias=*/0.0f,
      -std::numeric_limits<float>::infinity(), true, Out);
   // Expected corner value: (face2 (50) + face4 (25) + face0 (100)) / 3
   // ~= 58.33, blended with weight (1 - Wx) * (1 - Wy) ~= 0.01 against the
