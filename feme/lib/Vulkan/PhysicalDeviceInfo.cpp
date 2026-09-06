@@ -844,6 +844,15 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // re-run.
   Info.Features.shaderStorageImageReadWithoutFormat = VK_TRUE;
   Info.Features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+  // `shaderResourceMinLod` is still not advertised: roadmap L60(d)'s own
+  // flip/measure/revert experiment (most recently re-run alongside
+  // roadmap L63) confirms `Array2D`'s own `Grad`-blocking `VulkanBuffer`
+  // register-bound-resource-handle gap, `Plain3D`'s identical gap, the
+  // integer-sampler restriction, and (until this session) `Plain1D`'s/
+  // `Array1D`'s own hardcoded-`Lod=0` bug all still regress a real
+  // `textureclamp`/`texturegradclamp` majority of cases from
+  // `NotSupported` to actual `Fail` today -- see VulkanCTSReport.md's own
+  // `shaderResourceMinLod` section for the current per-shape breakdown.
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;

@@ -28893,3 +28893,111 @@ change is otherwise side-effect free:
 `Bias` image operand is core SPIR-V and is gated by no feature bit, unlike
 `MinLod`'s own `shaderResourceMinLod`, which remains `VK_FALSE` (see roadmap
 L61).
+
+## Roadmap L63: `Plain1D`/`Array1D` implicit-LOD mip selection fixed
+
+Roadmap L60(d)'s own `shaderResourceMinLod` flip/measure/revert re-run (with
+L52(c)/L58/L59/L60(a)/L61 all now landed) categorized `textureclamp`'s
+remaining 20 real failures and found 2 (`sampler1d_bias_{fixed,float}_fragment`)
+that did not match any previously-filed category: `Plain1D`/`Array1D`
+implicit-LOD sampling always hardcoded `Lod=0.0`
+(`femeCpuImageSample1D{,Array}V4F32`), unlike `Plain2D`'s real
+screen-space-derivative-based LOD computation (roadmap H7i's own
+`femeRTPlanImplicitLod`). `Array1D`'s identically-structured test
+coincidentally passed before this fix only because that particular case's
+clamp/bias parameters happen to saturate to a near-constant mip level, not
+because the code path was actually correct — a real, previously-latent bug,
+not a false positive.
+
+### Change
+
+| Phase | Change |
+| --- | --- |
+| CPU lowering (API) | `createSample1D`/`createSample1DArray` (`ImageCalls.h`/`.cpp`) gained a `DUdX`/`DUdY` screen-space-derivative pair, positioned immediately after the differentiated coordinate (mirroring `createSample2DArray`'s own `U, V, ArrayLayer, DUdX, DUdY, DVdX, DVdY` ordering); a new `getOrSynthesizeSample1DDerivatives` helper mirrors `getOrSynthesizeSample2DDerivatives`'s own Fragment-stage-gated real-derivative-or-zero-constants pattern |
+| CPU lowering (use) | `SPIRVResourceLowering.cpp`'s `Plain1D`/`Array1D` special case synthesizes a real derivative per shape (zero constants for an explicit-LOD `textureLod()`) and threads it through `createSample1D`/`createSample1DArray` |
+| Runtime | A new `femeRTPlanImplicitLod1D(Img, DUdX, DUdY)` helper computes `Pmax = max(|DUdX*Width|, |DUdY*Width|)` and `Lod = Pmax<=0 ? 0 : femeRTFastLog2(Pmax)` directly — deliberately *not* reusing `femeRTPlanImplicitLod` with a zeroed V-axis, which would incorrectly trigger that function's own zero-`Pmin` maximal-anisotropy handling for every anisotropic 1D sample |
+
+### Two real bugs caught mid-session by the runtime-side unit test and a real CTS re-run (neither visible to the compiler-side lowering test alone)
+
+1. **`femeRTComputeClampedLod`'s own `UseExplicitLod` contract**: this helper
+   discards its `Lod` argument back to a hardcoded `0.0f` whenever
+   `UseExplicitLod` is `false` (`femeRTPlanImplicitLod` always calls it with a
+   hardcoded `true`, since by that point the LOD it passes is already the
+   sample's own real starting-point value, explicit or not). The initial 1D
+   fix instead forwarded the *sample's own* original `UseExplicitLod` flag
+   through unchanged, silently discarding the newly-computed real implicit LOD
+   back to `0.0` for every implicit-LOD sample. Caught by a new
+   `Sample1DRealDerivativeSelectsCoarserMipLevel` unit test, which failed with
+   exactly this symptom (`Out[0] == 1` when `9.0f` was expected) before the
+   fix. Fixed by always passing `/*UseExplicitLod=*/1` here, matching
+   `Plain2D`'s own established precedent.
+2. **A stray, mistyped derivative on `Array1D`**: `SPIRVResourceLowering.cpp`
+   computed one derivative pair unconditionally, differentiating `Coord`
+   directly, before branching on shape. Correct for `Plain1D` (`Coord` is
+   already a bare scalar `U`), but for `Array1D`, `Coord` is a 2-component
+   `(U, ArrayLayer)` vector — this produced a stray, unused, vector-typed
+   derivative call alongside the real scalar-`U` one the `Array1D` branch
+   already computed separately. Confirmed via a real `deqp-vk` re-run showing
+   `sampler1d_bias_*`/`sampler1darray_bias_*` each passing individually, but
+   one of the two deterministically regressing to the exact pre-fix
+   `difference = 1.85165` failure whenever both ran in the same `deqp-vk`
+   process — an analogous `sampler2d_bias`/`sampler2darray_bias` pairing
+   (sharing the same `Plain2D`/`Array2D` derivative-synthesis infrastructure)
+   never showed this symptom. Fixed by moving each shape's own derivative
+   computation inside its own branch, differentiating only the real scalar
+   value each shape actually samples.
+
+### Tests
+
+`ImageCallsTest.cpp`'s two existing `Sample1D`/`Sample1DArray` positive tests
+extended with the new `DUdX`/`DUdY` parameters; `SPIRVResourceLoweringTest.cpp`'s
+four existing tests' arg-count/index expectations bumped, plus a new
+`FragmentStageImplicitSample1DSynthesizesRealDerivatives` test;
+`ImageSamplingTest.cpp`'s `Sample1DFn`/`Sample1DArrayFn` typedefs and 6 call
+sites updated, plus a new `Sample1DRealDerivativeSelectsCoarserMipLevel` test.
+
+`ninja check-feme`:
+
+| | Before | After |
+| --- | --- | --- |
+| Discovered | 2689 | 2691 |
+| Passed | 2630 | 2632 |
+| Unsupported | 59 | 59 |
+| Failed | 0 | 0 |
+
+### Real `deqp-vk` results
+
+A temporary `Info.Features.shaderResourceMinLod = VK_TRUE` experiment (reverted
+after measurement, per this project's own flip/measure/revert methodology) was
+needed to reach `textureclamp`'s own `textureClampARB` codepath at all:
+
+| Case | Before | After |
+| --- | --- | --- |
+| `dEQP-VK.glsl.texture_functions.textureclamp.sampler1d_bias_fixed_fragment` | Fail | **Pass** |
+| `dEQP-VK.glsl.texture_functions.textureclamp.sampler1d_bias_float_fragment` | Fail | **Pass** |
+
+Confirmed stable across 3 repeated full `textureclamp` sweeps, and alongside
+`sampler1darray_bias_*` in the same `deqp-vk` process (the exact pairing that
+exposed bug (2) above): 14 Pass (up from 12), 18 Fail (down from 20), 18
+NotSupported (unchanged), deterministic across all 3 runs.
+
+A feature-independent re-run of the plain (non-clamp)
+`texture.sampler1d_bias_{fixed,float}_fragment` cases (ordinary `Bias` needs no
+`shaderResourceMinLod` flip) confirms this fix already benefits real,
+always-reachable CTS coverage without any feature-bit change: 2/2 Pass.
+
+A `git stash`-based before/after sweep of every
+`dEQP-VK.glsl.texture_functions.*.sampler1d*` case (1,355 cases) confirms a
+strictly monotonic improvement with no regressions: 28 Pass after this fix vs.
+26 before (up by exactly these same 2 cases), 776 Fail after vs. 778 before
+(down by exactly 2), 551 NotSupported unchanged in both.
+
+`shaderResourceMinLod` itself remains correctly advertised as `VK_FALSE`
+(reverted after measurement) — `Array2D`/`Plain3D`'s own `VulkanBuffer`
+register-bound-resource-handle gap (roadmap L60(a)), the integer-sampler
+restriction, and roadmap L62's own still-unstarted `Dref`+`Bias`+`MinLod` gap
+all still block safely flipping it on.
+
+`FeMeGraphicsDesign.md`/`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed: no deviation or update needed (internal CPU-lowering plumbing only,
+no new feature/extension bit).
