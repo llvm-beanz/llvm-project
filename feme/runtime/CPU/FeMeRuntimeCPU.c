@@ -4470,12 +4470,10 @@ femeRTSampleLinear3D(const FemeRTImageDescriptor *Img,
 // trilinear-mip-blend (`femeRTSelectMipLevels`) decisions; no `OffsetX`/
 // `OffsetY` parameter, mirroring `createSample3D`'s own scope decision
 // (see `ImageCalls.h`'s `Sample3D` doc) -- no real CTS case exercises a
-// `ConstOffset` against a 3D sampler yet, and SPIR-V's own per-instruction
-// `MinLod`/`Bias` operands are equally unstarted for this shape (roadmap
-// L66's own breakdown), so `femeCpuImageSample3DV4F32` below always calls
-// this with a `0`/no-op instruction bias and clamp, exactly like
-// `femeCpuImageSample1DV4F32` did before roadmap L61(c) added its own real
-// ones.
+// `ConstOffset` against a 3D sampler yet. `Bias`/`MinLodClamp` (roadmap
+// L67(a)) are applied by the caller before `ClampedLod` is even computed
+// (mirroring `femeRTSampleFiltered1D`'s own identical division of labor),
+// so this function itself needs no operand of its own for either.
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSampleFiltered3D(const FemeRTImageDescriptor *Img,
                        const FemeRTSamplerDescriptor *Samp, float U, float V,
@@ -4519,23 +4517,25 @@ femeRTPlanImplicitLod3D(const FemeRTImageDescriptor *Img, float DUdX,
   return Pmax <= 0.0f ? 0.0f : femeRTFastLog2(Pmax);
 }
 
-// `feme.cpu.image.sample.3d.v4f32` (roadmap L66(a)): samples a `Plain3D`
+// `feme.cpu.image.sample.3d.v4f32` (roadmap L66(a), extended with a real
+// `Bias`/`MinLodClamp` pair by roadmap L67(a)): samples a `Plain3D`
 // sampled image at normalized coordinates `(U, V, W)`, the volumetric
 // counterpart of `feme.cpu.image.sample.2d.v4f32` above -- same mag/min
 // and mip filter-selection logic (`femeRTSampleFiltered3D`), same
 // implicit-vs-explicit LOD split (`femeRTPlanImplicitLod3D` in place of
 // `femeRTPlanImplicitLod`/`femeRTPlanImplicitLod1D`, since no real CTS
 // case exercises anisotropic filtering against this shape -- see its own
-// doc), narrowed to this row's own ordinary-sampling-only scope: no
-// `Bias`/`MinLodClamp`/`ConstOffset`/`Grad` operand yet (roadmap L66's own
-// breakdown scopes each as its own follow-on row), mirroring
-// `femeCpuImageSample1DV4F32`'s own pre-L61(c)/pre-L65 starting point.
+// doc), and the same `Bias`/`MinLodClamp` pair `femeCpuImageSample1DV4F32`
+// carries (roadmap L61(c)), threaded through to `femeRTComputeClampedLod`
+// in place of the previous hardcoded `0.0f`/`-inf` no-op values. Still no
+// `ConstOffset`/`Grad` operand -- each its own follow-on roadmap L67(c)/
+// L67(b) sub-item.
 FemeRTv4f32 femeCpuImageSample3DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float W,
     float DUdX, float DUdY, float DVdX, float DVdY, float DWdX, float DWdY,
-    float Lod, _Bool UseExplicitLod,
+    float Lod, _Bool UseExplicitLod, float Bias, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.3d.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample3DV4F32(
@@ -4543,7 +4543,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample3DV4F32(
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float W,
     float DUdX, float DUdY, float DVdX, float DVdY, float DWdX, float DWdY,
-    float Lod, _Bool UseExplicitLod, _Bool Mask) {
+    float Lod, _Bool UseExplicitLod, float Bias, float MinLodClamp,
+    _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -4558,12 +4559,12 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample3DV4F32(
                      : femeRTPlanImplicitLod3D(&Img, DUdX, DUdY, DVdX, DVdY,
                                                DWdX, DWdY);
   // `UseExplicitLod=1` always -- see `femeCpuImageSample1DV4F32`'s own
-  // identical comment above; no per-instruction `MinLod`/`Bias` of its
-  // own yet (both no-ops here), see this function's own doc.
+  // identical comment above; `MinLodClamp`/`Bias` are now real
+  // caller-supplied values (roadmap L67(a)), not hardcoded no-ops.
   float ClampedLod = femeRTComputeClampedLod(RawLod, /*UseExplicitLod=*/1,
                                             &Samp, /*InstructionMinLod=*/
-                                            -__builtin_inff(),
-                                            /*InstructionBias=*/0.0f);
+                                            MinLodClamp,
+                                            /*InstructionBias=*/Bias);
   return femeRTSampleFiltered3D(&Img, &Samp, U, V, W, ClampedLod);
 }
 
