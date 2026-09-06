@@ -28162,3 +28162,146 @@ advertised).
 **Remaining work.** L52 sub-item (b)'s own literal `Dref`+`Bias` gap
 and sub-item (c) `samplecmp_clamp`'s `MinLod` operand remain the only
 still-open L52 sub-items.
+
+## Roadmap L59: explicit-`Grad` sampling for `Plain2D`/`Cube`, plus L60 filed for the rest
+
+**Context.** Re-investigating L52's own remaining sub-items (b)
+`Dref`+`Bias` and (c) `samplecmp_clamp`'s `MinLod` operand found both
+unchanged (zero standalone real CTS cases for (c); (b) still needs a
+new LLVM core intrinsic). That same investigation probed the 4 real
+CTS groups gated by the still-disabled `shaderResourceMinLod` feature
+bit (`textureclamp`, `textureoffsetclamp`, `texturegradclamp`,
+`textureoffsetgradclamp`) and discovered a dramatically larger,
+previously-unknown gap: explicit-gradient (`Grad`) sampling (SPIR-V's
+own `Grad` image operand, GLSL's `textureGrad()`/`textureGradOffset()`,
+HLSL's `Texture2D::SampleGrad`) has **zero implementation anywhere in
+feme**, failing at `ConvertSPIRVToLLVMPass` legalization itself. A real
+`deqp-vk` sweep of just the non-clamp `texturegrad`/`texturegradoffset`
+groups confirmed the scale: 726 real cases, 459 Fail (63.2%), 0 Pass,
+267 NotSupported (36.8%) -- the largest single known gap of any
+L-series row so far.
+
+**Root cause.** `spirv.ImageSampleExplicitLod` with a `Grad` image
+operand has no matching MLIR conversion pattern at all --
+`ImageSampleExplicitLodPattern`'s own doc comment already anticipated
+this ("`Grad`... is not yet covered"), but no sibling pattern existed
+to handle it. Unlike L52 sub-item (b)'s own `Dref`+`Bias` gap, the
+target LLVM intrinsics (`int_spv_resource_samplegrad`/
+`.samplegrad_clamp`, `llvm/include/llvm/IR/IntrinsicsSPIRV.td`) already
+exist -- no new core intrinsic definition is needed, only a new MLIR
+legalization pattern plus feme-internal plumbing.
+
+**Fix (scoped to `Plain2D`/`Cube`, `fixed`/`float`, `fragment`/`vertex`
+-- the narrowest tractable first slice, mirroring every prior
+narrow-first-slice precedent).**
+- `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`: new
+  `ImageSampleGradPattern`, registered alongside
+  `ImageSampleExplicitLodPattern` against the same
+  `spirv.ImageSampleExplicitLod` op -- the greedy pattern rewriter
+  falls through to it when the `Lod`-only pattern's exact match fails.
+  Recognizes any combination of `Grad`+`ConstOffset`+`MinLod` and
+  legalizes to `llvm.spv.resource.samplegrad`/`.samplegrad.clamp`,
+  mirroring `ImageSampleImplicitLodPattern`'s own combinatorial
+  `Bias`/`ConstOffset`/`MinLod` handling but for `Grad`'s mandatory
+  two-vector-operand shape (`dPdx` then `dPdy`, per the fixed SPIR-V
+  Image Operands bit order).
+- `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`: `isSampleIntrinsic`
+  gained a `bool &HasGrad` out-parameter recognizing
+  `spv_resource_samplegrad`/`.samplegrad_clamp`; `getSampleOffsetIdx`/
+  `getSampleClampIdx` now also take `HasGrad` (a `Grad` call's own
+  offset operand sits at index 5, after both gradient vectors, unlike
+  `Bias`'s single-scalar index-4 shift). `hasOnlySupportedImageUses`/
+  `hasOnlySupportedSamplerUses` gained a `HasGrad && Shape != Plain2D
+  && Shape != Cube` rejection mirroring `HasBias`'s own roadmap L58
+  scope, plus a coordinate-width check on both gradient vector
+  operands. `lowerImageAccesses` extracts the real `dPdx`/`dPdy`
+  vector operands and unpacks their components directly into
+  `createSample2D`'s existing `DUdX`/`DUdY`/`DVdX`/`DVdY` parameters
+  (`Plain2D`) or `createSampleCube`'s existing six
+  `DDirXdX`/.../`DDirZdY` parameters (`Cube`).
+- **No new `ImageCallKind`, builder, or runtime entry point was
+  needed at all** -- the runtime's own implicit-LOD mip/anisotropy
+  math (`femeRTPlanImplicitLod`) is agnostic to whether a derivative
+  was synthesized from `feme.stage.derivative.*` (an ordinary implicit
+  `texture()` sample), zeroed (an explicit-`Lod` `textureLod()`
+  sample), or supplied directly by the shader itself via `Grad`. This
+  is a materially smaller runtime-side change than initially
+  anticipated during scoping.
+
+**Deliberately out of scope (filed as roadmap L60).** `Array2D`/
+`CubeArray`/`Plain1D`/`Array1D`/`Plain3D` shapes; `isampler`/`usampler`
+integer formats; the `compute` stage; sparse-residency variants; the
+`Dref`+`Grad` depth-comparison combination; and the `Grad`+`MinLod`
+clamp combination (blocked on the still-disabled `shaderResourceMinLod`
+feature bit L52 already found).
+
+**Tests.** 4 new MLIR lit cases appended to the existing
+`feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-sampling.mlir`
+(`@sample_grad`, `@sample_grad_const_offset`, `@sample_grad_minlod`,
+`@sample_grad_const_offset_minlod` -- all four `ConstOffset`/`MinLod`
+combinations alongside `Grad`'s own mandatory operand). 3 new
+`SPIRVResourceLoweringTest` unit tests
+(`LowersSampleGradToPlain2DDerivatives`,
+`LowersSampleGradToCubeDerivatives`,
+`LeavesASampleGradAgainstArray2DAlone`), mirroring `HasBias`'s own
+roadmap L58 positive/negative-test precedent.
+
+**`ninja check-feme` (ccache + assertions, `build2`).** 2615/2674
+discovered (up from 2612/2671 by exactly the 3 new
+`SPIRVResourceLoweringTest` cases; the 4 new MLIR lit cases run under
+the pre-existing `spirv-to-llvm-sampling.mlir` lit file, not counted as
+separate discovered unit tests), 59 pre-existing `Unsupported`, 0
+`Failed` -- no regressions.
+
+**Measured impact.** Real
+`dEQP-VK.glsl.texture_functions.texturegrad.{sampler2d,samplercube}_{fixed,float}_{fragment,vertex}`
+re-run: **8/8 now Pass, up from 0/8** before this fix. A broader
+`texturegrad`/`texturegradoffset` sweep (726 cases, matching this
+row's own motivating baseline) confirms a strictly monotonic
+improvement and no regressions:
+
+| | Before | After |
+|---|---|---|
+| Pass | 0 | 28 |
+| Fail | 459 | 431 |
+| NotSupported | 267 | 267 |
+
+The 28 newly-passing cases are 8 from `texturegrad` itself, plus 20
+from `texturegradoffset`'s own 5 wrap modes (`repeat`/`mirrored`/
+`mirrored_repeat`/`clamp_to_edge`/`clamp_to_border`) x
+`sampler2d_{fixed,float}_{fragment,vertex}` -- `Cube` has no real
+`ConstOffset` operand to combine with `Grad` at all, mirroring
+`isSupportedOffset`'s existing `Dim::Cube` restriction, so no
+`samplercube*` cases appear in `texturegradoffset`. Every remaining
+`Fail` is a shape/format/stage this row deliberately left out of
+scope (see L60 below), not a regression. `NotSupported` is unchanged
+-- the `*clamp*` variants' own `shaderResourceMinLod` gating, untouched
+by this fix.
+
+**Design docs.** `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md` reviewed:
+no deviation to record (neither ever scoped sampled-image support to
+exclude an explicit `Grad` operand in a way this addition
+contradicts).
+
+**Feature/extension inventories.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed: no change needed (internal
+CPU-lowering plumbing only, no new feature/extension surface
+advertised, and `shaderResourceMinLod` remains correctly `VK_FALSE` --
+this fix alone doesn't clear the `Grad`+`MinLod` clamp subset that bit
+also gates).
+
+**Remaining work.** Filed as roadmap L60: (a) `Array2D`/`CubeArray`
+`Grad` sampling; (b) integer-channel `Grad` sampling (arguably not a
+real gap, since integer-channel sampling is unfiltered `texelFetch`-
+shaped in GLSL/HLSL, not `Grad`-shaped, in the first place); (c)
+`compute`-stage `Grad` sampling (confirmed to fail for a distinct,
+unrelated reason -- `vkCreateComputePipelines` itself fails, likely
+the same `VK_KHR_compute_shader_derivatives`-shaped gap prior sessions
+already identified); (d) `Grad`+`MinLod` clamp (this fix's own code
+already threads a real clamp through for `Plain2D`/`Cube`, so this may
+already be functionally correct -- unconfirmed only because
+`shaderResourceMinLod` is not yet `VK_TRUE`); (e) `Dref`+`Grad`
+depth-comparison sampling (not yet confirmed present in the CTS corpus;
+would need a new `llvm.spv.resource.samplecmpgrad`-shaped intrinsic
+that does not exist today); (f) sparse-residency `Grad` sampling (not
+yet investigated).
