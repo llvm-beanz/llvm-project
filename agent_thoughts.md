@@ -64743,3 +64743,127 @@ NotSupported (unrelated format/extension gaps). See
 2. `Roadmap.md`/`VulkanCTSReport.md` updates (L50 struck for sub-item
    (d), new L52 row filed for the remaining sub-items).
 3. This `agent_thoughts.md` entry (its own final commit).
+
+# L51: Root-causing the CubeArray-shadow rendering bug (seamless cube filtering)
+
+## Starting point
+
+L51 asked me to reduce `samplercubearrayshadow_fragment`'s own localized
+32x32-pixel rendering mismatch (`x:[96,127] y:[0,31]` of 128x128), which
+a prior session had already ruled out as a sampling-math bug in
+`femeCpuImageSampleCmpCubeArrayF32` itself (face/layer selection, LOD
+clamping, texel content, and depth-compare application were all
+independently proven correct). The milestone's own leading hypothesis
+was a rasterizer/vertex-attribute-interpolation bug, since this test's
+`v_texCoord.w` component does double duty as both the array-layer
+selector and the depth-compare reference value.
+
+## Reading the real CTS test source first
+
+Before touching any code, I read `vktShaderRender.cpp`'s `QuadGrid` and
+`vktShaderRenderTextureFunctionTests.cpp`'s shader-source generation
+closely. Two things fell out of this that reshaped my whole approach:
+
+1. The mismatch bbox (`x:[96,127] y:[0,31]`, 32x32) lines up *exactly*
+   with one specific cell of this test's `GRID_SIZE_DEFAULT_FRAGMENT=4`
+   `QuadGrid` (a 5x5-vertex, 4x4-cell, 32-triangle mesh over a 128x128
+   render target -- each cell is exactly 32x32px). That's a much
+   stronger, more specific correlation than "somewhere near a triangle
+   diagonal," and it made me suspicious the earlier "diagonal boundary"
+   framing in the milestone text was imprecise.
+2. `QuadGrid::getUserAttrib` is a *purely affine* function of screen
+   position, and the reference image (`computeFragmentReference`) is
+   computed by evaluating that same affine function directly at each
+   pixel's continuous center -- not by rasterizing at all. Since the
+   mesh's own vertex positions are *also* affine images of the same
+   domain (an orthographic quad, `w=1` everywhere), barycentric
+   interpolation across any real triangle in the mesh must reproduce the
+   *exact* analytic value everywhere, with no inherent piecewise-vs-
+   continuous discrepancy to blame. This was an important realization:
+   it meant a correctly-implemented rasterizer is provably not allowed
+   to differ from the reference here at all, so if I found even one
+   fragment where the interpolated value diverged from the affine
+   formula, that alone would be a confirmed bug -- and if I found none
+   diverged, the rasterizer would be conclusively cleared.
+
+## Debug dump, and a clean disproof
+
+I added a temporary `FEME_DEBUG_FRAG_INTERP`-gated `fprintf` into
+`Executor.cpp`'s FS-input interpolation loop (same pattern as prior
+sessions' own temporary debug techniques), rebuilt `feme_vulkan`, and
+re-ran the real failing case with the dump scoped to the mismatch bbox.
+1,088 fragments logged across exactly 2 triangles (one grid cell's own
+two, as predicted).
+
+I then went back to `vktShaderRenderTextureFunctionTests.cpp` and found
+the *exact* `CASE_SPEC` entry for this test
+(`Vec4(-1.0f,-1.0f,1.01f,-0.5f)` .. `Vec4(1.0f,1.0f,1.01f,1.5f)`) and
+`ShaderTextureFunctionInstance`'s own `baseCoordTrans` matrix
+construction, and derived the closed-form affine formula for each
+texcoord component by hand:  `x'=2sx-1`, `y'=2sy-1`, `z'=1.01`
+(constant), `w'=-sx+sy+0.5`. Plugging in pixel `(96,0)`'s own center
+gives `w'=-0.25` -- bit-for-bit identical to the real logged value. Every
+one of the 1,088 logged fragments matched this formula exactly. This
+directly disproves L51's own rasterizer hypothesis: the interpolated
+input to the texture-sampling function is exactly correct here.
+
+I want to flag this as a case where the milestone's own prior-session
+hypothesis (well-reasoned as it was) turned out to be wrong, and the
+right move was to keep following the evidence rather than assume the
+"needs (1)" plan in the roadmap text was the final word. Re-deriving the
+analytic ground truth by hand (rather than just eyeballing "does this
+look plausible") is what actually closed this off cleanly.
+
+## Finding the real root cause
+
+With the rasterizer cleared, I went back to the other 3 texcoord
+components and noticed the sample direction vector's dominant axis
+(`+Z`, `1.01`) beats the other two (`max(|x'|,|y'|)=0.992`) by a
+margin that's real but not huge (`0.992/1.01 ~= 0.98`) -- closer to the
+`+Z` face's own edge than any of this test's other 15 grid cells. That,
+plus recalling that Vulkan cube map sampling is seamless *by default*
+(a detail easy to forget, and not something any of the roadmap's prior
+Cube/CubeArray rows had mentioned), sent me to check whether
+`femeCpuImageSampleCubeV4F32` and friends actually implement seamless
+filtering. They don't -- they hard-code plain clamp-to-edge on a single
+selected face, unconditionally. I confirmed this is a genuine spec gap
+by checking VK-GL-CTS's own `mapVkSampler` (which sets
+`seamlessCubeMap` true by default) and `TextureCubeArrayView::
+sampleCompare`'s own dispatch to a real seamless-blend path.
+
+This explains everything precisely: only a `LINEAR`-filtered sample
+footprint that spans past a face edge sees any difference between real
+seamless blending and this target's single-face clamp, and this grid
+cell alone (of 16) has that footprint. Every other passing Cube/
+CubeArray CTS case samples comfortably face-interior.
+
+## Why I didn't attempt the fix in this session
+
+Implementing real seamless cube filtering isn't a small patch -- it
+needs a genuine cross-face coordinate-remapping helper (with a real
+special case for a linear tap landing outside the face on *both* axes
+at once, which VK-GL-CTS's own reference handles by averaging two
+faces rather than reading a third), a new per-sampler seamless bit
+threaded from `VkSamplerCreateInfo` down into `FemeRTSamplerDescriptor`
+(which doesn't have one today), and a new fetch path for 4 existing
+entry points (ordinary + Cmp, Cube + CubeArray). That's a materially
+bigger, standalone feature, not a bugfix -- so per this project's own
+precedent (L26->L33, L45->L47, L46->L48, L48->L50, L50->L51) I filed it
+as its own roadmap row, **L53**, with a concrete 5-part breakdown,
+rather than rushing a partial implementation without adequate test
+coverage.
+
+## Commits this session
+
+1. `Roadmap.md`/`VulkanCTSReport.md` updates (L51 struck through as
+   root-caused, new L53 row filed for the actual fix).
+2. This `agent_thoughts.md` entry (its own final commit).
+
+No runtime/compiler code changes were needed or made this session (the
+temporary `FEME_DEBUG_FRAG_INTERP` instrumentation in `Executor.cpp` was
+reverted before committing anything); `ninja check-feme` is therefore
+unaffected by this session (no new tests, no regressions -- nothing to
+rebuild or re-run beyond the real `deqp-vk` re-run described above,
+which reused the existing `build2` `feme_vulkan` binary already built as
+part of the investigation, and the earlier debug-instrumented binary was
+never itself committed or left in the tree).
