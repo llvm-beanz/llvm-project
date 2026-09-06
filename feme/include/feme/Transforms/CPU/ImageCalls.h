@@ -345,6 +345,17 @@ enum class ImageCallKind : uint8_t {
   /// `Texture1DArray` counterpart of `Sample1D`, adding the same float
   /// array-layer coordinate `Sample2DArray` adds to `Sample2D`.
   Sample1DArray,
+  /// `feme.cpu.image.samplecmp.1d.f32` (roadmap L54): the depth-comparison
+  /// counterpart of `Sample1D`, mirroring `SampleCmp2D`'s own relationship
+  /// to `Sample2D` -- but, like `Sample1D`/`Sample1DArray` themselves, no
+  /// `ConstOffset`/`MinLod` clamp (SPIR-V's own `ConstOffset` image
+  /// operand is legal against `Dim::1D`, but no real CTS case exercises it
+  /// yet, matching `Sample1D`'s own scope decision).
+  SampleCmp1D,
+  /// `feme.cpu.image.samplecmp.1darray.f32` (roadmap L54): the
+  /// `Texture1DArray` counterpart of `SampleCmp1D`, adding the same float
+  /// array-layer coordinate `Sample1DArray` adds to `Sample1D`.
+  SampleCmpArray1D,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -386,7 +397,8 @@ struct MatchedImageCall {
   /// `Load2DArray`'s own convention).
   /// `Sample1D`/`Sample1DArray` (roadmap L52a): the single normalized `U`
   /// coordinate, same shape as `Load1D`'s own `U` -- `V` is null for these
-  /// two kinds too.
+  /// two kinds too. `SampleCmp1D`/`SampleCmpArray1D` (roadmap L54) use
+  /// this the same way.
   llvm::Value *U = nullptr;
   llvm::Value *V = nullptr;
   /// `Sample2D` only (roadmap H7i): the caller's own screen-space partial
@@ -404,7 +416,8 @@ struct MatchedImageCall {
   /// every other kind, including the integer-coordinate `Load2DArray`/
   /// `Load2DArrayI32`, which instead use `Layer` below.
   /// `Sample1DArray` (roadmap L52a) also uses this, same convention as
-  /// `Sample2DArray`.
+  /// `Sample2DArray`. `SampleCmpArray1D` (roadmap L54) uses this the same
+  /// way too.
   llvm::Value *ArrayLayer = nullptr;
   /// `Load2DArray`/`Load2DArrayI32`/`Store2DArray`/`Store2DArrayI32`
   /// (roadmap H19b), `Load1DArray`/`Load1DArrayI32`/`Store1DArray`/
@@ -426,7 +439,9 @@ struct MatchedImageCall {
   /// null for `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32`, which
   /// always name their mip explicitly.
   llvm::Value *UseExplicitLod = nullptr;
-  /// `SampleCmp2D` only: the depth-comparison reference value.
+  /// `SampleCmp2D`/`SampleCmpArray2D`/`SampleCmpCube`/`SampleCmpCubeArray`/
+  /// `SampleCmp1D`/`SampleCmpArray1D` (roadmap L54) only: the
+  /// depth-comparison reference value.
   llvm::Value *Dref = nullptr;
   /// `Sample2D`/`SampleCmp2D`/`SampleCmpArray2D` only (roadmap L26/L50d):
   /// the integer `<ConstOffset>` texel offset's X/Y components (see
@@ -733,6 +748,29 @@ llvm::CallInst *createSample1DArray(llvm::IRBuilderBase &Builder,
                                     llvm::Value *UseExplicitLod,
                                     llvm::Value *Mask,
                                     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.samplecmp.1d.f32` call (roadmap L54), the
+/// depth-comparison counterpart of `createSample1D` -- see
+/// `ImageCallKind::SampleCmp1D`'s own doc for why this shape carries no
+/// `ConstOffset`/`MinLod` clamp.
+llvm::CallInst *createSampleCmp1D(llvm::IRBuilderBase &Builder,
+                                  const ImageCallEnv &Env,
+                                  llvm::Value *ImageIndex,
+                                  llvm::Value *SamplerIndex, llvm::Value *U,
+                                  llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                                  llvm::Value *Dref, llvm::Value *Mask,
+                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.samplecmp.1darray.f32` call (roadmap L54), the
+/// `Texture1DArray` counterpart of `createSampleCmp1D`.
+llvm::CallInst *createSampleCmpArray1D(llvm::IRBuilderBase &Builder,
+                                      const ImageCallEnv &Env,
+                                      llvm::Value *ImageIndex,
+                                      llvm::Value *SamplerIndex, llvm::Value *U,
+                                      llvm::Value *ArrayLayer, llvm::Value *Lod,
+                                      llvm::Value *UseExplicitLod,
+                                      llvm::Value *Dref, llvm::Value *Mask,
+                                      const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.1d.v4f32` call (roadmap H19c). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.
