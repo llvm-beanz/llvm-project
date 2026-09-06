@@ -207,12 +207,17 @@ using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
 using LoadI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                            int32_t, int32_t, uint32_t, uint32_t, bool, void *);
 /// The roadmap H7b-a `Texture2DArray` counterpart of `SampleFn`, adding a
-/// float `ArrayLayer` coordinate (rounded to nearest, clamped) before
-/// `Lod`.
+/// float `ArrayLayer` coordinate (rounded to nearest, clamped) before the
+/// four screen-space partial derivatives of `(U, V)` -- also gains
+/// (roadmap L60(a)) its own float `Bias` and trailing float
+/// `MinLodClamp`, mirroring `SampleFn`'s own operands above, but with no
+/// integer texel offset (an ordinary Array2D sample's own `ConstOffset`
+/// lowering remains future work, roadmap L33).
 using SampleArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                const FemeSamplerDescriptor *, uint32_t,
                                uint32_t, uint32_t, float, float, float, float,
-                               bool, bool, void *);
+                               float, float, float, float, bool, float, float,
+                               bool, void *);
 /// The roadmap H7b-a `Texture2DArray` counterpart of `LoadFn`, adding an
 /// integer `Layer` coordinate before `Mip`.
 using LoadArrayFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
@@ -2565,8 +2570,11 @@ TEST_F(ImageSamplingTest, Sample2DArrayReadsRequestedLayer) {
   SampleArrayFn Fn = resolve<SampleArrayFn>(
       addWrapper("sample_array", "feme.cpu.image.sample.2darray.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/2.0f, 0.0f,
-     true, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/2.0f,
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
+     /*Mask=*/true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
 }
 
@@ -2585,8 +2593,11 @@ TEST_F(ImageSamplingTest, Sample2DArrayRoundsLayerToNearest) {
       addWrapper("sample_array", "feme.cpu.image.sample.2darray.v4f32"));
   float Out[4];
   // 0.6 rounds to nearest layer 1, not truncates to layer 0.
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/0.6f, 0.0f,
-     true, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*ArrayLayer=*/0.6f,
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/true, /*Bias=*/0.0f,
+     /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
+     /*Mask=*/true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
 }
 
