@@ -411,15 +411,18 @@ enum class ImageCallKind : uint8_t {
   /// `CubeArray`/`Plain1D`/`Array1D`/`Plain3D` counterparts remain
   /// unstarted follow-on work.
   QueryLod2D,
-  /// `feme.cpu.image.sample.3d.v4f32` (roadmap L66(a)): the volumetric
-  /// counterpart of `Sample2D`, a plain `Plain3D` ordinary sample -- this
-  /// row's own scope is ordinary sampling only, so unlike `Sample1D`/
-  /// `Sample2D`, there is deliberately no `Bias`/`MinLodClamp`/`ConstOffset`
-  /// operand yet (each is its own follow-on roadmap L66 sub-item), only a
-  /// real `(U, V, W)` coordinate, its own screen-space partial derivatives
+  /// `feme.cpu.image.sample.3d.v4f32` (roadmap L66(a), extended with a
+  /// real `Bias`/`MinLodClamp` pair by roadmap L67(a)): the volumetric
+  /// counterpart of `Sample2D`, a `Plain3D` ordinary sample -- a real
+  /// `(U, V, W)` coordinate, its own screen-space partial derivatives
   /// (`DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY`, consulted only for an
   /// implicit-LOD sample, mirroring `Sample1D`'s own derivative pair) for
-  /// `Lod`/`UseExplicitLod`'s own implicit-vs-explicit split.
+  /// `Lod`/`UseExplicitLod`'s own implicit-vs-explicit split, and a real
+  /// `Bias`/`MinLodClamp` pair (mirroring `Sample1D`'s own roadmap L61(c)
+  /// extension). Still no `ConstOffset` operand -- that remains its own
+  /// follow-on roadmap L67(c)/L66(d) sub-item, blocked on the same
+  /// pre-existing `Plain2D`-only `isSupportedOffset` restriction roadmap
+  /// L33 already scopes.
   Sample3D,
 };
 
@@ -529,10 +532,11 @@ struct MatchedImageCall {
   /// always name their mip explicitly.
   llvm::Value *UseExplicitLod = nullptr;
   /// `Sample2D`/`SampleCube`/`SampleCubeArray`/`Sample2DArray` (roadmap
-  /// L58/L60(a)): SPIR-V's own `Bias` image operand, an additional term
-  /// added to the implicit-LOD footprint's own raw LOD before the
-  /// sampler's own bias/clamp runs (see `createSample2D`'s doc); null for
-  /// every other kind.
+  /// L58/L60(a)), `Sample1D`/`Sample1DArray` (roadmap L61(c)), and
+  /// `Sample3D` (roadmap L67(a)): SPIR-V's own `Bias` image operand, an
+  /// additional term added to the implicit-LOD footprint's own raw LOD
+  /// before the sampler's own bias/clamp runs (see `createSample2D`'s
+  /// doc); null for every other kind.
   llvm::Value *Bias = nullptr;
   /// `SampleCmp2D`/`SampleCmpArray2D`/`SampleCmpCube`/`SampleCmpCubeArray`/
   /// `SampleCmp1D`/`SampleCmpArray1D` (roadmap L54) only: the
@@ -548,11 +552,10 @@ struct MatchedImageCall {
   llvm::Value *OffsetY = nullptr;
   /// `Sample2D`/`SampleCube`/`SampleCubeArray`/`Sample2DArray`/
   /// `SampleCmp2D`/`SampleCmpArray2D`/`SampleCmpCube`/`SampleCmpCubeArray`
-  /// (roadmap L26/L60(a)/L52(c)): the `MinLod` clamp floor on the implicit
-  /// LOD (see `createSample2D`'s doc); null for every other kind,
-  /// including `SampleCmp1D`/`SampleCmpArray1D`, which `lowerImageAccesses`
-  /// never threads a real clamp value through (see its own
-  /// `HasMinLodClamp` shape restriction).
+  /// (roadmap L26/L60(a)/L52(c)), `Sample1D`/`Sample1DArray`/
+  /// `SampleCmp1D`/`SampleCmpArray1D` (roadmap L61(c)/L62), and `Sample3D`
+  /// (roadmap L67(a)): the `MinLod` clamp floor on the implicit LOD (see
+  /// `createSample2D`'s doc); null for every other kind.
   llvm::Value *MinLodClamp = nullptr;
   /// `Load2D`/`Load2DI32`/`Load2DArray`/`Load2DArrayI32` only (roadmap
   /// F8c/H19g/H19m): the multisample index a `subpassLoad`'s
@@ -956,13 +959,17 @@ llvm::CallInst *createQueryLod2D(llvm::IRBuilderBase &Builder,
                                  llvm::Value *DVdY, llvm::Value *Mask,
                                  const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.sample.3d.v4f32` call (roadmap L66(a)): a
+/// Builds a `feme.cpu.image.sample.3d.v4f32` call (roadmap L66(a),
+/// extended with a real \p Bias/\p MinLodClamp pair by roadmap L67(a)): a
 /// `Plain3D` ordinary sample, mirroring `createSample1D`'s own operand
 /// order (coordinate, then its own screen-space derivative pair(s), then
-/// `Lod`/`UseExplicitLod`/`Mask`), extended to a real `(U, V, W)`
-/// coordinate and its own `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY`
-/// derivative triple -- no `Bias`/`MinLodClamp`/`ConstOffset` operand yet,
-/// per `ImageCallKind::Sample3D`'s own doc.
+/// `Lod`/`UseExplicitLod`/`Bias`/`MinLodClamp`/`Mask`), extended to a real
+/// `(U, V, W)` coordinate and its own
+/// `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY` derivative triple. \p Bias/
+/// \p MinLodClamp mirror `createSample1D`'s own identically-named
+/// parameters -- a `Plain3D` sample can carry a real `Bias`/`MinLod` clamp
+/// too. Still no `ConstOffset` operand, per `ImageCallKind::Sample3D`'s
+/// own doc (roadmap L67(c)/L66(d)/L33's own still-open, unrelated scope).
 llvm::CallInst *createSample3D(llvm::IRBuilderBase &Builder,
                                const ImageCallEnv &Env,
                                llvm::Value *ImageIndex,
@@ -972,6 +979,7 @@ llvm::CallInst *createSample3D(llvm::IRBuilderBase &Builder,
                                llvm::Value *DVdX, llvm::Value *DVdY,
                                llvm::Value *DWdX, llvm::Value *DWdY,
                                llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                               llvm::Value *Bias, llvm::Value *MinLodClamp,
                                llvm::Value *Mask,
                                const llvm::Twine &Name = "");
 

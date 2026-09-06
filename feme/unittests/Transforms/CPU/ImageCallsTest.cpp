@@ -396,10 +396,11 @@ TEST_F(ImageCallsTest, MatchesSampleCmpArray1DCallWithBiasAndMinLodClamp) {
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 
-// (Roadmap L66(a)) `createSample3D`'s own ordinary `Plain3D` sample: a
-// real `(U, V, W)` coordinate plus its own screen-space derivative triple,
-// no `Bias`/`MinLodClamp`/`ConstOffset` operand yet (see
-// `ImageCallKind::Sample3D`'s own doc).
+// (Roadmap L66(a), extended with a real `Bias`/`MinLodClamp` pair by
+// roadmap L67(a)) `createSample3D`'s own ordinary `Plain3D` sample: a
+// real `(U, V, W)` coordinate plus its own screen-space derivative triple
+// and a real `Bias`/`MinLodClamp` pair, still no `ConstOffset` operand
+// (see `ImageCallKind::Sample3D`'s own doc).
 TEST_F(ImageCallsTest, MatchesSample3DCall) {
   IRBuilder<> Builder(BB);
   ImageCallEnv Env = makeEnv(Builder);
@@ -413,10 +414,12 @@ TEST_F(ImageCallsTest, MatchesSample3DCall) {
   Value *DWdX = ConstantFP::get(Builder.getFloatTy(), 0.5);
   Value *DWdY = ConstantFP::get(Builder.getFloatTy(), 0.6);
   Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *Bias = ConstantFP::get(Builder.getFloatTy(), 1.0);
+  Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(), 0.5);
   CallInst *CI = createSample3D(Builder, Env, Builder.getInt32(2),
                                 Builder.getInt32(1), U, V, W, DUdX, DUdY, DVdX,
                                 DVdY, DWdX, DWdY, Lod, Builder.getInt1(false),
-                                Builder.getInt1(true));
+                                Bias, MinLodClamp, Builder.getInt1(true));
   Builder.CreateRetVoid();
 
   std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
@@ -436,6 +439,8 @@ TEST_F(ImageCallsTest, MatchesSample3DCall) {
   EXPECT_EQ(Matched->DWdY, DWdY);
   EXPECT_EQ(Matched->Lod, Lod);
   EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
+  EXPECT_EQ(Matched->Bias, Bias);
+  EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 

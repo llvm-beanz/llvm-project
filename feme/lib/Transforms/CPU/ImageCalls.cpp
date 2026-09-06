@@ -557,16 +557,18 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // Roadmap L66(a): a real `(u, v, w)` coordinate plus its own
     // `du_dx`/`du_dy`/`dv_dx`/`dv_dy`/`dw_dx`/`dw_dy` screen-space
     // derivative triple (consulted only for an implicit-LOD sample,
-    // mirroring `Sample1D`'s own `du_dx`/`du_dy` pair), no `bias`/
-    // `min_lod_clamp`/`offset` operand yet -- see
-    // `ImageCallKind::Sample3D`'s own doc.
+    // mirroring `Sample1D`'s own `du_dx`/`du_dy` pair). Roadmap L67(a)
+    // adds a real `bias`/`min_lod_clamp` pair, mirroring `Sample1D`'s own
+    // operand order (lod, use_explicit_lod, bias, min_lod_clamp, mask).
+    // No `offset` operand yet -- see `ImageCallKind::Sample3D`'s own doc.
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
     //  image_index, sampler_index, u, v, w, du_dx, du_dy, dv_dx, dv_dy,
-    //  dw_dx, dw_dy, lod, use_explicit_lod, mask) -> <4 x float>
+    //  dw_dx, dw_dy, lod, use_explicit_lod, bias, min_lod_clamp, mask) ->
+    //  <4 x float>
     FTy = FunctionType::get(
         V4F32Ty,
         {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
-         F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, I1Ty},
+         F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, F32Ty, F32Ty, I1Ty},
         /*isVarArg=*/false);
     break;
   }
@@ -991,14 +993,16 @@ CallInst *feme::cpu::createSample3D(IRBuilderBase &Builder,
                                     Value *W, Value *DUdX, Value *DUdY,
                                     Value *DVdX, Value *DVdY, Value *DWdX,
                                     Value *DWdY, Value *Lod,
-                                    Value *UseExplicitLod, Value *Mask,
+                                    Value *UseExplicitLod, Value *Bias,
+                                    Value *MinLodClamp, Value *Mask,
                                     const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::Sample3D);
   return Builder.CreateCall(
       F, {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
           Env.SamplerHeapCount, ImageIndex, SamplerIndex, U, V, W, DUdX, DUdY,
-          DVdX, DVdY, DWdX, DWdY, Lod, UseExplicitLod, Mask},
+          DVdX, DVdY, DWdX, DWdY, Lod, UseExplicitLod, Bias, MinLodClamp,
+          Mask},
       Name);
 }
 
@@ -1822,7 +1826,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(10);
     break;
   case ImageCallKind::Sample3D:
-    if (CI.arg_size() != 18)
+    if (CI.arg_size() != 20)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -1841,7 +1845,9 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.DWdY = CI.getArgOperand(14);
     Result.Lod = CI.getArgOperand(15);
     Result.UseExplicitLod = CI.getArgOperand(16);
-    Result.Mask = CI.getArgOperand(17);
+    Result.Bias = CI.getArgOperand(17);
+    Result.MinLodClamp = CI.getArgOperand(18);
+    Result.Mask = CI.getArgOperand(19);
     break;
   }
   return Result;
