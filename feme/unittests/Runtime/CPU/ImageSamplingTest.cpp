@@ -161,23 +161,29 @@ using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
                              uint32_t, float, float, float, bool, float, float,
                              int32_t, int32_t, float, bool, void *);
 /// Roadmap L52a: the ordinary (non-comparison) `Texture1D` counterpart of
-/// `SampleFn` -- a single `U` coordinate, no derivatives/offset
-/// (mirroring `SampleArrayFn`'s own simpler scope, see
-/// `ImageCallKind::Sample1D`'s own doc for why). Roadmap L61(c) adds a
-/// real `Bias`/`MinLodClamp` pair, mirroring `SampleFn`'s own
-/// identically-named trailing parameters.
+/// `SampleFn` -- a single `U` coordinate, no `ConstOffset` (mirroring
+/// `SampleArrayFn`'s own simpler scope, see `ImageCallKind::Sample1D`'s
+/// own doc for why). Roadmap L61(c) adds a real `Bias`/`MinLodClamp`
+/// pair, mirroring `SampleFn`'s own identically-named trailing
+/// parameters. Roadmap L63 adds a real `DUdX`/`DUdY` screen-space
+/// partial-derivative pair right after `U`, mirroring `SampleFn`'s own
+/// identically-named parameters narrowed to this shape's single
+/// addressed coordinate component.
 using Sample1DFn = void (*)(const FemeImageDescriptor *, uint32_t,
                             const FemeSamplerDescriptor *, uint32_t, uint32_t,
-                            uint32_t, float, float, bool, float, float, bool,
-                            void *);
+                            uint32_t, float, float, float, float, bool, float,
+                            float, bool, void *);
 /// Roadmap L52a: the `Texture1DArray` counterpart of `Sample1DFn`, adding
 /// a float `ArrayLayer` coordinate before `Lod`, mirroring
 /// `SampleArrayFn`'s relationship to `SampleFn`. Roadmap L61(c) adds the
-/// same `Bias`/`MinLodClamp` pair `Sample1DFn` gained.
+/// same `Bias`/`MinLodClamp` pair `Sample1DFn` gained. Roadmap L63 adds
+/// the same `DUdX`/`DUdY` pair `Sample1DFn` gained, right after
+/// `ArrayLayer`.
 using Sample1DArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                  const FemeSamplerDescriptor *, uint32_t,
                                  uint32_t, uint32_t, float, float, float,
-                                 bool, float, float, bool, void *);
+                                 float, float, bool, float, float, bool,
+                                 void *);
 /// Roadmap L54: the depth-comparison counterpart of `Sample1DFn`,
 /// mirroring `SampleCmpFn`'s relationship to `SampleFn` -- a single `U`
 /// coordinate, no `ConstOffset`/`MinLodClamp` (see `ImageCallKind::
@@ -2705,8 +2711,8 @@ TEST_F(ImageSamplingTest, Sample1DLinearBlendsTwoTexels) {
   Sample1DFn Fn = resolve<Sample1DFn>(
       addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.0f, true, 0.0f,
-     -std::numeric_limits<float>::infinity(), true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     0.0f, true, 0.0f, -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
 }
 
@@ -2726,8 +2732,8 @@ TEST_F(ImageSamplingTest, Sample1DPointSampleReadsExactTexel) {
   Sample1DFn Fn = resolve<Sample1DFn>(
       addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, 0.0f, true, 0.0f,
-     -std::numeric_limits<float>::infinity(), true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     0.0f, true, 0.0f, -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 5.0f);
   EXPECT_FLOAT_EQ(Out[1], 6.0f);
   EXPECT_FLOAT_EQ(Out[2], 7.0f);
@@ -2750,8 +2756,9 @@ TEST_F(ImageSamplingTest, Sample1DArrayReadsRequestedLayer) {
   Sample1DArrayFn Fn = resolve<Sample1DArrayFn>(
       addWrapper("sample_1d_array", "feme.cpu.image.sample.1darray.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/2.0f, 0.0f, true,
-     0.0f, -std::numeric_limits<float>::infinity(), true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/2.0f,
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, 0.0f, true, 0.0f,
+     -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
 }
 
@@ -2771,8 +2778,9 @@ TEST_F(ImageSamplingTest, Sample1DInactiveLaneReadsZero) {
   Sample1DFn Fn = resolve<Sample1DFn>(
       addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
   float Out[4] = {9, 9, 9, 9};
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.0f, true, 0.0f,
-     -std::numeric_limits<float>::infinity(), /*Mask=*/false, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     0.0f, true, 0.0f, -std::numeric_limits<float>::infinity(),
+     /*Mask=*/false, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
@@ -2824,8 +2832,62 @@ TEST_F(ImageSamplingTest, Sample1DBiasSelectsCoarserMipLevel) {
   Sample1DFn Fn = resolve<Sample1DFn>(
       addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*Lod=*/0.0f,
-     /*UseExplicitLod=*/false, /*Bias=*/1.0f,
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/1.0f,
+     -std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
+}
+
+TEST_F(ImageSamplingTest, Sample1DRealDerivativeSelectsCoarserMipLevel) {
+  // Roadmap L63: mirrors `ImplicitLodMinifyingUsesMinFilterNotMagFilter`'s
+  // own `Plain2D` precedent (a real, nonzero `DUdX` alone -- no `Bias` --
+  // must select a coarser mip level), narrowed to a single spatial axis:
+  // a per-pixel `dU/dx` of `1.0` across this 2-texel-wide 1D image is a
+  // scale factor of 2 texels/pixel (`log2(2) == 1 > 0`), so mip level 1
+  // must be selected even with `Bias` and `MinLodClamp` both no-ops --
+  // confirming `femeRTPlanImplicitLod1D` (roadmap L63) actually consults
+  // its own `DUdX`/`DUdY` arguments, not just `Bias`/`MinLodClamp` like
+  // `Sample1DBiasSelectsCoarserMipLevel` above already covers.
+  float Level0[2][4] = {{1, 1, 1, 1}, {1, 1, 1, 1}};
+  float Level1[1][4] = {{9, 9, 9, 9}};
+  struct {
+    float L0[2][4];
+    float L1[1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture1D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 1;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  Sample1DFn Fn = resolve<Sample1DFn>(
+      addWrapper("sample_1d", "feme.cpu.image.sample.1d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*DUdX=*/1.0f, /*DUdY=*/0.0f,
+     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/0.0f,
      -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
@@ -2876,8 +2938,8 @@ TEST_F(ImageSamplingTest, Sample1DArrayMinLodClampRaisesImplicitLevel) {
       addWrapper("sample_1d_array", "feme.cpu.image.sample.1darray.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, /*ArrayLayer=*/0.0f,
-     /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Bias=*/0.0f,
-     /*MinLodClamp=*/1.0f, true, Out);
+     /*DUdX=*/0.0f, /*DUdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false,
+     /*Bias=*/0.0f, /*MinLodClamp=*/1.0f, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
