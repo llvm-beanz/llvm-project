@@ -986,27 +986,31 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
         return false; // No filtered sample over an integer-channel image.
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      // Roadmap L26/L60(a): `lowerImageAccesses` threads a `MinLod`
-      // clamp through `Plain2D`'s/`Cube`'s/`CubeArray`'s/`Array2D`'s own
-      // `createSample2D`/`createSampleCube`/`createSampleCubeArray`/
-      // `createSample2DArray` calls -- every other shape (`Plain1D`/
-      // `Array1D`/`Plain3D`) is left unlowered rather than silently
-      // dropping the clamp.
+      // Roadmap L26/L60(a)/L61(c): `lowerImageAccesses` threads a
+      // `MinLod` clamp through `Plain2D`'s/`Cube`'s/`CubeArray`'s/
+      // `Array2D`'s own `createSample2D`/`createSampleCube`/
+      // `createSampleCubeArray`/`createSample2DArray` calls, and (roadmap
+      // L61(c)) `Plain1D`'s/`Array1D`'s own `createSample1D`/
+      // `createSample1DArray` calls too -- only `Plain3D` is left
+      // unlowered rather than silently dropping the clamp.
       if (HasMinLodClamp && Shape != ImageShape::Plain2D &&
           Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
-          Shape != ImageShape::Array2D)
+          Shape != ImageShape::Array2D && Shape != ImageShape::Plain1D &&
+          Shape != ImageShape::Array1D)
         return false;
-      // Roadmap L58/L60(a): same restriction for `Bias`, mirroring
+      // Roadmap L58/L60(a)/L61(c): same restriction for `Bias`, mirroring
       // `HasMinLodClamp` immediately above -- `Plain2D`'s/`Cube`'s/
       // `CubeArray`'s/`Array2D`'s own `createSample2D`/`createSampleCube`/
       // `createSampleCubeArray`/`createSample2DArray` calls all thread a
-      // real `Bias` operand through `lowerImageAccesses`; `Plain1D`/
-      // `Array1D` (neither of which have a real implicit-LOD footprint of
-      // their own to add a bias to) are left unlowered rather than
-      // silently dropping the bias.
+      // real `Bias` operand through `lowerImageAccesses`, and (roadmap
+      // L61(c)) `Plain1D`'s/`Array1D`'s own `createSample1D`/
+      // `createSample1DArray` calls now do too; only `Plain3D` (no
+      // ordinary sampling infrastructure of its own at all yet) is left
+      // unlowered rather than silently dropping the bias.
       if (HasBias && Shape != ImageShape::Plain2D &&
           Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
-          Shape != ImageShape::Array2D)
+          Shape != ImageShape::Array2D && Shape != ImageShape::Plain1D &&
+          Shape != ImageShape::Array1D)
         return false;
       // Roadmap L59/L60(a): same restriction for `Grad`, mirroring
       // `HasBias` immediately above -- `Plain2D`'s/`Cube`'s/`CubeArray`'s/
@@ -2297,18 +2301,31 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
         // on why SPIR-V never vector-wraps a single-component coordinate),
         // not a vector `CreateExtractElement` could be applied to.
         if (Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D) {
+          // Roadmap L61(c): same `MinLod` clamp extraction as `Plain2D`'s
+          // own below -- negative infinity (a no-op floor) for every
+          // sample intrinsic other than `spv_resource_sample_clamp`/
+          // `samplebias_clamp`, neither of which `Plain1D`/`Array1D`
+          // could reach this branch through without `HasMinLodClamp`
+          // already being true (see `hasOnlySupportedImageUses`'s own
+          // updated restriction just above).
+          Value *MinLodClamp =
+              HasMinLodClamp
+                  ? CI->getArgOperand(
+                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
+                  : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                            /*Negative=*/true);
           CallInst *NewSample1DCall;
           if (Shape == ImageShape::Plain1D) {
-            NewSample1DCall =
-                createSample1D(Builder, Env, ImageIndex, SamplerIndex, Coord,
-                              Lod, ExplicitLodFlag, Mask, CI->getName());
+            NewSample1DCall = createSample1D(
+                Builder, Env, ImageIndex, SamplerIndex, Coord, Lod,
+                ExplicitLodFlag, Bias, MinLodClamp, Mask, CI->getName());
           } else {
             Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
             Value *ArrayLayer =
                 Builder.CreateExtractElement(Coord, uint64_t{1});
             NewSample1DCall = createSample1DArray(
                 Builder, Env, ImageIndex, SamplerIndex, U, ArrayLayer, Lod,
-                ExplicitLodFlag, Mask, CI->getName());
+                ExplicitLodFlag, Bias, MinLodClamp, Mask, CI->getName());
           }
           CI->replaceAllUsesWith(NewSample1DCall);
           CI->eraseFromParent();

@@ -5562,24 +5562,29 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DArrayV4F32(
 // `feme.cpu.image.sample.1d.v4f32` (roadmap L52a): the ordinary
 // (non-comparison) `Texture1D` counterpart of
 // `feme.cpu.image.sample.2d.v4f32` above -- a single `U` coordinate
-// instead of `(U, V)`, no screen-space derivatives/`ConstOffset`/`MinLod`
-// clamp (mirroring `feme.cpu.image.sample.2darray.v4f32`'s own simpler
-// scope rather than `feme.cpu.image.sample.2d.v4f32`'s richer roadmap
-// H7i/L26 additions, deferred here to keep this first pass minimal); the
+// instead of `(U, V)`, no screen-space derivatives/`ConstOffset`
+// (mirroring `feme.cpu.image.sample.2darray.v4f32`'s own simpler scope
+// rather than `feme.cpu.image.sample.2d.v4f32`'s richer roadmap H7i/L26
+// additions, deferred here to keep this first pass minimal); the
 // implicit-LOD case always resolves via `femeRTComputeClampedLod` alone,
 // degenerating to mip level 0 unless `textureLod()` supplies an explicit
-// one.
+// one. `Bias`/`MinLodClamp` (roadmap L61(c)) thread a real
+// `texture(sampler1D, u, bias)`/`MinLod`-clamp pair through to
+// `femeRTComputeClampedLod`, mirroring
+// `feme.cpu.image.sample.2d.v4f32`'s own identical parameters, in place
+// of the previous hardcoded `0.0f`/`-inf` no-op values.
 FemeRTv4f32 femeCpuImageSample1DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float Lod,
-    _Bool UseExplicitLod, _Bool Mask) asm("feme.cpu.image.sample.1d.v4f32");
+    _Bool UseExplicitLod, float Bias, float MinLodClamp,
+    _Bool Mask) asm("feme.cpu.image.sample.1d.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float Lod,
-    _Bool UseExplicitLod, _Bool Mask) {
+    _Bool UseExplicitLod, float Bias, float MinLodClamp, _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -5589,9 +5594,10 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
-                                            /*InstructionMinLod=*/-__builtin_inff(),
-                                            /*InstructionBias=*/0.0f);
+  float ClampedLod =
+      femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
+                             /*InstructionMinLod=*/MinLodClamp,
+                             /*InstructionBias=*/Bias);
   return femeRTSampleFiltered1D(&Img, &Samp, U, /*Layer=*/0, ClampedLod,
                               /*OffsetX=*/0);
 }
@@ -5601,19 +5607,22 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DV4F32(
 // filtering, plus `ArrayLayer` (SPIR-V's own arrayed-sample coordinate
 // convention: a float, rounded to nearest and clamped to a valid layer by
 // `femeRTRoundClampLayer` above), mirroring
-// `feme.cpu.image.sample.2darray.v4f32`'s own precedent.
+// `feme.cpu.image.sample.2darray.v4f32`'s own precedent. `Bias`/
+// `MinLodClamp` (roadmap L61(c)) mirror `femeCpuImageSample1DV4F32`'s own
+// identical new parameters.
 FemeRTv4f32 femeCpuImageSample1DArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
-    float Lod, _Bool UseExplicitLod,
+    float Lod, _Bool UseExplicitLod, float Bias, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.1darray.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DArrayV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
-    float Lod, _Bool UseExplicitLod, _Bool Mask) {
+    float Lod, _Bool UseExplicitLod, float Bias, float MinLodClamp,
+    _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -5623,9 +5632,10 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DArrayV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
-                                            /*InstructionMinLod=*/-__builtin_inff(),
-                                            /*InstructionBias=*/0.0f);
+  float ClampedLod =
+      femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
+                             /*InstructionMinLod=*/MinLodClamp,
+                             /*InstructionBias=*/Bias);
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
   return femeRTSampleFiltered1D(&Img, &Samp, U, Layer, ClampedLod,
                               /*OffsetX=*/0);

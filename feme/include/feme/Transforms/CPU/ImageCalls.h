@@ -858,23 +858,30 @@ llvm::CallInst *createSampleCmpCubeArray(
 
 /// Builds a `feme.cpu.image.sample.1d.v4f32` call (roadmap L52a). \p U is
 /// the single normalized coordinate -- see `ImageCallKind::Sample1D`'s own
-/// doc for why this shape carries no derivatives/`ConstOffset`/`MinLod`
-/// clamp.
+/// doc for why this shape carries no derivatives/`ConstOffset`. \p Bias/
+/// \p MinLodClamp (roadmap L61(c)) mirror `createSample2D`'s own
+/// identically-named parameters -- a `Plain1D` sample can carry a real
+/// `Bias`/`MinLod` clamp too, unlike the screen-space derivatives/
+/// `ConstOffset` this shape still has no infrastructure for.
 llvm::CallInst *createSample1D(llvm::IRBuilderBase &Builder,
                                const ImageCallEnv &Env,
                                llvm::Value *ImageIndex,
                                llvm::Value *SamplerIndex, llvm::Value *U,
                                llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                               llvm::Value *Bias, llvm::Value *MinLodClamp,
                                llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.1darray.v4f32` call (roadmap L52a), the
-/// `Texture1DArray` counterpart of `createSample1D`.
+/// `Texture1DArray` counterpart of `createSample1D`. \p Bias/\p
+/// MinLodClamp (roadmap L61(c)) mirror `createSample1D`'s own identically
+/// new parameters.
 llvm::CallInst *createSample1DArray(llvm::IRBuilderBase &Builder,
                                     const ImageCallEnv &Env,
                                     llvm::Value *ImageIndex,
                                     llvm::Value *SamplerIndex, llvm::Value *U,
                                     llvm::Value *ArrayLayer, llvm::Value *Lod,
                                     llvm::Value *UseExplicitLod,
+                                    llvm::Value *Bias, llvm::Value *MinLodClamp,
                                     llvm::Value *Mask,
                                     const llvm::Twine &Name = "");
 
