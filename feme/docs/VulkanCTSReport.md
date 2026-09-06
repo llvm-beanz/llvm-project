@@ -27262,3 +27262,120 @@ reviewed: `VK_EXT_non_seamless_cube_map` was already correctly listed as
 either way); no inventory change needed since seamless cube filtering
 itself has no dedicated feature/extension bit of its own to track (it is
 part of core `VkSamplerCreateInfo`'s always-on default behavior).
+
+## Roadmap L52(a): ordinary `Plain1D`/`Array1D` sampling fixed; `SampleCmp1D`/`SampleCmpArray1D` deferred to L54
+
+**Scope decision.** Roadmap L52 (the 4-sub-item breakdown of L50's
+remaining work) left (a) `Plain1D`/`Array1D` shadow sampling, (b) a
+`Bias` image operand, (c) `samplecmp_clamp`'s `MinLod` operand, and (e)
+the LOD-query derivative intrinsics open. A real `deqp-vk` probe against
+`dEQP-VK.glsl.texture_functions.texture.sampler1d*` (24 cases) found
+**0/24 passing** before this session: 4 `_bias_fragment` (blocked by
+sub-item (b), unrelated to this row), 6 `NotSupported` (4 `_compute` +
+2 shadow `_compute`, an unrelated `VK_KHR_compute_shader_derivatives`
+gap), 8 real ordinary (non-shadow, non-bias) `sampler1d{,array}_
+{fixed,float}_{fragment,vertex}` failures, and 4 real shadow (non-bias)
+`sampler1d{,array}shadow_{fragment,vertex}` failures. Sub-item (c) was
+investigated first (seemingly smallest) but has **zero confirmed real
+failing CTS cases**: `spv_resource_samplecmp_clamp` already exists as a
+real LLVM SPIR-V intrinsic, the frontend (`ImageSampleDrefImplicitLodPattern`
+in `SPIRVToLLVMPatterns.cpp`) already emits it correctly whenever a
+`MinLod` operand is present, and an exhaustive VK-GL-CTS search found no
+real case combining a shadow/depth-comparison sampler with a `MinLod`
+clamp but no `Bias` (every `CLAMP_CASE_SPEC` shadow case in
+`vktShaderRenderTextureFunctionTests.cpp` always pairs `useBias=true`
+with the clamp). Given (b)/(e)'s much larger cross-cutting scope (real
+LLVM SPIR-V backend intrinsic changes; a new runtime derivative design,
+respectively) and (c)'s zero real impact, **sub-item (a)'s ordinary
+(non-comparison) half** -- the 8 real confirmed failures, and the
+architecturally-required prerequisite for its own depth-comparison
+counterpart per L52's own framing -- was chosen as this session's target,
+with `SampleCmp1D`/`SampleCmpArray1D` (the 4 shadow cases) explicitly
+deferred as a new follow-on roadmap row, **L54**.
+
+**Root cause.** `classifySampledImage2DHandle` (`SPIRVResourceLowering.cpp`)
+-- the single gatekeeper deciding whether a *sampled* image handle (used
+with a sampler) is classified/converted at all -- only ever checked for
+`SPIRVDim2D`/`SPIRVDimCube`; `SPIRVDim1D` (value `0`) was never checked,
+even though the constant was already defined in the file (used only by
+the *storage*-image classifier). Every sampled 1D texture (ordinary or
+shadow) therefore had its handle left completely unclassified, so its
+`llvm.spv.resource.sample*` calls were never converted, and the
+unconverted SPIR-V-shaped intrinsics reached the CPU JIT and failed to
+compile -- surfacing only as a generic `VK_ERROR_INITIALIZATION_FAILED`
+at `vkCreateGraphicsPipelines`, with no diagnostic message (the same
+failure signature seen for every other previously-unclassified handle
+shape, e.g. before L50d's fix).
+
+**Fix.** `classifySampledImage2DHandle` now also accepts `SPIRVDim1D`,
+producing the already-existing `ImageShape::Plain1D`/`Array1D` enum
+values (previously only ever produced by the storage-image classifier).
+New `ImageCallKind::Sample1D`/`Sample1DArray` entries (`ImageCalls.h`/
+`.cpp`) mirror `Sample2DArray`'s own simpler shape (no screen-space
+derivatives/`ConstOffset`/`MinLod` clamp -- `Sample2D` alone carries
+those roadmap H7i/L26 additions) rather than attempting a richer first
+pass, plus new `createSample1D`/`createSample1DArray` builders.
+`hasOnlySupportedImageUses`'s `SampleCoordWidth` formula gained
+`Plain1D=1`/`Array1D=2` cases (`Plain1D`'s own single-component
+coordinate is a bare scalar, not a 1-element vector, per SPIR-V's own
+convention -- see `isCoordN`'s comment). `lowerImageAccesses`'s
+ordinary-sample switch gained an early special case for `Plain1D`/
+`Array1D`, handled *before* the generic `CreateExtractElement(Coord, 0/1)`
+every other shape shares (which assumes a vector `Coord` and would crash
+on `Plain1D`'s bare scalar). New runtime entry points
+`femeCpuImageSample1DV4F32`/`Sample1DArrayV4F32` (`FeMeRuntimeCPU.c`)
+mirror `femeCpuImageSample2DArrayV4F32`'s own implicit-LOD handling
+exactly, backed by new `femeRTSamplePoint1D`/`Linear1D`/`Filtered1D`
+filtering helpers that reuse every existing dimension-agnostic
+addressing/mip helper (`femeRTApplyAddressMode`, `femeRTMipExtent`,
+`femeRTUseLinearFilter`, `femeRTSelectMipLevels`, `femeRTNearestMipLevel`)
+and the pre-existing `femeRTFetchTexel1DArray` (already accepting a
+`Layer` parameter, usable as `0` for the non-arrayed case) -- no new
+byte-offset math was needed, since `Image.cpp`'s `computeSubresourceLayouts`
+already always produces `Height == 1` for a 1D image.
+
+**Deliberately out of scope this session** (documented, not silently
+dropped): (1) `SampleCmp1D`/`SampleCmpArray1D` -- `hasOnlySupportedImageUses`'s
+pre-existing dref-rejection of `Plain1D`/`Array1D` is left untouched;
+filed as **L54**. (2) A real 1D `OpImageFetch`/`texelFetch(sampler1D,
+...)` path -- `hasOnlySupportedImageUses`'s fetch-shape branch now
+explicitly rejects `Plain1D`/`Array1D` there too (previously it would
+have silently miscomputed a fetch coordinate width of 2 instead of 1 for
+`Plain1D` had a real case ever exercised it), until a real CTS case
+motivates adding it.
+
+**Tests.** 3 new `SPIRVResourceLoweringTest` unit tests
+(`LowersPlain1DSampledImageToImageSample1D`,
+`LowersArray1DSampledImageToImageSample1DArray` -- positive
+classification+lowering; `LeavesAPlain1DImageFetchAlone` -- negative,
+confirming the fetch path stays rejected). 4 new `ImageSamplingTest`
+runtime unit tests (`Sample1DLinearBlendsTwoTexels`,
+`Sample1DPointSampleReadsExactTexel`, `Sample1DArrayReadsRequestedLayer`,
+`Sample1DInactiveLaneReadsZero`), reusing the already-existing
+`makeImage1D`/`makeImage1DArray` helpers (roadmap H19c/H19e). `ninja
+check-feme`: 2584/2643 discovered, 59 pre-existing `Unsupported`, 0
+`Failed` -- up by exactly the 7 new tests this phase adds; no
+regressions.
+
+**Real `deqp-vk` re-run.** The 8 targeted cases
+(`dEQP-VK.glsl.texture_functions.texture.sampler1d{,array}_{fixed,float}_
+{fragment,vertex}`): **8/8 now Pass**, up from 0/8 before this fix. A
+broader `sampler1d*` sweep (24 cases) confirms exactly the expected,
+side-effect-free outcome: **8 Pass** (this fix), **10 Fail** (unchanged
+from before -- 4 `_bias_fragment` blocked by sub-item (b), 4
+`*shadow_{fragment,vertex}` blocked by the still-open `SampleCmp1D`/
+`SampleCmpArray1D` counterpart now filed as L54), **6 NotSupported**
+(unchanged -- `_compute`/shadow `_compute`, the unrelated
+`VK_KHR_compute_shader_derivatives` gap).
+
+**Design docs / inventories.** `FeMeGraphicsDesign.md`/`FeMeCPUDesign.md`
+reviewed: no deviation to record (neither document ever scoped sampled-
+image support to 2D/Cube shapes only in a way this widening
+contradicts). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+reviewed: no change needed (internal CPU-lowering plumbing only, no new
+feature/extension surface advertised).
+
+**Disposition.** Roadmap **L52 not struck through** (sub-items (b), (c),
+(e) remain open under the same row; only sub-item (a)'s ordinary-sampling
+half is done). Its deferred depth-comparison counterpart is filed as new
+roadmap row **L54**.
