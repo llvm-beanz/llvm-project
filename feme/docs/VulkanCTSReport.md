@@ -29306,3 +29306,45 @@ deviation or update needed -- `Plain3D` sampling is core SPIR-V/Vulkan with
 no gating feature bit or extension, and `shaderResourceMinLod` remains
 correctly advertised as `VK_FALSE` (unaffected by this row, per roadmap L66's
 own still-open scope).
+
+## Session: roadmap L67(a) -- `Plain3D` `Bias`/`MinLodClamp` sampling
+
+`createSample3D`/`ImageCallKind::Sample3D` gained a real `Bias`/`MinLodClamp`
+operand pair (widening its argument count 18 -> 20, inserted between
+`UseExplicitLod` and `Mask`), mirroring `createSample1D`'s own roadmap L61(c)
+operand ordering exactly. `hasOnlySupportedImageUses`'s `HasBias`/
+`HasMinLodClamp` shape checks now accept `Plain3D`; `lowerImageAccesses`'s
+`Plain3D` branch threads a real `MinLodClamp` value (via the same shape-
+agnostic `getSampleClampIdx` helper `Plain1D`/`Array1D` already use) plus the
+already-in-scope shared `Bias`; `femeCpuImageSample3DV4F32`'s runtime entry
+point now takes real `Bias`/`MinLodClamp` float parameters threaded into
+`femeRTComputeClampedLod` in place of the previous hardcoded no-op constants.
+
+`check-feme`: 2654/2713 pass, 0 fail, 59 unsupported (up from 2652/2711, +2
+net new tests: a new positive `LowersSampleBiasClampToPlain3DWithMinLodClamp`
+lowering-phase test replacing the now-obsolete negative
+`LeavesAPlain3DSampleBiasAlone` test, plus a new negative
+`LeavesAPlain3DSampleGradAlone` test to preserve this shape's own negative-
+test coverage; a new `Sample3DBiasSelectsCoarserMipLevel` runtime test;
+existing `Sample3D*` runtime tests updated for the new 22-argument runtime
+signature; a new lit-test case exercising `llvm.spv.resource.samplebias.clamp`
+against a `Dim3D` handle). 0 regressions.
+
+Real CTS, direct re-run of `texture.sampler3d_bias_{fixed,float}_fragment`
+(2 cases): **2/2 Pass, up from 2/2 Fail**. A broader
+`dEQP-VK.glsl.texture_functions.*.sampler3d_*` sweep (502 cases, every
+texture-function group against this one shape) confirms **10 Pass total (up
+from 8), 264 Fail (down from 266, by exactly these 2 newly-passing cases),
+228 NotSupported (unchanged)** -- no regressions anywhere in this shape's own
+CTS footprint. `texturegradclamp`/`textureclamp`/`textureoffsetclamp`'s own
+`sampler3d_*` cases remain confirmed `NotSupported`
+(`ShaderResourceMinLod feature not supported`), unchanged, since
+`shaderResourceMinLod` itself remains `VK_FALSE` (roadmap L66's own
+still-open scope) -- this row only unblocks *re-measuring* that flip
+experiment once L66(c)/(d)/(e) are also resolved, it does not itself flip the
+bit.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed: no
+deviation or update needed -- `Bias`/`MinLodClamp` sampling is core SPIR-V
+with no gating feature bit or extension of its own, and `shaderResourceMinLod`
+remains correctly advertised as `VK_FALSE` (unaffected by this row).
