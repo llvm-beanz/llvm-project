@@ -2957,6 +2957,177 @@ TEST_F(ImageSamplingTest, SampleCmpCubeArraySelectsRequestedCubeElement) {
   EXPECT_FLOAT_EQ(Element1, 0.0f);
 }
 
+// Roadmap L53: Vulkan's own spec-mandated default "seamless cube map
+// filtering" -- a `LINEAR` bilinear tap that falls just outside a face's
+// own bounds blends with its true geometric neighbor across the shared
+// cube edge, rather than clamping back onto the same face's own edge
+// texel the way `SampleCubeSelectsEachFaceByDirection`'s own `Nearest`
+// filter above implicitly relies on. A 2x2-texel-per-face cube, face 0
+// (+X) uniformly 100.0, face 4 (+Z) uniformly 0.0 (the two faces
+// `femeRTRemapCubeEdgeCoords` connects across face 0's own low-`U`
+// edge), sampled at a direction vector deliberately chosen so one of the
+// four bilinear taps lands one texel past that edge (`x0 == -1`,
+// `femeRTComputeCubeBilinearSupport`'s own `X0`), remapping onto face 4.
+// Pre-L53, `femeRTSampleFiltered2D`'s own `ClampToEdge` addressing would
+// have clamped that tap back to `x == 0` on face 0 itself, reading
+// exactly `100.0` -- proving the fix requires this test to observe a
+// value measurably below `100.0`.
+TEST_F(ImageSamplingTest, SampleCubeSeamlessBlendsAcrossFaceEdge) {
+  float Storage[6][2][2][4];
+  for (unsigned Face = 0; Face < 6; ++Face)
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Storage[Face][Y][X][C] = (Face == 0) ? 100.0f : 0.0f;
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 2, 2, 6,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeFn Fn = resolve<SampleCubeFn>(
+      addWrapper("sample_cube_seamless", "feme.cpu.image.sample.cube.v4f32"));
+  // (X=1, Y=0, Z=0.6): selects face 0 (+X, |X| is the largest-magnitude
+  // component); face 0's own U = -Z/Major places the bilinear footprint's
+  // low tap one texel below `u == 0`, remapping to face 4 (+Z).
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.6f, 0.0f, true,
+     -std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_LT(Out[0], 99.0f) << "expected a blended value pulling below face "
+                             "0's own uniform 100.0, not a clamped 100.0";
+  EXPECT_GT(Out[0], 1.0f) << "expected face 0's own contribution to still "
+                            "dominate the blend (face 0's tap has the "
+                            "larger bilinear weight here)";
+  EXPECT_NEAR(Out[0], 90.0f, 5.0f);
+}
+
+// The `NEAREST`-filter counterpart of `SampleCubeSeamlessBlendsAcrossFaceEdge`
+// above, confirming `femeRTSampleFilteredCube`'s own documented
+// short-circuit: a `NEAREST` tap never needs seamless cross-face
+// blending (Vulkan's own `NEAREST` filter has no fractional footprint
+// that could straddle a face edge), so the exact same direction vector
+// still reads face 0's own uniform `100.0` unmodified.
+TEST_F(ImageSamplingTest, SampleCubeNearestDoesNotBlendAcrossFaceEdge) {
+  float Storage[6][2][2][4];
+  for (unsigned Face = 0; Face < 6; ++Face)
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Storage[Face][Y][X][C] = (Face == 0) ? 100.0f : 0.0f;
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 2, 2, 6,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeFn Fn = resolve<SampleCubeFn>(
+      addWrapper("sample_cube_nearest", "feme.cpu.image.sample.cube.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.6f, 0.0f, true,
+     -std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 100.0f);
+}
+
+// The depth-comparison counterpart of `SampleCubeSeamlessBlendsAcrossFaceEdge`
+// above: face 0 (+X) uniformly fails a `GreaterEqual(0.5)` compare (depth
+// `0.0 < 0.5`), face 4 (+Z) uniformly passes it (depth `1.0 >= 0.5`); the
+// same edge-straddling direction vector should read a comparison result
+// strictly between `0.0` and `1.0` -- the percentage-closer-filtered
+// blend of face 0's own failing taps and face 4's own passing one --
+// rather than a clamped, unblended `0.0` (face 0's own uniform result).
+TEST_F(ImageSamplingTest, SampleCmpCubeSeamlessBlendsAcrossFaceEdge) {
+  float Storage[6][2][2][4];
+  for (unsigned Face = 0; Face < 6; ++Face)
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Storage[Face][Y][X][C] = (Face == 0) ? 0.0f : 1.0f;
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 2, 2, 6,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout,
+                       FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::GreaterEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpCubeFn Fn = resolve<SampleCmpCubeFn>(addWrapper(
+      "samplecmp_cube_seamless", "feme.cpu.image.samplecmp.cube.f32"));
+  float Out = 9.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.6f, 0.0f, true, /*Dref=*/0.5f, true, &Out);
+  EXPECT_GT(Out, 0.0f) << "expected a nonzero contribution from face 4's "
+                          "own passing texel";
+  EXPECT_LT(Out, 1.0f) << "expected face 0's own failing taps to still "
+                          "contribute (not fully replaced by face 4)";
+}
+
+// The doubly-out-of-bounds "corner" case `femeRTRemapCubeEdgeCoords`
+// itself flags `Ambiguous` (a bilinear tap whose integer coordinate
+// falls outside `[0, Size)` on *both* axes at once, straddling a cube
+// corner shared by three faces with no single unique neighbor):
+// `femeRTSampleCubeLinearAtLevel`/`femeRTSampleCmpCubeAtLevel` resolve it
+// by averaging the other three (non-ambiguous) taps, mirroring
+// VK-GL-CTS's own `getCubeLinearSamples`. A direction vector symmetric
+// in `Y`/`Z` (both `0.6`, matching `SampleCubeSeamlessBlendsAcrossFaceEdge`'s
+// own `Z`) pushes *both* `X0` and `Y0` one texel past face 0's own
+// bounds, so the `(X0, Y0)` tap remaps ambiguously; the other three taps
+// resolve to three distinct, known faces (0, 2, 4), each given its own
+// distinct marker value so the corner tap's own averaged contribution is
+// independently verifiable (`(50 + 25 + 100) / 3` -- see the derivation
+// in this test's own values below) rather than only checked indirectly
+// through the final blended result.
+TEST_F(ImageSamplingTest, SampleCubeSeamlessCornerAveragesThreeFaces) {
+  float Storage[6][2][2][4];
+  for (unsigned Face = 0; Face < 6; ++Face) {
+    float Value = Face == 0   ? 100.0f  // Face 0 (+X): T11 (in-bounds).
+                  : Face == 2 ? 50.0f   // Face 2 (+Y): T10's own remap.
+                  : Face == 4 ? 25.0f   // Face 4 (+Z): T01's own remap.
+                              : 0.0f;
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Storage[Face][Y][X][C] = Value;
+  }
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2DArray(Storage, sizeof(Storage), 2, 2, 6,
+                       ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeFn Fn = resolve<SampleCubeFn>(addWrapper(
+      "sample_cube_seamless_corner", "feme.cpu.image.sample.cube.v4f32"));
+  // (X=1, Y=0.6, Z=0.6): face 0 (+X) again, but now *both* U and V place
+  // their own bilinear footprint one texel past face 0's own bounds --
+  // the `(X0, Y0)` tap straddles the corner shared by faces 0, 2, and 4.
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.6f,
+     /*DirZ=*/0.6f, 0.0f, true,
+     -std::numeric_limits<float>::infinity(), true, Out);
+  // Expected corner value: (face2 (50) + face4 (25) + face0 (100)) / 3
+  // ~= 58.33, blended with weight (1 - Wx) * (1 - Wy) ~= 0.01 against the
+  // other three known taps (Wx == Wy ~= 0.9, mirroring
+  // `SampleCubeSeamlessBlendsAcrossFaceEdge`'s own derivation) -- overall
+  // expected result ~= 88.3, distinct from a naive corner-less
+  // extrapolation (which would read `100.0`, `0.0`, or some other value
+  // entirely if the corner tap were mishandled instead of averaged).
+  EXPECT_NEAR(Out[0], 88.3f, 3.0f);
+}
+
 // Roadmap H19a: `feme.cpu.image.store.2d.v4f32`/`.v4i32`, the write-side
 // counterpart of `feme.cpu.image.load.2d.*` for a plain, non-arrayed,
 // non-multisampled storage image.
