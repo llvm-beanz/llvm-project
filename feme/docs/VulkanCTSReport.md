@@ -28547,3 +28547,121 @@ rows) rather than rewriting the row from scratch. L60's sub-items
 (b)-(f) are unchanged by this session. The shared `VulkanBuffer`
 resource-handle gap blocking both shapes' `Grad` CTS cases remains
 unfiled and left for a future session, as before.
+
+## Roadmap L52(c): `samplecmp_clamp`'s `MinLod` clamp operand for `Plain2D`/`Array2D`/`Cube`/`CubeArray`
+
+**Change.** `createSampleCmp2D`/`createSampleCmpArray2D`/`createSampleCmpCube`/
+`createSampleCmpCubeArray` (`ImageCalls.h`/`.cpp`) each gained a real
+`MinLodClamp` parameter, mirroring the ordinary-sample `createSample2D`
+family's own roadmap L26/L58/L60(a) precedent (a genuine clamp value
+instead of a hardcoded negative-infinity floor). `isDrefSampleIntrinsic`
+(`SPIRVResourceLowering.cpp`) now recognizes
+`llvm.spv.resource.samplecmp.clamp` as a third intrinsic form alongside
+`samplecmp`/`samplecmplevelzero` (a new `HasClamp` out-parameter), and
+`lowerImageAccesses` threads the real clamp operand (`DrefSampleClampIdx`,
+a fixed index of 5 -- unlike the ordinary-sample family's computed
+`getSampleClampIdx`, since the Dref intrinsic family's operand layout
+never varies with `ExplicitLod`) through for `Plain2D`/`Array2D`/`Cube`/
+`CubeArray`. `Plain1D`/`Array1D` deliberately continue to reject a
+`samplecmp_clamp` use entirely -- `hasOnlySupportedImageUses` explicitly
+rejects `HasClamp` combined with either shape, and neither
+`createSampleCmp1D` nor `createSampleCmpArray1D` gained the new
+parameter, matching those two shapes' pre-existing `ConstOffset`
+exclusion for the identical "no real CTS case reaches it, blocked by the
+unrelated `VulkanBuffer` gap regardless" reason. `FeMeRuntimeCPU.c`'s 4
+`femeCpuImageSampleCmp*F32` entry points thread the same parameter
+through in place of the previous hardcoded `-__builtin_inff()` floor.
+
+**Tests.** `ImageSamplingTest.cpp`: 4 `SampleCmp*` function-pointer
+typedefs (`SampleCmpFn`/`SampleCmpArrayFn`/`SampleCmpCubeFn`/
+`SampleCmpCubeArrayFn`) and their ~14 call sites updated to pass
+`-std::numeric_limits<float>::infinity()`, preserving existing pass/fail
+semantics. `SPIRVResourceLoweringTest.cpp`: 6 pre-existing `SampleCmp*`
+tests' `arg_size()` expectations bumped by one; a stale negative test
+(`LeavesASampleCmpClampAlone`, which had asserted a `samplecmp_clamp`
+call was left entirely unlowered -- no longer true) replaced with a new
+positive test, `LowersSampleCmpClampToImageSampleCmpWithMinLodClamp`
+(asserts the real clamp operand threads through at the expected index
+for `Plain2D`); a new negative test,
+`LeavesASampleCmpClampAgainstPlain1DAlone`, confirms the deliberate
+`Plain1D` exclusion still holds. 3 `.ll` lit tests touched:
+`spirv-resource-lowering-image-samplecmp.ll`/`-shapes.ll` gained a
+`float -inf, ` operand in their existing `CHECK:` lines (LLVM prints
+negative infinity as the literal token `-inf`, confirmed via the actual
+FileCheck failure diff); the old
+`spirv-resource-lowering-image-samplecmp-unsupported.ll` (which had
+asserted `samplecmp_clamp` was unsupported for every shape) was replaced
+with a new `spirv-resource-lowering-image-samplecmp-clamp.ll` exercising
+all 4 now-supported shapes plus the still-unsupported `Plain1D` case.
+(A first draft of this new file crashed `feme-opt` with a
+"Uses remain when a value is destroyed!" assertion failure: reusing
+`(set, binding) = (0, 0)`/`(0, 1)` across multiple test functions in one
+module tripped `SPIRVResourceLoweringPass::run`'s own cross-function
+conflicting-identity detection -- `Ranges` is keyed by `(set, binding)`
+across the *whole module*, not per function, so two functions sharing a
+binding but declaring different image shapes/kinds mark that binding
+`Conflicting`, and `hasOnlySupportedSamplerUses`'s shape-blind dref-clamp
+recognition let the sampler side of an otherwise-rejected combination
+still get scheduled for erasure independently of its image side. Fixed
+by giving each test function in the new file its own unique bindings,
+0 through 9. Also discovered while fixing this: `FileCheck`'s
+`CHECK-LABEL` top-to-bottom ordering requires the file's one
+deliberately-*unrewritten* function (`samplecmp_clamp_1d_unsupported`) to
+be declared textually before the four functions this file rewrites --
+`SPIRVResourceLoweringPass::run` leaves an unrewritten function's
+position in the module alone but appends every rewritten function after
+every remaining declaration, reordering the module relative to the
+original source when both kinds of function are present together.)
+
+**`ninja check-feme` (ccache + assertions, `build2`).** 2678 total
+discovered, 59 `Unsupported`, 2619 `Passed`, 0 `Failed` -- no
+regressions (net +1 relative to the prior 2618-Passed baseline: the new
+`spirv-resource-lowering-image-samplecmp-clamp.ll` replaces the removed
+`-unsupported.ll` one-for-one at the lit level, while gaining one net
+new `SPIRVResourceLoweringTest` unit test overall -- see the arithmetic
+above). `FeMeTransformsCPUTests`'s full 335-test suite and
+`FeMeRuntimeCPUTests`'s full 220-test suite both pass in full, plus the
+filtered `*SampleCmp*`/`*Comparison*` subsets re-run individually.
+
+**Real CTS impact: none available, confirmed by design.** A real
+`deqp-vk` source grep (`vktShaderRenderTextureFunctionTests.cpp`) of
+every `MinLod`-clamp case pairing a shadow (`Dref`) sampler with a clamp
+operand -- the `textureclamp`/`texturegradclamp`/
+`textureoffsetgradclamp` groups' own `*shadow*` rows -- confirms this
+row's own original note was correct: every single one pairs its clamp
+with either an explicit `Bias` (`CLAMP_CASE_SPEC(sampler2dshadow_bias,
+...)` and siblings, blocked on the still-open sub-item (b)) or an
+explicit `Grad` (`GRADCLAMP_CASE_SPEC(sampler2dshadow, FUNCTION_TEXTUREGRAD,
+...)` and siblings, a distinct `Dref`+`Grad` gap this session did not
+touch, unrelated to L59's ordinary-sample `Grad` work). No real CTS case
+anywhere in the suite exercises the implicit-LOD-only, no-`Bias`,
+no-`Grad`, `Dref`+`MinLod`-clamp-only combination this row's
+`samplecmp_clamp` intrinsic recognition now lowers. `shaderResourceMinLod`
+is therefore deliberately left at its pre-existing `VK_FALSE`/unadvertised
+state -- flipping it on would not newly unlock any real CTS case, only
+change every *other* `ShaderResourceMinLod`-gated case's failure message
+from "feature not supported" to a real (and, for the `Bias`/`Grad`
+pairings above, still-failing) render. This row's own value is
+completing the builder/lowering precedent sub-item (b)'s own eventual
+`Bias`+`Dref` fix can build directly on top of, not a directly measurable
+CTS delta.
+
+**Design docs.** `FeMeGraphicsDesign.md` reviewed: no deviation to
+record (it never scoped `Dref`-sampling `MinLodClamp` support to a
+strict subset of shapes in a way this widening contradicts; the
+pre-existing `Plain1D`/`Array1D` exclusion note there already correctly
+anticipated exactly this shape split). `FeMeCPUDesign.md`/`Design.md`
+reviewed: no further deviation to record.
+
+**Feature/extension inventories.** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed: no change needed --
+`shaderResourceMinLod` remains correctly `VK_FALSE` (per the "no real
+CTS impact" finding above); internal CPU-lowering plumbing only, no new
+feature/extension surface advertised.
+
+**Roadmap update.** L52's own sub-item (c) is now complete; an `UPDATE:`
+addendum describing this session's fix is appended to the existing L52
+entry in `Roadmap.md` (following this project's established
+append-in-place precedent), rather than striking the whole L52 row --
+sub-item (b) (the literal `Dref`+`Bias` combination, needing a new LLVM
+core intrinsic) remains open and unstarted.

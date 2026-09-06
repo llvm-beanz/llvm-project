@@ -2492,7 +2492,20 @@ documented reason rather than an oversight:
   register-bound-resource-handle gap (not this row's own scope) still
   blocks a passing real `texturegrad` CTS case for either arrayed shape,
   and `shaderResourceMinLod` remaining disabled still blocks a real
-  `MinLodClamp` CTS case for any shape.
+  `MinLodClamp` CTS case for any shape. Update (roadmap L52(c)): the
+  separate depth-comparison (`Dref`) sample family's own `MinLod` clamp
+  operand (`llvm.spv.resource.samplecmp.clamp`, distinct from the
+  ordinary-sample `MinLodClamp` operand this bullet otherwise describes)
+  is now also implemented on the SPIR-V import side, scoped to
+  `Plain2D`/`Array2D`/`Cube`/`CubeArray` (mirroring this same bullet's
+  ordinary-sample shape precedent); `Plain1D`/`Array1D` shadow sampling
+  still has no `MinLod`-clamp counterpart, matching those two shapes'
+  pre-existing `ConstOffset` exclusion. As with the ordinary-sample case,
+  `shaderResourceMinLod` remaining disabled means no real CTS case
+  measures this yet -- every real `Dref`+`MinLod`-clamp CTS case pairs
+  its clamp with a `Bias` or explicit `Grad` operand this depth-
+  comparison family still does not support (see the `Dref`+`Bias`/
+  `Dref`+`Grad` notes above).
 - **1D and 3D/cube sampling**, and on the SPIR-V side an arrayed or
   multisampled storage image, or a non-mandatory-format/format-agnostic
   storage image (roadmap H19a closed the non-arrayed, non-multisampled,
