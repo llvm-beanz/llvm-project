@@ -2957,6 +2957,96 @@ TEST_F(ImageSamplingTest, SampleCmpCubeArraySelectsRequestedCubeElement) {
   EXPECT_FLOAT_EQ(Element1, 0.0f);
 }
 
+// Roadmap L55: Vulkan spec 16.5 "Depth Compare Operation" requires that,
+// for a *fixed-point* (normalized) depth format such as `D16_UNORM`, both
+// the compare reference (`Dref`) and the fetched depth texel are clamped
+// to `[0, 1]` before the comparison is applied -- matching VK-GL-CTS's
+// own `execCompare` (`tcuTexture.cpp`), which gates this clamping on
+// `isFixedPointDepth`. Before this fix, `femeRTApplyCompare` never
+// clamped at all, so an out-of-`[0,1]` `Dref` (as real
+// `dEQP-VK.glsl.texture_functions.texture.samplercubearrayshadow_fragment`
+// coordinates can produce, since that CTS case's own `v_texCoord.w`
+// doubles as both the cube-array layer index and the depth-compare
+// `Dref`) could flip a `Less`-family compare's pass/fail outcome versus
+// real hardware whenever the fetched texel happened to sit exactly at
+// the `0.0`/`1.0` clamp boundary. A `D16_UNORM` texel of exactly `0.0`
+// compared with `Less` against a negative `Dref` demonstrates the flip
+// directly: unclamped, `-0.5 < 0.0` is trivially true (an incorrect
+// pass); clamped, `Ref=clamp(-0.5,0,1)=0.0` and `Texel=clamp(0.0,0,1)=
+// 0.0`, so `0.0 < 0.0` is false (the correct fail).
+TEST_F(ImageSamplingTest, SampleCmp2DClampsFixedPointDepthReference) {
+  uint16_t Storage[1][1] = {{0}}; // 0 / 65535 == 0.0.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::D16_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::Less);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpFn Fn = resolve<SampleCmpFn>(
+      addWrapper("samplecmp", "feme.cpu.image.samplecmp.2d.f32"));
+  float Result = 1.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true,
+     /*Dref=*/-0.5f, 0, 0, true, &Result);
+  EXPECT_FLOAT_EQ(Result, 0.0f);
+}
+
+// The `D32_FLOAT` counterpart: a floating-point depth format must NOT be
+// clamped (VK-GL-CTS's `isFixedPointDepth` is false for it), so the same
+// negative `Dref` against the same `0.0` texel keeps its unclamped,
+// mathematically literal `Less` result -- a real pass, unlike the
+// `D16_UNORM` case immediately above. This guards against a regression
+// that clamps every depth format indiscriminately.
+TEST_F(ImageSamplingTest, SampleCmp2DDoesNotClampFloatDepthReference) {
+  float Storage[1][1] = {{0.0f}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::D32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::Less);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpFn Fn = resolve<SampleCmpFn>(
+      addWrapper("samplecmp", "feme.cpu.image.samplecmp.2d.f32"));
+  float Result = 0.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true,
+     /*Dref=*/-0.5f, 0, 0, true, &Result);
+  EXPECT_FLOAT_EQ(Result, 1.0f);
+}
+
+// The `TextureCubeArray` counterpart, exercising `femeRTSampleCmpCubeAtLevel`
+// directly -- the function actually responsible for roadmap L55's real
+// `samplercubearrayshadow_fragment` mismatch (a `D16_UNORM` depth image,
+// the format that CTS case's own depth attachment uses). Mirrors the 2D
+// case above: a `0.0` texel on cube-array element 0 compared with `Less`
+// against a negative `Dref` must fail once clamped, not incorrectly pass.
+TEST_F(ImageSamplingTest, SampleCmpCubeArrayClampsFixedPointDepthReference) {
+  uint16_t Storage[6][1][1] = {{{0}}, {{0}}, {{0}}, {{0}}, {{0}}, {{0}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2DArray(
+      Storage, sizeof(Storage), 1, 1, 6, ResourceFormat::D16_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::Repeat);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::Less);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmpCubeArrayFn Fn = resolve<SampleCmpCubeArrayFn>(addWrapper(
+      "samplecmp_cubearray", "feme.cpu.image.samplecmp.cubearray.f32"));
+  float Result = 1.0f;
+  // Face 0 (+X) of element 0, texel 0.0, compared Less against -0.5.
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f,
+     /*ArrayLayer=*/0.0f, 0.0f, true, /*Dref=*/-0.5f, true, &Result);
+  EXPECT_FLOAT_EQ(Result, 0.0f);
+}
+
 // Roadmap L53: Vulkan's own spec-mandated default "seamless cube map
 // filtering" -- a `LINEAR` bilinear tap that falls just outside a face's
 // own bounds blends with its true geometric neighbor across the shared
