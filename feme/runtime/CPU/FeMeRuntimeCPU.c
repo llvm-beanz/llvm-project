@@ -5414,6 +5414,137 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DArrayV4F32(
                               /*OffsetX=*/0);
 }
 
+// (Roadmap L54) The single-level body of `femeCpuImageSampleCmp1DF32`/
+// `femeCpuImageSampleCmpArray1DF32` below, mirroring
+// `femeRTSampleCmp2DAtLevel`'s own point/bilinear comparison-filtering
+// logic (percentage-closer filtering: compare each fetched texel first,
+// then filter the 0/1 results) but reusing the 1D(-array) fetch/addressing
+// helpers (`femeRTFetchTexel1DArray`, minus the `V` axis) `femeRTSamplePoint1D`/
+// `femeRTSampleLinear1D` above already established for an ordinary 1D
+// color sample. No `OffsetX` parameter: unlike `Plain2D`/`Array2D`
+// (roadmap L50d), no real CTS case exercises a nonzero `ConstOffset`
+// against a 1D shadow sampler yet, matching `Sample1D`/`Sample1DArray`'s
+// own scope decision (see `ImageCalls.h`'s `SampleCmp1D` doc).
+__attribute__((always_inline)) static float
+femeRTSampleCmp1DAtLevel(const FemeRTImageDescriptor *Img,
+                         const FemeRTSamplerDescriptor *Samp, float U,
+                         uint32_t Layer, uint32_t Level, float Dref,
+                         _Bool UseLinear) {
+  if (!UseLinear) { // Point (nearest).
+    uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
+    int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
+    _Bool BorderX = 0;
+    int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
+                                           Samp->AddressU, &BorderX);
+    FemeRTv4f32 T = femeRTFetchTexel1DArray(Img, Level, AddrX, Layer,
+                                            /*Sample=*/0, BorderX,
+                                            Samp->BorderColor);
+    return femeRTApplyCompare(Samp->CompareFunc, Dref, T[0]);
+  }
+
+  uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
+  float TexelU = U * (float)LevelWidth - 0.5f;
+  float FloorU = __builtin_floorf(TexelU);
+  float Wx = TexelU - FloorU;
+  _Bool BorderX0 = 0, BorderX1 = 0;
+  int32_t X0 = femeRTApplyAddressMode((int32_t)FloorU, (int32_t)LevelWidth,
+                                      Samp->AddressU, &BorderX0);
+  int32_t X1 = femeRTApplyAddressMode((int32_t)FloorU + 1,
+                                      (int32_t)LevelWidth, Samp->AddressU,
+                                      &BorderX1);
+  FemeRTv4f32 T0 = femeRTFetchTexel1DArray(Img, Level, X0, Layer,
+                                          /*Sample=*/0, BorderX0,
+                                          Samp->BorderColor);
+  FemeRTv4f32 T1 = femeRTFetchTexel1DArray(Img, Level, X1, Layer,
+                                          /*Sample=*/0, BorderX1,
+                                          Samp->BorderColor);
+  float C0 = femeRTApplyCompare(Samp->CompareFunc, Dref, T0[0]);
+  float C1 = femeRTApplyCompare(Samp->CompareFunc, Dref, T1[0]);
+  return C0 + (C1 - C0) * Wx;
+}
+
+// `feme.cpu.image.samplecmp.1d.f32` (roadmap L54): the depth-comparison
+// counterpart of `feme.cpu.image.sample.1d.v4f32`, mirroring
+// `feme.cpu.image.samplecmp.2d.f32`'s own trilinear-blend body above
+// (`femeRTSampleCmp2DAtLevel`) but reusing `femeRTSampleCmp1DAtLevel`
+// instead -- a single `U` coordinate instead of `(U, V)`, no
+// `ConstOffset`/`MinLod` clamp (see `femeRTSampleCmp1DAtLevel`'s own
+// comment).
+float femeCpuImageSampleCmp1DF32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float Lod,
+    _Bool UseExplicitLod, float Dref,
+    _Bool Mask) asm("feme.cpu.image.samplecmp.1d.f32");
+
+__attribute__((always_inline)) float femeCpuImageSampleCmp1DF32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float Lod,
+    _Bool UseExplicitLod, float Dref, _Bool Mask) {
+  if (!Mask)
+    return 0.0f;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return 0.0f;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
+                                            /*InstructionMinLod=*/-__builtin_inff());
+  _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, &Samp);
+  FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
+  _Bool Trilinear = Samp.MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
+  uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
+  float Lo = femeRTSampleCmp1DAtLevel(&Img, &Samp, U, /*Layer=*/0, Level0,
+                                     Dref, UseLinear);
+  if (!Trilinear)
+    return Lo;
+  float Hi = femeRTSampleCmp1DAtLevel(&Img, &Samp, U, /*Layer=*/0,
+                                      MipPlan.Level1, Dref, UseLinear);
+  return Lo + (Hi - Lo) * MipPlan.Frac;
+}
+
+// `feme.cpu.image.samplecmp.1darray.f32` (roadmap L54): the
+// `Texture1DArray` counterpart of `feme.cpu.image.samplecmp.1d.f32` above,
+// mirroring `feme.cpu.image.sample.1darray.v4f32`'s own relationship to
+// `feme.cpu.image.sample.1d.v4f32`.
+float femeCpuImageSampleCmpArray1DF32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
+    float Lod, _Bool UseExplicitLod, float Dref,
+    _Bool Mask) asm("feme.cpu.image.samplecmp.1darray.f32");
+
+__attribute__((always_inline)) float femeCpuImageSampleCmpArray1DF32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
+    float Lod, _Bool UseExplicitLod, float Dref, _Bool Mask) {
+  if (!Mask)
+    return 0.0f;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return 0.0f;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  float ClampedLod = femeRTComputeClampedLod(Lod, UseExplicitLod, &Samp,
+                                            /*InstructionMinLod=*/-__builtin_inff());
+  uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
+  _Bool UseLinear = femeRTUseLinearFilter(ClampedLod, &Samp);
+  FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
+  _Bool Trilinear = Samp.MipFilter == 1 && MipPlan.Level0 != MipPlan.Level1;
+  uint32_t Level0 = Trilinear ? MipPlan.Level0 : femeRTNearestMipLevel(MipPlan);
+  float Lo = femeRTSampleCmp1DAtLevel(&Img, &Samp, U, Layer, Level0, Dref,
+                                     UseLinear);
+  if (!Trilinear)
+    return Lo;
+  float Hi = femeRTSampleCmp1DAtLevel(&Img, &Samp, U, Layer, MipPlan.Level1,
+                                      Dref, UseLinear);
+  return Lo + (Hi - Lo) * MipPlan.Frac;
+}
+
 // `feme.cpu.image.samplecmp.2darray.f32` (roadmap L48): the
 // `Texture2DArray` counterpart of `feme.cpu.image.samplecmp.2d.f32` above
 // -- identical (U, V) depth-comparison filtering, plus `ArrayLayer`
