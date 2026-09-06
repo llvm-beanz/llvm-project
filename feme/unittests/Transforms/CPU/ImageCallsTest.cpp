@@ -333,4 +333,67 @@ TEST_F(ImageCallsTest, MatchesSample1DArrayCallWithBiasAndMinLodClamp) {
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 
+// (Roadmap L62) The depth-comparison counterparts of the two tests above,
+// added for the same reason: `createSampleCmp1D`/`createSampleCmpArray1D`
+// each grew a real `Bias`/`MinLodClamp` operand pair, so `matchImageCall`'s
+// own hardcoded arg-count guards had to grow with them (11 -> 13, 12 -> 14).
+TEST_F(ImageCallsTest, MatchesSampleCmp1DCallWithBiasAndMinLodClamp) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *U = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *Dref = ConstantFP::get(Builder.getFloatTy(), 0.75);
+  Value *Bias = ConstantFP::get(Builder.getFloatTy(), 1.0);
+  Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(), 0.5);
+  CallInst *CI = createSampleCmp1D(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1), U, Lod,
+      Builder.getInt1(false), Dref, Bias, MinLodClamp, Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::SampleCmp1D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(2));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(1));
+  EXPECT_EQ(Matched->U, U);
+  EXPECT_EQ(Matched->Lod, Lod);
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
+  EXPECT_EQ(Matched->Dref, Dref);
+  EXPECT_EQ(Matched->Bias, Bias);
+  EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+TEST_F(ImageCallsTest, MatchesSampleCmpArray1DCallWithBiasAndMinLodClamp) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *U = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *ArrayLayer = ConstantFP::get(Builder.getFloatTy(), 2.0);
+  Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *Dref = ConstantFP::get(Builder.getFloatTy(), 0.75);
+  Value *Bias = ConstantFP::get(Builder.getFloatTy(), 1.0);
+  Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(), 0.5);
+  CallInst *CI = createSampleCmpArray1D(Builder, Env, Builder.getInt32(2),
+                                        Builder.getInt32(1), U, ArrayLayer, Lod,
+                                        Builder.getInt1(false), Dref, Bias,
+                                        MinLodClamp, Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::SampleCmpArray1D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(2));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(1));
+  EXPECT_EQ(Matched->U, U);
+  EXPECT_EQ(Matched->ArrayLayer, ArrayLayer);
+  EXPECT_EQ(Matched->Lod, Lod);
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
+  EXPECT_EQ(Matched->Dref, Dref);
+  EXPECT_EQ(Matched->Bias, Bias);
+  EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
 } // namespace

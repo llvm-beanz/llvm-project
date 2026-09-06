@@ -2885,8 +2885,8 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmp1DToImageSampleCmp1D) {
   CallInst *SampleCmp = findImageCall(*F, "feme.cpu.image.samplecmp.1d.f32");
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, lod, use_explicit_lod, dref, mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 11u);
+  //  u, lod, use_explicit_lod, dref, bias, min_lod_clamp, mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 13u);
   EXPECT_EQ(SampleCmp->getArgOperand(9)->getName(), "dref");
 }
 
@@ -2924,8 +2924,9 @@ TEST(SPIRVResourceLoweringTest, LowersSampleCmpArray1DToImageSampleCmpArray1D) {
       findImageCall(*F, "feme.cpu.image.samplecmp.1darray.f32");
   ASSERT_TRUE(SampleCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, array_layer, lod, use_explicit_lod, dref, mask).
-  ASSERT_EQ(SampleCmp->arg_size(), 12u);
+  //  u, array_layer, lod, use_explicit_lod, dref, bias, min_lod_clamp,
+  //  mask).
+  ASSERT_EQ(SampleCmp->arg_size(), 14u);
   EXPECT_EQ(SampleCmp->getArgOperand(10)->getName(), "dref");
 }
 

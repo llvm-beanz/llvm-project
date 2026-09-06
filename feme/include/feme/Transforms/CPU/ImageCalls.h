@@ -898,27 +898,28 @@ llvm::CallInst *createSample1DArray(llvm::IRBuilderBase &Builder,
                                     const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.1d.f32` call (roadmap L54), the
-/// depth-comparison counterpart of `createSample1D` -- see
-/// `ImageCallKind::SampleCmp1D`'s own doc for why this shape carries no
-/// `ConstOffset`/`MinLod` clamp.
+/// depth-comparison counterpart of `createSample1D`. \p Bias/\p MinLodClamp
+/// (roadmap L62) mirror `createSampleCmpCube`'s own identically-named
+/// parameters; this shape still carries no `ConstOffset`, per
+/// `ImageCallKind::SampleCmp1D`'s own doc.
 llvm::CallInst *createSampleCmp1D(llvm::IRBuilderBase &Builder,
                                   const ImageCallEnv &Env,
                                   llvm::Value *ImageIndex,
                                   llvm::Value *SamplerIndex, llvm::Value *U,
                                   llvm::Value *Lod, llvm::Value *UseExplicitLod,
-                                  llvm::Value *Dref, llvm::Value *Mask,
+                                  llvm::Value *Dref, llvm::Value *Bias,
+                                  llvm::Value *MinLodClamp, llvm::Value *Mask,
                                   const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.1darray.f32` call (roadmap L54), the
-/// `Texture1DArray` counterpart of `createSampleCmp1D`.
-llvm::CallInst *createSampleCmpArray1D(llvm::IRBuilderBase &Builder,
-                                      const ImageCallEnv &Env,
-                                      llvm::Value *ImageIndex,
-                                      llvm::Value *SamplerIndex, llvm::Value *U,
-                                      llvm::Value *ArrayLayer, llvm::Value *Lod,
-                                      llvm::Value *UseExplicitLod,
-                                      llvm::Value *Dref, llvm::Value *Mask,
-                                      const llvm::Twine &Name = "");
+/// `Texture1DArray` counterpart of `createSampleCmp1D`. \p Bias/\p
+/// MinLodClamp (roadmap L62) mirror that function's own new parameters.
+llvm::CallInst *createSampleCmpArray1D(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
+    llvm::Value *ArrayLayer, llvm::Value *Lod, llvm::Value *UseExplicitLod,
+    llvm::Value *Dref, llvm::Value *Bias, llvm::Value *MinLodClamp,
+    llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.querylod.2d.v2f32` call (roadmap L52e): see
 /// `ImageCallKind::QueryLod2D`'s own doc for its `<2 x float>` result

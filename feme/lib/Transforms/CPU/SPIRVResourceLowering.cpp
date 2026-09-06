@@ -2715,18 +2715,19 @@ void lowerImageAccesses(const MapVector<CallInst *, ImageHeapEntry> &HeapIndices
           // compare)`, GLSL's own `sampler1DShadow` convention), not a
           // bare scalar -- so the shared `C0`/`C1` extraction above
           // already works unmodified; only `C0` (the real `u`) is used.
+          // Roadmap L62: `Bias`/`MinLodClamp` are the same two generically
+          // extracted values every other shape's arm already passes.
           NewCall = createSampleCmp1D(Builder, Env, ImageIndex, SamplerIndex,
-                                      C0, Lod, ExplicitLodFlag, Dref, Mask,
-                                      CI->getName());
+                                      C0, Lod, ExplicitLodFlag, Dref, Bias,
+                                      MinLodClamp, Mask, CI->getName());
           break;
         case ImageShape::Array1D:
           // Same real-capture-confirmed shape as Plain1D just above, but
           // `vec3(u, layer, compare)` -- both `C0` (u) and `C1` (layer)
           // are real, meaningful components here.
-          NewCall = createSampleCmpArray1D(Builder, Env, ImageIndex,
-                                           SamplerIndex, C0, C1, Lod,
-                                           ExplicitLodFlag, Dref, Mask,
-                                           CI->getName());
+          NewCall = createSampleCmpArray1D(
+              Builder, Env, ImageIndex, SamplerIndex, C0, C1, Lod,
+              ExplicitLodFlag, Dref, Bias, MinLodClamp, Mask, CI->getName());
           break;
         case ImageShape::Plain3D:
         case ImageShape::Plain2DMS:
