@@ -37,6 +37,8 @@ protected:
     ImageCallEnv Env;
     Env.ImageHeap = ConstantPointerNull::get(PointerType::get(Ctx, 0));
     Env.ImageHeapCount = Builder.getInt32(1);
+    Env.SamplerHeap = ConstantPointerNull::get(PointerType::get(Ctx, 0));
+    Env.SamplerHeapCount = Builder.getInt32(1);
     return Env;
   }
 };
@@ -249,6 +251,76 @@ TEST_F(ImageCallsTest, MatchesAtomicCompareExchange2DCall) {
   EXPECT_EQ(Matched->V, Builder.getInt32(2));
   EXPECT_EQ(Matched->Comparator, Builder.getInt32(0));
   EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(42));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// Roadmap L61(c): `matchImageCall`'s own `Sample1D`/`Sample1DArray` cases
+// hardcoded the pre-fix `arg_size()` (10/11) `createSample1D`/
+// `createSample1DArray` had before this row added a real `Bias`/
+// `MinLodClamp` pair (see `ImageCalls.cpp`'s own updated cases) --
+// exactly the same "arg-count table not kept in sync with a real operand
+// addition" shape roadmap H19l already caught once for
+// `Store2DMS`/`Store2DMSI32` above, here newly reachable the moment
+// `hasOnlySupportedImageUses` (roadmap L61(c)) started accepting a
+// `Bias`/`MinLodClamp` sample against `Plain1D`/`Array1D` at all: a real
+// `dEQP-VK.glsl.texture_functions.texture.sampler1d_bias_*_fragment`
+// re-run (see `VulkanCTSReport.md`) hit `feme-cpu-simdize`'s generic
+// "not yet supported" diagnostic for the exact same reason -- `AllKinds`
+// found the callee by name, but the arg-count guard below it silently
+// rejected the call, so `matchImageCall` returned `std::nullopt` for a
+// perfectly real, well-formed `feme.cpu.image.sample.1d.v4f32` call.
+TEST_F(ImageCallsTest, MatchesSample1DCallWithBiasAndMinLodClamp) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *U = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *Bias = ConstantFP::get(Builder.getFloatTy(), 1.0);
+  Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(), 0.5);
+  CallInst *CI = createSample1D(Builder, Env, Builder.getInt32(2),
+                                Builder.getInt32(1), U, Lod,
+                                Builder.getInt1(false), Bias, MinLodClamp,
+                                Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Sample1D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(2));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(1));
+  EXPECT_EQ(Matched->U, U);
+  EXPECT_EQ(Matched->Lod, Lod);
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
+  EXPECT_EQ(Matched->Bias, Bias);
+  EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+TEST_F(ImageCallsTest, MatchesSample1DArrayCallWithBiasAndMinLodClamp) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *U = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *ArrayLayer = ConstantFP::get(Builder.getFloatTy(), 2.0);
+  Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  Value *Bias = ConstantFP::get(Builder.getFloatTy(), 1.0);
+  Value *MinLodClamp = ConstantFP::get(Builder.getFloatTy(), 0.5);
+  CallInst *CI = createSample1DArray(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1), U, ArrayLayer,
+      Lod, Builder.getInt1(false), Bias, MinLodClamp, Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Sample1DArray);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(2));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(1));
+  EXPECT_EQ(Matched->U, U);
+  EXPECT_EQ(Matched->ArrayLayer, ArrayLayer);
+  EXPECT_EQ(Matched->Lod, Lod);
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
+  EXPECT_EQ(Matched->Bias, Bias);
+  EXPECT_EQ(Matched->MinLodClamp, MinLodClamp);
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 

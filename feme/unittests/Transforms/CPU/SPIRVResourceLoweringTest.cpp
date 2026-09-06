@@ -1585,8 +1585,8 @@ TEST(SPIRVResourceLoweringTest, LowersPlain1DSampledImageToImageSample1D) {
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4f32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, lod, use_explicit_lod, mask).
-  EXPECT_EQ(Sample->arg_size(), 10u);
+  //  u, lod, use_explicit_lod, bias, min_lod_clamp, mask).
+  EXPECT_EQ(Sample->arg_size(), 12u);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersArray1DSampledImageToImageSample1DArray) {
@@ -1620,8 +1620,83 @@ TEST(SPIRVResourceLoweringTest, LowersArray1DSampledImageToImageSample1DArray) {
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, array_layer, lod, use_explicit_lod, mask).
-  EXPECT_EQ(Sample->arg_size(), 11u);
+  //  u, array_layer, lod, use_explicit_lod, bias, min_lod_clamp, mask).
+  EXPECT_EQ(Sample->arg_size(), 13u);
+}
+
+TEST(SPIRVResourceLoweringTest, LowersSampleBiasToPlain1DBias) {
+  // Roadmap L61(c): `llvm.spv.resource.samplebias` against a `Plain1D`
+  // handle now lowers a real `Bias` operand through to
+  // `createSample1D`, mirroring `LowersSampleBiasToPlain2DBias`'s own
+  // identical `Plain2D` precedent -- previously `hasOnlySupportedImageUses`
+  // rejected this shape/operand combination outright (see its own comment
+  // before this fix), leaving the whole handle -- and any real CTS shader
+  // combining it with an otherwise-fine buffer handle in the same
+  // function -- unlowered.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(float %u, float %bias) {
+      %img = call target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1d(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp1d(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplebias(
+          target("spirv.Image", float, 0, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %u, float %bias,
+          <1 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 0, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1d(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp1d(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4f32");
+  ASSERT_TRUE(Sample);
+  ASSERT_EQ(Sample->arg_size(), 12u);
+  EXPECT_EQ(Sample->getArgOperand(9)->getName(), "bias");
+}
+
+TEST(SPIRVResourceLoweringTest, LowersSampleBiasClampToArray1DWithMinLodClamp) {
+  // Roadmap L61(c): `llvm.spv.resource.samplebias.clamp` against an
+  // `Array1D` handle now lowers both a real `Bias` operand and a real
+  // `MinLod` clamp through to `createSample1DArray`, exercising the same
+  // combined `HasBias`+`HasMinLodClamp` intrinsic this file's own
+  // `Plain2D`/`Cube` coverage already validates, now extended to
+  // `Array1D`.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x float> %uandlayer, float %bias, float %clamp) {
+      %img = call target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1darr(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp1darr(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplebias.clamp(
+          target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %uandlayer, float %bias,
+          <1 x i32> zeroinitializer, float %clamp)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1darr(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp1darr(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32");
+  ASSERT_TRUE(Sample);
+  ASSERT_EQ(Sample->arg_size(), 13u);
+  EXPECT_EQ(Sample->getArgOperand(10)->getName(), "bias");
+  EXPECT_EQ(Sample->getArgOperand(11)->getName(), "clamp");
 }
 
 TEST(SPIRVResourceLoweringTest, LeavesAPlain1DImageFetchAlone) {
