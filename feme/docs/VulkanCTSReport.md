@@ -26909,3 +26909,134 @@ functional change). No feature/extension bit touched;
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` reviewed, no
 change needed. `FeMeGraphicsDesign.md` reviewed, no deviation to record
 (no design decision made or changed this session, only an investigation).
+
+## Roadmap L49: fixed (a genuinely divergent task-payload offset threaded through the whole wave-body-lowering pipeline)
+
+**Scope.** L47's own `CanonicalizeStagePass`-side fix taught the
+canonicalizer to recognize a dynamically-indexed (per-invocation)
+task-payload access (e.g. a real shader's
+`td.branch[gl_LocalInvocationIndex] = ...`), but a temporary
+investigative unit test from that same session confirmed a real,
+materially larger gap remained: every wave-body-lowering phase between
+`CanonicalizeStagePass` and `TaskPayloadWrapperPass`/
+`MeshOutputWrapperPass` (`Linearize.cpp`, `SIMDize.cpp`,
+`StageMaskCalls.{h,cpp}`, `TaskPayloadWrapper.cpp`,
+`MeshOutputWrapper.cpp`) still hard-assumed a task-payload byte offset
+was a single compile-time constant, identical for every lane -- a
+`cast<ConstantInt>` assertion fired the moment a real dynamic offset
+reached `TaskPayloadWrapper.cpp`'s `lowerTaskPayloadStore`. L49 was
+filed to break this remaining scope down into sub-items (a)-(f), with
+(a)-(d) explicitly called out as "tightly coupled stages of a single
+data flow" that should land together as one change, unlike L48's own
+more independent sub-item split.
+
+**Fix.** Implemented all of (a)-(d) together as one coherent change:
+
+- **`Linearize.cpp`** (sub-item a): the `TaskPayloadStore` case already
+  passed its `Offset` operand through generically as a `Value*` --
+  fixed a stale comment that incorrectly claimed the offset "stays a
+  plain constant"; no logic change needed here.
+- **`SIMDize.cpp`** (sub-item b): `widenStageOp`'s `TaskPayloadLoad`
+  handling and `widenMaskedTaskPayloadStore` both used to keep the
+  offset operand unconditionally scalar/unwidened, safe only because
+  the offset used to always be a genuine `Constant` (valid to reference
+  unchanged from any function). Both now only keep the offset scalar
+  when `isa<Constant>` actually holds; a real per-invocation `Value` is
+  instead routed through `FunctionWidener::getWidened`, exactly like
+  every other divergent operand -- both to produce a real widened
+  `<W x i32>` per-lane vector, and because a raw non-`Constant`
+  reference from the pre-widened function is not even a valid reference
+  in the newly built widened function at all.
+- **`StageMaskCalls.{h,cpp}`'s `getOrInsertMaskedTaskPayloadStore`,
+  `StageOps.cpp`'s `getOrInsertStageOp`** (sub-item c, refined beyond
+  the roadmap's original wording): both needed a new, *independent*
+  mangling dimension for the offset's own type. The pre-existing
+  convention -- "mangle a masked/widened stage op's callee name by
+  exactly the one type that varies between its scalar and widened
+  forms" -- was safe before L47 because every op's "varying" operands
+  (Value, Mask, Row, Component, Vertex, ...) always widened in lockstep
+  with the whole function, while a task-payload offset was always a
+  true compile-time constant. L47 breaks that invariant: an offset can
+  now independently stay scalar `i32` (a real constant) or become a
+  widened `<W x i32>` vector regardless of whether the call's other
+  operands are widened. Without an extra, independent offset-type
+  suffix, two call sites sharing the same value/result type but
+  different offset shapes would collide under one mangled name (same
+  name, different `FunctionType`) -- a real, previously-latent bug this
+  session's own investigation surfaced while reading the existing code,
+  not something the original roadmap text called out this precisely.
+  `getOrInsertMaskedTaskPayloadStore` gained a new `OffsetTy` parameter
+  and its own mangled suffix; `getOrInsertStageOp` gained a
+  `TaskPayloadLoad`-specific extra suffix appending the offset argument's
+  own type, alongside the existing result-type-based suffix.
+- **`TaskPayloadWrapper.cpp`'s `lowerTaskPayloadStore`/
+  `lowerTaskPayloadLoad`, `MeshOutputWrapper.cpp`'s
+  `lowerMeshTaskPayloadLoad`** (sub-item d): each now keeps its
+  pre-existing hoisted-single-address/single-shared-broadcast fast path,
+  byte-for-byte unchanged, when the offset really is a `ConstantInt`.
+  When it is a genuine per-invocation `Value` instead, each function
+  falls back to a real per-lane addressing loop -- extracting each
+  lane's own offset via the existing `extractLaneOrScalar` helper (no
+  new helper needed, already handled both scalar and widened-vector
+  inputs correctly) and computing a fresh address/bounds check (store
+  side) or a fresh scalar read (load side) per lane, since a divergent
+  offset means different lanes may genuinely address completely
+  different payload byte ranges within the same masked call.
+
+**Unit/lit tests** (sub-item e). 5 new unit tests, each running the real
+`LinearizePass`->`SIMDizePass`->`WaveLoweringPass`->wrapper-pass pipeline
+end to end from a raw `feme.stage.task.payload.*` call, mirroring the
+existing constant-offset tests' own harness:
+`SIMDizeTest.WidensDynamicTaskPayloadStoreOffset`/
+`WidensDynamicTaskPayloadLoadOffset` (confirm the widened callee's
+offset argument becomes a real `<4 x i32>` and the callee name carries
+the new independent mangling suffix),
+`TaskPayloadWrapperTest.LowersPayloadStoreWithDynamicOffset`/
+`LowersPayloadLoadWithDynamicOffset`, and
+`MeshOutputWrapperTest.LowersTaskPayloadLoadWithDynamicOffset` (each
+confirms a genuine per-lane addressing loop -- one `getelementptr`/load
+per lane off the real `task_payload`/`mesh_payload` buffer -- rather
+than a shared single address/broadcast). Also updated the one
+pre-existing test whose expectation the new mangling changed:
+`StageOpsTest.TaskPayloadLoadIsOverloadedOnResult`'s expected callee
+name now includes the new `.i32` offset-type suffix (this suffix is
+unconditional, even for this test's own ordinary constant-offset case,
+since the mangling scheme must always account for both dimensions
+independently once either can vary).
+
+**`ninja check-feme`** (ccache, assertions-enabled `build2`):
+2632/2632 supported discovered tests pass (59 pre-existing
+`Unsupported`, 0 `Failed`) -- up by exactly the 5 new tests this change
+adds, no regressions. `FeMeTransformsCPUTests` and `FeMeCoreTests` also
+run directly with no filter to confirm no regressions in either full
+suite.
+
+**Real `deqp-vk` re-run** (sub-item f, `VK_ICD_FILENAMES` pointed at the
+real `feme` ICD per `feme/.instructions.md`). Both of L47's own named
+cases now pass:
+
+```
+dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.task_mesh.inside_rp.single_view.only_primary   -- Pass
+dEQP-VK.mesh_shader.ext.query.no_queries.lines.no_reset.copy.no_wait.draw.32bit.no_availability.multiple_blocks.task_mesh.inside_rp.single_view.with_secondary -- Pass
+```
+
+A broader `dEQP-VK.mesh_shader.ext.query.*task_mesh*` sweep (12,340
+cases) shows exactly 2/2 real (non-`NotSupported`) cases passing, 0
+failed -- the remaining 12,338 cases are `NotSupported` for an
+unrelated, already-known reason (`meshShaderQueries` not yet exposed by
+this ICD), not affected by this fix either way. A full
+`dEQP-VK.mesh_shader.*` sweep (28,044 cases: 78 passed, 361 failed,
+27,605 not supported) shows no new failures introduced by this change --
+the 361 pre-existing failures are unrelated, differently-scoped gaps
+(e.g. `dEQP-VK.mesh_shader.ext.misc.payload_read`'s own already-known
+divergent-branch diagnostic, unrelated to a task-payload offset) tracked
+by their own separate roadmap rows.
+
+**Disposition.** Roadmap **L49 fixed** at the scale this row's own real
+CTS repro measured. No feature/extension bit touched (internal
+wave-body-lowering plumbing only); `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` reviewed, no change needed.
+`FeMeCPUDesign.md`/`FeMeGraphicsDesign.md` reviewed: no deviation to
+record (neither design doc described a task-payload offset's own
+addressing model at a level of detail this fix's dynamic-offset
+generalization would contradict).
