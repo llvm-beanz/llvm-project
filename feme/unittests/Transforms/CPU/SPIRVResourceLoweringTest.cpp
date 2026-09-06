@@ -2163,14 +2163,17 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToArray2DDerivatives) {
   // `Array2D`, widening `Grad`'s own roadmap L59 `Plain2D`/`Cube`/
   // `CubeArray`-only scope -- the real (dPdx, dPdy) vectors are unpacked
   // into `createSample2DArray`'s own `DUdX`/`DUdY`/`DVdX`/`DVdY`
-  // operands, mirroring `Plain2D`'s own handling (the array-layer
-  // component of each 3-wide `dPdx`/`dPdy` vector this row's own
-  // coordinate-width check requires is present but unused, matching
-  // `D`'s own 2-component-only extraction, the same way `CubeArray`'s
-  // own 4-wide vectors leave their trailing layer component unused).
+  // operands, mirroring `Plain2D`'s own handling.
+  //
+  // Roadmap L64: each derivative is 2-wide against this shape's own
+  // 3-wide `(U, V, Layer)` coordinate, per SPIR-V's rule that a `Grad`
+  // operand carries one component per image dimension *not counting*
+  // the array layer. This test previously passed 3-wide derivatives,
+  // which no real shader ever emits -- it was written to satisfy the
+  // over-strict coordinate-width check L64 fixed, not to match SPIR-V.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define <4 x float> @main(<3 x float> %coord, <3 x float> %dpdx, <3 x float> %dpdy) {
+    define <4 x float> @main(<3 x float> %coord, <2 x float> %dpdx, <2 x float> %dpdy) {
       %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %samp = call target("spirv.Sampler")
@@ -2178,7 +2181,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToArray2DDerivatives) {
       %r = call <4 x float> @llvm.spv.resource.samplegrad(
           target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, <3 x float> %coord,
-          <3 x float> %dpdx, <3 x float> %dpdy, <2 x i32> zeroinitializer)
+          <2 x float> %dpdx, <2 x float> %dpdy, <2 x i32> zeroinitializer)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
@@ -2210,6 +2213,74 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToArray2DDerivatives) {
   EXPECT_EQ(cast<ConstantInt>(DVdX->getIndexOperand())->getZExtValue(), 1u);
   EXPECT_EQ(DVdY->getVectorOperand()->getName(), "dpdy");
   EXPECT_EQ(cast<ConstantInt>(DVdY->getIndexOperand())->getZExtValue(), 1u);
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LeavesAnArray2DSampleGradWithCoordWidthDerivativesAlone) {
+  // Roadmap L64: the negative counterpart of
+  // `LowersSampleGradToArray2DDerivatives` above. A `Grad` derivative
+  // that is as wide as the *coordinate* (3 components here, including an
+  // array layer that SPIR-V never differentiates) is malformed, and must
+  // still be rejected rather than silently having its trailing component
+  // ignored -- the width check L64 relaxed was narrowed to exactly the
+  // legal width, not removed.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x float> %coord, <3 x float> %dpdx, <3 x float> %dpdy) {
+      %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplegrad(
+          target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord,
+          <3 x float> %dpdx, <3 x float> %dpdy, <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LeavesAPlain2DSampleGradWithNarrowedDerivativesAlone) {
+  // Roadmap L64: the mirror-image negative test. `Plain2D` is *not*
+  // arrayed, so its derivatives must match its 2-wide coordinate exactly;
+  // a 1-wide derivative is malformed. This pins that L64's narrowing is
+  // conditional on the shape being arrayed, rather than a blanket
+  // "one narrower than the coordinate" rule.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x float> %coord, <1 x float> %dpdx, <1 x float> %dpdy) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.samplegrad(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord,
+          <1 x float> %dpdx, <1 x float> %dpdy, <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2d.v4f32"));
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleBiasToCubeArrayBias) {
@@ -2289,13 +2360,15 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToCubeArrayDerivatives) {
   // `CubeArray`, widening `Grad`'s own roadmap L59 `Plain2D`/`Cube`-only
   // scope -- the real 3-component direction-derivative vectors are
   // unpacked into `createSampleCubeArray`'s own six
-  // `DDirXdX`/.../`DDirZdY` operands, mirroring `Cube`'s own handling
-  // (the array-layer component of each 4-wide `dPdx`/`dPdy` vector this
-  // row's own coordinate-width check requires is present but unused,
-  // matching `CD`'s own 3-component-only extraction).
+  // `DDirXdX`/.../`DDirZdY` operands, mirroring `Cube`'s own handling.
+  //
+  // Roadmap L64: each derivative is 3-wide against this shape's own
+  // 4-wide `(X, Y, Z, Layer)` coordinate, for the same
+  // array-layer-is-never-differentiated reason as `Array2D`'s own test
+  // above; this test previously passed 4-wide derivatives.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define <4 x float> @main(<4 x float> %coord, <4 x float> %dpdx, <4 x float> %dpdy) {
+    define <4 x float> @main(<4 x float> %coord, <3 x float> %dpdx, <3 x float> %dpdy) {
       %img = call target("spirv.Image", float, 3, 0, 1, 0, 1, 0)
           @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
       %samp = call target("spirv.Sampler")
@@ -2303,7 +2376,7 @@ TEST(SPIRVResourceLoweringTest, LowersSampleGradToCubeArrayDerivatives) {
       %r = call <4 x float> @llvm.spv.resource.samplegrad(
           target("spirv.Image", float, 3, 0, 1, 0, 1, 0) %img,
           target("spirv.Sampler") %samp, <4 x float> %coord,
-          <4 x float> %dpdx, <4 x float> %dpdy, <2 x i32> zeroinitializer)
+          <3 x float> %dpdx, <3 x float> %dpdy, <2 x i32> zeroinitializer)
       ret <4 x float> %r
     }
     declare target("spirv.Image", float, 3, 0, 1, 0, 1, 0)

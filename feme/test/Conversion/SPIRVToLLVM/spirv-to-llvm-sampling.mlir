@@ -374,6 +374,34 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // -----
 
+// Roadmap L64: an *arrayed* `Grad` sample. SPIR-V gives a `Grad` derivative
+// one component per image dimension *not counting* the array layer, so this
+// `Arrayed` 2D image pairs a 3-component `(U, V, Layer)` coordinate with
+// 2-component derivatives. This conversion forwards all three operands
+// unchanged whatever their widths -- pinned here because the downstream
+// `feme-cpu-lower-spirv-resources` width check used to (wrongly) require the
+// derivatives to be as wide as the coordinate, rejecting exactly this shape.
+
+// CHECK-LABEL: llvm.func @sample_grad_arrayed
+// CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[SAMP:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.samplegrad"(%[[IMG]], %[[SAMP]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @sample_grad_arrayed(%coord : vector<3xf32>, %dpdx : vector<2xf32>, %dpdy : vector<2xf32>) -> vector<4xf32> "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %3 = spirv.Load "UniformConstant" %2 : !spirv.sampler
+    %4 = spirv.SampledImage %1, %3 : !spirv.image<f32, Dim2D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>>
+    %5 = spirv.ImageSampleExplicitLod %4, %coord ["Grad"], %dpdx, %dpdy : !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, Arrayed, SingleSampled, NeedSampler, Unknown>>, vector<3xf32>, vector<2xf32>, vector<2xf32> -> vector<4xf32>
+    spirv.ReturnValue %5 : vector<4xf32>
+  }
+}
+
+// -----
+
 // Roadmap L59: `spirv.ImageSampleExplicitLod` with `Grad|ConstOffset`
 // together (GLSL's `textureGradOffset()`) converts to
 // `llvm.spv.resource.samplegrad` with the real, possibly-nonzero offset

@@ -146,6 +146,20 @@ enum class ImageShape {
   Array2DMS,
 };
 
+/// Whether \p Shape addresses a discrete array layer as the last component
+/// of its coordinate. SPIR-V never differentiates that layer -- it selects
+/// a slice rather than a filtered axis -- so an arrayed shape's `Grad`
+/// derivative operands are exactly one component narrower than its own
+/// sample coordinate (see `hasOnlySupportedImageUses`'s own
+/// `GradDerivativeWidth`).
+///
+/// The fetch-only arrayed shapes (`Array1D`/`Array2DMS`) are included for
+/// consistency even though no sample intrinsic reaches them today.
+bool isArrayedShape(ImageShape Shape) {
+  return Shape == ImageShape::Array2D || Shape == ImageShape::CubeArray ||
+         Shape == ImageShape::Array1D || Shape == ImageShape::Array2DMS;
+}
+
 /// Whether \p Kind is one of the two texel-buffer kinds (see `HandleKind`).
 bool isTexelHandleKind(HandleKind Kind) {
   return Kind == HandleKind::TexelStorage || Kind == HandleKind::TexelUniform;
@@ -1046,14 +1060,27 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
           Shape != ImageShape::Array2D)
         return false;
       unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
-      // Roadmap L59: `Grad`'s own `dPdx`/`dPdy` operands (indices 3, 4)
-      // are each a full coordinate-shaped vector -- one screen-space
-      // partial derivative per addressed component, same width as
-      // `Coord` itself (`SampleCoordWidth`) -- unlike `Bias`'s single
-      // scalar at the same index.
-      if (HasGrad &&
-          (!isCoordN(CI->getArgOperand(3), SampleCoordWidth, /*Float=*/true) ||
-           !isCoordN(CI->getArgOperand(4), SampleCoordWidth, /*Float=*/true)))
+      // Roadmap L59/L64: `Grad`'s own `dPdx`/`dPdy` operands (indices 3,
+      // 4) are each a screen-space partial derivative of `Coord`, one
+      // component per *differentiable* coordinate component -- which is
+      // not always `Coord`'s own width. SPIR-V requires a `Grad`
+      // derivative to have "the number of components ... equal to the
+      // number of dimensions of the image, not counting the array layer":
+      // an arrayed sample's layer index selects a discrete slice rather
+      // than addressing a filtered axis, so it has no derivative at all.
+      // `Array2D` therefore pairs a 3-component `(U, V, Layer)` coordinate
+      // with 2-component derivatives, and `CubeArray` a 4-component
+      // `(X, Y, Z, Layer)` coordinate with 3-component ones, while the
+      // two non-arrayed shapes' derivatives do match their coordinate.
+      // (`lowerImageAccesses` below already reads exactly these narrower
+      // widths -- elements 0/1 for `Array2D`, 0/1/2 for `CubeArray` --
+      // so only this check ever disagreed.)
+      unsigned GradDerivativeWidth =
+          isArrayedShape(Shape) ? SampleCoordWidth - 1 : SampleCoordWidth;
+      if (HasGrad && (!isCoordN(CI->getArgOperand(3), GradDerivativeWidth,
+                                /*Float=*/true) ||
+                      !isCoordN(CI->getArgOperand(4), GradDerivativeWidth,
+                                /*Float=*/true)))
         return false;
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
           !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape) ||
