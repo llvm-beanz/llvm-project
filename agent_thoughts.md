@@ -66488,3 +66488,135 @@ it is inconvenient.
 - `*shadow*` regression sweep (32 cases): 11 -> **13** Pass, 4 -> **2** Fail,
   17 NotSupported unchanged.
 - Roadmap L52 struck through; all four of its sub-items are now closed.
+
+# Session: L60/L61 follow-up — L63 (`Plain1D`/`Array1D` implicit-LOD mip fix)
+
+Asked to work on L60 or other prerequisites blocking L-series milestones.
+L60 sub-item (a) (`Array2D`/`CubeArray` `Bias`/`MinLodClamp`/`Grad`) was
+already fully closed by prior sessions; (b)/(c)/(e)/(f) are documented as
+either not-a-real-gap or a materially bigger, separately-scoped item. That
+left (d) (`Grad`+`MinLod` clamp) as the only open, potentially-tractable
+sub-item — but it's gated behind the still-disabled `shaderResourceMinLod`
+feature bit, so re-measuring it meant repeating L60/L61's own
+flip/measure/revert experiment now that L52(c)/L58/L59/L60(a)/L61 have all
+landed since the last time it was tried.
+
+## Re-running the flip/measure/revert experiment
+
+Set `Info.Features.shaderResourceMinLod = VK_TRUE` temporarily, rebuilt, and
+categorized all 20 real `textureclamp` failures (50 cases total). Most match
+already-filed, already-understood categories (integer-sampler restriction,
+`Plain3D`'s missing infrastructure, L62's own `Dref`+`Bias` gap) — but 2
+(`sampler1d_bias_{fixed,float}_fragment`) didn't fit any of them. Root cause:
+`Plain1D`/`Array1D` implicit-LOD sampling has *never* computed a real mip
+level from screen-space derivatives — it just hardcodes `Lod=0.0`, unlike
+`Plain2D`'s real `femeRTPlanImplicitLod`-based computation. This is a
+genuinely new, previously-unfiled bug, not a re-discovery of something already
+tracked. (`Array1D`'s own identically-shaped baseline test happened to pass
+before this session purely by coincidence — its specific bias/clamp
+parameters saturate to a near-constant mip level regardless of the actual LOD
+computed, so the bug was invisible there.)
+
+Given how well-scoped this was (mirrors existing `Plain2D` derivative
+infrastructure closely), I decided to fix it this session as roadmap L63,
+rather than just filing it and stopping at L60(d)'s re-measurement.
+
+## The fix, and two real bugs caught along the way
+
+The initial fix (extending `createSample1D`/`createSample1DArray` with a real
+`DUdX`/`DUdY` pair, synthesizing it via a new
+`getOrSynthesizeSample1DDerivatives` mirroring `Plain2D`'s own helper, and
+adding a dedicated `femeRTPlanImplicitLod1D` runtime helper) built cleanly, and
+a new compiler-side unit test (`FragmentStageImplicitSample1DSynthesizesRealDerivatives`)
+confirmed `SPIRVResourceLowering` was doing the right thing. But a real
+`deqp-vk` re-run of `textureclamp.sampler1d_bias_{fixed,float}_fragment`
+**still failed identically** to the pre-fix behavior — bit-for-bit the same
+`difference = 1.85165`, which was suspicious enough (an identical failure
+across a real code change strongly suggests the new path isn't being
+exercised at all, not just computing something slightly wrong) that I kept
+digging rather than assuming the fix was somehow a no-op for an unrelated
+reason.
+
+Two genuinely separate bugs turned up:
+
+1. **`femeRTComputeClampedLod`'s own `UseExplicitLod` contract.** This
+   existing helper (used by every shape's implicit/explicit LOD path)
+   discards its own `Lod` parameter back to a hardcoded `0.0f` whenever
+   `UseExplicitLod` is `false` — by design, since `femeRTPlanImplicitLod`
+   (the existing `Plain2D` helper) always calls it with a hardcoded
+   `/*UseExplicitLod=*/1`, because by that point the LOD it's passing in is
+   already the sample's own real starting-point value, whether the *original*
+   sample was explicit or implicit. I missed this and forwarded the sample's
+   *own* original `UseExplicitLod` flag straight through, which silently threw
+   away my newly-computed real implicit LOD and fell back to `0.0` again —
+   the exact same bug I was trying to fix, just reintroduced one call deeper.
+   A new runtime-side unit test I added specifically to catch this kind of
+   thing (`Sample1DRealDerivativeSelectsCoarserMipLevel`) failed with exactly
+   this symptom the first time I ran it (before I'd even gotten to the real
+   CTS re-run), which is exactly the value of writing a runtime-level test
+   that doesn't just check the compiler emitted the right IR shape, but that
+   the numbers that come out the other end are actually right.
+
+2. **A stray, mistyped derivative call for `Array1D`.** After fixing (1), the
+   isolated unit test passed, and running `sampler1d_bias_*` alone against
+   real CTS passed too — but running it *together* with
+   `sampler1darray_bias_*` in the same `deqp-vk` process (which is exactly
+   what a full `textureclamp` sweep does) caused one of the two to
+   deterministically regress back to the exact pre-fix failure, while the
+   other passed. This was the same class of "identical value as before"
+   symptom that first tipped me off, so I didn't assume it was some vague
+   flakiness — I bisected it down to a minimal 2-case repro
+   (`sampler1d_bias_fixed_fragment,sampler1darray_bias_fixed_fragment`) and
+   confirmed the analogous `sampler2d_bias`/`sampler2darray_bias` pairing
+   (which shares the same derivative-synthesis machinery via
+   `getOrSynthesizeSample2DDerivatives`) never showed this symptom — so it had
+   to be something specific to my new 1D code, not some general
+   multi-pipeline instability in feme. Looking at the `SPIRVResourceLowering.cpp`
+   lowering again, I'd computed one derivative (`D`) unconditionally,
+   differentiating `Coord` directly, *before* branching on `Plain1D` vs.
+   `Array1D` — correct for `Plain1D` (`Coord` really is a bare scalar `U`
+   there), but for `Array1D`, `Coord` is actually a 2-component
+   `(U, ArrayLayer)` vector. So every `Array1D` sample was emitting a stray,
+   unused, vector-typed derivative call in addition to the real scalar-`U` one
+   (`ArrayD`) the `Array1D` branch already computed separately. I didn't fully
+   pin down the exact mechanism by which this dead, mistyped call corrupted a
+   *different* pipeline's result later in the same process (I suspect it's
+   related to how the wave-lowering/SIMDize machinery assigns some kind of
+   ordinal/index bookkeeping to `feme.stage.derivative.*` call sites, though I
+   didn't chase that all the way down since the fix itself — just don't emit
+   the stray call — is unambiguous and the real CTS results confirm it), but
+   removing the dead, wrongly-typed derivative call and computing each
+   shape's own derivative only inside its own branch fixed it completely and
+   deterministically (confirmed stable across 3 repeated full `textureclamp`
+   sweeps).
+
+This is a good illustration of why the project's own methodology (real CTS
+re-run after each change, not just a passing unit test) matters: both bugs
+above passed every unit test I'd written for the "obviously right" shape of
+the fix, and only a real end-to-end CTS run — first the identical-failure-value
+red flag, then the combined-pipeline repro — actually caught them.
+
+## Results
+
+- `textureclamp.sampler1d_bias_{fixed,float}_fragment`: 0/2 -> **2/2 Pass**,
+  confirmed stable across 3 repeated full-group runs.
+- Full `textureclamp` group (50 cases): 12 -> **14** Pass, 20 -> **18** Fail,
+  18 NotSupported unchanged, deterministic across repeats (this is with the
+  temporary `shaderResourceMinLod = VK_TRUE` flag, reverted after
+  measurement).
+- Feature-independent `texture.sampler1d_bias_{fixed,float}_fragment` (no
+  flag needed): 2/2 Pass — a real, always-reachable benefit.
+- `git stash`-based before/after sweep of `texture_functions.*.sampler1d*`
+  (1,355 cases): 26 -> **28** Pass, 778 -> **776** Fail, 551 NotSupported
+  unchanged — monotonic improvement, no regressions.
+- `ninja check-feme`: 2632/2632 supported tests pass (0 Failed), up by 6 new
+  unit tests net of edits to 6 existing ones.
+- `shaderResourceMinLod` reverted to `VK_FALSE` after measurement; L60(d)
+  remains blocked on L62 (`Dref`+`Bias`+`MinLod`), the `Array2D`/`Plain3D`
+  `VulkanBuffer` gap, and the integer-sampler restriction — this session
+  closed one of several prerequisites, not all of them.
+- Roadmap L63 added (struck through, fixed), parented under L60. L60 itself
+  is left un-struck, since sub-items (b)/(c)/(e)/(f) remain out-of-scope or
+  bigger and (d) is still blocked on other prerequisites — no new breakdown
+  entries needed since L60's existing (a)-(f) breakdown already covers the
+  remaining work.
