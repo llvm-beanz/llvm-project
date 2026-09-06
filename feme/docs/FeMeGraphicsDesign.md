@@ -2458,8 +2458,19 @@ documented reason rather than an oversight:
   `Plain2D`/`Cube` only (matching roadmap L26's own `MinLodClamp` scope
   precedent); DXIL's own `Bias` operand still always lowers to a
   zero-constant no-op (`ResourceLowering.cpp`), and a `Dref`+`Bias`
-  combination (depth-comparison sampling with a bias) and gradient
-  sampling remain entirely unimplemented on both frontends.
+  combination (depth-comparison sampling with a bias) remains entirely
+  unimplemented on both frontends. Update (roadmap L59): explicit-`Grad`
+  gradient sampling is likewise now implemented on the SPIR-V import
+  side, scoped to `Plain2D`/`Cube`, `fixed`/`float` (non-integer) channel
+  formats, `fragment`/`vertex` stages only -- reusing `createSample2D`/
+  `createSampleCube`'s existing screen-space-derivative operands
+  unchanged (the runtime's own implicit-LOD mip/anisotropy math is
+  agnostic to whether a derivative was synthesized, zeroed, or supplied
+  explicitly), so no new runtime entry point was needed. DXIL's own
+  gradient sampling, `Array2D`/`CubeArray`/other-shape SPIR-V gradient
+  sampling, integer-channel/`compute`-stage/sparse-residency SPIR-V
+  gradient sampling, and a `Dref`+`Grad` depth-comparison combination all
+  remain unimplemented (see roadmap L60).
 - **1D and 3D/cube sampling**, and on the SPIR-V side an arrayed or
   multisampled storage image, or a non-mandatory-format/format-agnostic
   storage image (roadmap H19a closed the non-arrayed, non-multisampled,

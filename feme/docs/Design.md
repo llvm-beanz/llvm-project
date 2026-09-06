@@ -611,6 +611,7 @@ dialect can then name the backend's intrinsics directly, as
 | `spirv.SampledImage` + `spirv.ImageSampleImplicitLod` (no modifiers, or any combination of `Bias`/`ConstOffset`/`MinLod`) | `llvm.spv.resource.sample`/`llvm.spv.resource.samplebias` (or their `.clamp` siblings, once `MinLod` is present) (roadmap L22 threads the real offset/bias/clamp operands through in every case; the backend itself folds away an all-zero `ConstOffset`; roadmap L26 closed the matching CPU-backend gap, which had rejected a real nonzero offset/clamp outright -- see the "Known gap (closed)" note below) | *(folds both handles into one combined runner-facing type; no sampling op pattern at all)* |
 | `spirv.Image` (extracting a plain image handle back out of a combined `!spirv.sampled_image` value, e.g. so a combined-image-sampler binding can still feed `spirv.ImageFetch`/`spirv.ImageQuerySize`) | `llvm.extractvalue` reading field 0 of that same image/sampler struct (roadmap H29h) | *(no pattern; fails to legalize)* |
 | `spirv.ImageSampleExplicitLod` with a lone `Lod` operand | `llvm.spv.resource.samplelevel` | *(no pattern; fails to legalize)* |
+| `spirv.ImageSampleExplicitLod` with `Grad` (optionally combined with `ConstOffset`/`MinLod`) (roadmap L59) | `llvm.spv.resource.samplegrad`/`.samplegrad.clamp` | *(no pattern; fails to legalize)* |
 | `spirv.ImageSampleDrefImplicitLod`/`spirv.ImageSampleDrefExplicitLod`/`spirv.ImageQueryLod` (roadmap L25: added to the upstream MLIR SPIR-V dialect itself -- opcodes 89, 90, and 105 respectively had no `spirv.*` op or deserializer case at all before this row) | `llvm.spv.resource.samplecmp`/`.samplecmp.clamp` (implicit-LOD dref, `None`/`ConstOffset`/`MinLod` only -- no `Bias`, since no `samplecmpbias` intrinsic exists), `llvm.spv.resource.samplecmplevelzero` (explicit-LOD dref, only for a literal, compile-time-constant `Lod = 0.0`; any other `Lod`, or a `Grad`-based sample, fails to legalize), and two calls to `llvm.spv.resource.calculate.lod`/`.calculate.lod.unclamped` combined via `llvm.insertelement` into one `vector<2xf32>` (`ImageQueryLod`) (roadmap L31; CPU-side lowering for all five of these intrinsics remains a further gap -- see roadmap L46) | *(no pattern for any of these three either)* |
 | `spirv.Switch` | `llvm.switch`, case literals rebuilt against the (post-conversion, signless) selector type | *(no pattern; fails to legalize -- see "`spirv.Switch` op is not supported at the moment" in `mlir::populateSPIRVToLLVMConversionPatterns`)* |
 | `spirv.Dot` | a per-lane `llvm.intr.fmuladd` chain, mirroring `feme::dxil::expandFDot`'s expansion of the analogous (post-raising) `llvm.dx.fdot` intrinsic | *(no pattern; fails to legalize)* |
@@ -762,6 +763,13 @@ What is still missing is breadth rather than a structural gap:
   ...) and `OpImageGather`/`OpImageDrefGather` each still need their own
   pattern supplying the additional operand(s)
   `llvm.spv.resource.samplebias`/`samplegrad`/`samplecmp*`/`gather*` expect.
+  **Update:** roadmap L22 has since added `Bias`/`ConstOffset`/`MinLod`
+  handling to `ImageSampleImplicitLodPattern` itself, and roadmap L59 has
+  landed a dedicated `ImageSampleGradPattern` for `spirv.ImageSampleExplicitLod`
+  with `Grad` (optionally combined with `ConstOffset`/`MinLod`); only the
+  depth-comparison (`*DrefImplicitLod`/`*DrefExplicitLod` with `Grad`) and
+  `OpImageGather`/`OpImageDrefGather` variants named in this bullet remain
+  unimplemented.
   Every one of MLIR's own `spirv` dialect ops for these variants already
   exists (`ImageSampleImplicitLod`/`ImageDrefGather`/etc. are all already
   defined in upstream `SPIRVImageOps.td`); this bullet is purely a missing
