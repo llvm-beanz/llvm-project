@@ -198,20 +198,29 @@ using LoadArrayI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
                                 uint32_t, bool, void *);
 /// The roadmap H7b-a `TextureCube` counterpart of `SampleFn`: a
 /// direction-vector coordinate (`DirX`, `DirY`, `DirZ`) instead of `(U, V)`,
-/// and (roadmap L26) a trailing float `MinLodClamp` floor before the mask
-/// -- but no integer texel offset, unlike `SampleFn` (SPIR-V forbids
+/// followed (roadmap L56) by six screen-space partial-derivative operands
+/// of that direction vector (`DDirXdX`, `DDirXdY`, `DDirYdX`, `DDirYdY`,
+/// `DDirZdX`, `DDirZdY`, consulted only for an implicit-LOD sample -- see
+/// `femeRTComputeCubeUVDerivatives`'s doc, `FeMeRuntimeCPU.c`), and
+/// (roadmap L26) a trailing float `MinLodClamp` floor before the mask --
+/// but no integer texel offset, unlike `SampleFn` (SPIR-V forbids
 /// `ConstOffset` against a cube image; see `isSupportedOffset`'s comment).
 using SampleCubeFn = void (*)(const FemeImageDescriptor *, uint32_t,
                               const FemeSamplerDescriptor *, uint32_t,
                               uint32_t, uint32_t, float, float, float, float,
-                              bool, float, bool, void *);
+                              float, float, float, float, float, float, bool,
+                              float, bool, void *);
 /// The roadmap H7b-a `TextureCubeArray` counterpart of `SampleCubeFn`,
 /// adding a float `ArrayLayer` coordinate (selecting a six-layer cube
-/// element) before `Lod`.
+/// element) before `Lod`; also gains its own roadmap L56
+/// `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY` operands,
+/// mirroring `SampleCubeFn`'s own new operands above.
 using SampleCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                    const FemeSamplerDescriptor *, uint32_t,
                                    uint32_t, uint32_t, float, float, float,
+                                   float, float, float, float, float, float,
                                    float, float, bool, bool, void *);
+
 /// The roadmap L48 `Texture2DArray` counterpart of `SampleCmpFn`, adding
 /// a float `ArrayLayer` coordinate before `Lod` -- mirroring
 /// `SampleArrayFn`'s relationship to `SampleFn`.
@@ -2784,8 +2793,9 @@ TEST_F(ImageSamplingTest, SampleCubeSelectsEachFaceByDirection) {
   };
   for (auto &C : Cases) {
     float Out[4];
-    Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, C.X, C.Y, C.Z, 0.0f, true,
-       -std::numeric_limits<float>::infinity(), true, Out);
+    Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, C.X, C.Y, C.Z, 0.0f, 0.0f, 0.0f,
+       0.0f, 0.0f, 0.0f, 0.0f, true, -std::numeric_limits<float>::infinity(),
+       true, Out);
     EXPECT_FLOAT_EQ(Out[0], C.Expected)
         << "direction (" << C.X << ", " << C.Y << ", " << C.Z << ")";
   }
@@ -2812,10 +2822,10 @@ TEST_F(ImageSamplingTest, SampleCubeArraySelectsRequestedCubeElement) {
   SampleCubeArrayFn Fn = resolve<SampleCubeArrayFn>(
       addWrapper("sample_cubearray", "feme.cpu.image.sample.cubearray.v4f32"));
   float Out0[4], Out1[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, /*ArrayLayer=*/0.0f,
-     0.0f, true, true, Out0);
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, /*ArrayLayer=*/1.0f,
-     0.0f, true, true, Out1);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+     0.0f, 0.0f, 0.0f, /*ArrayLayer=*/0.0f, 0.0f, true, true, Out0);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+     0.0f, 0.0f, 0.0f, /*ArrayLayer=*/1.0f, 0.0f, true, true, Out1);
   EXPECT_FLOAT_EQ(Out0[0], 0.0f);
   EXPECT_FLOAT_EQ(Out1[0], 100.0f);
 }
@@ -3085,7 +3095,7 @@ TEST_F(ImageSamplingTest, SampleCubeSeamlessBlendsAcrossFaceEdge) {
   // low tap one texel below `u == 0`, remapping to face 4 (+Z).
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
-     /*DirZ=*/0.6f, 0.0f, true,
+     /*DirZ=*/0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,
      -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_LT(Out[0], 99.0f) << "expected a blended value pulling below face "
                              "0's own uniform 100.0, not a clamped 100.0";
@@ -3121,9 +3131,149 @@ TEST_F(ImageSamplingTest, SampleCubeNearestDoesNotBlendAcrossFaceEdge) {
       addWrapper("sample_cube_nearest", "feme.cpu.image.sample.cube.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
-     /*DirZ=*/0.6f, 0.0f, true,
+     /*DirZ=*/0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,
      -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_FLOAT_EQ(Out[0], 100.0f);
+}
+
+// Roadmap L56: an implicit-LOD `TextureCube::Sample` with no measurable
+// minification (every `DDir*` derivative zero -- the same "outside the
+// fragment stage" scenario `ImplicitLodWithNoDerivativesReadsBaseLevel`
+// exercises for `Plain2D`) must still read the base level -- this is the
+// pre-existing, unregressed behavior for a caller with no real derivative
+// to give.
+TEST_F(ImageSamplingTest, SampleCubeImplicitLodWithNoDerivativesReadsBaseLevel) {
+  // A two-level, 6-face cube mip chain: level 0 is 2x2 per face (all
+  // 1s), level 1 is 1x1 per face (value 9), mirroring
+  // `ImplicitLodWithNoDerivativesReadsBaseLevel`'s own two-level Plain2D
+  // layout, but replicated across all 6 faces.
+  float Level0[6][2][2][4];
+  float Level1[6][1][1][4];
+  for (unsigned Face = 0; Face < 6; ++Face) {
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Level0[Face][Y][X][C] = 1.0f;
+    for (unsigned C = 0; C < 4; ++C)
+      Level1[Face][0][0][C] = 9.0f;
+  }
+  struct {
+    float L0[6][2][2][4];
+    float L1[6][1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/2 * 2 * 4 * sizeof(float), /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/1 * 1 * 4 * sizeof(float), /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 6;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MipFilter = static_cast<uint32_t>(SamplerFilter::Nearest);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeFn Fn = resolve<SampleCubeFn>(addWrapper(
+      "sample_cube_no_derivs", "feme.cpu.image.sample.cube.v4f32"));
+  float Out[4];
+  // Direction (1, 0, 0) selects face 0 dead-center; every `DDir*`
+  // derivative operand is zero.
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/0.0f,
+     /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, -std::numeric_limits<float>::infinity(), true,
+     Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+}
+
+// Roadmap L56: the core proof of this row's own fix -- an implicit-LOD
+// `TextureCube::Sample` given a nonzero screen-space derivative of its
+// own direction vector must now resolve to a real, non-always-zero
+// implicit LOD, reading the coarser mip level exactly the way
+// `ImplicitLodSelectsCoarserMipFromDerivatives` already proves for
+// `Plain2D`. Before this row, `SampleCube`'s implicit-LOD path always
+// hardcoded `Lod = 0` (see `ImageCalls.h`'s own former scope-note
+// comment), so this same call would previously have read level 0's
+// value (1.0) unconditionally, regardless of any derivative passed in.
+TEST_F(ImageSamplingTest, SampleCubeImplicitLodSelectsCoarserMipFromDerivatives) {
+  float Level0[6][2][2][4];
+  float Level1[6][1][1][4];
+  for (unsigned Face = 0; Face < 6; ++Face) {
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Level0[Face][Y][X][C] = 1.0f;
+    for (unsigned C = 0; C < 4; ++C)
+      Level1[Face][0][0][C] = 9.0f;
+  }
+  struct {
+    float L0[6][2][2][4];
+    float L1[6][1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/2 * 2 * 4 * sizeof(float), /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(float),
+       /*SlicePitch=*/1 * 1 * 4 * sizeof(float), /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 6;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MipFilter = static_cast<uint32_t>(SamplerFilter::Nearest);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeFn Fn = resolve<SampleCubeFn>(addWrapper(
+      "sample_cube_derivs", "feme.cpu.image.sample.cube.v4f32"));
+  // Direction (1, 0, 0) selects face 0 dead-center (U = V = 0.5 in
+  // face-local terms); a large `DDirYdX` (this direction's own Y
+  // component varying steeply across the screen-space X axis) is a
+  // real, sharp minification once converted through face 0's own
+  // quotient-rule UV derivative (face 0: U = -Z/X, V = -Y/X -- see
+  // `femeRTComputeCubeUVDerivatives`), large enough to resolve well past
+  // the midpoint LOD `0.5` and read the coarser (1x1) level's own value.
+  float Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/4.0f,
+     /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, -std::numeric_limits<float>::infinity(), true,
+     Out);
+  EXPECT_FLOAT_EQ(Out[0], 9.0f);
 }
 
 // The depth-comparison counterpart of `SampleCubeSeamlessBlendsAcrossFaceEdge`
@@ -3206,7 +3356,7 @@ TEST_F(ImageSamplingTest, SampleCubeSeamlessCornerAveragesThreeFaces) {
   // the `(X0, Y0)` tap straddles the corner shared by faces 0, 2, and 4.
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.6f,
-     /*DirZ=*/0.6f, 0.0f, true,
+     /*DirZ=*/0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true,
      -std::numeric_limits<float>::infinity(), true, Out);
   // Expected corner value: (face2 (50) + face4 (25) + face0 (100)) / 3
   // ~= 58.33, blended with weight (1 - Wx) * (1 - Wy) ~= 0.01 against the

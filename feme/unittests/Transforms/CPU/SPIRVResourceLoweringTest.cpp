@@ -1454,8 +1454,68 @@ TEST(SPIRVResourceLoweringTest, LowersCubeSampledImageToImageSampleCube) {
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cube.v4f32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  dir_x, dir_y, dir_z, lod, use_explicit_lod, min_lod_clamp, mask).
-  EXPECT_EQ(Sample->arg_size(), 13u);
+  //  dir_x, dir_y, dir_z, ddirxdx, ddirxdy, ddirydx, ddirydy, ddirzdx,
+  //  ddirzdy, lod, use_explicit_lod, min_lod_clamp, mask). Roadmap L56
+  //  adds the six derivative operands.
+  EXPECT_EQ(Sample->arg_size(), 19u);
+  // `main` here carries no `feme.shader.stage` attribute (i.e. it is not
+  // recognized as a Fragment-stage entry point), so this implicit cube
+  // sample gets six zero-constant derivatives rather than a real
+  // `feme.stage.derivative.*` synthesis, mirroring
+  // `LowersSampledImageAndSamplerPairToImageSample`'s own Plain2D
+  // assertion (roadmap L56's own Fragment-only gate; see
+  // `getOrSynthesizeSampleCubeDerivatives`).
+  for (unsigned ArgNo : {9, 10, 11, 12, 13, 14})
+    EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(ArgNo))->isZero());
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersCubeSampledImageToImageSampleCubeWithRealDerivativesInFragmentStage) {
+  // Roadmap L56: the same shape as `LowersCubeSampledImageToImageSampleCube`
+  // above, but `main` now carries a real `feme.shader.stage` `Fragment`
+  // attribute -- the one stage GLSL/HLSL's own implicit `texture()`/
+  // `Sample()` is ever legal from -- so this implicit-LOD cube sample
+  // must synthesize six real `feme.stage.derivative.*` calls (not zero
+  // constants) for its own direction vector, mirroring
+  // `getOrSynthesizeSample2DDerivatives`'s already-tested Plain2D
+  // behavior but for `getOrSynthesizeSampleCubeDerivatives` instead.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x float> %dir) #0 {
+      %img = call target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timgcube(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsampcube(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 3, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %dir, <3 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    declare target("spirv.Image", float, 3, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timgcube(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsampcube(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cube.v4f32");
+  ASSERT_TRUE(Sample);
+  ASSERT_EQ(Sample->arg_size(), 19u);
+  // None of the six derivative operands (arg 9-14) is a zero constant --
+  // each is a real `feme.stage.derivative.*` call result instead.
+  for (unsigned ArgNo : {9, 10, 11, 12, 13, 14}) {
+    Value *Operand = Sample->getArgOperand(ArgNo);
+    EXPECT_FALSE(isa<ConstantFP>(Operand));
+    auto *DerivCall = dyn_cast<CallInst>(Operand);
+    ASSERT_TRUE(DerivCall);
+    Function *Callee = DerivCall->getCalledFunction();
+    ASSERT_TRUE(Callee);
+    EXPECT_TRUE(Callee->getName().starts_with("feme.stage.derivative."));
+  }
 }
 
 TEST(SPIRVResourceLoweringTest, LowersCubeArraySampledImageToImageSampleCubeArray) {
@@ -1485,8 +1545,10 @@ TEST(SPIRVResourceLoweringTest, LowersCubeArraySampledImageToImageSampleCubeArra
       findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  dir_x, dir_y, dir_z, array_layer, lod, use_explicit_lod, mask).
-  EXPECT_EQ(Sample->arg_size(), 13u);
+  //  dir_x, dir_y, dir_z, ddirxdx, ddirxdy, ddirydx, ddirydy, ddirzdx,
+  //  ddirzdy, array_layer, lod, use_explicit_lod, mask). Roadmap L56 adds
+  //  the six derivative operands.
+  EXPECT_EQ(Sample->arg_size(), 19u);
 }
 
 TEST(SPIRVResourceLoweringTest, LowersPlain1DSampledImageToImageSample1D) {
