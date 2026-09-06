@@ -65853,3 +65853,129 @@ updated the prose rather than leaving it stale. Verified
 clear the `Grad`+`MinLod`-clamp subset that bit also gates), and no new
 feature/extension surface is advertised by this purely-internal
 CPU-lowering plumbing change.
+
+# Session: L60(a) CubeArray Bias/MinLodClamp/Grad sampling
+
+**Request.** Standing L52/L-series-blocker request, re-sent verbatim with
+the same long-form context recap of L50/L52's own sub-item history (an
+"UPDATE" was already appended to that context noting L59's Grad-sampling
+discovery from the prior session).
+
+**Investigation: is `shaderResourceMinLod` safe to enable now?** L58
+(`Bias`) and L59 (`Grad`) both scoped their fixes to `Plain2D`/`Cube` only,
+and `shaderResourceMinLod` gates 295 CTS cases across
+`textureclamp`/`textureoffsetclamp`/`texturegradclamp`/
+`textureoffsetgradclamp` -- currently all report `NotSupported` since the
+bit is `VK_FALSE`. With two of the shapes those groups exercise now
+covered, I hypothesized the bit might be safe to flip on. I ran a real
+experiment: temporarily set `Info.Features.shaderResourceMinLod = VK_TRUE`
+in `PhysicalDeviceInfo.cpp` (marked `TEMP-EXPERIMENT`), rebuilt
+`feme_vulkan`, and re-ran the four gated groups. Result: far from safe --
+`textureclamp` went to 28/50 real `Fail` (56%), `textureoffsetclamp` to
+105/180 `Fail`, `texturegradclamp` to 29/52 `Fail`, all regressing from
+`NotSupported` to real failures against shapes (`Array2D`, `CubeArray`,
+`1D`, `3D`, `Dref`+`Bias`) that still have zero `Bias`/`Grad`/`MinLodClamp`
+support. I reverted the experimental flag change immediately (confirmed via
+`sed`/`edit` diff that the file is back to its pre-experiment state) --
+this was purely an investigative probe, never intended to ship. This
+confirmed the actual blocker isn't the feature bit's own correctness, but
+shape coverage: more shapes need `Bias`/`Grad`/`MinLodClamp` support before
+the bit can be safely advertised.
+
+**Why `CubeArray` next.** Of the remaining unsupported shapes named in
+L60(a) (`Array2D`/`CubeArray`), `CubeArray` was clearly the more tractable
+target: `createSampleCubeArray`/`femeCpuImageSampleCubeArrayV4F32` already
+had all six screen-space derivative operands wired from roadmap L56 (added
+for real implicit-LOD mip selection against `TextureCubeArray`), just
+hardcoded to `Bias=0.0f`/`MinLodClamp=-inf` no-ops and with zero `HasGrad`
+recognition in `lowerImageAccesses`. `Array2D`'s `createSample2DArray` has
+*no* derivative operands at all -- a materially bigger lift. This mirrors
+the "reuse existing derivative plumbing before building new" lesson this
+project has repeated since L59 (and L56/L58 before that): pick the
+narrowest slice that reuses existing infrastructure, not the theoretically
+"complete" fix.
+
+**Implementation.** Extended `createSampleCubeArray`'s signature
+(`ImageCalls.h`/`.cpp`) with real `Bias`/`MinLodClamp` parameters (19->21
+args total), threading them through `femeCpuImageSampleCubeArrayV4F32`
+(`FeMeRuntimeCPU.c`, both the `asm`-named declaration and
+`always_inline` definition) into the existing `femeRTComputeCubeClampedLod`
+runtime helper -- previously only reachable from the `Cube` (non-array)
+sampling path. In `SPIRVResourceLowering.cpp`, widened
+`hasOnlySupportedImageUses`'s three `HasMinLodClamp`/`HasBias`/`HasGrad`
+shape-restriction checks to also allow `CubeArray` (previously
+`Plain2D`/`Cube` only), and extended `lowerImageAccesses`'s `CubeArray`
+case with a real `MinLodClamp` extraction (mirroring `Cube`'s) and a new
+`HasGrad` branch extracting the real `dPdx`/`dPdy` 3-component direction
+derivatives, mirroring `Cube`'s exact handling.
+
+**A second call site almost missed.** The first build attempt after these
+changes failed only in `ResourceLowering.cpp` (the DXIL-frontend
+counterpart to `SPIRVResourceLowering.cpp`) -- its own `CubeArray` case
+called the old 19-arg `createSampleCubeArray` signature and was easy to
+overlook since it's a separate file entirely, not touched by the SPIR-V
+frontend work. Fixed by adding local `NoMinLodClamp`/`ZeroBias` constants
+matching the `Cube` case immediately above it in the same file (DXIL
+doesn't thread real bias/clamp values through yet, so this is a no-op
+extension, not a functional DXIL improvement).
+
+**Unit tests.** Updated `ImageSamplingTest.cpp`'s `SampleCubeArrayFn`
+typedef and its one call site for the 2 new runtime parameters. In
+`SPIRVResourceLoweringTest.cpp`: fixed the existing
+`LowersCubeArraySampledImageToImageSampleCubeArray` test's stale
+`arg_size()` assertion (19u->21u), and added 3 new tests
+(`LowersSampleBiasToCubeArrayBias`, `LowersSampleClampToCubeArrayMinLodClamp`,
+`LowersSampleGradToCubeArrayDerivatives`), mirroring the existing `Cube`-shape
+test patterns for the same three operands. All 7 `*CubeArray*`-filtered
+tests pass. `ninja check-feme`: 2618/2677 discovered, 59 pre-existing
+`Unsupported`, 0 `Failed` -- up by exactly the 3 new tests, no regressions.
+
+**Real CTS validation.** Took a bit of trial and error to find the right
+`--deqp-case` pattern -- an initial guess using a `*`-glob inside
+double-quoted shell arguments silently matched 0 cases (looked like a shell
+quoting/expansion issue in one of my invocations, not an actual absence of
+matching cases), which sent me briefly down the wrong path of thinking
+these CTS cases didn't exist at all. Grepping the CTS source
+(`vktShaderRenderTextureFunctionTests.cpp`) directly for the
+`createCaseGroup(this, "texture", ...)` call confirmed the plain (ungated)
+`samplercubearray_bias_{fixed,float}_fragment` cases really do live under
+`dEQP-VK.glsl.texture_functions.texture.*`, and running the single-quoted
+glob (or the fully-qualified exact case name) worked fine: 2/2 now `Pass`,
+up from 0/2. A broader `texture.*bias*` sweep (50 cases) confirmed exactly
+the expected side-effect-free improvement: 6 `Pass` (up from 4), 26 `Fail`
+unchanged (`Array2D`'s own `Bias` cases, out of this session's scope), 18
+`NotSupported` unchanged.
+
+I also investigated `texturegrad`'s own `CubeArray` cases out of caution
+(since I'd added real `HasGrad` handling for `CubeArray` this session) and
+found they still fail -- but at pipeline-creation time, with an unrelated
+error: `llvm.spv.resource.handlefrombinding.tspirv.VulkanBuffer_sl_v4f32s_2_0t`
+rejected as an unsupported register-bound resource handle. A `git
+stash`/rebuild/re-run/`stash pop`/rebuild round-trip confirmed this
+failure is byte-for-byte identical both before and after this session's
+fix -- i.e., a pre-existing, unrelated gap, not something my change caused
+or could have fixed. The same error also reproduces for
+`sampler2darray_fixed_fragment` in the same `texturegrad` group, confirming
+it's an `Array2D`/`CubeArray`-shared resource-binding limitation specific
+to this CTS group's shader form (likely how it passes an array-layer index
+via a uniform buffer), unrelated to `Bias`/`Grad`/`MinLodClamp` support at
+all. I did not chase this further or file it as its own roadmap row this
+session -- flagged in `VulkanCTSReport.md` and here for a future session to
+pick up, rather than scope-creeping this row.
+
+**Docs.** Updated roadmap L60(a) in place (not struck through -- only the
+`CubeArray` half of "`Array2D`/`CubeArray` Grad sampling" is actually done;
+`Array2D` remains a bigger, unstarted follow-on). Updated
+`VulkanCTSReport.md` with a full write-up (experiment methodology and
+result, fix, tests, real CTS impact, the newly-discovered unrelated
+`texturegrad` `VulkanBuffer` gap). Updated `FeMeGraphicsDesign.md`'s
+"Bias/gradient sampling and gather" bullet's L59 update paragraph to note
+`CubeArray` is now also covered -- this was a genuine deviation from what
+that paragraph previously said (it explicitly listed `CubeArray` gradient
+sampling as still unimplemented), so per the standing instruction I updated
+it rather than leaving it stale. Verified
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+changes: `shaderResourceMinLod` correctly remains `VK_FALSE` (confirmed
+directly by this session's own revert), and no new feature/extension
+surface is advertised by this purely-internal CPU-lowering plumbing
+change.
