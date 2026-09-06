@@ -49,6 +49,24 @@ Function *getRuntimeFunction(Module &M, StringRef Name) {
   return M.getFunction(("\1" + Name).str());
 }
 
+/// A host-side re-implementation of `femeRTFastLog2`'s exact approximation
+/// formula (FeMeRuntimeCPU.c), used only by the `QueryLod2D*` tests below
+/// to compute an expected raw/unclamped lod value -- this approximation
+/// has a real, small, *constant* bias even at an exact power of two
+/// (e.g. `femeRTFastLog2(1.0) ~= 0.0573`, not `0.0`, despite this file's
+/// own doc comment calling it "exact at each power of two" -- that claim
+/// describes the mantissa's own linear term, not this fixed-point
+/// additive constant), so a test asserting against true mathematical
+/// `log2` would need an unreasonably loose tolerance to pass; comparing
+/// against this identical formula instead lets every test below use a
+/// tight one.
+float expectedFastLog2(float X) {
+  uint32_t Bits;
+  memcpy(&Bits, &X, sizeof(Bits));
+  float Y = (float)Bits;
+  return Y * (1.0f / 8388608.0f) - 126.94269504f;
+}
+
 class ImageSamplingTest : public testing::Test {
 protected:
   static void SetUpTestSuite() {
@@ -170,6 +188,16 @@ using SampleCmpArray1DFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                     const FemeSamplerDescriptor *, uint32_t,
                                     uint32_t, uint32_t, float, float, float,
                                     bool, float, bool, void *);
+/// Roadmap L52e: `Texture2D`'s own `OpImageQueryLod` counterpart -- no
+/// `(U, V)` coordinate operand at all (see `ImageCallKind::QueryLod2D`'s
+/// own doc for why), just the caller's own screen-space partial
+/// derivatives and an active-lane mask; the result's own two lanes
+/// (clamped level, unclamped lod) are written through the trailing `out`
+/// pointer as a `float[2]`.
+using QueryLod2DFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                              const FemeSamplerDescriptor *, uint32_t,
+                              uint32_t, uint32_t, float, float, float, float,
+                              bool, void *);
 using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                         int32_t, int32_t, uint32_t, uint32_t, bool, void *);
 /// The `feme.cpu.image.load.2d.v4i32` (roadmap E26) counterpart of `LoadFn`,
@@ -2680,6 +2708,204 @@ TEST_F(ImageSamplingTest, SampleCmp1DInactiveLaneReadsZero) {
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.0f, true, 0.4f,
      /*Mask=*/false, &Result);
   EXPECT_FLOAT_EQ(Result, 0.0f);
+}
+
+// Roadmap L52e: `Texture2D`'s own `OpImageQueryLod` runtime entry point
+// (`femeCpuImageQueryLod2DV2F32`) -- isolating its clamped-level/
+// unclamped-lod computation, independent of the already-tested ordinary
+// sampling math above. Every test below uses a single-layer, `Width ==
+// Height == 4` image so a `dU/dx == 1/Width` derivative of exactly `0.25`
+// maps to a clean, easily-checked texel-space footprint of `1.0`
+// (`log2(1.0) == 0.0`).
+TEST_F(ImageSamplingTest, QueryLod2DZeroDerivativesReportUnclampedNegativeInfinity) {
+  // Roadmap L52e design note (`QLODTM_ZERO_UV_WIDTH`, VK-GL-CTS's own
+  // `vktShaderRenderTextureFunctionTests.cpp`): a coordinate with no
+  // measurable derivatives at all reports an unclamped raw lod of
+  // `-infinity`, not `0.0` -- diverging from `femeRTPlanImplicitLod`'s
+  // own ordinary-sampling convention (see `femeRTComputeUnclampedQueryLod`'s
+  // doc). The clamped level still resolves to `0.0` (this sampler's own
+  // default `MinLod=0.0` floor wins over the `-infinity` bias-shifted
+  // value), matching that same CTS test mode's own expectation.
+  float Storage[4][4][4] = {}; // Uninitialized texel contents don't matter.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 4, 4,
+                 ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  QueryLod2DFn Fn = resolve<QueryLod2DFn>(
+      addWrapper("querylod_2d", "feme.cpu.image.querylod.2d.v2f32"));
+  float Out[2] = {1.0f, 1.0f};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DUdX=*/0.0f, /*DUdY=*/0.0f,
+     /*DVdX=*/0.0f, /*DVdY=*/0.0f, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_EQ(Out[1], -std::numeric_limits<float>::infinity());
+}
+
+TEST_F(ImageSamplingTest, QueryLod2DReportsRawLodFromDerivatives) {
+  // A real, nonzero `dU/dx = 0.25` (this image's own `1/Width`) against a
+  // single-mip image is the standard one-screen-pixel-per-texel texel-
+  // space footprint (`Pmax == 1.0`); the clamped level is this
+  // non-mipmapped image's own `MipLevels <= 1` special case, always
+  // `0.0` (per `femeRTComputeClampedQueryLevel`'s doc), while the
+  // unclamped lod is `femeRTFastLog2(1.0)` -- compared against
+  // `expectedFastLog2`'s identical formula, not true `log2` (see its own
+  // doc for why: this approximation has a small but real, nonzero bias
+  // even at an exact power of two).
+  float Storage[4][4][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 4, 4,
+                 ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  QueryLod2DFn Fn = resolve<QueryLod2DFn>(
+      addWrapper("querylod_2d", "feme.cpu.image.querylod.2d.v2f32"));
+  float Out[2] = {-9.0f, -9.0f};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DUdX=*/0.25f, /*DUdY=*/0.0f,
+     /*DVdX=*/0.0f, /*DVdY=*/0.0f, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_NEAR(Out[1], expectedFastLog2(1.0f), 1e-5f);
+}
+
+TEST_F(ImageSamplingTest, QueryLod2DClampedLevelRoundsForNearestMipFilter) {
+  // Roadmap L52e (`computeLevelFromLod`, VK-GL-CTS's own reference
+  // oracle): a real two-mip-level image with a `mipmapMode=NEAREST`
+  // (`MipFilter=Nearest`) sampler must round its own clamped level to
+  // the nearest whole level -- unlike `MipFilter=Linear`, which reports
+  // the continuous fractional value unrounded (see the test below).
+  // `DUdX` below is chosen so the texel-space footprint is `1.6`, whose
+  // `expectedFastLog2` value (~0.657, comfortably past the `NEAREST`
+  // rounding threshold's own midpoint of `0.5`, and still comfortably
+  // inside this two-level image's own valid `[0, 1]` range) must round
+  // up to level 1.
+  float Level0[4][4][4] = {};
+  float Level1[2][2][4] = {};
+  struct {
+    float L0[4][4][4];
+    float L1[2][2][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/4 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 4;
+  Img.Height = 4;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  Samp.MipFilter = static_cast<uint32_t>(SamplerFilter::Nearest);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  QueryLod2DFn Fn = resolve<QueryLod2DFn>(
+      addWrapper("querylod_2d", "feme.cpu.image.querylod.2d.v2f32"));
+  float Out[2] = {-9.0f, -9.0f};
+  // `dU/dx = 1.6 / Width`: a texel-space footprint (`Ux`) of `1.6`.
+  float DUdX = 1.6f / 4.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, DUdX, 0.0f, 0.0f, 0.0f, true, Out);
+  float ExpectedLod = expectedFastLog2(1.6f);
+  EXPECT_NEAR(Out[1], ExpectedLod, 1e-5f); // Unclamped lod: unrounded, as-is.
+  EXPECT_FLOAT_EQ(Out[0], 1.0f); // Clamped level: rounds ~0.657 up to 1.
+}
+
+TEST_F(ImageSamplingTest, QueryLod2DClampedLevelStaysFractionalForLinearMipFilter) {
+  // Same image/derivative as
+  // `QueryLod2DClampedLevelRoundsForNearestMipFilter` above, but this
+  // sampler's own `MipFilter=Linear` (explicitly overridden below --
+  // `makeSampler` itself always defaults to `Nearest`) must instead
+  // report the clamped level as the same unrounded ~0.657 fractional
+  // value a real trilinear sample's own two-level blend would use, not
+  // round it to a whole level the way `MipFilter=Nearest` does.
+  float Level0[4][4][4] = {};
+  float Level1[2][2][4] = {};
+  struct {
+    float L0[4][4][4];
+    float L1[2][2][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/4 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/2 * 4 * sizeof(float),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Img.Width = 4;
+  Img.Height = 4;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  // `makeSampler` always defaults `MipFilter` to `Nearest` -- override it
+  // explicitly here (unlike the sibling test above, whose own explicit
+  // `Nearest` override just restates that same default).
+  Samp.MipFilter = static_cast<uint32_t>(SamplerFilter::Linear);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  QueryLod2DFn Fn = resolve<QueryLod2DFn>(
+      addWrapper("querylod_2d", "feme.cpu.image.querylod.2d.v2f32"));
+  float Out[2] = {-9.0f, -9.0f};
+  float DUdX = 1.6f / 4.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, DUdX, 0.0f, 0.0f, 0.0f, true, Out);
+  float ExpectedLod = expectedFastLog2(1.6f);
+  EXPECT_NEAR(Out[1], ExpectedLod, 1e-5f); // Unclamped lod.
+  EXPECT_NEAR(Out[0], ExpectedLod, 1e-5f); // Clamped level: unrounded, matches lod.
+}
+
+TEST_F(ImageSamplingTest, QueryLod2DInactiveLaneReadsZero) {
+  // Mirrors every other entry point's own `Mask=false` convention.
+  float Storage[4][4][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 4, 4,
+                 ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  QueryLod2DFn Fn = resolve<QueryLod2DFn>(
+      addWrapper("querylod_2d", "feme.cpu.image.querylod.2d.v2f32"));
+  float Out[2] = {9.0f, 9.0f};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.0f, 0.0f, 0.0f,
+     /*Mask=*/false, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
 }
 
 TEST_F(ImageSamplingTest, Load2DArrayReadsRequestedLayer) {

@@ -3202,3 +3202,169 @@ TEST(SPIRVResourceLoweringTest, LeavesAMultisampledCubeStorageImageHandleAlone) 
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
+TEST(SPIRVResourceLoweringTest,
+     LowersQueryLodToImageQueryLodWithZeroDerivativesOutsideFragment) {
+  // Roadmap L52e: a `Plain2D` `calculate.lod`/`calculate.lod.unclamped`
+  // pair (`OpImageQueryLod`'s own two-lane legalization,
+  // `ImageQueryLodPattern`) each independently lowers to its own
+  // `feme.cpu.image.querylod.2d.v2f32` call (this pass does no
+  // cross-call CSE of its own, see `lowerImageAccesses`'s own comment),
+  // extracting lane 0 (the clamped level) or lane 1 (the raw unclamped
+  // lod) from its own call respectively. `main` here carries no
+  // `feme.shader.stage` attribute (not recognized as a Fragment-stage
+  // entry point), so -- mirroring `SampleShader`'s own analogous
+  // zero-constant-derivatives case above -- both calls' own derivative
+  // pairs synthesize as zero constants rather than a real
+  // `feme.stage.derivative.*` call.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x float> @main(<2 x float> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %level = call float @llvm.spv.resource.calculate.lod(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord)
+      %lod = call float @llvm.spv.resource.calculate.lod.unclamped(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord)
+      %r0 = insertelement <2 x float> poison, float %level, i64 0
+      %r1 = insertelement <2 x float> %r0, float %lod, i64 1
+      ret <2 x float> %r1
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+
+  // Neither original scalar intrinsic call survives; every replacement
+  // `feme.cpu.image.querylod.2d.v2f32` call has all-zero derivative
+  // operands (no Fragment-stage synthesis) and a true mask, and each is
+  // consumed by exactly one `extractelement` picking out its own lane 0
+  // or lane 1.
+  unsigned NumQueryLodCalls = 0;
+  unsigned NumLane0Extracts = 0, NumLane1Extracts = 0;
+  for (Instruction &I : instructions(*F)) {
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      if (Function *Callee = CI->getCalledFunction()) {
+        EXPECT_NE(Callee->getIntrinsicID(),
+                 Intrinsic::spv_resource_calculate_lod);
+        EXPECT_NE(Callee->getIntrinsicID(),
+                 Intrinsic::spv_resource_calculate_lod_unclamped);
+        if (Callee->getName() == "feme.cpu.image.querylod.2d.v2f32") {
+          ++NumQueryLodCalls;
+          // (image_heap, count, sampler_heap, count, image_index,
+          //  sampler_index, dudx, dudy, dvdx, dvdy, mask). No `u`/`v`
+          // operand at all.
+          ASSERT_EQ(CI->arg_size(), 11u);
+          for (unsigned ArgNo : {6, 7, 8, 9})
+            EXPECT_TRUE(cast<ConstantFP>(CI->getArgOperand(ArgNo))->isZero());
+          EXPECT_TRUE(cast<ConstantInt>(CI->getArgOperand(10))->isOne());
+        }
+      }
+      continue;
+    }
+    auto *EE = dyn_cast<ExtractElementInst>(&I);
+    if (!EE)
+      continue;
+    auto *VecCall = dyn_cast<CallInst>(EE->getVectorOperand());
+    if (!VecCall || !VecCall->getCalledFunction() ||
+        VecCall->getCalledFunction()->getName() !=
+            "feme.cpu.image.querylod.2d.v2f32")
+      continue;
+    uint64_t Lane = cast<ConstantInt>(EE->getIndexOperand())->getZExtValue();
+    if (Lane == 0)
+      ++NumLane0Extracts;
+    else if (Lane == 1)
+      ++NumLane1Extracts;
+  }
+  EXPECT_EQ(NumQueryLodCalls, 2u);
+  EXPECT_EQ(NumLane0Extracts, 1u);
+  EXPECT_EQ(NumLane1Extracts, 1u);
+}
+
+TEST(SPIRVResourceLoweringTest,
+     FragmentStageQueryLodSynthesizesRealDerivatives) {
+  // Same shape as the test above, except `main` now carries a real
+  // `feme.shader.stage`="fragment" attribute (roadmap H7i's own
+  // Fragment-only derivative-synthesis gate) -- the query's own shared
+  // `feme.cpu.image.querylod.2d.v2f32` call must now get real
+  // `feme.stage.derivative.*` calls synthesized as its derivative
+  // operands, not zero constants, mirroring
+  // `FragmentStageImplicitSampleSynthesizesRealDerivatives` above.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<2 x float> %coord) #0 {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %level = call float @llvm.spv.resource.calculate.lod(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord)
+      ret float %level
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *QueryLod = findImageCall(*F, "feme.cpu.image.querylod.2d.v2f32");
+  ASSERT_TRUE(QueryLod);
+  for (unsigned ArgNo : {6, 7, 8, 9}) {
+    Value *Deriv = QueryLod->getArgOperand(ArgNo);
+    EXPECT_FALSE(isa<ConstantFP>(Deriv));
+    auto *DerivCall = dyn_cast<CallInst>(Deriv);
+    ASSERT_TRUE(DerivCall);
+    Function *Callee = DerivCall->getCalledFunction();
+    ASSERT_TRUE(Callee);
+    EXPECT_TRUE(Callee->getName().starts_with("feme.stage.derivative."));
+  }
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesAnArrayedQueryLodHandleAlone) {
+  // Roadmap L52e deliberately scopes `OpImageQueryLod` support to
+  // `Plain2D` only -- `Array2D` (and every other shape) is left entirely
+  // unlowered, the same honest all-or-nothing contract every other
+  // unsupported shape gets (`collectHandles` declines the whole
+  // function).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<3 x float> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %level = call float @llvm.spv.resource.calculate.lod(
+          target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord)
+      ret float %level
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.querylod.2d.v2f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+
