@@ -411,6 +411,16 @@ enum class ImageCallKind : uint8_t {
   /// `CubeArray`/`Plain1D`/`Array1D`/`Plain3D` counterparts remain
   /// unstarted follow-on work.
   QueryLod2D,
+  /// `feme.cpu.image.sample.3d.v4f32` (roadmap L66(a)): the volumetric
+  /// counterpart of `Sample2D`, a plain `Plain3D` ordinary sample -- this
+  /// row's own scope is ordinary sampling only, so unlike `Sample1D`/
+  /// `Sample2D`, there is deliberately no `Bias`/`MinLodClamp`/`ConstOffset`
+  /// operand yet (each is its own follow-on roadmap L66 sub-item), only a
+  /// real `(U, V, W)` coordinate, its own screen-space partial derivatives
+  /// (`DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY`, consulted only for an
+  /// implicit-LOD sample, mirroring `Sample1D`'s own derivative pair) for
+  /// `Lod`/`UseExplicitLod`'s own implicit-vs-explicit split.
+  Sample3D,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -468,8 +478,16 @@ struct MatchedImageCall {
   llvm::Value *DUdY = nullptr;
   llvm::Value *DVdX = nullptr;
   llvm::Value *DVdY = nullptr;
-  /// `SampleCube`/`SampleCubeArray` only: the direction vector's Z
-  /// component; null for every other kind.
+  /// `Sample3D` only (roadmap L66(a)): the caller's own screen-space
+  /// partial derivatives of the third, depth-axis `W` coordinate below,
+  /// consulted only for an implicit-LOD sample, mirroring `DUdX`/`DUdY`/
+  /// `DVdX`/`DVdY` immediately above; null for every other kind.
+  llvm::Value *DWdX = nullptr;
+  llvm::Value *DWdY = nullptr;
+  /// `SampleCube`/`SampleCubeArray`: the direction vector's Z component.
+  /// `Sample3D` (roadmap L66(a)): the third, depth-axis normalized `W`
+  /// coordinate, same convention as `U`/`V` above. Null for every other
+  /// kind.
   llvm::Value *W = nullptr;
   /// `SampleCube`/`SampleCubeArray` only (roadmap L56): the caller's own
   /// screen-space partial derivatives of the direction vector's `X`/`Y`/
@@ -937,6 +955,25 @@ llvm::CallInst *createQueryLod2D(llvm::IRBuilderBase &Builder,
                                  llvm::Value *DUdY, llvm::Value *DVdX,
                                  llvm::Value *DVdY, llvm::Value *Mask,
                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.sample.3d.v4f32` call (roadmap L66(a)): a
+/// `Plain3D` ordinary sample, mirroring `createSample1D`'s own operand
+/// order (coordinate, then its own screen-space derivative pair(s), then
+/// `Lod`/`UseExplicitLod`/`Mask`), extended to a real `(U, V, W)`
+/// coordinate and its own `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY`
+/// derivative triple -- no `Bias`/`MinLodClamp`/`ConstOffset` operand yet,
+/// per `ImageCallKind::Sample3D`'s own doc.
+llvm::CallInst *createSample3D(llvm::IRBuilderBase &Builder,
+                               const ImageCallEnv &Env,
+                               llvm::Value *ImageIndex,
+                               llvm::Value *SamplerIndex, llvm::Value *U,
+                               llvm::Value *V, llvm::Value *W,
+                               llvm::Value *DUdX, llvm::Value *DUdY,
+                               llvm::Value *DVdX, llvm::Value *DVdY,
+                               llvm::Value *DWdX, llvm::Value *DWdY,
+                               llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                               llvm::Value *Mask,
+                               const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.1d.v4f32` call (roadmap H19c). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.

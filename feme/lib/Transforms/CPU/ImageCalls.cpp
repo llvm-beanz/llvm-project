@@ -118,6 +118,8 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.samplecmp.1darray.f32";
   case ImageCallKind::QueryLod2D:
     return "feme.cpu.image.querylod.2d.v2f32";
+  case ImageCallKind::Sample3D:
+    return "feme.cpu.image.sample.3d.v4f32";
   }
   llvm_unreachable("unhandled ImageCallKind");
 }
@@ -551,6 +553,22 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
         /*isVarArg=*/false);
     break;
   }
+  case ImageCallKind::Sample3D:
+    // Roadmap L66(a): a real `(u, v, w)` coordinate plus its own
+    // `du_dx`/`du_dy`/`dv_dx`/`dv_dy`/`dw_dx`/`dw_dy` screen-space
+    // derivative triple (consulted only for an implicit-LOD sample,
+    // mirroring `Sample1D`'s own `du_dx`/`du_dy` pair), no `bias`/
+    // `min_lod_clamp`/`offset` operand yet -- see
+    // `ImageCallKind::Sample3D`'s own doc.
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, u, v, w, du_dx, du_dy, dv_dx, dv_dy,
+    //  dw_dx, dw_dy, lod, use_explicit_lod, mask) -> <4 x float>
+    FTy = FunctionType::get(
+        V4F32Ty,
+        {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
+         F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, F32Ty, I1Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
   }
 
   StringRef Name = getImageCallName(Kind);
@@ -967,6 +985,23 @@ CallInst *feme::cpu::createQueryLod2D(IRBuilderBase &Builder,
       Name);
 }
 
+CallInst *feme::cpu::createSample3D(IRBuilderBase &Builder,
+                                    const ImageCallEnv &Env, Value *ImageIndex,
+                                    Value *SamplerIndex, Value *U, Value *V,
+                                    Value *W, Value *DUdX, Value *DUdY,
+                                    Value *DVdX, Value *DVdY, Value *DWdX,
+                                    Value *DWdY, Value *Lod,
+                                    Value *UseExplicitLod, Value *Mask,
+                                    const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::Sample3D);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+          Env.SamplerHeapCount, ImageIndex, SamplerIndex, U, V, W, DUdX, DUdY,
+          DVdX, DVdY, DWdX, DWdY, Lod, UseExplicitLod, Mask},
+      Name);
+}
+
 CallInst *feme::cpu::createLoad1D(IRBuilderBase &Builder,
                                   const ImageCallEnv &Env, Value *ImageIndex,
                                   Value *X, Value *Mip, Value *Sample,
@@ -1266,7 +1301,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::SampleCmpArray2D, ImageCallKind::SampleCmpCube,
       ImageCallKind::SampleCmpCubeArray, ImageCallKind::Sample1D,
       ImageCallKind::Sample1DArray, ImageCallKind::SampleCmp1D,
-      ImageCallKind::SampleCmpArray1D, ImageCallKind::QueryLod2D};
+      ImageCallKind::SampleCmpArray1D, ImageCallKind::QueryLod2D,
+      ImageCallKind::Sample3D};
 
   ImageCallKind Kind;
   bool Found = false;
@@ -1784,6 +1820,28 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.DVdX = CI.getArgOperand(8);
     Result.DVdY = CI.getArgOperand(9);
     Result.Mask = CI.getArgOperand(10);
+    break;
+  case ImageCallKind::Sample3D:
+    if (CI.arg_size() != 18)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.W = CI.getArgOperand(8);
+    Result.DUdX = CI.getArgOperand(9);
+    Result.DUdY = CI.getArgOperand(10);
+    Result.DVdX = CI.getArgOperand(11);
+    Result.DVdY = CI.getArgOperand(12);
+    Result.DWdX = CI.getArgOperand(13);
+    Result.DWdY = CI.getArgOperand(14);
+    Result.Lod = CI.getArgOperand(15);
+    Result.UseExplicitLod = CI.getArgOperand(16);
+    Result.Mask = CI.getArgOperand(17);
     break;
   }
   return Result;

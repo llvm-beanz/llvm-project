@@ -396,4 +396,47 @@ TEST_F(ImageCallsTest, MatchesSampleCmpArray1DCallWithBiasAndMinLodClamp) {
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 
+// (Roadmap L66(a)) `createSample3D`'s own ordinary `Plain3D` sample: a
+// real `(U, V, W)` coordinate plus its own screen-space derivative triple,
+// no `Bias`/`MinLodClamp`/`ConstOffset` operand yet (see
+// `ImageCallKind::Sample3D`'s own doc).
+TEST_F(ImageCallsTest, MatchesSample3DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  Value *U = ConstantFP::get(Builder.getFloatTy(), 0.25);
+  Value *V = ConstantFP::get(Builder.getFloatTy(), 0.5);
+  Value *W = ConstantFP::get(Builder.getFloatTy(), 0.75);
+  Value *DUdX = ConstantFP::get(Builder.getFloatTy(), 0.1);
+  Value *DUdY = ConstantFP::get(Builder.getFloatTy(), 0.2);
+  Value *DVdX = ConstantFP::get(Builder.getFloatTy(), 0.3);
+  Value *DVdY = ConstantFP::get(Builder.getFloatTy(), 0.4);
+  Value *DWdX = ConstantFP::get(Builder.getFloatTy(), 0.5);
+  Value *DWdY = ConstantFP::get(Builder.getFloatTy(), 0.6);
+  Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+  CallInst *CI = createSample3D(Builder, Env, Builder.getInt32(2),
+                                Builder.getInt32(1), U, V, W, DUdX, DUdY, DVdX,
+                                DVdY, DWdX, DWdY, Lod, Builder.getInt1(false),
+                                Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Sample3D);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(2));
+  EXPECT_EQ(Matched->SamplerIndex, Builder.getInt32(1));
+  EXPECT_EQ(Matched->U, U);
+  EXPECT_EQ(Matched->V, V);
+  EXPECT_EQ(Matched->W, W);
+  EXPECT_EQ(Matched->DUdX, DUdX);
+  EXPECT_EQ(Matched->DUdY, DUdY);
+  EXPECT_EQ(Matched->DVdX, DVdX);
+  EXPECT_EQ(Matched->DVdY, DVdY);
+  EXPECT_EQ(Matched->DWdX, DWdX);
+  EXPECT_EQ(Matched->DWdY, DWdY);
+  EXPECT_EQ(Matched->Lod, Lod);
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
 } // namespace
